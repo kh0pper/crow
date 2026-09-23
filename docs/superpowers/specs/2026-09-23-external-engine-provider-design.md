@@ -37,23 +37,45 @@ Every orchestrator path treats an external engine as not orchestratable here, **
 - `resolveWarmableProviderName` returns `null`;
 - `ensureResident` skips it, logging once;
 - `getMutexSiblings` / sibling eviction never includes it;
-- idle-revert never reverts to it.
+- idle-revert never reverts to it;
+- it is never "always resident" (`isAlwaysResident` is false for it), so it never enters the boot/deferred residency sets;
+- the legacy `servers/shared/lifecycle.js` `ensureModelWarm` refuses it and `releaseModel` is a no-op for it.
 
-**Validation.** `upsertProvider`, or the registration path, rejects a row that combines `engine.managed:"external"` with a `bundleId` or `gpuPolicy.runtime === "native"` (error `EXTERNAL_ENGINE_CONFLICT`). The combination is contradictory.
+**Validation (transition-only; revised after review round 1).** `upsertProvider` rejects a write only when it **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row **and** the resulting row is invalid. Invalid means one of three things:
+- a malformed marker (`EXTERNAL_ENGINE_INVALID`);
+- a marker combined with a `bundleId` or `runtime: "native"` (`EXTERNAL_ENGINE_CONFLICT`);
+- a marked row converted in one step into an orchestratable one (`EXTERNAL_ENGINE_CONFLICT`: unmark first).
+
+A malformed incoming `gpu_policy` JSON string is rejected as invalid, not read as "keep the stored policy".
+
+A write that leaves those three fields as stored always passes, even if the stored row is contradictory. Replication writes rows directly, never through `upsertProvider`, so a contradictory or malformed row can arrive from a peer. Today's re-enable, host-repair and reconciler writes must keep working on such a row.
+
+The models.json reconciler also changes in two ways:
+- It keeps a stored `engine` when it re-asserts a row's `gpu_policy`.
+- It isolates each row in its own try/catch, so one refused row cannot abort the pass.
 
 ### 2.3 Continuous read-only health (D3)
 
 - A new tick, `pollExternalEngines`, arms next to the residency poll with its own interval. It defaults to 60 s and is set by `CROW_EXTERNAL_ENGINE_POLL_MS`.
 - Each tick, for every enabled external-engine row, it sends `GET <base_url>/models`: no auth header, a 3 s timeout, and HTTP 2xx means ready. It records the result in `provider-health` under a new, separate map `external`: `{ baseUrl, engineHost, label, ready, firstSeenAt, lastReadyAt, lastError, checkedAt }`.
 - **Rows that disappear or are disabled** are pruned from the map.
+- **Only a DB-sourced config counts (review round 1).** `loadProviders()` falls back to models.json when its cache is empty or the DB read fails, and that fallback carries no markers. A tick probes and prunes only when `cfg._source === "db:providers"`; any other tick is a no-op. Otherwise, a tick after `invalidateProvidersCache()` would wipe every clock.
 - **Read-only.** A GET on `/models` changes nothing on the engine. The probe never retries within a tick and never reacts to a result.
-- **Per instance, by construction.** Each instance probes from its own network position. A peer the firewall blocks (black-swan off-LAN) reports its own truth: the engine is unreachable from there. The two-host spec §7 already chose the firewall, not sync filtering, as the fix for reachability, and this design does not change sync.
+- **Per instance, by construction.** Each instance probes from its own network position. A peer the firewall blocks (black-swan off-LAN) reports its own truth: the engine is unreachable from there. A peer on a different LAN could even reach a different device at the same private IP. That is harmless, because the result is info-only and the probe is a GET on `/models`. The two-host spec §7 already chose the firewall, not sync filtering, as the fix for reachability, and this design does not change sync.
 
 ### 2.4 Surfacing (D4)
 
-- **The nest `providersSignal`** gains the external engines:
-  - An engine that has been ready **at least once in this process** and has since been not-ready for longer than the existing `notReadyWarnMs` → `warn`, with copy naming the engine and its host.
-  - An engine **never** ready in this process → shown as info, "not reachable from this instance", **never** warn. This prevents a permanent false warning on peers the firewall excludes (black-swan).
+- **The nest `providersSignal`** gains the external engines, at severity **info only, never warn** (revised after review round 1):
+  - `"<label> on <host>: up"`;
+  - `"down for <age> (externally managed)"` for an engine that answered at least once in this process;
+  - `"not reachable from this instance"` for one that never answered.
+
+  **Why info and not warn:**
+  - A nest warn becomes a high-priority push through the health monitor.
+  - These engines are operated from outside Crow: raven's production windows stop halogen for hours by design, so every window would page the operator for something they did on purpose.
+  - Crow can do nothing about it (D5: no route-away).
+
+  The resident-model warn path is byte-identical to before. When it fires, it is the signal's one issue.
 - **The Providers tab** status dot for an external-engine row uses the health state: up, down, or not probed yet. The row also gets an "external · <host>" badge.
 - **`GET /api/providers/health`** is unchanged. The Health tab's on-demand matrix already probes everything.
 - **i18n:** every new string in both `en` and `es`.
@@ -67,7 +89,8 @@ Every orchestrator path treats an external engine as not orchestratable here, **
 
 - Code ships first. After deploy, no row carries the marker, so nothing new is probed.
 - **pi-lab cleared the probe (Question A, answered 2026-09-23 ~14:30):** "fine at any time, windows included", because a GET against a stopped service costs nothing.
-- Right after deploy, mark `raven-flash-next` and `raven-halogen-smoke` on crow through the normal provider-update path (`engine: {managed:"external", host:"raven", label:"halogen"}`). The marker then replicates, and each instance starts its own 60 s read-only probe.
+- Right after deploy, mark **only `raven-flash-next`** (`http://10.0.0.126:8030/v1`, which answered 200 on 2026-09-23) on crow through the normal provider-update path (`engine: {managed:"external", host:"raven", label:"halogen"}`). The marker then replicates, and each instance starts its own 60 s read-only probe.
+- `raven-halogen-smoke` points at `:8731`, which is dead, so it is **not** marked. That row is raised with Kevin separately.
 
 ## 3. Out of scope
 
@@ -86,12 +109,13 @@ Every orchestrator path treats an external engine as not orchestratable here, **
   - `ensureResident` skips it, logging once;
   - a sibling with a shared `mutexGroup` is never stopped for it;
   - idle-revert never targets it.
-- **Validation:** marker + `bundleId` and marker + native runtime are both rejected.
+- **Validation:** a write that newly introduces marker + `bundleId` or marker + native runtime is rejected. A write that leaves the stored engine, bundle and runtime unchanged passes even on a contradictory row seeded directly (re-enable, host repair, reconciler). The reconciler keeps a stored `engine`.
+- **Poll source gate:** a non-DB config never probes or prunes.
 - **`pollExternalEngines`** with an injected fetch and clock:
   - 2xx → ready; a non-2xx or throw → not-ready with `lastError`;
   - pruning on disable and removal;
   - no auth header is sent;
   - the timeout is honoured.
 - **`provider-health`:** `external` map semantics, first-seen and last-ready clocks.
-- **Nest signal:** warn only after ready-once plus the threshold; never-ready → info, not warn; the copy names the host; es parity.
+- **Nest signal:** external engines are info only, never warn, including one that was ready once and has been down for hours; the copy names the host; the resident-model warn is unchanged; es parity.
 - **Providers tab:** the dot reflects external health; the badge renders.

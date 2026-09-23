@@ -22,23 +22,24 @@
 - Every orchestrator path checks the marker **before** any other check (spec §2.2).
 - The probe is `GET <base_url>/models` with **no auth header**, a **3 s timeout**, no retry within a tick, and 2xx means ready. The interval defaults to **60 s** and is set by `CROW_EXTERNAL_ENGINE_POLL_MS` (spec §2.3).
 - The probe is read-only and never reacts to what it finds. The llm-router, chat, and sync are **not** changed (spec §2.5). `GET /api/providers/health` is unchanged (spec §2.4).
-- An engine that was ready once and has been not-ready for at least `notReadyWarnMs()` (the existing `CROW_PROVIDER_NOT_READY_WARN_MS`, default 10 min) raises a warn. An engine that has **never** been ready in this process raises info only, **never** warn (spec §2.4).
-- The validation error codes are exactly `EXTERNAL_ENGINE_CONFLICT` (spec) and `EXTERNAL_ENGINE_INVALID` (derived from "managed is exactly 'external'"). The typed orchestrator error is `ExternalEngineError` with `code: "external_engine"`.
+- External engines **never** produce a nest warn, and so never a push. They surface at severity `info` only: `"<label> on <host>: up"`, `"… down for <age> (externally managed)"` if the engine answered once in this process, or `"… not reachable from this instance"` if it never did. The resident-model warn path stays byte-identical (spec §2.4, revised in review round 1).
+- Validation is **transition-only**. `upsertProvider` throws `EXTERNAL_ENGINE_CONFLICT` or `EXTERNAL_ENGINE_INVALID` only when a write **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row **and** the resulting row is invalid. A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`. The typed orchestrator error is `ExternalEngineError` with `code: "external_engine"`.
+- The poll probes and prunes only when `cfg._source === "db:providers"` (the value `loadProvidersFromDb` sets, `servers/shared/providers-db.js`). A models.json-fallback config never probes and never prunes.
 - The Providers tab is server-rendered HTML with no client script. Interpolate engine `host` and `label` only through `escapeHtml`, and into i18n strings only through `fill()`, because they are free text replicated from peers.
 
 ## Review Focus
 
 These are the five inputs the spec implies but never spells out, most likely first. Each one is pinned by a test in the task named on its line.
 
-1. **A typo'd or partial marker**, such as `managed: "External"` or a missing `host`. Today such a row silently stays orchestratable. Expected: the write is rejected loudly with `EXTERNAL_ENGINE_INVALID`, and the orchestrator treats only the exact string `"external"` as marked (Task 1 truth table, Task 2 write tests).
+1. **A typo'd or partial marker**, such as `managed: "External"` or a missing `host`. Today such a row silently stays orchestratable. Expected: a write that introduces it is rejected loudly with `EXTERNAL_ENGINE_INVALID`, and the orchestrator treats only the exact string `"external"` as marked (Task 1 truth table, Task 2 write tests). A contradictory or malformed row that arrives by replication still accepts writes that leave the engine, bundle and runtime alone (Task 2).
 2. **A later write that re-arms a marked row.**
    - Case (a): `gpuPolicy: null` plus a `bundleId`. The SQL `COALESCE` keeps the stored marker, so the effective row is contradictory.
    - Case (b): a `registerModel`-shaped write whose fresh `gpuPolicy: { runtime: "native" }` silently drops the marker and adopts the engine.
    - Expected: both are refused with `EXTERNAL_ENGINE_CONFLICT`. To unmark, the operator makes a separate, explicit write (Task 2).
 3. **Free-text `host` or `label` carrying HTML or `$&`** that replicates in from a peer. Expected: the Providers tab escapes it (Task 5), and the nest copy renders it verbatim through `fill()` without mangling it (Task 4).
-4. **A tick whose config read comes back empty** (`loadProviders()` returns `{providers:{}}` when both the DB and models.json are unreadable). Expected: the external map, with its ready-once and outage clocks, survives. This mirrors the residency poll's reviewed CRITICAL (Task 3).
+4. **A tick whose config is not the DB.** `loadProviders()` falls back to models.json, which has no markers, when its cache is null or the DB read fails. That includes the tick right after `invalidateProvidersCache()`, and the empty `{providers:{}}` case. Expected: the tick neither probes nor prunes, and every clock survives (Task 3).
 5. **A repointed or odd `base_url`.**
-   - A repointed URL starts fresh clocks, so it never inherits a "was ready" warn, and the tab shows "not probed yet" until the new URL has been probed.
+   - A repointed URL starts fresh clocks, so it never inherits a stale "down for <age>" line, and the tab shows "not probed yet" until the new URL has been probed.
    - A non-http(s) `base_url` (such as `file:`) is never fetched.
    - A fetch that ignores the abort signal still resolves the tick at the timeout.
    - Covered in Task 3 and Task 5.
@@ -50,14 +51,15 @@ These are the five inputs the spec implies but never spells out, most likely fir
 | File | Responsibility |
 |---|---|
 | `servers/shared/provider-engine.js` (create) | Pure marker helpers: `isExternalEngine`, `externalEngineInfo`, `engineShapeError`, `externalEngineConflict`, `ExternalEngineError`. No imports. |
-| `servers/gateway/gpu-orchestrator.js` (modify) | D2 guards in maybeAcquire, acquire, warm-resolve, ensureResident, acquireOrStartNative, siblings and mutex groups. Arms the poll in `initOrchestrator`. |
-| `servers/shared/providers-db.js` (modify) | Validates `upsertProvider` writes (D2). |
+| `servers/gateway/gpu-orchestrator.js` (modify) | D2 guards in maybeAcquire, acquire, warm-resolve, ensureResident, acquireOrStartNative, `isAlwaysResident`, siblings and mutex groups. Arms the poll in `initOrchestrator`. |
+| `servers/shared/lifecycle.js` (modify) | D2 guard: `ensureModelWarm` refuses a marked row and `releaseModel` is a no-op for it. |
+| `servers/shared/providers-db.js` (modify) | Transition-only validation of `upsertProvider` writes (D2). The reconciler keeps a stored `engine` and isolates each row in its own try/catch. |
 | `servers/gateway/provider-health.js` (modify) | The new `external` map: `recordExternal`, `pruneExternal`, and `getProviderHealth().external`. |
 | `servers/gateway/external-engine-poll.js` (create) | `probeExternalEngine`, `pollExternalEngines`, `startExternalEngineMonitor`, `_stopExternalEngineMonitor`, `externalEnginePollMs`. |
 | `scripts/run-suite.mjs` (modify) | Sets `CROW_EXTERNAL_ENGINE_POLL_MS=0` for scratch suite gateways. |
-| `servers/gateway/dashboard/panels/nest/health-signals.js` (modify) | `providersSignal` gains the external engines. |
+| `servers/gateway/dashboard/panels/nest/health-signals.js` (modify) | `providersSignal` gains the external engines, at info severity only. |
 | `servers/gateway/dashboard/settings/sections/llm/providers-tab.js` (modify) | `statusDot` and `engineBadge`, both exported, plus `render({ db, lang })`. |
-| `servers/gateway/dashboard/shared/i18n.js` (modify) | 7 `signals.providers.*` keys and 4 `settings.providers.*` keys. |
+| `servers/gateway/dashboard/shared/i18n.js` (modify) | 3 `signals.providers.*` keys and 4 `settings.providers.*` keys. |
 | `docs/architecture/models.md` (modify) | Adds an "External engines" section. |
 
 ---
@@ -66,8 +68,9 @@ These are the five inputs the spec implies but never spells out, most likely fir
 
 **Files:**
 - Create: `servers/shared/provider-engine.js`
-- Modify: `servers/gateway/gpu-orchestrator.js` (imports near :93-96; `getMutexSiblings` :414; `getMutexGroups` :454; `maybeAcquireLocalProvider` :580; `resolveWarmableProviderName` :624; `acquireOrStartNative` :1085; `acquireProvider` :1230; `ensureResident` :1459)
-- Test: `tests/provider-engine.test.js` (create), `tests/gpu-orchestrator-native.test.js`, `tests/gpu-orchestrator-host-gate.test.js`, `tests/gpu-warm-resolve.test.js`
+- Modify: `servers/gateway/gpu-orchestrator.js` (imports near :93-96; `getMutexSiblings` :414; `isAlwaysResident` :423; `getMutexGroups` :454; `maybeAcquireLocalProvider` :580; `resolveWarmableProviderName` :624; `acquireOrStartNative` :1085; `acquireProvider` :1230; `ensureResident` :1459; the `_deferredResidents` filter in `initOrchestrator`)
+- Modify: `servers/shared/lifecycle.js` (imports :20-23; `ensureModelWarm` :192; `releaseModel` :297)
+- Test: `tests/provider-engine.test.js` (create), `tests/lifecycle-external-engine.test.js` (create), `tests/gpu-orchestrator-native.test.js`, `tests/gpu-orchestrator-host-gate.test.js`, `tests/gpu-warm-resolve.test.js`
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -80,6 +83,8 @@ These are the five inputs the spec implies but never spells out, most likely fir
   - `ENGINE_FIELD_MAX = 64`.
   - `_resetExternalSkipNoticesForTest()`. Exported from `gpu-orchestrator.js`.
   - `_internals.getMutexGroups(cfg?)`. It now accepts an optional cfg.
+  - `isAlwaysResident(v)` returns false for a marked row, so `declaredAlwaysResident`, `localAlwaysResident`, `alwaysResidentProviders` and `_deferredResidents` never contain one.
+  - In `lifecycle.js`: `ensureModelWarm(id, opts)` returns `{ ok: false, reason: "external_engine" }` for a marked row, and `releaseModel(id, opts)` returns `{ ok: true, refs: 0, external: true }`. Both accept an optional `opts.cfg` seam; production omits it.
 
 - [ ] **Step 1: Write the failing helper tests**
 
@@ -317,6 +322,72 @@ test("external engines are never warmable: direct, as an alias, or as the siblin
 });
 ```
 
+In `tests/gpu-orchestrator-host-gate.test.js`, add `declaredAlwaysResident, localAlwaysResident` to the named import from `../servers/gateway/gpu-orchestrator.js`, then append to the END of the file:
+
+```js
+test("external engine: never always-resident — not declared, not local, not ensured, even with alwaysResident:true on a loopback bundle", () => {
+  const cfg = { providers: {
+    "crow-voice": CFG.providers["crow-voice"],
+    "ext-resident": {
+      baseUrl: "http://127.0.0.1:8030/v1", host: "cloud", bundleId: "halogen",
+      gpuPolicy: { alwaysResident: true, engine: { managed: "external", host: "raven" } },
+    },
+  } };
+  assert.deepEqual(declaredAlwaysResident(cfg), ["crow-voice"]);
+  assert.deepEqual(localAlwaysResident(cfg, CROW), ["crow-voice"]);
+  assert.deepEqual(alwaysResidentProviders(cfg, CROW), ["crow-voice"]);
+});
+```
+
+Create `tests/lifecycle-external-engine.test.js`:
+
+```js
+/**
+ * Legacy lifecycle.js (ensureModelWarm/releaseModel) refuses external engines
+ * (spec 2026-09-23 external-engine-provider §2.2). CROW_REFCOUNT_PATH is
+ * pointed at a tmp file BEFORE the module loads (it reads/persists refcounts
+ * at import time); fetch is replaced with a spy so nothing leaves the box.
+ */
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const dir = mkdtempSync(join(tmpdir(), "lifecycle-ext-"));
+process.env.CROW_REFCOUNT_PATH = join(dir, "refcounts.json");
+const { ensureModelWarm, releaseModel, onLifecycleEvent } = await import("../servers/shared/lifecycle.js");
+
+const cfg = { providers: {
+  "raven-flash-next": {
+    baseUrl: "http://10.0.0.126:8030/v1", host: "cloud", bundleId: "halogen", // contradictory on purpose
+    models: [{ id: "flash-next" }],
+    gpuPolicy: { engine: { managed: "external", host: "raven", label: "halogen" } },
+  },
+} };
+
+let realFetch;
+const fetchCalls = [];
+before(() => { realFetch = globalThis.fetch; globalThis.fetch = async (...a) => { fetchCalls.push(a); throw new Error("no network in tests"); }; });
+after(() => { globalThis.fetch = realFetch; rmSync(dir, { recursive: true, force: true }); });
+
+test("ensureModelWarm refuses an external engine: no probe, no bundle start, reason external_engine", async () => {
+  const events = [];
+  const off = onLifecycleEvent((e) => events.push(e.type));
+  try {
+    const r = await ensureModelWarm("raven-flash-next", { cfg });
+    assert.deepEqual(r, { ok: false, reason: "external_engine" });
+  } finally { off(); }
+  assert.equal(fetchCalls.length, 0);
+  assert.ok(!events.includes("bundle_start"));
+});
+
+test("releaseModel is a no-op for an external engine", async () => {
+  assert.deepEqual(await releaseModel("raven-flash-next", { cfg }), { ok: true, refs: 0, external: true });
+  assert.equal(fetchCalls.length, 0);
+});
+```
+
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/provider-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js`
@@ -325,6 +396,8 @@ Expected results:
 - `provider-engine.test.js` and `gpu-orchestrator-native.test.js` fail to load. The first reports `Cannot find module .../provider-engine.js`. The second reports "does not provide an export named 'ExternalEngineError'".
 - The new host-gate test fails with `true !== null`.
 - The new warm-resolve test fails with `'ext-bundle' !== null`.
+- The new always-resident test fails (`ext-resident` is listed).
+- The lifecycle tests fail: the guard is missing, so `ensureModelWarm` tries the probe and the fetch spy is called.
 
 - [ ] **Step 4: Create the helper**
 
@@ -569,9 +642,96 @@ Replace it with:
     if (p && isNativeRuntime(p)) {
 ```
 
+(i) `isAlwaysResident`. Replace:
+
+```js
+function isAlwaysResident(v) {
+  return v?.gpuPolicy?.alwaysResident === true || v?.alwaysResident === true;
+}
+```
+
+with:
+
+```js
+function isAlwaysResident(v) {
+  if (isExternalEngine(v)) return false; // spec 2026-09-23 D2: never resident here
+  return v?.gpuPolicy?.alwaysResident === true || v?.alwaysResident === true;
+}
+```
+
+In `initOrchestrator`, the deferred set uses its own inline copy of that predicate. Find:
+
+```js
+        .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
+          && !orchestratableHere(v, {}, ownAddrs))
+```
+
+Replace it with:
+
+```js
+        .filter(([, v]) => isAlwaysResident(v) && !orchestratableHere(v, {}, ownAddrs))
+```
+
+(j) `servers/shared/lifecycle.js`. Find:
+
+```js
+import { loadProviders } from "./providers.js";
+```
+
+Replace it with:
+
+```js
+import { loadProviders } from "./providers.js";
+import { isExternalEngine } from "./provider-engine.js";
+```
+
+Directly above the `/**` doc comment of `export async function ensureModelWarm`, insert:
+
+```js
+/** External engine (spec 2026-09-23 D2): another machine runs it — this
+ *  module never warms, counts or stops it. `opts.cfg` is a test seam. */
+function isExternalHere(providerId, opts = {}) {
+  const cfg = opts.cfg || loadProviders();
+  return isExternalEngine(cfg.providers?.[providerId]);
+}
+```
+
+In `ensureModelWarm`, find:
+
+```js
+export async function ensureModelWarm(providerId, opts = {}) {
+  const info = lookupProvider(providerId);
+```
+
+Replace it with:
+
+```js
+export async function ensureModelWarm(providerId, opts = {}) {
+  if (isExternalHere(providerId, opts)) {
+    emit({ type: "external_engine_refused", providerId });
+    return { ok: false, reason: "external_engine" };
+  }
+  const info = lookupProvider(providerId);
+```
+
+In `releaseModel`, find:
+
+```js
+export async function releaseModel(providerId, opts = {}) {
+  const info = lookupProvider(providerId);
+```
+
+Replace it with:
+
+```js
+export async function releaseModel(providerId, opts = {}) {
+  if (isExternalHere(providerId, opts)) return { ok: true, refs: 0, external: true };
+  const info = lookupProvider(providerId);
+```
+
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/provider-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js`
+Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/provider-engine.test.js tests/lifecycle-external-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js`
 
 Expected: PASS, 0 failures. That includes every pre-existing test in these files, since unmarked rows behave exactly as before.
 
@@ -579,29 +739,40 @@ Expected: PASS, 0 failures. That includes every pre-existing test in these files
 
 ```bash
 cd ~/crow-wt-external-engine
-git add servers/shared/provider-engine.js tests/provider-engine.test.js
-git commit servers/shared/provider-engine.js servers/gateway/gpu-orchestrator.js tests/provider-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js -m "feat(providers): external-engine marker; orchestrator never acquires, warms, evicts or reverts to one"
+git add servers/shared/provider-engine.js tests/provider-engine.test.js tests/lifecycle-external-engine.test.js
+git commit servers/shared/provider-engine.js servers/gateway/gpu-orchestrator.js servers/shared/lifecycle.js tests/provider-engine.test.js tests/lifecycle-external-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js -m "feat(providers): external-engine marker; orchestrator never acquires, warms, evicts or reverts to one"
 git show --stat HEAD
 ```
 
 ---
 
-### Task 2: Write-path validation in `upsertProvider` (D2 validation)
+### Task 2: Transition-only write validation in `upsertProvider`, plus reconciler hardening (D2 validation)
 
 **Files:**
-- Modify: `servers/shared/providers-db.js` (imports near :38; `upsertProvider` :227)
-- Test: `tests/providers-external-engine-write.test.js` (create)
+- Modify: `servers/shared/providers-db.js`: imports near :38; `upsertProvider` :227; `syncProvidersFromModelsJson` :555.
+- Test: `tests/providers-external-engine-write.test.js` (create).
 
 **Interfaces:**
 - Consumes: `engineShapeError`, `externalEngineConflict`, `isExternalEngine` from Task 1.
-- Produces: `upsertProvider` throws an `Error` with `.code` set to `"EXTERNAL_ENGINE_INVALID"` or `"EXTERNAL_ENGINE_CONFLICT"`. Nothing is written or emitted when it throws. Every other write behaves as before.
+- Produces:
+  - `upsertProvider` throws an `Error` whose `.code` is `"EXTERNAL_ENGINE_INVALID"` or `"EXTERNAL_ENGINE_CONFLICT"`. Nothing is written or emitted when it throws. Every other write behaves as before.
+  - `syncProvidersFromModelsJson` returns one extra counter, `failed: number`.
 
-Rules, in order:
-1. If the incoming `gpuPolicy` is non-null, `engineShapeError(incoming.engine)` must return null. Otherwise the write fails with `EXTERNAL_ENGINE_INVALID`.
-2. The effective policy is the incoming policy if present, else the stored one (this mirrors `COALESCE(excluded.gpu_policy, providers.gpu_policy)`). `externalEngineConflict({ bundleId: incomingBundleId, gpuPolicy: effective })` must be false. Otherwise the write fails with `EXTERNAL_ENGINE_CONFLICT`.
-3. **No one-step adoption.** Suppose the stored row is marked and the effective row is unmarked but orchestratable (it has a bundle or `runtime: "native"`). The write fails with `EXTERNAL_ENGINE_CONFLICT`. To unmark, the operator makes a separate write that has no engine, no bundle and no native runtime.
+The rules below are **transition-only** (review round 1, C2). They run after the existing-row `SELECT` and **before** the no-op check.
 
-These run after the existing-row `SELECT` and **before** the no-op check.
+1. **A malformed incoming `gpu_policy` is always `EXTERNAL_ENGINE_INVALID`.** Malformed means a raw string that does not parse, or that parses to something other than a plain object. It is never treated as "keep the stored policy".
+2. **Work out the resulting row.**
+   - The effective policy is the incoming policy if there is one, else the stored one. This mirrors `COALESCE(excluded.gpu_policy, providers.gpu_policy)`.
+   - The effective bundle is always the incoming `bundleId`, because `bundle_id = excluded.bundle_id`.
+3. **Did the write change anything that matters?** It changed if `engine` differs by canonical deep-equal, or the bundle differs (`null` ≡ `""`), or `runtime` differs, compared with the stored row. If none of these changed, the write passes, even when the stored row is contradictory or malformed. Such a row can arrive by replication, which never goes through `upsertProvider`.
+4. **If something changed, reject a resulting row that is invalid:**
+   - `engineShapeError(effective.engine)` → `EXTERNAL_ENGINE_INVALID`;
+   - `externalEngineConflict({ bundleId, gpuPolicy: effective })` → `EXTERNAL_ENGINE_CONFLICT`;
+   - a stored-marked row that becomes an unmarked but orchestratable row (it gains a bundle or `runtime: "native"`) → `EXTERNAL_ENGINE_CONFLICT`. Unmark first, in a separate write.
+
+The reconciler changes in two ways.
+- **Q3:** when the assert branch writes a non-null `gpuPolicy` for a row whose stored policy carries `engine`, the stored `engine` is copied into the written policy.
+- **C2:** each models.json entry runs in its own `try/catch`. A refusal logs `[providers-reconcile] <id> skipped: <code>: <message>`, increments `failed`, and the pass continues.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -609,30 +780,43 @@ Create `tests/providers-external-engine-write.test.js`:
 
 ```js
 /**
- * upsertProvider refuses contradictory external-engine rows (spec
- * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.2).
- * Harness: freshLibsql() from providers-upsert-noop.test.js — a per-test
- * init-db'd tmp DB; CROW_DATA_DIR points there so the instance-id file never
- * lands in the real ~/.crow.
+ * upsertProvider external-engine validation is TRANSITION-ONLY (spec
+ * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.2,
+ * revised after review round 1): a write is refused only when it CHANGES
+ * engine / bundleId / runtime and the result is invalid. Replication writes
+ * rows directly, so contradictory or malformed rows are seeded here with raw
+ * SQL, and today's write paths (tab re-enable, reenableProviderPreservingContent,
+ * repairProviderHosts, the models.json reconciler) must keep working on them.
+ *
+ * Harness: freshLibsql() from providers-reconcile-gate.test.js — per-test
+ * init-db'd tmp DB, CROW_DATA_DIR and CROW_MODELS_JSON pointed into it, so
+ * neither the real ~/.crow nor any real models.json is touched.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { upsertProvider, listProvidersAll, setProviderSyncManager } from "../servers/shared/providers-db.js";
+import {
+  upsertProvider, listProvidersAll, setProviderSyncManager,
+  reenableProviderPreservingContent, repairProviderHosts, syncProvidersFromModelsJson,
+} from "../servers/shared/providers-db.js";
 
-function freshLibsql() {
+function freshLibsql(fixtureProviders = {}) {
   const dir = mkdtempSync(join(tmpdir(), "providers-ext-engine-"));
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe",
+    env: { ...process.env, CROW_DATA_DIR: dir, CROW_MODELS_JSON: "" }, stdio: "pipe",
     cwd: join(import.meta.dirname, ".."),
   });
+  const fixturePath = join(dir, "models.fixture.json");
+  writeFileSync(fixturePath, JSON.stringify({ providers: fixtureProviders }));
   const prevDataDir = process.env.CROW_DATA_DIR;
+  const prevModelsJson = process.env.CROW_MODELS_JSON;
   process.env.CROW_DATA_DIR = dir;
+  process.env.CROW_MODELS_JSON = fixturePath;
   const db = createClient({ url: "file:" + join(dir, "crow.db") });
   return {
     db,
@@ -640,6 +824,8 @@ function freshLibsql() {
       setProviderSyncManager(null);
       if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR;
       else process.env.CROW_DATA_DIR = prevDataDir;
+      if (prevModelsJson === undefined) delete process.env.CROW_MODELS_JSON;
+      else process.env.CROW_MODELS_JSON = prevModelsJson;
       try { db.close(); } catch {}
       rmSync(dir, { recursive: true, force: true });
     },
@@ -647,9 +833,10 @@ function freshLibsql() {
 }
 
 const ENGINE = { managed: "external", host: "raven", label: "halogen" };
+const RAVEN = "http://10.0.0.126:8030/v1";
 const ravenRow = (extra = {}) => ({
   id: "raven-flash-next",
-  baseUrl: "http://10.0.0.126:8030/v1",
+  baseUrl: RAVEN,
   apiKey: null,
   host: "cloud",
   bundleId: null,
@@ -660,37 +847,48 @@ const ravenRow = (extra = {}) => ({
   ...extra,
 });
 
-async function storedPolicy(db, id) {
-  const { rows } = await db.execute({ sql: "SELECT gpu_policy FROM providers WHERE id = ?", args: [id] });
-  return rows[0]?.gpu_policy == null ? null : JSON.parse(rows[0].gpu_policy);
+/** Seed a row the way replication does: raw SQL, no validation. */
+async function seedRaw(db, { id, baseUrl = RAVEN, host = "cloud", bundleId = null, gpuPolicy, disabled = 0, instanceId = "peer-instance" }) {
+  await db.execute({
+    sql: `INSERT INTO providers (id, base_url, api_key, host, bundle_id, description, models, disabled, lamport_ts, instance_id, provider_type, gpu_policy)
+          VALUES (?, ?, NULL, ?, ?, NULL, '[{"id":"m"}]', ?, 5, ?, 'openai-compat', ?)`,
+    args: [id, baseUrl, host, bundleId, disabled, instanceId, gpuPolicy == null ? null : (typeof gpuPolicy === "string" ? gpuPolicy : JSON.stringify(gpuPolicy))],
+  });
 }
+
+async function stored(db, id) {
+  const { rows } = await db.execute({ sql: "SELECT * FROM providers WHERE id = ?", args: [id] });
+  return rows[0] || null;
+}
+const policyOf = (row) => (row?.gpu_policy == null ? null : JSON.parse(row.gpu_policy));
 const code = (c) => (err) => err?.code === c;
+
+// --- new invalid rows are refused -------------------------------------------
 
 test("a valid marker on a cloud row is accepted and stored", async () => {
   const h = freshLibsql();
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
-    assert.deepEqual((await storedPolicy(h.db, "raven-flash-next")).engine, ENGINE);
+    assert.deepEqual(policyOf(await stored(h.db, "raven-flash-next")).engine, ENGINE);
   } finally { h.cleanup(); }
 });
 
-test("marker + bundleId is rejected with EXTERNAL_ENGINE_CONFLICT and nothing is written", async () => {
+test("a NEW row with marker + bundleId is refused (EXTERNAL_ENGINE_CONFLICT); nothing written", async () => {
   const h = freshLibsql();
   try {
     await assert.rejects(upsertProvider(h.db, ravenRow({ bundleId: "halogen", gpuPolicy: { engine: ENGINE } })), code("EXTERNAL_ENGINE_CONFLICT"));
-    const { rows } = await h.db.execute({ sql: "SELECT COUNT(*) AS n FROM providers WHERE id = ?", args: ["raven-flash-next"] });
-    assert.equal(Number(rows[0].n), 0);
+    assert.equal(await stored(h.db, "raven-flash-next"), null);
   } finally { h.cleanup(); }
 });
 
-test("marker + native runtime is rejected with EXTERNAL_ENGINE_CONFLICT", async () => {
+test("a NEW row with marker + native runtime is refused (EXTERNAL_ENGINE_CONFLICT)", async () => {
   const h = freshLibsql();
   try {
     await assert.rejects(upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE, runtime: "native" } })), code("EXTERNAL_ENGINE_CONFLICT"));
   } finally { h.cleanup(); }
 });
 
-test("a malformed marker is rejected loudly with EXTERNAL_ENGINE_INVALID (typo'd managed, missing host)", async () => {
+test("introducing a malformed marker is refused (EXTERNAL_ENGINE_INVALID): typo'd managed, missing host, empty host", async () => {
   const h = freshLibsql();
   try {
     await assert.rejects(upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: { managed: "External", host: "raven" } } })), code("EXTERNAL_ENGINE_INVALID"));
@@ -699,33 +897,41 @@ test("a malformed marker is rejected loudly with EXTERNAL_ENGINE_INVALID (typo'd
   } finally { h.cleanup(); }
 });
 
-test("COALESCE hole: a null-policy write adding a bundleId to a MARKED row is rejected", async () => {
+test("a malformed incoming gpu_policy JSON string is INVALID, not 'keep stored' — even on a row with no marker", async () => {
+  const h = freshLibsql();
+  try {
+    await upsertProvider(h.db, ravenRow({ gpuPolicy: { mutexGroup: "g" } }));
+    await assert.rejects(upsertProvider(h.db, ravenRow({ gpu_policy: "{not json" })), code("EXTERNAL_ENGINE_INVALID"));
+    await assert.rejects(upsertProvider(h.db, ravenRow({ gpu_policy: "[1,2]" })), code("EXTERNAL_ENGINE_INVALID"));
+    assert.deepEqual(policyOf(await stored(h.db, "raven-flash-next")), { mutexGroup: "g" }, "stored policy untouched");
+  } finally { h.cleanup(); }
+});
+
+test("COALESCE hole: a null-policy write that NEWLY adds a bundleId to a marked row is refused", async () => {
   const h = freshLibsql();
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
     await assert.rejects(upsertProvider(h.db, ravenRow({ bundleId: "halogen", gpuPolicy: null })), code("EXTERNAL_ENGINE_CONFLICT"));
-    assert.deepEqual((await storedPolicy(h.db, "raven-flash-next")).engine, ENGINE, "marker untouched");
+    const row = await stored(h.db, "raven-flash-next");
+    assert.equal(row.bundle_id, null);
+    assert.deepEqual(policyOf(row).engine, ENGINE, "marker untouched");
   } finally { h.cleanup(); }
 });
 
-test("no one-step adoption: a registerModel-shaped native write over a MARKED row is rejected; unmark-then-register works", async () => {
+test("no one-step adoption: a registerModel-shaped native write over a marked row is refused; unmark-then-register works", async () => {
   const h = freshLibsql();
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
-    await assert.rejects(
-      upsertProvider(h.db, ravenRow({ host: "local", gpuPolicy: { runtime: "native", catalogId: "x", quant: "Q4", port: 18200 } })),
-      code("EXTERNAL_ENGINE_CONFLICT"),
-    );
-    // Explicit unmark (its own write) …
-    await upsertProvider(h.db, ravenRow({ gpuPolicy: {} }));
-    assert.equal((await storedPolicy(h.db, "raven-flash-next")).engine, undefined);
-    // … then the native registration is allowed.
-    await upsertProvider(h.db, ravenRow({ host: "local", gpuPolicy: { runtime: "native", catalogId: "x", quant: "Q4", port: 18200 } }));
-    assert.equal((await storedPolicy(h.db, "raven-flash-next")).runtime, "native");
+    const native = { runtime: "native", catalogId: "x", quant: "Q4", port: 18200 };
+    await assert.rejects(upsertProvider(h.db, ravenRow({ host: "local", gpuPolicy: native })), code("EXTERNAL_ENGINE_CONFLICT"));
+    await upsertProvider(h.db, ravenRow({ gpuPolicy: {} })); // explicit unmark, its own write
+    assert.equal(policyOf(await stored(h.db, "raven-flash-next")).engine, undefined);
+    await upsertProvider(h.db, ravenRow({ host: "local", gpuPolicy: native }));
+    assert.equal(policyOf(await stored(h.db, "raven-flash-next")).runtime, "native");
   } finally { h.cleanup(); }
 });
 
-test("the provider-update path used to mark rows ({...listProvidersAll row, gpuPolicy}) and the tab's re-enable ({...row, disabled:false}) both pass on a marked row", async () => {
+test("the marking path ({...listProvidersAll row, gpuPolicy + engine}) passes; a spread re-enable of the marked row is a no-op", async () => {
   const h = freshLibsql();
   try {
     await upsertProvider(h.db, ravenRow());
@@ -735,8 +941,97 @@ test("the provider-update path used to mark rows ({...listProvidersAll row, gpuP
     assert.deepEqual(row.gpuPolicy.engine, ENGINE);
     assert.equal(row.host, "cloud", "host stays cloud (spec §2.1)");
     const r = await upsertProvider(h.db, { ...row, disabled: false });
-    assert.equal(r.unchanged, true, "no-op suppression still applies to a valid marked row");
+    assert.equal(r.unchanged, true);
   } finally { h.cleanup(); }
+});
+
+// --- replicated contradictory / malformed rows keep accepting today's writes --
+
+test("replicated contradictory row (marker + bundle): the tab's {...row, disabled:false} write passes", async () => {
+  const h = freshLibsql();
+  try {
+    await seedRaw(h.db, { id: "rep-bundle", bundleId: "halogen", gpuPolicy: { engine: ENGINE }, disabled: 1 });
+    const row = (await listProvidersAll(h.db)).find((r) => r.id === "rep-bundle");
+    await upsertProvider(h.db, { ...row, disabled: false });
+    assert.equal(Number((await stored(h.db, "rep-bundle")).disabled), 0);
+  } finally { h.cleanup(); }
+});
+
+test("replicated contradictory and malformed rows: reenableProviderPreservingContent passes", async () => {
+  const h = freshLibsql();
+  try {
+    await seedRaw(h.db, { id: "rep-native", gpuPolicy: { engine: ENGINE, runtime: "native" }, disabled: 1 });
+    await seedRaw(h.db, { id: "rep-typo", gpuPolicy: { engine: { managed: "External", host: "raven" } }, disabled: 1 });
+    assert.ok(await reenableProviderPreservingContent(h.db, "rep-native"));
+    assert.ok(await reenableProviderPreservingContent(h.db, "rep-typo"));
+    assert.equal(Number((await stored(h.db, "rep-native")).disabled), 0);
+    assert.equal(Number((await stored(h.db, "rep-typo")).disabled), 0);
+  } finally { h.cleanup(); }
+});
+
+test("replicated contradictory row: repairProviderHosts still repairs its host", async () => {
+  const h = freshLibsql();
+  try {
+    // In repair scope: no bundle, no owner, written by THIS instance, host "local" but the IP is not ours.
+    await seedRaw(h.db, { id: "rep-repair", host: "local", gpuPolicy: { engine: ENGINE, runtime: "native" }, instanceId: "own-instance" });
+    const res = await repairProviderHosts(h.db, {
+      ownInstanceId: "own-instance",
+      ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+    });
+    assert.deepEqual(res.changes.map((c) => c.id), ["rep-repair"]);
+    assert.equal((await stored(h.db, "rep-repair")).host, "cloud");
+  } finally { h.cleanup(); }
+});
+
+test("replicated contradictory row: the reconciler re-asserts it (same bundle, engine preserved) without failing", async () => {
+  const h = freshLibsql({
+    "rep-recon": { baseUrl: RAVEN, bundleId: "halogen", mutexGroup: "g", models: [{ id: "m" }] },
+  });
+  try {
+    await seedRaw(h.db, { id: "rep-recon", bundleId: "halogen", gpuPolicy: { engine: ENGINE } });
+    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+    assert.equal(res.failed, 0);
+    const p = policyOf(await stored(h.db, "rep-recon"));
+    assert.equal(p.mutexGroup, "g");
+    assert.deepEqual(p.engine, ENGINE);
+  } finally { h.cleanup(); }
+});
+
+// --- reconciler: Q3 (engine preserved) and per-row isolation ------------------
+
+test("Q3: the reconciler keeps a stored engine when it re-asserts a gpuPolicy", async () => {
+  const h = freshLibsql({
+    "raven-flash-next": { baseUrl: RAVEN, mutexGroup: "g", alwaysResident: false, models: [{ id: "flash-next" }] },
+  });
+  try {
+    await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
+    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+    assert.equal(res.failed, 0);
+    const p = policyOf(await stored(h.db, "raven-flash-next"));
+    assert.equal(p.mutexGroup, "g", "file content asserted");
+    assert.deepEqual(p.engine, ENGINE, "marker survived the reconcile");
+  } finally { h.cleanup(); }
+});
+
+test("reconciler isolation: one refused entry is logged and counted; the rest of the pass still runs", async () => {
+  const h = freshLibsql({
+    "raven-flash-next": { baseUrl: RAVEN, bundleId: "halogen", models: [{ id: "flash-next" }] }, // newly adds a bundle to a marked row
+    "fx-loop": { baseUrl: "http://127.0.0.1:8011/v1", models: [{ id: "m" }] },
+  });
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  try {
+    await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
+    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+    assert.equal(res.failed, 1);
+    assert.ok(await stored(h.db, "fx-loop"), "the next entry was still seeded");
+    assert.equal((await stored(h.db, "raven-flash-next")).bundle_id, null, "refused write left the row alone");
+    assert.ok(warns.some((w) => w.includes("[providers-reconcile] raven-flash-next skipped: EXTERNAL_ENGINE_CONFLICT")), warns.join("\n"));
+  } finally {
+    console.warn = origWarn;
+    h.cleanup();
+  }
 });
 ```
 
@@ -744,7 +1039,7 @@ test("the provider-update path used to mark rows ({...listProvidersAll row, gpuP
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-external-engine-write.test.js`
 
-Expected: FAIL. The conflict, invalid, COALESCE and adoption tests all report "Missing expected rejection". The first test and the last test pass.
+Expected: FAIL. The refusal tests report "Missing expected rejection". The Q3 test fails because the engine was dropped. The isolation test fails because `res.failed` is `undefined`. The replicated-row tests pass already, since nothing validates yet.
 
 - [ ] **Step 3: Implement the validation**
 
@@ -764,43 +1059,72 @@ import { isExternalEngine, engineShapeError, externalEngineConflict } from "./pr
 Directly above the `/**` doc comment that precedes `export async function upsertProvider`, insert:
 
 ```js
-function parsePolicy(raw) {
-  if (raw == null) return null;
-  if (typeof raw === "object") return raw;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
 function engineWriteError(code, message) {
   const err = new Error(message);
   err.code = code;
   return err;
 }
 
+/** Stored gpu_policy → object, or null (absent or corrupt — corrupt reads as "none"). */
+function parseStoredPolicy(raw) {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
+
+/** Incoming gpu_policy (the upsert's already-stringified value) → { policy, malformed }. */
+function parseIncomingPolicy(raw) {
+  if (raw == null) return { policy: null, malformed: false };
+  if (typeof raw === "object") return { policy: raw, malformed: Array.isArray(raw) };
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? { policy: v, malformed: false } : { policy: null, malformed: true };
+  } catch { return { policy: null, malformed: true }; }
+}
+
+const nullish = (v) => (v === undefined ? null : v);
+
 /**
- * External-engine write rules (spec 2026-09-23 §2.2). Judged on the EFFECTIVE
- * policy, because the upsert SQL COALESCEs a null gpu_policy into "keep the
- * stored one" — a null-policy write that adds a bundleId would otherwise
- * produce a marked row with a bundle. Also refuses one-step adoption: a write
- * that swaps a marked row's policy for an orchestratable one (bundle or
- * native) must be preceded by its own explicit unmark write.
+ * External-engine write rules (spec 2026-09-23 §2.2, TRANSITION-ONLY after
+ * review round 1). Replication writes rows directly — never through here — so
+ * a contradictory or malformed marked row can already be stored. A write that
+ * leaves engine / bundleId / runtime as stored must pass regardless (the tab's
+ * re-enable, reenableProviderPreservingContent, repairProviderHosts and the
+ * reconciler all spread the stored row back in). Only a write that CHANGES one
+ * of them is judged, on the EFFECTIVE row: the upsert SQL COALESCEs a null
+ * gpu_policy into the stored one, while bundle_id is always overwritten.
  */
-function assertExternalEngineWrite({ bundleId, incomingPolicy, storedPolicy }) {
-  if (incomingPolicy) {
-    const shape = engineShapeError(incomingPolicy.engine);
-    if (shape) throw engineWriteError("EXTERNAL_ENGINE_INVALID", shape);
-  }
-  const effective = incomingPolicy ?? storedPolicy;
-  if (externalEngineConflict({ bundleId, gpuPolicy: effective })) {
+function assertExternalEngineWrite({ incomingBundleId, incomingPolicyRaw, storedRow }) {
+  const { policy: incoming, malformed } = parseIncomingPolicy(incomingPolicyRaw);
+  if (malformed) throw engineWriteError("EXTERNAL_ENGINE_INVALID", "gpu_policy must be a JSON object");
+  const storedPolicy = storedRow ? parseStoredPolicy(storedRow.gpu_policy) : null;
+  const storedBundle = storedRow ? nullish(storedRow.bundle_id) : null;
+  const effective = incoming ?? storedPolicy;
+  const bundle = nullish(incomingBundleId);
+
+  const changed =
+    !canonicalJsonEqual(nullish(storedPolicy?.engine), nullish(effective?.engine))
+    || String(storedBundle ?? "") !== String(bundle ?? "")
+    || nullish(storedPolicy?.runtime) !== nullish(effective?.runtime);
+  if (!changed) return;
+
+  const shape = engineShapeError(effective?.engine);
+  if (shape) throw engineWriteError("EXTERNAL_ENGINE_INVALID", shape);
+  if (externalEngineConflict({ bundleId: bundle, gpuPolicy: effective })) {
     throw engineWriteError("EXTERNAL_ENGINE_CONFLICT",
       'an external engine (gpu_policy.engine.managed = "external") cannot also carry a bundleId or gpu_policy.runtime = "native"');
   }
-  const orchestratable = (bundleId != null && bundleId !== "") || effective?.runtime === "native";
+  const orchestratable = (bundle != null && bundle !== "") || effective?.runtime === "native";
   if (isExternalEngine({ gpuPolicy: storedPolicy }) && !isExternalEngine({ gpuPolicy: effective }) && orchestratable) {
     throw engineWriteError("EXTERNAL_ENGINE_CONFLICT",
       "this row is an external engine; clear gpu_policy.engine in its own write before giving it a bundle or a native runtime");
   }
 }
 ```
+
+(`canonicalJsonEqual` is already defined above `upsertIsNoop` in this file. `canonicalJsonEqual(null, null)` is `true`.)
 
 Inside `upsertProvider`, find:
 
@@ -816,26 +1140,90 @@ Replace it with:
   const gpuPolicy = provider.gpuPolicy != null ? JSON.stringify(provider.gpuPolicy) : (provider.gpu_policy ?? null);
 
   assertExternalEngineWrite({
-    bundleId: provider.bundleId ?? provider.bundle_id ?? null,
-    incomingPolicy: parsePolicy(gpuPolicy),
-    storedPolicy: existed ? parsePolicy(rows[0].gpu_policy) : null,
+    incomingBundleId: provider.bundleId ?? provider.bundle_id ?? null,
+    incomingPolicyRaw: gpuPolicy,
+    storedRow: existed ? rows[0] : null,
   });
 
   if (existed && upsertIsNoop(rows[0], {
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Harden the reconciler (Q3 plus per-row isolation)**
 
-Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-external-engine-write.test.js tests/providers-upsert-noop.test.js tests/providers-war-sim.test.js tests/providers-host-inference.test.js tests/models-registration.test.js tests/sync-emit-sites.test.js`
+In `syncProvidersFromModelsJson`, replace everything from `const counters = {` down to (but not including) `const rep = await repairProviderHosts(dbClient, { ownAddrs: addrs });` with:
+
+```js
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0, failed: 0 };
+  const entries = config?.providers
+    ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
+    : [];
+
+  const { rows: existingRows } = await dbClient.execute("SELECT id, disabled, gpu_policy FROM providers");
+  const existing = new Map(existingRows.map((r) => [r.id, r]));
+
+  for (const [id, p] of entries) {
+    // Per-row isolation (external-engine review C2): one refused write — e.g.
+    // a models.json entry that would newly give a marked external engine a
+    // bundle — must not abort the rest of the pass or the host repair below.
+    try {
+      const cur = existing.get(id);
+      const decision = reconcileDecision({
+        owned: isLocallyOrchestratable({ baseUrl: p.baseUrl }, addrs),
+        present: cur !== undefined,
+        disabled: cur !== undefined && !!Number(cur.disabled),
+        force,
+      });
+      if (decision === "skip_disabled") { counters.skipped_disabled++; continue; }
+      if (decision === "skip_unowned") { counters.skipped_unowned++; continue; }
+      if (decision === "reenable") {
+        const res = await reenableProviderPreservingContent(dbClient, id);
+        if (res) counters.reenabled++;
+        continue;
+      }
+      // "seed" | "assert" — full assert from the file entry.
+      let gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
+        ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }
+        : null;
+      // Q3: models.json knows nothing of external engines — never let a
+      // re-assert drop a stored marker. (A null gpuPolicy already keeps the
+      // stored one via the upsert's COALESCE.)
+      const storedEngine = cur ? parseStoredPolicy(cur.gpu_policy)?.engine : undefined;
+      if (gpuPolicy && storedEngine != null) gpuPolicy = { ...gpuPolicy, engine: storedEngine };
+      const res = await upsertProvider(dbClient, {
+        id,
+        baseUrl: p.baseUrl || "",
+        apiKey: p.apiKey ?? null,
+        host: inferHost(p.baseUrl, p.host, { ownAddrs: addrs }),
+        bundleId: p.bundleId ?? null,
+        description: p.$description || p.description || null,
+        models: p.models || [],
+        disabled: false,
+        providerType: inferProviderType(p.api) || p.providerType || null,
+        gpuPolicy,
+      });
+      if (res.unchanged) counters.unchanged++;
+      else counters.upserted++;
+    } catch (err) {
+      counters.failed++;
+      console.warn(`[providers-reconcile] ${id} skipped: ${err?.code ? err.code + ": " : ""}${err?.message ?? err}`);
+    }
+  }
+```
+
+Then update the function's JSDoc `@returns` line so that it lists `failed: number` next to `repaired: number`.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-external-engine-write.test.js tests/providers-upsert-noop.test.js tests/providers-war-sim.test.js tests/providers-host-inference.test.js tests/providers-reconcile-gate.test.js tests/providers-host-repair.test.js tests/providers-host-repair-sim.test.js tests/models-registration.test.js tests/sync-emit-sites.test.js`
 
 Expected: PASS, 0 failures.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd ~/crow-wt-external-engine
 git add tests/providers-external-engine-write.test.js
-git commit servers/shared/providers-db.js tests/providers-external-engine-write.test.js -m "feat(providers): upsertProvider rejects contradictory or malformed external-engine rows"
+git commit servers/shared/providers-db.js tests/providers-external-engine-write.test.js -m "feat(providers): transition-only external-engine write validation; reconciler keeps the marker and isolates rows"
 git show --stat HEAD
 ```
 
@@ -861,7 +1249,8 @@ git show --stat HEAD
     - `externalEnginePollMs(env?) -> number`.
     - `externalModelsUrl(baseUrl) -> string|null`.
     - `probeExternalEngine(baseUrl, { fetchImpl, timeoutMs }) -> Promise<{ ready, error }>`.
-    - `pollExternalEngines({ cfg?, fetchImpl?, now?, timeoutMs? }) -> Promise<string[]>`. It never throws.
+    - `pollExternalEngines({ cfg?, fetchImpl?, now?, timeoutMs? }) -> Promise<string[]>`. It never throws, and it is a no-op unless `cfg._source === "db:providers"`.
+    - `DB_PROVIDERS_SOURCE = "db:providers"`.
     - `startExternalEngineMonitor({ intervalMs?, poll? }) -> boolean` and `_stopExternalEngineMonitor()`.
 
 - [ ] **Step 1: Write the failing provider-health tests**
@@ -959,7 +1348,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  EXTERNAL_ENGINE_PROBE_TIMEOUT_MS, DEFAULT_EXTERNAL_ENGINE_POLL_MS,
+  EXTERNAL_ENGINE_PROBE_TIMEOUT_MS, DEFAULT_EXTERNAL_ENGINE_POLL_MS, DB_PROVIDERS_SOURCE,
   externalEnginePollMs, externalModelsUrl, pollExternalEngines,
   startExternalEngineMonitor, _stopExternalEngineMonitor,
 } from "../servers/gateway/external-engine-poll.js";
@@ -971,7 +1360,8 @@ const extRow = (extra = {}) => ({
   baseUrl: RAVEN, host: "cloud", bundleId: null, apiKey: null,
   models: [{ id: "flash-next" }], gpuPolicy: { engine: ENGINE }, ...extra,
 });
-const cfgOne = (extra = {}) => ({ providers: {
+const DB = "db:providers"; // the _source loadProvidersFromDb sets (servers/shared/providers-db.js)
+const cfgOne = (extra = {}) => ({ _source: DB, providers: {
   "raven-flash-next": extRow(extra),
   "cloud-openai": { baseUrl: "https://api.openai.com/v1", host: "cloud", apiKey: "sk-cloud" },
   "crow-voice": { baseUrl: "http://127.0.0.1:8011/v1", host: "local", bundleId: "vllm-qwen35-4b" },
@@ -994,6 +1384,7 @@ beforeEach(() => { _resetProviderHealth(); _stopExternalEngineMonitor(); });
 afterEach(() => { _stopExternalEngineMonitor(); });
 
 test("defaults: 3 s probe timeout, 60 s interval; CROW_EXTERNAL_ENGINE_POLL_MS overrides; 0 disables", () => {
+  assert.equal(DB_PROVIDERS_SOURCE, DB);
   assert.equal(EXTERNAL_ENGINE_PROBE_TIMEOUT_MS, 3000);
   assert.equal(DEFAULT_EXTERNAL_ENGINE_POLL_MS, 60000);
   assert.equal(externalEnginePollMs({}), 60000);
@@ -1048,7 +1439,7 @@ test("the timeout is honoured even when fetch ignores the abort signal; the sign
 });
 
 test("disabled and removed rows are pruned from the external map", async () => {
-  const two = { providers: {
+  const two = { _source: DB, providers: {
     "raven-flash-next": extRow(),
     "raven-halogen-smoke": extRow({ baseUrl: "http://10.0.0.126:8031/v1" }),
     "cloud-openai": { baseUrl: "https://api.openai.com/v1", host: "cloud" },
@@ -1057,7 +1448,7 @@ test("disabled and removed rows are pruned from the external map", async () => {
   assert.deepEqual(Object.keys(ext()).sort(), ["raven-flash-next", "raven-halogen-smoke"]);
 
   const f = recorder(ok200);
-  await pollExternalEngines({ cfg: { providers: {
+  await pollExternalEngines({ cfg: { _source: DB, providers: {
     "raven-flash-next": extRow({ disabled: true }),
     "cloud-openai": { baseUrl: "https://api.openai.com/v1", host: "cloud" },
   } }, fetchImpl: f, now: () => 2 });
@@ -1065,10 +1456,21 @@ test("disabled and removed rows are pruned from the external map", async () => {
   assert.equal(f.calls.length, 0, "a disabled row is not probed");
 });
 
-test("an unreadable-config tick (empty providers map) prunes nothing — clocks survive", async () => {
+test("C1: a non-DB config (models.json fallback after invalidateProvidersCache, or empty) neither probes nor prunes", async () => {
   await pollExternalEngines({ cfg: cfgOne(), fetchImpl: recorder(ok200), now: () => 1000 });
-  await pollExternalEngines({ cfg: { providers: {} }, fetchImpl: recorder(ok200), now: () => 2000 });
-  assert.equal(ext()["raven-flash-next"].lastReadyAt, 1000);
+  const f = recorder(ok200);
+  // Non-empty, no markers, sourced from a models.json path — exactly what
+  // loadProviders() returns while its cache is null or the DB read fails.
+  const fallback = { _source: "/home/kh0pp/crow/models.json", providers: {
+    "crow-voice": { baseUrl: "http://127.0.0.1:8011/v1", host: "local", bundleId: "vllm-qwen35-4b" },
+  } };
+  assert.deepEqual(await pollExternalEngines({ cfg: fallback, fetchImpl: f, now: () => 2000 }), []);
+  await pollExternalEngines({ cfg: { _source: null, providers: {} }, fetchImpl: f, now: () => 2500 });
+  // Even a marked row is not probed from a config the DB did not produce.
+  await pollExternalEngines({ cfg: { providers: { "raven-flash-next": extRow() } }, fetchImpl: f, now: () => 3000 });
+  assert.equal(f.calls.length, 0);
+  assert.equal(ext()["raven-flash-next"].lastReadyAt, 1000, "clocks survive every non-DB tick");
+  assert.equal(ext()["raven-flash-next"].checkedAt, 1000);
 });
 
 test("a repointed base_url starts fresh clocks on the next tick", async () => {
@@ -1091,7 +1493,7 @@ test("a non-http(s) base_url is recorded not-ready and NEVER fetched; a trailing
 });
 
 test("pollExternalEngines never throws — a config whose providers getter throws is a no-op tick", async () => {
-  const bad = { get providers() { throw new Error("db unreadable"); } };
+  const bad = { _source: "db:providers", get providers() { throw new Error("db unreadable"); } };
   const origWarn = console.warn;
   console.warn = () => {};
   try {
@@ -1261,6 +1663,10 @@ import { recordExternal, pruneExternal } from "./provider-health.js";
 
 export const EXTERNAL_ENGINE_PROBE_TIMEOUT_MS = 3_000;
 export const DEFAULT_EXTERNAL_ENGINE_POLL_MS = 60_000;
+/** The `_source` loadProvidersFromDb() sets. Anything else is the models.json
+ *  fallback loadProviders() serves while its cache is null or the DB read
+ *  fails — it carries no markers, so trusting it would prune every clock. */
+export const DB_PROVIDERS_SOURCE = "db:providers";
 
 let _timer = null;
 let _inFlight = false;
@@ -1305,7 +1711,8 @@ export async function probeExternalEngine(baseUrl, {
     // Deliberately NO headers: the engine has no auth (spec §3) and a row's
     // api_key must never be sent to a LAN box on a timer.
     const res = await Promise.race([fetchImpl(url, { method: "GET", signal: ac.signal }), timedOut]);
-    try { await res?.body?.cancel?.(); } catch { /* the body is irrelevant */ }
+    // Fire-and-forget: releasing the body must never extend the tick past the race.
+    try { res?.body?.cancel?.()?.catch?.(() => {}); } catch { /* the body is irrelevant */ }
     if (res && res.ok) return { ready: true, error: null };
     return { ready: false, error: `http ${res?.status ?? "?"}` };
   } catch (err) {
@@ -1317,15 +1724,16 @@ export async function probeExternalEngine(baseUrl, {
 
 /**
  * One tick. Returns the names probed. MUST NEVER THROW (the interval relies
- * on it). Prunes entries for rows no longer enabled+marked — but only when a
- * config was actually read: loadProviders() returns {providers:{}} when the
- * DB and models.json are both unreadable, and pruning on that would wipe
- * every ready-once clock (the residency poll's reviewed CRITICAL).
+ * on it). Probes AND prunes only when the config came from the DB
+ * (review round 1, C1): after invalidateProvidersCache() or a DB error,
+ * loadProviders() serves the models.json fallback — non-empty, no markers —
+ * and pruning on it would wipe every ready-once clock. Such a tick is a no-op.
  */
 export async function pollExternalEngines(opts = {}) {
   const probed = [];
   try {
     const cfg = opts.cfg !== undefined ? opts.cfg : loadProviders();
+    if (cfg?._source !== DB_PROVIDERS_SOURCE) return probed;
     const fetchImpl = opts.fetchImpl || globalThis.fetch;
     const now = opts.now || Date.now;
     const timeoutMs = opts.timeoutMs ?? EXTERNAL_ENGINE_PROBE_TIMEOUT_MS;
@@ -1342,7 +1750,7 @@ export async function pollExternalEngines(opts = {}) {
       });
       probed.push(name);
     }
-    if (Object.keys(providers).length > 0) pruneExternal(targets.map(([n]) => n));
+    pruneExternal(targets.map(([n]) => n)); // DB-sourced: an absent/disabled row really is gone
   } catch (err) {
     if (!_failing) {
       _failing = true;
@@ -1459,24 +1867,28 @@ git show --stat HEAD
 
 ---
 
-### Task 4: Nest `providersSignal` gains external engines (D4, nest)
+### Task 4: Nest `providersSignal` shows external engines, at info only (D4, nest)
 
 **Files:**
-- Modify: `servers/gateway/dashboard/panels/nest/health-signals.js` (the i18n import at :27, the header comment, and `providersSignal` at :704)
-- Modify: `servers/gateway/dashboard/shared/i18n.js` (after `"signals.providers.action"`)
+- Modify: `servers/gateway/dashboard/panels/nest/health-signals.js`: the i18n import at :27, the header comment, and `providersSignal` at :704.
+- Modify: `servers/gateway/dashboard/shared/i18n.js`: after `"signals.providers.action"`.
 - Test: `tests/providers-health-signal.test.js`
 
 **Interfaces:**
-- Consumes: `getProviderHealth().external` and `recordExternal` (Task 3); `fill` from `i18n.js` (already exported).
+- Consumes:
+  - `getProviderHealth().external` and `recordExternal` (Task 3);
+  - `fill` from `i18n.js` (already exported).
 - Produces: the same signal object shape `{ id: "providers", severity, state, label, value, issueLabel?, actionLabel?, actionHref? }`. `state` can now also be `"info"`.
 
-Rules:
-- An external engine that is ready counts as up.
-- An engine that is not ready with `lastReadyAt == null` has never answered here. It becomes info, never warn.
-- An engine that is not ready and has been silent for at least the threshold since `lastReadyAt` is down and becomes warn.
-- An engine that is not ready but under the threshold is shown only in the `{up}/{n}` count.
-- Every warn source (residency down and external down) folds into **one** issue.
-- The existing residency-only copy stays byte-identical.
+Rules (review round 1, C3):
+- External engines **never** produce a warn, and so never a health-monitor push.
+- Each engine contributes one line:
+  - `"<label> on <host>: up"`;
+  - `"<label> on <host>: down for <age> (externally managed)"` if it answered at least once in this process;
+  - `"<label> on <host>: not reachable from this instance"` if it never did.
+- If any external engine is not up, and no resident model is in warn, the signal is `info`. Its issue label joins the not-up lines with `"; "`.
+- If a resident model is in warn, the signal returns exactly today's warn object, byte for byte, and the external lines are not added.
+- If there are no resident entries and no external entries, the signal is `off` as today.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1491,94 +1903,93 @@ import {
 Append to the END of the file:
 
 ```js
-// --- external engines (spec 2026-09-23 external-engine-provider §2.4) -------
+// --- external engines (spec 2026-09-23 external-engine-provider §2.4, as
+// revised in review round 1: info only, NEVER warn — raven's prod windows stop
+// halogen for hours by design, and a nest warn is a high-priority push) -------
 
 const RAVEN = "http://10.0.0.126:8030/v1";
 function ext(ready, nowMs, extra = {}) {
   recordExternal("raven-flash-next", { ready, nowMs, baseUrl: RAVEN, engineHost: "raven", label: "halogen", ...extra });
 }
+const HOUR = 60 * MIN;
 
-test("external only, ready → ok, value shows 1/1 external up, no issue", async () => {
+test("external only, up → ok, no issue, value 'halogen on raven: up'", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(true, NOW);
   const { detail, issue } = await providers({ now: at(NOW) });
   assert.equal(detail.state, "ok");
   assert.equal(issue, undefined);
-  assert.match(detail.value, /1\/1 external up/);
+  assert.equal(detail.value, "halogen on raven: up");
 });
 
-test("never ready in this process → INFO naming engine + host, never warn — even hours later", async () => {
+test("never answered in this process → INFO 'not reachable from this instance', never warn, nest stays ok", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(false, NOW, { error: "timeout after 3000ms" });
-  const { detail, issue, all } = await providers({ now: at(NOW + 10 * 60 * MIN) });
+  const { detail, issue, all } = await providers({ now: at(NOW + 10 * HOUR) });
   assert.equal(detail.state, "info");
   assert.equal(issue.severity, "info");
-  assert.match(issue.label, /halogen/);
-  assert.match(issue.label, /raven/);
-  assert.match(detail.value, /not reachable from this instance/);
-  assert.equal(all.ok, true, "info never flips the nest to not-ok");
+  assert.equal(issue.label, "halogen on raven: not reachable from this instance");
+  assert.equal(all.ok, true);
 });
 
-test("ready once, then down UNDER the threshold → ok, no issue, 0/1 up", async () => {
+test("answered once, then down for HOURS → still info (never warn): 'down for 10h (externally managed)'", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(true, NOW);
-  ext(false, NOW + 1 * MIN);
-  const { detail, issue } = await providers({ now: at(NOW + 5 * MIN) });
-  assert.equal(detail.state, "ok");
-  assert.equal(issue, undefined);
-  assert.match(detail.value, /0\/1 external up/);
+  ext(false, NOW + MIN);
+  const { detail, issue, all } = await providers({ now: at(NOW + 10 * HOUR) });
+  assert.equal(detail.state, "info");
+  assert.equal(issue.severity, "info");
+  assert.equal(issue.label, "halogen on raven: down for 10h (externally managed)");
+  assert.equal(all.ok, true);
+  assert.equal(all.issues.filter((i) => i.severity === "warn").length, 0, "nothing the health monitor would push");
 });
 
-test("ready once, then down OVER the threshold → one warn naming engine + host; no placeholder left", async () => {
+test("down for under a minute reads '<1m', never 'now'", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(true, NOW);
-  ext(false, NOW + 1 * MIN);
-  const { detail, issue } = await providers({ now: at(NOW + THRESHOLD + MIN) });
-  assert.equal(detail.state, "warn");
-  assert.equal(issue.severity, "warn");
-  assert.match(detail.value, /halogen on raven unreachable/);
-  assert.match(issue.label, /halogen/);
-  assert.match(issue.label, /raven/);
-  assert.match(issue.label, /raven-flash-next/);
-  for (const s of [detail.value, issue.label]) assert.doesNotMatch(s, /\{[a-z]+\}/);
+  ext(false, NOW + 1000);
+  const { detail } = await providers({ now: at(NOW + 20_000) });
+  assert.match(detail.value, /down for <1m \(externally managed\)/);
 });
 
-test("a residency outage and an external outage fold into exactly ONE warn issue naming both", async () => {
+test("a resident-model warn is byte-identical with or without an external engine down", async () => {
+  _resetProviderHealth();
+  setResidencyInitialized();
+  recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
+  const alone = (await providers({ now: at(NOW + THRESHOLD + MIN) })).all.issues.find((i) => i.id === "providers");
+
   _resetProviderHealth();
   setResidencyInitialized();
   recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
   ext(true, NOW);
-  ext(false, NOW + 1 * MIN);
-  const { detail, all } = await providers({ now: at(NOW + THRESHOLD + MIN) });
-  assert.equal(detail.state, "warn");
-  const issues = all.issues.filter((i) => i.id === "providers");
-  assert.equal(issues.length, 1);
-  assert.match(issues[0].label, /2/);
-  assert.match(issues[0].label, /crow-voice/);
-  assert.match(issues[0].label, /halogen \(raven\)/);
+  ext(false, NOW + MIN);
+  const r = await providers({ now: at(NOW + THRESHOLD + MIN) });
+  const withExt = r.all.issues.find((i) => i.id === "providers");
+  assert.deepEqual(withExt, alone);
+  assert.equal(r.detail.state, "warn");
+  assert.equal(r.all.issues.filter((i) => i.id === "providers").length, 1);
 });
 
-test("a residency warn wins over an external never-ready info (one issue, warn)", async () => {
+test("resident ok + an external engine not reachable → info; value carries both parts", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
-  recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
+  recordResidency("crow-voice", { ready: true, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
   ext(false, NOW);
-  const { detail, all } = await providers({ now: at(NOW + THRESHOLD + MIN) });
-  assert.equal(detail.state, "warn");
-  assert.equal(all.issues.filter((i) => i.id === "providers").length, 1);
-  assert.match(all.issues.find((i) => i.id === "providers").label, /crow-voice/);
+  const { detail } = await providers({ now: at(NOW) });
+  assert.equal(detail.state, "info");
+  assert.equal(detail.value, "1 resident · halogen on raven: not reachable from this instance");
 });
 
 test("free-text label/host render verbatim through fill() — '$&' is not a replacement pattern", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
-  recordExternal("raven-flash-next", { ready: false, nowMs: NOW, baseUrl: RAVEN, engineHost: "r$&n", label: "h$'x" });
+  recordExternal("raven-flash-next", { ready: true, nowMs: NOW, baseUrl: RAVEN, engineHost: "r$&n", label: "h$'x" });
   const { detail } = await providers({ now: at(NOW) });
-  assert.match(detail.value, /h\$'x \(r\$&n\)/);
+  assert.equal(detail.value, "h$'x on r$&n: up");
 });
 
 test("Spanish: the info copy is translated and still names engine + host", async () => {
@@ -1589,26 +2000,18 @@ test("Spanish: the info copy is translated and still names engine + host", async
   _resetReceiveHealth();
   const r = await collectHealthSignals(db, { now: at(NOW), lang: "es" });
   const issue = r.issues.find((i) => i.id === "providers");
-  assert.match(issue.label, /motor externo/i);
-  assert.match(issue.label, /halogen/);
-  assert.match(issue.label, /raven/);
+  assert.equal(issue.severity, "info");
+  assert.match(issue.label, /halogen en raven: no accesible desde esta instancia/);
 });
 
-test("EN and ES render for all 7 new external-engine keys", () => {
+test("EN and ES render for the 3 new external-engine keys", () => {
   const keys = [
-    "signals.providers.external",
-    "signals.providers.externalDown",
-    "signals.providers.externalDownIssue",
-    "signals.providers.downIssueAny",
+    "signals.providers.externalUp",
+    "signals.providers.externalDownFor",
     "signals.providers.externalUnreachable",
-    "signals.providers.externalUnreachableMulti",
-    "signals.providers.externalUnreachableIssue",
   ];
   for (const key of keys) {
-    for (const lang of ["en", "es"]) {
-      const rendered = t(key, lang);
-      assert.notEqual(rendered, key, `missing i18n for ${key} (${lang})`);
-    }
+    for (const lang of ["en", "es"]) assert.notEqual(t(key, lang), key, `missing i18n for ${key} (${lang})`);
     assert.notEqual(t(key, "es"), t(key, "en"), `${key}: es must be a real translation`);
   }
 });
@@ -1618,7 +2021,7 @@ test("EN and ES render for all 7 new external-engine keys", () => {
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-health-signal.test.js`
 
-Expected: FAIL. The new external tests fail: for example, "external only, ready" gets `off` where it expects `ok`, and the i18n test reports a missing key. The pre-existing tests still pass.
+Expected: FAIL. The new external tests fail: for example, "external only, up" gets state `off` and a different value, and the i18n test reports missing keys. All pre-existing tests still pass.
 
 - [ ] **Step 3: Add the i18n keys**
 
@@ -1632,14 +2035,10 @@ Replace it with:
 
 ```js
   "signals.providers.action": { en: "Open model health", es: "Ver estado de modelos" },
-  // External engines (spec 2026-09-23 external-engine-provider §2.4)
-  "signals.providers.external": { en: "{up}/{n} external up", es: "{up}/{n} externos activos" },
-  "signals.providers.externalDown": { en: "{label} on {host} unreachable ≥{age}", es: "{label} en {host} inaccesible ≥{age}" },
-  "signals.providers.externalDownIssue": { en: "The external engine {label} on {host} has stopped answering; requests routed to {name} fail until it recovers.", es: "El motor externo {label} en {host} ha dejado de responder; las solicitudes dirigidas a {name} fallan hasta que se recupere." },
-  "signals.providers.downIssueAny": { en: "{n} model providers are unreachable ({names}); requests routed to them fall back or fail until they recover.", es: "{n} proveedores de modelos están inaccesibles ({names}); las solicitudes dirigidas a ellos recurren a alternativas o fallan hasta que se recuperen." },
-  "signals.providers.externalUnreachable": { en: "{label} ({host}) not reachable from this instance", es: "{label} ({host}) no es accesible desde esta instancia" },
-  "signals.providers.externalUnreachableMulti": { en: "{n} external engines not reachable from this instance", es: "{n} motores externos no son accesibles desde esta instancia" },
-  "signals.providers.externalUnreachableIssue": { en: "The external engine {label} on {host} has not answered from this instance — expected when a firewall keeps this instance off its network.", es: "El motor externo {label} en {host} no ha respondido desde esta instancia; es lo esperado si un cortafuegos deja esta instancia fuera de su red." },
+  // External engines (spec 2026-09-23 external-engine-provider §2.4) — info only, never warn
+  "signals.providers.externalUp": { en: "{label} on {host}: up", es: "{label} en {host}: activo" },
+  "signals.providers.externalDownFor": { en: "{label} on {host}: down for {age} (externally managed)", es: "{label} en {host}: caído desde hace {age} (gestionado externamente)" },
+  "signals.providers.externalUnreachable": { en: "{label} on {host}: not reachable from this instance", es: "{label} en {host}: no accesible desde esta instancia" },
 ```
 
 - [ ] **Step 4: Rewrite `providersSignal`**
@@ -1666,11 +2065,10 @@ with:
 
 ```
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
- *               + external engines (ready-once then silent ≥threshold → warn;
- *               never ready here → info, never warn)
+ *               + external engines (info only — never warn, never a push)
 ```
 
-Replace the whole `async function providersSignal(lang, nowFn) { … }` with:
+Replace the whole `async function providersSignal(lang, nowFn) { … }` with the version below. Everything up to and including the `if (down.length > 0) { … return warn }` block is today's code unchanged, except for the widened `off` check:
 
 ```js
 async function providersSignal(lang, nowFn) {
@@ -1707,51 +2105,23 @@ async function providersSignal(lang, nowFn) {
     }
   }
 
-  // External engines (spec 2026-09-23 §2.4). Warn ONLY for an engine that has
-  // answered at least once in THIS process and has since been silent for
-  // >= threshold. One that has never answered here is info — a peer the
-  // firewall keeps off the engine's LAN (black-swan) must never carry a
-  // permanent warning. Labels/hosts are free text replicated from peers, so
-  // they go through fill() (no $-pattern mangling); the nest escapes HTML.
-  const extDown = [];
-  const extNever = [];
-  let extUp = 0;
-  for (const name of extNames) {
-    const e = external[name];
-    const who = { name, label: e.label || name, host: e.engineHost || "?" };
-    if (e.ready) { extUp++; continue; }
-    if (e.lastReadyAt == null) { extNever.push(who); continue; }
-    if (now - e.lastReadyAt >= threshold) extDown.push({ ...who, age: formatAge(now - e.lastReadyAt) });
-  }
+  if (down.length > 0) {
+    const value = down.length === 1
+      ? t("signals.providers.down", lang).replace("{name}", down[0].name).replace("{age}", down[0].age)
+      : t("signals.providers.downMulti", lang).replace("{n}", String(down.length));
 
-  const totalDown = down.length + extDown.length;
-  if (totalDown > 0) {
-    let value;
+    // Always NAME the provider when exactly one is down — this string becomes the
+    // notification title (post-listen.js sets title: issue.label). The embed-vs-voice
+    // split is derived from the provider's own embed flag, never hardcoded: crow only
+    // ever owns crow-voice, which carries no embed model.
     let issueLabel;
-    if (extDown.length === 0) {
-      value = down.length === 1
-        ? t("signals.providers.down", lang).replace("{name}", down[0].name).replace("{age}", down[0].age)
-        : t("signals.providers.downMulti", lang).replace("{n}", String(down.length));
-      // Always NAME the provider when exactly one is down — this string becomes the
-      // notification title (post-listen.js sets title: issue.label). The embed-vs-voice
-      // split is derived from the provider's own embed flag, never hardcoded: crow only
-      // ever owns crow-voice, which carries no embed model.
-      if (down.length === 1) {
-        const key = down[0].embed ? "signals.providers.downIssueEmbed" : "signals.providers.downIssue";
-        issueLabel = t(key, lang).replace("{name}", down[0].name);
-      } else {
-        issueLabel = t("signals.providers.downIssueMulti", lang)
-          .replace("{n}", String(down.length))
-          .replace("{names}", down.map(d => d.name).join(", "));
-      }
-    } else if (totalDown === 1) {
-      const d = extDown[0];
-      value = fill(t("signals.providers.externalDown", lang), { label: d.label, host: d.host, age: d.age });
-      issueLabel = fill(t("signals.providers.externalDownIssue", lang), { label: d.label, host: d.host, name: d.name });
+    if (down.length === 1) {
+      const key = down[0].embed ? "signals.providers.downIssueEmbed" : "signals.providers.downIssue";
+      issueLabel = t(key, lang).replace("{name}", down[0].name);
     } else {
-      const list = [...down.map((d) => d.name), ...extDown.map((d) => `${d.label} (${d.host})`)];
-      value = fill(t("signals.providers.downMulti", lang), { n: totalDown });
-      issueLabel = fill(t("signals.providers.downIssueAny", lang), { n: totalDown, names: list.join(", ") });
+      issueLabel = t("signals.providers.downIssueMulti", lang)
+        .replace("{n}", String(down.length))
+        .replace("{names}", down.map(d => d.name).join(", "));
     }
     return { id: "providers", severity: "warn", state: "warn", label, value, issueLabel, ...action };
   }
@@ -1763,20 +2133,33 @@ async function providersSignal(lang, nowFn) {
       parts.push(t("signals.providers.warming", lang).replace("{n}", String(warmingCount)));
     }
   }
-  if (extNames.length > 0) {
-    parts.push(fill(t("signals.providers.external", lang), { up: extUp, n: extNames.length }));
+
+  // External engines (spec 2026-09-23 §2.4, revised in review round 1): INFO
+  // ONLY, NEVER WARN. They are operated from outside Crow — raven's prod
+  // windows stop halogen for hours by design — and a warn here becomes a
+  // high-priority push via the health monitor. Labels/hosts are free text
+  // replicated from peers: fill() (no $-pattern mangling); the nest escapes HTML.
+  const notUp = [];
+  for (const name of extNames) {
+    const e = external[name];
+    const vars = { label: e.label || name, host: e.engineHost || "?" };
+    if (e.ready) {
+      parts.push(fill(t("signals.providers.externalUp", lang), vars));
+      continue;
+    }
+    let line;
+    if (e.lastReadyAt != null) {
+      const age = formatAge(now - e.lastReadyAt);
+      line = fill(t("signals.providers.externalDownFor", lang), { ...vars, age: age === "now" ? "<1m" : age });
+    } else {
+      line = fill(t("signals.providers.externalUnreachable", lang), vars);
+    }
+    parts.push(line);
+    notUp.push(line);
   }
 
-  if (extNever.length > 0) {
-    const one = extNever.length === 1;
-    const unreachable = one
-      ? fill(t("signals.providers.externalUnreachable", lang), { label: extNever[0].label, host: extNever[0].host })
-      : fill(t("signals.providers.externalUnreachableMulti", lang), { n: extNever.length });
-    parts.push(unreachable);
-    const issueLabel = one
-      ? fill(t("signals.providers.externalUnreachableIssue", lang), { label: extNever[0].label, host: extNever[0].host })
-      : unreachable;
-    return { id: "providers", severity: "info", state: "info", label, value: parts.join(" · "), issueLabel, ...action };
+  if (notUp.length > 0) {
+    return { id: "providers", severity: "info", state: "info", label, value: parts.join(" · "), issueLabel: notUp.join("; "), ...action };
   }
   return { id: "providers", severity: null, state: "ok", label, value: parts.join(" · ") };
 }
@@ -1786,13 +2169,13 @@ async function providersSignal(lang, nowFn) {
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-health-signal.test.js tests/i18n-global-parity.test.js tests/messages-health-signal.test.js`
 
-Expected: PASS, 0 failures. The pre-existing residency tests prove the residency-only copy is unchanged.
+Expected: PASS, 0 failures. The pre-existing residency tests, together with the byte-identical test, prove the resident-model warn path is unchanged.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd ~/crow-wt-external-engine
-git commit servers/gateway/dashboard/panels/nest/health-signals.js servers/gateway/dashboard/shared/i18n.js tests/providers-health-signal.test.js -m "feat(nest): providers signal watches external engines (warn after ready-once, info if never reachable here)"
+git commit servers/gateway/dashboard/panels/nest/health-signals.js servers/gateway/dashboard/shared/i18n.js tests/providers-health-signal.test.js -m "feat(nest): providers signal lists external engines at info severity only (never a push)"
 git show --stat HEAD
 ```
 
@@ -2069,21 +2452,35 @@ In `docs/architecture/models.md`, directly above the line `## What later plans a
 ```markdown
 ## External engines
 
-A provider row can declare that **another machine runs the engine**: `gpu_policy.engine = { managed: "external", host: "<machine>", label?: "<engine>" }` (today: halogen on raven, rows `raven-flash-next` and `raven-halogen-smoke`). `managed` must be exactly `"external"`, the only value defined. `host` is a display label, never a routing input, and `providers.host` stays `cloud` (the tab shows "network" + "external · raven"). The helper is `isExternalEngine` in `servers/shared/provider-engine.js`. `gpu_policy` replicates, so every paired instance learns that the row is not its to manage.
+A provider row can declare that **another machine runs the engine**: `gpu_policy.engine = { managed: "external", host: "<machine>", label?: "<engine>" }` (today: halogen on raven, row `raven-flash-next`). `managed` must be exactly `"external"`, the only value defined. `host` is a display label, never a routing input, and `providers.host` stays `cloud` (the tab shows "network" + "external · raven"). The helper is `isExternalEngine` in `servers/shared/provider-engine.js`. `gpu_policy` replicates, so every paired instance learns that the row is not its to manage.
 
-**Never orchestrated.** Every orchestrator path checks the marker first. `maybeAcquireLocalProvider` returns `null`, so the caller dials `base_url` directly, exactly as for a cloud row. `acquireProvider` throws `ExternalEngineError` (`code: "external_engine"`). `resolveWarmableProviderName` returns `null`. `ensureResident` skips the row and logs once per provider. The row is never a mutex sibling (so it is never evicted), never a mutex-group member, and never an idle-revert default.
+**Never orchestrated.** Every orchestrator path checks the marker first. `maybeAcquireLocalProvider` returns `null`, so the caller dials `base_url` directly, exactly as for a cloud row. `acquireProvider` throws `ExternalEngineError` (`code: "external_engine"`). `resolveWarmableProviderName` returns `null`. `ensureResident` skips the row and logs once per provider. The row is never always-resident, never a mutex sibling (so it is never evicted), never a mutex-group member, and never an idle-revert default. The legacy `servers/shared/lifecycle.js` `ensureModelWarm` refuses it (`reason: "external_engine"`), and `releaseModel` is a no-op for it.
 
-**Write validation.** `upsertProvider` refuses the following:
+**Write validation (transition-only).** `upsertProvider` judges a write only when it **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row. It then refuses a resulting row that has any of these:
 - a malformed marker (`EXTERNAL_ENGINE_INVALID`);
 - a marker combined with a `bundleId` or `runtime: "native"`, judged on the effective policy after the upsert's `COALESCE` (`EXTERNAL_ENGINE_CONFLICT`);
-- a single write that replaces a marked row's policy with an orchestratable one (`EXTERNAL_ENGINE_CONFLICT`). To convert such a row, first unmark it with its own write (no `engine`, no bundle, no native runtime), then register.
+- a marked row turned into an orchestratable one in a single write (`EXTERNAL_ENGINE_CONFLICT`). To convert such a row, first unmark it with its own write (no `engine`, no bundle, no native runtime), then register.
+
+A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`.
+
+A write that leaves those three fields as stored always passes. Replication writes rows directly, never through `upsertProvider`, so a contradictory row can arrive from a peer, and the tab's re-enable, host repair and the reconciler must keep working on it.
+
+The models.json reconciler keeps a stored `engine` when it re-asserts `gpu_policy`. It also runs each entry in its own try/catch: a refused entry is logged as `[providers-reconcile] <id> skipped: …` and counted in `failed`.
 
 **Read-only health.** `servers/gateway/external-engine-poll.js` is armed by `initOrchestrator` next to the residency monitor.
 - Every `CROW_EXTERNAL_ENGINE_POLL_MS` (default 60000; `0` disables it; the scratch test suite sets `0`), each enabled marked row gets one `GET <base_url>/models` with no auth header and a 3 s timeout. 2xx means ready.
 - Results land in `getProviderHealth().external` (`servers/gateway/provider-health.js`). Disabled and removed rows are pruned from it.
-- Each instance probes from its own network position.
+- A tick probes and prunes only when the providers config came from the DB (`_source === "db:providers"`). The models.json fallback that `loadProviders()` serves after a cache invalidation or a DB error carries no markers, so such a tick is a no-op and every clock survives.
+- Each instance probes from its own network position. A peer on another LAN may even reach a *different* device at the same private IP (for example `10.0.0.126`). That is harmless: the result is info-only, and the request is a header-less GET on `/models`.
 
-**Surfacing.** The nest `providers` signal treats an engine that answered once and has since been silent for at least `CROW_PROVIDER_NOT_READY_WARN_MS` (default 10 min) as a **warn** that names the engine and host. An engine that has never answered from this instance is **info** only, so a peer that a firewall keeps off raven's LAN (black-swan) never carries a permanent warning. The Settings > LLM > Providers dot for a marked row shows this instance's probe result: reachable, not reachable, or not probed yet.
+**Surfacing.** The nest `providers` signal lists external engines at **info severity only, never warn**, so they never trigger a health-monitor push. Each engine gets one line:
+- `"halogen on raven: up"`;
+- `"… down for <age> (externally managed)"` once it has answered in this process;
+- `"… not reachable from this instance"` if it never has.
+
+Engines run outside Crow are stopped on purpose: raven's production windows stop halogen for hours, and Crow has no route-away. A resident-model warn is unchanged, and when it fires it is the signal's one issue.
+
+The Settings > LLM > Providers dot for a marked row shows this instance's probe result: reachable, not reachable, or not probed yet.
 
 **Not in scope:** remote lifecycle (the window script starts and stops halogen over ssh), route-away or fallback when an engine is down, and sync filtering. `GET /api/providers/health` still probes every row on demand.
 ```
@@ -2113,35 +2510,91 @@ git show --stat HEAD
 
 ## Operational step (controller, after merge + deploy — NOT a code task)
 
-Do this only after the PR is merged, CI check-runs are green, and both crow gateways have auto-updated to the merge commit. Confirm with `git -C ~/crow log -1 --oneline`, and check that `auto_update_last_result` is not "Skipped". pi-lab cleared the probe to run at any time (spec §2.6), and this step starts no model, so no `CROW-SCHEDULE.md` reservation is needed.
+Do this only when all of the following hold:
+- the PR is merged;
+- the CI check-runs are green;
+- `crow-gateway.service` (`WorkingDirectory=/home/kh0pp/crow`) has auto-updated to the merge commit. Check `git -C ~/crow log -1 --oneline`, and confirm that `auto_update_last_result` is not "Skipped".
 
-Mark the two rows **on crow**. The instance is `crow-gateway.service` with `WorkingDirectory=/home/kh0pp/crow` and the default data dir `~/.crow/data`. Use the normal provider-update path: `upsertProvider(db, { ...row, gpuPolicy: { ...row.gpuPolicy, engine } })` in `servers/shared/providers-db.js`, where `row` comes from `listProvidersAll(db)`. This is the same read-spread-upsert shape that the Providers tab's `llm_provider_enable` action and `reenableProviderPreservingContent` use. `upsertProvider` bumps `lamport_ts` and calls `emitOrQueue`. With no live sync manager in a one-shot process, the change is queued in the sync outbox, and the running gateway drains it to peers (r4, black-swan, grackle).
+pi-lab cleared the probe for any time (spec §2.6), and this step starts no model, so no `CROW-SCHEDULE.md` reservation is needed.
 
-This is a deliberate operator write against the live DB. It is **not** a test, so it runs as a one-shot `node` process from the deployed checkout:
+**Mark ONLY `raven-flash-next`.** Its `base_url` is `http://10.0.0.126:8030/v1`, which answered 200 on 2026-09-23. **Do NOT mark `raven-halogen-smoke`.** It points at `:8731`, which is dead, and the controller raises it with Kevin separately.
+
+Use the normal provider-update path: `upsertProvider(db, { ...row, gpuPolicy: { ...row.gpuPolicy, engine } })` in `servers/shared/providers-db.js`, with `row` taken from `listProvidersAll(db)`. This is the read-spread-upsert shape used by the Providers tab's `llm_provider_enable` action and by `reenableProviderPreservingContent`.
+
+`upsertProvider` bumps `lamport_ts` and calls `emitOrQueue`. A one-shot process has no live sync manager, so the change goes into `sync_outbox` (`table_name = 'providers'`), and the running gateway's drain sends it to peers.
+
+This is a deliberate operator write against the live DB, **not** a test. The data dir is set explicitly. Run:
 
 ```bash
 export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH
 cd ~/crow
-node --input-type=module -e '
+CROW_DATA_DIR=/home/kh0pp/.crow/data node --input-type=module -e '
 import { createDbClient } from "./servers/db.js";
 import { listProvidersAll, upsertProvider } from "./servers/shared/providers-db.js";
+const ID = "raven-flash-next";
+const EXPECT_URL = "http://10.0.0.126:8030/v1";
 const ENGINE = { managed: "external", host: "raven", label: "halogen" };
 const db = createDbClient();
+const outbox = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM sync_outbox WHERE table_name = '\''providers'\''")).rows[0].n);
 try {
-  const all = await listProvidersAll(db);
-  for (const id of ["raven-flash-next", "raven-halogen-smoke"]) {
-    const row = all.find((r) => r.id === id);
-    if (!row) { console.log(id, "MISSING — stop and investigate"); continue; }
-    if (row.bundleId || row.gpuPolicy?.runtime === "native") { console.log(id, "has bundle/native — refusing, investigate"); continue; }
-    const res = await upsertProvider(db, { ...row, gpuPolicy: { ...(row.gpuPolicy || {}), engine: ENGINE } });
-    console.log(id, JSON.stringify(res));
-  }
+  const row = (await listProvidersAll(db)).find((r) => r.id === ID);
+  if (!row) throw new Error(ID + " MISSING — stop and investigate");
+  if (row.baseUrl !== EXPECT_URL) throw new Error(ID + " base_url is " + row.baseUrl + ", expected " + EXPECT_URL + " — stop");
+  if (row.bundleId || row.gpuPolicy?.runtime === "native") throw new Error(ID + " has bundle/native — stop and investigate");
+  const before = await outbox();
+  const res = await upsertProvider(db, { ...row, gpuPolicy: { ...(row.gpuPolicy || {}), engine: ENGINE } });
+  const after = await outbox();
+  console.log(ID, JSON.stringify(res), "sync_outbox providers rows:", before, "->", after);
+  if (after !== before + 1) console.log("WARNING: outbox did not grow by exactly 1 — the marker may not replicate; stop and investigate (sync_deployment_enabled? drain already ran?)");
 } finally { db.close(); }
 '
 ```
 
-Verify:
-1. Re-read both rows with `listProvidersAll`. Each should have `gpuPolicy.engine` equal to `{managed:"external",host:"raven",label:"halogen"}` and `host === "cloud"`.
-2. Within about 90 s (30 s providers cache plus the 60 s tick), crow's Settings > LLM > Providers shows the "external · raven" badge on both rows, with a green dot if halogen is up or a muted "not probed yet" dot before the first tick. The gateway journal shows `[external-engines] read-only poll armed: every 60000ms` from boot.
-3. Replication: after the outbox drains, the r4 instance (`CROW_DATA_DIR=/home/kh0pp/.crow-r4/data`) has the marker on both rows. Check read-only with the same `listProvidersAll` one-liner run with `CROW_DATA_DIR=/home/kh0pp/.crow-r4/data CROW_HOME=/home/kh0pp/.crow-r4`, without the upsert. Black-swan should then show the engines as info ("not reachable from this instance"), not warn.
-4. To roll back, run the same one-liner with `gpuPolicy: { ...rest }`, where `rest` is the row's `gpuPolicy` minus `engine`. This is the explicit unmark write the validation expects.
+Then verify each of the following in order:
+
+1. **The one-shot's output.**
+   - `res` shows a new `lamport_ts`, with no `unchanged`.
+   - The outbox count rose by exactly 1.
+   - If the count did not rise, stop. The marker is set locally but will not replicate.
+2. **The drain.** Within about 60 s the gateway drains the queued row:
+
+   ```bash
+   journalctl -u crow-gateway.service --since "-3 min" --no-pager | grep "sync-outbox-drain"
+   ```
+
+   Expect `[sync-outbox-drain] drained batch: emitted=… deleted=…`.
+3. **The row on crow.** Re-read it with `listProvidersAll`. `gpuPolicy.engine` should equal `{managed:"external",host:"raven",label:"halogen"}` and `host` should still be `"cloud"`.
+4. **The Providers tab.** Within about 90 s (the 30 s providers cache plus the 60 s tick), crow's Settings > LLM > Providers shows "external · raven" on `raven-flash-next`, with a green dot when halogen answers. The gateway journal has `[external-engines] read-only poll armed: every 60000ms` from boot.
+5. **The row on r4, read-only.** r4's DB is `/home/kh0pp/.crow-r4/data/crow.db`, and this check only reads it:
+
+   ```bash
+   cd ~/crow && node --input-type=module -e '
+   import { createClient } from "@libsql/client";
+   const db = createClient({ url: "file:/home/kh0pp/.crow-r4/data/crow.db" });
+   const { rows } = await db.execute({ sql: "SELECT gpu_policy, lamport_ts FROM providers WHERE id = ?", args: ["raven-flash-next"] });
+   console.log(rows[0] ? rows[0].gpu_policy + " lamport=" + rows[0].lamport_ts : "row missing on r4");
+   db.close();
+   '
+   ```
+
+   The printed `gpu_policy` must carry `"engine":{"managed":"external","host":"raven","label":"halogen"}`. If it does not appear within a few minutes, check r4's instance-sync log before retrying anything.
+
+**Rollback.** Run the same one-shot with `gpuPolicy: rest`, where `rest` is the row's `gpuPolicy` without `engine`. This is the explicit unmark write the validation expects.
+
+---
+
+## Review
+
+### Adversarial review round 1 (binding rulings from the coordinator, 2026-09-23)
+
+| # | Finding | Resolution in this plan |
+|---|---|---|
+| C1 | **A prune could wipe the clocks after a cache invalidation.** `loadProviders()` falls back to `loadFromModelsJson()` when its cache is null or the DB read fails (`servers/shared/providers.js:44-63`). The next tick would then see a non-empty config with no markers and prune every external entry. | Task 3: `pollExternalEngines` probes **and** prunes only when `cfg._source === "db:providers"`. That is the exact value `loadProvidersFromDb` sets, verified in `servers/shared/providers-db.js`; the fallback sets a file path or `null`. Any other tick is a no-op. New test "C1: a non-DB config … neither probes nor prunes". The old "any provider present" prune guard is gone. |
+| C2 | **Validation rejected today's writes on rows it never wrote.** Replication applies rows directly, so contradictory or malformed marked rows can arrive from a peer. The spread writes then failed on them: the tab's re-enable, `reenableProviderPreservingContent`, `repairProviderHosts` and the reconciler. | Task 2 is rewritten to be **transition-only**. It throws only when the write changes `engine`, `bundleId` or `runtime` relative to the stored row **and** the resulting row is invalid. A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`. `syncProvidersFromModelsJson` runs each entry in its own try/catch (log, `failed++`, continue). Tests seed contradictory and malformed rows with raw SQL, and each of those four paths succeeds on them. A write that newly adds a `bundleId` to a marked row still throws. |
+| C3 | **False high-priority pushes.** A nest warn becomes a health-monitor push, and raven's production windows stop halogen for hours by design. | Task 4 is rewritten: external engines are severity **info only**, never warn. The lines are "`<label> on <host>: up`", "`… down for <age> (externally managed)`" once the engine has answered in this process, or "`… not reachable from this instance`". The `downIssueAny` fold-into-warn logic and its keys are dropped, leaving 3 new keys instead of 7. The resident-model warn path is byte-identical, pinned by a deepEqual test. Spec §2.4 is updated with the reason. |
+| Q3 | **The reconciler dropped the marker** when it re-asserted a non-null `gpuPolicy` from models.json. | Task 2 Step 4: the reconciler reads the stored `gpu_policy` and copies its `engine` into the written policy. Tested by "Q3: the reconciler keeps a stored engine…" and by the replicated-row reconciler test. |
+| S1 | `isAlwaysResident` could let a marked row into the declared, local or deferred residency sets. | Task 1 (i): `isAlwaysResident` returns false for marked rows, and `initOrchestrator`'s inline deferred-set predicate now uses `isAlwaysResident`. Tested in the host-gate file. |
+| S2 | The legacy `lifecycle.js` `ensureModelWarm` and `releaseModel` had no guard. | Task 1 (j): `ensureModelWarm` returns `{ ok: false, reason: "external_engine" }` with no probe and no bundle start, and `releaseModel` is a no-op. There is a `cfg` test seam, and the new `tests/lifecycle-external-engine.test.js` uses a tmp `CROW_REFCOUNT_PATH` and a fetch spy. |
+| S3 | `await res.body.cancel()` ran outside the timeout race and could extend the tick. | Task 3: the cancel is now fire-and-forget, with a `.catch`. |
+| S4 | The per-network-position caveat was undocumented. | Task 6 docs and spec §2.3: a peer on another LAN may reach a different device at the same private IP. This is harmless, since the result is info-only and the request is a header-less GET on `/models`. |
+| Ops | The operational step marked a dead endpoint and did not verify replication. | The step is rewritten. It marks only `raven-flash-next`, after asserting its `base_url`; `raven-halogen-smoke` (`:8731`, dead) is left for Kevin. It sets `CROW_DATA_DIR=/home/kh0pp/.crow/data` explicitly, checks that the `sync_outbox` providers count grows by exactly 1, looks for the drain log line, and verifies the marker on r4 read-only. Spec §2.6 is updated to match. |
