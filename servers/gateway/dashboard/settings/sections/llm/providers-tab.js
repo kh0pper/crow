@@ -23,6 +23,9 @@ import { KNOWN_PROVIDER_TYPES } from "../../../../../shared/provider-type.js";
 import { hostLabel } from "../../../../../shared/provider-host.js";
 import { getOwnAddresses } from "../../../../../shared/locality.js";
 import { getOrCreateLocalInstanceId } from "../../../../instance-registry.js";
+import { isExternalEngine, externalEngineInfo } from "../../../../../shared/provider-engine.js";
+import { getProviderHealth } from "../../../../provider-health.js";
+import { t, fill } from "../../../shared/i18n.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -34,9 +37,48 @@ export function hostBadge(p, ctx) {
   return `<span style="${base};color:${color}" title="stored host: ${escapeHtml(String(p.host ?? ""))}">${escapeHtml(text)}${suffix}</span>`;
 }
 
+/** "external · <host>" pill for a row marked gpu_policy.engine.managed = "external"; "" otherwise.
+ *  host/label are free text replicated from peers — escaped, never trusted. */
+export function engineBadge(p, lang = "en") {
+  const info = externalEngineInfo(p);
+  if (!info) return "";
+  const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);white-space:nowrap;margin-left:4px`;
+  const text = fill(t("settings.providers.externalBadge", lang), { host: info.host || "?" });
+  return `<span style="${base};color:var(--crow-text-secondary)" title="${escapeHtml(info.label || "")}">${escapeHtml(text)}</span>`;
+}
+
+/** Status dot. External engines show THIS instance's read-only probe result
+ *  (external-engine-poll.js); every other row keeps the enabled/disabled dot. */
+export function statusDot(p, { external = {}, lang = "en" } = {}) {
+  let color;
+  let title;
+  if (p.disabled) {
+    color = "var(--crow-text-muted)";
+    title = "disabled (soft-delete)";
+  } else if (!isExternalEngine(p)) {
+    color = "var(--crow-success)";
+    title = "enabled";
+  } else {
+    const h = external[p.id];
+    if (!h || h.baseUrl !== p.baseUrl) {
+      color = "var(--crow-text-muted)";
+      title = t("settings.providers.engineUnprobed", lang);
+    } else if (h.ready) {
+      color = "var(--crow-success)";
+      title = t("settings.providers.engineUp", lang);
+    } else {
+      color = "var(--crow-error)";
+      title = t("settings.providers.engineDown", lang);
+    }
+  }
+  const tEsc = escapeHtml(title);
+  return `<span aria-label="${tEsc}" title="${tEsc}" style="color:${color};font-size:1.15rem;line-height:1">●</span>`;
+}
+
 export default {
-  async render({ db }) {
+  async render({ db, lang = "en" }) {
     const providers = await listProvidersAll(db);
+    const external = getProviderHealth().external;
     let instanceNames = new Map();
     try {
       const { rows } = await db.execute("SELECT id, name FROM crow_instances");
@@ -47,13 +89,11 @@ export default {
     const hostCtx = { ownAddrs: getOwnAddresses(), ownInstanceId, instanceNames };
     const rows = providers.map((p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
-      const dotColor = p.disabled ? "var(--crow-text-muted)" : "var(--crow-success)";
-      const dotTitle = p.disabled ? "disabled (soft-delete)" : "enabled";
       const idEsc = escapeHtml(p.id);
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}">
-        <td class="llm-cell-status"><span aria-label="${dotTitle}" title="${dotTitle}" style="color:${dotColor};font-size:1.15rem;line-height:1">●</span></td>
+        <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}</td>
-        <td>${hostBadge(p, hostCtx)}</td>
+        <td>${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
         <td class="llm-cell-endpoint">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" title="${escapeHtml(models)}">${models}</td>
         <td class="llm-cell-actions">

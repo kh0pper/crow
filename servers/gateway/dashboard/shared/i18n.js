@@ -1558,6 +1558,11 @@ export const translations = {
 
   // ─── Settings Panel ───
   "settings.pageTitle": { en: "Settings", es: "Ajustes" },
+  // Providers tab — external engines (spec 2026-09-23 external-engine-provider §2.4)
+  "settings.providers.externalBadge": { en: "external · {host}", es: "externo · {host}" },
+  "settings.providers.engineUp": { en: "external engine reachable from this instance", es: "motor externo accesible desde esta instancia" },
+  "settings.providers.engineDown": { en: "external engine not reachable from this instance", es: "motor externo no accesible desde esta instancia" },
+  "settings.providers.engineUnprobed": { en: "external engine not probed yet", es: "motor externo aún sin sondear" },
   "settings.searchPlaceholder": { en: "Search settings", es: "Buscar ajustes" },
   "settings.searchNoResults": { en: "No settings match your search.", es: "Ningún ajuste coincide con tu búsqueda." },
   "settings.passwordUpdated": { en: "Password updated.", es: "Contraseña actualizada." },
