@@ -238,12 +238,17 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   session.render({ anchors: [anchors[0]], pose: pose(0), bird: { species: "crow", seed: 7, mood: "happy" } });
   assert.equal(els.labels.children.length, 1);
   assert.equal(east.parentNode, null);
-  // No bird: the egg shows; no heading: radar mode label and rows.
-  const f2 = session.render({ anchors, pose: pose(null), bird: null });
+  // No bird: the egg shows (given an egg to show); no heading: radar mode
+  // label and rows.
+  const f2 = session.render({ anchors, pose: pose(null), bird: null, hasEgg: true });
   assert.equal(f2.mode, "radar");
   assert.equal(els.mode.textContent, "Radar · no compass");
   assert.equal(els.bird.hasAttribute("hidden"), true); assert.equal(els.egg.hasAttribute("hidden"), false);
   assert.equal(els.labels.children.length, 0);
+  // Neither bird nor egg: the renderer, not startAr, must hide it — it
+  // repaints every frame and would otherwise undo anything startAr set.
+  session.render({ anchors, pose: pose(null), bird: null, hasEgg: false });
+  assert.equal(els.egg.hasAttribute("hidden"), true, "nothing to draw with no bird and no egg");
   assert.equal(els.list.children.length, 2);
   assert.notEqual(els.list.children, rowsBefore, "the mode flip repaints the list (its key includes the mode)");
   els.list.children[0].click();

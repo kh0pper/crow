@@ -41,7 +41,8 @@ const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.j
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
 const { default: bus } = await import("../servers/shared/event-bus.js");
-const { isoWeek } = await import("../bundles/ramble/server/eggs.js");
+const { isoWeek, mintIncubatingEgg } = await import("../bundles/ramble/server/eggs.js");
+const { initRambleTables } = await import("../bundles/ramble/server/init-tables.js");
 const { nestsInCells, cellsInBbox, NEST_RATE_DEFAULT } = await import("../bundles/ramble/server/nests.js");
 const { bboxAround } = await import("../bundles/ramble/server/around.js");
 
@@ -49,9 +50,10 @@ const { bboxAround } = await import("../bundles/ramble/server/around.js");
  * Fog gates public terrain (spec 2026-09-08 §2.1), so a test that lists or
  * claims a nest must first walk to ground that actually unlocks it. Each walk
  * posts /api/ramble/area with `here`, which credits +20 visit_place warmth
- * against a hatch_at of 100 — this file already churns hatches and later
- * asserts an incubating egg exists, so the credit is suppressed around the
- * walk rather than left to accumulate.
+ * against a hatch_at of 100 — this file's other warmth-accrual tests already
+ * push some hatches, and Phase 3 hatches no longer guarantee a successor
+ * (they promote from the shelf, or leave the slot empty), so the credit is
+ * suppressed around the walk rather than left to accumulate on top of that.
  *
  * ⚠ An unlock is permanent (spec §2.1): once a test calls this, that cell
  * stays unlocked for every test that runs afterward in this file. A fog
@@ -143,6 +145,22 @@ const PK_BLOCKED = "ed".repeat(32);
   try { db.close?.(); } catch { /* scratch */ }
 }
 
+// Task 2 (spec 2026-09-08 §4.1): minting is deliberate now — a read no longer
+// creates an egg by being looked at. This suite's warmth-accrual tests are
+// about the DELTA an event credits, not about egg supply, so give them an
+// explicit starter egg here rather than weaken any of their assertions.
+// ⚠ Phase 3: a hatch no longer guarantees a successor (hatchIfReady promotes
+// from the shelf, or leaves the slot empty) — any test past this point that
+// needs an incubating egg to exist must mint its own rather than assume this
+// starter, or the file's later churn, left one in place.
+{
+  const db = createDbClient();
+  try {
+    await initRambleTables(db);
+    await mintIncubatingEgg(db, { now: Date.now() });
+  } finally { db.close?.(); }
+}
+
 after(async () => {
   await new Promise((r) => server.close(r));
   for (const [k, v] of Object.entries(savedEnv)) {
@@ -166,6 +184,46 @@ function req(path, opts = {}) {
     headers,
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
   });
+}
+
+/** AST-lite bracket-depth scan (no JS parser pulled in) — copied verbatim
+ * from tests/bird-drawer-core.test.js's own helper. */
+function matchBrace(src, braceStart) {
+  let depth = 0, end = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  return end;
+}
+
+/** Extract a top-level `function NAME(...){...}` declaration's full source
+ * (signature through closing brace) from the client script, so its PURE
+ * logic can be unit-tested standalone without a DOM (there is no jsdom or vm
+ * sandbox harness for this file, unlike ramble-ar.js). */
+function extractFunction(src, name) {
+  const marker = "function " + name + "(";
+  const start = src.indexOf(marker);
+  if (start < 0) return null;
+  const braceStart = src.indexOf("{", start);
+  const end = matchBrace(src, braceStart);
+  if (end < 0) return null;
+  return src.slice(start, end + 1);
+}
+
+/** Extract the balanced `{...}` block that begins at the first `{` AFTER a
+ * given anchor substring — for an anonymous listener body (`$("id")
+ * .addEventListener("click", function () { ... })`) that has no name for
+ * extractFunction to find. Lets a test assert a call happens WITHIN a
+ * specific handler, not merely somewhere in the file (which a whole-file
+ * `includes()` cannot distinguish from the wrong handler entirely). */
+function extractAfter(src, anchor) {
+  const anchorAt = src.indexOf(anchor);
+  if (anchorAt < 0) return null;
+  const braceStart = src.indexOf("{", anchorAt);
+  const end = matchBrace(src, braceStart);
+  if (end < 0) return null;
+  return src.slice(braceStart, end + 1);
 }
 
 // --------------------------------------------------------------- panel shape
@@ -567,6 +625,29 @@ test("POST /api/ramble/egg/checkin credits warmth once per local day", async () 
   assert.equal(checklist.checked_in_today, true);
 });
 
+// Carried from Task 6's review: the `egg` boolean on the checkin response had
+// no coverage, and Task 7's confirmation copy branches on it (S2) — a
+// regression here would silently produce the wrong three-way message.
+test("POST /api/ramble/egg/checkin reports whether an egg is incubating, independent of the day's credit", async () => {
+  const gone = createDbClient();
+  try {
+    await gone.execute({ sql: "DELETE FROM ramble_eggs WHERE status = 'incubating'", args: [] });
+  } finally {
+    gone.close();
+  }
+  const eggless = await (await req("/api/ramble/egg/checkin", { method: "POST", body: {} })).json();
+  assert.equal(eggless.egg, false, "no incubating egg after the delete above");
+
+  const minted = createDbClient();
+  try {
+    await mintIncubatingEgg(minted, { now: Date.now() });
+  } finally {
+    minted.close();
+  }
+  const withEgg = await (await req("/api/ramble/egg/checkin", { method: "POST", body: {} })).json();
+  assert.equal(withEgg.egg, true, "an incubating egg exists after the mint above");
+});
+
 test("POST /api/ramble/pet/chore completes each kind once a day and 400s an unknown kind", async () => {
   const first = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
   assert.equal(first.status, 200);
@@ -908,8 +989,123 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
     "storage can throw outright in private mode — a remembered preference must never break the panel");
   assert.ok(body.includes('perchOpenBtn.addEventListener("click"'), "the door is wired independently of the map marker");
 
-  assert.ok(body.includes("eggPercent = pet.egg.percent"), "the world view's warmth line follows the pet refresh");
+  assert.ok(body.includes("eggPercent = nextPct"), "the world view's warmth line follows the pet refresh");
   assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
+});
+
+// -------------------------------------------------------------- eggless (Task 7)
+
+test("the Next egg card is never hidden — it is the only route to the check-in", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(!/setHidden\(\s*\$\("rb-pet-nextegg"\)/.test(src),
+    "hiding it would delete the daily check-in for an eggless player (phase 1's defect)");
+  assert.ok(src.includes("rb-nextegg-empty"), "it changes state instead");
+});
+
+test("a shelf egg waiting for an empty slot is offered, not hidden", () => {
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("waiting on your shelf"));
+  assert.ok(shell.includes('id="rb-nextegg-warm"'), "and a one-tap way to act on it");
+
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("lastWaitingEggId"), "wired to the shipped incubate endpoint");
+  // The lay line must not claim you are eggless while an egg sits on the shelf.
+  assert.ok(/setHidden\(\$\("rb-nextegg-lay"\)|!!waiting/.test(src));
+});
+
+// A source grep cannot catch a wrong boolean passed to setHidden — paintPet
+// itself has no DOM harness to run against, so the visibility DECISION is
+// pulled out as a pure function (nextEggVisibility) and exercised directly,
+// standalone, exactly like tests/bird-drawer-core.test.js does for its own
+// client-side pure helpers. This caught a real regression: the empty line
+// ("Nothing warming just now.") and the waiting line ("One's waiting on your
+// shelf.") both rendering at once on the one card that must never be hidden.
+test("nextEggVisibility: exactly the intended lines show in each of the three card states", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fnSrc = extractFunction(src, "nextEggVisibility");
+  assert.ok(fnSrc, "nextEggVisibility must be defined and extractable");
+  const nextEggVisibility = new Function(fnSrc + "\nreturn nextEggVisibility;")();
+
+  // An egg is incubating: only the ring/percent/art card; every eggless
+  // affordance is hidden.
+  assert.deepEqual(
+    nextEggVisibility(true, null, true),
+    { art: false, empty: true, waiting: true, warm: true, lay: true },
+    "incubating: art shows, nothing else does",
+  );
+
+  // Nothing anywhere: the empty line (and the lay line, if there is a count).
+  assert.deepEqual(
+    nextEggVisibility(false, null, true),
+    { art: true, empty: false, waiting: true, warm: true, lay: false },
+    "eggless with nothing waiting: only the empty line and the lay line",
+  );
+
+  // One waiting on the shelf: ONLY the waiting line and the Warm it button.
+  // The empty line must NOT also show — that was the regression.
+  assert.deepEqual(
+    nextEggVisibility(false, "egg-1", true),
+    { art: true, empty: true, waiting: false, warm: false, lay: true },
+    "a shelf egg waiting: the empty line and the lay line must both stay hidden",
+  );
+});
+
+// incubate() only re-enables the button it disabled from its OWN .catch —
+// the failure path. A successful warm leaves rb-nextegg-warm disabled and
+// then hidden; the bug is that nothing clears .disabled again before the
+// button can next become visible (a later gift, a claimed nest, or a lapsed
+// swap unlocking a shelf egg all repaint this card waiting with no incubate()
+// call in between). Slice-checked the same way nextEggVisibility is above,
+// anchored on the exact toggle line so the test can't pass against unrelated
+// disabled-handling elsewhere in paintPet.
+test("paintPet clears the Warm it button's disabled state whenever it repaints the card visible", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const paintPetSrc = extractFunction(src, "paintPet");
+  assert.ok(paintPetSrc, "paintPet must be defined and extractable");
+
+  const warmAt = paintPetSrc.indexOf('rb-nextegg-warm"');
+  assert.ok(warmAt >= 0, "paintPet must reference rb-nextegg-warm");
+  const afterAt = paintPetSrc.indexOf("lastWaitingEggId = waiting;", warmAt);
+  assert.ok(afterAt > warmAt, "the waiting-egg id bookkeeping must follow the warm-button toggle");
+  const warmBlock = paintPetSrc.slice(warmAt, afterAt);
+
+  assert.ok(
+    warmBlock.includes("disabled = false"),
+    "paintPet must clear the Warm it button's disabled state itself, right where it toggles the " +
+      "button's visibility — incubate()'s own .catch only re-enables on FAILURE, so a successful " +
+      "warm leaves the button disabled, and the next paintPet that un-hides it (a gift, a claimed " +
+      "nest, or a lapsed swap freeing a shelf egg) shows a dead button with no message",
+  );
+});
+
+test("the eggless copy is present and written from inside the premise", () => {
+  // ⚠ TWO FILES. Static copy lives in the server-rendered shell; only strings
+  // the client BUILDS live in the client. An earlier draft asserted both
+  // against the client, and asserted a "good days" literal the client never
+  // contains — it is concatenated around a pluralised day/days.
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("Nothing warming just now."));
+  assert.ok(shell.includes("Nests hold them. So do friends."));
+
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("No one on the way just now."));
+  assert.ok(src.includes("keep it up and you'll manage one yourself"), "K4: the soft count is named");
+  assert.ok(src.includes('" good "'), "pluralised around the count");
+});
+
+test("the AR renderer hides the egg when there is neither bird nor egg", () => {
+  // In the RENDERER, not startAr: ramble-ar.js repaints every frame and would
+  // otherwise un-hide the egg whenever there is no valid bird.
+  const src = readFileSync("bundles/ramble/panel/static/ramble-ar.js", "utf8");
+  assert.ok(/setHidden\(e\.egg,\s*valid\s*\|\|\s*!.*hasEgg/.test(src),
+    "seedFromEggId(null) is 0, so an unguarded frame shows an egg that does not exist");
+});
+
+test("the map marker does not draw a phantom egg for a player who has neither", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fn = src.slice(src.indexOf("function hereArt()"), src.indexOf("function paintHereArt()"));
+  assert.ok(/else if \(eggSeedId\)/.test(fn),
+    "hereArt must fall through to the plain dot when there is no bird and no egg");
 });
 
 test("the map draws heart pips, counts them, and says something when one is taken", async () => {
@@ -1219,6 +1415,15 @@ test("POST /api/ramble/nests/claim: too far is a friendly refusal; in range clai
 });
 
 test("GET /api/ramble/flock shows the shelf egg; incubate swaps it in and shelves the old egg as 'user'", async () => {
+  // Phase 3: flockState no longer mints or promotes on a read. This file's
+  // earlier warmth churn may already have hatched the incubating egg with
+  // nothing yet on the shelf to refill it (promoteFromShelf only runs from
+  // hatchIfReady), so make sure one exists rather than assume the old
+  // auto-mint left one lying around.
+  {
+    const db = createDbClient();
+    try { await mintIncubatingEgg(db, { now: Date.now() }); } finally { db.close(); }
+  }
   const flock = await (await req("/api/ramble/flock")).json();
   assert.equal(flock.species_total, 8);
   assert.equal(flock.shelf_cap, 5);
@@ -1685,9 +1890,10 @@ async function withHeartSettings(pairs, fn) {
 }
 
 // `warmth.visit_place` is zeroed for the same reason walkTo() zeroes it: this
-// file churns hatches and later asserts an incubating egg exists, and three or
-// four +20 credits against a hatch_at of 100 is a hatch these tests did not ask
-// for.
+// file's warmth-accrual tests already churn hatches, and three or four +20
+// credits against a hatch_at of 100 is a hatch these tests did not ask for —
+// and since Phase 3 a hatch is not guaranteed to leave a successor egg in
+// place at all.
 const HEARTS_ON = [
   ["heart.rate", "1"], ["heart.wild.rate", "999999"],
   ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"],
@@ -1881,4 +2087,57 @@ test("the energy bar is drawn against the server's ceiling, not a hardcoded 100"
   assert.ok(body.includes("function paintHeartRow("), "the pet page shows the containers themselves");
   assert.ok(body.includes("paintHearts(hearts)"),
     "the map-bar counter is painted from the pet read too, not only from a position fix");
+});
+
+test("both prologue beats are present, in the game's voice", () => {
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("You are an egg."));
+  assert.ok(shell.includes("wandered off from your nest"));
+  assert.ok(shell.includes("Nobody knows what&rsquo;s inside you yet") ||
+            shell.includes("Nobody knows what's inside you yet"));
+  assert.ok(shell.includes("Nothing here is ever lost."),
+    "the no-fail-state promise lives in the game, not only in the docs");
+  assert.ok(shell.includes("rb-prologue"), "the overlay exists in the server-rendered shell");
+});
+
+test("the prologue is skippable and both beats dismiss", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("/api/ramble/prologue/intro"));
+  assert.ok(src.includes("/api/ramble/prologue/hatch"));
+});
+
+// A source grep proves the two prologue endpoints are called SOMEWHERE, but
+// not that beat one's gate is right or that beat two is hooked to the right
+// event — the exact two ways this feature can silently regress. Pulled out
+// and slice-checked the same way nextEggVisibility and the ramble-ar handler
+// tests do, rather than another whole-file includes().
+
+test("shouldShowIntro: beat one shows only for a player who has never had an egg at all", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fnSrc = extractFunction(src, "shouldShowIntro");
+  assert.ok(fnSrc, "shouldShowIntro must be defined and extractable");
+  const shouldShowIntro = new Function(fnSrc + "\nreturn shouldShowIntro;")();
+
+  assert.equal(shouldShowIntro({ intro_seen: false, granted: false }), true,
+    "never had an egg, never seen the intro: show it");
+  assert.equal(shouldShowIntro({ intro_seen: true, granted: false }), false,
+    "already tapped Go: never show it again");
+  assert.equal(shouldShowIntro({ intro_seen: false, granted: true }), false,
+    "already has an egg some other way (e.g. a gift): the egg arrived without the words, don't retro-show them");
+  assert.equal(shouldShowIntro({ intro_seen: true, granted: true }), false);
+});
+
+test("the hatch beat hooks the rb-meet-bird handler, not clearHatch", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+
+  const meetHandler = extractAfter(src, '$("rb-meet-bird")');
+  assert.ok(meetHandler, "the rb-meet-bird click handler must be extractable");
+  assert.ok(meetHandler.includes("maybeHatchBeat("),
+    "beat two rides the rb-meet-bird click, where the just-hatched bird is still known");
+
+  const clearHatchFn = extractFunction(src, "clearHatch");
+  assert.ok(clearHatchFn, "clearHatch must be defined and extractable");
+  assert.ok(!clearHatchFn.includes("maybeHatchBeat("),
+    "clearHatch fires on ANY view change and has no access to the hatched bird — " +
+    "hooking it here would show the beat at random moments with no species name");
 });

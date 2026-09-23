@@ -34,6 +34,7 @@ import {
   CROW_ID_RE, isRambleEnvelope, parseEggPayload, giftPayload, tradePayload, parseTradePayload,
   payloadToMark, enqueueDeliveries,
 } from "./delivery.js";
+import { OPEN_SQL, isEggLocked, lockedEggIds } from "./egg-locks.js";
 
 export const TRADE_TTL_MS = 7 * 86400e3;
 export const OPEN_STATES = ["proposed", "accepted"];
@@ -50,6 +51,11 @@ export const MAX_GIFTS_PER_CONTACT_PER_DAY = 20;
  */
 export const MAX_CONTACT_MARKS_PER_CONTACT = 50;
 
+// Re-exported so its existing importers (flock.js:22 and
+// tests/ramble-trades.test.js:14 — NOT panel/routes.js, which never imported
+// them) need no change and there is still one definition of "locked".
+export { isEggLocked, lockedEggIds };
+
 async function safeEmit(emit, table, op, row) {
   if (!emit) return;
   try { await emit(table, op, row); }
@@ -65,22 +71,9 @@ async function getTrade(db, tradeId) {
   return rows[0] ?? null;
 }
 
-const OPEN_SQL = "state IN ('proposed', 'accepted')";
 const LOCK_GUARD_SQL = `NOT EXISTS (SELECT 1 FROM ramble_trades WHERE my_egg_id = ? AND ${OPEN_SQL})`;
 /** Binds ONE ?: the egg must still be giftable at write time (a gift racing a propose must not lock a gone egg — S1). */
 const GIFTABLE_GUARD_SQL = "EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status IN ('shelf', 'received'))";
-
-/* ---------------------------------------------------------------- locks */
-
-export async function lockedEggIds(db) {
-  const { rows } = await db.execute({ sql: `SELECT my_egg_id FROM ramble_trades WHERE my_egg_id IS NOT NULL AND ${OPEN_SQL}`, args: [] });
-  return new Set(rows.map((r) => r.my_egg_id));
-}
-
-export async function isEggLocked(db, eggId) {
-  const { rows } = await db.execute({ sql: `SELECT 1 FROM ramble_trades WHERE my_egg_id = ? AND ${OPEN_SQL} LIMIT 1`, args: [eggId] });
-  return rows.length > 0;
-}
 
 /** The "receive an egg" upsert shared by gifts and swap completion: insert if new, revive if it was gifted away, else no-op. */
 function receivedEggStatement(egg, fromCrowId, now) {

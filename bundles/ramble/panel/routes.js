@@ -805,15 +805,24 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   router.get("/api/ramble/pet", handle(async (req, res) => {
     const now = Date.now();
     // One read for the whole companion strip: mood/energy/chores, the bird
-    // that hatched (null until the first one does), and just the egg's
-    // progress percent — the panel's full egg card reads /api/ramble/egg.
+    // that hatched (null until the first one does), and the incubating egg
+    // (null if none exists) — the panel's full egg card reads /api/ramble/egg.
     const pet = await mods.petMod.petState(db, { now });
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
+    const lay = await mods.eggsMod.layProgress(db);
+    // The egg sitting on the shelf that a tap would incubate, or null. Nothing
+    // auto-promotes it (see promoteFromShelf's note), so the card offers it.
+    const waiting = await mods.eggsMod.nextPromotable(db);
     res.json({
       ...pet,
       bird,
-      egg: { percent: egg.egg.percent },
+      // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state now — a read
+      // must not crash for it, so an absent egg is reported as `null`, not
+      // dereferenced.
+      egg: egg.egg ?? null,
+      shelf_waiting: waiting ? waiting.egg_id : null,
+      lay,
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
       energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
@@ -833,7 +842,32 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   // `eggState` and `creditWarmth` have NO internal `now` default (the db layer
   // refuses an undefined argument), so every call from here passes one.
   router.get("/api/ramble/egg", handle(async (req, res) => {
-    res.json(await mods.eggsMod.eggState(db, { now: Date.now() }));
+    // No promote here. A GET must never queue a sync op, and see
+    // promoteFromShelf's note: a read-path promote both races the drain and
+    // launders shelf_origin. hatchIfReady is the only local emptier.
+    const state = await mods.eggsMod.eggState(db, { now: Date.now() });
+    const lay = await mods.eggsMod.layProgress(db);
+    res.json({ ...state, lay });
+    // NOTE: no `shelf_waiting` here. The waiting egg is offered on the PET
+    // card (Task 7), which reads GET /api/ramble/pet; adding it to this route
+    // too would give the egg view a field it never paints, and the two
+    // surfaces would then disagree — the egg view saying "No one on the way"
+    // while the pet card offers one. One surface owns this affordance.
+  }));
+
+  router.get("/api/ramble/prologue", handle(async (req, res) => {
+    res.json(await mods.eggsMod.readPrologue(db));
+  }));
+
+  router.post("/api/ramble/prologue/intro", handle(async (req, res) => {
+    const egg = await mods.eggsMod.grantStarterEgg(db, { now: Date.now(), emit });
+    await mods.eggsMod.setPrologueSeen(db, "intro", { emit });
+    res.json({ egg: egg ? { egg_id: egg.egg_id, warmth: egg.warmth } : null, intro_seen: true });
+  }));
+
+  router.post("/api/ramble/prologue/hatch", handle(async (req, res) => {
+    await mods.eggsMod.setPrologueSeen(db, "hatch", { emit });
+    res.json({ hatch_seen: true });
   }));
 
   router.post("/api/ramble/egg/checkin", handle(async (req, res) => {
@@ -846,6 +880,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       credited,
       warmth,
       hatched: hatched ? { egg_id: hatched.egg_id, species: hatched.species, seed: hatched.seed } : null,
+      // Read AFTER feedAll deliberately: a check-in that hatches the last egg
+      // with an empty shelf reports false, and "nothing to warm yet" is then
+      // the true statement about what comes next.
+      egg: !!(await mods.eggsMod.getIncubatingEgg(db)),
     });
   }));
 
