@@ -6,6 +6,11 @@ import {
   fitBadge,
   getCachedProbe,
   reprobe,
+  parseVulkaninfo,
+  parseRocminfo,
+  parseGfxArch,
+  parseMemTotalMb,
+  readAmdgpuMem,
 } from "../servers/gateway/models/probe.js";
 
 // ---------------------------------------------------------------------------
@@ -165,13 +170,97 @@ Agent 2
       Allocatable:             TRUE
 `;
 
-function fakeFs({ existsFiles = [], readFiles = {}, statfs = null } = {}) {
+// Captured from `vulkaninfo` on host crow 2026-09-23 (Mesa 25.2.8, RADV
+// GFX1151), trimmed to the header + memory-heap blocks. Byte sizes are
+// crow's real ones: heap0 41.50 GiB host-visible (no DEVICE_LOCAL flag),
+// heap1 83.00 GiB DEVICE_LOCAL — a slice of the same unified pool as RAM.
+const VULKANINFO_CROW_UNIFIED = `
+==========
+VULKANINFO
+==========
+
+Devices:
+========
+GPU0:
+VkPhysicalDeviceProperties:
+---------------------------
+	apiVersion        = 1.4.318 (4211006)
+	driverVersion     = 25.2.8 (104865800)
+	vendorID          = 0x1002
+	deviceID          = 0x1586
+	deviceType        = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName        = AMD Radeon Graphics (RADV GFX1151)
+
+VkPhysicalDeviceMemoryProperties:
+=================================
+memoryHeaps: count = 2
+	memoryHeaps[0]:
+		size   = 44560285696 (0xa60000000) (41.50 GiB)
+		budget = 23818784768 (0x58bb5d000) (22.18 GiB)
+		usage  = 0 (0x00000000) (0.00 B)
+		flags:
+			None
+	memoryHeaps[1]:
+		size   = 89120571392 (0x14c0000000) (83.00 GiB)
+		budget = 47637569536 (0xb176ba000) (44.37 GiB)
+		usage  = 0 (0x00000000) (0.00 B)
+		flags: count = 1
+			MEMORY_HEAP_DEVICE_LOCAL_BIT
+memoryTypes: count = 11
+`;
+
+// crow's real amdgpu sysfs values (spec §1): 512 MiB BIOS carve-out,
+// GTT sized by amdgpu.gttsize=126976. /sys/class/drm listing is crow's
+// real one (connector entries, renderD128 and version included).
+const DRM_DIRS_CROW = {
+  "/sys/class/drm": ["card0", "card0-DP-1", "card0-DP-2", "card0-HDMI-A-1", "card0-Writeback-1", "renderD128", "version"],
+};
+const SYSFS_CROW = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "536870912\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "133143986176\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "61800000000\n",
+};
+
+// A discrete AMD card's sysfs: 16 GiB VRAM carve-out (way above the 2 GiB
+// unified threshold) alongside its own (small) GTT aperture.
+const SYSFS_DISCRETE_AMD = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "17179869184\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
+};
+
+// Two amdgpu cards: an APU's iGPU (card0, 512 MiB carve-out) beside a
+// discrete card (card1, 16 GiB). Vulkan picks the discrete one.
+const DRM_DIRS_TWO_CARDS = { "/sys/class/drm": ["card0", "card0-eDP-1", "card1", "card1-DP-1", "renderD128", "renderD129", "version"] };
+const SYSFS_TWO_CARDS = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "536870912\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "33554432000\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
+  "/sys/class/drm/card1/device/mem_info_vram_total": "17179869184\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_total": "8589934592\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_used": "1048576\n",
+};
+
+// A small (2 GiB) discrete card: at the heuristic's threshold, but Vulkan
+// says DISCRETE, and Vulkan wins.
+const SYSFS_SMALL_DISCRETE = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "2147483648\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
+};
+
+function fakeFs({ existsFiles = [], readFiles = {}, statfs = null, dirs = {} } = {}) {
   return {
     existsSync(path) {
       return existsFiles.includes(path);
     },
     readFileSync(path, enc) {
       if (path in readFiles) return readFiles[path];
+      const err = new Error(`ENOENT: ${path}`);
+      err.code = "ENOENT";
+      throw err;
+    },
+    readdirSync(path) {
+      if (path in dirs) return dirs[path];
       const err = new Error(`ENOENT: ${path}`);
       err.code = "ENOENT";
       throw err;
@@ -323,6 +412,231 @@ test("disk free reported via fs.statfsSync when modelsDir given", async () => {
 
   assert.equal(probe.diskFreeMb, Math.round((1000000 * 4096) / (1024 * 1024)));
   assert.ok(!probe.unknown.includes("disk"));
+});
+
+// ---------------------------------------------------------------------------
+// Strix Halo spec §2.1 — unified memory, GTT, gpuArch, MemTotal
+// ---------------------------------------------------------------------------
+
+test("parseVulkaninfo: crow's excerpt -> INTEGRATED_GPU, gfx1151, DEVICE_LOCAL heap still reported as vramMb", () => {
+  assert.deepEqual(parseVulkaninfo(VULKANINFO_CROW_UNIFIED), {
+    name: "AMD Radeon Graphics (RADV GFX1151)",
+    vramMb: 84992, // 89120571392 / 1024 / 1024 — the heap, unchanged meaning
+    deviceType: "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU",
+    arch: "gfx1151",
+  });
+});
+
+test("parseVulkaninfo: discrete sample -> DISCRETE_GPU, no gfx token -> arch null", () => {
+  const vk = parseVulkaninfo(VULKANINFO_AMD_NO_ROCM);
+  assert.equal(vk.deviceType, "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU");
+  assert.equal(vk.arch, null);
+  assert.equal(vk.vramMb, 16384);
+});
+
+test("parseGfxArch: RADV names, case-insensitive, letter suffix; non-matching -> null", () => {
+  assert.equal(parseGfxArch("AMD Radeon Graphics (RADV GFX1151)"), "gfx1151");
+  assert.equal(parseGfxArch("AMD Radeon Pro (radv gfx90a)"), "gfx90a");
+  assert.equal(parseGfxArch("AMD Radeon RX 7800 XT (RADV NAVI32)"), null);
+  assert.equal(parseGfxArch("NVIDIA GeForce RTX 3080"), null);
+  assert.equal(parseGfxArch(null), null);
+});
+
+test("parseRocminfo: reports the chosen GPU agent's gfx arch", () => {
+  const rc = parseRocminfo(ROCMINFO_AGENT_BLOCK);
+  assert.equal(rc.arch, "gfx1151");
+  assert.equal(rc.vramMb, 126976);
+});
+
+test("parseMemTotalMb: MemTotal kB -> MB rounded; missing -> null", () => {
+  assert.equal(parseMemTotalMb(MEMINFO_HUGE_SWAP), 127941); // 131011448 / 1024
+  assert.equal(parseMemTotalMb("MemAvailable: 1024 kB\n"), null);
+  assert.equal(parseMemTotalMb(null), null);
+});
+
+test("probeHardware on crow: vulkan gfx1151 integrated -> unified true, GTT + MemTotal read, vramMb unchanged", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_CROW_UNIFIED });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_CROW }, dirs: DRM_DIRS_CROW });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.18.22-generic" });
+
+  assert.equal(probe.accel, "vulkan");
+  assert.equal(probe.gpuArch, "gfx1151");
+  assert.equal(probe.unified, true);
+  assert.equal(probe.vramMb, 84992);
+  assert.equal(probe.gttTotalMb, 126976); // 133143986176 / 1024 / 1024
+  assert.equal(probe.gttUsedMb, 58937); // 61800000000 / 1024 / 1024, rounded
+  assert.equal(probe.ramTotalMb, 127941);
+  assert.equal(probe.ramAvailableMb, 500);
+});
+
+test("probeHardware: discrete AMD (DISCRETE_GPU, 16 GiB) -> unified false, GTT fields NOT populated", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_DISCRETE_AMD }, dirs: { "/sys/class/drm": ["card0"] } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gpuArch, null);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
+});
+
+test("probeHardware: iGPU card0 (512 MiB) + discrete card1 (16 GiB), Vulkan says DISCRETE -> unified false, no GTT, discrete fitBadge unchanged", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_TWO_CARDS }, dirs: DRM_DIRS_TWO_CARDS });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
+  const quant = { min_ram_mb: 16000, min_vram_mb: 8000 };
+  // 500 MB available + 16384 MB VRAM credit >= 16000 -> fits, exactly as a
+  // pre-change probe (no new fields) computes it.
+  assert.equal(fitBadge(probe, quant), "fits");
+  assert.equal(fitBadge(probe, quant), fitBadge({ ramAvailableMb: probe.ramAvailableMb, vramMb: probe.vramMb }, quant));
+});
+
+test("probeHardware: a <=2 GiB discrete card reported DISCRETE by Vulkan -> unified false (Vulkan beats the sysfs heuristic)", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_SMALL_DISCRETE }, dirs: { "/sys/class/drm": ["card0"] } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gttTotalMb, null);
+});
+
+test("probeHardware: discrete sample with no sysfs at all -> unified false, GTT null", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
+});
+
+test("probeHardware: rocminfo-only AMD host with a <=2 GiB carve-out + GTT -> unified true via sysfs, arch from rocminfo", async () => {
+  const execFile = fakeExecFile({ rocminfo: ROCMINFO_AGENT_BLOCK });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_CROW }, dirs: DRM_DIRS_CROW });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.accel, "vulkan");
+  assert.equal(probe.gpuArch, "gfx1151");
+  assert.equal(probe.unified, true);
+  assert.equal(probe.gttTotalMb, 126976);
+});
+
+test("probeHardware: NVIDIA host whose drm cards expose no mem_info files -> GTT null, unified false", async () => {
+  const execFile = fakeExecFile({ "nvidia-smi": NVIDIA_SMI_CSV });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP }, dirs: { "/sys/class/drm": ["card0", "card0-DP-1", "renderD128"] } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.accel, "cuda");
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gpuArch, null);
+});
+
+test("probeHardware: no GPU at all -> unified null (not false), gpuArch null; ramTotalMb still read", async () => {
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP } });
+  const probe = await probeHardware({ execFile: ALL_FAIL_EXEC, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, null);
+  assert.equal(probe.gpuArch, null);
+  assert.equal(probe.ramTotalMb, 127941);
+});
+
+test("probeHardware: WSL2 and darwin leave every new field null", async () => {
+  const wsl = await probeHardware({
+    execFile: fakeExecFile({ vulkaninfo: VULKANINFO_CROW_UNIFIED }),
+    fs: fakeFs({ existsFiles: ["/proc/sys/fs/binfmt_misc/WSLInterop"], readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP } }),
+    platform: "linux",
+    release: "5.15.0-microsoft-standard-WSL2",
+  });
+  assert.equal(wsl.unified, null);
+  assert.equal(wsl.gpuArch, null);
+  assert.equal(wsl.gttTotalMb, null);
+
+  const mac = await probeHardware({ execFile: fakeExecFile({ sysctl: "34359738368\n" }), fs: fakeFs({}), platform: "darwin", release: "23.0.0" });
+  assert.equal(mac.unified, null);
+  assert.equal(mac.gpuArch, null);
+  assert.equal(mac.gttTotalMb, null);
+  assert.equal(mac.ramTotalMb, null);
+});
+
+test("readAmdgpuMem: only card<N> dirs count; among cards with GTT the smallest VRAM (the iGPU) wins; junk/unreadable skipped", () => {
+  const fs = fakeFs({
+    dirs: { "/sys/class/drm": ["card10", "card2-DP-1", "version", "renderD128", "card2", "card1", "card3"] },
+    readFiles: {
+      // card1: gtt_total is garbage -> skipped entirely
+      "/sys/class/drm/card1/device/mem_info_gtt_total": "not-a-number\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": "1048576\n",
+      // card2: 256 MiB carve-out -> the iGPU, chosen; gtt_used missing -> null
+      "/sys/class/drm/card2/device/mem_info_gtt_total": "1073741824\n",
+      "/sys/class/drm/card2/device/mem_info_vram_total": "268435456\n",
+      // card3: GTT but no vram_total -> ranks last
+      "/sys/class/drm/card3/device/mem_info_gtt_total": "4294967296\n",
+      // card10: discrete 16 GiB -> larger VRAM, not chosen
+      "/sys/class/drm/card10/device/mem_info_gtt_total": "2147483648\n",
+      "/sys/class/drm/card10/device/mem_info_vram_total": "17179869184\n",
+    },
+  });
+  assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 1024, gttUsedMb: null, vramTotalMb: 256 });
+});
+
+// Round 2 (review): these fail against a naive "first numeric card with GTT"
+// implementation — the dGPU sits at card0 and the no-vram card sorts first.
+const DRM_DIRS_DGPU_FIRST = { "/sys/class/drm": ["card0", "card0-DP-1", "card1", "card1-eDP-1", "renderD128", "renderD129", "version"] };
+const SYSFS_DGPU_CARD0_IGPU_CARD1 = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "17179869184\n", // dGPU, 16 GiB
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
+  "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n", // iGPU, 512 MiB carve-out
+  "/sys/class/drm/card1/device/mem_info_gtt_total": "133143986176\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_used": "61800000000\n",
+};
+
+test("readAmdgpuMem: dGPU at card0 (16 GiB) + iGPU at card1 (512 MiB) -> card1's GTT (a first-card-wins impl picks card0 and fails)", () => {
+  const fs = fakeFs({ dirs: DRM_DIRS_DGPU_FIRST, readFiles: SYSFS_DGPU_CARD0_IGPU_CARD1 });
+  assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 126976, gttUsedMb: 58937, vramTotalMb: 512 });
+});
+
+test("probeHardware: crow's INTEGRATED vulkaninfo + dGPU at card0 and iGPU at card1 -> GTT fields come from card1", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_CROW_UNIFIED });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_DGPU_CARD0_IGPU_CARD1 }, dirs: DRM_DIRS_DGPU_FIRST });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.18.22-generic" });
+  assert.equal(probe.unified, true);
+  assert.equal(probe.gttTotalMb, 126976); // card1, not card0's 8192
+  assert.equal(probe.gttUsedMb, 58937); // card1, not card0's 1
+});
+
+test("readAmdgpuMem: a card with no mem_info_vram_total listed BEFORE one that has it ranks last (the card with vram_total wins)", () => {
+  const fs = fakeFs({
+    dirs: { "/sys/class/drm": ["card0", "card1"] },
+    readFiles: {
+      "/sys/class/drm/card0/device/mem_info_gtt_total": "4294967296\n", // no vram_total file
+      "/sys/class/drm/card1/device/mem_info_gtt_total": "1073741824\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n",
+    },
+  });
+  assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 1024, gttUsedMb: null, vramTotalMb: 512 });
+});
+
+test("readAmdgpuMem: equal VRAM -> the lower card number wins", () => {
+  const fs = fakeFs({
+    dirs: { "/sys/class/drm": ["card4", "card1"] },
+    readFiles: {
+      "/sys/class/drm/card1/device/mem_info_gtt_total": "1073741824\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n",
+      "/sys/class/drm/card4/device/mem_info_gtt_total": "2147483648\n",
+      "/sys/class/drm/card4/device/mem_info_vram_total": "536870912\n",
+    },
+  });
+  assert.equal(readAmdgpuMem(fs).gttTotalMb, 1024);
+});
+
+test("readAmdgpuMem: no /sys/class/drm, or an fs without readdirSync -> null, never throws", () => {
+  assert.equal(readAmdgpuMem(fakeFs({})), null);
+  assert.equal(readAmdgpuMem({ readFileSync() { throw new Error("x"); } }), null);
 });
 
 // ---------------------------------------------------------------------------
