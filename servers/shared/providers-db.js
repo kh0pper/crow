@@ -12,10 +12,14 @@
  * On first boot or if the DB is empty, the seed() call populates it from
  * models.json so existing users see no behavioral change.
  *
- * `host` column invariant (three allowed values only):
- *   - "local"            → this gateway's own host (127.0.0.1 / loopback)
- *   - "<instance-id>"    → a paired Crow instance (resolve via crow_instances)
- *   - "cloud"            → no host; call base_url directly (OpenAI, Anthropic…)
+ * `host` column (spec 2026-09-22 provider-host-identity; helpers in ./provider-host.js):
+ *   - "local"         the WRITER's own machine (loopback / own interface address).
+ *   - "<instance-id>" 32-hex id of the serving Crow instance; written only
+ *                     explicitly, never by inference.
+ *   - "cloud"         not managed from here; call base_url directly (public
+ *                     APIs and unmanaged network boxes alike).
+ * host is NOT an orchestration gate: readers veto only a foreign instance id
+ * (isForeignInstanceHost); locality comes from address/owner checks.
  *
  * Any new routing code MUST NOT treat a non-"local" value as an implicit
  * remote-peer fetch. Cloud rows use base_url directly and have `bundle_id IS
@@ -31,6 +35,7 @@ import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
+import { inferHost, repairHostDecision } from "./provider-host.js";
 
 function readModelsJson() {
   const merged = { providers: {} };
@@ -45,17 +50,6 @@ function readModelsJson() {
     } catch {}
   }
   return { path: paths.join(", ") || null, config: merged };
-}
-
-function inferHost(baseUrl, existingHost) {
-  if (existingHost) return existingHost;
-  if (!baseUrl) return "local";
-  try {
-    const h = new URL(baseUrl).hostname;
-    if (h === "localhost" || h.startsWith("127.") || h.startsWith("10.") ||
-        h.startsWith("192.168.") || h.startsWith("100.")) return "local";
-    return "cloud";
-  } catch { return "local"; }
 }
 
 const API_TO_PROVIDER_TYPE = {
@@ -94,7 +88,7 @@ export async function seedProvidersFromModelsJson(db) {
         id,
         p.baseUrl || "",
         p.apiKey || null,
-        p.host || "local",
+        inferHost(p.baseUrl, p.host),
         p.bundleId || null,
         p.$description || p.description || null,
         JSON.stringify(p.models || []),
@@ -232,6 +226,7 @@ function upsertIsNoop(existing, w) {
  */
 export async function upsertProvider(db, provider) {
   if (!provider || !provider.id) throw new Error("provider.id required");
+  const host = provider.host || inferHost(provider.baseUrl || provider.base_url || "", null);
   const instanceId = getOrCreateLocalInstanceId();
   const { rows } = await db.execute({
     sql: "SELECT * FROM providers WHERE id = ?",
@@ -245,7 +240,7 @@ export async function upsertProvider(db, provider) {
   if (existed && upsertIsNoop(rows[0], {
     baseUrl: provider.baseUrl || provider.base_url || "",
     apiKey: provider.apiKey ?? provider.api_key ?? null,
-    host: provider.host || "local",
+    host,
     bundleId: provider.bundleId ?? provider.bundle_id ?? null,
     description: provider.description ?? null,
     models: provider.models || [],
@@ -279,7 +274,7 @@ export async function upsertProvider(db, provider) {
       provider.id,
       provider.baseUrl || provider.base_url || "",
       provider.apiKey ?? provider.api_key ?? null,
-      provider.host || "local",
+      host,
       provider.bundleId ?? provider.bundle_id ?? null,
       provider.description ?? null,
       JSON.stringify(provider.models || []),
@@ -295,7 +290,7 @@ export async function upsertProvider(db, provider) {
     id: provider.id,
     base_url: provider.baseUrl || provider.base_url || "",
     api_key: provider.apiKey ?? provider.api_key ?? null,
-    host: provider.host || "local",
+    host,
     bundle_id: provider.bundleId ?? provider.bundle_id ?? null,
     description: provider.description ?? null,
     models: JSON.stringify(provider.models || []),
@@ -492,6 +487,26 @@ export async function reenableProviderPreservingContent(db, id) {
 }
 
 /**
+ * Spec 2026-09-22 §3.4: repair provider rows whose host THIS instance wrote
+ * wrongly. Scope, D3, G1 and G2 live in repairHostDecision (pure). Round-trips
+ * the parsed listProvidersAll shape (R2-M2) so upsertProvider re-stamps and emits.
+ * Harmless if imperfect: host is not an orchestration gate (D9).
+ */
+export async function repairProviderHosts(db, {
+  ownInstanceId = getOrCreateLocalInstanceId(),
+  ownAddrs = getOwnAddresses(),
+} = {}) {
+  const changes = [];
+  for (const row of await listProvidersAll(db)) {
+    const next = repairHostDecision(row, { ownInstanceId, ownAddrs });
+    if (next === null) continue;
+    await upsertProvider(db, { ...row, host: next });
+    changes.push({ id: row.id, from: row.host, to: next });
+  }
+  return { repaired: changes.length, changes };
+}
+
+/**
  * Continuous reconciler: assert models.json entries into the DB — but only
  * the entries this instance OWNS (single-writer by endpoint ownership).
  *
@@ -524,10 +539,16 @@ export async function reenableProviderPreservingContent(db, id) {
  * reconcile sees tailscale coming up after boot and tailnet/DHCP IP changes.
  * Injectable for tests.
  *
+ * Runs unconditionally (even absent models.json / providers config): after
+ * the models.json assert loop, always calls repairProviderHosts (spec §3.4)
+ * over the same `ownAddrs`, so the hourly reconciler also heals this
+ * instance's own bad `host` writes (`repaired` in the returned counters).
+ *
  * @param {object} db
  * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
  * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
- *                     skipped_unowned: number, reenabled: number, source: string|null }>}
+ *                     skipped_unowned: number, reenabled: number, repaired: number,
+ *                     source: string|null }>}
  *   `upserted` counts actual writes; `unchanged` counts owned entries whose
  *   content already converged (D2 no-op suppression).
  */
@@ -535,11 +556,10 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
   const dbClient = db || createDbClient();
   const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
   const { path, config } = readModelsJson();
-  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0 };
-  if (!config?.providers) return { ...counters, source: path };
-
-  const entries = Object.entries(config.providers).filter(([id]) => !id.startsWith("$"));
-  if (entries.length === 0) return { ...counters, source: path };
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0 };
+  const entries = config?.providers
+    ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
+    : [];
 
   const { rows: existingRows } = await dbClient.execute("SELECT id, disabled FROM providers");
   const existing = new Map(existingRows.map((r) => [r.id, r]));
@@ -567,7 +587,7 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
       id,
       baseUrl: p.baseUrl || "",
       apiKey: p.apiKey ?? null,
-      host: inferHost(p.baseUrl, p.host),
+      host: inferHost(p.baseUrl, p.host, { ownAddrs: addrs }),
       bundleId: p.bundleId ?? null,
       description: p.$description || p.description || null,
       models: p.models || [],
@@ -578,5 +598,7 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
     if (res.unchanged) counters.unchanged++;
     else counters.upserted++;
   }
+  const rep = await repairProviderHosts(dbClient, { ownAddrs: addrs });
+  counters.repaired = rep.repaired;
   return { ...counters, source: path };
 }

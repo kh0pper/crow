@@ -90,6 +90,7 @@ import { mergeLaunch } from "./models/launch.js";
 import { getRuntimeOverride } from "./models/runtime-override.js";
 import { isOrchestratableHere } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
+import { isForeignInstanceHost } from "../shared/provider-host.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -570,8 +571,9 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   const cfg = opts.cfg || loadProviders();
   const p = getProvider(providerName, cfg);
   if (!p?.bundleId && !isNativeRuntime(p)) return null;
-  // host unset defaults to local (matches resolveFromModelsJson).
-  if (p.host && p.host !== "local") return null;
+  // host is not a locality gate (spec 2026-09-22 D9) — only "belongs to another Crow instance" vetoes;
+  // orchestratableHere below decides by address/owner.
+  if (isForeignInstanceHost(p.host, () => ownInstanceId(opts))) return null;
   if (!orchestratableHere(p, opts)) return null; // F-INSTALL-10 / owner gate: not this machine's/instance's bundle
   try {
     return await acquireProvider(providerName, opts);
@@ -616,7 +618,7 @@ export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresse
     if (!isLocallyOrchestratable(direct, ownAddrs)) return null; // F-INSTALL-10
     return name;
   }
-  if (direct.host != null && direct.host !== "local") return null; // cloud alias — not warmable
+  if (isForeignInstanceHost(direct.host, () => ownInstanceId())) return null; // another instance's alias — not warmable here
   const base = direct.baseUrl || direct.baseURL || direct.base_url;
   if (!base) return null;
   for (const [n, v] of Object.entries(provs)) {

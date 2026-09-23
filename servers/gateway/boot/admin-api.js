@@ -150,8 +150,8 @@ export async function mountAdminApi(app, deps) {
       try {
         const { syncProvidersFromModelsJson } = await import("../../shared/providers-db.js");
         const res = await syncProvidersFromModelsJson(createDbClient());
-        if (res.upserted > 0 || res.reenabled > 0) {
-          console.log(`[providers] Reconciled models.json → DB: upserted=${res.upserted} reenabled=${res.reenabled} unchanged=${res.unchanged} skipped_disabled=${res.skipped_disabled} skipped_unowned=${res.skipped_unowned}`);
+        if (res.upserted > 0 || res.reenabled > 0 || res.repaired > 0) {
+          console.log(`[providers] Reconciled models.json → DB: upserted=${res.upserted} reenabled=${res.reenabled} unchanged=${res.unchanged} skipped_disabled=${res.skipped_disabled} skipped_unowned=${res.skipped_unowned} repaired=${res.repaired}`);
         }
       } catch (err) {
         console.warn("[providers] Reconciler skipped:", err.message);
