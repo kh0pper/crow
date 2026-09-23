@@ -68,8 +68,9 @@ The discrete and unknown paths are byte-identical to today. When
   double-count.
 - **GTT-expanded APU** (`gttTotalMb` known, `ramTotalMb` known, and
   `gttTotalMb >= 0.75 × ramTotalMb`, as on crow with `amdgpu.gttsize`):
-  1. `min_ram_mb <= ramAvailableMb` → `fits`;
-  2. `min_ram_mb > gttTotalMb` → `wont_fit`, because it can never run on this box;
+  1. `min_ram_mb > gttTotalMb` → `wont_fit`, because it can never run on
+     this box. This is checked first: on an idle box MemAvailable can exceed GTT;
+  2. `min_ram_mb <= ramAvailableMb` → `fits`;
   3. otherwise → `tight`: it fits the box, but only after other resident
      models are stopped.
 - **Every other unified host** (default GTT, e.g. a laptop APU whose GTT is
@@ -126,7 +127,10 @@ carries.
     `clear` print the resolved data dir.
   - The CLI is a second writer of `state.json`. After every write it re-reads
     the file and verifies the change landed; on a mismatch it retries once,
-    then exits non-zero saying a concurrent gateway write overwrote it.
+    then exits non-zero saying a concurrent gateway write overwrote it. The
+    read-back narrows the race but does not close it: a gateway that loaded
+    state before the write and saves after the read-back still wins. Verify
+    with `get` after the next gateway restart.
   - `list`/`get` never write; `clear` without `--model` does not create or
     write `state.json` when no host override exists. When
     `CROW_LLAMA_SERVER_BIN` is set, host `get`/`clear` warn that the gateway
@@ -155,7 +159,9 @@ carries.
   (pi-lab approved it as a default; opt out via `gpu_policy.launch`).
 - The orchestrator warms the probe cache in `resolveNativeBinPath`, before any
   override early-return, and the start's critical section only reads the
-  cached probe (null → no profile).
+  cached probe (null → no profile). A warm-up failure is remembered for
+  5 minutes: no re-probe inside that window on override starts, and one
+  warning per window. The stock path still probes when it needs to.
 - **Precedence: host profile < catalog `launch` < provider `gpu_policy.launch` < the jinja layer.**
   - **(D7) The profile is the LOWEST layer.** The spec §4 order is unchanged
     above it: a curated catalog value, or an operator's per-provider value,

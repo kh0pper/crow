@@ -26,7 +26,7 @@
   - The parsers stay pure and exported. Sysfs reads go through the injected `fs`.
   - `unified`: when vulkaninfo answered, `INTEGRATED_GPU` → `true` and `DISCRETE_GPU` → `false`. Other Vulkan types, and the no-Vulkan (rocminfo) path, use the sysfs heuristic: an AMD GPU with `mem_info_vram_total` ≤ 2048 MiB plus a `mem_info_gtt_total`. darwin keeps `unified: null`.
   - `gttTotalMb`/`gttUsedMb` are populated only when `unified === true`, from the amdgpu card with the smallest `mem_info_vram_total` that has GTT (the iGPU).
-  - `fitBadge` on discrete and unknown hosts is byte-for-byte unchanged. The unified path never adds VRAM credit. The GTT ceiling applies only to a **GTT-expanded** APU (`unified === true`, `gttTotalMb` and `ramTotalMb` known, `gttTotalMb >= 0.75 × ramTotalMb`): `min_ram_mb <= ramAvailableMb` → `fits`, `min_ram_mb > gttTotalMb` → `wont_fit`, else `tight`. Every other unified host uses today's formula minus the VRAM credit.
+  - `fitBadge` on discrete and unknown hosts is byte-for-byte unchanged. The unified path never adds VRAM credit. The GTT ceiling applies only to a **GTT-expanded** APU (`unified === true`, `gttTotalMb` and `ramTotalMb` known, `gttTotalMb >= 0.75 × ramTotalMb`), ceiling first: `min_ram_mb > gttTotalMb` → `wont_fit`, then `min_ram_mb <= ramAvailableMb` → `fits`, else `tight`. Every other unified host uses today's formula minus the VRAM credit.
   - The CLI is a second `state.json` writer: after every write it re-reads and verifies, retries once, then exits 3 naming a concurrent gateway write.
   - **No new badge value** (D3). `FIT_ORDER`, the panel client script and the panel tests are untouched.
   - Per-model overrides live in `state.json` under `runtimeOverrides`. They never go in `gpu_policy` or any DB column, because they must never replicate.
@@ -393,6 +393,44 @@ test("readAmdgpuMem: only card<N> dirs count; among cards with GTT the smallest 
   assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 1024, gttUsedMb: null, vramTotalMb: 256 });
 });
 
+// Round 2 (review): these fail against a naive "first numeric card with GTT"
+// implementation — the dGPU sits at card0 and the no-vram card sorts first.
+const DRM_DIRS_DGPU_FIRST = { "/sys/class/drm": ["card0", "card0-DP-1", "card1", "card1-eDP-1", "renderD128", "renderD129", "version"] };
+const SYSFS_DGPU_CARD0_IGPU_CARD1 = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "17179869184\n", // dGPU, 16 GiB
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
+  "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n", // iGPU, 512 MiB carve-out
+  "/sys/class/drm/card1/device/mem_info_gtt_total": "133143986176\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_used": "61800000000\n",
+};
+
+test("readAmdgpuMem: dGPU at card0 (16 GiB) + iGPU at card1 (512 MiB) -> card1's GTT (a first-card-wins impl picks card0 and fails)", () => {
+  const fs = fakeFs({ dirs: DRM_DIRS_DGPU_FIRST, readFiles: SYSFS_DGPU_CARD0_IGPU_CARD1 });
+  assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 126976, gttUsedMb: 58937, vramTotalMb: 512 });
+});
+
+test("probeHardware: crow's INTEGRATED vulkaninfo + dGPU at card0 and iGPU at card1 -> GTT fields come from card1", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_CROW_UNIFIED });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_DGPU_CARD0_IGPU_CARD1 }, dirs: DRM_DIRS_DGPU_FIRST });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.18.22-generic" });
+  assert.equal(probe.unified, true);
+  assert.equal(probe.gttTotalMb, 126976); // card1, not card0's 8192
+  assert.equal(probe.gttUsedMb, 58937); // card1, not card0's 1
+});
+
+test("readAmdgpuMem: a card with no mem_info_vram_total listed BEFORE one that has it ranks last (the card with vram_total wins)", () => {
+  const fs = fakeFs({
+    dirs: { "/sys/class/drm": ["card0", "card1"] },
+    readFiles: {
+      "/sys/class/drm/card0/device/mem_info_gtt_total": "4294967296\n", // no vram_total file
+      "/sys/class/drm/card1/device/mem_info_gtt_total": "1073741824\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n",
+    },
+  });
+  assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 1024, gttUsedMb: null, vramTotalMb: 512 });
+});
+
 test("readAmdgpuMem: equal VRAM -> the lower card number wins", () => {
   const fs = fakeFs({
     dirs: { "/sys/class/drm": ["card4", "card1"] },
@@ -420,6 +458,8 @@ export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH
 cd /home/kh0pp/crow-wt-halo-profile && npm test -- tests/models-probe.test.js
 ```
 Expected: FAIL. The file fails to load with `SyntaxError: The requested module '../servers/gateway/models/probe.js' does not provide an export named 'parseGfxArch'`.
+
+The three round-2 tests (dGPU at card0 + iGPU at card1 through `readAmdgpuMem` and through `probeHardware`, and the no-vram card listed first) are deliberately built to FAIL against a naive "first numeric card with GTT wins" `readAmdgpuMem`. That implementation returns card0 in all three: GTT 8192 instead of 126976, and GTT 4096 instead of 1024. If a draft passes them while picking the first card, the fixture is wrong.
 
 - [ ] **Step 3: Implement**
 
@@ -793,9 +833,17 @@ test("fitBadge default-GTT laptop APU: today's 10% band, minus the VRAM credit",
 
 test("fitBadge unified: the 0.75 GTT-expansion boundary is inclusive and integer-exact", () => {
   const at = { unified: true, gttTotalMb: 96000, ramTotalMb: 128000, ramAvailableMb: 47104 };
+  // (both variants: 90000 is below GTT 96000 and above available 47104)
   const below = { ...at, gttTotalMb: 95999 };
   assert.equal(fitBadge(at, { min_ram_mb: 90000, min_vram_mb: 0 }), "tight"); // expanded -> GTT ceiling
   assert.equal(fitBadge(below, { min_ram_mb: 90000, min_vram_mb: 0 }), "wont_fit"); // default -> 10% band
+});
+
+test("fitBadge GTT-expanded: the ceiling is checked FIRST — an idle box with MemAvailable > GTT still says wont_fit above GTT", () => {
+  // gtt = 80% of MemTotal; idle, so MemAvailable (110000) exceeds GTT (102400).
+  const idle = { unified: true, gttTotalMb: 102400, ramTotalMb: 128000, ramAvailableMb: 110000 };
+  assert.equal(fitBadge(idle, { min_ram_mb: 105000, min_vram_mb: 0 }), "wont_fit"); // between GTT and available
+  assert.equal(fitBadge(idle, { min_ram_mb: 102400, min_vram_mb: 0 }), "fits"); // == GTT, within available
 });
 
 test("fitBadge unified: GTT or MemTotal unknown -> today's formula minus VRAM credit (no GTT ceiling, no widening)", () => {
@@ -836,6 +884,7 @@ Expected: FAIL.
 - `"min_vram_mb > 0 NEVER adds VRAM"` gets `"fits"`, and the laptop `30000/8000` case gets `"fits"`, which is the double-count.
 - The "GTT or MemTotal unknown" test fails on the VRAM credit: 115068 with `min_vram_mb: 8000` gets `"fits"`.
 - The hint test fails its `/other models stopped first/` match.
+- The ceiling-first test's `105000` case gets `"fits"` from today's VRAM-credited math.
 - The "under available", "GLM -> wont_fit", "fits MemAvailable but exceeds GTT" and "unified:false" tests already pass. They pin behaviour that must not move.
 
 - [ ] **Step 3: Implement**
@@ -856,9 +905,10 @@ const positiveOrNull = (v) => (typeof v === "number" && Number.isFinite(v) && v 
  * GPU's DEVICE_LOCAL heap is a slice of the same RAM, so VRAM is NEVER
  * added (that was a double-count).
  *   GTT-expanded APU (gttTotalMb and ramTotalMb known, and
- *   gttTotalMb >= 0.75 x ramTotalMb — e.g. crow with amdgpu.gttsize):
- *     min_ram_mb <= ramAvailableMb -> "fits"
+ *   gttTotalMb >= 0.75 x ramTotalMb — e.g. crow with amdgpu.gttsize),
+ *   ceiling FIRST (MemAvailable can exceed GTT on an idle box):
  *     min_ram_mb >  gttTotalMb     -> "wont_fit" (can never run on this box)
+ *     min_ram_mb <= ramAvailableMb -> "fits"
  *     otherwise                    -> "tight"  (fits once other resident
  *                                     models are stopped)
  *   Every other unified host (default GTT, or GTT/MemTotal unknown): the
@@ -895,9 +945,11 @@ export function fitBadge(probe, quant) {
     const gtt = positiveOrNull(probe.gttTotalMb);
     const total = positiveOrNull(probe.ramTotalMb);
     if (gtt != null && total != null && 4 * gtt >= 3 * total) {
-      // GTT-expanded APU: gtt >= 0.75 x MemTotal, integer-exact.
-      if (minRam <= effective) return "fits";
+      // GTT-expanded APU: gtt >= 0.75 x MemTotal, integer-exact. The
+      // ceiling is checked FIRST: on an idle box MemAvailable can exceed
+      // GTT, and a quant above GTT can still never be GPU-resident.
       if (minRam > gtt) return "wont_fit";
+      if (minRam <= effective) return "fits";
       return "tight";
     }
     // Any other unified host: today's formula, never the VRAM credit.
@@ -1089,6 +1141,7 @@ test("per-model override: a missing/empty/prototype-ish model id is refused with
 **(c)** In `tests/gpu-orchestrator-native.test.js`:
 
 - in `startCapableOpts`, add `getModelRuntimeOverrideFn: () => null,` directly after `getRuntimeOverrideFn: () => null,`;
+- add `_resetProbeFailureWindowForTest` to the `gpu-orchestrator.js` import list, and call `_resetProbeFailureWindowForTest();` as the last line of the top-level `beforeEach`. The window is module state, and a throwing-probe test must not starve a later cold-cache test;
 - append these tests after `"native start: the runtime override binary wins over the catalog release; a vanished override falls back"`:
 
 ```js
@@ -1188,6 +1241,34 @@ test("runtime resolve: the probe is warmed BEFORE an override early-return (cold
   assert.equal(await acquireProvider("native-target", opts), true);
   assert.equal(reprobeCalls, 1);
   assert.notEqual(cached, null, "an override start leaves the probe cache warm");
+});
+
+test("runtime resolve: a probe failure on an override path is remembered — two acquires inside 5 min reprobe once and warn once; after the window it probes again", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18109, "native-target") } };
+  let t = 1_000_000;
+  let reprobeCalls = 0;
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  const acquire = async () => {
+    _setNativeHandleForTest("native-target", null);
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    opts.getCachedProbeFn = () => null;
+    opts.reprobeFn = async () => { reprobeCalls++; throw new Error("vulkaninfo exploded"); };
+    opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/window/llama-server" });
+    opts.nowFn = () => t;
+    return acquireProvider("native-target", opts);
+  };
+  try {
+    assert.equal(await acquire(), true);
+    t += 60_000; // 1 min later, inside the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 1, "no re-probe inside the failure window");
+    assert.equal(warns.filter((w) => w.includes("hardware probe failed")).length, 1, "one warning per window");
+    t += 5 * 60_000; // past the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 2, "the window expired, so it probed again");
+  } finally { console.warn = origWarn; }
 });
 
 test("runtime resolve: a probe failure is survivable on an override path but still surfaces on the stock path", async () => {
@@ -1360,6 +1441,19 @@ Replace the `resolveNativeBinPath` function head, from `async function resolveNa
 // on every chat turn, and a vanished binary would otherwise spam the log.
 // A bin that reappears re-arms its warning.
 const _warnedMissingOverrideBins = new Set();
+
+// Probe-failure window (review round 2). When the pre-override probe
+// warm-up throws, remember when; for the next PROBE_RETRY_MS no warm-up
+// re-probes (each acquire of an override-started model would otherwise
+// fork vulkaninfo/nvidia-smi/rocminfo again), and the warning fires once
+// per window. The stock path is unchanged: it still probes itself when it
+// has no probe, because it cannot pick a runtime asset without one.
+export const PROBE_RETRY_MS = 5 * 60 * 1000;
+let _probeFailedAt = null;
+/** Test seam: forget any remembered probe failure. */
+export function _resetProbeFailureWindowForTest() {
+  _probeFailedAt = null;
+}
 function warnMissingOverrideOnce(bin, message) {
   if (_warnedMissingOverrideBins.has(bin)) return;
   _warnedMissingOverrideBins.add(bin);
@@ -1377,6 +1471,7 @@ async function resolveNativeBinPath(p, opts = {}) {
     getModelRuntimeOverrideFn = getModelRuntimeOverride,
     existsSyncFn = existsSync,
     providerName = null,
+    nowFn = Date.now,
   } = opts;
   const dir = resolveDataDirFn();
 
@@ -1385,13 +1480,23 @@ async function resolveNativeBinPath(p, opts = {}) {
   // also leaves it warm for startNativeAndAwaitReady's host launch profile
   // (Strix Halo spec §2.4, review round 1). A probe failure is only fatal
   // on the stock path, which needs the probe to pick a runtime asset.
-  let probe = null;
+  // A failure is remembered for PROBE_RETRY_MS: inside that window the
+  // warm-up does not re-probe, and it warns once per window.
+  let probe = getCachedProbeFn();
   let probeError = null;
-  try {
-    probe = getCachedProbeFn() || (await reprobeFn());
-  } catch (err) {
-    probeError = err;
-    console.warn(`[gpu-orchestrator] hardware probe failed: ${err.message}`);
+  if (!probe) {
+    const now = nowFn();
+    const inFailureWindow = _probeFailedAt !== null && now - _probeFailedAt < PROBE_RETRY_MS;
+    if (!inFailureWindow) {
+      try {
+        probe = await reprobeFn();
+        _probeFailedAt = null;
+      } catch (err) {
+        probeError = err;
+        _probeFailedAt = now;
+        console.warn(`[gpu-orchestrator] hardware probe failed (not retried for ${PROBE_RETRY_MS / 60000} min on override starts): ${err.message}`);
+      }
+    }
   }
 
   // Resolve order (Strix Halo runtime profile spec §2.3): per-model
@@ -1423,8 +1528,11 @@ Then replace the old probe block that follows `const catalog = loadCatalogFn();`
 
 ```js
   // The probe was warmed at the top of this function (Fix 1 still holds:
-  // one reprobe on a cold cache, none after). The stock path needs it.
+  // one reprobe on a cold cache, none after). The stock path needs it:
+  // a failure from THIS call surfaces as-is; a warm-up skipped by the
+  // failure window gets one real probe here, exactly as before this change.
   if (probeError) throw probeError;
+  if (!probe) probe = await reprobeFn();
 ```
 
 Leave the rest of the function unchanged, from `const key = ...` to the end.
@@ -1730,7 +1838,10 @@ Create `scripts/models-runtime-override.mjs`:
  * gateway write can land between our write and the next read and silently
  * drop our change. Every write is therefore re-read and verified; on a
  * mismatch it is retried once, then the CLI exits 3 saying a concurrent
- * gateway write overwrote it.
+ * gateway write overwrote it. The read-back NARROWS the race but does not
+ * close it: a gateway that loaded state.json before our write and saves
+ * after our read-back still wins, silently. After a `set`/`clear`, verify
+ * with `get` after the next gateway restart.
  *
  * `list`/`get` read state.json directly — they never go through
  * getRuntimeOverride(), whose CROW_LLAMA_SERVER_BIN bootstrap would WRITE
@@ -2365,6 +2476,7 @@ For r4, point it at r4's data dir:
 - `list` and `get` only read. They never trigger the env bootstrap. `clear` without `--model` writes nothing when no host override is stored.
 - `set` and `clear` print the data dir they wrote to.
 - The CLI is a second writer of `state.json`, next to the gateway. After every write it re-reads the file and checks the change landed. On a mismatch it retries once, then exits 3 saying a concurrent gateway write overwrote it.
+- The read-back narrows the race but does not close it. A gateway that loaded `state.json` before the write and saves after the read-back still wins, silently. Verify with `get` after the next gateway restart.
 - When `CROW_LLAMA_SERVER_BIN` is set, host `get`/`clear` warn that the gateway will re-bootstrap the host override from that variable.
 - `set --model` warns when the id matches no catalog id and no registered model, because such an override only applies to a provider with that exact name.
 - A running model keeps its binary until it is next started.
@@ -2398,10 +2510,10 @@ On an APU, `vramMb` (RADV's `DEVICE_LOCAL` heap, 83 GiB on crow) is a slice of R
 
 **Fit badge.** On a unified host `fitBadge` never adds VRAM to RAM. The GTT ceiling applies only to a **GTT-expanded** APU, where GTT total is at least 75% of `MemTotal`, as on crow with `amdgpu.gttsize`:
 
-| condition (GTT-expanded) | badge |
+| condition (GTT-expanded, checked in this order) | badge |
 |---|---|
+| `min_ram_mb` above GTT total | `wont_fit`, even when an idle box has more MemAvailable than GTT |
 | `min_ram_mb` within MemAvailable | `fits` |
-| `min_ram_mb` above GTT total | `wont_fit` |
 | anything in between | `tight`: it fits the box, but only after other resident models are stopped |
 
 Every other unified host (default GTT, or GTT/MemTotal unknown) uses the discrete formula minus the VRAM credit: `fits` within MemAvailable, `tight` within 110% of it, else `wont_fit`. So a laptop APU with default GTT never has a `fits` turned into `wont_fit`. Only GTT-expanded hosts get the wider `tight` band. There is no fourth badge value. The tight hint says both "close to your limits" and "may need other models stopped first". The discrete path is unchanged. The live GTT start gate is a separate change (two-host spec §6).
@@ -2494,4 +2606,13 @@ Adversarial review round 1. Every ruling below was binding and has been applied 
 - **A per-model override keyed by `catalogId` applies to every quant/variant row of that model.** That is intended, because pi-lab builds are per model. Recorded in the spec, the CLI header and the docs.
 - **`--no-op-offload` stays in the profile regardless of `ngl`.** pi-lab approved it as a default. The opt-out is `gpu_policy.launch: { no_op_offload: false }`.
 - **darwin keeps `unified: null`.** Pinned by the Task 1 WSL2/darwin test.
+
+### Round 2
+
+| # | finding | resolution |
+|---|---|---|
+| R2-1 | The C1 tests would pass a naive "first numeric card with GTT" `readAmdgpuMem`: every fixture put the iGPU first. | Added a dGPU-at-card0 (16 GiB) + iGPU-at-card1 (512 MiB) fixture. It is tested directly through `readAmdgpuMem` (card1's GTT wins) and through `probeHardware` with crow's INTEGRATED vulkaninfo (GTT fields from card1). A third test lists a card with no `mem_info_vram_total` before one that has it, and the card with vram_total wins. Task 1 Step 2 states that all three fail against a first-card implementation. |
+| R2-2 | GTT-expanded `fitBadge` checked `fits` before the ceiling, so an idle box whose MemAvailable exceeds GTT said `fits` for a quant above GTT. | The ceiling is checked first: `> gttTotalMb` → `wont_fit`, then `<= ramAvailableMb` → `fits`, else `tight`. Added the idle-box test (GTT 80% of MemTotal, MemAvailable > GTT, quant between them → `wont_fit`). Spec §2.2's numbered order is updated. |
+| R2-3 | A probe that throws was re-run on every override-path acquire. | A module-level failure timestamp is added, with a `nowFn` seam and `PROBE_RETRY_MS` of 5 min. Inside the window the warm-up does not re-probe, and it warns once per window. The stock path still probes itself when it has no probe, so its behaviour is unchanged. A test checks that two acquires inside the window reprobe once and warn once, and that a third acquire after the window probes again. The harness `beforeEach` resets the window. |
+| R2-4 | The CLI docs overstated the read-back verification. | The CLI header and the Task 6 docs now say the read-back narrows but does not close the race: a gateway that loaded state before the write and saves after the read-back still wins. They advise "verify with `get` after the next gateway restart". |
 
