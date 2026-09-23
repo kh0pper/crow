@@ -24,7 +24,7 @@ export function servingClassOf(entry) {
 
 export class ServingClassError extends Error {
   constructor(servingClass, providerName) {
-    super(`${providerName || "model"} is a ${servingClass} model — the gateway will not start it without an explicit serving_override of "${servingClass}"; heavy models run through an operator window`);
+    super(`${providerName || "model"} is a ${servingClass} model — the gateway does not start it on demand; heavy models run through an operator window`);
     this.name = "ServingClassError";
     this.code = "serving_class_refused";
     this.http = 409;

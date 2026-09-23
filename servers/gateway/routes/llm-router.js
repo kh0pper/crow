@@ -393,7 +393,13 @@ export default function llmRouterRouter(opts = {}) {
   // exceed that and 413.
   router.use("/llm", express.json({ limit: "10mb" }));
   router.get("/llm/v1/models", (req, res) => handleModels(res));
-  router.post("/llm/v1/chat/completions", (req, res) => handleChat(req, res, deps));
+  router.post("/llm/v1/chat/completions", (req, res) => {
+    handleChat(req, res, deps).catch((err) => {
+      console.error(`[llm-router] chat handler failed: ${err?.stack || err}`);
+      if (res.headersSent) { if (!res.writableEnded) res.end(); return; }
+      res.status(502).json({ error: { code: "router_error", message: `model routing failed: ${err?.message || err}` } });
+    });
+  });
   // POST /llm/acquire { provider } — warm a local model bundle and wait until it's
   // ready. The gateway chat path warms inline before a turn; this gives the same
   // capability to the pi-bots host (background jobs + bridge) which runs in a

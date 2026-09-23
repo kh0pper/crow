@@ -94,7 +94,13 @@ function setup(cls, { fastStatus = "down", servingOverride } = {}) {
 }
 
 // Pin the reservation reader: a live box reservation on the host must not leak into these tests.
-beforeEach(() => { _resetProviderHealth(); _setNativeHandleForTest("native-target", null); _setReservationReaderForTest(() => null); _resetReservationNoticesForTest(); });
+beforeEach(() => {
+  _resetProviderHealth();
+  _setNativeHandleForTest("native-target", null);
+  _setNativeHandleForTest("native-sib", null);
+  _setReservationReaderForTest(() => null);
+  _resetReservationNoticesForTest();
+});
 
 test("cold wedge-risk: acquireProvider throws ServingClassError and never spawns", async () => {
   const { opts, startCalls } = setup("wedge-risk");
@@ -168,4 +174,56 @@ test("reserved box + cold wedge-risk: the permanent refusal wins over box_reserv
     await assert.rejects(acquireProvider("native-target", opts), ServingClassError);
     assert.equal(startCalls.length, 0);
   } finally { _setReservationReaderForTest(() => null); }
+});
+
+test("cold wedge-risk with a resident LIVE sibling in the same mutexGroup: refused BEFORE sibling eviction", async () => {
+  const p = nativeProv(18200, "native-target", { gpuPolicy: { mutexGroup: "local-llm" } });
+  const sib = nativeProv(18201, "native-sib", { gpuPolicy: { mutexGroup: "local-llm" } });
+  const cfg = { providers: { "native-target": p, "native-sib": sib } };
+  const sibHandle = fakeHandle();
+  _setNativeHandleForTest("native-sib", sibHandle);
+
+  const startCalls = [];
+  let stopModelFnCalls = 0;
+  const identityProbeFn = async () => "down";
+  const opts = {
+    ...startCapableOpts({ cfg, identityProbeFn, startCalls }),
+    loadCatalogFn: catalogWith("wedge-risk"),
+    stopModelFn: async (h) => { stopModelFnCalls += 1; return h.stop(); },
+  };
+
+  await assert.rejects(acquireProvider("native-target", opts), (e) => e instanceof ServingClassError && e.servingClass === "wedge-risk");
+  assert.equal(startCalls.length, 0);
+  assert.equal(stopModelFnCalls, 0, "the injected stopModelFn was never called");
+  assert.equal(sibHandle.stopCalls, 0, "the sibling handle's stop() was never called");
+  assert.equal(sibHandle.live, true, "the sibling is still resident/live");
+});
+
+// --- item 3 (MINOR, D6): an unreadable catalog is uncurated, so the start
+// proceeds. `loadCatalogFn` is shared across the whole native-start path —
+// `acquireProvider` calls it FIRST via `resolveNativeBinPath` (unguarded:
+// resolveNativeBinPath does not try/catch it, so a throw there aborts the
+// start before the serving.class gate is ever reached — not what this test
+// is pinning), and again later inside `startNativeAndAwaitReady`'s
+// catalogEntry lookup (already try/catch-guarded there). So this stub lets
+// call #1 (resolveNativeBinPath) succeed, throws on call #2 — the
+// serving.class D6 catch this test targets — and succeeds again after, so
+// the unrelated steps around it are unaffected.
+test("D6: an unreadable catalog at the serving.class check is treated as uncurated — the start still proceeds", async () => {
+  const p = nativeProv(18202, "native-target");
+  const cfg = { providers: { "native-target": p } };
+  const startCalls = [];
+  let probeCalls = 0;
+  const identityProbeFn = async () => (++probeCalls === 1 ? "down" : "resident");
+  let loadCatalogCalls = 0;
+  const loadCatalogFn = () => {
+    loadCatalogCalls += 1;
+    if (loadCatalogCalls === 2) throw new Error("bad json");
+    return { runtime: { release: "b1", assets: {} } };
+  };
+  const opts = { ...startCapableOpts({ cfg, identityProbeFn, startCalls }), loadCatalogFn };
+
+  await acquireProvider("native-target", opts);
+  assert.equal(startCalls.length, 1);
+  assert.ok(loadCatalogCalls > 2, "loadCatalogFn was called again by unrelated start steps (startNativeAndAwaitReady's catalogEntry lookup)");
 });
