@@ -4,6 +4,7 @@ import {
   getOwnAddresses, isLocallyOrchestratable,
   alwaysResidentProviders, resolveWarmableProviderName,
   retryDeferredResidents, _setDeferredResidentsForTest, _setOwnInstanceIdForTest,
+  maybeAcquireLocalProvider,
 } from "../servers/gateway/gpu-orchestrator.js";
 
 // Real fleet shapes (models.json fallback on a fresh install):
@@ -120,5 +121,46 @@ test("C3: a deferred native row owned by a co-hosted PEER stays parked, never en
   } finally {
     _setOwnInstanceIdForTest(null);
     _setDeferredResidentsForTest([]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// D9: host stops gating locality — only a foreign instance id vetoes.
+// ---------------------------------------------------------------------------
+
+const SELF = "0867ac2809dedd885ba7769b21966f8e";
+const OTHER = "49cf71ca878643ba7717f344329266fd";
+
+test("D9: an own bundle marked cloud (boot-race seed) or with own id is still warmable; a foreign id is not", async () => {
+  _setOwnInstanceIdForTest(SELF);
+  try {
+    const ready = { probeReadyFn: async () => true }; // fast path: "already resident" — nothing starts
+    const mk = (host) => ({ providers: { p: { baseUrl: "http://127.0.0.1:1/v1", host, bundleId: "b" } } });
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("cloud"), ...ready }), true);
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk(SELF), ...ready }), true);
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("local"), ...ready }), true);
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("grackle-5fc01ac74463b6f4"), ...ready }), true);
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk(OTHER), ...ready }), null);
+  } finally {
+    _setOwnInstanceIdForTest(null);
+  }
+});
+
+test("D9 resolveWarmableProviderName: own-id / cloud alias resolves to its local bundle sibling; foreign id does not", () => {
+  _setOwnInstanceIdForTest(SELF);
+  try {
+    const cfg = { providers: {
+      "bundle":       { baseUrl: "http://100.118.41.122:8003/v1", host: "local", bundleId: "b1" },
+      "alias-self":   { baseUrl: "http://100.118.41.122:8003/v1", host: SELF,    bundleId: null },
+      "alias-cloud":  { baseUrl: "http://100.118.41.122:8003/v1", host: "cloud", bundleId: null },
+      "alias-other":  { baseUrl: "http://100.118.41.122:8003/v1", host: OTHER,   bundleId: null },
+      "public-cloud": { baseUrl: "https://api.together.xyz/v1",   host: "cloud", bundleId: null },
+    } };
+    assert.equal(resolveWarmableProviderName(cfg, "alias-self", CROW), "bundle");
+    assert.equal(resolveWarmableProviderName(cfg, "alias-cloud", CROW), "bundle");
+    assert.equal(resolveWarmableProviderName(cfg, "alias-other", CROW), null);
+    assert.equal(resolveWarmableProviderName(cfg, "public-cloud", CROW), null);
+  } finally {
+    _setOwnInstanceIdForTest(null);
   }
 });
