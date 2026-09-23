@@ -35,7 +35,7 @@ import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
-import { inferHost } from "./provider-host.js";
+import { inferHost, repairHostDecision } from "./provider-host.js";
 
 function readModelsJson() {
   const merged = { providers: {} };
@@ -487,6 +487,26 @@ export async function reenableProviderPreservingContent(db, id) {
 }
 
 /**
+ * Spec 2026-09-22 §3.4: repair provider rows whose host THIS instance wrote
+ * wrongly. Scope, D3, G1 and G2 live in repairHostDecision (pure). Round-trips
+ * the parsed listProvidersAll shape (R2-M2) so upsertProvider re-stamps and emits.
+ * Harmless if imperfect: host is not an orchestration gate (D9).
+ */
+export async function repairProviderHosts(db, {
+  ownInstanceId = getOrCreateLocalInstanceId(),
+  ownAddrs = getOwnAddresses(),
+} = {}) {
+  const changes = [];
+  for (const row of await listProvidersAll(db)) {
+    const next = repairHostDecision(row, { ownInstanceId, ownAddrs });
+    if (next === null) continue;
+    await upsertProvider(db, { ...row, host: next });
+    changes.push({ id: row.id, from: row.host, to: next });
+  }
+  return { repaired: changes.length, changes };
+}
+
+/**
  * Continuous reconciler: assert models.json entries into the DB — but only
  * the entries this instance OWNS (single-writer by endpoint ownership).
  *
@@ -519,10 +539,16 @@ export async function reenableProviderPreservingContent(db, id) {
  * reconcile sees tailscale coming up after boot and tailnet/DHCP IP changes.
  * Injectable for tests.
  *
+ * Runs unconditionally (even absent models.json / providers config): after
+ * the models.json assert loop, always calls repairProviderHosts (spec §3.4)
+ * over the same `ownAddrs`, so the hourly reconciler also heals this
+ * instance's own bad `host` writes (`repaired` in the returned counters).
+ *
  * @param {object} db
  * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
  * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
- *                     skipped_unowned: number, reenabled: number, source: string|null }>}
+ *                     skipped_unowned: number, reenabled: number, repaired: number,
+ *                     source: string|null }>}
  *   `upserted` counts actual writes; `unchanged` counts owned entries whose
  *   content already converged (D2 no-op suppression).
  */
@@ -530,11 +556,10 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
   const dbClient = db || createDbClient();
   const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
   const { path, config } = readModelsJson();
-  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0 };
-  if (!config?.providers) return { ...counters, source: path };
-
-  const entries = Object.entries(config.providers).filter(([id]) => !id.startsWith("$"));
-  if (entries.length === 0) return { ...counters, source: path };
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0 };
+  const entries = config?.providers
+    ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
+    : [];
 
   const { rows: existingRows } = await dbClient.execute("SELECT id, disabled FROM providers");
   const existing = new Map(existingRows.map((r) => [r.id, r]));
@@ -573,5 +598,7 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
     if (res.unchanged) counters.unchanged++;
     else counters.upserted++;
   }
+  const rep = await repairProviderHosts(dbClient, { ownAddrs: addrs });
+  counters.repaired = rep.repaired;
   return { ...counters, source: path };
 }
