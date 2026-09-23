@@ -57,7 +57,12 @@ A second invalid value is live fleet-wide:
 | `<instance-id>` | The endpoint is served by that paired Crow instance. | explicit writers only: bundle manifests' `host`, operator edits, existing rows. **Inference never writes an instance id** (mine, §4 D2). |
 | `cloud` | Crow does not manage this endpoint from here; call `base_url` directly. This covers public APIs **and unmanaged network machines such as raven today** (Kevin's decision). | inference, dashboard add form, migrations |
 
-Any other stored value is **invalid**; `'raven'` is the only one known. See §3.4.
+Any other stored value is **invalid**. Known invalid values:
+- `'raven'`, set by hand;
+- grackle's `grackle-5fc01ac74463b6f4` label;
+- `'external'`, written by `routes/models.js:759` for the local-only Hugging Face token row. This PR changes that writer to `cloud`.
+
+See §3.4.
 
 ### 3.2 `inferHost` (pure)
 
@@ -78,18 +83,34 @@ inferHost(baseUrl, existingHost, { ownAddrs }) →
 - `seedProvidersFromModelsJson`, which is defect 2 and now calls `inferHost` instead of `p.host || "local"`;
 - `upsertProvider`'s missing-host fallback (defect 3): `provider.host || inferHost(baseUrl, null, …)`.
 
-### 3.3 Readers: `isSelfHost` (pure)
+### 3.3 Readers: `host` stops deciding what a machine may start (revised after plan review round 1)
 
-A new `isSelfHost(host, ownInstanceId)` returns true for `local` and for the reader's own instance id.
-- `gpu-orchestrator.js:574` and `:619` switch to it, which closes the latent reader bug in §1.
-- The address, owner and native checks that come after it are unchanged, so no row becomes *more* startable than the address rule allows.
-- Behaviour changes only for a row whose `host` is the reader's own id **and** whose address or owner already passes. That is exactly the latent bug.
+`gpu-orchestrator.js:574` (`maybeAcquireLocalProvider`) and `:619` (`resolveWarmableProviderName`) currently refuse every row whose `host` is not the literal `local`. They change to refuse **only a foreign instance id**: `isInstanceIdShape(host) && host !== ownInstanceId`.
+
+- `local`, `cloud` and invalid labels all fall through to the existing address, owner and native checks. Those checks already decide locality (`locality.js`: `host` "cannot be used").
+- Consequence: **a wrong `host` value can no longer make a box refuse its own models**, whether it comes from repair, a seed during the Tailscale boot race, or an old value left over from the sync war.
+- `host` becomes descriptive (display, vendor bucket) plus one real veto: "this belongs to that other instance".
+- Nothing becomes *more* startable than the address rule allows:
+  - a `cloud` row still needs a bundle or native runtime **and** an own address or owner match;
+  - a public API row has neither.
+- Side effects:
+  - The latent own-id reader bug in §1 is fixed, since an own id is not foreign.
+  - grackle's own `grackle-*` rows, labelled `grackle-5fc01ac74463b6f4`, stop being refused on grackle.
+- Implemented as `isForeignInstanceHost(host, ownInstanceId)` in `provider-host.js`. The own instance id is read **lazily**, only when the host has instance-id shape (orchestrator "Ruling 3" comment, `gpu-orchestrator.js:350`).
 
 ### 3.4 One-time repair of rows this instance wrote wrongly
 
 A repair pass runs inside the existing hourly reconciler, after the models.json loop, over `listProvidersAll`. It is idempotent.
 
-**Rewrite rule:** a row is rewritten to `inferHost(base_url, null, {ownAddrs})` **only when all three conditions hold:**
+**Scope (revised after plan review round 1):** repair considers only rows that meet all of these:
+- `bundle_id IS NULL`;
+- no `gpu_policy.owner`;
+- not `gpu_policy.local_only`;
+- `disabled = 0`.
+
+The reason is that bundle and native rows take `host` from manifests and registration, never from inference. The review also showed D3's premise fails for them: `upsertProvider`, `disableProvider`, the dashboard enable and `reenableProviderPreservingContent` all re-stamp `instance_id` **without touching `host`**. Live on crow and on grackle, crow's own bundle rows `crow-chat`, `crow-voice` and `crow-swap-agentic` carry grackle's `instance_id` from the old sync war. Unscoped, grackle would repair them to `cloud`.
+
+**Rewrite rule:** within that scope, a row is rewritten to `inferHost(base_url, null, {ownAddrs})` **only when all three conditions hold:**
 1. **This instance was the last writer:** `row.instance_id === ownInstanceId`.
 2. The stored `host` is either:
    - (a) invalid (§3.1), or
@@ -98,7 +119,7 @@ A repair pass runs inside the existing hourly reconciler, after the models.json 
 
 **Two guards, because repair WRITES** (mine, §4 D7). The reconciler's `assert` gate tolerates an incomplete own-address set because being unsure only makes it *skip*. Repair is a write, and a false "not mine" would flip this machine's own rows `local`→`cloud`. `maybeAcquireLocalProvider` would then refuse them, and nothing flips a bundle-manifest row back.
 
-- **G1: judge an address only against a network this machine is on right now.** Skip the whole repair pass when `ownAddrs` holds no non-loopback address. Otherwise, a condition-2(b) row is judged "not mine" only if `ownAddrs` currently holds at least one non-loopback address of the **same class** as the target:
+- **G1: judge an address only against a network this machine is on right now.** Skip the whole repair pass when `ownAddrs` holds no non-loopback address. Otherwise, **any repair whose result would be `cloud`, whether from condition 2(a) or 2(b),** is allowed only when the target is an IP literal and `ownAddrs` currently holds at least one non-loopback address of the **same class** as the target:
 
   | target class | ranges |
   |---|---|
@@ -114,11 +135,13 @@ A repair pass runs inside the existing hourly reconciler, after the models.json 
   (A recorded-`tailscale_ip` check was considered and rejected: `crow_instances.tailscale_ip` is empty for every instance, verified 2026-09-22.)
 - **G2: `local`→`cloud` only for IP-literal hostnames.** Condition 2(b) applies only when the base-URL hostname is an IPv4 or IPv6 literal.
   - A DNS name (`crow.dachshund-chromatic.ts.net`, `raven`) cannot be judged against an address set, so a `local` row naming a host is left alone.
-  - Condition 2(a), an invalid value, still recomputes for any hostname, because the stored value is wrong either way.
+  - Condition 2(a), an invalid value, recomputes only when the result is `local`, or when the result is `cloud` and the target is an IP literal that passes G1. An invalid label on a DNS-name row is left for the operator.
 
-**Why only this instance's own writes (mine, §4 D3):** it makes repair single-writer by construction.
+**Why only this instance's own writes (mine, §4 D3):** it makes repair nearly single-writer.
+- "Last writer" is only a proxy for "author of the host claim". The scope restriction above removes the rows where the two are known to differ.
+- When copies of a row diverge, each instance can be the last writer of its own copy: r4 and crow each last-wrote their own raven rows. That is safe because every writer computes the same value from the same address.
+- Any residual mistake now costs only display, because of §3.3.
 - A `local` written by another instance is that instance's own claim. It is correct from its own side, or it is that instance's job to fix. Overwriting it would restart the war: the owner re-asserts `local` every hour, and we rewrite it to `cloud` again.
-- Rule 1 guarantees two instances never repair the same row to different values, because at most one of them is the last writer.
 
 **The instance-id check for (a) is by shape, not by the `crow_instances` table.** A value counts as an instance id when it is a 32-character lowercase hex string, which is what `generateInstanceId` produces. `grackle-5fc01ac74463b6f4` is therefore invalid, and correctly so.
 
@@ -131,19 +154,15 @@ Reason (mine, §4 D4): the instances table differs across the fleet (MPA is stil
 | `raven-halogen-smoke` | `local` | `cloud` |
 | `raven-flash-next` | `raven` (invalid) | `cloud` |
 
+**grackle's copies:** grackle holds `raven-flash-next` as `host='local'`, written by crow. It was offline for the 09-10 manual fix and later for five days. That copy is repaired by crow's emit once it syncs, not by grackle, under D3.
+
 It touches nothing else **on crow**.
 
-**grackle rewrites its own three `grackle-*` rows** from the invalid label to `local`, because their endpoint is grackle's own address. Those rows then sync to the fleet as `local`, and viewers show them as "network" (§3.5).
-
-This does not start a war:
-- grackle's hourly `assert` for those ids goes through `inferHost(p.baseUrl, p.host)`, and the invalid file value falls through to the same `local`;
-- every other instance holding those rows reaches `skip_unowned`.
-
-The grackle-local `config/models.json` label is left as it is: inference overrides it. Deleting it is optional operator cleanup, not a code change.
+**grackle's `grackle-*` rows are bundle rows, so they are out of repair scope** and keep their invalid label. §3.3 makes the label harmless for orchestration, and the display shows it as it is. grackle is being decommissioned anyway.
 
 r4 was also the last writer of its own copies of both raven rows, so r4 repairs those two as well.
 
-The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) against copies of the live DBs before any deploy.
+The plan must verify these claims (2 rows on crow, 2 on r4, 0 on grackle) against copies of the live DBs before any deploy.
 
 (Kevin, 2026-09-22: grackle is to be **decommissioned and sold**, which is its own queue item. The grackle rows then become moot, but the rule stays correct for any instance.)
 
@@ -158,7 +177,7 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) agains
 
 ### 3.6 Docs
 
-- Update the `host` invariant comment in `providers-db.js`: the three meanings from §3.1, "inference never writes instance ids", and "readers use `isSelfHost` plus address checks".
+- Update the `host` invariant comment in `providers-db.js`: the three meanings from §3.1, "inference never writes instance ids", and "readers veto only a foreign instance id (`isForeignInstanceHost`); locality comes from the address and owner checks". Keep the existing paragraph about cloud rows versus bundle rows (`bundle_id`/`provider_type`).
 - **Two-host spec §3.1** (PR #344): the "Set `host = 'raven'`" instruction is superseded. Unmanaged network endpoints are `cloud`. Add a one-line pointer to this spec.
 
 ## 4. Decisions (all mine unless marked Kevin's)
@@ -171,9 +190,20 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) agains
 - **D3:** repair rewrites only rows this instance wrote last (§3.4).
 - **D4:** instance-id validity is judged by shape, not by a fleet-divergent table.
 - **D5:** there is no migration and no `SCHEMA_GENERATION` bump. Repair is data, run by the existing reconciler, and fully idempotent.
+- **D9 (after plan review):** `host` stops being an orchestration gate except for the foreign-instance-id veto (§3.3). This is what makes every remaining inference imperfection harmless, and it is the decision that makes the rest safe:
+  - own `100.x` rows seeded as `cloud` during a Tailscale boot race;
+  - the seed-insert race, where two non-owners compute different hosts;
+  - rows written through `upsertProvider`'s missing-host fallback.
+  All three are **accepted as display-only**.
 - **D7:** the two repair guards, G1 (interfaces settled) and G2 (IP literals only for `local`→`cloud`), come from asymmetric risk. A missed repair costs one more hour of a wrong badge. A false repair makes crow refuse its own models.
 - **D8:** `inferHost` keeps treating a DNS-name base URL as `cloud`, unchanged from today. Only addresses are compared, which matches `isLocallyOrchestratable`. A row naming this machine by DNS name must set `host` explicitly, as rows already do.
 - **D6 (not done):** instances will not advertise their LAN addresses so viewers could map endpoints to peers. Nothing needs it until raven pairs, and even then §3.5 display plus D2 are enough. Revisit in the raven-pairing item only if a concrete need shows up.
+
+## 4.1 Accepted limitations
+
+- **Tailscale boot race on write-time inference.** Seeds and fallback writes during that window can store `cloud` for this machine's own `100.x` endpoint. The effect is display only (D9). models.json rows heal on the owner's next assert.
+- **Seed-insert race.** Two instances seeding the same absent id at once can store different hosts and log one insert conflict. This is bounded, and display only.
+- **Messages picker.** `messages/client.js:416` appends " (cloud)" to `host==='cloud'` rows, so the raven rows will now read "(cloud)" there. This is accepted.
 
 ## 5. Out of scope
 
@@ -194,7 +224,7 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) agains
   - no baseUrl;
   - a valid `existingHost` short-circuits;
   - an invalid `existingHost` (`raven`) falls through.
-- **Unit, `isSelfHost`:** `local`, own id, a foreign id, `cloud`, null.
+- **Unit, `isForeignInstanceHost`:** `local`, `cloud`, an invalid label and null are all not foreign. The own id is not foreign. A different 32-hex id is foreign. The own id is read lazily, only for id-shaped hosts.
 - **Unit, repair decision** as a pure function over (row, ownId, ownAddrs): the full matrix of the §3.4 conditions, including "another instance wrote it" → never.
 - **Orchestrator:** extend `gpu-orchestrator-host-gate.test.js`.
   - A bundle row whose `host` is the reader's own id and whose address is own is now acquirable.
@@ -209,7 +239,7 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) agains
   - the lamport clock stops advancing after convergence.
   - A second arm: B is the endpoint's owner and asserts `local`, and A never rewrites B's write.
   - Each test must be shown to fail against the pre-change code (red before green).
-- **Live-data dry run (plan task):** run the repair decision read-only against copies of crow's, r4's and grackle's `crow.db`. Record every row it would touch; the expectation is 2 on crow, 2 on r4, 3 on grackle.
+- **Live-data dry run (plan task):** run the repair decision read-only against copies of crow's, r4's and grackle's `crow.db`. Record every row it would touch; the expectation is 2 on crow, 2 on r4, 0 on grackle.
 - **Full suite:** via `scripts/run-suite.mjs` (Node 22), plus `tests/auth-network.test.js`, which is untouched but cheap to include.
 
 ## 7. Rollout
