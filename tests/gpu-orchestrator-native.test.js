@@ -37,6 +37,9 @@ import {
   NativeHostLockHeldError,
   _setNativeHandleForTest,
   _resetProbeFailureWindowForTest,
+  ExternalEngineError,
+  _resetExternalSkipNoticesForTest,
+  _internals,
 } from "../servers/gateway/gpu-orchestrator.js";
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
@@ -1686,4 +1689,117 @@ test("host profile: a probe that throws means no profile, never a failed start",
     assert.equal(await acquireProvider("native-target", opts), true);
   } finally { console.warn = origWarn; }
   assert.deepEqual(startCalls[0].launch, {});
+});
+
+// --- external engines (spec 2026-09-23 external-engine-provider §2.2) --------
+//
+// A row carrying gpu_policy.engine.managed === "external" is run by ANOTHER
+// machine. Several fixtures below are deliberately contradictory (marker +
+// runtime native, marker + bundleId) — the shape a replicated or legacy row
+// could have. Without the guard each of them WOULD be started, evicted or
+// warmed; that is what makes these tests non-vacuous.
+
+const ENGINE = { managed: "external", host: "raven", label: "halogen" };
+
+test("external engine: maybeAcquireLocalProvider returns null and spawns nothing, even for a row that also claims runtime native", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18180, "qwen3-4b", { gpuPolicy: { engine: ENGINE } }) } };
+  const startCalls = [];
+  const result = await maybeAcquireLocalProvider(
+    "native-target",
+    startCapableOpts({ cfg, identityProbeFn: async () => "down", startCalls }),
+  );
+  assert.equal(result, null);
+  assert.equal(startCalls.length, 0);
+});
+
+test("external engine: acquireProvider throws ExternalEngineError (code external_engine) before any probe or start", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18181, "qwen3-4b", { gpuPolicy: { engine: ENGINE } }) } };
+  let probes = 0;
+  const startCalls = [];
+  await assert.rejects(
+    acquireProvider("native-target", startCapableOpts({
+      cfg,
+      identityProbeFn: async () => { probes += 1; return "down"; },
+      startCalls,
+    })),
+    (err) => err instanceof ExternalEngineError && err.code === "external_engine" && err.engineHost === "raven",
+  );
+  assert.equal(probes, 0, "refused before the identity probe");
+  assert.equal(startCalls.length, 0);
+});
+
+test("external engine: a Docker-shaped external row is refused by acquireProvider too — bundleUp never runs", async () => {
+  const cfg = { providers: { ext: dockerProv("http://127.0.0.1:8030/v1", "halogen-bundle", { gpuPolicy: { engine: ENGINE } }) } };
+  const bundleUpCalls = [];
+  await assert.rejects(
+    acquireProvider("ext", {
+      cfg,
+      probeReadyFn: async () => false,
+      bundleUpFn: async (id) => { bundleUpCalls.push(id); },
+      waitForReadyFn: async () => true,
+    }),
+    ExternalEngineError,
+  );
+  assert.deepEqual(bundleUpCalls, []);
+});
+
+test("external engine: ensureResident skips it, starts nothing, and logs exactly once across repeated calls", async () => {
+  _resetExternalSkipNoticesForTest();
+  const cfg = { providers: { "native-target": nativeProv(18182, "qwen3-4b", { gpuPolicy: { engine: ENGINE, alwaysResident: true } }) } };
+  const startCalls = [];
+  const opts = startCapableOpts({ cfg, identityProbeFn: async () => "down", startCalls });
+  const logs = await captureLogs(async () => {
+    assert.equal(await ensureResident("native-target", cfg, opts), false);
+    assert.equal(await ensureResident("native-target", cfg, opts), false);
+  });
+  assert.equal(startCalls.length, 0);
+  const skips = logs.filter((l) => l.includes("residency skipped native-target") && l.includes("external engine on raven"));
+  assert.equal(skips.length, 1, logs.join("\n"));
+});
+
+test("external engine: a native acquire never evicts an external sibling sharing its mutexGroup", async () => {
+  const cfg = { providers: {
+    "native-target": nativeProv(18183, "qwen3-4b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm" } }),
+    // Contradictory on purpose: without the guard its bundleId would be bundleStop'd.
+    "native-sib": dockerProv("http://127.0.0.1:8030/v1", "halogen-bundle", { gpuPolicy: { mutexGroup: "local-llm", engine: ENGINE } }),
+  } };
+  const bundleStopCalls = [];
+  const result = await acquireProvider("native-target", {
+    ...startCapableOpts({ cfg, identityProbeFn: downThenResident() }),
+    bundleStopFn: async (id) => { bundleStopCalls.push(id); },
+    probeReadyFn: async () => true, // the external engine is answering
+  });
+  assert.equal(result, true);
+  assert.deepEqual(bundleStopCalls, [], "the external engine was never stopped");
+});
+
+test("external engine: a Docker acquire never stops an external sibling's live native handle", async () => {
+  const cfg = { providers: {
+    "docker-target": dockerProv("http://127.0.0.1:8003/v1", "vllm-rocm-qwen35-4b", { gpuPolicy: { mutexGroup: "local-llm" } }),
+    "native-sib": nativeProv(18184, "qwen3-4b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm", engine: ENGINE } }),
+  } };
+  const sibHandle = fakeHandle();
+  _setNativeHandleForTest("native-sib", sibHandle);
+  const result = await acquireProvider("docker-target", {
+    cfg,
+    probeReadyFn: async () => false,
+    bundleUpFn: async () => {},
+    waitForReadyFn: async () => true,
+  });
+  assert.equal(result, true);
+  assert.equal(sibHandle.stopCalls, 0);
+  assert.equal(sibHandle.live, true);
+});
+
+test("external engine: idle-revert's mutex groups never name it as default nor list it as a member; siblings exclude it", () => {
+  const cfg = { providers: {
+    "chat-a": dockerProv("http://127.0.0.1:8003/v1", "bundle-a", { gpuPolicy: { mutexGroup: "g" } }),
+    "chat-b": dockerProv("http://127.0.0.1:8004/v1", "bundle-b", { gpuPolicy: { mutexGroup: "g" } }),
+    "ext-default": { baseUrl: "http://10.0.0.126:8030/v1", host: "cloud", bundleId: null, gpuPolicy: { mutexGroup: "g", defaultMember: true, engine: ENGINE } },
+  } };
+  const g = _internals.getMutexGroups(cfg).get("g");
+  assert.equal(g.default, null, "idle-revert must never revert TO an external engine");
+  assert.deepEqual(g.members.map((m) => m.name).sort(), ["chat-a", "chat-b"]);
+  assert.deepEqual(_internals.getMutexSiblings("chat-a", cfg), ["chat-b"]);
+  assert.deepEqual(_internals.getMutexSiblings("ext-default", cfg), []);
 });

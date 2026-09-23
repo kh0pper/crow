@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { resolve, dirname } from "path";
 import { homedir } from "os";
 import { loadProviders } from "./providers.js";
+import { isExternalEngine } from "./provider-engine.js";
 
 const REFCOUNT_PATH = process.env.CROW_REFCOUNT_PATH
   || resolve(homedir(), ".crow", "data", "orchestrator-refcounts.json");
@@ -116,8 +117,7 @@ async function withMutex(providerId, fn) {
 // Provider metadata helpers
 // -----------------------------------------------------------------------
 
-function lookupProvider(providerId) {
-  const cfg = loadProviders();
+function lookupProvider(providerId, cfg = loadProviders()) {
   const p = cfg.providers?.[providerId];
   if (!p) return null;
   const model = p.models?.[0] || {};
@@ -176,6 +176,13 @@ async function bundleAction(action, bundleId, { gatewayUrl, instanceAuthToken } 
 // Public API
 // -----------------------------------------------------------------------
 
+/** External engine (spec 2026-09-23 D2): another machine runs it — this
+ *  module never warms, counts or stops it. `opts.cfg` is a test seam. */
+function isExternalHere(providerId, opts = {}) {
+  const cfg = opts.cfg || loadProviders();
+  return isExternalEngine(cfg.providers?.[providerId]);
+}
+
 /**
  * Ensure the given provider is warm (i.e. its underlying bundle is running
  * and /v1/models responds). Increments refcount. Idempotent — concurrent
@@ -190,7 +197,11 @@ async function bundleAction(action, bundleId, { gatewayUrl, instanceAuthToken } 
  *         { ok: false, reason: string } on failure.
  */
 export async function ensureModelWarm(providerId, opts = {}) {
-  const info = lookupProvider(providerId);
+  if (isExternalHere(providerId, opts)) {
+    emit({ type: "external_engine_refused", providerId });
+    return { ok: false, reason: "external_engine" };
+  }
+  const info = lookupProvider(providerId, opts.cfg);
   if (!info) return { ok: false, reason: "unknown_provider" };
 
   return withMutex(providerId, async () => {
@@ -295,7 +306,8 @@ async function waitForReady(baseUrl, timeoutMs) {
  * bumps it back up. Pinned providers (priority=maker_lab) never release.
  */
 export async function releaseModel(providerId, opts = {}) {
-  const info = lookupProvider(providerId);
+  if (isExternalHere(providerId, opts)) return { ok: true, refs: 0, external: true };
+  const info = lookupProvider(providerId, opts.cfg);
   if (!info) return { ok: false, reason: "unknown_provider" };
   if (isPinned(info)) {
     emit({ type: "release_ignored_pinned", providerId });

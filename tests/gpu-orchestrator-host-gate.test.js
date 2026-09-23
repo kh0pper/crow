@@ -5,6 +5,7 @@ import {
   alwaysResidentProviders, resolveWarmableProviderName,
   retryDeferredResidents, _setDeferredResidentsForTest, _setOwnInstanceIdForTest,
   maybeAcquireLocalProvider,
+  declaredAlwaysResident, localAlwaysResident,
 } from "../servers/gateway/gpu-orchestrator.js";
 
 // Real fleet shapes (models.json fallback on a fresh install):
@@ -163,4 +164,26 @@ test("D9 resolveWarmableProviderName: own-id / cloud alias resolves to its local
   } finally {
     _setOwnInstanceIdForTest(null);
   }
+});
+
+test("external engine: maybeAcquireLocalProvider returns null before the host/locality gates, even on a loopback bundle row", async () => {
+  // Without the guard this row passes every gate and the fast path returns true.
+  const cfg = { providers: { p: {
+    baseUrl: "http://127.0.0.1:1/v1", host: "cloud", bundleId: "b",
+    gpuPolicy: { engine: { managed: "external", host: "raven" } },
+  } } };
+  assert.equal(await maybeAcquireLocalProvider("p", { cfg, probeReadyFn: async () => true }), null);
+});
+
+test("external engine: never always-resident — not declared, not local, not ensured, even with alwaysResident:true on a loopback bundle", () => {
+  const cfg = { providers: {
+    "crow-voice": CFG.providers["crow-voice"],
+    "ext-resident": {
+      baseUrl: "http://127.0.0.1:8030/v1", host: "cloud", bundleId: "halogen",
+      gpuPolicy: { alwaysResident: true, engine: { managed: "external", host: "raven" } },
+    },
+  } };
+  assert.deepEqual(declaredAlwaysResident(cfg), ["crow-voice"]);
+  assert.deepEqual(localAlwaysResident(cfg, CROW), ["crow-voice"]);
+  assert.deepEqual(alwaysResidentProviders(cfg, CROW), ["crow-voice"]);
 });
