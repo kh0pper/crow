@@ -96,6 +96,17 @@ A repair pass runs inside the existing hourly reconciler, after the models.json 
    - (b) `local`, but the row's hostname is **not** in `ownAddrs`.
 3. The recomputed value differs from the stored one. Anything else would be a no-op, so no emit.
 
+**Two guards, because repair WRITES** (mine, §4 D7). The reconciler's `assert` gate tolerates an incomplete own-address set because being unsure only makes it *skip*. Repair is a write, and a false "not mine" would flip this machine's own rows `local`→`cloud`. `maybeAcquireLocalProvider` would then refuse them, and nothing flips a bundle-manifest row back.
+
+- **G1: interfaces must be settled.** Skip the whole repair pass for this run when either:
+  - `ownAddrs` holds no non-loopback address; or
+  - this instance's own `crow_instances` row records a `tailscale_ip` that is not in `ownAddrs`. This is the boot race where Tailscale comes up after the gateway.
+
+  The next hourly run retries.
+- **G2: `local`→`cloud` only for IP-literal hostnames.** Condition 2(b) applies only when the base-URL hostname is an IPv4 or IPv6 literal.
+  - A DNS name (`crow.dachshund-chromatic.ts.net`, `raven`) cannot be judged against an address set, so a `local` row naming a host is left alone.
+  - Condition 2(a), an invalid value, still recomputes for any hostname, because the stored value is wrong either way.
+
 **Why only this instance's own writes (mine, §4 D3):** it makes repair single-writer by construction.
 - A `local` written by another instance is that instance's own claim. It is correct from its own side, or it is that instance's job to fix. Overwriting it would restart the war: the owner re-asserts `local` every hour, and we rewrite it to `cloud` again.
 - Rule 1 guarantees two instances never repair the same row to different values, because at most one of them is the last writer.
@@ -123,6 +134,8 @@ The grackle-local `config/models.json` label is left as it is: inference overrid
 
 The plan must verify both claims (2 rows on crow, 3 on grackle, 0 on r4) against copies of the live DBs before any deploy.
 
+(Kevin, 2026-09-22: grackle is to be **decommissioned and sold**, which is its own queue item. The grackle rows then become moot, but the rule stays correct for any instance.)
+
 ### 3.5 Display: say where it actually is
 
 - `providers-tab.js` `hostBadge` gains an address-derived label. The stored value stays as it is; only the label changes.
@@ -146,6 +159,8 @@ The plan must verify both claims (2 rows on crow, 3 on grackle, 0 on r4) against
 - **D3:** repair rewrites only rows this instance wrote last (§3.4).
 - **D4:** instance-id validity is judged by shape, not by a fleet-divergent table.
 - **D5:** there is no migration and no `SCHEMA_GENERATION` bump. Repair is data, run by the existing reconciler, and fully idempotent.
+- **D7:** the two repair guards, G1 (interfaces settled) and G2 (IP literals only for `local`→`cloud`), come from asymmetric risk. A missed repair costs one more hour of a wrong badge. A false repair makes crow refuse its own models.
+- **D8:** `inferHost` keeps treating a DNS-name base URL as `cloud`, unchanged from today. Only addresses are compared, which matches `isLocallyOrchestratable`. A row naming this machine by DNS name must set `host` explicitly, as rows already do.
 - **D6 (not done):** instances will not advertise their LAN addresses so viewers could map endpoints to peers. Nothing needs it until raven pairs, and even then §3.5 display plus D2 are enough. Revisit in the raven-pairing item only if a concrete need shows up.
 
 ## 5. Out of scope
