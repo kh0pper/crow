@@ -98,11 +98,20 @@ A repair pass runs inside the existing hourly reconciler, after the models.json 
 
 **Two guards, because repair WRITES** (mine, §4 D7). The reconciler's `assert` gate tolerates an incomplete own-address set because being unsure only makes it *skip*. Repair is a write, and a false "not mine" would flip this machine's own rows `local`→`cloud`. `maybeAcquireLocalProvider` would then refuse them, and nothing flips a bundle-manifest row back.
 
-- **G1: interfaces must be settled.** Skip the whole repair pass for this run when either:
-  - `ownAddrs` holds no non-loopback address; or
-  - this instance's own `crow_instances` row records a `tailscale_ip` that is not in `ownAddrs`. This is the boot race where Tailscale comes up after the gateway.
+- **G1: judge an address only against a network this machine is on right now.** Skip the whole repair pass when `ownAddrs` holds no non-loopback address. Otherwise, a condition-2(b) row is judged "not mine" only if `ownAddrs` currently holds at least one non-loopback address of the **same class** as the target:
 
-  The next hourly run retries.
+  | target class | ranges |
+  |---|---|
+  | CGNAT / Tailscale | `100.64/10` |
+  | RFC1918 | `10/8`, `172.16/12`, `192.168/16` |
+  | ULA | `fc00::/7` |
+  | public v4 or v6 | anything else routable |
+
+  Link-local targets are never judged.
+
+  This covers the boot race where Tailscale comes up after the gateway: with no live `100.64/10` address, a `100.x` target is skipped rather than wrongly declared foreign. The next hourly run retries.
+
+  (A recorded-`tailscale_ip` check was considered and rejected: `crow_instances.tailscale_ip` is empty for every instance, verified 2026-09-22.)
 - **G2: `local`→`cloud` only for IP-literal hostnames.** Condition 2(b) applies only when the base-URL hostname is an IPv4 or IPv6 literal.
   - A DNS name (`crow.dachshund-chromatic.ts.net`, `raven`) cannot be judged against an address set, so a `local` row naming a host is left alone.
   - Condition 2(a), an invalid value, still recomputes for any hostname, because the stored value is wrong either way.
@@ -132,7 +141,9 @@ This does not start a war:
 
 The grackle-local `config/models.json` label is left as it is: inference overrides it. Deleting it is optional operator cleanup, not a code change.
 
-The plan must verify both claims (2 rows on crow, 3 on grackle, 0 on r4) against copies of the live DBs before any deploy.
+r4 was also the last writer of its own copies of both raven rows, so r4 repairs those two as well.
+
+The plan must verify these claims (2 rows on crow, 2 on r4, 3 on grackle) against copies of the live DBs before any deploy.
 
 (Kevin, 2026-09-22: grackle is to be **decommissioned and sold**, which is its own queue item. The grackle rows then become moot, but the rule stays correct for any instance.)
 
@@ -140,7 +151,8 @@ The plan must verify both claims (2 rows on crow, 3 on grackle, 0 on r4) against
 
 - `providers-tab.js` `hostBadge` gains an address-derived label. The stored value stays as it is; only the label changes.
   - A `cloud` row whose hostname is private (RFC1918, CGNAT `100.64/10`, link-local, `.local`, `*.ts.net`) shows **"network"**. A public one shows "cloud · <type>" as today.
-  - A `local` row shows **"this machine"** only when its hostname is in the viewer's `ownAddrs`. Otherwise it shows "network", which fixes crow's `crow-chat` reading "local" on grackle.
+  - A `local` row shows **"this machine"** only when its hostname is in the viewer's `ownAddrs`, or when it has no base URL. Otherwise it shows "network" for a private hostname, which fixes crow's `crow-chat` reading "local" on grackle, and "cloud" for a public one.
+  - Example of the public case: r4's `zai-coding` row carries `host='local'` with `https://api.z.ai/...`, a relic of the first-boot seed bug. G2 leaves the stored value alone because the target is a DNS name, and the label shows "cloud".
   - Instance-id rows show the instance's `name` when `crow_instances` has it, and otherwise the truncated id, as today.
 - The private-address classifier is a small pure helper (`isPrivateHost`) in `locality.js`. It is used **only for display**, never for any routing or starting decision. The docstring must say so; mixing up display and ownership is the original bug.
 
@@ -197,7 +209,7 @@ The plan must verify both claims (2 rows on crow, 3 on grackle, 0 on r4) against
   - the lamport clock stops advancing after convergence.
   - A second arm: B is the endpoint's owner and asserts `local`, and A never rewrites B's write.
   - Each test must be shown to fail against the pre-change code (red before green).
-- **Live-data dry run (plan task):** run the repair decision read-only against copies of crow's, r4's and grackle's `crow.db`. Record every row it would touch; the expectation is 2 on crow, 3 on grackle, 0 on r4.
+- **Live-data dry run (plan task):** run the repair decision read-only against copies of crow's, r4's and grackle's `crow.db`. Record every row it would touch; the expectation is 2 on crow, 2 on r4, 3 on grackle.
 - **Full suite:** via `scripts/run-suite.mjs` (Node 22), plus `tests/auth-network.test.js`, which is untouched but cheap to include.
 
 ## 7. Rollout
