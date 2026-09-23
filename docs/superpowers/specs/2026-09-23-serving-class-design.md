@@ -152,10 +152,11 @@ never goes through this gateway path.
     for an operator using curl or a script. That is the strongest reading of
     "never one-tap", and it costs nothing today: neither non-resident model can
     run single-box on this hardware through this path anyway.
-- The runtime strip's own Start button, and the client-side re-render after a
-  quant change, apply the same rule. The rule lives in one exported helper,
-  `startAffordance(entry)`, so the server render and the client script cannot
-  drift apart.
+- The runtime strip's own Start button applies the same rule. Both server
+  renders call one exported helper, `startAffordance(servingClass)`, so they
+  cannot drift apart. The client script never creates a Start button except
+  through a server re-render. If it ever does, the card carries
+  `data-serving-class`.
 - i18n: all new strings in both `en` and `es`, since the global i18n parity
   gate is live.
 
