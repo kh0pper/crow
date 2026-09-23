@@ -69,6 +69,26 @@ round breaks the two-box benchmark program on its next run.
 
 ### 3.1 Flash-Next as a production service on raven
 
+> **Status 2026-09-22: superseded in part. Raven production now runs on halogen, not llama.cpp.**
+>
+> - **Current setup:** since 2026-09-20, `flash-next.service` on raven runs `ghcr.io/peonist-ai/halogen-flash-server:0.12.1` in Docker.
+>   - Model: the same UD-Q4_K_XL GGUF bytes.
+>   - Context: **655k (YaRN ×2.5)**, not 1M.
+>   - Port: the API is still published on **:8030**, so the provider row and every consumer keep their address.
+> - **Rollback:** the llama.cpp unit below remains on disk as `flash-next-llamacpp.service` (disabled). The rollback is `systemctl disable --now flash-next && systemctl enable --now flash-next-llamacpp`.
+> - **Why the switch:** measured on raven with this file, prefill runs at 1,296 / 1,455 / 1,389 t/s at 8k / 32k / 131k. llama.cpp served about 310 t/s at 32k. Decode runs at 26–31 t/s.
+>   Sources: the unit file header, and pi-lab lever queue §4at/§4au.
+> - **What this changes in the rest of this section:**
+>   - The "natively, not in a container" requirement no longer holds for this service. halogen ships only as a container.
+>   - The launch line and the 17.7 GiB headroom figure describe the rollback unit, not production.
+> - **New constraints:**
+>   - halogen is closed-source under an EULA. Use is free and benchmarking and publication are permitted, but modified images may not be redistributed, so Crow can reference the image by pinned tag and never vendor it.
+>   - It serves one model only.
+>   - It has no auth of its own. The ufw scope on 8030 carries that weight.
+>   - It must stop only through `docker stop -t 300`. halogen's own docs say an unclean exit can hold 35–45 GiB of GTT until reboot.
+> - **Direction (Kevin, 2026-09-22):** halogen is the stopgap. The long-term plan is an open, halogen-class path landed upstream in llama.cpp and consumed through Crow's native runtime. Crow's side should treat this row as an externally managed engine on a dedicated host.
+>   Details: crow-engineering `backlog/2026-09-22-strix-halo-profile-and-external-engines.md`.
+
 Raven has run no production services until now. This makes it a second production host.
 
 Launch, from the validated single-box config (tree `~/llama-max-stack`, or b10715 for the MTP head):
