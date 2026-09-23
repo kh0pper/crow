@@ -14,6 +14,8 @@
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
+ *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
+ *               info at most — never warn, never a push; no card when none
  *   syncOutbox — stdio→gateway outbox depth + oldest-row age (stuck >15min → warn)
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
@@ -24,7 +26,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
@@ -71,6 +73,35 @@ export function pruneResolved(lastMap, activeIssueIds) {
     if (active.has(id)) out[id] = ts;
   }
   return out;
+}
+
+/**
+ * One health-monitor notify pass — extracted from post-listen.js so it is
+ * testable (external-engine review round 2). Pushes each WARN issue that
+ * shouldNotify() allows (24 h per-id window), stamping its marker only when
+ * `notify` resolves; then drops markers for ids no longer active (warn OR
+ * info — pruneResolved). Returns the new map, whether it changed, and the ids
+ * pushed. `notify(issue)` is the caller's createNotification wrapper.
+ */
+export async function runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) {
+  const map = { ...lastMap };
+  let dirty = false;
+  const pushed = [];
+  for (const issue of issues) {
+    if (issue.severity !== "warn") continue; // info issues stay strip-only
+    if (!shouldNotify(map, issue.id, nowMs)) continue;
+    try {
+      await notify(issue);
+      map[issue.id] = nowMs;
+      dirty = true;
+      pushed.push(issue.id);
+    } catch (notifErr) {
+      console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
+    }
+  }
+  const pruned = pruneResolved(map, issues.map((i) => i.id));
+  if (Object.keys(pruned).length !== Object.keys(map).length) dirty = true;
+  return { lastMap: pruned, dirty, pushed };
 }
 
 // ─── Internal signal collectors ──────────────────────────────────────────────
@@ -760,6 +791,51 @@ async function providersSignal(lang, nowFn) {
   return { id: "providers", severity: null, state: "ok", label, value: parts.join(" · ") };
 }
 
+// External engines (spec 2026-09-23 external-engine-provider §2.4, review
+// rounds 1+2). OWN id, never "providers": the monitor's dedupe is per issue id
+// and pruneResolved keeps a marker alive while ANY issue with that id is active,
+// so an external info under "providers" would keep the resident warn's marker
+// alive and swallow the next real resident push. INFO AT MOST, never warn:
+// these engines are operated from outside Crow (raven's prod windows stop
+// halogen for hours by design). Labels/hosts are free text replicated from
+// peers — fill() (no $-pattern mangling); the nest escapes HTML.
+async function externalEnginesSignal(lang, nowFn) {
+  const health = getProviderHealth();
+  const external = health.external || {};
+  const names = Object.keys(external);
+  if (!health.initialized || names.length === 0) return null; // nothing watched → no card
+  const label = t("signals.externalEngines.label", lang);
+  const now = nowFn();
+  const lines = [];
+  const notUp = [];
+  for (const name of names) {
+    const e = external[name];
+    const vars = { label: e.label || name, host: e.engineHost || "?" };
+    if (e.ready) {
+      lines.push(fill(t("signals.externalEngines.up", lang), vars));
+      continue;
+    }
+    let line;
+    if (e.lastReadyAt != null) {
+      const age = formatAge(now - e.lastReadyAt);
+      line = fill(t("signals.externalEngines.downFor", lang), { ...vars, age: age === "now" ? "<1m" : age });
+    } else {
+      line = fill(t("signals.externalEngines.unreachable", lang), vars);
+    }
+    lines.push(line);
+    notUp.push(line);
+  }
+  if (notUp.length > 0) {
+    return {
+      id: "externalEngines", severity: "info", state: "info", label,
+      value: lines.join(" · "), issueLabel: notUp.join("; "),
+      actionLabel: t("signals.externalEngines.action", lang),
+      actionHref: "/dashboard/settings?section=llm&tab=providers",
+    };
+  }
+  return { id: "externalEngines", severity: null, state: "ok", label, value: lines.join(" · ") };
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -792,6 +868,7 @@ export async function collectHealthSignals(db, opts = {}) {
     federationAuditSignal(lang),
     messagesSignal(db, lang, nowFn),
     providersSignal(lang, nowFn),
+    externalEnginesSignal(lang, nowFn),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
@@ -801,14 +878,16 @@ export async function collectHealthSignals(db, opts = {}) {
     _err: err?.message,
   }))));
 
-  const details = rawSignals.map(s => ({
+  // A signal may opt out by returning null (externalEngines when nothing is watched).
+  const present = rawSignals.filter(Boolean);
+  const details = present.map(s => ({
     id: s.id,
     label: s.label,
     value: s.value,
     state: s.state ?? "off",
   }));
 
-  const issues = rawSignals
+  const issues = present
     .filter(s => s.state === "warn" || s.state === "info")
     .map(s => ({
       id: s.id,
