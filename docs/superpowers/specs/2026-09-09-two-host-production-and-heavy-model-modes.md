@@ -117,7 +117,7 @@ Open items for the implementer:
   does, and it exempts loopback endpoints; this row syncs because `10.0.0.126` is routable, where the
   `crow-dsv4` row §7 retires never synced at all. Two requirements follow, and both were violated on the first
   attempt (2026-09-10):
-  - Set **`host = 'raven'`**, on every instance that carries the row. `host` rides the wire, so whichever copy
+  - ~~Set **`host = 'raven'`**, on every instance that carries the row.~~ **Superseded 2026-09-23 (PR #382, `86b26b65`):** unmanaged network endpoints are stored as `cloud` (shown as "network"), `inferHost` now judges own-address membership instead of private ranges, and `host` is no longer an orchestration gate except for a foreign-instance-id veto — see `docs/superpowers/specs/2026-09-22-provider-host-identity-design.md`. The original instruction follows for the record: `host` rides the wire, so whichever copy
     wins on `lamport_ts` imposes its value fleet-wide, and `host = 'local'` tells
     `resolveWarmableProviderName` the endpoint is startable on the local box when it is not.
 
