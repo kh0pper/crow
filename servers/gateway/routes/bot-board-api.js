@@ -1010,7 +1010,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     const botId = b.bot_id, threadId = b.gateway_thread_id, message = b.message;
     if (!botId || !threadId || !message) return jsonError(res, 400, "bot_id, gateway_thread_id, and message required");
     const { spawn } = await import("node:child_process");
-    const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
+    const NODE = process.execPath;
     const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
     const payload = JSON.stringify({ bot_id: botId, gateway_thread_id: threadId, user_message: message });
     const child = spawn(NODE, [BRIDGE, "--inject", payload], {

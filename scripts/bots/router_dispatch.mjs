@@ -273,7 +273,7 @@ async function dispatch(action) {
       return `bumped next_run on ${action.task}`;
     }
     case "exec-node": {
-      const r = await execAsync(["/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", action.script], {});
+      const r = await execAsync([process.execPath, action.script], {});
       if (r.code !== 0) throw new Error(`node ${action.script} exit=${r.code}: ${r.stderr.slice(-200)}`);
       return `ran ${action.script}: ${(r.stdout.trim().split("\n").pop() || "").slice(0, 200)}`;
     }
