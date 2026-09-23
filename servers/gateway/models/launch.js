@@ -8,13 +8,17 @@
  * `renderLaunchArgs`. Identity flags (--model/--alias/--port/--host) and
  * companion/task flags (--mmproj/--embedding/--reranking) stay owned by
  * runtime.js + gpu-orchestrator.js; `extra_args` may never carry them.
+ *
+ * Precedence at a native start (Strix Halo runtime profile spec §2.4, D7):
+ * host profile (`host-profile.js`) < catalog `launch` < provider
+ * `gpu_policy.launch` < the jinja layer — each layer via `mergeLaunch`.
  */
 
 export const FLASH_ATTN_VALUES = ["on", "off", "auto"];
 export const KV_TYPES = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"];
 const SPEC_TYPE_RE = /^[a-z0-9][a-z0-9-]*$/;
 
-const TOP_LEVEL_KEYS = new Set(["ctx", "ngl", "flash_attn", "parallel", "no_mmap", "kv_type", "spec", "sampling", "jinja", "extra_args"]);
+const TOP_LEVEL_KEYS = new Set(["ctx", "ngl", "flash_attn", "parallel", "no_mmap", "no_op_offload", "kv_type", "spec", "sampling", "jinja", "extra_args"]);
 const SAMPLING_RULES = {
   temp: (v) => v >= 0 && v <= 5,
   top_p: (v) => v >= 0 && v <= 1,
@@ -28,6 +32,7 @@ export const LAUNCH_OWNED_FLAGS = new Set([
   "-m", "--model", "--alias", "--port", "--host",
   "-c", "--ctx-size", "--mmproj", "--embedding", "--embeddings", "--reranking", "--jinja",
   "-ngl", "--n-gpu-layers", "-fa", "--flash-attn", "-np", "--parallel", "--no-mmap",
+  "--op-offload", "--no-op-offload",
   "-ctk", "-ctv", "--cache-type-k", "--cache-type-v",
   "--spec-type", "--spec-draft-n-max",
   "--temp", "--top-p", "--top-k", "--min-p", "--presence-penalty",
@@ -45,7 +50,7 @@ export function validateLaunch(launch, { contextLen = null, label = "launch", ha
   for (const key of Object.keys(launch)) {
     if (!TOP_LEVEL_KEYS.has(key)) errors.push(`${label}: unknown key "${key}"`);
   }
-  const { ctx, ngl, flash_attn, parallel, no_mmap, kv_type, spec, sampling, jinja, extra_args } = launch;
+  const { ctx, ngl, flash_attn, parallel, no_mmap, no_op_offload, kv_type, spec, sampling, jinja, extra_args } = launch;
 
   if (ctx !== undefined) {
     if (!Number.isInteger(ctx) || ctx < 1024) errors.push(`${label}: ctx must be an integer >= 1024`);
@@ -54,6 +59,7 @@ export function validateLaunch(launch, { contextLen = null, label = "launch", ha
   if (ngl !== undefined && (!Number.isInteger(ngl) || ngl < 0)) errors.push(`${label}: ngl must be an integer >= 0`);
   if (parallel !== undefined && (!Number.isInteger(parallel) || parallel < 1)) errors.push(`${label}: parallel must be an integer >= 1`);
   if (no_mmap !== undefined && typeof no_mmap !== "boolean") errors.push(`${label}: no_mmap must be a boolean`);
+  if (no_op_offload !== undefined && typeof no_op_offload !== "boolean") errors.push(`${label}: no_op_offload must be a boolean`);
   if (jinja !== undefined && typeof jinja !== "boolean") errors.push(`${label}: jinja must be a boolean`);
   if (flash_attn !== undefined && !FLASH_ATTN_VALUES.includes(flash_attn)) {
     errors.push(`${label}: flash_attn must be one of ${FLASH_ATTN_VALUES.join(", ")}`);
@@ -115,6 +121,7 @@ export function renderLaunchArgs(launch) {
   if (launch.flash_attn !== undefined) args.push("-fa", launch.flash_attn);
   if (launch.parallel !== undefined) args.push("-np", String(launch.parallel));
   if (launch.no_mmap === true) args.push("--no-mmap");
+  if (launch.no_op_offload === true) args.push("--no-op-offload");
   if (launch.kv_type !== undefined) args.push("-ctk", launch.kv_type, "-ctv", launch.kv_type);
   if (isPlainObject(launch.spec)) args.push("--spec-type", launch.spec.type, "--spec-draft-n-max", String(launch.spec.draft_n_max));
   if (isPlainObject(launch.sampling)) {

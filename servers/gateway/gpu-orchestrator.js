@@ -87,6 +87,7 @@ import { createNoticeState, reservationNotices, sendReservationNotice } from "./
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll } from "../shared/providers-db.js";
 import { mergeLaunch } from "./models/launch.js";
+import { hostLaunchDefaults } from "./models/host-profile.js";
 import { getRuntimeOverride, getModelRuntimeOverride } from "./models/runtime-override.js";
 import { isOrchestratableHere } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
@@ -887,6 +888,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     nativeReadinessTimeoutMsFn = nativeReadinessTimeoutMs,
     loadCatalogFn = defaultLoadCatalog,
     existsSyncFn = existsSync,
+    getCachedProbeFn = getCachedProbe,
   } = opts;
 
   const alias = nativeAlias(p);
@@ -935,21 +937,31 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     if (typeof onTerminal === "function") onTerminal(reason);
   };
 
-  // Launch profile (spec §3.1/§4, Task 10): catalog defaults merged under
-  // the provider row's `gpuPolicy.launch` override via `mergeLaunch`, then
-  // rendered by `runtime.js`'s `startModel` into llama-server flags.
-  // Scoped --jinja (C1 Task 1, now folded into `launch.jinja` instead of a
-  // raw extraArgs push): chat_template_kwargs in request bodies is only
-  // honored under llama-server's jinja engine; scoped per-model — the
-  // other catalog models are not template-verified under --jinja.
+  // Launch profile (spec §3.1/§4, Task 10; Strix Halo spec §2.4, D7):
+  //   host profile < catalog `launch` < provider `gpuPolicy.launch` < jinja,
+  // each layer via `mergeLaunch`, then rendered by `runtime.js`'s
+  // `startModel` into llama-server flags. The host profile only fills keys
+  // nobody set. Scoped --jinja (C1 Task 1, folded into `launch.jinja`):
+  // chat_template_kwargs in request bodies is only honored under
+  // llama-server's jinja engine; scoped per-model — the other catalog
+  // models are not template-verified under --jinja.
   const catalogId = p.gpuPolicy?.catalogId || providerName;
   let catalogEntry = null;
   try {
     catalogEntry = (loadCatalogFn()?.models || []).find((m) => m.id === catalogId) || null;
   } catch { /* catalog unreadable → no catalog-driven args, model starts as before */ }
 
+  // resolveNativeBinPath already warmed the probe cache (before any
+  // override early-return), so this only READS it — no probing inside the
+  // single-flight critical section. A null cache (the probe failed on an
+  // override path) means "no host profile", never a failed start.
+  const hostProbe = getCachedProbeFn();
+
   const jinja = !!(catalogEntry && catalogEntry.chat_template_kwargs && typeof catalogEntry.chat_template_kwargs === "object");
-  const launch = mergeLaunch(mergeLaunch(catalogEntry?.launch, p.gpuPolicy?.launch), jinja ? { jinja: true } : null);
+  const launch = mergeLaunch(
+    mergeLaunch(mergeLaunch(hostLaunchDefaults(hostProbe), catalogEntry?.launch), p.gpuPolicy?.launch),
+    jinja ? { jinja: true } : null,
+  );
   if (Number.isInteger(launch.ctx) && Number.isFinite(catalogEntry?.context_len) && launch.ctx > catalogEntry.context_len) {
     const err = new Error(`orchestrator: launch ctx ${launch.ctx} exceeds ${catalogId} context_len ${catalogEntry.context_len}`);
     err.code = "CTX_EXCEEDS_MODEL";

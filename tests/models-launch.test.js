@@ -112,3 +112,29 @@ test("renderLaunchArgs: absent knobs render nothing; no_mmap:false renders nothi
   assert.deepEqual(renderLaunchArgs({ no_mmap: false, jinja: false }), []);
   assert.deepEqual(renderLaunchArgs({ ctx: 8192 }), ["-c", "8192"]);
 });
+
+// --- no_op_offload (Strix Halo spec §2.4) ---------------------------------
+
+test("validateLaunch: no_op_offload is a boolean knob", () => {
+  assert.deepEqual(validateLaunch({ no_op_offload: true }), []);
+  assert.deepEqual(validateLaunch({ no_op_offload: false }), []);
+  assert.match(validateLaunch({ no_op_offload: "yes" })[0], /no_op_offload must be a boolean/);
+  assert.match(validateLaunch({ no_op_offload: 1 })[0], /no_op_offload must be a boolean/);
+});
+
+test("validateLaunch: extra_args may not smuggle --op-offload or --no-op-offload", () => {
+  assert.match(validateLaunch({ extra_args: ["--no-op-offload"] })[0], /extra_args may not contain "--no-op-offload"/);
+  assert.match(validateLaunch({ extra_args: ["--op-offload"] })[0], /extra_args may not contain "--op-offload"/);
+  assert.ok(LAUNCH_OWNED_FLAGS.has("--op-offload") && LAUNCH_OWNED_FLAGS.has("--no-op-offload"));
+});
+
+test("renderLaunchArgs: no_op_offload:true renders --no-op-offload right after --no-mmap; false/absent renders nothing", () => {
+  assert.deepEqual(renderLaunchArgs({ no_mmap: true, no_op_offload: true, kv_type: "q8_0" }),
+    ["--no-mmap", "--no-op-offload", "-ctk", "q8_0", "-ctv", "q8_0"]);
+  assert.deepEqual(renderLaunchArgs({ no_op_offload: false }), []);
+  assert.deepEqual(renderLaunchArgs({ flash_attn: "on" }), ["-fa", "on"]);
+});
+
+test("mergeLaunch: a later layer's no_op_offload:false beats an earlier true", () => {
+  assert.deepEqual(mergeLaunch({ no_op_offload: true, no_mmap: true }, { no_op_offload: false }), { no_op_offload: false, no_mmap: true });
+});

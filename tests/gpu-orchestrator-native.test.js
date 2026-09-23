@@ -41,6 +41,7 @@ import {
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
 import { loadState, saveState } from "../servers/gateway/models/state.js";
+import { renderLaunchArgs } from "../servers/gateway/models/launch.js";
 
 // --- fixtures ------------------------------------------------------------
 
@@ -1595,4 +1596,94 @@ test("I1: an owner-declaring row with a loopback /v1 baseUrl and no gpu_policy.p
   opts.ownInstanceIdFn = () => "this-instance";
   await assert.rejects(acquireProvider("native-target", opts), /has no port/);
   assert.equal(startCalls.length, 0);
+});
+
+// --- gfx1151 host launch profile (Strix Halo spec §2.4, D6/D7) -------------
+
+const HALO_PROBE = { platform: "linux", accel: "vulkan", gpuArch: "gfx1151", unified: true };
+const haloCatalog = (launch) => () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192, ...(launch ? { launch } : {}) }] });
+
+test("host profile: on gfx1151 vulkan the profile fills launch keys nobody set", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18130, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog({ ctx: 8192, ngl: 999 });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "on", no_mmap: true, no_op_offload: true, ctx: 8192, ngl: 999 });
+  const argv = renderLaunchArgs(startCalls[0].launch);
+  for (const f of ["--no-mmap", "--no-op-offload"]) assert.ok(argv.includes(f), `${f} in ${argv.join(" ")}`);
+  assert.deepEqual(argv.slice(argv.indexOf("-fa"), argv.indexOf("-fa") + 2), ["-fa", "on"]);
+});
+
+test("host profile: a curated catalog value wins over the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18131, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog({ flash_attn: "off" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "off", no_mmap: true, no_op_offload: true });
+});
+
+test("host profile: gpu_policy.launch opts out (no_op_offload:false, no_mmap:false) — neither flag renders", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18132, "native-target", { gpuPolicy: { launch: { no_op_offload: false, no_mmap: false } } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog(null);
+  assert.equal(await acquireProvider("native-target", opts), true);
+  const argv = renderLaunchArgs(startCalls[0].launch);
+  assert.ok(!argv.includes("--no-op-offload"), argv.join(" "));
+  assert.ok(!argv.includes("--no-mmap"), argv.join(" "));
+  assert.equal(startCalls[0].launch.flash_attn, "on", "keys the provider did not touch still come from the profile");
+});
+
+test("host profile: jinja still layers on top of the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18133, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192, chat_template_kwargs: { enable_thinking: false } }] });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "on", no_mmap: true, no_op_offload: true, jinja: true });
+});
+
+test("host profile: another arch on vulkan gets no profile (launch stays empty)", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18134, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => ({ platform: "linux", accel: "vulkan", gpuArch: "gfx1100", unified: false });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, {});
+});
+
+test("host profile: an override-only start (cold probe cache) still warms the probe and applies the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18135, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  let cached = null;
+  let reprobeCalls = 0;
+  opts.getCachedProbeFn = () => cached;
+  opts.reprobeFn = async () => { reprobeCalls++; cached = HALO_PROBE; return HALO_PROBE; };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo/llama-server" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/halo/llama-server");
+  assert.equal(reprobeCalls, 1);
+  assert.equal(startCalls[0].launch.no_op_offload, true);
+});
+
+test("host profile: a probe that throws means no profile, never a failed start", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18136, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => null;
+  opts.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo2/llama-server" }); // override path: the probe failure is survivable
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(await acquireProvider("native-target", opts), true);
+  } finally { console.warn = origWarn; }
+  assert.deepEqual(startCalls[0].launch, {});
 });
