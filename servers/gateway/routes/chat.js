@@ -80,6 +80,17 @@ export function boxReservedError(err, lang) {
   };
 }
 
+/** serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+ *  §3.3): the model has a curated ceiling (windowed/wedge-risk) — say which
+ *  class and provider refused, never the generic "didn't load in time". */
+export function servingClassRefusedError(err, lang) {
+  return {
+    message: fill(t("chat.serving_class_refused", lang), { provider: (err && err.provider) || "?", cls: (err && err.servingClass) || "?" }),
+    code: "serving_class_refused",
+    serving_class: (err && err.servingClass) || null,
+  };
+}
+
 export function providerNotReadyError(providerName, isNative, lang) {
   if (isNative) {
     return {
@@ -721,6 +732,11 @@ export default function chatRouter(dashboardAuth) {
       } catch (err) {
         if (err && err.code === "box_reserved") {
           sendEvent("error", boxReservedError(err, lang));
+          closeStream();
+          return;
+        }
+        if (err && err.code === "serving_class_refused") {
+          sendEvent("error", servingClassRefusedError(err, lang));
           closeStream();
           return;
         }

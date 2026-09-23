@@ -36,6 +36,7 @@ import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { requesterTag } from "../requester-tag.js";
 import { ReservedError } from "../box-reservation.js";
+import { ServingClassError } from "../models/serving-class.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
@@ -233,27 +234,49 @@ async function handleChat(req, res, deps) {
   try {
     await deps.acquireFn(providerId, { requester });
   } catch (err) {
-    if (!(err instanceof ReservedError)) throw err;
-    // Box reserved (docs/architecture/box-reservation.md): DEGRADE, never
-    // stall and never retry — a retry is exactly what turned one refused
-    // start into a second ownership strike on 2026-08-29. An escalation
-    // falls back to the resident fast model with a note; anything else (or
-    // a cold fast model) gets a fast 503 the client can show or wait on.
-    const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
-    if (fast && await deps.probeReadyFn(fast.baseUrl)) {
-      key = FAST_KEY;
-      [providerId] = splitKey(key);
-      routeLabel = "degraded(box_reserved)";
-      body.messages = [
-        ...(Array.isArray(body.messages) ? body.messages : []),
-        { role: "system", content: `Note: the box is reserved (by ${err.owner} until ${err.expires_at || "?"}); the larger model is unavailable, answer with what you have.` },
-      ];
+    if (err instanceof ServingClassError) {
+      // serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+      // §3.3): DEGRADE like a box reservation — an escalation falls back to
+      // the resident fast model with a note; anything else gets a fast 409
+      // (never a retry: this class of model never becomes available on its
+      // own, so there is nothing to wait on).
+      const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
+      if (fast && await deps.probeReadyFn(fast.baseUrl)) {
+        key = FAST_KEY;
+        [providerId] = splitKey(key);
+        routeLabel = "degraded(serving_class)";
+        body.messages = [
+          ...(Array.isArray(body.messages) ? body.messages : []),
+          { role: "system", content: `Note: ${err.provider || "the larger model"} is a ${err.servingClass} model that only runs in an operator window; answer with what you have.` },
+        ];
+      } else {
+        console.log(`[llm-router] route=refused(serving_class) -> ${key} requester=${requester} class=${err.servingClass}`);
+        return res.status(409).json({ error: { code: "serving_class_refused", message: err.message, serving_class: err.servingClass } });
+      }
+    } else if (!(err instanceof ReservedError)) {
+      throw err;
     } else {
-      const secs = Math.round((Date.parse(err.expires_at || 0) - Date.now()) / 1000);
-      const retryAfter = Math.max(60, Number.isFinite(secs) ? secs : 60);
-      console.log(`[llm-router] route=refused(box_reserved) -> ${key} requester=${requester} owner=${err.owner}`);
-      res.setHeader("Retry-After", String(retryAfter));
-      return res.status(503).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, retry_after: retryAfter } });
+      // Box reserved (docs/architecture/box-reservation.md): DEGRADE, never
+      // stall and never retry — a retry is exactly what turned one refused
+      // start into a second ownership strike on 2026-08-29. An escalation
+      // falls back to the resident fast model with a note; anything else (or
+      // a cold fast model) gets a fast 503 the client can show or wait on.
+      const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
+      if (fast && await deps.probeReadyFn(fast.baseUrl)) {
+        key = FAST_KEY;
+        [providerId] = splitKey(key);
+        routeLabel = "degraded(box_reserved)";
+        body.messages = [
+          ...(Array.isArray(body.messages) ? body.messages : []),
+          { role: "system", content: `Note: the box is reserved (by ${err.owner} until ${err.expires_at || "?"}); the larger model is unavailable, answer with what you have.` },
+        ];
+      } else {
+        const secs = Math.round((Date.parse(err.expires_at || 0) - Date.now()) / 1000);
+        const retryAfter = Math.max(60, Number.isFinite(secs) ? secs : 60);
+        console.log(`[llm-router] route=refused(box_reserved) -> ${key} requester=${requester} owner=${err.owner}`);
+        res.setHeader("Retry-After", String(retryAfter));
+        return res.status(503).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, retry_after: retryAfter } });
+      }
     }
   }
 
@@ -386,6 +409,9 @@ export default function llmRouterRouter(opts = {}) {
     } catch (err) {
       if (err instanceof ReservedError) {
         return res.status(409).json({ ok: false, error: "box_reserved", owner: err.owner, expires_at: err.expires_at, message: err.message });
+      }
+      if (err instanceof ServingClassError) {
+        return res.status(409).json({ ok: false, error: "serving_class_refused", serving_class: err.servingClass, message: err.message });
       }
       res.status(500).json({ ok: false, error: err.message });
     }

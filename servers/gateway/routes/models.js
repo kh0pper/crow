@@ -595,13 +595,19 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       // doc) so it can ride along in the response body as `cause`.
       let startError = null;
       let result;
+      const servingOverride = typeof req.body?.serving_override === "string" ? req.body.serving_override : undefined;
       try {
-        result = await maybeAcquireLocalProviderFn(modelId, { requester: "models-panel", onError: (err) => { startError = err; } });
+        result = await maybeAcquireLocalProviderFn(modelId, { requester: "models-panel", servingOverride, onError: (err) => { startError = err; } });
       } catch (err) {
         // Box reservation: maybeAcquireLocalProvider rethrows ReservedError so
         // callers can tell a refusal from a failure (docs/architecture/box-reservation.md).
         if (err && err.code === "box_reserved") {
           return res.status(409).json({ error: err.message, code: "BOX_RESERVED", owner: err.owner || null, expires_at: err.expires_at || null });
+        }
+        // serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+        // §3.3): same rethrow shape as a box reservation, distinct code.
+        if (err && err.code === "serving_class_refused") {
+          return res.status(409).json({ error: err.message, code: "SERVING_CLASS_REFUSED", serving_class: err.servingClass || null });
         }
         throw err;
       }

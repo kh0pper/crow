@@ -1275,3 +1275,48 @@ test("POST /api/models/:id/start: a box reservation (ReservedError) maps to 409 
     });
   } finally { await h.cleanup(); }
 });
+
+test("POST /api/models/:id/start: a serving.class refusal (ServingClassError) maps to 409 SERVING_CLASS_REFUSED and forwards serving_override", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+    const { ServingClassError } = await import("../servers/gateway/models/serving-class.js");
+    let seen = null;
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      maybeAcquireLocalProviderFn: async (id, opts) => { seen = opts; throw new ServingClassError("wedge-risk", id); },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/panel-test-model/start", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ serving_override: "wedge-risk" }),
+      });
+      assert.equal(r.status, 409);
+      const body = await r.json();
+      assert.equal(body.code, "SERVING_CLASS_REFUSED");
+      assert.equal(body.serving_class, "wedge-risk");
+      assert.equal(seen.servingOverride, "wedge-risk");
+      assert.equal(seen.requester, "models-panel");
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/:id/start: with no body, serving_override is undefined", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+    const { ServingClassError } = await import("../servers/gateway/models/serving-class.js");
+    let seen = null;
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      maybeAcquireLocalProviderFn: async (id, opts) => { seen = opts; throw new ServingClassError("windowed", id); },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(r.status, 409);
+      assert.equal(seen.servingOverride, undefined);
+    });
+  } finally { await h.cleanup(); }
+});
