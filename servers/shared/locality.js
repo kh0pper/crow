@@ -19,6 +19,7 @@
  */
 
 import { networkInterfaces } from "node:os";
+import { isIP } from "node:net";
 
 // Bridge/virtual interfaces carry SHARED-SUBNET gateway IPs (every docker
 // host has 172.17.0.1; libvirt ships 192.168.122.1) — never machine identity
@@ -47,4 +48,54 @@ export function isLocallyOrchestratable(p, ownAddrs = getOwnAddresses()) {
   } catch {
     return false;
   }
+}
+
+function v4Octets(h) {
+  let m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(h);
+  if (m) return isIP(m[1]) === 4 ? m[1].split(".").map(Number) : null;
+  m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h); // WHATWG-normalised mapped form
+  if (m) {
+    const hi = parseInt(m[1], 16), lo = parseInt(m[2], 16);
+    return [hi >> 8, hi & 255, lo >> 8, lo & 255];
+  }
+  return isIP(h) === 4 ? h.split(".").map(Number) : null;
+}
+
+/**
+ * Network class of an IP literal, or null for a DNS name. Used by the
+ * providers host-repair guard G1 (spec 2026-09-22 §3.4) and by display.
+ * NEVER a locality or ownership answer — that is own-address membership
+ * (isLocallyOrchestratable), not a range test.
+ */
+export function addressClass(h) {
+  if (typeof h !== "string" || !h) return null;
+  const o = v4Octets(h);
+  if (o) {
+    const [a, b] = o;
+    if (a === 127) return "loopback";
+    if (a === 169 && b === 254) return "linklocal";
+    if (a === 100 && b >= 64 && b <= 127) return "cgnat";
+    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return "rfc1918";
+    return "public4";
+  }
+  if (isIP(h) !== 6) return null;
+  const x = h.toLowerCase();
+  if (x === "::1") return "loopback";
+  if (/^fe[89ab]/.test(x)) return "linklocal";
+  if (/^f[cd]/.test(x)) return "ula";
+  return "public6";
+}
+
+/**
+ * DISPLAY ONLY: does this hostname look like it lives on a private network?
+ * Never use it to decide routing, ownership or whether to start a model —
+ * conflating "private address" with "this machine" was the inferHost bug.
+ */
+export function isPrivateHost(h) {
+  if (typeof h !== "string" || !h) return false;
+  const c = addressClass(h);
+  if (c) return c !== "public4" && c !== "public6";
+  const n = h.toLowerCase();
+  if (!n.includes(".")) return true;
+  return /\.(local|lan|internal|home\.arpa|ts\.net)$/.test(n);
 }
