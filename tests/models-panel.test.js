@@ -193,6 +193,47 @@ test("GET /api/models/catalog: 200 with a valid session", async () => {
   } finally { await h.cleanup(); }
 });
 
+/** makeCatalog() plus a second, wedge-risk model — for serving_class tests. */
+function makeCatalogWithServing() {
+  const catalog = makeCatalog();
+  catalog.models[0].serving = { class: "resident" };
+  catalog.models.push({
+    id: "panel-test-wedge-model",
+    family: "TestFamily",
+    lab: "TestLab",
+    hf_repo: "test/panel-test-wedge-model-GGUF",
+    license: "apache-2.0",
+    gated: false,
+    task: "chat",
+    context_len: 8192,
+    min_runtime_version: "b10068",
+    default_quant: "Q4_K_M",
+    first_run_default: false,
+    tags: ["chat", "large"],
+    notes: "test fixture",
+    serving: { class: "wedge-risk" },
+    quants: [
+      { file: "panel-test-wedge-model-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 500, min_ram_mb: 1000, min_vram_mb: 0, sha256: "jkl" },
+    ],
+  });
+  return catalog;
+}
+
+test("GET /api/models/catalog: serving_class is a curated ceiling from registry/model-catalog.json's serving.class — resident and wedge-risk both surface", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalogWithServing, getCachedProbeFn: () => FIXED_PROBE }, async (base) => {
+      const r = await fetch(base + "/api/models/catalog", { headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      const byId = Object.fromEntries(body.models.map((m) => [m.id, m]));
+      assert.equal(byId["panel-test-model"].serving_class, "resident");
+      assert.equal(byId["panel-test-wedge-model"].serving_class, "wedge-risk");
+    });
+  } finally { await h.cleanup(); }
+});
+
 /** Every route this router mounts, as [method, path]. Kept as one literal
  * list so the parametrized auth test below and its own length assertion
  * catch a route silently added without auth coverage. */

@@ -67,6 +67,7 @@ import {
 } from "../models/manager.js";
 import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
+import { servingClassOf } from "../models/serving-class.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // routes/models.js -> gateway -> servers -> repo root -> registry/model-catalog.json
@@ -258,6 +259,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
           registered: !!regEntry,
           registeredQuant: regEntry ? regEntry.quant : null,
           running: !!(handle && handle.live),
+          serving_class: servingClassOf(model),
           quants,
         };
       });

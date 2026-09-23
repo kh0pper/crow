@@ -719,6 +719,13 @@ export const translations = {
   "models.cardContext": { en: "{n} token context", es: "Contexto de {n} tokens" },
   "models.quantLabel": { en: "Variant", es: "Variante" },
 
+  // Serving class (Task 5) — no one-tap Start for windowed/wedge-risk models
+  "models.servingWindowedBadge": { en: "Operator window", es: "Ventana del operador" },
+  "models.servingWedgeRiskBadge": { en: "Wedge risk", es: "Riesgo de bloqueo" },
+  "models.servingWindowedHint": { en: "Operator window only: this model runs two-box or evicts production, so it is never started from here.", es: "Solo en ventana del operador: este modelo usa dos equipos o desaloja producción, así que nunca se inicia desde aquí." },
+  "models.errServingClassRefused": { en: "This model only runs in an operator window; it cannot be started here.", es: "Este modelo solo se ejecuta en una ventana del operador; no se puede iniciar aquí." },
+  "models.servingWedgeRiskHint": { en: "Known wedge risk: this shape has hung the machine before. It is never started from the dashboard.", es: "Riesgo conocido de bloqueo: esta configuración ya colgó la máquina. Nunca se inicia desde el panel." },
+
   // Fit badges
   "models.fitFits": { en: "Fits", es: "Cabe" },
   "models.fitTight": { en: "Tight", es: "Ajustado" },

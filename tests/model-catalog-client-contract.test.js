@@ -373,3 +373,50 @@ test("BEHAVIOR: HTTP_403 still shows the distinct 'accept the license, then retr
   assert.match(statusEl.textContent, /accept the license/i);
   assert.doesNotMatch(statusEl.textContent, /requires a Hugging Face login/);
 });
+
+// ─── 4. Serving class (Task 5): never a one-tap Start for windowed/wedge-risk ───
+
+test("client script defines ERROR_MESSAGES.SERVING_CLASS_REFUSED (the 409 SERVING_CLASS_REFUSED code the models-start route answers with)", () => {
+  assert.match(CLIENT_JS, /SERVING_CLASS_REFUSED/);
+});
+
+test("BEHAVIOR: a registered wedge-risk card with multiple quants renders no Start/Download for that id, and a quant change never restores either (Remove early-return in refreshCardActions)", () => {
+  const model = {
+    id: "wedge-risk-multi-quant", family: "fam", lab: "Lab", license: "mit", gated: false,
+    task: "chat", context_len: 4096, tags: ["chat", "large"], notes: null,
+    default_quant: "Q_SMALL", first_run_default: false, registered: true, registeredQuant: "Q_SMALL", running: false,
+    serving_class: "wedge-risk",
+    quants: [
+      { quant: "Q_SMALL", size_mb: 500, min_ram_mb: 500, min_vram_mb: 0, fitBadge: "fits" },
+      { quant: "Q_BIG", size_mb: 90_000, min_ram_mb: 90_000, min_vram_mb: 0, fitBadge: "wont_fit" },
+    ],
+  };
+  const { $, selectQuant } = boot({ models: [model] });
+
+  const actions = $('.mcat-card__actions[data-model-id="wedge-risk-multi-quant"]');
+  assert.equal(actions.querySelector('[data-action="start"]'), null, "no Start for a wedge-risk card");
+  assert.equal(actions.querySelector('[data-action="download"]'), null, "no Download either — it's already registered");
+  assert.ok(actions.querySelector('[data-action="remove"]'), "still removable");
+
+  const sel = $('.mcat-quant-select[data-model-id="wedge-risk-multi-quant"]');
+  selectQuant(sel, "Q_BIG");
+
+  assert.equal(actions.querySelector('[data-action="start"]'), null, "quant change never restores Start");
+  assert.equal(actions.querySelector('[data-action="download"]'), null, "quant change never restores Download");
+  assert.ok(actions.querySelector('[data-action="remove"]'), "Remove is still there after the quant change");
+});
+
+test("BEHAVIOR: a registered windowed card renders no Start/Download for that id either", () => {
+  const model = {
+    id: "windowed-single-quant", family: "fam", lab: "Lab", license: "mit", gated: false,
+    task: "chat", context_len: 4096, tags: ["chat", "large"], notes: null,
+    default_quant: "Q4", first_run_default: false, registered: true, registeredQuant: "Q4", running: false,
+    serving_class: "windowed",
+    quants: [{ quant: "Q4", size_mb: 500, min_ram_mb: 500, min_vram_mb: 0, fitBadge: "fits" }],
+  };
+  const { $ } = boot({ models: [model] });
+  const actions = $('.mcat-card__actions[data-model-id="windowed-single-quant"]');
+  assert.equal(actions.querySelector('[data-action="start"]'), null);
+  assert.equal(actions.querySelector('[data-action="download"]'), null);
+  assert.ok(actions.querySelector('[data-action="remove"]'));
+});
