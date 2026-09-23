@@ -158,7 +158,9 @@ Reason (mine, §4 D4): the instances table differs across the fleet (MPA is stil
 
 It touches nothing else **on crow**.
 
-**grackle's `grackle-*` rows are bundle rows, so they are out of repair scope** and keep their invalid label. §3.3 makes the label harmless for orchestration, and the display shows it as it is. grackle is being decommissioned anyway.
+**grackle's `grackle-*` rows are bundle rows, so they are out of repair scope.** They still change, but through grackle's own reconciler rather than through repair. grackle's models.json declares them with the label and they are owned there, so its hourly **assert** now runs `inferHost(p.baseUrl, "grackle-5fc01…")`: the invalid label falls through to `local`, and that syncs fleet-wide. The copies on crow and r4 were written at lower lamports, which may log a one-time conflict burst. Verified in plan review round 2.
+
+Behaviour change on grackle: with D9, `grackle-rerank` and `grackle-vision` (mutexGroup `grackle-specialists-swap`) become swappable on demand, since `maybeAcquireLocalProvider` no longer returns null for them. Also, r4's `CROW_EMBED_PROVIDER=grackle-embed` row now displays `local`, which is display only. grackle is being decommissioned anyway.
 
 r4 was also the last writer of its own copies of both raven rows, so r4 repairs those two as well.
 
@@ -203,6 +205,8 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 0 on grackle) agains
 
 - **Tailscale boot race on write-time inference.** Seeds and fallback writes during that window can store `cloud` for this machine's own `100.x` endpoint. The effect is display only (D9). models.json rows heal on the owner's next assert.
 - **Seed-insert race.** Two instances seeding the same absent id at once can store different hosts and log one insert conflict. This is bounded, and display only.
+- **Residual D3 hole.** A peer that disables, enables or force-reenables a *non-bundle* row re-stamps its `instance_id` without touching `host`. That peer then counts as the last writer, and may repair the owner's row to `cloud`. It heals only if the entry is in the owner's models.json. The effect is display only under D9.
+- **G1 is class-coarse.** crow also has `thunderbolt0 10.99.0.1`, so while eno1 is still coming up, a `10.0.0.x` target is still judged. Matching the target against an own interface's subnet would be tighter. Not done: the effect is display only.
 - **Messages picker.** `messages/client.js:416` appends " (cloud)" to `host==='cloud'` rows, so the raven rows will now read "(cloud)" there. This is accepted.
 
 ## 5. Out of scope

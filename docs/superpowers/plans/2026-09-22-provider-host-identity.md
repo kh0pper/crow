@@ -1,4 +1,4 @@
-# Provider Host Identity Implementation Plan (rev 2, after plan review round 1)
+# Provider Host Identity Implementation Plan (rev 3, after plan review rounds 1–2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -921,9 +921,16 @@ Model it on `tests/providers-war-sim.test.js`, and read that harness first. Copy
 
 Then make these changes:
 - **Ids:** `const A_ID = "a".repeat(32); const B_ID = "b".repeat(32);`. Write them into `join(dirA,"instance-id")` and `join(dirB,"instance-id")` with `writeFileSync` **before** any upsert.
-- **Per-side fixtures:** write a models.json into each dir. `dirA/models.json` is `{providers:{}}`. `dirB/models.json` declares `"grackle-embed": { "baseUrl": "http://100.121.254.89:9100/v1", "host": "local", "models": [{ "id": "e" }] }` and `"crow-swap-agentic"` absent.
-- **Side switching:** a helper `async function side(which)` sets `process.env.CROW_DATA_DIR`, `process.env.CROW_MODELS_JSON` (that side's file) and `setProviderSyncManager(mgrX)`.
-- **Fresh feeds per test:** each test builds its own `feedAtoB` and `feedBtoA`, sets `mgrA.outFeeds.set(B_ID, feedAtoB)` and `mgrB.outFeeds.set(A_ID, feedBtoA)`, and clears the providers table on both DBs at the start.
+- **Per-scenario, per-side fixtures (review round 2, C1).** Each scenario writes its OWN two files, `join(dirA, \`models-${scenario}.json\`)` and the same for B, and `side()` points `CROW_MODELS_JSON` at the current scenario's file.
+  - Scenarios A and C: both files are `{"providers":{}}`.
+  - Scenario B: A's file is `{"providers":{}}`, and B's declares
+    `"grackle-embed": { "baseUrl": "http://100.121.254.89:9100/v1", "host": "local", "models": [{ "id": "e" }] }`.
+  - A file shared across scenarios would make B's reconciler **seed** `grackle-embed` into A's and C's empty tables, because `reconcileDecision` returns "seed" for any absent row. That would break their `feedBtoA.length === 0` assertions.
+- **Side switching:** a helper `async function side(which, scenario)` sets `process.env.CROW_DATA_DIR`, `process.env.CROW_MODELS_JSON` (that side's scenario file) and `setProviderSyncManager(mgrX)`.
+- **Fresh, uniquely keyed feeds per test (review round 2, C2).**
+  - `makeStubFeed()` gains `key: randomBytes(32)` (import `randomBytes` from `node:crypto`). `_getLastAppliedSeq` (`instance-sync.js:3765-3772`) compares `Buffer.from(feed.key).toString("hex")` against the stored cursor's `k`. An unkeyed feed stores `k:null` and matches every later unkeyed feed, so the cursor carries over between tests and a new feed's seq 0 is silently skipped.
+  - At the start of each test, **also** run `DELETE FROM providers`, `DELETE FROM sync_conflicts` and `DELETE FROM sync_state` on both DBs. Check the cursor's table and column name with `grep -n "_appliedSeqRecord" -A12 servers/sharing/instance-sync.js`, and clear whatever table it reads.
+  - Build `feedAtoB` and `feedBtoA` fresh, then call `mgrA.outFeeds.set(B_ID, feedAtoB)` and `mgrB.outFeeds.set(A_ID, feedBtoA)`.
 - **Delivery:** `const deliver = (feed, mgr, fromId) => mgr._processNewEntries(fromId, feed);`. War-sim calls it repeatedly on the same feed, so it tracks its own cursor.
 - **Addresses:** `ADDRS_A = new Set(["127.0.0.1","::1","localhost","10.0.0.237","100.118.41.122"])` and `ADDRS_B = new Set(["127.0.0.1","::1","localhost","10.0.0.21","100.121.254.89"])`.
 - **Round function:** each round runs
@@ -940,17 +947,24 @@ Then make these changes:
     - Assert: both hosts are `cloud`; the lamports are equal; `feedAtoB.length === 1`; `feedBtoA.length === 0`; conflicts total 0.
     - Record both lamports after round 2 and assert they are unchanged after round 4 (clocks stop).
   - **Scenario B: the owner asserts and the non-owner never fights it.**
-    - Insert `('grackle-embed','http://100.121.254.89:9100/v1','local', lamport 50, instance_id B_ID)` into both DBs.
+    - Insert `('grackle-embed','http://100.121.254.89:9100/v1','local', models '[{"id":"e"}]', bundle_id NULL, gpu_policy NULL, lamport 50, instance_id B_ID)` into both DBs. The models match B's file exactly, so B's owned assert is a no-op (review round 2, C3).
     - Run 4 rounds.
-    - Assert: both are `local`; `feedAtoB.length === 0`; no conflicts; B's lamport is stable from round 2 on.
+    - Assert: both are `local`; `feedAtoB.length === 0`; `feedBtoA.length === 0` (B's assert is a no-op); no conflicts; both lamports stay 50.
   - **Scenario C: a re-stamped bundle row (the live crow-chat case).**
     - Insert `('crow-swap-agentic','http://100.118.41.122:8003/v1','local', lamport 50, instance_id B_ID, bundle_id 'llamacpp-vulkan-qwen36-35b-a3b')` into both DBs. B is the last writer, but the endpoint is A's.
     - Run 4 rounds.
     - Assert: both still `local`; `feedBtoA.length === 0`; no conflicts.
 
+  - **Scenario D: co-owners compute the same value (optional but cheap; review round 2, Q2).**
+    - A and B share one address set (both `ADDRS_A`), and each is last writer of its own copy: `('raven-y','http://10.0.0.126:8030/v1','raven', lamport 50)` with instance_id A_ID in dbA and B_ID in dbB. Both files are empty.
+    - Run 4 rounds.
+    - Assert: both copies are `cloud`, and the lamports have converged. Allow at most 1 conflict row total: two concurrent equal-data writes may log one tie, which is accepted per spec §4.1. Assert that the conflict count is the same after round 2 and after round 4 (no recurrence).
+
 - [ ] **Step 2: Prove the sim can fail.** Make two temporary mutations, running the file after each and reverting (`git diff servers/shared/provider-host.js` must be empty at the end):
   - (a) Delete the `if (!inRepairScope(row)) return null;` line in `repairHostDecision`. Expected: scenario C FAILS, because B repairs A's row to `cloud` and `feedBtoA.length` becomes greater than 0.
-  - (b) Delete the D3 line (`if (!ownInstanceId || row.instance_id !== ownInstanceId) return null;`) and make scenario B's row non-bundle. Expected: scenario B FAILS, because A rewrites B's `local` to `cloud`, B's owner assert writes `local` back, and the lamports keep climbing across rounds.
+  - (b) Delete the D3 line (`if (!ownInstanceId || row.instance_id !== ownInstanceId) return null;`). Scenario B's row is already non-bundle.
+    - Expected: scenario B FAILS, because A rewrites B's `local` to `cloud` and emits. Once the cursors are keyed, B then applies it, B's owned assert writes `local` back, and the lamports keep climbing across rounds.
+    - Add an explicit assertion for the climb: record B's lamport after rounds 2 and 4 and assert they are equal. The mutated run must fail on THAT assertion, not only on a feed length.
 
   Run: `npm test -- tests/providers-host-repair-sim.test.js` after each mutation.
 
@@ -1043,9 +1057,11 @@ Expected: PASS.
 Smoke boot, isolated, WITH the reconcile path (no `--no-auth`) and run-suite's safety env:
 
 ```bash
+cd /home/kh0pp/crow-wt-host-identity && export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 T=$(mktemp -d)
 CROW_HOME=$T CROW_DATA_DIR=$T/data CROW_MODELS_JSON= CROW_DISABLE_NOSTR=1 CROW_DISABLE_INSTANCE_SYNC=1 \
-CROW_DISABLE_BOT_RUNTIME=1 CROW_DISABLE_PERCH=1 CROW_GATEWAY_PORT=3999 timeout 25 node servers/gateway/index.js 2>&1 | tail -30; rm -rf $T
+CROW_DISABLE_BOT_RUNTIME=1 CROW_DISABLE_PERCH=1 CROW_BOX_RESERVATION_PATH=$T/box-reservation.json \
+CROW_GATEWAY_PORT=3999 timeout 25 node servers/gateway/index.js 2>&1 | tail -30; rm -rf $T
 ```
 
 Expected: a clean startup, no stack traces, and the `[providers]` reconcile either quiet or logging `repaired=0`. Check `scripts/run-suite.mjs` for the exact env var names it sets and use those. If the gateway needs a different port variable, read `servers/gateway/index.js` for it.
@@ -1070,7 +1086,10 @@ git show --stat HEAD
 ```js
 #!/usr/bin/env node
 // Read-only: on a COPY of a crow.db, what would (1) the reconciler's owned
-// asserts change in `host`, and (2) repairProviderHosts change?
+// asserts change in `host`, and (2) repairProviderHosts change? Each is
+// evaluated against the pre-assert state; in the real pass repair sees the
+// post-assert row — equivalent today because asserted rows are models.json
+// rows and repair's scope excludes nothing they could flip into.
 // Usage: provider-host-repair-dryrun.mjs <db-copy> <own-instance-id> <addr,addr,...> [models.json,...]
 import { readFileSync } from "node:fs";
 import { createDbClient } from "../../servers/db.js";
@@ -1108,16 +1127,17 @@ db.close?.();
 
 ```bash
 S=$(mktemp -d)
-sqlite3 ~/.crow/data/crow.db ".backup $S/crow.db"
-sqlite3 ~/.crow-r4/data/crow.db ".backup $S/r4.db"
-ssh kh0pp@10.0.0.21 "sqlite3 ~/crow/data/crow.db '.backup /tmp/gr.db'" && scp -q kh0pp@10.0.0.21:/tmp/gr.db $S/gr.db && scp -q kh0pp@10.0.0.21:crow/config/models.json $S/gr-models.json; ssh kh0pp@10.0.0.21 rm -f /tmp/gr.db
+# read-only opens (servers/db.js:503-507 warns against a second read-write opener of a live WAL db)
+sqlite3 "file:$HOME/.crow/data/crow.db?mode=ro" ".backup $S/crow.db"
+sqlite3 "file:$HOME/.crow-r4/data/crow.db?mode=ro" ".backup $S/r4.db"
+ssh kh0pp@10.0.0.21 'sqlite3 "file:$HOME/crow/data/crow.db?mode=ro" ".backup /tmp/gr.db"' && scp -q kh0pp@10.0.0.21:/tmp/gr.db $S/gr.db && scp -q kh0pp@10.0.0.21:crow/config/models.json $S/gr-models.json; ssh kh0pp@10.0.0.21 rm -f /tmp/gr.db
 node scripts/ops/provider-host-repair-dryrun.mjs $S/crow.db 0867ac2809dedd885ba7769b21966f8e 10.0.0.237,100.118.41.122 ~/crow/config/models.json,$HOME/.pi/agent/models.json
 node scripts/ops/provider-host-repair-dryrun.mjs $S/r4.db   c22c6af81c13ff920ce609d2d61d8065 10.0.0.237,100.118.41.122 ~/crow/config/models.json,$HOME/.pi/agent/models.json
 node scripts/ops/provider-host-repair-dryrun.mjs $S/gr.db   49cf71ca878643ba7717f344329266fd 10.0.0.21,100.121.254.89 $S/gr-models.json
 rm -rf $S
 ```
 
-Before running, find r4's real `CROW_MODELS_JSON` or its models.json paths by reading the r4 gateway unit (`systemctl --user cat` on the unit whose name contains `r4`). Use those paths instead of the ones above if they differ.
+r4's gateway (the **system** unit `crow-r4-gateway.service`) sets no `CROW_MODELS_JSON` and runs with `WorkingDirectory=/home/kh0pp/crow` and the same HOME. So it reads the same models.json files as crow, as passed above (verified in review round 2).
 
 Expected: `REPAIR raven-flash-next raven -> cloud` and `REPAIR raven-halogen-smoke local -> cloud` on crow and on r4, and 0 repairs on grackle.
 - ASSERT lines are allowed only where the file declares a host that is invalid or missing (for example grackle's label → `local`).
@@ -1132,7 +1152,7 @@ Expected: 0 failures. Record the pass count, and run the suite on `main` for the
 Then run:
 - `npm test -- tests/auth-network.test.js` (expected PASS);
 - `node scripts/check-port-allocation.js` (expected OK);
-- `node scripts/build-registry.js --check` (expected OK).
+- `node scripts/build-registry.mjs --check` (expected OK; this is the script CI runs).
 
 - [ ] **Step 4: Commit the script, rebase, push, open the PR**
 
@@ -1167,7 +1187,7 @@ No attribution lines.
 - [ ] **Step 2:**
   - Squash-merge through the GitHub MCP.
   - Confirm that `~/crow` is on `main` at the merge sha, and that `auto_update_last_result` in `dashboard_settings` is not "Skipped" (`sqlite3 ~/.crow/data/crow.db "select value from dashboard_settings where key='auto_update_last_result'"`).
-  - If auto-update hasn't restarted the gateways within 15 minutes, run `systemctl --user restart crow-gateway`, then restart the r4 gateway unit (find its name with `systemctl --user list-units 'crow*'`).
+  - If auto-update hasn't restarted the gateways within 15 minutes, run `echo '8r00kly^' | sudo -S systemctl restart crow-gateway crow-r4-gateway`. Both are **system** units, not user units (verified in review round 2).
 - [ ] **Step 3:**
   - **Do not use the dashboard "Sync bundle providers" (force) button.** Its re-enable path re-stamps `instance_id`.
   - The reconcile runs at boot, so after the restart run:
@@ -1176,10 +1196,12 @@ No attribution lines.
     ```
     Expected: the raven rows are `cloud`, and the three crow bundle rows are `local`, unchanged.
   - Repeat on `~/.crow-r4/data/crow.db`.
-  - Confirm with `journalctl --user -u crow-gateway --since "-10 min" | grep "\[providers\]"`, which should show `repaired=2`.
+  - Confirm with `journalctl -u crow-gateway --since "-10 min" | grep "\[providers\]"` and the same for `-u crow-r4-gateway`. Each should show `repaired=2`. They are system units; use `sudo -S` if the journal needs it.
 - [ ] **Step 4:**
   - One hour later, re-run the Step 3 query. The raven rows' lamports must be unchanged.
-  - Run `sqlite3 ~/.crow/data/crow.db "select count(*) from sync_conflicts where table_name='providers' and created_at > datetime('now','-1 hour')"`. Expected: 0, or only rows for the raven ids arriving from grackle's stale copy, and none recurring on a second check.
+  - Run `sqlite3 ~/.crow/data/crow.db "select count(*) from sync_conflicts where table_name='providers' and created_at > datetime('now','-1 hour')"`. Expected: 0, or a one-time burst for these cases, but none recurring on a second check an hour later:
+- the raven ids arriving from grackle's stale copy;
+- grackle's `grackle-*` rows flipping from their label to `local` through grackle's owned assert. r4 and crow last-wrote their copies at lower lamports (review round 2, Q1).
 - [ ] **Step 5:** Check that chat on crow still reaches crow's own 35b through `crow-chat`, which proves the D9 gate did not regress. Send one short chat through the dashboard, or `curl` the `/llm/v1` door with the local token. Also check that the Providers tab shows "network" for the raven rows and "this machine" for crow's own rows.
 - [ ] **Step 6:**
   - Two-host spec §3.1 lives on branch `spec/heavy-model-catalog-curation`, worktree `~/crow-wt-catalog`, PR #344. Replace the "Set **`host = 'raven'`**" requirement with "unmanaged network endpoints are `cloud`; `host` is not an orchestration gate (see `docs/superpowers/specs/2026-09-22-provider-host-identity-design.md`)". Commit with a path and push.
