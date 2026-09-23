@@ -352,7 +352,8 @@ function setup(cls, { fastStatus = "down", servingOverride } = {}) {
   return { cfg, opts, startCalls };
 }
 
-beforeEach(() => { _resetProviderHealth(); _setNativeHandleForTest("native-target", null); });
+// Pin the reservation reader: a live box reservation on the host must not leak into these tests.
+beforeEach(() => { _resetProviderHealth(); _setNativeHandleForTest("native-target", null); _setReservationReaderForTest(() => null); _resetReservationNoticesForTest(); });
 
 test("cold wedge-risk: acquireProvider throws ServingClassError and never spawns", async () => {
   const { opts, startCalls } = setup("wedge-risk");
@@ -425,7 +426,7 @@ test("reserved box + cold wedge-risk: the permanent refusal wins over box_reserv
     const { opts, startCalls } = setup("wedge-risk");
     await assert.rejects(acquireProvider("native-target", opts), ServingClassError);
     assert.equal(startCalls.length, 0);
-  } finally { _setReservationReaderForTest(null); }
+  } finally { _setReservationReaderForTest(() => null); }
 });
 ```
 
@@ -711,8 +712,8 @@ New i18n keys (`en` / `es`):
     - In the `else if (model.registered)` branch, emit `servingNotice` instead of the Start button when `affordance !== "start"`, and keep Remove.
     - Add CSS next to the existing badge rules: `.mcat-card__badge--serving-windowed` and `.mcat-card__badge--serving-wedge-risk` (use `var(--crow-error)` for wedge-risk and the existing warning colour token used by `--gated` for windowed; read the existing badge CSS to match).
     - Do not change the client script's quant-change re-render. It exits early when a Remove button exists, so **keep Remove on non-resident registered cards**; that is load-bearing.
-    - In `ERROR_MESSAGES` add `SERVING_CLASS_REFUSED: '${tJs("models.errServingClassRefused", lang)}',`.
-    - In the post-download `job.status === "done"` branch, when `card.getAttribute("data-serving-class")` is `windowed` or `wedge-risk`, do not build the "Try in chat" link. Instead set the actions to the same notice text as the server render: add `servingWindowedHint` and `servingWedgeRiskHint` via `tJs` into a small client map. Use single or double quotes only, **never backticks**.
+    - In `ERROR_MESSAGES` add `SERVING_CLASS_REFUSED: '${tJs("models.errServingClassRefused", lang)}',` **before** the last entry (`HTTP_401`, ~:718, which has no trailing comma), so that the object literal stays valid.
+    - In the post-download `job.status === "done"` branch, when `card.getAttribute("data-serving-class")` is `windowed` or `wedge-risk`, do not build the "Try in chat" link. Instead set the actions to the same notice text **plus a Remove button** (`data-action="remove" data-model-id=…`, the same markup and classes as the server-rendered Remove, so the delegated handler picks it up and `refreshCardActions`' Remove early return keeps a later quant change from restoring Download), as the server render: add `servingWindowedHint` and `servingWedgeRiskHint` via `tJs` into a small client map. Use single or double quotes only, **never backticks**.
     - Grep the client script for any code that creates a `data-action="start"` element client-side (`grep -n 'action="start"\|actionStart' servers/gateway/dashboard/panels/model-catalog.js`). If the client builds one after a download finishes, make it respect the class the same way. Pass the class through a `data-serving-class` attribute on the card root (`<div class="mcat-card" data-model-id=… data-serving-class="${escapeHtml(model.serving_class || "")}">`), and do not render Start when it is `windowed` or `wedge-risk`. **Always add `data-serving-class` to the card root**, because the post-download branch above reads it.
 
 - [ ] **Step 4:** Run `npm test -- tests/models-panel.test.js tests/models-panel-ui.test.js tests/model-catalog-client-contract.test.js` and the i18n parity test. Expected: PASS.
@@ -748,3 +749,5 @@ New i18n keys (`en` / `es`):
 - **Deferred to documented known limits (Task 6):** the bot-picker `on_demand` label, `pollResidency` down-reporting, and the HF-browser uncurated bypass.
 - **Q1 (key on the registry `catalogId` too?):** No. `registerModel` writes the same id to both, so the provider row is the single source.
 - **Q2 (router 409 for OpenAI-compatible clients):** the companion's models are resident, and an escalation degrades instead of returning 409. A direct 409 surfaces as a normal API error.
+
+**Round 2, 2026-09-23: APPROVE.** Adopted: `ERROR_MESSAGES` insertion before `HTTP_401` (no trailing comma); the reservation reader is pinned in `beforeEach`; the post-download non-resident branch keeps a Remove button.
