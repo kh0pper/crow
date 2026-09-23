@@ -62,6 +62,7 @@ first. Decisions D1–D8 are binding.
    Task 3.
 4. **Refusals must not collapse into a generic 502 or START_FAILED.**
    `maybeAcquireLocalProvider` must rethrow. Pinned in Tasks 3 and 4.
+6. **A reserved box and a wedge-risk model together**: the permanent refusal must win over `box_reserved`, so the check runs before `startBlockedBy`. Pinned in Task 3.
 5. **The runtime strip's Start button** is a second one-tap surface for a
    registered model. It must also be withheld. Pinned in Task 5.
 
@@ -210,22 +211,21 @@ export function startAffordance(servingClass) {
   - `glm-5.3-flash`: `windowed`.
   - Every other entry, including `qwen3.8-flash-next`: `resident`.
 
-- [ ] **Step 1: Write failing tests** (append to `tests/model-catalog-validate.test.js`; read the file's top to see how it builds a minimal valid catalog, and reuse that helper, named `validCatalog()` or similar, for `base`):
+- [ ] **Step 1: Write failing tests** (append to `tests/model-catalog-validate.test.js`). That file already imports `validateCatalog` (:3) and `readFileSync` (:6); use those names and add no aliased re-imports. Two fixtures exist:
+  - `loadSeed()` (:12) reads the real catalog. Its `models[0]` is `qwen3.5-4b`, the `first_run_default`, which the D3 test needs, because the D3 check only runs in the "exactly one default" branch (:325).
+  - `makeV2Catalog()` (:208-270) is a synthetic catalog used by about 20 tests, several of which assert `errors == []`. **Add `serving: { class: "resident" }` to both of its models (`fixture-small`, `fixture-sharded`) in this step**, or those tests fail once `serving` is required.
 
 ```js
 // ─── serving.class (spec 2026-09-23) ───
-import { validateCatalog as _vc } from "../scripts/validate-model-catalog.js";
-import { readFileSync as _rf } from "node:fs";
-
 function withModel(mutate) {
-  const cat = structuredClone(/* the file's existing minimal-valid-catalog fixture */);
+  const cat = structuredClone(loadSeed()); // real catalog; models[0] = qwen3.5-4b (first_run_default)
   mutate(cat.models[0], cat);
-  return _vc(cat);
+  return validateCatalog(cat);
 }
 
 test("serving: the real catalog validates and every entry has a class", () => {
-  const real = JSON.parse(_rf(new URL("../registry/model-catalog.json", import.meta.url), "utf8"));
-  const r = _vc(real);
+  const real = loadSeed();
+  const r = validateCatalog(real);
   assert.deepEqual(r.errors, []);
   for (const m of real.models) assert.ok(m.serving && m.serving.class, `${m.id} has serving.class`);
   const by = Object.fromEntries(real.models.map((m) => [m.id, m.serving.class]));
@@ -263,7 +263,7 @@ test("serving: first_run_default must be resident (D3); two-box tag cannot be re
 });
 ```
 
-When wiring `withModel`: if the file's fixture has several models or puts `first_run_default` elsewhere, adapt the index so that model 0 is the one the test mutates. The fixture itself also needs `serving: { class: "resident" }` on every model, or every existing test starts failing on "missing serving". Update the fixture in this step.
+Note: `withModel` mutates the seed. The seed only gets `serving` in Step 3, so until then every `withModel` result also carries "serving is required" errors for the other models. The regexes above are specific enough that this does not cause false passes; check each expected failure message in Step 2's output.
 
 - [ ] **Step 2:** Run `npm test -- tests/model-catalog-validate.test.js`. Expected: the new tests FAIL.
 
@@ -310,7 +310,9 @@ Then add the field to all 11 entries in `registry/model-catalog.json`, directly 
 - Modify: `servers/gateway/gpu-orchestrator.js`:
   - add an import;
   - `maybeAcquireLocalProvider` (~:569-590): rethrow;
-  - `acquireOrStartNative` (~:993): add the check right after the `startBlockedBy` block (~:1037-1040);
+  - `acquireOrStartNative` (~:993): add the check right after the resident fast path (~:1017-1034) and **before** the `startBlockedBy` block (~:1037-1040);
+  - idle-revert's `acquireProvider` catch (~:1253-1256): route the refusal through the once-per-provider notice;
+  - `_resetReservationNoticesForTest` (~:520): also clear `_servingNoticed`;
   - `ensureNativeResident` (~:1314): swallow the refusal.
 - Test: create `tests/gpu-orchestrator-serving-class.test.js`.
 
@@ -328,6 +330,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   acquireProvider, maybeAcquireLocalProvider, ensureResident, _setNativeHandleForTest,
+  _setReservationReaderForTest, _resetReservationNoticesForTest,
 } from "../servers/gateway/gpu-orchestrator.js";
 import { ServingClassError } from "../servers/gateway/models/serving-class.js";
 import { _resetProviderHealth } from "../servers/gateway/provider-health.js";
@@ -397,12 +400,32 @@ test("maybeAcquireLocalProvider rethrows the refusal (a decision, not a failure)
   assert.equal(onErrorCalls, 0);
 });
 
-test("ensureResident: alwaysResident wedge-risk returns false, never throws, never spawns", async () => {
+test("ensureResident: alwaysResident wedge-risk returns false via the serving notice (not the generic failure catch), once", async () => {
+  _resetReservationNoticesForTest();
   const { cfg, opts, startCalls } = setup("wedge-risk");
   cfg.providers["native-target"].gpuPolicy.alwaysResident = true;
-  const out = await ensureResident("native-target", cfg, opts);
-  assert.equal(out, false);
+  const logs = [], errs = [];
+  const origLog = console.log, origErr = console.error;
+  console.log = (...a) => logs.push(a.join(" "));
+  console.error = (...a) => errs.push(a.join(" "));
+  try {
+    assert.equal(await ensureResident("native-target", cfg, opts), false);
+    assert.equal(await ensureResident("native-target", cfg, setup("wedge-risk").opts), false);
+  } finally { console.log = origLog; console.error = origErr; }
   assert.equal(startCalls.length, 0);
+  // ensureResident's OUTER catch also returns false — so pin that the
+  // native catch handled it: no generic failure line, one skip notice.
+  assert.equal(errs.filter((l) => /failed to bring up|native-target/.test(l)).length, 0, errs.join("\n"));
+  assert.equal(logs.filter((l) => /residency skipped native-target: serving\.class wedge-risk/.test(l)).length, 1, logs.join("\n"));
+});
+
+test("reserved box + cold wedge-risk: the permanent refusal wins over box_reserved", async () => {
+  _setReservationReaderForTest(() => ({ owner: "someone", expires_at: "2099-01-01T00:00:00Z", allow: [], key: "k" }));
+  try {
+    const { opts, startCalls } = setup("wedge-risk");
+    await assert.rejects(acquireProvider("native-target", opts), ServingClassError);
+    assert.equal(startCalls.length, 0);
+  } finally { _setReservationReaderForTest(null); }
 });
 ```
 
@@ -419,12 +442,15 @@ import { servingClassRefusal, ServingClassError } from "./models/serving-class.j
 export { ServingClassError } from "./models/serving-class.js";
 ```
 
-In `acquireOrStartNative`, immediately after the `startBlockedBy` block:
+In `acquireOrStartNative`, immediately **before** the `startBlockedBy` block (after the fast path's `// "down" — fall through` comment):
 
 ```js
   {
     // serving.class ceiling (spec 2026-09-23 §3.3): after the resident fast
-    // path (a running model is never refused) and after the reservation gate.
+    // path (a running model is never refused) and BEFORE the reservation
+    // gate — a permanent refusal must not surface as a retryable box_reserved.
+    // (A runtime-binary error in acquireProvider's pre-resolution can still
+    // precede this; acceptable — that start could not have succeeded either.)
     // Uncurated (no catalog entry / unreadable catalog) is allowed (D6).
     const catalogId = p?.gpuPolicy?.catalogId || providerName;
     let entry = null;
@@ -463,6 +489,17 @@ function noteServingRefused(name, err) {
   _servingNoticed.add(name);
   console.log(`[gpu-orchestrator] residency skipped ${name}: serving.class ${err.servingClass} never auto-starts`);
 }
+```
+
+In `_resetReservationNoticesForTest`, add `_servingNoticed.clear();` (declare `_servingNoticed` above it, or move the declaration up).
+
+In idle-revert's catch (~:1253-1256):
+
+```js
+      } catch (err) {
+        if (err instanceof ServingClassError) noteServingRefused(group.default, err);
+        else console.warn(`[gpu-orchestrator] auto-revert to ${group.default} failed: ${err.message}`);
+      }
 ```
 
 Also check that `ensureResident`'s own outer catch (it "never throws") does not already convert the error before `ensureNativeResident` sees it. The return value must be `false`.
@@ -607,13 +644,14 @@ and in the warm catch, after the `box_reserved` branch:
 - Modify: `servers/gateway/dashboard/panels/model-catalog.js`:
   - data shaping (~:159-185): add the same field;
   - `runtimeModels` (~:195): add `servingClass` by looking up `catalog.models` by `modelId`;
-  - `renderRuntimeStrip` (~:476-478): no Start for non-resident;
+  - `renderRuntimeStrip` (Start at ~:484-485): no Start for non-resident;
+  - client script: `ERROR_MESSAGES` (~:696) gains `SERVING_CLASS_REFUSED`; the post-download "Try in chat" swap (~:821-829) is suppressed for non-resident cards;
   - `renderModelCard` (~:536-588): badge, and the notice in place of Start.
 - Modify: `servers/gateway/dashboard/shared/i18n.js`, adding the keys below.
 - Test: append to `tests/models-panel.test.js` (API field) and `tests/models-panel-ui.test.js` (render). Update `tests/model-catalog-client-contract.test.js` if it pins the API field list.
 
 **Interfaces:**
-- Consumes: `servingClassOf` and `startAffordance` (Task 1).
+- Consumes: `servingClassOf` and `startAffordance` (Task 1). Import them in the panel as `import { servingClassOf, startAffordance } from "../../models/serving-class.js";` and in `routes/models.js` as `from "../models/serving-class.js"`.
 - Produces:
   - API field `serving_class` (a string or `null`) on every catalog item;
   - card DOM: a badge `mcat-card__badge--serving-<class>`, and a notice `mcat-card__notice mcat-card__notice--serving` holding the i18n text;
@@ -625,6 +663,7 @@ New i18n keys (`en` / `es`):
   "models.servingWindowedBadge": { en: "Operator window", es: "Ventana del operador" },
   "models.servingWedgeRiskBadge": { en: "Wedge risk", es: "Riesgo de bloqueo" },
   "models.servingWindowedHint": { en: "Operator window only: this model runs two-box or evicts production, so it is never started from here.", es: "Solo en ventana del operador: este modelo usa dos equipos o desaloja producción, así que nunca se inicia desde aquí." },
+  "models.errServingClassRefused": { en: "This model only runs in an operator window; it cannot be started here.", es: "Este modelo solo se ejecuta en una ventana del operador; no se puede iniciar aquí." },
   "models.servingWedgeRiskHint": { en: "Known wedge risk: this shape has hung the machine before. It is never started from the dashboard.", es: "Riesgo conocido de bloqueo: esta configuración ya colgó la máquina. Nunca se inicia desde el panel." },
 ```
 
@@ -638,6 +677,7 @@ New i18n keys (`en` / `es`):
     Repeat for `windowed`. For a registered `resident` model, assert that `data-action="start"` is still present.
   - **Runtime strip:** a registry entry whose `catalogId` is the wedge-risk model, not live. Assert no Start button for it in `renderRuntimeStrip`'s output.
   - **Download:** an unregistered wedge-risk model with a fitting quant still renders `data-action="download"`.
+  - **Client contract** (`tests/model-catalog-client-contract.test.js`, which runs the real client script in linkedom): render a registered wedge-risk card with two or more quants, dispatch a `change` on its quant select, and assert that no `data-action="start"` and no `data-action="download"` element appears for that id. This pins the dependency on `refreshCardActions`' early return when a Remove button is present (~:748). Also assert `ERROR_MESSAGES` contains `SERVING_CLASS_REFUSED`, using whatever mechanism that file already uses to inspect the client script.
 
 - [ ] **Step 2:** Run the tests. Expected: FAIL.
 
@@ -670,8 +710,10 @@ New i18n keys (`en` / `es`):
 
     - In the `else if (model.registered)` branch, emit `servingNotice` instead of the Start button when `affordance !== "start"`, and keep Remove.
     - Add CSS next to the existing badge rules: `.mcat-card__badge--serving-windowed` and `.mcat-card__badge--serving-wedge-risk` (use `var(--crow-error)` for wedge-risk and the existing warning colour token used by `--gated` for windowed; read the existing badge CSS to match).
-    - Do not change the client script's download re-render.
-    - Grep the client script for any code that creates a `data-action="start"` element client-side (`grep -n 'action="start"\|actionStart' servers/gateway/dashboard/panels/model-catalog.js`). If the client builds one after a download finishes, make it respect the class the same way. Pass the class through a `data-serving-class` attribute on the card root (`<div class="mcat-card" data-model-id=… data-serving-class="${escapeHtml(model.serving_class || "")}">`), and do not render Start when it is `windowed` or `wedge-risk`.
+    - Do not change the client script's quant-change re-render. It exits early when a Remove button exists, so **keep Remove on non-resident registered cards**; that is load-bearing.
+    - In `ERROR_MESSAGES` add `SERVING_CLASS_REFUSED: '${tJs("models.errServingClassRefused", lang)}',`.
+    - In the post-download `job.status === "done"` branch, when `card.getAttribute("data-serving-class")` is `windowed` or `wedge-risk`, do not build the "Try in chat" link. Instead set the actions to the same notice text as the server render: add `servingWindowedHint` and `servingWedgeRiskHint` via `tJs` into a small client map. Use single or double quotes only, **never backticks**.
+    - Grep the client script for any code that creates a `data-action="start"` element client-side (`grep -n 'action="start"\|actionStart' servers/gateway/dashboard/panels/model-catalog.js`). If the client builds one after a download finishes, make it respect the class the same way. Pass the class through a `data-serving-class` attribute on the card root (`<div class="mcat-card" data-model-id=… data-serving-class="${escapeHtml(model.serving_class || "")}">`), and do not render Start when it is `windowed` or `wedge-risk`. **Always add `data-serving-class` to the card root**, because the post-download branch above reads it.
 
 - [ ] **Step 4:** Run `npm test -- tests/models-panel.test.js tests/models-panel-ui.test.js tests/model-catalog-client-contract.test.js` and the i18n parity test. Expected: PASS.
 - [ ] **Step 5:** Commit: `git commit servers/gateway/routes/models.js servers/gateway/dashboard/panels/model-catalog.js servers/gateway/dashboard/shared/i18n.js <tests> -m "feat(models-panel): serving_class in the catalog API; no one-tap start for windowed/wedge-risk"`
@@ -683,6 +725,26 @@ New i18n keys (`en` / `es`):
 **Files:**
 - Modify: `docs/architecture/` model docs. Find the models or gateway doc that describes the catalog fields (`grep -rln "first_run_default\|min_runtime_version" docs/architecture docs/developers`). Add a short `serving.class` subsection: the three classes, the fact that it is a ceiling living in the catalog and never in settings, what the gateway refuses, and the `serving_override` API.
 
-- [ ] **Step 1:** Write the doc subsection (≤ 25 lines). Link the spec.
+- [ ] **Step 1:** Write the doc subsection (≤ 30 lines). Link the spec. Include a **Known limits** list:
+  - A model fetched through the HF browser (`/hf-download`), or any provider whose `gpuPolicy.catalogId` is not a catalog id, is uncurated. It is allowed (D6), so a DeepSeek GGUF fetched that way gets no ceiling.
+  - An `alwaysResident` non-resident model is never started, and `pollResidency` reports it as down. That is honest, but it is a misconfiguration.
+  - The bot model picker (`model-availability.js`) still lists a refused native model as `on_demand`. Picking it yields the refusal error, not a hang.
 - [ ] **Step 2:** Run `npm test` (full suite). Expected: 0 failures. Run `npm run validate-model-catalog` and `node scripts/build-registry.mjs --check`.
 - [ ] **Step 3:** Commit the doc with a path argument.
+
+## Review
+
+**Round 1, 2026-09-23 (adversarial Plan subagent): REVISE (minor).** Resolved:
+- **C1:** the validator fixtures were misdescribed. Task 2 now names `loadSeed()` and `makeV2Catalog()`, the latter gains `serving`, and the aliased imports are dropped.
+- **C2:** a reservation masked the permanent refusal. The check moved **before** `startBlockedBy`. The spec §3.3 is updated, and a combined test is added.
+- **Suggestions adopted:**
+  - the `ensureResident` test pins the native catch (console capture, once-only);
+  - the `_servingNoticed` reset;
+  - idle-revert goes through the once-notice;
+  - `ERROR_MESSAGES` gets the new code;
+  - "Try in chat" is suppressed;
+  - a client-contract quant-change test;
+  - line numbers and import paths are corrected.
+- **Deferred to documented known limits (Task 6):** the bot-picker `on_demand` label, `pollResidency` down-reporting, and the HF-browser uncurated bypass.
+- **Q1 (key on the registry `catalogId` too?):** No. `registerModel` writes the same id to both, so the provider row is the single source.
+- **Q2 (router 409 for OpenAI-compatible clients):** the companion's models are resident, and an escalation degrades instead of returning 409. A direct 409 surfaces as a normal API error.

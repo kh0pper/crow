@@ -100,8 +100,11 @@ never reaches this check.
 
 ### 3.3 Enforcement at the single native choke point
 
-The check goes in `acquireOrStartNative` (`gpu-orchestrator.js`), directly
-after the box-reservation gate and **after** the resident fast path. A model
+The check goes in `acquireOrStartNative` (`gpu-orchestrator.js`), **after** the
+resident fast path and **before** the box-reservation gate. The static
+ceiling runs in front of every live gate, so a permanent refusal is never
+reported as a transient `box_reserved` that tells a client to retry a start
+that can never succeed (plan-review finding, 2026-09-23). A model
 that is already running is never refused, for the same reason a reservation
 never refuses one: refusing it would not make the box any safer.
 
