@@ -46,13 +46,14 @@ Every orchestrator path treats an external engine as not orchestratable here, **
 - a marker combined with a `bundleId` or `runtime: "native"` (`EXTERNAL_ENGINE_CONFLICT`);
 - a marked row converted in one step into an orchestratable one (`EXTERNAL_ENGINE_CONFLICT`: unmark first).
 
-A malformed incoming `gpu_policy` JSON string is rejected as invalid, not read as "keep the stored policy".
+A malformed or non-object incoming `gpu_policy` (such as `[1]` or `7`) is rejected as invalid, not read as "keep the stored policy". The exception is when it is byte-equal or canonically equal to the stored value (review round 2): a spread write that re-sends what is stored must pass.
 
 A write that leaves those three fields as stored always passes, even if the stored row is contradictory. Replication writes rows directly, never through `upsertProvider`, so a contradictory or malformed row can arrive from a peer. Today's re-enable, host-repair and reconciler writes must keep working on such a row.
 
-The models.json reconciler also changes in two ways:
-- It keeps a stored `engine` when it re-asserts a row's `gpu_policy`.
-- It isolates each row in its own try/catch, so one refused row cannot abort the pass.
+The models.json reconciler and `repairProviderHosts` also change:
+- The reconciler keeps a stored `engine` when it re-asserts a row's `gpu_policy`.
+- Both isolate each row in its own try/catch, but swallow **only** errors whose code starts with `EXTERNAL_ENGINE_` (review round 2). A DB or emit failure is rethrown and surfaces where it did before.
+- A swallowed skip is logged once per row id per process, not every hourly pass.
 
 ### 2.3 Continuous read-only health (D3)
 
@@ -65,7 +66,7 @@ The models.json reconciler also changes in two ways:
 
 ### 2.4 Surfacing (D4)
 
-- **The nest `providersSignal`** gains the external engines, at severity **info only, never warn** (revised after review round 1):
+- **A separate nest signal, `externalEngines`** (its own id, label and i18n keys), shows the external engines at severity **info at most, never warn** (revised in review rounds 1 and 2). There is no card when no engine is watched. The lines are:
   - `"<label> on <host>: up"`;
   - `"down for <age> (externally managed)"` for an engine that answered at least once in this process;
   - `"not reachable from this instance"` for one that never answered.
@@ -75,7 +76,12 @@ The models.json reconciler also changes in two ways:
   - These engines are operated from outside Crow: raven's production windows stop halogen for hours by design, so every window would page the operator for something they did on purpose.
   - Crow can do nothing about it (D5: no route-away).
 
-  The resident-model warn path is byte-identical to before. When it fires, it is the signal's one issue.
+  **Why its own id, and not `providers` (review round 2):**
+  - The health monitor dedupes pushes per issue id with a 24 h window.
+  - `pruneResolved` keeps a marker alive while any issue with that id is active, warn or info.
+  - An external info issue under `providers` would therefore keep the resident warn's marker alive and suppress the next real resident push.
+
+  `providersSignal` output for resident rows is therefore exactly as before, with no external content at all. A monitor-cycle test pins this: resident warn → push; the resident recovers while an engine is down; the resident warns again within 24 h → push again.
 - **The Providers tab** status dot for an external-engine row uses the health state: up, down, or not probed yet. The row also gets an "external · <host>" badge.
 - **`GET /api/providers/health`** is unchanged. The Health tab's on-demand matrix already probes everything.
 - **i18n:** every new string in both `en` and `es`.
@@ -117,5 +123,5 @@ The models.json reconciler also changes in two ways:
   - no auth header is sent;
   - the timeout is honoured.
 - **`provider-health`:** `external` map semantics, first-seen and last-ready clocks.
-- **Nest signal:** external engines are info only, never warn, including one that was ready once and has been down for hours; the copy names the host; the resident-model warn is unchanged; es parity.
+- **Nest signal:** external engines appear only under their own `externalEngines` id and are info at most, never warn, including one that was ready once and has been down for hours. The copy names the host. `providersSignal` is unchanged. A monitor-cycle test proves a recurring resident outage is pushed again within 24 h while an engine is down, and that it fails with a shared id. es parity.
 - **Providers tab:** the dot reflects external health; the badge renders.

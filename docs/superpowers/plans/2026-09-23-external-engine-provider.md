@@ -22,7 +22,8 @@
 - Every orchestrator path checks the marker **before** any other check (spec §2.2).
 - The probe is `GET <base_url>/models` with **no auth header**, a **3 s timeout**, no retry within a tick, and 2xx means ready. The interval defaults to **60 s** and is set by `CROW_EXTERNAL_ENGINE_POLL_MS` (spec §2.3).
 - The probe is read-only and never reacts to what it finds. The llm-router, chat, and sync are **not** changed (spec §2.5). `GET /api/providers/health` is unchanged (spec §2.4).
-- External engines **never** produce a nest warn, and so never a push. They surface at severity `info` only: `"<label> on <host>: up"`, `"… down for <age> (externally managed)"` if the engine answered once in this process, or `"… not reachable from this instance"` if it never did. The resident-model warn path stays byte-identical (spec §2.4, revised in review round 1).
+- External engines **never** produce a nest warn, and so never a push. They surface in their **own** nest signal, id `externalEngines`, at severity `info` at most. The lines are `"<label> on <host>: up"`, `"… down for <age> (externally managed)"` if the engine answered once in this process, or `"… not reachable from this instance"` if it never did. They never emit anything under id `"providers"`, whose output stays exactly as today (spec §2.4, review rounds 1 and 2).
+- Per-row catches in the reconciler and in `repairProviderHosts` swallow only errors whose `code` starts with `"EXTERNAL_ENGINE_"`, and log each skip once per row id per process. Every other error is rethrown.
 - Validation is **transition-only**. `upsertProvider` throws `EXTERNAL_ENGINE_CONFLICT` or `EXTERNAL_ENGINE_INVALID` only when a write **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row **and** the resulting row is invalid. A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`. The typed orchestrator error is `ExternalEngineError` with `code: "external_engine"`.
 - The poll probes and prunes only when `cfg._source === "db:providers"` (the value `loadProvidersFromDb` sets, `servers/shared/providers-db.js`). A models.json-fallback config never probes and never prunes.
 - The Providers tab is server-rendered HTML with no client script. Interpolate engine `host` and `label` only through `escapeHtml`, and into i18n strings only through `fill()`, because they are free text replicated from peers.
@@ -57,9 +58,10 @@ These are the five inputs the spec implies but never spells out, most likely fir
 | `servers/gateway/provider-health.js` (modify) | The new `external` map: `recordExternal`, `pruneExternal`, and `getProviderHealth().external`. |
 | `servers/gateway/external-engine-poll.js` (create) | `probeExternalEngine`, `pollExternalEngines`, `startExternalEngineMonitor`, `_stopExternalEngineMonitor`, `externalEnginePollMs`. |
 | `scripts/run-suite.mjs` (modify) | Sets `CROW_EXTERNAL_ENGINE_POLL_MS=0` for scratch suite gateways. |
-| `servers/gateway/dashboard/panels/nest/health-signals.js` (modify) | `providersSignal` gains the external engines, at info severity only. |
+| `servers/gateway/dashboard/panels/nest/health-signals.js` (modify) | New `externalEnginesSignal` (id `externalEngines`, info at most), and `runHealthNotifyCycle` extracted from post-listen. `providersSignal` is untouched. |
+| `servers/gateway/boot/post-listen.js` (modify) | The health-monitor loop calls `runHealthNotifyCycle`. |
 | `servers/gateway/dashboard/settings/sections/llm/providers-tab.js` (modify) | `statusDot` and `engineBadge`, both exported, plus `render({ db, lang })`. |
-| `servers/gateway/dashboard/shared/i18n.js` (modify) | 3 `signals.providers.*` keys and 4 `settings.providers.*` keys. |
+| `servers/gateway/dashboard/shared/i18n.js` (modify) | 5 `signals.externalEngines.*` keys and 4 `settings.providers.*` keys. |
 | `docs/architecture/models.md` (modify) | Adds an "External engines" section. |
 
 ---
@@ -371,6 +373,9 @@ const fetchCalls = [];
 before(() => { realFetch = globalThis.fetch; globalThis.fetch = async (...a) => { fetchCalls.push(a); throw new Error("no network in tests"); }; });
 after(() => { globalThis.fetch = realFetch; rmSync(dir, { recursive: true, force: true }); });
 
+// cfg is injected through the Step 2b lookupProvider seam, so without the guard
+// this row IS found: the probe and the bundle start run (fetchCalls 2) — the
+// assertions below then fail on the guard itself, not on "unknown_provider".
 test("ensureModelWarm refuses an external engine: no probe, no bundle start, reason external_engine", async () => {
   const events = [];
   const off = onLifecycleEvent((e) => events.push(e.type));
@@ -388,6 +393,29 @@ test("releaseModel is a no-op for an external engine", async () => {
 });
 ```
 
+- [ ] **Step 2b: Give `lifecycle.js`'s `lookupProvider` the cfg seam (no behaviour change)**
+
+Without this step, the lifecycle test cannot tell a missing guard apart from an unknown provider, because `lookupProvider` ignores `opts.cfg` and would return `unknown_provider` either way (review round 2, item 4). In `servers/shared/lifecycle.js`, find:
+
+```js
+function lookupProvider(providerId) {
+  const cfg = loadProviders();
+```
+
+Replace it with:
+
+```js
+function lookupProvider(providerId, cfg = loadProviders()) {
+```
+
+In `ensureModelWarm` and in `releaseModel`, change the first `const info = lookupProvider(providerId);` line to:
+
+```js
+  const info = lookupProvider(providerId, opts.cfg);
+```
+
+Leave every other `lookupProvider(otherId)` call alone. Production never passes `opts.cfg`, so the default `loadProviders()` applies exactly as before.
+
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/provider-engine.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-warm-resolve.test.js`
@@ -397,7 +425,9 @@ Expected results:
 - The new host-gate test fails with `true !== null`.
 - The new warm-resolve test fails with `'ext-bundle' !== null`.
 - The new always-resident test fails (`ext-resident` is listed).
-- The lifecycle tests fail: the guard is missing, so `ensureModelWarm` tries the probe and the fetch spy is called.
+- The lifecycle tests fail on the missing guard itself. Because of the Step 2b seam, `lookupProvider` finds the injected row, so the result is not `unknown_provider`:
+  - `ensureModelWarm` returns `{ ok: false, reason: "bundle_start_failed:no network in tests" }`, and `fetchCalls.length` is 2 (the `/models` probe and the bundles `start` POST);
+  - `releaseModel` returns `{ ok: true, refs: 0 }` without `external: true`.
 
 - [ ] **Step 4: Create the helper**
 
@@ -700,7 +730,7 @@ In `ensureModelWarm`, find:
 
 ```js
 export async function ensureModelWarm(providerId, opts = {}) {
-  const info = lookupProvider(providerId);
+  const info = lookupProvider(providerId, opts.cfg);
 ```
 
 Replace it with:
@@ -711,14 +741,14 @@ export async function ensureModelWarm(providerId, opts = {}) {
     emit({ type: "external_engine_refused", providerId });
     return { ok: false, reason: "external_engine" };
   }
-  const info = lookupProvider(providerId);
+  const info = lookupProvider(providerId, opts.cfg);
 ```
 
 In `releaseModel`, find:
 
 ```js
 export async function releaseModel(providerId, opts = {}) {
-  const info = lookupProvider(providerId);
+  const info = lookupProvider(providerId, opts.cfg);
 ```
 
 Replace it with:
@@ -726,7 +756,7 @@ Replace it with:
 ```js
 export async function releaseModel(providerId, opts = {}) {
   if (isExternalHere(providerId, opts)) return { ok: true, refs: 0, external: true };
-  const info = lookupProvider(providerId);
+  const info = lookupProvider(providerId, opts.cfg);
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -757,10 +787,11 @@ git show --stat HEAD
 - Produces:
   - `upsertProvider` throws an `Error` whose `.code` is `"EXTERNAL_ENGINE_INVALID"` or `"EXTERNAL_ENGINE_CONFLICT"`. Nothing is written or emitted when it throws. Every other write behaves as before.
   - `syncProvidersFromModelsJson` returns one extra counter, `failed: number`.
+  - `_resetEngineSkipLogForTest()` (exported from `providers-db.js`).
 
 The rules below are **transition-only** (review round 1, C2). They run after the existing-row `SELECT` and **before** the no-op check.
 
-1. **A malformed incoming `gpu_policy` is always `EXTERNAL_ENGINE_INVALID`.** Malformed means a raw string that does not parse, or that parses to something other than a plain object. It is never treated as "keep the stored policy".
+1. **A malformed incoming `gpu_policy` is `EXTERNAL_ENGINE_INVALID` unless it re-sends exactly what is stored.** Malformed means a raw string that does not parse, or that parses to something other than a plain object (such as `[1]` or `7`). "Exactly what is stored" means byte-identical, or canonically equal after parsing both sides (review round 2, item 2). In that case the policy is treated as unchanged, because a spread write that re-sends a malformed stored value must pass. A malformed value that differs from the stored one is never treated as "keep the stored policy".
 2. **Work out the resulting row.**
    - The effective policy is the incoming policy if there is one, else the stored one. This mirrors `COALESCE(excluded.gpu_policy, providers.gpu_policy)`.
    - The effective bundle is always the incoming `bundleId`, because `bundle_id = excluded.bundle_id`.
@@ -770,9 +801,10 @@ The rules below are **transition-only** (review round 1, C2). They run after the
    - `externalEngineConflict({ bundleId, gpuPolicy: effective })` → `EXTERNAL_ENGINE_CONFLICT`;
    - a stored-marked row that becomes an unmarked but orchestratable row (it gains a bundle or `runtime: "native"`) → `EXTERNAL_ENGINE_CONFLICT`. Unmark first, in a separate write.
 
-The reconciler changes in two ways.
+The reconciler and host repair change as follows.
 - **Q3:** when the assert branch writes a non-null `gpuPolicy` for a row whose stored policy carries `engine`, the stored `engine` is copied into the written policy.
-- **C2:** each models.json entry runs in its own `try/catch`. A refusal logs `[providers-reconcile] <id> skipped: <code>: <message>`, increments `failed`, and the pass continues.
+- **C2, narrowed in round 2:** each models.json entry in `syncProvidersFromModelsJson`, and each row in `repairProviderHosts`, runs in its own `try/catch`. The catch swallows **only** errors whose `code` starts with `"EXTERNAL_ENGINE_"`: it increments `failed` (in the reconciler) and continues. Anything else, such as a DB error or an emit failure, is rethrown so it surfaces exactly where it did before.
+- **Log once per row:** a swallowed skip is logged **once per row id per process**, as `[providers-reconcile] <id> skipped: <code>: <message>` or `[providers-repair] …`. The hourly reconciler must not repeat the line every hour.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -803,6 +835,7 @@ import { join } from "node:path";
 import {
   upsertProvider, listProvidersAll, setProviderSyncManager,
   reenableProviderPreservingContent, repairProviderHosts, syncProvidersFromModelsJson,
+  _resetEngineSkipLogForTest,
 } from "../servers/shared/providers-db.js";
 
 function freshLibsql(fixtureProviders = {}) {
@@ -897,7 +930,7 @@ test("introducing a malformed marker is refused (EXTERNAL_ENGINE_INVALID): typo'
   } finally { h.cleanup(); }
 });
 
-test("a malformed incoming gpu_policy JSON string is INVALID, not 'keep stored' — even on a row with no marker", async () => {
+test("a malformed incoming gpu_policy JSON string that DIFFERS from the stored one is INVALID, not 'keep stored'", async () => {
   const h = freshLibsql();
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { mutexGroup: "g" } }));
@@ -1013,7 +1046,8 @@ test("Q3: the reconciler keeps a stored engine when it re-asserts a gpuPolicy", 
   } finally { h.cleanup(); }
 });
 
-test("reconciler isolation: one refused entry is logged and counted; the rest of the pass still runs", async () => {
+test("reconciler isolation: one refused entry is counted each run but logged ONCE per process; the rest of the pass still runs", async () => {
+  _resetEngineSkipLogForTest();
   const h = freshLibsql({
     "raven-flash-next": { baseUrl: RAVEN, bundleId: "halogen", models: [{ id: "flash-next" }] }, // newly adds a bundle to a marked row
     "fx-loop": { baseUrl: "http://127.0.0.1:8011/v1", models: [{ id: "m" }] },
@@ -1023,15 +1057,88 @@ test("reconciler isolation: one refused entry is logged and counted; the rest of
   console.warn = (m) => warns.push(String(m));
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
-    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
-    assert.equal(res.failed, 1);
+    const own = { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) };
+    const first = await syncProvidersFromModelsJson(h.db, own);
+    const second = await syncProvidersFromModelsJson(h.db, own); // the next hourly pass
+    assert.equal(first.failed, 1);
+    assert.equal(second.failed, 1);
     assert.ok(await stored(h.db, "fx-loop"), "the next entry was still seeded");
     assert.equal((await stored(h.db, "raven-flash-next")).bundle_id, null, "refused write left the row alone");
-    assert.ok(warns.some((w) => w.includes("[providers-reconcile] raven-flash-next skipped: EXTERNAL_ENGINE_CONFLICT")), warns.join("\n"));
+    const lines = warns.filter((w) => w.includes("[providers-reconcile] raven-flash-next skipped: EXTERNAL_ENGINE_CONFLICT"));
+    assert.equal(lines.length, 1, warns.join("\n"));
   } finally {
     console.warn = origWarn;
     h.cleanup();
   }
+});
+
+// --- round 2: malformed stored policies survive spread writes; only
+// EXTERNAL_ENGINE_* errors are swallowed per row ------------------------------
+
+for (const raw of ["[1]", "7"]) {
+  test(`replicated row with a non-object gpu_policy ${raw} survives the tab enable, reenable, repair and the reconciler`, async () => {
+    const h = freshLibsql({
+      "rep-malformed": { baseUrl: RAVEN, mutexGroup: "g", models: [{ id: "m" }] },
+    });
+    try {
+      await seedRaw(h.db, { id: "rep-malformed", host: "local", gpuPolicy: raw, disabled: 1, instanceId: "own-instance" });
+      // 1. the Providers tab's llm_provider_enable spread write
+      const row = (await listProvidersAll(h.db)).find((r) => r.id === "rep-malformed");
+      await upsertProvider(h.db, { ...row, disabled: false });
+      // 2. reenableProviderPreservingContent
+      await h.db.execute({ sql: "UPDATE providers SET disabled = 1 WHERE id = ?", args: ["rep-malformed"] });
+      assert.ok(await reenableProviderPreservingContent(h.db, "rep-malformed"));
+      // 3. repairProviderHosts (host "local" on a LAN IP that is not ours → repaired to cloud).
+      // The two writes above re-stamped instance_id with this process's id (D3 scope).
+      const writer = (await stored(h.db, "rep-malformed")).instance_id;
+      const rep = await repairProviderHosts(h.db, {
+        ownInstanceId: writer,
+        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+      });
+      assert.deepEqual(rep.changes.map((c) => c.id), ["rep-malformed"]);
+      // 4. the reconciler (owned entry; a valid object policy from the file)
+      const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+      assert.equal(res.failed, 0);
+      assert.equal(Number((await stored(h.db, "rep-malformed")).disabled), 0);
+    } finally { h.cleanup(); }
+  });
+}
+
+/** Wrap a libsql client so every providers INSERT fails like a DB would. */
+function failingInserts(db) {
+  return {
+    execute: (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (sql.trimStart().startsWith("INSERT INTO providers")) {
+        return Promise.reject(Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }));
+      }
+      return db.execute(q);
+    },
+  };
+}
+
+test("reconciler: a non-EXTERNAL_ENGINE error (DB failure) is NOT swallowed — it still surfaces", async () => {
+  const h = freshLibsql({ "fx-loop": { baseUrl: "http://127.0.0.1:8011/v1", models: [{ id: "m" }] } });
+  try {
+    await assert.rejects(
+      syncProvidersFromModelsJson(failingInserts(h.db), { ownAddrs: new Set(["localhost", "127.0.0.1", "::1"]) }),
+      (err) => err.code === "SQLITE_BUSY",
+    );
+  } finally { h.cleanup(); }
+});
+
+test("repairProviderHosts: a non-EXTERNAL_ENGINE error is NOT swallowed", async () => {
+  const h = freshLibsql();
+  try {
+    await seedRaw(h.db, { id: "rep-repair-fail", host: "local", gpuPolicy: null, instanceId: "own-instance" });
+    await assert.rejects(
+      repairProviderHosts(failingInserts(h.db), {
+        ownInstanceId: "own-instance",
+        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+      }),
+      (err) => err.code === "SQLITE_BUSY",
+    );
+  } finally { h.cleanup(); }
 });
 ```
 
@@ -1039,7 +1146,11 @@ test("reconciler isolation: one refused entry is logged and counted; the rest of
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-external-engine-write.test.js`
 
-Expected: FAIL. The refusal tests report "Missing expected rejection". The Q3 test fails because the engine was dropped. The isolation test fails because `res.failed` is `undefined`. The replicated-row tests pass already, since nothing validates yet.
+Expected: FAIL.
+- The refusal tests report "Missing expected rejection".
+- The Q3 test fails because the engine was dropped.
+- The isolation test fails to load because `_resetEngineSkipLogForTest` is not exported. Once that is added, it fails because `res.failed` is `undefined`.
+- The replicated-row, `[1]`/`7` and non-engine-error tests already pass, because nothing validates or catches yet. They are regression guards for Steps 3-4.
 
 - [ ] **Step 3: Implement the validation**
 
@@ -1064,6 +1175,19 @@ function engineWriteError(code, message) {
   err.code = code;
   return err;
 }
+
+const isEngineWriteError = (err) => typeof err?.code === "string" && err.code.startsWith("EXTERNAL_ENGINE_");
+
+// Per-row skips are logged once per (where, id) per process — the reconciler
+// runs hourly and must not repeat the same line every hour.
+const _engineSkipLogged = new Set();
+function noteEngineSkip(where, id, err) {
+  const key = `${where}:${id}`;
+  if (_engineSkipLogged.has(key)) return;
+  _engineSkipLogged.add(key);
+  console.warn(`[${where}] ${id} skipped: ${err.code}: ${err.message}`);
+}
+export function _resetEngineSkipLogForTest() { _engineSkipLogged.clear(); }
 
 /** Stored gpu_policy → object, or null (absent or corrupt — corrupt reads as "none"). */
 function parseStoredPolicy(raw) {
@@ -1096,9 +1220,23 @@ const nullish = (v) => (v === undefined ? null : v);
  * of them is judged, on the EFFECTIVE row: the upsert SQL COALESCEs a null
  * gpu_policy into the stored one, while bundle_id is always overwritten.
  */
+/** Is the incoming raw gpu_policy exactly what is stored (byte-equal, or canonically equal once parsed)? */
+function samePolicyValue(incomingRaw, storedRaw) {
+  if (incomingRaw == null || storedRaw == null) return false;
+  if (String(incomingRaw) === String(storedRaw)) return true;
+  try { return canonicalJsonEqual(JSON.parse(incomingRaw), JSON.parse(storedRaw)); } catch { return false; }
+}
+
 function assertExternalEngineWrite({ incomingBundleId, incomingPolicyRaw, storedRow }) {
-  const { policy: incoming, malformed } = parseIncomingPolicy(incomingPolicyRaw);
-  if (malformed) throw engineWriteError("EXTERNAL_ENGINE_INVALID", "gpu_policy must be a JSON object");
+  let { policy: incoming, malformed } = parseIncomingPolicy(incomingPolicyRaw);
+  if (malformed) {
+    // Round 2: a spread write that re-sends a malformed STORED value (e.g. a
+    // replicated '[1]') must pass — only a malformed value that differs is refused.
+    if (!samePolicyValue(incomingPolicyRaw, storedRow?.gpu_policy)) {
+      throw engineWriteError("EXTERNAL_ENGINE_INVALID", "gpu_policy must be a JSON object");
+    }
+    incoming = null; // unchanged: judge the row on its stored policy (which parses to "none")
+  }
   const storedPolicy = storedRow ? parseStoredPolicy(storedRow.gpu_policy) : null;
   const storedBundle = storedRow ? nullish(storedRow.bundle_id) : null;
   const effective = incoming ?? storedPolicy;
@@ -1148,7 +1286,7 @@ Replace it with:
   if (existed && upsertIsNoop(rows[0], {
 ```
 
-- [ ] **Step 4: Harden the reconciler (Q3 plus per-row isolation)**
+- [ ] **Step 4: Harden the reconciler and host repair (Q3, per-row isolation of EXTERNAL_ENGINE_* only)**
 
 In `syncProvidersFromModelsJson`, replace everything from `const counters = {` down to (but not including) `const rep = await repairProviderHosts(dbClient, { ownAddrs: addrs });` with:
 
@@ -1204,11 +1342,39 @@ In `syncProvidersFromModelsJson`, replace everything from `const counters = {` d
       if (res.unchanged) counters.unchanged++;
       else counters.upserted++;
     } catch (err) {
+      if (!isEngineWriteError(err)) throw err; // DB/emit failures surface exactly as before
       counters.failed++;
-      console.warn(`[providers-reconcile] ${id} skipped: ${err?.code ? err.code + ": " : ""}${err?.message ?? err}`);
+      noteEngineSkip("providers-reconcile", id, err);
     }
   }
 ```
+
+Replace the whole `repairProviderHosts` function with:
+
+```js
+export async function repairProviderHosts(db, {
+  ownInstanceId = getOrCreateLocalInstanceId(),
+  ownAddrs = getOwnAddresses(),
+} = {}) {
+  const changes = [];
+  for (const row of await listProvidersAll(db)) {
+    const next = repairHostDecision(row, { ownInstanceId, ownAddrs });
+    if (next === null) continue;
+    // Per-row isolation (external-engine review round 2): only an
+    // EXTERNAL_ENGINE_* refusal is swallowed; anything else still throws.
+    try {
+      await upsertProvider(db, { ...row, host: next });
+      changes.push({ id: row.id, from: row.host, to: next });
+    } catch (err) {
+      if (!isEngineWriteError(err)) throw err;
+      noteEngineSkip("providers-repair", row.id, err);
+    }
+  }
+  return { repaired: changes.length, changes };
+}
+```
+
+Keep its existing doc comment above it.
 
 Then update the function's JSDoc `@returns` line so that it lists `failed: number` next to `repaired: number`.
 
@@ -1867,84 +2033,120 @@ git show --stat HEAD
 
 ---
 
-### Task 4: Nest `providersSignal` shows external engines, at info only (D4, nest)
+### Task 4: Nest — a separate `externalEngines` signal (info at most), and the monitor's notify cycle extracted and tested (D4, nest)
 
 **Files:**
-- Modify: `servers/gateway/dashboard/panels/nest/health-signals.js`: the i18n import at :27, the header comment, and `providersSignal` at :704.
+- Modify: `servers/gateway/dashboard/panels/nest/health-signals.js`:
+  - the i18n import at :27 and the header comment;
+  - a new `externalEnginesSignal`;
+  - `collectHealthSignals` (register the new signal and filter out `null`s);
+  - a new exported `runHealthNotifyCycle`.
+  - `providersSignal` is **not** touched.
+- Modify: `servers/gateway/boot/post-listen.js`: the health-monitor loop at :282-331 now calls `runHealthNotifyCycle`.
 - Modify: `servers/gateway/dashboard/shared/i18n.js`: after `"signals.providers.action"`.
-- Test: `tests/providers-health-signal.test.js`
+- Test: `tests/external-engines-signal.test.js` (create), `tests/health-notify-cycle.test.js` (create), `tests/providers-health-signal.test.js`.
 
 **Interfaces:**
 - Consumes:
   - `getProviderHealth().external` and `recordExternal` (Task 3);
-  - `fill` from `i18n.js` (already exported).
-- Produces: the same signal object shape `{ id: "providers", severity, state, label, value, issueLabel?, actionLabel?, actionHref? }`. `state` can now also be `"info"`.
+  - `fill` from `i18n.js`;
+  - the existing `shouldNotify` and `pruneResolved`.
+- Produces:
+  - The signal `{ id: "externalEngines", severity: "info"|null, state: "info"|"ok", label, value, issueLabel?, actionLabel?, actionHref? }`. It is `null` (no card at all) when the orchestrator is not initialized or no external engine is being watched.
+  - `runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) -> Promise<{ lastMap, dirty, pushed: string[] }>`.
 
-Rules (review round 1, C3):
-- External engines **never** produce a warn, and so never a health-monitor push.
+Rules:
+- **Review round 1, C3:** external engines never warn and never push.
+- **Review round 2, item 1:** external engines never emit anything under id `"providers"`.
+  - The health monitor's dedupe is per issue id. `pruneResolved` keeps a 24 h marker alive while *any* issue with that id is active, warn or info.
+  - A shared id would therefore let an external "info" keep the resident warn's marker alive. The next real resident outage within 24 h would then be silently suppressed.
+  - So external engines get their own id, `externalEngines`, and `providersSignal`'s output stays exactly as today.
 - Each engine contributes one line:
   - `"<label> on <host>: up"`;
-  - `"<label> on <host>: down for <age> (externally managed)"` if it answered at least once in this process;
+  - `"<label> on <host>: down for <age> (externally managed)"` if it answered at least once in this process (`<1m` instead of `now`);
   - `"<label> on <host>: not reachable from this instance"` if it never did.
-- If any external engine is not up, and no resident model is in warn, the signal is `info`. Its issue label joins the not-up lines with `"; "`.
-- If a resident model is in warn, the signal returns exactly today's warn object, byte for byte, and the external lines are not added.
-- If there are no resident entries and no external entries, the signal is `off` as today.
+- If any engine is not up, the signal is `info` and its issue label joins the not-up lines with `"; "`. Otherwise it is `ok`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing signal tests**
 
-In `tests/providers-health-signal.test.js`, change the provider-health import to:
+Create `tests/external-engines-signal.test.js`:
 
 ```js
+/**
+ * externalEngines nest signal (spec 2026-09-23 external-engine-provider §2.4,
+ * revised in review rounds 1+2): its OWN id, info at most, never warn, and the
+ * resident `providers` signal never carries external content.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { collectHealthSignals, invalidateHealthCache } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
 } from "../servers/gateway/provider-health.js";
-```
+import { _resetReceiveHealth } from "../servers/sharing/receive-health.js";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
-Append to the END of the file:
-
-```js
-// --- external engines (spec 2026-09-23 external-engine-provider §2.4, as
-// revised in review round 1: info only, NEVER warn — raven's prod windows stop
-// halogen for hours by design, and a nest warn is a high-priority push) -------
-
+const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
 const RAVEN = "http://10.0.0.126:8030/v1";
+const db = { execute: async () => ({ rows: [] }) };
+const at = (ms) => () => ms;
+
+async function signals(opts = {}) {
+  _resetReceiveHealth();
+  invalidateHealthCache();
+  const r = await collectHealthSignals(db, opts);
+  return {
+    ext: r.details.find((d) => d.id === "externalEngines"),
+    extIssue: r.issues.find((i) => i.id === "externalEngines"),
+    prov: r.details.find((d) => d.id === "providers"),
+    provIssue: r.issues.find((i) => i.id === "providers"),
+    all: r,
+  };
+}
 function ext(ready, nowMs, extra = {}) {
   recordExternal("raven-flash-next", { ready, nowMs, baseUrl: RAVEN, engineHost: "raven", label: "halogen", ...extra });
 }
-const HOUR = 60 * MIN;
 
-test("external only, up → ok, no issue, value 'halogen on raven: up'", async () => {
+test("no external engines watched → no externalEngines card at all", async () => {
+  _resetProviderHealth();
+  setResidencyInitialized();
+  const { ext: card, all } = await signals({ now: at(NOW) });
+  assert.equal(card, undefined);
+  assert.ok(all.details.some((d) => d.id === "disk"), "siblings unaffected by the null filter");
+});
+
+test("up → ok card 'halogen on raven: up', no issue", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(true, NOW);
-  const { detail, issue } = await providers({ now: at(NOW) });
-  assert.equal(detail.state, "ok");
-  assert.equal(issue, undefined);
-  assert.equal(detail.value, "halogen on raven: up");
+  const { ext: card, extIssue } = await signals({ now: at(NOW) });
+  assert.equal(card.state, "ok");
+  assert.equal(card.value, "halogen on raven: up");
+  assert.equal(extIssue, undefined);
 });
 
-test("never answered in this process → INFO 'not reachable from this instance', never warn, nest stays ok", async () => {
+test("never answered → info 'not reachable from this instance'; nest stays ok", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
-  ext(false, NOW, { error: "timeout after 3000ms" });
-  const { detail, issue, all } = await providers({ now: at(NOW + 10 * HOUR) });
-  assert.equal(detail.state, "info");
-  assert.equal(issue.severity, "info");
-  assert.equal(issue.label, "halogen on raven: not reachable from this instance");
+  ext(false, NOW);
+  const { ext: card, extIssue, all } = await signals({ now: at(NOW + 10 * HOUR) });
+  assert.equal(card.state, "info");
+  assert.equal(extIssue.severity, "info");
+  assert.equal(extIssue.label, "halogen on raven: not reachable from this instance");
   assert.equal(all.ok, true);
 });
 
-test("answered once, then down for HOURS → still info (never warn): 'down for 10h (externally managed)'", async () => {
+test("answered once, down for HOURS → still info: 'down for 10h (externally managed)'; never a warn", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(true, NOW);
   ext(false, NOW + MIN);
-  const { detail, issue, all } = await providers({ now: at(NOW + 10 * HOUR) });
-  assert.equal(detail.state, "info");
-  assert.equal(issue.severity, "info");
-  assert.equal(issue.label, "halogen on raven: down for 10h (externally managed)");
-  assert.equal(all.ok, true);
-  assert.equal(all.issues.filter((i) => i.severity === "warn").length, 0, "nothing the health monitor would push");
+  const { extIssue, all } = await signals({ now: at(NOW + 10 * HOUR) });
+  assert.equal(extIssue.severity, "info");
+  assert.equal(extIssue.label, "halogen on raven: down for 10h (externally managed)");
+  assert.equal(all.issues.filter((i) => i.severity === "warn" && i.id === "externalEngines").length, 0);
 });
 
 test("down for under a minute reads '<1m', never 'now'", async () => {
@@ -1952,78 +2154,153 @@ test("down for under a minute reads '<1m', never 'now'", async () => {
   setResidencyInitialized();
   ext(true, NOW);
   ext(false, NOW + 1000);
-  const { detail } = await providers({ now: at(NOW + 20_000) });
-  assert.match(detail.value, /down for <1m \(externally managed\)/);
+  const { ext: card } = await signals({ now: at(NOW + 20_000) });
+  assert.equal(card.value, "halogen on raven: down for <1m (externally managed)");
 });
 
-test("a resident-model warn is byte-identical with or without an external engine down", async () => {
+test("the resident providers signal carries NO external content and no external-driven issue", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
-  recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
-  const alone = (await providers({ now: at(NOW + THRESHOLD + MIN) })).all.issues.find((i) => i.id === "providers");
+  ext(false, NOW); // external engine never reachable
+  let r = await signals({ now: at(NOW + HOUR) });
+  assert.equal(r.prov.state, "off", "no resident rows → providers is off, exactly as before");
+  assert.equal(r.provIssue, undefined);
 
-  _resetProviderHealth();
-  setResidencyInitialized();
-  recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
-  ext(true, NOW);
-  ext(false, NOW + MIN);
-  const r = await providers({ now: at(NOW + THRESHOLD + MIN) });
-  const withExt = r.all.issues.find((i) => i.id === "providers");
-  assert.deepEqual(withExt, alone);
-  assert.equal(r.detail.state, "warn");
-  assert.equal(r.all.issues.filter((i) => i.id === "providers").length, 1);
-});
-
-test("resident ok + an external engine not reachable → info; value carries both parts", async () => {
-  _resetProviderHealth();
-  setResidencyInitialized();
   recordResidency("crow-voice", { ready: true, nowMs: NOW, baseUrl: "http://x:8011/v1", embed: false });
-  ext(false, NOW);
-  const { detail } = await providers({ now: at(NOW) });
-  assert.equal(detail.state, "info");
-  assert.equal(detail.value, "1 resident · halogen on raven: not reachable from this instance");
+  r = await signals({ now: at(NOW + HOUR) });
+  assert.equal(r.prov.state, "ok");
+  assert.equal(r.prov.value, "1 resident");
+  assert.equal(r.provIssue, undefined);
 });
 
 test("free-text label/host render verbatim through fill() — '$&' is not a replacement pattern", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   recordExternal("raven-flash-next", { ready: true, nowMs: NOW, baseUrl: RAVEN, engineHost: "r$&n", label: "h$'x" });
-  const { detail } = await providers({ now: at(NOW) });
-  assert.equal(detail.value, "h$'x on r$&n: up");
+  const { ext: card } = await signals({ now: at(NOW) });
+  assert.equal(card.value, "h$'x on r$&n: up");
 });
 
-test("Spanish: the info copy is translated and still names engine + host", async () => {
+test("Spanish: translated label and lines", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   ext(false, NOW);
-  invalidateHealthCache();
-  _resetReceiveHealth();
-  const r = await collectHealthSignals(db, { now: at(NOW), lang: "es" });
-  const issue = r.issues.find((i) => i.id === "providers");
-  assert.equal(issue.severity, "info");
-  assert.match(issue.label, /halogen en raven: no accesible desde esta instancia/);
+  const { ext: card, extIssue } = await signals({ now: at(NOW), lang: "es" });
+  assert.equal(card.label, "Motores externos");
+  assert.equal(extIssue.label, "halogen en raven: no accesible desde esta instancia");
 });
 
-test("EN and ES render for the 3 new external-engine keys", () => {
-  const keys = [
-    "signals.providers.externalUp",
-    "signals.providers.externalDownFor",
-    "signals.providers.externalUnreachable",
-  ];
-  for (const key of keys) {
+test("EN and ES render for the 5 externalEngines keys", () => {
+  for (const key of [
+    "signals.externalEngines.label", "signals.externalEngines.up", "signals.externalEngines.downFor",
+    "signals.externalEngines.unreachable", "signals.externalEngines.action",
+  ]) {
     for (const lang of ["en", "es"]) assert.notEqual(t(key, lang), key, `missing i18n for ${key} (${lang})`);
     assert.notEqual(t(key, "es"), t(key, "en"), `${key}: es must be a real translation`);
   }
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Write the failing monitor-cycle test**
 
-Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-health-signal.test.js`
+Create `tests/health-notify-cycle.test.js`:
 
-Expected: FAIL. The new external tests fail: for example, "external only, up" gets state `off` and a different value, and the i18n test reports missing keys. All pre-existing tests still pass.
+```js
+/**
+ * The health monitor's notify cycle (post-listen.js), driven end to end through
+ * collectHealthSignals + the extracted runHealthNotifyCycle (review round 2,
+ * item 1). The dedupe map is keyed by issue id with a 24 h window, and
+ * pruneResolved keeps a marker alive while ANY issue with that id is active —
+ * so if external engines shared the "providers" id, an external info issue
+ * would keep the resident warn's marker alive and swallow the next real
+ * resident push. This test pins that it does not.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle,
+} from "../servers/gateway/dashboard/panels/nest/health-signals.js";
+import {
+  setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
+} from "../servers/gateway/provider-health.js";
+import { _resetReceiveHealth } from "../servers/sharing/receive-health.js";
 
-- [ ] **Step 3: Add the i18n keys**
+const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+const VOICE = "http://x:8011/v1";
+const RAVEN = "http://10.0.0.126:8030/v1";
+const db = { execute: async () => ({ rows: [] }) };
+
+async function monitorCycle(lastMap, nowMs) {
+  _resetReceiveHealth();
+  invalidateHealthCache();
+  const signals = await collectHealthSignals(db, { now: () => nowMs });
+  const pushed = [];
+  const r = await runHealthNotifyCycle({
+    issues: signals.issues, lastMap, nowMs,
+    notify: async (issue) => { pushed.push(issue.id); },
+  });
+  return { lastMap: r.lastMap, pushed, issues: signals.issues };
+}
+
+test("resident warn → pushed; recovers while an external engine is down; warns again within 24h → pushed AGAIN", async () => {
+  _resetProviderHealth();
+  setResidencyInitialized();
+
+  // Cycle 1: crow-voice never answered for 11 min → warn → push.
+  recordResidency("crow-voice", { ready: false, nowMs: NOW, baseUrl: VOICE, embed: false });
+  let c = await monitorCycle({}, NOW + 11 * MIN);
+  assert.ok(c.pushed.includes("providers"), "first resident outage pushes");
+
+  // Between cycles: crow-voice recovers; raven's halogen answered, then stopped (a prod window).
+  recordResidency("crow-voice", { ready: true, nowMs: NOW + 20 * MIN, baseUrl: VOICE, embed: false });
+  recordExternal("raven-flash-next", { ready: true, nowMs: NOW + 20 * MIN, baseUrl: RAVEN, engineHost: "raven", label: "halogen" });
+  recordExternal("raven-flash-next", { ready: false, nowMs: NOW + 25 * MIN, baseUrl: RAVEN, engineHost: "raven", label: "halogen" });
+
+  // Cycle 2: resident fine, external down → only an externalEngines INFO issue.
+  c = await monitorCycle(c.lastMap, NOW + 30 * MIN);
+  assert.equal(c.issues.find((i) => i.id === "providers"), undefined, "no providers issue while the resident is fine");
+  assert.equal(c.issues.find((i) => i.id === "externalEngines")?.severity, "info");
+  assert.equal(c.lastMap.providers, undefined, "the resident incident's marker was pruned");
+  assert.ok(!c.pushed.includes("externalEngines"), "external engines never push");
+
+  // Cycle 3 (well inside 24 h of cycle 1): crow-voice down again for 20 min → MUST push again.
+  recordResidency("crow-voice", { ready: false, nowMs: NOW + 40 * MIN, baseUrl: VOICE, embed: false });
+  c = await monitorCycle(c.lastMap, NOW + 60 * MIN);
+  assert.ok(c.pushed.includes("providers"), "a new resident outage within 24 h is pushed, not swallowed");
+});
+
+test("runHealthNotifyCycle: warn-only, 24 h window, a failed notify leaves no marker, resolved ids pruned", async () => {
+  const warn = { id: "disk", severity: "warn", label: "Disk" };
+  const info = { id: "peers", severity: "info", label: "Peers" };
+  let r = await runHealthNotifyCycle({ issues: [warn, info], lastMap: {}, nowMs: 1000, notify: async () => {} });
+  assert.deepEqual(r.pushed, ["disk"]);
+  assert.deepEqual(r.lastMap, { disk: 1000 });
+  assert.equal(r.dirty, true);
+  r = await runHealthNotifyCycle({ issues: [warn], lastMap: r.lastMap, nowMs: 2000, notify: async () => {} });
+  assert.deepEqual(r.pushed, [], "inside the 24 h window");
+  assert.equal(r.dirty, false);
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    r = await runHealthNotifyCycle({ issues: [{ id: "backup", severity: "warn" }], lastMap: {}, nowMs: 1, notify: async () => { throw new Error("ntfy down"); } });
+  } finally { console.warn = origWarn; }
+  assert.deepEqual(r.lastMap, {}, "a failed notification is retried next cycle");
+  r = await runHealthNotifyCycle({ issues: [], lastMap: { disk: 1000 }, nowMs: 3000, notify: async () => {} });
+  assert.deepEqual(r.lastMap, {});
+  assert.equal(r.dirty, true);
+});
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/external-engines-signal.test.js tests/health-notify-cycle.test.js`
+
+Expected: FAIL.
+- `health-notify-cycle.test.js` fails to load, because `runHealthNotifyCycle` is not exported.
+- In `external-engines-signal.test.js`, every test that expects a card fails (`card` is `undefined`), and the i18n test reports missing keys.
+
+- [ ] **Step 4: Add the i18n keys**
 
 In `servers/gateway/dashboard/shared/i18n.js`, find:
 
@@ -2035,15 +2312,17 @@ Replace it with:
 
 ```js
   "signals.providers.action": { en: "Open model health", es: "Ver estado de modelos" },
-  // External engines (spec 2026-09-23 external-engine-provider §2.4) — info only, never warn
-  "signals.providers.externalUp": { en: "{label} on {host}: up", es: "{label} en {host}: activo" },
-  "signals.providers.externalDownFor": { en: "{label} on {host}: down for {age} (externally managed)", es: "{label} en {host}: caído desde hace {age} (gestionado externamente)" },
-  "signals.providers.externalUnreachable": { en: "{label} on {host}: not reachable from this instance", es: "{label} en {host}: no accesible desde esta instancia" },
+  // External engines (spec 2026-09-23 external-engine-provider §2.4) — own signal, info at most
+  "signals.externalEngines.label": { en: "External engines", es: "Motores externos" },
+  "signals.externalEngines.up": { en: "{label} on {host}: up", es: "{label} en {host}: activo" },
+  "signals.externalEngines.downFor": { en: "{label} on {host}: down for {age} (externally managed)", es: "{label} en {host}: caído desde hace {age} (gestionado externamente)" },
+  "signals.externalEngines.unreachable": { en: "{label} on {host}: not reachable from this instance", es: "{label} en {host}: no accesible desde esta instancia" },
+  "signals.externalEngines.action": { en: "Open providers", es: "Ver proveedores" },
 ```
 
-- [ ] **Step 4: Rewrite `providersSignal`**
+- [ ] **Step 5: Add the signal, register it, and extract the notify cycle**
 
-In `servers/gateway/dashboard/panels/nest/health-signals.js`, change the import:
+In `servers/gateway/dashboard/panels/nest/health-signals.js`, change:
 
 ```js
 import { t } from "../../shared/i18n.js";
@@ -2055,127 +2334,243 @@ to:
 import { t, fill } from "../../shared/i18n.js";
 ```
 
-In the header comment, replace the line:
+In the header comment, directly after the line:
 
 ```
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
 ```
 
-with:
+insert:
 
 ```
- *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
- *               + external engines (info only — never warn, never a push)
+ *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
+ *               info at most — never warn, never a push; no card when none
 ```
 
-Replace the whole `async function providersSignal(lang, nowFn) { … }` with the version below. Everything up to and including the `if (down.length > 0) { … return warn }` block is today's code unchanged, except for the widened `off` check:
+Directly below the closing `}` of `async function providersSignal(…)` (which stays unchanged), insert:
 
 ```js
-async function providersSignal(lang, nowFn) {
+// External engines (spec 2026-09-23 external-engine-provider §2.4, review
+// rounds 1+2). OWN id, never "providers": the monitor's dedupe is per issue id
+// and pruneResolved keeps a marker alive while ANY issue with that id is active,
+// so an external info under "providers" would keep the resident warn's marker
+// alive and swallow the next real resident push. INFO AT MOST, never warn:
+// these engines are operated from outside Crow (raven's prod windows stop
+// halogen for hours by design). Labels/hosts are free text replicated from
+// peers — fill() (no $-pattern mangling); the nest escapes HTML.
+async function externalEnginesSignal(lang, nowFn) {
   const health = getProviderHealth();
-  const label = t("signals.providers.label", lang);
-  const action = {
-    actionLabel: t("signals.providers.action", lang),
-    actionHref: "/dashboard/settings?section=llm&tab=health",
-  };
-
-  if (!health.initialized) {
-    return { id: "providers", severity: null, state: "off", label, value: t("signals.providers.notStarted", lang) };
-  }
-  const names = Object.keys(health.providers);
   const external = health.external || {};
-  const extNames = Object.keys(external);
-  if (names.length === 0 && extNames.length === 0) {
-    return { id: "providers", severity: null, state: "off", label, value: t("signals.providers.off", lang) };
-  }
-
+  const names = Object.keys(external);
+  if (!health.initialized || names.length === 0) return null; // nothing watched → no card
+  const label = t("signals.externalEngines.label", lang);
   const now = nowFn();
-  const threshold = notReadyWarnMs();
-  const down = [];
-  let readyCount = 0;
-  let warmingCount = 0;
-  for (const name of names) {
-    const p = health.providers[name];
-    if (p.ready) { readyCount++; continue; }
-    const origin = p.lastReadyAt ?? p.firstOwnedAt;
-    if (now - origin >= threshold) {
-      down.push({ name, embed: !!p.embed, age: formatAge(now - origin) });
-    } else {
-      warmingCount++;
-    }
-  }
-
-  if (down.length > 0) {
-    const value = down.length === 1
-      ? t("signals.providers.down", lang).replace("{name}", down[0].name).replace("{age}", down[0].age)
-      : t("signals.providers.downMulti", lang).replace("{n}", String(down.length));
-
-    // Always NAME the provider when exactly one is down — this string becomes the
-    // notification title (post-listen.js sets title: issue.label). The embed-vs-voice
-    // split is derived from the provider's own embed flag, never hardcoded: crow only
-    // ever owns crow-voice, which carries no embed model.
-    let issueLabel;
-    if (down.length === 1) {
-      const key = down[0].embed ? "signals.providers.downIssueEmbed" : "signals.providers.downIssue";
-      issueLabel = t(key, lang).replace("{name}", down[0].name);
-    } else {
-      issueLabel = t("signals.providers.downIssueMulti", lang)
-        .replace("{n}", String(down.length))
-        .replace("{names}", down.map(d => d.name).join(", "));
-    }
-    return { id: "providers", severity: "warn", state: "warn", label, value, issueLabel, ...action };
-  }
-
-  const parts = [];
-  if (names.length > 0) {
-    parts.push(t("signals.providers.resident", lang).replace("{n}", String(readyCount)));
-    if (warmingCount > 0) {
-      parts.push(t("signals.providers.warming", lang).replace("{n}", String(warmingCount)));
-    }
-  }
-
-  // External engines (spec 2026-09-23 §2.4, revised in review round 1): INFO
-  // ONLY, NEVER WARN. They are operated from outside Crow — raven's prod
-  // windows stop halogen for hours by design — and a warn here becomes a
-  // high-priority push via the health monitor. Labels/hosts are free text
-  // replicated from peers: fill() (no $-pattern mangling); the nest escapes HTML.
+  const lines = [];
   const notUp = [];
-  for (const name of extNames) {
+  for (const name of names) {
     const e = external[name];
     const vars = { label: e.label || name, host: e.engineHost || "?" };
     if (e.ready) {
-      parts.push(fill(t("signals.providers.externalUp", lang), vars));
+      lines.push(fill(t("signals.externalEngines.up", lang), vars));
       continue;
     }
     let line;
     if (e.lastReadyAt != null) {
       const age = formatAge(now - e.lastReadyAt);
-      line = fill(t("signals.providers.externalDownFor", lang), { ...vars, age: age === "now" ? "<1m" : age });
+      line = fill(t("signals.externalEngines.downFor", lang), { ...vars, age: age === "now" ? "<1m" : age });
     } else {
-      line = fill(t("signals.providers.externalUnreachable", lang), vars);
+      line = fill(t("signals.externalEngines.unreachable", lang), vars);
     }
-    parts.push(line);
+    lines.push(line);
     notUp.push(line);
   }
-
   if (notUp.length > 0) {
-    return { id: "providers", severity: "info", state: "info", label, value: parts.join(" · "), issueLabel: notUp.join("; "), ...action };
+    return {
+      id: "externalEngines", severity: "info", state: "info", label,
+      value: lines.join(" · "), issueLabel: notUp.join("; "),
+      actionLabel: t("signals.externalEngines.action", lang),
+      actionHref: "/dashboard/settings?section=llm&tab=providers",
+    };
   }
-  return { id: "providers", severity: null, state: "ok", label, value: parts.join(" · ") };
+  return { id: "externalEngines", severity: null, state: "ok", label, value: lines.join(" · ") };
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+In `collectHealthSignals`, find:
 
-Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/providers-health-signal.test.js tests/i18n-global-parity.test.js tests/messages-health-signal.test.js`
+```js
+    providersSignal(lang, nowFn),
+  ].map(p => Promise.resolve(p).catch(err => ({
+```
 
-Expected: PASS, 0 failures. The pre-existing residency tests, together with the byte-identical test, prove the resident-model warn path is unchanged.
+Replace it with:
 
-- [ ] **Step 6: Commit**
+```js
+    providersSignal(lang, nowFn),
+    externalEnginesSignal(lang, nowFn),
+  ].map(p => Promise.resolve(p).catch(err => ({
+```
+
+Then find:
+
+```js
+  const details = rawSignals.map(s => ({
+```
+
+Replace it with:
+
+```js
+  // A signal may opt out by returning null (externalEngines when nothing is watched).
+  const present = rawSignals.filter(Boolean);
+  const details = present.map(s => ({
+```
+
+and find:
+
+```js
+  const issues = rawSignals
+```
+
+Replace it with:
+
+```js
+  const issues = present
+```
+
+Directly below the closing `}` of `export function pruneResolved(…)`, insert:
+
+```js
+/**
+ * One health-monitor notify pass — extracted from post-listen.js so it is
+ * testable (external-engine review round 2). Pushes each WARN issue that
+ * shouldNotify() allows (24 h per-id window), stamping its marker only when
+ * `notify` resolves; then drops markers for ids no longer active (warn OR
+ * info — pruneResolved). Returns the new map, whether it changed, and the ids
+ * pushed. `notify(issue)` is the caller's createNotification wrapper.
+ */
+export async function runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) {
+  const map = { ...lastMap };
+  let dirty = false;
+  const pushed = [];
+  for (const issue of issues) {
+    if (issue.severity !== "warn") continue; // info issues stay strip-only
+    if (!shouldNotify(map, issue.id, nowMs)) continue;
+    try {
+      await notify(issue);
+      map[issue.id] = nowMs;
+      dirty = true;
+      pushed.push(issue.id);
+    } catch (notifErr) {
+      console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
+    }
+  }
+  const pruned = pruneResolved(map, issues.map((i) => i.id));
+  if (Object.keys(pruned).length !== Object.keys(map).length) dirty = true;
+  return { lastMap: pruned, dirty, pushed };
+}
+```
+
+- [ ] **Step 6: Make post-listen use the extracted cycle**
+
+In `servers/gateway/boot/post-listen.js`, find:
+
+```js
+        const { collectHealthSignals, shouldNotify, invalidateHealthCache, pruneResolved } =
+          await import("../dashboard/panels/nest/health-signals.js");
+```
+
+Replace it with:
+
+```js
+        const { collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle } =
+          await import("../dashboard/panels/nest/health-signals.js");
+```
+
+Then find this whole block, from `const nowMs = Date.now();` through the closing `}` of the prune `if`:
+
+```js
+          const nowMs = Date.now();
+          let mapDirty = false;
+
+          for (const issue of signals.issues) {
+            if (issue.severity !== "warn") continue; // info issues stay strip-only
+            if (!shouldNotify(lastMap, issue.id, nowMs)) continue;
+
+            try {
+              await createNotification(db, {
+                type: "system",
+                source: `health-monitor:${issue.id}`,
+                priority: "high",
+                title: issue.label,
+                body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+                action_url: "/dashboard/nest",
+              });
+              lastMap[issue.id] = nowMs;
+              mapDirty = true;
+            } catch (notifErr) {
+              console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
+            }
+          }
+
+          // Incident-scoped dedupe: drop markers for issues no longer present
+          // (warn OR info), so a resolved-then-recurring issue notifies again
+          // instead of staying silent under the 24h window. A warn→info
+          // downgrade keeps the marker (id still active = same incident).
+          const activeIds = signals.issues.map(i => i.id);
+          const pruned = pruneResolved(lastMap, activeIds);
+          if (Object.keys(pruned).length !== Object.keys(lastMap).length) {
+            lastMap = pruned;
+            mapDirty = true;
+          }
+```
+
+Replace it with:
+
+```js
+          // Push new warn issues (24 h per-id window), then incident-scoped
+          // dedupe: markers for ids no longer present (warn OR info) are
+          // dropped, so a resolved-then-recurring issue notifies again. A
+          // warn→info downgrade keeps the marker (id still active = same
+          // incident) — which is exactly why external engines have their OWN id.
+          const cycle = await runHealthNotifyCycle({
+            issues: signals.issues,
+            lastMap,
+            nowMs: Date.now(),
+            notify: (issue) => createNotification(db, {
+              type: "system",
+              source: `health-monitor:${issue.id}`,
+              priority: "high",
+              title: issue.label,
+              body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+              action_url: "/dashboard/nest",
+            }),
+          });
+          lastMap = cycle.lastMap;
+          const mapDirty = cycle.dirty;
+```
+
+The `if (mapDirty) { … persist … }` block that follows stays as it is.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/external-engines-signal.test.js tests/health-notify-cycle.test.js tests/providers-health-signal.test.js tests/health-monitor-dedupe.test.js tests/messages-health-signal.test.js tests/i18n-global-parity.test.js`
+
+Expected: PASS, 0 failures. `providers-health-signal.test.js` is unmodified and passes untouched, which proves the resident signal is unchanged.
+
+- [ ] **Step 8: Confirm the cycle test catches the old shared-id design, then revert**
+
+Temporarily change `id: "externalEngines"` to `id: "providers"` in **both** return statements of `externalEnginesSignal`. Re-run:
+
+`export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && cd ~/crow-wt-external-engine && npm test -- tests/health-notify-cycle.test.js`
+
+Expected: FAIL at the cycle-2 or cycle-3 assertion. Cycle 2 has an info issue with id `providers`, so the marker survives, and cycle 3's resident outage is not pushed. Revert both ids to `"externalEngines"`, re-run, and expect PASS. Run `git diff --stat` to confirm the revert left no stray change.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 cd ~/crow-wt-external-engine
-git commit servers/gateway/dashboard/panels/nest/health-signals.js servers/gateway/dashboard/shared/i18n.js tests/providers-health-signal.test.js -m "feat(nest): providers signal lists external engines at info severity only (never a push)"
+git add tests/external-engines-signal.test.js tests/health-notify-cycle.test.js
+git commit servers/gateway/dashboard/panels/nest/health-signals.js servers/gateway/boot/post-listen.js servers/gateway/dashboard/shared/i18n.js tests/external-engines-signal.test.js tests/health-notify-cycle.test.js -m "feat(nest): separate externalEngines signal (info at most); health-monitor notify cycle extracted and tested"
 git show --stat HEAD
 ```
 
@@ -2473,12 +2868,14 @@ The models.json reconciler keeps a stored `engine` when it re-asserts `gpu_polic
 - A tick probes and prunes only when the providers config came from the DB (`_source === "db:providers"`). The models.json fallback that `loadProviders()` serves after a cache invalidation or a DB error carries no markers, so such a tick is a no-op and every clock survives.
 - Each instance probes from its own network position. A peer on another LAN may even reach a *different* device at the same private IP (for example `10.0.0.126`). That is harmless: the result is info-only, and the request is a header-less GET on `/models`.
 
-**Surfacing.** The nest `providers` signal lists external engines at **info severity only, never warn**, so they never trigger a health-monitor push. Each engine gets one line:
+**Surfacing.** External engines have their **own** nest signal, `externalEngines`, at **info severity at most, never warn**, so they never trigger a health-monitor push. There is no card when no engine is watched. Each engine gets one line:
 - `"halogen on raven: up"`;
 - `"… down for <age> (externally managed)"` once it has answered in this process;
 - `"… not reachable from this instance"` if it never has.
 
-Engines run outside Crow are stopped on purpose: raven's production windows stop halogen for hours, and Crow has no route-away. A resident-model warn is unchanged, and when it fires it is the signal's one issue.
+Engines run outside Crow are stopped on purpose: raven's production windows stop halogen for hours, and Crow has no route-away.
+
+The engines deliberately do **not** share the `providers` id. The monitor's dedupe is per issue id with a 24 h window, and a marker survives while any issue with that id is active. An external info issue under `providers` would therefore swallow the next real resident-model push. The resident `providers` signal is exactly as before.
 
 The Settings > LLM > Providers dot for a marked row shows this instance's probe result: reachable, not reachable, or not probed yet.
 
@@ -2598,3 +2995,12 @@ Then verify each of the following in order:
 | S3 | `await res.body.cancel()` ran outside the timeout race and could extend the tick. | Task 3: the cancel is now fire-and-forget, with a `.catch`. |
 | S4 | The per-network-position caveat was undocumented. | Task 6 docs and spec §2.3: a peer on another LAN may reach a different device at the same private IP. This is harmless, since the result is info-only and the request is a header-less GET on `/models`. |
 | Ops | The operational step marked a dead endpoint and did not verify replication. | The step is rewritten. It marks only `raven-flash-next`, after asserting its `base_url`; `raven-halogen-smoke` (`:8731`, dead) is left for Kevin. It sets `CROW_DATA_DIR=/home/kh0pp/.crow/data` explicitly, checks that the `sync_outbox` providers count grows by exactly 1, looks for the drain log line, and verifies the marker on r4 read-only. Spec §2.6 is updated to match. |
+
+### Round 2 (binding rulings from the coordinator, 2026-09-23)
+
+| # | Finding | Resolution in this plan |
+|---|---|---|
+| 1 (CRITICAL) | **Issue-id collision.** External engines emitted issues under `providers`. `pruneResolved` together with the per-id 24 h `shouldNotify` window (`post-listen.js:304-331`) let an external *info* issue keep the resident warn's marker alive and suppress the next real resident push. | Task 4 is rewritten. External engines get their own signal, `externalEnginesSignal` (id `externalEngines`, own label and 5 `signals.externalEngines.*` keys, strip-only, info at most, `null` / no card when nothing is watched). `providersSignal` is untouched, and its tests pass unmodified. The notify loop is extracted from `post-listen.js` into `runHealthNotifyCycle`, which post-listen now calls. New `tests/health-notify-cycle.test.js` drives `collectHealthSignals` + `runHealthNotifyCycle`: resident warn → pushed; the resident recovers while halogen is down; the resident warns again within 24 h → pushed again. Step 8 has the implementer temporarily switch the id to `providers`, see the test fail, and revert. |
+| 2 (CRITICAL) | **The malformed-policy rule broke spread writes.** A replicated `'[1]'` or `'7'` `gpu_policy`, re-sent by a spread write, was rejected. | Task 2: a malformed or non-object incoming policy is `EXTERNAL_ENGINE_INVALID` only when it is not byte-equal or canonically equal to the stored value (`samePolicyValue`). When equal, it is judged as unchanged. `repairProviderHosts` gets per-row try/catch. New parameterised test: raw-SQL-seeded `'[1]'` and `'7'` rows survive the tab's enable spread, `reenableProviderPreservingContent`, `repairProviderHosts` and the reconciler. |
+| 3 | **The per-row catches were too broad and logged too often.** | Task 2: the reconciler and `repairProviderHosts` swallow only errors whose `code` starts with `EXTERNAL_ENGINE_` (`isEngineWriteError`) and rethrow everything else. New tests make providers INSERTs fail with `SQLITE_BUSY` and assert that the error still surfaces from both. Skips are logged through `noteEngineSkip`, once per (reconcile or repair, row id) per process. The isolation test runs two passes and asserts one log line with `failed` counted each pass. |
+| 4 | **The lifecycle test's expected-failure text was wrong.** `lookupProvider` ignored `opts.cfg`, so without the guard the result would have been `unknown_provider`. | Task 1, new Step 2b: `lookupProvider(providerId, cfg = loadProviders())`, with `ensureModelWarm` and `releaseModel` passing `opts.cfg`. This is behaviour-preserving in production. The test now injects its row through that seam. The stated failure without the guard is `reason: "bundle_start_failed:no network in tests"` with 2 fetch calls, and `releaseModel` missing `external: true`. |
