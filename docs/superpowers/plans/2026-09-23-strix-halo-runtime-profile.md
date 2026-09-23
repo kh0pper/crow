@@ -24,7 +24,10 @@
   - Probe fields are **additive only**. Every existing field keeps its meaning, and `vramMb` still reports the Vulkan `DEVICE_LOCAL` heap.
   - `probe.js` must NOT import `gpu-arch.js` or `hardware-gate.js`.
   - The parsers stay pure and exported. Sysfs reads go through the injected `fs`.
-  - On the discrete path `fitBadge` is byte-for-byte unchanged. The unified path never adds VRAM credit.
+  - `unified`: when vulkaninfo answered, `INTEGRATED_GPU` → `true` and `DISCRETE_GPU` → `false`. Other Vulkan types, and the no-Vulkan (rocminfo) path, use the sysfs heuristic: an AMD GPU with `mem_info_vram_total` ≤ 2048 MiB plus a `mem_info_gtt_total`. darwin keeps `unified: null`.
+  - `gttTotalMb`/`gttUsedMb` are populated only when `unified === true`, from the amdgpu card with the smallest `mem_info_vram_total` that has GTT (the iGPU).
+  - `fitBadge` on discrete and unknown hosts is byte-for-byte unchanged. The unified path never adds VRAM credit. The GTT ceiling applies only to a **GTT-expanded** APU (`unified === true`, `gttTotalMb` and `ramTotalMb` known, `gttTotalMb >= 0.75 × ramTotalMb`): `min_ram_mb <= ramAvailableMb` → `fits`, `min_ram_mb > gttTotalMb` → `wont_fit`, else `tight`. Every other unified host uses today's formula minus the VRAM credit.
+  - The CLI is a second `state.json` writer: after every write it re-reads and verifies, retries once, then exits 3 naming a concurrent gateway write.
   - **No new badge value** (D3). `FIT_ORDER`, the panel client script and the panel tests are untouched.
   - Per-model overrides live in `state.json` under `runtimeOverrides`. They never go in `gpu_policy` or any DB column, because they must never replicate.
   - Resolve order: per-model override (keyed `p.gpuPolicy?.catalogId || providerName`), then host override, then stock release through `ensureRuntime`. A missing `bin` warns once per bin and falls through to the next layer. A per-model override skips `ensureRuntime` and therefore skips `min_runtime_version`.
@@ -36,9 +39,9 @@
 
 ## Review Focus
 
-1. **An override-only start never warms the probe cache.** With a per-model or host override set, `resolveNativeBinPath` returns before it probes. The gfx1151 profile would then silently never apply on exactly the host this work is for. Expected: the start path warms the probe itself (`getCachedProbeFn() || await reprobeFn()`). A probe that throws means "no profile", never a failed start. Pinned in Task 5, Steps 1 and 3.
+1. **An override-only start never warms the probe cache.** With a per-model or host override set, `resolveNativeBinPath` returns before it probes. The gfx1151 profile would then silently never apply on exactly the host this work is for. Expected: `resolveNativeBinPath` warms the probe BEFORE any override early-return, so override and stock paths both leave a warm cache, and `startNativeAndAwaitReady` only reads `getCachedProbeFn()` (null → no profile). A probe that throws on an override path means "no profile", never a failed start; on the stock path it still surfaces, as today. Pinned in Task 3, Step 1 and Task 5, Step 1.
 2. **An override set under the wrong id never applies, silently.** An operator may type a provider name such as `crow-chat` where the row carries `gpu_policy.catalogId`. Expected: the CLI warns when the id matches no catalog id and no registered `catalogId`, but still stores it, since the provider-name fallback is legal. Pinned in Task 4, Step 1.
-3. **A read-only CLI command must not write state.** `getRuntimeOverride()` bootstraps from `CROW_LLAMA_SERVER_BIN` and persists, so a `list` or `get` routed through it would write `state.json`. Expected: `list` and `get` read `loadState()` directly and never create or modify the file. Pinned in Task 4, Step 1.
+3. **A read-only CLI command must not write state.** `getRuntimeOverride()` bootstraps from `CROW_LLAMA_SERVER_BIN` and persists, so a `list` or `get` routed through it would write `state.json`. Expected: `list` and `get` read `loadState()` directly and never create or modify the file, and neither does a host `clear` when no host override is stored. Pinned in Task 4, Step 1.
 4. **A state file written by an older gateway, or a hand-mangled one.** This covers `state.json` with no `runtimeOverrides`, or with `runtimeOverrides` set to an array or `null`. Expected: it loads as `{}`, the host override and registry are untouched, and a later per-model `set` keeps every other key intact. Pinned in Task 3, Step 1.
 5. **Real `/sys/class/drm` noise.** The directory holds connector entries (`card0-DP-1`, `card0-HDMI-A-1`), `renderD128`, `version`, cards with no `mem_info_*` files, and unreadable files. Expected: only `card<N>` directories count, in numeric order, and the first one carrying `mem_info_gtt_total` wins. Anything missing leaves the field `null` without throwing. Pinned in Task 1, Step 1.
 
@@ -80,7 +83,7 @@
   - `parseRocminfo(text) → { name, vramMb, arch: string|null } | null`
   - `parseGfxArch(name: string) → "gfxNNNN" | null`
   - `parseMemTotalMb(text) → number|null`
-  - `readAmdgpuMem(fs) → { gttTotalMb, gttUsedMb, vramTotalMb } | null`
+  - `readAmdgpuMem(fs) → { gttTotalMb, gttUsedMb, vramTotalMb } | null`, taken from the `card<N>` with GTT whose `vramTotalMb` is smallest (missing VRAM ranks last; ties go to the lower card number)
   - `UNIFIED_VRAM_CARVEOUT_MAX_MB = 2048`
   - The `Probe` object gains `gpuArch: string|null`, `unified: boolean|null`, `gttTotalMb: number|null`, `gttUsedMb: number|null` and `ramTotalMb: number|null`.
   - Task 2 reads `unified`, `gttTotalMb` and `ramTotalMb`. Task 5 reads `gpuArch` and `accel`.
@@ -197,6 +200,25 @@ const SYSFS_DISCRETE_AMD = {
   "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
   "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
 };
+
+// Two amdgpu cards: an APU's iGPU (card0, 512 MiB carve-out) beside a
+// discrete card (card1, 16 GiB). Vulkan picks the discrete one.
+const DRM_DIRS_TWO_CARDS = { "/sys/class/drm": ["card0", "card0-eDP-1", "card1", "card1-DP-1", "renderD128", "renderD129", "version"] };
+const SYSFS_TWO_CARDS = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "536870912\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "33554432000\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_used": "1048576\n",
+  "/sys/class/drm/card1/device/mem_info_vram_total": "17179869184\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_total": "8589934592\n",
+  "/sys/class/drm/card1/device/mem_info_gtt_used": "1048576\n",
+};
+
+// A small (2 GiB) discrete card: at the heuristic's threshold, but Vulkan
+// says DISCRETE, and Vulkan wins.
+const SYSFS_SMALL_DISCRETE = {
+  "/sys/class/drm/card0/device/mem_info_vram_total": "2147483648\n",
+  "/sys/class/drm/card0/device/mem_info_gtt_total": "8589934592\n",
+};
 ```
 
 Add these tests after the existing `"disk free reported via fs.statfsSync when modelsDir given"` test:
@@ -257,14 +279,39 @@ test("probeHardware on crow: vulkan gfx1151 integrated -> unified true, GTT + Me
   assert.equal(probe.ramAvailableMb, 500);
 });
 
-test("probeHardware: discrete AMD (DISCRETE_GPU, 16 GiB carve-out) -> unified false, GTT still reported", async () => {
+test("probeHardware: discrete AMD (DISCRETE_GPU, 16 GiB) -> unified false, GTT fields NOT populated", async () => {
   const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
   const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_DISCRETE_AMD }, dirs: { "/sys/class/drm": ["card0"] } });
   const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
 
   assert.equal(probe.unified, false);
   assert.equal(probe.gpuArch, null);
-  assert.equal(probe.gttTotalMb, 8192);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
+});
+
+test("probeHardware: iGPU card0 (512 MiB) + discrete card1 (16 GiB), Vulkan says DISCRETE -> unified false, no GTT, discrete fitBadge unchanged", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_TWO_CARDS }, dirs: DRM_DIRS_TWO_CARDS });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
+  const quant = { min_ram_mb: 16000, min_vram_mb: 8000 };
+  // 500 MB available + 16384 MB VRAM credit >= 16000 -> fits, exactly as a
+  // pre-change probe (no new fields) computes it.
+  assert.equal(fitBadge(probe, quant), "fits");
+  assert.equal(fitBadge(probe, quant), fitBadge({ ramAvailableMb: probe.ramAvailableMb, vramMb: probe.vramMb }, quant));
+});
+
+test("probeHardware: a <=2 GiB discrete card reported DISCRETE by Vulkan -> unified false (Vulkan beats the sysfs heuristic)", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_AMD_NO_ROCM });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_SMALL_DISCRETE }, dirs: { "/sys/class/drm": ["card0"] } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, false);
+  assert.equal(probe.gttTotalMb, null);
 });
 
 test("probeHardware: discrete sample with no sysfs at all -> unified false, GTT null", async () => {
@@ -326,20 +373,37 @@ test("probeHardware: WSL2 and darwin leave every new field null", async () => {
   assert.equal(mac.ramTotalMb, null);
 });
 
-test("readAmdgpuMem: only card<N> dirs, numeric order, first with mem_info_gtt_total wins; junk/unreadable -> skipped", () => {
+test("readAmdgpuMem: only card<N> dirs count; among cards with GTT the smallest VRAM (the iGPU) wins; junk/unreadable skipped", () => {
   const fs = fakeFs({
-    dirs: { "/sys/class/drm": ["card10", "card2-DP-1", "version", "renderD128", "card2", "card1"] },
+    dirs: { "/sys/class/drm": ["card10", "card2-DP-1", "version", "renderD128", "card2", "card1", "card3"] },
     readFiles: {
-      // card1: files present but garbage -> skipped (no gtt_total parse)
+      // card1: gtt_total is garbage -> skipped entirely
       "/sys/class/drm/card1/device/mem_info_gtt_total": "not-a-number\n",
-      // card2: the first valid one in numeric order (card10 sorts after it)
+      "/sys/class/drm/card1/device/mem_info_vram_total": "1048576\n",
+      // card2: 256 MiB carve-out -> the iGPU, chosen; gtt_used missing -> null
       "/sys/class/drm/card2/device/mem_info_gtt_total": "1073741824\n",
       "/sys/class/drm/card2/device/mem_info_vram_total": "268435456\n",
-      // gtt_used missing on card2 -> gttUsedMb null, no throw
+      // card3: GTT but no vram_total -> ranks last
+      "/sys/class/drm/card3/device/mem_info_gtt_total": "4294967296\n",
+      // card10: discrete 16 GiB -> larger VRAM, not chosen
       "/sys/class/drm/card10/device/mem_info_gtt_total": "2147483648\n",
+      "/sys/class/drm/card10/device/mem_info_vram_total": "17179869184\n",
     },
   });
   assert.deepEqual(readAmdgpuMem(fs), { gttTotalMb: 1024, gttUsedMb: null, vramTotalMb: 256 });
+});
+
+test("readAmdgpuMem: equal VRAM -> the lower card number wins", () => {
+  const fs = fakeFs({
+    dirs: { "/sys/class/drm": ["card4", "card1"] },
+    readFiles: {
+      "/sys/class/drm/card1/device/mem_info_gtt_total": "1073741824\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": "536870912\n",
+      "/sys/class/drm/card4/device/mem_info_gtt_total": "2147483648\n",
+      "/sys/class/drm/card4/device/mem_info_vram_total": "536870912\n",
+    },
+  });
+  assert.equal(readAmdgpuMem(fs).gttTotalMb, 1024);
 });
 
 test("readAmdgpuMem: no /sys/class/drm, or an fs without readdirSync -> null, never throws", () => {
@@ -368,6 +432,7 @@ const WSL_INTEROP_PATH = "/proc/sys/fs/binfmt_misc/WSLInterop";
 const MEMINFO_PATH = "/proc/meminfo";
 const DRM_CLASS_DIR = "/sys/class/drm";
 const INTEGRATED_GPU_TYPE = "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU";
+const DISCRETE_GPU_TYPE = "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU";
 const AMD_NAME_RE = /\b(AMD|Radeon|RADV)\b/i;
 
 /**
@@ -470,9 +535,13 @@ function readSysfsBytes(fs, path) {
 const bytesToMb = (b) => (b == null ? null : Math.round(b / 1024 / 1024));
 
 /**
- * Read amdgpu's memory counters from the first `/sys/class/drm/card<N>`
- * (numeric order; connector entries like `card0-DP-1`, `renderD128` and
- * `version` are ignored) that exposes `device/mem_info_gtt_total`.
+ * Read amdgpu's memory counters for the host's iGPU: among the
+ * `/sys/class/drm/card<N>` entries (connector entries like `card0-DP-1`,
+ * `renderD128` and `version` are ignored) that expose
+ * `device/mem_info_gtt_total`, the one with the SMALLEST
+ * `mem_info_vram_total` (an APU's BIOS carve-out; a missing vram_total
+ * ranks last; ties go to the lower card number). On a host with an iGPU
+ * beside a discrete card this picks the iGPU, never the dGPU.
  * Returns { gttTotalMb, gttUsedMb, vramTotalMb } (the latter two null when
  * their file is missing/unreadable), or null when no card has GTT info
  * (not amdgpu, not linux, or `fs` can't list directories). Never throws.
@@ -489,17 +558,22 @@ export function readAmdgpuMem(fs) {
     .map((e) => String(e))
     .filter((e) => /^card\d+$/.test(e))
     .sort((a, b) => Number(a.slice(4)) - Number(b.slice(4)));
+  let best = null;
   for (const card of cards) {
     const base = `${DRM_CLASS_DIR}/${card}/device`;
     const gttTotal = readSysfsBytes(fs, `${base}/mem_info_gtt_total`);
     if (gttTotal == null) continue;
-    return {
+    const info = {
       gttTotalMb: bytesToMb(gttTotal),
       gttUsedMb: bytesToMb(readSysfsBytes(fs, `${base}/mem_info_gtt_used`)),
       vramTotalMb: bytesToMb(readSysfsBytes(fs, `${base}/mem_info_vram_total`)),
     };
+    const rank = info.vramTotalMb ?? Number.POSITIVE_INFINITY;
+    const bestRank = best ? (best.vramTotalMb ?? Number.POSITIVE_INFINITY) : null;
+    // Strict "<" keeps the lower card number on a tie (cards are sorted).
+    if (best === null || rank < bestRank) best = info;
   }
-  return null;
+  return best;
 }
 ```
 
@@ -549,8 +623,8 @@ Then replace the whole `} else { probe.wsl2 = detectWsl2(fs, release); ... }` li
 ```js
   } else {
     probe.wsl2 = detectWsl2(fs, release);
-    let integrated = false; // Vulkan said INTEGRATED_GPU
-    let amdGpu = false; // the chosen GPU is AMD (sysfs GTT belongs to it)
+    let vkType = null; // Vulkan's deviceType verdict, when vulkaninfo answered
+    let amdGpu = false; // the chosen GPU is AMD (the sysfs heuristic may apply)
 
     if (probe.wsl2) {
       // v1 rule: force cpu, no GPU passthrough detection attempted. This is
@@ -565,7 +639,7 @@ Then replace the whole `} else { probe.wsl2 = detectWsl2(fs, release); ... }` li
         probe.gpuName = vk.name;
         probe.vramMb = vk.vramMb;
         probe.gpuArch = vk.arch;
-        integrated = vk.deviceType === INTEGRATED_GPU_TYPE;
+        vkType = vk.deviceType;
         amdGpu = AMD_NAME_RE.test(vk.name);
       } else {
         const nvOut = await run(execFile, "nvidia-smi", [
@@ -596,18 +670,24 @@ Then replace the whole `} else { probe.wsl2 = detectWsl2(fs, release); ... }` li
       }
     }
 
-    // amdgpu GTT (spec §2.1). Read whenever sysfs has it, EXCEPT when the
-    // chosen GPU is a non-AMD one (an NVIDIA dGPU beside an AMD iGPU would
-    // otherwise report the iGPU's aperture as if it were the dGPU's).
+    // Unified (spec §2.1, review C1). Vulkan's deviceType decides whenever
+    // it answered: INTEGRATED -> true, DISCRETE -> false. Only other Vulkan
+    // types, or no Vulkan at all (the rocminfo path; the nvidia path has
+    // amdGpu false), fall back to the sysfs small-carve-out heuristic.
+    // GTT fields are the iGPU's and are reported ONLY on a unified host —
+    // a discrete card's GTT aperture is not a model ceiling.
     const amd = readAmdgpuMem(fs);
-    if (amd && (amdGpu || probe.gpuName == null)) {
+    if (probe.gpuName != null) {
+      if (vkType === INTEGRATED_GPU_TYPE) probe.unified = true;
+      else if (vkType === DISCRETE_GPU_TYPE) probe.unified = false;
+      else {
+        probe.unified =
+          amdGpu && amd != null && amd.vramTotalMb != null && amd.vramTotalMb <= UNIFIED_VRAM_CARVEOUT_MAX_MB;
+      }
+    }
+    if (probe.unified === true && amd) {
       probe.gttTotalMb = amd.gttTotalMb;
       probe.gttUsedMb = amd.gttUsedMb;
-    }
-    if (probe.gpuName != null) {
-      const smallCarveOut =
-        amdGpu && amd != null && amd.vramTotalMb != null && amd.vramTotalMb <= UNIFIED_VRAM_CARVEOUT_MAX_MB;
-      probe.unified = integrated || smallCarveOut;
     }
 
     const meminfo = readMeminfo(fs);
@@ -629,7 +709,9 @@ Then replace the whole `} else { probe.wsl2 = detectWsl2(fs, release); ... }` li
  * `unified`, `gttTotalMb`/`gttUsedMb` (amdgpu sysfs, read through the same
  * injected `fs`) and `ramTotalMb` are additive. On an APU the Vulkan
  * DEVICE_LOCAL heap is a slice of RAM, so `unified: true` tells fitBadge
- * never to add `vramMb` on top of RAM; GTT total is the real ceiling.
+ * never to add `vramMb` on top of RAM. Vulkan's deviceType decides
+ * `unified` whenever it answered; the sysfs carve-out heuristic is only a
+ * fallback. GTT fields are reported only when `unified === true`.
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -673,53 +755,65 @@ In `tests/models-probe.test.js`, add `import { t } from "../servers/gateway/dash
 
 // crow today (spec §1): 126,976 MiB GTT, 127,941 MiB MemTotal, ~46 GiB
 // available with 35b + embed resident, RADV's 83 GiB DEVICE_LOCAL heap.
+// GTT >= 0.75 x MemTotal -> a GTT-expanded APU (review C2).
 const CROW_UNIFIED = { unified: true, gttTotalMb: 126976, ramTotalMb: 127941, ramAvailableMb: 47104, vramMb: 84992 };
+// A default-GTT laptop APU: GTT is half of RAM -> NOT GTT-expanded.
+const LAPTOP_APU = { unified: true, gttTotalMb: 16000, ramTotalMb: 32000, ramAvailableMb: 24000, vramMb: 16000 };
 
-test("fitBadge unified: under available -> fits", () => {
+test("fitBadge GTT-expanded: under available -> fits", () => {
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 40000, min_vram_mb: 0 }), "fits");
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 47104, min_vram_mb: 0 }), "fits"); // boundary inclusive
 });
 
-test("fitBadge unified: between available and GTT -> tight (Flash-Next UD-Q4_K_XL, 115,068 MiB)", () => {
+test("fitBadge GTT-expanded (crow): Flash-Next UD-Q4_K_XL 115,068 MiB -> tight; == GTT still tight", () => {
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 115068, min_vram_mb: 0 }), "tight");
-  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 126976, min_vram_mb: 0 }), "tight"); // == ceiling still fits the box
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 126976, min_vram_mb: 0 }), "tight");
 });
 
-test("fitBadge unified: above GTT -> wont_fit (GLM UD-IQ4_XS, 157,911 MiB)", () => {
+test("fitBadge GTT-expanded (crow): GLM UD-IQ4_XS 157,911 MiB -> wont_fit; GTT+1 -> wont_fit", () => {
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 157911, min_vram_mb: 0 }), "wont_fit");
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 126977, min_vram_mb: 0 }), "wont_fit");
 });
 
-test("fitBadge unified: GTT unknown -> ceiling is ramTotalMb", () => {
-  const probe = { ...CROW_UNIFIED, gttTotalMb: null };
-  assert.equal(fitBadge(probe, { min_ram_mb: 127941, min_vram_mb: 0 }), "tight");
-  assert.equal(fitBadge(probe, { min_ram_mb: 127942, min_vram_mb: 0 }), "wont_fit");
-});
-
-test("fitBadge unified: a GTT smaller than MemAvailable is still the ceiling (spec: > ceiling is wont_fit)", () => {
-  const probe = { ...CROW_UNIFIED, gttTotalMb: 32768 };
-  assert.equal(fitBadge(probe, { min_ram_mb: 40000, min_vram_mb: 0 }), "wont_fit");
-});
-
-test("fitBadge unified: min_vram_mb > 0 NEVER adds VRAM (no double-count)", () => {
-  // Discrete math would be 47104 + 84992 >= 60000 -> fits. Unified: RAM
-  // alone is short, the box can hold it -> tight.
+test("fitBadge GTT-expanded: min_vram_mb > 0 NEVER adds VRAM (no double-count)", () => {
+  // Discrete math would be 47104 + 84992 >= 60000 -> fits.
   assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 60000, min_vram_mb: 8000 }), "tight");
+});
+
+test("fitBadge default-GTT laptop APU: fits MemAvailable but exceeds GTT -> fits (GTT is not a ceiling here)", () => {
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 20000, min_vram_mb: 0 }), "fits");
+});
+
+test("fitBadge default-GTT laptop APU: today's 10% band, minus the VRAM credit", () => {
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 26400, min_vram_mb: 0 }), "tight"); // 24000 x 1.10 exactly
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 26401, min_vram_mb: 0 }), "wont_fit"); // no widening to GTT/RAM
+  // Discrete math would add 16000 VRAM -> fits; unified never does.
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 30000, min_vram_mb: 8000 }), "wont_fit");
+});
+
+test("fitBadge unified: the 0.75 GTT-expansion boundary is inclusive and integer-exact", () => {
+  const at = { unified: true, gttTotalMb: 96000, ramTotalMb: 128000, ramAvailableMb: 47104 };
+  const below = { ...at, gttTotalMb: 95999 };
+  assert.equal(fitBadge(at, { min_ram_mb: 90000, min_vram_mb: 0 }), "tight"); // expanded -> GTT ceiling
+  assert.equal(fitBadge(below, { min_ram_mb: 90000, min_vram_mb: 0 }), "wont_fit"); // default -> 10% band
+});
+
+test("fitBadge unified: GTT or MemTotal unknown -> today's formula minus VRAM credit (no GTT ceiling, no widening)", () => {
+  const noGtt = { ...CROW_UNIFIED, gttTotalMb: null };
+  const noTotal = { ...CROW_UNIFIED, ramTotalMb: null };
+  for (const probe of [noGtt, noTotal]) {
+    assert.equal(fitBadge(probe, { min_ram_mb: 47104, min_vram_mb: 8000 }), "fits");
+    assert.equal(fitBadge(probe, { min_ram_mb: 51814, min_vram_mb: 8000 }), "tight"); // <= 47104 x 1.10
+    assert.equal(fitBadge(probe, { min_ram_mb: 115068, min_vram_mb: 8000 }), "wont_fit");
+  }
 });
 
 test("fitBadge unified: missing ramAvailableMb -> unknown (fail-closed unchanged)", () => {
   assert.equal(fitBadge({ ...CROW_UNIFIED, ramAvailableMb: null }, { min_ram_mb: 1, min_vram_mb: 0 }), "unknown");
 });
 
-test("fitBadge unified: both ceilings unknown -> the RAM-only 10% band, still no VRAM credit", () => {
-  const probe = { unified: true, gttTotalMb: null, ramTotalMb: null, ramAvailableMb: 8000, vramMb: 84992 };
-  assert.equal(fitBadge(probe, { min_ram_mb: 8000, min_vram_mb: 8000 }), "fits");
-  assert.equal(fitBadge(probe, { min_ram_mb: 8800, min_vram_mb: 8000 }), "tight");
-  assert.equal(fitBadge(probe, { min_ram_mb: 8801, min_vram_mb: 8000 }), "wont_fit");
-});
-
 test("fitBadge: unified:false keeps the discrete VRAM credit exactly as before", () => {
-  const probe = { unified: false, ramAvailableMb: 6000, vramMb: 12000, gttTotalMb: 8192 };
+  const probe = { unified: false, ramAvailableMb: 6000, vramMb: 12000, gttTotalMb: null };
   assert.equal(fitBadge(probe, { min_ram_mb: 16000, min_vram_mb: 8000 }), "fits");
 });
 
@@ -737,11 +831,12 @@ export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH
 cd /home/kh0pp/crow-wt-halo-profile && npm test -- tests/models-probe.test.js
 ```
 Expected: FAIL.
-- `"between available and GTT -> tight"` gets `"wont_fit"`: today's math is 115068 > 47104 × 1.10.
-- `"GTT unknown -> ceiling is ramTotalMb"` gets `"wont_fit"`.
-- `"min_vram_mb > 0 NEVER adds VRAM"` gets `"fits"`, which is the double-count.
+- `"Flash-Next ... -> tight"` gets `"wont_fit"`: today's math is 115068 > 47104 × 1.10.
+- The 0.75-boundary test's expanded case gets `"wont_fit"`.
+- `"min_vram_mb > 0 NEVER adds VRAM"` gets `"fits"`, and the laptop `30000/8000` case gets `"fits"`, which is the double-count.
+- The "GTT or MemTotal unknown" test fails on the VRAM credit: 115068 with `min_vram_mb: 8000` gets `"fits"`.
 - The hint test fails its `/other models stopped first/` match.
-- The "above GTT", "under available" and "unified:false" tests already pass. They pin behaviour that must not move.
+- The "under available", "GLM -> wont_fit", "fits MemAvailable but exceeds GTT" and "unified:false" tests already pass. They pin behaviour that must not move.
 
 - [ ] **Step 3: Implement**
 
@@ -759,16 +854,18 @@ const positiveOrNull = (v) => (typeof v === "number" && Number.isFinite(v) && v 
  *
  * Unified memory (`probe.unified === true`, Strix Halo spec §2.2, D2) — the
  * GPU's DEVICE_LOCAL heap is a slice of the same RAM, so VRAM is NEVER
- * added (that was a double-count):
- *   ceiling = gttTotalMb, else ramTotalMb
- *   min_ram_mb > ceiling          -> "wont_fit" (can never run on this box)
- *   min_ram_mb <= ramAvailableMb  -> "fits"
- *   otherwise                     -> "tight"  (fits the box once other
- *                                    resident models are stopped)
- *   with neither ceiling known, the discrete RAM-only 10% band below
- *   applies, still without VRAM credit.
+ * added (that was a double-count).
+ *   GTT-expanded APU (gttTotalMb and ramTotalMb known, and
+ *   gttTotalMb >= 0.75 x ramTotalMb — e.g. crow with amdgpu.gttsize):
+ *     min_ram_mb <= ramAvailableMb -> "fits"
+ *     min_ram_mb >  gttTotalMb     -> "wont_fit" (can never run on this box)
+ *     otherwise                    -> "tight"  (fits once other resident
+ *                                     models are stopped)
+ *   Every other unified host (default GTT, or GTT/MemTotal unknown): the
+ *   discrete formula below with effective = ramAvailableMb (no VRAM credit).
+ *   A default GTT is NOT a ceiling — llama.cpp can run the rest on CPU.
  *
- * Discrete / unknown (`unified` false or null) — unchanged:
+ * Discrete / unknown (`unified` false or null) — byte-identical to before:
  * effective RAM = probe.ramAvailableMb
  *   + (probe.vramMb, only when quant.min_vram_mb > 0 AND
  *      probe.vramMb >= quant.min_vram_mb — i.e. the GPU can actually hold
@@ -793,22 +890,22 @@ export function fitBadge(probe, quant) {
   const minRam = quant?.min_ram_mb;
   if (typeof minRam !== "number" || !Number.isFinite(minRam)) return "unknown";
 
-  if (probe.unified === true) {
-    const available = probe.ramAvailableMb;
-    const ceiling = positiveOrNull(probe.gttTotalMb) ?? positiveOrNull(probe.ramTotalMb);
-    if (ceiling != null) {
-      if (minRam > ceiling) return "wont_fit";
-      return minRam <= available ? "fits" : "tight";
-    }
-    if (minRam <= available) return "fits";
-    if (10 * minRam <= 11 * available) return "tight";
-    return "wont_fit";
-  }
-
-  const minVram = typeof quant?.min_vram_mb === "number" ? quant.min_vram_mb : 0;
   let effective = probe.ramAvailableMb;
-  if (minVram > 0 && typeof probe.vramMb === "number" && probe.vramMb >= minVram) {
-    effective += probe.vramMb;
+  if (probe.unified === true) {
+    const gtt = positiveOrNull(probe.gttTotalMb);
+    const total = positiveOrNull(probe.ramTotalMb);
+    if (gtt != null && total != null && 4 * gtt >= 3 * total) {
+      // GTT-expanded APU: gtt >= 0.75 x MemTotal, integer-exact.
+      if (minRam <= effective) return "fits";
+      if (minRam > gtt) return "wont_fit";
+      return "tight";
+    }
+    // Any other unified host: today's formula, never the VRAM credit.
+  } else {
+    const minVram = typeof quant?.min_vram_mb === "number" ? quant.min_vram_mb : 0;
+    if (minVram > 0 && typeof probe.vramMb === "number" && probe.vramMb >= minVram) {
+      effective += probe.vramMb;
+    }
   }
 
   if (minRam <= effective) return "fits";
@@ -861,6 +958,7 @@ git show --stat HEAD
 **Interfaces:**
 - Consumes: the existing `validateBinary(bin, { accessSyncImpl, spawnSyncImpl })` (module-private), `loadState`, `saveState` and `RuntimeOverrideError`.
 - Produces:
+  - `resolveNativeBinPath` warms the probe cache (`getCachedProbeFn() || await reprobeFn()`) before any override early-return. Task 5 relies on this: `startNativeAndAwaitReady` only reads `getCachedProbeFn()`.
   - `getModelRuntimeOverride(dir, catalogId, { loadStateFn }?) → { bin, label, version, setAt, source: "state" } | null`
   - `setModelRuntimeOverride(dir, catalogId, bin, { label?, loadStateFn?, saveStateFn?, now?, accessSyncImpl?, spawnSyncImpl? }?) → { bin, label, version, setAt }`. It throws `RuntimeOverrideError`, with codes `BAD_MODEL_ID`, `NOT_ABSOLUTE`, `NOT_EXECUTABLE` and `VERSION_FAILED`.
   - `clearModelRuntimeOverride(dir, catalogId, { loadStateFn?, saveStateFn? }?) → boolean`
@@ -904,14 +1002,33 @@ test("loadState: runtimeOverrides round-trips; absent, null or an array loads as
 
 Check that `mkdirSync`, `writeFileSync`, `statePath`, `mkdtempSync`, `rmSync`, `tmpdir`, `join`, `loadState` and `saveState` are imported at the top of the file. They are already used by existing tests there. Add any that are missing to the existing import lines.
 
-**(b)** In `tests/models-runtime-override.test.js`, change the second import to:
+**(b)** In `tests/models-runtime-override.test.js`, two import lines change.
+
+Replace line 6 exactly,
+
+```js
+import { loadState } from "../servers/gateway/models/state.js";
+```
+
+with
+
+```js
+import { loadState, saveState } from "../servers/gateway/models/state.js";
+```
+
+and replace line 7 exactly,
+
+```js
+import { getRuntimeOverride, setRuntimeOverride, clearRuntimeOverride, parseLlamaServerVersion, RuntimeOverrideError } from "../servers/gateway/models/runtime-override.js";
+```
+
+with
 
 ```js
 import {
   getRuntimeOverride, setRuntimeOverride, clearRuntimeOverride, parseLlamaServerVersion, RuntimeOverrideError,
   getModelRuntimeOverride, setModelRuntimeOverride, clearModelRuntimeOverride, listModelRuntimeOverrides,
 } from "../servers/gateway/models/runtime-override.js";
-import { saveState } from "../servers/gateway/models/state.js";
 ```
 
 Append:
@@ -1058,6 +1175,38 @@ test("runtime resolve: ensureResident's native start also applies the per-model 
   opts.getModelRuntimeOverrideFn = (dir, id) => (id === "qwen3-4b" ? { bin: "/opt/resident/llama-server" } : null);
   await ensureResident("native-target", cfg, opts);
   assert.equal(startCalls[0].binPath, "/opt/resident/llama-server");
+});
+
+test("runtime resolve: the probe is warmed BEFORE an override early-return (cold cache -> one reprobe)", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18107, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+  let cached = null;
+  let reprobeCalls = 0;
+  opts.getCachedProbeFn = () => cached;
+  opts.reprobeFn = async () => { reprobeCalls++; cached = { platform: "linux", accel: "cpu" }; return cached; };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/warm/llama-server" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(reprobeCalls, 1);
+  assert.notEqual(cached, null, "an override start leaves the probe cache warm");
+});
+
+test("runtime resolve: a probe failure is survivable on an override path but still surfaces on the stock path", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18108, "native-target") } };
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const withOverride = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    withOverride.getCachedProbeFn = () => null;
+    withOverride.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    withOverride.getModelRuntimeOverrideFn = () => ({ bin: "/opt/survive/llama-server" });
+    assert.equal(await acquireProvider("native-target", withOverride), true);
+
+    _setNativeHandleForTest("native-target", null);
+    const stock = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    stock.getCachedProbeFn = () => null;
+    stock.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    await assert.rejects(acquireProvider("native-target", stock), /vulkaninfo exploded/);
+  } finally { console.warn = origWarn; }
 });
 ```
 
@@ -1231,6 +1380,20 @@ async function resolveNativeBinPath(p, opts = {}) {
   } = opts;
   const dir = resolveDataDirFn();
 
+  // Warm the probe cache FIRST (Fix 1: nothing on the boot path calls
+  // reprobe()), before any override early-return, so an override start
+  // also leaves it warm for startNativeAndAwaitReady's host launch profile
+  // (Strix Halo spec §2.4, review round 1). A probe failure is only fatal
+  // on the stock path, which needs the probe to pick a runtime asset.
+  let probe = null;
+  let probeError = null;
+  try {
+    probe = getCachedProbeFn() || (await reprobeFn());
+  } catch (err) {
+    probeError = err;
+    console.warn(`[gpu-orchestrator] hardware probe failed: ${err.message}`);
+  }
+
   // Resolve order (Strix Halo runtime profile spec §2.3): per-model
   // override -> host override -> stock catalog release. Each override layer
   // whose bin is missing warns once and falls through. Either override
@@ -1256,7 +1419,15 @@ async function resolveNativeBinPath(p, opts = {}) {
   }
 ```
 
-Leave the rest of the function unchanged, from `const catalog = loadCatalogFn();` to the end.
+Then replace the old probe block that follows `const catalog = loadCatalogFn();` — from the `// Fix 1 (final-review fix wave, CRITICAL)` comment through `probe = await reprobeFn();\n  }` — with:
+
+```js
+  // The probe was warmed at the top of this function (Fix 1 still holds:
+  // one reprobe on a cold cache, none after). The stock path needs it.
+  if (probeError) throw probeError;
+```
+
+Leave the rest of the function unchanged, from `const key = ...` to the end.
 
 In `startNativeAndAwaitReady`, replace
 
@@ -1316,8 +1487,10 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: from Task 3, `getModelRuntimeOverride`, `setModelRuntimeOverride`, `clearModelRuntimeOverride` and `listModelRuntimeOverrides`. From the existing code: `setRuntimeOverride`, `clearRuntimeOverride`, `RuntimeOverrideError`, `loadState` and `resolveDataDir` (`servers/db.js`).
-- Produces: `main(argv: string[], deps?: { dir?, out?, err?, overrideOpts?, catalogIds? }) → Promise<0|1|2>`.
-  - Exit codes: 0 is ok, 1 is refused by validation, 2 is a usage error.
+- Produces: `main(argv: string[], deps?: { dir?, out?, err?, overrideOpts?, catalogIds?, env? }) → Promise<0|1|2|3>` and `EXIT_CONCURRENT_WRITE = 3`.
+  - Exit codes: 0 is ok, 1 is refused by validation, 2 is a usage error, 3 means a concurrent gateway write overwrote the change twice.
+  - Every write is re-read and verified, and retried once on a mismatch. `overrideOpts` is forwarded to the library set/clear calls, so tests can inject a clobbering `saveStateFn`.
+  - `set` and `clear` print `(data dir: <dir>)`. `clear` without `--model` writes nothing when no host override is stored. Host `get`/`clear` warn when `env.CROW_LLAMA_SERVER_BIN` is set.
   - Run directly, the script sets `process.exitCode` from `main(process.argv.slice(2))`.
   - Data dir: `resolveDataDir()`, the gateway's own helper. It honours `CROW_DATA_DIR`, else `~/.crow/data`, else the repo `./data`.
 
@@ -1333,7 +1506,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { main } from "../scripts/models-runtime-override.mjs";
+import { main, EXIT_CONCURRENT_WRITE } from "../scripts/models-runtime-override.mjs";
 import { loadState, saveState, statePath } from "../servers/gateway/models/state.js";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "models-runtime-override.mjs");
@@ -1352,6 +1525,7 @@ async function run(dir, argv, extra = {}) {
     err: (s) => err.push(String(s)),
     overrideOpts,
     catalogIds: ["qwen3.6-35b-a3b"],
+    env: {},
     ...extra,
   });
   return { code, out: out.join("\n"), err: err.join("\n") };
@@ -1362,10 +1536,24 @@ function withDir(fn) {
   return Promise.resolve(fn(dir)).finally(() => rmSync(dir, { recursive: true, force: true }));
 }
 
-test("cli: set --model, get --model, list, clear --model round-trip", () => withDir(async (dir) => {
+/** A saveStateFn that saves, then lets a "gateway" clobber the file `times` times. */
+function clobberingSave(times, clobber) {
+  let left = times;
+  return (d, st) => {
+    saveState(d, st);
+    if (left > 0) {
+      left -= 1;
+      saveState(d, clobber(st));
+    }
+  };
+}
+const dropOverrides = (st) => ({ ...st, runtimeOverride: null, runtimeOverrides: {} });
+
+test("cli: set --model, get --model, list, clear --model round-trip; set/clear print the data dir", () => withDir(async (dir) => {
   const set = await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server", "--label", "pr-1234"]);
   assert.equal(set.code, 0, set.err);
   assert.match(set.out, /qwen3\.6-35b-a3b.*\/opt\/pr\/llama-server.*b10068/);
+  assert.ok(set.out.includes(`(data dir: ${dir})`), set.out);
   assert.equal(set.err, "", "a catalog id produces no warning");
 
   const get = await run(dir, ["get", "--model", "qwen3.6-35b-a3b"]);
@@ -1382,6 +1570,7 @@ test("cli: set --model, get --model, list, clear --model round-trip", () => with
   const clear = await run(dir, ["clear", "--model", "qwen3.6-35b-a3b"]);
   assert.equal(clear.code, 0);
   assert.match(clear.out, /cleared/);
+  assert.ok(clear.out.includes(`(data dir: ${dir})`), clear.out);
   assert.deepEqual(loadState(dir).runtimeOverrides, {});
   assert.match((await run(dir, ["clear", "--model", "qwen3.6-35b-a3b"])).out, /nothing to clear/);
   assert.equal((await run(dir, ["get", "--model", "qwen3.6-35b-a3b"])).out, "none");
@@ -1392,10 +1581,51 @@ test("cli: without --model, set/get/clear act on the host override and leave per
   assert.equal((await run(dir, ["get"])).out, "none");
   const set = await run(dir, ["set", "--bin", "/opt/host/llama-server"]);
   assert.equal(set.code, 0, set.err);
+  assert.ok(set.out.includes(`(data dir: ${dir})`), set.out);
   assert.equal(JSON.parse((await run(dir, ["get"])).out).bin, "/opt/host/llama-server");
   assert.equal((await run(dir, ["clear"])).code, 0);
   assert.equal(loadState(dir).runtimeOverride, null);
   assert.ok(loadState(dir).runtimeOverrides["qwen3.6-35b-a3b"], "per-model entry survived the host clear");
+}));
+
+test("cli: host clear with no host override stored neither creates nor rewrites state.json", () => withDir(async (dir) => {
+  const r = await run(dir, ["clear"]);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /nothing to clear \(host override\)/);
+  assert.equal(existsSync(statePath(dir)), false);
+}));
+
+test("cli: host get/clear warn when CROW_LLAMA_SERVER_BIN is set; --model commands and an unset env do not", () => withDir(async (dir) => {
+  const env = { CROW_LLAMA_SERVER_BIN: "/opt/env/llama-server" };
+  assert.match((await run(dir, ["get"], { env })).err, /CROW_LLAMA_SERVER_BIN is set.*re-bootstraps the host override/);
+  assert.match((await run(dir, ["clear"], { env })).err, /re-bootstraps the host override/);
+  assert.equal((await run(dir, ["get", "--model", "qwen3.6-35b-a3b"], { env })).err, "");
+  assert.equal((await run(dir, ["get"])).err, "");
+}));
+
+test("cli: a write clobbered once by a concurrent gateway write is retried and lands (exit 0)", () => withDir(async (dir) => {
+  const r = await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server"], {
+    overrideOpts: { ...overrideOpts, saveStateFn: clobberingSave(1, dropOverrides) },
+  });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(loadState(dir).runtimeOverrides["qwen3.6-35b-a3b"].bin, "/opt/pr/llama-server");
+}));
+
+test("cli: a write clobbered twice exits 3 naming the concurrent gateway write (set, host set, and clear)", () => withDir(async (dir) => {
+  const always = { ...overrideOpts, saveStateFn: clobberingSave(99, dropOverrides) };
+  const setModel = await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server"], { overrideOpts: always });
+  assert.equal(setModel.code, EXIT_CONCURRENT_WRITE);
+  assert.match(setModel.err, /concurrent gateway write overwrote it/);
+  const setHost = await run(dir, ["set", "--bin", "/opt/host/llama-server"], { overrideOpts: always });
+  assert.equal(setHost.code, EXIT_CONCURRENT_WRITE);
+
+  // clear: the "gateway" keeps writing the old record back.
+  await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server"]);
+  const rec = loadState(dir).runtimeOverrides["qwen3.6-35b-a3b"];
+  const restore = { ...overrideOpts, saveStateFn: clobberingSave(99, (st) => ({ ...st, runtimeOverrides: { "qwen3.6-35b-a3b": rec } })) };
+  const clear = await run(dir, ["clear", "--model", "qwen3.6-35b-a3b"], { overrideOpts: restore });
+  assert.equal(clear.code, EXIT_CONCURRENT_WRITE);
+  assert.match(clear.err, /concurrent gateway write overwrote it/);
 }));
 
 test("cli: a binary that fails validation exits 1 with the code, and persists nothing", () => withDir(async (dir) => {
@@ -1431,9 +1661,10 @@ test("cli: usage errors exit 2", () => withDir(async (dir) => {
   assert.equal((await run(dir, ["--help"])).code, 0);
 }));
 
-test("cli (child process): resolves the data dir from CROW_DATA_DIR; list/get never write state or bootstrap CROW_LLAMA_SERVER_BIN", () => withDir(async (dir) => {
+test("cli (child process): resolves the data dir from CROW_DATA_DIR; list/get/host-clear never write state or bootstrap CROW_LLAMA_SERVER_BIN", () => withDir(async (dir) => {
   saveState(dir, { ...loadState(dir), runtimeOverrides: { "qwen3.6-35b-a3b": { bin: "/opt/seeded/llama-server", label: null, version: "b1", setAt: "2026-09-23T00:00:00Z" } } });
   const env = { ...process.env, CROW_DATA_DIR: dir };
+  delete env.CROW_LLAMA_SERVER_BIN;
   const list = spawnSync(process.execPath, [SCRIPT, "list"], { env, encoding: "utf8" });
   assert.equal(list.status, 0, list.stderr);
   const parsed = JSON.parse(list.stdout);
@@ -1441,16 +1672,16 @@ test("cli (child process): resolves the data dir from CROW_DATA_DIR; list/get ne
   assert.equal(parsed.models["qwen3.6-35b-a3b"].bin, "/opt/seeded/llama-server");
 
   // A fresh dir + an env bin that WOULD validate (node --version exits 0):
-  // if list/get went through getRuntimeOverride's bootstrap, state.json
-  // would appear. It must not.
+  // if any of these went through getRuntimeOverride's bootstrap, or host
+  // clear wrote unconditionally, state.json would appear. It must not.
   const fresh = mkdtempSync(join(tmpdir(), "rt-override-cli-fresh-"));
   try {
     const env2 = { ...process.env, CROW_DATA_DIR: fresh, CROW_LLAMA_SERVER_BIN: process.execPath };
-    for (const argv of [["list"], ["get"]]) {
+    for (const argv of [["list"], ["get"], ["clear"]]) {
       const r = spawnSync(process.execPath, [SCRIPT, ...argv], { env: env2, encoding: "utf8" });
       assert.equal(r.status, 0, r.stderr);
     }
-    assert.equal(existsSync(statePath(fresh)), false, "read-only commands must not create state.json");
+    assert.equal(existsSync(statePath(fresh)), false, "read-only commands and a no-op host clear must not create state.json");
   } finally { rmSync(fresh, { recursive: true, force: true }); }
 }));
 ```
@@ -1482,21 +1713,32 @@ Create `scripts/models-runtime-override.mjs`:
  *   clear [--model <id>]
  *
  * Without --model a command acts on the HOST override. <id> is the provider
- * row's gpu_policy.catalogId (or the provider name for a row without one).
+ * row's gpu_policy.catalogId (or the provider name for a row without one);
+ * a catalogId override applies to every quant/variant row of that model.
  * `set` validates exactly like the gateway: absolute path, executable,
  * `<bin> --version` exits 0.
  *
  * Data dir: resolveDataDir() — the gateway's own helper (CROW_DATA_DIR, else
- * ~/.crow/data, else the repo's ./data). For a second instance, run with
- * that instance's CROW_DATA_DIR. The gateway reads state.json on every
- * native start, so no restart is needed; a model that is already running
- * keeps its binary until it is stopped and started again.
+ * ~/.crow/data, else the repo's ./data). For r4:
+ *   CROW_DATA_DIR=/home/kh0pp/.crow-r4/data node scripts/models-runtime-override.mjs …
+ * `set`/`clear` print the data dir they wrote. The gateway reads state.json
+ * on every native start, so no restart is needed; a model that is already
+ * running keeps its binary until it is stopped and started again.
+ *
+ * Second writer: the gateway also rewrites state.json (reservations,
+ * registry, liveness markers) with a whole-file load/modify/save, so a
+ * gateway write can land between our write and the next read and silently
+ * drop our change. Every write is therefore re-read and verified; on a
+ * mismatch it is retried once, then the CLI exits 3 saying a concurrent
+ * gateway write overwrote it.
  *
  * `list`/`get` read state.json directly — they never go through
  * getRuntimeOverride(), whose CROW_LLAMA_SERVER_BIN bootstrap would WRITE
- * state from a read command.
+ * state from a read command. `clear` without --model writes nothing when
+ * no host override is stored.
  *
- * Exit codes: 0 ok, 1 refused (binary/id validation), 2 usage.
+ * Exit codes: 0 ok, 1 refused (binary/id validation), 2 usage,
+ * 3 overwritten by a concurrent gateway write.
  */
 
 import { readFileSync, realpathSync } from "node:fs";
@@ -1517,6 +1759,8 @@ import {
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 const CATALOG_PATH = join(REPO, "registry", "model-catalog.json");
 
+export const EXIT_CONCURRENT_WRITE = 3;
+
 export const USAGE = [
   "usage: node scripts/models-runtime-override.mjs <command> [options]",
   "  list",
@@ -1525,6 +1769,8 @@ export const USAGE = [
   "  clear [--model <id>]",
   "without --model, get/set/clear act on the host-wide override",
 ].join("\n");
+
+class ConcurrentWriteError extends Error {}
 
 function defaultCatalogIds() {
   try {
@@ -1543,8 +1789,26 @@ function knownModelIds(dir, catalogIds) {
   return ids;
 }
 
+/**
+ * Run `apply()` (one library write), re-read state.json, and confirm
+ * `landed(state, result)`. Retry once on a mismatch; a second mismatch
+ * throws ConcurrentWriteError. Returns the FIRST attempt's result (e.g.
+ * clear's "was one set?").
+ */
+function writeVerified(dir, apply, landed) {
+  const first = apply();
+  if (landed(loadState(dir), first)) return first;
+  const second = apply();
+  if (landed(loadState(dir), second)) return first;
+  throw new ConcurrentWriteError(
+    `state.json at ${dir} did not keep the change after a retry — a concurrent gateway write overwrote it. Run the command again; if it keeps happening, check that the gateway on this data dir is current (an older gateway drops unknown state keys).`,
+  );
+}
+
+const sameRecord = (stored, rec) => !!stored && stored.bin === rec.bin && stored.setAt === rec.setAt;
+
 export async function main(argv, deps = {}) {
-  const { out = (s) => console.log(s), err = (s) => console.error(s), overrideOpts = {} } = deps;
+  const { out = (s) => console.log(s), err = (s) => console.error(s), overrideOpts = {}, env = process.env } = deps;
 
   let parsed;
   try {
@@ -1581,6 +1845,10 @@ export async function main(argv, deps = {}) {
   const cmd = positionals[0];
   const dir = deps.dir ?? resolveDataDir();
 
+  if (!model && (cmd === "get" || cmd === "clear") && env.CROW_LLAMA_SERVER_BIN) {
+    err(`warning: CROW_LLAMA_SERVER_BIN is set (${env.CROW_LLAMA_SERVER_BIN}) in this shell; a gateway started with it re-bootstraps the host override from it whenever none is stored`);
+  }
+
   try {
     switch (cmd) {
       case "list": {
@@ -1610,18 +1878,41 @@ export async function main(argv, deps = {}) {
           if (!knownModelIds(dir, catalogIds).has(model)) {
             err(`warning: "${model}" matches no catalog id or registered model; it will only apply to a provider named "${model}" whose gpu_policy has no catalogId`);
           }
-          const rec = setModelRuntimeOverride(dir, model, values.bin, { ...overrideOpts, label });
-          out(`per-model override set for ${model}: ${rec.bin} (${rec.version})`);
+          const rec = writeVerified(
+            dir,
+            () => setModelRuntimeOverride(dir, model, values.bin, { ...overrideOpts, label }),
+            (st, r) => Object.hasOwn(st.runtimeOverrides, model) && sameRecord(st.runtimeOverrides[model], r),
+          );
+          out(`per-model override set for ${model}: ${rec.bin} (${rec.version}) (data dir: ${dir})`);
         } else {
-          const rec = setRuntimeOverride(dir, { bin: values.bin, label }, overrideOpts);
-          out(`host override set: ${rec.bin} (${rec.version})`);
+          const rec = writeVerified(
+            dir,
+            () => setRuntimeOverride(dir, { bin: values.bin, label }, overrideOpts),
+            (st, r) => sameRecord(st.runtimeOverride, r),
+          );
+          out(`host override set: ${rec.bin} (${rec.version}) (data dir: ${dir})`);
         }
         return 0;
       }
       case "clear": {
-        const had = model ? clearModelRuntimeOverride(dir, model) : clearRuntimeOverride(dir);
         const what = model ? `per-model override for ${model}` : "host override";
-        out(had ? `cleared ${what}` : `nothing to clear (${what})`);
+        let had;
+        if (model) {
+          had = writeVerified(
+            dir,
+            () => clearModelRuntimeOverride(dir, model, overrideOpts),
+            (st) => !Object.hasOwn(st.runtimeOverrides, model),
+          );
+        } else if (loadState(dir).runtimeOverride == null) {
+          had = false; // nothing stored: never create or rewrite state.json
+        } else {
+          had = writeVerified(
+            dir,
+            () => clearRuntimeOverride(dir, overrideOpts),
+            (st) => st.runtimeOverride == null,
+          );
+        }
+        out(`${had ? `cleared ${what}` : `nothing to clear (${what})`} (data dir: ${dir})`);
         return 0;
       }
       default:
@@ -1632,6 +1923,10 @@ export async function main(argv, deps = {}) {
     if (e instanceof RuntimeOverrideError) {
       err(`refused (${e.code}): ${e.message}`);
       return 1;
+    }
+    if (e instanceof ConcurrentWriteError) {
+      err(`error: ${e.message}`);
+      return EXIT_CONCURRENT_WRITE;
     }
     throw e;
   }
@@ -1679,7 +1974,7 @@ git show --stat HEAD
 - Test: `tests/models-launch.test.js`, `tests/models-host-profile.test.js` (create), `tests/gpu-orchestrator-native.test.js`
 
 **Interfaces:**
-- Consumes: from Task 1, `probe.gpuArch` and `probe.accel`. The existing `mergeLaunch` and `renderLaunchArgs`. The orchestrator seams `getCachedProbeFn` and `reprobeFn`, which `startNativeAndAwaitReady` now also reads.
+- Consumes: from Task 1, `probe.gpuArch` and `probe.accel`. The existing `mergeLaunch` and `renderLaunchArgs`. From Task 3, the warm probe cache that `resolveNativeBinPath` leaves behind; `startNativeAndAwaitReady` now reads the `getCachedProbeFn` seam (never `reprobeFn`).
 - Produces:
   - `hostLaunchDefaults(probe) → { flash_attn: "on", no_mmap: true, no_op_offload: true } | null` (a fresh object each call)
   - `GFX1151_VULKAN_DEFAULTS` (frozen)
@@ -1840,7 +2135,7 @@ test("host profile: a probe that throws means no profile, never a failed start",
   const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
   opts.getCachedProbeFn = () => null;
   opts.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
-  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo2/llama-server" }); // skip resolveNativeBinPath's own reprobe
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo2/llama-server" }); // override path: the probe failure is survivable
   const origWarn = console.warn;
   console.warn = () => {};
   try {
@@ -1930,7 +2225,11 @@ In `renderLaunchArgs`, directly after `if (launch.no_mmap === true) args.push("-
  *
  * gfx1151 (Strix Halo) on Vulkan gets kyuz0's / pi-lab's flags:
  * `-fa on` (llama.cpp renders `-fa 1` as `on`), `--no-mmap`, and
- * `--no-op-offload`. pi-lab's caveats, kept here on purpose:
+ * `--no-op-offload`. Flash attention stays on for every task: production
+ * containers already run `-fa on` for chat AND embedding models on this
+ * hardware, and FA on an unsupported head size falls back silently.
+ * `--no-op-offload` stays regardless of `ngl` (pi-lab approved it as a
+ * default). pi-lab's caveats, kept here on purpose:
  *   - `--no-op-offload` changes nothing unless weights are host-resident;
  *   - its measured +18% alone did NOT include the fork-only
  *     `GGML_MOE_PREFETCH`, so do not expect that number from stock builds;
@@ -1960,12 +2259,13 @@ Add below the `mergeLaunch` import (`:89`):
 import { hostLaunchDefaults } from "./models/host-profile.js";
 ```
 
-In `startNativeAndAwaitReady`'s opts destructure, add two entries after `existsSyncFn = existsSync,`:
+In `startNativeAndAwaitReady`'s opts destructure, add one entry after `existsSyncFn = existsSync,`:
 
 ```js
     getCachedProbeFn = getCachedProbe,
-    reprobeFn = reprobe,
 ```
+
+It deliberately does NOT take `reprobeFn`: Task 3 made `resolveNativeBinPath` warm the probe before any override early-return, so this function, which runs inside the single-flight, only reads the cache and never probes.
 
 Replace the launch-profile comment and the `const launch = mergeLaunch(...)` line. That runs from `// Launch profile (spec §3.1/§4, Task 10)` through `const launch = mergeLaunch(mergeLaunch(catalogEntry?.launch, p.gpuPolicy?.launch), jinja ? { jinja: true } : null);`. Keep the `catalogId`/`catalogEntry`/`jinja` lines between them exactly as they are. The block becomes:
 
@@ -1984,16 +2284,11 @@ Replace the launch-profile comment and the `const launch = mergeLaunch(...)` lin
     catalogEntry = (loadCatalogFn()?.models || []).find((m) => m.id === catalogId) || null;
   } catch { /* catalog unreadable → no catalog-driven args, model starts as before */ }
 
-  // The probe cache is cold when an override short-circuited
-  // resolveNativeBinPath before it probed — warm it here so the profile
-  // still applies to an override start (the Strix Halo case). A probe
-  // failure means "no profile", never a failed start.
-  let hostProbe = null;
-  try {
-    hostProbe = getCachedProbeFn() || (await reprobeFn());
-  } catch (err) {
-    console.warn(`[gpu-orchestrator] hardware probe failed; starting ${providerName} without a host launch profile: ${err.message}`);
-  }
+  // resolveNativeBinPath already warmed the probe cache (before any
+  // override early-return), so this only READS it — no probing inside the
+  // single-flight critical section. A null cache (the probe failed on an
+  // override path) means "no host profile", never a failed start.
+  const hostProbe = getCachedProbeFn();
 
   const jinja = !!(catalogEntry && catalogEntry.chat_template_kwargs && typeof catalogEntry.chat_template_kwargs === "object");
   const launch = mergeLaunch(
@@ -2061,10 +2356,20 @@ The operator surface is a CLI that resolves the data dir the way the gateway doe
     node scripts/models-runtime-override.mjs set   --bin /abs/llama-server [--model <id>] [--label <text>]
     node scripts/models-runtime-override.mjs clear [--model <id>]
 
+For r4, point it at r4's data dir:
+
+    CROW_DATA_DIR=/home/kh0pp/.crow-r4/data node scripts/models-runtime-override.mjs …
+
 - Without `--model`, a command acts on the host override.
-- `list` and `get` only read. They never trigger the env bootstrap.
+- A per-model override keyed by a `catalogId` applies to every quant/variant row of that model. That is intended: pi-lab builds are per model.
+- `list` and `get` only read. They never trigger the env bootstrap. `clear` without `--model` writes nothing when no host override is stored.
+- `set` and `clear` print the data dir they wrote to.
+- The CLI is a second writer of `state.json`, next to the gateway. After every write it re-reads the file and checks the change landed. On a mismatch it retries once, then exits 3 saying a concurrent gateway write overwrote it.
+- When `CROW_LLAMA_SERVER_BIN` is set, host `get`/`clear` warn that the gateway will re-bootstrap the host override from that variable.
 - `set --model` warns when the id matches no catalog id and no registered model, because such an override only applies to a provider with that exact name.
 - A running model keeps its binary until it is next started.
+
+**Deploy note:** restart the crow and r4 gateways once after deploying this, before the first `set`. An older gateway drops unknown state keys, so it would rewrite `state.json` without `runtimeOverrides`.
 
 This CLI is how a pi-lab pre-merge llama.cpp build reaches a single model. The dashboard card for both overrides is plan 3.
 ```
@@ -2089,21 +2394,23 @@ This section covers the Strix Halo runtime profile, spec `docs/superpowers/specs
 
 On an APU, `vramMb` (RADV's `DEVICE_LOCAL` heap, 83 GiB on crow) is a slice of RAM. It is not separate memory.
 
-**Fit badge.** On a unified host `fitBadge` never adds VRAM to RAM. The ceiling is GTT total, or `MemTotal` when GTT is unknown.
+`unified` comes from Vulkan's `deviceType` whenever vulkaninfo answers: `INTEGRATED_GPU` is `true` and `DISCRETE_GPU` is `false`. The sysfs small-carve-out heuristic is only a fallback, for other Vulkan types and for the rocminfo path. GTT fields are reported only when `unified` is `true`, taken from the amdgpu card with the smallest VRAM (the iGPU).
 
-| condition | badge |
+**Fit badge.** On a unified host `fitBadge` never adds VRAM to RAM. The GTT ceiling applies only to a **GTT-expanded** APU, where GTT total is at least 75% of `MemTotal`, as on crow with `amdgpu.gttsize`:
+
+| condition (GTT-expanded) | badge |
 |---|---|
-| `min_ram_mb` above the ceiling | `wont_fit` |
 | `min_ram_mb` within MemAvailable | `fits` |
+| `min_ram_mb` above GTT total | `wont_fit` |
 | anything in between | `tight`: it fits the box, but only after other resident models are stopped |
 
-There is no fourth badge value. The tight hint says both "close to your limits" and "may need other models stopped first". The discrete path is unchanged. The live GTT start gate is a separate change (two-host spec §6).
+Every other unified host (default GTT, or GTT/MemTotal unknown) uses the discrete formula minus the VRAM credit: `fits` within MemAvailable, `tight` within 110% of it, else `wont_fit`. So a laptop APU with default GTT never has a `fits` turned into `wont_fit`. Only GTT-expanded hosts get the wider `tight` band. There is no fourth badge value. The tight hint says both "close to your limits" and "may need other models stopped first". The discrete path is unchanged. The live GTT start gate is a separate change (two-host spec §6).
 
 **Host launch profile.** `servers/gateway/models/host-profile.js` returns `{ flash_attn: "on", no_mmap: true, no_op_offload: true }` for `gpuArch: "gfx1151"` on `accel: "vulkan"`, and nothing otherwise. It is the **lowest** launch layer:
 
     host profile < catalog launch < provider gpu_policy.launch < jinja
 
-So a curated catalog value or an operator's per-provider value always wins. A provider opts out per key with `gpu_policy.launch: { no_op_offload: false }`, `{ no_mmap: false }` or `{ flash_attn: "off" }`.
+So a curated catalog value or an operator's per-provider value always wins. Flash attention stays on for every task, because production containers already run `-fa on` for chat and embedding models on this hardware, and FA on an unsupported head size falls back silently. `--no-op-offload` stays in the profile regardless of `ngl`. A provider opts out per key with `gpu_policy.launch: { no_op_offload: false }`, `{ no_mmap: false }` or `{ flash_attn: "off" }`.
 
 `no_op_offload` is a typed launch key. It renders `--no-op-offload` only when `true`, and `--op-offload`/`--no-op-offload` can never ride in `extra_args`.
 
@@ -2166,3 +2473,25 @@ git show --stat HEAD
 - `readAmdgpuMem` returns `{ gttTotalMb, gttUsedMb, vramTotalMb }` in both the probe code and its test.
 
 **4. Review Focus.** Each of the five items has a pinned test: Task 5 Step 1 (two tests), Task 4 Step 1 (two tests), Task 3 Step 1 (the state test), and Task 1 Step 1 (the `readAmdgpuMem` tests).
+
+## Review
+
+Adversarial review round 1. Every ruling below was binding and has been applied to this plan and to the spec.
+
+| # | finding | resolution |
+|---|---|---|
+| C1 | `unified` misfired on discrete AMD: the sysfs carve-out heuristic could mark a host unified even though Vulkan reported a discrete GPU, and the first card's GTT was reported for a dGPU. | Vulkan's `deviceType` decides whenever vulkaninfo answered (`INTEGRATED_GPU` → true, `DISCRETE_GPU` → false). Other types and the no-Vulkan (rocminfo) path use the heuristic. GTT fields are populated only when `unified === true`, from the amdgpu card with the smallest `mem_info_vram_total` that has GTT (the iGPU). New Task 1 tests: a two-card iGPU+dGPU fixture (Vulkan DISCRETE) gives unified false, no GTT and an unchanged discrete `fitBadge`; a ≤2 GiB discrete card reported DISCRETE gives unified false; `readAmdgpuMem` picks the smallest-VRAM card, with ties going to the lower card number. |
+| C2 | The unified `fitBadge` could flip `fits` to `wont_fit` on default-GTT laptop APUs, where GTT is ~50% of RAM. | The GTT ceiling applies only to a GTT-expanded APU (`gttTotalMb >= 0.75 × ramTotalMb`, both known), in the order fits → wont_fit (> GTT) → tight. Every other unified host uses today's formula minus the VRAM credit. Discrete and unknown hosts are byte-identical. The "GTT smaller than MemAvailable is still the ceiling" test is dropped. Added: a default-GTT laptop quant within MemAvailable but above GTT gives `fits`, crow's Flash-Next 115,068 gives `tight`, GLM 157,911 gives `wont_fit`, an integer-exact 0.75 boundary test, and GTT/MemTotal unknown uses the 10% band without VRAM. The spec's §2.2 records that the tight widening applies only to GTT-expanded hosts. |
+| C3 | The CLI is a second `state.json` writer and can silently lose a race with the gateway. | Every write is re-read and verified, retried once, then the CLI exits 3 with "a concurrent gateway write overwrote it" (tests inject a clobbering `saveStateFn`). `set`/`clear` print the resolved data dir. Task 6 docs gain the deploy note (restart the crow and r4 gateways once before the first `set`, since an older gateway drops unknown state keys) and the r4 invocation `CROW_DATA_DIR=/home/kh0pp/.crow-r4/data node scripts/models-runtime-override.mjs …`. |
+| S1 | `clear` with no `--model` wrote or created `state.json` even when nothing was stored. | It now checks first and writes nothing. Pinned by an in-process test and by the child-process no-write loop. |
+| S2 | A host `get`/`clear` is misleading when `CROW_LLAMA_SERVER_BIN` is set. | Both print a warning that the gateway re-bootstraps the host override from that variable. Tested. |
+| S3 | The probe warm-up sat inside `startNativeAndAwaitReady`'s single-flight critical section. | Moved into `resolveNativeBinPath`, before any override early-return, so override and stock paths both leave a warm cache. `startNativeAndAwaitReady` only reads `getCachedProbeFn()` (null means no profile). A probe failure is survivable on an override path and still surfaces on the stock path, as before. Tests are in Tasks 3 and 5. |
+| S4 | Should flash attention stay on in the profile? | It is kept `"on"`, since production containers run `-fa on` for chat and embedding models on this hardware. The host-profile module comment and the docs note that FA on an unsupported head size falls back silently. |
+| S5 | Task 3(b)'s import edit was vague. | It now names the exact lines 6 and 7 of `tests/models-runtime-override.test.js`, with their replacements. |
+
+**Questions answered:**
+
+- **A per-model override keyed by `catalogId` applies to every quant/variant row of that model.** That is intended, because pi-lab builds are per model. Recorded in the spec, the CLI header and the docs.
+- **`--no-op-offload` stays in the profile regardless of `ngl`.** pi-lab approved it as a default. The opt-out is `gpu_policy.launch: { no_op_offload: false }`.
+- **darwin keeps `unified: null`.** Pinned by the Task 1 WSL2/darwin test.
+
