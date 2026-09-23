@@ -10,7 +10,7 @@ Conecta dos instalaciones de Crow para que compartan la misma identidad, sincron
 ## Requisitos previos
 
 - **Dos máquinas** con Crow instalado (consulta [Servidor en Casa](./home-server) o [Instalación de Escritorio](./desktop-install))
-- **Node.js 18+** en ambas máquinas
+- **Node.js 24+** en ambas máquinas
 - **Conectividad de red** entre ellas — se recomienda Tailscale (consulta [Configuración de Tailscale](./tailscale-setup)), o la misma LAN
 
 ## Paso 1: Elige Tu Instancia Principal

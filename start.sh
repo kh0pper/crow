@@ -17,7 +17,7 @@ if ! command -v node &>/dev/null; then
   echo "  Node.js is required but not installed."
   echo ""
   echo "  Install Node.js from https://nodejs.org"
-  echo "  Or run: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs"
+  echo "  Or run: curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
   echo ""
   # Try to open browser
   xdg-open "https://nodejs.org" 2>/dev/null || true
@@ -27,8 +27,8 @@ if ! command -v node &>/dev/null; then
 fi
 
 NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-  echo "  Node.js $(node -v) is too old. Need version 18 or newer."
+if [ "$NODE_VERSION" -lt 24 ]; then
+  echo "  Node.js $(node -v) is too old. Need version 24 or newer."
   echo "  Install from https://nodejs.org"
   xdg-open "https://nodejs.org" 2>/dev/null || true
   echo "  Press any key to exit."
