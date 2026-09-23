@@ -51,7 +51,7 @@ Después de la configuración, tu asistente de IA tendrá:
 
 ## Requisitos
 
-- Node.js 18+ (para todas las opciones autoalojadas)
+- Node.js 24+ (para todas las opciones autoalojadas)
 - Una cuenta gratuita de [Oracle Cloud](https://cloud.oracle.com) (para despliegue en la nube)
 - Raspberry Pi 4+ con 4 GB de RAM (para Crow OS)
 - Una cuenta en al menos una plataforma de IA (Claude, ChatGPT, Gemini, etc.)

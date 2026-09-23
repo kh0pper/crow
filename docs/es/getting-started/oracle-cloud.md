@@ -49,8 +49,8 @@ ssh ubuntu@<tu-ip-publica>
 # Actualizar paquetes del sistema
 sudo apt update && sudo apt upgrade -y
 
-# Instalar Node.js 22
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+# Instalar Node.js 24
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt install -y nodejs git
 
 # Verificar

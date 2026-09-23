@@ -5,7 +5,7 @@ Run Crow locally with Claude Desktop using stdio transport. No cloud deployment 
 ## Prerequisites
 
 - [Claude Desktop](https://claude.ai/download) installed
-- [Node.js](https://nodejs.org) 18 or later
+- [Node.js](https://nodejs.org) 24 or later
 - Git
 
 ## Step 1: Clone and Install

@@ -75,7 +75,7 @@ See the [Context & Performance guide](/guide/context-performance) for ways to op
 
 ## Requirements
 
-- Node.js 18+ (for all self-hosted options)
+- Node.js 24+ (for all self-hosted options)
 - A free [Oracle Cloud](https://cloud.oracle.com) account (for cloud deploy)
 - Raspberry Pi 4+ with 4 GB RAM (for Crow OS)
 - An account on at least one AI platform (Claude, ChatGPT, Gemini, etc.)

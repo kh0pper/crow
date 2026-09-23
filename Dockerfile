@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:24-slim
 
 # Install Python 3 + uv (for uvx-based MCP servers like Google Workspace, Zotero, MCP Research)
 # Also install curl for uv installer, git which some npx packages need,

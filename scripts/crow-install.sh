@@ -21,7 +21,7 @@ set -euo pipefail
 CROW_HOME="$HOME/.crow"
 CROW_APP="$CROW_HOME/app"
 CROW_DATA="$CROW_HOME/data"
-NODE_MAJOR=22
+NODE_MAJOR=24
 
 # Colors
 RED='\033[0;31m'
@@ -189,7 +189,7 @@ header "Step 2/9: Node.js ${NODE_MAJOR}"
 
 if command -v node >/dev/null 2>&1; then
   CURRENT_NODE=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
-  if [ "$CURRENT_NODE" -ge 18 ]; then
+  if [ "$CURRENT_NODE" -ge "$NODE_MAJOR" ]; then
     log "Node.js $(node --version) already installed"
   else
     warn "Node.js $(node --version) is too old, upgrading..."

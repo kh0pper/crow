@@ -10,7 +10,7 @@ Connect two Crow installations so they share the same identity, sync memories, a
 ## Prerequisites
 
 - **Two machines** with Crow installed (see [Home Server](./home-server) or [Desktop Install](./desktop-install))
-- **Node.js 18+** on both machines
+- **Node.js 24+** on both machines
 - **Network connectivity** between them — Tailscale recommended (see [Tailscale Setup](./tailscale-setup)), or same LAN
 
 ## Step 1: Pick Your Home Instance
