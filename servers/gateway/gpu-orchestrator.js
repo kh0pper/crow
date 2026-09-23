@@ -695,10 +695,6 @@ function warnMissingOverrideOnce(bin, message) {
 }
 
 /**
- * Resolve order: per-model override (state.runtimeOverrides[catalogId ||
- * providerName]) -> host override -> catalog release (Strix Halo spec
- * §2.3).
- *
  * Resolve the llama-server `binPath` for a native provider. Deliberately
  * called from `acquireProvider`'s native branch BEFORE the `_swapInFlight`
  * chain is ever touched (Task 9 review round 1, finding 2): a first-install
@@ -710,6 +706,10 @@ function warnMissingOverrideOnce(bin, message) {
  * unconditionally on every acquire — even one that turns out to hit the
  * `identityProbe` fast path and never needs to start anything — is an
  * acceptable, small, constant cost.
+ *
+ * Resolve order: per-model override (state.runtimeOverrides[catalogId ||
+ * providerName]) -> host override -> catalog release (Strix Halo spec
+ * §2.3).
  */
 async function resolveNativeBinPath(p, opts = {}) {
   const {

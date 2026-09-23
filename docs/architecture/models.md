@@ -70,7 +70,7 @@ A native start resolves its binary in this order:
 
 Either override skips `ensureRuntime`, and with it any `min_runtime_version` check. An override binary that goes missing logs one warning per binary and falls through to the next layer rather than failing the start.
 
-The operator surface is a CLI that resolves the data dir the way the gateway does (`CROW_DATA_DIR`, else `~/.crow/data`):
+The operator surface is a CLI that resolves the data dir the way the gateway does (`CROW_DATA_DIR`, else `~/.crow/data`, else the repo's `./data`):
 
     node scripts/models-runtime-override.mjs list
     node scripts/models-runtime-override.mjs get   [--model <id>]
@@ -105,7 +105,7 @@ This section covers the Strix Halo runtime profile, spec `docs/superpowers/specs
 |---|---|
 | `gpuArch` | e.g. `gfx1151`, from the Vulkan device name, else from rocminfo |
 | `unified` | `true` when Vulkan reports `INTEGRATED_GPU`, or when amdgpu sysfs shows a VRAM carve-out of 2 GiB or less alongside a GTT total. `false` for a discrete GPU. `null` when no GPU is detected. |
-| `gttTotalMb`, `gttUsedMb` | from the first `/sys/class/drm/card<N>/device/mem_info_gtt_*` |
+| `gttTotalMb`, `gttUsedMb` | from the amdgpu card with the smallest VRAM carve-out (the iGPU) that exposes `mem_info_gtt_*` |
 | `ramTotalMb` | `/proc/meminfo` `MemTotal` |
 
 On an APU, `vramMb` (RADV's `DEVICE_LOCAL` heap, 83 GiB on crow) is a slice of RAM. It is not separate memory.
@@ -129,6 +129,8 @@ Every other unified host (default GTT, or GTT/MemTotal unknown) uses the discret
 So a curated catalog value or an operator's per-provider value always wins. Flash attention stays on for every task, because production containers already run `-fa on` for chat and embedding models on this hardware, and FA on an unsupported head size falls back silently. `--no-op-offload` stays in the profile regardless of `ngl`. A provider opts out per key with `gpu_policy.launch: { no_op_offload: false }`, `{ no_mmap: false }` or `{ flash_attn: "off" }`.
 
 `no_op_offload` is a typed launch key. It renders `--no-op-offload` only when `true`, and `--op-offload`/`--no-op-offload` can never ride in `extra_args`.
+
+An old override llama-server build that predates `-fa on` support or `--no-op-offload` will fail at launch on gfx1151, because a runtime override (host or per-model) skips `ensureRuntime` and with it the `min_runtime_version` check — opt out per provider with `gpu_policy.launch: { no_op_offload: false }` / `{ flash_attn: "off" }`.
 
 pi-lab's caveats, also recorded in the module:
 

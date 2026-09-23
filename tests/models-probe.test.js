@@ -210,6 +210,43 @@ memoryHeaps: count = 2
 memoryTypes: count = 11
 `;
 
+// A mixed-vendor host: Vulkan's chosen device is an Intel INTEGRATED_GPU
+// (laptop iGPU), while a separate discrete AMD card is also present as the
+// host's only amdgpu sysfs card (see SYSFS_DISCRETE_AMD below, reused as
+// that card). readAmdgpuMem always returns the amdgpu card with the
+// smallest vram_total, which on this host is the dGPU itself (there is no
+// smaller amdgpu card to beat it) — its GTT aperture must NOT be surfaced
+// as a unified-memory ceiling just because Vulkan judged unrelated
+// hardware "integrated".
+const VULKANINFO_INTEL_INTEGRATED = `
+==========
+VULKANINFO
+==========
+
+Devices:
+========
+GPU0:
+VkPhysicalDeviceProperties:
+---------------------------
+	apiVersion        = 1.3.275 (4206699)
+	driverVersion     = 23.2.1 (0)
+	vendorID          = 0x8086
+	deviceID          = 0x9a49
+	deviceType        = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName        = Intel(R) Iris(R) Xe Graphics (TGL GT2)
+
+VkPhysicalDeviceMemoryProperties:
+=================================
+memoryHeaps: count = 1
+	memoryHeaps[0]:
+		size   = 4294967296 (0x100000000) (4.00 GiB)
+		budget = 3221225472 (0xc0000000) (3.00 GiB)
+		usage  = 0 (0x00000000) (0.00 B)
+		flags: count = 1
+			MEMORY_HEAP_DEVICE_LOCAL_BIT
+memoryTypes: count = 1
+`;
+
 // crow's real amdgpu sysfs values (spec §1): 512 MiB BIOS carve-out,
 // GTT sized by amdgpu.gttsize=126976. /sys/class/drm listing is crow's
 // real one (connector entries, renderD128 and version included).
@@ -608,6 +645,16 @@ test("probeHardware: crow's INTEGRATED vulkaninfo + dGPU at card0 and iGPU at ca
   assert.equal(probe.unified, true);
   assert.equal(probe.gttTotalMb, 126976); // card1, not card0's 8192
   assert.equal(probe.gttUsedMb, 58937); // card1, not card0's 1
+});
+
+test("probeHardware: Vulkan INTEGRATED Intel + a single 16 GiB amdgpu dGPU card -> unified true (Vulkan's verdict), but GTT NOT surfaced (the amdgpu card is not a carve-out iGPU)", async () => {
+  const execFile = fakeExecFile({ vulkaninfo: VULKANINFO_INTEL_INTEGRATED });
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP, ...SYSFS_DISCRETE_AMD }, dirs: { "/sys/class/drm": ["card0"] } });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+
+  assert.equal(probe.unified, true);
+  assert.equal(probe.gttTotalMb, null);
+  assert.equal(probe.gttUsedMb, null);
 });
 
 test("readAmdgpuMem: a card with no mem_info_vram_total listed BEFORE one that has it ranks last (the card with vram_total wins)", () => {

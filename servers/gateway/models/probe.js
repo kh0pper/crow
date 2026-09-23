@@ -275,24 +275,29 @@ export function parseRocminfo(text) {
   return candidates[0];
 }
 
-/** Parse the `MemAvailable:  N kB` line from /proc/meminfo text. MB, rounded. */
-export function parseMemAvailableMb(text) {
+/**
+ * Parse a `<field>:  N kB` line from /proc/meminfo text. MB, rounded.
+ * Shared by `parseMemAvailableMb` and `parseMemTotalMb` — same line shape,
+ * different field name.
+ */
+export function parseMeminfoKbField(text, field) {
   if (!text) return null;
+  const re = new RegExp(`^${field}:\\s+(\\d+)\\s+kB`);
   for (const line of text.split("\n")) {
-    const m = line.match(/^MemAvailable:\s+(\d+)\s+kB/);
+    const m = line.match(re);
     if (m) return Math.round(Number(m[1]) / 1024);
   }
   return null;
 }
 
+/** Parse the `MemAvailable:  N kB` line from /proc/meminfo text. MB, rounded. */
+export function parseMemAvailableMb(text) {
+  return parseMeminfoKbField(text, "MemAvailable");
+}
+
 /** Parse the `MemTotal:  N kB` line from /proc/meminfo text. MB, rounded. */
 export function parseMemTotalMb(text) {
-  if (!text) return null;
-  for (const line of text.split("\n")) {
-    const m = line.match(/^MemTotal:\s+(\d+)\s+kB/);
-    if (m) return Math.round(Number(m[1]) / 1024);
-  }
-  return null;
+  return parseMeminfoKbField(text, "MemTotal");
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +516,19 @@ export async function probeHardware(opts = {}) {
           amdGpu && amd != null && amd.vramTotalMb != null && amd.vramTotalMb <= UNIFIED_VRAM_CARVEOUT_MAX_MB;
       }
     }
-    if (probe.unified === true && amd) {
+    // Only report GTT when the chosen amdgpu card itself looks like a
+    // carve-out iGPU. `probe.unified` can be true from Vulkan's verdict on a
+    // NON-amdgpu integrated GPU (e.g. Intel) while a separate amdgpu
+    // DISCRETE card is also present on the host; readAmdgpuMem always
+    // returns the amdgpu card with the smallest vram_total, which on that
+    // mixed host is the dGPU, not an iGPU — its GTT aperture is not a model
+    // ceiling and must not be surfaced.
+    if (
+      probe.unified === true &&
+      amd &&
+      amd.vramTotalMb != null &&
+      amd.vramTotalMb <= UNIFIED_VRAM_CARVEOUT_MAX_MB
+    ) {
       probe.gttTotalMb = amd.gttTotalMb;
       probe.gttUsedMb = amd.gttUsedMb;
     }

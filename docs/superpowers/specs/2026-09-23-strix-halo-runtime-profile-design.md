@@ -123,8 +123,8 @@ carries.
   `set --bin <abs> [--model <id>] [--label <s>]` and `clear [--model <id>]`.
   - Without `--model`, the command acts on the host override.
   - It resolves the data dir the same way the gateway does
-    (`resolveDataDir()`: `CROW_DATA_DIR`, else `~/.crow/data`); `set` and
-    `clear` print the resolved data dir.
+    (`resolveDataDir()`: `CROW_DATA_DIR`, else `~/.crow/data`, else the
+    repo's `./data`); `set` and `clear` print the resolved data dir.
   - The CLI is a second writer of `state.json`. After every write it re-reads
     the file and verifies the change landed; on a mismatch it retries once,
     then exits non-zero saying a concurrent gateway write overwrote it. The
