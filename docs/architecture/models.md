@@ -58,7 +58,85 @@ Starting a native provider runs: **identity probe on loopback** (is something al
 
 ## Runtime override
 
-`state.json.runtimeOverride` (`{ bin, label, version, setAt }`) is host-local — it lives in the state file, never in the `providers` DB row, so it never replicates to another instance. It bootstraps once from the `CROW_LLAMA_SERVER_BIN` environment variable when no record exists yet. When set, every native start on that host uses the override binary instead of the pinned catalog release, skipping `ensureRuntime` entirely; if the override binary later goes missing, the orchestrator falls back to the release with a logged warning rather than failing the start. A panel card for setting and clearing the override (with `--version` validation surfaced in the UI) is scoped to a later plan (plan 3), not this branch.
+`state.json.runtimeOverride` (`{ bin, label, version, setAt }`) is host-local. It lives in the state file, never in the `providers` DB row, so it never replicates to another instance. It bootstraps once from the `CROW_LLAMA_SERVER_BIN` environment variable when no record exists yet.
+
+`state.json.runtimeOverrides[<id>]` is a **per-model** override with the same record shape and the same validation. `<id>` is the provider row's `gpu_policy.catalogId`, or the provider name for a row without one.
+
+A native start resolves its binary in this order:
+
+1. the per-model override;
+2. the host override;
+3. the pinned catalog release through `ensureRuntime`.
+
+Either override skips `ensureRuntime`, and with it any `min_runtime_version` check. An override binary that goes missing logs one warning per binary and falls through to the next layer rather than failing the start.
+
+The operator surface is a CLI that resolves the data dir the way the gateway does (`CROW_DATA_DIR`, else `~/.crow/data`):
+
+    node scripts/models-runtime-override.mjs list
+    node scripts/models-runtime-override.mjs get   [--model <id>]
+    node scripts/models-runtime-override.mjs set   --bin /abs/llama-server [--model <id>] [--label <text>]
+    node scripts/models-runtime-override.mjs clear [--model <id>]
+
+For r4, point it at r4's data dir:
+
+    CROW_DATA_DIR=/home/kh0pp/.crow-r4/data node scripts/models-runtime-override.mjs …
+
+- Without `--model`, a command acts on the host override.
+- A per-model override keyed by a `catalogId` applies to every quant/variant row of that model. That is intended: pi-lab builds are per model.
+- `list` and `get` only read. They never trigger the env bootstrap. `clear` without `--model` writes nothing when no host override is stored.
+- `set` and `clear` print the data dir they wrote to.
+- The CLI is a second writer of `state.json`, next to the gateway. After every write it re-reads the file and checks the change landed. On a mismatch it retries once, then exits 3 saying a concurrent gateway write overwrote it.
+- The read-back narrows the race but does not close it. A gateway that loaded `state.json` before the write and saves after the read-back still wins, silently. Verify with `get` after the next gateway restart.
+- When `CROW_LLAMA_SERVER_BIN` is set, host `get`/`clear` warn that the gateway will re-bootstrap the host override from that variable.
+- `set --model` warns when the id matches no catalog id and no registered model, because such an override only applies to a provider with that exact name.
+- A running model keeps its binary until it is next started.
+
+**Deploy note:** restart the crow and r4 gateways once after deploying this, before the first `set`. An older gateway drops unknown state keys, so it would rewrite `state.json` without `runtimeOverrides`.
+
+This CLI is how a pi-lab pre-merge llama.cpp build reaches a single model. The dashboard card for both overrides is plan 3.
+
+## Unified memory and the gfx1151 host profile
+
+This section covers the Strix Halo runtime profile, spec `docs/superpowers/specs/2026-09-23-strix-halo-runtime-profile-design.md`.
+
+**Probe.** `probeHardware()` adds five fields. Every earlier field keeps its meaning.
+
+| field | what it holds |
+|---|---|
+| `gpuArch` | e.g. `gfx1151`, from the Vulkan device name, else from rocminfo |
+| `unified` | `true` when Vulkan reports `INTEGRATED_GPU`, or when amdgpu sysfs shows a VRAM carve-out of 2 GiB or less alongside a GTT total. `false` for a discrete GPU. `null` when no GPU is detected. |
+| `gttTotalMb`, `gttUsedMb` | from the first `/sys/class/drm/card<N>/device/mem_info_gtt_*` |
+| `ramTotalMb` | `/proc/meminfo` `MemTotal` |
+
+On an APU, `vramMb` (RADV's `DEVICE_LOCAL` heap, 83 GiB on crow) is a slice of RAM. It is not separate memory.
+
+`unified` comes from Vulkan's `deviceType` whenever vulkaninfo answers: `INTEGRATED_GPU` is `true` and `DISCRETE_GPU` is `false`. The sysfs small-carve-out heuristic is only a fallback, for other Vulkan types and for the rocminfo path. GTT fields are reported only when `unified` is `true`, taken from the amdgpu card with the smallest VRAM (the iGPU).
+
+**Fit badge.** On a unified host `fitBadge` never adds VRAM to RAM. The GTT ceiling applies only to a **GTT-expanded** APU, where GTT total is at least 75% of `MemTotal`, as on crow with `amdgpu.gttsize`:
+
+| condition (GTT-expanded, checked in this order) | badge |
+|---|---|
+| `min_ram_mb` above GTT total | `wont_fit`, even when an idle box has more MemAvailable than GTT |
+| `min_ram_mb` within MemAvailable | `fits` |
+| anything in between | `tight`: it fits the box, but only after other resident models are stopped |
+
+Every other unified host (default GTT, or GTT/MemTotal unknown) uses the discrete formula minus the VRAM credit: `fits` within MemAvailable, `tight` within 110% of it, else `wont_fit`. So a laptop APU with default GTT never has a `fits` turned into `wont_fit`. Only GTT-expanded hosts get the wider `tight` band. There is no fourth badge value. The tight hint says both "close to your limits" and "may need other models stopped first". The discrete path is unchanged. The live GTT start gate is a separate change (two-host spec §6).
+
+**Host launch profile.** `servers/gateway/models/host-profile.js` returns `{ flash_attn: "on", no_mmap: true, no_op_offload: true }` for `gpuArch: "gfx1151"` on `accel: "vulkan"`, and nothing otherwise. It is the **lowest** launch layer:
+
+    host profile < catalog launch < provider gpu_policy.launch < jinja
+
+So a curated catalog value or an operator's per-provider value always wins. Flash attention stays on for every task, because production containers already run `-fa on` for chat and embedding models on this hardware, and FA on an unsupported head size falls back silently. `--no-op-offload` stays in the profile regardless of `ngl`. A provider opts out per key with `gpu_policy.launch: { no_op_offload: false }`, `{ no_mmap: false }` or `{ flash_attn: "off" }`.
+
+`no_op_offload` is a typed launch key. It renders `--no-op-offload` only when `true`, and `--op-offload`/`--no-op-offload` can never ride in `extra_args`.
+
+pi-lab's caveats, also recorded in the module:
+
+- `--no-op-offload` changes nothing unless weights are host-resident;
+- pi-lab's measured +18% did not include the fork-only `GGML_MOE_PREFETCH`;
+- results match on argmax, not bit for bit.
+
+The profile applies to native starts only. Docker bundles build their own command lines.
 
 ## What later plans add
 
