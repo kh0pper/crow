@@ -94,6 +94,7 @@ import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { isForeignInstanceHost } from "../shared/provider-host.js";
 import { servingClassRefusal, ServingClassError } from "./models/serving-class.js";
 import { isExternalEngine, externalEngineInfo, ExternalEngineError } from "../shared/provider-engine.js";
+import { startExternalEngineMonitor } from "./external-engine-poll.js";
 export { ServingClassError } from "./models/serving-class.js";
 export { ExternalEngineError } from "../shared/provider-engine.js";
 
@@ -1812,6 +1813,14 @@ export async function initOrchestrator() {
   // failure class this feature exists to eliminate).
   setResidencyInitialized();
   startResidencyMonitor();
+  // External engines (spec 2026-09-23 §2.3): read-only GET /models every
+  // CROW_EXTERNAL_ENGINE_POLL_MS (default 60 s). Armed here, before anything
+  // that can throw, for the same reason as the residency monitor.
+  try {
+    startExternalEngineMonitor();
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] external-engine poll not armed: ${err.message}`);
+  }
 
   // Native-model boot reconciliation (final-review fix wave, Fix 3) — its
   // own dedicated try/catch, deliberately separate from the alwaysResident

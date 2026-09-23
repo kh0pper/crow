@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import {
   setResidencyInitialized, recordResidency, releaseResidency,
   pruneResidency, getProviderHealth, _resetProviderHealth,
+  recordExternal, pruneExternal,
 } from "../servers/gateway/provider-health.js";
 
 test("fresh state → initialized:false, providers empty", () => {
@@ -159,4 +160,69 @@ test("_resetProviderHealth restores the initial shape", () => {
   const h = getProviderHealth();
   assert.equal(h.initialized, false);
   assert.deepEqual(h.providers, {});
+});
+
+// --- external engines (spec 2026-09-23 external-engine-provider §2.3) -------
+
+const RAVEN = "http://10.0.0.126:8030/v1";
+const ext = (ready, nowMs, extra = {}) =>
+  recordExternal("raven-flash-next", { ready, nowMs, baseUrl: RAVEN, engineHost: "raven", label: "halogen", ...extra });
+
+test("recordExternal: first sight stamps firstSeenAt with lastReadyAt null; fields as specified", () => {
+  _resetProviderHealth();
+  ext(false, 1000, { error: new Error("ECONNREFUSED") });
+  const e = getProviderHealth().external["raven-flash-next"];
+  assert.deepEqual(e, {
+    baseUrl: RAVEN, engineHost: "raven", label: "halogen",
+    ready: false, firstSeenAt: 1000, lastReadyAt: null, lastError: "ECONNREFUSED", checkedAt: 1000,
+  });
+});
+
+test("recordExternal: ready stamps lastReadyAt + clears lastError; a later not-ready keeps both clocks", () => {
+  _resetProviderHealth();
+  ext(false, 1000, { error: "down" });
+  ext(true, 2000);
+  ext(false, 9000, { error: "http 503" });
+  const e = getProviderHealth().external["raven-flash-next"];
+  assert.equal(e.firstSeenAt, 1000);
+  assert.equal(e.lastReadyAt, 2000);
+  assert.equal(e.ready, false);
+  assert.equal(e.lastError, "http 503");
+  assert.equal(e.checkedAt, 9000);
+});
+
+test("recordExternal: a changed baseUrl starts a fresh entry — no inherited 'was ready'", () => {
+  _resetProviderHealth();
+  ext(true, 1000);
+  ext(false, 5000, { baseUrl: "http://10.0.0.127:8030/v1" });
+  const e = getProviderHealth().external["raven-flash-next"];
+  assert.equal(e.baseUrl, "http://10.0.0.127:8030/v1");
+  assert.equal(e.firstSeenAt, 5000);
+  assert.equal(e.lastReadyAt, null);
+});
+
+test("pruneExternal drops only names not passed (array and Set); the residency map is untouched", () => {
+  _resetProviderHealth();
+  recordResidency("crow-voice", { ready: true, nowMs: 1, baseUrl: "u" });
+  recordExternal("a", { ready: true, nowMs: 1, baseUrl: "u" });
+  recordExternal("b", { ready: true, nowMs: 1, baseUrl: "u" });
+  pruneExternal(["a"]);
+  assert.ok(getProviderHealth().external.a);
+  assert.equal(getProviderHealth().external.b, undefined);
+  pruneExternal(new Set());
+  assert.deepEqual(getProviderHealth().external, {});
+  assert.ok(getProviderHealth().providers["crow-voice"], "residency map is a separate map");
+  pruneResidency([]);
+  assert.deepEqual(getProviderHealth().providers, {});
+});
+
+test("getProviderHealth copies the external map too; _resetProviderHealth clears it", () => {
+  _resetProviderHealth();
+  ext(true, 1);
+  const first = getProviderHealth();
+  first.external["raven-flash-next"].ready = false;
+  delete first.external["raven-flash-next"];
+  assert.equal(getProviderHealth().external["raven-flash-next"].ready, true);
+  _resetProviderHealth();
+  assert.deepEqual(getProviderHealth().external, {});
 });
