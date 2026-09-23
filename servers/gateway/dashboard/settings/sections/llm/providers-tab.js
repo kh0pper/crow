@@ -20,19 +20,31 @@ import {
 } from "../../../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../../../shared/providers.js";
 import { KNOWN_PROVIDER_TYPES } from "../../../../../shared/provider-type.js";
+import { hostLabel } from "../../../../../shared/provider-host.js";
+import { getOwnAddresses } from "../../../../../shared/locality.js";
+import { getOrCreateLocalInstanceId } from "../../../../instance-registry.js";
 
 const BACK = "?section=llm&tab=providers";
 
-function hostBadge(p) {
+export function hostBadge(p, ctx) {
   const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);white-space:nowrap`;
-  if (p.host === "cloud") return `<span style="${base};color:var(--crow-accent)">cloud${p.provider_type ? ` · ${escapeHtml(p.provider_type)}` : ""}</span>`;
-  if (p.host === "local") return `<span style="${base};color:var(--crow-text-secondary)">local</span>`;
-  return `<span style="${base};color:var(--crow-text-secondary)">${escapeHtml((p.host || "").slice(0, 18))}</span>`;
+  const { kind, text } = hostLabel(p, ctx);
+  const color = kind === "cloud" ? "var(--crow-accent)" : "var(--crow-text-secondary)";
+  const suffix = kind === "cloud" && p.provider_type ? ` · ${escapeHtml(p.provider_type)}` : "";
+  return `<span style="${base};color:${color}" title="stored host: ${escapeHtml(String(p.host ?? ""))}">${escapeHtml(text)}${suffix}</span>`;
 }
 
 export default {
   async render({ db }) {
     const providers = await listProvidersAll(db);
+    let instanceNames = new Map();
+    try {
+      const { rows } = await db.execute("SELECT id, name FROM crow_instances");
+      instanceNames = new Map(rows.map((r) => [r.id, r.name]));
+    } catch {}
+    let ownInstanceId = null;
+    try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
+    const hostCtx = { ownAddrs: getOwnAddresses(), ownInstanceId, instanceNames };
     const rows = providers.map((p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const dotColor = p.disabled ? "var(--crow-text-muted)" : "var(--crow-success)";
@@ -41,7 +53,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}">
         <td class="llm-cell-status"><span aria-label="${dotTitle}" title="${dotTitle}" style="color:${dotColor};font-size:1.15rem;line-height:1">●</span></td>
         <td class="llm-cell-id">${idEsc}</td>
-        <td>${hostBadge(p)}</td>
+        <td>${hostBadge(p, hostCtx)}</td>
         <td class="llm-cell-endpoint">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" title="${escapeHtml(models)}">${models}</td>
         <td class="llm-cell-actions">
