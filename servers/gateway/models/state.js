@@ -30,8 +30,13 @@
  *   - conversions (keyed by provider id): a snapshot of the Docker-bundle
  *     provider row a native registration replaced, so an operator can see or
  *     restore what that provider id used to be.
- *   - runtimeOverride: `null`, or `{ bin, version }` naming an operator-chosen
- *     llama-server binary that wins over the catalog's release.
+ *   - runtimeOverride: `null`, or `{ bin, label, version, setAt }` naming an
+ *     operator-chosen llama-server binary that wins over the catalog's release.
+ *   - runtimeOverrides (keyed by catalog id, or provider name for a row with
+ *     no catalogId): per-model `{ bin, label, version, setAt }` that wins over
+ *     BOTH runtimeOverride and the release for that one model (Strix Halo
+ *     runtime profile spec §2.3). Host-local like runtimeOverride — a binary
+ *     path is host-specific, so this never goes in the synced gpu_policy.
  *
  * `dir` is always injected by the caller — this module never guesses a
  * path itself. Production callers pass `resolveDataDir()` (the same
@@ -79,7 +84,7 @@ export class PortRangeExhaustedError extends Error {
 }
 
 function emptyState() {
-  return { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null };
+  return { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null, runtimeOverrides: {} };
 }
 
 /** Path to the state file for a given (injected) CROW_HOME/data dir. */
@@ -157,6 +162,10 @@ export function loadState(dir) {
         parsed && parsed.runtimeOverride && typeof parsed.runtimeOverride === "object"
           ? parsed.runtimeOverride
           : null,
+      runtimeOverrides:
+        parsed && parsed.runtimeOverrides && typeof parsed.runtimeOverrides === "object" && !Array.isArray(parsed.runtimeOverrides)
+          ? parsed.runtimeOverrides
+          : {},
     };
   } catch {
     return emptyState();

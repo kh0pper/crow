@@ -36,10 +36,12 @@ import {
   NativePortConflictError,
   NativeHostLockHeldError,
   _setNativeHandleForTest,
+  _resetProbeFailureWindowForTest,
 } from "../servers/gateway/gpu-orchestrator.js";
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
 import { loadState, saveState } from "../servers/gateway/models/state.js";
+import { renderLaunchArgs } from "../servers/gateway/models/launch.js";
 
 // --- fixtures ------------------------------------------------------------
 
@@ -114,6 +116,7 @@ function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn 
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
     existsSyncFn: () => true,
     getRuntimeOverrideFn: () => null,
+    getModelRuntimeOverrideFn: () => null,
     ownInstanceIdFn: () => "this-instance",
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
@@ -125,6 +128,7 @@ beforeEach(() => {
   _resetProviderHealth();
   _setNativeHandleForTest("native-target", null);
   _setNativeHandleForTest("native-sib", null);
+  _resetProbeFailureWindowForTest();
 });
 
 // --- getNativeHandle (Item G, Task 12 follow-up: read-only accessor for the
@@ -1192,6 +1196,151 @@ test("native start: the runtime override binary wins over the catalog release; a
   assert.equal(startCalls[1].binPath, "/fake/runtimes/llamacpp/b1/llama-server");
 });
 
+// --- per-model runtime override resolve order (Strix Halo spec §2.3, D4) ---
+
+test("runtime resolve: a per-model override wins over the host override and the stock release", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  const asked = [];
+  opts.getModelRuntimeOverrideFn = (dir, id) => { asked.push([dir, id]); return { bin: "/opt/model/llama-server" }; };
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/host/llama-server" });
+  let ensured = 0; opts.ensureRuntimeFn = async () => { ensured++; return "/fake/release/llama-server"; };
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/model/llama-server");
+  assert.equal(ensured, 0, "ensureRuntime (and so min_runtime_version) skipped under a per-model override");
+  assert.deepEqual(asked[0], ["/fake/crow-home", "native-target"]);
+});
+
+test("runtime resolve: the per-model key is gpuPolicy.catalogId, not the provider name", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18101, "qwen3-4b") } }; // catalogId "qwen3-4b"
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  const asked = [];
+  opts.getModelRuntimeOverrideFn = (dir, id) => { asked.push(id); return id === "qwen3-4b" ? { bin: "/opt/qwen/llama-server" } : null; };
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/qwen/llama-server");
+  assert.deepEqual([...new Set(asked)], ["qwen3-4b"]);
+});
+
+test("runtime resolve: with no gpuPolicy.catalogId the per-model key falls back to the provider name", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18102, "qwen3-4b", { gpuPolicy: { catalogId: undefined } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = (dir, id) => (id === "native-target" ? { bin: "/opt/byname/llama-server" } : null);
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/byname/llama-server");
+});
+
+test("runtime resolve: a missing per-model bin falls through to the host override", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18103, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-model-a/llama-server" });
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/host/llama-server" });
+  opts.existsSyncFn = (p) => p !== "/opt/gone-model-a/llama-server";
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/host/llama-server");
+});
+
+test("runtime resolve: missing per-model AND missing host bins fall through to the stock release", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18104, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-model-b/llama-server" });
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/gone-host-b/llama-server" });
+  opts.existsSyncFn = (p) => p !== "/opt/gone-model-b/llama-server" && p !== "/opt/gone-host-b/llama-server";
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/fake/runtimes/llamacpp/b1/llama-server");
+});
+
+test("runtime resolve: a missing per-model bin warns once per bin across repeated acquires", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18105, "native-target") } };
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  try {
+    for (let i = 0; i < 2; i++) {
+      _setNativeHandleForTest("native-target", null);
+      const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+      opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-warn-once/llama-server" });
+      opts.existsSyncFn = (p) => p !== "/opt/gone-warn-once/llama-server";
+      assert.equal(await acquireProvider("native-target", opts), true);
+    }
+  } finally { console.warn = origWarn; }
+  assert.equal(warns.filter((w) => w.includes("/opt/gone-warn-once/llama-server")).length, 1, warns.join("\n"));
+});
+
+test("runtime resolve: ensureResident's native start also applies the per-model override", async () => {
+  const startCalls = [];
+  const p = nativeProv(18106, "qwen3-4b", { gpuPolicy: { alwaysResident: true, runtime: "native" } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = (dir, id) => (id === "qwen3-4b" ? { bin: "/opt/resident/llama-server" } : null);
+  await ensureResident("native-target", cfg, opts);
+  assert.equal(startCalls[0].binPath, "/opt/resident/llama-server");
+});
+
+test("runtime resolve: the probe is warmed BEFORE an override early-return (cold cache -> one reprobe)", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18107, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+  let cached = null;
+  let reprobeCalls = 0;
+  opts.getCachedProbeFn = () => cached;
+  opts.reprobeFn = async () => { reprobeCalls++; cached = { platform: "linux", accel: "cpu" }; return cached; };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/warm/llama-server" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(reprobeCalls, 1);
+  assert.notEqual(cached, null, "an override start leaves the probe cache warm");
+});
+
+test("runtime resolve: a probe failure on an override path is remembered — two acquires inside 5 min reprobe once and warn once; after the window it probes again", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18109, "native-target") } };
+  let t = 1_000_000;
+  let reprobeCalls = 0;
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  const acquire = async () => {
+    _setNativeHandleForTest("native-target", null);
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    opts.getCachedProbeFn = () => null;
+    opts.reprobeFn = async () => { reprobeCalls++; throw new Error("vulkaninfo exploded"); };
+    opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/window/llama-server" });
+    opts.nowFn = () => t;
+    return acquireProvider("native-target", opts);
+  };
+  try {
+    assert.equal(await acquire(), true);
+    t += 60_000; // 1 min later, inside the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 1, "no re-probe inside the failure window");
+    assert.equal(warns.filter((w) => w.includes("hardware probe failed")).length, 1, "one warning per window");
+    t += 5 * 60_000; // past the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 2, "the window expired, so it probed again");
+  } finally { console.warn = origWarn; }
+});
+
+test("runtime resolve: a probe failure is survivable on an override path but still surfaces on the stock path", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18108, "native-target") } };
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const withOverride = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    withOverride.getCachedProbeFn = () => null;
+    withOverride.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    withOverride.getModelRuntimeOverrideFn = () => ({ bin: "/opt/survive/llama-server" });
+    assert.equal(await acquireProvider("native-target", withOverride), true);
+
+    _setNativeHandleForTest("native-target", null);
+    const stock = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    stock.getCachedProbeFn = () => null;
+    stock.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    await assert.rejects(acquireProvider("native-target", stock), /vulkaninfo exploded/);
+  } finally { console.warn = origWarn; }
+});
+
 test("owner gate: a native row owned by another instance is never orchestrated here even when its host is one of ours", async () => {
   const startCalls = [];
   const p = nativeProv(18100, "native-target", { baseUrl: "http://127.0.0.1:3001/llm/v1", gpuPolicy: { owner: "other-instance", port: 18100 } });
@@ -1447,4 +1596,94 @@ test("I1: an owner-declaring row with a loopback /v1 baseUrl and no gpu_policy.p
   opts.ownInstanceIdFn = () => "this-instance";
   await assert.rejects(acquireProvider("native-target", opts), /has no port/);
   assert.equal(startCalls.length, 0);
+});
+
+// --- gfx1151 host launch profile (Strix Halo spec §2.4, D6/D7) -------------
+
+const HALO_PROBE = { platform: "linux", accel: "vulkan", gpuArch: "gfx1151", unified: true };
+const haloCatalog = (launch) => () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192, ...(launch ? { launch } : {}) }] });
+
+test("host profile: on gfx1151 vulkan the profile fills launch keys nobody set", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18130, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog({ ctx: 8192, ngl: 999 });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "on", no_mmap: true, no_op_offload: true, ctx: 8192, ngl: 999 });
+  const argv = renderLaunchArgs(startCalls[0].launch);
+  for (const f of ["--no-mmap", "--no-op-offload"]) assert.ok(argv.includes(f), `${f} in ${argv.join(" ")}`);
+  assert.deepEqual(argv.slice(argv.indexOf("-fa"), argv.indexOf("-fa") + 2), ["-fa", "on"]);
+});
+
+test("host profile: a curated catalog value wins over the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18131, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog({ flash_attn: "off" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "off", no_mmap: true, no_op_offload: true });
+});
+
+test("host profile: gpu_policy.launch opts out (no_op_offload:false, no_mmap:false) — neither flag renders", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18132, "native-target", { gpuPolicy: { launch: { no_op_offload: false, no_mmap: false } } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = haloCatalog(null);
+  assert.equal(await acquireProvider("native-target", opts), true);
+  const argv = renderLaunchArgs(startCalls[0].launch);
+  assert.ok(!argv.includes("--no-op-offload"), argv.join(" "));
+  assert.ok(!argv.includes("--no-mmap"), argv.join(" "));
+  assert.equal(startCalls[0].launch.flash_attn, "on", "keys the provider did not touch still come from the profile");
+});
+
+test("host profile: jinja still layers on top of the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18133, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => HALO_PROBE;
+  opts.loadCatalogFn = () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192, chat_template_kwargs: { enable_thinking: false } }] });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { flash_attn: "on", no_mmap: true, no_op_offload: true, jinja: true });
+});
+
+test("host profile: another arch on vulkan gets no profile (launch stays empty)", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18134, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => ({ platform: "linux", accel: "vulkan", gpuArch: "gfx1100", unified: false });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, {});
+});
+
+test("host profile: an override-only start (cold probe cache) still warms the probe and applies the profile", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18135, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  let cached = null;
+  let reprobeCalls = 0;
+  opts.getCachedProbeFn = () => cached;
+  opts.reprobeFn = async () => { reprobeCalls++; cached = HALO_PROBE; return HALO_PROBE; };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo/llama-server" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/halo/llama-server");
+  assert.equal(reprobeCalls, 1);
+  assert.equal(startCalls[0].launch.no_op_offload, true);
+});
+
+test("host profile: a probe that throws means no profile, never a failed start", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18136, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getCachedProbeFn = () => null;
+  opts.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/halo2/llama-server" }); // override path: the probe failure is survivable
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(await acquireProvider("native-target", opts), true);
+  } finally { console.warn = origWarn; }
+  assert.deepEqual(startCalls[0].launch, {});
 });

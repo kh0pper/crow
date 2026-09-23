@@ -160,7 +160,7 @@ test("statePath derives from the injected dir, never os.homedir()", () => {
 test("loadState on a missing state file returns an empty state, not a throw", async () => {
   await withScratch("load-missing", async (dir) => {
     const state = loadState(dir);
-    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null });
+    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null, runtimeOverrides: {} });
     assert.ok(!existsSync(statePath(dir)));
   });
 });
@@ -183,6 +183,7 @@ test("saveState + loadState round-trip atomically and deep-equal", async () => {
       },
       conversions: {},
       runtimeOverride: null,
+      runtimeOverrides: {},
     };
     saveState(dir, state);
     assert.ok(existsSync(statePath(dir)));
@@ -204,7 +205,7 @@ test("loadState on a corrupt (non-JSON) state file returns an empty state, not a
     mkdirSync(join(dir, "models"), { recursive: true });
     writeFileSync(statePath(dir), "{ not valid json", "utf8");
     const state = loadState(dir);
-    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null });
+    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null, runtimeOverrides: {} });
   });
 });
 
@@ -428,4 +429,22 @@ test("findRegistryEntryForProvider resolves via gpuPolicy.catalogId/quant, else 
   assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: { catalogId: "a", quant: "Q4" } }).key, "a@Q4");
   assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: { catalogId: "a", quant: "Q8" } }), null);
   assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: {} }), null);
+});
+
+test("loadState: runtimeOverrides round-trips; absent, null or an array loads as {} without touching runtimeOverride", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "models-state-"));
+  try {
+    const host = { bin: "/x/llama-server", label: null, version: "b1", setAt: "2026-09-23T00:00:00Z" };
+    const perModel = { "qwen3.6-35b-a3b": { bin: "/opt/pr/llama-server", label: "pr-1234", version: "b9999", setAt: "2026-09-23T00:00:00Z" } };
+    saveState(dir, { ...loadState(dir), runtimeOverride: host, runtimeOverrides: perModel });
+    assert.deepEqual(loadState(dir).runtimeOverrides, perModel);
+    assert.deepEqual(loadState(dir).runtimeOverride, host);
+
+    for (const bad of [undefined, null, ["x"], "str"]) {
+      mkdirSync(join(dir, "models"), { recursive: true });
+      writeFileSync(statePath(dir), JSON.stringify({ registry: {}, runtimeOverride: host, runtimeOverrides: bad }), "utf8");
+      assert.deepEqual(loadState(dir).runtimeOverrides, {}, `runtimeOverrides=${JSON.stringify(bad)}`);
+      assert.deepEqual(loadState(dir).runtimeOverride, host);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
