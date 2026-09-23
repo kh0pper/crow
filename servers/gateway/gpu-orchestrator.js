@@ -91,6 +91,8 @@ import { getRuntimeOverride } from "./models/runtime-override.js";
 import { isOrchestratableHere } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { isForeignInstanceHost } from "../shared/provider-host.js";
+import { servingClassRefusal, ServingClassError } from "./models/serving-class.js";
+export { ServingClassError } from "./models/serving-class.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -517,7 +519,8 @@ let _noticeState = createNoticeState();
 let _noticeSender = sendReservationNotice;
 export function _setReservationNoticeSenderForTest(fn) { _noticeSender = fn ? (n) => fn(n) : sendReservationNotice; }
 const _deferNoticed = new Set();
-export function _resetReservationNoticesForTest() { _noticeState = createNoticeState(); _deferNoticed.clear(); }
+const _servingNoticed = new Set();
+export function _resetReservationNoticesForTest() { _noticeState = createNoticeState(); _deferNoticed.clear(); _servingNoticed.clear(); }
 
 function currentReservation() {
   try { return (_reservationReader || readReservation)(); }
@@ -558,6 +561,13 @@ function noteDeferred(reservation, what) {
   console.log(`[gpu-orchestrator] residency deferred: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (${what})`);
 }
 
+/** Residency never auto-starts a non-resident model; say so once per provider. */
+function noteServingRefused(name, err) {
+  if (_servingNoticed.has(name)) return;
+  _servingNoticed.add(name);
+  console.log(`[gpu-orchestrator] residency skipped ${name}: serving.class ${err.servingClass} never auto-starts`);
+}
+
 /** Called from the residency tick so a NEW reservation is announced even
  *  before anything tries to start (scope §3.5). Returns the reservation. */
 export function noticeReservation() {
@@ -580,7 +590,7 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   } catch (err) {
     // A reservation is a decision, not a failure: callers degrade on it
     // (llm-router, chat, models panel) and must be able to tell it apart.
-    if (err instanceof ReservedError) throw err;
+    if (err instanceof ReservedError || err instanceof ServingClassError) throw err;
     console.warn(`[gpu-orchestrator] maybeAcquireLocalProvider(${providerName}) failed: ${err.message}`);
     if (typeof opts.onError === "function") {
       try { opts.onError(err); } catch { /* caller's observer must never break this function */ }
@@ -1035,6 +1045,28 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
   }
 
   {
+    // serving.class ceiling (spec 2026-09-23 §3.3): after the resident fast
+    // path (a running model is never refused) and BEFORE the reservation
+    // gate — a permanent refusal must not surface as a retryable box_reserved.
+    // (A runtime-binary error in acquireProvider's pre-resolution can still
+    // precede this; acceptable — that start could not have succeeded either.)
+    // Uncurated (no catalog entry / unreadable catalog) is allowed (D6).
+    const { loadCatalogFn = defaultLoadCatalog } = opts;
+    const catalogId = p?.gpuPolicy?.catalogId || providerName;
+    let entry = null;
+    try {
+      entry = ((loadCatalogFn()?.models || [])).find((m) => m.id === catalogId) || null;
+    } catch (err) {
+      console.warn(`[gpu-orchestrator] serving.class: catalog unreadable, treating ${providerName} as uncurated: ${err.message}`);
+    }
+    const refusal = servingClassRefusal(entry, providerName, opts.servingOverride);
+    if (refusal) {
+      console.log(`[gpu-orchestrator] refusing to start ${providerName}: serving.class ${refusal.servingClass} (requested-by=${opts.requester || "-"})`);
+      throw refusal;
+    }
+  }
+
+  {
     const blocked = startBlockedBy(providerName);
     if (blocked) throw refuseStart(blocked, providerName, opts);
   }
@@ -1252,7 +1284,8 @@ async function checkIdleRevert() {
       try {
         await acquireProvider(group.default, { requester: "idle-revert" });
       } catch (err) {
-        console.warn(`[gpu-orchestrator] auto-revert to ${group.default} failed: ${err.message}`);
+        if (err instanceof ServingClassError) noteServingRefused(group.default, err);
+        else console.warn(`[gpu-orchestrator] auto-revert to ${group.default} failed: ${err.message}`);
       }
     }
   }
@@ -1325,6 +1358,7 @@ async function ensureNativeResident(name, p, cfg, opts = {}) {
     // Residency never throws on a reservation: a resident native provider
     // returns before the gate; a cold one is deferred (logged once).
     if (err instanceof ReservedError) { noteDeferred(currentReservation() || err, name); return false; }
+    if (err instanceof ServingClassError) { noteServingRefused(name, err); return false; }
     throw err;
   }
   if (!result.freshStart) {
