@@ -756,7 +756,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
         id: HF_TOKEN_PROVIDER_ID,
         baseUrl: "https://huggingface.co",
         apiKey: cleaned || null,
-        host: "external",
+        host: "cloud",
         bundleId: null,
         description: "Hugging Face API token (models catalog downloads — not an LLM provider)",
         models: [],

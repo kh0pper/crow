@@ -245,6 +245,8 @@ test("ownership gate end-to-end: seed-all → loopback-only skips unowned → ad
     const lamportOf = async (id) => Number(
       (await db.execute({ sql: "SELECT lamport_ts FROM providers WHERE id = ?", args: [id] })).rows[0].lamport_ts,
     );
+    const hostOfRow = async (id) =>
+      (await db.execute({ sql: "SELECT host FROM providers WHERE id = ?", args: [id] })).rows[0].host;
     const probeTsAfterSeed = await lamportOf(probeId);
 
     // Call 2: same loopback-only ownAddrs, rows now PRESENT → non-loopback
@@ -259,19 +261,28 @@ test("ownership gate end-to-end: seed-all → loopback-only skips unowned → ad
     assert.equal(await lamportOf(probeId), probeTsAfterSeed, "unowned row untouched (no lamport bump)");
 
     // Call 3: claim one tailnet IP. Its entries flip from skipped_unowned to
-    // owned+unchanged — observable ONLY via the counters (content identical,
-    // D2 suppresses writes), which is exactly what makes the counter
-    // semantics testable.
+    // owned. Seeding (call 1) ran with loopback-only ownAddrs, so write-time
+    // host inference stored these rows as "cloud" — this instance didn't own
+    // the address yet at seed time (spec §4.1 "Tailscale boot race on
+    // write-time inference"). Claiming the address here is therefore a real
+    // content change (host cloud → local self-heal on gaining ownership),
+    // not a no-op — it counts in `upserted`, not `unchanged`.
     const claimedIp = hostnameOf(nonLoopback[0][1].baseUrl);
     const claimedCount = nonLoopback.filter(([, p]) => hostnameOf(p.baseUrl) === claimedIp).length;
+    const claimedIds = nonLoopback.filter(([, p]) => hostnameOf(p.baseUrl) === claimedIp).map(([id]) => id);
     const third = await syncProvidersFromModelsJson(db, {
       ownAddrs: new Set([...LOOPBACK, claimedIp]),
     });
     assert.equal(third.skipped_unowned, entries.length - loopbackIds.length - claimedCount,
       `claiming ${claimedIp} removes its ${claimedCount} entries from skipped_unowned`);
-    assert.equal(third.unchanged, loopbackIds.length + claimedCount,
-      "claimed entries evaluated as owned (unchanged, content converged)");
-    assert.equal(third.upserted, 0);
+    assert.equal(third.unchanged, loopbackIds.length,
+      "loopback entries still converged; claimed entries are a real self-heal, not unchanged (spec §4.1)");
+    assert.equal(third.upserted, claimedCount,
+      "claimed entries self-heal host cloud→local now that this instance owns the address (spec §4.1)");
+    for (const id of claimedIds) {
+      const hostOf = await hostOfRow(id);
+      assert.equal(hostOf, "local", `${id} host self-heals to local now that its address is owned`);
+    }
   } finally { cleanup(); }
 });
 
