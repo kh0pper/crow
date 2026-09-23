@@ -927,15 +927,18 @@ Then make these changes:
     `"grackle-embed": { "baseUrl": "http://100.121.254.89:9100/v1", "host": "local", "models": [{ "id": "e" }] }`.
   - A file shared across scenarios would make B's reconciler **seed** `grackle-embed` into A's and C's empty tables, because `reconcileDecision` returns "seed" for any absent row. That would break their `feedBtoA.length === 0` assertions.
 - **Side switching:** a helper `async function side(which, scenario)` sets `process.env.CROW_DATA_DIR`, `process.env.CROW_MODELS_JSON` (that side's scenario file) and `setProviderSyncManager(mgrX)`.
+- **Hermetic setup and cleanup:**
+  - Pass `CROW_MODELS_JSON: ""` in `init-db`'s env.
+  - The `after` hook restores BOTH `CROW_DATA_DIR` and `CROW_MODELS_JSON` to their previous values, or deletes them if they were unset.
 - **Fresh, uniquely keyed feeds per test (review round 2, C2).**
   - `makeStubFeed()` gains `key: randomBytes(32)` (import `randomBytes` from `node:crypto`). `_getLastAppliedSeq` (`instance-sync.js:3765-3772`) compares `Buffer.from(feed.key).toString("hex")` against the stored cursor's `k`. An unkeyed feed stores `k:null` and matches every later unkeyed feed, so the cursor carries over between tests and a new feed's seq 0 is silently skipped.
   - At the start of each test, **also** run `DELETE FROM providers`, `DELETE FROM sync_conflicts` and `DELETE FROM sync_state` on both DBs. Check the cursor's table and column name with `grep -n "_appliedSeqRecord" -A12 servers/sharing/instance-sync.js`, and clear whatever table it reads.
   - Build `feedAtoB` and `feedBtoA` fresh, then call `mgrA.outFeeds.set(B_ID, feedAtoB)` and `mgrB.outFeeds.set(A_ID, feedBtoA)`.
 - **Delivery:** `const deliver = (feed, mgr, fromId) => mgr._processNewEntries(fromId, feed);`. War-sim calls it repeatedly on the same feed, so it tracks its own cursor.
 - **Addresses:** `ADDRS_A = new Set(["127.0.0.1","::1","localhost","10.0.0.237","100.118.41.122"])` and `ADDRS_B = new Set(["127.0.0.1","::1","localhost","10.0.0.21","100.121.254.89"])`.
-- **Round function:** each round runs
-  1. `side("A")` then `syncProvidersFromModelsJson(dbA, { ownAddrs: ADDRS_A })`, which includes repair;
-  2. `side("B")` then `syncProvidersFromModelsJson(dbB, { ownAddrs: ADDRS_B })`;
+- **Round function:** `async function round(scenario, addrsA, addrsB)` runs
+  1. `side("A", scenario)` then `syncProvidersFromModelsJson(dbA, { ownAddrs: addrsA })`, which includes repair;
+  2. `side("B", scenario)` then `syncProvidersFromModelsJson(dbB, { ownAddrs: addrsB })`;
   3. `deliver(feedAtoB, mgrB, A_ID)`;
   4. `deliver(feedBtoA, mgrA, B_ID)`.
 
@@ -949,7 +952,11 @@ Then make these changes:
   - **Scenario B: the owner asserts and the non-owner never fights it.**
     - Insert `('grackle-embed','http://100.121.254.89:9100/v1','local', models '[{"id":"e"}]', bundle_id NULL, gpu_policy NULL, lamport 50, instance_id B_ID)` into both DBs. The models match B's file exactly, so B's owned assert is a no-op (review round 2, C3).
     - Run 4 rounds.
-    - Assert: both are `local`; `feedAtoB.length === 0`; `feedBtoA.length === 0` (B's assert is a no-op); no conflicts; both lamports stay 50.
+    - Assert **in this order**:
+      1. B's lamport after round 2 equals B's lamport after round 4, and both stay 50. This goes first so that mutation (b) fails here.
+      2. Both rows are `local`.
+      3. `feedAtoB.length === 0` and `feedBtoA.length === 0`, since B's assert is a no-op.
+      4. No conflicts.
   - **Scenario C: a re-stamped bundle row (the live crow-chat case).**
     - Insert `('crow-swap-agentic','http://100.118.41.122:8003/v1','local', lamport 50, instance_id B_ID, bundle_id 'llamacpp-vulkan-qwen36-35b-a3b')` into both DBs. B is the last writer, but the endpoint is A's.
     - Run 4 rounds.
@@ -958,7 +965,11 @@ Then make these changes:
   - **Scenario D: co-owners compute the same value (optional but cheap; review round 2, Q2).**
     - A and B share one address set (both `ADDRS_A`), and each is last writer of its own copy: `('raven-y','http://10.0.0.126:8030/v1','raven', lamport 50)` with instance_id A_ID in dbA and B_ID in dbB. Both files are empty.
     - Run 4 rounds.
-    - Assert: both copies are `cloud`, and the lamports have converged. Allow at most 1 conflict row total: two concurrent equal-data writes may log one tie, which is accepted per spec §4.1. Assert that the conflict count is the same after round 2 and after round 4 (no recurrence).
+    - Call `round("D", ADDRS_A, ADDRS_A)`.
+    - Assert:
+      - both copies are `cloud`;
+      - both lamports are equal;
+      - **exactly 0** conflict rows. `rowsEquivalent` ignores `lamport_ts` and `instance_id`, so equal-lamport, equal-data deliveries are skipped (verified in plan review round 3). Spec §4.1's "≤1" remains the documented bound.
 
 - [ ] **Step 2: Prove the sim can fail.** Make two temporary mutations, running the file after each and reverting (`git diff servers/shared/provider-host.js` must be empty at the end):
   - (a) Delete the `if (!inRepairScope(row)) return null;` line in `repairHostDecision`. Expected: scenario C FAILS, because B repairs A's row to `cloud` and `feedBtoA.length` becomes greater than 0.
@@ -1061,7 +1072,7 @@ cd /home/kh0pp/crow-wt-host-identity && export PATH=/home/kh0pp/.nvm/versions/no
 T=$(mktemp -d)
 CROW_HOME=$T CROW_DATA_DIR=$T/data CROW_MODELS_JSON= CROW_DISABLE_NOSTR=1 CROW_DISABLE_INSTANCE_SYNC=1 \
 CROW_DISABLE_BOT_RUNTIME=1 CROW_DISABLE_PERCH=1 CROW_BOX_RESERVATION_PATH=$T/box-reservation.json \
-CROW_GATEWAY_PORT=3999 timeout 25 node servers/gateway/index.js 2>&1 | tail -30; rm -rf $T
+PORT= CROW_GATEWAY_PORT=3999 timeout 25 node servers/gateway/index.js 2>&1 | tail -30; rm -rf $T
 ```
 
 Expected: a clean startup, no stack traces, and the `[providers]` reconcile either quiet or logging `repaired=0`. Check `scripts/run-suite.mjs` for the exact env var names it sets and use those. If the gateway needs a different port variable, read `servers/gateway/index.js` for it.
@@ -1207,3 +1218,26 @@ No attribution lines.
   - Two-host spec §3.1 lives on branch `spec/heavy-model-catalog-curation`, worktree `~/crow-wt-catalog`, PR #344. Replace the "Set **`host = 'raven'`**" requirement with "unmanaged network endpoints are `cloud`; `host` is not an orchestration gate (see `docs/superpowers/specs/2026-09-22-provider-host-identity-design.md`)". Commit with a path and push.
   - Update memory `crow-inferhost-private-address-bug.md` to FIXED, with the PR number and merge sha.
   - Update the Gitea queue doc: sub-project 1 done.
+
+
+## Review
+
+- **Round 1 (2026-09-22): REVISE.** Seven critical issues:
+  - C1: the D3 premise is broken by writes that re-stamp `instance_id`. The live crow bundle rows carry grackle's `instance_id`.
+  - C2: G1 did not cover the invalid-value branch.
+  - C3: `routes/models.js` wrote `host:"external"`.
+  - C4: the tests read an `instance-id` file that `init-db` never creates.
+  - C5: the reconcile-gate expectation change.
+  - C6: the simulation did not run the reconciler.
+  - C7: a `maybeAcquireLocalProvider` test that could not fail.
+
+  **Resolution:** the spec was revised. D9 makes `host` stop gating orchestration except for a foreign-id veto, which is the root fix for C1. Repair was scoped to non-bundle, non-owner, not-`local_only`, enabled rows. G1 was generalised. All the test issues were rewritten.
+- **Round 2: REVISE.** Five issues:
+  - C1: the shared simulation fixture seeded rows into the other scenarios.
+  - C2: unkeyed stub feeds share one cursor across tests.
+  - C3: scenario B's `models` did not match.
+  - C4: the gateways are **system** units, not user units.
+  - C5: the script is `build-registry.mjs`.
+
+  **Resolution:** all fixed. The spec now records grackle's label→`local` change through its own assert, rerank and vision becoming swappable on grackle, the residual D3 hole, and G1's coarseness.
+- **Round 3: APPROVE**, with minor notes (scenario B assertion order, `round()` signature, env restore, scenario D asserting exactly 0 conflicts, `PORT=` on the smoke boot). All were folded in. Every scenario and both mutations were traced by hand against the lamport arithmetic.
