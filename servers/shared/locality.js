@@ -5,11 +5,11 @@
  * The only trustworthy signal for "does this provider endpoint live on THIS
  * machine" is whether its baseUrl points at loopback or one of our own
  * interface addresses. The providers `host` column cannot be used: it syncs
- * fleet-wide with the seeding instance's perspective baked in (live fleet:
- * grackle's own embed row says host='grackle-5fc01ac74463b6f4', crow's
- * bundles say 'local' everywhere), so a host-string gate either breaks a
- * peer keeping its own bundle resident or lets a fresh install start the
- * maintainer-lab's bundles.
+ * fleet-wide with the seeding instance's perspective baked in (historically,
+ * grackle's own embed row carried host='grackle-5fc01ac74463b6f4' while
+ * crow's bundles said 'local' everywhere), so a host-string gate either
+ * breaks a peer keeping its own bundle resident or lets a fresh install
+ * start the maintainer-lab's bundles.
  *
  * Caveat for sync-ownership callers: loopback addresses are in every
  * instance's own-address set, so a loopback baseUrl is "local" EVERYWHERE —

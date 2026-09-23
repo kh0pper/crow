@@ -11,9 +11,9 @@ import {
 
 const FIXTURE = {
   "fx-cloud": { baseUrl: "https://api.together.xyz/v1", models: [{ id: "a" }] },
-  "fx-raven": { baseUrl: "http://10.0.0.126:8030/v1", models: [{ id: "b" }] },
+  "fx-raven": { baseUrl: "http://10.255.254.10:8030/v1", models: [{ id: "b" }] },
   "fx-loop":  { baseUrl: "http://127.0.0.1:8003/v1", models: [{ id: "c" }] },
-  "fx-tail":  { baseUrl: "http://100.121.254.89:9100/v1", models: [{ id: "d" }] },
+  "fx-tail":  { baseUrl: "http://100.100.254.10:9100/v1", models: [{ id: "d" }] },
 };
 
 function fresh() {
@@ -53,14 +53,14 @@ test("first-boot seed infers host instead of blanket 'local'", async () => {
     assert.equal(h["fx-cloud"], "cloud");
     assert.equal(h["fx-raven"], "cloud");
     assert.equal(h["fx-loop"], "local");
-    assert.equal(h["fx-tail"], "cloud"); // no test box owns grackle's 100.121.254.89
+    assert.equal(h["fx-tail"], "cloud"); // no lab box owns this tailnet-style address
   } finally { t.cleanup(); }
 });
 
 test("reconciler seed of an absent id: foreign → cloud, own → local", async () => {
   const t = fresh();
   try {
-    const ownAddrs = new Set(["localhost", "127.0.0.1", "::1", "100.121.254.89"]);
+    const ownAddrs = new Set(["localhost", "127.0.0.1", "::1", "100.100.254.10"]);
     await syncProvidersFromModelsJson(t.db, { ownAddrs });
     const h = await hosts(t.db);
     assert.equal(h["fx-raven"], "cloud");
@@ -73,9 +73,9 @@ test("reconciler seed of an absent id: foreign → cloud, own → local", async 
 test("upsertProvider without a host infers it; an explicit host is kept", async () => {
   const t = fresh();
   try {
-    await upsertProvider(t.db, { id: "u-raven", baseUrl: "http://10.0.0.126:8030/v1", models: [] });
+    await upsertProvider(t.db, { id: "u-raven", baseUrl: "http://10.255.254.10:8030/v1", models: [] });
     await upsertProvider(t.db, { id: "u-loop", baseUrl: "http://127.0.0.1:9/v1", models: [] });
-    await upsertProvider(t.db, { id: "u-explicit", baseUrl: "http://10.0.0.126:8030/v1", host: "local", models: [] });
+    await upsertProvider(t.db, { id: "u-explicit", baseUrl: "http://10.255.254.10:8030/v1", host: "local", models: [] });
     const h = await hosts(t.db);
     assert.equal(h["u-raven"], "cloud");
     assert.equal(h["u-loop"], "local");

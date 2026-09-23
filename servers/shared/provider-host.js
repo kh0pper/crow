@@ -61,14 +61,6 @@ export function inRepairScope(row) {
   return true;
 }
 
-function hasNonLoopback(ownAddrs) {
-  for (const a of ownAddrs) {
-    const c = addressClass(a);
-    if (c && c !== "loopback" && c !== "linklocal") return true;
-  }
-  return false;
-}
-
 /** G1: an IP-literal target with a live own address of the same class. */
 function judgeable(h, ownAddrs) {
   if (!isIpLiteral(h)) return false;
@@ -90,7 +82,7 @@ export function repairHostDecision(row, { ownInstanceId, ownAddrs }) {
   if (cur === "local" && (h === null || !isIpLiteral(h) || ownAddrs.has(h))) return null; // G2 / own
   const next = inferHost(row.baseUrl, null, { ownAddrs });
   if (next === cur) return null;
-  if (next === "cloud" && (!hasNonLoopback(ownAddrs) || !judgeable(h, ownAddrs))) return null; // G1
+  if (next === "cloud" && !judgeable(h, ownAddrs)) return null; // G1
   return next;
 }
 
@@ -100,7 +92,10 @@ export function hostLabel(p, { ownAddrs, ownInstanceId, instanceNames }) {
   const h = hostnameOf(p?.baseUrl);
   const away = () => (isPrivateHost(h) ? { kind: "network", text: "network" } : { kind: "cloud", text: "cloud" });
   if (host === "local") return h === null || ownAddrs.has(h) ? { kind: "this", text: "this machine" } : away();
-  if (host === "cloud") return h !== null && isPrivateHost(h) ? { kind: "network", text: "network" } : { kind: "cloud", text: "cloud" };
+  if (host === "cloud") {
+    if (h !== null && ownAddrs.has(h)) return { kind: "this", text: "this machine" };
+    return h !== null && isPrivateHost(h) ? { kind: "network", text: "network" } : { kind: "cloud", text: "cloud" };
+  }
   if (isInstanceIdShape(host)) {
     if (host === ownInstanceId) return { kind: "this", text: "this machine" };
     return { kind: "instance", text: instanceNames?.get(host) || host.slice(0, 18) };

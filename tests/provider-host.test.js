@@ -180,6 +180,7 @@ test("hostLabel", () => {
   assert.deepEqual(hostLabel({ host: "local", baseUrl: "https://api.z.ai/v4" }, ctx), { kind: "cloud", text: "cloud" });
   assert.deepEqual(hostLabel({ host: "cloud", baseUrl: "http://10.0.0.126:8030/v1" }, ctx), { kind: "network", text: "network" });
   assert.deepEqual(hostLabel({ host: "cloud", baseUrl: "https://api.together.xyz/v1" }, ctx), { kind: "cloud", text: "cloud" });
+  assert.deepEqual(hostLabel({ host: "cloud", baseUrl: "http://127.0.0.1:9/v1" }, ctx), { kind: "this", text: "this machine" });
   assert.deepEqual(hostLabel({ host: OWN_ID, baseUrl: "http://127.0.0.1:1/v1" }, ctx), { kind: "this", text: "this machine" });
   assert.deepEqual(hostLabel({ host: PEER_ID, baseUrl: "http://x/v1" }, ctx), { kind: "instance", text: "Primary" });
   const unknown = "ffffffffffffffffffffffffffffffff";

@@ -119,7 +119,7 @@ The reason is that bundle and native rows take `host` from manifests and registr
 
 **Two guards, because repair WRITES** (mine, §4 D7). The reconciler's `assert` gate tolerates an incomplete own-address set because being unsure only makes it *skip*. Repair is a write, and a false "not mine" would flip this machine's own rows `local`→`cloud`. `maybeAcquireLocalProvider` would then refuse them, and nothing flips a bundle-manifest row back.
 
-- **G1: judge an address only against a network this machine is on right now.** Skip the whole repair pass when `ownAddrs` holds no non-loopback address. Otherwise, **any repair whose result would be `cloud`, whether from condition 2(a) or 2(b),** is allowed only when the target is an IP literal and `ownAddrs` currently holds at least one non-loopback address of the **same class** as the target:
+- **G1: judge an address only against a network this machine is on right now.** Applied per row, not as a pass-wide skip: **any repair whose result would be `cloud`, whether from condition 2(a) or 2(b),** is allowed only when the target is an IP literal and `ownAddrs` currently holds at least one live non-loopback address of the **same class** as the target. A repair whose result would be `local` needs no such guard.
 
   | target class | ranges |
   |---|---|
@@ -251,7 +251,7 @@ The plan must verify these claims (2 rows on crow, 2 on r4, 0 on grackle) agains
 - Ships as one PR. CI must be green, with check-runs verified.
 - Merge only in a free CROW-SCHEDULE slot. Auto-update restarts the crow and r4 gateways.
 - After deploy, check live:
-  - Within one reconcile tick (hourly, or force it through the dashboard "Sync bundle providers" button), crow shows `raven-flash-next` / `raven-halogen-smoke` as `cloud`, badged "network".
+  - Within one reconcile tick — the reconcile runs at boot, right after the auto-update restart — crow shows `raven-flash-next` / `raven-halogen-smoke` as `cloud`, badged "network". Do NOT use the dashboard "Sync bundle providers" button to force this: it re-enables disabled rows and re-stamps `instance_id`.
   - The rows' lamport clocks do not keep rising (sample twice, one hour apart).
   - `sync_conflicts` gains no recurring `providers` rows.
   - grackle's badges read "this machine" for its own rows and "network" for crow's.

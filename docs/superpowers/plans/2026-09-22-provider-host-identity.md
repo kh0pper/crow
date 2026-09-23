@@ -29,7 +29,7 @@
 - **Repair scope:** `bundleId == null`, no `gpuPolicy.owner`, `gpuPolicy.local_only !== true`, and `!disabled`.
 - **Repair rules:**
   - it applies only when `instance_id === ownInstanceId` (D3);
-  - G1: any result of `cloud` needs an IP-literal target plus a live own address of the same class, and the whole pass is skipped if `ownAddrs` holds only loopback;
+  - G1: any result of `cloud` needs an IP-literal target plus a live own non-loopback address of the same class, applied per row — a result of `local` needs no such guard;
   - G2: `local` rows naming a DNS host are never touched.
 - **No schema change:** no `SCHEMA_GENERATION` bump and no `scripts/init-db.js` change (D5).
 - **Tests:** always through `npm test -- tests/<file>.test.js` or `node scripts/run-suite.mjs`, with Node 22 on PATH: `export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH` (check that `node -v` prints v22.23.1; the shell default is v24). **Never** run raw `node --test` (it hits the live DB).
