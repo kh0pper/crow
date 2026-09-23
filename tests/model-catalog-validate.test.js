@@ -229,6 +229,7 @@ function makeV2Catalog() {
         default_quant: "Q4_K_M",
         first_run_default: true,
         tags: ["chat", "small", "cpu-capable"],
+        serving: { class: "resident" },
         notes: "fixture",
         quants: [
           { file: "small-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 100, min_ram_mb: 400, min_vram_mb: 0, sha256: SHA_A },
@@ -246,6 +247,7 @@ function makeV2Catalog() {
         min_runtime_version: "b10068",
         default_quant: "Q4_K_M",
         tags: ["chat", "large"],
+        serving: { class: "resident" },
         notes: "fixture",
         quants: [
           {
@@ -483,4 +485,50 @@ test("runtime asset key linux-x64-cuda is accepted and requires min_glibc", () =
   assert.match(validateCatalog(c).errors[0], /linux-x64-cuda.*min_glibc/);
   c.runtime.assets["linux-x64-cuda"].min_glibc = "2.34";
   assert.deepEqual(validateCatalog(c).errors, []);
+});
+
+// ─── serving.class (spec 2026-09-23) ───
+function withModel(mutate) {
+  const cat = structuredClone(loadSeed()); // real catalog; models[0] = qwen3.5-4b (first_run_default)
+  mutate(cat.models[0], cat);
+  return validateCatalog(cat);
+}
+
+test("serving: the real catalog validates and every entry has a class", () => {
+  const real = loadSeed();
+  const r = validateCatalog(real);
+  assert.deepEqual(r.errors, []);
+  for (const m of real.models) assert.ok(m.serving && m.serving.class, `${m.id} has serving.class`);
+  const by = Object.fromEntries(real.models.map((m) => [m.id, m.serving.class]));
+  assert.equal(by["deepseek-v4-flash"], "wedge-risk");
+  assert.equal(by["glm-5.3-flash"], "windowed");
+  assert.equal(by["qwen3.8-flash-next"], "resident");
+});
+
+test("serving: missing → error (D1, required)", () => {
+  const r = withModel((m) => { delete m.serving; });
+  assert.ok(r.errors.some((e) => /serving/.test(e)), r.errors.join("\n"));
+});
+
+test("serving: unknown class and unknown key inside serving → errors", () => {
+  assert.ok(withModel((m) => { m.serving = { class: "safe" }; }).errors.some((e) => /serving\.class/.test(e)));
+  assert.ok(withModel((m) => { m.serving = { class: "resident", note: "x" }; }).errors.some((e) => /serving.*note/.test(e)));
+  assert.ok(withModel((m) => { m.serving = "resident"; }).errors.some((e) => /serving/.test(e)));
+});
+
+test("serving: arithmetic — a quant above SINGLE_BOX_RAM_MB cannot be resident (D2)", () => {
+  const over = withModel((m) => { m.serving = { class: "resident" }; m.quants[0].min_ram_mb = 157911; });
+  assert.ok(over.errors.some((e) => /126976/.test(e)), over.errors.join("\n"));
+  const overWindowed = withModel((m) => { m.serving = { class: "windowed" }; m.quants[0].min_ram_mb = 157911; m.first_run_default = false; });
+  assert.ok(!overWindowed.errors.some((e) => /126976/.test(e)));
+  const under = withModel((m) => { m.serving = { class: "resident" }; m.quants[0].min_ram_mb = 115068; });
+  assert.ok(!under.errors.some((e) => /126976/.test(e)));
+});
+
+test("serving: first_run_default must be resident (D3); two-box tag cannot be resident (D4)", () => {
+  // The fixture's first model is (or is made) the first_run_default.
+  const frd = withModel((m) => { m.first_run_default = true; m.serving = { class: "windowed" }; });
+  assert.ok(frd.errors.some((e) => /first_run_default.*resident/.test(e)), frd.errors.join("\n"));
+  const tb = withModel((m) => { m.tags = [...(m.tags || []), "two-box"]; m.serving = { class: "resident" }; });
+  assert.ok(tb.errors.some((e) => /two-box/.test(e)), tb.errors.join("\n"));
 });

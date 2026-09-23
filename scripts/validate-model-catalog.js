@@ -52,12 +52,19 @@
  *     blocks are validated: ctx must not exceed the model's context_len, extra_args
  *     may not contain ownership-reserved flags, spec requires an mtp companion or
  *     the "mtp" tag on the model.
+ *
+ * Schema v4 (serving.class, 2026-09-23):
+ *   - every model requires `serving: { class }` (one of "resident", "windowed",
+ *     "wedge-risk"); a quant needing more than SINGLE_BOX_RAM_MB cannot be
+ *     "resident", nor can a model tagged "two-box", and first_run_default must
+ *     be "resident" — see servers/gateway/models/serving-class.js.
  */
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateLaunch } from "../servers/gateway/models/launch.js";
+import { SERVING_CLASSES, SINGLE_BOX_RAM_MB, servingClassOf } from "../servers/gateway/models/serving-class.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CATALOG_PATH = join(REPO_ROOT, "registry/model-catalog.json");
@@ -213,6 +220,24 @@ export function validateCatalog(catalog) {
       }
     }
 
+    {
+      const sv = model.serving;
+      if (sv === undefined) {
+        errors.push(`${label}: serving is required ({ "class": ${SERVING_CLASSES.map((c) => `"${c}"`).join(" | ")} })`);
+      } else if (!sv || typeof sv !== "object" || Array.isArray(sv)) {
+        errors.push(`${label}: serving must be an object, got ${JSON.stringify(sv)}`);
+      } else {
+        for (const k of Object.keys(sv)) if (k !== "class") errors.push(`${label}: unknown key serving.${k}`);
+        if (!SERVING_CLASSES.includes(sv.class)) {
+          errors.push(`${label}: serving.class must be one of ${SERVING_CLASSES.join(", ")}, got ${JSON.stringify(sv.class)}`);
+        } else if (sv.class === "resident") {
+          const big = (Array.isArray(model.quants) ? model.quants : []).find((q) => q && Number(q.min_ram_mb) > SINGLE_BOX_RAM_MB);
+          if (big) errors.push(`${label}: serving.class "resident" but quant ${big.quant} needs min_ram_mb ${big.min_ram_mb} > ${SINGLE_BOX_RAM_MB} (one box) — use "windowed" or "wedge-risk"`);
+          if (Array.isArray(model.tags) && model.tags.includes("two-box")) errors.push(`${label}: tagged two-box, so serving.class cannot be "resident"`);
+        }
+      }
+    }
+
     if (model.launch !== undefined) {
       const hasMtp = (Array.isArray(model.tags) && model.tags.includes("mtp"))
         || (Array.isArray(model.companions) && model.companions.some((c) => c && c.kind === "mtp"));
@@ -331,6 +356,9 @@ export function validateCatalog(catalog) {
     const hasCpuCapable = quants.some((q) => q && q.min_vram_mb === 0);
     if (!hasCpuCapable) {
       errors.push(`first_run_default model "${def.id}" must have at least one quant with min_vram_mb:0`);
+    }
+    if (servingClassOf(def) !== "resident") {
+      errors.push(`first_run_default model "${def.id}" must be serving.class "resident" (onboarding downloads it one-tap)`);
     }
   }
 
