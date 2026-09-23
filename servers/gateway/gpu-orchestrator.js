@@ -87,7 +87,7 @@ import { createNoticeState, reservationNotices, sendReservationNotice } from "./
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll } from "../shared/providers-db.js";
 import { mergeLaunch } from "./models/launch.js";
-import { getRuntimeOverride } from "./models/runtime-override.js";
+import { getRuntimeOverride, getModelRuntimeOverride } from "./models/runtime-override.js";
 import { isOrchestratableHere } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { isForeignInstanceHost } from "../shared/provider-host.js";
@@ -670,7 +670,34 @@ export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutex
 // courtesy, not a correctness requirement — but it's cheap to provide.
 const _runtimeEnsureInFlight = new Map(); // release key -> Promise<binPath>
 
+// Missing-override warnings fire once per bin (spec §2.3) — an acquire runs
+// on every chat turn, and a vanished binary would otherwise spam the log.
+// A bin that reappears re-arms its warning.
+const _warnedMissingOverrideBins = new Set();
+
+// Probe-failure window (review round 2). When the pre-override probe
+// warm-up throws, remember when; for the next PROBE_RETRY_MS no warm-up
+// re-probes (each acquire of an override-started model would otherwise
+// fork vulkaninfo/nvidia-smi/rocminfo again), and the warning fires once
+// per window. The stock path is unchanged: it still probes itself when it
+// has no probe, because it cannot pick a runtime asset without one.
+export const PROBE_RETRY_MS = 5 * 60 * 1000;
+let _probeFailedAt = null;
+/** Test seam: forget any remembered probe failure. */
+export function _resetProbeFailureWindowForTest() {
+  _probeFailedAt = null;
+}
+function warnMissingOverrideOnce(bin, message) {
+  if (_warnedMissingOverrideBins.has(bin)) return;
+  _warnedMissingOverrideBins.add(bin);
+  console.warn(`[gpu-orchestrator] ${message}`);
+}
+
 /**
+ * Resolve order: per-model override (state.runtimeOverrides[catalogId ||
+ * providerName]) -> host override -> catalog release (Strix Halo spec
+ * §2.3).
+ *
  * Resolve the llama-server `binPath` for a native provider. Deliberately
  * called from `acquireProvider`'s native branch BEFORE the `_swapInFlight`
  * chain is ever touched (Task 9 review round 1, finding 2): a first-install
@@ -690,25 +717,68 @@ async function resolveNativeBinPath(p, opts = {}) {
     loadCatalogFn = defaultLoadCatalog,
     getCachedProbeFn = getCachedProbe,
     reprobeFn = reprobe,
+    getRuntimeOverrideFn = getRuntimeOverride,
+    getModelRuntimeOverrideFn = getModelRuntimeOverride,
+    existsSyncFn = existsSync,
+    providerName = null,
+    nowFn = Date.now,
   } = opts;
   const dir = resolveDataDirFn();
-  const { getRuntimeOverrideFn = getRuntimeOverride, existsSyncFn = existsSync } = opts;
+
+  // Warm the probe cache FIRST (Fix 1: nothing on the boot path calls
+  // reprobe()), before any override early-return, so an override start
+  // also leaves it warm for startNativeAndAwaitReady's host launch profile
+  // (Strix Halo spec §2.4, review round 1). A probe failure is only fatal
+  // on the stock path, which needs the probe to pick a runtime asset.
+  // A failure is remembered for PROBE_RETRY_MS: inside that window the
+  // warm-up does not re-probe, and it warns once per window.
+  let probe = getCachedProbeFn();
+  let probeError = null;
+  if (!probe) {
+    const now = nowFn();
+    const inFailureWindow = _probeFailedAt !== null && now - _probeFailedAt < PROBE_RETRY_MS;
+    if (!inFailureWindow) {
+      try {
+        probe = await reprobeFn();
+        _probeFailedAt = null;
+      } catch (err) {
+        probeError = err;
+        _probeFailedAt = now;
+        console.warn(`[gpu-orchestrator] hardware probe failed (not retried for ${PROBE_RETRY_MS / 60000} min on override starts): ${err.message}`);
+      }
+    }
+  }
+
+  // Resolve order (Strix Halo runtime profile spec §2.3): per-model
+  // override -> host override -> stock catalog release. Each override layer
+  // whose bin is missing warns once and falls through. Either override
+  // skips ensureRuntime — and therefore min_runtime_version.
+  const modelId = p?.gpuPolicy?.catalogId || providerName;
+  if (modelId) {
+    const perModel = getModelRuntimeOverrideFn(dir, modelId);
+    if (perModel && typeof perModel.bin === "string") {
+      if (existsSyncFn(perModel.bin)) {
+        _warnedMissingOverrideBins.delete(perModel.bin);
+        return perModel.bin;
+      }
+      warnMissingOverrideOnce(perModel.bin, `per-model runtime override for "${modelId}" (${perModel.bin}) is missing — falling back to the host override or the catalog release`);
+    }
+  }
   const override = getRuntimeOverrideFn(dir);
   if (override && typeof override.bin === "string") {
-    if (existsSyncFn(override.bin)) return override.bin;
-    console.warn(`[gpu-orchestrator] runtime override ${override.bin} is missing — falling back to the catalog release`);
+    if (existsSyncFn(override.bin)) {
+      _warnedMissingOverrideBins.delete(override.bin);
+      return override.bin;
+    }
+    warnMissingOverrideOnce(override.bin, `runtime override ${override.bin} is missing — falling back to the catalog release`);
   }
   const catalog = loadCatalogFn();
-  // Fix 1 (final-review fix wave, CRITICAL): the cache is null until
-  // reprobe() runs, and nothing on the production boot path ever calls it
-  // — every native acquire threw UNSUPPORTED_PLATFORM(null) forever. Warm
-  // it here, once, on a cache miss; reprobe() also populates probe.js's own
-  // module cache, so subsequent calls' getCachedProbeFn() sees it warm and
-  // never re-probes.
-  let probe = getCachedProbeFn();
-  if (!probe) {
-    probe = await reprobeFn();
-  }
+  // The probe was warmed at the top of this function (Fix 1 still holds:
+  // one reprobe on a cold cache, none after). The stock path needs it:
+  // a failure from THIS call surfaces as-is; a warm-up skipped by the
+  // failure window gets one real probe here, exactly as before this change.
+  if (probeError) throw probeError;
+  if (!probe) probe = await reprobeFn();
   const key = (catalog && catalog.runtime && catalog.runtime.release) || "default";
   if (_runtimeEnsureInFlight.has(key)) return _runtimeEnsureInFlight.get(key);
   const inFlight = Promise.resolve()
@@ -851,7 +921,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     ? readinessTimeoutMsOverride
     : nativeReadinessTimeoutMsFn(regEntry.sizeMb, storageClass);
 
-  const binPath = preResolvedBinPath || await resolveNativeBinPath(p, opts);
+  const binPath = preResolvedBinPath || await resolveNativeBinPath(p, { ...opts, providerName });
 
   // Wrap the caller's onTerminal (if any — `acquireOrStartNative` passes
   // its lock-release closure here) so the SAME single, exactly-once
@@ -1161,7 +1231,7 @@ export async function acquireProvider(providerName, opts = {}) {
     // unrelated provider's swap is waiting behind. Only the actual
     // spawn+sibling-swap (acquireNativeSwap, via startNativeAndAwaitReady)
     // runs inside the single-flight below.
-    const binPath = await resolveNativeBinPath(p, opts);
+    const binPath = await resolveNativeBinPath(p, { ...opts, providerName });
     const nativeOpts = { ...opts, binPath };
     const nativeSwap = _swapInFlight.then(() => acquireNativeSwap(providerName, p, cfg, nativeOpts));
     _swapInFlight = nativeSwap.catch(() => {});

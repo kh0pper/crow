@@ -27,6 +27,11 @@
  * it (source: "env"); a stored record always wins over the env var once
  * one exists (source: "state"). A bootstrap that fails validation is
  * swallowed — an operator's stale/wrong env var must never crash boot.
+ *
+ * Per-model overrides (Strix Halo runtime profile spec §2.3, D4) live in
+ * `state.runtimeOverrides[catalogId]` with the same record shape and the
+ * same `validateBinary`. The orchestrator resolves per-model -> host ->
+ * catalog release. Unlike the host override there is no env bootstrap.
  */
 
 import { accessSync, constants } from "node:fs";
@@ -131,4 +136,70 @@ export function getRuntimeOverride(dir, opts = {}) {
   } catch {
     return null; // an invalid env bootstrap is ignored, never fatal at boot
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-model overrides (Strix Halo runtime profile spec §2.3, D4)
+// ---------------------------------------------------------------------------
+
+// A catalog id ("qwen3.6-35b-a3b") or a provider name ("crow-chat"). The
+// leading [A-Za-z0-9] keeps "__proto__"-style keys out of the map.
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/;
+
+function assertModelId(catalogId) {
+  if (typeof catalogId !== "string" || !MODEL_ID_RE.test(catalogId)) {
+    throw new RuntimeOverrideError(
+      `a per-model runtime override needs a model id (catalog id or provider name), got ${JSON.stringify(catalogId)}`,
+      "BAD_MODEL_ID",
+    );
+  }
+}
+
+function overridesOf(state) {
+  const m = state && state.runtimeOverrides;
+  return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+}
+
+/** The stored per-model override for `catalogId` (source: "state"), or null. Never bootstraps. */
+export function getModelRuntimeOverride(dir, catalogId, { loadStateFn = loadState } = {}) {
+  if (typeof catalogId !== "string" || !catalogId) return null;
+  const map = overridesOf(loadStateFn(dir));
+  if (!Object.hasOwn(map, catalogId)) return null;
+  const rec = map[catalogId];
+  return rec && typeof rec.bin === "string" ? { ...rec, source: "state" } : null;
+}
+
+/**
+ * Validate `bin` exactly like the host override, then persist
+ * `{ bin, label, version, setAt }` under `state.runtimeOverrides[catalogId]`.
+ * Throws RuntimeOverrideError (BAD_MODEL_ID / NOT_ABSOLUTE / NOT_EXECUTABLE /
+ * VERSION_FAILED) — nothing is persisted in that case. `opts.label` is the
+ * optional human label.
+ */
+export function setModelRuntimeOverride(dir, catalogId, bin, opts = {}) {
+  assertModelId(catalogId);
+  const { label = null, loadStateFn = loadState, saveStateFn = saveState, now = () => new Date() } = opts;
+  const version = validateBinary(bin, opts);
+  const record = { bin, label, version, setAt: now().toISOString() };
+  const state = loadStateFn(dir);
+  state.runtimeOverrides = { ...overridesOf(state), [catalogId]: record };
+  saveStateFn(dir, state);
+  return record;
+}
+
+/** Remove the per-model override for `catalogId`. Returns true iff one was set. */
+export function clearModelRuntimeOverride(dir, catalogId, { loadStateFn = loadState, saveStateFn = saveState } = {}) {
+  if (typeof catalogId !== "string" || !catalogId) return false;
+  const state = loadStateFn(dir);
+  const map = { ...overridesOf(state) };
+  if (!Object.hasOwn(map, catalogId)) return false;
+  delete map[catalogId];
+  state.runtimeOverrides = map;
+  saveStateFn(dir, state);
+  return true;
+}
+
+/** A copy of every stored per-model override, keyed by model id. */
+export function listModelRuntimeOverrides(dir, { loadStateFn = loadState } = {}) {
+  return { ...overridesOf(loadStateFn(dir)) };
 }

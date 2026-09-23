@@ -36,6 +36,7 @@ import {
   NativePortConflictError,
   NativeHostLockHeldError,
   _setNativeHandleForTest,
+  _resetProbeFailureWindowForTest,
 } from "../servers/gateway/gpu-orchestrator.js";
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
@@ -114,6 +115,7 @@ function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn 
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
     existsSyncFn: () => true,
     getRuntimeOverrideFn: () => null,
+    getModelRuntimeOverrideFn: () => null,
     ownInstanceIdFn: () => "this-instance",
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
@@ -125,6 +127,7 @@ beforeEach(() => {
   _resetProviderHealth();
   _setNativeHandleForTest("native-target", null);
   _setNativeHandleForTest("native-sib", null);
+  _resetProbeFailureWindowForTest();
 });
 
 // --- getNativeHandle (Item G, Task 12 follow-up: read-only accessor for the
@@ -1190,6 +1193,151 @@ test("native start: the runtime override binary wins over the catalog release; a
   opts2.existsSyncFn = (p) => p !== "/opt/gone/llama-server";
   assert.equal(await acquireProvider("native-target", opts2), true);
   assert.equal(startCalls[1].binPath, "/fake/runtimes/llamacpp/b1/llama-server");
+});
+
+// --- per-model runtime override resolve order (Strix Halo spec §2.3, D4) ---
+
+test("runtime resolve: a per-model override wins over the host override and the stock release", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  const asked = [];
+  opts.getModelRuntimeOverrideFn = (dir, id) => { asked.push([dir, id]); return { bin: "/opt/model/llama-server" }; };
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/host/llama-server" });
+  let ensured = 0; opts.ensureRuntimeFn = async () => { ensured++; return "/fake/release/llama-server"; };
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/model/llama-server");
+  assert.equal(ensured, 0, "ensureRuntime (and so min_runtime_version) skipped under a per-model override");
+  assert.deepEqual(asked[0], ["/fake/crow-home", "native-target"]);
+});
+
+test("runtime resolve: the per-model key is gpuPolicy.catalogId, not the provider name", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18101, "qwen3-4b") } }; // catalogId "qwen3-4b"
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  const asked = [];
+  opts.getModelRuntimeOverrideFn = (dir, id) => { asked.push(id); return id === "qwen3-4b" ? { bin: "/opt/qwen/llama-server" } : null; };
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/qwen/llama-server");
+  assert.deepEqual([...new Set(asked)], ["qwen3-4b"]);
+});
+
+test("runtime resolve: with no gpuPolicy.catalogId the per-model key falls back to the provider name", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18102, "qwen3-4b", { gpuPolicy: { catalogId: undefined } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = (dir, id) => (id === "native-target" ? { bin: "/opt/byname/llama-server" } : null);
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/byname/llama-server");
+});
+
+test("runtime resolve: a missing per-model bin falls through to the host override", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18103, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-model-a/llama-server" });
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/host/llama-server" });
+  opts.existsSyncFn = (p) => p !== "/opt/gone-model-a/llama-server";
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/host/llama-server");
+});
+
+test("runtime resolve: missing per-model AND missing host bins fall through to the stock release", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18104, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-model-b/llama-server" });
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/gone-host-b/llama-server" });
+  opts.existsSyncFn = (p) => p !== "/opt/gone-model-b/llama-server" && p !== "/opt/gone-host-b/llama-server";
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/fake/runtimes/llamacpp/b1/llama-server");
+});
+
+test("runtime resolve: a missing per-model bin warns once per bin across repeated acquires", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18105, "native-target") } };
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  try {
+    for (let i = 0; i < 2; i++) {
+      _setNativeHandleForTest("native-target", null);
+      const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+      opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/gone-warn-once/llama-server" });
+      opts.existsSyncFn = (p) => p !== "/opt/gone-warn-once/llama-server";
+      assert.equal(await acquireProvider("native-target", opts), true);
+    }
+  } finally { console.warn = origWarn; }
+  assert.equal(warns.filter((w) => w.includes("/opt/gone-warn-once/llama-server")).length, 1, warns.join("\n"));
+});
+
+test("runtime resolve: ensureResident's native start also applies the per-model override", async () => {
+  const startCalls = [];
+  const p = nativeProv(18106, "qwen3-4b", { gpuPolicy: { alwaysResident: true, runtime: "native" } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getModelRuntimeOverrideFn = (dir, id) => (id === "qwen3-4b" ? { bin: "/opt/resident/llama-server" } : null);
+  await ensureResident("native-target", cfg, opts);
+  assert.equal(startCalls[0].binPath, "/opt/resident/llama-server");
+});
+
+test("runtime resolve: the probe is warmed BEFORE an override early-return (cold cache -> one reprobe)", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18107, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+  let cached = null;
+  let reprobeCalls = 0;
+  opts.getCachedProbeFn = () => cached;
+  opts.reprobeFn = async () => { reprobeCalls++; cached = { platform: "linux", accel: "cpu" }; return cached; };
+  opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/warm/llama-server" });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(reprobeCalls, 1);
+  assert.notEqual(cached, null, "an override start leaves the probe cache warm");
+});
+
+test("runtime resolve: a probe failure on an override path is remembered — two acquires inside 5 min reprobe once and warn once; after the window it probes again", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18109, "native-target") } };
+  let t = 1_000_000;
+  let reprobeCalls = 0;
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  const acquire = async () => {
+    _setNativeHandleForTest("native-target", null);
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    opts.getCachedProbeFn = () => null;
+    opts.reprobeFn = async () => { reprobeCalls++; throw new Error("vulkaninfo exploded"); };
+    opts.getModelRuntimeOverrideFn = () => ({ bin: "/opt/window/llama-server" });
+    opts.nowFn = () => t;
+    return acquireProvider("native-target", opts);
+  };
+  try {
+    assert.equal(await acquire(), true);
+    t += 60_000; // 1 min later, inside the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 1, "no re-probe inside the failure window");
+    assert.equal(warns.filter((w) => w.includes("hardware probe failed")).length, 1, "one warning per window");
+    t += 5 * 60_000; // past the window
+    assert.equal(await acquire(), true);
+    assert.equal(reprobeCalls, 2, "the window expired, so it probed again");
+  } finally { console.warn = origWarn; }
+});
+
+test("runtime resolve: a probe failure is survivable on an override path but still surfaces on the stock path", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18108, "native-target") } };
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const withOverride = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    withOverride.getCachedProbeFn = () => null;
+    withOverride.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    withOverride.getModelRuntimeOverrideFn = () => ({ bin: "/opt/survive/llama-server" });
+    assert.equal(await acquireProvider("native-target", withOverride), true);
+
+    _setNativeHandleForTest("native-target", null);
+    const stock = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    stock.getCachedProbeFn = () => null;
+    stock.reprobeFn = async () => { throw new Error("vulkaninfo exploded"); };
+    await assert.rejects(acquireProvider("native-target", stock), /vulkaninfo exploded/);
+  } finally { console.warn = origWarn; }
 });
 
 test("owner gate: a native row owned by another instance is never orchestrated here even when its host is one of ours", async () => {
