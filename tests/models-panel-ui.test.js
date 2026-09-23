@@ -41,6 +41,8 @@ import modelCatalogPanel, {
   fitLabelKey,
   fitHintKey,
   loadPanelData,
+  renderCuratedTab,
+  renderRuntimeStrip,
 } from "../servers/gateway/dashboard/panels/model-catalog.js";
 import { dashboardAuth } from "../servers/gateway/dashboard/auth.js";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
@@ -241,6 +243,82 @@ test("loadPanelData: hfTokenConfigured true only when the reserved provider row 
     listProvidersAllFn: async () => { throw new Error("db offline"); },
   });
   assert.equal(dbThrows.hfTokenConfigured, false); // fails closed, never throws
+});
+
+// ---------------------------------------------------------------------------
+// 2b. Serving class (Task 5): never a one-tap Start for windowed/wedge-risk
+// ---------------------------------------------------------------------------
+
+/** Shape post-loadPanelData shaping — same fields renderModelCard/
+ * renderRuntimeStrip already consume elsewhere (mirrors
+ * model-catalog-client-contract.test.js's fixtures), plus serving_class. */
+function servingCardData(overrides = {}) {
+  return {
+    id: "serving-test-model", family: "fam", lab: "Lab", license: "mit", gated: false,
+    task: "chat", context_len: 4096, tags: ["chat", "mid"], notes: null,
+    default_quant: "Q4", first_run_default: false, registered: true, registeredQuant: "Q4", running: false,
+    serving_class: null,
+    quants: [{ quant: "Q4", size_mb: 500, min_ram_mb: 500, min_vram_mb: 0, fitBadge: "fits" }],
+    ...overrides,
+  };
+}
+
+function baseTabData(models) {
+  return {
+    runtime: { name: "llama.cpp", release: "b10068" },
+    probe: { platform: "linux", wsl2: false, accel: "cpu", gpuName: null, vramMb: null, ramAvailableMb: 8000, diskFreeMb: 500_000, unknown: [] },
+    models,
+    runtimeModels: [],
+    estimatedRamMb: 0,
+    estimatedVramMb: 0,
+    hfTokenConfigured: false,
+  };
+}
+
+test("renderCuratedTab: a registered wedge-risk model shows the wedge-risk hint + badge and no Start button", () => {
+  const model = servingCardData({ id: "wedge-model", serving_class: "wedge-risk" });
+  const html = renderCuratedTab(baseTabData([model]), "en");
+  assert.match(html, /Known wedge risk: this shape has hung the machine before\. It is never started from the dashboard\./);
+  assert.match(html, /mcat-card__badge--serving-wedge-risk/);
+  assert.doesNotMatch(html, /data-action="start" data-model-id="wedge-model"/);
+  // still manageable: Remove stays available
+  assert.match(html, /data-action="remove" data-model-id="wedge-model"/);
+});
+
+test("renderCuratedTab: a registered windowed model shows the windowed hint + badge and no Start button", () => {
+  const model = servingCardData({ id: "windowed-model", serving_class: "windowed" });
+  const html = renderCuratedTab(baseTabData([model]), "en");
+  assert.match(html, /Operator window only: this model runs two-box or evicts production, so it is never started from here\./);
+  assert.match(html, /mcat-card__badge--serving-windowed/);
+  assert.doesNotMatch(html, /data-action="start" data-model-id="windowed-model"/);
+  assert.match(html, /data-action="remove" data-model-id="windowed-model"/);
+});
+
+test("renderCuratedTab: a registered resident model (serving_class null/'resident') still gets a Start button", () => {
+  for (const servingClass of [null, "resident"]) {
+    const model = servingCardData({ id: "resident-model", serving_class: servingClass });
+    const html = renderCuratedTab(baseTabData([model]), "en");
+    assert.match(html, /data-action="start" data-model-id="resident-model"/, `serving_class=${servingClass}`);
+  }
+});
+
+test("renderCuratedTab: an unregistered wedge-risk model with a fitting quant still renders Download (only Start is refused)", () => {
+  const model = servingCardData({
+    id: "wedge-download-model", serving_class: "wedge-risk", registered: false, registeredQuant: null,
+  });
+  const html = renderCuratedTab(baseTabData([model]), "en");
+  assert.match(html, /data-action="download" data-model-id="wedge-download-model"/);
+  assert.doesNotMatch(html, /data-action="start" data-model-id="wedge-download-model"/);
+});
+
+test("renderRuntimeStrip: a registered, not-live wedge-risk model gets no Start button in the runtime table", () => {
+  const runtimeModels = [
+    { modelId: "wedge-strip-model", registryKey: "wedge-strip-model@Q4", quant: "Q4", source: "curated", servingClass: "wedge-risk", state: "stopped", live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null },
+  ];
+  const data = { ...baseTabData([]), runtimeModels };
+  const html = renderRuntimeStrip(data, "en");
+  assert.doesNotMatch(html, /data-action="start" data-model-id="wedge-strip-model"/);
+  assert.match(html, /wedge-strip-model/);
 });
 
 // ---------------------------------------------------------------------------

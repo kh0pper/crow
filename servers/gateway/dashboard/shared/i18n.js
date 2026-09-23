@@ -364,6 +364,7 @@ export const translations = {
   // ─── Chat — native model runtime (Item G, Task 10) ───
   "chat.native_model_loading": { en: "Loading local model \"{provider}\" — this can take a few minutes for larger models.", es: "Cargando el modelo local \"{provider}\" — esto puede tardar varios minutos en modelos más grandes." },
   "chat.box_reserved": { en: "The box is reserved by {owner} until {until}; local models can't start right now. Try a smaller resident model or wait.", es: "El equipo está reservado por {owner} hasta {until}; los modelos locales no pueden iniciarse ahora. Prueba un modelo residente más pequeño o espera." },
+  "chat.serving_class_refused": { en: "{provider} is a {cls} model: it only runs in an operator-run window, never on demand from chat. Pick a resident model.", es: "{provider} es un modelo {cls}: solo se ejecuta en una ventana operada por una persona, nunca bajo demanda desde el chat. Elige un modelo residente." },
   "chat.native_model_load_failed": { en: "The local model \"{provider}\" didn't load in time. Check the gateway logs for details.", es: "El modelo local \"{provider}\" no cargó a tiempo. Consulta los registros del gateway para más detalles." },
 
   // ─── Peer invite share (Messages Phase 2 PR1) ───
@@ -717,6 +718,13 @@ export const translations = {
   "models.cardLicense": { en: "License: {license}", es: "Licencia: {license}" },
   "models.cardContext": { en: "{n} token context", es: "Contexto de {n} tokens" },
   "models.quantLabel": { en: "Variant", es: "Variante" },
+
+  // Serving class (Task 5) — no one-tap Start for windowed/wedge-risk models
+  "models.servingWindowedBadge": { en: "Operator window", es: "Ventana del operador" },
+  "models.servingWedgeRiskBadge": { en: "Wedge risk", es: "Riesgo de bloqueo" },
+  "models.servingWindowedHint": { en: "Operator window only: this model runs two-box or evicts production, so it is never started from here.", es: "Solo en ventana del operador: este modelo usa dos equipos o desaloja producción, así que nunca se inicia desde aquí." },
+  "models.errServingClassRefused": { en: "This model only runs in an operator window; it cannot be started here.", es: "Este modelo solo se ejecuta en una ventana del operador; no se puede iniciar aquí." },
+  "models.servingWedgeRiskHint": { en: "Known wedge risk: this shape has hung the machine before. It is never started from the dashboard.", es: "Riesgo conocido de bloqueo: esta configuración ya colgó la máquina. Nunca se inicia desde el panel." },
 
   // Fit badges
   "models.fitFits": { en: "Fits", es: "Cabe" },

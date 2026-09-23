@@ -45,6 +45,7 @@ import { getStatusSnapshot } from "../../models/runtime.js";
 import { getNativeHandle } from "../../gpu-orchestrator.js";
 import { listProvidersAll } from "../../../shared/providers-db.js";
 import { HF_TOKEN_PROVIDER_ID } from "../../routes/models.js";
+import { servingClassOf, startAffordance } from "../../models/serving-class.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -181,12 +182,17 @@ export async function loadPanelData({
       registered: !!regEntry,
       registeredQuant: regEntry ? regEntry.quant : null,
       running: !!(handle && handle.live),
+      serving_class: servingClassOf(model),
       quants,
     };
   });
 
   const snapshot = getStatusSnapshotFn();
   const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
+  // Serving class (Task 5): keyed by catalog id once, up front — the
+  // runtime strip's rows key on `modelId` (the catalog id), so this map
+  // avoids re-scanning `catalog.models` per registry entry.
+  const classById = new Map((catalog.models || []).map((m) => [m.id, servingClassOf(m)]));
   // Registry keys are now `<catalogId>@<quant>` (Task 5); mirrors
   // routes/models.js's GET /api/models/runtime assembly — see that route
   // for why `modelId` (the alias the process supervisor + this panel's
@@ -199,8 +205,9 @@ export async function loadPanelData({
     // their ONLY surface — it needs to know their source to offer a
     // Remove affordance there instead.
     const source = entry?.source || "curated";
+    const servingClass = classById.get(modelId) ?? null;
     const status = byAlias.get(modelId);
-    if (status) return { modelId, registryKey: key, quant: entry.quant, source, ...status };
+    if (status) return { modelId, registryKey: key, quant: entry.quant, source, servingClass, ...status };
     // Task 13 fix round 1, finding c: distinguish "never started" from
     // "was resident when the gateway restarted, hasn't re-warmed yet" via
     // the persisted wasLive marker — same classification GET /api/models/
@@ -211,6 +218,7 @@ export async function loadPanelData({
       registryKey: key,
       quant: entry.quant,
       source,
+      servingClass,
       state: registryEntryRuntimeStateFn(entry, false),
       live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
     };
@@ -322,6 +330,8 @@ function panelStyles() {
 .mcat-card__badge--recommended { color:var(--crow-accent); background:var(--crow-accent-muted); }
 .mcat-card__badge--gated { color:var(--crow-warning); background:rgba(245,158,11,0.14); }
 .mcat-card__badge--running { color:var(--crow-success); background:rgba(34,197,94,0.14); }
+.mcat-card__badge--serving-windowed { color:var(--crow-warning); background:rgba(245,158,11,0.14); }
+.mcat-card__badge--serving-wedge-risk { color:var(--crow-error); background:rgba(239,68,68,0.14); }
 .mcat-card__meta { font-size:0.75rem; color:var(--crow-text-muted); font-family:'JetBrains Mono',monospace; }
 .mcat-card__tags { display:flex; flex-wrap:wrap; gap:0.3rem; }
 .mcat-card__tag {
@@ -354,6 +364,7 @@ function panelStyles() {
   background:var(--crow-bg-deep); border-radius:8px; padding:0.5rem 0.65rem;
 }
 .mcat-card__notice--warning { color:var(--crow-warning); }
+.mcat-card__notice--serving { color:var(--crow-text-secondary); }
 
 .mcat-card__actions { display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:auto; padding-top:0.35rem; }
 .mcat-card__status-text { font-size:0.75rem; color:var(--crow-text-muted); min-height:1.1em; }
@@ -480,9 +491,12 @@ export function renderRuntimeStrip(data, lang) {
     const stateCell = m.state === "stopped_after_restart"
       ? escapeHtml(t(stateKey, lang)) + `<div class="mcat-strip__status">${escapeHtml(t("models.runtimeStateReloadingHint", lang))}</div>`
       : escapeHtml(t(stateKey, lang));
+    const affordance = startAffordance(m.servingClass ?? null);
     const actionBtn = m.live
       ? button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(m.modelId)}"` })
-      : button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(m.modelId)}"` });
+      : affordance === "start"
+        ? button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(m.modelId)}"` })
+        : `<span class="mcat-strip__status">${escapeHtml(t(affordance === "never" ? "models.servingWedgeRiskBadge" : "models.servingWindowedBadge", lang))}</span>`;
     // Task 13 fix round 3: an hf-browser-registered model has NO curated
     // card (its id is never in the catalog), so the runtime strip is the
     // only place it can ever be removed from — give it a Remove button
@@ -555,6 +569,14 @@ function renderModelCard(model, lang, hfTokenConfigured) {
   if (model.gated) badges.push(`<span class="mcat-card__badge mcat-card__badge--gated">${escapeHtml(t("models.gatedBadge", lang))}</span>`);
   if (model.running) badges.push(`<span class="mcat-card__badge mcat-card__badge--running">${escapeHtml(t("models.statusRunning", lang))}</span>`);
 
+  const affordance = startAffordance(model.serving_class ?? null);
+  if (affordance !== "start") {
+    const key = affordance === "never" ? "models.servingWedgeRiskBadge" : "models.servingWindowedBadge";
+    badges.push(`<span class="mcat-card__badge mcat-card__badge--serving-${escapeHtml(model.serving_class)}">${escapeHtml(t(key, lang))}</span>`);
+  }
+  const servingNotice = affordance === "start" ? "" :
+    `<div class="mcat-card__notice mcat-card__notice--serving">${escapeHtml(t(affordance === "never" ? "models.servingWedgeRiskHint" : "models.servingWindowedHint", lang))}</div>`;
+
   const otherTags = (model.tags || []).filter((tag) => !SIZE_CLASSES.includes(tag));
   const tagsHtml = otherTags.length
     ? `<div class="mcat-card__tags">${otherTags.map((tag) => `<span class="mcat-card__tag">${escapeHtml(tag)}</span>`).join("")}</div>`
@@ -575,8 +597,10 @@ function renderModelCard(model, lang, hfTokenConfigured) {
     actionHtml = `${button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(model.id)}"` })}` +
       `${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`;
   } else if (model.registered) {
-    actionHtml = `${button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(model.id)}"` })}` +
-      `${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`;
+    actionHtml = affordance !== "start"
+      ? `${servingNotice}${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`
+      : `${button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(model.id)}"` })}` +
+        `${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`;
   } else if (initialFit === "wont_fit") {
     actionHtml = `<div class="mcat-card__notice">${escapeHtml(t("models.fitWontFitHint", lang))}</div>`;
   } else {
@@ -586,7 +610,7 @@ function renderModelCard(model, lang, hfTokenConfigured) {
     });
   }
 
-  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}">
+  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}">
     <div class="mcat-card__head">
       <span class="mcat-card__title">${escapeHtml(model.id)}</span>
       ${badges.join("")}
@@ -710,6 +734,7 @@ export function modelCatalogClientJS(lang) {
           INVALID_HF_FILE: '${tJs("models.errInvalidHf", lang)}',
           NO_VERIFIABLE_CHECKSUM: '${tJs("models.errNoVerifiableChecksum", lang)}',
           HF_FILE_NOT_FOUND: '${tJs("models.errHfUpstream", lang)}',
+          SERVING_CLASS_REFUSED: '${tJs("models.errServingClassRefused", lang)}',
           // Task 13 fix round 3: Hugging Face answers an unauthenticated
           // gated download 401 (no/invalid token), distinct from 403
           // (authenticated but the license hasn't been accepted yet) —
@@ -808,6 +833,14 @@ export function modelCatalogClientJS(lang) {
           unknown: '${tJs("models.fitUnknownHint", lang)}'
         };
 
+        // Serving class (Task 5): the post-download "done" branch below
+        // never renders a Start affordance for a non-resident model — this
+        // is the client-side mirror of renderModelCard's servingNotice.
+        var SERVING_NOTICES = {
+          windowed: '${tJs("models.servingWindowedHint", lang)}',
+          "wedge-risk": '${tJs("models.servingWedgeRiskHint", lang)}'
+        };
+
         // --- Download flow ---
         function pollDownload(jobId, modelId) {
           apiFetch("/downloads").then(function (res) {
@@ -826,7 +859,27 @@ export function modelCatalogClientJS(lang) {
               setProgress(modelId, 100, false);
               var card = document.querySelector('.mcat-card[data-model-id="' + modelId + '"]');
               var actions = card ? card.querySelector(".mcat-card__actions") : null;
-              if (actions) {
+              var servingClass = card ? card.getAttribute("data-serving-class") : "";
+              if (actions && (servingClass === "windowed" || servingClass === "wedge-risk")) {
+                // Never offer "Try in chat" (a one-tap-to-start surface) for
+                // a non-resident model — same rule renderModelCard applies
+                // server-side. A Remove button is added so the card stays
+                // manageable; its presence also keeps refreshCardActions'
+                // early return from ever re-adding a Download/Start button
+                // on a later quant change.
+                actions.replaceChildren();
+                var servingNoticeEl = document.createElement("div");
+                servingNoticeEl.className = "mcat-card__notice mcat-card__notice--serving";
+                servingNoticeEl.textContent = SERVING_NOTICES[servingClass] || SERVING_NOTICES.windowed;
+                actions.appendChild(servingNoticeEl);
+                var servingRemoveBtn = document.createElement("button");
+                servingRemoveBtn.type = "button";
+                servingRemoveBtn.className = "btn btn-danger btn-sm";
+                servingRemoveBtn.setAttribute("data-action", "remove");
+                servingRemoveBtn.setAttribute("data-model-id", modelId);
+                servingRemoveBtn.textContent = '${tJs("models.actionRemove", lang)}';
+                actions.appendChild(servingRemoveBtn);
+              } else if (actions) {
                 actions.replaceChildren();
                 var link = document.createElement("a");
                 link.className = "btn btn-primary btn-sm";

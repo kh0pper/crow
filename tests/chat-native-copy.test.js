@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nativeWarmingEvent, providerNotReadyError, boxReservedError } from "../servers/gateway/routes/chat.js";
+import { nativeWarmingEvent, providerNotReadyError, boxReservedError, servingClassRefusedError } from "../servers/gateway/routes/chat.js";
 import { t, fill } from "../servers/gateway/dashboard/shared/i18n.js";
 
 // --- Docker/cloud path: unchanged from pre-Task-10 behavior ----------------
@@ -104,4 +104,14 @@ test("boxReservedError: names the owner + expiry in both langs, code box_reserve
   assert.notEqual(en.message, providerNotReadyError("x", true, "en").message);
   const bare = boxReservedError({}, "en");
   assert.match(bare.message, /unknown/);
+});
+
+test("servingClassRefusedError: names the provider + serving class in both langs, code serving_class_refused", () => {
+  const err = { code: "serving_class_refused", servingClass: "windowed", provider: "glm" };
+  const en = servingClassRefusedError(err, "en");
+  const es = servingClassRefusedError(err, "es");
+  assert.equal(en.code, "serving_class_refused");
+  assert.equal(en.serving_class, "windowed");
+  assert.match(en.message, /glm/, "the provider name is in the message");
+  assert.notEqual(en.message, es.message, "EN and ES copy must actually differ (real translation, not a stub)");
 });
