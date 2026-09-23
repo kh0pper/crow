@@ -114,6 +114,126 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 - `tailscale` (MagicDNS, peer connections)
 - `crowdsec-firewall-bouncer` (deferred to PR 4.5 — upstream does not publish a Docker image; needs a custom Dockerfile and a tested unwind command verified on a throwaway host) — will need host network to manipulate iptables/nftables
 
+## Second host: raven
+
+Until 2026-09-09 this registry described one machine. The two-host production design
+(`docs/superpowers/specs/2026-09-09-two-host-production-and-heavy-model-modes.md`) makes **raven** a production
+host, so ports now need a host qualifier to mean anything.
+
+Raven's ports live in their own namespace and do not collide with crow's. The first column below is deliberately
+`raven:<port>` rather than a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the
+first cell as **crow** allocations. Keeping raven rows unparseable to it is correct today and is a stopgap:
+**making the checker host-aware is follow-up work**, and until it lands, a raven port is only verified by looking
+at raven.
+
+### Production and reserved (raven)
+
+| port | bind | what | status |
+|---|---|---|---|
+| raven:8030 | 0.0.0.0 | Qwen3.8-Flash-Next @1M, production (native systemd, not a container) | planned |
+| raven:8031 | 0.0.0.0 | Flash-Next two-box master (window mode) | reserved |
+| raven:8032 | 0.0.0.0 | DeepSeek-V4-Flash two-box master (window mode) | reserved |
+| raven:8033 | 0.0.0.0 | GLM-5.3-Flash two-box master (window mode) | reserved |
+
+### Benchmark-transient, held only inside a window
+
+Bound by `pi-lab/scripts/`, never by a compose file, so `check-port-allocation.js` cannot see any of them. Listed
+because a registry that covers a host while omitting ports in regular use is worse than one that omits the host.
+
+| port | bind | what |
+|---|---|---|
+| raven:8021 | 127.0.0.1 | **two-box master port**, the standard across R1 to R26 (25 `raven-*` scripts). Thursday's W0 binds it |
+| raven:8035 | 127.0.0.1 | R24 result-check server |
+| raven:8036 | 127.0.0.1 | R25 / R25b single-box stack runs. This is the Flash-Next config chosen for production, so 8030 and 8036 are the same shape on different ports |
+| raven:8037 | 127.0.0.1 | R23 knob-sanity (`KS_PORT`), moved here off 8031 when this section reserved that range |
+| raven:8098 | 0.0.0.0 | zoo arm endpoint, two-box master and single-box arms (`ZOO_PORT`) |
+| raven:8099 | 127.0.0.1 | Q4 MTP smoke |
+| raven:50052 | 10.99.0.2 (USB4) | `ggml-rpc-server` when **raven** is the worker |
+| raven:50053 | 127.0.0.1 | second `ggml-rpc-server`, for arms running two workers on raven's one GPU |
+| crow:8012, 8013 | 127.0.0.1 | GLM-5.2 IQ2 and IQ4 windows (`glm52-window.sh` and friends) |
+| crow:8020 | 127.0.0.1 | DeepSeek-V4-Flash windowed serve (`dsv4-window.sh`). The `crow-dsv4` provider row points here |
+| crow:8021 | 127.0.0.1 | phase-0 Vulkan probes, run as duties under `dsv4-window.sh` (`PHASE0_PORT`) |
+| crow:8022, 8024, 8025, 8026, 8027 | 127.0.0.1 | DSv4 Vulkan hyper-connection investigation duties (`dsv4-vk-hc-*`, `dsv4-ubatch-confirm`) |
+| crow:8023 | 127.0.0.1 | DSv4 top-k A/B and HC verify (`TOPK_PORT`, `HCV_PORT`) |
+| crow:8099 | 127.0.0.1 | GTT ladder duty under `dsv4-window --duty` |
+
+### Three ports bind on BOTH machines
+
+`8021`, `8099` and `50052` each mean two different things depending on the box. 8021 and 8099 are the same number
+on the same loopback on two hosts, so nothing about the number distinguishes them; 50052 at least differs by bind
+address (`10.99.0.1` is crow, `10.99.0.2` is raven). This is the whole argument for the `raven:`/`crow:` prefix,
+and it is why the prefix is worth keeping even after the checker learns host-awareness. A bare number here is not
+an allocation, it is an ambiguity.
+
+Verified free on raven 2026-09-09: 8030 through 8033, 8035, 8036, 8037, 8098 and 8099. Raven listens only on 22,
+53, 631 and two ephemeral ports.
+
+### A constraint this registry cannot express
+
+**Raven cannot host 8030 and 8036 at the same time, however free both ports are.** They are the same Flash-Next
+single-box config, one as the proposed production port and one as the R25/R25b benchmark port, and each wants
+about 92.6 GiB on a 124 GiB box. Two free ports, one machine's worth of memory. Allocating a port is not the same
+as being able to run the thing, and no port table can say so.
+
+Read it as the general case rather than one awkward pair: on a single-tenant box, port availability is a necessary
+condition and never a sufficient one. Same class as the ordering constraint in
+`docs/superpowers/specs/2026-09-09-two-host-production-and-heavy-model-modes.md` §3.0, where the port would have
+been free and the arm would still have been unsafe.
+
+### Three gaps this section exposes, all worth closing
+
+1. **Crow's own model ports are largely unlisted.** 8003 (35b), 8006 (27b solo) and 8014 (27b 512k) are absent
+   from the allocation table; only 8010 (27b copilot) is recorded. They bind the tailnet IP from `crow-addons/`
+   composes, which the conventions above already flag as a separate registry, so nothing catches them.
+2. **Crow's own benchmark ports were unlisted too**, and are now in the table above rather than the main one,
+   because they are script-bound and transient. There are eleven of them.
+3. **8098 is ambiguous across hosts.** The table allocates it to searxng on crow's loopback, while the two-box
+   benchmark zoo arms conventionally use 8098 on raven. Both are correct today because they are different
+   machines, and neither the table nor the checker can say so. This is precisely the class of silent
+   double-allocation the conventions section warns about, one host further out.
+
+### How this list was built, because the method outlasts the list
+
+Four passes each found more, and the last two were humans reading their own trees:
+
+1. `PORT=` assignments: four ports.
+2. Adding `--port` and `host:port` forms: five more (8022, 8024 through 8027).
+3. Adding the shell-default form `${VAR:-NNNN}`: this is the easiest to miss, because a scan for `PORT=8021`,
+   `port 8021` or `:8021` returns **nothing** on a file that binds 8021 all day via `PORT="${PHASE0_PORT:-8021}"`.
+   That form is also multiplying, since parameterising a hardcoded port is the right fix for the ambiguities above
+   and creates a new hiding place every time.
+4. Two people reading their own trees: four more ports, one wrong host attribution, and one live collision inside
+   a range this section had just reserved.
+
+**Treat any scan of this kind as a lower bound.** If the checker grows host-awareness, its companion should read
+invocations and shell defaults as well as assignments.
+
+### The failure mode behind every mistake made here
+
+Building this section produced four errors, and not one was a missing grep:
+
+1. A trailing comment on a shell assignment line swallowed the assignments after it. `bash -n` passed; it would
+   have failed at first use under `set -u`.
+2. A categorical negative, "not one script on that host uses it", was asserted from a pattern that could not have
+   matched the files in question.
+3. A string replace reported success without applying, because its pattern did not match the file's line
+   wrapping. Every other edit in the same script worked, so the run looked clean.
+4. A grep confirming a correct edit returned zero, because the grep was single-line and the text wrapped across a
+   newline. Re-probing whitespace-flattened text found it.
+
+All four are one failure: **the check and the thing checked disagree about shape, and the check returns the
+reassuring answer.** The fourth is the most dangerous, because it makes a correct edit look failed, and the
+natural response is to apply it again.
+
+Three habits follow, and they are cheap. Assert the match count before substituting, so a no-op is loud rather
+than silent. Verify against text normalised the same way the edit was written, since a single-line probe cannot
+see a wrapped phrase. And never assert a categorical negative from a pattern-based scan; the honest form is "this
+pattern found none", which is a different claim.
+
+A related trap, from the same evening: a scan **surfaced** a colliding port and its author read the hit as
+confirming their own reservation rather than as a conflict. That turns evidence into confirmation, and it is worse
+than missing the port outright.
+
 ## Process for amending this file
 
 1. Pick an unallocated port in a sensible range (admin UIs in 3000-3099, backend APIs in 8000-8099, metrics in 19000-19999).
