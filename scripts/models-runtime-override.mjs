@@ -93,14 +93,16 @@ function knownModelIds(dir, catalogIds) {
 /**
  * Run `apply()` (one library write), re-read state.json, and confirm
  * `landed(state, result)`. Retry once on a mismatch; a second mismatch
- * throws ConcurrentWriteError. Returns the FIRST attempt's result (e.g.
- * clear's "was one set?").
+ * throws ConcurrentWriteError. Returns the result of whichever attempt
+ * `landed` actually confirmed (the retry's, when the first was clobbered
+ * before we could read it back) — e.g. `set`'s persisted record (its
+ * `setAt` must match what's on disk) or clear's "was one set?".
  */
 function writeVerified(dir, apply, landed) {
   const first = apply();
   if (landed(loadState(dir), first)) return first;
   const second = apply();
-  if (landed(loadState(dir), second)) return first;
+  if (landed(loadState(dir), second)) return second;
   throw new ConcurrentWriteError(
     `state.json at ${dir} did not keep the change after a retry — a concurrent gateway write overwrote it. Run the command again; if it keeps happening, check that the gateway on this data dir is current (an older gateway drops unknown state keys).`,
   );

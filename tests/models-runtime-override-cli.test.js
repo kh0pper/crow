@@ -110,6 +110,41 @@ test("cli: a write clobbered once by a concurrent gateway write is retried and l
   assert.equal(loadState(dir).runtimeOverrides["qwen3.6-35b-a3b"].bin, "/opt/pr/llama-server");
 }));
 
+test("cli: on a clobbered-then-landed retry, the returned/printed record is the RETRY's, not the discarded first attempt", () => withDir(async (dir) => {
+  // `now` and `spawnSyncImpl` are both driven by the same `attempt` counter
+  // (bumped once per validateBinary call, i.e. once per writeVerified
+  // attempt), so the first attempt's record and the retry's record differ
+  // in BOTH setAt and version — attempt 1 never lands (the "gateway"
+  // clobbers it away), only attempt 2 is actually persisted. `set`'s
+  // printed message includes `version` (not setAt), so that's the
+  // observable proof of which record writeVerified returned: printing
+  // attempt 1's "b1001" while attempt 2's "b1002" is what's on disk would
+  // mean the OLD "return first" bug is back.
+  let attempt = 0;
+  const timestamps = ["2026-09-23T00:00:00Z", "2026-09-23T00:05:00Z"];
+  const versions = ["version: 1001 (aaa1111)\n", "version: 1002 (bbb2222)\n"];
+  const spawnSyncImpl = () => {
+    attempt += 1;
+    return { status: 0, stdout: "", stderr: versions[attempt - 1] };
+  };
+  const now = () => new Date(timestamps[attempt - 1]);
+
+  const r = await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server"], {
+    overrideOpts: { ...overrideOpts, spawnSyncImpl, now, saveStateFn: clobberingSave(1, dropOverrides) },
+  });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(attempt, 2, "the first attempt must have been clobbered, forcing exactly one retry");
+
+  const persisted = loadState(dir).runtimeOverrides["qwen3.6-35b-a3b"];
+  assert.equal(persisted.setAt, "2026-09-23T00:05:00.000Z");
+  assert.equal(persisted.version, "b1002");
+
+  // The printed record must be the retry's (b1002), matching what's
+  // actually on disk — never the clobbered-away first attempt's (b1001).
+  assert.match(r.out, /b1002/, r.out);
+  assert.doesNotMatch(r.out, /b1001/, r.out);
+}));
+
 test("cli: a write clobbered twice exits 3 naming the concurrent gateway write (set, host set, and clear)", () => withDir(async (dir) => {
   const always = { ...overrideOpts, saveStateFn: clobberingSave(99, dropOverrides) };
   const setModel = await run(dir, ["set", "--model", "qwen3.6-35b-a3b", "--bin", "/opt/pr/llama-server"], { overrideOpts: always });
