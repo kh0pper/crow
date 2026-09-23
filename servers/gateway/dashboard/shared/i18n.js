@@ -732,7 +732,7 @@ export const translations = {
   "models.fitWontFit": { en: "Won't fit", es: "No cabe" },
   "models.fitUnknown": { en: "Unknown", es: "Desconocido" },
   "models.fitFitsHint": { en: "Comfortably fits your detected hardware.", es: "Se ajusta cómodamente a tu hardware detectado." },
-  "models.fitTightHint": { en: "Close to your limits — may run slowly or use swap.", es: "Cerca de tus límites — puede ejecutarse lento o usar memoria de intercambio." },
+  "models.fitTightHint": { en: "Close to your limits — may run slowly, use swap, or need other models stopped first.", es: "Cerca de tus límites — puede ejecutarse lento, usar memoria de intercambio o necesitar que otros modelos se detengan primero." },
   "models.fitWontFitHint": { en: "Needs more RAM/VRAM than this machine has available.", es: "Necesita más RAM/VRAM de la que esta máquina tiene disponible." },
   "models.fitUnknownHint": { en: "Couldn't verify fit — this may not run.", es: "No se pudo verificar si es compatible — puede que no funcione." },
 

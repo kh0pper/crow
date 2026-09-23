@@ -540,6 +540,8 @@ export async function probeHardware(opts = {}) {
 // fitBadge
 // ---------------------------------------------------------------------------
 
+const positiveOrNull = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+
 /**
  * Decide whether `quant` fits on the given `probe`.
  *
@@ -547,6 +549,21 @@ export async function probeHardware(opts = {}) {
  * returns "fits" — it returns "unknown". Swap is never part of `probe`, so
  * it can never leak in here either.
  *
+ * Unified memory (`probe.unified === true`, Strix Halo spec §2.2, D2) — the
+ * GPU's DEVICE_LOCAL heap is a slice of the same RAM, so VRAM is NEVER
+ * added (that was a double-count).
+ *   GTT-expanded APU (gttTotalMb and ramTotalMb known, and
+ *   gttTotalMb >= 0.75 x ramTotalMb — e.g. crow with amdgpu.gttsize),
+ *   ceiling FIRST (MemAvailable can exceed GTT on an idle box):
+ *     min_ram_mb >  gttTotalMb     -> "wont_fit" (can never run on this box)
+ *     min_ram_mb <= ramAvailableMb -> "fits"
+ *     otherwise                    -> "tight"  (fits once other resident
+ *                                     models are stopped)
+ *   Every other unified host (default GTT, or GTT/MemTotal unknown): the
+ *   discrete formula below with effective = ramAvailableMb (no VRAM credit).
+ *   A default GTT is NOT a ceiling — llama.cpp can run the rest on CPU.
+ *
+ * Discrete / unknown (`unified` false or null) — byte-identical to before:
  * effective RAM = probe.ramAvailableMb
  *   + (probe.vramMb, only when quant.min_vram_mb > 0 AND
  *      probe.vramMb >= quant.min_vram_mb — i.e. the GPU can actually hold
@@ -559,6 +576,9 @@ export async function probeHardware(opts = {}) {
  *   min_ram_mb <= effective * 1.10 (inclusive)  -> "tight"
  *   otherwise                                   -> "wont_fit"
  *
+ * "tight" deliberately carries both meanings (near the limit / needs other
+ * models stopped) — no fourth badge value (D3); the hint copy says both.
+ *
  * @param {Probe|null|undefined} probe
  * @param {{min_ram_mb?: number, min_vram_mb?: number}} quant
  * @returns {"fits"|"tight"|"wont_fit"|"unknown"}
@@ -568,10 +588,24 @@ export function fitBadge(probe, quant) {
   const minRam = quant?.min_ram_mb;
   if (typeof minRam !== "number" || !Number.isFinite(minRam)) return "unknown";
 
-  const minVram = typeof quant?.min_vram_mb === "number" ? quant.min_vram_mb : 0;
   let effective = probe.ramAvailableMb;
-  if (minVram > 0 && typeof probe.vramMb === "number" && probe.vramMb >= minVram) {
-    effective += probe.vramMb;
+  if (probe.unified === true) {
+    const gtt = positiveOrNull(probe.gttTotalMb);
+    const total = positiveOrNull(probe.ramTotalMb);
+    if (gtt != null && total != null && 4 * gtt >= 3 * total) {
+      // GTT-expanded APU: gtt >= 0.75 x MemTotal, integer-exact. The
+      // ceiling is checked FIRST: on an idle box MemAvailable can exceed
+      // GTT, and a quant above GTT can still never be GPU-resident.
+      if (minRam > gtt) return "wont_fit";
+      if (minRam <= effective) return "fits";
+      return "tight";
+    }
+    // Any other unified host: today's formula, never the VRAM credit.
+  } else {
+    const minVram = typeof quant?.min_vram_mb === "number" ? quant.min_vram_mb : 0;
+    if (minVram > 0 && typeof probe.vramMb === "number" && probe.vramMb >= minVram) {
+      effective += probe.vramMb;
+    }
   }
 
   if (minRam <= effective) return "fits";

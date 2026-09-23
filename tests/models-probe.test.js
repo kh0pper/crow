@@ -12,6 +12,7 @@ import {
   parseMemTotalMb,
   readAmdgpuMem,
 } from "../servers/gateway/models/probe.js";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures — provenance noted per block. See task-3-report.md for full detail.
@@ -699,6 +700,87 @@ test("fitBadge: min_vram_mb 0 (CPU-capable quant) never adds VRAM even if presen
   const probe = { ramAvailableMb: 8000, vramMb: 24000 };
   const quant = { min_ram_mb: 8000, min_vram_mb: 0 };
   assert.equal(fitBadge(probe, quant), "fits"); // RAM alone already fits
+});
+
+// ---------------------------------------------------------------------------
+// fitBadge on unified memory (Strix Halo spec §2.2, D2)
+// ---------------------------------------------------------------------------
+
+// crow today (spec §1): 126,976 MiB GTT, 127,941 MiB MemTotal, ~46 GiB
+// available with 35b + embed resident, RADV's 83 GiB DEVICE_LOCAL heap.
+// GTT >= 0.75 x MemTotal -> a GTT-expanded APU (review C2).
+const CROW_UNIFIED = { unified: true, gttTotalMb: 126976, ramTotalMb: 127941, ramAvailableMb: 47104, vramMb: 84992 };
+// A default-GTT laptop APU: GTT is half of RAM -> NOT GTT-expanded.
+const LAPTOP_APU = { unified: true, gttTotalMb: 16000, ramTotalMb: 32000, ramAvailableMb: 24000, vramMb: 16000 };
+
+test("fitBadge GTT-expanded: under available -> fits", () => {
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 40000, min_vram_mb: 0 }), "fits");
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 47104, min_vram_mb: 0 }), "fits"); // boundary inclusive
+});
+
+test("fitBadge GTT-expanded (crow): Flash-Next UD-Q4_K_XL 115,068 MiB -> tight; == GTT still tight", () => {
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 115068, min_vram_mb: 0 }), "tight");
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 126976, min_vram_mb: 0 }), "tight");
+});
+
+test("fitBadge GTT-expanded (crow): GLM UD-IQ4_XS 157,911 MiB -> wont_fit; GTT+1 -> wont_fit", () => {
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 157911, min_vram_mb: 0 }), "wont_fit");
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 126977, min_vram_mb: 0 }), "wont_fit");
+});
+
+test("fitBadge GTT-expanded: min_vram_mb > 0 NEVER adds VRAM (no double-count)", () => {
+  // Discrete math would be 47104 + 84992 >= 60000 -> fits.
+  assert.equal(fitBadge(CROW_UNIFIED, { min_ram_mb: 60000, min_vram_mb: 8000 }), "tight");
+});
+
+test("fitBadge default-GTT laptop APU: fits MemAvailable but exceeds GTT -> fits (GTT is not a ceiling here)", () => {
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 20000, min_vram_mb: 0 }), "fits");
+});
+
+test("fitBadge default-GTT laptop APU: today's 10% band, minus the VRAM credit", () => {
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 26400, min_vram_mb: 0 }), "tight"); // 24000 x 1.10 exactly
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 26401, min_vram_mb: 0 }), "wont_fit"); // no widening to GTT/RAM
+  // Discrete math would add 16000 VRAM -> fits; unified never does.
+  assert.equal(fitBadge(LAPTOP_APU, { min_ram_mb: 30000, min_vram_mb: 8000 }), "wont_fit");
+});
+
+test("fitBadge unified: the 0.75 GTT-expansion boundary is inclusive and integer-exact", () => {
+  const at = { unified: true, gttTotalMb: 96000, ramTotalMb: 128000, ramAvailableMb: 47104 };
+  // (both variants: 90000 is below GTT 96000 and above available 47104)
+  const below = { ...at, gttTotalMb: 95999 };
+  assert.equal(fitBadge(at, { min_ram_mb: 90000, min_vram_mb: 0 }), "tight"); // expanded -> GTT ceiling
+  assert.equal(fitBadge(below, { min_ram_mb: 90000, min_vram_mb: 0 }), "wont_fit"); // default -> 10% band
+});
+
+test("fitBadge GTT-expanded: the ceiling is checked FIRST — an idle box with MemAvailable > GTT still says wont_fit above GTT", () => {
+  // gtt = 80% of MemTotal; idle, so MemAvailable (110000) exceeds GTT (102400).
+  const idle = { unified: true, gttTotalMb: 102400, ramTotalMb: 128000, ramAvailableMb: 110000 };
+  assert.equal(fitBadge(idle, { min_ram_mb: 105000, min_vram_mb: 0 }), "wont_fit"); // between GTT and available
+  assert.equal(fitBadge(idle, { min_ram_mb: 102400, min_vram_mb: 0 }), "fits"); // == GTT, within available
+});
+
+test("fitBadge unified: GTT or MemTotal unknown -> today's formula minus VRAM credit (no GTT ceiling, no widening)", () => {
+  const noGtt = { ...CROW_UNIFIED, gttTotalMb: null };
+  const noTotal = { ...CROW_UNIFIED, ramTotalMb: null };
+  for (const probe of [noGtt, noTotal]) {
+    assert.equal(fitBadge(probe, { min_ram_mb: 47104, min_vram_mb: 8000 }), "fits");
+    assert.equal(fitBadge(probe, { min_ram_mb: 51814, min_vram_mb: 8000 }), "tight"); // <= 47104 x 1.10
+    assert.equal(fitBadge(probe, { min_ram_mb: 115068, min_vram_mb: 8000 }), "wont_fit");
+  }
+});
+
+test("fitBadge unified: missing ramAvailableMb -> unknown (fail-closed unchanged)", () => {
+  assert.equal(fitBadge({ ...CROW_UNIFIED, ramAvailableMb: null }, { min_ram_mb: 1, min_vram_mb: 0 }), "unknown");
+});
+
+test("fitBadge: unified:false keeps the discrete VRAM credit exactly as before", () => {
+  const probe = { unified: false, ramAvailableMb: 6000, vramMb: 12000, gttTotalMb: null };
+  assert.equal(fitBadge(probe, { min_ram_mb: 16000, min_vram_mb: 8000 }), "fits");
+});
+
+test("models.fitTightHint copy covers 'other models stopped first' in en and es", () => {
+  assert.match(t("models.fitTightHint", "en"), /other models stopped first/);
+  assert.match(t("models.fitTightHint", "es"), /otros modelos/);
 });
 
 // ---------------------------------------------------------------------------
