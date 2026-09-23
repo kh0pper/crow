@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadState } from "../servers/gateway/models/state.js";
-import { getRuntimeOverride, setRuntimeOverride, clearRuntimeOverride, parseLlamaServerVersion, RuntimeOverrideError } from "../servers/gateway/models/runtime-override.js";
+import { loadState, saveState } from "../servers/gateway/models/state.js";
+import {
+  getRuntimeOverride, setRuntimeOverride, clearRuntimeOverride, parseLlamaServerVersion, RuntimeOverrideError,
+  getModelRuntimeOverride, setModelRuntimeOverride, clearModelRuntimeOverride, listModelRuntimeOverrides,
+} from "../servers/gateway/models/runtime-override.js";
 
 const okAccess = () => {};
 const okSpawn = () => ({ status: 0, stdout: "", stderr: "version: 10068 (abc1234)\nbuilt with cc\n" });
@@ -84,4 +87,55 @@ test("clearRuntimeOverride removes the record", () => withDir((dir) => {
   assert.equal(clearRuntimeOverride(dir), true);
   assert.equal(getRuntimeOverride(dir, { env: {} }), null);
   assert.equal(clearRuntimeOverride(dir), false);
+}));
+
+// --- per-model overrides (Strix Halo spec §2.3, D4) -----------------------
+
+test("per-model override: set, get, list, clear round-trip through state.json", () => withDir((dir) => {
+  const opts = { spawnSyncImpl: okSpawn, accessSyncImpl: okAccess, now: () => new Date("2026-09-23T00:00:00Z"), label: "pr-1234" };
+  const rec = setModelRuntimeOverride(dir, "qwen3.6-35b-a3b", "/opt/pr/llama-server", opts);
+  assert.deepEqual(rec, { bin: "/opt/pr/llama-server", label: "pr-1234", version: "b10068", setAt: "2026-09-23T00:00:00.000Z" });
+  assert.deepEqual(loadState(dir).runtimeOverrides, { "qwen3.6-35b-a3b": rec });
+  assert.deepEqual(getModelRuntimeOverride(dir, "qwen3.6-35b-a3b"), { ...rec, source: "state" });
+  assert.equal(getModelRuntimeOverride(dir, "other-model"), null);
+  assert.deepEqual(listModelRuntimeOverrides(dir), { "qwen3.6-35b-a3b": rec });
+  assert.equal(clearModelRuntimeOverride(dir, "qwen3.6-35b-a3b"), true);
+  assert.equal(clearModelRuntimeOverride(dir, "qwen3.6-35b-a3b"), false);
+  assert.deepEqual(listModelRuntimeOverrides(dir), {});
+}));
+
+test("per-model override: label defaults to null; a second model and the host override coexist untouched", () => withDir((dir) => {
+  const v = { spawnSyncImpl: okSpawn, accessSyncImpl: okAccess };
+  const host = setRuntimeOverride(dir, { bin: "/opt/host/llama-server" }, v);
+  saveState(dir, { ...loadState(dir), registry: { "a@Q4": { file: "a.gguf", catalogId: "a", quant: "Q4" } } });
+  setModelRuntimeOverride(dir, "a", "/opt/a/llama-server", v);
+  setModelRuntimeOverride(dir, "b", "/opt/b/llama-server", v);
+  const s = loadState(dir);
+  assert.equal(s.runtimeOverrides.a.label, null);
+  assert.deepEqual(Object.keys(s.runtimeOverrides).sort(), ["a", "b"]);
+  assert.deepEqual(s.runtimeOverride, host);
+  assert.equal(s.registry["a@Q4"].file, "a.gguf");
+  clearModelRuntimeOverride(dir, "a");
+  assert.deepEqual(loadState(dir).runtimeOverride, host, "clearing a per-model override never touches the host override");
+  assert.ok(loadState(dir).runtimeOverrides.b);
+}));
+
+test("per-model override: validateBinary errors are the host override's, and nothing persists", () => withDir((dir) => {
+  assert.throws(() => setModelRuntimeOverride(dir, "a", "llama-server", { spawnSyncImpl: okSpawn, accessSyncImpl: okAccess }),
+    (e) => e instanceof RuntimeOverrideError && e.code === "NOT_ABSOLUTE");
+  assert.throws(() => setModelRuntimeOverride(dir, "a", "/x/llama-server", { spawnSyncImpl: okSpawn, accessSyncImpl: () => { throw new Error("EACCES"); } }),
+    (e) => e.code === "NOT_EXECUTABLE");
+  assert.throws(() => setModelRuntimeOverride(dir, "a", "/x/llama-server", { spawnSyncImpl: () => ({ status: 1, stdout: "", stderr: "boom" }), accessSyncImpl: okAccess }),
+    (e) => e.code === "VERSION_FAILED");
+  assert.deepEqual(loadState(dir).runtimeOverrides, {});
+}));
+
+test("per-model override: a missing/empty/prototype-ish model id is refused with BAD_MODEL_ID; lookups of them return null", () => withDir((dir) => {
+  const v = { spawnSyncImpl: okSpawn, accessSyncImpl: okAccess };
+  for (const id of [undefined, "", " ", "__proto__", "has space", 42]) {
+    assert.throws(() => setModelRuntimeOverride(dir, id, "/x/llama-server", v), (e) => e.code === "BAD_MODEL_ID", String(id));
+  }
+  assert.equal(getModelRuntimeOverride(dir, "constructor"), null);
+  assert.equal(getModelRuntimeOverride(dir, ""), null);
+  assert.equal(clearModelRuntimeOverride(dir, "toString"), false);
 }));
