@@ -29,6 +29,7 @@
 const INITIAL = () => ({
   initialized: false,
   providers: Object.create(null),
+  external: Object.create(null),
 });
 
 let _state = INITIAL();
@@ -99,7 +100,59 @@ export function getProviderHealth() {
   for (const name of Object.keys(_state.providers)) {
     providers[name] = { ..._state.providers[name] };
   }
-  return { initialized: _state.initialized, providers };
+  const external = {};
+  for (const name of Object.keys(_state.external)) {
+    external[name] = { ..._state.external[name] };
+  }
+  return { initialized: _state.initialized, providers, external };
+}
+
+/*
+ * External engines (spec docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.3)
+ * — a SEPARATE map, written by external-engine-poll.js. An external engine is
+ * never "owned": this instance only watches it from its own network position.
+ *
+ *   firstSeenAt  stamped once, on first probe (or after a baseUrl change)
+ *   lastReadyAt  last 2xx; null = has NEVER answered in this process — the
+ *                nest signal shows that as info, never warn (a firewalled
+ *                peer like black-swan must not carry a permanent warning)
+ */
+export function recordExternal(name, { ready, nowMs, baseUrl, engineHost = null, label = null, error = null } = {}) {
+  let e = _state.external[name];
+  if (e && e.baseUrl !== baseUrl) {
+    delete _state.external[name]; // repointed: a fresh engine, fresh clocks
+    e = undefined;
+  }
+  if (!e) {
+    e = _state.external[name] = {
+      baseUrl,
+      engineHost,
+      label,
+      ready: false,
+      firstSeenAt: nowMs,
+      lastReadyAt: null,
+      lastError: null,
+      checkedAt: nowMs,
+    };
+  }
+  e.engineHost = engineHost;
+  e.label = label;
+  e.ready = !!ready;
+  e.checkedAt = nowMs;
+  if (ready) {
+    e.lastReadyAt = nowMs;
+    e.lastError = null;
+  } else {
+    e.lastError = error != null ? (error?.message ?? String(error)) : null;
+  }
+}
+
+/** Drop external entries whose name is not in liveNames (array or Set). */
+export function pruneExternal(liveNames) {
+  const live = liveNames instanceof Set ? liveNames : new Set(liveNames);
+  for (const name of Object.keys(_state.external)) {
+    if (!live.has(name)) delete _state.external[name];
+  }
 }
 
 /** Test hook — restore the initial shape (mirrors _resetReceiveHealth). */

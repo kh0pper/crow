@@ -42,3 +42,17 @@ test("cloud alias / unknown / no-sibling resolve to null (no warm)", () => {
   const lonely = { providers: { x: { baseUrl: "http://y:9/v1", host: "local", bundleId: null } } };
   assert.strictEqual(resolveWarmableProviderName(lonely, "x", OWN), null);
 });
+
+test("external engines are never warmable: direct, as an alias, or as the sibling an alias would resolve to", () => {
+  const ENGINE = { managed: "external", host: "raven", label: "halogen" };
+  const c = { providers: {
+    "ext-bundle":  { baseUrl: "http://x:8030/v1", host: "local", bundleId: "halogen", gpuPolicy: { engine: ENGINE } },
+    "ext-alias":   { baseUrl: "http://x:8003/v1", host: "cloud", bundleId: null, gpuPolicy: { engine: ENGINE } },
+    "crow-chat":   { baseUrl: "http://x:8003/v1", host: "local", bundleId: "llamacpp-qwen36-35b" },
+    "plain-alias": { baseUrl: "http://x:8030/v1", host: "local", bundleId: null },
+  } };
+  assert.strictEqual(resolveWarmableProviderName(c, "ext-bundle", OWN), null);
+  assert.strictEqual(resolveWarmableProviderName(c, "ext-alias", OWN), null);
+  assert.strictEqual(resolveWarmableProviderName(c, "plain-alias", OWN), null, "an external engine is never the sibling to warm");
+  assert.strictEqual(resolveWarmableProviderName(c, "crow-chat", OWN), "crow-chat", "unmarked neighbours are unaffected");
+});

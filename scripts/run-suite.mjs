@@ -107,6 +107,10 @@ env.CROW_DISABLE_BOT_RUNTIME = "1";
 // real host's own supervised copy. Tests that exercise the runtime inject
 // their own env object through initPerchRuntime's seam.
 env.CROW_DISABLE_PERCH = "1";
+// External-engine poll (spec 2026-09-23 §2.3): a scratch suite gateway must
+// never send its 60 s read-only probe from the test runner. Unit tests drive
+// pollExternalEngines/startExternalEngineMonitor through their own seams.
+env.CROW_EXTERNAL_ENGINE_POLL_MS = "0";
 // The suite must never believe it is supervised: a systemd-launched context
 // (CI runner, systemd-run, VS Code remote) leaks INVOCATION_ID, and code
 // under test would arm real restart/exit paths inside test processes.
