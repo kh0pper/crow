@@ -1,5 +1,5 @@
 /**
- * Reranker client for grackle-rerank (Qwen3-Reranker-0.6B via vLLM-CUDA).
+ * Reranker client. Provider is host-neutral: see resolveDefaultRerankProvider.
  *
  * Used after hybrid FTS+vector retrieval to reorder top-K candidates
  * by cross-encoder relevance. Falls through to identity order if the
@@ -7,16 +7,22 @@
  */
 
 import { loadProviders } from "../shared/providers.js";
+import { resolveProviderForTask, RERANK_TASKS } from "../shared/provider-task.js";
+import { loadProviderFromDb } from "./embeddings.js";
 
-const DEFAULT_PROVIDER = "grackle-rerank";
 const RERANK_TIMEOUT_MS = 10_000;
 
-function resolveRerankConfig(providerName = DEFAULT_PROVIDER) {
-  const cfg = loadProviders();
-  const p = cfg.providers?.[providerName];
-  if (!p || !p.baseUrl) {
-    throw new Error(`rerank provider "${providerName}" not configured`);
-  }
+/** CROW_RERANK_PROVIDER env → dashboard_settings 'rerank_provider' → lowest-id
+ *  enabled provider with a rerank/score-tagged model → null (spec 2026-09-24). */
+export async function resolveDefaultRerankProvider() {
+  return resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "CROW_RERANK_PROVIDER", settingKey: "rerank_provider" });
+}
+
+async function resolveRerankConfig(providerName) {
+  if (!providerName) throw new Error("no rerank provider");
+  let p = loadProviders().providers?.[providerName];
+  if (!p || !p.baseUrl) p = await loadProviderFromDb(providerName); // cold cache / DB-only row
+  if (!p || !p.baseUrl) throw new Error(`rerank provider "${providerName}" not configured`);
   const model = p.models?.[0]?.id || "default";
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, name: providerName };
 }
@@ -32,12 +38,13 @@ function resolveRerankConfig(providerName = DEFAULT_PROVIDER) {
  * @returns {Promise<Array>} sorted desc by relevance_score, augmented with { relevance: number }
  *   On reranker failure, returns candidates in original order without a relevance field.
  */
-export async function rerank(query, candidates, { topK = 10, providerName = DEFAULT_PROVIDER } = {}) {
+export async function rerank(query, candidates, { topK = 10, providerName } = {}) {
   if (!candidates || candidates.length === 0) return [];
+  providerName = providerName || (await resolveDefaultRerankProvider());
 
   let cfg;
   try {
-    cfg = resolveRerankConfig(providerName);
+    cfg = await resolveRerankConfig(providerName);
   } catch {
     return candidates.slice(0, topK); // no provider, fallback
   }

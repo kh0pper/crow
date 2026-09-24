@@ -1,9 +1,7 @@
 /**
- * Embedding client + BLOB+JS cosine-similarity search.
- *
- * Phase 4 semantic memory. Uses grackle's vLLM-CUDA Qwen3-Embedding-0.6B
- * endpoint as the primary provider, falls back to Ollama's nomic-embed-text
- * (used by spring-2026) if grackle is offline.
+ * Embedding client + BLOB+JS cosine-similarity search. The default provider
+ * is host-neutral: see resolveDefaultProvider (spec 2026-09-24
+ * host-neutral-model-defaults).
  *
  * Vectors stored as Float32Array serialized to BLOB. In-process scan over
  * the candidate set suffices for personal-KB scale (<10K items).
@@ -15,56 +13,25 @@ import { loadProviders } from "../shared/providers.js";
 import { createDbClient } from "../db.js";
 import { localizeDbBaseUrl } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
+import { resolveProviderForTask, EMBED_TASKS } from "../shared/provider-task.js";
 
-// Fallback when no provider is configured via env or the dashboard setting.
-const FALLBACK_PROVIDER = "grackle-embed";
 // Per-request embed timeout. Default suits fast GPU endpoints; CPU/local
 // embedders (e.g. llamafile) need more for long documents — raise via env.
 const EMBED_TIMEOUT_MS = Number(process.env.CROW_EMBED_TIMEOUT_MS) || 10_000;
 const FETCH_RETRIES = 1;
 
-// Default embedding-provider resolution, in priority order:
-//   1. CROW_EMBED_PROVIDER env var (headless/scripts/gateway via .env)
-//   2. dashboard_settings 'embed_provider' (shared crow.db — reaches every
-//      process, including the MCP servers Claude Code spawns, with no
-//      re-registration; settable from the dashboard)
-//   3. FALLBACK_PROVIDER ("grackle-embed") — preserves prior behavior
-// Cached for 30s so the hot embed path stays cheap.
-let _defaultProviderCache = null;
-let _defaultProviderAt = 0;
-const DEFAULT_PROVIDER_TTL_MS = 30_000;
-
+// Default embedding-provider resolution (spec 2026-09-24): CROW_EMBED_PROVIDER
+// env → dashboard_settings 'embed_provider' → the lowest-id enabled provider
+// with an embed-tagged model → null. Never a named host.
 export async function resolveDefaultProvider() {
-  if (process.env.CROW_EMBED_PROVIDER) return process.env.CROW_EMBED_PROVIDER;
-  if (_defaultProviderCache && Date.now() - _defaultProviderAt < DEFAULT_PROVIDER_TTL_MS) {
-    return _defaultProviderCache;
-  }
-  let resolved = FALLBACK_PROVIDER;
-  try {
-    const db = createDbClient();
-    try {
-      const { rows } = await db.execute({
-        sql: "SELECT value FROM dashboard_settings WHERE key = 'embed_provider'",
-        args: [],
-      });
-      const v = rows?.[0]?.value;
-      if (v && String(v).trim()) resolved = String(v).trim();
-    } finally {
-      db.close?.();
-    }
-  } catch {
-    // DB unavailable — keep the fallback.
-  }
-  _defaultProviderCache = resolved;
-  _defaultProviderAt = Date.now();
-  return resolved;
+  return resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "CROW_EMBED_PROVIDER", settingKey: "embed_provider" });
 }
 
 // -----------------------------------------------------------------------
 // Provider resolution
 // -----------------------------------------------------------------------
 
-async function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
+async function resolveEmbedConfig(providerName) {
   let p = loadProviders().providers?.[providerName];
   // Cold-cache / DB-only provider: loadProviders() returns models.json on a
   // process's first call (it warms from the DB asynchronously). Fall back to a

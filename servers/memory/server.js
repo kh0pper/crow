@@ -123,7 +123,7 @@ export function createMemoryServer(dbPath, options = {}) {
       category: z.string().max(500).optional().describe("Filter by category"),
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance threshold"),
       limit: z.number().max(100).default(10).describe("Maximum results to return"),
-      semantic: z.boolean().default(true).describe("Enable semantic search + reranker (auto-falls back to FTS-only if grackle-embed offline)"),
+      semantic: z.boolean().default(true).describe("Enable semantic search + reranker (auto-falls back to FTS-only if the embedding provider is offline)"),
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
@@ -133,7 +133,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
       // Phase 4: BLOB + in-process cosine path. Loads all memory embeddings,
       // scores by cosine similarity, optionally reranks top-K via
-      // grackle-rerank. (The never-wired sqlite-vec branch was removed in W5.5.)
+      // the default rerank provider. (The never-wired sqlite-vec branch was removed in W5.5.)
       if (semantic && semanticRows.length === 0) {
         try {
           const info = await phase4ProviderHealthy();
