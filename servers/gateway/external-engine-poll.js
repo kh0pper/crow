@@ -97,6 +97,9 @@ export async function pollExternalEngines(opts = {}) {
     const now = opts.now || Date.now;
     const timeoutMs = opts.timeoutMs ?? EXTERNAL_ENGINE_PROBE_TIMEOUT_MS;
     const providers = cfg.providers || {};
+    // `!p.disabled` is belt-and-braces: loadProvidersFromDb's own query already
+    // selects `disabled = 0`, so every row reaching `providers` here is already
+    // enabled. Kept in case `cfg` is ever a test/injected fixture built by hand.
     const targets = Object.entries(providers).filter(([, p]) => p && !p.disabled && isExternalEngine(p));
     const results = await Promise.all(targets.map(async ([name, p]) => ({
       name, p, r: await probeExternalEngine(p.baseUrl, { fetchImpl, timeoutMs }),

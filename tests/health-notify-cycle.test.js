@@ -10,12 +10,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle,
+  collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle, _setTailscaleReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
 } from "../servers/gateway/provider-health.js";
 import { _resetReceiveHealth } from "../servers/sharing/receive-health.js";
+
+// Same host-isolation as tests/external-engines-signal.test.js: backupSignal
+// reads real mtimes under CROW_BACKUP_DIR (a fixed future NOW would read a
+// live install's real backups as impossibly stale), and exposureSignal shells
+// out to the real `tailscale` CLI. Neutralize both so `all.ok`/`issues`
+// reflect only the signals under test, on any host.
+process.env.CROW_BACKUP_DIR = "/tmp/__crow_test_nonexistent_backup_dir__";
+_setTailscaleReader(() => { throw new Error("no tailscale"); });
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;

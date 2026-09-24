@@ -149,13 +149,13 @@ A provider row can declare that **another machine runs the engine**: `gpu_policy
 **Write validation (transition-only).** `upsertProvider` judges a write only when it **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row. It then refuses a resulting row that has any of these:
 - a malformed marker (`EXTERNAL_ENGINE_INVALID`);
 - a marker combined with a `bundleId` or `runtime: "native"`, judged on the effective policy after the upsert's `COALESCE` (`EXTERNAL_ENGINE_CONFLICT`);
-- a marked row turned into an orchestratable one in a single write (`EXTERNAL_ENGINE_CONFLICT`). To convert such a row, first unmark it with its own write (no `engine`, no bundle, no native runtime), then register.
+- a marked row turned into an orchestratable one in a single write (`EXTERNAL_ENGINE_CONFLICT`). Unmarking and orchestrating are refused together on purpose: `registerModel` still refuses an unmarked row that carries no `bundle_id` and no native runtime with `ProviderIdConflictError`, since it isn't "ours" to overwrite. To bring such a row under Crow's management, unmark it with its own write first (no `engine`, no bundle, no native runtime), then either disable/delete that row and register a fresh provider id, or convert it through a bundle install.
 
-A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`.
+A malformed incoming `gpu_policy` JSON string is `EXTERNAL_ENGINE_INVALID` only when it differs (byte- or canonically-equal check) from what is already stored; a spread write that re-sends the stored value — malformed or not — passes untouched (spec §2.2, review round 2).
 
 A write that leaves those three fields as stored always passes. Replication writes rows directly, never through `upsertProvider`, so a contradictory row can arrive from a peer, and the tab's re-enable, host repair and the reconciler must keep working on it.
 
-The models.json reconciler keeps a stored `engine` when it re-asserts `gpu_policy`. It also runs each entry in its own try/catch: a refused entry is logged as `[providers-reconcile] <id> skipped: …` and counted in `failed`.
+The models.json reconciler keeps a stored `engine` when it re-asserts `gpu_policy`. It also runs each entry in its own try/catch: a refused entry is logged as `[providers-reconcile] <id> skipped: …` and counted in `failed`. `repairProviderHosts` has the same per-row isolation: a refused row is logged as `[providers-repair] <id> skipped: …` and the repair loop continues with the next row.
 
 **Read-only health.** `servers/gateway/external-engine-poll.js` is armed by `initOrchestrator` next to the residency monitor.
 - Every `CROW_EXTERNAL_ENGINE_POLL_MS` (default 60000; `0` disables it; the scratch test suite sets `0`), each enabled marked row gets one `GET <base_url>/models` with no auth header and a 3 s timeout. 2xx means ready.

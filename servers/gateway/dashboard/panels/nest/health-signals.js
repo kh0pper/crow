@@ -20,6 +20,13 @@
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
+ *
+ * Also exports async runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) —
+ * the extracted notify loop (post-listen.js's health monitor and
+ * tests/health-notify-cycle.test.js both drive it): applies shouldNotify's
+ * dedupe per issue, calls `notify(issue)` for each one it allows, stamps its
+ * marker only on a successful notify, and prunes resolved issue ids from
+ * `lastMap`.
  */
 
 import { execFileSync } from "node:child_process";

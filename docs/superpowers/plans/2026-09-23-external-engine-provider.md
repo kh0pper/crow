@@ -2953,15 +2953,15 @@ Then verify each of the following in order:
    - `res` shows a new `lamport_ts`, with no `unchanged`.
    - The outbox count rose by exactly 1.
    - If the count did not rise, stop. The marker is set locally but will not replicate.
-2. **The drain.** Within about 60 s the gateway drains the queued row:
+2. **The drain.** Within about 60 s the gateway drains the queued row. `crow-gateway.service` logs to `/var/log/crow-inference/gateway.log`, not journald:
 
    ```bash
-   journalctl -u crow-gateway.service --since "-3 min" --no-pager | grep "sync-outbox-drain"
+   grep -E "sync-outbox-drain|external-engines" /var/log/crow-inference/gateway.log | tail
    ```
 
-   Expect `[sync-outbox-drain] drained batch: emitted=… deleted=…`.
+   Expect `[sync-outbox-drain] drained batch: emitted=… deleted=…`. (r4's gateway, `crow-r4-gateway`, still logs to the journal — use `journalctl -u crow-r4-gateway` there.)
 3. **The row on crow.** Re-read it with `listProvidersAll`. `gpuPolicy.engine` should equal `{managed:"external",host:"raven",label:"halogen"}` and `host` should still be `"cloud"`.
-4. **The Providers tab.** Within about 90 s (the 30 s providers cache plus the 60 s tick), crow's Settings > LLM > Providers shows "external · raven" on `raven-flash-next`, with a green dot when halogen answers. The gateway journal has `[external-engines] read-only poll armed: every 60000ms` from boot.
+4. **The Providers tab.** Within about 90 s (the 30 s providers cache plus the 60 s tick), crow's Settings > LLM > Providers shows "external · raven" on `raven-flash-next`, with a green dot when halogen answers. The same `grep -E "sync-outbox-drain|external-engines" /var/log/crow-inference/gateway.log | tail` should show `[external-engines] read-only poll armed: every 60000ms` from boot.
 5. **The row on r4, read-only.** r4's DB is `/home/kh0pp/.crow-r4/data/crow.db`, and this check only reads it:
 
    ```bash

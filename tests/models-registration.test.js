@@ -442,6 +442,65 @@ test("registerModel: a native row for a DIFFERENT catalog model at a colliding i
   } finally { cleanup(); }
 });
 
+test("registerModel: refuses to register over an external-engine row BEFORE allocating a port, upserting, or touching state.json (EXTERNAL_ENGINE_CONFLICT)", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    // Seeded the way replication does -- raw SQL, bypassing upsertProvider's
+    // assertExternalEngineWrite -- so a contradictory marker+bundle row can
+    // already be sitting in the DB (spec §2.2 TRANSITION-ONLY note; see
+    // tests/providers-external-engine-write.test.js for the same pattern).
+    await db.execute({
+      sql: `INSERT INTO providers (id, base_url, api_key, host, bundle_id, description, models, disabled, lamport_ts, instance_id, provider_type, gpu_policy)
+            VALUES (?, ?, NULL, ?, ?, NULL, ?, 0, 5, ?, 'openai-compat', ?)`,
+      args: [
+        "chat-test-model",
+        "http://10.0.0.126:9000/v1",
+        "cloud",
+        "llamacpp-vulkan-qwen36-35b-a3b",
+        JSON.stringify([{ id: "chat-test-model", task: "chat" }]),
+        "peer-instance",
+        JSON.stringify({ engine: { managed: "external", host: "raven" } }),
+      ],
+    });
+    const before = await dbRow(db, "chat-test-model");
+
+    let allocateCalls = 0;
+    let upsertCalls = 0;
+    await assert.rejects(
+      () => registerModel({
+        modelId: "chat-test-model",
+        catalog: makeCatalog(),
+        db,
+        dir,
+        allocatePortFn: async (...args) => {
+          allocateCalls++;
+          const { allocatePort } = await import("../servers/gateway/models/state.js");
+          return allocatePort(...args);
+        },
+        upsertProviderFn: async (...args) => { upsertCalls++; return upsertProvider(...args); },
+      }),
+      (err) => {
+        assert.equal(err.code, "EXTERNAL_ENGINE_CONFLICT");
+        return true;
+      },
+    );
+
+    assert.equal(allocateCalls, 0, "no port allocated for a rejected external-engine collision");
+    assert.equal(upsertCalls, 0, "no upsert attempted for a rejected external-engine collision");
+
+    const after = await dbRow(db, "chat-test-model");
+    assert.equal(after.base_url, before.base_url);
+    assert.equal(after.bundle_id, before.bundle_id);
+    assert.equal(after.gpu_policy, before.gpu_policy);
+    assert.equal(after.lamport_ts, before.lamport_ts, "no write happened at all -- not even a no-op upsert bump");
+
+    const state = loadState(dir);
+    assert.equal(state.reservations["chat-test-model"], undefined, "no port reservation leaked by the rejected call");
+    assert.equal(state.registry["chat-test-model"], undefined, "no registry entry leaked by the rejected call");
+    assert.deepEqual(state.conversions, {}, "no conversion snapshot leaked by the rejected call");
+  } finally { cleanup(); }
+});
+
 // ---------------------------------------------------------------------------
 // unregisterModel — order + effects
 // ---------------------------------------------------------------------------

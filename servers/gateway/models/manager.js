@@ -82,6 +82,7 @@ import { validateLaunch } from "./launch.js";
 import { doorBaseUrl, gatewayPort } from "./door.js";
 import { getOwnTailnetIp } from "../../shared/tailnet-ip.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
+import { isExternalEngine } from "../../shared/provider-engine.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -252,6 +253,26 @@ export class ProviderIdConflictError extends Error {
     super(`A provider with id "${modelId}" already exists and was not registered by this native runtime for this model — refusing to overwrite it.`);
     this.name = "ProviderIdConflictError";
     this.code = "PROVIDER_ID_CONFLICT";
+    this.modelId = modelId;
+  }
+}
+
+/** Thrown by `registerModel` when a provider row already exists at the
+ * target id and is marked as an externally managed engine (spec
+ * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.1:
+ * `gpu_policy.engine.managed === "external"`). Crow never starts, stops or
+ * converts one of these, so this must be caught immediately after the
+ * existing row is resolved — BEFORE allocatePortFn, the conversions
+ * snapshot, the registry entry or saveState run — so a rejected call never
+ * leaks a port reservation, registry entry or conversion snapshot.
+ * upsertProvider's own assertExternalEngineWrite would eventually refuse
+ * the same row with the same "EXTERNAL_ENGINE_CONFLICT" code, but only
+ * AFTER those side effects already happened. */
+export class ExternalEngineConflictError extends Error {
+  constructor(modelId) {
+    super(`A provider with id "${modelId}" is an external engine (gpu_policy.engine.managed = "external") — Crow cannot register a bundle or native runtime over it.`);
+    this.name = "ExternalEngineConflictError";
+    this.code = "EXTERNAL_ENGINE_CONFLICT";
     this.modelId = modelId;
   }
 }
@@ -1549,15 +1570,25 @@ export function pickChatMutexGroup(existingRows) {
  * could already occupy that id by coincidence — an unrelated row that this
  * call must never clobber. BEFORE anything else (before even allocating a
  * port, so a rejected call never leaks a reservation), any existing row at
- * this id is checked: it's "ours" (a prior registration of this exact
- * catalog model by this runtime — ownership must survive a
- * register→unregister→re-register cycle on the same instance) if its
- * `gpu_policy.runtime === "native"` AND its own `models[]` array already
- * carries an entry for this catalog model's id; it's a convertible BUNDLE
- * row if it carries a `bundle_id`; anything else (a foreign provider, or a
- * native-tagged row for a different model) throws `ProviderIdConflictError`
- * with the existing row completely untouched.
+ * this id is checked: if it's marked as an external engine
+ * (`gpu_policy.engine.managed === "external"`, spec §2.1) this throws
+ * `ExternalEngineConflictError` immediately — a contradictory replicated
+ * row (marker + bundle_id, or marker + a native runtime whose models[]
+ * matches) must never be allowed to slip past this guard and reach
+ * allocatePortFn/the conversions snapshot/the registry entry/saveState,
+ * even though upsertProvider's own assertExternalEngineWrite would
+ * eventually refuse it too — that check runs too late to prevent the leak.
+ * Otherwise it's "ours" (a prior registration of this exact catalog model
+ * by this runtime — ownership must survive a register→unregister→re-register
+ * cycle on the same instance) if its `gpu_policy.runtime === "native"` AND
+ * its own `models[]` array already carries an entry for this catalog
+ * model's id; it's a convertible BUNDLE row if it carries a `bundle_id`;
+ * anything else (a foreign provider, or a native-tagged row for a
+ * different model) throws `ProviderIdConflictError` with the existing row
+ * completely untouched.
  *
+ * @throws {ExternalEngineConflictError} if a provider already exists at
+ *   this id and is marked as an external engine.
  * @throws {ProviderIdConflictError} if a provider already exists at this id
  *   and isn't a prior registration of this same model by this runtime, or
  *   a convertible bundle row.
@@ -1603,6 +1634,7 @@ export async function registerModel({
   // leaves no reservation behind to clean up).
   const existingRows = await listProvidersAllFn(db);
   const existingRow = existingRows.find((r) => r.id === providerId) || null;
+  if (existingRow && isExternalEngine(existingRow)) throw new ExternalEngineConflictError(providerId);
   let converted = false;
   if (existingRow) {
     const isOurs = existingRow.gpuPolicy?.runtime === NATIVE_RUNTIME

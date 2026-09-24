@@ -254,6 +254,13 @@ function parseIncomingPolicy(raw) {
 
 const nullish = (v) => (v === undefined ? null : v);
 
+/** Is the incoming raw gpu_policy exactly what is stored (byte-equal, or canonically equal once parsed)? */
+function samePolicyValue(incomingRaw, storedRaw) {
+  if (incomingRaw == null || storedRaw == null) return false;
+  if (String(incomingRaw) === String(storedRaw)) return true;
+  try { return canonicalJsonEqual(JSON.parse(incomingRaw), JSON.parse(storedRaw)); } catch { return false; }
+}
+
 /**
  * External-engine write rules (spec 2026-09-23 §2.2, TRANSITION-ONLY after
  * review round 1). Replication writes rows directly — never through here — so
@@ -264,13 +271,6 @@ const nullish = (v) => (v === undefined ? null : v);
  * of them is judged, on the EFFECTIVE row: the upsert SQL COALESCEs a null
  * gpu_policy into the stored one, while bundle_id is always overwritten.
  */
-/** Is the incoming raw gpu_policy exactly what is stored (byte-equal, or canonically equal once parsed)? */
-function samePolicyValue(incomingRaw, storedRaw) {
-  if (incomingRaw == null || storedRaw == null) return false;
-  if (String(incomingRaw) === String(storedRaw)) return true;
-  try { return canonicalJsonEqual(JSON.parse(incomingRaw), JSON.parse(storedRaw)); } catch { return false; }
-}
-
 function assertExternalEngineWrite({ incomingBundleId, incomingPolicyRaw, storedRow }) {
   let { policy: incoming, malformed } = parseIncomingPolicy(incomingPolicyRaw);
   if (malformed) {
