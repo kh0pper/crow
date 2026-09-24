@@ -2,56 +2,55 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A gateway started with `CROW_DISABLE_MODEL_ORCHESTRATION=1` never starts, stops or evicts a model. Every start path refuses, the read-only monitors keep running, and the Models panel says why. Raven's Crow instance needs this before it installs.
+**Goal:** A gateway started with `CROW_DISABLE_MODEL_ORCHESTRATION=1` never starts, stops or evicts a model or a model container. Every path refuses, whether it is orchestrator acquire, residency, idle-revert, warm, or model-bundle install/start/stop (local or peer-forwarded). The read-only monitors keep running, and the Models panel says why. Raven's Crow instance needs this before it installs.
 
 **Architecture:**
-- A pure env reader and a typed error live in a new `servers/shared/model-orchestration.js`.
-- `servers/gateway/gpu-orchestrator.js` checks the switch at each start chokepoint:
-  - `maybeAcquireLocalProvider` returns `null`;
-  - `acquireProvider` throws;
-  - `ensureResident` returns `false`;
-  - `retryDeferredResidents` returns `[]`;
-  - `checkIdleRevert` returns;
-  - the boot residency body is extracted into an exported `bootResidency()` that skips the ensure loop and the idle-revert timer.
-- The Models route returns 409 `MODEL_ORCHESTRATION_DISABLED`, and the panel's runtime strip shows a notice.
+- A new pure module, `servers/shared/model-orchestration.js`, holds the env reader, the typed error and a model-bundle manifest predicate.
+- `servers/gateway/gpu-orchestrator.js` checks the switch at every entry point AND at the lowest-level start/stop primitives.
+- `servers/gateway/routes/bundles.js` gains one exported guard, `bundleOrchestrationRefusal(bundleId)`, called from `validateInstall` and from `dispatchBundleAction`'s local path.
+- The Models route returns 409 `MODEL_ORCHESTRATION_DISABLED`; the panel shows a notice and translated error text.
 
-**Tech Stack:** Node 24 ESM, Express routes, the `node:test` runner (via `npm test -- tests/<file>.test.js` only; never raw `node --test`).
+**Tech Stack:** Node 24 ESM, Express, the `node:test` runner via `npm test -- tests/<file>.test.js [more files…]`. Never use raw `node --test`: it writes to the live DB.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`. Read it in full; D2 and D4 were corrected after plan review round 1.
 
 ## Global Constraints
 
-- **Env name:** exactly `CROW_DISABLE_MODEL_ORCHESTRATION`. It is on only for `"1"` or `"true"` (case-insensitive, after trim). Every other value, including unset, means orchestration is ON, which is unchanged behaviour.
-- **Read on every call,** never cached at import, so tests can toggle `process.env`.
-- **Error:** class `OrchestrationDisabledError` with `code = "model_orchestration_disabled"`, `http = 409` and `provider` set to the provider name or `null`.
-- **Route error code:** `MODEL_ORCHESTRATION_DISABLED` (HTTP 409).
+- **Env name:** exactly `CROW_DISABLE_MODEL_ORCHESTRATION`. It is on only for `"1"` or `"true"` (case-insensitive, after trim). Every other value, including unset and `"0"`, means orchestration is ON, which is unchanged behaviour.
+- **Read on every call,** never cached at import.
+- **Error:** class `OrchestrationDisabledError` with `code = "model_orchestration_disabled"`, `http = 409` and `provider` set to the provider name or `null`. Its message contains the literal `CROW_DISABLE_MODEL_ORCHESTRATION`.
+- **Route and bundle error code:** `MODEL_ORCHESTRATION_DISABLED` (HTTP 409).
+- **Model-bundle predicate:** `manifest.inference === true` OR a truthy `manifest.requires.gpu` OR `manifest.providers` is a non-empty array.
 - **Boot log line, verbatim:** `[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted`
-- **Read-only monitors stay armed** under the switch: `startResidencyMonitor()`, `startExternalEngineMonitor()`, and `initNativeModels()` (downloads-only reconcile).
-- **i18n:** every new key has both `en` and `es` (the global parity gate).
-- **Tests** stub every notice sender that writes a DB row, the way the reservation tests do.
-- **Commits:** `git add <new file>` for new files, then `git commit <paths> -m ...`. Never commit without a path.
+- **Read-only monitors stay armed** under the switch: `startResidencyMonitor()`, `startExternalEngineMonitor()`, `initNativeModels()`.
+- **i18n:** every new key has `en` and `es` (gate: `tests/i18n-global-parity.test.js`).
+- **Bundles:** any change under `bundles/<id>/` bumps that bundle's `manifest.json` `version` (CLAUDE.md rule).
+- **Commits:** `git add <new files>`, then `git commit <paths> -m ...`. Never commit without a path.
+- **Test hygiene:** tests restore `process.env.CROW_DISABLE_MODEL_ORCHESTRATION` in `finally`/`afterEach`, and they stub the reservation notice sender (it writes DB rows).
 
 ## Review Focus
 
-1. **The switch set to `"0"`, `"false"`, `""`, `" 1 "` or `"TRUE"`.** Only `" 1 "` (after trim) and `"TRUE"` enable it. `"0"` must NOT disable orchestration, because an operator writing `=0` expects "not disabled". Pinned in Task 1's truth-table test.
-2. **An already-running local model.** Under the switch, `maybeAcquireLocalProvider` returns `null`, never `true`. The caller dials base_url, which still works, and the router is unaffected. Pinned in Task 2: `probeReadyFn` must not even be called.
-3. **The idle-revert path when an operator flips the env on a host with mutex groups.** The timer is never armed, and `checkIdleRevert` returns before probing if it is ever called. Pinned in Task 2 through `bootResidency`'s `armTimer` seam.
-4. **Starting from the Models panel under the switch.** The user sees 409 `MODEL_ORCHESTRATION_DISABLED` with a message naming the env var, not `NOT_NATIVE`. Pinned in Task 3.
-5. **The switch off, on the same fixtures.** Orchestration proceeds exactly as today, which proves the gate is the switch and not the fixture. Pinned in Tasks 2 and 3.
+1. **The env set to `"0"`, `""`, `" 1 "` or `"TRUE"`.** Only trimmed `1`/`true` (any case) disable orchestration. Pinned in Task 1.
+2. **A peer forwards a bundle start of a model bundle to raven.** It lands on raven's local `dispatchBundleAction` path and must return 409. Pinned in Task 3: the guard is tested on real repo manifests, and a source-scan test proves the local path calls it.
+3. **An already-running local model.** `maybeAcquireLocalProvider` returns `null` without even probing, and callers dial base_url. Pinned in Task 2.
+4. **Idle-revert on a host with mutex groups.** `startIdleRevertTimer` never arms under the switch, and `checkIdleRevert` returns first. Pinned in Task 2.
+5. **Spanish UI, Start pressed.** The client maps `MODEL_ORCHESTRATION_DISABLED` to translated copy, not the server's English. Pinned in Task 4.
+6. **The switch off.** The same fixtures orchestrate exactly as today. Pinned in Tasks 2 and 3.
 
 ---
 
-### Task 1: The switch reader and its error
+### Task 1: Switch reader, error, model-bundle predicate, suite env hygiene
 
 **Files:**
 - Create: `servers/shared/model-orchestration.js`
+- Modify: `scripts/run-suite.mjs` (the forced-env block, ~lines 88-117)
 - Test: `tests/model-orchestration-switch.test.js`
 
-**Interfaces:**
-- Produces:
-  - `isModelOrchestrationDisabled(env = process.env): boolean`
-  - `class OrchestrationDisabledError extends Error`, constructed as `(providerName?: string)`, with fields `name`, `code`, `http` and `provider`
-  - `ORCHESTRATION_DISABLED_ENV = "CROW_DISABLE_MODEL_ORCHESTRATION"`
+**Interfaces (produces):**
+- `ORCHESTRATION_DISABLED_ENV = "CROW_DISABLE_MODEL_ORCHESTRATION"`
+- `isModelOrchestrationDisabled(env = process.env): boolean`
+- `class OrchestrationDisabledError extends Error`, constructed as `(providerName?)`
+- `isModelBundleManifest(manifest): boolean`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -60,7 +59,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  isModelOrchestrationDisabled, OrchestrationDisabledError, ORCHESTRATION_DISABLED_ENV,
+  isModelOrchestrationDisabled, OrchestrationDisabledError, ORCHESTRATION_DISABLED_ENV, isModelBundleManifest,
 } from "../servers/shared/model-orchestration.js";
 
 test("env name is CROW_DISABLE_MODEL_ORCHESTRATION", () => {
@@ -100,12 +99,24 @@ test("OrchestrationDisabledError carries code/http/provider and names the env va
   assert.match(e.message, /CROW_DISABLE_MODEL_ORCHESTRATION/);
   assert.equal(new OrchestrationDisabledError().provider, null);
 });
+
+test("isModelBundleManifest: inference, requires.gpu, or non-empty providers", () => {
+  assert.equal(isModelBundleManifest({ inference: true }), true);
+  assert.equal(isModelBundleManifest({ requires: { gpu: true } }), true);
+  assert.equal(isModelBundleManifest({ requires: { gpu: "amd" } }), true);
+  assert.equal(isModelBundleManifest({ providers: [{ id: "x" }] }), true);
+  assert.equal(isModelBundleManifest({ providers: [] }), false);
+  assert.equal(isModelBundleManifest({ inference: false, requires: { gpu: false } }), false);
+  assert.equal(isModelBundleManifest({}), false);
+  assert.equal(isModelBundleManifest(null), false);
+  assert.equal(isModelBundleManifest(undefined), false);
+});
 ```
 
 - [ ] **Step 2: Run it and confirm it fails**
 
 Run: `export PATH=/home/kh0pp/.nvm/versions/node/v24.21.0/bin:$PATH && npm test -- tests/model-orchestration-switch.test.js`
-Expected: FAIL (cannot find module `servers/shared/model-orchestration.js`).
+Expected: FAIL, module not found.
 
 - [ ] **Step 3: Implement**
 
@@ -117,8 +128,8 @@ Expected: FAIL (cannot find module `servers/shared/model-orchestration.js`).
  *
  * A host whose models are owned by something else (raven: halogen under
  * systemd and pi-lab's windows) sets CROW_DISABLE_MODEL_ORCHESTRATION=1, and
- * its gateway never starts, stops or evicts a model. Read on every call so
- * tests can toggle it. Pure, no I/O.
+ * its gateway never starts, stops or evicts a model or a model bundle. Read
+ * on every call so tests can toggle it. Pure, no I/O.
  */
 
 export const ORCHESTRATION_DISABLED_ENV = "CROW_DISABLE_MODEL_ORCHESTRATION";
@@ -137,41 +148,52 @@ export class OrchestrationDisabledError extends Error {
     this.provider = providerName || null;
   }
 }
+
+/** A bundle whose containers serve a model: declared inference, a GPU
+ *  requirement, or provider rows it registers. */
+export function isModelBundleManifest(manifest) {
+  if (!manifest || typeof manifest !== "object") return false;
+  if (manifest.inference === true) return true;
+  if (manifest.requires && manifest.requires.gpu) return true;
+  return Array.isArray(manifest.providers) && manifest.providers.length > 0;
+}
+```
+
+In `scripts/run-suite.mjs`, directly after `delete env.CROW_SUPERVISED;`, add:
+
+```js
+// Host-level model-orchestration switch (spec 2026-09-24): a shell that
+// exports it must not flip every orchestrator suite; tests set it per-case.
+delete env.CROW_DISABLE_MODEL_ORCHESTRATION;
 ```
 
 - [ ] **Step 4: Run it and confirm it passes**
 
 Run: `npm test -- tests/model-orchestration-switch.test.js`
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add servers/shared/model-orchestration.js tests/model-orchestration-switch.test.js
-git commit servers/shared/model-orchestration.js tests/model-orchestration-switch.test.js -m "feat(models): CROW_DISABLE_MODEL_ORCHESTRATION reader + OrchestrationDisabledError"
+git commit servers/shared/model-orchestration.js tests/model-orchestration-switch.test.js scripts/run-suite.mjs -m "feat(models): CROW_DISABLE_MODEL_ORCHESTRATION reader, error, model-bundle predicate"
 ```
 
 ---
 
-### Task 2: Gate every start path in the orchestrator
+### Task 2: Gate every orchestrator path (entry points + lowest-level primitives)
 
 **Files:**
-- Modify: `servers/gateway/gpu-orchestrator.js`:
-  - imports (near line 82);
-  - `maybeAcquireLocalProvider` (~587);
-  - `acquireProvider` (~1244);
-  - `checkIdleRevert` (~1361);
-  - `ensureResident` (~1486);
-  - `retryDeferredResidents` (~1522);
-  - `initOrchestrator` (~1807): extract the body into `bootResidency`.
+- Modify: `servers/gateway/gpu-orchestrator.js`
+- Modify: `bundles/meta-glasses/panel/routes.js` (~line 279) and `bundles/meta-glasses/manifest.json` (version `0.1.0` → `0.1.1`)
 - Test: `tests/gpu-orchestrator-orchestration-switch.test.js`
 
 **Interfaces:**
-- Consumes: `isModelOrchestrationDisabled`, `OrchestrationDisabledError` (Task 1).
+- Consumes (Task 1): `isModelOrchestrationDisabled`, `OrchestrationDisabledError`.
 - Produces:
-  - `export async function bootResidency({ cfg = loadProviders(), ownAddrs = getOwnAddresses(), ensure = ensureResident, armTimer = startIdleRevertTimer } = {}): Promise<{ disabled: boolean, ensured: string[] }>`
-  - `initOrchestrator` calls `await bootResidency()` in place of its former post-reconcile body.
-  - A re-export for route callers: `export { OrchestrationDisabledError } from "../shared/model-orchestration.js";`
+  - `export async function bootResidency({ cfg, ownAddrs, ensure = ensureResident, armTimer = startIdleRevertTimer } = {}): Promise<{ disabled: boolean, ensured: string[] }>`
+  - `export function _resetOrchestrationDisabledNoticeForTest()`
+  - a re-export: `export { OrchestrationDisabledError } from "../shared/model-orchestration.js";`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -184,6 +206,7 @@ git commit servers/shared/model-orchestration.js tests/model-orchestration-switc
 // switch off — the "switch off" tests prove the gate is the switch.
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import * as orch from "../servers/gateway/gpu-orchestrator.js";
 import { OrchestrationDisabledError } from "../servers/shared/model-orchestration.js";
 
@@ -194,12 +217,14 @@ const cfg = {
   },
 };
 const mustNot = (what) => async () => { throw new Error(`must not ${what}`); };
+const DISABLED_LINE = "[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted";
 
 let prevEnv, logs, origLog;
 beforeEach(() => {
   prevEnv = process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
   orch._setReservationReaderForTest(() => null);
   orch._setReservationNoticeSenderForTest(async () => {}); // never write notification rows
+  orch._resetOrchestrationDisabledNoticeForTest();
   logs = []; origLog = console.log; console.log = (m) => logs.push(String(m));
 });
 afterEach(() => {
@@ -229,9 +254,12 @@ test("switch on: maybeAcquireLocalProvider returns null without probing or start
   assert.equal(r, null);
 });
 
-test("switch on: warmProviderByName is a no-op (null)", async () => {
+test("switch on: resolveWarmableProviderName -> null; switch off -> the bundle row (proves the gate)", () => {
+  const own = new Set(["127.0.0.1"]);
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
-  assert.equal(await orch.warmProviderByName("crow-chat", { cfg, probeReadyFn: mustNot("probe"), bundleUpFn: mustNot("start") }), null);
+  assert.equal(orch.resolveWarmableProviderName(cfg, "crow-embed", own), null);
+  delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+  assert.equal(orch.resolveWarmableProviderName(cfg, "crow-embed", own), "crow-embed");
 });
 
 test("switch on: ensureResident returns false and never starts", async () => {
@@ -249,13 +277,33 @@ test("switch on: retryDeferredResidents returns [] and never ensures", async () 
   } finally { orch._setDeferredResidentsForTest([]); }
 });
 
-test("switch on: bootResidency ensures nothing, arms no timer, logs the DISABLED line once", async () => {
+test("switch on: bootResidency ensures nothing, arms no timer, logs the DISABLED line exactly once", async () => {
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
   let armed = 0;
   const r = await orch.bootResidency({ cfg, ownAddrs: new Set(["127.0.0.1"]), ensure: mustNot("ensure"), armTimer: () => { armed++; } });
   assert.deepEqual(r, { disabled: true, ensured: [] });
   assert.equal(armed, 0);
-  assert.equal(logs.filter((l) => l === "[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted").length, 1, logs.join("\n"));
+  await orch.ensureResident("crow-chat", cfg, { bundleUpFn: mustNot("start") }); // second note must not re-log
+  assert.equal(logs.filter((l) => l === DISABLED_LINE).length, 1, logs.join("\n"));
+});
+
+test("switch on: startIdleRevertTimer does not arm (returns without scheduling)", () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  const origSetInterval = globalThis.setInterval;
+  let scheduled = 0;
+  globalThis.setInterval = (...a) => { scheduled++; const h = origSetInterval(...a); clearInterval(h); return h; };
+  try { orch.startIdleRevertTimer(); } finally { globalThis.setInterval = origSetInterval; }
+  assert.equal(scheduled, 0);
+});
+
+test("lowest-level primitives are gated in source (defence in depth)", () => {
+  const src = readFileSync(new URL("../servers/gateway/gpu-orchestrator.js", import.meta.url), "utf8");
+  for (const fn of ["async function bundleUp(", "async function bundleStop(", "async function startNativeAndAwaitReady(", "async function checkIdleRevert(", "export function startIdleRevertTimer("]) {
+    const at = src.indexOf(fn);
+    assert.ok(at >= 0, `${fn} not found`);
+    const body = src.slice(at, at + 400);
+    assert.match(body, /isModelOrchestrationDisabled\(\)/, `${fn} must check the switch first`);
+  }
 });
 
 test("switch off: the same fixtures orchestrate (acquire starts; bootResidency ensures + arms)", async () => {
@@ -277,25 +325,30 @@ test("switch set to \"0\" does NOT disable orchestration", async () => {
   await orch.acquireProvider("crow-embed", { cfg, probeReadyFn: async () => false, bundleUpFn: async () => { started++; }, waitForReadyFn: async () => true, bundleStopFn: async () => {} });
   assert.equal(started, 1);
 });
+
+test("meta-glasses: an OrchestrationDisabledError is skipped quietly (no warn)", () => {
+  const src = readFileSync(new URL("../bundles/meta-glasses/panel/routes.js", import.meta.url), "utf8");
+  assert.match(src, /model_orchestration_disabled/);
+});
 ```
 
-(`isAlwaysResident` reads `v.gpuPolicy.alwaysResident` or `v.alwaysResident`, at gpu-orchestrator.js ~427. The fixture uses the first.)
+`isAlwaysResident` (gpu-orchestrator.js ~427) reads `v.gpuPolicy.alwaysResident` or `v.alwaysResident`; the fixture uses the first. `resolveWarmableProviderName(cfg, name, ownAddrs)` is exported (~634).
 
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `npm test -- tests/gpu-orchestrator-orchestration-switch.test.js`
-Expected: FAIL. `bootResidency` is not exported, and the switch-on tests fail because the orchestrator ignores the env.
+Expected: FAIL (`bootResidency` / `_resetOrchestrationDisabledNoticeForTest` not exported; the switch is ignored).
 
-- [ ] **Step 3: Implement the gates**
+- [ ] **Step 3: Implement** in `servers/gateway/gpu-orchestrator.js`
 
-1. **Imports** (next to the other `../shared/` imports):
+1. **Imports** (next to the other `../shared/` imports near line 82-92):
 
 ```js
 import { isModelOrchestrationDisabled, OrchestrationDisabledError } from "../shared/model-orchestration.js";
 export { OrchestrationDisabledError } from "../shared/model-orchestration.js";
 ```
 
-2. **One-shot log helper** (module scope, near `noteServingRefused`):
+2. **Once-per-process note** (module scope, just above `noteServingRefused`):
 
 ```js
 const DISABLED_LINE = "[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted";
@@ -306,11 +359,24 @@ function noteOrchestrationDisabled() {
   _disabledNoticed = true;
   console.log(DISABLED_LINE);
 }
+/** Test seam: re-arm the once-per-process DISABLED log line. */
+export function _resetOrchestrationDisabledNoticeForTest() { _disabledNoticed = false; }
 ```
 
-The bootResidency test asserts exactly one DISABLED line in `logs`, while earlier tests in the same file may already have tripped the once-flag. So export a reset seam, `export function _resetOrchestrationDisabledNoticeForTest() { _disabledNoticed = false; }`, and call it in the test file's `beforeEach` (add `orch._resetOrchestrationDisabledNoticeForTest();` there).
+3. **Lowest-level primitives.** The FIRST statement of each of `bundleUp(bundleId)` (~279), `bundleStop(bundleId)` (~283) and `startNativeAndAwaitReady(providerName, p, opts)` (~885):
 
-3. **`maybeAcquireLocalProvider`:** first statement after `if (!providerName) return null;`:
+```js
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);      // bundleUp / bundleStop
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(providerName);  // startNativeAndAwaitReady
+```
+
+   The FIRST statement of `checkIdleRevert()` and of `startIdleRevertTimer()`:
+
+```js
+  if (isModelOrchestrationDisabled()) return;
+```
+
+4. **`maybeAcquireLocalProvider`:** after `if (!providerName) return null;`:
 
 ```js
   // Host-level switch (spec 2026-09-24 D2): "not mine to manage", the same
@@ -318,25 +384,20 @@ The bootResidency test asserts exactly one DISABLED line in `logs`, while earlie
   if (isModelOrchestrationDisabled()) return null;
 ```
 
-4. **`acquireProvider`:** directly after the `if (!p) throw …unknown provider…` line:
+5. **`resolveWarmableProviderName`:** first statement: `if (isModelOrchestrationDisabled()) return null; // spec 2026-09-24: nothing is warmable here`
+
+6. **`acquireProvider`:** directly after the `if (!p) throw …unknown provider…` line:
 
 ```js
-  // Host-level switch (spec 2026-09-24 D2) — defence in depth: before any
-  // probe, lock, sibling stop or start.
+  // Host-level switch (spec 2026-09-24 D2) — before any probe, lock, sibling stop or start.
   if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(providerName);
 ```
 
-5. **`checkIdleRevert`:** first statement: `if (isModelOrchestrationDisabled()) return;`
+7. **`ensureResident`:** first statement inside its `try`: `if (isModelOrchestrationDisabled()) { noteOrchestrationDisabled(); return false; }`
 
-6. **`ensureResident`:** first statement inside the `try`:
+8. **`retryDeferredResidents`:** first statement: `if (isModelOrchestrationDisabled()) return [];`
 
-```js
-    if (isModelOrchestrationDisabled()) { noteOrchestrationDisabled(); return false; }
-```
-
-7. **`retryDeferredResidents`:** first statement: `if (isModelOrchestrationDisabled()) return [];`
-
-8. **Extract `bootResidency` from `initOrchestrator`.** Replace the final `try { const cfg = loadProviders(); … } catch (err) { console.warn(... initOrchestrator body failed ...) }` block of `initOrchestrator` with `await bootResidency();`, and add:
+9. **Extract `bootResidency`.** In `initOrchestrator`, replace the final `try { const cfg = loadProviders(); … } catch (err) { console.warn(`[gpu-orchestrator] initOrchestrator body failed: ${err.message}`); }` block with `await bootResidency();`. Add this function directly above `initOrchestrator`:
 
 ```js
 /**
@@ -346,18 +407,15 @@ The bootResidency test asserts exactly one DISABLED line in `logs`, while earlie
  * none of that runs — the read-only monitors initOrchestrator armed first
  * stay armed. Never throws.
  */
-export async function bootResidency({
-  cfg = loadProviders(),
-  ownAddrs = getOwnAddresses(),
-  ensure = ensureResident,
-  armTimer = startIdleRevertTimer,
-} = {}) {
+export async function bootResidency({ cfg, ownAddrs, ensure = ensureResident, armTimer = startIdleRevertTimer } = {}) {
   if (isModelOrchestrationDisabled()) {
     noteOrchestrationDisabled();
     return { disabled: true, ensured: [] };
   }
   const ensured = [];
   try {
+    cfg = cfg ?? loadProviders();
+    ownAddrs = ownAddrs ?? getOwnAddresses();
     const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
     _deferredResidents = new Set(
       Object.entries(cfg.providers || {})
@@ -388,39 +446,182 @@ export async function bootResidency({
 }
 ```
 
-In the `cfg` / `ownAddrs` defaults above, `loadProviders()` and `getOwnAddresses()` throwing would escape `bootResidency` before the `try`. `loadProviders` already catches internally (read it to confirm). If `getOwnAddresses` can throw, move both calls inside the `try` using `cfg ??= loadProviders()` and destructure without defaults.
+Keep `initOrchestrator`'s earlier statements (monitors, `initNativeModels` reconcile) exactly as they are. `tests/external-engine-poll.test.js` scans that ordering.
 
-- [ ] **Step 4: Run and confirm it passes, plus the neighbouring orchestrator suites**
+10. **meta-glasses** (`bundles/meta-glasses/panel/routes.js` ~279-282). Replace the catch body:
 
-Run: `npm test -- tests/gpu-orchestrator-orchestration-switch.test.js tests/gpu-orchestrator-reservation.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js tests/lifecycle-external-engine.test.js`
+```js
+      } catch (err) {
+        // Host switch (CROW_DISABLE_MODEL_ORCHESTRATION): the provider is not
+        // ours to start — dial it as-is, quietly.
+        if (err?.code !== "model_orchestration_disabled") {
+          console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
+        }
+      }
+```
+
+    Then bump `bundles/meta-glasses/manifest.json` `"version"` from `"0.1.0"` to `"0.1.1"`.
+
+- [ ] **Step 4: Run it and confirm it passes, with the neighbouring suites**
+
+Run: `npm test -- tests/gpu-orchestrator-orchestration-switch.test.js tests/gpu-orchestrator-reservation.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js tests/lifecycle-external-engine.test.js tests/external-engine-poll.test.js tests/bundle-server-deps.test.js`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add tests/gpu-orchestrator-orchestration-switch.test.js
-git commit servers/gateway/gpu-orchestrator.js tests/gpu-orchestrator-orchestration-switch.test.js -m "feat(models): gate every orchestrator start path on CROW_DISABLE_MODEL_ORCHESTRATION; extract bootResidency"
+git commit servers/gateway/gpu-orchestrator.js bundles/meta-glasses/panel/routes.js bundles/meta-glasses/manifest.json tests/gpu-orchestrator-orchestration-switch.test.js -m "feat(models): gate every orchestrator path on CROW_DISABLE_MODEL_ORCHESTRATION; extract bootResidency"
 ```
 
 ---
 
-### Task 3: Models route and panel say why
+### Task 3: Gate model-bundle install/start/stop
 
 **Files:**
-- Modify: `servers/gateway/routes/models.js`: the `POST /api/models/:id/start` handler (~578) and `GET /api/models/runtime` (~660).
-- Modify: `servers/gateway/dashboard/panels/model-catalog.js`: `loadPanelData` return (~260) and `renderRuntimeStrip` notices (~457-471).
-- Modify: `servers/gateway/dashboard/shared/i18n.js`: add `models.runtimeOrchestrationDisabled` next to `models.runtimeNoBinary` (~685).
+- Modify: `servers/gateway/routes/bundles.js`: `validateInstall` (~1167), `dispatchBundleAction` local path (~2438-2496), and imports.
+- Test: `tests/bundles-orchestration-switch.test.js`
+
+**Interfaces:**
+- Consumes (Task 1): `isModelOrchestrationDisabled`, `isModelBundleManifest`. From `servers/gateway/bundles-config.js`: `getInstalledFirstManifest(bundleId)` (installed copy first, then repo).
+- Produces: `export function bundleOrchestrationRefusal(bundleId): null | { status: 409, code: "MODEL_ORCHESTRATION_DISABLED", error: string }`
+
+- [ ] **Step 1: Write the failing test**
+
+```js
+// tests/bundles-orchestration-switch.test.js
+//
+// Spec 2026-09-24 D4 (corrected): under CROW_DISABLE_MODEL_ORCHESTRATION a
+// model bundle can be neither installed nor started/stopped — locally or via
+// a peer-forwarded /bundles/api/start. Uses real repo manifests:
+// llamacpp-vulkan-qwen36-35b-a3b (inference + gpu), caddy (not a model bundle).
+import { test, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { bundleOrchestrationRefusal, validateInstall } from "../servers/gateway/routes/bundles.js";
+import { _setDockerProbeForTest } from "../servers/gateway/dashboard/panels/extensions/data-queries.js";
+
+_setDockerProbeForTest(true); // same pin as bundles-validate-install.test.js
+
+const prev = process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+afterEach(() => {
+  if (prev === undefined) delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+  else process.env.CROW_DISABLE_MODEL_ORCHESTRATION = prev;
+});
+
+test("switch on: a model bundle is refused with 409 MODEL_ORCHESTRATION_DISABLED", () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  const r = bundleOrchestrationRefusal("llamacpp-vulkan-qwen36-35b-a3b");
+  assert.equal(r?.status, 409);
+  assert.equal(r?.code, "MODEL_ORCHESTRATION_DISABLED");
+  assert.match(r.error, /CROW_DISABLE_MODEL_ORCHESTRATION/);
+});
+
+test("switch on: a non-model bundle passes; switch off: a model bundle passes", () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  assert.equal(bundleOrchestrationRefusal("caddy"), null);
+  delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+  assert.equal(bundleOrchestrationRefusal("llamacpp-vulkan-qwen36-35b-a3b"), null);
+});
+
+test("switch on: unknown bundle id -> null (other gates own not-found)", () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  assert.equal(bundleOrchestrationRefusal("definitely-not-a-real-bundle"), null);
+});
+
+test("switch on: validateInstall refuses a model bundle before any other gate", async () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  const r = await validateInstall("llamacpp-vulkan-qwen36-35b-a3b", { forceInstall: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 409);
+  assert.equal(r.code, "MODEL_ORCHESTRATION_DISABLED");
+});
+
+test("dispatchBundleAction's LOCAL path calls the guard before runCompose (peer-forwarded starts land here)", () => {
+  const src = readFileSync(new URL("../servers/gateway/routes/bundles.js", import.meta.url), "utf8");
+  const at = src.indexOf("// Local path");
+  assert.ok(at > 0, "local-path marker not found");
+  const local = src.slice(at, src.indexOf("runCompose(", at));
+  assert.match(local, /bundleOrchestrationRefusal\(bundleId\)/);
+});
+```
+
+- [ ] **Step 2: Run it and confirm it fails**
+
+Run: `npm test -- tests/bundles-orchestration-switch.test.js`
+Expected: FAIL (`bundleOrchestrationRefusal` not exported).
+
+- [ ] **Step 3: Implement** in `servers/gateway/routes/bundles.js`
+
+1. **Imports:** add `import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";`. Then check whether `getInstalledFirstManifest` is already imported from `../bundles-config.js` (grep the import block near lines 40-60); add it to that import if not.
+
+2. **The guard** (module scope, directly above `export async function validateInstall`):
+
+```js
+/**
+ * Host-level switch (spec 2026-09-24 D4): under CROW_DISABLE_MODEL_ORCHESTRATION
+ * a model bundle (inference / GPU / provider rows) is never installed, started
+ * or stopped here — including a start a peer forwards to this instance.
+ * Unknown ids return null: other gates own not-found.
+ */
+export function bundleOrchestrationRefusal(bundleId) {
+  if (!isModelOrchestrationDisabled()) return null;
+  if (!isModelBundleManifest(getInstalledFirstManifest(bundleId))) return null;
+  return {
+    status: 409,
+    code: "MODEL_ORCHESTRATION_DISABLED",
+    error: `Bundle '${bundleId}' serves a model, and model orchestration is disabled on this host (CROW_DISABLE_MODEL_ORCHESTRATION)`,
+  };
+}
+```
+
+3. **`validateInstall`:** directly after the `invalid_id` check and before the source-exists check:
+
+```js
+  const orchRefusal = bundleOrchestrationRefusal(bundleId);
+  if (orchRefusal) return { ok: false, ...orchRefusal };
+```
+
+4. **`dispatchBundleAction` local path:** directly after the `// Local path` comment, before `const bundleDir`:
+
+```js
+    const orchRefusal = bundleOrchestrationRefusal(bundleId);
+    if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+```
+
+- [ ] **Step 4: Run it and confirm it passes, with the neighbouring bundle suites**
+
+Run: `npm test -- tests/bundles-orchestration-switch.test.js tests/bundles-validate-install.test.js tests/bundles-install-job.test.js tests/bundles-install-set.test.js tests/bundles-install-env.test.js tests/bundles-webui-lifecycle.test.js`
+Expected: all PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/bundles-orchestration-switch.test.js
+git commit servers/gateway/routes/bundles.js tests/bundles-orchestration-switch.test.js -m "feat(bundles): refuse model-bundle install/start/stop under CROW_DISABLE_MODEL_ORCHESTRATION"
+```
+
+---
+
+### Task 4: Models route and panel say why (translated)
+
+**Files:**
+- Modify: `servers/gateway/routes/models.js`: the start handler (~578) and the runtime handler (~660).
+- Modify: `servers/gateway/dashboard/panels/model-catalog.js`: the `loadPanelData` return (~260), `renderRuntimeStrip` (~449), and the client `ERROR_MESSAGES` (~720).
+- Modify: `servers/gateway/dashboard/shared/i18n.js`: two keys next to `models.runtimeNoBinary` (~685).
 - Test: append to `tests/models-panel.test.js` and `tests/model-catalog-client-contract.test.js`.
 
 **Interfaces:**
-- Consumes: `isModelOrchestrationDisabled` (Task 1).
+- Consumes (Task 1): `isModelOrchestrationDisabled`.
 - Produces:
-  - route JSON `{ error, code: "MODEL_ORCHESTRATION_DISABLED" }` with status 409;
-  - runtime JSON gains `orchestrationDisabled: boolean`;
-  - panel data gains `orchestrationDisabled: boolean`;
-  - `renderRuntimeStrip` renders `t("models.runtimeOrchestrationDisabled")` as a notice when it is true.
+  - route 409 `{ error, code: "MODEL_ORCHESTRATION_DISABLED" }`;
+  - runtime JSON gains `orchestrationDisabled`;
+  - panel data gains `orchestrationDisabled`;
+  - i18n keys `models.runtimeOrchestrationDisabled` and `models.errOrchestrationDisabled`.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/models-panel.test.js`, reusing its `freshLibsql`, `seedSession`, `withServer`, `makeCatalog`, `authHeaders` and `FIXED_PROBE` helpers exactly as the serving-class tests at ~1320 do)
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/models-panel.test.js`, reusing its existing helpers `freshLibsql`, `seedSession`, `withServer`, `makeCatalog`, `authHeaders` and `FIXED_PROBE`, exactly as the serving-class tests at ~1320 do:
 
 ```js
 test("POST /api/models/:id/start under CROW_DISABLE_MODEL_ORCHESTRATION=1 -> 409 MODEL_ORCHESTRATION_DISABLED, acquire never called", async () => {
@@ -469,29 +670,31 @@ test("GET /api/models/runtime carries orchestrationDisabled (true under the swit
 });
 ```
 
-Also append to `tests/model-catalog-client-contract.test.js`. Build `data` the same way that file's existing `renderRuntimeStrip(data, "en")` call does at ~65, copying its fixture:
+Append to `tests/model-catalog-client-contract.test.js`. It uses that file's own `baseData()` (line ~44) and the already-imported `renderRuntimeStrip` and `modelCatalogClientJS`:
 
 ```js
-test("renderRuntimeStrip shows the orchestration-disabled notice only when data.orchestrationDisabled", () => {
-  const base = /* the file's existing runtime-strip data fixture */;
-  const on = renderRuntimeStrip({ ...base, orchestrationDisabled: true }, "en");
-  const off = renderRuntimeStrip({ ...base, orchestrationDisabled: false }, "en");
+test("renderRuntimeStrip shows the orchestration-disabled notice only when data.orchestrationDisabled (en + es)", () => {
+  const on = renderRuntimeStrip({ ...baseData(), orchestrationDisabled: true }, "en");
+  const off = renderRuntimeStrip({ ...baseData(), orchestrationDisabled: false }, "en");
   assert.match(on, /Model orchestration is disabled on this host/);
   assert.doesNotMatch(off, /Model orchestration is disabled on this host/);
-  assert.match(renderRuntimeStrip({ ...base, orchestrationDisabled: true }, "es"), /orquestación de modelos está desactivada/);
+  assert.match(renderRuntimeStrip({ ...baseData(), orchestrationDisabled: true }, "es"), /orquestación de modelos está desactivada/);
+});
+
+test("client ERROR_MESSAGES maps MODEL_ORCHESTRATION_DISABLED to translated copy", () => {
+  assert.match(modelCatalogClientJS("en"), /MODEL_ORCHESTRATION_DISABLED:\s*'Model orchestration is disabled on this host/);
+  assert.match(modelCatalogClientJS("es"), /MODEL_ORCHESTRATION_DISABLED:\s*'La orquestación de modelos está desactivada/);
 });
 ```
-
-Replace the `/* … */` with the actual fixture expression from that file: if it is a named const, reference it; if it is inline, lift it into a `const` both tests share. The plan does not know its exact name, so read lines 30-80 first.
 
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `npm test -- tests/models-panel.test.js tests/model-catalog-client-contract.test.js`
-Expected: the three new tests FAIL (409 missing, flag missing, notice missing).
+Expected: the 4 new tests FAIL.
 
 - [ ] **Step 3: Implement**
 
-1. **`routes/models.js`:** import `isModelOrchestrationDisabled` from `../../shared/model-orchestration.js` (check the relative depth: `routes/` sits under `servers/gateway/`, so it is `../../shared/`). In the start handler, directly after the `NOT_INSTALLED` 404 check:
+1. **`routes/models.js`:** add `import { isModelOrchestrationDisabled } from "../../shared/model-orchestration.js";`. In the start handler, directly after the `NOT_INSTALLED` 404 return:
 
 ```js
     // Host-level switch (spec 2026-09-24 D3): say why, instead of the
@@ -504,49 +707,54 @@ Expected: the three new tests FAIL (409 missing, flag missing, notice missing).
     }
 ```
 
-   In the runtime handler: `res.json({ probe: getCachedProbeFn(), models, activeDownloads, orchestrationDisabled: isModelOrchestrationDisabled() });`
+   Runtime handler: `res.json({ probe: getCachedProbeFn(), models, activeDownloads, orchestrationDisabled: isModelOrchestrationDisabled() });`
 
-2. **`model-catalog.js`:** import `isModelOrchestrationDisabled` from `../../../shared/model-orchestration.js` (the panel lives in `servers/gateway/dashboard/panels/`). Add `orchestrationDisabled: isModelOrchestrationDisabled(),` to `loadPanelData`'s return object. In `renderRuntimeStrip`, destructure `orchestrationDisabled`, and as the first notice push:
+2. **`model-catalog.js`:**
+   - add `import { isModelOrchestrationDisabled } from "../../../shared/model-orchestration.js";`;
+   - add `orchestrationDisabled: isModelOrchestrationDisabled(),` to `loadPanelData`'s return;
+   - in `renderRuntimeStrip`, add `orchestrationDisabled` to the destructure. Directly after `const notices = [];`: `if (orchestrationDisabled) notices.push(t("models.runtimeOrchestrationDisabled", lang));`
+   - in the client `ERROR_MESSAGES` object, after the `SERVING_CLASS_REFUSED` line, add:
 
 ```js
-  if (orchestrationDisabled) notices.push(t("models.runtimeOrchestrationDisabled", lang));
+          MODEL_ORCHESTRATION_DISABLED: '${tJs("models.errOrchestrationDisabled", lang)}',
 ```
 
-   It must come before the `if (!probe)` branch, so it shows even with no probe.
+   (The client JS is a template literal: no backticks inside it.)
 
 3. **`i18n.js`,** next to `models.runtimeNoBinary`:
 
 ```js
   "models.runtimeOrchestrationDisabled": { en: "Model orchestration is disabled on this host. Models here are started outside Crow.", es: "La orquestación de modelos está desactivada en este equipo. Los modelos se inician fuera de Crow." },
+  "models.errOrchestrationDisabled": { en: "Model orchestration is disabled on this host, so Crow can't start models here.", es: "La orquestación de modelos está desactivada en este equipo, así que Crow no puede iniciar modelos aquí." },
 ```
 
 - [ ] **Step 4: Run and confirm it passes**
 
-Run: `npm test -- tests/models-panel.test.js tests/model-catalog-client-contract.test.js`, then any i18n parity test: `ls tests | grep -i i18n` and run each with `npm test -- tests/<that>.test.js`.
+Run: `npm test -- tests/models-panel.test.js tests/model-catalog-client-contract.test.js tests/i18n-global-parity.test.js`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit servers/gateway/routes/models.js servers/gateway/dashboard/panels/model-catalog.js servers/gateway/dashboard/shared/i18n.js tests/models-panel.test.js tests/model-catalog-client-contract.test.js -m "feat(models): Models panel/route explain CROW_DISABLE_MODEL_ORCHESTRATION (409 + runtime notice)"
+git commit servers/gateway/routes/models.js servers/gateway/dashboard/panels/model-catalog.js servers/gateway/dashboard/shared/i18n.js tests/models-panel.test.js tests/model-catalog-client-contract.test.js -m "feat(models): Models panel/route explain CROW_DISABLE_MODEL_ORCHESTRATION (409 + translated notice)"
 ```
 
 ---
 
-### Task 4: Docs, the raven port section, full suite
+### Task 5: Docs, the raven port section, full suite
 
 **Files:**
-- Modify: `docs/developers/configuration.md`: add a row to the same table that holds `CROW_DISABLE_NOSTR` (line ~47).
-- Modify: `docs/architecture/models.md`: a new section `## Host switch: no model orchestration` placed before `## External engines`.
-- Modify: `docs/developers/port-allocation.md`: a new `## Second host: raven` section appended at the end, after `## Process for amending this file`.
+- Modify: `docs/developers/configuration.md`: a row in the table that holds `CROW_DISABLE_NOSTR` (~47).
+- Modify: `docs/architecture/models.md`: a new section before `## External engines`.
+- Modify: `docs/developers/port-allocation.md`: append a `## Second host: raven` section at the end.
 
-- [ ] **Step 1: configuration.md row**
+- [ ] **Step 1: configuration.md row** (insert right after the `CROW_DISABLE_NOSTR` row)
 
 ```markdown
-| `CROW_DISABLE_MODEL_ORCHESTRATION` | *(unset)* | `1` (or `true`) makes this gateway **never start, stop or evict a model**: on-demand acquires return "not managed here" (callers dial the provider's base_url), boot residency and idle-revert are skipped, the Models panel's Start answers 409 `MODEL_ORCHESTRATION_DISABLED`. Read-only health polls stay on. For hosts whose models are owned by something else (raven: halogen under systemd). Any other value, including `0`, leaves orchestration on. |
+| `CROW_DISABLE_MODEL_ORCHESTRATION` | *(unset)* | `1` (or `true`) makes this gateway **never start, stop or evict a model or a model bundle**: on-demand acquires return "not managed here" (callers dial the provider's base_url), boot residency, warm and idle-revert are skipped, model-bundle install/start/stop (including peer-forwarded starts) answer 409 `MODEL_ORCHESTRATION_DISABLED`, and the Models panel's Start answers the same. Read-only health polls stay on. For hosts whose models are owned by something else (raven: halogen under systemd). Any other value, including `0`, leaves orchestration on. |
 ```
 
-- [ ] **Step 2: models.md section**
+- [ ] **Step 2: models.md section** (insert directly before `## External engines`)
 
 ```markdown
 ## Host switch: no model orchestration
@@ -555,20 +763,23 @@ git commit servers/gateway/routes/models.js servers/gateway/dashboard/panels/mod
 
 Under the switch:
 
-- `maybeAcquireLocalProvider` returns `null`, the same as for a cloud row;
-- `acquireProvider` throws `OrchestrationDisabledError` (`model_orchestration_disabled`) before any probe or start;
-- `ensureResident`, `retryDeferredResidents` and `checkIdleRevert` are no-ops;
-- `bootResidency` logs one DISABLED line and arms no idle-revert timer.
+- **Entry points:**
+  - `maybeAcquireLocalProvider` and `resolveWarmableProviderName` return `null`;
+  - `acquireProvider` throws `OrchestrationDisabledError` (`model_orchestration_disabled`) before any probe or start;
+  - `ensureResident`, `retryDeferredResidents` and `checkIdleRevert` are no-ops;
+  - `bootResidency` logs one DISABLED line and arms no idle-revert timer.
+- **Lowest-level primitives** (`bundleUp`, `bundleStop`, `startNativeAndAwaitReady`) throw as well, so a future caller cannot bypass the gate.
+- **Model bundles** (`inference: true`, `requires.gpu`, or `providers[]`) cannot be installed, started or stopped through `/bundles/api/*`. This includes starts a peer forwards (`bundleOrchestrationRefusal` in `routes/bundles.js`).
 
 The residency poll and the external-engine poll still run, since both are read-only. Model downloads are not gated. Spec: `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`.
 ```
 
-- [ ] **Step 3: port-allocation.md raven section**
+- [ ] **Step 3: port-allocation.md raven section** (append at the end of the file)
 
 ```markdown
 ## Second host: raven
 
-Raven (10.0.0.126, `raven.dachshund-chromatic.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
+Raven (10.0.0.126, `raven.dachshund-chromatic.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
 
 | port | bind | what | status |
 |---|---|---|---|
@@ -580,12 +791,10 @@ Raven (10.0.0.126, `raven.dachshund-chromatic.ts.net`) is the second Strix Halo 
 | raven:9000 | 127.0.0.1 | Lemonade websocket | disabled |
 ```
 
-- [ ] **Step 4: Full verification**
-
-Run, in order:
+- [ ] **Step 4: Full verification**, in order:
 1. `node scripts/check-port-allocation.js`: expected exit 0.
-2. `npm run build-registry -- --check`, if that script exists in `package.json` (CI runs it): expected exit 0.
-3. `npm test`, the FULL suite in the scratch env: expected 0 failures. Record the pass count in the PR body.
+2. `npm run build-registry -- --check`: expected exit 0. The meta-glasses version bump may require regenerating `registry/add-ons.json`; if `--check` fails for that reason, run `npm run build-registry` and include the regenerated file in this task's commit.
+3. `npm test`, the FULL suite in the scratch env: expected 0 failures. Record the pass/fail counts for the PR body.
 
 - [ ] **Step 5: Commit**
 
@@ -593,26 +802,45 @@ Run, in order:
 git commit docs/developers/configuration.md docs/architecture/models.md docs/developers/port-allocation.md -m "docs: CROW_DISABLE_MODEL_ORCHESTRATION + raven port namespace"
 ```
 
+(Add `registry/add-ons.json` to the path list if Step 4.2 regenerated it.)
+
 ---
 
 ## Operational runbook (NOT part of the PR; the controller runs it after merge)
 
 **A. Deploy.**
 1. Confirm check-runs are green on the main sha.
-2. In a free slot in `~/CROW-SCHEDULE.md`: `git -C ~/crow pull --ff-only origin main && sudo systemctl restart crow-gateway crow-r4-gateway`.
+2. In a free `~/CROW-SCHEDULE.md` slot: `git -C ~/crow pull --ff-only origin main && sudo systemctl restart crow-gateway crow-r4-gateway`.
 3. `/health` returns 200 on :3001 and :3008.
-4. Neither log contains the DISABLED line (the env is unset there).
+4. Neither log contains the DISABLED line.
 
-**B. Raven install** (spec D5). In a registered slot outside 22:00–06:00, with MemAvailable ≥ 6 GiB checked first. Every step is idempotent.
-1. nvm and Node v24.21.0 (user-level).
-2. `git clone https://github.com/kh0pper/crow.git ~/crow`, then `cd ~/crow && CROW_DATA_DIR=$HOME/.crow/data npm run setup`.
-3. Write `~/.config/systemd/user/crow-gateway.service` with the env from spec D5, plus `Restart=always` and `MemoryMax=1G`. Then `loginctl enable-linger kh0pp` (sudo) and `systemctl --user enable --now crow-gateway`.
+**B. Raven install** (spec D5). In a registered slot outside 22:00–06:00, with MemAvailable ≥ 6 GiB checked first.
+1. nvm and Node v24.21.0 (user).
+2. `git clone https://github.com/kh0pper/crow.git ~/crow`, then `CROW_DATA_DIR=$HOME/.crow/data npm run setup`.
+3. User unit with the spec D5 env plus `CROW_DISABLE_PERCH=1`, `Restart=always` and `MemoryMax=1G`. Then `sudo loginctl enable-linger kh0pp` and `systemctl --user enable --now crow-gateway`.
 4. `sudo tailscale serve --bg --https=8444 http://127.0.0.1:3009`.
 5. **Verify:**
-   - the journal shows the DISABLED line;
-   - `https://raven…ts.net:8444/health` returns 200 from crow;
-   - `ss -ltn` shows `127.0.0.1:3009` only;
+   - the DISABLED line is in the journal;
+   - Serve `/health` returns 200 from crow;
+   - `ss -ltn` shows only `127.0.0.1:3009`;
    - halogen returns 200.
-6. Add the standing-automations row to CROW-SCHEDULE.
+6. Add the CROW-SCHEDULE standing-automations row.
 
-**C. Pairing** (spec D6). **Only after Kevin's explicit go:** identity export/import, crow's enroll window (two crow restarts), `instance-pair.js`, then verify sync both ways.
+**C. Pairing** (spec D6). **Kevin said GO on 2026-09-24:** identity export/import, crow's enroll window (two crow restarts, each registered), `instance-pair.js`, then verify sync both ways.
+
+## Review
+
+- **Round 1 (2026-09-24, staff-engineer subagent): REVISE.**
+  - **Critical, fixed:**
+    - (1) model-bundle install/start/stop through `/bundles/api/*` (incl. peer-forwarded) was ungated, and spec D4 falsely claimed model bundles were retired. Task 3 was added and D4 corrected.
+    - (2) the `warmProviderByName` test was vacuous (it ignores `opts.cfg` and reads real providers). `resolveWarmableProviderName` is now gated and tested with an injected cfg.
+  - **Suggestions adopted:**
+    - lowest-level gates (`bundleUp`/`bundleStop`/`startNativeAndAwaitReady`/`startIdleRevertTimer`);
+    - the meta-glasses quiet skip, with a version bump;
+    - `bootResidency` defaults moved inside the `try`;
+    - the reset seam in `beforeEach` code;
+    - a translated client error mapping;
+    - the named parity gate and `baseData()`;
+    - `run-suite.mjs` deletes the env;
+    - `CROW_DISABLE_PERCH=1` on raven.
+  - **Not adopted:** the chat.js `provider_warming` pre-event is cosmetic. It fires only for native rows, and raven registers none.

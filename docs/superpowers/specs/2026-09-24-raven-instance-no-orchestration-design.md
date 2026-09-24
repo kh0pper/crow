@@ -38,7 +38,9 @@ It follows the existing `CROW_DISABLE_*` family (NOSTR, INSTANCE_SYNC, BOT_RUNTI
 | `maybeAcquireLocalProvider` | Returns `null` before any lookup, like a cloud or external row: "not mine to manage". Callers already handle `null` by dialing `base_url` directly (chat, llm-router, `/llm/acquire` warm, meta-glasses), so none of them change. |
 | `acquireProvider` | **Defence in depth:** throws the typed `OrchestrationDisabledError` (`code: "model_orchestration_disabled"`) as its first statement after the unknown-provider check. That puts it before any probe, lock, sibling stop or start, so a future caller that bypasses `maybeAcquireLocalProvider` still cannot start anything. |
 | `ensureResident`, `retryDeferredResidents` | Return `false` / `[]` immediately (after one log line per process), for callers other than `initOrchestrator`. |
-| `warmProviderByName` | Covered, because it goes through `maybeAcquireLocalProvider`. |
+| `resolveWarmableProviderName` / `warmProviderByName` | `resolveWarmableProviderName` returns `null`, so `/llm/acquire` warms nothing, and model-availability no longer offers cold local rows as `on_demand` (they could never start). |
+| lowest level: `bundleUp`, `bundleStop`, `startNativeAndAwaitReady`, `startIdleRevertTimer` | The first three throw `OrchestrationDisabledError`, and `startIdleRevertTimer` returns without arming. This is defence in depth: any future caller that skips the entry points still cannot start or stop a model. |
+| meta-glasses vision resolve | It calls `acquireProvider` **directly** (`bundles/meta-glasses/panel/routes.js`), so it gets the throw. Its catch logs nothing for `model_orchestration_disabled` and dials the provider as before. The bundle manifest version is bumped. |
 | `checkIdleRevert` | Unreachable, because the timer is never armed. It also returns early under the switch (defence in depth: it stops and starts containers). |
 
 ### D3 (mine): the Models panel says why
@@ -52,7 +54,7 @@ It follows the existing `CROW_DISABLE_*` family (NOSTR, INSTANCE_SYNC, BOT_RUNTI
 ### D4 (mine): out of scope
 
 - **Model downloads** (`/api/models/download`, `hf-download`) stay allowed. They fill the disk but never start anything, and an operator may stage weights for a host-managed engine.
-- **Extension bundle installs** (`routes/bundles.js`, `docker compose up` for any bundle) are not model orchestration. Model bundles were retired to the catalog in the models arc. Not gated here.
+- ~~Extension bundle installs are not model orchestration.~~ **Corrected after plan review round 1:** model bundles were NOT retired. `registry/add-ons.json` still lists `llamacpp-vulkan-qwen36-35b-a3b` (gfx1151), `vllm-rocm-qwen35-4b`, the embed bundles and others, and `/bundles/api/install|start|stop` run `docker compose` on them. After pairing, a peer can forward a bundle start to raven. So the switch ALSO refuses (409 `MODEL_ORCHESTRATION_DISABLED`) any install, start or stop of a **model bundle**, meaning a manifest with `inference: true`, a truthy `requires.gpu`, or a non-empty `providers[]`. It uses one pure guard, `bundleOrchestrationRefusal(bundleId)` in `routes/bundles.js`, called from `validateInstall` (which covers single and collection installs) and from the local path of `dispatchBundleAction`. Non-model bundles are unaffected.
 - **Deliberately no dashboard toggle.** This is a host property set by whoever owns the box, in the unit file, not something a dashboard user flips.
 
 ### D5 (mine): the raven install is manual, not `crow-install.sh`
@@ -65,6 +67,7 @@ It follows the existing `CROW_DISABLE_*` family (NOSTR, INSTANCE_SYNC, BOT_RUNTI
    - `PORT=3009`, `CROW_GATEWAY_PORT=3009`, `CROW_GATEWAY_BIND=127.0.0.1`
    - `CROW_DISABLE_MODEL_ORCHESTRATION=1`
    - `CROW_DISABLE_BOT_RUNTIME=1`: no pi bot runtime on raven. Bots belong to crow, and they would pull models.
+   - `CROW_DISABLE_PERCH=1` (mine, from review round 1): no Perch hub or session pool on a headless peer, which keeps it inside `MemoryMax=1G`.
    - `CROW_MODELS_JSON=`: empty, so it ignores any `~/.pi/agent/models.json` a pi-lab session leaves on raven.
    - `CROW_HOME=~/.crow`, `CROW_DATA_DIR=~/.crow/data`, and an explicit `CROW_DB_PATH=~/.crow/data/crow.db` (the r4 lesson: dotenv fallbacks leak).
    - `CROW_GATEWAY_URL=https://raven.dachshund-chromatic.ts.net:8444`
