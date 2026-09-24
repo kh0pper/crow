@@ -13,18 +13,19 @@ test("CROW_EMBED_PROVIDER env var takes precedence", async () => {
   }
 });
 
-test("falls back to grackle-embed when no env override and DB unreachable", async () => {
+test("no env override and DB unreachable -> null (never a named host)", async () => {
+  const { _resetProviderTaskCacheForTest } = await import("../servers/shared/provider-task.js");
+  _resetProviderTaskCacheForTest();
   const prevProvider = process.env.CROW_EMBED_PROVIDER;
   const prevDb = process.env.CROW_DB_PATH;
   delete process.env.CROW_EMBED_PROVIDER;
-  // Point at a path whose parent dir does not exist so the lookup fails and we
-  // exercise the fallback branch deterministically.
   process.env.CROW_DB_PATH = "/nonexistent-dir-xyz-123/none.db";
   try {
-    assert.equal(await resolveDefaultProvider(), "grackle-embed");
+    assert.equal(await resolveDefaultProvider(), null);
   } finally {
     if (prevProvider !== undefined) process.env.CROW_EMBED_PROVIDER = prevProvider;
     if (prevDb === undefined) delete process.env.CROW_DB_PATH;
     else process.env.CROW_DB_PATH = prevDb;
+    _resetProviderTaskCacheForTest();
   }
 });

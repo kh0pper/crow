@@ -237,7 +237,7 @@ When an embedding provider is configured, Crow enhances memory search with **sem
 
 ### Choosing the embedding provider
 
-Crow uses `grackle-embed` by default, but the provider is configurable so you can point semantic search at whatever embedder you run. Resolution order (first match wins):
+Crow has no hard-coded default provider — it picks one automatically, but the provider is configurable so you can point semantic search at whatever embedder you run. Resolution order (first match wins):
 
 1. **`CROW_EMBED_PROVIDER`** environment variable — best for headless/scripted runs and the gateway (loaded from `.env`).
 2. **`embed_provider`** key in `dashboard_settings` — stored in the shared `crow.db`, so it reaches **every** process (the gateway, the MCP servers Claude Code spawns, the sync/backfill scripts) with no re-registration. Set it once:
@@ -245,7 +245,7 @@ Crow uses `grackle-embed` by default, but the provider is configurable so you ca
    INSERT INTO dashboard_settings (key, value) VALUES ('embed_provider', '<provider-id>')
      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
    ```
-3. **`grackle-embed`** fallback (preserves prior behavior).
+3. **The lowest-id enabled provider with an embed-tagged model** — a capability pick, not a named host. If no provider is tagged for embedding, semantic search stays off.
 
 The value is the provider `id` as registered (e.g. by an embedding bundle). After changing it, allow up to ~30s for the in-process cache to refresh (running processes re-probe the new provider automatically — no restart needed).
 
