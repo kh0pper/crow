@@ -15,6 +15,8 @@ import { localizeDbBaseUrl } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { resolveProviderForTask, EMBED_TASKS } from "../shared/provider-task.js";
 
+const EMBED_TASK_SET = new Set(EMBED_TASKS);
+
 // Per-request embed timeout. Default suits fast GPU endpoints; CPU/local
 // embedders (e.g. llamafile) need more for long documents — raise via env.
 const EMBED_TIMEOUT_MS = Number(process.env.CROW_EMBED_TIMEOUT_MS) || 10_000;
@@ -32,6 +34,7 @@ export async function resolveDefaultProvider() {
 // -----------------------------------------------------------------------
 
 async function resolveEmbedConfig(providerName) {
+  if (!providerName) throw new Error("no embedding provider configured");
   let p = loadProviders().providers?.[providerName];
   // Cold-cache / DB-only provider: loadProviders() returns models.json on a
   // process's first call (it warms from the DB asynchronously). Fall back to a
@@ -43,8 +46,10 @@ async function resolveEmbedConfig(providerName) {
   if (!p || !p.baseUrl) {
     throw new Error(`embedding provider "${providerName}" not configured`);
   }
-  const model = p.models?.[0]?.id || "default";
-  const dim = p.models?.[0]?.dim || null;
+  const models = Array.isArray(p.models) ? p.models : [];
+  const embedModel = models.find((m) => m && EMBED_TASK_SET.has(m.task)) || models[0];
+  const model = embedModel?.id || "default";
+  const dim = embedModel?.dim || null;
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, dim, name: providerName };
 }
 

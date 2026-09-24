@@ -11,6 +11,7 @@ import { resolveProviderForTask, RERANK_TASKS } from "../shared/provider-task.js
 import { loadProviderFromDb } from "./embeddings.js";
 
 const RERANK_TIMEOUT_MS = 10_000;
+const RERANK_TASK_SET = new Set(RERANK_TASKS);
 
 /** CROW_RERANK_PROVIDER env → dashboard_settings 'rerank_provider' → lowest-id
  *  enabled provider with a rerank/score-tagged model → null (spec 2026-09-24). */
@@ -23,7 +24,9 @@ async function resolveRerankConfig(providerName) {
   let p = loadProviders().providers?.[providerName];
   if (!p || !p.baseUrl) p = await loadProviderFromDb(providerName); // cold cache / DB-only row
   if (!p || !p.baseUrl) throw new Error(`rerank provider "${providerName}" not configured`);
-  const model = p.models?.[0]?.id || "default";
+  const models = Array.isArray(p.models) ? p.models : [];
+  const rerankModel = models.find((m) => m && RERANK_TASK_SET.has(m.task)) || models[0];
+  const model = rerankModel?.id || "default";
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, name: providerName };
 }
 

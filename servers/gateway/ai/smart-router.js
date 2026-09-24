@@ -106,16 +106,29 @@ function detectKeywordRoute(content) {
   return null;
 }
 
+function isImageCapable(m) {
+  return (Array.isArray(m?.input) && m.input.includes("image")) || m?.task === "vision";
+}
+
 /** Lowest-id enabled provider with an image-capable model (input includes
- *  "image", or task "vision"), else null. Pure (spec 2026-09-24 D3). */
+ *  "image", or task "vision"), else null. The returned provider carries
+ *  `_preferredModelId`, the id of the image-capable model that matched —
+ *  not necessarily models[0] — so callers route to a model that can
+ *  actually see the attachment. Pure (spec 2026-09-24 D3). */
 export function pickVisionProvider(providers) {
   if (!Array.isArray(providers)) return null;
   const ok = providers
     .filter((p) => p && p.id && !Number(p.disabled))
-    .filter((p) => (Array.isArray(p.models) ? p.models : []).some((m) =>
-      (Array.isArray(m?.input) && m.input.includes("image")) || m?.task === "vision"))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return ok[0] || null;
+    .map((p) => {
+      const models = Array.isArray(p.models) ? p.models : [];
+      const match = models.find(isImageCapable);
+      return match ? { p, matchId: match.id } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.p.id < b.p.id ? -1 : a.p.id > b.p.id ? 1 : 0));
+  if (!ok.length) return null;
+  const { p, matchId } = ok[0];
+  return { ...p, _preferredModelId: matchId };
 }
 
 /**
@@ -244,7 +257,10 @@ async function wrapWithVendorLock({ db, convId, picked, reasonBase, currentProvi
   }
   const models = Array.isArray(picked.models) ? picked.models : [];
   const firstModel = models[0];
-  const modelId = typeof firstModel === "string" ? firstModel : firstModel?.id;
+  // A capability pick (e.g. pickVisionProvider) tags the model that actually
+  // matched the capability — honor it over models[0] when present.
+  const modelId = picked._preferredModelId
+    || (typeof firstModel === "string" ? firstModel : firstModel?.id);
   return {
     provider_id: picked.id,
     model_id: modelId || currentModel || null,

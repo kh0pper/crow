@@ -171,6 +171,15 @@ test("image attachment with no enabled vision-capable provider falls back as bef
   assert.equal(r.provider_id, "crow-chat");
 });
 
+test("image attachment: capability-picked vision provider uses its image-capable model, not models[0]", async () => {
+  const mixedProviders = providers.concat([
+    { id: "aa-vl-mixed", models: [{ id: "text-only" }, { id: "vl-model", input: ["text", "image"] }] },
+  ]);
+  const r = await pick(router, "what is this?", { attachments: [{ mime_type: "image/png" }], providers: mixedProviders });
+  assert.equal(r.provider_id, "aa-vl-mixed");
+  assert.equal(r.model_id, "vl-model");
+});
+
 test("smart-router.js contains no named-host literal", async () => {
   const { readFileSync } = await import("node:fs");
   assert.doesNotMatch(readFileSync(MODULE_PATH, "utf8"), /grackle-(embed|rerank|vision)/);

@@ -7,8 +7,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { _resetProviderTaskCacheForTest } from "../servers/shared/provider-task.js";
-import { resolveDefaultProvider } from "../servers/memory/embeddings.js";
+import { resolveDefaultProvider, embedText } from "../servers/memory/embeddings.js";
 import { resolveDefaultRerankProvider, rerank } from "../servers/memory/rerank.js";
+
+async function seedRaw(rows, settings = {}) {
+  // Like seed(), but each row's `models` is the full array (for multi-model
+  // fixtures where task tagging matters and models[0] must NOT win).
+  const db = createDbClient(dbPath);
+  try {
+    await db.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT, models TEXT, gpu_policy TEXT, disabled INTEGER DEFAULT 0)");
+    await db.execute("CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT)");
+    await db.execute("DELETE FROM providers");
+    await db.execute("DELETE FROM dashboard_settings");
+    for (const [id, models, disabled = 0, baseUrl = "http://127.0.0.1:1/v1"] of rows) {
+      await db.execute({ sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?, ?, ?, ?)", args: [id, baseUrl, JSON.stringify(models), disabled] });
+    }
+    for (const [k, v] of Object.entries(settings)) {
+      await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES (?, ?)", args: [k, v] });
+    }
+  } finally { db.close?.(); }
+}
 
 const dir = mkdtempSync(join(tmpdir(), "embed-rerank-defaults-"));
 const dbPath = join(dir, "crow.db");
@@ -98,6 +116,39 @@ test("rerank: no provider -> candidates unreranked in original order", async () 
   await seed([["crow-chat", "chat"]]);
   const out = await rerank("q", [{ id: 1, text: "a" }, { id: 2, text: "b" }, { id: 3, text: "c" }], { topK: 2 });
   assert.deepEqual(out.map((c) => c.id), [1, 2]);
+});
+
+test("embed: provider lists a chat model first, embed-tagged model second -> the embed model is used, not models[0]", async () => {
+  await seedRaw([["mixed-embed", [{ id: "chat-model" }, { id: "embed-model", task: "embed" }]]]);
+  const origFetch = globalThis.fetch;
+  let seenBody;
+  globalThis.fetch = async (url, init) => {
+    seenBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await embedText("hello");
+    assert.equal(seenBody.model, "embed-model");
+  } finally { globalThis.fetch = origFetch; }
+});
+
+test("rerank: provider lists a chat model first, rerank-tagged model second -> the rerank model is used, not models[0]", async () => {
+  await seedRaw([["mixed-rerank", [{ id: "chat-model" }, { id: "rerank-model", task: "rerank" }]]]);
+  const origFetch = globalThis.fetch;
+  let seenBody;
+  globalThis.fetch = async (url, init) => {
+    seenBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await rerank("q", [{ id: 1, text: "a" }]);
+    assert.equal(seenBody.model, "rerank-model");
+  } finally { globalThis.fetch = origFetch; }
+});
+
+test("embed: no provider configured -> explicit guard error", async () => {
+  await seed([["crow-chat", "chat"]]); // no embed-tagged rows -> resolveDefaultProvider() is null
+  await assert.rejects(() => embedText("hi"), /no embedding provider configured/);
 });
 
 test("no named-host literals remain in the memory servers", () => {
