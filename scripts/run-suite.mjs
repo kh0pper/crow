@@ -116,6 +116,9 @@ env.CROW_EXTERNAL_ENGINE_POLL_MS = "0";
 // under test would arm real restart/exit paths inside test processes.
 delete env.INVOCATION_ID;
 delete env.CROW_SUPERVISED;
+// Host-level model-orchestration switch (spec 2026-09-24): a shell that
+// exports it must not flip every orchestrator suite; tests set it per-case.
+delete env.CROW_DISABLE_MODEL_ORCHESTRATION;
 // Cross-run port isolation (2026-08-13 flake hunt): models-state /
 // models-registration tests bind-probe the model-port allocator range with
 // REAL sockets. Concurrent suite runs (worktrees, subagent implementers)
