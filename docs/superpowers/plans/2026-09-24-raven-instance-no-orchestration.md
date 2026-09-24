@@ -903,3 +903,10 @@ git commit docs/developers/configuration.md docs/architecture/models.md docs/dev
     - the meta-glasses test checks the catch block itself;
     - the regression-pin label is added;
     - spec §4 is trimmed to match (the native-row and monitors-armed cases are covered by the lowest-level gate and the unchanged `initOrchestrator` prefix).
+- **Round 3 (2026-09-24, scoped): APPROVE.**
+  - The predicate matches exactly 13 bundles, with no false positives or misses across 87 manifests.
+  - The `ensureResident` test is non-vacuous, and the slices and id variables (`bundle_id` for uninstall, `bundleId` for apply) are correct.
+  - `build-registry` changes only one line.
+  - Minor notes:
+    - Before Task 1, run `npm ci` in the worktree (the controller did this).
+    - The uninstall guard goes before the 404 check, so on a switch-on host a not-installed model bundle answers 409, and an installed one can't be uninstalled from the UI. Both are intended.
