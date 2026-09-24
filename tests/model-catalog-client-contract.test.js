@@ -420,3 +420,16 @@ test("BEHAVIOR: a registered windowed card renders no Start/Download for that id
   assert.equal(actions.querySelector('[data-action="download"]'), null);
   assert.ok(actions.querySelector('[data-action="remove"]'));
 });
+
+test("renderRuntimeStrip shows the orchestration-disabled notice only when data.orchestrationDisabled (en + es)", () => {
+  const on = renderRuntimeStrip({ ...baseData(), orchestrationDisabled: true }, "en");
+  const off = renderRuntimeStrip({ ...baseData(), orchestrationDisabled: false }, "en");
+  assert.match(on, /Model orchestration is disabled on this host/);
+  assert.doesNotMatch(off, /Model orchestration is disabled on this host/);
+  assert.match(renderRuntimeStrip({ ...baseData(), orchestrationDisabled: true }, "es"), /orquestación de modelos está desactivada/);
+});
+
+test("client ERROR_MESSAGES maps MODEL_ORCHESTRATION_DISABLED to translated copy", () => {
+  assert.match(modelCatalogClientJS("en"), /MODEL_ORCHESTRATION_DISABLED:\s*'Model orchestration is disabled on this host/);
+  assert.match(modelCatalogClientJS("es"), /MODEL_ORCHESTRATION_DISABLED:\s*'La orquestación de modelos está desactivada/);
+});

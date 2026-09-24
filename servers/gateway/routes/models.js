@@ -68,6 +68,7 @@ import {
 import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
 import { servingClassOf } from "../models/serving-class.js";
+import { isModelOrchestrationDisabled } from "../../shared/model-orchestration.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // routes/models.js -> gateway -> servers -> repo root -> registry/model-catalog.json
@@ -589,6 +590,14 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     if (!regEntry) {
       return res.status(404).json({ error: `${modelId} is not installed`, code: "NOT_INSTALLED" });
     }
+    // Host-level switch (spec 2026-09-24 D3): say why, instead of the
+    // NOT_NATIVE a null acquire would otherwise surface.
+    if (isModelOrchestrationDisabled()) {
+      return res.status(409).json({
+        error: "Model orchestration is disabled on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — models here are started outside Crow",
+        code: "MODEL_ORCHESTRATION_DISABLED",
+      });
+    }
     try {
       // Fix (Item G, PR G-F, defect 4): the 502 below used to swallow the
       // underlying typed error (e.g. GLIBC_TOO_OLD) entirely — it reached
@@ -686,7 +695,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       });
       const activeDownloads = Array.from(downloadJobs.values())
         .filter((j) => j.status === "downloading" || j.status === "registering").length;
-      res.json({ probe: getCachedProbeFn(), models, activeDownloads });
+      res.json({ probe: getCachedProbeFn(), models, activeDownloads, orchestrationDisabled: isModelOrchestrationDisabled() });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
     }
