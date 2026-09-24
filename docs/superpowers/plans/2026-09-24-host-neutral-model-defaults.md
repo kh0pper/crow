@@ -222,7 +222,7 @@ export async function resolveProviderForTask({ tasks, envVar, settingKey, dbFact
         if (v && String(v).trim()) value = String(v).trim();
       }
       if (!value) {
-        const { rows } = await db.execute({ sql: "SELECT id, models, disabled FROM providers WHERE disabled = 0 ORDER BY id", args: [] });
+        const { rows } = await db.execute({ sql: "SELECT id, models, disabled FROM providers WHERE (disabled IS NULL OR disabled = 0) ORDER BY id", args: [] });
         value = pickProviderByTask(rows || [], tasks);
       }
     } finally {
@@ -308,10 +308,13 @@ const dir = mkdtempSync(join(tmpdir(), "embed-rerank-defaults-"));
 const dbPath = join(dir, "crow.db");
 const prevDb = process.env.CROW_DB_PATH;
 process.env.CROW_DB_PATH = dbPath;
+const prevModelsJson = process.env.CROW_MODELS_JSON;
+process.env.CROW_MODELS_JSON = ""; // hermetic: ignore any real ~/.pi/agent/models.json
 const saved = {};
 for (const k of ["CROW_EMBED_PROVIDER", "CROW_RERANK_PROVIDER"]) saved[k] = process.env[k];
 after(() => {
   if (prevDb === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = prevDb;
+  if (prevModelsJson === undefined) delete process.env.CROW_MODELS_JSON; else process.env.CROW_MODELS_JSON = prevModelsJson;
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   rmSync(dir, { recursive: true, force: true });
 });
@@ -392,14 +395,14 @@ test("rerank: no provider -> candidates unreranked in original order", async () 
 });
 
 test("no named-host literals remain in the memory servers", () => {
-  for (const f of ["../servers/memory/embeddings.js", "../servers/memory/rerank.js", "../servers/memory/server.js"]) {
+  for (const f of ["../servers/memory/embeddings.js", "../servers/memory/rerank.js", "../servers/memory/server.js"]) { // smart-router.js is scanned in Task 3
     const src = readFileSync(new URL(f, import.meta.url), "utf8");
     assert.doesNotMatch(src, /grackle-(embed|rerank|vision)/, f);
   }
 });
 ```
 
-Before relying on the stubbed-fetch test, read how `rerank()` parses the response body today (`results[].index` / `relevance_score`, or `data[]`?). Make the stub return exactly the shape the existing code parses, then keep the assertion that the highest-scored candidate (`id 3`) comes first.
+(Verified in review: `rerank()` parses `json.results[]` using `index` and `relevance_score`, so the stub above matches as written.)
 
 - [ ] **Step 2: Run them and confirm they fail**
 
@@ -460,7 +463,7 @@ async function resolveRerankConfig(providerName) {
 
 - [ ] **Step 4: Run and confirm it passes**
 
-Run: `npm test -- tests/embed-provider.test.js tests/embed-rerank-defaults.test.js tests/provider-task.test.js tests/memory-search-smoke.test.js`
+Run: `npm test -- tests/embed-provider.test.js tests/embed-rerank-defaults.test.js tests/provider-task.test.js tests/memory-search-smoke.test.js tests/providers-localize-resolvers.test.js`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
@@ -522,6 +525,11 @@ test("image attachment with no enabled vision-capable provider falls back as bef
   assert.equal(r.provider_id, "crow-chat");
 });
 
+test("smart-router.js contains no named-host literal", async () => {
+  const { readFileSync } = await import("node:fs");
+  assert.doesNotMatch(readFileSync(MODULE_PATH, "utf8"), /grackle-(embed|rerank|vision)/);
+});
+
 test("CROW_SMART_ROUTER_VISION env override wins for a fresh module load", async () => {
   process.env.CROW_SMART_ROUTER_VISION = "my-coder";
   try {
@@ -571,7 +579,7 @@ export function pickVisionProvider(providers) {
   }
 ```
 
-- [ ] **Step 4: Settings hint** (`ai-profiles.js` ~169). The hint currently renders `DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default`, which would show vision as `crow-chat`. Render `r.id === "vision" && !DEFAULT_ROUTES.vision ? "first image-capable provider" : (DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default)`, keeping it inside the existing `escapeHtml(...)`. This file is server-rendered HTML in a template literal, so add no backticks inside `${}`.
+- [ ] **Step 4: Settings hint** (`ai-profiles.js` ~169). The hint currently renders `DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default`, which would show vision as `crow-chat`. Render `r.id === "vision" && !DEFAULT_ROUTES.vision ? "first image-capable provider" : (DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default)`, keeping it inside the existing `escapeHtml(...)`. This file is server-rendered HTML in a template literal: use plain string quotes for the new literal.
 
 - [ ] **Step 5: Smoke scripts** (manual, not in the suite). Make them host-neutral:
    - `providers-resolve.js`: replace `"grackle-embed"`, `"grackle-rerank"` and `"grackle-vision"` in its id list with `process.env.SMOKE_EMBED_PROVIDER || "crow-embed"`, and include rerank and vision only when `SMOKE_RERANK_PROVIDER` / `SMOKE_VISION_PROVIDER` are set.
@@ -625,3 +633,11 @@ git commit servers/gateway/ai/smart-router.js servers/gateway/dashboard/settings
     - the spec aligned on DB failure → `null`;
     - the smoke mutex check gated on env;
     - the unused imports and the test count fixed.
+- **Round 2 (2026-09-24): APPROVE.**
+  - Minors folded in:
+    - the NULL-safe `disabled` predicate;
+    - a hermetic `CROW_MODELS_JSON=""`;
+    - the `providers-localize-resolvers` regression run;
+    - the smart-router literal scan;
+    - the stub shape confirmed;
+    - the hint quoting wording.
