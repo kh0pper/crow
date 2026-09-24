@@ -120,3 +120,16 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 2. Add a row to the table with bundle name and PR/status.
 3. CI port-collision check (the `static-checks` job in `.github/workflows/test.yml`) verifies your new port doesn't clash.
 4. Reference this file in your bundle's PR description.
+
+## Second host: raven
+
+Raven (10.0.0.126, `raven.dachshund-chromatic.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
+
+| port | bind | what | status |
+|---|---|---|---|
+| raven:3009 | 127.0.0.1 | Crow gateway (user unit `crow-gateway.service`, `CROW_DISABLE_MODEL_ORCHESTRATION=1`); reached only through Tailscale Serve `raven:8444` | planned |
+| raven:8444 | tailnet (Serve) | Tailscale Serve HTTPS → `127.0.0.1:3009` (fleet `:8444` convention; never Funnel) | planned |
+| raven:8030 | 0.0.0.0 (ufw: crow + grackle only) | halogen Flash-Next production (`flash-next.service`), an external engine Crow never manages | live |
+| raven:8031–8033 | 0.0.0.0 | two-box masters (window mode, pi-lab) | reserved |
+| raven:13305 | 127.0.0.1 | Lemonade server (`lemond`, installed but disabled since the 2026-09-24 NPU spike) | disabled |
+| raven:9000 | 127.0.0.1 | Lemonade websocket | disabled |

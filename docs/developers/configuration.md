@@ -45,6 +45,7 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `CROW_PROVIDERS_RECONCILE_MS` | `3600000` | Interval for the models.json → providers-DB reconcile (owner-asserted rows only; skipped entirely on `--no-auth` companions). |
 | `CROW_MODELS_JSON` | *(unset = standard locations)* | Colon-separated override of the models.json search paths. Empty string = ignore all models.json files (hermetic tests / fresh-install audits). |
 | `CROW_DISABLE_NOSTR` | *(unset)* | `1` disables all Nostr relay dialing (messaging transport). For scratch/test gateways: set together with `CROW_DISABLE_INSTANCE_SYNC=1` for a fully-offline boot. |
+| `CROW_DISABLE_MODEL_ORCHESTRATION` | *(unset)* | `1` (or `true`) makes this gateway **never start, stop or evict a model or a model bundle**: on-demand acquires return "not managed here" (callers dial the provider's base_url), boot residency, warm and idle-revert are skipped, model-bundle install/start/stop (including peer-forwarded starts) answer 409 `MODEL_ORCHESTRATION_DISABLED`, and the Models panel's Start answers the same. Read-only health polls stay on. For hosts whose models are owned by something else (raven: halogen under systemd). Any other value, including `0`, leaves orchestration on. |
 | `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Fast voice-turn model for the AI Companion. |
 | `COMPANION_ESCALATION_MODEL` | `crow-chat/qwen3.6-35b-a3b` | Escalation model (`!escalate` / tool turns). |
 | `COMPANION_FAST_DISABLE_THINKING` | `1` | Disable chain-of-thought on voice turns. |
