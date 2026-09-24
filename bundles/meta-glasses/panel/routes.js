@@ -279,7 +279,11 @@ async function resolveVisionProfileConfig(db, device, aiProfile) {
         const { acquireProvider } = await import(pathToFileURL(join(gatewayDir, "gpu-orchestrator.js")).href);
         await acquireProvider(profile.provider_id);
       } catch (err) {
-        console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
+        // Host switch (CROW_DISABLE_MODEL_ORCHESTRATION): the provider is not
+        // ours to start — dial it as-is, quietly.
+        if (err?.code !== "model_orchestration_disabled") {
+          console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
+        }
       }
       const { resolveProvider } = await loadResolveProv();
       return await resolveProvider(profile.provider_id, profile.model_id);
