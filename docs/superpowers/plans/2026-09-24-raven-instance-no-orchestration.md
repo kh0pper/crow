@@ -20,7 +20,7 @@
 - **Read on every call,** never cached at import.
 - **Error:** class `OrchestrationDisabledError` with `code = "model_orchestration_disabled"`, `http = 409` and `provider` set to the provider name or `null`. Its message contains the literal `CROW_DISABLE_MODEL_ORCHESTRATION`.
 - **Route and bundle error code:** `MODEL_ORCHESTRATION_DISABLED` (HTTP 409).
-- **Model-bundle predicate:** `manifest.inference === true` OR a truthy `manifest.requires.gpu` OR `manifest.providers` is a non-empty array.
+- **Model-bundle predicate** (decided after review round 2): `manifest.inference === true` OR a truthy `manifest.requires.gpu` OR a non-empty `manifest.requires.gpu_arch` array OR a non-empty `manifest.providers` array OR a truthy `manifest.sttProfileSeed` / `manifest.ttsProfileSeed`. Against the repo today it matches 13 bundles: the llamacpp/vllm family, `sdxl`, `vllm`, `ollama`, `localai`, `faster-whisper-server` and `kokoro-tts`. `companion` is NOT a model container (it calls the router) and is not matched.
 - **Boot log line, verbatim:** `[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted`
 - **Read-only monitors stay armed** under the switch: `startResidencyMonitor()`, `startExternalEngineMonitor()`, `initNativeModels()`.
 - **i18n:** every new key has `en` and `es` (gate: `tests/i18n-global-parity.test.js`).
@@ -105,6 +105,10 @@ test("isModelBundleManifest: inference, requires.gpu, or non-empty providers", (
   assert.equal(isModelBundleManifest({ requires: { gpu: true } }), true);
   assert.equal(isModelBundleManifest({ requires: { gpu: "amd" } }), true);
   assert.equal(isModelBundleManifest({ providers: [{ id: "x" }] }), true);
+  assert.equal(isModelBundleManifest({ requires: { gpu_arch: ["cuda", "rocm", "cpu"] } }), true); // ollama/localai shape
+  assert.equal(isModelBundleManifest({ requires: { gpu_arch: [] } }), false);
+  assert.equal(isModelBundleManifest({ sttProfileSeed: { id: "whisper" } }), true); // faster-whisper-server
+  assert.equal(isModelBundleManifest({ ttsProfileSeed: { id: "kokoro" } }), true);  // kokoro-tts
   assert.equal(isModelBundleManifest({ providers: [] }), false);
   assert.equal(isModelBundleManifest({ inference: false, requires: { gpu: false } }), false);
   assert.equal(isModelBundleManifest({}), false);
@@ -150,12 +154,16 @@ export class OrchestrationDisabledError extends Error {
 }
 
 /** A bundle whose containers serve a model: declared inference, a GPU
- *  requirement, or provider rows it registers. */
+ *  requirement or GPU-arch list, provider rows it registers, or a speech
+ *  (STT/TTS) profile seed. */
 export function isModelBundleManifest(manifest) {
   if (!manifest || typeof manifest !== "object") return false;
   if (manifest.inference === true) return true;
-  if (manifest.requires && manifest.requires.gpu) return true;
-  return Array.isArray(manifest.providers) && manifest.providers.length > 0;
+  const req = manifest.requires || {};
+  if (req.gpu) return true;
+  if (Array.isArray(req.gpu_arch) && req.gpu_arch.length > 0) return true;
+  if (Array.isArray(manifest.providers) && manifest.providers.length > 0) return true;
+  return Boolean(manifest.sttProfileSeed || manifest.ttsProfileSeed);
 }
 ```
 
@@ -170,7 +178,7 @@ delete env.CROW_DISABLE_MODEL_ORCHESTRATION;
 - [ ] **Step 4: Run it and confirm it passes**
 
 Run: `npm test -- tests/model-orchestration-switch.test.js`
-Expected: PASS, 5 tests.
+Expected: PASS, 5 tests (the predicate test carries 14 assertions).
 
 - [ ] **Step 5: Commit**
 
@@ -243,6 +251,8 @@ test("switch on: acquireProvider throws OrchestrationDisabledError before any pr
   );
 });
 
+// Regression pin (passes with or without the switch): the unknown-provider
+// error keeps precedence over the switch.
 test("switch on: acquireProvider still reports an unknown provider as unknown", async () => {
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
   await assert.rejects(() => orch.acquireProvider("nope", { cfg }), /unknown provider "nope"/);
@@ -262,10 +272,19 @@ test("switch on: resolveWarmableProviderName -> null; switch off -> the bundle r
   assert.equal(orch.resolveWarmableProviderName(cfg, "crow-embed", own), "crow-embed");
 });
 
-test("switch on: ensureResident returns false and never starts", async () => {
+test("switch on: ensureResident returns false, touches no seam, and logs DISABLED (not a swallowed failure)", async () => {
+  // ensureResident wraps everything in try/catch -> false, so a throwing seam
+  // would be swallowed: count calls instead, and require the DISABLED line.
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
-  const r = await orch.ensureResident("crow-chat", cfg, { probeReadyFn: mustNot("probe"), bundleUpFn: mustNot("start"), waitForReadyFn: mustNot("wait") });
-  assert.equal(r, false);
+  let calls = 0; const errs = []; const origErr = console.error; console.error = (m) => errs.push(String(m));
+  try {
+    const count = async () => { calls++; return true; };
+    const r = await orch.ensureResident("crow-chat", cfg, { probeReadyFn: count, bundleUpFn: count, waitForReadyFn: count });
+    assert.equal(r, false);
+  } finally { console.error = origErr; }
+  assert.equal(calls, 0);
+  assert.ok(logs.includes(DISABLED_LINE), logs.join("\n"));
+  assert.equal(errs.filter((e) => /failed to bring up/.test(e)).length, 0);
 });
 
 test("switch on: retryDeferredResidents returns [] and never ensures", async () => {
@@ -328,7 +347,10 @@ test("switch set to \"0\" does NOT disable orchestration", async () => {
 
 test("meta-glasses: an OrchestrationDisabledError is skipped quietly (no warn)", () => {
   const src = readFileSync(new URL("../bundles/meta-glasses/panel/routes.js", import.meta.url), "utf8");
-  assert.match(src, /model_orchestration_disabled/);
+  const at = src.indexOf("await acquireProvider(profile.provider_id)");
+  assert.ok(at > 0, "meta-glasses acquire call not found");
+  const catchBlock = src.slice(src.indexOf("} catch (err) {", at), src.indexOf("resolveProvider", at));
+  assert.match(catchBlock, /err\?\.code !== "model_orchestration_disabled"/);
 });
 ```
 
@@ -460,18 +482,18 @@ Keep `initOrchestrator`'s earlier statements (monitors, `initNativeModels` recon
       }
 ```
 
-    Then bump `bundles/meta-glasses/manifest.json` `"version"` from `"0.1.0"` to `"0.1.1"`.
+    Then bump `bundles/meta-glasses/manifest.json` `"version"` from `"0.1.0"` to `"0.1.1"`, and run `npm run build-registry`. `registry/add-ons.json` embeds each manifest, and `tests/bundle-contract.test.js` fails on drift. The regenerated `registry/add-ons.json` goes in this task's commit.
 
 - [ ] **Step 4: Run it and confirm it passes, with the neighbouring suites**
 
-Run: `npm test -- tests/gpu-orchestrator-orchestration-switch.test.js tests/gpu-orchestrator-reservation.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js tests/lifecycle-external-engine.test.js tests/external-engine-poll.test.js tests/bundle-server-deps.test.js`
+Run: `npm test -- tests/gpu-orchestrator-orchestration-switch.test.js tests/gpu-orchestrator-reservation.test.js tests/gpu-orchestrator-host-gate.test.js tests/gpu-orchestrator-native.test.js tests/gpu-orchestrator-residency-poll.test.js tests/gpu-orchestrator-serving-class.test.js tests/lifecycle-external-engine.test.js tests/external-engine-poll.test.js tests/bundle-server-deps.test.js tests/bundle-contract.test.js`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add tests/gpu-orchestrator-orchestration-switch.test.js
-git commit servers/gateway/gpu-orchestrator.js bundles/meta-glasses/panel/routes.js bundles/meta-glasses/manifest.json tests/gpu-orchestrator-orchestration-switch.test.js -m "feat(models): gate every orchestrator path on CROW_DISABLE_MODEL_ORCHESTRATION; extract bootResidency"
+git commit servers/gateway/gpu-orchestrator.js bundles/meta-glasses/panel/routes.js bundles/meta-glasses/manifest.json registry/add-ons.json tests/gpu-orchestrator-orchestration-switch.test.js -m "feat(models): gate every orchestrator path on CROW_DISABLE_MODEL_ORCHESTRATION; extract bootResidency"
 ```
 
 ---
@@ -517,6 +539,13 @@ test("switch on: a model bundle is refused with 409 MODEL_ORCHESTRATION_DISABLED
   assert.match(r.error, /CROW_DISABLE_MODEL_ORCHESTRATION/);
 });
 
+test("switch on: ollama (gpu_arch only) and faster-whisper-server (stt seed) are refused", () => {
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  assert.equal(bundleOrchestrationRefusal("ollama")?.code, "MODEL_ORCHESTRATION_DISABLED");
+  assert.equal(bundleOrchestrationRefusal("faster-whisper-server")?.code, "MODEL_ORCHESTRATION_DISABLED");
+  assert.equal(bundleOrchestrationRefusal("companion"), null);
+});
+
 test("switch on: a non-model bundle passes; switch off: a model bundle passes", () => {
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
   assert.equal(bundleOrchestrationRefusal("caddy"), null);
@@ -544,6 +573,16 @@ test("dispatchBundleAction's LOCAL path calls the guard before runCompose (peer-
   const local = src.slice(at, src.indexOf("runCompose(", at));
   assert.match(local, /bundleOrchestrationRefusal\(bundleId\)/);
 });
+
+test("uninstall and shared-storage apply routes call the guard before any compose", () => {
+  const src = readFileSync(new URL("../servers/gateway/routes/bundles.js", import.meta.url), "utf8");
+  for (const route of ['router.post("/bundles/api/uninstall"', 'router.post("/bundles/api/shared-storage/apply/:id"']) {
+    const at = src.indexOf(route);
+    assert.ok(at > 0, `${route} not found`);
+    const body = src.slice(at, src.indexOf("runCompose(", at));
+    assert.match(body, /bundleOrchestrationRefusal\(/, `${route} must call the guard before runCompose`);
+  }
+});
 ```
 
 - [ ] **Step 2: Run it and confirm it fails**
@@ -553,7 +592,7 @@ Expected: FAIL (`bundleOrchestrationRefusal` not exported).
 
 - [ ] **Step 3: Implement** in `servers/gateway/routes/bundles.js`
 
-1. **Imports:** add `import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";`. Then check whether `getInstalledFirstManifest` is already imported from `../bundles-config.js` (grep the import block near lines 40-60); add it to that import if not.
+1. **Imports:** add `import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";`, and add `getInstalledFirstManifest` to the existing `from "../bundles-config.js"` import block (lines ~43-52). It is not imported today.
 
 2. **The guard** (module scope, directly above `export async function validateInstall`):
 
@@ -589,6 +628,15 @@ export function bundleOrchestrationRefusal(bundleId) {
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
 ```
 
+5. **Uninstall** (`router.post("/bundles/api/uninstall"`, ~2211) and **shared-storage apply** (`router.post("/bundles/api/shared-storage/apply/:id"`, ~2660). In each handler, right after the bundle id is validated and before anything else runs, add the refusal, using that handler's own id variable (read the handler; it is `bundle_id` from the body for uninstall, and the `:id` param for apply):
+
+```js
+    const orchRefusal = bundleOrchestrationRefusal(<that handler's bundle id variable>);
+    if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+```
+
+   The uninstall's `compose down` stops a model container. Raven has none installed today, but this closes the path.
+
 - [ ] **Step 4: Run it and confirm it passes, with the neighbouring bundle suites**
 
 Run: `npm test -- tests/bundles-orchestration-switch.test.js tests/bundles-validate-install.test.js tests/bundles-install-job.test.js tests/bundles-install-set.test.js tests/bundles-install-env.test.js tests/bundles-webui-lifecycle.test.js`
@@ -598,7 +646,7 @@ Expected: all PASS.
 
 ```bash
 git add tests/bundles-orchestration-switch.test.js
-git commit servers/gateway/routes/bundles.js tests/bundles-orchestration-switch.test.js -m "feat(bundles): refuse model-bundle install/start/stop under CROW_DISABLE_MODEL_ORCHESTRATION"
+git commit servers/gateway/routes/bundles.js tests/bundles-orchestration-switch.test.js -m "feat(bundles): refuse model-bundle install/start/stop/uninstall/apply under CROW_DISABLE_MODEL_ORCHESTRATION"
 ```
 
 ---
@@ -844,3 +892,14 @@ git commit docs/developers/configuration.md docs/architecture/models.md docs/dev
     - `run-suite.mjs` deletes the env;
     - `CROW_DISABLE_PERCH=1` on raven.
   - **Not adopted:** the chat.js `provider_warming` pre-event is cosmetic. It fires only for native rows, and raven registers none.
+- **Round 2 (2026-09-24): REVISE.**
+  - **Critical, fixed:**
+    - (1) the predicate missed `ollama`/`localai` (`requires.gpu_arch` only). It now covers `gpu_arch`, plus the STT/TTS seeds (faster-whisper-server, kokoro-tts), with a real-manifest test. companion is confirmed not a model container.
+    - (2) the `ensureResident` test was vacuous (the function swallows throws). It now counts seam calls and requires the DISABLED line.
+    - (3) the meta-glasses bump breaks registry drift. Task 2 now regenerates `registry/add-ons.json` and runs `bundle-contract.test.js`.
+  - **Suggestions adopted:**
+    - uninstall and shared-storage apply are gated;
+    - the import hedge is removed;
+    - the meta-glasses test checks the catch block itself;
+    - the regression-pin label is added;
+    - spec §4 is trimmed to match (the native-row and monitors-armed cases are covered by the lowest-level gate and the unchanged `initOrchestrator` prefix).
