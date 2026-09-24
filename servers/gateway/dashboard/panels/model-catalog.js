@@ -46,6 +46,7 @@ import { getNativeHandle } from "../../gpu-orchestrator.js";
 import { listProvidersAll } from "../../../shared/providers-db.js";
 import { HF_TOKEN_PROVIDER_ID } from "../../routes/models.js";
 import { servingClassOf, startAffordance } from "../../models/serving-class.js";
+import { isModelOrchestrationDisabled } from "../../../shared/model-orchestration.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -265,6 +266,7 @@ export async function loadPanelData({
     estimatedRamMb,
     estimatedVramMb,
     hfTokenConfigured,
+    orchestrationDisabled: isModelOrchestrationDisabled(),
   };
 }
 
@@ -447,7 +449,7 @@ function renderFitPill(badgeName, lang) {
 }
 
 export function renderRuntimeStrip(data, lang) {
-  const { runtime, probe, runtimeModels, estimatedRamMb, estimatedVramMb } = data;
+  const { runtime, probe, runtimeModels, estimatedRamMb, estimatedVramMb, orchestrationDisabled } = data;
 
   const binaryLine = runtime.name
     ? escapeHtml(fill(t("models.runtimeBinary", lang), { name: runtime.name, release: runtime.release || "" }))
@@ -455,6 +457,7 @@ export function renderRuntimeStrip(data, lang) {
 
   let hardwareLine;
   const notices = [];
+  if (orchestrationDisabled) notices.push(t("models.runtimeOrchestrationDisabled", lang));
   if (!probe) {
     hardwareLine = escapeHtml(t("models.runtimeNoBinary", lang));
   } else {
@@ -735,6 +738,7 @@ export function modelCatalogClientJS(lang) {
           NO_VERIFIABLE_CHECKSUM: '${tJs("models.errNoVerifiableChecksum", lang)}',
           HF_FILE_NOT_FOUND: '${tJs("models.errHfUpstream", lang)}',
           SERVING_CLASS_REFUSED: '${tJs("models.errServingClassRefused", lang)}',
+          MODEL_ORCHESTRATION_DISABLED: '${tJs("models.errOrchestrationDisabled", lang)}',
           // Task 13 fix round 3: Hugging Face answers an unauthenticated
           // gated download 401 (no/invalid token), distinct from 403
           // (authenticated but the license hasn't been accepted yet) —

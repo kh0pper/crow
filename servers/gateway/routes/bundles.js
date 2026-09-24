@@ -47,9 +47,11 @@ import {
   APP_ROOT,
   APP_BUNDLES,
   getManifest,
+  getInstalledFirstManifest,
   needsConfigKeys,
   _setAppBundlesForTest,
 } from "../bundles-config.js";
+import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1164,10 +1166,29 @@ function getAiProviderConfig(bundleId, envVars) {
  *          hardware_gate | gpu_arch_gate | docker_unavailable | consent_required |
  *          consent_invalid | hosted_forbidden
  */
+/**
+ * Host-level switch (spec 2026-09-24 D4): under CROW_DISABLE_MODEL_ORCHESTRATION
+ * a model bundle (inference / GPU / provider rows) is never installed, started
+ * or stopped here — including a start a peer forwards to this instance.
+ * Unknown ids return null: other gates own not-found.
+ */
+export function bundleOrchestrationRefusal(bundleId) {
+  if (!isModelOrchestrationDisabled()) return null;
+  if (!isModelBundleManifest(getInstalledFirstManifest(bundleId))) return null;
+  return {
+    status: 409,
+    code: "MODEL_ORCHESTRATION_DISABLED",
+    error: `Bundle '${bundleId}' serves a model, and model orchestration is disabled on this host (CROW_DISABLE_MODEL_ORCHESTRATION)`,
+  };
+}
+
 export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false } = {}) {
   if (!bundleId || !isValidBundleId(bundleId)) {
     return { ok: false, status: 400, code: "invalid_id", error: "Invalid bundle ID" };
   }
+
+  const orchRefusal = bundleOrchestrationRefusal(bundleId);
+  if (orchRefusal) return { ok: false, ...orchRefusal };
 
   // Check source exists
   const sourceDir = join(APP_BUNDLES, bundleId);
@@ -2215,6 +2236,9 @@ export default function bundlesRouter() {
       return res.status(400).json({ error: "Invalid bundle ID" });
     }
 
+    const orchRefusal = bundleOrchestrationRefusal(bundle_id);
+    if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+
     const bundleDir = join(BUNDLES_DIR, bundle_id);
     if (!existsSync(bundleDir)) {
       return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
@@ -2478,6 +2502,9 @@ export default function bundlesRouter() {
     }
 
     // Local path
+    const orchRefusal = bundleOrchestrationRefusal(bundleId);
+    if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+
     const bundleDir = join(BUNDLES_DIR, bundleId);
     const composePath = join(bundleDir, "docker-compose.yml");
     if (!existsSync(composePath)) {
@@ -2662,6 +2689,9 @@ export default function bundlesRouter() {
     if (!isValidBundleId(bundleId)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
     }
+    const orchRefusal = bundleOrchestrationRefusal(bundleId);
+    if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+
     const manifest = getManifest(bundleId);
     if (!manifest?.storage?.translator) {
       return res.status(400).json({ error: `Bundle '${bundleId}' does not declare manifest.storage.translator` });

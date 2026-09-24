@@ -140,6 +140,22 @@ pi-lab's caveats, also recorded in the module:
 
 The profile applies to native starts only. Docker bundles build their own command lines.
 
+## Host switch: no model orchestration
+
+`CROW_DISABLE_MODEL_ORCHESTRATION=1` (`servers/shared/model-orchestration.js`) is a property of the **host**, not of a provider row. Per-row gates (locality, owner, foreign-instance veto, bundle/runtime presence, the external-engine marker) decide *which* rows a host may orchestrate. This switch says the host orchestrates *none*, however rows arrive through sync. That matters on a box like raven, where any synced row whose base_url is the box's own LAN address counts as local.
+
+Under the switch:
+
+- **Entry points:**
+  - `maybeAcquireLocalProvider` and `resolveWarmableProviderName` return `null`;
+  - `acquireProvider` throws `OrchestrationDisabledError` (`model_orchestration_disabled`) before any probe or start;
+  - `ensureResident`, `retryDeferredResidents` and `checkIdleRevert` are no-ops;
+  - `bootResidency` logs one DISABLED line and arms no idle-revert timer.
+- **Lowest-level primitives** (`bundleUp`, `bundleStop`, `startNativeAndAwaitReady`) throw as well, so a future caller cannot bypass the gate.
+- **Model bundles** (`inference: true`, truthy `requires.gpu`, non-empty `requires.gpu_arch`, non-empty `providers[]`, or an STT/TTS profile seed via `sttProfileSeed`/`ttsProfileSeed` — e.g. ollama, localai, faster-whisper-server, kokoro-tts) cannot be installed, started, stopped, uninstalled, or have shared storage applied through `/bundles/api/*`. This includes starts a peer forwards (`bundleOrchestrationRefusal` in `routes/bundles.js`).
+
+The residency poll and the external-engine poll still run, since both are read-only. Model downloads are not gated. Spec: `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`.
+
 ## External engines
 
 A provider row can declare that **another machine runs the engine**: `gpu_policy.engine = { managed: "external", host: "<machine>", label?: "<engine>" }` (today: halogen on raven, row `raven-flash-next`). `managed` must be exactly `"external"`, the only value defined. `host` is a display label, never a routing input, and `providers.host` stays `cloud` (the tab shows "network" + "external · raven"). The helper is `isExternalEngine` in `servers/shared/provider-engine.js`. `gpu_policy` replicates, so every paired instance learns that the row is not its to manage.

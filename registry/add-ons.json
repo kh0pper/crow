@@ -3448,7 +3448,7 @@
     {
       "id": "meta-glasses",
       "name": "Meta Glasses",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
       "type": "mcp-server",
       "author": "Crow",
