@@ -41,7 +41,7 @@ Model routing runs in-process in the gateway: `servers/gateway/routes/llm-router
 | Fast voice (default) | `crow-voice/qwen3.5-4b` (`:8011`) | vLLM-ROCm | Text-only. Qwen3.5-4B is natively vision-language, but its ViT encoder OOMs (256 GiB) under vLLM-ROCm multimodal profiling on gfx1151, so image/video input is disabled (`--limit-mm-per-prompt`). Registered `alwaysResident` with **no mutex group** so it co-resides with the 35B and can never evict it. |
 | Escalation (agentic) | `crow-chat/qwen3.6-35b-a3b` (`:8003`) | llama.cpp Vulkan | The daily-driver MoE; **multimodal** (mmproj). Vision-bearing turns escalate here. |
 
-Vision routes through the smart-router's capability pick — the first enabled provider with an image-capable model, or (if none is tagged) the multimodal 35B — **not** the fast 4B, so a text-only fast model loses no capability; image turns simply escalate. See [GPU orchestration](/architecture/gateway) for the `mutexGroup` eviction model.
+Vision routes through the smart-router's capability pick — the first enabled provider with an image-capable model, or (if none is tagged) the profile fallback, then crow-chat (on crow, the multimodal 35B) — **not** the fast 4B, so a text-only fast model loses no capability; image turns simply escalate. See [GPU orchestration](/architecture/gateway) for the `mutexGroup` eviction model.
 
 ### Three model registries
 

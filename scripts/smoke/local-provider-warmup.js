@@ -4,8 +4,8 @@
  *
  * Covers the non-docker paths only — does NOT attempt to `docker compose up`
  * any bundle. Validates:
- *   1. mutexGroup lookup reads both provider-level (grackle-*) AND
- *      models[0].mutexGroup (crow-swap-*) declarations.
+ *   1. mutexGroup lookup reads both provider-level (host-level provider ids)
+ *      AND models[0].mutexGroup (crow-swap-*) declarations.
  *   2. `maybeAcquireLocalProvider` is a safe no-op for cloud providers
  *      (null), unknown IDs (null), and peer-hosted bundles (null).
  *

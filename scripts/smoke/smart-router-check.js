@@ -137,7 +137,7 @@ if (cloudProvider) {
 
 // Force cross-vendor: try to send to a vendor bucket != "openai". We don't have
 // an anthropic provider in the DB, so test the vendorBucket fallback directly.
-// Instead, override to `grackle-vision` whose host is a peer instance — vendor bucket
+// Instead, override to a vision provider whose host is a peer instance — vendor bucket
 // still "openai" since no provider_type. Skip — we've covered the tool-lock guard in
 // vendor-guard tests. Move on.
 
