@@ -152,7 +152,7 @@ Under the switch:
   - `ensureResident`, `retryDeferredResidents` and `checkIdleRevert` are no-ops;
   - `bootResidency` logs one DISABLED line and arms no idle-revert timer.
 - **Lowest-level primitives** (`bundleUp`, `bundleStop`, `startNativeAndAwaitReady`) throw as well, so a future caller cannot bypass the gate.
-- **Model bundles** (`inference: true`, `requires.gpu`, or `providers[]`) cannot be installed, started or stopped through `/bundles/api/*`. This includes starts a peer forwards (`bundleOrchestrationRefusal` in `routes/bundles.js`).
+- **Model bundles** (`inference: true`, truthy `requires.gpu`, non-empty `requires.gpu_arch`, non-empty `providers[]`, or an STT/TTS profile seed via `sttProfileSeed`/`ttsProfileSeed` — e.g. ollama, localai, faster-whisper-server, kokoro-tts) cannot be installed, started, stopped, uninstalled, or have shared storage applied through `/bundles/api/*`. This includes starts a peer forwards (`bundleOrchestrationRefusal` in `routes/bundles.js`).
 
 The residency poll and the external-engine poll still run, since both are read-only. Model downloads are not gated. Spec: `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`.
 

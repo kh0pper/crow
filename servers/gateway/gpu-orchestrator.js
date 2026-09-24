@@ -1823,14 +1823,6 @@ export async function initNativeModels({
 }
 
 /**
- * Startup — ensure all alwaysResident providers are up.
- * Non-fatal: logs and continues on error. Call from gateway init.
- *
- * If an embed-capable alwaysResident provider was down at startup and came
- * back up here, fire a non-blocking embedding backfill to catch rows that
- * were inserted while embed was offline.
- */
-/**
  * Boot residency (extracted from initOrchestrator for testability): ensure
  * owned alwaysResident providers, park the not-yet-local ones, arm the
  * idle-revert/deferred-retry timer. Under CROW_DISABLE_MODEL_ORCHESTRATION
@@ -1875,6 +1867,14 @@ export async function bootResidency({ cfg, ownAddrs, ensure = ensureResident, ar
   return { disabled: false, ensured };
 }
 
+/**
+ * Startup — ensure all alwaysResident providers are up.
+ * Non-fatal: logs and continues on error. Call from gateway init.
+ *
+ * If an embed-capable alwaysResident provider was down at startup and came
+ * back up here, fire a non-blocking embedding backfill to catch rows that
+ * were inserted while embed was offline.
+ */
 export async function initOrchestrator() {
   if (_initialized) return;
   _initialized = true;
