@@ -683,6 +683,8 @@ export const translations = {
   "models.runtimeHeading": { en: "Runtime status", es: "Estado del runtime" },
   "models.runtimeBinary": { en: "Runtime: {name} {release}", es: "Runtime: {name} {release}" },
   "models.runtimeNoBinary": { en: "No runtime detected yet.", es: "Aún no se ha detectado el runtime." },
+  "models.runtimeOrchestrationDisabled": { en: "Model orchestration is disabled on this host. Models here are started outside Crow.", es: "La orquestación de modelos está desactivada en este equipo. Los modelos se inician fuera de Crow." },
+  "models.errOrchestrationDisabled": { en: "Model orchestration is disabled on this host, so Crow can't start models here.", es: "La orquestación de modelos está desactivada en este equipo, así que Crow no puede iniciar modelos aquí." },
   "models.runtimeHardware": { en: "Detected: {accel} · RAM available: {ram} · Disk free: {disk}", es: "Detectado: {accel} · RAM disponible: {ram} · Disco libre: {disk}" },
   "models.runtimeGpu": { en: "GPU: {gpu} ({vram})", es: "GPU: {gpu} ({vram})" },
   "models.runtimeNoGpu": { en: "No GPU detected — running on CPU only.", es: "No se detectó GPU — se ejecuta solo en CPU." },

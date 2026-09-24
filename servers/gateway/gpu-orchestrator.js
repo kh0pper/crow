@@ -95,8 +95,10 @@ import { isForeignInstanceHost } from "../shared/provider-host.js";
 import { servingClassRefusal, ServingClassError } from "./models/serving-class.js";
 import { isExternalEngine, externalEngineInfo, ExternalEngineError } from "../shared/provider-engine.js";
 import { startExternalEngineMonitor } from "./external-engine-poll.js";
+import { isModelOrchestrationDisabled, OrchestrationDisabledError } from "../shared/model-orchestration.js";
 export { ServingClassError } from "./models/serving-class.js";
 export { ExternalEngineError } from "../shared/provider-engine.js";
+export { OrchestrationDisabledError } from "../shared/model-orchestration.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -277,10 +279,12 @@ function runDockerCompose(args, { timeoutMs = 60_000 } = {}) {
 }
 
 async function bundleUp(bundleId) {
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
   await runDockerCompose(["-f", composeFile(bundleId), "up", "-d"], { timeoutMs: 30_000 });
 }
 
 async function bundleStop(bundleId) {
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
   await runDockerCompose(["-f", composeFile(bundleId), "stop"], { timeoutMs: 30_000 });
 }
 
@@ -569,6 +573,17 @@ function noteDeferred(reservation, what) {
   console.log(`[gpu-orchestrator] residency deferred: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (${what})`);
 }
 
+const DISABLED_LINE = "[gpu-orchestrator] model orchestration DISABLED on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — no model will be started, stopped or evicted";
+let _disabledNoticed = false;
+/** Log the host-level switch once per process (spec 2026-09-24 D2). */
+function noteOrchestrationDisabled() {
+  if (_disabledNoticed) return;
+  _disabledNoticed = true;
+  console.log(DISABLED_LINE);
+}
+/** Test seam: re-arm the once-per-process DISABLED log line. */
+export function _resetOrchestrationDisabledNoticeForTest() { _disabledNoticed = false; }
+
 /** Residency never auto-starts a non-resident model; say so once per provider. */
 function noteServingRefused(name, err) {
   if (_servingNoticed.has(name)) return;
@@ -586,6 +601,9 @@ export function noticeReservation() {
 
 export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!providerName) return null;
+  // Host-level switch (spec 2026-09-24 D2): "not mine to manage", the same
+  // null a cloud row gets; the caller dials base_url.
+  if (isModelOrchestrationDisabled()) return null;
   const cfg = opts.cfg || loadProviders();
   const p = getProvider(providerName, cfg);
   // External engine (spec 2026-09-23 D2) — checked FIRST: "not mine to
@@ -632,6 +650,7 @@ export function isNativeRuntimeProvider(providerName, cfg = loadProviders()) {
  * (cloud provider / unknown / no matching bundle).
  */
 export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresses()) {
+  if (isModelOrchestrationDisabled()) return null; // spec 2026-09-24: nothing is warmable here
   const provs = (cfg && cfg.providers) || {};
   const direct = provs[name];
   if (!direct) return null;
@@ -883,6 +902,7 @@ function persistLivenessMarker(dir, modelId, { wasLive }) {
  * (test seam only).
  */
 async function startNativeAndAwaitReady(providerName, p, opts = {}) {
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(providerName);
   const {
     identityProbeFn = identityProbe,
     startModelFn = startModel,
@@ -1245,6 +1265,8 @@ export async function acquireProvider(providerName, opts = {}) {
   const cfg = opts.cfg || loadProviders();
   const p = getProvider(providerName, cfg);
   if (!p) throw new Error(`orchestrator: unknown provider "${providerName}"`);
+  // Host-level switch (spec 2026-09-24 D2) — before any probe, lock, sibling stop or start.
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(providerName);
   // External engine (spec 2026-09-23 D2) — before any probe, lock or start.
   if (isExternalEngine(p)) throw new ExternalEngineError(providerName, externalEngineInfo(p)?.host ?? null);
 
@@ -1359,6 +1381,7 @@ export async function acquireProvider(providerName, opts = {}) {
  * with no recorded usage get a grace period (timer seeded on first sighting).
  */
 async function checkIdleRevert() {
+  if (isModelOrchestrationDisabled()) return;
   const groups = getMutexGroups();
   for (const [, group] of groups) {
     if (!group.default) continue;
@@ -1390,6 +1413,7 @@ async function checkIdleRevert() {
 }
 
 export function startIdleRevertTimer() {
+  if (isModelOrchestrationDisabled()) return;
   if (_idleRevertTimer) return;
   if (!(IDLE_REVERT_MS > 0) || !(IDLE_CHECK_INTERVAL_MS > 0)) {
     console.log("[gpu-orchestrator] idle auto-revert disabled");
@@ -1485,6 +1509,7 @@ export function _resetExternalSkipNoticesForTest() { _externalSkipNoticed.clear(
  *  `ensureNativeResident` — see its doc; ignored by the Docker branch. */
 export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
   try {
+    if (isModelOrchestrationDisabled()) { noteOrchestrationDisabled(); return false; }
     const p = (cfg.providers || {})[name];
     const requester = opts.requester || "residency";
     if (p && isExternalEngine(p)) { noteExternalSkip(name, p); return false; }
@@ -1524,6 +1549,7 @@ export async function retryDeferredResidents({
   ownAddrs = getOwnAddresses(),
   ensure = ensureResident,
 } = {}) {
+  if (isModelOrchestrationDisabled()) return [];
   if (!_deferredResidents.size) return [];
   const ensured = [];
   let embedRecovered = false;
@@ -1797,6 +1823,51 @@ export async function initNativeModels({
 }
 
 /**
+ * Boot residency (extracted from initOrchestrator for testability): ensure
+ * owned alwaysResident providers, park the not-yet-local ones, arm the
+ * idle-revert/deferred-retry timer. Under CROW_DISABLE_MODEL_ORCHESTRATION
+ * none of that runs — the read-only monitors initOrchestrator armed first
+ * stay armed. Never throws.
+ */
+export async function bootResidency({ cfg, ownAddrs, ensure = ensureResident, armTimer = startIdleRevertTimer } = {}) {
+  if (isModelOrchestrationDisabled()) {
+    noteOrchestrationDisabled();
+    return { disabled: true, ensured: [] };
+  }
+  const ensured = [];
+  try {
+    cfg = cfg ?? loadProviders();
+    ownAddrs = ownAddrs ?? getOwnAddresses();
+    const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
+    _deferredResidents = new Set(
+      Object.entries(cfg.providers || {})
+        .filter(([, v]) => isAlwaysResident(v) && !orchestratableHere(v, {}, ownAddrs))
+        .map(([n]) => n)
+    );
+    if (residents.length === 0 && _deferredResidents.size === 0) {
+      console.log("[gpu-orchestrator] no alwaysResident providers declared");
+      armTimer();
+      return { disabled: false, ensured };
+    }
+    if (residents.length) {
+      console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
+    }
+    let embedRecovered = false;
+    for (const name of residents) {
+      ensured.push(name);
+      if (await ensure(name, cfg, { requester: "residency" })) embedRecovered = true;
+    }
+    armTimer();
+    if (embedRecovered) {
+      triggerEmbedBackfill(); // fire-and-forget — don't block gateway startup
+    }
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] initOrchestrator body failed: ${err.message}`);
+  }
+  return { disabled: false, ensured };
+}
+
+/**
  * Startup — ensure all alwaysResident providers are up.
  * Non-fatal: logs and continues on error. Call from gateway init.
  *
@@ -1837,32 +1908,5 @@ export async function initOrchestrator() {
     console.warn(`[gpu-orchestrator] native model reconcile failed: ${err.message}`);
   }
 
-  try {
-    const cfg = loadProviders();
-    const ownAddrs = getOwnAddresses();
-    const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
-    _deferredResidents = new Set(
-      Object.entries(cfg.providers || {})
-        .filter(([, v]) => isAlwaysResident(v) && !orchestratableHere(v, {}, ownAddrs))
-        .map(([n]) => n)
-    );
-    if (residents.length === 0 && _deferredResidents.size === 0) {
-      console.log("[gpu-orchestrator] no alwaysResident providers declared");
-      startIdleRevertTimer();
-      return;
-    }
-    if (residents.length) {
-      console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
-    }
-    let embedRecovered = false;
-    for (const name of residents) {
-      if (await ensureResident(name, cfg, { requester: "residency" })) embedRecovered = true;
-    }
-    startIdleRevertTimer();
-    if (embedRecovered) {
-      triggerEmbedBackfill(); // fire-and-forget — don't block gateway startup
-    }
-  } catch (err) {
-    console.warn(`[gpu-orchestrator] initOrchestrator body failed: ${err.message}`);
-  }
+  await bootResidency();
 }

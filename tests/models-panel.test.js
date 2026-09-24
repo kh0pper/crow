@@ -1361,3 +1361,48 @@ test("POST /api/models/:id/start: with no body, serving_override is undefined", 
     });
   } finally { await h.cleanup(); }
 });
+
+test("POST /api/models/:id/start under CROW_DISABLE_MODEL_ORCHESTRATION=1 -> 409 MODEL_ORCHESTRATION_DISABLED, acquire never called", async () => {
+  const prev = process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+  process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+    let called = 0;
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      maybeAcquireLocalProviderFn: async () => { called++; return true; },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(r.status, 409);
+      const body = await r.json();
+      assert.equal(body.code, "MODEL_ORCHESTRATION_DISABLED");
+      assert.match(body.error, /CROW_DISABLE_MODEL_ORCHESTRATION/);
+      assert.equal(called, 0);
+    });
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION; else process.env.CROW_DISABLE_MODEL_ORCHESTRATION = prev;
+    await h.cleanup();
+  }
+});
+
+test("GET /api/models/runtime carries orchestrationDisabled (true under the switch, false without)", async () => {
+  const prev = process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE }, async (base) => {
+      delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION;
+      let body = await (await fetch(base + "/api/models/runtime", { headers: authHeaders(token) })).json();
+      assert.equal(body.orchestrationDisabled, false);
+      process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
+      body = await (await fetch(base + "/api/models/runtime", { headers: authHeaders(token) })).json();
+      assert.equal(body.orchestrationDisabled, true);
+    });
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DISABLE_MODEL_ORCHESTRATION; else process.env.CROW_DISABLE_MODEL_ORCHESTRATION = prev;
+    await h.cleanup();
+  }
+});
