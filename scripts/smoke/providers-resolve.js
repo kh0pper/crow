@@ -9,14 +9,16 @@
 
 import { loadProviders } from "../../servers/shared/providers.js";
 
+const EMBED_PROVIDER = process.env.SMOKE_EMBED_PROVIDER || "crow-embed";
+
 const EXPECTED_PROVIDERS = [
   "crow-dispatch",
   "crow-chat",
   "crow-swap-coder",
   "crow-swap-deep",
-  "grackle-embed",
-  "grackle-rerank",
-  "grackle-vision",
+  EMBED_PROVIDER,
+  ...(process.env.SMOKE_RERANK_PROVIDER ? [process.env.SMOKE_RERANK_PROVIDER] : []),
+  ...(process.env.SMOKE_VISION_PROVIDER ? [process.env.SMOKE_VISION_PROVIDER] : []),
 ];
 
 function fail(msg) {

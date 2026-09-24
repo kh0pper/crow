@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const dataDir = mkdtempSync(join(tmpdir(), "smart-router-test-"));
 process.env.CROW_DATA_DIR = dataDir;
-for (const tier of ["CODE", "FAST", "DEEP"]) delete process.env[`CROW_SMART_ROUTER_${tier}`];
+for (const tier of ["CODE", "FAST", "DEEP", "VISION"]) delete process.env[`CROW_SMART_ROUTER_${tier}`];
 process.on("exit", () => { try { rmSync(dataDir, { recursive: true, force: true }); } catch {} });
 
 const MODULE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "servers", "gateway", "ai", "smart-router.js");
@@ -41,7 +41,7 @@ const db = {
 const providers = [
   { id: "crow-chat", models: [{ id: "qwen3.6-35b-a3b" }] },
   { id: "crow-voice", models: [{ id: "qwen3.5-4b" }] },
-  { id: "grackle-vision", models: [{ id: "qwen3-vl-4b" }] },
+  { id: "some-vl", models: [{ id: "qwen3-vl-4b", input: ["text", "image"] }] },
   { id: "my-coder", models: [{ id: "coder-model" }] },
 ];
 
@@ -53,10 +53,10 @@ function pick(mod, content, extra = {}) {
   });
 }
 
-test("DEFAULT_ROUTES: code/deep -> crow-chat, fast -> crow-voice, vision -> grackle-vision, default -> crow-chat", () => {
+test("DEFAULT_ROUTES: code/deep -> crow-chat, fast -> crow-voice, vision -> null (capability pick), default -> crow-chat", () => {
   assert.deepEqual({ ...DEFAULT_ROUTES }, {
     code: "crow-chat",
-    vision: "grackle-vision",
+    vision: null,
     fast: "crow-voice",
     deep: "crow-chat",
     default: "crow-chat",
@@ -137,5 +137,53 @@ test("env override naming a provider that is absent falls through to crow-chat",
     assert.equal(r.provider_id, "crow-chat");
   } finally {
     delete process.env.CROW_SMART_ROUTER_CODE;
+  }
+});
+
+test("pickVisionProvider: lowest enabled image-capable id; disabled skipped; none -> null", () => {
+  const { pickVisionProvider } = router;
+  const list = [
+    { id: "zz-vl", disabled: 0, models: [{ id: "a", input: ["text", "image"] }] },
+    { id: "aa-vl", disabled: true, models: [{ id: "b", input: ["image"] }] },
+    { id: "mm-vl", disabled: 0, models: [{ id: "c", task: "vision" }] },
+    { id: "crow-chat", disabled: 0, models: [{ id: "d", input: ["text"] }] },
+  ];
+  assert.equal(pickVisionProvider(list)?.id, "mm-vl");
+  assert.equal(pickVisionProvider([{ id: "x", disabled: 1, models: [{ input: ["image"] }] }]), null);
+  assert.equal(pickVisionProvider([]), null);
+  assert.equal(pickVisionProvider(null), null);
+});
+
+test("image attachment routes to the image-capable provider", async () => {
+  const r = await pick(router, "what is this?", { attachments: [{ mime_type: "image/png" }] });
+  assert.equal(r.provider_id, "some-vl");
+});
+
+test("/vision slash routes to the image-capable provider", async () => {
+  const r = await pick(router, "/vision describe it");
+  assert.equal(r.provider_id, "some-vl");
+});
+
+test("image attachment with no enabled vision-capable provider falls back as before", async () => {
+  const noVision = providers.filter((p) => p.id !== "some-vl").concat([{ id: "off-vl", disabled: 1, models: [{ input: ["image"] }] }]);
+  const r = await pick(router, "what is this?", { attachments: [{ mime_type: "image/png" }], providers: noVision });
+  assert.notEqual(r.provider_id, "off-vl");
+  assert.equal(r.provider_id, "crow-chat");
+});
+
+test("smart-router.js contains no named-host literal", async () => {
+  const { readFileSync } = await import("node:fs");
+  assert.doesNotMatch(readFileSync(MODULE_PATH, "utf8"), /grackle-(embed|rerank|vision)/);
+});
+
+test("CROW_SMART_ROUTER_VISION env override wins for a fresh module load", async () => {
+  process.env.CROW_SMART_ROUTER_VISION = "my-coder";
+  try {
+    const fresh = await import(pathToFileURL(MODULE_PATH).href + "?env-override=vision");
+    assert.equal(fresh.DEFAULT_ROUTES.vision, "my-coder");
+    const r = await pick(fresh, "what is this?", { attachments: [{ mime_type: "image/png" }] });
+    assert.equal(r.provider_id, "my-coder");
+  } finally {
+    delete process.env.CROW_SMART_ROUTER_VISION;
   }
 });

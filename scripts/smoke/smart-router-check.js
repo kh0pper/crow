@@ -76,11 +76,13 @@ checkTrue("slash /code → crow-chat", r1.provider_id === "crow-chat");
 checkTrue("slash reason includes /code", r1.reason.includes("matched /code"));
 
 const r2 = await pick("/vision what is this");
-checkTrue("slash /vision → grackle-vision", r2.provider_id === "grackle-vision");
+checkTrue("slash /vision → vision provider",
+  process.env.SMOKE_VISION_PROVIDER ? r2.provider_id === process.env.SMOKE_VISION_PROVIDER : !!r2.provider_id);
 
 // attachment with image → vision
 const r3 = await pick("what's in this photo", { attachments: [{ mime_type: "image/jpeg" }] });
-checkTrue("attachment image → grackle-vision", r3.provider_id === "grackle-vision");
+checkTrue("attachment image → vision provider",
+  process.env.SMOKE_VISION_PROVIDER ? r3.provider_id === process.env.SMOKE_VISION_PROVIDER : !!r3.provider_id);
 checkTrue("attachment reason", r3.reason.includes("image attachment"));
 
 // slash BEATS attachment

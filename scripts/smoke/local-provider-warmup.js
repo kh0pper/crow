@@ -46,11 +46,15 @@ expect("crow-chat sees all 3 other crow-* providers as siblings",
   chatSiblings,
   ["crow-dispatch", "crow-swap-coder", "crow-swap-deep"]);
 
-// grackle-rerank's mutexGroup is at provider-level; make sure the fallback
-// didn't regress the original case.
-const rerankSiblings = getMutexSiblings("grackle-rerank");
-expect("grackle-rerank sees grackle-vision as sibling",
-  rerankSiblings, ["grackle-vision"]);
+// The rerank/vision pair's mutexGroup is at provider-level; make sure the
+// fallback didn't regress the original case. Only run when both smoke
+// provider ids are configured (no shipped provider row declares this pair
+// by default — see the vision capability pick in smart-router.js).
+if (process.env.SMOKE_RERANK_PROVIDER && process.env.SMOKE_VISION_PROVIDER) {
+  const rerankSiblings = getMutexSiblings(process.env.SMOKE_RERANK_PROVIDER);
+  expect(`${process.env.SMOKE_RERANK_PROVIDER} sees ${process.env.SMOKE_VISION_PROVIDER} as sibling`,
+    rerankSiblings, [process.env.SMOKE_VISION_PROVIDER]);
+}
 
 // All 4 crow-* members show up in the group, with crow-chat as default
 // (idle auto-revert restores it when a specialist times out).
@@ -71,8 +75,10 @@ expect("maybeAcquireLocalProvider(null) is no-op",
   await maybeAcquireLocalProvider(null), null);
 expect("maybeAcquireLocalProvider('does-not-exist') is no-op",
   await maybeAcquireLocalProvider("does-not-exist"), null);
-expect("maybeAcquireLocalProvider('grackle-vision') is no-op (peer host)",
-  await maybeAcquireLocalProvider("grackle-vision"), null);
+if (process.env.SMOKE_RERANK_PROVIDER && process.env.SMOKE_VISION_PROVIDER) {
+  expect(`maybeAcquireLocalProvider('${process.env.SMOKE_VISION_PROVIDER}') is no-op (peer host)`,
+    await maybeAcquireLocalProvider(process.env.SMOKE_VISION_PROVIDER), null);
+}
 
 if (failed) {
   console.error(`\n${failed} assertion(s) failed`);
