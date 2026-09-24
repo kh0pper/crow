@@ -2,8 +2,9 @@
 /**
  * Phase 5-full smoke: lifecycle refcount + mutex + idempotent merging.
  *
- * Runs entirely in-process using the real grackle-embed provider as the
- * target (since it's already running and cheap to probe).
+ * Runs entirely in-process using the real crow-embed provider (or
+ * SMOKE_EMBED_PROVIDER) as the target (since it's already running and
+ * cheap to probe).
  *
  * Usage: node scripts/smoke/lifecycle-refcount.js
  */
@@ -15,6 +16,8 @@ import {
   onLifecycleEvent,
   resetAllRefcounts,
 } from "../../servers/shared/lifecycle.js";
+
+const P = process.env.SMOKE_EMBED_PROVIDER || "crow-embed";
 
 let failed = 0;
 function t(name, ok, detail) {
@@ -29,27 +32,27 @@ const events = [];
 const unsub = onLifecycleEvent((e) => events.push(e));
 
 // -- 1. ensureModelWarm on a live, always-warm provider --
-const r1 = await ensureModelWarm("grackle-embed");
+const r1 = await ensureModelWarm(P);
 t("ensureModelWarm returns ok for live provider", r1.ok, r1.reason);
 
 // -- 2. Refcount increments on subsequent calls --
-const r2 = await ensureModelWarm("grackle-embed");
+const r2 = await ensureModelWarm(P);
 t("second ensureModelWarm increments refcount", r2.ok && r2.refs >= 2, `refs=${r2.refs}`);
 
 // -- 3. Concurrent ensureModelWarm calls on the same provider share the mutex --
 const [r3a, r3b, r3c] = await Promise.all([
-  ensureModelWarm("grackle-embed"),
-  ensureModelWarm("grackle-embed"),
-  ensureModelWarm("grackle-embed"),
+  ensureModelWarm(P),
+  ensureModelWarm(P),
+  ensureModelWarm(P),
 ]);
 t("concurrent warm all ok", r3a.ok && r3b.ok && r3c.ok);
 const snap1 = getLifecycleSnapshot();
-t("refcount reflects all calls", snap1["grackle-embed"].refs === 5, `refs=${snap1["grackle-embed"].refs}`);
+t("refcount reflects all calls", snap1[P].refs === 5, `refs=${snap1[P].refs}`);
 
 // -- 4. Releases decrement --
-for (let i = 0; i < 5; i++) await releaseModel("grackle-embed");
+for (let i = 0; i < 5; i++) await releaseModel(P);
 const snap2 = getLifecycleSnapshot();
-t("refcount returns to 0 after matching releases", snap2["grackle-embed"].refs === 0);
+t("refcount returns to 0 after matching releases", snap2[P].refs === 0);
 
 // -- 5. Pinned provider rejects release --
 // crow-voice (Qwen3.5-4B, :8011) is the pinned always-warm provider since the

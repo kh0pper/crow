@@ -39,9 +39,9 @@ El enrutamiento de modelos corre en proceso dentro del gateway: `servers/gateway
 | Rol | Proveedor / modelo | Motor | Notas |
 |------|------------------|--------|-------|
 | Voz rápida (predeterminado) | `crow-voice/qwen3.5-4b` (`:8011`) | vLLM-ROCm | Solo texto. Qwen3.5-4B es nativamente visión-lenguaje, pero su encoder ViT se queda sin memoria (OOM, 256 GiB) bajo el perfilado multimodal de vLLM-ROCm en gfx1151, así que la entrada de imagen/video está deshabilitada (`--limit-mm-per-prompt`). Registrado `alwaysResident` **sin grupo de mutex**, de modo que coexiste con el 35B y nunca puede desalojarlo. |
-| Escalado (agéntico) | `crow-chat/qwen3.6-35b-a3b` (`:8003`) | llama.cpp Vulkan | El MoE de uso diario; **multimodal** (mmproj). Los turnos con visión escalan aquí (o a `grackle-vision`). |
+| Escalado (agéntico) | `crow-chat/qwen3.6-35b-a3b` (`:8003`) | llama.cpp Vulkan | El MoE de uso diario; **multimodal** (mmproj). Los turnos con visión escalan aquí. |
 
-La visión en este nodo la sirven el 35B multimodal (estable en Vulkan) y el modelo bajo demanda `grackle-vision` — **no** el 4B rápido — así que un modelo rápido de solo texto no pierde ninguna capacidad; los turnos con imágenes simplemente escalan. Consulta la [orquestación de GPU](/es/architecture/gateway) para el modelo de desalojo por `mutexGroup`.
+La visión se enruta mediante la selección por capacidad del smart-router — el primer proveedor habilitado con un modelo con capacidad de imagen o, si ninguno está etiquetado así, el fallback del perfil y luego crow-chat (en crow, el 35B multimodal) — **no** el 4B rápido — así que un modelo rápido de solo texto no pierde ninguna capacidad; los turnos con imágenes simplemente escalan. Consulta la [orquestación de GPU](/es/architecture/gateway) para el modelo de desalojo por `mutexGroup`.
 
 ### Tres registros de modelos
 

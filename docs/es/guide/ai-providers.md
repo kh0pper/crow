@@ -232,7 +232,7 @@ Cuando hay configurado un proveedor de embeddings, Crow mejora la búsqueda de m
 
 ### Requisitos
 
-- Una entrada de proveedor de embeddings en `models.json` — funciona cualquier endpoint de embeddings compatible con OpenAI (un modelo de embeddings local en vLLM/llama.cpp, Ollama con `nomic-embed-text`, o un proveedor en la nube). Por defecto, Crow busca un proveedor llamado `grackle-embed`.
+- Una entrada de proveedor de embeddings en `models.json` — funciona cualquier endpoint de embeddings compatible con OpenAI (un modelo de embeddings local en vLLM/llama.cpp, Ollama con `nomic-embed-text`, o un proveedor en la nube). Por defecto, Crow no depende de ningún host concreto: elige automáticamente el proveedor habilitado con el `id` más bajo que tenga un modelo etiquetado para embeddings.
 - Eso es todo — los embeddings se almacenan como BLOBs simples en la tabla `memory_embeddings` y se comparan dentro del propio proceso, lo cual es más que suficiente a la escala de una base de conocimiento personal.
 
 ### Cómo funciona

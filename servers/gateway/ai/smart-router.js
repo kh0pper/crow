@@ -15,7 +15,7 @@
  * the best-known local provider for this route" — the defaults are:
  *
  *   code    → crow-chat   (env CROW_SMART_ROUTER_CODE)
- *   vision  → grackle-vision
+ *   vision  → first enabled image-capable provider (CROW_SMART_ROUTER_VISION overrides)
  *   fast    → crow-voice  (env CROW_SMART_ROUTER_FAST; Qwen3.5-4B, :8011)
  *   deep    → crow-chat   (env CROW_SMART_ROUTER_DEEP)
  *   default → crow-chat (also the final fallback; Qwen3.6-35B-A3B as of Apr 2026)
@@ -56,7 +56,7 @@ function tierDefault(tier, fallback) {
 
 export const DEFAULT_ROUTES = Object.freeze({
   code:    tierDefault("code", "crow-chat"),
-  vision:  "grackle-vision",
+  vision:  tierDefault("vision", null),
   fast:    tierDefault("fast", "crow-voice"),
   deep:    tierDefault("deep", "crow-chat"),
   default: "crow-chat",
@@ -106,6 +106,31 @@ function detectKeywordRoute(content) {
   return null;
 }
 
+function isImageCapable(m) {
+  return (Array.isArray(m?.input) && m.input.includes("image")) || m?.task === "vision";
+}
+
+/** Lowest-id enabled provider with an image-capable model (input includes
+ *  "image", or task "vision"), else null. The returned provider carries
+ *  `_preferredModelId`, the id of the image-capable model that matched —
+ *  not necessarily models[0] — so callers route to a model that can
+ *  actually see the attachment. Pure (spec 2026-09-24 D3). */
+export function pickVisionProvider(providers) {
+  if (!Array.isArray(providers)) return null;
+  const ok = providers
+    .filter((p) => p && p.id && !Number(p.disabled))
+    .map((p) => {
+      const models = Array.isArray(p.models) ? p.models : [];
+      const match = models.find(isImageCapable);
+      return match ? { p, matchId: match.id } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.p.id < b.p.id ? -1 : a.p.id > b.p.id ? 1 : 0));
+  if (!ok.length) return null;
+  const { p, matchId } = ok[0];
+  return { ...p, _preferredModelId: matchId };
+}
+
 /**
  * Resolve a route id → provider row using the profile's auto_rules
  * overrides when present, else the baked-in default. If the mapped
@@ -130,6 +155,11 @@ function resolveRouteToProvider(route, providers, rules) {
   // 2. baked-in default for this route
   const baked = pick(DEFAULT_ROUTES[route]);
   if (baked) return baked;
+  // 2b. capability pick for vision when no override/baked default (spec 2026-09-24 D3)
+  if (route === "vision" && !DEFAULT_ROUTES.vision) {
+    const v = pickVisionProvider(providers);
+    if (v) return v;
+  }
   // 3. profile fallback provider
   const fb = pick(fallback);
   if (fb) return fb;
@@ -227,7 +257,10 @@ async function wrapWithVendorLock({ db, convId, picked, reasonBase, currentProvi
   }
   const models = Array.isArray(picked.models) ? picked.models : [];
   const firstModel = models[0];
-  const modelId = typeof firstModel === "string" ? firstModel : firstModel?.id;
+  // A capability pick (e.g. pickVisionProvider) tags the model that actually
+  // matched the capability — honor it over models[0] when present.
+  const modelId = picked._preferredModelId
+    || (typeof firstModel === "string" ? firstModel : firstModel?.id);
   return {
     provider_id: picked.id,
     model_id: modelId || currentModel || null,
