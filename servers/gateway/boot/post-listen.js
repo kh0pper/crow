@@ -279,7 +279,7 @@ export async function runPostListenSetup(server, app, deps) {
     const HEALTH_MONITOR_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min
     const runHealthMonitorCycle = async () => {
       try {
-        const { collectHealthSignals, shouldNotify, invalidateHealthCache, pruneResolved } =
+        const { collectHealthSignals, invalidateHealthCache, runHealthNotifyCycle } =
           await import("../dashboard/panels/nest/health-signals.js");
         const { createNotification } = await import("../../shared/notifications.js");
         const { readSetting } = await import("../dashboard/settings/registry.js");
@@ -298,39 +298,26 @@ export async function runPostListenSetup(server, app, deps) {
             if (raw) lastMap = JSON.parse(raw);
           } catch {}
 
-          const nowMs = Date.now();
-          let mapDirty = false;
-
-          for (const issue of signals.issues) {
-            if (issue.severity !== "warn") continue; // info issues stay strip-only
-            if (!shouldNotify(lastMap, issue.id, nowMs)) continue;
-
-            try {
-              await createNotification(db, {
-                type: "system",
-                source: `health-monitor:${issue.id}`,
-                priority: "high",
-                title: issue.label,
-                body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
-                action_url: "/dashboard/nest",
-              });
-              lastMap[issue.id] = nowMs;
-              mapDirty = true;
-            } catch (notifErr) {
-              console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
-            }
-          }
-
-          // Incident-scoped dedupe: drop markers for issues no longer present
-          // (warn OR info), so a resolved-then-recurring issue notifies again
-          // instead of staying silent under the 24h window. A warn→info
-          // downgrade keeps the marker (id still active = same incident).
-          const activeIds = signals.issues.map(i => i.id);
-          const pruned = pruneResolved(lastMap, activeIds);
-          if (Object.keys(pruned).length !== Object.keys(lastMap).length) {
-            lastMap = pruned;
-            mapDirty = true;
-          }
+          // Push new warn issues (24 h per-id window), then incident-scoped
+          // dedupe: markers for ids no longer present (warn OR info) are
+          // dropped, so a resolved-then-recurring issue notifies again. A
+          // warn→info downgrade keeps the marker (id still active = same
+          // incident) — which is exactly why external engines have their OWN id.
+          const cycle = await runHealthNotifyCycle({
+            issues: signals.issues,
+            lastMap,
+            nowMs: Date.now(),
+            notify: (issue) => createNotification(db, {
+              type: "system",
+              source: `health-monitor:${issue.id}`,
+              priority: "high",
+              title: issue.label,
+              body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+              action_url: "/dashboard/nest",
+            }),
+          });
+          lastMap = cycle.lastMap;
+          const mapDirty = cycle.dirty;
 
           if (mapDirty) {
             try {

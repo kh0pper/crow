@@ -93,7 +93,10 @@ import { isOrchestratableHere } from "../shared/native-locality.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { isForeignInstanceHost } from "../shared/provider-host.js";
 import { servingClassRefusal, ServingClassError } from "./models/serving-class.js";
+import { isExternalEngine, externalEngineInfo, ExternalEngineError } from "../shared/provider-engine.js";
+import { startExternalEngineMonitor } from "./external-engine-poll.js";
 export { ServingClassError } from "./models/serving-class.js";
+export { ExternalEngineError } from "../shared/provider-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -413,14 +416,16 @@ function registryKeyOf(p, providerName, state) {
 
 function getMutexSiblings(name, cfg = loadProviders()) {
   const p = getProvider(name, cfg);
+  if (isExternalEngine(p)) return []; // spec 2026-09-23 D2: never part of a swap
   const group = mutexGroupOf(p);
   if (!group) return [];
   return Object.entries(cfg.providers || {})
-    .filter(([n, v]) => n !== name && mutexGroupOf(v) === group)
+    .filter(([n, v]) => n !== name && !isExternalEngine(v) && mutexGroupOf(v) === group)
     .map(([n]) => n);
 }
 
 function isAlwaysResident(v) {
+  if (isExternalEngine(v)) return false; // spec 2026-09-23 D2: never resident here
   return v?.gpuPolicy?.alwaysResident === true || v?.alwaysResident === true;
 }
 
@@ -451,10 +456,12 @@ export function alwaysResidentProviders(cfg = loadProviders(), ownAddrs = getOwn
 }
 
 // Map<mutexGroup, { default: string|null, members: Array<{name, baseUrl, bundleId}> }>
-function getMutexGroups() {
-  const cfg = loadProviders();
+// External engines (spec 2026-09-23 D2) are never members and never the
+// default — idle-revert must neither probe/seed them nor revert TO them.
+function getMutexGroups(cfg = loadProviders()) {
   const groups = new Map();
   for (const [name, v] of Object.entries(cfg.providers || {})) {
+    if (isExternalEngine(v)) continue;
     const group = mutexGroupOf(v);
     if (!group) continue;
     if (!groups.has(group)) groups.set(group, { default: null, members: [] });
@@ -581,6 +588,9 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!providerName) return null;
   const cfg = opts.cfg || loadProviders();
   const p = getProvider(providerName, cfg);
+  // External engine (spec 2026-09-23 D2) — checked FIRST: "not mine to
+  // manage", the same null a cloud row gets; the caller dials base_url.
+  if (isExternalEngine(p)) return null;
   if (!p?.bundleId && !isNativeRuntime(p)) return null;
   // host is not a locality gate (spec 2026-09-22 D9) — only "belongs to another Crow instance" vetoes;
   // orchestratableHere below decides by address/owner.
@@ -625,6 +635,7 @@ export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresse
   const provs = (cfg && cfg.providers) || {};
   const direct = provs[name];
   if (!direct) return null;
+  if (isExternalEngine(direct)) return null; // spec 2026-09-23 D2: never warmed here
   if (direct.bundleId || isNativeRuntime(direct)) {
     if (!isLocallyOrchestratable(direct, ownAddrs)) return null; // F-INSTALL-10
     return name;
@@ -633,7 +644,7 @@ export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresse
   const base = direct.baseUrl || direct.baseURL || direct.base_url;
   if (!base) return null;
   for (const [n, v] of Object.entries(provs)) {
-    if (n === name || !v || !v.bundleId) continue;
+    if (n === name || !v || !v.bundleId || isExternalEngine(v)) continue;
     if (!isLocallyOrchestratable(v, ownAddrs)) continue; // F-INSTALL-10
     if ((v.baseUrl || v.baseURL || v.base_url) === base) return n;
   }
@@ -1083,6 +1094,9 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
  *   recovery), `true` when this call actually started it.
  */
 async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
+  // External engine (spec 2026-09-23 D2): the single native-spawn funnel
+  // refuses one even if a caller forgot to gate.
+  if (isExternalEngine(p)) throw new ExternalEngineError(providerName, externalEngineInfo(p)?.host ?? null);
   // Owner gate, defence in depth (final review C3). Every caller is
   // SUPPOSED to gate first, but this is the single funnel through which a
   // native process is ever spawned, and one caller (`retryDeferredResidents`
@@ -1231,6 +1245,8 @@ export async function acquireProvider(providerName, opts = {}) {
   const cfg = opts.cfg || loadProviders();
   const p = getProvider(providerName, cfg);
   if (!p) throw new Error(`orchestrator: unknown provider "${providerName}"`);
+  // External engine (spec 2026-09-23 D2) — before any probe, lock or start.
+  if (isExternalEngine(p)) throw new ExternalEngineError(providerName, externalEngineInfo(p)?.host ?? null);
 
   if (isNativeRuntime(p)) {
     if (!orchestratableHere(p, opts)) {
@@ -1450,6 +1466,17 @@ async function ensureNativeResident(name, p, cfg, opts = {}) {
   return providerHasEmbedModel(p);
 }
 
+// ensureResident runs at boot and on every residency retry; an external
+// engine is announced once per provider, then skipped silently.
+const _externalSkipNoticed = new Set();
+function noteExternalSkip(name, p) {
+  if (_externalSkipNoticed.has(name)) return;
+  _externalSkipNoticed.add(name);
+  const host = externalEngineInfo(p)?.host || "another machine";
+  console.log(`[gpu-orchestrator] residency skipped ${name}: external engine on ${host} — never started here`);
+}
+export function _resetExternalSkipNoticesForTest() { _externalSkipNoticed.clear(); }
+
 /** Ensure ONE alwaysResident provider: probe → bundleUp → waitForReady.
  *  Returns true iff it warmed an embed-capable provider (caller may
  *  trigger the embedding backfill). Never throws.
@@ -1460,6 +1487,7 @@ export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
   try {
     const p = (cfg.providers || {})[name];
     const requester = opts.requester || "residency";
+    if (p && isExternalEngine(p)) { noteExternalSkip(name, p); return false; }
     if (p && isNativeRuntime(p)) {
       return await ensureNativeResident(name, p, cfg, { ...opts, requester });
     }
@@ -1785,6 +1813,14 @@ export async function initOrchestrator() {
   // failure class this feature exists to eliminate).
   setResidencyInitialized();
   startResidencyMonitor();
+  // External engines (spec 2026-09-23 §2.3): read-only GET /models every
+  // CROW_EXTERNAL_ENGINE_POLL_MS (default 60 s). Armed here, before anything
+  // that can throw, for the same reason as the residency monitor.
+  try {
+    startExternalEngineMonitor();
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] external-engine poll not armed: ${err.message}`);
+  }
 
   // Native-model boot reconciliation (final-review fix wave, Fix 3) — its
   // own dedicated try/catch, deliberately separate from the alwaysResident
@@ -1807,8 +1843,7 @@ export async function initOrchestrator() {
     const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
     _deferredResidents = new Set(
       Object.entries(cfg.providers || {})
-        .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
-          && !orchestratableHere(v, {}, ownAddrs))
+        .filter(([, v]) => isAlwaysResident(v) && !orchestratableHere(v, {}, ownAddrs))
         .map(([n]) => n)
     );
     if (residents.length === 0 && _deferredResidents.size === 0) {

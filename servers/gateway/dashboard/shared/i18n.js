@@ -228,6 +228,12 @@ export const translations = {
   "signals.providers.downIssue": { en: "The always-on model provider {name} has been unreachable; features that route to it (voice, chat) fall back or fail until it recovers.", es: "El proveedor de modelos siempre activo {name} lleva un rato inaccesible; las funciones que lo usan (voz, chat) recurren a alternativas o fallan hasta que se recupere." },
   "signals.providers.downIssueMulti": { en: "{n} always-on model providers are unreachable ({names}); features that route to them fall back or fail until they recover.", es: "{n} proveedores de modelos siempre activos están inaccesibles ({names}); las funciones que los usan recurren a alternativas o fallan hasta que se recuperen." },
   "signals.providers.action": { en: "Open model health", es: "Ver estado de modelos" },
+  // External engines (spec 2026-09-23 external-engine-provider §2.4) — own signal, info at most
+  "signals.externalEngines.label": { en: "External engines", es: "Motores externos" },
+  "signals.externalEngines.up": { en: "{label} on {host}: up", es: "{label} en {host}: activo" },
+  "signals.externalEngines.downFor": { en: "{label} on {host}: down for {age} (externally managed)", es: "{label} en {host}: caído desde hace {age} (gestionado externamente)" },
+  "signals.externalEngines.unreachable": { en: "{label} on {host}: not reachable from this instance", es: "{label} en {host}: no accesible desde esta instancia" },
+  "signals.externalEngines.action": { en: "Open providers", es: "Ver proveedores" },
 
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
@@ -1552,6 +1558,11 @@ export const translations = {
 
   // ─── Settings Panel ───
   "settings.pageTitle": { en: "Settings", es: "Ajustes" },
+  // Providers tab — external engines (spec 2026-09-23 external-engine-provider §2.4)
+  "settings.providers.externalBadge": { en: "external · {host}", es: "externo · {host}" },
+  "settings.providers.engineUp": { en: "external engine reachable from this instance", es: "motor externo accesible desde esta instancia" },
+  "settings.providers.engineDown": { en: "external engine not reachable from this instance", es: "motor externo no accesible desde esta instancia" },
+  "settings.providers.engineUnprobed": { en: "external engine not probed yet", es: "motor externo aún sin sondear" },
   "settings.searchPlaceholder": { en: "Search settings", es: "Buscar ajustes" },
   "settings.searchNoResults": { en: "No settings match your search.", es: "Ningún ajuste coincide con tu búsqueda." },
   "settings.passwordUpdated": { en: "Password updated.", es: "Contraseña actualizada." },

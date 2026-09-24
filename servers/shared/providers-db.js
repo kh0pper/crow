@@ -36,6 +36,7 @@ import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
 import { inferHost, repairHostDecision } from "./provider-host.js";
+import { isExternalEngine, engineShapeError, externalEngineConflict } from "./provider-engine.js";
 
 function readModelsJson() {
   const merged = { providers: {} };
@@ -213,6 +214,97 @@ function upsertIsNoop(existing, w) {
   return true;
 }
 
+function engineWriteError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+const isEngineWriteError = (err) => typeof err?.code === "string" && err.code.startsWith("EXTERNAL_ENGINE_");
+
+// Per-row skips are logged once per (where, id) per process — the reconciler
+// runs hourly and must not repeat the same line every hour.
+const _engineSkipLogged = new Set();
+function noteEngineSkip(where, id, err) {
+  const key = `${where}:${id}`;
+  if (_engineSkipLogged.has(key)) return;
+  _engineSkipLogged.add(key);
+  console.warn(`[${where}] ${id} skipped: ${err.code}: ${err.message}`);
+}
+export function _resetEngineSkipLogForTest() { _engineSkipLogged.clear(); }
+
+/** Stored gpu_policy → object, or null (absent or corrupt — corrupt reads as "none"). */
+function parseStoredPolicy(raw) {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
+
+/** Incoming gpu_policy (the upsert's already-stringified value) → { policy, malformed }. */
+function parseIncomingPolicy(raw) {
+  if (raw == null) return { policy: null, malformed: false };
+  if (typeof raw === "object") return { policy: raw, malformed: Array.isArray(raw) };
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? { policy: v, malformed: false } : { policy: null, malformed: true };
+  } catch { return { policy: null, malformed: true }; }
+}
+
+const nullish = (v) => (v === undefined ? null : v);
+
+/** Is the incoming raw gpu_policy exactly what is stored (byte-equal, or canonically equal once parsed)? */
+function samePolicyValue(incomingRaw, storedRaw) {
+  if (incomingRaw == null || storedRaw == null) return false;
+  if (String(incomingRaw) === String(storedRaw)) return true;
+  try { return canonicalJsonEqual(JSON.parse(incomingRaw), JSON.parse(storedRaw)); } catch { return false; }
+}
+
+/**
+ * External-engine write rules (spec 2026-09-23 §2.2, TRANSITION-ONLY after
+ * review round 1). Replication writes rows directly — never through here — so
+ * a contradictory or malformed marked row can already be stored. A write that
+ * leaves engine / bundleId / runtime as stored must pass regardless (the tab's
+ * re-enable, reenableProviderPreservingContent, repairProviderHosts and the
+ * reconciler all spread the stored row back in). Only a write that CHANGES one
+ * of them is judged, on the EFFECTIVE row: the upsert SQL COALESCEs a null
+ * gpu_policy into the stored one, while bundle_id is always overwritten.
+ */
+function assertExternalEngineWrite({ incomingBundleId, incomingPolicyRaw, storedRow }) {
+  let { policy: incoming, malformed } = parseIncomingPolicy(incomingPolicyRaw);
+  if (malformed) {
+    // Round 2: a spread write that re-sends a malformed STORED value (e.g. a
+    // replicated '[1]') must pass — only a malformed value that differs is refused.
+    if (!samePolicyValue(incomingPolicyRaw, storedRow?.gpu_policy)) {
+      throw engineWriteError("EXTERNAL_ENGINE_INVALID", "gpu_policy must be a JSON object");
+    }
+    incoming = null; // unchanged: judge the row on its stored policy (which parses to "none")
+  }
+  const storedPolicy = storedRow ? parseStoredPolicy(storedRow.gpu_policy) : null;
+  const storedBundle = storedRow ? nullish(storedRow.bundle_id) : null;
+  const effective = incoming ?? storedPolicy;
+  const bundle = nullish(incomingBundleId);
+
+  const changed =
+    !canonicalJsonEqual(nullish(storedPolicy?.engine), nullish(effective?.engine))
+    || String(storedBundle ?? "") !== String(bundle ?? "")
+    || nullish(storedPolicy?.runtime) !== nullish(effective?.runtime);
+  if (!changed) return;
+
+  const shape = engineShapeError(effective?.engine);
+  if (shape) throw engineWriteError("EXTERNAL_ENGINE_INVALID", shape);
+  if (externalEngineConflict({ bundleId: bundle, gpuPolicy: effective })) {
+    throw engineWriteError("EXTERNAL_ENGINE_CONFLICT",
+      'an external engine (gpu_policy.engine.managed = "external") cannot also carry a bundleId or gpu_policy.runtime = "native"');
+  }
+  const orchestratable = (bundle != null && bundle !== "") || effective?.runtime === "native";
+  if (isExternalEngine({ gpuPolicy: storedPolicy }) && !isExternalEngine({ gpuPolicy: effective }) && orchestratable) {
+    throw engineWriteError("EXTERNAL_ENGINE_CONFLICT",
+      "this row is an external engine; clear gpu_policy.engine in its own write before giving it a bundle or a native runtime");
+  }
+}
+
 /**
  * Upsert a single provider. Bumps lamport_ts and sets instance_id so
  * instance-sync can propagate. Emits a sync change to peers when a
@@ -236,6 +328,12 @@ export async function upsertProvider(db, provider) {
   const existed = rows.length > 0;
   const providerType = provider.providerType ?? provider.provider_type ?? null;
   const gpuPolicy = provider.gpuPolicy != null ? JSON.stringify(provider.gpuPolicy) : (provider.gpu_policy ?? null);
+
+  assertExternalEngineWrite({
+    incomingBundleId: provider.bundleId ?? provider.bundle_id ?? null,
+    incomingPolicyRaw: gpuPolicy,
+    storedRow: existed ? rows[0] : null,
+  });
 
   if (existed && upsertIsNoop(rows[0], {
     baseUrl: provider.baseUrl || provider.base_url || "",
@@ -500,8 +598,15 @@ export async function repairProviderHosts(db, {
   for (const row of await listProvidersAll(db)) {
     const next = repairHostDecision(row, { ownInstanceId, ownAddrs });
     if (next === null) continue;
-    await upsertProvider(db, { ...row, host: next });
-    changes.push({ id: row.id, from: row.host, to: next });
+    // Per-row isolation (external-engine review round 2): only an
+    // EXTERNAL_ENGINE_* refusal is swallowed; anything else still throws.
+    try {
+      await upsertProvider(db, { ...row, host: next });
+      changes.push({ id: row.id, from: row.host, to: next });
+    } catch (err) {
+      if (!isEngineWriteError(err)) throw err;
+      noteEngineSkip("providers-repair", row.id, err);
+    }
   }
   return { repaired: changes.length, changes };
 }
@@ -548,55 +653,71 @@ export async function repairProviderHosts(db, {
  * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
  * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
  *                     skipped_unowned: number, reenabled: number, repaired: number,
- *                     source: string|null }>}
+ *                     failed: number, source: string|null }>}
  *   `upserted` counts actual writes; `unchanged` counts owned entries whose
- *   content already converged (D2 no-op suppression).
+ *   content already converged (D2 no-op suppression); `failed` counts entries
+ *   refused by external-engine write validation (EXTERNAL_ENGINE_*), each
+ *   logged once per row id per process (see noteEngineSkip).
  */
 export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs } = {}) {
   const dbClient = db || createDbClient();
   const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
   const { path, config } = readModelsJson();
-  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0 };
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0, failed: 0 };
   const entries = config?.providers
     ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
     : [];
 
-  const { rows: existingRows } = await dbClient.execute("SELECT id, disabled FROM providers");
+  const { rows: existingRows } = await dbClient.execute("SELECT id, disabled, gpu_policy FROM providers");
   const existing = new Map(existingRows.map((r) => [r.id, r]));
 
   for (const [id, p] of entries) {
-    const cur = existing.get(id);
-    const decision = reconcileDecision({
-      owned: isLocallyOrchestratable({ baseUrl: p.baseUrl }, addrs),
-      present: cur !== undefined,
-      disabled: cur !== undefined && !!Number(cur.disabled),
-      force,
-    });
-    if (decision === "skip_disabled") { counters.skipped_disabled++; continue; }
-    if (decision === "skip_unowned") { counters.skipped_unowned++; continue; }
-    if (decision === "reenable") {
-      const res = await reenableProviderPreservingContent(dbClient, id);
-      if (res) counters.reenabled++;
-      continue;
+    // Per-row isolation (external-engine review C2): one refused write — e.g.
+    // a models.json entry that would newly give a marked external engine a
+    // bundle — must not abort the rest of the pass or the host repair below.
+    try {
+      const cur = existing.get(id);
+      const decision = reconcileDecision({
+        owned: isLocallyOrchestratable({ baseUrl: p.baseUrl }, addrs),
+        present: cur !== undefined,
+        disabled: cur !== undefined && !!Number(cur.disabled),
+        force,
+      });
+      if (decision === "skip_disabled") { counters.skipped_disabled++; continue; }
+      if (decision === "skip_unowned") { counters.skipped_unowned++; continue; }
+      if (decision === "reenable") {
+        const res = await reenableProviderPreservingContent(dbClient, id);
+        if (res) counters.reenabled++;
+        continue;
+      }
+      // "seed" | "assert" — full assert from the file entry.
+      let gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
+        ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }
+        : null;
+      // Q3: models.json knows nothing of external engines — never let a
+      // re-assert drop a stored marker. (A null gpuPolicy already keeps the
+      // stored one via the upsert's COALESCE.)
+      const storedEngine = cur ? parseStoredPolicy(cur.gpu_policy)?.engine : undefined;
+      if (gpuPolicy && storedEngine != null) gpuPolicy = { ...gpuPolicy, engine: storedEngine };
+      const res = await upsertProvider(dbClient, {
+        id,
+        baseUrl: p.baseUrl || "",
+        apiKey: p.apiKey ?? null,
+        host: inferHost(p.baseUrl, p.host, { ownAddrs: addrs }),
+        bundleId: p.bundleId ?? null,
+        description: p.$description || p.description || null,
+        models: p.models || [],
+        disabled: false,
+        providerType: inferProviderType(p.api) || p.providerType || null,
+        gpuPolicy,
+      });
+      if (res.unchanged) counters.unchanged++;
+      else counters.upserted++;
+    } catch (err) {
+      if (!isEngineWriteError(err)) throw err; // DB/emit failures surface exactly as before
+      counters.failed++;
+      noteEngineSkip("providers-reconcile", id, err);
     }
-    // "seed" | "assert" — full assert from the file entry.
-    const gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
-      ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }
-      : null;
-    const res = await upsertProvider(dbClient, {
-      id,
-      baseUrl: p.baseUrl || "",
-      apiKey: p.apiKey ?? null,
-      host: inferHost(p.baseUrl, p.host, { ownAddrs: addrs }),
-      bundleId: p.bundleId ?? null,
-      description: p.$description || p.description || null,
-      models: p.models || [],
-      disabled: false,
-      providerType: inferProviderType(p.api) || p.providerType || null,
-      gpuPolicy,
-    });
-    if (res.unchanged) counters.unchanged++;
-    else counters.upserted++;
   }
   const rep = await repairProviderHosts(dbClient, { ownAddrs: addrs });
   counters.repaired = rep.repaired;
