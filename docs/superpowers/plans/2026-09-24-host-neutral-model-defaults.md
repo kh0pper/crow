@@ -2,40 +2,42 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** No code default names a machine. The embedding and rerank providers resolve by env → `dashboard_settings` → the lowest-id enabled provider whose first model has the matching `task`. The smart-router's vision route picks an image-capable enabled provider.
+**Goal:** No code default names a machine. The embedding and rerank providers resolve by env → `dashboard_settings` → the lowest-id enabled provider that has a model with a matching task tag. The smart-router's vision route picks an image-capable enabled provider.
 
 **Architecture:**
-- A new module, `servers/shared/provider-task.js`, holds a pure picker (`pickProviderByTask`) and one async resolver with a per-task 30 s cache (`resolveProviderForTask`).
+- A new module, `servers/shared/provider-task.js`, holds a pure picker (`pickProviderByTask`, which takes a set of task synonyms) and one async resolver with a cache keyed on task and setting (`resolveProviderForTask`).
 - `embeddings.js` and `rerank.js` call the resolver.
-- `smart-router.js` gets a pure `pickVisionProvider` fallback between the baked default and the profile fallback.
+- `rerank.js` also gets the DB-row fallback that embeddings already has.
+- `smart-router.js` gets a pure `pickVisionProvider` fallback, and the Settings AI-profiles hint shows it.
 
-**Tech Stack:** Node 24 ESM, libsql `createDbClient`, the `node:test` runner via `npm test -- tests/<file>.test.js` (never raw `node --test`).
+**Tech Stack:** Node 24 ESM, libsql `createDbClient(dbPath?)` (reads `dbPath || process.env.CROW_DB_PATH` on every call), the `node:test` runner via `npm test -- tests/<file>.test.js` (never raw `node --test`).
 
-**Spec:** `docs/superpowers/specs/2026-09-24-host-neutral-model-defaults-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-24-host-neutral-model-defaults-design.md` (updated after plan review round 1).
 
 ## Global Constraints
 
-- **Embed resolution order:** `CROW_EMBED_PROVIDER` env → `dashboard_settings.embed_provider` → lowest-id enabled provider with `models[0].task === "embed"` → `null`.
-- **Rerank resolution order:** `CROW_RERANK_PROVIDER` env → `dashboard_settings.rerank_provider` → lowest-id enabled provider with `models[0].task === "rerank"` → `null`. A `null` provider means candidates come back unreranked (today's missing-provider behaviour).
+- **Task synonyms:** `EMBED_TASKS = ["embed", "embedding"]` and `RERANK_TASKS = ["rerank", "score"]`. Real rerank rows are tagged `score` (`bundles/vllm-cuda-rerank/manifest.json`), and `servers/gateway/perch-model-catalog.js` already treats these as synonyms.
+- **A row matches a task set** when ANY entry in its `models` array has `task` in the set.
+- **Embed resolution order:** `CROW_EMBED_PROVIDER` env → `dashboard_settings.embed_provider` → the lowest-id enabled matching provider → `null`.
+- **Rerank resolution order:** `CROW_RERANK_PROVIDER` env → `dashboard_settings.rerank_provider` → the lowest-id enabled matching provider → `null`. A `null` provider means candidates come back unreranked, in their original order.
 - **Vision:**
-  - `DEFAULT_ROUTES.vision = tierDefault("vision", null)`, so the `CROW_SMART_ROUTER_VISION` env override works like the other tiers.
-  - With no override or baked default, it picks the lowest-id enabled provider that has a model with `input` including `"image"` or `task === "vision"`.
-  - Otherwise the existing profile-fallback chain applies.
-- **"Enabled"** means `disabled` is falsy (0, false, null or undefined). **"Lowest id"** means the smallest by JavaScript string comparison.
-- **Caching:** each task's resolution is cached 30 s. Env is read before the cache on every call, so an env override is never masked by it.
-- **DB unavailable:** the task fallback resolves `null`. Never fall back to a named host.
-- **The literal strings `grackle-embed`, `grackle-rerank` and `grackle-vision` must not appear in `servers/`** (comments included, except history notes that say "retired"), nor in the smoke scripts' expectations.
+  - `DEFAULT_ROUTES.vision = tierDefault("vision", null)`, so `CROW_SMART_ROUTER_VISION` is read once at module load like the other tiers.
+  - When it is `null`, the route picks the lowest-id enabled provider that has a model whose `input` includes `"image"` or whose `task === "vision"`. Otherwise the existing chain (profile fallback → `crow-chat`) applies.
+- **"Enabled"** means `Number(disabled)` is 0: that covers `0`, `false`, `null` and `undefined`, whereas `true` and `1` mean disabled. **"Lowest id"** means the smallest by JavaScript string comparison.
+- **Caching:** 30 s, keyed on `task|settingKey`. Env is read before the cache on every call.
+- **DB unavailable:** the task fallback resolves `null`. There is no `models.json` fallback, because that could bring back a named host.
+- **Named-host literals:** `servers/memory/embeddings.js`, `servers/memory/rerank.js`, `servers/memory/server.js` and `servers/gateway/ai/smart-router.js` must contain no `grackle-embed`, `grackle-rerank` or `grackle-vision` literal, comments included. Other files' history comments may stay.
 - **`embed_provider` and `rerank_provider` stay OUT of `SYNC_ALLOWLIST`.**
 - **Commits:** `git add <new files>`, then `git commit <paths> -m ...`. Never a bare commit. No attribution lines.
-- **Test hygiene:** tests that set env restore it in `finally`, and tests reset the resolver cache with the seam. Every DB a test opens is a temp file under the test's own `mkdtempSync` dir, passed through `CROW_DB_PATH`, which is restored afterwards.
+- **Test hygiene:** tests restore env in `finally`/`after` and reset the resolver cache with the seam. Every DB a test opens is a temp file under the test's own `mkdtempSync` dir, passed through `CROW_DB_PATH`, which is restored afterwards.
 
 ## Review Focus
 
-1. **Two enabled embed rows (`crow-embed`, `grackle-embed`).** The lowest id (`crow-embed`) wins. With `crow-embed` disabled, `grackle-embed` wins. Pinned in Task 1 and Task 2.
-2. **A provider row whose `models` has no `task`, or an empty `models`.** It is ignored and must not throw. Pinned in Task 1.
-3. **`dashboard_settings.embed_provider` set to whitespace.** Treated as unset, so the task fallback applies. Pinned in Task 2.
-4. **The resolver cache must not hide an env override set later in the same process.** The env is checked first on every call. Pinned in Task 1.
-5. **An image attachment with no vision-capable enabled provider.** Routing falls back exactly as before (profile fallback → `crow-chat`) and never picks a disabled image-capable row. Pinned in Task 3.
+1. **A real rerank row tagged `score`.** It resolves as the rerank default. Pinned in Tasks 1 and 2.
+2. **Two enabled embed rows (`crow-embed`, `grackle-embed`).** The lowest id wins; disabling it makes the other win. Pinned in Tasks 1 and 2.
+3. **A rerank provider that exists only in the DB (cold `loadProviders` cache).** It is still called, not silently skipped. Pinned in Task 2 with a stubbed `fetch`.
+4. **The resolver cache must not hide an env override set later.** Pinned in Task 1.
+5. **An image attachment with no enabled vision-capable provider.** It falls back exactly as before and never picks a disabled row. Pinned in Task 3.
 
 ---
 
@@ -46,8 +48,9 @@
 - Test: `tests/provider-task.test.js`
 
 **Interfaces (produces):**
-- `pickProviderByTask(providers, task) → string|null`. `providers` is either an object map `{ [id]: { models, disabled? } }` or an array of `{ id, models, disabled? }`.
-- `async resolveProviderForTask({ task, envVar, settingKey, dbFactory = createDbClient }) → string|null`
+- `EMBED_TASKS` (`["embed", "embedding"]`) and `RERANK_TASKS` (`["rerank", "score"]`), both frozen arrays.
+- `pickProviderByTask(providers, tasks) → string|null`, where `tasks` is a string or an array of strings, and `providers` is either an object map `{ [id]: { models, disabled? } }` or an array of `{ id, models, disabled? }`. `models` may be an array or a JSON string.
+- `async resolveProviderForTask({ tasks, envVar, settingKey, dbFactory = createDbClient }) → string|null`
 - `_resetProviderTaskCacheForTest()`
 
 - [ ] **Step 1: Write the failing test**
@@ -56,36 +59,48 @@
 // tests/provider-task.test.js
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pickProviderByTask, resolveProviderForTask, _resetProviderTaskCacheForTest } from "../servers/shared/provider-task.js";
+import {
+  pickProviderByTask, resolveProviderForTask, _resetProviderTaskCacheForTest, EMBED_TASKS, RERANK_TASKS,
+} from "../servers/shared/provider-task.js";
 
-const embedRow = (extra = {}) => ({ models: [{ id: "qwen3-embedding-0.6b", task: "embed" }], ...extra });
+const withTask = (task, extra = {}) => ({ models: [{ id: "m", task }], ...extra });
 
 beforeEach(() => _resetProviderTaskCacheForTest());
 
-test("pickProviderByTask: lowest enabled id with matching models[0].task wins (map and array forms)", () => {
-  const map = { "grackle-embed": embedRow(), "crow-embed": embedRow(), "crow-chat": { models: [{ id: "x" }] } };
-  assert.equal(pickProviderByTask(map, "embed"), "crow-embed");
-  const arr = [{ id: "grackle-embed", ...embedRow() }, { id: "crow-embed", ...embedRow() }];
-  assert.equal(pickProviderByTask(arr, "embed"), "crow-embed");
+test("task synonym sets", () => {
+  assert.deepEqual([...EMBED_TASKS], ["embed", "embedding"]);
+  assert.deepEqual([...RERANK_TASKS], ["rerank", "score"]);
+  assert.ok(Object.isFrozen(EMBED_TASKS) && Object.isFrozen(RERANK_TASKS));
 });
 
-test("pickProviderByTask: disabled rows skipped; missing/empty models ignored; no match -> null", () => {
-  const map = { "crow-embed": embedRow({ disabled: 1 }), "grackle-embed": embedRow({ disabled: 0 }), "a": { models: [] }, "b": {}, "c": { models: [{ id: "m" }] } };
-  assert.equal(pickProviderByTask(map, "embed"), "grackle-embed");
-  assert.equal(pickProviderByTask(map, "rerank"), null);
-  assert.equal(pickProviderByTask({}, "embed"), null);
-  assert.equal(pickProviderByTask(null, "embed"), null);
-  assert.equal(pickProviderByTask("nope", "embed"), null);
+test("pickProviderByTask: lowest enabled id wins (map and array forms); synonyms match", () => {
+  const map = { "grackle-embed": withTask("embed"), "crow-embed": withTask("embedding"), "crow-chat": { models: [{ id: "x" }] } };
+  assert.equal(pickProviderByTask(map, EMBED_TASKS), "crow-embed");
+  const arr = [{ id: "zz-rr", ...withTask("score") }, { id: "aa-rr", ...withTask("rerank") }];
+  assert.equal(pickProviderByTask(arr, RERANK_TASKS), "aa-rr");
+  assert.equal(pickProviderByTask(arr, "score"), "zz-rr");
 });
 
-// A fake dbFactory: records SQL, answers the settings lookup and the providers scan.
+test("pickProviderByTask: any model in the row counts; JSON-string models parse", () => {
+  const map = { multi: { models: [{ id: "chat" }, { id: "e", task: "embed" }] }, str: { models: JSON.stringify([{ id: "e", task: "embed" }]) } };
+  assert.equal(pickProviderByTask(map, EMBED_TASKS), "multi");
+  delete map.multi;
+  assert.equal(pickProviderByTask(map, EMBED_TASKS), "str");
+});
+
+test("pickProviderByTask: disabled (1 or true) skipped; missing/empty/garbage models ignored; no match -> null", () => {
+  const map = { "crow-embed": withTask("embed", { disabled: true }), "d1": withTask("embed", { disabled: 1 }), "grackle-embed": withTask("embed", { disabled: 0 }), a: { models: [] }, b: {}, c: { models: "not json" } };
+  assert.equal(pickProviderByTask(map, EMBED_TASKS), "grackle-embed");
+  assert.equal(pickProviderByTask(map, RERANK_TASKS), null);
+  assert.equal(pickProviderByTask({}, EMBED_TASKS), null);
+  assert.equal(pickProviderByTask(null, EMBED_TASKS), null);
+  assert.equal(pickProviderByTask("nope", EMBED_TASKS), null);
+});
+
 function fakeDb({ setting = null, rows = [] } = {}) {
   const calls = [];
   const factory = () => ({
-    async execute({ sql, args }) {
+    async execute({ sql }) {
       calls.push(sql);
       if (/dashboard_settings/.test(sql)) return { rows: setting === null ? [] : [{ value: setting }] };
       if (/FROM providers/.test(sql)) return { rows };
@@ -102,38 +117,40 @@ test("resolveProviderForTask: env wins, and is read before the cache on every ca
   const { factory } = fakeDb({ rows: [dbRow("crow-embed", "embed")] });
   try {
     delete process.env.X_TEST_PROVIDER;
-    assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_TEST_PROVIDER", settingKey: "embed_provider", dbFactory: factory }), "crow-embed");
+    assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_TEST_PROVIDER", settingKey: "embed_provider", dbFactory: factory }), "crow-embed");
     process.env.X_TEST_PROVIDER = "from-env";
-    assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_TEST_PROVIDER", settingKey: "embed_provider", dbFactory: factory }), "from-env");
+    assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_TEST_PROVIDER", settingKey: "embed_provider", dbFactory: factory }), "from-env");
   } finally {
     if (prev === undefined) delete process.env.X_TEST_PROVIDER; else process.env.X_TEST_PROVIDER = prev;
   }
 });
 
-test("resolveProviderForTask: setting wins over task pick; whitespace setting is ignored", async () => {
+test("resolveProviderForTask: setting wins over the task pick; whitespace setting ignored", async () => {
   let r = fakeDb({ setting: "my-embed", rows: [dbRow("crow-embed", "embed")] });
-  assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_1", settingKey: "embed_provider", dbFactory: r.factory }), "my-embed");
+  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_1", settingKey: "embed_provider", dbFactory: r.factory }), "my-embed");
   _resetProviderTaskCacheForTest();
   r = fakeDb({ setting: "   ", rows: [dbRow("crow-embed", "embed")] });
-  assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_1", settingKey: "embed_provider", dbFactory: r.factory }), "crow-embed");
+  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_1", settingKey: "embed_provider", dbFactory: r.factory }), "crow-embed");
 });
 
-test("resolveProviderForTask: lowest-id enabled row for the task; none -> null; DB failure -> null", async () => {
-  let r = fakeDb({ rows: [dbRow("grackle-embed", "embed"), dbRow("crow-embed", "embed", 1), dbRow("crow-rerank", "rerank")] });
-  assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: r.factory }), "grackle-embed");
-  _resetProviderTaskCacheForTest();
-  assert.equal(await resolveProviderForTask({ task: "vision", envVar: "X_UNSET_2", settingKey: "vision_provider_x", dbFactory: r.factory }), null);
+test("resolveProviderForTask: task pick; none -> null; DB failure -> null", async () => {
+  const r = fakeDb({ rows: [dbRow("grackle-embed", "embed"), dbRow("crow-embed", "embed", 1), dbRow("crow-rerank", "score")] });
+  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: r.factory }), "grackle-embed");
+  assert.equal(await resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "X_UNSET_2", settingKey: "rerank_provider", dbFactory: r.factory }), "crow-rerank");
+  assert.equal(await resolveProviderForTask({ tasks: ["vision"], envVar: "X_UNSET_2", settingKey: "vision_x", dbFactory: r.factory }), null);
   _resetProviderTaskCacheForTest();
   const broken = () => { throw new Error("no db"); };
-  assert.equal(await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: broken }), null);
+  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: broken }), null);
 });
 
-test("resolveProviderForTask: cached per task for 30 s (second call does not hit the DB)", async () => {
+test("resolveProviderForTask: cached 30 s per task|settingKey (second call does not hit the DB; another key does)", async () => {
   const r = fakeDb({ rows: [dbRow("crow-embed", "embed")] });
-  await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_3", settingKey: "embed_provider", dbFactory: r.factory });
+  await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_3", settingKey: "embed_provider", dbFactory: r.factory });
   const n = r.calls.length;
-  await resolveProviderForTask({ task: "embed", envVar: "X_UNSET_3", settingKey: "embed_provider", dbFactory: r.factory });
+  await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_3", settingKey: "embed_provider", dbFactory: r.factory });
   assert.equal(r.calls.length, n);
+  await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_3", settingKey: "other_key", dbFactory: r.factory });
+  assert.ok(r.calls.length > n);
 });
 ```
 
@@ -151,14 +168,17 @@ Expected: FAIL, module not found.
  * docs/superpowers/specs/2026-09-24-host-neutral-model-defaults-design.md).
  *
  * A default must never name a machine. A task's default provider resolves:
- * env override → dashboard_settings key → the lowest-id ENABLED provider whose
- * first model declares that task → null. Cached 30 s per task; the env is
- * consulted before the cache on every call.
+ * env override → dashboard_settings key → the lowest-id ENABLED provider that
+ * has a model tagged with one of the task's synonyms → null. Cached 30 s per
+ * task|settingKey; the env is consulted before the cache on every call.
  */
 import { createDbClient } from "../db.js";
 
+export const EMBED_TASKS = Object.freeze(["embed", "embedding"]);
+export const RERANK_TASKS = Object.freeze(["rerank", "score"]);
+
 const TTL_MS = 30_000;
-const _cache = new Map(); // task -> { value, at }
+const _cache = new Map(); // `${tasks}|${settingKey}` -> { value, at }
 
 /** Test seam: forget cached resolutions. */
 export function _resetProviderTaskCacheForTest() { _cache.clear(); }
@@ -166,27 +186,31 @@ export function _resetProviderTaskCacheForTest() { _cache.clear(); }
 function modelsOf(p) {
   if (!p) return [];
   if (Array.isArray(p.models)) return p.models;
-  if (typeof p.models === "string") { try { const m = JSON.parse(p.models); return Array.isArray(m) ? m : []; } catch { return []; } }
+  if (typeof p.models === "string") {
+    try { const m = JSON.parse(p.models); return Array.isArray(m) ? m : []; } catch { return []; }
+  }
   return [];
 }
 
-/** Lowest enabled id whose models[0].task === task, else null. Pure. */
-export function pickProviderByTask(providers, task) {
+/** Lowest enabled id with any model tagged in `tasks`, else null. Pure. */
+export function pickProviderByTask(providers, tasks) {
   if (!providers || typeof providers !== "object") return null;
+  const want = new Set(Array.isArray(tasks) ? tasks : [tasks]);
   const entries = Array.isArray(providers)
     ? providers.filter((p) => p && p.id).map((p) => [p.id, p])
     : Object.entries(providers);
   const ids = entries
-    .filter(([, p]) => p && !Number(p.disabled) && modelsOf(p)[0]?.task === task)
+    .filter(([, p]) => p && !Number(p.disabled) && modelsOf(p).some((m) => m && want.has(m.task)))
     .map(([id]) => id)
     .sort();
   return ids[0] ?? null;
 }
 
-export async function resolveProviderForTask({ task, envVar, settingKey, dbFactory = createDbClient }) {
+export async function resolveProviderForTask({ tasks, envVar, settingKey, dbFactory = createDbClient }) {
   const env = envVar ? process.env[envVar] : undefined;
   if (typeof env === "string" && env.trim()) return env.trim();
-  const hit = _cache.get(task);
+  const key = `${[].concat(tasks).join(",")}|${settingKey || ""}`;
+  const hit = _cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
   let value = null;
   try {
@@ -199,7 +223,7 @@ export async function resolveProviderForTask({ task, envVar, settingKey, dbFacto
       }
       if (!value) {
         const { rows } = await db.execute({ sql: "SELECT id, models, disabled FROM providers WHERE disabled = 0 ORDER BY id", args: [] });
-        value = pickProviderByTask(rows || [], task);
+        value = pickProviderByTask(rows || [], tasks);
       }
     } finally {
       db.close?.();
@@ -207,7 +231,7 @@ export async function resolveProviderForTask({ task, envVar, settingKey, dbFacto
   } catch {
     value = null; // DB unavailable: never fall back to a named host
   }
-  _cache.set(task, { value, at: Date.now() });
+  _cache.set(key, { value, at: Date.now() });
   return value;
 }
 ```
@@ -215,7 +239,7 @@ export async function resolveProviderForTask({ task, envVar, settingKey, dbFacto
 - [ ] **Step 4: Run it and confirm it passes**
 
 Run: `npm test -- tests/provider-task.test.js`
-Expected: PASS, 7 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -226,28 +250,25 @@ git commit servers/shared/provider-task.js tests/provider-task.test.js -m "feat(
 
 ---
 
-### Task 2: Embeddings and rerank use the resolver
+### Task 2: Embeddings and rerank use the resolver; rerank reads DB-only rows
 
 **Files:**
-- Modify: `servers/memory/embeddings.js`:
-  - the header comment (lines 1-12);
-  - `FALLBACK_PROVIDER` and `resolveDefaultProvider` (~19-60);
-  - the `resolveEmbedConfig` default param (~66).
-- Modify: `servers/memory/rerank.js` (the header comment, `DEFAULT_PROVIDER`, `resolveRerankConfig`, `rerank`).
-- Modify: `servers/memory/server.js:126` (the tool description string).
-- Modify: `tests/embed-provider.test.js` (the second test asserts `grackle-embed`).
+- Modify: `servers/memory/embeddings.js`: the header comment (lines 1-12), `FALLBACK_PROVIDER` and `resolveDefaultProvider` (~19-60), and the `resolveEmbedConfig` default param (~66).
+- Modify: `servers/memory/rerank.js` (the whole file is ~80 lines; read it first).
+- Modify: `servers/memory/server.js`: the description string at `:126` and the comment at `:134-136` ("optionally reranks top-K via grackle-rerank").
+- Modify: `tests/embed-provider.test.js`: its second test asserts `grackle-embed`.
 - Test: `tests/embed-rerank-defaults.test.js` (new).
 
 **Interfaces:**
-- Consumes (Task 1): `resolveProviderForTask({ task, envVar, settingKey, dbFactory })` and `_resetProviderTaskCacheForTest()` from `../shared/provider-task.js`.
+- Consumes (Task 1): `resolveProviderForTask`, `EMBED_TASKS`, `RERANK_TASKS` and `_resetProviderTaskCacheForTest` from `../shared/provider-task.js`. `loadProviderFromDb(id)` is exported from `servers/memory/embeddings.js` (read its signature; it returns `{ baseUrl, apiKey, models }` or `null`).
 - Produces:
-  - `resolveDefaultProvider(): Promise<string|null>` (same export name as today; it can now return `null`);
+  - `resolveDefaultProvider(): Promise<string|null>` (same export name as today; it can now be `null`);
   - `export async function resolveDefaultRerankProvider(): Promise<string|null>` from `rerank.js`;
-  - `rerank(query, candidates, { topK, providerName })`, where `providerName` is now optional (resolved when absent).
+  - `rerank(query, candidates, { topK, providerName })`, with `providerName` optional.
 
 - [ ] **Step 1: Write the failing tests**
 
-Replace the second test in `tests/embed-provider.test.js` (the one titled "falls back to grackle-embed when no env override and DB unreachable") with:
+In `tests/embed-provider.test.js`, replace the second test (titled "falls back to grackle-embed when no env override and DB unreachable") with:
 
 ```js
 test("no env override and DB unreachable -> null (never a named host)", async () => {
@@ -268,7 +289,7 @@ test("no env override and DB unreachable -> null (never a named host)", async ()
 });
 ```
 
-Create `tests/embed-rerank-defaults.test.js`:
+Create `tests/embed-rerank-defaults.test.js`. Static imports run before the env assignment below; that is safe because none of these modules opens a DB at import, and `createDbClient()` reads `CROW_DB_PATH` on every call.
 
 ```js
 // tests/embed-rerank-defaults.test.js
@@ -287,20 +308,23 @@ const dir = mkdtempSync(join(tmpdir(), "embed-rerank-defaults-"));
 const dbPath = join(dir, "crow.db");
 const prevDb = process.env.CROW_DB_PATH;
 process.env.CROW_DB_PATH = dbPath;
+const saved = {};
+for (const k of ["CROW_EMBED_PROVIDER", "CROW_RERANK_PROVIDER"]) saved[k] = process.env[k];
 after(() => {
   if (prevDb === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = prevDb;
+  for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   rmSync(dir, { recursive: true, force: true });
 });
 
 async function seed(rows, settings = {}) {
   const db = createDbClient(dbPath);
   try {
-    await db.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, base_url TEXT, models TEXT, disabled INTEGER DEFAULT 0)");
+    await db.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT, models TEXT, gpu_policy TEXT, disabled INTEGER DEFAULT 0)");
     await db.execute("CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT)");
     await db.execute("DELETE FROM providers");
     await db.execute("DELETE FROM dashboard_settings");
-    for (const [id, task, disabled = 0] of rows) {
-      await db.execute({ sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?, ?, ?, ?)", args: [id, "http://127.0.0.1:1/v1", JSON.stringify([{ id: "m", task }]), disabled] });
+    for (const [id, task, disabled = 0, baseUrl = "http://127.0.0.1:1/v1"] of rows) {
+      await db.execute({ sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?, ?, ?, ?)", args: [id, baseUrl, JSON.stringify([{ id: "m-" + id, task }]), disabled] });
     }
     for (const [k, v] of Object.entries(settings)) {
       await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES (?, ?)", args: [k, v] });
@@ -308,12 +332,11 @@ async function seed(rows, settings = {}) {
   } finally { db.close?.(); }
 }
 
-const saved = {};
 beforeEach(() => {
   _resetProviderTaskCacheForTest();
-  for (const k of ["CROW_EMBED_PROVIDER", "CROW_RERANK_PROVIDER"]) { saved[k] = process.env[k]; delete process.env[k]; }
+  delete process.env.CROW_EMBED_PROVIDER;
+  delete process.env.CROW_RERANK_PROVIDER;
 });
-after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
 test("embed: two enabled embed rows -> lowest id; disabling it -> the other", async () => {
   await seed([["grackle-embed", "embed"], ["crow-embed", "embed"], ["crow-chat", "chat"]]);
@@ -336,16 +359,35 @@ test("embed: no embed-task rows -> null", async () => {
   assert.equal(await resolveDefaultProvider(), null);
 });
 
-test("rerank: task-resolved; env override wins; none -> candidates unreranked in original order", async () => {
-  await seed([["zz-rerank", "rerank"], ["aa-rerank", "rerank"]]);
+test("rerank: 'score'-tagged row resolves; env override wins", async () => {
+  await seed([["zz-rerank", "score"], ["aa-rerank", "rerank"]]);
   assert.equal(await resolveDefaultRerankProvider(), "aa-rerank");
+  _resetProviderTaskCacheForTest();
+  await seed([["only-score", "score"]]);
+  assert.equal(await resolveDefaultRerankProvider(), "only-score");
   process.env.CROW_RERANK_PROVIDER = "env-rerank";
   assert.equal(await resolveDefaultRerankProvider(), "env-rerank");
-  delete process.env.CROW_RERANK_PROVIDER;
-  _resetProviderTaskCacheForTest();
+});
+
+test("rerank: a DB-only task-resolved provider IS called (stubbed fetch) and reorders", async () => {
+  await seed([["db-rerank", "score", 0, "http://127.0.0.1:9/v1"]]);
+  const origFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push(String(url));
+    return new Response(JSON.stringify({ results: [{ index: 2, relevance_score: 0.9 }, { index: 0, relevance_score: 0.5 }, { index: 1, relevance_score: 0.1 }] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const out = await rerank("q", [{ id: 1, text: "a" }, { id: 2, text: "b" }, { id: 3, text: "c" }], { topK: 3 });
+    assert.equal(seen.length, 1, "reranker endpoint must be called");
+    assert.match(seen[0], /127\.0\.0\.1:9\/v1\/rerank$/);
+    assert.equal(out[0].id, 3);
+  } finally { globalThis.fetch = origFetch; }
+});
+
+test("rerank: no provider -> candidates unreranked in original order", async () => {
   await seed([["crow-chat", "chat"]]);
-  const cands = [{ id: 1, text: "a" }, { id: 2, text: "b" }, { id: 3, text: "c" }];
-  const out = await rerank("q", cands, { topK: 2 });
+  const out = await rerank("q", [{ id: 1, text: "a" }, { id: 2, text: "b" }, { id: 3, text: "c" }], { topK: 2 });
   assert.deepEqual(out.map((c) => c.id), [1, 2]);
 });
 
@@ -357,53 +399,64 @@ test("no named-host literals remain in the memory servers", () => {
 });
 ```
 
+Before relying on the stubbed-fetch test, read how `rerank()` parses the response body today (`results[].index` / `relevance_score`, or `data[]`?). Make the stub return exactly the shape the existing code parses, then keep the assertion that the highest-scored candidate (`id 3`) comes first.
+
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `npm test -- tests/embed-provider.test.js tests/embed-rerank-defaults.test.js`
-Expected: FAIL (`resolveDefaultRerankProvider` is not exported; the fallback returns `grackle-embed`; the literal scan fails).
+Expected: FAIL (the missing `resolveDefaultRerankProvider` export, the `grackle-embed` fallback, the literal scan, and the DB-only rerank row not being called).
 
 - [ ] **Step 3: Implement**
 
 1. **`servers/memory/embeddings.js`:**
    - Replace the header's first paragraph with: `Embedding client + BLOB+JS cosine-similarity search. The default provider is host-neutral: see resolveDefaultProvider (spec 2026-09-24 host-neutral-model-defaults).`
-   - Delete `const FALLBACK_PROVIDER = "grackle-embed";`, the resolution-order comment block and the `_defaultProvider*` cache variables. Replace the whole `resolveDefaultProvider` function with:
+   - Delete `FALLBACK_PROVIDER`, the resolution-order comment block and the `_defaultProvider*` cache variables. Add `import { resolveProviderForTask, EMBED_TASKS } from "../shared/provider-task.js";` to the imports, and replace `resolveDefaultProvider` with:
 
 ```js
-import { resolveProviderForTask } from "../shared/provider-task.js";
-
 // Default embedding-provider resolution (spec 2026-09-24): CROW_EMBED_PROVIDER
 // env → dashboard_settings 'embed_provider' → the lowest-id enabled provider
-// whose first model has task "embed" → null. Never a named host.
+// with an embed-tagged model → null. Never a named host.
 export async function resolveDefaultProvider() {
-  return resolveProviderForTask({ task: "embed", envVar: "CROW_EMBED_PROVIDER", settingKey: "embed_provider" });
+  return resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "CROW_EMBED_PROVIDER", settingKey: "embed_provider" });
 }
 ```
 
-   (Put the import with the other imports at the top of the file.)
-   - Change `async function resolveEmbedConfig(providerName = FALLBACK_PROVIDER)` to `async function resolveEmbedConfig(providerName)`. Its existing `throw new Error(\`embedding provider "${providerName}" not configured\`)` stays; for `null` it now reads `embedding provider "null" not configured`. Callers at ~126 and ~165 already pass `providerName || (await resolveDefaultProvider())`.
-   - Grep the file for any remaining `FALLBACK_PROVIDER` and resolve each use the same way.
+   - Change `async function resolveEmbedConfig(providerName = FALLBACK_PROVIDER)` to `async function resolveEmbedConfig(providerName)`. Then grep the file: no `FALLBACK_PROVIDER` may remain. Callers (~126, ~165) already pass `providerName || (await resolveDefaultProvider())`.
 
 2. **`servers/memory/rerank.js`:**
    - Header line 2 becomes `Reranker client. Provider is host-neutral: see resolveDefaultRerankProvider.`
-   - Delete `const DEFAULT_PROVIDER = "grackle-rerank";`.
+   - Delete `DEFAULT_PROVIDER`. Import `resolveProviderForTask` and `RERANK_TASKS` from `../shared/provider-task.js`, and `loadProviderFromDb` from `./embeddings.js`.
    - Add:
 
 ```js
-import { resolveProviderForTask } from "../shared/provider-task.js";
-
 /** CROW_RERANK_PROVIDER env → dashboard_settings 'rerank_provider' → lowest-id
- *  enabled provider with task "rerank" → null (spec 2026-09-24). */
+ *  enabled provider with a rerank/score-tagged model → null (spec 2026-09-24). */
 export async function resolveDefaultRerankProvider() {
-  return resolveProviderForTask({ task: "rerank", envVar: "CROW_RERANK_PROVIDER", settingKey: "rerank_provider" });
+  return resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "CROW_RERANK_PROVIDER", settingKey: "rerank_provider" });
 }
 ```
 
-   - Change `resolveRerankConfig(providerName = DEFAULT_PROVIDER)` to `resolveRerankConfig(providerName)`, and make its first line `if (!providerName) throw new Error("no rerank provider");`.
-   - Change `rerank`'s signature to `{ topK = 10, providerName } = {}`, and as its first statement after the empty-candidates check: `providerName = providerName || (await resolveDefaultRerankProvider());`. The existing `try { cfg = resolveRerankConfig(providerName) } catch { return candidates.slice(0, topK) }` then covers the `null` case.
+   - Make `resolveRerankConfig` async and mirror embeddings' DB fallback:
 
-3. **`servers/memory/server.js:126`:** change `(auto-falls back to FTS-only if grackle-embed offline)` to `(auto-falls back to FTS-only if the embedding provider is offline)`.
+```js
+async function resolveRerankConfig(providerName) {
+  if (!providerName) throw new Error("no rerank provider");
+  let p = loadProviders().providers?.[providerName];
+  if (!p || !p.baseUrl) p = await loadProviderFromDb(providerName); // cold cache / DB-only row
+  if (!p || !p.baseUrl) throw new Error(`rerank provider "${providerName}" not configured`);
+  const model = p.models?.[0]?.id || "default";
+  return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, name: providerName };
+}
+```
 
-4. **Check other callers:** `grep -rn "rerank(" servers --include=*.js | grep -v "function rerank"`. Any caller passing `providerName: "grackle-rerank"` explicitly must drop it, so the default resolution applies. Show the grep output in your report.
+   - In `rerank`: the signature becomes `{ topK = 10, providerName } = {}`. After the empty-candidates check, add `providerName = providerName || (await resolveDefaultRerankProvider());`, and change `cfg = resolveRerankConfig(providerName)` to `cfg = await resolveRerankConfig(providerName)` inside the existing try/catch (which returns `candidates.slice(0, topK)`).
+   - Check for an import cycle: `embeddings.js` must not import `rerank.js`. If it does, move `loadProviderFromDb` usage behind a dynamic `await import("./embeddings.js")` inside `resolveRerankConfig`.
+
+3. **`servers/memory/server.js`:**
+   - `:126`: `(auto-falls back to FTS-only if grackle-embed offline)` becomes `(auto-falls back to FTS-only if the embedding provider is offline)`.
+   - The comment at `:134-136`: `optionally reranks top-K via grackle-rerank` becomes `optionally reranks top-K via the default rerank provider`.
+
+4. **Callers:** run `grep -rn "rerank(" servers bundles --include=*.js | grep -v "function rerank"`. Any caller passing a named `providerName` for a host must drop it. Paste the grep in your report.
 
 - [ ] **Step 4: Run and confirm it passes**
 
@@ -414,41 +467,35 @@ Expected: all PASS.
 
 ```bash
 git add tests/embed-rerank-defaults.test.js
-git commit servers/memory/embeddings.js servers/memory/rerank.js servers/memory/server.js tests/embed-provider.test.js tests/embed-rerank-defaults.test.js -m "feat(memory): host-neutral embed + rerank defaults (no grackle fallback)"
+git commit servers/memory/embeddings.js servers/memory/rerank.js servers/memory/server.js tests/embed-provider.test.js tests/embed-rerank-defaults.test.js -m "feat(memory): host-neutral embed + rerank defaults; rerank reads DB-only rows"
 ```
 
 ---
 
-### Task 3: Smart-router vision fallback, smoke scripts, docs
+### Task 3: Smart-router vision capability pick, UI hint, smoke scripts, docs
 
 **Files:**
-- Modify: `servers/gateway/ai/smart-router.js`:
-  - the header comment line ~18 (`vision → grackle-vision`);
-  - `DEFAULT_ROUTES` (~57);
-  - `resolveRouteToProvider` (~115).
-- Modify: `tests/smart-router.test.js`: the `DEFAULT_ROUTES` test (~line 57 of the file) and the fixture provider list (~line 41).
+- Modify: `servers/gateway/ai/smart-router.js`: the header comment (~18), `DEFAULT_ROUTES` (~57) and `resolveRouteToProvider` (~115).
+- Modify: `servers/gateway/dashboard/settings/sections/llm/ai-profiles.js` (~169, the baked-in-default hint).
+- Modify: `tests/smart-router.test.js`: the top env-clearing loop (~24), the fixture (~44), the `DEFAULT_ROUTES` test (~56); plus appended tests.
 - Modify: `scripts/smoke/providers-resolve.js`, `scripts/smoke/lifecycle-refcount.js`, `scripts/smoke/smart-router-check.js`, `scripts/smoke/local-provider-warmup.js`.
-- Modify: docs that state the grackle default. Run `grep -rn "grackle-embed\|grackle-rerank\|grackle-vision" docs --include=*.md`, then edit only sentences that describe a *default or fallback*. Leave historical logs and specs alone.
+- Modify: docs. Run `grep -rn "grackle-embed\|grackle-rerank\|grackle-vision" docs --include=*.md` and edit only sentences that state a *default or fallback* provider.
 
 **Interfaces:**
-- Produces: `export function pickVisionProvider(providers) → object|null` from `smart-router.js`. It takes `listProvidersAll`'s array shape (`{ id, disabled, models: [{ input?, task? }] }`).
+- Produces: `export function pickVisionProvider(providers) → object|null` from `smart-router.js`. It takes `listProvidersAll`'s array shape `{ id, disabled, models: [{ input?, task? }] }`.
 
 - [ ] **Step 1: Write the failing tests** (in `tests/smart-router.test.js`)
-
-   First, delete `CROW_SMART_ROUTER_VISION` alongside the others at the top: change `for (const tier of ["CODE", "FAST", "DEEP"])` to `for (const tier of ["CODE", "FAST", "DEEP", "VISION"])`.
-
-   Then change the provider fixture's `{ id: "grackle-vision", models: [{ id: "qwen3-vl-4b" }] }` entry to `{ id: "some-vl", models: [{ id: "qwen3-vl-4b", input: ["text", "image"] }] }`.
-
-   In the `DEFAULT_ROUTES` test, change its title's `vision -> grackle-vision` to `vision -> null (picked by capability)`, and its expected `vision: "grackle-vision"` to `vision: null`.
-
-   Append:
+   - Change the top loop from `for (const tier of ["CODE", "FAST", "DEEP"])` to `for (const tier of ["CODE", "FAST", "DEEP", "VISION"])`.
+   - In the `providers` fixture, replace `{ id: "grackle-vision", models: [{ id: "qwen3-vl-4b" }] },` with `{ id: "some-vl", models: [{ id: "qwen3-vl-4b", input: ["text", "image"] }] },`.
+   - In the `DEFAULT_ROUTES` test, retitle `vision -> grackle-vision` to `vision -> null (capability pick)` and change the expected `vision: "grackle-vision"` to `vision: null`. Keep its `Object.isFrozen` assertion.
+   - Append:
 
 ```js
-test("pickVisionProvider: lowest enabled id with an image-capable model; disabled skipped; none -> null", () => {
+test("pickVisionProvider: lowest enabled image-capable id; disabled skipped; none -> null", () => {
   const { pickVisionProvider } = router;
   const list = [
     { id: "zz-vl", disabled: 0, models: [{ id: "a", input: ["text", "image"] }] },
-    { id: "aa-vl", disabled: 1, models: [{ id: "b", input: ["image"] }] },
+    { id: "aa-vl", disabled: true, models: [{ id: "b", input: ["image"] }] },
     { id: "mm-vl", disabled: 0, models: [{ id: "c", task: "vision" }] },
     { id: "crow-chat", disabled: 0, models: [{ id: "d", input: ["text"] }] },
   ];
@@ -459,27 +506,43 @@ test("pickVisionProvider: lowest enabled id with an image-capable model; disable
 });
 
 test("image attachment routes to the image-capable provider", async () => {
-  const r = await chooseProvider(args({ content: "what is this?", attachments: [{ mime_type: "image/png" }] }));
+  const r = await pick(router, "what is this?", { attachments: [{ mime_type: "image/png" }] });
   assert.equal(r.provider_id, "some-vl");
 });
 
-test("image attachment with no vision-capable enabled provider falls back as before", async () => {
+test("/vision slash routes to the image-capable provider", async () => {
+  const r = await pick(router, "/vision describe it");
+  assert.equal(r.provider_id, "some-vl");
+});
+
+test("image attachment with no enabled vision-capable provider falls back as before", async () => {
   const noVision = providers.filter((p) => p.id !== "some-vl").concat([{ id: "off-vl", disabled: 1, models: [{ input: ["image"] }] }]);
-  const r = await chooseProvider(args({ content: "what is this?", attachments: [{ mime_type: "image/png" }], providers: noVision }));
+  const r = await pick(router, "what is this?", { attachments: [{ mime_type: "image/png" }], providers: noVision });
   assert.notEqual(r.provider_id, "off-vl");
   assert.equal(r.provider_id, "crow-chat");
 });
+
+test("CROW_SMART_ROUTER_VISION env override wins for a fresh module load", async () => {
+  process.env.CROW_SMART_ROUTER_VISION = "my-coder";
+  try {
+    const fresh = await import(pathToFileURL(MODULE_PATH).href + "?env-override=vision");
+    assert.equal(fresh.DEFAULT_ROUTES.vision, "my-coder");
+    const r = await pick(fresh, "what is this?", { attachments: [{ mime_type: "image/png" }] });
+    assert.equal(r.provider_id, "my-coder");
+  } finally {
+    delete process.env.CROW_SMART_ROUTER_VISION;
+  }
+});
 ```
 
-   `args(...)` is the helper the test file already defines around line 50 (it spreads `...extra` over `{ db, convId, providers, autoRules: null }`). Read it. If it has a different name, use that name, and pass `providers` through it exactly as it allows. If the file's existing chooseProvider calls pass `content`/`attachments` under other keys, match them.
+   The existing `/fast`/`/code` tests show how slash commands route. If `/vision` requires the rest of the message in a specific form, match the existing slash tests' pattern.
 
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `npm test -- tests/smart-router.test.js`
-Expected: FAIL (`pickVisionProvider` is not exported; `DEFAULT_ROUTES.vision` is still `grackle-vision`).
+Expected: FAIL (`pickVisionProvider` is not exported; vision still defaults to `grackle-vision`).
 
 - [ ] **Step 3: Implement** in `servers/gateway/ai/smart-router.js`
-
    - Header comment: `vision  → grackle-vision` becomes `vision  → first enabled image-capable provider (CROW_SMART_ROUTER_VISION overrides)`.
    - `DEFAULT_ROUTES`: `vision:  "grackle-vision",` becomes `vision:  tierDefault("vision", null),`.
    - Add above `resolveRouteToProvider`:
@@ -498,7 +561,7 @@ export function pickVisionProvider(providers) {
 }
 ```
 
-   - In `resolveRouteToProvider`, between step 2 (baked) and step 3 (profile fallback), insert:
+   - In `resolveRouteToProvider`, between step 2 (baked) and step 3 (profile fallback):
 
 ```js
   // 2b. capability pick for vision when no override/baked default (spec 2026-09-24 D3)
@@ -508,23 +571,25 @@ export function pickVisionProvider(providers) {
   }
 ```
 
-- [ ] **Step 4: Smoke scripts (manual, not in the suite).** Replace host-named provider ids with env-driven, host-neutral values:
-   - In `scripts/smoke/providers-resolve.js`, replace the `"grackle-embed"`, `"grackle-rerank"` and `"grackle-vision"` entries in its id list with `process.env.SMOKE_EMBED_PROVIDER || "crow-embed"`, `process.env.SMOKE_RERANK_PROVIDER || "crow-rerank"` and `process.env.SMOKE_VISION_PROVIDER || "crow-vision"`.
-   - In `scripts/smoke/lifecycle-refcount.js`, introduce `const P = process.env.SMOKE_EMBED_PROVIDER || "crow-embed";` at the top and use `P` everywhere `"grackle-embed"` appears, including in assertion messages.
-   - In `scripts/smoke/smart-router-check.js`, the two checks expecting `grackle-vision` become checks that `provider_id` equals `process.env.SMOKE_VISION_PROVIDER` when that env is set, and otherwise that it is truthy.
-   - In `scripts/smoke/local-provider-warmup.js`, the `grackle-rerank`/`grackle-vision` mutex-sibling and peer-host expectations use `process.env.SMOKE_RERANK_PROVIDER || "crow-rerank"` and `process.env.SMOKE_VISION_PROVIDER || "crow-vision"`.
-   - Keep each script's structure, and run `node --check <file>` on each (syntax only; this never touches a DB).
+- [ ] **Step 4: Settings hint** (`ai-profiles.js` ~169). The hint currently renders `DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default`, which would show vision as `crow-chat`. Render `r.id === "vision" && !DEFAULT_ROUTES.vision ? "first image-capable provider" : (DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default)`, keeping it inside the existing `escapeHtml(...)`. This file is server-rendered HTML in a template literal, so add no backticks inside `${}`.
 
-- [ ] **Step 5: Docs.** Run the docs grep from **Files**. For each sentence that states a *default or fallback* provider, rewrite it to the host-neutral rule; each short sentence should link to `docs/superpowers/specs/2026-09-24-host-neutral-model-defaults-design.md`. Show the grep output before and after in your report.
+- [ ] **Step 5: Smoke scripts** (manual, not in the suite). Make them host-neutral:
+   - `providers-resolve.js`: replace `"grackle-embed"`, `"grackle-rerank"` and `"grackle-vision"` in its id list with `process.env.SMOKE_EMBED_PROVIDER || "crow-embed"`, and include rerank and vision only when `SMOKE_RERANK_PROVIDER` / `SMOKE_VISION_PROVIDER` are set.
+   - `lifecycle-refcount.js`: add `const P = process.env.SMOKE_EMBED_PROVIDER || "crow-embed";` at the top and use `P` for every `"grackle-embed"`, messages included.
+   - `smart-router-check.js`: the two `grackle-vision` checks assert `provider_id === process.env.SMOKE_VISION_PROVIDER` when that env is set, and only that `provider_id` is truthy otherwise.
+   - `local-provider-warmup.js`: wrap the rerank/vision mutex-sibling expectation and the vision peer-host expectation in `if (process.env.SMOKE_RERANK_PROVIDER && process.env.SMOKE_VISION_PROVIDER) { … }`, using those env values in place of the `grackle-*` ids.
+   - Run `node --check <file>` on each (syntax only; it never touches a DB).
 
-- [ ] **Step 6: Run and confirm it passes, then run the full suite**
+- [ ] **Step 6: Docs.** Run the docs grep; for each sentence stating a *default/fallback* provider, rewrite it to the host-neutral rule. Paste the grep before and after in your report.
 
-Run: `npm test -- tests/smart-router.test.js` (expected PASS), then `npm test` (full suite, expected 0 failures). Record the counts.
+- [ ] **Step 7: Run and confirm it passes, then the full suite**
 
-- [ ] **Step 7: Commit**
+Run: `npm test -- tests/smart-router.test.js` (PASS), then `npm test` (full suite, 0 failures). Record the counts.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git commit servers/gateway/ai/smart-router.js tests/smart-router.test.js scripts/smoke/providers-resolve.js scripts/smoke/lifecycle-refcount.js scripts/smoke/smart-router-check.js scripts/smoke/local-provider-warmup.js <each doc file edited> -m "feat(router): vision route picks an image-capable provider; host-neutral smoke scripts + docs"
+git commit servers/gateway/ai/smart-router.js servers/gateway/dashboard/settings/sections/llm/ai-profiles.js tests/smart-router.test.js scripts/smoke/providers-resolve.js scripts/smoke/lifecycle-refcount.js scripts/smoke/smart-router-check.js scripts/smoke/local-provider-warmup.js <each doc file edited> -m "feat(router): vision picks an image-capable provider; host-neutral hint, smoke scripts, docs"
 ```
 
 ---
@@ -532,10 +597,31 @@ git commit servers/gateway/ai/smart-router.js tests/smart-router.test.js scripts
 ## Operational runbook (NOT part of the PR; the controller runs it after merge + deploy). Spec §3.
 
 1. Register a CROW-SCHEDULE slot (no GPU, no model containers).
-2. **On crow:** add a `crow-embed` provider row (`http://100.118.41.122:8004/v1`, host `local`, models `[{"id":"qwen3-embedding-0.6b","task":"embed","dim":1024,"matryoshkaDims":[1024,768,512,256],"warm":true,"priority":"interactive"}]`, `bundle_id llamacpp-vulkan-qwen3-embed`) through the gateway's providers API, never a second DB client. Set `dashboard_settings.embed_provider=crow-embed` through the settings API. Disable `grackle-rerank` and `grackle-vision`.
-3. **On r4:** the same row and setting through r4's API (:3008). Edit `crow-r4-gateway.service` `CROW_EMBED_PROVIDER` → `crow-embed` and `~/.crow-r4/mcp-addons.json` `EMBED_HOST` → `http://100.118.41.122:8004`. Back up both first, then restart r4.
+2. **On crow**, through the gateway's providers/settings API (never a second DB client):
+   - add a `crow-embed` row (`http://100.118.41.122:8004/v1`, host `local`, models `[{"id":"qwen3-embedding-0.6b","task":"embed","dim":1024,"matryoshkaDims":[1024,768,512,256],"warm":true,"priority":"interactive"}]`, `bundle_id llamacpp-vulkan-qwen3-embed`);
+   - set `embed_provider=crow-embed`;
+   - disable `grackle-rerank` and `grackle-vision`.
+3. **On r4:** the same row and setting through :3008. Back up `crow-r4-gateway.service` and `~/.crow-r4/mcp-addons.json`, then change `CROW_EMBED_PROVIDER` to `crow-embed` and `EMBED_HOST` to `http://100.118.41.122:8004`. Restart r4.
 4. **Verify:**
-   - a semantic memory search on crow and r4;
+   - semantic memory search on crow and r4;
    - the crow embed container log shows requests;
-   - raven resolves `crow-embed` (the row synced);
-   - grackle `:9100` receives no new requests from crow, r4 or raven.
+   - raven resolves `crow-embed`;
+   - grackle `:9100` gets no new traffic from crow, r4 or raven.
+5. **Note:** no shipped provider row declares an image-capable model, so vision keeps falling back to `crow-chat`, which is a VLM. That is fine. Tagging crow-chat's model `input: ["text","image"]` would make the capability pick explicit; it's optional and deferred.
+
+## Review
+
+- **Round 1 (2026-09-24): REVISE.**
+  - **Critical, fixed:**
+    - (1) rerank rows are tagged `score`, so synonym sets were added;
+    - (2) the literal scan would have tripped on the un-edited `server.js:136` comment, so that comment was added to the edits and the constraint scoped to the four files;
+    - (3) the smart-router helper is `pick(mod, content, extra)`, so exact calls were written;
+    - (4) rerank ignored DB-only rows, so the `loadProviderFromDb` fallback was added, plus a stubbed-fetch test.
+  - **Suggestions adopted:**
+    - the ai-profiles hint;
+    - the cache key `task|settingKey`;
+    - tests for the VISION env override, `/vision` and `disabled: true`;
+    - a match on any model in the row;
+    - the spec aligned on DB failure → `null`;
+    - the smoke mutex check gated on env;
+    - the unused imports and the test count fixed.

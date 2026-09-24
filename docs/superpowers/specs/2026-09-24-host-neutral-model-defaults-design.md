@@ -20,10 +20,10 @@ A default that names one machine is a product bug, whatever the machine. It is a
 
 ### D1 (mine): default embed provider resolved by task, not by name
 
-`resolveDefaultProvider()` keeps its order: `CROW_EMBED_PROVIDER` env first, then `dashboard_settings.embed_provider`. The hard-coded third step, `"grackle-embed"`, is replaced by **the first enabled provider whose first model has `task === "embed"`**. "First" means lowest `id` in the providers table, which is already how `loadProvidersFromDb` orders rows (`WHERE disabled = 0 ORDER BY id`). If no such provider exists, it resolves to `null`.
+`resolveDefaultProvider()` keeps its order: `CROW_EMBED_PROVIDER` env first, then `dashboard_settings.embed_provider`. The hard-coded third step, `"grackle-embed"`, is replaced by **the lowest-id enabled provider that has a model tagged with an embed synonym (`embed`/`embedding`)**. *Revised after plan review:* the match considers ANY model in the row, and uses synonym sets, because real rerank rows are tagged `score` (`bundles/vllm-cuda-rerank/manifest.json`), matching `perch-model-catalog.js`. "First" means lowest `id` in the providers table, which is already how `loadProvidersFromDb` orders rows (`WHERE disabled = 0 ORDER BY id`). If no such provider exists, it resolves to `null`.
 
 - A pure, exported helper, `pickProviderByTask(providers, task)`, lives in a new small module `servers/shared/provider-task.js`. It takes a `{ id: row }` map, the shape `loadProviders().providers` has, plus a task string. It returns the lowest id whose `models[0].task === task` and that is not disabled, or `null`. Embeddings and rerank both use it.
-- To avoid the cold-cache problem the existing code comments on, the fallback reads the providers table directly (enabled rows, `ORDER BY id`) through the same `createDbClient` path `resolveDefaultProvider` already opens for the settings lookup. It then applies `pickProviderByTask`. If the DB is unavailable, it falls back to `loadProviders().providers`.
+- To avoid the cold-cache problem the existing code comments on, the fallback reads the providers table directly (enabled rows, `ORDER BY id`) through the same `createDbClient` path `resolveDefaultProvider` already opens for the settings lookup. It then applies `pickProviderByTask`. *Revised after plan review:* if the DB is unavailable it resolves `null`, not `models.json`, because a `models.json` fallback could bring back a named host.
 - `resolveEmbedConfig(providerName)` loses its `= FALLBACK_PROVIDER` default. Every caller already passes the resolved name. Check this during planning and keep a safe default: callers that pass nothing get `await resolveDefaultProvider()`.
 - **When nothing resolves:** embedding calls throw `embedding provider not configured` as they do today for a missing row. `crow_search_memories` already degrades semantic search to FTS on embed failure, and the `semantic` tool description is corrected to stop naming grackle.
 
@@ -33,7 +33,9 @@ A default that names one machine is a product bug, whatever the machine. It is a
 
 1. `CROW_RERANK_PROVIDER` env;
 2. `dashboard_settings.rerank_provider`, if set (a new, optional, local, non-synced key; readable but with no UI in this sub-project);
-3. `pickProviderByTask(providers, "rerank")`.
+3. `pickProviderByTask(providers, ["rerank","score"])`.
+
+`resolveRerankConfig` also gains the DB-row fallback that embeddings already has (`loadProviderFromDb`), so a rerank provider that exists only in the DB is still called.
 
 If nothing resolves, it returns candidates unreranked, which is today's missing-provider behaviour. The resolution is cached for 30 s like embed's.
 
