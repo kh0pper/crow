@@ -43,7 +43,7 @@ export const configFields = [
 /** Per-turn prompt hint (registry, A1.3). Reply auto-delivered like Discord. */
 export function gatewayHint(threadId) {
   return "\nGATEWAY: telegram — your reply text is sent to the Telegram chat automatically. "
-    + "Do NOT use gmail tools. (thread ref: " + threadId + ")";
+    + "Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: " + threadId + ")";
 }
 
 /** Lazy probe: is telegraf importable? Used by the host to skip cleanly. */
