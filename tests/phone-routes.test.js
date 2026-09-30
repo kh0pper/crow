@@ -18,14 +18,16 @@ before(async () => {
   process.env.CROW_APP_ROOT = join(import.meta.dirname, "..");
   s.db = createDbClient(join(s.home, "crow.db"));
   await s.db.executeMultiple(`CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
-    INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'), ('phone_owner_name','Kevin');`);
+    INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'), ('phone_owner_name','Kevin');
+    CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT, host TEXT, disabled INTEGER DEFAULT 0);
+    INSERT INTO providers (id, base_url, host) VALUES ('loc','http://127.0.0.1:1/v1','local'), ('cld','https://x.example/v1','cloud');`);
   await initPhoneTables(s.db);
   s.secret = "f".repeat(48); process.env.PHONE_RUNNER_SECRET = s.secret;
-  s.farend = [];
+  s.farend = []; s.inits = 0;
   const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
   const auth = (req, res, next) => { const sess = req.headers["x-test-session"]; if (!sess) return res.status(401).end(); req.dashboardSession = sess; next(); };
   const router = phoneRouter(auth, {
-    db: s.db, startDispatcher: false, csrf: (req, res, next) => next(),
+    db: s.db, startDispatcher: false, onInit: () => { s.inits++; }, csrf: (req, res, next) => next(),
     runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async () => ({ ok: true }) },
     authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456" },
   });
@@ -83,4 +85,39 @@ test("farend relays owner-typed business lines to the runner (interactive FakeLi
   await s.db.execute({ sql: "UPDATE phone_calls SET status='live' WHERE id=?", args: [id] });
   assert.equal((await post(`/api/phone/calls/${id}/farend`, { text: "Hello, Smile Dental" })).status, 200);
   assert.deepEqual(s.farend.at(-1), [id, "Hello, Smile Dental"]);
+});
+
+test("settings POST requires local session + TOTP and validates model specs", async () => {
+  const good = { totp: "123456", localModel: "loc/m1", cloudModel: "cld/m2", dailyCap: 7.9 };
+  assert.equal((await post("/api/phone/settings", good, "sso")).status, 403);
+  assert.equal((await post("/api/phone/settings", { ...good, totp: "000000" })).status, 403);
+  assert.equal((await post("/api/phone/settings", { totp: "123456", localModel: "cld/m2" })).status, 400);
+  assert.equal((await post("/api/phone/settings", { totp: "123456", localModel: "nope/m" })).status, 400);
+  assert.equal((await post("/api/phone/settings", { totp: "123456", cloudModel: "noslash" })).status, 400);
+  assert.equal((await post("/api/phone/settings", good)).status, 200);
+  const g = await (await fetch(s.base + "/api/phone/settings", { headers: { "x-test-session": "local" } })).json();
+  assert.equal(g.localModel, "loc/m1"); assert.equal(g.cloudModel, "cld/m2"); assert.equal(g.dailyCap, 7);
+  assert.equal((await post("/api/phone/settings", { totp: "123456", cloudModel: "" })).status, 200);
+});
+
+test("call reads never expose token_hash or approved_by_session", async () => {
+  const id = await newPlan();
+  await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const h = { "x-test-session": "local" };
+  const list = await (await fetch(s.base + "/api/phone/calls", { headers: h })).json();
+  const one = await (await fetch(s.base + `/api/phone/calls/${id}`, { headers: h })).json();
+  for (const c of [...list.calls, one.call]) { assert.ok(!("token_hash" in c)); assert.ok(!("approved_by_session" in c)); }
+});
+
+test("verify with wrong secret does not burn the token", async () => {
+  const id = await newPlan();
+  const { token } = await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const v = (a) => fetch(s.base + "/api/phone/verify", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${a}` }, body: JSON.stringify({ call_id: id, token }) });
+  assert.equal((await v("wrong")).status, 401);
+  assert.deepEqual(await (await v(s.secret)).json(), { ok: true });
+});
+
+test("concurrent first requests share one init", async () => {
+  await Promise.all([1, 2, 3].map(() => fetch(s.base + "/api/phone/calls", { headers: { "x-test-session": "local" } })));
+  assert.equal(s.inits, 1);
 });
