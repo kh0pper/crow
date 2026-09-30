@@ -25,6 +25,24 @@ test("checkNumberPolicy blocks N11 codes, 900/976, the owner's number, suppresse
   checkNumberPolicy("+15125550101", { ownerNumber: "+15129372366", suppressed: new Set() });
 });
 
+test("checkNumberPolicy rejects non-normalized E.164 input", () => {
+  const block = (n, opts = {}) => assert.throws(() => checkNumberPolicy(n, opts), (e) => e.code === "number_blocked" && e.reason === "not_e164", n);
+  block("5129115555");              // Missing +1 prefix
+  block("+5129115555");             // Missing 1 prefix
+});
+
+test("checkNumberPolicy normalizes ownerNumber and blocks on match", () => {
+  // Formatted ownerNumber should be normalized and still block the matching E.164
+  assert.throws(() => checkNumberPolicy("+15129372366", { ownerNumber: "(512) 937-2366" }),
+    (e) => e.code === "number_blocked" && e.reason === "owner_number");
+  // Invalid ownerNumber should be ignored, not throw
+  checkNumberPolicy("+15125550101", { ownerNumber: "invalid" });
+});
+
+test("checkNumberPolicy blocks 900 exchange", () => {
+  assert.throws(() => checkNumberPolicy("+15129005555"), (e) => e.code === "number_blocked" && e.reason === "premium");
+});
+
 const base = {
   business_name: "Smile Dental", number: "512-555-0101", goal: "Book a cleaning",
   limits: { date_range: { from: "2026-10-05", to: "2026-10-16" }, days_of_week: ["mon","tue","wed","thu","fri"],
@@ -47,6 +65,13 @@ test("validatePlan rejects bad language, inverted ranges, bad times", () => {
   bad({ limits: { ...base.limits, time_window: { start: "25:00", end: "18:00", tz: "America/Chicago" } } });
   bad({ goal: "" });
   bad({ business_name: "x".repeat(201) });
+});
+
+test("validatePlan rejects null or non-object limits", () => {
+  const bad = (patch) => assert.throws(() => validatePlan({ ...base, ...patch }), (e) => e.code === "invalid_plan");
+  bad({ limits: null });
+  bad({ limits: "string" });
+  bad({ limits: 123 });
 });
 
 test("planHash is stable and changes when anything material changes", () => {

@@ -25,11 +25,27 @@ export function normalizeNumber(raw) {
 }
 
 export function checkNumberPolicy(e164, { ownerNumber, suppressed } = {}) {
-  const area = e164.slice(2, 5), exch = e164.slice(5, 8);
   const block = (reason) => { throw fail("number_blocked", `number blocked: ${reason}`, { reason }); };
+
+  // Validate input is E.164 formatted
+  if (!NANP.test(e164)) block("not_e164");
+
+  const area = e164.slice(2, 5), exch = e164.slice(5, 8);
   if (/^[2-9]11$/.test(area) || /^[2-9]11$/.test(exch)) block("n11");
   if (area === "900" || exch === "900" || exch === "976") block("premium");
-  if (ownerNumber && e164 === ownerNumber) block("owner_number");
+
+  // Normalize ownerNumber for comparison; if invalid, ignore it
+  if (ownerNumber) {
+    let normalizedOwner;
+    try {
+      normalizedOwner = normalizeNumber(ownerNumber);
+    } catch (_e) {
+      // Invalid ownerNumber is ignored, not thrown
+      normalizedOwner = null;
+    }
+    if (normalizedOwner && e164 === normalizedOwner) block("owner_number");
+  }
+
   if (suppressed && suppressed.has(e164)) block("suppressed");
 }
 
@@ -40,32 +56,33 @@ function str(v, max, field) {
 }
 
 function limits(l = {}) {
+  if (l === null || (l != null && typeof l !== "object")) throw fail("invalid_plan", "limits must be an object");
   const out = {};
-  if (l.date_range) {
+  if (l?.date_range) {
     const { from, to } = l.date_range;
     if (!DATE.test(from) || !DATE.test(to) || from > to) throw fail("invalid_plan", "date_range invalid");
     out.date_range = { from, to };
   }
-  if (l.days_of_week) {
+  if (l?.days_of_week) {
     if (!Array.isArray(l.days_of_week) || !l.days_of_week.every((d) => DAYS.includes(d))) throw fail("invalid_plan", "days_of_week invalid");
     out.days_of_week = [...new Set(l.days_of_week)];
   }
-  if (l.time_window) {
+  if (l?.time_window) {
     const { start, end, tz } = l.time_window;
     if (!TIME.test(start) || !TIME.test(end) || start >= end || !tz) throw fail("invalid_plan", "time_window invalid");
     out.time_window = { start, end, tz: String(tz) };
   }
-  if (l.max_price) {
+  if (l?.max_price) {
     const amount = Number(l.max_price.amount);
     if (!Number.isFinite(amount) || amount < 0) throw fail("invalid_plan", "max_price invalid");
     out.max_price = { amount, currency: String(l.max_price.currency || "USD") };
   }
-  if (l.duration_minutes != null) {
+  if (l?.duration_minutes != null) {
     const m = Number(l.duration_minutes);
     if (!Number.isInteger(m) || m <= 0 || m > 600) throw fail("invalid_plan", "duration_minutes invalid");
     out.duration_minutes = m;
   }
-  if (l.notes) out.notes = str(l.notes, 500, "limits.notes");
+  if (l?.notes) out.notes = str(l.notes, 500, "limits.notes");
   return out;
 }
 
