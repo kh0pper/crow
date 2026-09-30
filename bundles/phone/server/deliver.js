@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { appImport } from "./app-root.js";
 
 const LABEL = { booked: "Booked", info_gathered: "Information gathered", needs_callback: "Needs a callback", no_answer: "No answer",
   voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
@@ -29,10 +30,26 @@ function ownerText(call) {
   return `${LABEL[call.outcome] || call.outcome}: ${call.business_name}${when}`.trim();
 }
 
+// Same lazy self-heal core uses (servers/gateway/ai/tool-executor.js ensureBotJobs):
+// the shared DDL from scripts/pi-bots/bot-jobs-schema.mjs, ALTERs first, then the DDL.
+async function ensureBotJobs(db) {
+  const { BOT_JOBS_DDL, missingBotJobsColumns } = await appImport("scripts/pi-bots/bot-jobs-schema.mjs");
+  const names = (await db.execute("PRAGMA table_info(bot_jobs)")).rows.map((r) => r.name);
+  if (names.length) for (const stmt of missingBotJobsColumns(names)) await db.execute(stmt);
+  await db.executeMultiple(BOT_JOBS_DDL);
+}
+
+/** Deliver a finished call. The owner is notified ONCE (first attempt only; the
+ *  sweep retries up to 5 times and retries must not re-notify). The notification
+ *  carries no model-written summary. A bot-delivery failure THROWS so the sweep
+ *  retries it. */
 export async function deliverPhoneResult(db, call, deps) {
-  const notify = deps.notify;
-  await notify(db, { title: "Phone: " + ownerText(call), body: call.summary ? String(call.summary).slice(0, 300) : null,
-    type: "system", source: "phone", priority: "normal", action_url: `/dashboard/phone?call=${call.id}` });
+  if (!(call.delivery_attempts > 0)) {
+    try {
+      await deps.notify(db, { title: "Phone: " + ownerText(call), body: null,
+        type: "system", source: "phone", priority: "normal", action_url: `/dashboard/phone?call=${call.id}` });
+    } catch (e) { console.warn(`[phone] owner notification failed for ${call.id}: ${e.message}`); }
+  }
 
   const d = call.deliver_to;
   const botId = call.created_by?.kind === "bot" ? call.created_by.id : null;
@@ -41,12 +58,13 @@ export async function deliverPhoneResult(db, call, deps) {
 
   if (d.kind === "perch") {
     if (!deps.perchMessage) return { via: "notify_only" };
-    try { await deps.perchMessage(d.session_id, goal); return { via: "perch" }; }
-    catch { return { via: "notify_only" }; }
+    await deps.perchMessage(d.session_id, goal); // throws → sweep retries
+    return { via: "perch" };
   }
   if (d.kind === "gateway") {
     const bot = (await db.execute({ sql: "SELECT enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0];
     if (!bot || !bot.enabled) return { via: "notify_only" };
+    await ensureBotJobs(db);
     const jobId = "job-" + Date.now().toString(36) + "-" + randomBytes(3).toString("hex");
     await db.execute({ sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, escalate) VALUES (?, ?, ?, 'queued', ?, 'phone', 0)",
       args: [jobId, botId, goal, JSON.stringify(d)] });
