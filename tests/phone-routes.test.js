@@ -123,8 +123,11 @@ test("concurrent first requests share one init", async () => {
 });
 
 test("panel renders in EN and ES with the approval controls and no backticks in the client script", async () => {
-  const { default: panel } = await import("../bundles/phone/panel/phone.js");
+  const { default: panel, PHONE_STRINGS } = await import("../bundles/phone/panel/phone.js");
   const layout = ({ title, content, scripts }) => `<title>${title}</title>${content}<script>${scripts || ""}</script>`;
+  const enKeys = Object.keys(PHONE_STRINGS.en).sort();
+  const esKeys = Object.keys(PHONE_STRINGS.es).sort();
+  assert.deepEqual(enKeys, esKeys, "EN and ES have identical key sets");
   for (const lang of ["en", "es"]) {
     const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang });
     assert.match(html, /id="phone-pending"/);
@@ -132,8 +135,10 @@ test("panel renders in EN and ES with the approval controls and no backticks in 
     assert.match(html, /name="business_confirmed"/);
     assert.match(html, /name="allow_cloud"/);
     assert.match(html, /name="totp"/);
-    const script = html.split("<script>")[1] || "";
+    const script = (html.split("<script>")[1] || "").split("</script>")[0];
     assert.equal(script.includes("`"), false, "no backticks in client script");
+    assert.equal(script.includes("${"), false, "no dollar-brace in client script");
+    assert.doesNotThrow(function () { new Function(script); }, "script is valid JavaScript");
   }
   const es = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "es" });
   assert.match(es, /Aprobar/);
