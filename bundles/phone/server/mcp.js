@@ -1,5 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+// NO bare imports here: the installed copy lives in ~/.crow/bundles/phone/server,
+// where Node cannot resolve the app's packages. The gateway injects its own
+// McpServer class and zod instance (createPhoneMcpServer({ McpServer, z })).
 import { validatePlan, checkNumberPolicy } from "./plan.js";
 import * as store from "./store.js";
 
@@ -33,7 +34,7 @@ function assertReadable(c, actor) {
 }
 const wrap = (fn) => async (a, extra) => { try { return ok(await fn(a, extra)); } catch (e) { return err(e); } };
 
-const limitsSchema = z.object({
+const limitsSchema = (z) => z.object({
   date_range: z.object({ from: z.string(), to: z.string() }).optional(),
   days_of_week: z.array(z.enum(["mon","tue","wed","thu","fri","sat","sun"])).optional(),
   time_window: z.object({ start: z.string(), end: z.string(), tz: z.string() }).optional(),
@@ -42,12 +43,13 @@ const limitsSchema = z.object({
   notes: z.string().optional(),
 }).optional();
 
-export function createPhoneMcpServer({ db, ownerNumber } = {}) {
+export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify } = {}) {
+  if (!McpServer || !z) throw new Error("createPhoneMcpServer needs the gateway's McpServer and z (dependency injection)");
   const server = new McpServer({ name: "crow-phone", version: "0.1.0" });
 
   server.tool("phone_plan_call",
     "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan in Crow's Nest → Phone. Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
-    { business_name: z.string(), number: z.string(), goal: z.string(), limits: limitsSchema,
+    { business_name: z.string(), number: z.string(), goal: z.string(), limits: limitsSchema(z),
       shareable: z.record(z.string()).optional(), language: z.enum(["en", "es"]).optional(),
       notes: z.string().optional(), run_after: z.string().optional() },
     wrap(async (a, extra) => {
@@ -55,6 +57,12 @@ export function createPhoneMcpServer({ db, ownerNumber } = {}) {
       checkNumberPolicy(plan.number_e164, { ownerNumber: typeof ownerNumber === "function" ? await ownerNumber() : ownerNumber, suppressed: await store.suppressedSet(db) });
       const actor = resolvePhoneActor(extra);
       const { call_id } = await store.createPlan(db, plan, actor, deliverToFromActor(actor));
+      if (notify) {
+        try {
+          await notify(db, { title: `Phone: ${actor.kind === "bot" && actor.id ? actor.id : "A bot"} wants to call ${plan.business_name}`,
+            body: null, type: "system", source: "phone", priority: "high", action_url: `/dashboard/phone?call=${call_id}` });
+        } catch (e) { console.warn(`[phone] plan notification failed for ${call_id}: ${e.message}`); }
+      }
       return { call_id, status: "awaiting_approval", note: "The owner has been asked to approve this call. You will receive the result in this conversation when it finishes." };
     }));
 

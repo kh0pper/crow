@@ -23,6 +23,9 @@ import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken, ensurePhoneToken } from "../local-token.js";
 import { pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { createNotification } from "../../shared/notifications.js";
 import { startOutboxDrain } from "../../sharing/sync-outbox-drain.js";
 
 /**
@@ -279,7 +282,7 @@ export async function mountMcpServers(app, deps) {
       if (minted) console.log("[gateway] phone token minted");
       const { readSetting } = await import("../dashboard/settings/registry.js");
       const ownerNumber = async () => (await readSetting(phoneDb, "phone_owner_number")) || null;
-      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber }), sessionManager, authMiddleware, peerExposureGate);
+      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification }), sessionManager, authMiddleware, peerExposureGate);
       console.log("[gateway] phone MCP mounted at /phone/mcp");
     }
   } catch (err) {

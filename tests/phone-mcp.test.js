@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createDbClient } from "../servers/db.js";
@@ -17,7 +18,7 @@ import { getCall } from "../bundles/phone/server/store.js";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
 
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
-const s = {};
+const s = { notes: [] };
 
 before(async () => {
   s.home = mkdtempSync(join(tmpdir(), "phone-mcp-home-"));
@@ -35,7 +36,7 @@ before(async () => {
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "unauthorized" } });
   const sm = new SessionManager();
-  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, ownerNumber: "+15129372366" }), sm, noAuth);
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, ownerNumber: "+15129372366", McpServer, z, notify: async (db, n) => { s.notes.push(n); } }), sm, noAuth);
   mountMcpServer(app, "/memory", () => new McpServer({ name: "stub", version: "0" }), sm, noAuth);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
@@ -130,7 +131,7 @@ test("ownerNumber may be a function evaluated per call", async () => {
   const app = express(); app.use(express.json());
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({});
-  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, ownerNumber: () => owner }), new SessionManager(), noAuth);
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, ownerNumber: () => owner, McpServer, z }), new SessionManager(), noAuth);
   const http = app.listen(0); await new Promise((r) => http.once("listening", r));
   const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${http.address().port}/phone/mcp`),
     { requestInit: { headers: { ...botHeaders, Authorization: `Bearer ${s.phoneToken}` } } });
@@ -162,4 +163,34 @@ test("resolvePhoneActor ignores actor headers from non-local auth; unknown gatew
     "x-crow-actor-kind": "bot", "x-crow-actor-id": "evil", "x-crow-actor-thread": "discord:1", "x-crow-actor-gateway": "discord" } } });
   assert.equal(a.kind, "session");
   assert.equal(deliverToFromActor({ kind: "bot", id: "b", thread: "t", gateway: "gmail" }), null);
+});
+
+test("createPhoneMcpServer refuses to build without the injected McpServer and z", () => {
+  assert.throws(() => createPhoneMcpServer({ db: s.db }), /dependency injection/);
+});
+
+test("phone_plan_call notifies the owner (high priority, deep link, no body)", async () => {
+  s.notes.length = 0;
+  const c = await client("/phone/mcp", s.phoneToken, botHeaders);
+  const { call_id } = payload(await c.callTool({ name: "phone_plan_call", arguments: args }));
+  assert.equal(s.notes.length, 1);
+  assert.deepEqual(s.notes[0], { title: "Phone: bobby wants to call Smile Dental", body: null, type: "system", source: "phone",
+    priority: "high", action_url: `/dashboard/phone?call=${call_id}` });
+  await c.close();
+});
+
+test("a notify failure does not fail phone_plan_call", async () => {
+  const app = express(); app.use(express.json());
+  app.use(localTokenAuthMiddleware(s.db));
+  const noAuth = (req, res) => res.status(401).json({});
+  const boom = async () => { throw new Error("notify down"); };
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, McpServer, z, notify: boom }), new SessionManager(), noAuth);
+  const http = app.listen(0); await new Promise((r) => http.once("listening", r));
+  const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${http.address().port}/phone/mcp`),
+    { requestInit: { headers: { ...botHeaders, "X-Crow-Actor-Id": "notifyfail", Authorization: `Bearer ${s.phoneToken}` } } });
+  const c = new Client({ name: "t", version: "0" }); await c.connect(t);
+  const r = await c.callTool({ name: "phone_plan_call", arguments: args });
+  assert.notEqual(r.isError, true);
+  assert.equal(payload(r).status, "awaiting_approval");
+  await c.close(); await new Promise((r2) => http.close(r2));
 });
