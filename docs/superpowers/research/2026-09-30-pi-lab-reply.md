@@ -116,3 +116,22 @@ The ROCm CTranslate2 build is a community package and needs Kevin's approval to 
 - Residency = call lease honored by all windows, plus an admission check (no active or imminent window, model healthy).
 - STT and TTS pluggable, chosen by the bake-off.
 - Spoken-stream markup filter is **mandatory**.
+
+## Update, 2026-09-30 evening: the gufo tool-call failure is fixed in raven prod
+
+The Spanish IVR failure above (Flash-Next writing `<function=press_digits>\n1\n</parameter>` with no opening parameter tag, so the call was dropped and the markup came back as `content`) is the malformed-call shape tracked under gufo #266. The maintainer's open PR **gufo-org/gufo#324** constrains tool-call decoding once a call starts. We tested it on raven with identical flags:
+
+| | prod before (9abedf6) | 9abedf6 + #324 |
+|---|---|---|
+| Spanish IVR → `press_digits` | 0/10 (markup leaked as text) | 10/10 |
+| English IVR | 10/10 | 10/10 |
+| All six call scenarios | 9/12 | 12/12 |
+| Warm time to first tool-call delta | 0.43 s | 0.46 s |
+
+**Raven prod now runs 9abedf6 + #324** (`~/gufo-prod/9abedf6-pr324-c873a8a`, since 17:21; compat 7/7, pi smoke 3/3, call probe 23/24 over two runs; the one miss was the "offer" turn answering "That works" without `record_booking`, the prompt-design point in §4). Test results were posted on the PR: https://github.com/gufo-org/gufo/pull/324#issuecomment-5920730244. When #324 and our YaRN PR #350 merge, prod moves to upstream main.
+
+What this changes for the spec and what it does not:
+
+- **The spoken-stream markup filter stays mandatory.** #324 fixes gufo; the call instance recommended in §1 is llama.cpp (the 35b wrote `<end_call …>` as text in the same test), and a cloud fallback can fail the same way.
+- **The §1 recommendation is unchanged.** Raven prod is still one session shared with pi and gets evicted for windows, so it is still not the real-time call host. It does make Flash-Next on gufo a stronger candidate in the scripted call eval, and a reasonable non-real-time tool worker (post-call summaries, booking extraction).
+- Related gufo issues still open and worth a look if you target gufo later: #304 (raw newlines in JSON arguments leak the same way; maintainer fix in progress) and #273 (long-context thinking-on turns that end without a call because reasoning uses up `max_tokens`; keep `enable_thinking: false` on call turns).
