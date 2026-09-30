@@ -8,7 +8,7 @@ const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
 export async function isLocalDashboardSession(db, rawSession) {
   if (!rawSession) return false;
   const r = await db.execute({
-    sql: "SELECT scopes FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND expires_at > datetime('now')",
+    sql: "SELECT scopes FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND datetime(expires_at) > datetime('now')",
     args: [sha(rawSession)],
   });
   return r.rows[0]?.scopes === "dashboard";
