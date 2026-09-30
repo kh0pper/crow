@@ -53,6 +53,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3040 | 127.0.0.1 | gitea (web) | MVP PR 5 |
 | 3050 | 127.0.0.1 | forgejo (web) | MVP PR 5 |
 | 3061 | 127.0.0.1 | rookery (OpenScience reviewer) | PR #157 |
+| 3065 | 127.0.0.1 | phone (crow-phone-runner, assistant calls) | Phone plan A |
 | 3080 | 127.0.0.1 | romm (existing) | existing |
 | 3456 | 127.0.0.1 | vikunja (existing) | existing |
 | 4533 | 127.0.0.1 | navidrome (existing) | existing |
