@@ -99,25 +99,30 @@ def booking_within_limits(booking: dict, limits: dict) -> tuple[bool, str]:
         mp = limits.get("max_price")
         if mp:
             try:
-                # max_price.amount must be a valid finite number
-                try:
-                    max_amount = float(mp["amount"])
-                except (KeyError, TypeError, ValueError):
+                # max_price.amount must be int/float (not bool, not string)
+                amount_val = mp["amount"]
+                if isinstance(amount_val, bool):
                     return False, "invalid price limit"
+                if not isinstance(amount_val, (int, float)):
+                    return False, "invalid price limit"
+                max_amount = float(amount_val)
                 if not math.isfinite(max_amount):
                     return False, "invalid price limit"
 
-                # When max_price is set, booking must have a finite price (not bool, not None)
+                # When max_price is set, booking must have a finite price (not bool, not None, not string)
                 price_val = booking.get("price")
                 if price_val is None:
                     return False, "price required by the price limit"
                 # Reject bool (bool is technically numeric in Python)
                 if isinstance(price_val, bool):
                     return False, "price required by the price limit"
-                try:
-                    price = float(price_val)
-                except (TypeError, ValueError):
+                # Reject string prices
+                if isinstance(price_val, str):
                     return False, "price required by the price limit"
+                # Must be int or float
+                if not isinstance(price_val, (int, float)):
+                    return False, "price required by the price limit"
+                price = float(price_val)
                 if not math.isfinite(price):
                     return False, "price required by the price limit"
                 if price > max_amount:

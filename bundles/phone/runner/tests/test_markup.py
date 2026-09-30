@@ -109,3 +109,80 @@ def test_stray_angle_brackets_in_speech_replaced_no_markup_flag():
     r = sanitize("if x<5 then y>3")
     assert not r.had_markup and "<" not in r.clean and ">" not in r.clean
     assert r.calls == []
+
+
+def test_complete_attribute_tag_with_single_quote():
+    """Complete attribute-style tag with single-quoted values must be stripped entirely."""
+    r = sanitize("<end_call outcome=booked summary='ok'>")
+    assert r.clean == "" and r.had_markup
+    assert r.calls[0].name == "end_call" and r.calls[0].args["outcome"] == "booked"
+    assert r.calls[0].args["summary"] == "ok"
+
+
+def test_attribute_tag_in_sentence():
+    """Attribute-style tag in sentence must leave only speech."""
+    r = sanitize("I have <end_call outcome=booked> bye")
+    assert r.clean == "I have bye" and r.had_markup
+    assert r.calls[0].name == "end_call"
+
+
+def test_self_closing_attribute_tag():
+    """Self-closing attribute-style tag must be stripped entirely."""
+    r = sanitize('<end_call outcome="booked" summary="ok"/>')
+    assert r.clean == "" and r.had_markup
+    assert r.calls[0].name == "end_call" and r.calls[0].args["outcome"] == "booked"
+
+
+def test_parameter_tag_in_sentence():
+    """Unknown parameter tag in sentence must leave only speech."""
+    r = sanitize("Okay <parameter=x> great")
+    assert r.clean == "Okay great" and r.had_markup
+    assert r.calls == []
+
+
+def test_complete_tag_case_insensitive_with_clean():
+    """Uppercase TOOL_CALL/FUNCTION must be recovered with completely clean text."""
+    r = sanitize(
+        "<TOOL_CALL><FUNCTION=PRESS_DIGITS>5</PARAMETER></FUNCTION></TOOL_CALL>"
+    )
+    assert r.clean == "" and r.had_markup
+    assert r.calls[0].name == "press_digits" and r.calls[0].args["digits"] == "5"
+
+
+def test_unclosed_tag_at_end():
+    """Unclosed tag fragment at end must be stripped."""
+    r = sanitize("Sure <end_call outcome=booked>")
+    assert r.clean == "Sure" and r.had_markup
+
+
+def test_complete_function_block_with_clean():
+    """Complete function block with parameters must leave clean text."""
+    r = sanitize(
+        "Great, see you then. <Function=end_call><Parameter=outcome>booked</Parameter>"
+    )
+    assert r.clean == "Great, see you then." and r.had_markup
+    assert r.calls[0].name == "end_call" and r.calls[0].args["outcome"] == "booked"
+
+
+def test_unclosed_json_tool_call_nothing_spoken():
+    """Unclosed JSON tool_call must be recovered and nothing spoken."""
+    r = sanitize(
+        'Say yes. <tool_call>{"name": "press_digits", "arguments": {"digits": "1"}}'
+    )
+    assert r.clean == "Say yes." and r.had_markup
+    assert r.calls[0].name == "press_digits" and r.calls[0].args["digits"] == "1"
+
+
+def test_nested_brackets_in_params_stripped():
+    """Nested brackets in parameter values must be stripped."""
+    r = sanitize(
+        "<tool_call><function=press_digits><<function=press_digits>1>></function></tool_call>"
+    )
+    assert r.clean == "" and r.had_markup
+    assert r.calls[0].name == "press_digits" and r.calls[0].args["digits"] == "1"
+
+
+def test_stray_brackets_no_markup_flag():
+    """Stray brackets in math not setting had_markup."""
+    r = sanitize("if x<5 then y>3")
+    assert not r.had_markup and r.clean == "if x 5 then y 3"

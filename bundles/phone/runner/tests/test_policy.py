@@ -102,3 +102,21 @@ def test_booking_limits_never_raises():
         assert not ok, (
             f"Expected False for booking={booking}, limits={limits}, got {ok}"
         )
+
+
+def test_price_must_be_int_or_float_not_string():
+    """Price must be int/float, not string."""
+    limits_with_price = {"max_price": {"amount": 150}}
+    ok, reason = policy.booking_within_limits(
+        {"date": "2026-10-06", "time": "15:30", "price": "100"}, limits_with_price
+    )
+    assert not ok and "price" in reason.lower(), (ok, reason)
+
+
+def test_max_price_amount_must_be_int_or_float():
+    """max_price.amount must be int/float, not bool."""
+    ok, reason = policy.booking_within_limits(
+        {"date": "2026-10-06", "time": "15:30", "price": 100},
+        {"max_price": {"amount": True}},
+    )
+    assert not ok and "limit" in reason.lower(), (ok, reason)

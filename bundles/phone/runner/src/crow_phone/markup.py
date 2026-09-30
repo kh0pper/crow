@@ -37,17 +37,19 @@ _PARAM = re.compile(r"<parameter=([a-z_]+)>(.*?)</parameter>", re.S | re.I)
 _ATTR_TAG = re.compile(r"<\s*(" + "|".join(KNOWN_TOOLS) + r")\b([^>]*)>", re.S | re.I)
 # Attributes with double quotes, single quotes, or unquoted
 _ATTR = re.compile(r'([a-z_]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]*))', re.I)
-_UNCLOSED_TAG = re.compile(
-    r"<\s*(?:tool_call|function|parameter|"
-    + "|".join(KNOWN_TOOLS)
-    + r")\b[^>]*(?!>)(?=[^<]*(?:<|$))",
-    re.I,
-)
-_ANY_TAG = re.compile(
+# Complete tags with closing > (including self-closing />)
+_COMPLETE_TAG = re.compile(
     r"<\s*/?\s*(?:tool_call|function|parameter|"
     + "|".join(KNOWN_TOOLS)
-    + r")\b[^>]*>|<[^<>]*=[^<>]*>",
+    + r")\b[^>]*(?:>|/>)|<[^<>]*=[^<>]*>",
     re.S | re.I,
+)
+# Unclosed tag fragments - anchored to not cross > or start of another tag
+_UNCLOSED_FRAGMENT = re.compile(
+    r"<\s*(?:tool_call|function|parameter|"
+    + "|".join(KNOWN_TOOLS)
+    + r")\b[^<>]*(?=[<\s]|$)|<[^<>]*=[^<>]*(?=[<\s]|$)",
+    re.I,
 )
 
 
@@ -135,34 +137,38 @@ def sanitize(text: str) -> Sanitized:
     # Now process text for removal of markup
     stripped = text
 
-    # Remove complete tool_call blocks
+    # FIRST: Remove complete tool_call blocks (including unclosed ones)
+    if _BLOCK.search(stripped):
+        had = True
     stripped = _BLOCK.sub(" ", stripped)
 
-    # Remove function tags
+    # SECOND: Remove function and parameter tags with their content
+    if _FUNC.search(stripped):
+        had = True
     stripped = _FUNC.sub(" ", stripped)
 
-    # Remove unclosed tag fragments (e.g., "<end_call" or "<parameter=x")
-    if _UNCLOSED_TAG.search(stripped):
+    # THIRD: Remove complete standalone tags (_COMPLETE_TAG) including self-closing
+    if _COMPLETE_TAG.search(stripped):
         had = True
-    stripped = _UNCLOSED_TAG.sub(" ", stripped)
+    stripped = _COMPLETE_TAG.sub(" ", stripped)
 
-    # Check for any remaining tag-shaped content
-    if _ANY_TAG.search(stripped):
+    # FOURTH: Remove unclosed tag fragments (e.g., "<end_call" or "<parameter=x")
+    if _UNCLOSED_FRAGMENT.search(stripped):
         had = True
-    stripped = _ANY_TAG.sub(" ", stripped)
+    stripped = _UNCLOSED_FRAGMENT.sub(" ", stripped)
 
     # Collapse multiple spaces
     clean = re.sub(r"\s+", " ", stripped).strip()
 
-    # Handle stray < and > in normal speech
-    # First check if there are any angle brackets left
+    # FIFTH: Handle stray < and > in normal speech (not tag-shaped)
+    # Replace with spaces without setting had_markup for simple angle brackets
     if "<" in clean or ">" in clean:
         # A tag-shaped pattern has characteristics like:
-        # - <word with space or /
+        # - <word with space
         # - <word= (attribute)
-        # - / at end before >
+        # - / before >
         tag_pattern = re.compile(r"<\s*[a-z_][a-z_]*\s|<\s*[a-z_][a-z_]*=|/\s*>", re.I)
-        # If they look tag-shaped, set had_markup; otherwise just replace
+        # If they look tag-shaped, set had_markup
         if tag_pattern.search(clean):
             had = True
         # Replace all < and > with spaces
