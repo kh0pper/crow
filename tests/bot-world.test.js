@@ -353,7 +353,7 @@ const GOLDENS = {
       "PI_PROVIDER": "stub"
     },
     "sysSha": "af0c6e8d1327a77f81b48d35d905539e2527c1c91f0d6d69e07484d19def86f3",
-    "prompt": "PROJECT: (none)\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. Do NOT use gmail tools. (thread ref: discord-golden)\n\nKanban:\n(no project linked)\n\nUser said: \"hello golden\"\n\nReply on the gateway thread. Use tools as needed per your system prompt: if the user asks a simple question (criteria, status, specific employer), call the appropriate query tools and answer; if the user asks for work to be done, run the workflow; if they're just saying hi, reply briefly without tools. Don't ask 'which card?' unless their message is genuinely ambiguous."
+    "prompt": "PROJECT: (none)\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: discord-golden)\n\nKanban:\n(no project linked)\n\nUser said: \"hello golden\"\n\nReply on the gateway thread. Use tools as needed per your system prompt: if the user asks a simple question (criteria, status, specific employer), call the appropriate query tools and answer; if the user asks for work to be done, run the workflow; if they're just saying hi, reply briefly without tools. Don't ask 'which card?' unless their message is genuinely ambiguous."
   },
   "runjob": {
     "argv": [
