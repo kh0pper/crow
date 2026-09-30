@@ -14,7 +14,7 @@
   "ports": [3065],
   "requires": { "env": ["PHONE_RUNNER_SECRET"], "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
-    { "name": "PHONE_RUNNER_SECRET", "description": "Shared secret between Crow and the phone runner. Generate one with: openssl rand -hex 24", "required": true, "secret": true }
+    { "name": "PHONE_RUNNER_SECRET", "description": "Shared secret between Crow and the phone runner; must be at least 32 characters. Generate one with: openssl rand -hex 24", "required": true, "secret": true }
   ],
   "notes": "Plan A: calls run on a simulated line (FakeLine). The Bluetooth phone line arrives in a later release. Every call needs owner approval."
 }

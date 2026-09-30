@@ -4521,7 +4521,7 @@
       "env_vars": [
         {
           "name": "PHONE_RUNNER_SECRET",
-          "description": "Shared secret between Crow and the phone runner. Generate one with: openssl rand -hex 24",
+          "description": "Shared secret between Crow and the phone runner; must be at least 32 characters. Generate one with: openssl rand -hex 24",
           "required": true,
           "secret": true
         }
