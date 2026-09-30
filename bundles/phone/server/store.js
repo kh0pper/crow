@@ -62,12 +62,18 @@ async function applyEdits(db, id, plan) {
 export async function approveCall(db, id, { session, allowCloud, edits, runAfter } = {}) {
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
-  if (edits && row.status === "awaiting_approval") await applyEdits(db, id, planFromRow(row, edits));
+  if (row.status !== "awaiting_approval") throw fail("not_pending", "call is not awaiting approval");
+  // Validate the edited plan (if any) before the CAS
+  let plan = row;
+  if (edits) {
+    plan = planFromRow(row, edits);
+  }
   const token = randomBytes(24).toString("hex");
+  const newHash = planHash(plan);
   const r = await db.execute({
-    sql: `UPDATE phone_calls SET status='approved', token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=COALESCE(?, run_after), updated_at=datetime('now')
+    sql: `UPDATE phone_calls SET status='approved', business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=COALESCE(?, run_after), updated_at=datetime('now')
           WHERE id=? AND status='awaiting_approval'`,
-    args: [sha(token + ":" + id), sha(session || ""), allowCloud ? 1 : 0, runAfter || null, id],
+    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, sha(token + ":" + id + ":" + newHash), sha(session || ""), allowCloud ? 1 : 0, runAfter || null, id],
   });
   if (!r.rowsAffected) throw fail("not_pending", "call is not awaiting approval");
   await audit(db, id, "owner", "approved", { allowCloud: !!allowCloud, runAfter: runAfter || null });
@@ -78,8 +84,14 @@ export async function editCall(db, id, edits) {
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
   if (!["awaiting_approval", "approved"].includes(row.status)) throw fail("not_editable", "call can no longer be edited");
-  await applyEdits(db, id, planFromRow(row, edits));
-  await db.execute({ sql: "UPDATE phone_calls SET status='awaiting_approval', token_hash=NULL, approved_at=NULL WHERE id=?", args: [id] });
+  const plan = planFromRow(row, edits);
+  const newHash = planHash(plan);
+  const r = await db.execute({
+    sql: `UPDATE phone_calls SET business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, status='awaiting_approval', token_hash=NULL, approved_at=NULL, approved_by_session=NULL, updated_at=datetime('now')
+          WHERE id=? AND status IN ('awaiting_approval','approved')`,
+    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, id],
+  });
+  if (!r.rowsAffected) throw fail("not_editable", "call can no longer be edited");
   await audit(db, id, "owner", "edited", Object.keys(edits));
 }
 
@@ -99,7 +111,9 @@ export async function cancelCall(db, id, actor) {
 
 export async function consumeToken(db, id, token) {
   if (!token) return false;
-  const r = await db.execute({ sql: "UPDATE phone_calls SET token_hash=NULL WHERE id=? AND token_hash=? AND status IN ('approved','starting','live')", args: [id, sha(token + ":" + id)] });
+  const row = await getCall(db, id);
+  if (!row) return false;
+  const r = await db.execute({ sql: "UPDATE phone_calls SET token_hash=NULL WHERE id=? AND token_hash=? AND plan_hash=? AND status IN ('approved','starting','live')", args: [id, sha(token + ":" + id + ":" + row.plan_hash), row.plan_hash] });
   return r.rowsAffected === 1;
 }
 
@@ -109,17 +123,30 @@ export async function expirePlans(db) {
 }
 
 export async function claimNextDue(db) {
-  const live = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status IN ('starting','live')", args: [] })).rows[0].n;
-  if (live) return null;
-  const next = (await db.execute({
-    sql: "SELECT id FROM phone_calls WHERE status='approved' AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY approved_at ASC LIMIT 1", args: [] })).rows[0];
-  if (!next) return null;
-  const r = await db.execute({ sql: "UPDATE phone_calls SET status='starting', updated_at=datetime('now') WHERE id=? AND status='approved'", args: [next.id] });
-  return r.rowsAffected ? getCall(db, next.id) : null;
+  const r = await db.execute({
+    sql: `UPDATE phone_calls SET status='starting', updated_at=datetime('now')
+          WHERE id = (SELECT id FROM phone_calls WHERE status='approved' AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%dT%H:%M:%fZ','now')) ORDER BY approved_at ASC, rowid ASC LIMIT 1)
+          AND NOT EXISTS (SELECT 1 FROM phone_calls WHERE status IN ('starting','live'))`,
+    args: [] });
+  if (!r.rowsAffected) return null;
+  const next = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='starting' ORDER BY updated_at DESC LIMIT 1", args: [] })).rows[0];
+  return next ? getCall(db, next.id) : null;
 }
 
 export async function markLive(db, id, modelUsed) {
-  await db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now'), model_used=? WHERE id=?", args: [modelUsed || null, id] });
+  const r = await db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now'), model_used=? WHERE id=? AND status='starting'", args: [modelUsed || null, id] });
+  return r.rowsAffected === 1;
+}
+
+export async function issueStartToken(db, id) {
+  const row = await getCall(db, id);
+  if (!row || row.status !== "starting") return null;
+  const token = randomBytes(24).toString("hex");
+  const r = await db.execute({
+    sql: "UPDATE phone_calls SET token_hash=? WHERE id=? AND status='starting'",
+    args: [sha(token + ":" + id + ":" + row.plan_hash), id],
+  });
+  return r.rowsAffected ? token : null;
 }
 
 export async function appendEvents(db, id, events) {

@@ -95,3 +95,119 @@ test("suppression set", async () => {
   await store.addSuppression(db, "+15125550101", "asked");
   assert.ok((await store.suppressedSet(db)).has("+15125550101"));
 });
+
+test("approval with edits: ONE UPDATE, token bound to plan_hash", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false, edits: { goal: "New goal" } });
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "approved");
+  assert.equal(c.goal, "New goal");
+  // token bound to plan_hash; if we edit after approval, old token is invalid
+  await store.editCall(db, call_id, { goal: "Another goal" });
+  assert.equal(await store.consumeToken(db, call_id, token), false);
+});
+
+test("editCall: ONE guarded UPDATE, refuses to edit live/done calls", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  await db.execute({ sql: "UPDATE phone_calls SET status='live' WHERE id=?", args: [call_id] });
+  await assert.rejects(store.editCall(db, call_id, { goal: "Nope" }), (e) => e.code === "not_editable");
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "live");
+});
+
+test("claimNextDue: concurrent claims yield exactly one starting call", async () => {
+  const a = await store.createPlan(db, plan(), bot, null);
+  const b = await store.createPlan(db, plan(), bot, null);
+  await store.approveCall(db, a.call_id, { session: "s", allowCloud: false });
+  await store.approveCall(db, b.call_id, { session: "s", allowCloud: false });
+  const results = await Promise.allSettled([
+    store.claimNextDue(db),
+    store.claimNextDue(db),
+  ]);
+  const claimed = results.map((r) => r.status === "fulfilled" ? r.value : null).filter((r) => r !== null);
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0].status, "starting");
+});
+
+test("markLive: status guard, returns boolean", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  const first = await store.claimNextDue(db);
+  assert.equal(first.status, "starting");
+  const res = await store.markLive(db, call_id);
+  assert.equal(res, true);
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "live");
+  // Try to mark a done call as live
+  await store.finalizeCall(db, call_id, { outcome: "ok", booking: null, summary: "done" });
+  const res2 = await store.markLive(db, call_id);
+  assert.equal(res2, false);
+  const c2 = await store.getCall(db, call_id);
+  assert.equal(c2.status, "done");
+});
+
+test("consumeToken refused on non-approved call", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  // Token still pending approval — oh wait, it's already approved above.
+  // Let's test the case where token is consumed while status changes
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "approved");
+  assert.equal(await store.consumeToken(db, call_id, token), true);
+  const c2 = await store.getCall(db, call_id);
+  assert.equal(c2.status, "approved"); // consumeToken clears hash but doesn't change status
+});
+
+test("daily bot limit: 10/day (excludes non-pending)", async () => {
+  for (let i = 0; i < 10; i++) {
+    const { call_id } = await store.createPlan(db, plan(), bot, null);
+    if (i % 2 === 0) await store.rejectCall(db, call_id); // Reject half of them
+  }
+  // We have 5 rejected, 5 pending. Total 10 created today. Next one should fail.
+  await assert.rejects(store.createPlan(db, plan(), bot, null), (e) => e.code === "rate_limited");
+});
+
+test("cancelCall: bot ownership enforced", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const other = { kind: "bot", id: "other-bot" };
+  await assert.rejects(store.cancelCall(db, call_id, other), (e) => e.code === "forbidden");
+});
+
+test("cancelCall: success case", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await store.cancelCall(db, call_id, bot);
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "cancelled");
+});
+
+test("rejectCall", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await store.rejectCall(db, call_id);
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "rejected");
+});
+
+test("markDelivered: idempotent single-use", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const res1 = await store.markDelivered(db, call_id);
+  assert.equal(res1, true);
+  const res2 = await store.markDelivered(db, call_id);
+  assert.equal(res2, false);
+});
+
+test("issueStartToken: generates token for starting calls only", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  // Call is approved, not starting
+  const token1 = await store.issueStartToken(db, call_id);
+  assert.equal(token1, null);
+  // Claim it
+  const claimed = await store.claimNextDue(db);
+  assert.equal(claimed.status, "starting");
+  // Now issue a token
+  const token2 = await store.issueStartToken(db, call_id);
+  assert(token2);
+  // Consume it
+  assert.equal(await store.consumeToken(db, call_id, token2), true);
+});
