@@ -155,30 +155,33 @@ test("consumeToken refused on unapproved or plan-changed call", async () => {
   assert.equal(await store.consumeToken(db, call_id, token), false);
 });
 
-test("daily bot limit: 10/day total, pend limit does not block when low", async () => {
+test("per-bot daily limit: 10 plans per day regardless of pending", async () => {
   const callIds = [];
+  // Control: Create 5, approve 5; create 4 more (total 9, pend=4); create 10th (succeeds); approve all 4
   for (let i = 0; i < 5; i++) {
     const { call_id } = await store.createPlan(db, plan(), bot, null);
     callIds.push(call_id);
   }
-  // Approve first 5 to clear pending; now day=5 but pend=0
   for (let i = 0; i < 5; i++) {
     await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
+  }
+  for (let i = 0; i < 4; i++) {
+    const { call_id } = await store.createPlan(db, plan(), bot, null);
+    callIds.push(call_id);
   }
   let pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [bot.id] })).rows[0].n;
-  assert.equal(pend, 0);
-  // Create 5 more to reach day=10 (pend will be 5 during creation of 5th)
-  for (let i = 0; i < 5; i++) {
-    const { call_id } = await store.createPlan(db, plan(), bot, null);
-    callIds.push(call_id);
-  }
-  // Now day=10, pend=5. Approve the last 5 to clear pending
-  for (let i = 5; i < 10; i++) {
+  assert(pend <= 4);
+  const res9 = await store.createPlan(db, plan(), bot, null);
+  assert(res9.call_id);
+  callIds.push(res9.call_id);
+  // Approve the 4 new awaiting plans (indices 5-8)
+  for (let i = 5; i < 9; i++) {
     await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
   }
+  // Boundary: now day=10, pend=1 (the 10th plan). Approve it then 11th fails
+  await store.approveCall(db, callIds[9], { session: "s", allowCloud: false });
   pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [bot.id] })).rows[0].n;
   assert.equal(pend, 0);
-  // 11th should fail due to day>=10, not pending limit
   await assert.rejects(store.createPlan(db, plan(), bot, null), (e) => e.code === "rate_limited");
 });
 
