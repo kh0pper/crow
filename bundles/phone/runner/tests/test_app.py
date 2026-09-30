@@ -207,3 +207,34 @@ def test_controller_crash_still_emits_result(tmp_path):
         c.post("/calls/c5/farend", json={"text": "Hello?"}, headers=H)
         ev = wait_for(c, "c5", lambda ev: ev["done"])
         assert ev["events"][-1]["data"]["outcome"] == "failed"
+
+
+def test_restart_closes_unfinished_calls(tmp_path):
+    from crow_phone.events import EventLog
+    log = EventLog(tmp_path / "events.db")
+    log.append("orphan", "state", {"state": "dialing"})
+    log.append("finished", "state", {"state": "dialing"})
+    log.append("finished", "result", {"outcome": "info_gathered"})
+    with TestClient(app_with(tmp_path)) as c:
+        ev = c.get("/calls/orphan/events?since=0", headers=H).json()
+        assert ev["done"] is True and ev["active"] is False
+        res = [e for e in ev["events"] if e["type"] == "result"]
+        assert len(res) == 1 and res[0]["data"]["outcome"] == "failed" and res[0]["data"]["error"] == "runner restarted"
+        fin = c.get("/calls/finished/events?since=0", headers=H).json()
+        assert [e["type"] for e in fin["events"]].count("result") == 1
+    # a second restart does not append another result
+    with TestClient(app_with(tmp_path)) as c:
+        ev = c.get("/calls/orphan/events?since=0", headers=H).json()
+        assert [e["type"] for e in ev["events"]].count("result") == 1
+
+
+def test_events_report_active_only_for_the_running_call(tmp_path):
+    with TestClient(app_with(tmp_path)) as c:
+        unknown = c.get("/calls/nope/events?since=0", headers=H).json()
+        assert unknown == {"events": [], "done": False, "active": False}
+        assert c.post("/calls/c1/start", json=body(), headers=H).status_code == 200
+        live = c.get("/calls/c1/events?since=0", headers=H).json()
+        assert live["active"] is True and live["done"] is False
+        c.post("/calls/c1/stop", headers=H)
+        ev = wait_for(c, "c1", lambda e: e["done"])
+        assert ev["active"] is False

@@ -4,6 +4,7 @@ import { deliverPhoneResult } from "./deliver.js";
 
 const MAX_FAILURES = 30;       // consecutive events() failures (~60s at 2s ticks)
 const MAX_MINUTES = 25;
+const LOST_GRACE_S = 15;       // start latency before "runner not running it" means lost
 const cap = (v) => (v == null ? null : String(v).slice(0, 200));
 
 function cleanBooking(b) {
@@ -97,6 +98,12 @@ export function createDispatcher({ db, runner, deps, settings }) {
     }
     if (events.length) await store.appendEvents(db, live.id, events);
     if (!result && r.done) await fail(live, "failed", "runner ended without a result");
+    // The runner answers but is not running this call and has no result for it
+    // (e.g. it restarted before this build closed orphans): free the slot now
+    // instead of holding it for MAX_MINUTES.
+    else if (!result && r.done === false && r.active === false && live.age_min != null && live.age_min * 60 > LOST_GRACE_S) {
+      await stopAndFail(live.id, "runner lost the call");
+    }
     return true;
   }
 

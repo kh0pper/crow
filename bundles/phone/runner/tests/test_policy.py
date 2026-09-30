@@ -120,3 +120,19 @@ def test_max_price_amount_must_be_int_or_float():
         {"max_price": {"amount": True}},
     )
     assert not ok and "limit" in reason.lower(), (ok, reason)
+
+
+def test_check_number_blocks_bad_numbers():
+    assert policy.check_number("+15125550101") == (True, "ok")
+    for bad in ["+19115550101", "+15129110101", "+19005550101", "+15129000101", "+15129760101",
+                "+15125550101#", "*67+15125550101", "+15125550101,1", "+15125550101;1", "+15125550101w1", "+15125550101p1",
+                "+1512555010", "+11125550101", "+15121550101", "5125550101", "+445125550101", None, 15125550101]:
+        ok, _ = policy.check_number(bad)
+        assert not ok, bad
+
+
+def test_normalize_number():
+    assert policy.normalize_number("(512) 555-0101") == "+15125550101"
+    assert policy.normalize_number("+1 512.555.0101") == "+15125550101"
+    for bad in ["512-555-0101#", "*67 512 555 0101", "512555", "abc", None]:
+        assert policy.normalize_number(bad) is None, bad

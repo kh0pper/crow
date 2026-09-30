@@ -22,6 +22,11 @@ MODEL_OUTCOMES = {"booked", "info_gathered", "needs_callback", "refused"}
 _DIGITS = re.compile(r"^[0-9*#]{1,20}$")
 _DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Mirror of the gateway's plan.js number policy: the runner re-checks the number
+# it is about to dial, so a bad plan can never reach the line.
+_NANP = re.compile(r"\+1[2-9]\d{2}[2-9]\d{6}")
+_DIAL_CODES = re.compile(r"[*#,;wWpP]")
+_N11 = re.compile(r"[2-9]11")
 
 _DISCLOSURE = {
     "en": "Hi, I'm an automated assistant calling on behalf of {owner}. This call may be recorded.",
@@ -36,6 +41,38 @@ _CALLBACK = {
 
 def valid_digits(s) -> bool:
     return isinstance(s, str) and bool(_DIGITS.match(s))
+
+
+def normalize_number(raw) -> str | None:
+    """US/Canada number -> E.164, or None. Dial codes (* # , ; w p) are never normalized away."""
+    s = str(raw if raw is not None else "").strip()
+    if _DIAL_CODES.search(s):
+        return None
+    d = re.sub(r"[\s().\-]", "", s)
+    if d.startswith("+"):
+        d = d[1:]
+    if not d.isdigit():
+        return None
+    if len(d) == 10:
+        d = "1" + d
+    e164 = "+" + d
+    return e164 if _NANP.fullmatch(e164) else None
+
+
+def check_number(e164) -> tuple[bool, str]:
+    """Is this exact string a dialable NANP E.164 number under the policy?"""
+    if not isinstance(e164, str):
+        return False, "not a number"
+    if _DIAL_CODES.search(e164):
+        return False, "dial codes"
+    if not _NANP.fullmatch(e164):
+        return False, "not NANP E.164"
+    area, exch = e164[2:5], e164[5:8]
+    if _N11.fullmatch(area) or _N11.fullmatch(exch):
+        return False, "n11"
+    if area == "900" or exch in ("900", "976"):
+        return False, "premium"
+    return True, "ok"
 
 
 def disclosure(lang: str, owner_name: str) -> str:

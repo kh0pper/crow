@@ -60,6 +60,9 @@ class CallController:
     async def run(self):
         try:
             try:
+                ok, _reason = policy.check_number(self.plan.get("number_e164"))
+                if not ok:
+                    return self._finish(self.result("failed", error="number blocked by runner policy"))
                 if not await self.verify():
                     return self._finish(self.result("failed", error="start token rejected"))
                 self.emit("state", {"state": "dialing"})

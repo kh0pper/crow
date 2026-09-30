@@ -166,3 +166,25 @@ test("runner result is validated: bad outcome → failed; booking whitelisted", 
   assert.equal(cb.outcome, "booked");
   assert.equal(cb.booking.evil, undefined); assert.equal(cb.booking.location.length, 200); assert.equal(cb.booking.price, null); assert.equal(cb.booking.notes, "n");
 });
+
+test("runner not running the call (active:false, done:false) → failed 'runner lost the call' after the start grace", async () => {
+  let stops = 0;
+  const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => ({ events: [], done: false, active: false }), stop: async () => { stops++; } }) });
+  await d.tick(); // start → live
+  await d.tick(); // inside the 15 s start grace: still live
+  assert.equal((await store.getCall(db, call_id)).status, "live");
+  await db.execute({ sql: "UPDATE phone_calls SET started_at=datetime('now','-20 seconds') WHERE id=?", args: [call_id] });
+  await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "done"); assert.equal(c.outcome, "failed"); assert.equal(c.error, "runner lost the call"); assert.equal(stops, 1);
+});
+
+test("active:true or a runner without the active field keeps waiting", async () => {
+  for (const extra of [{ active: true }, {}]) {
+    const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => ({ events: [], done: false, ...extra }) }) });
+    await d.tick();
+    await db.execute({ sql: "UPDATE phone_calls SET started_at=datetime('now','-5 minutes') WHERE id=?", args: [call_id] });
+    await d.tick();
+    assert.equal((await store.getCall(db, call_id)).status, "live", JSON.stringify(extra));
+  }
+});

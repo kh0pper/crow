@@ -256,3 +256,12 @@ async def test_booking_reported_only_when_booked():
         R("", ("needs_owner", {"reason": "need to check"})),
     ])
     assert result["outcome"] == "needs_callback" and result["booking"] is None
+
+
+async def test_blocked_number_never_dials():
+    for number in ["+19005550101", "+15129110101", "+15125550101#", "+15129760101", "911"]:
+        plan = {**PLAN, "number_e164": number}
+        r, events, line = await run(FakeLine(["Hello"]), [], plan=plan)
+        assert r["outcome"] == "failed" and r["error"] == "number blocked by runner policy", number
+        assert not line.dialed and line.said == [], number
+        assert events[-1][0] == "result"

@@ -39,6 +39,14 @@ def make_app(
         "PHONE_GATEWAY_URL", "http://host.docker.internal:3001"
     ).rstrip("/")
     log = EventLog(data_dir / "events.db")
+    # A call that was running when the runner died can never finish now: close it
+    # so the gateway stops waiting on it (it would otherwise hold the slot).
+    for orphan in log.unfinished():
+        log.append(
+            orphan,
+            "result",
+            {"outcome": "failed", "booking": None, "summary": "", "do_not_call": False, "error": "runner restarted"},
+        )
     app = FastAPI(title="crow-phone-runner")
     state = {"task": None, "ctrl": None, "line": None, "call_id": None}
 
@@ -156,6 +164,8 @@ def make_app(
 
     @app.get("/calls/{call_id}/events", dependencies=[Depends(auth)])
     async def events(call_id: str, since: int = 0):
-        return {"events": log.since(call_id, since), "done": log.done(call_id)}
+        done = log.done(call_id)
+        active = state["call_id"] == call_id and busy() and not done
+        return {"events": log.since(call_id, since), "done": done, "active": active}
 
     return app

@@ -58,3 +58,11 @@ class EventLog:
                 ).fetchone()
                 is not None
             )
+
+    def unfinished(self) -> list:
+        """Call ids that have events but no result (orphaned by a runner restart)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT call_id FROM events WHERE call_id NOT IN (SELECT call_id FROM events WHERE type = 'result') ORDER BY call_id"
+            ).fetchall()
+        return [r[0] for r in rows]
