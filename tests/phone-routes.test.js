@@ -23,12 +23,13 @@ before(async () => {
     INSERT INTO providers (id, base_url, host) VALUES ('loc','http://127.0.0.1:1/v1','local'), ('cld','https://x.example/v1','cloud');`);
   await initPhoneTables(s.db);
   s.secret = "f".repeat(48); process.env.PHONE_RUNNER_SECRET = s.secret;
-  s.farend = []; s.inits = 0;
+  s.farend = []; s.inits = 0; s.stops = []; s.runnerActive = true;
   const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
   const auth = (req, res, next) => { const sess = req.headers["x-test-session"]; if (!sess) return res.status(401).end(); req.dashboardSession = sess; next(); };
   const router = phoneRouter(auth, {
     db: s.db, startDispatcher: false, onInit: () => { s.inits++; }, csrf: (req, res, next) => next(),
-    runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async () => ({ ok: true }) },
+    runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async (id) => { s.stops.push(id); return { ok: true }; },
+      events: async () => ({ events: [], done: false, active: s.runnerActive }) },
     authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456" },
   });
   const app = express(); app.use(router);
@@ -42,9 +43,10 @@ after(async () => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
 
+let planN = 0; // distinct bot ids keep every test clear of the per-bot plan rate limit
 async function newPlan() {
   const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
-  return (await store.createPlan(s.db, p, { kind: "bot", id: "bobby" }, null)).call_id;
+  return (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
 }
 const post = (path, body, session = "local") => fetch(s.base + path, { method: "POST", headers: { "Content-Type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: JSON.stringify(body || {}) });
 
@@ -135,11 +137,78 @@ test("panel renders in EN and ES with the approval controls and no backticks in 
     assert.match(html, /name="business_confirmed"/);
     assert.match(html, /name="allow_cloud"/);
     assert.match(html, /name="totp"/);
+    assert.match(html, /class="phone-share-edit"/);
+    assert.match(html, /class="phone-cloud-model"/);
     const script = (html.split("<script>")[1] || "").split("</script>")[0];
     assert.equal(script.includes("`"), false, "no backticks in client script");
     assert.equal(script.includes("${"), false, "no dollar-brace in client script");
     assert.doesNotThrow(function () { new Function(script); }, "script is valid JavaScript");
   }
+  const en = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = en.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /createElement\('textarea'\)/, "an editable textarea per shareable value");
+  assert.match(script, /'share_' \+ k/, "textareas are named share_<key>");
+  assert.match(script, /edits = \{ shareable: edited \}/, "approve sends the edited shareable values");
+  assert.match(script, /esc\(sh\[k\]\)/, "shareable VALUES are shown, escaped");
+  assert.match(script, /var lastPendingKey = null;/, "first empty load renders 'Nothing here yet.'");
   const es = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "es" });
   assert.match(es, /Aprobar/);
+});
+
+async function sharePlan() {
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", shareable: { name: "Kevin", date_of_birth: "1980-01-01" } });
+  return (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
+}
+
+test("approve with edits.shareable stores the owner-edited values (cleared field withheld)", async () => {
+  const id = await sharePlan();
+  const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, edits: { shareable: { name: "Kev", date_of_birth: "" } } });
+  assert.equal(r.status, 200);
+  const c = await store.getCall(s.db, id);
+  assert.equal(c.status, "approved");
+  assert.deepEqual(c.shareable, { name: "Kev" });
+});
+
+test("approve requires a non-empty owner name (409 owner_name_required)", async () => {
+  await s.db.execute({ sql: "UPDATE dashboard_settings SET value='  ' WHERE key='phone_owner_name'", args: [] });
+  try {
+    const id = await newPlan();
+    const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).error, "owner_name_required");
+    assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval");
+  } finally {
+    await s.db.execute({ sql: "UPDATE dashboard_settings SET value='Kevin' WHERE key='phone_owner_name'", args: [] });
+  }
+});
+
+test("reject and edit require a local password session (403 local_login_required)", async () => {
+  const id = await newPlan();
+  for (const [path, body] of [[`/api/phone/calls/${id}/reject`, {}], [`/api/phone/calls/${id}/edit`, { edits: { goal: "x" } }]]) {
+    const r = await post(path, body, "sso");
+    assert.equal(r.status, 403, path);
+    assert.equal((await r.json()).error, "local_login_required");
+  }
+  assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval");
+  assert.equal((await post(`/api/phone/calls/${id}/reject`, {})).status, 200);
+  assert.equal((await store.getCall(s.db, id)).status, "rejected");
+});
+
+test("stop on an orphaned call (runner not running it) finalizes it failed 'stopped by owner'", async () => {
+  const id = await newPlan();
+  await s.db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now') WHERE id=?", args: [id] });
+  s.runnerActive = false;
+  try {
+    assert.equal((await post(`/api/phone/calls/${id}/stop`, {})).status, 200);
+  } finally { s.runnerActive = true; }
+  assert.ok(s.stops.includes(id));
+  const c = await store.getCall(s.db, id);
+  assert.equal(c.status, "done"); assert.equal(c.outcome, "failed"); assert.equal(c.error, "stopped by owner");
+});
+
+test("stop on an active call only asks the runner (the runner's result finalizes it)", async () => {
+  const id = await newPlan();
+  await s.db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now') WHERE id=?", args: [id] });
+  assert.equal((await post(`/api/phone/calls/${id}/stop`, {})).status, 200);
+  assert.equal((await store.getCall(s.db, id)).status, "live");
 });

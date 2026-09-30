@@ -107,13 +107,38 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (!(await authority.isLocalDashboardSession(db, req.dashboardSession))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to approve calls (peer sign-in is not enough)." });
     if (!(await authority.stepUpOk(b.totp))) return res.status(403).json({ error: "totp_required", message: "Enter your current 2FA code." });
     if (b.business_confirmed !== true) return res.status(400).json({ error: "business_confirmation_required" });
-    if (!(await readSettings(db)).tcpaAck) return res.status(409).json({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." });
+    const st = await readSettings(db);
+    if (!st.tcpaAck) return res.status(409).json({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." });
+    if (!String(st.ownerName || "").trim()) return res.status(409).json({ error: "owner_name_required", message: "Set your first name in Phone settings first (the assistant says who it is calling for)." });
     await mods.store.approveCall(db, req.params.id, { session: req.dashboardSession, allowCloud: !!b.allow_cloud, edits: b.edits || undefined, runAfter: b.run_after || undefined });
     res.json({ ok: true });
   }));
-  router.post("/api/phone/calls/:id/reject", wrap(async (req, res) => { await mods.store.rejectCall(db, req.params.id); res.json({ ok: true }); }));
-  router.post("/api/phone/calls/:id/edit", wrap(async (req, res) => { await mods.store.editCall(db, req.params.id, (req.body || {}).edits || {}); res.json({ ok: true }); }));
-  router.post("/api/phone/calls/:id/stop", wrap(async (req, res) => { await runner.stop(req.params.id); res.json({ ok: true }); }));
+  const localOnly = async (req, res) => {
+    if (await authority.isLocalDashboardSession(db, req.dashboardSession)) return true;
+    res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to change call plans (peer sign-in is not enough)." });
+    return false;
+  };
+  router.post("/api/phone/calls/:id/reject", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
+    await mods.store.rejectCall(db, req.params.id); res.json({ ok: true });
+  }));
+  router.post("/api/phone/calls/:id/edit", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
+    await mods.store.editCall(db, req.params.id, (req.body || {}).edits || {}); res.json({ ok: true });
+  }));
+  // Stop always ends the call: ask the runner to stop; if the runner says it is
+  // not running this call (orphaned by a runner restart), finalize it here.
+  router.post("/api/phone/calls/:id/stop", wrap(async (req, res) => {
+    const id = req.params.id;
+    await Promise.resolve().then(() => runner.stop(id)).catch(() => {});
+    const c = await mods.store.getCall(db, id);
+    if (c && (c.status === "live" || c.status === "starting")) {
+      let r = null;
+      try { r = await runner.events(id, c.event_seq); } catch { /* unreachable: the dispatcher times it out */ }
+      if (r && r.active === false && !r.done) await mods.store.finalizeCall(db, id, { outcome: "failed", booking: null, summary: null, error: "stopped by owner" });
+    }
+    res.json({ ok: true });
+  }));
   router.post("/api/phone/calls/:id/farend", wrap(async (req, res) => {
     const c = await mods.store.getCall(db, req.params.id);
     if (!c || c.status !== "live") return res.status(409).json({ error: "not_live" });
