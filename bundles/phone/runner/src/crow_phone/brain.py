@@ -89,6 +89,8 @@ class OpenAIBrain:
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+            if not isinstance(args, dict):
+                args = {}
             calls.append(ToolCall(tc["function"]["name"], args))
         return BrainReply(text=msg.get("content") or "", tool_calls=calls)
 

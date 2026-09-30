@@ -9,15 +9,19 @@ class ToolState:
         self.needs_owner = None
         self.end = None
         self.do_not_call = False
+        self.menu_text = ""  # latest automated-menu utterance; pressed digits must come from it
 
     def apply(self, call):
         """Validate + apply one tool call. Returns (ok, reason). Code, not the model, decides."""
-        a = call.args or {}
+        a = call.args if isinstance(call.args, dict) else {}
         if call.name == "press_digits":
             if self.mode != "ivr":
                 return False, "press_digits is only allowed in an automated menu"
-            if not policy.valid_digits(str(a.get("digits", ""))):
+            digits = str(a.get("digits", ""))
+            if not policy.valid_digits(digits):
                 return False, "digits must be 0-9, * or #"
+            if len(digits) > 3 or not all(d in self.menu_text for d in digits):
+                return False, "digits were not offered by the menu"
             return True, "ok"
         if call.name == "record_booking":
             ok, reason = policy.booking_within_limits(a, self.plan.get("limits") or {})

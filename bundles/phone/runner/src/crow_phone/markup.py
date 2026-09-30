@@ -94,10 +94,13 @@ def sanitize(text: str) -> Sanitized:
         if body.startswith("{"):
             try:
                 obj = json.loads(body)
-                name = obj.get("name", "").lower()
+                if not isinstance(obj, dict):
+                    raise json.JSONDecodeError("not an object", body, 0)
+                name = str(obj.get("name", "")).lower()
                 if name in KNOWN_TOOLS:
                     args = {}
-                    for k, v in obj.get("arguments", {}).items():
+                    raw_args = obj.get("arguments")
+                    for k, v in (raw_args if isinstance(raw_args, dict) else {}).items():
                         if isinstance(v, str):
                             args[k] = _strip_angle_brackets(v)
                         else:

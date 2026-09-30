@@ -186,3 +186,9 @@ def test_stray_brackets_no_markup_flag():
     """Stray brackets in math not setting had_markup."""
     r = sanitize("if x<5 then y>3")
     assert not r.had_markup and r.clean == "if x 5 then y 3"
+
+
+def test_non_dict_arguments_in_json_tool_call_become_empty():
+    from crow_phone.markup import sanitize
+    s = sanitize('<tool_call>{"name":"press_digits","arguments":[1]}</tool_call>')
+    assert s.calls[0].name == "press_digits" and s.calls[0].args == {}

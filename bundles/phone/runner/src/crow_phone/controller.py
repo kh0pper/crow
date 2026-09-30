@@ -39,6 +39,7 @@ class CallController:
         self.messages = [{"role": "system", "content": system_prompt(plan, owner_name)}]
         self._stop = False
         self._disclosed_for_segment = False
+        self._n = 0
 
     def request_stop(self):
         self._stop = True
@@ -58,16 +59,40 @@ class CallController:
 
     async def run(self):
         try:
-            if not await self.verify():
-                return self._finish(self.result("failed", error="start token rejected"))
-            self.emit("state", {"state": "dialing"})
-            r = await self.line.dial(self.plan["number_e164"])
-            if r != "answered":
-                return self._finish(self.result({"busy": "busy", "no_answer": "no_answer"}.get(r, "failed"), error=None if r in ("busy", "no_answer") else r))
-            self.emit("state", {"state": "answered"})
-            return self._finish(await self._converse())
+            try:
+                if not await self.verify():
+                    return self._finish(self.result("failed", error="start token rejected"))
+                self.emit("state", {"state": "dialing"})
+                try:
+                    r = await asyncio.wait_for(self.line.dial(self.plan["number_e164"]), self.ring_timeout)
+                except asyncio.TimeoutError:
+                    r = "no_answer"
+                if r != "answered":
+                    return self._finish(self.result({"busy": "busy", "no_answer": "no_answer"}.get(r, "failed"), error=None if r in ("busy", "no_answer") else r))
+                self.emit("state", {"state": "answered"})
+                return self._finish(await self._converse())
+            except Exception as e:  # run() never raises
+                res = self.result("failed", error=f"{type(e).__name__}: {e}")
+                try:
+                    self.emit("result", res)
+                except Exception:
+                    pass
+                return res
         finally:
-            await self.line.hangup()
+            try:
+                await self.line.hangup()
+            except Exception:
+                pass
+
+    async def _ensure_disclosed(self):
+        """Nothing model-generated (or the callback line) is spoken before the disclosure in this segment."""
+        if not self._disclosed_for_segment:
+            await self.say(policy.disclosure(self.lang, self.owner))
+            self._disclosed_for_segment = True
+
+    def _call_id(self):
+        self._n += 1
+        return f"call_{self._n}"
 
     def _finish(self, res):
         self.emit("result", res)
@@ -81,6 +106,7 @@ class CallController:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if self.state.mode != "hold":
+                    await self._ensure_disclosed()
                     await self.say(policy.callback_line(self.lang))
                 return self.result("needs_callback", "time limit reached")
             text = await self.line.next_farend(min(self.farend_timeout, remaining))
@@ -101,7 +127,13 @@ class CallController:
                 self._disclosed_for_segment = False
                 self.emit("state", {"state": "on_hold"})
                 continue
-            self.state.mode = "ivr" if kind == "ivr" else "human"
+            # A menu is only honored before we have started talking to a human in this segment;
+            # a person saying "press 9" mid-conversation is the callee-injection case.
+            if kind == "ivr" and not self._disclosed_for_segment:
+                self.state.mode = "ivr"
+                self.state.menu_text = text
+            else:
+                self.state.mode = "human"
             if self.state.mode == "human" and not self._disclosed_for_segment:
                 await self.say(policy.disclosure(self.lang, self.owner))
                 self._disclosed_for_segment = True
@@ -123,34 +155,51 @@ class CallController:
                 if s.had_markup and not s.calls:
                     bad_markup += 1
                     if bad_markup >= 2:
+                        await self._ensure_disclosed()
                         await self.say(policy.filler(self.lang))
                         await self.say(policy.callback_line(self.lang))
                         return self.result("needs_callback", "model produced unusable output")
-                    self.messages.append({"role": "system", "content": "Your last reply contained markup. Reply again with plain speech or a proper tool call."})
+                    self._note("Your last reply contained markup. Reply again with plain speech or a proper tool call.")
                     continue
                 spoken = "" if s.had_markup else s.clean
-            if spoken:
+            # Validate/apply every tool call BEFORE speaking; a refused call drops the reply's speech.
+            ids = [self._call_id() for _ in calls]
+            results = [self.state.apply(c) for c in calls]
+            refused = any(not ok for ok, _ in results)
+            if calls:
+                self.messages.append({"role": "assistant", "content": (None if refused else spoken) or None, "tool_calls": [
+                    {"id": i, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.args if isinstance(c.args, dict) else {})}}
+                    for i, c in zip(ids, calls)]})
+                for i, c, (ok, reason) in zip(ids, calls, results):
+                    self.emit("tool", {"name": c.name, "ok": ok, "reason": reason})
+                    self.messages.append({"role": "tool", "tool_call_id": i, "content": "accepted" if ok else f"REFUSED: {reason}"})
+            elif spoken:
                 self.messages.append({"role": "assistant", "content": spoken})
+            if refused:
+                continue
+            if spoken:
+                await self._ensure_disclosed()
                 await self.say(spoken)
             if not calls:
                 return None
             for c in calls:
-                ok, reason = self.state.apply(c)
-                self.emit("tool", {"name": c.name, "ok": ok, "reason": reason})
-                self.messages.append({"role": "system", "content": f"tool {c.name} {'accepted' if ok else 'REFUSED: ' + reason}"})
-                if ok and c.name == "press_digits":
+                if c.name == "press_digits":
                     for d in str(c.args["digits"]):
                         await self.line.send_digit(d)
                         self.emit("dtmf", {"digits": d})
                         await asyncio.sleep(0)
                     self._disclosed_for_segment = False  # whoever answers after the menu hears the disclosure
                     return None
-                if ok and c.name == "mark_do_not_call":
+                if c.name == "mark_do_not_call":
                     return self.result("refused", "business asked not to be called again")
-                if ok and c.name == "needs_owner":
+                if c.name == "needs_owner":
+                    await self._ensure_disclosed()
                     await self.say(policy.callback_line(self.lang))
                     return self.result("needs_callback", self.state.needs_owner)
-                if ok and c.name == "end_call":
+                if c.name == "end_call":
                     outcome, summary = self.state.end
                     return self.result(outcome, summary)
         return None
+
+    def _note(self, text):
+        self.messages.append({"role": "user", "content": f"(note from the call controller) {text}"})
