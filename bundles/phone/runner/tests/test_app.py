@@ -1,3 +1,4 @@
+import asyncio
 import time
 from fastapi.testclient import TestClient
 from crow_phone.app import make_app
@@ -126,12 +127,37 @@ def test_full_interactive_call(tmp_path):
 
 def test_warmup_failure_is_not_admissible(tmp_path):
     with TestClient(app_with(tmp_path, brain=FailingWarmup([]))) as c:
-        assert (
-            c.post("/calls/c2/start", json=body("c2"), headers=H).json()["started"]
-            is False
-        )
-        ev = c.get("/calls/c2/events?since=0", headers=H).json()
-        assert ev["done"] and ev["events"][-1]["data"]["outcome"] == "not_admissible"
+        assert c.post("/calls/c2/start", json=body("c2"), headers=H).json()["started"] is True
+        ev = wait_for(c, "c2", lambda ev: ev["done"])
+        assert ev["events"][-1]["data"]["outcome"] == "not_admissible"
+
+
+class SlowWarmup(ScriptedBrain):
+    async def warmup(self, system, tools):
+        await asyncio.sleep(0.2)
+
+
+def test_back_to_back_starts_second_is_409(tmp_path):
+    with TestClient(app_with(tmp_path, brain=SlowWarmup([]))) as c:
+        assert c.post("/calls/s1/start", json=body("s1"), headers=H).status_code == 200
+        assert c.post("/calls/s2/start", json=body("s2"), headers=H).status_code == 409
+
+
+def test_auth_variants(tmp_path):
+    with TestClient(app_with(tmp_path)) as c:
+        assert c.get("/calls/c1/events?since=0", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        assert c.post("/calls/c1/stop").status_code == 401
+        assert c.post("/calls/c1/farend", json={"text": "x"}).status_code == 401
+    app = make_app(secret="", data_dir=tmp_path / "e")
+    with TestClient(app) as c:
+        assert c.get("/calls/c1/events?since=0", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_restart_of_existing_call_id_is_409(tmp_path):
+    with TestClient(app_with(tmp_path, brain=FailingWarmup([]))) as c:
+        c.post("/calls/d1/start", json=body("d1"), headers=H)
+        wait_for(c, "d1", lambda ev: ev["done"])
+        assert c.post("/calls/d1/start", json=body("d1"), headers=H).status_code == 409
 
 
 def test_rejected_token_never_dials(tmp_path):

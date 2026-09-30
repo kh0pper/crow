@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import os
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def make_app(
     state = {"task": None, "ctrl": None, "line": None, "call_id": None}
 
     def auth(authorization: str = Header(default="")):
-        if not secret or authorization != f"Bearer {secret}":
+        if not secret or not hmac.compare_digest(authorization.encode(), f"Bearer {secret}".encode()):
             raise HTTPException(status_code=401, detail="unauthorized")
 
     def default_verify_factory(call_id, token):
@@ -87,17 +88,7 @@ def make_app(
             except Exception:
                 pass
 
-    @app.get("/health")
-    async def health():
-        return {"ok": True, "busy": busy()}
-
-    @app.post("/calls/{call_id}/start", dependencies=[Depends(auth)])
-    async def start(call_id: str, body: StartBody):
-        if body.call_id != call_id:
-            raise HTTPException(400, "call_id mismatch")
-        if busy():
-            raise HTTPException(409, "a call is already running")
-        brain = brain_factory(body.model)
+    async def run_call(call_id, ctrl, line, brain, body):
         try:
             await brain.warmup(system_prompt(body.plan, body.owner_name), TOOLS)
         except Exception as e:
@@ -112,7 +103,22 @@ def make_app(
                     "error": f"model warm-up failed: {e}",
                 },
             )
-            return {"ok": True, "started": False}
+            return
+        await run_safe(call_id, ctrl, line)
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True, "busy": busy()}
+
+    @app.post("/calls/{call_id}/start", dependencies=[Depends(auth)])
+    async def start(call_id: str, body: StartBody):
+        if body.call_id != call_id:
+            raise HTTPException(400, "call_id mismatch")
+        if busy():
+            raise HTTPException(409, "a call is already running")
+        if log.since(call_id, 0):
+            raise HTTPException(409, "call already started")
+        brain = brain_factory(body.model)
         line = line_factory(body.line)
         ctrl = CallController(
             call_id,
@@ -127,7 +133,7 @@ def make_app(
             ctrl=ctrl,
             line=line,
             call_id=call_id,
-            task=asyncio.create_task(run_safe(call_id, ctrl, line)),
+            task=asyncio.create_task(run_call(call_id, ctrl, line, brain, body)),
         )
         return {"ok": True, "started": True}
 
