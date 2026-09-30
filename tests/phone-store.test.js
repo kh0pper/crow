@@ -147,24 +147,38 @@ test("markLive: status guard, returns boolean", async () => {
   assert.equal(c2.status, "done");
 });
 
-test("consumeToken refused on non-approved call", async () => {
+test("consumeToken refused on unapproved or plan-changed call", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
+  assert.equal(await store.consumeToken(db, call_id, "any-token"), false);
   const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false });
-  // Token still pending approval — oh wait, it's already approved above.
-  // Let's test the case where token is consumed while status changes
-  const c = await store.getCall(db, call_id);
-  assert.equal(c.status, "approved");
-  assert.equal(await store.consumeToken(db, call_id, token), true);
-  const c2 = await store.getCall(db, call_id);
-  assert.equal(c2.status, "approved"); // consumeToken clears hash but doesn't change status
+  await store.editCall(db, call_id, { goal: "New goal" });
+  assert.equal(await store.consumeToken(db, call_id, token), false);
 });
 
-test("daily bot limit: 10/day (excludes non-pending)", async () => {
-  for (let i = 0; i < 10; i++) {
+test("daily bot limit: 10/day total, pend limit does not block when low", async () => {
+  const callIds = [];
+  for (let i = 0; i < 5; i++) {
     const { call_id } = await store.createPlan(db, plan(), bot, null);
-    if (i % 2 === 0) await store.rejectCall(db, call_id); // Reject half of them
+    callIds.push(call_id);
   }
-  // We have 5 rejected, 5 pending. Total 10 created today. Next one should fail.
+  // Approve first 5 to clear pending; now day=5 but pend=0
+  for (let i = 0; i < 5; i++) {
+    await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
+  }
+  let pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [bot.id] })).rows[0].n;
+  assert.equal(pend, 0);
+  // Create 5 more to reach day=10 (pend will be 5 during creation of 5th)
+  for (let i = 0; i < 5; i++) {
+    const { call_id } = await store.createPlan(db, plan(), bot, null);
+    callIds.push(call_id);
+  }
+  // Now day=10, pend=5. Approve the last 5 to clear pending
+  for (let i = 5; i < 10; i++) {
+    await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
+  }
+  pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [bot.id] })).rows[0].n;
+  assert.equal(pend, 0);
+  // 11th should fail due to day>=10, not pending limit
   await assert.rejects(store.createPlan(db, plan(), bot, null), (e) => e.code === "rate_limited");
 });
 
