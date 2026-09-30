@@ -238,3 +238,13 @@ test("a derived browser block names its own instance and never the primary", () 
   }
   assert.ok(!block.cwd.startsWith(primary + "/"), `browser block cwd points at the primary: ${block.cwd}`);
 });
+
+test("probe surface offers the phone http server when the phone token exists (Bot Builder Tools tab)", () => {
+  const { home } = instanceB();
+  const canonical = { mcpServers: {} };
+  assert.ok(!serversForProbe(canonical, home, { binding: BINDING_B(home) }).phone, "no phone token → no phone tools");
+  writeFileSync(join(home, "phone-token"), "ptok", { mode: 0o600 });
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home), gatewayPort: 3999 });
+  assert.equal(surface.phone.url, "http://127.0.0.1:3999/phone/mcp");
+  assert.equal(surface.phone.headers.Authorization, "Bearer ptok");
+});

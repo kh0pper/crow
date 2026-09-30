@@ -239,7 +239,8 @@ function coreBlock(spec, binding, repoEnv, node) {
  * of an opaque spawn failure.
  *
  * `coreNames` names the subset of `servers` sourced from the registry
- * (CORE_SERVERS + CONDITIONAL_SERVERS) rather than from mcp-addons.json. It
+ * (CORE_SERVERS + CONDITIONAL_SERVERS, plus the core-mounted `phone` http
+ * entry when its token exists) rather than from mcp-addons.json. It
  * exists so a consumer that wants ONLY the registry-sourced servers (the ones
  * that vanish from the picker once Crow entries leave the homedir config) can
  * select them without re-deriving the split — `probeExtensions` already owns
@@ -260,7 +261,10 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   if (board) servers.board = board;
   else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
   const phone = phoneBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
-  if (phone) servers.phone = phone;
+  // Phone joins coreNames so serversForProbe offers its tools in the Bot
+  // Builder Tools tab (an http block; probeServerTools speaks HTTP). Only when
+  // the gateway minted a phone token, i.e. the Phone bundle is installed.
+  if (phone) { servers.phone = phone; coreNames.push("phone"); }
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);
