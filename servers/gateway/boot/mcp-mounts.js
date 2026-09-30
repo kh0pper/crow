@@ -277,8 +277,9 @@ export async function mountMcpServers(app, deps) {
       await initPhoneTables(phoneDb);
       const { minted } = await ensurePhoneToken(phoneDb);
       if (minted) console.log("[gateway] phone token minted");
-      const ownerRow = (await phoneDb.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='phone_owner_number'", args: [] })).rows[0];
-      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber: ownerRow?.value || null }), sessionManager, authMiddleware, peerExposureGate);
+      const { readSetting } = await import("../dashboard/settings/registry.js");
+      const ownerNumber = async () => (await readSetting(phoneDb, "phone_owner_number")) || null;
+      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber }), sessionManager, authMiddleware, peerExposureGate);
       console.log("[gateway] phone MCP mounted at /phone/mcp");
     }
   } catch (err) {

@@ -258,9 +258,9 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   // otherwise all-stdio catalog. See boardBlock() above.
   const board = boardBlock(crowHome, { botId: opts.botId, jobId: opts.jobId, port: opts.gatewayPort });
   if (board) servers.board = board;
+  else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
   const phone = phoneBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
   if (phone) servers.phone = phone;
-  else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);

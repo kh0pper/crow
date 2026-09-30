@@ -12,7 +12,7 @@ import { SessionManager } from "../servers/gateway/session-manager.js";
 import { mountMcpServer } from "../servers/gateway/routes/mcp.js";
 import { localTokenAuthMiddleware, generatePhoneToken, generateBoardToken } from "../servers/gateway/local-token.js";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
-import { createPhoneMcpServer } from "../bundles/phone/server/mcp.js";
+import { createPhoneMcpServer, resolvePhoneActor, deliverToFromActor } from "../bundles/phone/server/mcp.js";
 import { getCall } from "../bundles/phone/server/store.js";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
 
@@ -104,4 +104,62 @@ test("bot catalog includes /phone/mcp with bot, thread and gateway headers", () 
   assert.equal(servers.phone.headers["X-Crow-Actor-Thread"], "perch-7");
   assert.equal(servers.phone.headers["X-Crow-Actor-Gateway"], "perch");
   rmSync(home, { recursive: true, force: true });
+});
+
+test("catalog: board token only -> board present, no unconfigured.board, no phone", () => {
+  const home = mkdtempSync(join(tmpdir(), "phone-cat-b-"));
+  writeFileSync(join(home, "board-token"), "btok", { mode: 0o600 });
+  const { servers, unconfigured } = crowServerCatalog(home, { botId: "bobby" });
+  assert.ok(servers.board);
+  assert.equal(unconfigured.board, undefined);
+  assert.equal(servers.phone, undefined);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("catalog: phone token only -> phone present and board reason preserved", () => {
+  const home = mkdtempSync(join(tmpdir(), "phone-cat-p-"));
+  writeFileSync(join(home, "phone-token"), "tok", { mode: 0o600 });
+  const { servers, unconfigured } = crowServerCatalog(home, { botId: "bobby" });
+  assert.ok(servers.phone);
+  assert.ok(unconfigured.board);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("ownerNumber may be a function evaluated per call", async () => {
+  let owner = "+15125550000";
+  const app = express(); app.use(express.json());
+  app.use(localTokenAuthMiddleware(s.db));
+  const noAuth = (req, res) => res.status(401).json({});
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, ownerNumber: () => owner }), new SessionManager(), noAuth);
+  const http = app.listen(0); await new Promise((r) => http.once("listening", r));
+  const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${http.address().port}/phone/mcp`),
+    { requestInit: { headers: { ...botHeaders, Authorization: `Bearer ${s.phoneToken}` } } });
+  const c = new Client({ name: "t", version: "0" }); await c.connect(t);
+  const a2 = { ...args, number: "512-555-0199" };
+  assert.notEqual((await c.callTool({ name: "phone_plan_call", arguments: a2 })).isError, true);
+  owner = "+15125550199";
+  assert.equal((await c.callTool({ name: "phone_plan_call", arguments: a2 })).isError, true);
+  await c.close(); await new Promise((r) => http.close(r));
+});
+
+test("bot actors can only read their own calls; session actors read any", async () => {
+  const bob = await client("/phone/mcp", s.phoneToken, botHeaders);
+  const { call_id } = payload(await bob.callTool({ name: "phone_plan_call", arguments: args }));
+  const other = await client("/phone/mcp", s.phoneToken, { ...botHeaders, "X-Crow-Actor-Id": "mallory" });
+  for (const name of ["phone_call_status", "phone_call_result"]) {
+    const r = await other.callTool({ name, arguments: { call_id } });
+    assert.equal(r.isError, true, name);
+    assert.match(r.content[0].text, /forbidden/);
+    assert.notEqual((await bob.callTool({ name, arguments: { call_id } })).isError, true, name);
+  }
+  const owner = await client("/phone/mcp", s.phoneToken);
+  assert.notEqual((await owner.callTool({ name: "phone_call_status", arguments: { call_id } })).isError, true);
+  await bob.close(); await other.close(); await owner.close();
+});
+
+test("resolvePhoneActor ignores actor headers from non-local auth; unknown gateway -> null", () => {
+  const a = resolvePhoneActor({ authInfo: { clientId: "instance:abc" }, requestInfo: { headers: {
+    "x-crow-actor-kind": "bot", "x-crow-actor-id": "evil", "x-crow-actor-thread": "discord:1", "x-crow-actor-gateway": "discord" } } });
+  assert.equal(a.kind, "session");
+  assert.equal(deliverToFromActor({ kind: "bot", id: "b", thread: "t", gateway: "gmail" }), null);
 });
