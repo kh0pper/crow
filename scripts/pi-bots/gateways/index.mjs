@@ -42,7 +42,7 @@ export function isHostManaged(type) { return !!HOST_BY_TYPE[type]; }
 export function gatewayHint(type, threadId) {
   if (type === "discord") {
     return "\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. "
-      + "Do NOT use gmail tools. (thread ref: " + threadId + ")";
+      + "Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: " + threadId + ")";
   }
   if (type === "gmail") {
     return "\nGATEWAY THREAD: gmail thread_id=" + threadId
@@ -53,7 +53,7 @@ export function gatewayHint(type, threadId) {
     // operator is watching the reply stream in the dashboard right now.
     // New type, so nothing existing shifts in the cached prompt prefix.
     return "\nGATEWAY: perch — you are in a live chat with the operator in the Crow dashboard; "
-      + "your reply text is streamed straight back to them. Do NOT use gmail tools. "
+      + "your reply text is streamed straight back to them. Do NOT reply via gmail tools (use them only for email tasks the user asks for). "
       + "(session ref: " + threadId + ")";
   }
   if (type === "board") {

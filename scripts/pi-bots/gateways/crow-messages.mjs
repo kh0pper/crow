@@ -14,7 +14,7 @@ export const configFields = []; // custom Share/manage UI ships in Plan 2
 
 export function gatewayHint(threadId) {
   return "\nGATEWAY: crow-messages — your reply text is delivered over Crow Messages automatically. "
-    + "Do NOT use gmail tools. (thread ref: " + threadId + ")";
+    + "Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: " + threadId + ")";
 }
 
 /**

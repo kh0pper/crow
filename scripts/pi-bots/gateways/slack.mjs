@@ -42,7 +42,7 @@ export const configFields = [
 
 export function gatewayHint(threadId) {
   return "\nGATEWAY: slack — your reply text is posted to the Slack thread automatically. "
-    + "Do NOT use gmail tools. (thread ref: " + threadId + ")";
+    + "Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: " + threadId + ")";
 }
 
 export async function checkRequirements() {

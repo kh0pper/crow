@@ -119,7 +119,7 @@ test("gatewayHint: perch gets a live-chat hint; gmail/discord stay byte-identica
   // the system-prompt prefix the KV cache depends on. Pinned verbatim.
   assert.equal(gatewayHint("discord", "T1"),
     "\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. "
-    + "Do NOT use gmail tools. (thread ref: T1)");
+    + "Do NOT reply via gmail tools (use them only for email tasks the user asks for). (thread ref: T1)");
   assert.equal(gatewayHint("gmail", "T1"),
     "\nGATEWAY THREAD: gmail thread_id=T1"
     + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.");
