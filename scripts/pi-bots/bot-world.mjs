@@ -146,7 +146,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted.
     const w = writeBotMcp(def, {
-      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
+      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
       ensureServers: (jobId || cardBound) ? ["board"] : [],
     });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
