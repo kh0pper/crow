@@ -121,3 +121,20 @@ test("concurrent first requests share one init", async () => {
   await Promise.all([1, 2, 3].map(() => fetch(s.base + "/api/phone/calls", { headers: { "x-test-session": "local" } })));
   assert.equal(s.inits, 1);
 });
+
+test("panel renders in EN and ES with the approval controls and no backticks in the client script", async () => {
+  const { default: panel } = await import("../bundles/phone/panel/phone.js");
+  const layout = ({ title, content, scripts }) => `<title>${title}</title>${content}<script>${scripts || ""}</script>`;
+  for (const lang of ["en", "es"]) {
+    const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang });
+    assert.match(html, /id="phone-pending"/);
+    assert.match(html, /id="phone-live"/);
+    assert.match(html, /name="business_confirmed"/);
+    assert.match(html, /name="allow_cloud"/);
+    assert.match(html, /name="totp"/);
+    const script = html.split("<script>")[1] || "";
+    assert.equal(script.includes("`"), false, "no backticks in client script");
+  }
+  const es = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "es" });
+  assert.match(es, /Aprobar/);
+});
