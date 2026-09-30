@@ -55,7 +55,7 @@ class CallController:
         await self.line.say(text)
 
     def result(self, outcome, summary="", error=None):
-        return {"outcome": outcome, "booking": self.state.booking, "summary": summary, "do_not_call": self.state.do_not_call, "error": error}
+        return {"outcome": outcome, "booking": self.state.booking if outcome == "booked" else None, "summary": summary, "do_not_call": self.state.do_not_call, "error": error}
 
     async def run(self):
         try:
@@ -164,8 +164,12 @@ class CallController:
                 spoken = "" if s.had_markup else s.clean
             # Validate/apply every tool call BEFORE speaking; a refused call drops the reply's speech.
             ids = [self._call_id() for _ in calls]
+            snap = {k: getattr(self.state, k) for k in ("booking", "needs_owner", "end", "do_not_call", "mode", "menu_text")}
             results = [self.state.apply(c) for c in calls]
             refused = any(not ok for ok, _ in results)
+            if refused:  # a refused batch leaves no partial state behind
+                for k, v in snap.items():
+                    setattr(self.state, k, v)
             if calls:
                 self.messages.append({"role": "assistant", "content": (None if refused else spoken) or None, "tool_calls": [
                     {"id": i, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.args if isinstance(c.args, dict) else {})}}

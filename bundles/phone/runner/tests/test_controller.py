@@ -223,3 +223,36 @@ def test_toolstate_non_dict_args_and_validation():
     assert s.apply(ToolCall("press_digits", {"digits": "2222"}))[0] is False
     assert s.apply(ToolCall("end_call", {"outcome": "booked", "summary": "x"}))[0] is False
     assert s.apply(ToolCall("end_call", {"outcome": "weird", "summary": "x"}))[0] is False
+
+
+async def test_refused_batch_does_not_leak_state_and_later_booking_works():
+    events = []
+    async def _v():
+        return True
+    line = FakeLine(["Hello, Smile Dental.", "Tuesday the 6th at 3:30?"])
+    good = {"date": "2026-10-06", "time": "15:30"}
+    snaps = []
+    c = None
+    def second(m):
+        snaps.append(c.state.booking)
+        return R("", ("record_booking", good), ("end_call", {"outcome": "booked", "summary": "x"}))
+    brain = ScriptedBrain([
+        R("Hi, a cleaning please."),
+        R("Sounds great", ("record_booking", good), ("press_digits", {"digits": "1"})),
+        second,
+    ])
+    c = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _v)
+    result = await c.run()
+    assert snaps == [None]
+    assert not any("Sounds great" in s for s in line.said)
+    assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06"
+
+
+async def test_booking_reported_only_when_booked():
+    line = FakeLine(["Hello.", "Tuesday 3:30 is open."])
+    result, _, _ = await run(line, [
+        R("Hi."),
+        R("", ("record_booking", {"date": "2026-10-06", "time": "15:30"})),
+        R("", ("needs_owner", {"reason": "need to check"})),
+    ])
+    assert result["outcome"] == "needs_callback" and result["booking"] is None
