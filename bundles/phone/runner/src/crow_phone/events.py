@@ -13,6 +13,8 @@ class EventLog:
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._lock = threading.Lock()
         with self._lock:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS events (call_id TEXT, seq INTEGER, type TEXT, data TEXT, at TEXT, PRIMARY KEY (call_id, seq))"
             )
@@ -25,7 +27,7 @@ class EventLog:
             ).fetchone()
             seq = row[0] + 1
             self._db.execute(
-                "INSERT INTO events VALUES (?,?,?,?,?)",
+                "INSERT INTO events (call_id, seq, type, data, at) VALUES (?, ?, ?, ?, ?)",
                 (
                     call_id,
                     seq,

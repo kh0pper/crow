@@ -1,3 +1,4 @@
+import math
 import re
 from datetime import date
 
@@ -53,26 +54,77 @@ def callback_line(lang: str) -> str:
 
 def booking_within_limits(booking: dict, limits: dict) -> tuple[bool, str]:
     try:
-        d = date.fromisoformat(str(booking.get("date", "")))
-    except ValueError:
-        return False, "date is not YYYY-MM-DD"
-    t = str(booking.get("time", ""))
-    if not _TIME.match(t):
-        return False, "time is not HH:MM"
-    dr = limits.get("date_range")
-    if dr and not (dr["from"] <= d.isoformat() <= dr["to"]):
-        return False, "date outside the allowed range"
-    days = limits.get("days_of_week")
-    if days and _DAYS[d.weekday()] not in days:
-        return False, "day of week not allowed"
-    tw = limits.get("time_window")
-    if tw and not (tw["start"] <= t < tw["end"]):
-        return False, "time outside the allowed window"
-    mp = limits.get("max_price")
-    if mp and booking.get("price") is not None:
+        # Handle None inputs
+        if booking is None or limits is None:
+            return False, "invalid limits/booking"
+
+        # Parse and validate date
         try:
-            if float(booking["price"]) > float(mp["amount"]):
-                return False, "price above the allowed maximum"
-        except (TypeError, ValueError):
-            return False, "price is not a number"
-    return True, "ok"
+            d = date.fromisoformat(str(booking.get("date", "")))
+        except ValueError:
+            return False, "date is not YYYY-MM-DD"
+
+        # Validate time
+        t = str(booking.get("time", ""))
+        if not _TIME.match(t):
+            return False, "time is not HH:MM"
+
+        # Validate date range
+        dr = limits.get("date_range")
+        if dr:
+            try:
+                if not (dr["from"] <= d.isoformat() <= dr["to"]):
+                    return False, "date outside the allowed range"
+            except (KeyError, TypeError):
+                return False, "invalid limits/booking"
+
+        # Validate days of week
+        days = limits.get("days_of_week")
+        if days:
+            if not isinstance(days, list):
+                return False, "invalid limits/booking"
+            if _DAYS[d.weekday()] not in days:
+                return False, "day of week not allowed"
+
+        # Validate time window
+        tw = limits.get("time_window")
+        if tw:
+            try:
+                if not (tw["start"] <= t < tw["end"]):
+                    return False, "time outside the allowed window"
+            except (KeyError, TypeError):
+                return False, "invalid limits/booking"
+
+        # Validate max price (fail closed)
+        mp = limits.get("max_price")
+        if mp:
+            try:
+                # max_price.amount must be a valid finite number
+                try:
+                    max_amount = float(mp["amount"])
+                except (KeyError, TypeError, ValueError):
+                    return False, "invalid price limit"
+                if not math.isfinite(max_amount):
+                    return False, "invalid price limit"
+
+                # When max_price is set, booking must have a finite price (not bool, not None)
+                price_val = booking.get("price")
+                if price_val is None:
+                    return False, "price required by the price limit"
+                # Reject bool (bool is technically numeric in Python)
+                if isinstance(price_val, bool):
+                    return False, "price required by the price limit"
+                try:
+                    price = float(price_val)
+                except (TypeError, ValueError):
+                    return False, "price required by the price limit"
+                if not math.isfinite(price):
+                    return False, "price required by the price limit"
+                if price > max_amount:
+                    return False, "price above the allowed maximum"
+            except (KeyError, TypeError, AttributeError):
+                return False, "invalid limits/booking"
+
+        return True, "ok"
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return False, "invalid limits/booking"
