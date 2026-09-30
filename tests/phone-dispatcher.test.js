@@ -68,3 +68,101 @@ test("gateway restart mid-call: a new dispatcher resumes from event_seq without 
   await d2.tick();
   assert.equal((await store.getCall(db, call_id)).transcript.length, 2);
 });
+
+// ---- fix round 1 ----
+const okResult = (extra = {}) => ({ events: [{ seq: 1, type: "result", data: { outcome: "info_gathered", booking: null, summary: "ok", ...extra } }], done: true });
+const mkRunner = (over = {}) => ({ start: async () => ({ ok: true }), stop: async () => {}, events: async () => okResult(), ...over });
+
+test("deliver throws once → retried and delivered exactly once on a later tick", async () => {
+  let n = 0; const ok = [];
+  const { db, call_id } = await setup({ runner: mkRunner() });
+  const d = createDispatcher({ db, runner: mkRunner(), deps: { notify: async () => {}, deliver: async (_d, c) => { if (++n === 1) throw new Error("boom"); ok.push(c.id); return {}; } },
+    settings: () => ({ ownerName: "K", dailyCap: 10, line: "fake", model: () => ({ label: "l" }) }) });
+  await d.tick(); await d.tick(); await d.tick(); await d.tick();
+  assert.deepEqual(ok, [call_id]);
+  assert.equal((await store.getCall(db, call_id)).status, "done");
+});
+
+test("restart: a new dispatcher delivers a done+undelivered call", async () => {
+  const { db, call_id } = await setup({ runner: mkRunner() });
+  await db.execute({ sql: "UPDATE phone_calls SET status='done', outcome='failed', delivered=0, ended_at=datetime('now') WHERE id=?", args: [call_id] });
+  const got = [];
+  const d = createDispatcher({ db, runner: mkRunner(), deps: { notify: async () => {}, deliver: async (_d, c) => { got.push(c.id); return {}; } }, settings: () => ({ dailyCap: 10, model: () => null }) });
+  await d.tick();
+  assert.deepEqual(got, [call_id]);
+});
+
+test("deliver always throwing → stops after 5 attempts", async () => {
+  let n = 0;
+  const { db, call_id } = await setup({ runner: mkRunner() });
+  await db.execute({ sql: "UPDATE phone_calls SET status='done', outcome='failed', ended_at=datetime('now') WHERE id=?", args: [call_id] });
+  const d = createDispatcher({ db, runner: mkRunner(), deps: { notify: async () => {}, deliver: async () => { n++; throw new Error("x"); } }, settings: () => ({ dailyCap: 10, model: () => null }) });
+  for (let i = 0; i < 9; i++) await d.tick();
+  assert.equal(n, 5);
+});
+
+test("result finalizes first; a repeated result does not re-finalize or re-deliver", async () => {
+  const delivered = [];
+  const { db, call_id, d } = await setup({ runner: mkRunner() });
+  await d.tick(); await d.tick(); await d.tick(); await d.tick();
+  assert.equal((await store.getCall(db, call_id)).status, "done");
+  assert.equal((await store.getCall(db, call_id)).event_seq, 1);
+});
+
+test("done:true without a result → failed 'runner ended without a result'", async () => {
+  const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => ({ events: [], done: true }) }) });
+  await d.tick(); await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.outcome, "failed"); assert.match(c.error, /ended without a result/);
+});
+
+test("30 consecutive events() failures → stop + failed 'runner unreachable'", async () => {
+  let stops = 0;
+  const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => { throw new Error("down"); }, stop: async () => { stops++; } }) });
+  await d.tick();
+  for (let i = 0; i < 29; i++) await d.tick();
+  assert.equal((await store.getCall(db, call_id)).status, "live");
+  await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.outcome, "failed"); assert.match(c.error, /runner unreachable/); assert.equal(stops, 1);
+});
+
+test("call older than 25 minutes → stop + failed 'maximum duration'", async () => {
+  let stops = 0;
+  const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => ({ events: [], done: false }), stop: async () => { stops++; } }) });
+  await d.tick();
+  await db.execute({ sql: "UPDATE phone_calls SET started_at=datetime('now','-26 minutes') WHERE id=?", args: [call_id] });
+  await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.outcome, "failed"); assert.match(c.error, /maximum duration/); assert.equal(stops, 1);
+});
+
+test("runner.start throws → runner.stop called and call failed", async () => {
+  let stops = 0;
+  const { db, call_id, d } = await setup({ runner: mkRunner({ start: async () => { throw new Error("nope"); }, stop: async () => { stops++; } }) });
+  await d.tick();
+  assert.equal(stops, 1);
+  assert.equal((await store.getCall(db, call_id)).outcome, "failed");
+});
+
+test("markLive false after start → runner.stop called", async () => {
+  let stops = 0;
+  let dbRef;
+  const runner = mkRunner({ start: async (c) => { await dbRef.execute({ sql: "UPDATE phone_calls SET status='cancelled' WHERE id=?", args: [c.id] }); return { ok: true }; }, stop: async () => { stops++; } });
+  const s = await setup({ runner }); dbRef = s.db;
+  await s.d.tick();
+  assert.equal(stops, 1);
+});
+
+test("runner result is validated: bad outcome → failed; booking whitelisted", async () => {
+  const a = await setup({ runner: mkRunner({ events: async () => okResult({ outcome: "pwned" }) }) });
+  await a.d.tick(); await a.d.tick();
+  const ca = await store.getCall(a.db, a.call_id);
+  assert.equal(ca.outcome, "failed"); assert.match(ca.error, /invalid outcome from runner/);
+  const long = "x".repeat(500);
+  const b = await setup({ runner: mkRunner({ events: async () => okResult({ outcome: "booked", booking: { date: "2026-10-06", location: long, price: "abc", evil: "x", notes: "n" } }) }) });
+  await b.d.tick(); await b.d.tick();
+  const cb = await store.getCall(b.db, b.call_id);
+  assert.equal(cb.outcome, "booked");
+  assert.equal(cb.booking.evil, undefined); assert.equal(cb.booking.location.length, 200); assert.equal(cb.booking.price, null); assert.equal(cb.booking.notes, "n");
+});

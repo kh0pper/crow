@@ -189,3 +189,14 @@ export async function callsTodayCount(db) {
 export async function recentCallToNumber(db, e164, minutes = 10) {
   return (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE number_e164=? AND started_at > datetime('now', ?)", args: [e164, `-${minutes} minutes`] })).rows[0].n > 0;
 }
+
+export async function listUndelivered(db, limit = 5) {
+  const rows = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='done' AND delivered=0 AND delivery_attempts < 5 ORDER BY ended_at LIMIT ?", args: [limit] })).rows;
+  const out = [];
+  for (const r of rows) out.push(await getCall(db, r.id));
+  return out;
+}
+
+export async function bumpDeliveryAttempt(db, id) {
+  await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts = delivery_attempts + 1 WHERE id=?", args: [id] });
+}

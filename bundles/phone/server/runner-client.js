@@ -1,6 +1,7 @@
 export function createRunnerClient({ baseUrl = "http://127.0.0.1:3065", secret, fetchImpl = fetch } = {}) {
   const h = { "Content-Type": "application/json", Authorization: `Bearer ${secret}` };
   async function req(method, path, body) {
+    if (!secret) throw new Error("runner secret is not configured");
     const r = await fetchImpl(baseUrl + path, { method, headers: h, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10000) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { const e = new Error(j.detail || j.error || `runner ${r.status}`); e.status = r.status; throw e; }
