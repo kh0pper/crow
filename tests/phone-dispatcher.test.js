@@ -193,3 +193,64 @@ test("active:true or a runner without the active field keeps waiting", async () 
     assert.equal((await store.getCall(db, call_id)).status, "live", JSON.stringify(extra));
   }
 });
+
+// ---- spec 2026-10-01 §4.2 / §4.6: card pushes ----
+async function perchSetup(runner, log, { approve = true } = {}) {
+  const db = createDbClient(join(mkdtempSync(join(tmpdir(), "phone-disp-card-")), "crow.db"));
+  await initPhoneTables(db);
+  const plan = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  const { call_id } = await store.createPlan(db, plan, { kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-1" });
+  if (approve) await approveFresh(db, call_id, { session: "s", allowCloud: false });
+  const d = createDispatcher({ db, runner,
+    deps: { notify: async () => {},
+      deliver: async (_db, c) => { log.push(["deliver", c.id]); return { via: "perch" }; },
+      notifyCard: async (sid, frame, opts) => { log.push(["card", sid, frame, opts]); return { delivered: true, botId: opts.botId }; } },
+    settings: () => ({ ownerName: "K", ownerNumber: null, dailyCap: 10, line: "fake", model: () => ({ label: "l" }) }) });
+  return { db, call_id, d };
+}
+
+test("one pointer frame per changed call per tick: live, transcript, terminal — terminal BEFORE delivery", async () => {
+  const log = []; let step = 0;
+  const runner = { start: async () => ({ ok: true }), stop: async () => {},
+    events: async (_id, since) => {
+      step++;
+      if (step === 1) return { events: [{ seq: 1, type: "state", data: { state: "answered" } }], done: false, active: true };
+      if (step === 2) return { events: [], done: false, active: true };
+      return { events: [{ seq: 2, type: "result", data: { outcome: "info_gathered", booking: null, summary: "ok" } }].filter((e) => e.seq > since), done: true };
+    } };
+  const { call_id, d } = await perchSetup(runner, log);
+  await d.tick(); // claim + start -> live
+  await d.tick(); // seq 1
+  await d.tick(); // nothing new -> no frame
+  await d.tick(); // result -> done
+  const cards = log.filter((x) => x[0] === "card");
+  assert.deepEqual(cards.map((x) => [x[2].status, x[2].event_seq]), [["live", 0], ["live", 1], ["done", 2]]);
+  for (const c of cards) {
+    assert.equal(c[1], "perch-1");
+    assert.deepEqual(Object.keys(c[2]).sort(), ["call_id", "event_seq", "status", "type"]);
+    assert.equal(c[2].type, "phone_call"); assert.equal(c[2].call_id, call_id);
+    assert.deepEqual(c[3], { botId: "hank" });
+  }
+  const iDone = log.findIndex((x) => x[0] === "card" && x[2].status === "done");
+  const iDeliver = log.findIndex((x) => x[0] === "deliver");
+  assert.ok(iDone > -1 && iDeliver > iDone, "the owner sees the outcome before the bot hears about it");
+});
+
+test("a failed start pushes the terminal frame too", async () => {
+  const log = [];
+  const runner = { start: async () => { throw new Error("down"); }, stop: async () => {}, events: async () => ({ events: [], done: false }) };
+  const { d } = await perchSetup(runner, log);
+  await d.tick();
+  assert.deepEqual(log.filter((x) => x[0] === "card").map((x) => x[2].status), ["done"]);
+});
+
+test("a plan that expires (24 h) pushes its expired state to the chat card", async () => {
+  const log = [];
+  const runner = { start: async () => ({ ok: true }), stop: async () => {}, events: async () => ({ events: [], done: false }) };
+  const { db, call_id, d } = await perchSetup(runner, log, { approve: false });
+  await db.execute({ sql: "UPDATE phone_calls SET created_at=datetime('now','-25 hours') WHERE id=?", args: [call_id] });
+  await d.tick();
+  assert.deepEqual(log.filter((x) => x[0] === "card").map((x) => [x[2].call_id, x[2].status]), [[call_id, "expired"]]);
+  await d.tick();
+  assert.equal(log.filter((x) => x[0] === "card").length, 1, "expired once, pushed once");
+});

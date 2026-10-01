@@ -2034,3 +2034,69 @@ test("_setInteractiveEngineForTest installs the process singleton (test-only)", 
   _resetInteractiveEngineForTest();
   assert.equal(getInteractiveEngine({ createIfMissing: false }), null);
 });
+
+// ---------------------------------------------------------------------------
+// Phone production wiring (spec 2026-10-01 S7): no seam, the real singleton
+// ---------------------------------------------------------------------------
+
+async function phoneRouterNoSeam() {
+  const { default: express } = await import("express");
+  const { createDbClient } = await import("../servers/db.js");
+  const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
+  const db = createDbClient(DB_FILE);
+  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'),('phone_owner_name','Kevin') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
+  const router = phoneRouter((req, res, next) => { req.dashboardSession = "local"; next(); }, {
+    db, startDispatcher: false, csrf: (req, res, next) => next(),
+    runner: { stop: async () => ({}), events: async () => ({ events: [], done: false, active: true }), farend: async () => ({}) },
+    authority: { isLocalDashboardSession: async () => true, stepUpOk: async () => true, totpRequired: async () => false },
+  });
+  const app = express(); app.use(router);
+  const http = app.listen(0); await new Promise((r) => http.once("listening", r));
+  const base = `http://127.0.0.1:${http.address().port}`;
+  await fetch(base + "/api/phone/whoami");           // first request runs init (initPhoneTables)
+  return { db, http, base };
+}
+async function perchPlanFor(db, botId, sessionId) {
+  const store = await import("../bundles/phone/server/store.js");
+  const { validatePlan } = await import("../bundles/phone/server/plan.js");
+  const { call_id } = await store.createPlan(db, validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" }),
+    { kind: "bot", id: botId }, { kind: "perch", session_id: sessionId });
+  return { call_id, plan_hash: (await store.getCall(db, call_id)).plan_hash };
+}
+const approveVia = (base, c) => fetch(base + `/api/phone/calls/${c.call_id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ plan_hash: c.plan_hash, business_confirmed: true, totp: "" }) });
+
+test("phone routes' default notifyCard reaches the process engine singleton (no seam)", async () => {
+  const saved = process.env.CROW_APP_ROOT; process.env.CROW_APP_ROOT = REPO;
+  const { engine } = makeEngine();
+  _setInteractiveEngineForTest(engine);
+  assert.equal(getInteractiveEngine({ createIfMissing: false }), engine);
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  const { db, http, base } = await phoneRouterNoSeam();
+  try {
+    const c = await perchPlanFor(db, "hank", s.sessionId);
+    assert.equal((await approveVia(base, c)).status, 200);
+    assert.deepEqual(sink.ofType("phone_call"), [{ type: "phone_call", call_id: c.call_id, status: "approved", event_seq: 0 }]);
+  } finally {
+    await new Promise((r) => http.close(r));
+    await engine.stopAll();
+    if (saved === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = saved;
+  }
+});
+
+test("with no engine in the process, pushes are dropped and no_engine is logged ONCE", async () => {
+  const saved = process.env.CROW_APP_ROOT; process.env.CROW_APP_ROOT = REPO;
+  assert.equal(getInteractiveEngine({ createIfMissing: false }), null);
+  const warns = []; const orig = console.warn; console.warn = (...a) => { warns.push(a.join(" ")); };
+  const { db, http, base } = await phoneRouterNoSeam();
+  try {
+    for (let i = 0; i < 2; i++) assert.equal((await approveVia(base, await perchPlanFor(db, "ivy-" + i, "perchlive-none"))).status, 200);
+    assert.equal(warns.filter((w) => /no Perch engine/.test(w)).length, 1);
+    assert.equal(getInteractiveEngine({ createIfMissing: false }), null, "a push never creates the engine");
+  } finally {
+    console.warn = orig;
+    await new Promise((r) => http.close(r));
+    if (saved === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = saved;
+  }
+});

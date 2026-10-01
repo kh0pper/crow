@@ -313,3 +313,13 @@ test("listPerchCalls: only this Perch session's calls from this session's bot, n
   assert.equal(bulk.length, 20, "never more than 20");
   assert.equal(bulk[0].id, "call_bulk_21", "newest first");
 });
+
+test("expirePlanIds returns exactly the plans it expired; expirePlans still returns a count", async () => {
+  const a = (await store.createPlan(db, plan(), bot, null)).call_id;
+  const b = (await store.createPlan(db, plan(), bot, null)).call_id;
+  await db.execute({ sql: "UPDATE phone_calls SET created_at = datetime('now','-25 hours') WHERE id = ?", args: [a] });
+  assert.deepEqual(await store.expirePlanIds(db), [a]);
+  assert.deepEqual(await store.expirePlanIds(db), []);
+  await db.execute({ sql: "UPDATE phone_calls SET created_at = datetime('now','-25 hours') WHERE id = ?", args: [b] });
+  assert.equal(await store.expirePlans(db), 1);
+});

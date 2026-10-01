@@ -147,9 +147,21 @@ export async function consumeToken(db, id, token) {
   return r.rowsAffected === 1;
 }
 
+/** Expire unapproved plans older than 24 h and return the ids this call
+ *  expired (spec 2026-10-01 S6: each gets a card frame). Per-id CAS, so two
+ *  dispatchers never both claim one expiry. */
+export async function expirePlanIds(db) {
+  const ids = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='awaiting_approval' AND created_at < datetime('now','-24 hours')", args: [] })).rows.map((r) => r.id);
+  const out = [];
+  for (const id of ids) {
+    const r = await db.execute({ sql: "UPDATE phone_calls SET status='expired', updated_at=datetime('now') WHERE id=? AND status='awaiting_approval'", args: [id] });
+    if (r.rowsAffected) out.push(id);
+  }
+  return out;
+}
+
 export async function expirePlans(db) {
-  const r = await db.execute({ sql: "UPDATE phone_calls SET status='expired', updated_at=datetime('now') WHERE status='awaiting_approval' AND created_at < datetime('now','-24 hours')", args: [] });
-  return r.rowsAffected;
+  return (await expirePlanIds(db)).length;
 }
 
 export async function claimNextDue(db) {

@@ -3,6 +3,7 @@
 // McpServer class and zod instance (createPhoneMcpServer({ McpServer, z })).
 import { validatePlan, checkNumberPolicy } from "./plan.js";
 import * as store from "./store.js";
+import { pushCallCard } from "./card.js";
 
 const CHANNEL_GATEWAYS = new Set(["discord", "telegram", "slack"]);
 
@@ -43,12 +44,18 @@ const limitsSchema = (z) => z.object({
   notes: z.string().optional(),
 }).optional();
 
-export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify } = {}) {
+export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, notifyCard } = {}) {
+  // Spec 2026-10-01 §4.2: keep the requesting Perch chat's call card current (I3-checked).
+  const pushCard = async (id) => {
+    if (!notifyCard) return;
+    try { await pushCallCard(db, await store.getCall(db, id), notifyCard); }
+    catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
+  };
   if (!McpServer || !z) throw new Error("createPhoneMcpServer needs the gateway's McpServer and z (dependency injection)");
   const server = new McpServer({ name: "crow-phone", version: "0.1.0" });
 
   server.tool("phone_plan_call",
-    "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan in Crow's Nest → Phone. Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
+    "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan (in this chat's call card, or in Crow's Nest → Phone). Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
     { business_name: z.string(), number: z.string(), goal: z.string(), limits: limitsSchema(z),
       shareable: z.record(z.string()).optional(), language: z.enum(["en", "es"]).optional(),
       notes: z.string().optional(), run_after: z.string().optional() },
@@ -63,6 +70,7 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify } =
             body: null, type: "system", source: "phone", priority: "high", action_url: `/dashboard/phone?call=${call_id}` });
         } catch (e) { console.warn(`[phone] plan notification failed for ${call_id}: ${e.message}`); }
       }
+      await pushCard(call_id);
       return { call_id, status: "awaiting_approval", note: "The owner has been asked to approve this call. You will receive the result in this conversation when it finishes." };
     }));
 
@@ -87,7 +95,7 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify } =
 
   server.tool("phone_cancel", "Cancel a call plan you proposed that has not started yet.",
     { call_id: z.string() },
-    wrap(async ({ call_id }, extra) => { await store.cancelCall(db, call_id, resolvePhoneActor(extra)); return { call_id, status: "cancelled" }; }));
+    wrap(async ({ call_id }, extra) => { await store.cancelCall(db, call_id, resolvePhoneActor(extra)); await pushCard(call_id); return { call_id, status: "cancelled" }; }));
 
   return server;
 }

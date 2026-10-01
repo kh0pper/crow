@@ -17,7 +17,7 @@ import { z } from "zod";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "bundles", "phone", "server");
-const MODULES = ["mcp.js", "init-tables.js", "store.js", "plan.js", "deliver.js", "dispatcher.js", "runner-client.js", "authority.js", "secrets.js"];
+const MODULES = ["mcp.js", "init-tables.js", "store.js", "plan.js", "deliver.js", "dispatcher.js", "runner-client.js", "authority.js", "secrets.js", "card.js"];
 const saved = process.env.CROW_APP_ROOT;
 let tmp, dir;
 

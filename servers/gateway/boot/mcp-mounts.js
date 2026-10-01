@@ -282,7 +282,17 @@ export async function mountMcpServers(app, deps) {
       if (minted) console.log("[gateway] phone token minted");
       const { readSetting } = await import("../dashboard/settings/registry.js");
       const ownerNumber = async () => (await readSetting(phoneDb, "phone_owner_number")) || null;
-      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification }), sessionManager, authMiddleware, peerExposureGate);
+      // Spec 2026-10-01 §4.2: the call card in the requesting Perch chat. The
+      // engine is looked up per push and never created here; it checks I3 itself.
+      let warnedNoEngine = false;
+      const notifyCard = async (sid, frame, opts) => {
+        const { getInteractiveEngine } = await import("../perch-interactive.js");
+        const eng = getInteractiveEngine({ createIfMissing: false });
+        if (eng && typeof eng.notifyCard === "function") return eng.notifyCard(sid, frame, opts);
+        if (!warnedNoEngine) { warnedNoEngine = true; console.warn("[phone] no Perch engine in this process yet: call cards appear when the chat is opened"); }
+        return { delivered: false, botId: null, reason: "no_engine" };
+      };
+      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification, notifyCard }), sessionManager, authMiddleware, peerExposureGate);
       console.log("[gateway] phone MCP mounted at /phone/mcp");
     }
   } catch (err) {

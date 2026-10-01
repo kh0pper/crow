@@ -194,3 +194,72 @@ test("a notify failure does not fail phone_plan_call", async () => {
   assert.equal(payload(r).status, "awaiting_approval");
   await c.close(); await new Promise((r2) => http.close(r2));
 });
+
+// ---- spec 2026-10-01 §4.2 / I3: card pushes from the bot's tools ----
+async function mountWithCards(notifyCard) {
+  const app = express(); app.use(express.json());
+  app.use(localTokenAuthMiddleware(s.db));
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: s.db, McpServer, z, notify: async () => {}, notifyCard }), new SessionManager(), (req, res) => res.status(401).json({}));
+  const http = app.listen(0); await new Promise((r) => http.once("listening", r));
+  return http;
+}
+async function clientVia(http, headers) {
+  const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${http.address().port}/phone/mcp`),
+    { requestInit: { headers: { ...headers, Authorization: `Bearer ${s.phoneToken}` } } });
+  const c = new Client({ name: "t", version: "0" }); await c.connect(t);
+  return c;
+}
+async function planVia(http, headers) {
+  const c = await clientVia(http, headers);
+  const r = payload(await c.callTool({ name: "phone_plan_call", arguments: args }));
+  await c.close();
+  return r;
+}
+// A stand-in engine: one resident session, owned by hank, with notifyCard's I3 rule.
+function fakeEngine(cards) {
+  const owner = { "perch-1": "hank" };
+  return async (sid, frame, opts) => {
+    if (!owner[sid]) return { delivered: false, botId: null, reason: "no_session" };
+    if (opts?.botId !== owner[sid]) return { delivered: false, botId: owner[sid], reason: "bot_mismatch" };
+    cards.push([sid, frame]); return { delivered: true, botId: owner[sid] };
+  };
+}
+const hankInPerch = { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Actor-Thread": "perch-1", "X-Crow-Actor-Gateway": "perch" };
+
+test("phone_plan_call from a Perch chat pushes ONE pointer frame to that chat", async () => {
+  const cards = []; const http = await mountWithCards(fakeEngine(cards));
+  try {
+    const r = await planVia(http, hankInPerch);
+    assert.deepEqual(cards, [["perch-1", { type: "phone_call", call_id: r.call_id, status: "awaiting_approval", event_seq: 0 }]]);
+  } finally { await new Promise((r2) => http.close(r2)); }
+});
+
+test("phone_cancel pushes the cancelled state to the chat card", async () => {
+  const cards = []; const http = await mountWithCards(fakeEngine(cards));
+  try {
+    const c = await clientVia(http, hankInPerch);
+    const { call_id } = payload(await c.callTool({ name: "phone_plan_call", arguments: args }));
+    assert.equal(payload(await c.callTool({ name: "phone_cancel", arguments: { call_id } })).status, "cancelled");
+    await c.close();
+    assert.deepEqual(cards.map(([, f]) => [f.call_id, f.status]), [[call_id, "awaiting_approval"], [call_id, "cancelled"]]);
+  } finally { await new Promise((r2) => http.close(r2)); }
+});
+
+test("I3: a forged X-Crow-Actor-Thread naming another bot's session gets no card, an audit row, and the plan still lands in Phone", async () => {
+  const cards = []; const http = await mountWithCards(fakeEngine(cards));
+  try {
+    const r = await planVia(http, { ...hankInPerch, "X-Crow-Actor-Id": "mallory" });
+    assert.equal(cards.length, 0);
+    assert.equal((await getCall(s.db, r.call_id)).status, "awaiting_approval");
+    const ev = (await s.db.execute({ sql: "SELECT event FROM phone_audit WHERE call_id=? AND event='card_target_mismatch'", args: [r.call_id] })).rows;
+    assert.equal(ev.length, 1);
+  } finally { await new Promise((r2) => http.close(r2)); }
+});
+
+test("the gateway mount injects notifyCard from the engine singleton, never creating one, and logs no_engine once", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/boot/mcp-mounts.js", import.meta.url), "utf8");
+  assert.match(src, /createPhoneMcpServer\(\{[^}]*notifyCard[^}]*\}\)/);
+  assert.match(src, /getInteractiveEngine\(\{ createIfMissing: false \}\)/);
+  assert.match(src, /if \(!warnedNoEngine\) \{ warnedNoEngine = true;/);
+});

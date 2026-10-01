@@ -34,7 +34,7 @@ async function resolveModel(db, spec) {
 
 export default function phoneRouter(authMiddleware, seams = {}) {
   const router = Router();
-  let mods = null, db = seams.db || null, runner = seams.runner || null, authority = seams.authority || null, csrf = seams.csrf || null;
+  let mods = null, db = seams.db || null, runner = seams.runner || null, authority = seams.authority || null, csrf = seams.csrf || null, notifyCard = seams.notifyCard || null;
 
   let ready = null;
 
@@ -51,15 +51,27 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   async function init() {
     seams.onInit?.();
-    const [store, plan, auth, secrets, deliver, rc, disp] = await Promise.all(
-      ["store.js", "plan.js", "authority.js", "secrets.js", "deliver.js", "runner-client.js", "dispatcher.js"].map(bundleImport));
+    const [store, plan, auth, secrets, deliver, rc, disp, card] = await Promise.all(
+      ["store.js", "plan.js", "authority.js", "secrets.js", "deliver.js", "runner-client.js", "dispatcher.js", "card.js"].map(bundleImport));
     if (!db) { const { createDbClient } = await appImport("servers/db.js"); db = createDbClient(); }
     const { initPhoneTables } = await bundleImport("init-tables.js"); await initPhoneTables(db);
     const secret = secrets.readRunnerSecret();
     if (!secret) console.warn("[phone] PHONE_RUNNER_SECRET not configured: calls cannot start until it is set (reinstall or set it in Extensions)");
     if (!runner) runner = rc.createRunnerClient({ baseUrl: process.env.PHONE_RUNNER_URL || "http://127.0.0.1:3065", secret });
     if (!authority) authority = auth;
-    const m = { store, plan, secrets, deliver, disp };
+    const m = { store, plan, secrets, deliver, disp, card };
+    // Spec 2026-10-01 §4.2: card frames into the requesting Perch chat (the engine
+    // checks I3). Resolved per push through the process singleton; never created here.
+    if (!notifyCard) {
+      let warnedNoEngine = false;
+      notifyCard = async (sid, frame, opts) => {
+        const { getInteractiveEngine } = await appImport("servers/gateway/perch-interactive.js");
+        const eng = getInteractiveEngine({ createIfMissing: false });
+        if (eng && typeof eng.notifyCard === "function") return eng.notifyCard(sid, frame, opts);
+        if (!warnedNoEngine) { warnedNoEngine = true; console.warn("[phone] no Perch engine in this process yet: call cards appear when the chat is opened"); }
+        return { delivered: false, botId: null, reason: "no_engine" };
+      };
+    }
     if (seams.startDispatcher !== false) {
       const { createNotification } = await appImport("servers/shared/notifications.js");
       let perchMessage = null;
@@ -71,7 +83,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
       const refresh = async () => { cached = await readSettings(db); cached.local = await resolveModel(db, cached.localModel); cached.cloud = await resolveModel(db, cached.cloudModel); };
       await refresh(); setInterval(() => refresh().catch((e) => console.warn("[phone] settings refresh:", e.message)), 30000).unref();
       const d = disp.createDispatcher({ db, runner,
-        deps: { notify: createNotification, deliver: deliver.deliverPhoneResult, perchMessage },
+        deps: { notify: createNotification, deliver: deliver.deliverPhoneResult, perchMessage, notifyCard },
         settings: () => ({ ownerName: cached.ownerName, ownerNumber: cached.ownerNumber, dailyCap: cached.dailyCap, line: "interactive",
           model: (call) => (call.allow_cloud && cached.cloud) ? { ...cached.cloud, label: "cloud:" + cached.cloudModel } : (cached.local || null) }) });
       setInterval(() => d.tick().catch((e) => console.warn("[phone] dispatcher:", e.message)), 2000).unref();
@@ -83,6 +95,10 @@ export default function phoneRouter(authMiddleware, seams = {}) {
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
     catch (e) { const st = { not_found: 404, not_pending: 409, not_editable: 409, invalid_plan: 400, rate_limited: 429, plan_changed: 409, plan_hash_required: 400 }[e.code] || 500; res.status(st).json({ error: e.code || "error", message: e.message }); }
+  };
+  const pushCard = async (id) => {
+    try { await mods.card.pushCallCard(db, await mods.store.getCall(db, id), notifyCard); }
+    catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
   };
   const csrfMw = async (req, res, next) => {
     if (!csrf) { const m = await appImport("servers/gateway/dashboard/shared/csrf.js"); csrf = m.csrfMiddleware; }
@@ -158,15 +174,16 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     // or a missing 2FA code never learns whether the plan changed.
     await mods.store.approveCall(db, req.params.id, { session: req.dashboardSession, allowCloud: !!b.allow_cloud, edits: b.edits || undefined, runAfter,
       expectedHash: typeof b.plan_hash === "string" ? b.plan_hash : undefined });
+    await pushCard(req.params.id);
     res.json({ ok: true });
   }));
   router.post("/api/phone/calls/:id/reject", wrap(async (req, res) => {
     if (!(await localOnly(req, res))) return;
-    await mods.store.rejectCall(db, req.params.id); res.json({ ok: true });
+    await mods.store.rejectCall(db, req.params.id); await pushCard(req.params.id); res.json({ ok: true });
   }));
   router.post("/api/phone/calls/:id/edit", wrap(async (req, res) => {
     if (!(await localOnly(req, res))) return;
-    await mods.store.editCall(db, req.params.id, (req.body || {}).edits || {}); res.json({ ok: true });
+    await mods.store.editCall(db, req.params.id, (req.body || {}).edits || {}); await pushCard(req.params.id); res.json({ ok: true });
   }));
   // Stop is gated only by a dashboard session (any, incl. peer SSO): stopping a call is always safe.
   // Stop always ends the call: ask the runner to stop; if the runner says it is
@@ -178,7 +195,9 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (c && (c.status === "live" || c.status === "starting")) {
       let r = null;
       try { r = await runner.events(id, c.event_seq); } catch { /* unreachable: the dispatcher times it out */ }
-      if (r && r.active === false && !r.done) await mods.store.finalizeCall(db, id, { outcome: "failed", booking: null, summary: null, error: "stopped by owner" });
+      if (r && r.active === false && !r.done) {
+        if (await mods.store.finalizeCall(db, id, { outcome: "failed", booking: null, summary: null, error: "stopped by owner" })) await pushCard(id);
+      }
     }
     res.json({ ok: true });
   }));

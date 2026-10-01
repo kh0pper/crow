@@ -1,6 +1,7 @@
 import * as store from "./store.js";
 import { checkNumberPolicy, OUTCOMES } from "./plan.js";
 import { deliverPhoneResult } from "./deliver.js";
+import { pushCallCard } from "./card.js";
 
 const MAX_FAILURES = 30;       // consecutive events() failures (~60s at 2s ticks)
 const MAX_MINUTES = 25;
@@ -14,14 +15,28 @@ function cleanBooking(b) {
 }
 
 /** One tick: expire stale plans, advance the live call (pull events,
- *  finalize), or claim+start the next due call; then sweep undelivered
- *  results (at-least-once). Concurrency safety rests on the store's CAS. */
+ *  finalize), or claim+start the next due call; push one card frame per
+ *  changed call; then sweep undelivered results (at-least-once). Concurrency
+ *  safety rests on the store's CAS. */
 export function createDispatcher({ db, runner, deps, settings }) {
   let busy = false;
   const failures = new Map();
   const deliver = deps.deliver || deliverPhoneResult;
+  // Spec 2026-10-01 §4.2: calls whose state or transcript changed this tick.
+  // Flushed BEFORE deliveries (§4.6: the owner sees the outcome before the bot hears about it).
+  const touched = new Set();
+
+  async function flushCards() {
+    const ids = [...touched]; touched.clear();
+    if (!deps.notifyCard) return;
+    for (const id of ids) {
+      try { await pushCallCard(db, await store.getCall(db, id), deps.notifyCard); }
+      catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
+    }
+  }
 
   async function fail(call, outcome, error) {
+    touched.add(call.id);
     await store.finalizeCall(db, call.id, { outcome, booking: null, summary: null, error });
   }
 
@@ -45,6 +60,7 @@ export function createDispatcher({ db, runner, deps, settings }) {
   async function startNext() {
     const call = await store.claimNextDue(db);
     if (!call) return;
+    touched.add(call.id);
     const s = settings();
     try {
       checkNumberPolicy(call.number_e164, { ownerNumber: s.ownerNumber, suppressed: await store.suppressedSet(db) });
@@ -85,6 +101,7 @@ export function createDispatcher({ db, runner, deps, settings }) {
     }
     failures.delete(live.id);
     const events = r.events || [];
+    if (events.length) touched.add(live.id);
     const result = events.find((e) => e.type === "result");
     if (result) {
       // Finalize BEFORE advancing event_seq so a crash can never lose the result.
@@ -111,9 +128,10 @@ export function createDispatcher({ db, runner, deps, settings }) {
     async tick() {
       if (busy) return; busy = true;
       try {
-        await store.expirePlans(db);
+        for (const id of await store.expirePlanIds(db)) touched.add(id);
         const hadLive = await advanceLive();
         if (!hadLive) await startNext();
+        await flushCards();
         await sweepDeliveries();
       } finally { busy = false; }
     },

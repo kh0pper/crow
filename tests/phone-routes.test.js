@@ -28,7 +28,7 @@ before(async () => {
     INSERT INTO providers (id, base_url, host) VALUES ('loc','http://127.0.0.1:1/v1','local'), ('cld','https://x.example/v1','cloud');`);
   await initPhoneTables(s.db);
   s.secret = "f".repeat(48); process.env.PHONE_RUNNER_SECRET = s.secret;
-  s.farend = []; s.inits = 0; s.stops = []; s.runnerActive = true;
+  s.farend = []; s.inits = 0; s.stops = []; s.runnerActive = true; s.cards = [];
   const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
   const auth = (req, res, next) => { const sess = req.headers["x-test-session"]; if (!sess) return res.status(401).end(); req.dashboardSession = sess; next(); };
   const router = phoneRouter(auth, {
@@ -36,6 +36,7 @@ before(async () => {
     runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async (id) => { s.stops.push(id); return { ok: true }; },
       events: async () => ({ events: [], done: false, active: s.runnerActive }) },
     authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => s.totpOn === true },
+    notifyCard: async (sid, frame, opts) => { s.cards.push([sid, frame, opts]); return { delivered: true, botId: opts && opts.botId }; },
   });
   const app = express(); app.use(router);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
@@ -312,4 +313,36 @@ test("I7: whoami — local/totp/cloud for a password session; nothing for SSO", 
     s.totpOn = false;
     await s.db.execute({ sql: "UPDATE dashboard_settings SET value='' WHERE key='phone_cloud_model'", args: [] });
   }
+});
+
+const perchPlan = async () => (await store.createPlan(s.db, validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" }),
+  { kind: "bot", id: "hank-" + (++planN) }, { kind: "perch", session_id: "perch-push" })).call_id;
+
+test("approve, edit and reject push a pointer frame to the requesting Perch chat; a refused action pushes nothing", async () => {
+  const botOf = async (id) => (await store.getCall(s.db, id)).created_by.id;
+  s.cards.length = 0;
+  const a = await perchPlan();
+  assert.equal((await post(`/api/phone/calls/${a}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(a) })).status, 200);
+  const b = await perchPlan();
+  assert.equal((await post(`/api/phone/calls/${b}/edit`, { edits: { goal: "Ask hours" } })).status, 200);
+  assert.equal((await post(`/api/phone/calls/${b}/reject`, {})).status, 200);
+  assert.deepEqual(s.cards.map(([sid, f]) => [sid, f.call_id, f.status]),
+    [["perch-push", a, "approved"], ["perch-push", b, "awaiting_approval"], ["perch-push", b, "rejected"]]);
+  assert.deepEqual(s.cards[0][2], { botId: await botOf(a) });
+  const c = await perchPlan(); const n = s.cards.length;
+  assert.equal((await post(`/api/phone/calls/${c}/approve`, { totp: "000000", business_confirmed: true, plan_hash: await hashOf(c) })).status, 403);
+  assert.equal((await post(`/api/phone/calls/${c}/reject`, {}, "sso")).status, 403);
+  assert.equal(s.cards.length, n);
+});
+
+test("stop finalizing an orphaned call pushes the terminal state; a stop the runner handles pushes nothing yet", async () => {
+  const a = await perchPlan();
+  await s.db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now') WHERE id=?", args: [a] });
+  s.cards.length = 0;
+  assert.equal((await post(`/api/phone/calls/${a}/stop`, {})).status, 200);
+  assert.equal(s.cards.length, 0, "runner still has it: its result (via the dispatcher) pushes");
+  s.runnerActive = false;
+  try { assert.equal((await post(`/api/phone/calls/${a}/stop`, {}, "sso")).status, 200); }
+  finally { s.runnerActive = true; }
+  assert.deepEqual(s.cards.map(([, f]) => [f.call_id, f.status]), [[a, "done"]]);
 });
