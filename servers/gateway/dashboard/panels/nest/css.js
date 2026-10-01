@@ -265,7 +265,7 @@ export function nestCSS() {
     overflow-x: auto;
     overflow-y: hidden;
     scroll-snap-type: x mandatory;
-    touch-action: pan-x;
+    touch-action: pan-x pan-y; /* pan-y too: the carousel wraps the whole grid, and pan-x alone blocks vertical page scroll on phones */
     scroll-behavior: smooth;
     position: relative;
     z-index: 1;

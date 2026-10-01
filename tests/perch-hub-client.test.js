@@ -856,6 +856,125 @@ test("C2: a failed send appends a visible note instead of vanishing silently", a
     "send()'s .then must actually run on a rejected fetch for this note to appear");
 });
 
+// ---- A bot that cannot start must not swallow the operator's message ----
+
+const UNKNOWN_PROVIDER = 'pi exited (code 1) before responding — pi said: Error: Unknown provider "Qwen Cloud"';
+/** Each transcript row's text, including a message row's nested who/what lines. */
+const deepText = (n) => (n.textContent || "") + (n.children || []).map(deepText).join(" ");
+const transcriptTexts = (hub) => hub.els["perch-transcript"].children.map(deepText);
+
+test("pi_gone: the message stays, the reason shows in the chat, and the composer is NOT flipped to Steer", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "pi_gone", detail: UNKNOWN_PROVIDER }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "book me a haircut";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const rows = transcriptTexts(hub);
+  assert.ok(rows.some((t) => t.includes("book me a haircut")), "the operator's own message is still there");
+  assert.ok(rows.some((t) => t.startsWith("Bot could not start:") && t.includes('Unknown provider "Qwen Cloud"')),
+    "the chat says WHY the bot did not answer");
+  assert.equal(hub.els["perch-send"].textContent, "Send", "a dead child is not a running turn — no Steer");
+
+  // The stream's pi_exit error frame describes the SAME death: no second note.
+  FakeEventSource.instances[0]._serverFrame("error", { text: UNKNOWN_PROVIDER, reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(transcriptTexts(hub).filter((t) => t.startsWith("Bot could not start:")).length, 1, "deduped");
+});
+
+test("pi_exit error frame alone (the 202 raced the death) still puts the reason in the chat", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[0]._serverFrame("error", { text: UNKNOWN_PROVIDER, reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(transcriptTexts(hub).some((t) => t.startsWith("Bot could not start:")));
+});
+
+test("an exit with NO send outstanding (idle reap / OOM) stays on the Activity rail — no 'could not start' in the chat, nothing replayed", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("error", { text: "pi exited (code 137) before responding", reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!transcriptTexts(hub).some((t) => t.includes("Bot could not start")), "not a send failure");
+  assert.ok(hub.els["perch-activity-list"].children.some((c) => c.textContent.includes("code 137")), "still on the rail");
+});
+
+test("a reply clears the outstanding send: a later death is not blamed on the answered message", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("reply", { text: "hello!", turnId: "t1" });
+  es._serverFrame("error", { text: "pi exited (code 137)", reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!transcriptTexts(hub).some((t) => t.includes("Bot could not start")));
+});
+
+test("a long pi reason (POST detail capped, frame not) is still ONE note per send", async () => {
+  const long = "x".repeat(1500) + ' Unknown provider "Qwen Cloud"';
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "pi_gone", detail: long.slice(0, 1000) }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[0]._serverFrame("error", { text: long, reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(transcriptTexts(hub).filter((t) => t.startsWith("Bot could not start:")).length, 1);
+});
+
+test("a 409 turn_in_progress is still a raced turn start (Steer), not an error note", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "turn_in_progress" }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-send"].textContent, "Steer");
+  assert.ok(!transcriptTexts(hub).some((t) => t.startsWith("Bot could not start:")));
+});
+
+test("a reconnect's history resync replays the message that never reached the bot, and its reason", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({
+      "/message": () => makeResponse(409, { error: "pi_gone", detail: UNKNOWN_PROVIDER }),
+      "/options": () => Promise.reject(new Error("network down")),   // probe fails → scheduleReconnect
+    }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "still here?";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  // A reconnect resyncs: the transcript is cleared and rebuilt from pi's
+  // on-disk transcript ({events: []} here) — which never got this message.
+  const first = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  first._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  for (const [id, fn] of [...hub.timers.entries()]) { hub.timers.delete(id); hub.timerDelays.delete(id); fn(); }
+  await new Promise((r) => setTimeout(r, 0));
+  const second = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  assert.ok(second && second !== first, "a fresh EventSource was built");
+  second._open();                             // onopen → resyncHistory
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  const rows = transcriptTexts(hub);
+  assert.ok(rows.some((t) => t.includes("No transcript")) || rows.length >= 2, "the transcript was rebuilt");
+  assert.ok(rows.some((t) => t.includes("still here?")), "the unsent message survives the resync");
+  assert.ok(rows.some((t) => t.startsWith("Bot could not start:")), "and so does its reason");
+});
+
 // ---- I3: a native connection error must not masquerade as an engine frame ----
 
 test("I3: a native EventSource error prints nothing; a real error FRAME prints its text", async () => {

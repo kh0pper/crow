@@ -663,6 +663,102 @@ test("BEHAVIOR: saving from the checklist also updates the card's badge (no cros
     "a save made from the checklist re-scopes the card's Configure button too");
 });
 
+// ─── 6c. Install modal: required env gate (composes with consent) ───
+
+function consentFetch(consent) {
+  return (url) => {
+    if (url.includes("/consent-challenge/")) {
+      return { ok: true, status: 200, json: () => Promise.resolve(consent) };
+    }
+    return { ok: true, status: 200, json: () => Promise.resolve({}) };
+  };
+}
+
+const typeInto = (window, el, value) => {
+  el.value = value;
+  el.dispatchEvent(new window.Event("input", { bubbles: true }));
+};
+
+test("BEHAVIOR: Install stays disabled until every SERVER-listed blocking field has a non-whitespace value, and names the missing ones", async () => {
+  // install_required is the server's compose-derived list (consent-challenge).
+  const { window, document, click, settle, calls } = boot({ fetchImpl: consentFetch({ required: false, install_required: ["JELLYFIN_API_KEY"] }) });
+
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+
+  const btn = document.querySelector("#modal-content .btn-primary");
+  const note = document.querySelector("#modal-content .ext-install__required");
+  assert.equal(btn.disabled, true, "a blank required field keeps Install disabled");
+  assert.match(note.textContent, /JELLYFIN_API_KEY/, "the note names the missing required key");
+
+  typeInto(window, document.getElementById("env_JELLYFIN_API_KEY"), "   ");
+  assert.equal(btn.disabled, true, "whitespace is blank");
+
+  typeInto(window, document.getElementById("env_JELLYFIN_API_KEY"), "k");
+  assert.equal(btn.disabled, false, "filled → enabled");
+  assert.equal(note.style.display, "none");
+
+  typeInto(window, document.getElementById("env_JELLYFIN_API_KEY"), "");
+  assert.equal(btn.disabled, true, "cleared again → disabled again");
+  click(btn);
+  await settle();
+  assert.ok(!calls.some((c) => c.url.includes("/bundles/api/install")), "a click on the gated button never POSTs /install");
+});
+
+test("BEHAVIOR: a manifest-required key the server does NOT list as blocking leaves Install enabled (configured later via Needs setup)", async () => {
+  // jellyfin's JELLYFIN_API_KEY is required:true but only exists after the
+  // container runs — compose does not hard-fail on it, so the server omits it.
+  const { document, click, settle } = boot({ fetchImpl: consentFetch({ required: false, install_required: [] }) });
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+  const btn = document.querySelector("#modal-content .btn-primary");
+  assert.equal(document.getElementById("env_JELLYFIN_API_KEY").value, "", "left blank");
+  assert.equal(btn.disabled, false, "a non-blocking required key never disables Install");
+  assert.equal(document.querySelector("#modal-content .ext-install__required").style.display, "none");
+});
+
+test("BEHAVIOR: the required-env gate and the consent gate must BOTH hold", async () => {
+  const { window, document, click, settle } = boot({
+    fetchImpl: consentFetch({ required: true, privileged: false, token: "tok", message: "m", install_required: ["JELLYFIN_API_KEY"] }),
+  });
+
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+  const btn = document.querySelector("#modal-content .btn-primary");
+
+  typeInto(window, document.getElementById("env_JELLYFIN_API_KEY"), "k");
+  assert.equal(btn.disabled, true, "required filled, consent not given → disabled");
+
+  const check = document.querySelector('#modal-content input[type="checkbox"]');
+  check.checked = true;
+  check.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.equal(btn.disabled, false, "both satisfied → enabled");
+
+  typeInto(window, document.getElementById("env_JELLYFIN_API_KEY"), "");
+  assert.equal(btn.disabled, true, "consent given, required cleared → disabled");
+});
+
+test("BEHAVIOR: the detail modal of an installed bundle that needs setup offers Configure (server-computed keys)", async () => {
+  const { document, click, settle } = boot({ ...CARD_BOOT, fetchImpl: envFetch() });
+
+  click(card(document));   // the installed row opens the detail modal
+  const configure = document.querySelector("#modal-content .ext-detail__configure");
+  assert.ok(configure, "Configure is offered next to INSTALLED");
+
+  click(configure);
+  await settle();
+  assert.match(document.getElementById("modal-content").textContent, /Configure.*Jellyfin/s);
+  assert.ok(document.getElementById("env_JELLYFIN_API_KEY"));
+  assert.ok(document.getElementById("env_JELLYFIN_URL"), "scoped to the server-computed missing keys");
+});
+
+test("BEHAVIOR: the detail modal of a fully configured installed bundle offers no Configure", () => {
+  const { document, click } = boot({ installed: { jellyfin: { version: "1.0.0" } }, needsConfig: {}, fetchImpl: envFetch() });
+  click(card(document));
+  assert.ok(document.querySelector("#modal-content .ext-detail__actions"), "the detail modal opened");
+  assert.equal(document.querySelector("#modal-content .ext-detail__configure"), null);
+});
+
 // ─── 7. Category badge i18n (the live gap: the detail modal rendered the raw slug) ───
 
 test("BEHAVIOR: the detail modal shows a localized category, never the raw registry slug", () => {

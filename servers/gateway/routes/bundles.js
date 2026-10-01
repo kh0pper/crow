@@ -131,7 +131,9 @@ const SKILLS_DIR = join(CROW_HOME, "skills");
 const PANELS_DIR = join(CROW_HOME, "panels");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-const APP_ENV_PATH = join(APP_ROOT, ".env");
+let APP_ENV_PATH = join(APP_ROOT, ".env");
+/** Test-only: repoint the gateway .env that propagateEnvToGateway writes (normally <repo>/.env). */
+export function _setAppEnvPathForTest(path) { APP_ENV_PATH = path || join(APP_ROOT, ".env"); }
 
 export { needsConfigKeys, _setAppBundlesForTest };
 export { validateComposeFile as _validateComposeFileForTest };
@@ -720,8 +722,14 @@ export function composeEnv(base = process.env) {
   return { ...base, CROW_HOME };
 }
 
+// Test-only: replace every `docker compose` invocation (pull/up/down/...) with a
+// stub `(composeArgs, opts) => Promise`. null restores the real runner.
+let _composeRunnerForTest = null;
+export function _setComposeRunnerForTest(fn) { _composeRunnerForTest = fn || null; }
+
 /** Run a docker compose command with the detected compose variant */
 async function runCompose(composeArgs, opts = {}) {
+  if (_composeRunnerForTest) return _composeRunnerForTest(composeArgs, opts);
   const compose = await getComposeCmd();
   return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
 }
@@ -738,6 +746,45 @@ function readJsonSafe(path, fallback) {
 function writeJsonSafe(path, data) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 2));
+}
+
+/**
+ * panels.json comes in two shapes and the loader (panel-registry.js
+ * loadExternalPanels) accepts both: a bare array of ids, or an object
+ * `{ enabled: [...] }` (crow's own file is the object form). The installer used
+ * to assume the bare array and threw `includes is not a function` on the object
+ * form. These helpers read either shape and write back the SAME shape, keeping
+ * any other keys an object-form file carries.
+ */
+function readPanelsConfig(path) {
+  const raw = readJsonSafe(path, null);
+  if (Array.isArray(raw)) return { raw, list: raw.filter((x) => typeof x === "string"), objectForm: false };
+  if (raw && typeof raw === "object") {
+    const list = Array.isArray(raw.enabled) ? raw.enabled.filter((x) => typeof x === "string") : [];
+    return { raw, list, objectForm: true };
+  }
+  return { raw: null, list: [], objectForm: false };
+}
+
+function writePanelsConfig(path, { raw, objectForm }, list) {
+  writeJsonSafe(path, objectForm ? { ...raw, enabled: list } : list);
+}
+
+/** Enable a panel id in panels.json (either shape). Returns true when the file changed. */
+export function addPanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
+  const cfg = readPanelsConfig(path);
+  if (cfg.list.includes(panelId)) return false;
+  writePanelsConfig(path, cfg, [...cfg.list, panelId]);
+  return true;
+}
+
+/** Remove a panel id from panels.json (either shape). Returns true when the file changed. */
+export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
+  if (!existsSync(path)) return false;
+  const cfg = readPanelsConfig(path);
+  if (!cfg.list.includes(panelId)) return false;
+  writePanelsConfig(path, cfg, cfg.list.filter((p) => p !== panelId));
+  return true;
 }
 
 /**
@@ -1055,25 +1102,72 @@ function findDependents(bundleId) {
  * Uncomments and sets values for vars that are already present as comments,
  * or appends them if not found.
  */
+const GATEWAY_ENV_DENYLIST = new Set([
+  "CROW_DASHBOARD_PUBLIC", "NODE_OPTIONS", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+]);
+
 function propagateEnvToGateway(envVars) {
-  if (!envVars || typeof envVars !== "object" || Object.keys(envVars).length === 0) return;
-  if (!existsSync(APP_ENV_PATH)) return;
+  if (!envVars || typeof envVars !== "object" || Object.keys(envVars).length === 0) return false;
+  if (!existsSync(APP_ENV_PATH)) return false;
 
-  let content = readFileSync(APP_ENV_PATH, "utf8");
+  const before = readFileSync(APP_ENV_PATH, "utf8");
+  let content = before;
 
-  for (const [key, value] of Object.entries(envVars)) {
-    if (value === undefined || value === "") continue;
+  for (const [key, rawValue] of Object.entries(envVars)) {
+    // Belt-and-braces only. The real gates are upstream: callers pass ONLY the
+    // manifest-declared keys (declaredEnvSubset) and the routes REJECT bad
+    // keys / multi-line values with 400 invalid_env (findInvalidEnv). Here: a
+    // key is interpolated into a RegExp, so it must be a plain env name; a
+    // value is one line; and a few gateway-control keys are never writable
+    // from a bundle, whatever a (community) manifest declares.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (GATEWAY_ENV_DENYLIST.has(key)) continue;
+    if (rawValue === undefined || rawValue === null) continue;
+    const value = String(rawValue).replace(/[\r\n\0]/g, "");
+    if (value === "") continue;
     // Match commented-out or existing lines like: # KEY=value or KEY=value
     const pattern = new RegExp(`^(#\\s*)?${key}=.*$`, "m");
     if (pattern.test(content)) {
-      content = content.replace(pattern, `${key}=${value}`);
+      // Function replacement: a `$` in the value must stay literal.
+      content = content.replace(pattern, () => `${key}=${value}`);
     } else {
       // Append if not found at all
       content = content.trimEnd() + `\n${key}=${value}\n`;
     }
   }
 
+  if (content === before) return false;
   writeFileSync(APP_ENV_PATH, content);
+  return true;
+}
+
+/**
+ * Configure-time counterpart of install's gateway env propagation: push the
+ * subset of `envVars` the bundle's manifest declares in env_vars into the
+ * gateway .env. Docker bundles only — that is the install path that propagates
+ * (and the uninstall path that re-comments them). Returns true when the gateway
+ * .env changed (the caller reports needs_restart).
+ */
+export function propagateBundleEnvToGateway(bundleId, envVars) {
+  const manifest = getInstalledFirstManifest(bundleId);
+  if (!manifest || (manifest.type || "bundle") !== "bundle") return false;
+  const subset = declaredEnvSubset(manifest, envVars);
+  if (Object.keys(subset).length === 0) return false;
+  return propagateEnvToGateway(subset);
+}
+
+/**
+ * Only the keys the bundle's manifest declares in env_vars. Request bodies
+ * (install AND Configure) can carry any key — e.g. CROW_DASHBOARD_PUBLIC — and
+ * only the declared ones may ever reach the gateway's own .env.
+ */
+export function declaredEnvSubset(manifest, envVars) {
+  const declared = new Set((manifest?.env_vars || []).map((v) => v && v.name).filter(Boolean));
+  const subset = {};
+  for (const [k, v] of Object.entries(envVars && typeof envVars === "object" ? envVars : {})) {
+    if (declared.has(k)) subset[k] = v;
+  }
+  return subset;
 }
 
 /**
@@ -1164,7 +1258,7 @@ function getAiProviderConfig(bundleId, envVars) {
  *   { ok: true, manifest: object, installed: Array, consentVerified: boolean, hardwareWarning?: object }
  * | { ok: false, status: number, code: string, error: string, extra?: object }>}
  *   codes: invalid_id | not_found | already_installed | missing_dependencies |
- *          hardware_gate | gpu_arch_gate | docker_unavailable | consent_required |
+ *          missing_required_env (requireEnv only) | hardware_gate | gpu_arch_gate | docker_unavailable | consent_required |
  *          consent_invalid | hosted_forbidden
  */
 /**
@@ -1183,7 +1277,74 @@ export function bundleOrchestrationRefusal(bundleId) {
   };
 }
 
-export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false } = {}) {
+const nonBlankEnv = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+
+/** Keys a compose file interpolates as HARD-FAIL: `${KEY:?…}` or `${KEY?…}`. */
+export function hardFailComposeKeys(composeText) {
+  const keys = new Set();
+  const re = /\$\{([A-Za-z_][A-Za-z0-9_]*):?\?/g;
+  let m;
+  while ((m = re.exec(String(composeText || ""))) !== null) keys.add(m[1]);
+  return keys;
+}
+
+/**
+ * The env keys whose blank value makes `docker compose up` FAIL — and so the
+ * only keys that may block an install. A key blocks iff the manifest marks it
+ * `required`, it has no non-blank manifest `default`, AND the bundle's compose
+ * interpolates it hard-fail (`${KEY:?…}` / `${KEY?…}`).
+ *
+ * `required: true` alone does NOT block: for most self-host bundles it means
+ * "the MCP integration needs this", and the credential (gitea's GITEA_TOKEN,
+ * jellyfin's API key, …) can only exist after the container has run and the
+ * user has created it in the app. Those install blank and surface as "Needs
+ * setup" → Configure, exactly as before.
+ *
+ * Names only, never values (D5). Served to the install modal through the
+ * consent-challenge response so client and server gate on the SAME list.
+ */
+export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId)) {
+  if (!bundleId || !isValidBundleId(bundleId)) return [];
+  const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
+  let text = "";
+  try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → nothing blocks */ }
+  if (!text) return [];
+  const hard = hardFailComposeKeys(text);
+  return (manifest?.env_vars || [])
+    .filter((v) => v && v.required && typeof v.name === "string" && !nonBlankEnv(v.default) && hard.has(v.name))
+    .map((v) => v.name);
+}
+
+/** installBlockingEnvKeys minus those the request supplies non-blank. */
+export function missingInstallEnv(bundleId, envVars, manifest = getManifest(bundleId)) {
+  const provided = envVars && typeof envVars === "object" ? envVars : {};
+  return installBlockingEnvKeys(bundleId, manifest).filter((k) => !nonBlankEnv(provided[k]));
+}
+
+/**
+ * The first env entry that may not be written to an .env file, or null.
+ * Keys must be plain upper-case env names; a value may not carry CR, LF or
+ * NUL (it would add lines to the file, and a stripped copy in one file vs a
+ * raw copy in another makes shared secrets silently diverge). Callers REJECT
+ * (400 invalid_env), they never strip. Returns the KEY only — never the value.
+ */
+export function findInvalidEnv(envVars) {
+  if (!envVars || typeof envVars !== "object") return null;
+  for (const [k, v] of Object.entries(envVars)) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
+    if (v !== undefined && v !== null && /[\r\n\0]/.test(String(v))) return { key: k, why: "contains a line break or NUL character" };
+  }
+  return null;
+}
+
+/**
+ * `requireEnv` (single-install route only): refuse with 400 missing_required_env
+ * when an installBlockingEnvKeys() key would install blank — `docker compose up`
+ * would then fail on `${VAR:?...}` and leave a half-installed bundle. Collection installs
+ * deliberately do NOT pass it: they install members blank and surface the gap
+ * via NEEDS_CONFIG + the Configure flow.
+ */
+export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false, requireEnv = false } = {}) {
   if (!bundleId || !isValidBundleId(bundleId)) {
     return { ok: false, status: 400, code: "invalid_id", error: "Invalid bundle ID" };
   }
@@ -1214,6 +1375,19 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
         ok: false, status: 400, code: "missing_dependencies",
         error: `Bundle '${bundleId}' requires the following bundles to be installed first: ${missing.join(", ")}`,
         extra: { missing_dependencies: missing },
+      };
+    }
+  }
+
+  // Compose-blocking env present? Before the docker/consent gates so a doomed
+  // install never consumes a single-use consent token.
+  if (requireEnv) {
+    const missingEnv = missingInstallEnv(bundleId, envVars, manifest);
+    if (missingEnv.length > 0) {
+      return {
+        ok: false, status: 400, code: "missing_required_env",
+        error: `Bundle '${bundleId}' needs a value for: ${missingEnv.join(", ")}`,
+        extra: { code: "missing_required_env", missing_env: missingEnv },
       };
     }
   }
@@ -1385,6 +1559,11 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
 
 export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
   let needsRestart = false;
+  // Set when `docker compose up` fails. The install does NOT stop there: the
+  // non-container steps (gateway env, MCP registration, panel + routes,
+  // panels.json, skills) still run, so a bundle the user fixes via Configure +
+  // Start is complete. The job still ends not-ok with this reason.
+  let composeFailure = null;
   try {
     const addonType = manifest?.type || "bundle";
     const sourceDir = join(APP_BUNDLES, bundleId);
@@ -1532,19 +1711,23 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         } catch (err) {
           const detail = err.stderr || err.message;
           appendLog(job, `docker compose up failed: ${detail}`);
-          // Still add to installed.json so user can configure env vars and hit "Start"
+          // Still add to installed.json so user can configure env vars and hit
+          // "Start" — recorded NOW so a later step throwing can't lose it.
           const installed2 = getInstalled();
           if (!installed2.find((i) => i.id === bundleId)) {
             installed2.push({ id: bundleId, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
             saveInstalled(installed2);
           }
-          return { ok: false, reason: `docker compose up failed: ${detail}` };
+          composeFailure = `docker compose up failed: ${detail}`;
+          appendLog(job, "Continuing with the non-container install steps (panel, MCP server, gateway config, skills) so Configure + Start can finish the job");
         }
       }
 
-      // Propagate env vars to gateway .env so dependent services connect
-      if (envVars && Object.keys(envVars).length > 0) {
-        propagateEnvToGateway(envVars);
+      // Propagate the manifest-DECLARED env vars to the gateway .env so
+      // dependent services connect. Undeclared request keys never reach it.
+      const gatewayEnv = declaredEnvSubset(manifest, envVars);
+      if (Object.keys(gatewayEnv).length > 0) {
+        propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
         needsRestart = true;
       }
@@ -1605,11 +1788,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
             try { symlinkSync(gatewayNm, nmLink); } catch {}
           }
         }
-        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-        if (!panelsConfig.includes(bundleId)) {
-          panelsConfig.push(bundleId);
-          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-        }
+        addPanelEnabled(bundleId);
         needsRestart = true;
       }
     } else if (addonType === "mcp-server") {
@@ -1682,11 +1861,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           }
         }
         // Register in panels.json
-        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-        if (!panelsConfig.includes(bundleId)) {
-          panelsConfig.push(bundleId);
-          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-        }
+        addPanelEnabled(bundleId);
         needsRestart = true;
       }
     } else if (addonType === "skill") {
@@ -1711,11 +1886,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         const dest = join(PANELS_DIR, panelPath.split("/").pop());
         if (existsSync(src)) {
           cpSync(src, dest);
-          const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
-          if (!panelsCfg.includes(bundleId)) {
-            panelsCfg.push(bundleId);
-            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
-          }
+          addPanelEnabled(bundleId);
           appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
         }
       }
@@ -1731,17 +1902,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // Ensure panels directory exists
         mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
         copyFileSync(panelSourceDir, panelDest);
-        // Register in panels.json
-        const panelsJsonPath = join(CROW_HOME, "panels.json");
-        let panelsList = [];
-        if (existsSync(panelsJsonPath)) {
-          try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
-        }
-        const panelId = panelFilename.replace(/\.js$/, "");
-        if (!panelsList.includes(panelId)) {
-          panelsList.push(panelId);
-          writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
-        }
+        // Register in panels.json (either shape — see addPanelEnabled)
+        addPanelEnabled(panelFilename.replace(/\.js$/, ""));
         needsRestart = true;
         appendLog(job, `Installed panel: ${panelFilename}`);
       }
@@ -1795,8 +1957,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
-    // 6. Track installation
-    installedSnapshot.push({
+    // 6. Track installation (a compose-up failure already recorded the id;
+    // installedSnapshot predates that write, so dedupe against it here).
+    if (!installedSnapshot.find((i) => i.id === bundleId)) installedSnapshot.push({
       id: bundleId,
       type: addonType,
       version: manifest?.version || "1.0.0",
@@ -1882,11 +2045,16 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       appendLog(job, `Profile seed skipped: ${err.message}`);
     }
 
+    if (composeFailure) {
+      // Last log line = what the client shows on a failed job: keep the cause in it.
+      appendLog(job, `Installed, but the containers did not start (${composeFailure.slice(0, 400)}) — fix the configuration with Configure, then press Start`);
+      return { ok: false, reason: composeFailure, needsRestart };
+    }
     return { ok: true, needsRestart };
   } catch (err) {
     const reason = err?.message || String(err);
     appendLog(job, `Install failed: ${reason}`);
-    return { ok: false, reason };
+    return { ok: false, reason: composeFailure ? `${composeFailure}; then: ${reason}` : reason };
   }
 }
 
@@ -2050,8 +2218,11 @@ export default function bundlesRouter() {
     if (!manifest) {
       return res.status(404).json({ error: `Bundle '${bundleId}' not found` });
     }
+    // The keys the install modal must gate on — the server's own list, so the
+    // client can never disagree with validateInstall's 400.
+    const installRequired = installBlockingEnvKeys(bundleId, manifest);
     if (!manifestRequiresConsent(manifest)) {
-      return res.json({ required: false });
+      return res.json({ required: false, install_required: installRequired });
     }
     const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
     const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
@@ -2075,6 +2246,7 @@ export default function bundlesRouter() {
         min_android_app: manifest.requires?.min_android_app || null,
         token,
         expires_in_seconds,
+        install_required: installRequired,
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });
@@ -2087,10 +2259,18 @@ export default function bundlesRouter() {
   router.post("/bundles/api/install", async (req, res) => {
     const { bundle_id, env_vars, consent_token } = req.body;
 
+    // Before anything is copied or written: a bad key / multi-line value would
+    // corrupt the bundle .env (and diverge from the gateway copy).
+    const badEnv = findInvalidEnv(env_vars);
+    if (badEnv) {
+      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+    }
+
     const v = await validateInstall(bundle_id, {
       envVars: env_vars,
       consentToken: consent_token,
       forceInstall: !!req.body.force_install,
+      requireEnv: true,
     });
     if (!v.ok) {
       return res.status(v.status).json({ error: v.error, ...(v.extra || {}) });
@@ -2136,6 +2316,13 @@ export default function bundlesRouter() {
       });
       if (!out.ok) {
         finishJob(job, "failed");
+        // A compose-up failure still installs the panel / MCP server / gateway
+        // env (runInstallJob reports needsRestart for those); load them so
+        // Configure + Start finishes the bundle without another restart dance.
+        if (out.needsRestart) {
+          console.log(`[bundles] ${bundle_id}: install failed after non-container steps — restarting gateway to load them`);
+          scheduleGatewayRestart(3000);
+        }
         return;
       }
       finishJob(job, out.needsRestart ? "complete_restart" : "complete");
@@ -2207,6 +2394,13 @@ export default function bundlesRouter() {
             manifest: mv.manifest,
           });
           if (!out.ok) {
+            if (out.needsRestart) anyRestart = true; // compose failed, but its panel/MCP landed
+            // A compose-failed member is still RECORDED installed (Configure +
+            // Start finishes it) — so it belongs in the NEEDS_CONFIG checklist.
+            if (getInstalled().some((i) => i.id === member.id)) {
+              const failedKeys = needsConfigKeys(member.id);
+              if (failedKeys.length > 0) needsConfig.push({ id: member.id, keys: failedKeys });
+            }
             appendLog(job, `SUMMARY member ${member.id} failed ${out.reason}`);
             continue; // continue-on-error: one bad member must not sink the collection
           }
@@ -2303,20 +2497,10 @@ export default function bundlesRouter() {
           if (existsSync(panelFile)) { rmSync(panelFile); appendLog(job, "Removed panel"); }
           if (existsSync(routesFile)) { rmSync(routesFile); appendLog(job, "Removed panel routes"); }
           // Remove from panels.json
-          const panelsCfg2 = readJsonSafe(PANELS_CONFIG_PATH, []);
-          const idx2 = panelsCfg2.indexOf(bundle_id);
-          if (idx2 !== -1) {
-            panelsCfg2.splice(idx2, 1);
-            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg2);
-          }
+          removePanelEnabled(bundle_id);
         } else if (addonType === "panel") {
           // Remove from panels.json and delete panel file
-          const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
-          const idx = panelsCfg.indexOf(bundle_id);
-          if (idx !== -1) {
-            panelsCfg.splice(idx, 1);
-            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
-          }
+          removePanelEnabled(bundle_id);
           if (manifest?.panel) {
             const panelPath = resolvePanelPath(manifest, bundle_id);
             const panelFile = join(PANELS_DIR, panelPath.split("/").pop());
@@ -2336,15 +2520,8 @@ export default function bundlesRouter() {
           if (existsSync(panelDest)) {
             unlinkSync(panelDest);
           }
-          // Remove from panels.json
-          const panelsJsonPath = join(CROW_HOME, "panels.json");
-          if (existsSync(panelsJsonPath)) {
-            try {
-              let panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8"));
-              panelsList = panelsList.filter(p => p !== panelId);
-              writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
-            } catch {}
-          }
+          // Remove from panels.json (either shape)
+          removePanelEnabled(panelId);
           needsRestart = true;
           appendLog(job, `Removed panel: ${panelFilename}`);
         }
@@ -2573,6 +2750,12 @@ export default function bundlesRouter() {
     if (!env_vars || typeof env_vars !== "object") {
       return res.status(400).json({ error: "env_vars must be an object" });
     }
+    // Validate BEFORE writing either file, so the bundle .env and the gateway
+    // .env can never hold different copies of the same secret.
+    const badEnv = findInvalidEnv(env_vars);
+    if (badEnv) {
+      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+    }
 
     // Read existing .env, merge with new values
     const envPath = join(bundleDir, ".env");
@@ -2594,6 +2777,13 @@ export default function bundlesRouter() {
     // Also configure the MCP child, which reads mcp-addons.json — not this .env.
     const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
 
+    // And the gateway's own env, exactly as install does for docker bundles:
+    // gateway-side panel routes read their config from process.env (the phone
+    // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
+    // Only keys the manifest declares — never arbitrary request keys.
+    const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
+    const needsRestart = mcpUpdated || gatewayUpdated;
+
     // RE-DERIVE config state from the files we just wrote and hand it back: the
     // client must not decide "configured" itself. submitConfigureOnly guards only
     // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
@@ -2602,10 +2792,12 @@ export default function bundlesRouter() {
     // Key NAMES only; never values (D5).
     res.json({
       ok: true,
-      message: mcpUpdated
-        ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+      message: needsRestart
+        ? (mcpUpdated
+          ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+          : "Environment variables saved — restart the gateway to apply them")
         : "Environment variables saved",
-      needs_restart: mcpUpdated,
+      needs_restart: needsRestart,
       needs_config: needsConfigKeys(bundle_id),
     });
   });
