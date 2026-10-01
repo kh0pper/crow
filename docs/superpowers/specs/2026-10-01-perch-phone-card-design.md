@@ -36,10 +36,16 @@ take-over (plan C).
   `call_id` through the phone API), never from bytes the pi child emitted. No `crow-phone:` notify
   prefix or any child-originated card frame. The SSE frame only carries `{type:"phone_call", call_id}`
   (a pointer); the client fetches the row.
-- **I3 — Delivery target verified.** Before pushing a card into a Perch session, the gateway checks
-  that the session exists in the engine AND `session.botId === created_by.id` (a child with shell
-  access could forge `X-Crow-Actor-Thread`/`-Id` against `/phone/mcp`). Mismatch → no card (the call
-  still appears in the Phone panel; an audit row records the mismatch).
+- **I3 — Delivery target verified (scoped; see "Known limits").** Before pushing a card into a Perch
+  session, the gateway checks that the session exists in the engine AND
+  `session.botId === created_by.id`. Mismatch → no card (the call still appears in the Phone panel;
+  an audit row records the mismatch).
+  - **Result delivery gets the same check:** the session's bot, per `bot_sessions`, must be
+    `created_by.id`. Otherwise `notify_only` and an audit row (`deliver_target_mismatch`).
+  - **What this stops:** a child that forges only `X-Crow-Actor-Thread`, and accidental mismatches.
+  - **What it does not stop:** a child with shell access that forges *both* `X-Crow-Actor-Id` and
+    `X-Crow-Actor-Thread`. The only things guarding `/phone/mcp` are those two headers and the shared
+    local-mcp token.
 - **I4 — Approve exactly what was shown.** The card sends the `plan_hash` it rendered; `approveCall`'s
   CAS adds `AND plan_hash = ?` so an edit or approval made elsewhere in between cannot be approved
   blind (409 `plan_changed` → card refetches). The Phone panel sends `plan_hash` too.
@@ -50,9 +56,16 @@ take-over (plan C).
   `setSanitizedHtml` is the single innerHTML site). Bot-controlled fields (business_name, goal,
   shareable, transcript text) are never HTML. The Perch client is emitted inside a template literal:
   no backticks, no `${` in client code.
-- **I7 — Non-local viewers.** An SSO/peer viewer of the same Perch session sees the card read-only
-  (status, transcript); approve/reject/farend controls are not rendered for them. Stop stays
-  available (the server already allows it to any dashboard session).
+- **I7 — Non-local viewers (amended 2026-10-01 after staff review, strict reading).**
+  - **What they see:** an SSO/peer viewer of the same Perch session sees a **status-only pointer card**. It is built
+    from the gateway's own `phone_call` frame: status, a "sign in with your password on this Crow"
+    note, and Stop while the call is live.
+  - **Transcript and history:** they never see the transcript. Call transcripts stay
+    local-session-only, the same as `GET /api/phone/calls/:id`, for privacy. They also see **no
+    history cards**: the I5 list is local-only, so after a reload they see nothing until a frame
+    arrives.
+  - **Controls:** approve/reject/farend are never rendered for them. Stop stays available (the
+    server already allows it to any dashboard session).
 
 ## 4. Design
 
@@ -79,6 +92,11 @@ on load, §4.4). The SSE route already forwards any frame type as the SSE event 
   `business_confirmed`. Strips token_hash / approved_by_session as `/calls` does.
 - `GET /api/phone/calls/:id` already exists; the card uses it for refetches.
 - `POST /api/phone/calls/:id/approve` gains required `plan_hash` (I4). Missing → 400; mismatch → 409.
+  It also gains explicit `run_after` semantics (amended 2026-10-01):
+  - `null` = **now**, which clears a bot-proposed time;
+  - an ISO string = scheduled;
+  - absent = keep the stored time;
+  - unparseable = 400.
 - `GET /api/phone/whoami` → `{local:boolean, totp_required:boolean, cloud_model:string|null}` so the
   card knows whether to render controls (I7), the 2FA field, and the cloud label.
 
@@ -88,9 +106,17 @@ on load, §4.4). The SSE route already forwards any frame type as the SSE event 
 - `loadHistory` also fetches `/api/phone/perch/:sid/calls` (when the phone bundle is installed — a 404
   is ignored) and renders those cards, deduped by call_id, like file cards.
 - States:
-  - **pending**: business, number, goal, limits, shareable fields (editable; clear to withhold),
-    `This is a business` checkbox, `Allow cloud model for this call (<model>)` checkbox, 2FA field
-    (when required), `Approve now`, `Approve for…` (datetime), `Reject`.
+  - **pending** shows:
+    - the business, number, goal and limits;
+    - the call **language** ("English" / "Español"; it is part of the plan hash);
+    - a bot-proposed time ("Proposed time: …");
+    - the shareable fields (editable; clear to withhold);
+    - a `This is a business` checkbox and an `Allow cloud model for this call (<model>)` checkbox;
+    - a 2FA field (when required);
+    - the actions: `Approve now` (means now, and sends `run_after: null`), `Approve for…` (datetime,
+      prefilled with the proposed time) and `Reject`.
+
+    If the plan changes while the card is open, it redraws with "The plan changed — review it again".
   - **approved/queued**: "Approved — calling at …" / "Starting call…".
   - **live**: transcript lines (assistant / business / state / digits), "Business says…" input +
     Send (simulated line only), `Stop call`. When the line state is `answered` and no business line
@@ -114,10 +140,17 @@ on load, §4.4). The SSE route already forwards any frame type as the SSE event 
 
 ### 4.6 Result delivery hardening (`bundles/phone/server/deliver.js`)
 Today `deliverPhoneResult` injects the result as a user turn via `eng.message`, which throws
-`turn_in_progress` if the bot is mid-turn, and gives up after 5 retries (~10 s). Change: on
-`turn_in_progress`, keep the delivery pending and retry on the sweep with a longer window (up to
-10 min, backoff), and always push the terminal card frame immediately so the owner sees the outcome
-even before the bot hears about it.
+`turn_in_progress` if the bot is mid-turn, and gives up after 5 retries (~10 s).
+
+Change: on a **transient** failure, keep the delivery pending and retry on the sweep with a longer
+window (up to 10 min, backoff). Transient failures are:
+- `turn_in_progress` and `cycle_busy`;
+- `interactive_capacity` and `pi_capacity` (a full box);
+- `no_engine` (the engine singleton is created lazily by the first Perch request, so after a gateway
+  restart it can be missing for a while). This list was widened 2026-10-01 after staff review.
+
+Always push the terminal card frame immediately, so the owner sees the outcome even before the bot
+hears about it. The owner notification fires once.
 
 ### 4.7 Versioning
 Bump `bundles/phone/manifest.json` version (0.1.0 → 0.2.0) so installed copies refresh. Runner image
@@ -137,6 +170,18 @@ rebuild happens on Start/restart (compose has `build:`).
   card (2FA if on) → card goes live → assistant speaks first after ~6 s → type business lines →
   outcome on the card → bot reports the result in the chat.
 
-## 6. Dependencies / ordering
-Implement after the fixes PR (`fix/phone-install-and-perch-polish`) merges — it also touches
-`perch-interactive.js` and the Perch client (error surfacing). Rebase this branch onto main first.
+## 6. Known limits / follow-up
+- **Actor headers are not bound to the session.** `/phone/mcp` trusts `X-Crow-Actor-Id` and
+  `X-Crow-Actor-Thread` under the shared local-mcp token.
+  - I3 (cards) and the delivery check stop a forged thread and accidental mismatches, but not a
+    child that forges both headers. That child could get a card into, or a result delivered to,
+    another session of the bot it impersonates.
+  - Approval still needs the owner's local password session, 2FA and `plan_hash`, so no call can be
+    placed this way.
+  - **Follow-up, queued as its own item:** real per-session binding. The engine mints a per-session
+    secret into the child's MCP headers, and `/phone/mcp` resolves the actor from that secret instead
+    of trusting the headers. Plan A's delivery path has the same exposure.
+
+## 7. Dependencies / ordering
+The fixes PR (`fix/phone-install-and-perch-polish`, #393) has merged, and this branch is rebased
+onto main 9750e84f, which includes it.
