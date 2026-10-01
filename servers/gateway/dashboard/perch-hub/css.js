@@ -453,7 +453,7 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9
 #perch-hub-root .phonecard .ph-t-state{color:var(--dim)}
 #perch-hub-root .phonecard .ph-prompt{font-weight:600;color:var(--teal);font-size:13px}
 #perch-hub-root .phonecard .ph-farend{display:flex;gap:6px}
-#perch-hub-root .phonecard .ph-err{color:#b3261e;font-size:13px}
+#perch-hub-root .phonecard .ph-err{color:var(--attn);font-size:13px}
 #perch-hub-root .phonecard .ph-err:empty{display:none}
 #perch-hub-root .phonecard .ph-open{color:var(--teal);font-size:13px;text-decoration:none}
 /* The menu anchors to #perch-composer (position:sticky = its containing
