@@ -1662,7 +1662,8 @@ export function createInteractiveEngine({
       // Operators read the gateway log, not the drawer: without this line a
       // child that dies at spawn (an unknown provider) left only "world
       // rebuilt / model warm" behind, every time.
-      log(s.sessionId + ": pi exited: " + message);
+      // Capped: pi's stderr tail can echo provider error bodies.
+      log(s.sessionId + ": pi exited: " + String(message).slice(-2000));
       if (s.state !== "stopped") s.state = "hibernating";
       // Track 3 Task 6: a card claim outlives hibernation (occupancy rule
       // (c)) — release it ONLY in the branch where this exit lands on a
@@ -2367,7 +2368,7 @@ export function createInteractiveEngine({
     if (!message.trim()) throw engineError("empty_message");
     if (!s.turn) throw engineError("no_turn");
     const alive = !!(s.pi && s.pi._exitCode == null);
-    if (!alive) throw engineError("pi_gone");
+    if (!alive) throw engineError("pi_gone", { detail: s.lastError || "pi exited" });
     s.pi.send({ type: "steer", message });
     emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
     return { ok: true };

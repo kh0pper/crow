@@ -1325,7 +1325,7 @@ export function perchHubJs(lang = "en") {
       /* The child DIED (pi exited at spawn — an unknown provider, a missing
          model — or mid-turn). That is not rail chrome: the operator's message
          went nowhere, so say why where they are reading. */
-      if(d.reason==='pi_exit') showSendFailure(sid,d.text||'');
+      if(d.reason==='pi_exit'&&lastSent&&lastSent.sid===sid) showSendFailure(sid,d.text||'');
     });
     on('plan_state',function(d){
       var t=planStateText(d.state); if(t) appendActivity(t);
@@ -1791,7 +1791,6 @@ export function perchHubJs(lang = "en") {
     pendingImages=[];
     pendingFilePaths=[];
     lastSent={sid:mySid,text:text};
-    failShown=null;
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;
@@ -1807,23 +1806,26 @@ export function perchHubJs(lang = "en") {
   /* A send whose bot could not start. The operator's own words STAY in the
      transcript (a reconnect's resyncHistory rebuilds it from pi's on-disk
      transcript, which never received them, so they are replayed from here),
-     followed by the reason. Deduped: the POST's pi_gone and the stream's
-     pi_exit error frame describe the same death. */
+     followed by the reason.
+     Only while a send is OUTSTANDING: an exit with nothing pending (an idle
+     child reaped, an OOM after the bot already answered) is not a send
+     failure and stays on the Activity rail. One failure per send: the POST's
+     pi_gone and the stream's pi_exit frame describe the same death, and
+     whichever lands first consumes lastSent. */
   var lastSent=null;      /* {sid,text} of the last message sent, until a reply proves pi got it */
-  var failShown=null;     /* the failure text already shown for the last send */
   var unsent={};          /* sid -> [{text,note}] messages that never reached the bot */
   function showSendFailure(sid,detail){
-    var note=BOT_START_FAILED+' '+String(detail||'');
-    if(failShown===note) return;
-    failShown=note;
-    appendNote(note);
-    var sent=(lastSent&&lastSent.sid===sid)?lastSent.text:null;
+    if(!lastSent||lastSent.sid!==sid) return;
+    var sent=lastSent.text;
     lastSent=null;
+    var note=BOT_START_FAILED+' '+String(detail||'');
+    appendNote(note);
+    if(sent==null||sent==='') return;
     (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note});
   }
   function replayUnsent(sid){
     (unsent[sid]||[]).forEach(function(u){
-      if(u.text!=null) appendMessage('user','you',u.text);
+      appendMessage('user','you',u.text);
       appendNote(u.note);
     });
   }

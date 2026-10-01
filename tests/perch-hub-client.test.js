@@ -895,6 +895,42 @@ test("pi_exit error frame alone (the 202 raced the death) still puts the reason 
   assert.ok(transcriptTexts(hub).some((t) => t.startsWith("Bot could not start:")));
 });
 
+test("an exit with NO send outstanding (idle reap / OOM) stays on the Activity rail — no 'could not start' in the chat, nothing replayed", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("error", { text: "pi exited (code 137) before responding", reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!transcriptTexts(hub).some((t) => t.includes("Bot could not start")), "not a send failure");
+  assert.ok(hub.els["perch-activity-list"].children.some((c) => c.textContent.includes("code 137")), "still on the rail");
+});
+
+test("a reply clears the outstanding send: a later death is not blamed on the answered message", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("reply", { text: "hello!", turnId: "t1" });
+  es._serverFrame("error", { text: "pi exited (code 137)", reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!transcriptTexts(hub).some((t) => t.includes("Bot could not start")));
+});
+
+test("a long pi reason (POST detail capped, frame not) is still ONE note per send", async () => {
+  const long = "x".repeat(1500) + ' Unknown provider "Qwen Cloud"';
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "pi_gone", detail: long.slice(0, 1000) }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[0]._serverFrame("error", { text: long, reason: "pi_exit" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(transcriptTexts(hub).filter((t) => t.startsWith("Bot could not start:")).length, 1);
+});
+
 test("a 409 turn_in_progress is still a raced turn start (Steer), not an error note", async () => {
   const hub = await mountHub({
     fetchImpl: stdFetch({ "/message": () => makeResponse(409, { error: "turn_in_progress" }) }),
