@@ -108,7 +108,8 @@ export async function approveCall(db, id, { session, allowCloud, edits, runAfter
     plan = planFromRow(row, edits);
   }
   // "Approve now" means now: runAfter undefined keeps the stored time (a bot's
-  // proposal, which the card shows), null clears it, a string sets it.
+  // proposal, which the card and the Phone panel show and prefill), null clears it,
+  // a string sets it.
   const runAt = runAfter === undefined ? (row.run_after ?? null) : (runAfter || null);
   const token = randomBytes(24).toString("hex");
   const newHash = planHash(plan);

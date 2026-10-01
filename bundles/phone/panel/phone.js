@@ -7,7 +7,8 @@ const T = {
     localModel: "Local model (provider/model)", cloudModel: "Cloud model (provider/model)", cap: "Daily call limit", save: "Save",
     none: "Nothing here yet.", queued: "Queued", goal: "Goal", limits: "Limits", share: "May share", outcome: "Outcome",
     noLimits: "none", dates: "dates", days: "days", hours: "hours", maxPrice: "max price", duration: "duration", minutes: "min", limitNotes: "notes",
-    editShare: "Edit what may be shared (clear a field to withhold it)", cloudIs: "cloud model", noCloud: "no cloud model configured" },
+    editShare: "Edit what may be shared (clear a field to withhold it)", cloudIs: "cloud model", noCloud: "no cloud model configured",
+    proposed: "Proposed time" },
   es: { title: "Teléfono", pending: "Esperando tu aprobación", live: "Llamada en curso", history: "Historial", settings: "Ajustes",
     business: "Es un negocio", cloud: "Permitir modelo en la nube para esta llamada", totp: "Código 2FA", approve: "Aprobar ahora",
     approveAt: "Aprobar para", reject: "Rechazar", stop: "Colgar", says: "El negocio dice…", send: "Enviar",
@@ -16,7 +17,8 @@ const T = {
     localModel: "Modelo local (proveedor/modelo)", cloudModel: "Modelo en la nube (proveedor/modelo)", cap: "Límite diario de llamadas", save: "Guardar",
     none: "Nada por ahora.", queued: "En cola", goal: "Objetivo", limits: "Límites", share: "Puede compartir", outcome: "Resultado",
     noLimits: "ninguno", dates: "fechas", days: "días", hours: "horario", maxPrice: "precio máximo", duration: "duración", minutes: "min", limitNotes: "notas",
-    editShare: "Edita lo que se puede compartir (vacía un campo para no compartirlo)", cloudIs: "modelo en la nube", noCloud: "no hay modelo en la nube configurado" },
+    editShare: "Edita lo que se puede compartir (vacía un campo para no compartirlo)", cloudIs: "modelo en la nube", noCloud: "no hay modelo en la nube configurado",
+    proposed: "Hora propuesta" },
 };
 
 export { T as PHONE_STRINGS };
@@ -74,10 +76,18 @@ export default {
       "    if (l.notes) out.push(L.limitNotes + ': ' + l.notes);" +
       "    return out.length ? out.join('; ') : L.noLimits;" +
       "  }" +
+      "  function localInput(iso) {" +
+      "    if (!iso) return '';" +
+      "    var d = new Date(iso); if (isNaN(d.getTime())) return '';" +
+      "    function p(n) { return (n < 10 ? '0' : '') + n; }" +
+      "    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());" +
+      "  }" +
+      "  function fmtWhen(iso) { var d = new Date(iso); return isNaN(d.getTime()) ? String(iso) : d.toLocaleString(); }" +
       "  function describe(c) {" +
       "    var sh = c.shareable || {};" +
       "    var shared = Object.keys(sh).map(function (k) { return '<li>' + esc(k) + ': ' + esc(sh[k]) + '</li>'; }).join('');" +
       "    return '<b>' + esc(c.business_name) + '</b> ' + esc(c.number_e164) + '<br>' + esc(L.goal) + ': ' + esc(c.goal) +" +
+      "      (c.run_after ? '<br>' + esc(L.proposed) + ': ' + esc(fmtWhen(c.run_after)) : '') +" +
       "      '<br>' + esc(L.limits) + ': ' + esc(fmtLimits(c.limits)) + '<br>' + esc(L.share) + ':' + (shared ? '<ul class=\\'phone-share\\'>' + shared + '</ul>' : ' ' + esc(L.noLimits));" +
       "  }" +
       "  function renderPending(calls) {" +
@@ -96,6 +106,7 @@ export default {
       "        var ta = document.createElement('textarea'); ta.name = 'share_' + k; ta.rows = 1; ta.maxLength = 200; ta.value = sh[k];" +
       "        lab.appendChild(ta); fs.appendChild(lab);" +
       "      });" +
+      "      f.run_after.value = localInput(c.run_after);" +
       "      f.querySelector('.phone-cloud-model').textContent = '(' + (cloudModelSpec ? L.cloudIs + ': ' + cloudModelSpec : L.noCloud) + ')';" +
       "      f.addEventListener('submit', function (ev) {" +
       "        ev.preventDefault();" +

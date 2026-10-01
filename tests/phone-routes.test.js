@@ -279,6 +279,25 @@ test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null 
   assert.doesNotThrow(function () { new Function(script); });
 });
 
+test("m1: the Phone panel shows a bot-proposed run_after and prefills the time field with it (blank still means now)", async () => {
+  const { default: panel, PHONE_STRINGS } = await import("../bundles/phone/panel/phone.js");
+  assert.equal(PHONE_STRINGS.en.proposed, "Proposed time");
+  assert.ok(PHONE_STRINGS.es.proposed);
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = html.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /f\.run_after\.value = localInput\(c\.run_after\);/);
+  assert.match(script, /c\.run_after \? '<br>' \+ esc\(L\.proposed\) \+ ': ' \+ esc\(fmtWhen\(c\.run_after\)\)/);
+  assert.match(script, /var ra = f\.run_after\.value \? new Date\(f\.run_after\.value\)\.toISOString\(\) : null;/);
+  // localInput round-trips: the prefilled value submits the same instant the bot proposed.
+  const src = script.slice(script.indexOf("function localInput"), script.indexOf("function fmtWhen"));
+  const localInput = new Function(src + "; return localInput;")();
+  assert.equal(localInput(null), "");
+  assert.equal(localInput("garbage"), "");
+  const iso = "2030-01-01T15:30:00.000Z";
+  assert.equal(new Date(localInput(iso)).toISOString(), iso);
+});
+
 test("I5: GET /perch/:sid/calls — local only, this session's bot only, no secrets", async () => {
   await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT);
     INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-R1','perch-live'), ('ivy','perch','perch-R2','perch-live');`);
