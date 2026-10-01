@@ -2256,6 +2256,7 @@ export const translations = {
   "perch.startFailed": { en: "Could not start a session.", es: "No se pudo iniciar una sesión." },
   "perch.notAttached": { en: "That bot has no Perch channel attached.", es: "Ese bot no tiene canal Perch." },
   "perch.engineRequired": { en: "The bot engine is not installed.", es: "El motor de bots no está instalado." },
+  "perch.botStartFailed": { en: "Bot could not start:", es: "El bot no pudo iniciarse:" },
   "perch.sendFailed": { en: "The message did not send.", es: "El mensaje no se envió." },
   "perch.back": { en: "← Sessions", es: "← Sesiones" },
   "perch.composerPlaceholder": { en: "Message your bot…", es: "Escribe a tu bot…" },

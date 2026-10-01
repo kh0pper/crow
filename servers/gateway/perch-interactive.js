@@ -1659,6 +1659,10 @@ export function createInteractiveEngine({
         if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
       } catch { /* keep the generic message */ }
       s.lastError = message;
+      // Operators read the gateway log, not the drawer: without this line a
+      // child that dies at spawn (an unknown provider) left only "world
+      // rebuilt / model warm" behind, every time.
+      log(s.sessionId + ": pi exited: " + message);
       if (s.state !== "stopped") s.state = "hibernating";
       // Track 3 Task 6: a card claim outlives hibernation (occupancy rule
       // (c)) — release it ONLY in the branch where this exit lands on a
@@ -1668,7 +1672,9 @@ export function createInteractiveEngine({
       // stopped by some other path).
       if (s.state === "stopped") releaseCard(s.cardId, s.sessionId);
       writeLeases();
-      emit(s, { type: "error", text: message });
+      // reason "pi_exit": the drawer shows this one IN the chat (the operator's
+      // message went nowhere), not only on the Activity rail.
+      emit(s, { type: "error", text: message, reason: "pi_exit" });
       emit(s, stateEvent(s));
       writeRow(s, { status: "waiting-user" }).catch(() => {});
     }).catch(() => {});
@@ -2125,7 +2131,7 @@ export function createInteractiveEngine({
     const message = s.lastError || "pi exited before the turn could start";
     s.lastError = message;
     writeLeases();
-    emit(s, { type: "error", text: message });
+    emit(s, { type: "error", text: message, reason: "pi_exit" });
     emit(s, stateEvent(s));
     writeRow(s, { status: "waiting-user" }).catch(() => {});
     return true;
@@ -2301,10 +2307,10 @@ export function createInteractiveEngine({
     clearIdle(s);
     // D1: the child may already be gone (killed the instant before this call
     // landed) — refuse honestly rather than null-deref s.pi below.
-    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone");
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
     turn.statsBefore = await s.pi.getSessionStats().catch(() => null);
     // D1: …or it died WHILE that stats call was in flight.
-    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone");
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
     armStall(s);
     emit(s, stateEvent(s));
     // Track 3 Task 6: the FIRST message() after a card-bound spawn composes
