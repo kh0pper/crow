@@ -1,7 +1,7 @@
 {
   "id": "phone",
   "name": "Phone",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
   "type": "bundle",
   "author": "Crow",
@@ -20,5 +20,5 @@
   "env_vars": [
     { "name": "PHONE_RUNNER_SECRET", "description": "Shared secret between Crow and the phone runner; must be at least 32 characters. Generate one with: openssl rand -hex 24", "required": true, "secret": true }
   ],
-  "notes": "Plan A: calls run on a simulated line (FakeLine). The Bluetooth phone line arrives in a later release. Every call needs owner approval."
+  "notes": "Calls run on a simulated line (you type the business's lines). Approve and follow a call from the Perch chat that asked for it, or from Crow's Nest → Phone. The Bluetooth phone line arrives in a later release. Every call needs owner approval."
 }
