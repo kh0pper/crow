@@ -31,6 +31,16 @@ const BOARD_HASH_KEY = "mcp_board_token_hash";
 const BOARD_CREATED_KEY = "mcp_board_token_created";
 const BOARD_PATH_RE = /^\/board\/(?:mcp|sse|messages)$/;
 
+// Phone token (Phone bundle plan A): same shape as the board token, PATH-SCOPED
+// to /phone/(mcp|sse|messages). Lets bots propose calls; nothing on that
+// mount can dial (dialing requires an owner-approved single-use token).
+const PHONE_HASH_KEY = "mcp_phone_token_hash";
+const PHONE_CREATED_KEY = "mcp_phone_token_created";
+const PHONE_PATH_RE = /^\/phone\/(?:mcp|sse|messages)$/;
+function phoneTokenPath() {
+  return join(crowHome(), "phone-token");
+}
+
 // Deliberately self-contained (not importing resolveCrowHome from ./proxy.js)
 // — proxy.js pulls in the McpServer/Client/StdioClientTransport machinery for
 // the external-integrations proxy, which this file has no other reason to
@@ -153,6 +163,36 @@ export async function ensureBoardToken(db) {
   return { minted: true };
 }
 
+export async function generatePhoneToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, PHONE_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, PHONE_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = phoneTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validatePhoneToken(db, token) {
+  if (!token) return false;
+  const stored = await readSetting(db, PHONE_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensurePhoneToken(db) {
+  const hash = await readSetting(db, PHONE_HASH_KEY);
+  if (hash && existsSync(phoneTokenPath())) return { minted: false };
+  await generatePhoneToken(db);
+  return { minted: true };
+}
+
+export const PHONE_TOKEN_KEYS = { PHONE_HASH_KEY, PHONE_CREATED_KEY };
+
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
 // /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer
@@ -192,6 +232,9 @@ export function localTokenAuthMiddleware(db) {
       // registers only board_* tools, so there is no separate tool-level
       // allowlist to apply.
       if (BOARD_PATH_RE.test(req.path) && await validateBoardToken(db, token)) {
+        req.localTokenAuth = { token: "local-mcp" };
+      }
+      if (!req.localTokenAuth && PHONE_PATH_RE.test(req.path) && await validatePhoneToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp" };
       }
     } catch (err) {
