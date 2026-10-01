@@ -7,9 +7,19 @@
  * access token via the refresh grant IN MEMORY (never written back),
  * then fetches today's primary-calendar events and Drive files modified
  * in the last 24 hours. Any failure marks the section unavailable.
+ *
+ *   DRIVE_IGNORE — optional; `;`-separated case-insensitive patterns
+ *                  (regex or plain text) matched against each file's name
+ *                  and its owners' email addresses. Matches are dropped from
+ *                  the Drive section (folders shared in from elsewhere, etc.).
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { parseMailIgnore as parseIgnore } from "./outlook.js";
+
+const DRIVE_LIMIT = 10; // files shown in the section
+const DRIVE_PAGE_SIZE = 100; // over-fetch per page when a filter is active
+const DRIVE_MAX_PAGES = 5; // bound on the over-fetch
 
 const HTTP_TIMEOUT_MS = 15_000;
 
@@ -44,6 +54,35 @@ async function apiGet(url, accessToken) {
   });
   if (!res.ok) throw new Error(`Google API HTTP ${res.status} for ${new URL(url).pathname}`);
   return res.json();
+}
+
+/** Drop files whose name or any owner email matches an ignore pattern. */
+export function filterDriveFiles(files, patterns) {
+  if (!patterns || patterns.length === 0) return files;
+  return files.filter((f) => {
+    const hay = [f && f.name, ...((f && f.owners) || []).map((o) => o && o.emailAddress)].filter(
+      (v) => typeof v === "string"
+    );
+    return !patterns.some((re) => hay.some((h) => re.test(h)));
+  });
+}
+
+/**
+ * Newest-first files that survive the ignore patterns, at most `limit`.
+ * `fetchPage(pageToken)` resolves to { files, nextPageToken }. With a filter
+ * active, pages are followed (up to `maxPages`) until `limit` files are kept,
+ * so ignored files cannot crowd the kept ones out of the section.
+ */
+export async function collectDriveFiles(fetchPage, patterns, limit = DRIVE_LIMIT, maxPages = DRIVE_MAX_PAGES) {
+  const kept = [];
+  let pageToken;
+  for (let page = 0; page < maxPages; page++) {
+    const data = (await fetchPage(pageToken)) || {};
+    kept.push(...filterDriveFiles(data.files || [], patterns));
+    pageToken = data.nextPageToken;
+    if (kept.length >= limit || !pageToken) break;
+  }
+  return kept.slice(0, limit);
 }
 
 export async function googleSections(config) {
@@ -101,17 +140,21 @@ export async function googleSections(config) {
   // Drive: files modified in the last 24 hours
   try {
     const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-    const url =
-      "https://www.googleapis.com/drive/v3/files?" +
-      new URLSearchParams({
+    const patterns = parseIgnore(config.DRIVE_IGNORE);
+    const fetchPage = (pageToken) => {
+      const params = {
         q: `modifiedTime > '${since}' and trashed = false`,
         orderBy: "modifiedTime desc",
-        pageSize: "10",
-        fields: "files(id,name,mimeType,modifiedTime,webViewLink)",
-      });
-    const data = await apiGet(url, accessToken);
+        pageSize: String(patterns.length ? DRIVE_PAGE_SIZE : DRIVE_LIMIT),
+        fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,owners(emailAddress))",
+      };
+      if (pageToken) params.pageToken = pageToken;
+      return apiGet("https://www.googleapis.com/drive/v3/files?" + new URLSearchParams(params), accessToken);
+    };
+    // No filter: one page of DRIVE_LIMIT, as before.
+    const files = await collectDriveFiles(fetchPage, patterns, DRIVE_LIMIT, patterns.length ? DRIVE_MAX_PAGES : 1);
     driveSection.available = true;
-    for (const f of data.files || []) {
+    for (const f of files) {
       driveSection.items.push({
         label: f.name,
         meta: `modified ${String(f.modifiedTime).slice(0, 16).replace("T", " ")}`,
