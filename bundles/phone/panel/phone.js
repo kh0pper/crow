@@ -82,7 +82,7 @@ export default {
       "  }" +
       "  function renderPending(calls) {" +
       "    var list = calls.filter(function (c) { return c.status === 'awaiting_approval'; });" +
-      "    var key = list.map(function (c) { return c.id; }).join(',');" +
+      "    var key = list.map(function (c) { return c.id + ':' + c.plan_hash; }).join(',');" +
       "    if (key === lastPendingKey) return;" +
       "    lastPendingKey = key;" +
       "    var box = document.getElementById('phone-pending'); box.innerHTML = '';" +
@@ -101,10 +101,10 @@ export default {
       "        ev.preventDefault();" +
       "        var action = ev.submitter ? ev.submitter.value : 'approve';" +
       "        if (action === 'reject') { api('POST', '/calls/' + c.id + '/reject').then(load).catch(function () {}); return; }" +
-      "        var ra = f.run_after.value ? new Date(f.run_after.value).toISOString() : undefined;" +
-      "        var body = { business_confirmed: f.business_confirmed.checked, allow_cloud: f.allow_cloud.checked, totp: f.totp.value, run_after: ra };" +
+      "        var ra = f.run_after.value ? new Date(f.run_after.value).toISOString() : null;" +
+      "        var body = { plan_hash: c.plan_hash, business_confirmed: f.business_confirmed.checked, allow_cloud: f.allow_cloud.checked, totp: f.totp.value, run_after: ra };" +
       "        if (keys.length) { var edited = {}; keys.forEach(function (k) { edited[k] = f.elements['share_' + k].value; }); body.edits = { shareable: edited }; }" +
-      "        api('POST', '/calls/' + c.id + '/approve', body).then(load).catch(function () {});" +
+      "        api('POST', '/calls/' + c.id + '/approve', body).then(load).catch(function (e) { if (e.status === 409) { lastPendingKey = null; load(); } });" +
       "      });" +
       "      div.appendChild(f); box.appendChild(div);" +
       "    });" +

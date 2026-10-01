@@ -59,24 +59,37 @@ async function applyEdits(db, id, plan) {
   });
 }
 
-export async function approveCall(db, id, { session, allowCloud, edits, runAfter } = {}) {
+export async function approveCall(db, id, { session, allowCloud, edits, runAfter, expectedHash } = {}) {
+  // I4 (spec 2026-10-01): approve exactly what was shown. The caller names the
+  // plan_hash it rendered; the pre-check gives a clean error and the CAS below
+  // re-checks it in the same UPDATE, so an edit landing in between still loses.
+  if (typeof expectedHash !== "string" || !expectedHash) throw fail("plan_hash_required", "approval must name the plan_hash that was shown");
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
   if (row.status !== "awaiting_approval") throw fail("not_pending", "call is not awaiting approval");
-  // Validate the edited plan (if any) before the CAS
+  if (row.plan_hash !== expectedHash) throw fail("plan_changed", "the plan changed since it was shown; review it again");
+  // Validate the edited plan (if any) before the CAS. The CAS compares the SHOWN
+  // hash; the row then carries the edited plan's hash.
   let plan = row;
   if (edits) {
     plan = planFromRow(row, edits);
   }
+  // "Approve now" means now: runAfter undefined keeps the stored time (a bot's
+  // proposal, which the card shows), null clears it, a string sets it.
+  const runAt = runAfter === undefined ? (row.run_after ?? null) : (runAfter || null);
   const token = randomBytes(24).toString("hex");
   const newHash = planHash(plan);
   const r = await db.execute({
-    sql: `UPDATE phone_calls SET status='approved', business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=COALESCE(?, run_after), updated_at=datetime('now')
-          WHERE id=? AND status='awaiting_approval'`,
-    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, sha(token + ":" + id + ":" + newHash), sha(session || ""), allowCloud ? 1 : 0, runAfter || null, id],
+    sql: `UPDATE phone_calls SET status='approved', business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=?, updated_at=datetime('now')
+          WHERE id=? AND status='awaiting_approval' AND plan_hash=?`,
+    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, sha(token + ":" + id + ":" + newHash), sha(session || ""), allowCloud ? 1 : 0, runAt, id, expectedHash],
   });
-  if (!r.rowsAffected) throw fail("not_pending", "call is not awaiting approval");
-  await audit(db, id, "owner", "approved", { allowCloud: !!allowCloud, runAfter: runAfter || null });
+  if (!r.rowsAffected) {
+    const now = await getCall(db, id);
+    if (now && now.status === "awaiting_approval") throw fail("plan_changed", "the plan changed since it was shown; review it again");
+    throw fail("not_pending", "call is not awaiting approval");
+  }
+  await audit(db, id, "owner", "approved", { allowCloud: !!allowCloud, runAfter: runAt });
   return { token };
 }
 

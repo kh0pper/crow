@@ -8,13 +8,18 @@ import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
 import * as store from "../bundles/phone/server/store.js";
 import { validatePlan } from "../bundles/phone/server/plan.js";
 import { createDispatcher } from "../bundles/phone/server/dispatcher.js";
+// I4 (spec 2026-10-01): every approval names the plan_hash the owner was shown.
+async function approveFresh(d, id, o = {}) {
+  return store.approveCall(d, id, { expectedHash: (await store.getCall(d, id)).plan_hash, ...o });
+}
+
 
 async function setup({ runner, settings } = {}) {
   const db = createDbClient(join(mkdtempSync(join(tmpdir(), "phone-disp-")), "crow.db"));
   await initPhoneTables(db);
   const plan = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
   const { call_id } = await store.createPlan(db, plan, { kind: "bot", id: "bobby" }, null);
-  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  const { token } = await approveFresh(db, call_id, { session: "s", allowCloud: false });
   const delivered = [];
   const d = createDispatcher({ db, runner, deps: { notify: async () => {}, deliver: async (_db, c) => { delivered.push(c.id); return { via: "notify_only" }; } },
     settings: settings || (() => ({ ownerName: "Kevin", ownerNumber: "+15129372366", dailyCap: 10, line: "fake", model: () => ({ base_url: "http://m", api_key: "k", model: "x", label: "local" }) })) });

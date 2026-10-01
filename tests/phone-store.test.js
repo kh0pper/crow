@@ -7,6 +7,11 @@ import { createDbClient } from "../servers/db.js";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
 import * as store from "../bundles/phone/server/store.js";
 import { validatePlan } from "../bundles/phone/server/plan.js";
+// I4 (spec 2026-10-01): every approval names the plan_hash the owner was shown.
+async function approveFresh(d, id, o = {}) {
+  return store.approveCall(d, id, { expectedHash: (await store.getCall(d, id)).plan_hash, ...o });
+}
+
 
 let db;
 const plan = () => validatePlan({ business_name: "Smile Dental", number: "512-555-0101", goal: "Book a cleaning", language: "en",
@@ -36,8 +41,8 @@ test("per-bot rate limit: 5 pending max", async () => {
 test("approve is compare-and-set: two concurrent approvals yield one token", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
   const results = await Promise.allSettled([
-    store.approveCall(db, call_id, { session: "s1", allowCloud: false }),
-    store.approveCall(db, call_id, { session: "s1", allowCloud: false }),
+    approveFresh(db, call_id, { session: "s1", allowCloud: false }),
+    approveFresh(db, call_id, { session: "s1", allowCloud: false }),
   ]);
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   assert.equal(results.find((r) => r.status === "rejected").reason.code, "not_pending");
@@ -46,7 +51,7 @@ test("approve is compare-and-set: two concurrent approvals yield one token", asy
 test("token is single-use and bound to the call", async () => {
   const a = await store.createPlan(db, plan(), bot, null);
   const b = await store.createPlan(db, plan(), bot, null);
-  const { token } = await store.approveCall(db, a.call_id, { session: "s", allowCloud: true });
+  const { token } = await approveFresh(db, a.call_id, { session: "s", allowCloud: true });
   assert.equal(await store.consumeToken(db, b.call_id, token), false);
   assert.equal(await store.consumeToken(db, a.call_id, token), true);
   assert.equal(await store.consumeToken(db, a.call_id, token), false);
@@ -54,7 +59,7 @@ test("token is single-use and bound to the call", async () => {
 
 test("edit after approval invalidates the token and re-pends", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
-  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  const { token } = await approveFresh(db, call_id, { session: "s", allowCloud: false });
   await store.editCall(db, call_id, { goal: "Book two cleanings" });
   const c = await store.getCall(db, call_id);
   assert.equal(c.status, "awaiting_approval");
@@ -65,8 +70,8 @@ test("edit after approval invalidates the token and re-pends", async () => {
 test("claimNextDue: one live call at a time, respects run_after", async () => {
   const a = await store.createPlan(db, plan(), bot, null);
   const b = await store.createPlan(db, plan(), bot, null);
-  await store.approveCall(db, a.call_id, { session: "s", allowCloud: false, runAfter: new Date(Date.now() + 3600e3).toISOString() });
-  await store.approveCall(db, b.call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, a.call_id, { session: "s", allowCloud: false, runAfter: new Date(Date.now() + 3600e3).toISOString() });
+  await approveFresh(db, b.call_id, { session: "s", allowCloud: false });
   const first = await store.claimNextDue(db);
   assert.equal(first.id, b.call_id);
   assert.equal(await store.claimNextDue(db), null); // b is starting → nothing else runs
@@ -98,7 +103,7 @@ test("suppression set", async () => {
 
 test("approval with edits: ONE UPDATE, token bound to plan_hash", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
-  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false, edits: { goal: "New goal" } });
+  const { token } = await approveFresh(db, call_id, { session: "s", allowCloud: false, edits: { goal: "New goal" } });
   const c = await store.getCall(db, call_id);
   assert.equal(c.status, "approved");
   assert.equal(c.goal, "New goal");
@@ -109,7 +114,7 @@ test("approval with edits: ONE UPDATE, token bound to plan_hash", async () => {
 
 test("editCall: ONE guarded UPDATE, refuses to edit live/done calls", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
-  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, call_id, { session: "s", allowCloud: false });
   await db.execute({ sql: "UPDATE phone_calls SET status='live' WHERE id=?", args: [call_id] });
   await assert.rejects(store.editCall(db, call_id, { goal: "Nope" }), (e) => e.code === "not_editable");
   const c = await store.getCall(db, call_id);
@@ -119,8 +124,8 @@ test("editCall: ONE guarded UPDATE, refuses to edit live/done calls", async () =
 test("claimNextDue: concurrent claims yield exactly one starting call", async () => {
   const a = await store.createPlan(db, plan(), bot, null);
   const b = await store.createPlan(db, plan(), bot, null);
-  await store.approveCall(db, a.call_id, { session: "s", allowCloud: false });
-  await store.approveCall(db, b.call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, a.call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, b.call_id, { session: "s", allowCloud: false });
   const results = await Promise.allSettled([
     store.claimNextDue(db),
     store.claimNextDue(db),
@@ -132,7 +137,7 @@ test("claimNextDue: concurrent claims yield exactly one starting call", async ()
 
 test("markLive: status guard, returns boolean", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
-  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, call_id, { session: "s", allowCloud: false });
   const first = await store.claimNextDue(db);
   assert.equal(first.status, "starting");
   const res = await store.markLive(db, call_id);
@@ -150,7 +155,7 @@ test("markLive: status guard, returns boolean", async () => {
 test("consumeToken refused on unapproved or plan-changed call", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
   assert.equal(await store.consumeToken(db, call_id, "any-token"), false);
-  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  const { token } = await approveFresh(db, call_id, { session: "s", allowCloud: false });
   await store.editCall(db, call_id, { goal: "New goal" });
   assert.equal(await store.consumeToken(db, call_id, token), false);
 });
@@ -163,7 +168,7 @@ test("per-bot daily limit: 10 plans per day regardless of pending", async () => 
     callIds.push(call_id);
   }
   for (let i = 0; i < 5; i++) {
-    await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
+    await approveFresh(db, callIds[i], { session: "s", allowCloud: false });
   }
   for (let i = 0; i < 4; i++) {
     const { call_id } = await store.createPlan(db, plan(), bot, null);
@@ -176,10 +181,10 @@ test("per-bot daily limit: 10 plans per day regardless of pending", async () => 
   callIds.push(res9.call_id);
   // Approve the 4 new awaiting plans (indices 5-8)
   for (let i = 5; i < 9; i++) {
-    await store.approveCall(db, callIds[i], { session: "s", allowCloud: false });
+    await approveFresh(db, callIds[i], { session: "s", allowCloud: false });
   }
   // Boundary: now day=10, pend=1 (the 10th plan). Approve it then 11th fails
-  await store.approveCall(db, callIds[9], { session: "s", allowCloud: false });
+  await approveFresh(db, callIds[9], { session: "s", allowCloud: false });
   pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [bot.id] })).rows[0].n;
   assert.equal(pend, 0);
   await assert.rejects(store.createPlan(db, plan(), bot, null), (e) => e.code === "rate_limited");
@@ -215,7 +220,7 @@ test("markDelivered: idempotent single-use", async () => {
 
 test("issueStartToken: generates token for starting calls only", async () => {
   const { call_id } = await store.createPlan(db, plan(), bot, null);
-  await store.approveCall(db, call_id, { session: "s", allowCloud: false });
+  await approveFresh(db, call_id, { session: "s", allowCloud: false });
   // Call is approved, not starting
   const token1 = await store.issueStartToken(db, call_id);
   assert.equal(token1, null);
@@ -227,4 +232,65 @@ test("issueStartToken: generates token for starting calls only", async () => {
   assert(token2);
   // Consume it
   assert.equal(await store.consumeToken(db, call_id, token2), true);
+});
+
+// ---- spec 2026-10-01 I4: approve exactly what was shown ----
+test("approveCall requires the shown plan_hash (I4)", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  await assert.rejects(store.approveCall(db, call_id, { session: "s", allowCloud: false }), (e) => e.code === "plan_hash_required");
+  await assert.rejects(store.approveCall(db, call_id, { session: "s", allowCloud: false, expectedHash: "0".repeat(64) }), (e) => e.code === "plan_changed");
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "awaiting_approval");
+  assert.equal(c.token_hash, null);
+});
+
+test("an edit between render and approve is never approved blind (plan_changed)", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const shown = (await store.getCall(db, call_id)).plan_hash;
+  await store.editCall(db, call_id, { goal: "Book two cleanings" });
+  await assert.rejects(store.approveCall(db, call_id, { session: "s", allowCloud: false, expectedHash: shown }), (e) => e.code === "plan_changed");
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "awaiting_approval"); assert.equal(c.token_hash, null); assert.equal(c.goal, "Book two cleanings");
+});
+
+test("owner edits check the SHOWN hash, then store the edited plan's hash", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const shown = (await store.getCall(db, call_id)).plan_hash;
+  const { token } = await store.approveCall(db, call_id, { session: "s", allowCloud: false, expectedHash: shown, edits: { shareable: { name: "" } } });
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "approved");
+  assert.notEqual(c.plan_hash, shown);
+  assert.deepEqual(c.shareable, {});
+  assert.equal(await store.consumeToken(db, call_id, token), true);
+});
+
+test("the approve CAS itself carries plan_hash (an edit landing between read and UPDATE loses)", async () => {
+  const { call_id } = await store.createPlan(db, plan(), bot, null);
+  const shown = (await store.getCall(db, call_id)).plan_hash;
+  let raced = false;
+  const racy = {
+    execute: async (q) => {
+      if (!raced && typeof q === "object" && /SET status='approved'/.test(q.sql)) {
+        raced = true;
+        await db.execute({ sql: "UPDATE phone_calls SET plan_hash='edited-elsewhere' WHERE id=?", args: [call_id] });
+      }
+      return db.execute(q);
+    },
+  };
+  await assert.rejects(store.approveCall(racy, call_id, { session: "s", allowCloud: false, expectedHash: shown }), (e) => e.code === "plan_changed");
+  assert.equal(raced, true);
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "awaiting_approval"); assert.equal(c.token_hash, null);
+});
+
+test("approve: 'now' (null) clears a proposed run_after; absent keeps it; a time sets it", async () => {
+  const proposed = () => validatePlan({ business_name: "Smile Dental", number: "512-555-0101", goal: "Book", language: "en", run_after: "2030-01-01T15:00:00Z" });
+  const mk = async () => (await store.createPlan(db, proposed(), bot, null)).call_id;
+  const a = await mk(), b = await mk(), c = await mk();
+  await approveFresh(db, a, { session: "s", allowCloud: false, runAfter: null });
+  await approveFresh(db, b, { session: "s", allowCloud: false });
+  await approveFresh(db, c, { session: "s", allowCloud: false, runAfter: "2031-02-03T04:05:00.000Z" });
+  assert.equal((await store.getCall(db, a)).run_after, null, "Approve now means now");
+  assert.equal((await store.getCall(db, b)).run_after, "2030-01-01T15:00:00.000Z", "absent keeps the stored time");
+  assert.equal((await store.getCall(db, c)).run_after, "2031-02-03T04:05:00.000Z");
 });

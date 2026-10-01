@@ -72,7 +72,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
-    catch (e) { const st = { not_found: 404, not_pending: 409, not_editable: 409, invalid_plan: 400, rate_limited: 429 }[e.code] || 500; res.status(st).json({ error: e.code || "error", message: e.message }); }
+    catch (e) { const st = { not_found: 404, not_pending: 409, not_editable: 409, invalid_plan: 400, rate_limited: 429, plan_changed: 409, plan_hash_required: 400 }[e.code] || 500; res.status(st).json({ error: e.code || "error", message: e.message }); }
   };
   const csrfMw = async (req, res, next) => {
     if (!csrf) { const m = await appImport("servers/gateway/dashboard/shared/csrf.js"); csrf = m.csrfMiddleware; }
@@ -117,7 +117,19 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     const st = await readSettings(db);
     if (!st.tcpaAck) return res.status(409).json({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." });
     if (!String(st.ownerName || "").trim()) return res.status(409).json({ error: "owner_name_required", message: "Set your first name in Phone settings first (the assistant says who it is calling for)." });
-    await mods.store.approveCall(db, req.params.id, { session: req.dashboardSession, allowCloud: !!b.allow_cloud, edits: b.edits || undefined, runAfter: b.run_after || undefined });
+    // "Approve now" sends run_after:null and clears any proposed time; a string
+    // schedules it; an absent field keeps what is stored.
+    let runAfter;
+    if (b.run_after === null) runAfter = null;
+    else if (typeof b.run_after === "string" && b.run_after) {
+      const t = Date.parse(b.run_after);
+      if (!Number.isFinite(t)) return res.status(400).json({ error: "invalid_run_after", message: "run_after must be a date and time." });
+      runAfter = new Date(t).toISOString();
+    }
+    // I4: the hash check runs last, after every other gate, so a refused session
+    // or a missing 2FA code never learns whether the plan changed.
+    await mods.store.approveCall(db, req.params.id, { session: req.dashboardSession, allowCloud: !!b.allow_cloud, edits: b.edits || undefined, runAfter,
+      expectedHash: typeof b.plan_hash === "string" ? b.plan_hash : undefined });
     res.json({ ok: true });
   }));
   router.post("/api/phone/calls/:id/reject", wrap(async (req, res) => {

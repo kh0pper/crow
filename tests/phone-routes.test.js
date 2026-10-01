@@ -8,6 +8,11 @@ import { createDbClient } from "../servers/db.js";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
 import * as store from "../bundles/phone/server/store.js";
 import { validatePlan } from "../bundles/phone/server/plan.js";
+// I4 (spec 2026-10-01): every approval names the plan_hash the owner was shown.
+async function approveFresh(d, id, o = {}) {
+  return store.approveCall(d, id, { expectedHash: (await store.getCall(d, id)).plan_hash, ...o });
+}
+
 
 const s = {};
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_APP_ROOT: process.env.CROW_APP_ROOT, PHONE_RUNNER_SECRET: process.env.PHONE_RUNNER_SECRET };
@@ -43,6 +48,7 @@ after(async () => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
 
+const hashOf = async (id) => (await store.getCall(s.db, id)).plan_hash;
 let planN = 0; // distinct bot ids keep every test clear of the per-bot plan rate limit
 async function newPlan() {
   const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
@@ -59,7 +65,7 @@ test("approve refuses SSO sessions, missing TOTP, missing business confirmation"
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true }, "sso")).status, 403);
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "000000", business_confirmed: true })).status, 403);
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456" })).status, 400);
-  const ok = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, allow_cloud: true });
+  const ok = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, allow_cloud: true, plan_hash: await hashOf(id) });
   assert.equal(ok.status, 200);
   const c = await store.getCall(s.db, id);
   assert.equal(c.status, "approved"); assert.equal(c.allow_cloud, true);
@@ -74,7 +80,7 @@ test("approve refused until the owner acknowledged the AI-call notice", async ()
 
 test("verify: runner secret required, token single-use", async () => {
   const id = await newPlan();
-  const { token } = await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const { token } = await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const v = (auth) => fetch(s.base + "/api/phone/verify", { method: "POST", headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Bearer ${auth}` } : {}) }, body: JSON.stringify({ call_id: id, token }) });
   assert.equal((await v(null)).status, 401);
   assert.equal((await v("wrong")).status, 401);
@@ -104,7 +110,7 @@ test("settings POST requires local session + TOTP and validates model specs", as
 
 test("call reads never expose token_hash or approved_by_session", async () => {
   const id = await newPlan();
-  await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const h = { "x-test-session": "local" };
   const list = await (await fetch(s.base + "/api/phone/calls", { headers: h })).json();
   const one = await (await fetch(s.base + `/api/phone/calls/${id}`, { headers: h })).json();
@@ -113,7 +119,7 @@ test("call reads never expose token_hash or approved_by_session", async () => {
 
 test("verify with wrong secret does not burn the token", async () => {
   const id = await newPlan();
-  const { token } = await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const { token } = await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const v = (a) => fetch(s.base + "/api/phone/verify", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${a}` }, body: JSON.stringify({ call_id: id, token }) });
   assert.equal((await v("wrong")).status, 401);
   assert.deepEqual(await (await v(s.secret)).json(), { ok: true });
@@ -162,7 +168,7 @@ async function sharePlan() {
 
 test("approve with edits.shareable stores the owner-edited values (cleared field withheld)", async () => {
   const id = await sharePlan();
-  const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, edits: { shareable: { name: "Kev", date_of_birth: "" } } });
+  const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id), edits: { shareable: { name: "Kev", date_of_birth: "" } } });
   assert.equal(r.status, 200);
   const c = await store.getCall(s.db, id);
   assert.equal(c.status, "approved");
@@ -229,4 +235,45 @@ test("call reads, settings read and far-end input require a local password sessi
   assert.equal((await r.json()).error, "local_login_required");
   assert.equal(s.farend.length, before);
   assert.equal((await post(`/api/phone/calls/${id}/farend`, { text: "ok" }, "local")).status, 200);
+});
+
+test("I4: approve needs the plan_hash that was shown — missing 400, stale 409, SSO still 403", async () => {
+  const id = await newPlan();
+  const shown = await hashOf(id);
+  let r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, "plan_hash_required");
+  assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: shown }, "sso")).status, 403);
+  assert.equal((await post(`/api/phone/calls/${id}/edit`, { edits: { goal: "Ask hours" } })).status, 200);
+  r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: shown });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, "plan_changed");
+  assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval");
+  assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id) })).status, 200);
+});
+
+test("approve run_after: null clears a proposed time; a bad time is 400", async () => {
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", run_after: "2030-01-01T15:00:00Z" });
+  const mk = async () => (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
+  const a = await mk();
+  assert.equal((await post(`/api/phone/calls/${a}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(a), run_after: null })).status, 200);
+  assert.equal((await store.getCall(s.db, a)).run_after, null);
+  const b = await mk();
+  const r = await post(`/api/phone/calls/${b}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(b), run_after: "next tuesday-ish" });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, "invalid_run_after");
+  assert.equal((await store.getCall(s.db, b)).status, "awaiting_approval");
+});
+
+test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null for 'now', and re-renders when the hash changes", async () => {
+  const { default: panel } = await import("../bundles/phone/panel/phone.js");
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = html.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /plan_hash: c\.plan_hash/);
+  assert.match(script, /new Date\(f\.run_after\.value\)\.toISOString\(\) : null;/);
+  assert.match(script, /return c\.id \+ ':' \+ c\.plan_hash;/);
+  assert.match(script, /if \(e\.status === 409\) \{ lastPendingKey = null; load\(\); \}/);
+  assert.equal(script.includes("`"), false);
+  assert.doesNotThrow(function () { new Function(script); });
 });
