@@ -47,6 +47,7 @@ secrets file works as-is.
 | `SYNC_CONFIG_FILE` | Path to the sync config JSON (below) |
 | `NTFY_TOPIC` / `NTFY_URL` | Optional ntfy push of the digest summary (default base `https://ntfy.sh`) |
 | `GOOGLE_TOKEN_FILE` | Google OAuth2 `authorized_user` JSON (the format google-workspace-mcp writes). Access tokens are minted in memory via the refresh grant; nothing is written back |
+| `DRIVE_IGNORE` | Optional. `;`-separated case-insensitive patterns (regex or plain text) matched against each file's name and its owners' email addresses; matches are dropped from the digest's "Drive (last 24h)" section. For folders shared in from another organization, backup archives, and other files the reader never acts on. With a filter set the adapter over-fetches so ignored files cannot crowd out the rest |
 | `OUTLOOK_DRIVE_FOLDER_ID` | Optional (preferred). Read the newest JSON file an external agent (e.g. a Power Automate flow) drops into this Google Drive folder, using `GOOGLE_TOKEN_FILE` for auth. Lets tenants that block Graph user-consent feed Outlook into the digest with no extra hosting |
 | `OUTLOOK_INGEST_URL` / `OUTLOOK_INGEST_TOKEN` | Optional (alternative to the Drive drop). Pull the summary from a bearer-authed HTTP endpoint the agent POSTs to. Used only when `OUTLOOK_DRIVE_FOLDER_ID` is unset |
 | `OUTLOOK_INGEST_MAX_AGE_MIN` | Optional. Label the Outlook section stale if the summary is older than this many minutes (default 1440). Drive uses the file's `modifiedTime`; HTTP uses the wrapper's `received_at` |
