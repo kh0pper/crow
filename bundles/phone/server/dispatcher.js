@@ -7,6 +7,9 @@ const MAX_FAILURES = 30;       // consecutive events() failures (~60s at 2s tick
 const MAX_MINUTES = 25;
 const LOST_GRACE_S = 15;       // start latency before "runner not running it" means lost
 const cap = (v) => (v == null ? null : String(v).slice(0, 200));
+// Spec 2026-10-01 §4.6 / C2: "the bot cannot take a turn right now" — perch-interactive.js
+// engineError codes plus deliver.js's no_engine. Deferred with backoff, never a failed attempt.
+const BUSY_CODES = new Set(["turn_in_progress", "cycle_busy", "interactive_capacity", "pi_capacity", "no_engine"]);
 
 function cleanBooking(b) {
   if (!b || typeof b !== "object") return null;
@@ -51,6 +54,12 @@ export function createDispatcher({ db, runner, deps, settings }) {
         await deliver(db, c, deps);
         await store.markDelivered(db, c.id);
       } catch (e) {
+        if (e && BUSY_CODES.has(e.code)) {
+          // The terminal card was already pushed this tick by flushCards.
+          const r = await store.deferDelivery(db, c.id);
+          if (r.gaveUp) console.warn(`[phone] gave up delivering ${c.id}: the bot could not take a turn for 10 minutes (${e.code})`);
+          continue;
+        }
         await store.bumpDeliveryAttempt(db, c.id);
         console.warn(`[phone] delivery failed for ${c.id}: ${e.message}`);
       }

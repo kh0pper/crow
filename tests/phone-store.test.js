@@ -323,3 +323,26 @@ test("expirePlanIds returns exactly the plans it expired; expirePlans still retu
   await db.execute({ sql: "UPDATE phone_calls SET created_at = datetime('now','-25 hours') WHERE id = ?", args: [b] });
   assert.equal(await store.expirePlans(db), 1);
 });
+
+// ---- spec 2026-10-01 §4.6: delivery backoff columns ----
+test("initPhoneTables adds the delivery backoff columns to an existing table, idempotently", async () => {
+  const old = createDbClient(join(mkdtempSync(join(tmpdir(), "phone-store-old-")), "crow.db"));
+  await old.execute({ sql: "CREATE TABLE phone_calls (id TEXT PRIMARY KEY, status TEXT, number_e164 TEXT, started_at TEXT)", args: [] });
+  await initPhoneTables(old);
+  await initPhoneTables(old);
+  const cols = (await old.execute("PRAGMA table_info(phone_calls)")).rows.map((r) => r.name);
+  assert.ok(cols.includes("delivery_busy"));
+  assert.ok(cols.includes("delivery_retry_at"));
+});
+
+test("initPhoneTables: a concurrent init's duplicate-column ALTER is ignored; any other ALTER error is not", async () => {
+  const base = createDbClient(join(mkdtempSync(join(tmpdir(), "phone-store-dup-")), "crow.db"));
+  await base.execute({ sql: "CREATE TABLE phone_calls (id TEXT PRIMARY KEY, status TEXT, number_e164 TEXT, started_at TEXT)", args: [] });
+  // The other process won the race: our PRAGMA saw no column, our ALTER now fails.
+  const racing = (message) => ({
+    execute: (q) => (typeof q === "string" && q.startsWith("ALTER TABLE")) ? Promise.reject(new Error(message)) : base.execute(q),
+    executeMultiple: (sql) => base.executeMultiple(sql),
+  });
+  await initPhoneTables(racing("SQLITE_ERROR: duplicate column name: delivery_busy"));
+  await assert.rejects(initPhoneTables(racing("SQLITE_IOERR: disk I/O error")), /disk I\/O error/);
+});

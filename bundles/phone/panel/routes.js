@@ -76,7 +76,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
       let perchMessage = null;
       try {
         const { getInteractiveEngine } = await appImport("servers/gateway/perch-interactive.js");
-        perchMessage = async (sid, text) => { const eng = getInteractiveEngine({ createIfMissing: false }); if (!eng) throw new Error("no perch engine"); await eng.message(sid, text, []); };
+        perchMessage = deliver.enginePerchMessage(getInteractiveEngine); // no engine yet = transient (no_engine)
       } catch { /* perch unavailable → notify only */ }
       let cached = null;
       const refresh = async () => { cached = await readSettings(db); cached.local = await resolveModel(db, cached.localModel); cached.cloud = await resolveModel(db, cached.cloudModel); };

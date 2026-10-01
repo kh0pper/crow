@@ -233,7 +233,7 @@ export async function recentCallToNumber(db, e164, minutes = 10) {
 }
 
 export async function listUndelivered(db, limit = 5) {
-  const rows = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='done' AND delivered=0 AND delivery_attempts < 5 ORDER BY ended_at LIMIT ?", args: [limit] })).rows;
+  const rows = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='done' AND delivered=0 AND delivery_attempts < 5 AND (delivery_retry_at IS NULL OR delivery_retry_at <= datetime('now')) ORDER BY ended_at LIMIT ?", args: [limit] })).rows;
   const out = [];
   for (const r of rows) out.push(await getCall(db, r.id));
   return out;
@@ -241,4 +241,23 @@ export async function listUndelivered(db, limit = 5) {
 
 export async function bumpDeliveryAttempt(db, id) {
   await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts = delivery_attempts + 1 WHERE id=?", args: [id] });
+}
+
+/** Spec 2026-10-01 §4.6: the bot cannot take a turn RIGHT NOW (mid-turn, box
+ *  full, or no engine yet after a restart). Not a failure — keep the delivery
+ *  pending and back off 5,10,20,40,60,60… s, for up to `windowMinutes` after
+ *  the call ended. Then give up (the result is still in Phone and on the chat
+ *  card) and audit it. */
+export async function deferDelivery(db, id, windowMinutes = 10) {
+  const row = (await db.execute({ sql: "SELECT delivery_busy, (julianday('now') - julianday(ended_at)) * 1440 AS age_min FROM phone_calls WHERE id=?", args: [id] })).rows[0];
+  if (!row) return { gaveUp: true };
+  if (row.age_min != null && row.age_min >= windowMinutes) {
+    await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts=5, delivery_retry_at=NULL WHERE id=?", args: [id] });
+    await audit(db, id, "service", "delivery_gave_up", { reason: "the bot could not take a turn", minutes: windowMinutes });
+    return { gaveUp: true };
+  }
+  const n = Number(row.delivery_busy || 0);
+  const delaySeconds = Math.min(60, 5 * 2 ** Math.min(n, 4));
+  await db.execute({ sql: "UPDATE phone_calls SET delivery_busy=delivery_busy+1, delivery_retry_at=datetime('now', ?) WHERE id=?", args: [`+${delaySeconds} seconds`, id] });
+  return { gaveUp: false, delaySeconds };
 }

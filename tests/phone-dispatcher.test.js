@@ -254,3 +254,82 @@ test("a plan that expires (24 h) pushes its expired state to the chat card", asy
   await d.tick();
   assert.equal(log.filter((x) => x[0] === "card").length, 1, "expired once, pushed once");
 });
+
+// ---- spec 2026-10-01 §4.6 / C2: transient delivery failures ----
+async function doneCallForPerch() {
+  const db = createDbClient(join(mkdtempSync(join(tmpdir(), "phone-disp-busy-")), "crow.db"));
+  await initPhoneTables(db);
+  await db.executeMultiple(`CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT);
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-1','perch-live');`);
+  const plan = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  const { call_id } = await store.createPlan(db, plan, { kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-1" });
+  await db.execute({ sql: "UPDATE phone_calls SET status='done', outcome='info_gathered', ended_at=datetime('now') WHERE id=?", args: [call_id] });
+  return { db, call_id };
+}
+const idleRunner = { start: async () => ({ ok: true }), stop: async () => {}, events: async () => ({ events: [], done: false }) };
+const coded = (code) => Object.assign(new Error(code), { code });
+
+test("a bot mid-turn keeps the result pending with backoff, notifies the owner ONCE, then delivers", async () => {
+  const { db, call_id } = await doneCallForPerch();
+  const notes = []; const sent = []; let busy = 2;
+  const d = createDispatcher({ db, runner: idleRunner,
+    deps: { notify: async (_db, n) => { notes.push(n); }, perchMessage: async (sid) => { if (busy-- > 0) throw coded("turn_in_progress"); sent.push(sid); } },
+    settings: () => ({ dailyCap: 10, model: () => null }) });
+  await d.tick();
+  let c = await store.getCall(db, call_id);
+  assert.equal(c.delivered, 0); assert.equal(c.delivery_attempts, 0); assert.equal(c.delivery_busy, 1);
+  const wait = (await db.execute({ sql: "SELECT (julianday(delivery_retry_at) - julianday('now')) * 86400 AS s FROM phone_calls WHERE id=?", args: [call_id] })).rows[0].s;
+  assert.ok(wait > 3 && wait <= 6, "first backoff is ~5 s, got " + wait);
+  await d.tick(); // backoff not elapsed -> not retried
+  assert.equal((await store.getCall(db, call_id)).delivery_busy, 1);
+  for (let i = 0; i < 2; i++) {
+    await db.execute({ sql: "UPDATE phone_calls SET delivery_retry_at=datetime('now','-1 second') WHERE id=?", args: [call_id] });
+    await d.tick();
+  }
+  c = await store.getCall(db, call_id);
+  assert.equal(c.delivered, 1);
+  assert.deepEqual(sent, ["perch-1"]);
+  assert.equal(notes.length, 1, "the owner is notified once, not once per transient retry");
+});
+
+for (const code of ["turn_in_progress", "cycle_busy", "interactive_capacity", "pi_capacity", "no_engine"]) {
+  test(`C2: ${code} is transient — deferred with backoff, never counted as a failed attempt`, async () => {
+    const { db, call_id } = await doneCallForPerch();
+    const d = createDispatcher({ db, runner: idleRunner,
+      deps: { notify: async () => {}, perchMessage: async () => { throw coded(code); } },
+      settings: () => ({ dailyCap: 10, model: () => null }) });
+    for (let i = 0; i < 6; i++) {
+      await db.execute({ sql: "UPDATE phone_calls SET delivery_retry_at=NULL WHERE id=?", args: [call_id] });
+      await d.tick();
+    }
+    const c = await store.getCall(db, call_id);
+    assert.equal(c.delivered, 0);
+    assert.equal(c.delivery_attempts, 0, "6 transient failures, still deliverable");
+    assert.equal(c.delivery_busy, 6);
+  });
+}
+
+test("a plain error still burns the 5-attempt budget (not transient)", async () => {
+  const { db, call_id } = await doneCallForPerch();
+  let n = 0;
+  const d = createDispatcher({ db, runner: idleRunner,
+    deps: { notify: async () => {}, perchMessage: async () => { n++; throw new Error("session_stopped-ish"); } },
+    settings: () => ({ dailyCap: 10, model: () => null }) });
+  for (let i = 0; i < 7; i++) await d.tick();
+  assert.equal(n, 5);
+  assert.equal((await store.getCall(db, call_id)).delivery_busy, 0);
+});
+
+test("transient for 10 minutes: delivery gives up (audited), the result stays in Phone", async () => {
+  const { db, call_id } = await doneCallForPerch();
+  await db.execute({ sql: "UPDATE phone_calls SET ended_at=datetime('now','-11 minutes') WHERE id=?", args: [call_id] });
+  let tries = 0;
+  const d = createDispatcher({ db, runner: idleRunner,
+    deps: { notify: async () => {}, perchMessage: async () => { tries++; throw coded("no_engine"); } },
+    settings: () => ({ dailyCap: 10, model: () => null }) });
+  await d.tick(); await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.delivered, 0); assert.equal(c.delivery_attempts, 5); assert.equal(tries, 1);
+  const ev = (await db.execute({ sql: "SELECT event FROM phone_audit WHERE call_id=? AND event='delivery_gave_up'", args: [call_id] })).rows;
+  assert.equal(ev.length, 1);
+});
