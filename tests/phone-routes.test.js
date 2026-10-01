@@ -35,7 +35,7 @@ before(async () => {
     db: s.db, startDispatcher: false, onInit: () => { s.inits++; }, csrf: (req, res, next) => next(),
     runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async (id) => { s.stops.push(id); return { ok: true }; },
       events: async () => ({ events: [], done: false, active: s.runnerActive }) },
-    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456" },
+    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => s.totpOn === true },
   });
   const app = express(); app.use(router);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
@@ -276,4 +276,40 @@ test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null 
   assert.match(script, /if \(e\.status === 409\) \{ lastPendingKey = null; load\(\); \}/);
   assert.equal(script.includes("`"), false);
   assert.doesNotThrow(function () { new Function(script); });
+});
+
+test("I5: GET /perch/:sid/calls — local only, this session's bot only, no secrets", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT);
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-R1','perch-live'), ('ivy','perch','perch-R2','perch-live');`);
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  const mine = (await store.createPlan(s.db, p, { kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-R1" })).call_id;
+  await store.createPlan(s.db, p, { kind: "bot", id: "ivy" }, { kind: "perch", session_id: "perch-R1" }); // ivy's child forged only the thread
+  await store.createPlan(s.db, p, { kind: "bot", id: "ivy" }, { kind: "perch", session_id: "perch-R2" });
+  await store.approveCall(s.db, mine, { session: "local", allowCloud: false, expectedHash: await hashOf(mine) });
+  const get = (path, session) => fetch(s.base + path, { headers: session ? { "x-test-session": session } : {} });
+  assert.equal((await get("/api/phone/perch/perch-R1/calls")).status, 401);
+  const sso = await get("/api/phone/perch/perch-R1/calls", "sso");
+  assert.equal(sso.status, 403);
+  assert.equal((await sso.json()).error, "local_login_required");
+  const j = await (await get("/api/phone/perch/perch-R1/calls", "local")).json();
+  assert.deepEqual(j.calls.map((c) => c.id), [mine]);
+  for (const k of ["plan_hash", "status", "transcript", "allow_cloud", "outcome", "summary", "deliver_to"]) assert.ok(k in j.calls[0], k);
+  assert.ok(!("token_hash" in j.calls[0]));
+  assert.ok(!("approved_by_session" in j.calls[0]));
+  assert.deepEqual((await (await get("/api/phone/perch/no-such-session/calls", "local")).json()).calls, []);
+});
+
+test("I7: whoami — local/totp/cloud for a password session; nothing for SSO", async () => {
+  await s.db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_cloud_model','cld/m9') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
+  try {
+    const who = async (sess) => (await fetch(s.base + "/api/phone/whoami", { headers: { "x-test-session": sess } })).json();
+    assert.deepEqual(await who("local"), { local: true, totp_required: false, cloud_model: "cld/m9" });
+    s.totpOn = true;
+    assert.equal((await who("local")).totp_required, true);
+    assert.deepEqual(await who("sso"), { local: false, totp_required: false, cloud_model: null });
+    assert.equal((await fetch(s.base + "/api/phone/whoami")).status, 401);
+  } finally {
+    s.totpOn = false;
+    await s.db.execute({ sql: "UPDATE dashboard_settings SET value='' WHERE key='phone_cloud_model'", args: [] });
+  }
 });

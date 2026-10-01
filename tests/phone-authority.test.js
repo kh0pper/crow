@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createDbClient } from "../servers/db.js";
-import { isLocalDashboardSession, stepUpOk } from "../bundles/phone/server/authority.js";
+import { isLocalDashboardSession, stepUpOk, totpRequired } from "../bundles/phone/server/authority.js";
 import { readRunnerSecret } from "../bundles/phone/server/secrets.js";
 
 const sha = (s) => createHash("sha256").update(s).digest("hex");
@@ -56,4 +56,9 @@ test("runner secret comes from PHONE_RUNNER_SECRET and must be >= 32 chars", () 
   assert.equal(readRunnerSecret({ PHONE_RUNNER_SECRET: "short" }), null);
   const good = "a".repeat(48);
   assert.equal(readRunnerSecret({ PHONE_RUNNER_SECRET: good }), good);
+});
+
+test("totpRequired mirrors whether 2FA is enabled", async () => {
+  assert.equal(await totpRequired({ is2faEnabled: async () => true }), true);
+  assert.equal(await totpRequired({ is2faEnabled: async () => false }), false);
 });

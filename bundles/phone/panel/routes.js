@@ -37,6 +37,16 @@ export default function phoneRouter(authMiddleware, seams = {}) {
   let mods = null, db = seams.db || null, runner = seams.runner || null, authority = seams.authority || null, csrf = seams.csrf || null;
 
   let ready = null;
+
+  // Perch session -> its bot, read from the row perch-interactive.js adoptRow
+  // reads. A direct read on purpose: listing cards must never adopt or wake a
+  // session (spec 2026-10-01 §4.1 rule, applied to reads too).
+  const perchSessionBot = seams.perchSessionBot || (async (sid) => {
+    try {
+      const r = await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [sid] });
+      return r.rows[0] ? String(r.rows[0].bot_id) : null;
+    } catch { return null; } // no bot_sessions table: this instance has no Perch
+  });
   function ensure() { return ready ??= init().catch((e) => { ready = null; throw e; }); }
 
   async function init() {
@@ -97,6 +107,24 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to use Phone (peer sign-in is not enough) (peer sign-in is not enough)." });
     return false;
   };
+
+  // I7: any dashboard session may ask; only a local password session learns
+  // the 2FA requirement and the cloud model label.
+  router.get("/api/phone/whoami", wrap(async (req, res) => {
+    const local = await authority.isLocalDashboardSession(db, req.dashboardSession);
+    if (!local) return res.json({ local: false, totp_required: false, cloud_model: null });
+    const st = await readSettings(db);
+    res.json({ local: true, totp_required: !!(await authority.totpRequired()), cloud_model: st.cloudModel || null });
+  }));
+  // I5: one Perch chat's calls — that session's bot only, newest 20, local only.
+  router.get("/api/phone/perch/:sid/calls", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
+    const sid = String(req.params.sid || "");
+    const botId = await perchSessionBot(sid);
+    if (!botId) return res.json({ calls: [] });
+    const calls = await mods.store.listPerchCalls(db, sid, botId, 20);
+    res.json({ calls: calls.map(({ token_hash, approved_by_session, ...c }) => c) });
+  }));
   router.get("/api/phone/calls", wrap(async (req, res) => {
     if (!(await localOnly(req, res))) return;
     const calls = await mods.store.listCalls(db, { status: req.query.status || undefined, limit: 100 });

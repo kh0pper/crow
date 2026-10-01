@@ -44,6 +44,23 @@ export async function listCalls(db, { status, limit = 50 } = {}) {
   return r.rows.map(hydrate);
 }
 
+/** I5 (spec 2026-10-01): the calls a Perch chat may show. BOTH the target
+ *  session AND the creating bot must match. That stops a forged THREAD header
+ *  (the call names its real bot, which is not this session's) and accidental
+ *  mismatches; a child forging BOTH actor headers is out of scope here (spec
+ *  "Known limits": real per-session binding is a queued follow-up). */
+export async function listPerchCalls(db, sessionId, botId, limit = 20) {
+  const n = Math.max(1, Math.min(20, Number(limit) || 20));
+  const r = await db.execute({
+    sql: `SELECT * FROM phone_calls
+          WHERE json_extract(deliver_to,'$.kind')='perch' AND json_extract(deliver_to,'$.session_id')=?
+            AND json_extract(created_by,'$.kind')='bot' AND json_extract(created_by,'$.id')=?
+          ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    args: [String(sessionId), String(botId), n],
+  });
+  return r.rows.map(hydrate);
+}
+
 function planFromRow(row, edits = {}) {
   return validatePlan({
     business_name: edits.business_name ?? row.business_name, number: edits.number ?? row.number_e164,

@@ -294,3 +294,22 @@ test("approve: 'now' (null) clears a proposed run_after; absent keeps it; a time
   assert.equal((await store.getCall(db, b)).run_after, "2030-01-01T15:00:00.000Z", "absent keeps the stored time");
   assert.equal((await store.getCall(db, c)).run_after, "2031-02-03T04:05:00.000Z");
 });
+
+// ---- spec 2026-10-01 I5: per-session scoping ----
+test("listPerchCalls: only this Perch session's calls from this session's bot, newest first, max 20 (I5)", async () => {
+  const mk = async (actor, deliverTo) => (await store.createPlan(db, plan(), actor, deliverTo)).call_id;
+  const mine = await mk({ kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-A" });
+  await mk({ kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-B" });                                   // another session
+  await mk({ kind: "bot", id: "mallory" }, { kind: "perch", session_id: "perch-A" });                                // forged thread only, other bot
+  await mk({ kind: "bot", id: "hank" }, { kind: "gateway", gateway_type: "discord", gateway_thread_id: "perch-A" });  // not a perch target
+  await mk(null, { kind: "perch", session_id: "perch-A" });                                                          // no bot
+  assert.deepEqual((await store.listPerchCalls(db, "perch-A", "hank")).map((c) => c.id), [mine]);
+  assert.deepEqual(await store.listPerchCalls(db, "perch-A", "nobody"), []);
+  for (let i = 0; i < 22; i++) {
+    await db.execute({ sql: "INSERT INTO phone_calls (id, created_by, deliver_to, business_name, number_e164, goal, plan_hash, created_at) VALUES (?,?,?,?,?,?,?, datetime('now', ?))",
+      args: ["call_bulk_" + i, JSON.stringify({ kind: "bot", id: "hank" }), JSON.stringify({ kind: "perch", session_id: "perch-C" }), "B", "+15125550101", "g", "h", `+${i} seconds`] });
+  }
+  const bulk = await store.listPerchCalls(db, "perch-C", "hank", 50);
+  assert.equal(bulk.length, 20, "never more than 20");
+  assert.equal(bulk[0].id, "call_bulk_21", "newest first");
+});
