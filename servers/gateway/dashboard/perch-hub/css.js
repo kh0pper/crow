@@ -439,6 +439,23 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9
 #perch-hub-root .filecard .file-note{font-size:12px;color:var(--dim)}
 #perch-hub-root .filecard .file-dl{display:inline-block;margin-top:4px;color:var(--teal);font-size:13px;text-decoration:none}
 #perch-hub-root .filecard .file-img{max-width:100%;height:auto;border-radius:6px;margin-bottom:4px}
+/* Spec 2026-10-01: the phone call card (same box as a file card). */
+#perch-hub-root .phonecard{flex-direction:column;gap:4px;align-self:stretch;width:100%;min-width:0;
+background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin:2px 0}
+#perch-hub-root .phonecard .ph-title{font-weight:600;font-size:13.5px;color:var(--ink);word-break:break-word}
+#perch-hub-root .phonecard .ph-meta,#perch-hub-root .phonecard .ph-status,#perch-hub-root .phonecard .ph-note,#perch-hub-root .phonecard .ph-lang,#perch-hub-root .phonecard .ph-proposed{font-size:13px;color:var(--dim)}
+#perch-hub-root .phonecard .ph-goal,#perch-hub-root .phonecard .ph-limits,#perch-hub-root .phonecard .ph-summary{font-size:13px;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+#perch-hub-root .phonecard label{display:block;font-size:13px;margin:3px 0}
+#perch-hub-root .phonecard textarea,#perch-hub-root .phonecard input[type=text]{width:100%;box-sizing:border-box}
+#perch-hub-root .phonecard .ph-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px}
+#perch-hub-root .phonecard .ph-transcript{max-height:240px;overflow-y:auto;font-size:13px;display:flex;flex-direction:column;gap:2px}
+#perch-hub-root .phonecard .ph-t-farend{color:var(--teal)}
+#perch-hub-root .phonecard .ph-t-state{color:var(--dim)}
+#perch-hub-root .phonecard .ph-prompt{font-weight:600;color:var(--teal);font-size:13px}
+#perch-hub-root .phonecard .ph-farend{display:flex;gap:6px}
+#perch-hub-root .phonecard .ph-err{color:#b3261e;font-size:13px}
+#perch-hub-root .phonecard .ph-err:empty{display:none}
+#perch-hub-root .phonecard .ph-open{color:var(--teal);font-size:13px;text-decoration:none}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

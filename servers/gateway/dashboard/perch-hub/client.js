@@ -1,5 +1,6 @@
 import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
+import { perchPhoneCardJs } from "./phone-card.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
  *  backtick or ${ anywhere in here breaks the module at import time.
@@ -1094,6 +1095,7 @@ export function perchHubJs(lang = "en") {
     clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
     toolChips={};                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
+    resetPhoneCards();
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
@@ -1320,6 +1322,11 @@ export function perchHubJs(lang = "en") {
       renderFileCard(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
+    /* Spec 2026-10-01: a phone_call frame is a pointer — phone-card.js refetches the row. */
+    on('phone_call',function(d){
+      if(!histSettled){ phoneBuf.push(d); return; }   /* replayed by loadPhoneCards once the history lands */
+      phoneFrame(d,sid);
+    });
     on('error',function(d){
       appendActivity(d.text||'error');
       /* The child DIED (pi exited at spawn — an unknown provider, a missing
@@ -1457,6 +1464,7 @@ export function perchHubJs(lang = "en") {
     clearEl(el('perch-transcript'));
     toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
+    resetPhoneCards();
     histSettled=false; histBuf=[];
     loadHistory(botId,sid);
   }
@@ -1558,6 +1566,7 @@ export function perchHubJs(lang = "en") {
       renderTextFrame(f);
     });
     if(current.sid) replayUnsent(current.sid);
+    loadPhoneCards(current.sid);   /* spec 2026-10-01: this chat's call cards, after the transcript and unsent notes */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -1688,6 +1697,7 @@ export function perchHubJs(lang = "en") {
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
     toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
+    resetPhoneCards();
     resetFacts();
   }
 
@@ -2553,6 +2563,8 @@ export function perchHubJs(lang = "en") {
     tr.appendChild(wrap);
     tr.scrollTop=tr.scrollHeight;
   }
+
+${perchPhoneCardJs(lang)}
 
   /* ---- Wave 3: the slash-command menu ------------------------------------
      Fed by pi's OWN get_commands registry through the engine (never a
