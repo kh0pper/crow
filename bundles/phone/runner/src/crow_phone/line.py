@@ -3,6 +3,8 @@ import asyncio
 
 
 class FakeLine:
+    farend_timeout = 20  # scripted tests: a silent far end is a quick needs_callback
+
     def __init__(self, script, dial_result="answered"):
         self.script = list(script)
         self.dial_result = dial_result
@@ -36,7 +38,9 @@ class FakeLine:
 
 
 class InteractiveFakeLine(FakeLine):
-    """The owner types the business's lines in the Phone panel (acceptance testing)."""
+    """The owner types the business's lines in the Phone panel or the Perch call card."""
+
+    farend_timeout = 120  # a person is typing each business line on a phone (spec 2026-10-01 §4.5)
 
     def __init__(self):
         super().__init__([])
