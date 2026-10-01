@@ -300,6 +300,30 @@ test("I5: GET /perch/:sid/calls — local only, this session's bot only, no secr
   assert.deepEqual((await (await get("/api/phone/perch/no-such-session/calls", "local")).json()).calls, []);
 });
 
+test("I-1: GET /perch/:sid/calls — a transient bot_sessions error is a 500, not an empty list", async () => {
+  const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
+  const busyDb = new Proxy(s.db, { get(t, k) {
+    if (k === "execute") return async (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM bot_sessions/.test(sql)) throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+      return t.execute(q);
+    };
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  } });
+  const auth = (req, res, next) => { req.dashboardSession = req.headers["x-test-session"]; next(); };
+  const router = phoneRouter(auth, { db: busyDb, startDispatcher: false, csrf: (req, res, next) => next(),
+    runner: { farend: async () => ({ ok: true }), stop: async () => ({ ok: true }), events: async () => ({ events: [], done: false }) },
+    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async () => false, totpRequired: async () => false },
+    notifyCard: async () => ({ delivered: false }) });
+  const app = express(); app.use(router);
+  const srv = app.listen(0); await new Promise((r) => srv.once("listening", r));
+  try {
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/phone/perch/perch-R1/calls`, { headers: { "x-test-session": "local" } });
+    assert.equal(r.status, 500);
+    assert.equal((await r.json()).error, "SQLITE_BUSY");
+  } finally { await new Promise((r) => srv.close(r)); }
+});
+
 test("I7: whoami — local/totp/cloud for a password session; nothing for SSO", async () => {
   await s.db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_cloud_model','cld/m9') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
   try {

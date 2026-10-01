@@ -38,15 +38,9 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   let ready = null;
 
-  // Perch session -> its bot, read from the row perch-interactive.js adoptRow
-  // reads. A direct read on purpose: listing cards must never adopt or wake a
-  // session (spec 2026-10-01 §4.1 rule, applied to reads too).
-  const perchSessionBot = seams.perchSessionBot || (async (sid) => {
-    try {
-      const r = await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [sid] });
-      return r.rows[0] ? String(r.rows[0].bot_id) : null;
-    } catch { return null; } // no bot_sessions table: this instance has no Perch
-  });
+  // Perch session -> its bot (store.perchSessionBot: a direct read, never adopts or
+  // wakes a session, spec 2026-10-01 §4.1). A transient DB error throws → 500 via wrap.
+  const perchSessionBot = seams.perchSessionBot || ((sid) => mods.store.perchSessionBot(db, sid));
   function ensure() { return ready ??= init().catch((e) => { ready = null; throw e; }); }
 
   async function init() {
@@ -119,7 +113,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   const localOnly = async (req, res) => {
     if (await authority.isLocalDashboardSession(db, req.dashboardSession)) return true;
-    res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to use Phone (peer sign-in is not enough) (peer sign-in is not enough)." });
+    res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to use Phone (peer sign-in is not enough)." });
     return false;
   };
 

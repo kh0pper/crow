@@ -61,6 +61,22 @@ export async function listPerchCalls(db, sessionId, botId, limit = 20) {
   return r.rows.map(hydrate);
 }
 
+/** The bot that owns Perch session `sid`: the row perch-interactive.js adoptRow
+ *  reads. A direct read on purpose (never adopts or wakes a session). Returns
+ *  the bot id, or null when there is no row or no bot_sessions table (this
+ *  instance has no Perch). Any other error (SQLITE_BUSY, IOERR, a closed
+ *  client) is RETHROWN: callers must not mistake a transient failure for
+ *  "no owner". Shared by deliver.js and panel/routes.js. */
+export async function perchSessionBot(db, sid) {
+  try {
+    const r = await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [String(sid)] });
+    return r.rows[0] ? String(r.rows[0].bot_id) : null;
+  } catch (e) {
+    if (/no such table/i.test(String(e && e.message))) return null;
+    throw e;
+  }
+}
+
 function planFromRow(row, edits = {}) {
   return validatePlan({
     business_name: edits.business_name ?? row.business_name, number: edits.number ?? row.number_e164,

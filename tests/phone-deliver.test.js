@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { buildUntrustedGoal, deliverPhoneResult, enginePerchMessage } from "../bundles/phone/server/deliver.js";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
+import { perchSessionBot } from "../bundles/phone/server/store.js";
 
 const call = {
   id: "call_1", business_name: "Smile Dental", outcome: "booked",
@@ -117,12 +118,51 @@ test("S2: a perch result for a session owned by ANOTHER bot is not injected — 
   assert.deepEqual(JSON.parse(rows[0].detail_json), { session_id: "p2", expected_bot: "bobby", session_bot: "hank" });
 });
 
-test("S2: a perch result for a session that does not exist is notify_only", async () => {
+const mismatchRows = async (db) => (await db.execute({ sql: "SELECT detail_json FROM phone_audit WHERE call_id=? AND event='deliver_target_mismatch'", args: [call.id] })).rows;
+
+test("S2: a perch result for a session that does not exist is notify_only + a mismatch audit (session_bot null)", async () => {
   const db = await freshDb(); const sent = [];
   const r = await deliverPhoneResult(db, { ...call, deliver_to: { kind: "perch", session_id: "nope" } },
     { notify: async () => {}, perchMessage: async (sid) => sent.push(sid) });
   assert.equal(r.via, "notify_only");
   assert.deepEqual(sent, []);
+  const rows = await mismatchRows(db);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(JSON.parse(rows[0].detail_json), { session_id: "nope", expected_bot: "bobby", session_bot: null });
+});
+
+test("S2: no bot_sessions table (no Perch on this instance) → notify_only + a mismatch audit", async () => {
+  const db = await freshDb(); const sent = [];
+  await db.execute({ sql: "DROP TABLE bot_sessions", args: [] });
+  assert.equal(await perchSessionBot(db, "p1"), null);
+  const r = await deliverPhoneResult(db, { ...call, deliver_to: { kind: "perch", session_id: "p1" } },
+    { notify: async () => {}, perchMessage: async (sid) => sent.push(sid) });
+  assert.equal(r.via, "notify_only");
+  assert.deepEqual(sent, []);
+  const rows = await mismatchRows(db);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(JSON.parse(rows[0].detail_json), { session_id: "p1", expected_bot: "bobby", session_bot: null });
+});
+
+// An injected db wrapper whose bot_sessions reads fail like a lock held past busy_timeout.
+function busyOnSessions(db) {
+  return new Proxy(db, { get(t, k) {
+    if (k === "execute") return async (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM bot_sessions/.test(sql)) throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+      return t.execute(q);
+    };
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  } });
+}
+
+test("I-1: a TRANSIENT owner-lookup error is rethrown as db_busy — no mismatch audit, no injection", async () => {
+  const db = await freshDb(); const sent = [];
+  await assert.rejects(perchSessionBot(busyOnSessions(db), "p1"), /SQLITE_BUSY/);
+  await assert.rejects(deliverPhoneResult(busyOnSessions(db), { ...call, deliver_to: { kind: "perch", session_id: "p1" } },
+    { notify: async () => {}, perchMessage: async (sid) => sent.push(sid) }), (e) => e.code === "db_busy");
+  assert.deepEqual(sent, []);
+  assert.equal((await mismatchRows(db)).length, 0);
 });
 
 test("C2: enginePerchMessage — no engine is a TRANSIENT no_engine; an engine gets the turn", async () => {

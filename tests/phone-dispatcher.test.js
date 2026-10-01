@@ -309,6 +309,31 @@ for (const code of ["turn_in_progress", "cycle_busy", "interactive_capacity", "p
   });
 }
 
+test("I-1: a transient bot_sessions lookup error (SQLITE_BUSY) defers with backoff — no mismatch audit, not delivered", async () => {
+  const { db, call_id } = await doneCallForPerch();
+  const busyDb = new Proxy(db, { get(t, k) {
+    if (k === "execute") return async (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM bot_sessions/.test(sql)) throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+      return t.execute(q);
+    };
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  } });
+  const sent = [];
+  const d = createDispatcher({ db: busyDb, runner: idleRunner,
+    deps: { notify: async () => {}, perchMessage: async (sid) => { sent.push(sid); } },
+    settings: () => ({ dailyCap: 10, model: () => null }) });
+  await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.delivered, 0);
+  assert.equal(c.delivery_attempts, 0, "transient: not a failed attempt");
+  assert.equal(c.delivery_busy, 1, "deferred with the existing backoff");
+  assert.ok(c.delivery_retry_at, "a retry time is set");
+  assert.deepEqual(sent, []);
+  const mism = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_audit WHERE call_id=? AND event='deliver_target_mismatch'", args: [call_id] })).rows[0].n;
+  assert.equal(mism, 0);
+});
+
 test("a plain error still burns the 5-attempt budget (not transient)", async () => {
   const { db, call_id } = await doneCallForPerch();
   let n = 0;

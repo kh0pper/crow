@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { appImport } from "./app-root.js";
-import { audit } from "./store.js";
+import { audit, perchSessionBot } from "./store.js";
 
 const LABEL = { booked: "Booked", info_gathered: "Information gathered", needs_callback: "Needs a callback", no_answer: "No answer",
   voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
@@ -62,7 +62,11 @@ export async function deliverPhoneResult(db, call, deps) {
     // S2 (spec 2026-10-01): inject the result only into a session of the bot that
     // created the call. Like I3 this stops a forged THREAD header and accidental
     // mismatches, not a child that forges both actor headers ("Known limits").
-    const owner = await perchSessionBot(db, d.session_id);
+    // A failed lookup (SQLITE_BUSY, IOERR, …) is TRANSIENT, not "no owner": defer
+    // with the sweep's backoff; no mismatch audit, never marked delivered.
+    let owner;
+    try { owner = await perchSessionBot(db, d.session_id); }
+    catch (e) { throw Object.assign(new Error(`perch session lookup failed: ${e.message}`), { code: "db_busy", cause: e }); }
     if (owner !== botId) {
       try { await audit(db, call.id, "service", "deliver_target_mismatch", { session_id: String(d.session_id), expected_bot: botId, session_bot: owner }); }
       catch (e) { console.warn(`[phone] deliver mismatch audit failed for ${call.id}: ${e.message}`); }
@@ -81,14 +85,6 @@ export async function deliverPhoneResult(db, call, deps) {
     return { via: "bot_job", jobId };
   }
   return { via: "notify_only" };
-}
-
-/** The bot that owns a Perch session — the row perch-interactive.js adoptRow reads. */
-async function perchSessionBot(db, sid) {
-  try {
-    const r = await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [String(sid)] });
-    return r.rows[0] ? String(r.rows[0].bot_id) : null;
-  } catch { return null; }
 }
 
 /** The Perch delivery path (spec 2026-10-01 C2). The engine singleton is created
