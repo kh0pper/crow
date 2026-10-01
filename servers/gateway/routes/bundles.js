@@ -1102,6 +1102,10 @@ function findDependents(bundleId) {
  * Uncomments and sets values for vars that are already present as comments,
  * or appends them if not found.
  */
+const GATEWAY_ENV_DENYLIST = new Set([
+  "CROW_DASHBOARD_PUBLIC", "NODE_OPTIONS", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+]);
+
 function propagateEnvToGateway(envVars) {
   if (!envVars || typeof envVars !== "object" || Object.keys(envVars).length === 0) return false;
   if (!existsSync(APP_ENV_PATH)) return false;
@@ -1110,10 +1114,14 @@ function propagateEnvToGateway(envVars) {
   let content = before;
 
   for (const [key, rawValue] of Object.entries(envVars)) {
-    // A key is interpolated into a RegExp and written as a line: accept only a
-    // plain env-var name. A value is one line: a CR/LF would let a configured
-    // value smuggle extra KEY=value lines into the gateway's own .env.
+    // Belt-and-braces only. The real gates are upstream: callers pass ONLY the
+    // manifest-declared keys (declaredEnvSubset) and the routes REJECT bad
+    // keys / multi-line values with 400 invalid_env (findInvalidEnv). Here: a
+    // key is interpolated into a RegExp, so it must be a plain env name; a
+    // value is one line; and a few gateway-control keys are never writable
+    // from a bundle, whatever a (community) manifest declares.
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (GATEWAY_ENV_DENYLIST.has(key)) continue;
     if (rawValue === undefined || rawValue === null) continue;
     const value = String(rawValue).replace(/[\r\n\0]/g, "");
     if (value === "") continue;
@@ -1143,13 +1151,23 @@ function propagateEnvToGateway(envVars) {
 export function propagateBundleEnvToGateway(bundleId, envVars) {
   const manifest = getInstalledFirstManifest(bundleId);
   if (!manifest || (manifest.type || "bundle") !== "bundle") return false;
-  const declared = new Set((manifest.env_vars || []).map((v) => v && v.name).filter(Boolean));
-  const subset = {};
-  for (const [k, v] of Object.entries(envVars || {})) {
-    if (declared.has(k)) subset[k] = v;
-  }
+  const subset = declaredEnvSubset(manifest, envVars);
   if (Object.keys(subset).length === 0) return false;
   return propagateEnvToGateway(subset);
+}
+
+/**
+ * Only the keys the bundle's manifest declares in env_vars. Request bodies
+ * (install AND Configure) can carry any key — e.g. CROW_DASHBOARD_PUBLIC — and
+ * only the declared ones may ever reach the gateway's own .env.
+ */
+export function declaredEnvSubset(manifest, envVars) {
+  const declared = new Set((manifest?.env_vars || []).map((v) => v && v.name).filter(Boolean));
+  const subset = {};
+  for (const [k, v] of Object.entries(envVars && typeof envVars === "object" ? envVars : {})) {
+    if (declared.has(k)) subset[k] = v;
+  }
+  return subset;
 }
 
 /**
@@ -1259,24 +1277,70 @@ export function bundleOrchestrationRefusal(bundleId) {
   };
 }
 
+const nonBlankEnv = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+
+/** Keys a compose file interpolates as HARD-FAIL: `${KEY:?…}` or `${KEY?…}`. */
+export function hardFailComposeKeys(composeText) {
+  const keys = new Set();
+  const re = /\$\{([A-Za-z_][A-Za-z0-9_]*):?\?/g;
+  let m;
+  while ((m = re.exec(String(composeText || ""))) !== null) keys.add(m[1]);
+  return keys;
+}
+
 /**
- * Manifest env vars marked `required: true` that would install EMPTY: no
- * non-blank value in the request and no non-blank manifest default. Key NAMES
- * only — never values (D5).
+ * The env keys whose blank value makes `docker compose up` FAIL — and so the
+ * only keys that may block an install. A key blocks iff the manifest marks it
+ * `required`, it has no non-blank manifest `default`, AND the bundle's compose
+ * interpolates it hard-fail (`${KEY:?…}` / `${KEY?…}`).
+ *
+ * `required: true` alone does NOT block: for most self-host bundles it means
+ * "the MCP integration needs this", and the credential (gitea's GITEA_TOKEN,
+ * jellyfin's API key, …) can only exist after the container has run and the
+ * user has created it in the app. Those install blank and surface as "Needs
+ * setup" → Configure, exactly as before.
+ *
+ * Names only, never values (D5). Served to the install modal through the
+ * consent-challenge response so client and server gate on the SAME list.
  */
-export function missingRequiredEnv(manifest, envVars) {
-  const provided = envVars && typeof envVars === "object" ? envVars : {};
-  const nonBlank = (v) => typeof v === "string" ? v.trim() !== "" : (v !== undefined && v !== null && String(v).trim() !== "");
+export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId)) {
+  if (!bundleId || !isValidBundleId(bundleId)) return [];
+  const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
+  let text = "";
+  try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → nothing blocks */ }
+  if (!text) return [];
+  const hard = hardFailComposeKeys(text);
   return (manifest?.env_vars || [])
-    .filter((v) => v && v.required && typeof v.name === "string")
-    .filter((v) => !nonBlank(provided[v.name]) && !nonBlank(v.default))
+    .filter((v) => v && v.required && typeof v.name === "string" && !nonBlankEnv(v.default) && hard.has(v.name))
     .map((v) => v.name);
+}
+
+/** installBlockingEnvKeys minus those the request supplies non-blank. */
+export function missingInstallEnv(bundleId, envVars, manifest = getManifest(bundleId)) {
+  const provided = envVars && typeof envVars === "object" ? envVars : {};
+  return installBlockingEnvKeys(bundleId, manifest).filter((k) => !nonBlankEnv(provided[k]));
+}
+
+/**
+ * The first env entry that may not be written to an .env file, or null.
+ * Keys must be plain upper-case env names; a value may not carry CR, LF or
+ * NUL (it would add lines to the file, and a stripped copy in one file vs a
+ * raw copy in another makes shared secrets silently diverge). Callers REJECT
+ * (400 invalid_env), they never strip. Returns the KEY only — never the value.
+ */
+export function findInvalidEnv(envVars) {
+  if (!envVars || typeof envVars !== "object") return null;
+  for (const [k, v] of Object.entries(envVars)) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
+    if (v !== undefined && v !== null && /[\r\n\0]/.test(String(v))) return { key: k, why: "contains a line break or NUL character" };
+  }
+  return null;
 }
 
 /**
  * `requireEnv` (single-install route only): refuse with 400 missing_required_env
- * when a required env var would install blank — `docker compose up` would then
- * fail on `${VAR:?...}` and leave a half-installed bundle. Collection installs
+ * when an installBlockingEnvKeys() key would install blank — `docker compose up`
+ * would then fail on `${VAR:?...}` and leave a half-installed bundle. Collection installs
  * deliberately do NOT pass it: they install members blank and surface the gap
  * via NEEDS_CONFIG + the Configure flow.
  */
@@ -1315,10 +1379,10 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     }
   }
 
-  // Required env present? Before the docker/consent gates so a doomed install
-  // never consumes a single-use consent token.
+  // Compose-blocking env present? Before the docker/consent gates so a doomed
+  // install never consumes a single-use consent token.
   if (requireEnv) {
-    const missingEnv = missingRequiredEnv(manifest, envVars);
+    const missingEnv = missingInstallEnv(bundleId, envVars, manifest);
     if (missingEnv.length > 0) {
       return {
         ok: false, status: 400, code: "missing_required_env",
@@ -1659,9 +1723,11 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         }
       }
 
-      // Propagate env vars to gateway .env so dependent services connect
-      if (envVars && Object.keys(envVars).length > 0) {
-        propagateEnvToGateway(envVars);
+      // Propagate the manifest-DECLARED env vars to the gateway .env so
+      // dependent services connect. Undeclared request keys never reach it.
+      const gatewayEnv = declaredEnvSubset(manifest, envVars);
+      if (Object.keys(gatewayEnv).length > 0) {
+        propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
         needsRestart = true;
       }
@@ -2152,8 +2218,11 @@ export default function bundlesRouter() {
     if (!manifest) {
       return res.status(404).json({ error: `Bundle '${bundleId}' not found` });
     }
+    // The keys the install modal must gate on — the server's own list, so the
+    // client can never disagree with validateInstall's 400.
+    const installRequired = installBlockingEnvKeys(bundleId, manifest);
     if (!manifestRequiresConsent(manifest)) {
-      return res.json({ required: false });
+      return res.json({ required: false, install_required: installRequired });
     }
     const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
     const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
@@ -2177,6 +2246,7 @@ export default function bundlesRouter() {
         min_android_app: manifest.requires?.min_android_app || null,
         token,
         expires_in_seconds,
+        install_required: installRequired,
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });
@@ -2188,6 +2258,13 @@ export default function bundlesRouter() {
   // POST /bundles/api/install — Install a bundle
   router.post("/bundles/api/install", async (req, res) => {
     const { bundle_id, env_vars, consent_token } = req.body;
+
+    // Before anything is copied or written: a bad key / multi-line value would
+    // corrupt the bundle .env (and diverge from the gateway copy).
+    const badEnv = findInvalidEnv(env_vars);
+    if (badEnv) {
+      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+    }
 
     const v = await validateInstall(bundle_id, {
       envVars: env_vars,
@@ -2318,6 +2395,12 @@ export default function bundlesRouter() {
           });
           if (!out.ok) {
             if (out.needsRestart) anyRestart = true; // compose failed, but its panel/MCP landed
+            // A compose-failed member is still RECORDED installed (Configure +
+            // Start finishes it) — so it belongs in the NEEDS_CONFIG checklist.
+            if (getInstalled().some((i) => i.id === member.id)) {
+              const failedKeys = needsConfigKeys(member.id);
+              if (failedKeys.length > 0) needsConfig.push({ id: member.id, keys: failedKeys });
+            }
             appendLog(job, `SUMMARY member ${member.id} failed ${out.reason}`);
             continue; // continue-on-error: one bad member must not sink the collection
           }
@@ -2666,6 +2749,12 @@ export default function bundlesRouter() {
 
     if (!env_vars || typeof env_vars !== "object") {
       return res.status(400).json({ error: "env_vars must be an object" });
+    }
+    // Validate BEFORE writing either file, so the bundle .env and the gateway
+    // .env can never hold different copies of the same secret.
+    const badEnv = findInvalidEnv(env_vars);
+    if (badEnv) {
+      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
     }
 
     // Read existing .env, merge with new values

@@ -679,8 +679,9 @@ const typeInto = (window, el, value) => {
   el.dispatchEvent(new window.Event("input", { bubbles: true }));
 };
 
-test("BEHAVIOR: Install stays disabled until every required field has a non-whitespace value, and names the missing ones", async () => {
-  const { window, document, click, settle, calls } = boot({ fetchImpl: consentFetch({ required: false }) });
+test("BEHAVIOR: Install stays disabled until every SERVER-listed blocking field has a non-whitespace value, and names the missing ones", async () => {
+  // install_required is the server's compose-derived list (consent-challenge).
+  const { window, document, click, settle, calls } = boot({ fetchImpl: consentFetch({ required: false, install_required: ["JELLYFIN_API_KEY"] }) });
 
   click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
   await settle();
@@ -704,9 +705,21 @@ test("BEHAVIOR: Install stays disabled until every required field has a non-whit
   assert.ok(!calls.some((c) => c.url.includes("/bundles/api/install")), "a click on the gated button never POSTs /install");
 });
 
+test("BEHAVIOR: a manifest-required key the server does NOT list as blocking leaves Install enabled (configured later via Needs setup)", async () => {
+  // jellyfin's JELLYFIN_API_KEY is required:true but only exists after the
+  // container runs — compose does not hard-fail on it, so the server omits it.
+  const { document, click, settle } = boot({ fetchImpl: consentFetch({ required: false, install_required: [] }) });
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+  const btn = document.querySelector("#modal-content .btn-primary");
+  assert.equal(document.getElementById("env_JELLYFIN_API_KEY").value, "", "left blank");
+  assert.equal(btn.disabled, false, "a non-blocking required key never disables Install");
+  assert.equal(document.querySelector("#modal-content .ext-install__required").style.display, "none");
+});
+
 test("BEHAVIOR: the required-env gate and the consent gate must BOTH hold", async () => {
   const { window, document, click, settle } = boot({
-    fetchImpl: consentFetch({ required: true, privileged: false, token: "tok", message: "m" }),
+    fetchImpl: consentFetch({ required: true, privileged: false, token: "tok", message: "m", install_required: ["JELLYFIN_API_KEY"] }),
   });
 
   click(document.querySelector('.bundle-install[data-id="jellyfin"]'));

@@ -23,7 +23,7 @@ process.env.CROW_HOME = HOME;
 if (process.env.CROW_DATA_DIR) mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const B = await import("../servers/gateway/routes/bundles.js");
 const {
-  validateInstall, missingRequiredEnv, runInstallJob, addPanelEnabled, removePanelEnabled,
+  validateInstall, installBlockingEnvKeys, hardFailComposeKeys, findInvalidEnv, runInstallJob, addPanelEnabled, removePanelEnabled,
   _setAppBundlesForTest, _setComposeRunnerForTest, _setAppEnvPathForTest,
   _createJobForTest, _finishJobForTest,
 } = B;
@@ -51,12 +51,13 @@ function buildFixture(id, manifestExtra = {}) {
     env_vars: [
       { name: "FX_SECRET", required: true, secret: true },
       { name: "FX_WITH_DEFAULT", required: true, default: "dflt" },
+      { name: "FX_TOKEN", required: true, secret: true },   // post-install token: compose never needs it
       { name: "FX_OPTIONAL" },
     ],
     ...manifestExtra,
   }, null, 2));
   writeFileSync(join(dir, "docker-compose.yml"),
-    "services:\n  app:\n    image: busybox\n    environment:\n      - FX_SECRET=${FX_SECRET:?set it}\n");
+    "services:\n  app:\n    image: busybox\n    environment:\n      - FX_SECRET=${FX_SECRET:?set it}\n      - FX_WITH_DEFAULT=${FX_WITH_DEFAULT?}\n      - FX_OPTIONAL=${FX_OPTIONAL:-x}\n");
   writeFileSync(join(dir, "panel", id + ".js"), "export default { id: '" + id + "' };\n");
   writeFileSync(join(dir, "panel", "routes.js"), "export default function () {}\n");
   writeFileSync(join(dir, "skills", id + ".md"), "# skill\n");
@@ -67,17 +68,52 @@ _setAppBundlesForTest(FIXTURES);
 
 // ─── 1. required env ───
 
-test("missingRequiredEnv: blank / whitespace / absent required keys are reported by NAME; defaults satisfy", () => {
-  const manifest = { env_vars: [
-    { name: "A", required: true },
-    { name: "B", required: true, default: "x" },
-    { name: "C", required: true, default: "   " },
-    { name: "D" },
-  ] };
-  assert.deepEqual(missingRequiredEnv(manifest, {}), ["A", "C"]);
-  assert.deepEqual(missingRequiredEnv(manifest, { A: "   ", C: "" }), ["A", "C"]);
-  assert.deepEqual(missingRequiredEnv(manifest, { A: "v", C: "w" }), []);
-  assert.deepEqual(missingRequiredEnv(null, {}), []);
+test("hardFailComposeKeys: only ${KEY:?…} / ${KEY?…} count — not ${KEY}, ${KEY:-…}", () => {
+  const keys = hardFailComposeKeys("a: ${A:?msg}\nb: ${B?}\nc: ${C}\nd: ${D:-x}\ne: ${E-x}\n");
+  assert.deepEqual([...keys].sort(), ["A", "B"]);
+});
+
+test("installBlockingEnvKeys = required AND no default AND compose hard-fails on it", () => {
+  buildFixture("fx-blocking");
+  // FX_SECRET blocks; FX_WITH_DEFAULT is hard-fail but has a manifest default;
+  // FX_TOKEN is required but compose never references it; FX_OPTIONAL is not required.
+  assert.deepEqual(installBlockingEnvKeys("fx-blocking"), ["FX_SECRET"]);
+  assert.deepEqual(installBlockingEnvKeys("no-such-bundle"), []);
+});
+
+test("real bundles: phone is blocked on PHONE_RUNNER_SECRET; gitea's post-install GITEA_TOKEN is not", async () => {
+  _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
+  try {
+    assert.deepEqual(installBlockingEnvKeys("phone"), ["PHONE_RUNNER_SECRET"]);
+    const phone = await validateInstall("phone", { envVars: {}, requireEnv: true, forceInstall: true });
+    assert.equal(phone.code, "missing_required_env");
+    assert.deepEqual(phone.extra.missing_env, ["PHONE_RUNNER_SECRET"]);
+
+    const giteaManifest = JSON.parse(readFileSync(new URL("../bundles/gitea/manifest.json", import.meta.url), "utf8"));
+    assert.ok(giteaManifest.env_vars.some((v) => v.name === "GITEA_TOKEN" && v.required), "precondition: GITEA_TOKEN is manifest-required");
+    assert.deepEqual(installBlockingEnvKeys("gitea"), []);
+    const gitea = await validateInstall("gitea", { envVars: {}, requireEnv: true, forceInstall: true });
+    assert.notEqual(gitea.code, "missing_required_env", "gitea installs blank and is configured later");
+  } finally {
+    _setAppBundlesForTest(FIXTURES);
+  }
+});
+
+test("a required key with a manifest default (even compose hard-fail) and a required key compose ignores both install", async () => {
+  buildFixture("fx-defaulted");
+  const r = await validateInstall("fx-defaulted", { envVars: { FX_SECRET: "s" }, requireEnv: true, forceInstall: true });
+  assert.notEqual(r.code, "missing_required_env", JSON.stringify(r));
+});
+
+test("findInvalidEnv names the key (never the value) for a bad name or a CR/LF/NUL value", () => {
+  assert.equal(findInvalidEnv({ GOOD: "v", OTHER_1: "x" }), null);
+  assert.equal(findInvalidEnv({ lower: "v" }).key, "lower");
+  assert.equal(findInvalidEnv({ "A=B": "v" }).key, "A=B");
+  for (const bad of ["a\nb", "a\rb", "a\u0000b", "secret\r\n"]) {
+    const r = findInvalidEnv({ K: bad });
+    assert.equal(r.key, "K");
+    assert.ok(!JSON.stringify(r).includes("secret"));
+  }
 });
 
 test("validateInstall(requireEnv) refuses 400 missing_required_env listing names, never values", async () => {
@@ -116,6 +152,33 @@ test("POST /bundles/api/install refuses a blank required env var with 400 before
     assert.deepEqual(body.missing_env, ["FX_SECRET"]);
     assert.equal(body.job_id, undefined);
     assert.ok(!existsSync(join(HOME, "bundles", "fx-reqenv-route")), "nothing was copied");
+  } finally {
+    server.close();
+  }
+});
+
+test("POST /bundles/api/install rejects an invalid env key or a multi-line value with 400 invalid_env, writing nothing", async () => {
+  buildFixture("fx-invalid-env");
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  const post = (env_vars) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/install`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundle_id: "fx-invalid-env", env_vars, force_install: true }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  try {
+    const r1 = await post({ FX_SECRET: "topsecret\nCROW_DASHBOARD_PUBLIC=true" });
+    assert.equal(r1.status, 400);
+    assert.equal(r1.body.code, "invalid_env");
+    assert.equal(r1.body.key, "FX_SECRET");
+    assert.doesNotMatch(JSON.stringify(r1.body), /topsecret/, "the value is never echoed");
+    const r2 = await post({ FX_SECRET: "ok", "bad key": "v" });
+    assert.equal(r2.status, 400);
+    assert.equal(r2.body.key, "bad key");
+    assert.ok(!existsSync(join(HOME, "bundles", "fx-invalid-env")), "nothing was copied or written");
   } finally {
     server.close();
   }
@@ -162,7 +225,7 @@ test("compose-up failure: panel, routes, panels.json (object form), skills and g
   const job = _createJobForTest(id, "install");
   try {
     const manifest = JSON.parse(readFileSync(join(FIXTURES, id, "manifest.json"), "utf8"));
-    const out = await runInstallJob(id, { FX_SECRET: "s3cret$1" }, {
+    const out = await runInstallJob(id, { FX_SECRET: "s3cret$1", CROW_DASHBOARD_PUBLIC: "true" }, {
       job, installedSnapshot: [], consentVerified: false, manifest,
     });
 
@@ -177,6 +240,8 @@ test("compose-up failure: panel, routes, panels.json (object form), skills and g
     assert.ok(existsSync(join(HOME, "panels", id + "-routes.js")), "panel routes installed");
     assert.ok(existsSync(join(HOME, "skills", id + ".md")), "skill installed");
     assert.match(readFileSync(GATEWAY_ENV, "utf8"), /^FX_SECRET=s3cret\$1$/m, "gateway env propagated ($ kept literal)");
+    assert.doesNotMatch(readFileSync(GATEWAY_ENV, "utf8"), /CROW_DASHBOARD_PUBLIC/,
+      "an UNDECLARED install key never reaches the gateway .env (network-exposure invariant)");
 
     const installed = JSON.parse(readFileSync(join(HOME, "installed.json"), "utf8"));
     assert.equal(installed.filter((i) => i.id === id).length, 1, "recorded exactly once, so Configure + Start works");
@@ -210,15 +275,29 @@ test("POST /bundles/api/env propagates manifest-declared keys to the gateway .en
     body: JSON.stringify({ bundle_id: id, env_vars }),
   }).then(async (r) => ({ status: r.status, body: await r.json() }));
   try {
-    const r1 = await post({ FX_SECRET: "abc\nCROW_DASHBOARD_PUBLIC=true", NOT_DECLARED: "zzz" });
+    const bundleEnvPath = join(HOME, "bundles", id, ".env");
+    // I1: a multi-line value is REJECTED before either file is touched, so the
+    // bundle .env and the gateway .env can never hold different copies.
+    const bad = await post({ FX_SECRET: "abc\nCROW_DASHBOARD_PUBLIC=true" });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.code, "invalid_env");
+    assert.equal(bad.body.key, "FX_SECRET");
+    assert.doesNotMatch(JSON.stringify(bad.body), /abc/);
+    assert.equal(readFileSync(bundleEnvPath, "utf8"), "# placeholder\n", "bundle .env untouched");
+    assert.equal(readFileSync(GATEWAY_ENV, "utf8"), "PORT=3001\n", "gateway .env untouched");
+    const badKey = await post({ "x;y": "v" });
+    assert.equal(badKey.status, 400);
+    assert.equal(badKey.body.key, "x;y");
+
+    const r1 = await post({ FX_SECRET: "abc", NOT_DECLARED: "zzz" });
     assert.equal(r1.status, 200, JSON.stringify(r1.body));
     assert.equal(r1.body.needs_restart, true);
     const env = readFileSync(GATEWAY_ENV, "utf8");
-    assert.match(env, /^FX_SECRET=abcCROW_DASHBOARD_PUBLIC=true$/m, "a newline cannot smuggle a second line into the gateway env");
-    assert.doesNotMatch(env, /^CROW_DASHBOARD_PUBLIC=/m);
+    assert.match(env, /^FX_SECRET=abc$/m);
     assert.doesNotMatch(env, /NOT_DECLARED/, "undeclared keys never reach the gateway env");
+    assert.match(readFileSync(bundleEnvPath, "utf8"), /^FX_SECRET=abc$/m, "bundle and gateway copies agree");
 
-    const r2 = await post({ FX_SECRET: "abc\nCROW_DASHBOARD_PUBLIC=true" });
+    const r2 = await post({ FX_SECRET: "abc" });
     assert.equal(r2.body.needs_restart, false, "an unchanged gateway env needs no restart");
   } finally {
     server.close();

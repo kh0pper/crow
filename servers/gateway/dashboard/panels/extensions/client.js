@@ -103,12 +103,14 @@ export function extensionsClientJS(lang) {
             var consentToken = null;       // populated on /consent-challenge if required
             var consentSatisfied = true;   // false until user passes the gate (only when consent required)
             var installBtnRef = null;      // forward ref so consent UI can enable/disable it
-            var requiredNames = [];        // env vars marked required with no usable default
+            var requiredNames = [];        // install-BLOCKING keys, from the server (consent-challenge install_required)
             var requiredNoteRef = null;    // "Required: X, Y" line next to the button
 
-            // Required env vars still blank (whitespace counts as blank — the server
-            // refuses those with 400 missing_required_env). Install mode only: a
-            // configureOnly save may legitimately fill just some of the keys.
+            // Install-blocking env vars still blank (whitespace counts as blank — the
+            // server refuses those with 400 missing_required_env). The list is the
+            // SERVER's: keys compose hard-fails on (a manifest "required" alone does
+            // not block — a post-install token is configured later). Install mode
+            // only: a configureOnly save may legitimately fill just some keys.
             function missingRequired() {
               if (configureOnly) return [];
               return requiredNames.filter(function(n) {
@@ -133,6 +135,10 @@ export function extensionsClientJS(lang) {
             if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
               .then(function(r) { return r.json(); })
               .then(function(data) {
+                if (data && Array.isArray(data.install_required)) {
+                  requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
+                  refreshInstallBtnState();
+                }
                 if (!data || data.required === false) return; // no consent required
                 consentSatisfied = false; // gate the install button
                 refreshInstallBtnState();
@@ -313,12 +319,8 @@ export function extensionsClientJS(lang) {
                 input.type = ev.secret ? "password" : "text";
                 input.id = "env_" + ev.name;
                 input.value = ev.default || "";
-                if (ev.required) {
-                  requiredNames.push(ev.name);
-                  input.required = true;
-                  input.setAttribute("aria-required", "true");
-                  input.addEventListener("input", function() { refreshInstallBtnState(); });
-                }
+                if (ev.required) input.setAttribute("aria-required", "true");
+                input.addEventListener("input", function() { refreshInstallBtnState(); });
                 input.placeholder = ev.description || "";
                 input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
