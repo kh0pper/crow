@@ -94,3 +94,22 @@ for (const { id, dir } of bundles) {
     assert.deepEqual(missing, [], `${id}/package.json must declare: ${missing.join(", ")}`);
   });
 }
+
+// Core-mounted bundles: the GATEWAY imports these server dirs by path from the
+// installed copy (servers/gateway/boot/mcp-mounts.js, panel routes). No npm
+// install runs for them, so they must import NO bare packages at all — app
+// code comes via app-root.js and the MCP SDK/zod are injected by the gateway.
+const CORE_MOUNTED = ["phone"];
+
+for (const id of CORE_MOUNTED) {
+  test(`core-mounted bundle ${id}: server code imports no bare packages`, () => {
+    const files = walkJs(join(BUNDLES, id, "server"));
+    assert.ok(files.length > 0, `${id}/server has no js files`);
+    const offenders = [];
+    for (const file of files) {
+      const names = barePackages(readFileSync(file, "utf8"));
+      if (names.size) offenders.push(`${file.slice(ROOT.length + 1)}: ${[...names].join(", ")}`);
+    }
+    assert.deepEqual(offenders, [], `core-mounted bundle server must not import bare packages:\n${offenders.join("\n")}`);
+  });
+}

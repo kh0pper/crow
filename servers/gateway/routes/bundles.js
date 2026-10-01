@@ -134,6 +134,7 @@ const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
 
 export { needsConfigKeys, _setAppBundlesForTest };
+export { validateComposeFile as _validateComposeFileForTest };
 
 // Docker-availability probe (Item 4-PR5) — implemented in the extensions
 // panel's data-queries.js (the panel render path may not import this module;

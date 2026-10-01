@@ -281,7 +281,7 @@ export function writeBotMcp(def, opts = {}) {
   // handler, the CLI): the board entry then omits those headers and
   // board-mcp.js's resolveActor falls back to actor_kind='session'.
   const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, {
-    binding, botId: opts.botId, jobId: opts.jobId,
+    binding, botId: opts.botId, jobId: opts.jobId, threadId: opts.threadId, gatewayType: opts.gatewayType,
   });
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,

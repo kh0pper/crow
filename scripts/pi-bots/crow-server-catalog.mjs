@@ -134,6 +134,23 @@ function boardBlock(crowHome, { botId, jobId, port } = {}) {
   return { url: `http://127.0.0.1:${gatewayPort}/board/mcp`, headers };
 }
 
+function phoneTokenPath(crowHome) { return join(crowHome, "phone-token"); }
+
+/** Phone bundle: {url, headers} block for /phone/mcp. The actor headers carry
+ *  the bot, the thread and the gateway so the call result can be delivered
+ *  back to the conversation that asked for it. Absent token file → null. */
+function phoneBlock(crowHome, { botId, threadId, gatewayType, port } = {}) {
+  let token;
+  try { token = readFileSync(phoneTokenPath(crowHome), "utf8").trim(); } catch { return null; }
+  if (!token) return null;
+  const gatewayPort = port || process.env.CROW_GATEWAY_PORT || 3001;
+  const headers = { Authorization: "Bearer " + token, "X-Crow-Actor-Kind": "bot" };
+  if (botId) headers["X-Crow-Actor-Id"] = String(botId);
+  if (threadId) headers["X-Crow-Actor-Thread"] = String(threadId);
+  if (gatewayType) headers["X-Crow-Actor-Gateway"] = String(gatewayType);
+  return { url: `http://127.0.0.1:${gatewayPort}/phone/mcp`, headers };
+}
+
 function applyJournalGuard(env) {
   // The WAL-unlink scar: every server touching a crow.db runs journal DELETE.
   if (env && env.CROW_DB_PATH) env.CROW_JOURNAL_MODE = "DELETE";
@@ -222,7 +239,8 @@ function coreBlock(spec, binding, repoEnv, node) {
  * of an opaque spawn failure.
  *
  * `coreNames` names the subset of `servers` sourced from the registry
- * (CORE_SERVERS + CONDITIONAL_SERVERS) rather than from mcp-addons.json. It
+ * (CORE_SERVERS + CONDITIONAL_SERVERS, plus the core-mounted `phone` http
+ * entry when its token exists) rather than from mcp-addons.json. It
  * exists so a consumer that wants ONLY the registry-sourced servers (the ones
  * that vanish from the picker once Crow entries leave the homedir config) can
  * select them without re-deriving the split — `probeExtensions` already owns
@@ -242,6 +260,11 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   const board = boardBlock(crowHome, { botId: opts.botId, jobId: opts.jobId, port: opts.gatewayPort });
   if (board) servers.board = board;
   else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
+  const phone = phoneBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
+  // Phone joins coreNames so serversForProbe offers its tools in the Bot
+  // Builder Tools tab (an http block; probeServerTools speaks HTTP). Only when
+  // the gateway minted a phone token, i.e. the Phone bundle is installed.
+  if (phone) { servers.phone = phone; coreNames.push("phone"); }
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);

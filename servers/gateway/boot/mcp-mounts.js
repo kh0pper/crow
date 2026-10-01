@@ -21,7 +21,11 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken } from "../local-token.js";
+import { pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { createNotification } from "../../shared/notifications.js";
 import { startOutboxDrain } from "../../sharing/sync-outbox-drain.js";
 
 /**
@@ -264,6 +268,26 @@ export async function mountMcpServers(app, deps) {
   }
 
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions }), sessionManager, authMiddleware, peerExposureGate);
+  // Phone bundle (plan A): core-mounted like /board, but only when the bundle
+  // is installed. The server factory is imported by PATH from the installed
+  // copy (ramble-transport precedent). A failure here never blocks boot.
+  try {
+    const phoneServerDir = join(resolveCrowHome(), "bundles", "phone", "server");
+    if (existsSync(join(phoneServerDir, "mcp.js"))) {
+      const { createPhoneMcpServer } = await import(pathToFileURL(join(phoneServerDir, "mcp.js")).href);
+      const { initPhoneTables } = await import(pathToFileURL(join(phoneServerDir, "init-tables.js")).href);
+      const phoneDb = createDbClient();
+      await initPhoneTables(phoneDb);
+      const { minted } = await ensurePhoneToken(phoneDb);
+      if (minted) console.log("[gateway] phone token minted");
+      const { readSetting } = await import("../dashboard/settings/registry.js");
+      const ownerNumber = async () => (await readSetting(phoneDb, "phone_owner_number")) || null;
+      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification }), sessionManager, authMiddleware, peerExposureGate);
+      console.log("[gateway] phone MCP mounted at /phone/mcp");
+    }
+  } catch (err) {
+    console.warn(`[gateway] phone mount skipped: ${err.message}`);
+  }
   mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
   const projectServerFactory = () => createProjectServer(undefined, { instructions });
   mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
@@ -277,7 +301,7 @@ export async function mountMcpServers(app, deps) {
   // for admin / diagnostic use.
   const CLIENT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
   const CLIENT_NAME_RESERVED = new Set([
-    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm", "board",
+    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm", "board", "phone",
   ]);
   try {
     const clientsPath = join(resolveCrowHome(), "clients.json");

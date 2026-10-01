@@ -340,6 +340,7 @@ export default defineConfig({
           { text: 'Notifications & Push', link: '/guide/notifications' },
           { text: 'Contact Discovery', link: '/guide/contact-discovery' },
           { text: 'Bot Builder', link: '/guide/bot-builder' },
+          { text: 'Phone (assistant calls)', link: '/guide/phone' },
           { text: 'Your First Bot (Tutorial)', link: '/guide/bot-builder-tutorial' },
           { text: 'Crow Messages', link: '/guide/crow-messages' },
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },

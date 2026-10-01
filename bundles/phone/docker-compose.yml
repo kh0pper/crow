@@ -1,0 +1,25 @@
+services:
+  crow-phone-runner:
+    build: ./runner
+    container_name: crow-phone-runner
+    # Host networking, bound to 127.0.0.1 only (see Dockerfile CMD): the runner must reach
+    # the gateway and loopback-bound model providers, which a bridge network cannot.
+    network_mode: host
+    environment:
+      PHONE_RUNNER_SECRET: ${PHONE_RUNNER_SECRET:?PHONE_RUNNER_SECRET is required}
+      PHONE_GATEWAY_URL: ${PHONE_GATEWAY_URL:-http://127.0.0.1:${CROW_GATEWAY_PORT:-3001}}
+      PHONE_DATA_DIR: /data
+    volumes:
+      - crow-phone-runner-data:/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:3065/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  crow-phone-runner-data:

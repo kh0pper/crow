@@ -1,0 +1,24 @@
+{
+  "id": "phone",
+  "name": "Phone",
+  "version": "0.1.0",
+  "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["phone", "calls", "appointments", "assistant"],
+  "icon": "phone",
+  "docker": { "composefile": "docker-compose.yml" },
+  "panel": "panel/phone.js",
+  "panelRoutes": "panel/routes.js",
+  "privileged": true,
+  "install_consent_messages": {
+    "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines."
+  },
+  "ports": [3065],
+  "requires": { "env": ["PHONE_RUNNER_SECRET"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "PHONE_RUNNER_SECRET", "description": "Shared secret between Crow and the phone runner; must be at least 32 characters. Generate one with: openssl rand -hex 24", "required": true, "secret": true }
+  ],
+  "notes": "Plan A: calls run on a simulated line (FakeLine). The Bluetooth phone line arrives in a later release. Every call needs owner approval."
+}
