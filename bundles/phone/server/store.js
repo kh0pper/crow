@@ -44,6 +44,39 @@ export async function listCalls(db, { status, limit = 50 } = {}) {
   return r.rows.map(hydrate);
 }
 
+/** I5 (spec 2026-10-01): the calls a Perch chat may show. BOTH the target
+ *  session AND the creating bot must match. That stops a forged THREAD header
+ *  (the call names its real bot, which is not this session's) and accidental
+ *  mismatches; a child forging BOTH actor headers is out of scope here (spec
+ *  "Known limits": real per-session binding is a queued follow-up). */
+export async function listPerchCalls(db, sessionId, botId, limit = 20) {
+  const n = Math.max(1, Math.min(20, Number(limit) || 20));
+  const r = await db.execute({
+    sql: `SELECT * FROM phone_calls
+          WHERE json_extract(deliver_to,'$.kind')='perch' AND json_extract(deliver_to,'$.session_id')=?
+            AND json_extract(created_by,'$.kind')='bot' AND json_extract(created_by,'$.id')=?
+          ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    args: [String(sessionId), String(botId), n],
+  });
+  return r.rows.map(hydrate);
+}
+
+/** The bot that owns Perch session `sid`: the row perch-interactive.js adoptRow
+ *  reads. A direct read on purpose (never adopts or wakes a session). Returns
+ *  the bot id, or null when there is no row or no bot_sessions table (this
+ *  instance has no Perch). Any other error (SQLITE_BUSY, IOERR, a closed
+ *  client) is RETHROWN: callers must not mistake a transient failure for
+ *  "no owner". Shared by deliver.js and panel/routes.js. */
+export async function perchSessionBot(db, sid) {
+  try {
+    const r = await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1", args: [String(sid)] });
+    return r.rows[0] ? String(r.rows[0].bot_id) : null;
+  } catch (e) {
+    if (/no such table/i.test(String(e && e.message))) return null;
+    throw e;
+  }
+}
+
 function planFromRow(row, edits = {}) {
   return validatePlan({
     business_name: edits.business_name ?? row.business_name, number: edits.number ?? row.number_e164,
@@ -59,24 +92,38 @@ async function applyEdits(db, id, plan) {
   });
 }
 
-export async function approveCall(db, id, { session, allowCloud, edits, runAfter } = {}) {
+export async function approveCall(db, id, { session, allowCloud, edits, runAfter, expectedHash } = {}) {
+  // I4 (spec 2026-10-01): approve exactly what was shown. The caller names the
+  // plan_hash it rendered; the pre-check gives a clean error and the CAS below
+  // re-checks it in the same UPDATE, so an edit landing in between still loses.
+  if (typeof expectedHash !== "string" || !expectedHash) throw fail("plan_hash_required", "approval must name the plan_hash that was shown");
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
   if (row.status !== "awaiting_approval") throw fail("not_pending", "call is not awaiting approval");
-  // Validate the edited plan (if any) before the CAS
+  if (row.plan_hash !== expectedHash) throw fail("plan_changed", "the plan changed since it was shown; review it again");
+  // Validate the edited plan (if any) before the CAS. The CAS compares the SHOWN
+  // hash; the row then carries the edited plan's hash.
   let plan = row;
   if (edits) {
     plan = planFromRow(row, edits);
   }
+  // "Approve now" means now: runAfter undefined keeps the stored time (a bot's
+  // proposal, which the card and the Phone panel show and prefill), null clears it,
+  // a string sets it.
+  const runAt = runAfter === undefined ? (row.run_after ?? null) : (runAfter || null);
   const token = randomBytes(24).toString("hex");
   const newHash = planHash(plan);
   const r = await db.execute({
-    sql: `UPDATE phone_calls SET status='approved', business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=COALESCE(?, run_after), updated_at=datetime('now')
-          WHERE id=? AND status='awaiting_approval'`,
-    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, sha(token + ":" + id + ":" + newHash), sha(session || ""), allowCloud ? 1 : 0, runAfter || null, id],
+    sql: `UPDATE phone_calls SET status='approved', business_name=?, number_e164=?, goal=?, limits_json=?, shareable_json=?, language=?, notes=?, plan_hash=?, token_hash=?, approved_by_session=?, approved_at=datetime('now'), allow_cloud=?, run_after=?, updated_at=datetime('now')
+          WHERE id=? AND status='awaiting_approval' AND plan_hash=?`,
+    args: [plan.business_name, plan.number_e164, plan.goal, J(plan.limits), J(plan.shareable), plan.language, plan.notes, newHash, sha(token + ":" + id + ":" + newHash), sha(session || ""), allowCloud ? 1 : 0, runAt, id, expectedHash],
   });
-  if (!r.rowsAffected) throw fail("not_pending", "call is not awaiting approval");
-  await audit(db, id, "owner", "approved", { allowCloud: !!allowCloud, runAfter: runAfter || null });
+  if (!r.rowsAffected) {
+    const now = await getCall(db, id);
+    if (now && now.status === "awaiting_approval") throw fail("plan_changed", "the plan changed since it was shown; review it again");
+    throw fail("not_pending", "call is not awaiting approval");
+  }
+  await audit(db, id, "owner", "approved", { allowCloud: !!allowCloud, runAfter: runAt });
   return { token };
 }
 
@@ -117,9 +164,21 @@ export async function consumeToken(db, id, token) {
   return r.rowsAffected === 1;
 }
 
+/** Expire unapproved plans older than 24 h and return the ids this call
+ *  expired (spec 2026-10-01 S6: each gets a card frame). Per-id CAS, so two
+ *  dispatchers never both claim one expiry. */
+export async function expirePlanIds(db) {
+  const ids = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='awaiting_approval' AND created_at < datetime('now','-24 hours')", args: [] })).rows.map((r) => r.id);
+  const out = [];
+  for (const id of ids) {
+    const r = await db.execute({ sql: "UPDATE phone_calls SET status='expired', updated_at=datetime('now') WHERE id=? AND status='awaiting_approval'", args: [id] });
+    if (r.rowsAffected) out.push(id);
+  }
+  return out;
+}
+
 export async function expirePlans(db) {
-  const r = await db.execute({ sql: "UPDATE phone_calls SET status='expired', updated_at=datetime('now') WHERE status='awaiting_approval' AND created_at < datetime('now','-24 hours')", args: [] });
-  return r.rowsAffected;
+  return (await expirePlanIds(db)).length;
 }
 
 export async function claimNextDue(db) {
@@ -191,7 +250,7 @@ export async function recentCallToNumber(db, e164, minutes = 10) {
 }
 
 export async function listUndelivered(db, limit = 5) {
-  const rows = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='done' AND delivered=0 AND delivery_attempts < 5 ORDER BY ended_at LIMIT ?", args: [limit] })).rows;
+  const rows = (await db.execute({ sql: "SELECT id FROM phone_calls WHERE status='done' AND delivered=0 AND delivery_attempts < 5 AND (delivery_retry_at IS NULL OR delivery_retry_at <= datetime('now')) ORDER BY ended_at LIMIT ?", args: [limit] })).rows;
   const out = [];
   for (const r of rows) out.push(await getCall(db, r.id));
   return out;
@@ -199,4 +258,23 @@ export async function listUndelivered(db, limit = 5) {
 
 export async function bumpDeliveryAttempt(db, id) {
   await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts = delivery_attempts + 1 WHERE id=?", args: [id] });
+}
+
+/** Spec 2026-10-01 §4.6: the bot cannot take a turn RIGHT NOW (mid-turn, box
+ *  full, or no engine yet after a restart). Not a failure — keep the delivery
+ *  pending and back off 5,10,20,40,60,60… s, for up to `windowMinutes` after
+ *  the call ended. Then give up (the result is still in Phone and on the chat
+ *  card) and audit it. */
+export async function deferDelivery(db, id, windowMinutes = 10) {
+  const row = (await db.execute({ sql: "SELECT delivery_busy, (julianday('now') - julianday(ended_at)) * 1440 AS age_min FROM phone_calls WHERE id=?", args: [id] })).rows[0];
+  if (!row) return { gaveUp: true };
+  if (row.age_min != null && row.age_min >= windowMinutes) {
+    await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts=5, delivery_retry_at=NULL WHERE id=?", args: [id] });
+    await audit(db, id, "service", "delivery_gave_up", { reason: "the bot could not take a turn", minutes: windowMinutes });
+    return { gaveUp: true };
+  }
+  const n = Number(row.delivery_busy || 0);
+  const delaySeconds = Math.min(60, 5 * 2 ** Math.min(n, 4));
+  await db.execute({ sql: "UPDATE phone_calls SET delivery_busy=delivery_busy+1, delivery_retry_at=datetime('now', ?) WHERE id=?", args: [`+${delaySeconds} seconds`, id] });
+  return { gaveUp: false, delaySeconds };
 }

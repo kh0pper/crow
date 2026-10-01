@@ -17,7 +17,7 @@ import { z } from "zod";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "bundles", "phone", "server");
-const MODULES = ["mcp.js", "init-tables.js", "store.js", "plan.js", "deliver.js", "dispatcher.js", "runner-client.js", "authority.js", "secrets.js"];
+const MODULES = ["mcp.js", "init-tables.js", "store.js", "plan.js", "deliver.js", "dispatcher.js", "runner-client.js", "authority.js", "secrets.js", "card.js"];
 const saved = process.env.CROW_APP_ROOT;
 let tmp, dir;
 
@@ -48,4 +48,12 @@ test("installed mcp.js builds a server with the injected McpServer and z", async
   const { createPhoneMcpServer } = await import(pathToFileURL(join(dir, "mcp.js")).href);
   const server = createPhoneMcpServer({ db: {}, McpServer, z });
   assert.ok(server instanceof McpServer);
+});
+
+test("bundle version 0.2.0 (Perch call card) — the manifest and the MCP server agree", async () => {
+  const { readFileSync } = await import("node:fs");
+  const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", "phone", "manifest.json"), "utf8"));
+  assert.equal(manifest.version, "0.2.0");
+  const mcpSrc = readFileSync(join(SRC, "mcp.js"), "utf8");
+  assert.match(mcpSrc, /new McpServer\(\{ name: "crow-phone", version: "0\.2\.0" \}\)/);
 });

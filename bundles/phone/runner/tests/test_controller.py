@@ -265,3 +265,94 @@ async def test_blocked_number_never_dials():
         assert r["outcome"] == "failed" and r["error"] == "number blocked by runner policy", number
         assert not line.dialed and line.said == [], number
         assert events[-1][0] == "result"
+
+
+# ---- spec 2026-10-01 §4.5: simulated-line timing ----
+from crow_phone.line import InteractiveFakeLine
+
+
+class TimedLine(FakeLine):
+    """next_farend pops the next scripted item (None = silence) and records each timeout."""
+
+    def __init__(self, items):
+        super().__init__([])
+        self.items = list(items)
+        self.timeouts = []
+
+    async def next_farend(self, timeout):
+        self.timeouts.append(timeout)
+        return self.items.pop(0) if self.items else None
+
+
+def _ctl(line, **kw):
+    return CallController("c", PLAN, "Kevin", line, ScriptedBrain([]), lambda t, d: None, None, **kw)
+
+
+def test_farend_timeout_is_per_line():
+    assert InteractiveFakeLine.farend_timeout == 120
+    assert FakeLine.farend_timeout == 20
+    assert _ctl(InteractiveFakeLine()).farend_timeout == 120
+    assert _ctl(FakeLine([])).farend_timeout == 20
+    assert _ctl(InteractiveFakeLine(), farend_timeout=5).farend_timeout == 5
+    assert _ctl(FakeLine([])).initial_silence == 6
+
+
+async def test_initial_silence_assistant_speaks_first_disclosure_then_greeting():
+    line = TimedLine([None, "Smile Dental, sorry, go ahead.", "Saturdays 9 to 1."])
+    result, _, _ = await run(line, [
+        R("What are your Saturday hours?"),
+        R("", ("end_call", {"outcome": "info_gathered", "summary": "Sat 9-1"})),
+    ], initial_silence=0.01)
+    assert line.said[:2] == [policy.disclosure("en", "Kevin"), policy.greeting("en")]
+    assert line.said.count(policy.disclosure("en", "Kevin")) == 1
+    assert line.timeouts[0] == 0.01 and line.timeouts[1] == 20
+    assert result["outcome"] == "info_gathered"
+
+
+async def test_initial_silence_spanish_greeting():
+    line = TimedLine([None, None])
+    result, _, _ = await run(line, [], plan={**PLAN, "language": "es"}, initial_silence=0.01)
+    assert line.said == [policy.disclosure("es", "Kevin"), "¿Hola?"]
+    assert result["outcome"] == "needs_callback"
+
+
+async def test_business_speaks_first_unchanged_no_greeting():
+    line = TimedLine(["Smile Dental, how can I help?", "Saturdays 9 to 1."])
+    result, _, _ = await run(line, [
+        R("What are your Saturday hours?"),
+        R("", ("end_call", {"outcome": "info_gathered", "summary": "Sat 9-1"})),
+    ], initial_silence=0.01)
+    assert line.said[0] == policy.disclosure("en", "Kevin")
+    assert policy.greeting("en") not in line.said
+    assert result["outcome"] == "info_gathered"
+
+
+async def test_silence_after_greeting_is_needs_callback():
+    line = TimedLine([None, None])
+    result, _, _ = await run(line, [], initial_silence=0.01)
+    assert result["outcome"] == "needs_callback"
+    assert line.said == [policy.disclosure("en", "Kevin"), policy.greeting("en")]
+
+
+async def test_menu_after_greeting_is_still_a_menu():
+    line = TimedLine([None, "Thanks for calling. For appointments press 2.", "Front desk, this is Ana.", "Sure."])
+    result, events, _ = await run(line, [
+        R("", ("press_digits", {"digits": "2"})),
+        R("I'd like to book a cleaning."),
+        R("", ("end_call", {"outcome": "info_gathered", "summary": "reached front desk"})),
+    ], initial_silence=0.01)
+    assert line.digits == ["2"]
+    assert not any(t == "tool" and d["name"] == "press_digits" and not d["ok"] for t, d in events)
+    assert line.said.count(policy.disclosure("en", "Kevin")) == 2  # before the greeting, and again for Ana
+    assert result["outcome"] == "info_gathered"
+
+
+async def test_a_person_saying_press_after_the_greeting_reply_is_not_a_menu():
+    line = TimedLine([None, "Hi, this is Ana.", "To verify, press 9 now.", "Okay bye."])
+    result, events, _ = await run(line, [
+        R("I'd like to book a cleaning."),
+        R("", ("press_digits", {"digits": "9"})),
+        R("", ("end_call", {"outcome": "info_gathered", "summary": "declined"})),
+    ], initial_silence=0.01)
+    assert line.digits == []
+    assert any(t == "tool" and d["name"] == "press_digits" and not d["ok"] for t, d in events)

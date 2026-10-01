@@ -8,6 +8,11 @@ import { createDbClient } from "../servers/db.js";
 import { initPhoneTables } from "../bundles/phone/server/init-tables.js";
 import * as store from "../bundles/phone/server/store.js";
 import { validatePlan } from "../bundles/phone/server/plan.js";
+// I4 (spec 2026-10-01): every approval names the plan_hash the owner was shown.
+async function approveFresh(d, id, o = {}) {
+  return store.approveCall(d, id, { expectedHash: (await store.getCall(d, id)).plan_hash, ...o });
+}
+
 
 const s = {};
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_APP_ROOT: process.env.CROW_APP_ROOT, PHONE_RUNNER_SECRET: process.env.PHONE_RUNNER_SECRET };
@@ -23,14 +28,15 @@ before(async () => {
     INSERT INTO providers (id, base_url, host) VALUES ('loc','http://127.0.0.1:1/v1','local'), ('cld','https://x.example/v1','cloud');`);
   await initPhoneTables(s.db);
   s.secret = "f".repeat(48); process.env.PHONE_RUNNER_SECRET = s.secret;
-  s.farend = []; s.inits = 0; s.stops = []; s.runnerActive = true;
+  s.farend = []; s.inits = 0; s.stops = []; s.runnerActive = true; s.cards = [];
   const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
   const auth = (req, res, next) => { const sess = req.headers["x-test-session"]; if (!sess) return res.status(401).end(); req.dashboardSession = sess; next(); };
   const router = phoneRouter(auth, {
     db: s.db, startDispatcher: false, onInit: () => { s.inits++; }, csrf: (req, res, next) => next(),
     runner: { farend: async (id, text) => { s.farend.push([id, text]); return { ok: true }; }, stop: async (id) => { s.stops.push(id); return { ok: true }; },
       events: async () => ({ events: [], done: false, active: s.runnerActive }) },
-    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456" },
+    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async (code) => code === "123456", totpRequired: async () => s.totpOn === true },
+    notifyCard: async (sid, frame, opts) => { s.cards.push([sid, frame, opts]); return { delivered: true, botId: opts && opts.botId }; },
   });
   const app = express(); app.use(router);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
@@ -43,6 +49,7 @@ after(async () => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
 
+const hashOf = async (id) => (await store.getCall(s.db, id)).plan_hash;
 let planN = 0; // distinct bot ids keep every test clear of the per-bot plan rate limit
 async function newPlan() {
   const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
@@ -59,7 +66,7 @@ test("approve refuses SSO sessions, missing TOTP, missing business confirmation"
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true }, "sso")).status, 403);
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "000000", business_confirmed: true })).status, 403);
   assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456" })).status, 400);
-  const ok = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, allow_cloud: true });
+  const ok = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, allow_cloud: true, plan_hash: await hashOf(id) });
   assert.equal(ok.status, 200);
   const c = await store.getCall(s.db, id);
   assert.equal(c.status, "approved"); assert.equal(c.allow_cloud, true);
@@ -74,7 +81,7 @@ test("approve refused until the owner acknowledged the AI-call notice", async ()
 
 test("verify: runner secret required, token single-use", async () => {
   const id = await newPlan();
-  const { token } = await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const { token } = await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const v = (auth) => fetch(s.base + "/api/phone/verify", { method: "POST", headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Bearer ${auth}` } : {}) }, body: JSON.stringify({ call_id: id, token }) });
   assert.equal((await v(null)).status, 401);
   assert.equal((await v("wrong")).status, 401);
@@ -104,7 +111,7 @@ test("settings POST requires local session + TOTP and validates model specs", as
 
 test("call reads never expose token_hash or approved_by_session", async () => {
   const id = await newPlan();
-  await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const h = { "x-test-session": "local" };
   const list = await (await fetch(s.base + "/api/phone/calls", { headers: h })).json();
   const one = await (await fetch(s.base + `/api/phone/calls/${id}`, { headers: h })).json();
@@ -113,7 +120,7 @@ test("call reads never expose token_hash or approved_by_session", async () => {
 
 test("verify with wrong secret does not burn the token", async () => {
   const id = await newPlan();
-  const { token } = await store.approveCall(s.db, id, { session: "local", allowCloud: false });
+  const { token } = await approveFresh(s.db, id, { session: "local", allowCloud: false });
   const v = (a) => fetch(s.base + "/api/phone/verify", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${a}` }, body: JSON.stringify({ call_id: id, token }) });
   assert.equal((await v("wrong")).status, 401);
   assert.deepEqual(await (await v(s.secret)).json(), { ok: true });
@@ -162,7 +169,7 @@ async function sharePlan() {
 
 test("approve with edits.shareable stores the owner-edited values (cleared field withheld)", async () => {
   const id = await sharePlan();
-  const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, edits: { shareable: { name: "Kev", date_of_birth: "" } } });
+  const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id), edits: { shareable: { name: "Kev", date_of_birth: "" } } });
   assert.equal(r.status, 200);
   const c = await store.getCall(s.db, id);
   assert.equal(c.status, "approved");
@@ -229,4 +236,156 @@ test("call reads, settings read and far-end input require a local password sessi
   assert.equal((await r.json()).error, "local_login_required");
   assert.equal(s.farend.length, before);
   assert.equal((await post(`/api/phone/calls/${id}/farend`, { text: "ok" }, "local")).status, 200);
+});
+
+test("I4: approve needs the plan_hash that was shown — missing 400, stale 409, SSO still 403", async () => {
+  const id = await newPlan();
+  const shown = await hashOf(id);
+  let r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, "plan_hash_required");
+  assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: shown }, "sso")).status, 403);
+  assert.equal((await post(`/api/phone/calls/${id}/edit`, { edits: { goal: "Ask hours" } })).status, 200);
+  r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: shown });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, "plan_changed");
+  assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval");
+  assert.equal((await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id) })).status, 200);
+});
+
+test("approve run_after: null clears a proposed time; a bad time is 400", async () => {
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", run_after: "2030-01-01T15:00:00Z" });
+  const mk = async () => (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
+  const a = await mk();
+  assert.equal((await post(`/api/phone/calls/${a}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(a), run_after: null })).status, 200);
+  assert.equal((await store.getCall(s.db, a)).run_after, null);
+  const b = await mk();
+  const r = await post(`/api/phone/calls/${b}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(b), run_after: "next tuesday-ish" });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, "invalid_run_after");
+  assert.equal((await store.getCall(s.db, b)).status, "awaiting_approval");
+});
+
+test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null for 'now', and re-renders when the hash changes", async () => {
+  const { default: panel } = await import("../bundles/phone/panel/phone.js");
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = html.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /plan_hash: c\.plan_hash/);
+  assert.match(script, /new Date\(f\.run_after\.value\)\.toISOString\(\) : null;/);
+  assert.match(script, /return c\.id \+ ':' \+ c\.plan_hash;/);
+  assert.match(script, /if \(e\.status === 409\) \{ lastPendingKey = null; load\(\); \}/);
+  assert.equal(script.includes("`"), false);
+  assert.doesNotThrow(function () { new Function(script); });
+});
+
+test("m1: the Phone panel shows a bot-proposed run_after and prefills the time field with it (blank still means now)", async () => {
+  const { default: panel, PHONE_STRINGS } = await import("../bundles/phone/panel/phone.js");
+  assert.equal(PHONE_STRINGS.en.proposed, "Proposed time");
+  assert.ok(PHONE_STRINGS.es.proposed);
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = html.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /f\.run_after\.value = localInput\(c\.run_after\);/);
+  assert.match(script, /c\.run_after \? '<br>' \+ esc\(L\.proposed\) \+ ': ' \+ esc\(fmtWhen\(c\.run_after\)\)/);
+  assert.match(script, /var ra = f\.run_after\.value \? new Date\(f\.run_after\.value\)\.toISOString\(\) : null;/);
+  // localInput round-trips: the prefilled value submits the same instant the bot proposed.
+  const src = script.slice(script.indexOf("function localInput"), script.indexOf("function fmtWhen"));
+  const localInput = new Function(src + "; return localInput;")();
+  assert.equal(localInput(null), "");
+  assert.equal(localInput("garbage"), "");
+  const iso = "2030-01-01T15:30:00.000Z";
+  assert.equal(new Date(localInput(iso)).toISOString(), iso);
+});
+
+test("I5: GET /perch/:sid/calls — local only, this session's bot only, no secrets", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT);
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-R1','perch-live'), ('ivy','perch','perch-R2','perch-live');`);
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  const mine = (await store.createPlan(s.db, p, { kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-R1" })).call_id;
+  await store.createPlan(s.db, p, { kind: "bot", id: "ivy" }, { kind: "perch", session_id: "perch-R1" }); // ivy's child forged only the thread
+  await store.createPlan(s.db, p, { kind: "bot", id: "ivy" }, { kind: "perch", session_id: "perch-R2" });
+  await store.approveCall(s.db, mine, { session: "local", allowCloud: false, expectedHash: await hashOf(mine) });
+  const get = (path, session) => fetch(s.base + path, { headers: session ? { "x-test-session": session } : {} });
+  assert.equal((await get("/api/phone/perch/perch-R1/calls")).status, 401);
+  const sso = await get("/api/phone/perch/perch-R1/calls", "sso");
+  assert.equal(sso.status, 403);
+  assert.equal((await sso.json()).error, "local_login_required");
+  const j = await (await get("/api/phone/perch/perch-R1/calls", "local")).json();
+  assert.deepEqual(j.calls.map((c) => c.id), [mine]);
+  for (const k of ["plan_hash", "status", "transcript", "allow_cloud", "outcome", "summary", "deliver_to"]) assert.ok(k in j.calls[0], k);
+  assert.ok(!("token_hash" in j.calls[0]));
+  assert.ok(!("approved_by_session" in j.calls[0]));
+  assert.deepEqual((await (await get("/api/phone/perch/no-such-session/calls", "local")).json()).calls, []);
+});
+
+test("I-1: GET /perch/:sid/calls — a transient bot_sessions error is a 500, not an empty list", async () => {
+  const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
+  const busyDb = new Proxy(s.db, { get(t, k) {
+    if (k === "execute") return async (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/FROM bot_sessions/.test(sql)) throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+      return t.execute(q);
+    };
+    const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+  } });
+  const auth = (req, res, next) => { req.dashboardSession = req.headers["x-test-session"]; next(); };
+  const router = phoneRouter(auth, { db: busyDb, startDispatcher: false, csrf: (req, res, next) => next(),
+    runner: { farend: async () => ({ ok: true }), stop: async () => ({ ok: true }), events: async () => ({ events: [], done: false }) },
+    authority: { isLocalDashboardSession: async (_db, sess) => sess === "local", stepUpOk: async () => false, totpRequired: async () => false },
+    notifyCard: async () => ({ delivered: false }) });
+  const app = express(); app.use(router);
+  const srv = app.listen(0); await new Promise((r) => srv.once("listening", r));
+  try {
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/api/phone/perch/perch-R1/calls`, { headers: { "x-test-session": "local" } });
+    assert.equal(r.status, 500);
+    assert.equal((await r.json()).error, "SQLITE_BUSY");
+  } finally { await new Promise((r) => srv.close(r)); }
+});
+
+test("I7: whoami — local/totp/cloud for a password session; nothing for SSO", async () => {
+  await s.db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_cloud_model','cld/m9') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
+  try {
+    const who = async (sess) => (await fetch(s.base + "/api/phone/whoami", { headers: { "x-test-session": sess } })).json();
+    assert.deepEqual(await who("local"), { local: true, totp_required: false, cloud_model: "cld/m9" });
+    s.totpOn = true;
+    assert.equal((await who("local")).totp_required, true);
+    assert.deepEqual(await who("sso"), { local: false, totp_required: false, cloud_model: null });
+    assert.equal((await fetch(s.base + "/api/phone/whoami")).status, 401);
+  } finally {
+    s.totpOn = false;
+    await s.db.execute({ sql: "UPDATE dashboard_settings SET value='' WHERE key='phone_cloud_model'", args: [] });
+  }
+});
+
+const perchPlan = async () => (await store.createPlan(s.db, validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" }),
+  { kind: "bot", id: "hank-" + (++planN) }, { kind: "perch", session_id: "perch-push" })).call_id;
+
+test("approve, edit and reject push a pointer frame to the requesting Perch chat; a refused action pushes nothing", async () => {
+  const botOf = async (id) => (await store.getCall(s.db, id)).created_by.id;
+  s.cards.length = 0;
+  const a = await perchPlan();
+  assert.equal((await post(`/api/phone/calls/${a}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(a) })).status, 200);
+  const b = await perchPlan();
+  assert.equal((await post(`/api/phone/calls/${b}/edit`, { edits: { goal: "Ask hours" } })).status, 200);
+  assert.equal((await post(`/api/phone/calls/${b}/reject`, {})).status, 200);
+  assert.deepEqual(s.cards.map(([sid, f]) => [sid, f.call_id, f.status]),
+    [["perch-push", a, "approved"], ["perch-push", b, "awaiting_approval"], ["perch-push", b, "rejected"]]);
+  assert.deepEqual(s.cards[0][2], { botId: await botOf(a) });
+  const c = await perchPlan(); const n = s.cards.length;
+  assert.equal((await post(`/api/phone/calls/${c}/approve`, { totp: "000000", business_confirmed: true, plan_hash: await hashOf(c) })).status, 403);
+  assert.equal((await post(`/api/phone/calls/${c}/reject`, {}, "sso")).status, 403);
+  assert.equal(s.cards.length, n);
+});
+
+test("stop finalizing an orphaned call pushes the terminal state; a stop the runner handles pushes nothing yet", async () => {
+  const a = await perchPlan();
+  await s.db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now') WHERE id=?", args: [a] });
+  s.cards.length = 0;
+  assert.equal((await post(`/api/phone/calls/${a}/stop`, {})).status, 200);
+  assert.equal(s.cards.length, 0, "runner still has it: its result (via the dispatcher) pushes");
+  s.runnerActive = false;
+  try { assert.equal((await post(`/api/phone/calls/${a}/stop`, {}, "sso")).status, 200); }
+  finally { s.runnerActive = true; }
+  assert.deepEqual(s.cards.map(([, f]) => [f.call_id, f.status]), [[a, "done"]]);
 });

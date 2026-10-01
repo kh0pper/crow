@@ -206,7 +206,10 @@ test("async continuations are guarded — a fast back button must not cross sess
   // browser list fetch and its text-viewer read fetch. 18 as of PR-D (item 15):
   // the Session tab's narrowing-pane envelope fetch.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 18, "expected exactly 18 identity guards, found " + guards);
+  // 24 as of the Perch phone card (spec 2026-10-01): phoneRefetch,
+  // loadPhoneCards (whoami continuation + list continuation), upsertPhoneCard,
+  // phoneAct and the live-card poll tick.
+  assert.equal(guards, 24, "expected exactly 24 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -3777,4 +3780,115 @@ test("W3: a hibernating session's menu says asleep instead of faking an empty re
   const menu = hub.els["perch-cmdmenu"];
   assert.equal(menu.hidden, false);
   assert.match(menu.children[0].textContent, /asleep/);
+});
+
+// ---- spec 2026-10-01: the Perch phone call card, driven through the real script ----
+
+const PH_SID = "perchlive-aaaaaaaa";
+const phCall = (over = {}) => ({ id: "call_1", status: "awaiting_approval", plan_hash: "h1", business_name: "Smile Dental",
+  number_e164: "+15125550101", goal: "Book a cleaning", language: "en", limits: {}, shareable: { name: "Kevin" }, transcript: [],
+  event_seq: 0, run_after: null, deliver_to: { kind: "perch", session_id: PH_SID }, created_by: { kind: "bot", id: "r4" }, ...over });
+function phWalk(node, out = []) { out.push(node); for (const c of node.children || []) phWalk(c, out); return out; }
+const phCards = (hub) => hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("phonecard"));
+const phHops = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+/** /api/phone/* on top of stdFetch. `call` may be a function (read per request). */
+function phoneFetch({ who = { local: true, totp_required: false, cloud_model: null }, whoStatus = 200, calls = [], listStatus = 200,
+                      call = phCall(), callStatus = 200, posts = {}, transcript } = {}) {
+  return stdFetch({
+    "/api/phone/whoami": () => makeResponse(whoStatus, who),
+    "/api/phone/perch/": () => makeResponse(listStatus, { calls }),
+    "/api/phone/calls/": (method, path) => {
+      if (method === "GET") return makeResponse(callStatus, { call: typeof call === "function" ? call() : call });
+      const verb = path.split("/").pop();
+      return posts[verb] ? posts[verb]() : makeResponse(200, { ok: true });
+    },
+    ...(transcript ? { "/transcript": transcript } : {}),
+  });
+}
+
+test("phone card (a): Approve now POSTs the shown plan_hash, run_after null and the CSRF header", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall({ run_after: "2030-01-01T15:00:00.000Z" })] }) });
+  await openChatSession(hub);
+  await phHops();
+  const cards = phCards(hub);
+  assert.equal(cards.length, 1);
+  const nodes = phWalk(cards[0]);
+  assert.ok(nodes.some((n) => n.textContent === "Language: English"), "the call language is shown");
+  assert.ok(nodes.some((n) => String(n.textContent).startsWith("Proposed time: ")), "the bot's proposed time is shown");
+  const when = nodes.find((n) => n.type === "datetime-local");
+  assert.ok(when && when.value, "Approve for… is prefilled with the proposed time");
+  assert.equal(when.getAttribute("aria-label"), "Approve for…");
+  nodes.find((n) => n.tagName === "BUTTON" && n.textContent === "Approve now").onclick();
+  await phHops();
+  const post = hub.fetchCalls.find((c) => c.method === "POST" && c.path === "/api/phone/calls/call_1/approve");
+  assert.ok(post, "approve went to the existing phone route");
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.plan_hash, "h1");
+  assert.ok("run_after" in body); assert.equal(body.run_after, null, "Approve now means now");
+  assert.deepEqual(body.edits, { shareable: { name: "Kevin" } });
+  assert.equal(post.opts.headers["X-Crow-Csrf"], "test-csrf-token");
+});
+
+test("phone card (b): a non-local viewer gets no form, textarea or farend input — a pointer card with Stop only while live", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ who: { local: false, totp_required: false, cloud_model: null }, listStatus: 403, callStatus: 403 }) });
+  await openChatSession(hub);
+  await phHops();
+  assert.equal(phCards(hub).length, 0, "SSO viewers get no history cards");
+  FakeEventSource.instances[0]._serverFrame("phone_call", { type: "phone_call", call_id: "call_9", status: "live", event_seq: 3 });
+  await phHops();
+  const cards = phCards(hub);
+  assert.equal(cards.length, 1);
+  const nodes = phWalk(cards[0]);
+  assert.ok(!nodes.some((n) => ["FORM", "TEXTAREA", "INPUT"].includes(n.tagName)), "no controls and no inputs");
+  assert.deepEqual(nodes.filter((n) => n.tagName === "BUTTON").map((n) => n.textContent), ["Stop call"]);
+  assert.ok(!nodes.some((n) => String(n.className).includes("ph-transcript")), "no transcript for a non-local viewer");
+});
+
+test("phone card (c): a frame that arrives before the history settles lands ONCE, after the history", async () => {
+  let release; const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall()],
+    transcript: () => gate.then(() => makeResponse(200, batchEvents([asst("Calling the dentist now.")]))) }) });
+  await openChatSession(hub);
+  await phHops();
+  FakeEventSource.instances[0]._serverFrame("phone_call", { type: "phone_call", call_id: "call_1", status: "awaiting_approval", event_seq: 0 });
+  await phHops();
+  assert.equal(phCards(hub).length, 0, "parked until the history lands");
+  release();
+  await phHops(6);
+  const kids = hub.els["perch-transcript"].children;
+  const cards = phCards(hub);
+  assert.equal(cards.length, 1, "history + parked frame, deduped by call_id");
+  const iMsg = kids.findIndex((k) => deepText(k).includes("Calling the dentist now."));
+  assert.ok(iMsg > -1 && kids.indexOf(cards[0]) > iMsg, "the card sits after the transcript");
+});
+
+test("phone card (d): no phone bundle (404) leaves the transcript untouched, throws nothing, and stops asking", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ whoStatus: 404, listStatus: 404 }) });
+  await openChatSession(hub);
+  await phHops();
+  assert.equal(phCards(hub).length, 0);
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["No transcript yet."]);
+  assert.equal(hub.fetchCalls.filter((c) => c.path.startsWith("/api/phone/perch/")).length, 0, "whoami 404 → the list is never asked");
+  const hub2 = await mountHub({ fetchImpl: phoneFetch({ listStatus: 404 }) });
+  await openChatSession(hub2);
+  await phHops();
+  assert.equal(phCards(hub2).length, 0);
+  assert.deepEqual(notesIn(hub2.els["perch-transcript"]), ["No transcript yet."]);
+});
+
+test("phone card (e): a plan edited elsewhere redraws with 'plan changed' and keeps a half-typed 2FA code", async () => {
+  let cur = phCall();
+  const hub = await mountHub({ fetchImpl: phoneFetch({ who: { local: true, totp_required: true, cloud_model: null }, calls: [cur], call: () => cur }) });
+  await openChatSession(hub);
+  await phHops();
+  const totp = phWalk(phCards(hub)[0]).find((n) => n.tagName === "INPUT" && n.inputMode === "numeric");
+  assert.ok(totp, "2FA field present when 2FA is on");
+  totp.value = "123";
+  cur = phCall({ plan_hash: "h2", goal: "Book two cleanings" });
+  FakeEventSource.instances[0]._serverFrame("phone_call", { type: "phone_call", call_id: "call_1", status: "awaiting_approval", event_seq: 0 });
+  await phHops();
+  const nodes = phWalk(phCards(hub)[0]);
+  assert.ok(nodes.some((n) => n.textContent === "The plan changed — review it again before approving."));
+  assert.ok(nodes.some((n) => n.textContent === "Goal: Book two cleanings"));
+  assert.equal(nodes.find((n) => n.tagName === "INPUT" && n.inputMode === "numeric").value, "123");
 });

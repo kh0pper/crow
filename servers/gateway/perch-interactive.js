@@ -3125,6 +3125,36 @@ export function createInteractiveEngine({
     return { stopped: live.length };
   }
 
+  /**
+   * Phone card hook (spec 2026-10-01 §4.1). A card frame is a gateway-built
+   * POINTER ({type:"phone_call", call_id, status, event_seq}); the client
+   * fetches the row itself. Rules:
+   *  - RESIDENT sessions only — sessions.get, never resolveSession: showing a
+   *    card must never adopt a row or wake a child.
+   *  - I3: the caller names the bot the call belongs to and the frame goes out
+   *    only when this session is that bot's. That stops a forged
+   *    X-Crow-Actor-Thread and accidental mismatches; it cannot stop a child
+   *    that forges BOTH actor headers (spec "Known limits").
+   *  - Allowlisted types, primitive fields only: this hook can never inject a
+   *    chat text/reply/ask_user frame or a nested payload.
+   *  - Not persisted: cards are rebuilt from the DB on load.
+   */
+  const CARD_FRAME_TYPES = new Set(["phone_call"]);
+  function notifyCard(sessionId, frame, opts) {
+    const s = sessions.get(String(sessionId));
+    if (!s) return { delivered: false, botId: null, reason: "no_session" };
+    const want = opts && opts.botId != null ? String(opts.botId) : null;
+    if (!want) return { delivered: false, botId: s.botId, reason: "bot_required" };
+    if (want !== s.botId) return { delivered: false, botId: s.botId, reason: "bot_mismatch" };
+    if (!frame || typeof frame !== "object" || !CARD_FRAME_TYPES.has(frame.type)) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    const out = {};
+    for (const [k, v] of Object.entries(frame)) {
+      if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+    }
+    emit(s, out);
+    return { delivered: true, botId: s.botId };
+  }
+
   return {
     spawn,
     message,
@@ -3142,6 +3172,8 @@ export function createInteractiveEngine({
     get,
     list,
     stopAll,
+    /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
+    notifyCard,
     /** Track 3 Task 6: exported so the dispatch ROUTE can 409 a card BEFORE
      * ever reaching spawn() — see the module header. */
     checkCardFree,
@@ -3198,8 +3230,26 @@ export function getInteractiveEngine({ createIfMissing = true } = {}) {
   return singleton;
 }
 
+/** The one default notifyCard hook for callers outside the engine (the phone
+ * MCP mount and the phone panel router; spec 2026-10-01 §4.2). Looks the
+ * engine up per push and NEVER creates one: with no engine in this process the
+ * frame is dropped as `no_engine` (the card appears when the chat is opened).
+ * The engine's own notifyCard enforces I3. */
+export async function notifyCardToResident(sid, frame, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.notifyCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
+  return eng.notifyCard(sid, frame, opts);
+}
+
 /** Test-only: drop the singleton so one test can never leak an engine (or a
  * live child) into the next. */
 export function _resetInteractiveEngineForTest() {
   singleton = null;
+}
+
+/** Test-only: install a harness-built engine as the process singleton, so a
+ * test can prove that another module's appImport (the phone bundle's default
+ * notifyCard) reaches THIS instance — spec 2026-10-01 S7. */
+export function _setInteractiveEngineForTest(engine) {
+  singleton = engine;
 }

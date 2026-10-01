@@ -26,3 +26,9 @@ export async function stepUpOk(code, deps) {
   const secret = await d.getTotpSecret();
   return !!secret && d.verifyTotp(String(code), secret);
 }
+
+/** Whether an approval needs a 2FA code right now (drives the card's 2FA field). */
+export async function totpRequired(deps) {
+  const d = deps || (await defaultDeps());
+  return !!(await d.is2faEnabled());
+}

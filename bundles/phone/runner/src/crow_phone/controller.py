@@ -30,15 +30,21 @@ def classify(text: str) -> str:
 
 
 class CallController:
-    def __init__(self, call_id, plan, owner_name, line, brain, emit, verify, max_seconds=1200, ring_timeout=60, farend_timeout=20):
+    def __init__(self, call_id, plan, owner_name, line, brain, emit, verify, max_seconds=1200, ring_timeout=60, farend_timeout=None, initial_silence=6):
         self.call_id, self.plan, self.owner = call_id, plan, owner_name
         self.line, self.brain, self._emit, self.verify = line, brain, emit, verify
-        self.max_seconds, self.ring_timeout, self.farend_timeout = max_seconds, ring_timeout, farend_timeout
+        self.max_seconds, self.ring_timeout = max_seconds, ring_timeout
+        # Per line (spec 2026-10-01 §4.5): an owner typing on a phone needs far longer than a script.
+        self.farend_timeout = farend_timeout if farend_timeout is not None else getattr(line, "farend_timeout", 20)
+        self.initial_silence = initial_silence
         self.lang = "es" if plan.get("language") == "es" else "en"
         self.state = ToolState(plan)
         self.messages = [{"role": "system", "content": system_prompt(plan, owner_name)}]
         self._stop = False
         self._disclosed_for_segment = False
+        # Set when we spoke first into initial silence and nobody has answered yet:
+        # the first far-end line after that may still be an automated menu.
+        self._greeted_unanswered = False
         self._n = 0
 
     def request_stop(self):
@@ -103,6 +109,7 @@ class CallController:
 
     async def _converse(self):
         deadline = time.monotonic() + self.max_seconds
+        first_wait = True
         while True:
             if self._stop:
                 return self.result("failed", error="stopped by owner")
@@ -112,13 +119,26 @@ class CallController:
                     await self._ensure_disclosed()
                     await self.say(policy.callback_line(self.lang))
                 return self.result("needs_callback", "time limit reached")
-            text = await self.line.next_farend(min(self.farend_timeout, remaining))
+            wait = self.initial_silence if first_wait else self.farend_timeout
+            text = await self.line.next_farend(min(wait, remaining))
             if self._stop:
                 return self.result("failed", error="stopped by owner")
             if text is None:
                 if time.monotonic() >= deadline:
                     continue
+                if first_wait:
+                    # Spec 2026-10-01 §4.5: silence right after answering -> speak first.
+                    # The templated disclosure ALWAYS precedes the greeting; nothing
+                    # model-generated is spoken here.
+                    first_wait = False
+                    await self._ensure_disclosed()
+                    await self.say(policy.greeting(self.lang))
+                    self._greeted_unanswered = True
+                    continue
                 return self.result("needs_callback", "the other side went silent") if self.state.mode != "hold" else self.result("needs_callback", "left on hold")
+            first_wait = False
+            greeted = self._greeted_unanswered
+            self._greeted_unanswered = False
             self.emit("farend", {"text": text})
             kind = classify(text)
             if kind == "sit":
@@ -131,8 +151,9 @@ class CallController:
                 self.emit("state", {"state": "on_hold"})
                 continue
             # A menu is only honored before we have started talking to a human in this segment;
-            # a person saying "press 9" mid-conversation is the callee-injection case.
-            if kind == "ivr" and not self._disclosed_for_segment:
+            # a person saying "press 9" mid-conversation is the callee-injection case. The one
+            # exception: the very first line after our speak-first greeting (a slow IVR).
+            if kind == "ivr" and (not self._disclosed_for_segment or greeted):
                 self.state.mode = "ivr"
                 self.state.menu_text = text
             else:
