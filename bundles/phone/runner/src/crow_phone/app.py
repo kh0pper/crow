@@ -36,7 +36,7 @@ def make_app(
     secret = secret if secret is not None else os.environ.get("PHONE_RUNNER_SECRET", "")
     data_dir = Path(data_dir or os.environ.get("PHONE_DATA_DIR", "/data"))
     gateway = os.environ.get(
-        "PHONE_GATEWAY_URL", "http://host.docker.internal:3001"
+        "PHONE_GATEWAY_URL", "http://127.0.0.1:3001"
     ).rstrip("/")
     log = EventLog(data_dir / "events.db")
     # A call that was running when the runner died can never finish now: close it

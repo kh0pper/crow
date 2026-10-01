@@ -25,6 +25,9 @@ Calls run on a **simulated line**: you type what the business says ("Business sa
 and watch the assistant respond. This lets you try the whole flow safely. The real
 phone line (your own phone over Bluetooth) comes in the next release.
 
+## Networking
+The phone runner uses host networking so it can reach Crow and your local models, but it listens on `127.0.0.1:3065` only and opens no network ports to other machines. Because host networking is a privileged capability, installing the bundle asks for your explicit consent.
+
 ## Safety rails
 - Only US/Canada business numbers. Never 911 or other N11 codes, 900/976, or your own number.
 - The assistant cannot press keys except in automated menus, cannot agree to anything

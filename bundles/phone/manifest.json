@@ -11,6 +11,10 @@
   "docker": { "composefile": "docker-compose.yml" },
   "panel": "panel/phone.js",
   "panelRoutes": "panel/routes.js",
+  "privileged": true,
+  "install_consent_messages": {
+    "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines."
+  },
   "ports": [3065],
   "requires": { "env": ["PHONE_RUNNER_SECRET"], "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
