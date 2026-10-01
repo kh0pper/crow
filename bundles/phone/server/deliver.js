@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { appImport } from "./app-root.js";
+import { audit, perchSessionBot } from "./store.js";
 
 const LABEL = { booked: "Booked", info_gathered: "Information gathered", needs_callback: "Needs a callback", no_answer: "No answer",
   voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
@@ -44,7 +45,7 @@ async function ensureBotJobs(db) {
  *  carries no model-written summary. A bot-delivery failure THROWS so the sweep
  *  retries it. */
 export async function deliverPhoneResult(db, call, deps) {
-  if (!(call.delivery_attempts > 0)) {
+  if (!(call.delivery_attempts > 0) && !(call.delivery_busy > 0)) { // first attempt only — transient deferrals are retries too
     try {
       await deps.notify(db, { title: "Phone: " + ownerText(call), body: null,
         type: "system", source: "phone", priority: "normal", action_url: `/dashboard/phone?call=${call.id}` });
@@ -58,7 +59,20 @@ export async function deliverPhoneResult(db, call, deps) {
 
   if (d.kind === "perch") {
     if (!deps.perchMessage) return { via: "notify_only" };
-    await deps.perchMessage(d.session_id, goal); // throws → sweep retries
+    // S2 (spec 2026-10-01): inject the result only into a session of the bot that
+    // created the call. Like I3 this stops a forged THREAD header and accidental
+    // mismatches, not a child that forges both actor headers ("Known limits").
+    // A failed lookup (SQLITE_BUSY, IOERR, …) is TRANSIENT, not "no owner": defer
+    // with the sweep's backoff; no mismatch audit, never marked delivered.
+    let owner;
+    try { owner = await perchSessionBot(db, d.session_id); }
+    catch (e) { throw Object.assign(new Error(`perch session lookup failed: ${e.message}`), { code: "db_busy", cause: e }); }
+    if (owner !== botId) {
+      try { await audit(db, call.id, "service", "deliver_target_mismatch", { session_id: String(d.session_id), expected_bot: botId, session_bot: owner }); }
+      catch (e) { console.warn(`[phone] deliver mismatch audit failed for ${call.id}: ${e.message}`); }
+      return { via: "notify_only" };
+    }
+    await deps.perchMessage(d.session_id, goal); // throws → sweep retries (transient codes back off)
     return { via: "perch" };
   }
   if (d.kind === "gateway") {
@@ -71,4 +85,17 @@ export async function deliverPhoneResult(db, call, deps) {
     return { via: "bot_job", jobId };
   }
   return { via: "notify_only" };
+}
+
+/** The Perch delivery path (spec 2026-10-01 C2). The engine singleton is created
+ *  lazily by the first Perch request, so after a gateway restart it can be
+ *  missing for a while: that is TRANSIENT (code no_engine), not a failure. Engine
+ *  errors (turn_in_progress, cycle_busy, interactive_capacity, pi_capacity, …)
+ *  pass through with their .code. Never creates the engine. */
+export function enginePerchMessage(getEngine) {
+  return async (sid, text) => {
+    const eng = getEngine({ createIfMissing: false });
+    if (!eng) throw Object.assign(new Error("no perch engine"), { code: "no_engine" });
+    await eng.message(sid, text, []);
+  };
 }

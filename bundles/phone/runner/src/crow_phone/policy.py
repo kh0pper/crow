@@ -89,6 +89,14 @@ def callback_line(lang: str) -> str:
     return _CALLBACK["es" if lang == "es" else "en"]
 
 
+_GREETING = {"en": "Hello?", "es": "¿Hola?"}
+
+
+def greeting(lang: str) -> str:
+    """Spoken after the disclosure when the business is silent after answering (spec 2026-10-01 §4.5)."""
+    return _GREETING["es" if lang == "es" else "en"]
+
+
 def booking_within_limits(booking: dict, limits: dict) -> tuple[bool, str]:
     try:
         # Handle None inputs
