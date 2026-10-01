@@ -153,8 +153,13 @@ Always push the terminal card frame immediately, so the owner sees the outcome e
 hears about it. The owner notification fires once.
 
 ### 4.7 Versioning
-Bump `bundles/phone/manifest.json` version (0.1.0 → 0.2.0) so installed copies refresh. Runner image
-rebuild happens on Start/restart (compose has `build:`).
+Bump `bundles/phone/manifest.json` version (0.1.0 → 0.2.0) so installed copies refresh. On the
+version change the gateway's refresh (`refreshVersionedBundle`) copies `server/`, `panel/` and the
+compose `build:` context directories (here `runner/`) into the installed copy; it does not rebuild
+anything. A gateway restart does not run compose, and `restart: unless-stopped` keeps the old image,
+so after upgrading Crow the Phone runner is rebuilt the next time you Restart/Start Phone in
+Extensions (`up -d --build`). Do that once after an upgrade, when no call is live (recreating the
+container ends a running call).
 
 ## 5. Testing
 - Node (bundle + core): I1 (card approve path hits the same route; SSO session refused), I3 (forged

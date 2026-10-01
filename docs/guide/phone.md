@@ -54,6 +54,11 @@ Approving in the card uses the same gates as the Phone panel:
   local login **and** your current 2FA code, the same as approving calls. The local
   model setting must name a non-cloud provider.
 
+## After upgrading Crow
+Upgrading Crow updates the Phone runner's source but does not rebuild it. The runner is rebuilt the
+next time you **Restart** (or **Start**) Phone in Extensions. Do that once after an upgrade, when no
+call is live: restarting the runner ends a call in progress.
+
 ## This release
 Calls run on a **simulated line**: you type what the business says ("Business says…")
 and watch the assistant respond. You get two minutes for each line. If you say nothing for
