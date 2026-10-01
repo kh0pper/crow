@@ -171,7 +171,12 @@ function mapEngineError(res, err) {
   // would throw inside an async catch block.
   const code = err && err.code;
   const mapped = code && Object.hasOwn(ERROR_MAP, code) ? ERROR_MAP[code] : null;
-  if (mapped) return jsonError(res, mapped[0], mapped[1]);
+  // `detail` is the engine's human reason (pi_gone: pi's own exit message,
+  // e.g. an unknown provider) so the drawer can say WHY, not just "pi_gone".
+  if (mapped) {
+    const detail = err && typeof err.detail === "string" && err.detail ? { detail: err.detail.slice(0, 1000) } : undefined;
+    return jsonError(res, mapped[0], mapped[1], detail);
+  }
   return jsonError(res, 500, String((err && err.message) || err));
 }
 

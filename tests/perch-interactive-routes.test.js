@@ -445,6 +445,20 @@ test("POST /interactive/:sid/message maps turn_in_progress, no_such_session (404
   assert.equal(r.body.error, "stopped");
 });
 
+test("POST /interactive/:sid/message: pi_gone carries the engine's detail (pi's exit reason) for the drawer", async () => {
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("pi_gone"), { detail: 'pi exited (code 1) — pi said: Error: Unknown provider "Qwen Cloud"' });
+  };
+  const r = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "pi_gone");
+  assert.match(r.body.detail, /Unknown provider "Qwen Cloud"/);
+
+  engineImpl.message = async () => { throw engineErr("turn_in_progress"); };
+  const r2 = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r2.body.detail, undefined, "no detail key when the engine gave none");
+});
+
 // ---------------------------------------------------------------------------
 // POST /interactive/:sid/steer (Task 13, controller ruling)
 // ---------------------------------------------------------------------------

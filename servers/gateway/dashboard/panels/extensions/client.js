@@ -103,16 +103,42 @@ export function extensionsClientJS(lang) {
             var consentToken = null;       // populated on /consent-challenge if required
             var consentSatisfied = true;   // false until user passes the gate (only when consent required)
             var installBtnRef = null;      // forward ref so consent UI can enable/disable it
+            var requiredNames = [];        // install-BLOCKING keys, from the server (consent-challenge install_required)
+            var requiredNoteRef = null;    // "Required: X, Y" line next to the button
 
+            // Install-blocking env vars still blank (whitespace counts as blank — the
+            // server refuses those with 400 missing_required_env). The list is the
+            // SERVER's: keys compose hard-fails on (a manifest "required" alone does
+            // not block — a post-install token is configured later). Install mode
+            // only: a configureOnly save may legitimately fill just some keys.
+            function missingRequired() {
+              if (configureOnly) return [];
+              return requiredNames.filter(function(n) {
+                var inp = document.getElementById("env_" + n);
+                return !inp || !String(inp.value || "").trim();
+              });
+            }
+
+            // BOTH gates must hold: consent (when the bundle requires it) and every
+            // required field filled.
             function refreshInstallBtnState() {
               if (!installBtnRef) return;
-              installBtnRef.disabled = !consentSatisfied;
+              var missing = missingRequired();
+              installBtnRef.disabled = !consentSatisfied || missing.length > 0;
+              if (requiredNoteRef) {
+                requiredNoteRef.style.display = missing.length > 0 ? "block" : "none";
+                requiredNoteRef.textContent = '${tJs("extensions.requiredMissing", lang)}' + " " + missing.join(", ");
+              }
             }
 
             // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
             if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
               .then(function(r) { return r.json(); })
               .then(function(data) {
+                if (data && Array.isArray(data.install_required)) {
+                  requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
+                  refreshInstallBtnState();
+                }
                 if (!data || data.required === false) return; // no consent required
                 consentSatisfied = false; // gate the install button
                 refreshInstallBtnState();
@@ -293,6 +319,8 @@ export function extensionsClientJS(lang) {
                 input.type = ev.secret ? "password" : "text";
                 input.id = "env_" + ev.name;
                 input.value = ev.default || "";
+                if (ev.required) input.setAttribute("aria-required", "true");
+                input.addEventListener("input", function() { refreshInstallBtnState(); });
                 input.placeholder = ev.description || "";
                 input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
@@ -310,6 +338,12 @@ export function extensionsClientJS(lang) {
             statusDiv.id = "install-status";
             statusDiv.style.cssText = "font-size:0.85rem;margin:0.75rem 0;display:none";
             frag.appendChild(statusDiv);
+
+            var requiredNote = document.createElement("div");
+            requiredNote.className = "ext-install__required";
+            requiredNote.style.cssText = "font-size:0.8rem;color:var(--crow-warning, #f0ad4e);margin:0.5rem 0;display:none";
+            frag.appendChild(requiredNote);
+            requiredNoteRef = requiredNote;
 
             var btnRow = document.createElement("div");
             btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem";
@@ -383,6 +417,8 @@ export function extensionsClientJS(lang) {
 
             installBtn.addEventListener("click", function() {
               if (configureOnly) { submitConfigureOnly(); return; }
+              // Defense in depth: a disabled button can still be clicked programmatically.
+              if (!consentSatisfied || missingRequired().length > 0) { refreshInstallBtnState(); return; }
 
               installBtn.disabled = true;
               installBtn.textContent = '${tJs("extensions.installing", lang)}';
@@ -1133,6 +1169,22 @@ export function extensionsClientJS(lang) {
             });
             actions.appendChild(installAction);
           } else {
+            // An installed bundle that still has unmet required config gets a
+            // Configure button here too — it reuses the installed card's
+            // .bundle-configure flow, whose data-keys are the SERVER-computed
+            // needs_config (no card button => nothing missing => no button).
+            var cardItem = findInstalledCard(addon.id);
+            var cardConfigure = cardItem ? cardItem.querySelector(".bundle-configure") : null;
+            if (cardConfigure) {
+              var configureAction = document.createElement("button");
+              configureAction.className = "btn btn-primary ext-detail__configure";
+              configureAction.textContent = '${tJs("extensions.configure", lang)}';
+              configureAction.addEventListener("click", function() {
+                hideModal();
+                cardConfigure.click();
+              });
+              actions.appendChild(configureAction);
+            }
             var installedBadge = document.createElement("span");
             installedBadge.className = "badge badge--published";
             installedBadge.style.cssText = "display:flex;align-items:center;padding:0.3rem 0.8rem;font-size:0.85rem";

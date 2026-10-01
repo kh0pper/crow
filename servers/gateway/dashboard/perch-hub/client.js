@@ -308,6 +308,7 @@ export function perchHubJs(lang = "en") {
      are safe inside single-quoted literals. */
   var SESSION_GONE='${tJs("perch.sessionGone", lang)}';
   var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
+  var BOT_START_FAILED='${tJs("perch.botStartFailed", lang)}';
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
   var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
   var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
@@ -1302,6 +1303,7 @@ export function perchHubJs(lang = "en") {
          composer state is NOT buffered: it never appears in the batch, and
          delaying Steer/Stop back to "sendable" is worse than one frame of
          lag on the prose. */
+      lastSent=null;                  /* a reply proves the last send reached the bot */
       if(!histSettled) histBuf.push({ reply:true, text:d.text, html:d.html, turnId:d.turnId });
       else {
         var already=d.turnId?(renderedTurn===d.turnId):turnRendered;
@@ -1318,7 +1320,13 @@ export function perchHubJs(lang = "en") {
       renderFileCard(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
-    on('error',function(d){ appendActivity(d.text||'error'); });
+    on('error',function(d){
+      appendActivity(d.text||'error');
+      /* The child DIED (pi exited at spawn — an unknown provider, a missing
+         model — or mid-turn). That is not rail chrome: the operator's message
+         went nowhere, so say why where they are reading. */
+      if(d.reason==='pi_exit'&&lastSent&&lastSent.sid===sid) showSendFailure(sid,d.text||'');
+    });
     on('plan_state',function(d){
       var t=planStateText(d.state); if(t) appendActivity(t);
       planState=(d&&d.state&&typeof d.state==='object')?d.state:null;
@@ -1508,6 +1516,7 @@ export function perchHubJs(lang = "en") {
      dies with the transcript everywhere toolChips does (same seam). */
   var fileSeen={};
   function renderTextFrame(d){
+    lastSent=null;        /* the bot answered: the last send reached it */
     appendMessage('bot','bot',d.text,d.html);
     if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
   }
@@ -1548,6 +1557,7 @@ export function perchHubJs(lang = "en") {
       }
       renderTextFrame(f);
     });
+    if(current.sid) replayUnsent(current.sid);
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -1780,10 +1790,43 @@ export function perchHubJs(lang = "en") {
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
     pendingFilePaths=[];
+    lastSent={sid:mySid,text:text};
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       if(current.sid!==mySid) return;
-      if(r.status===409){ setTurnInFlight(true); return; }   /* raced a turn start */
-      if(!r.ok) appendNote((r.j&&r.j.error)||SEND_FAILED);
+      var code=r.j&&r.j.error;
+      /* Only a REAL turn race means "a turn is running" — every other 409
+         (pi_gone above all: the bot's child died before the turn started) was
+         read as one, flipping the composer to Steer and saying nothing. */
+      if(r.status===409&&(code==='turn_in_progress'||!code)){ setTurnInFlight(true); return; }
+      if(code==='pi_gone'){ showSendFailure(mySid,(r.j&&r.j.detail)||code); return; }
+      if(!r.ok) appendNote(code||SEND_FAILED);
+    });
+  }
+
+  /* A send whose bot could not start. The operator's own words STAY in the
+     transcript (a reconnect's resyncHistory rebuilds it from pi's on-disk
+     transcript, which never received them, so they are replayed from here),
+     followed by the reason.
+     Only while a send is OUTSTANDING: an exit with nothing pending (an idle
+     child reaped, an OOM after the bot already answered) is not a send
+     failure and stays on the Activity rail. One failure per send: the POST's
+     pi_gone and the stream's pi_exit frame describe the same death, and
+     whichever lands first consumes lastSent. */
+  var lastSent=null;      /* {sid,text} of the last message sent, until a reply proves pi got it */
+  var unsent={};          /* sid -> [{text,note}] messages that never reached the bot */
+  function showSendFailure(sid,detail){
+    if(!lastSent||lastSent.sid!==sid) return;
+    var sent=lastSent.text;
+    lastSent=null;
+    var note=BOT_START_FAILED+' '+String(detail||'');
+    appendNote(note);
+    if(sent==null||sent==='') return;
+    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note});
+  }
+  function replayUnsent(sid){
+    (unsent[sid]||[]).forEach(function(u){
+      appendMessage('user','you',u.text);
+      appendNote(u.note);
     });
   }
 

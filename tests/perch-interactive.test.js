@@ -255,7 +255,7 @@ function makeEngine(o = {}) {
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
-    log: () => {},
+    log: o.log || (() => {}),
   });
   return { engine, clock, bridge, env, state: bridge._state };
 }
@@ -539,7 +539,7 @@ test("steer: refused with pi_gone when the child's exit code is set but attachEx
   // clear s.turn too, making no_turn (not pi_gone) the observed refusal (see
   // the sibling no_turn test above). This isolates the liveness check itself.
   pi._exitCode = 1;
-  await assert.rejects(() => engine.steer(s.sessionId, "still there?"), (e) => e.code === "pi_gone");
+  await assert.rejects(() => engine.steer(s.sessionId, "still there?"), (e) => e.code === "pi_gone" && typeof e.detail === "string" && e.detail.length > 0, "steer pi_gone carries a reason for the drawer");
   assert.equal(pi.sent.length, 0, "nothing is sent to a dead child");
 });
 
@@ -611,6 +611,46 @@ test("D1: a child that dies WHILE the pre-turn stats call is in flight is caught
     (e) => e.code === "pi_gone"
   );
   assert.equal(pi.turns.length, 0, "promptTurn is never called on the now-dead child");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+});
+
+test("a child that dies at spawn (unknown provider) refuses the message WITH pi's reason, flags the error frame pi_exit, and logs it to the gateway log", async () => {
+  const lines = [];
+  const { engine, state } = makeEngine({ log: (m) => lines.push(String(m)) });
+  const s = await spawned(engine);
+  state.instances[0].exit(1);                 // park it: the next message must WAKE
+  await tick();
+  const sink = await collect(engine, s.sessionId);
+
+  const reason = 'pi exited (code 1) before responding — pi said: Error: Unknown provider "Qwen Cloud"';
+  state.piScript = (pi, idx) => {
+    if (idx !== 1) return;
+    pi._exitError = () => new Error(reason);
+    pi.exit(1);                               // dies the moment it is spawned
+  };
+  await assert.rejects(
+    () => engine.message(s.sessionId, "hello?"),
+    (e) => e.code === "pi_gone" && /Unknown provider "Qwen Cloud"/.test(String(e.detail)),
+    "the refusal carries pi's own reason for the drawer to show",
+  );
+  state.piScript = null;
+  await tick();
+
+  const errs = sink.ofType("error");
+  assert.ok(errs.some((e) => e.reason === "pi_exit" && /Unknown provider/.test(e.text)),
+    "the stream's error frame is flagged as a child death, with the reason");
+  assert.ok(lines.some((l) => l.includes(s.sessionId) && /pi exited: .*Unknown provider "Qwen Cloud"/.test(l)),
+    "the gateway log names the exit reason, not just world rebuilt / model warm");
+
+  // M6: the logged reason is capped (pi stderr can echo provider error bodies).
+  const { engine: e2, state: st2 } = makeEngine({ log: (m) => lines.push(String(m)) });
+  const s2 = await spawned(e2, "botty2");
+  st2.instances[0]._exitError = () => new Error("y".repeat(5000) + "END");
+  st2.instances[0].exit(1);
+  await tick();
+  const logged = lines.find((l) => l.startsWith(s2.sessionId + ": pi exited: "));
+  assert.ok(logged && logged.endsWith("END") && logged.length <= s2.sessionId.length + ": pi exited: ".length + 2000,
+    "the tail is kept, capped at 2000 chars");
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 });
 
