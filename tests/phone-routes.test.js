@@ -212,3 +212,21 @@ test("stop on an active call only asks the runner (the runner's result finalizes
   assert.equal((await post(`/api/phone/calls/${id}/stop`, {})).status, 200);
   assert.equal((await store.getCall(s.db, id)).status, "live");
 });
+
+test("call reads, settings read and far-end input require a local password session", async () => {
+  const id = await newPlan();
+  await s.db.execute({ sql: "UPDATE phone_calls SET status='live' WHERE id=?", args: [id] });
+  const get = (path, session) => fetch(s.base + path, { headers: { "x-test-session": session } });
+  for (const path of ["/api/phone/calls", `/api/phone/calls/${id}`, "/api/phone/settings"]) {
+    const r = await get(path, "sso");
+    assert.equal(r.status, 403, path);
+    assert.equal((await r.json()).error, "local_login_required");
+    assert.equal((await get(path, "local")).status, 200, path);
+  }
+  const before = s.farend.length;
+  const r = await post(`/api/phone/calls/${id}/farend`, { text: "steer" }, "sso");
+  assert.equal(r.status, 403);
+  assert.equal((await r.json()).error, "local_login_required");
+  assert.equal(s.farend.length, before);
+  assert.equal((await post(`/api/phone/calls/${id}/farend`, { text: "ok" }, "local")).status, 200);
+});

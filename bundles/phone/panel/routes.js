@@ -92,11 +92,18 @@ export default function phoneRouter(authMiddleware, seams = {}) {
 
   router.use("/api/phone", authMiddleware, csrfMw);
 
+  const localOnly = async (req, res) => {
+    if (await authority.isLocalDashboardSession(db, req.dashboardSession)) return true;
+    res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to use Phone (peer sign-in is not enough) (peer sign-in is not enough)." });
+    return false;
+  };
   router.get("/api/phone/calls", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
     const calls = await mods.store.listCalls(db, { status: req.query.status || undefined, limit: 100 });
     res.json({ calls: calls.map(({ token_hash, approved_by_session, ...c }) => c) });
   }));
   router.get("/api/phone/calls/:id", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
     const c = await mods.store.getCall(db, req.params.id);
     if (!c) return res.status(404).json({ error: "not_found" });
     const { token_hash, approved_by_session, ...safe } = c; res.json({ call: safe });
@@ -113,11 +120,6 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     await mods.store.approveCall(db, req.params.id, { session: req.dashboardSession, allowCloud: !!b.allow_cloud, edits: b.edits || undefined, runAfter: b.run_after || undefined });
     res.json({ ok: true });
   }));
-  const localOnly = async (req, res) => {
-    if (await authority.isLocalDashboardSession(db, req.dashboardSession)) return true;
-    res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to change call plans (peer sign-in is not enough)." });
-    return false;
-  };
   router.post("/api/phone/calls/:id/reject", wrap(async (req, res) => {
     if (!(await localOnly(req, res))) return;
     await mods.store.rejectCall(db, req.params.id); res.json({ ok: true });
@@ -126,6 +128,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (!(await localOnly(req, res))) return;
     await mods.store.editCall(db, req.params.id, (req.body || {}).edits || {}); res.json({ ok: true });
   }));
+  // Stop is gated only by a dashboard session (any, incl. peer SSO): stopping a call is always safe.
   // Stop always ends the call: ask the runner to stop; if the runner says it is
   // not running this call (orphaned by a runner restart), finalize it here.
   router.post("/api/phone/calls/:id/stop", wrap(async (req, res) => {
@@ -140,6 +143,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     res.json({ ok: true });
   }));
   router.post("/api/phone/calls/:id/farend", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
     const c = await mods.store.getCall(db, req.params.id);
     if (!c || c.status !== "live") return res.status(409).json({ error: "not_live" });
     const b = req.body || {};
@@ -148,7 +152,10 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     await runner.farend(req.params.id, text); res.json({ ok: true });
   }));
 
-  router.get("/api/phone/settings", wrap(async (req, res) => { res.json(await readSettings(db)); }));
+  router.get("/api/phone/settings", wrap(async (req, res) => {
+    if (!(await localOnly(req, res))) return;
+    res.json(await readSettings(db));
+  }));
   router.post("/api/phone/settings", wrap(async (req, res) => {
     const b = req.body || {};
     if (!(await authority.isLocalDashboardSession(db, req.dashboardSession))) return res.status(403).json({ error: "local_login_required", message: "Sign in on this Crow with your password to change Phone settings." });
