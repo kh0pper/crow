@@ -22,8 +22,8 @@ import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync } from "node:fs";
+import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
@@ -387,6 +387,58 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
 }
 
 /**
+ * The compose `build:` contexts of a bundle (`build: ./runner` or
+ * `build:\n  context: ./runner`), read from the compose TEXT the same way the
+ * rest of this file reads compose (line regexes, no YAML parser). Returns only
+ * contexts that are relative, resolve to a directory STRICTLY inside the
+ * bundle dir (never the bundle root ".": that would sweep in compose/.env/
+ * data), stay inside it after symlink resolution, and are not also a volume
+ * bind source (refresh must never mutate a live container's mounts). Each is
+ * returned as a bundle-relative path.
+ */
+function composeBuildContexts(appSrc) {
+  let text;
+  try { text = readFileSync(join(appSrc, "docker-compose.yml"), "utf8"); } catch { return []; }
+  const lines = text.split(/\r?\n/);
+  const raw = [];
+  const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s+)build:\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const inline = clean(m[2]);
+    if (inline && !inline.startsWith("{")) { raw.push(inline); continue; }
+    const indent = m[1].length;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j].trim() || /^\s*#/.test(lines[j])) continue;
+      const ind = /^(\s*)/.exec(lines[j])[1].length;
+      if (ind <= indent) break;
+      const c = /^\s+context:\s*(.+)$/.exec(lines[j]);
+      if (c) { raw.push(clean(c[1])); break; }
+    }
+  }
+  let rootReal;
+  try { rootReal = realpathSync(appSrc); } catch { return []; }
+  const out = new Set();
+  for (const ctx of raw) {
+    if (!ctx || isAbsolute(ctx) || ctx.includes("$") || ctx.includes("\\")) continue;
+    const rel = relativePath(appSrc, resolvePath(appSrc, ctx));
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
+    const src = join(appSrc, rel);
+    let real;
+    try { real = realpathSync(src); if (!statSync(real).isDirectory()) continue; } catch { continue; }
+    const realRel = relativePath(rootReal, real);
+    if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
+    const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`^\\s*-\\s+["']?(\\./)?${escaped}/?(:|["']?\\s*$)`, "m").test(text)) continue;
+    out.add(rel);
+  }
+  return [...out];
+}
+
+/** Local dev/test droppings never copied with a build context. */
+const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", ".git"]);
+
+/**
  * True iff the repo package.json declares a dependency NAME absent from the
  * installed bundle's node_modules/ (R1/R2: narrow, added-dep-only; a removed
  * dep or a version-range-only bump must NOT fire a boot-time npm install), OR
@@ -502,6 +554,24 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
 
   for (const item of new Set([...topFiles, ...dirs, ...declaredRoots])) {
     if (copyBundleRefreshItem(appSrc, destDir, item)) touched.push(item);
+  }
+
+  // Docker bundles: compose `build:` context dirs (e.g. phone's runner/) are
+  // build INPUTS, not bind mounts, so the live-mount rationale above does not
+  // apply — without this a version bump never ships the image's source.
+  // No automatic rebuild: Extensions Restart/Start runs `up -d --build`.
+  if (isDocker) {
+    const contexts = composeBuildContexts(appSrc);
+    for (const rel of contexts) {
+      cpSync(join(appSrc, rel), join(destDir, rel), {
+        recursive: true,
+        filter: (src) => !BUILD_CONTEXT_SKIP.has(basename(src)),
+      });
+      touched.push(`build:${rel}`);
+    }
+    if (contexts.length) {
+      console.log(`[bundles] ${id}: build source refreshed (${contexts.join(", ")}) — Restart/Start it in Extensions to rebuild the image`);
+    }
   }
 
   // Served panel artifacts — exactly as install does (bundles.js ~:1170-1184),

@@ -306,6 +306,75 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
 });
 
 // ---------------------------------------------------------------------------
+// Docker build contexts (phone runner/): a compose `build: ./runner` dir is a
+// build input, so a version bump refreshes it; a context escaping the bundle
+// dir, the bundle root ".", and a context that is also a bind mount are not.
+// ---------------------------------------------------------------------------
+describe("docker build contexts refresh on a version bump", () => {
+  test("build: ./runner is refreshed; ../x and . are ignored; nothing is rebuilt", async () => {
+    const id = "widget-build-ctx";
+    const repoRoot = freshRoot("crowrepo-buildctx-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "B", version: "0.2.0", type: "bundle", category: "misc", description: "d",
+      docker: { composefile: "docker-compose.yml" },
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, [
+      "services:",
+      "  runner:",
+      "    build: ./runner",
+      "  sidecar:",
+      "    build:",
+      "      context: ../x",
+      "      dockerfile: Dockerfile",
+      "  root:",
+      "    build: .",
+      "  mounted:",
+      "    build: ./cfg",
+      "    volumes:",
+      "      - ./cfg:/cfg",
+      "",
+    ].join("\n"));
+    put(repoRoot, `${id}/runner/Dockerfile`, "FROM python:3.12-slim # v2\n");
+    put(repoRoot, `${id}/runner/src/app.py`, "TIMEOUT = 120\n");
+    put(repoRoot, `${id}/runner/.venv/lib/junk.py`, "dev venv\n");
+    put(repoRoot, `${id}/cfg/live.yml`, "repo cfg\n");
+    put(repoRoot, "x/Dockerfile", "outside the bundle\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "0.1.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/runner/src/app.py`, "TIMEOUT = 20\n");
+    put(CROW_HOME, `bundles/${id}/.env`, "SECRET=keep\n");
+    setInstalled([id]);
+
+    const runner = fakeRunner();
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+
+    const dest = destBundleDir(id);
+    assert.equal(readAt(dest, "runner/src/app.py"), "TIMEOUT = 120\n", "runner/ source refreshed");
+    assert.equal(readAt(dest, "runner/Dockerfile"), "FROM python:3.12-slim # v2\n");
+    assert.ok(!existsSync(join(dest, "runner", ".venv")), "local .venv is never copied");
+    assert.ok(!existsSync(join(dest, "..", "x")), "a context escaping the bundle dir is ignored");
+    assert.ok(!existsSync(join(dest, "docker-compose.yml")), "build: . never sweeps in the bundle root");
+    assert.ok(!existsSync(join(dest, "cfg")), "a context that is also a bind mount is not touched");
+    assert.equal(readAt(dest, ".env"), "SECRET=keep\n");
+    assert.equal(runner.calls.length, 0, "no rebuild (or any command) runs on refresh");
+  });
+
+  test("the same version does not touch the build context", async () => {
+    const id = "widget-build-ctx-same";
+    const repoRoot = freshRoot("crowrepo-buildctx-same-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "B", version: "0.2.0", type: "bundle", category: "misc", description: "d", docker: { composefile: "docker-compose.yml" } }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services:\n  runner:\n    build: ./runner\n");
+    put(repoRoot, `${id}/runner/src/app.py`, "TIMEOUT = 120\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "0.2.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/runner/src/app.py`, "TIMEOUT = 20\n");
+    setInstalled([id]);
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Test 4c (C4 Task 3): version-drift on an EXACT-pinned dep also fires npm —
 // today only an added dep NAME does. A range-pinned dep stays presence-only
 // (no version comparison at all), exactly as before.
