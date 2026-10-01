@@ -14,6 +14,8 @@ export function cardFrame(call) {
  *  mismatches — not a child that forges both actor headers (spec "Known
  *  limits"). A mismatch shows no card; the call still appears in the Phone
  *  panel, and ONE audit row records it. Never throws. */
+let warnedHookError = false;
+
 export async function pushCallCard(db, call, notifyCard) {
   if (!notifyCard) return { delivered: false, reason: "no_hook" };
   if (!call) return { delivered: false, reason: "no_call" };
@@ -23,7 +25,10 @@ export async function pushCallCard(db, call, notifyCard) {
   if (!botId) return { delivered: false, reason: "no_bot" };
   let r;
   try { r = await notifyCard(String(d.session_id), cardFrame(call), { botId }); }
-  catch (e) { return { delivered: false, reason: "error", error: e.message }; }
+  catch (e) {
+    if (!warnedHookError) { warnedHookError = true; console.warn(`[phone] card push hook threw for ${call.id}: ${e.message} (logged once per process)`); }
+    return { delivered: false, reason: "error", error: e.message };
+  }
   r = r || { delivered: false, reason: "no_result" };
   if (r.reason === "bot_mismatch") {
     try {

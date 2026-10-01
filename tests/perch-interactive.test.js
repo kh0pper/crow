@@ -45,7 +45,7 @@ const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const LEASE_PATH = join(CROW_HOME, "perch-interactive-leases.json");
 
-let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest;
+let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident;
 
 function raw() {
   return new Database(DB_FILE);
@@ -293,6 +293,7 @@ before(async () => {
   getInteractiveEngine = mod.getInteractiveEngine;
   _resetInteractiveEngineForTest = mod._resetInteractiveEngineForTest;
   _setInteractiveEngineForTest = mod._setInteractiveEngineForTest;
+  notifyCardToResident = mod.notifyCardToResident;
 });
 
 beforeEach(() => {
@@ -2099,4 +2100,11 @@ test("with no engine in the process, pushes are dropped and no_engine is logged 
     await new Promise((r) => http.close(r));
     if (saved === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = saved;
   }
+});
+
+test("notifyCardToResident: no engine in the process -> no_engine, and it never creates one", async () => {
+  assert.equal(getInteractiveEngine({ createIfMissing: false }), null);
+  const r = await notifyCardToResident("perch-x", { type: "phone_call", call_id: "c1", status: "approved", event_seq: 0 }, { botId: "hank" });
+  assert.deepEqual(r, { delivered: false, botId: null, reason: "no_engine" });
+  assert.equal(getInteractiveEngine({ createIfMissing: false }), null, "the helper never mints an engine");
 });

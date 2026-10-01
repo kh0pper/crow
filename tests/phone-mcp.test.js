@@ -260,6 +260,6 @@ test("the gateway mount injects notifyCard from the engine singleton, never crea
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../servers/gateway/boot/mcp-mounts.js", import.meta.url), "utf8");
   assert.match(src, /createPhoneMcpServer\(\{[^}]*notifyCard[^}]*\}\)/);
-  assert.match(src, /getInteractiveEngine\(\{ createIfMissing: false \}\)/);
+  assert.match(src, /const \{ notifyCardToResident \} = await import\("\.\.\/perch-interactive\.js"\)/);
   assert.match(src, /if \(!warnedNoEngine\) \{ warnedNoEngine = true;/);
 });

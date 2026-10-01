@@ -3230,6 +3230,17 @@ export function getInteractiveEngine({ createIfMissing = true } = {}) {
   return singleton;
 }
 
+/** The one default notifyCard hook for callers outside the engine (the phone
+ * MCP mount and the phone panel router; spec 2026-10-01 §4.2). Looks the
+ * engine up per push and NEVER creates one: with no engine in this process the
+ * frame is dropped as `no_engine` (the card appears when the chat is opened).
+ * The engine's own notifyCard enforces I3. */
+export async function notifyCardToResident(sid, frame, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.notifyCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
+  return eng.notifyCard(sid, frame, opts);
+}
+
 /** Test-only: drop the singleton so one test can never leak an engine (or a
  * live child) into the next. */
 export function _resetInteractiveEngineForTest() {

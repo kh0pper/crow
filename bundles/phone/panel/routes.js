@@ -65,11 +65,10 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (!notifyCard) {
       let warnedNoEngine = false;
       notifyCard = async (sid, frame, opts) => {
-        const { getInteractiveEngine } = await appImport("servers/gateway/perch-interactive.js");
-        const eng = getInteractiveEngine({ createIfMissing: false });
-        if (eng && typeof eng.notifyCard === "function") return eng.notifyCard(sid, frame, opts);
-        if (!warnedNoEngine) { warnedNoEngine = true; console.warn("[phone] no Perch engine in this process yet: call cards appear when the chat is opened"); }
-        return { delivered: false, botId: null, reason: "no_engine" };
+        const { notifyCardToResident } = await appImport("servers/gateway/perch-interactive.js");
+        const r = await notifyCardToResident(sid, frame, opts);
+        if (r && r.reason === "no_engine") { if (!warnedNoEngine) { warnedNoEngine = true; console.warn("[phone] no Perch engine in this process yet: call cards appear when the chat is opened"); } }
+        return r;
       };
     }
     if (seams.startDispatcher !== false) {
