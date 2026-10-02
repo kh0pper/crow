@@ -14,7 +14,7 @@
 
 import { createNotification } from "../shared/notifications.js";
 import bus from "../shared/event-bus.js";
-import { markInstanceConnectionSeen } from "../shared/instance-status.js";
+import { handleInstanceConnection } from "./instance-connect.js";
 import { ensureColumn } from "../db.js";
 import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js";
 import {
@@ -808,37 +808,10 @@ export async function initSharingRuntime(managers, helpers) {
   peerManager.onInstanceConnected = async (crowId, conn, remoteInstanceId = null) => {
     console.log(`[sharing] Instance peer connected: ${crowId}`);
 
-    // Find which instance this connection belongs to. Accept status='active'
-    // or 'offline' — a live Hyperswarm connection IS the signal the peer is
-    // up, so treating an offline-but-connected peer as unreachable would
-    // create a chicken-and-egg where sync never initializes and status never
-    // flips to active. Revoked/paused peers stay excluded.
+    // One connection = one instance when the peer advertised its id
+    // (servers/sharing/instance-connect.js, review I2).
     try {
-      const { rows } = await db.execute({
-        sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status IN ('active','offline') AND id != ?",
-        args: [crowId, instanceSyncManager.localInstanceId],
-      });
-
-      for (const inst of rows) {
-        // Initialize feed (idempotent — opens outgoing feed, and incoming feed
-        // too if we already know the peer's feed key from the challenge-response
-        // handshake or from a prior exchange persisted to crow_instances.sync_url).
-        const existingKey = inst.sync_url ? Buffer.from(inst.sync_url, "hex") : null;
-        await instanceSyncManager.initInstance(inst.id, existingKey);
-
-        // Replicate over this connection. Our outgoing feed key was already
-        // piggybacked on the challenge-response JSON message (see peer-manager.js
-        // case "challenge" + getFeedKeyForCrow wiring below).
-        await instanceSyncManager.replicate(inst.id, conn);
-      }
-
-      // Update last_seen on the instance that connected — not on every row
-      // sharing the crow_id (that fan-out kept the retired MPA row 'active'),
-      // and never over a revoked/paused decision.
-      await markInstanceConnectionSeen(db, {
-        matchedIds: rows.map((r) => r.id),
-        remoteInstanceId,
-      });
+      await handleInstanceConnection({ db, instanceSyncManager, crowId, conn, remoteInstanceId });
     } catch (err) {
       console.warn(`[sharing] Instance connection handling failed for ${crowId}:`, err.message);
     }

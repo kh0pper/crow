@@ -19,6 +19,9 @@ test("configuredSelfGatewayUrl: only CROW_PEER_GATEWAY_URL, validated and normal
   assert.equal(configuredSelfGatewayUrl({ CROW_PEER_GATEWAY_URL: "http://0.0.0.0:3001" }), null);
   assert.equal(configuredSelfGatewayUrl({ CROW_PEER_GATEWAY_URL: "not a url" }), null);
   assert.equal(configuredSelfGatewayUrl({ CROW_PEER_GATEWAY_URL: "ftp://x.example" }), null);
+  for (const lo of ["http://localhost:3001", "http://127.0.0.1:3001", "http://[::1]:3001", "https://app.localhost"]) {
+    assert.equal(configuredSelfGatewayUrl({ CROW_PEER_GATEWAY_URL: lo }), null, lo);
+  }
 });
 
 async function withSelfRow(gatewayUrl, fn) {

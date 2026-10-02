@@ -172,13 +172,22 @@ export async function runPostListenSetup(server, app, deps) {
   // Probe and connect to remote Crow instances (federation). Run once at
   // startup, then every 60s — the re-probe refreshes each instance's
   // `last_seen_at` and heals stale-session cases after a peer restarts
-  // (cached mcp-session-id becomes invalid on the other side). For
-  // already-connected instances loadRemoteInstances is effectively a
-  // no-op (the status='connected' guard in the loop short-circuits it),
-  // so re-running is cheap.
-  const runRemoteProbe = () => loadRemoteInstances().catch((err) => {
-    console.warn("[proxy] Remote instance loading:", err.message);
-  });
+  // (cached mcp-session-id becomes invalid on the other side). Already-
+  // connected instances keep their MCP client but still get a /health GET
+  // (up to 5 s each, feeding the nest peers signal), so a cycle can outlast
+  // the interval: the in-flight guard skips a tick rather than overlap.
+  let remoteProbeRunning = false;
+  const runRemoteProbe = async () => {
+    if (remoteProbeRunning) return;
+    remoteProbeRunning = true;
+    try {
+      await loadRemoteInstances();
+    } catch (err) {
+      console.warn("[proxy] Remote instance loading:", err.message);
+    } finally {
+      remoteProbeRunning = false;
+    }
+  };
   runRemoteProbe();
   setInterval(runRemoteProbe, 60_000).unref();
 

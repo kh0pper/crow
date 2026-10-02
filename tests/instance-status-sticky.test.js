@@ -138,7 +138,7 @@ test("no unconditional liveness UPDATE of crow_instances.status remains in serve
 
 // Defect 5: the Paired Instances page promised a revoke action that did not
 // exist. It now renders one per revocable row and runs revokeInstance().
-test("Paired Instances: Revoke renders for peers only and revokes through revokeInstance()", async () => {
+test("Paired Instances: Revoke renders for peers only, refuses self with a flash, and revokes through revokePeer()", async () => {
   const { db, dir } = freshDb();
   const prevData = process.env.CROW_DATA_DIR;
   process.env.CROW_DATA_DIR = dir;
@@ -155,6 +155,8 @@ test("Paired Instances: Revoke renders for peers only and revokes through revoke
       await db.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, is_home, status, auth_token_hash) VALUES (?,?,'c',?,?,'h')", args: [id, name, home, status] });
     }
     const { default: section, canRevokeRow } = await import("../servers/gateway/dashboard/settings/sections/paired-instances.js");
+    const { _setSyncManagerResolverForTest } = await import("../servers/sharing/revoke-peer.js");
+    _setSyncManagerResolverForTest(() => null); // render/row behaviour only; teardown is covered in peer-revoke-teardown.test.js
     assert.equal(canRevokeRow({ id: "peer1", status: "active", is_home: 0 }, "self"), true);
     assert.equal(canRevokeRow({ id: "self", status: "active", is_home: 0 }, "self"), false);
     assert.equal(canRevokeRow({ id: "homey", status: "active", is_home: 1 }, "self"), false);
@@ -166,17 +168,36 @@ test("Paired Instances: Revoke renders for peers only and revokes through revoke
 
     let redirected = null;
     const res = { redirectAfterPost: (u) => { redirected = u; } };
-    // a forged revoke of the local row is refused (no-op), still redirects
+    // a forged revoke of the local row is refused, with an error flash
     await section.handleAction({ req: { body: { instance_id: "self" } }, res, db, action: "revoke_instance" });
     assert.equal((await statusOf(db, "self")).status, "active");
+    assert.equal(redirected, "/dashboard/settings?section=paired-instances&revoke_error=self");
+    const flashHtml = await section.render({ req: { csrfToken: "tok", query: { revoke_error: "self" } }, db, lang: "en" });
+    assert.match(flashHtml, /can't be revoked from here/);
     const handled = await section.handleAction({ req: { body: { instance_id: "peer1" } }, res, db, action: "revoke_instance" });
     assert.equal(handled, true);
-    assert.equal(redirected, "/dashboard/settings?section=paired-instances");
+    assert.equal(redirected, "/dashboard/settings?section=paired-instances&revoked=1");
     const { rows } = await db.execute("SELECT status, auth_token_hash FROM crow_instances WHERE id = 'peer1'");
     assert.equal(rows[0].status, "revoked");
     assert.equal(rows[0].auth_token_hash, null);
   } finally {
     if (prevData === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevData;
+    db.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("heartbeatInstance with a status is liveness-only: never un-revokes, rejects non-liveness values", async () => {
+  const { db, dir } = freshDb();
+  try {
+    await seed(db);
+    const { heartbeatInstance } = await import("../servers/gateway/instance-registry.js");
+    await heartbeatInstance(db, "gone", { status: "active" });
+    assert.equal((await statusOf(db, "gone")).status, "revoked");
+    await heartbeatInstance(db, "down", { status: "active" });
+    assert.equal((await statusOf(db, "down")).status, "active");
+    await assert.rejects(() => heartbeatInstance(db, "live", { status: "revoked" }));
+  } finally {
     db.close?.();
     rmSync(dir, { recursive: true, force: true });
   }

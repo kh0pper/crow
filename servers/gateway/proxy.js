@@ -21,6 +21,7 @@ import { createDbClient } from "../db.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
+import bus from "../shared/event-bus.js";
 
 /** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
 async function probePeerHealth(gatewayUrl) {
@@ -37,6 +38,25 @@ async function probePeerHealth(gatewayUrl) {
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
 export { connectedServers };
+
+/** Drop the federated MCP client for a remote instance (revoke teardown). */
+export function dropRemoteInstance(instanceId) {
+  const key = `instance-${instanceId}`;
+  const entry = connectedServers.get(key);
+  if (!entry) return false;
+  connectedServers.delete(key);
+  try { entry.client?.close?.(); } catch {}
+  return true;
+}
+
+// Revoke teardown (review C1): an in-process revoke drops the peer's live
+// federated client at once. A revoke from another process is caught by the
+// 60 s probe below, which drops connections for rows no longer probed.
+bus.on("crow_instances:row_updated", (evt) => {
+  try {
+    if (evt?.fields?.status === "revoked" && evt.id) dropRemoteInstance(evt.id);
+  } catch {}
+});
 
 /**
  * Resolve the Crow instance home directory. Primary gateway leaves this
@@ -540,6 +560,16 @@ export async function loadRemoteInstances() {
       sql: "SELECT * FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL AND id != ?",
       args: [localId],
     });
+
+    // A connection whose row is no longer probed (revoked, or deleted) is
+    // dropped — otherwise a revoked peer kept a live federated MCP client.
+    const liveIds = new Set(rows.map((r) => r.id));
+    for (const key of [...connectedServers.keys()]) {
+      const entry = connectedServers.get(key);
+      if (entry?.isRemote && entry.instanceId && !liveIds.has(entry.instanceId)) {
+        dropRemoteInstance(entry.instanceId);
+      }
+    }
 
     if (rows.length === 0) return;
 

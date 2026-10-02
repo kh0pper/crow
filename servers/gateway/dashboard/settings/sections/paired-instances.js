@@ -2,8 +2,9 @@
  * Settings Section: Paired Instances (Multi-Instance group)
  *
  * Read-focused view of the crow_instances table with peer status, trust
- * gate, last-seen timestamps, and a per-peer Revoke action (the same
- * revokeInstance() the crow_revoke_instance MCP tool uses). Key rotation is
+ * gate, last-seen timestamps, and a per-peer Revoke action — the same
+ * revokePeer() (servers/sharing/revoke-peer.js) the crow_revoke_instance MCP
+ * tool runs: row + token, feed teardown, notification. Key rotation is
  * not a dashboard action; it runs through the instance-sync rotation flow.
  *
  * Pairing itself happens via the `crow instance pair` CLI — that's the
@@ -15,8 +16,8 @@
 import { escapeHtml } from "../../shared/components.js";
 import { readSetting, writeSetting } from "../registry.js";
 import { t, fill } from "../../shared/i18n.js";
-import { getInstance, revokeInstance, getOrCreateLocalInstanceId } from "../../../instance-registry.js";
-import { createNotification } from "../../../../shared/notifications.js";
+import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
+import { revokePeer } from "../../../../sharing/revoke-peer.js";
 
 function localInstanceIdOrNull() {
   try { return getOrCreateLocalInstanceId(); } catch { return null; }
@@ -48,6 +49,10 @@ export default {
   async render({ req, db, lang }) {
     const localId = localInstanceIdOrNull();
     const csrf = req?.csrfToken || "";
+    const revokeErr = req?.query?.revoke_error;
+    const flash = revokeErr
+      ? `<div class="alert alert-error">${escapeHtml(t("settings.pairedRevokeRefused", lang))}</div>`
+      : (req?.query?.revoked ? `<div class="alert alert-success">${escapeHtml(t("settings.pairedRevokeDone", lang))}</div>` : "");
     const ssoOn = (await readSetting(db, "sso_enabled")) === "true";
     const { rows } = await db.execute({
       sql: "SELECT id, name, hostname, tailscale_ip, gateway_url, status, trusted, is_home, last_seen_at, created_at FROM crow_instances ORDER BY is_home DESC, status ASC, name",
@@ -87,7 +92,7 @@ export default {
       `;
     }).join("") || `<tr><td colspan="7" style="padding:16px;text-align:center;color:var(--crow-text-muted)">No instances registered yet.</td></tr>`;
 
-    return `<style>
+    return `${flash}<style>
       .pi-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
       .pi-table th { text-align:left; padding:8px; background:var(--crow-bg-deep); color:var(--crow-text-muted); font-weight:500; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.03em; }
       .pi-table tr { border-bottom:1px solid var(--crow-border); }
@@ -135,18 +140,10 @@ export default {
   async handleAction({ req, res, db, action }) {
     if (action === "revoke_instance") {
       const id = String(req.body.instance_id || "").slice(0, 100);
-      const row = id ? await getInstance(db, id) : null;
-      if (canRevokeRow(row, localInstanceIdOrNull())) {
-        await revokeInstance(db, id);
-        try {
-          await createNotification(db, {
-            title: `Instance revoked: ${row.name || id.slice(0, 16)}`,
-            type: "system",
-            source: "instance-registry",
-          });
-        } catch {}
-      }
-      res.redirectAfterPost("/dashboard/settings?section=paired-instances");
+      const result = await revokePeer(db, id, { localInstanceId: localInstanceIdOrNull() });
+      res.redirectAfterPost(result.ok
+        ? "/dashboard/settings?section=paired-instances&revoked=1"
+        : `/dashboard/settings?section=paired-instances&revoke_error=${encodeURIComponent(result.reason)}`);
       return true;
     }
     if (action !== "save_sso_enabled") return false;

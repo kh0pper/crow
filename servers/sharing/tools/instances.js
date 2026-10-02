@@ -275,39 +275,24 @@ export function registerInstancesTools(server, ctx) {
         };
       }
 
-      const { getInstance, revokeInstance } = await import("../../gateway/instance-registry.js");
+      const { getOrCreateLocalInstanceId } = await import("../../gateway/instance-registry.js");
+      const { revokePeer } = await import("../revoke-peer.js");
 
-      const existing = await getInstance(db, instance_id);
-      if (!existing) {
-        return {
-          content: [{ type: "text", text: `Instance not found: ${instance_id}` }],
-          isError: true,
-        };
+      // One revoke operation for every door (review C1): row + token, feed
+      // teardown on this process's manager, notification.
+      const result = await revokePeer(db, instance_id, {
+        instanceSyncManager: instanceSyncManager || null,
+        localInstanceId: getOrCreateLocalInstanceId(),
+      });
+      if (!result.ok) {
+        const text = {
+          not_found: `Instance not found: ${instance_id}`,
+          home: "Cannot revoke the home instance. Designate another instance as home first.",
+          self: "Cannot revoke this instance's own row.",
+        }[result.reason] || `Revocation refused: ${result.reason}`;
+        return { content: [{ type: "text", text }], isError: true };
       }
-
-      if (existing.is_home) {
-        return {
-          content: [{ type: "text", text: "Cannot revoke the home instance. Designate another instance as home first." }],
-          isError: true,
-        };
-      }
-
-      await revokeInstance(db, instance_id);
-
-      // Close Hypercore feeds for the revoked instance to free FDs.
-      // Instances lazily re-init on un-revoke (boot eagerInitPairedPeers /
-      // tailnet-sync paths gate on status and will reopen if un-revoked).
-      if (instanceSyncManager) {
-        try { await instanceSyncManager.closeInstanceFeeds(instance_id); } catch {}
-      }
-
-      try {
-        await createNotification(db, {
-          title: `Instance revoked: ${existing.name}`,
-          type: "system",
-          source: "instance-registry",
-        });
-      } catch {}
+      const existing = result.instance;
 
       return {
         content: [{
