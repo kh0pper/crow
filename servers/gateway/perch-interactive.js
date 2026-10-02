@@ -377,7 +377,8 @@ function countCsvTools(csv) {
  *  a facts row that cannot be measured renders as "—", never as a guess. */
 function childMemoryMB(s) {
   try {
-    const pid = s.pi && s.pi.proc && s.pi.proc.pid;
+    // S3: under the pi sandbox proc.pid is the bwrap wrapper; piPid is pi.
+    const pid = (s.pi && s.pi.piPid) || (s.pi && s.pi.proc && s.pi.proc.pid);
     if (!pid) return null;
     const fields = readFileSync("/proc/" + pid + "/statm", "utf8").trim().split(/\s+/);
     const pages = Number(fields[1]);
@@ -873,6 +874,12 @@ export function createInteractiveEngine({
       if (!pid) continue;
       anyAwake = true;
       leases[String(pid)] = { sessionId: s.sessionId, expiresAt: now() + LEASE_TTL_MS };
+      // S3 fix round 1 (I1): under the pi sandbox proc.pid is the bwrap
+      // wrapper. Lease pi's own pid too, so a reaper that does not fold
+      // wrappers (an older pi_lifecycle still loaded in another process on
+      // this host) also sees the inner pi as leased.
+      const inner = s.pi && s.pi.piPid;
+      if (inner && inner !== pid) leases[String(inner)] = { sessionId: s.sessionId, expiresAt: now() + LEASE_TTL_MS };
     }
     const file = join(crowHome, LEASE_FILENAME);
     const tmp = file + ".tmp-" + process.pid;

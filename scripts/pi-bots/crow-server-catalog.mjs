@@ -28,7 +28,7 @@ import {
   resolveEnvValue,
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
-import { signActor } from "./actor-sig.mjs";
+import { signActor, signBoardActor } from "./actor-sig.mjs";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -132,6 +132,10 @@ function boardBlock(crowHome, { botId, jobId, port } = {}) {
   const headers = { Authorization: "Bearer " + token, "X-Crow-Actor-Kind": "bot" };
   if (botId) headers["X-Crow-Actor-Id"] = String(botId);
   if (jobId) headers["X-Crow-Job-Id"] = String(jobId);
+  // S5: board-mcp honours the actor headers only with this signature (present
+  // only when this process holds the per-boot key; see actor-sig.mjs).
+  const sig = signBoardActor({ botId, jobId });
+  if (sig) headers["X-Crow-Actor-Sig"] = sig;
   return { url: `http://127.0.0.1:${gatewayPort}/board/mcp`, headers };
 }
 

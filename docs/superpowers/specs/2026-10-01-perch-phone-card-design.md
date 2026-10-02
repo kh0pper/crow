@@ -204,8 +204,18 @@ container ends a running call).
   - Bot worlds built outside the gateway process (`pibot-gateways@`, the CLI) hold no key, so their
     plans are unattributed. Generic scheduled jobs are signed as gateway `job` (no delivery
     target) when they run in the gateway process.
-  - **S5 note:** board lock exemption now keyed by the real bot id for scheduled jobs; signing
-    board headers (S5) must cover this.
+  - **S5 (done, fix/bot-isolation):** the board actor headers are signed the same way (MAC kind
+    `board`, bound to bot + job id). /board/mcp attributes a mutation, and grants the lock
+    exemption (job rail by job id, session rail by bot id, which covers scheduled jobs), only on
+    a valid signature; unsigned or forged headers, and the board token with no headers, become an
+    unattributed bot (`actor_kind` bot, no id). Bots run by key-less hosts (`pibot-gateways@`)
+    therefore lose the lock exemption: a job-rail card they finish stays locked for the owner.
+  - **S3 (fix/bot-isolation, defense in depth, NOT closed):** pi children run under bubblewrap
+    where usable. The docker socket and the user session (D-Bus, systemd user manager, tmux) are
+    masked, user units are read-only, and no_new_privs blocks sudo. This removes the casual
+    docker/sudo routes but is not containment: the writable filesystem (rc files, `~/crow`) and
+    `ssh localhost` remain escape routes until a dedicated bot user exists. See
+    `scripts/pi-bots/pi_sandbox.mjs`.
 
 ## 7. Dependencies / ordering
 The fixes PR (`fix/phone-install-and-perch-polish`, #393) has merged, and this branch is rebased

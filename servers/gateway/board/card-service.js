@@ -106,9 +106,13 @@ async function resolveItemDef(tdb, boardId) {
 // result↔lock contract, exercised by result-service.js's reportResult).
 function lockExemptMatches(lock, lockExempt) {
   if (!lockExempt || !lock || !lock.row) return false;
-  if (lock.rail === "job") return String(lock.row.job_id) === String(lockExempt.jobId);
+  // S5: an unattributed actor (unsigned headers → id/jobId null) never
+  // matches, even a lock row whose own id happens to stringify to "null".
+  if (lock.rail === "job") {
+    return lockExempt.jobId != null && lock.row.job_id != null && String(lock.row.job_id) === String(lockExempt.jobId);
+  }
   if (lock.rail === "session") {
-    return lock.row.bot_id != null && String(lock.row.bot_id) === String(lockExempt.id);
+    return lockExempt.id != null && lock.row.bot_id != null && String(lock.row.bot_id) === String(lockExempt.id);
   }
   return false;
 }

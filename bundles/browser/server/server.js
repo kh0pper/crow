@@ -199,7 +199,15 @@ export function createBrowserServer(options = {}) {
         try {
           const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", container], { encoding: "utf-8", timeout: 5000 }).trim();
           return out === "true";
-        } catch {
+        } catch (err) {
+          // No docker CLI or no daemon access (e.g. a bot turn inside the pi
+          // sandbox, which masks the docker socket): the container state is
+          // UNKNOWN, not "down". Report that so the model does not conclude
+          // the browser is gone while CDP may be fine.
+          const why = String((err && err.stderr) || (err && err.message) || "");
+          if ((err && err.code === "ENOENT") || /Cannot connect to the Docker daemon|permission denied|connection refused/i.test(why)) {
+            return "unknown (no docker access)";
+          }
           return false;
         }
       })();
@@ -217,7 +225,7 @@ export function createBrowserServer(options = {}) {
             cdp_connected: cdpConnected,
             state_root: stateRoot(),
             current_url: currentUrl,
-            vnc_url: containerRunning ? `http://localhost:${resolvedVncPort}/vnc.html` : null,
+            vnc_url: containerRunning ? `http://localhost:${resolvedVncPort}/vnc.html` : null, // truthy "unknown…" keeps the url
           }, null, 2),
         }],
       };
