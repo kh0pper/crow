@@ -131,6 +131,8 @@ Write down five numbers: **O** = crow out-feed length; **I** = black-swan in-fee
 
 If no row matches, or more than one does, stop and report NEEDS_DECISION with the numbers. A green test for H1 does not repair H5.
 
+**On H2–H5 (or no match), "stop" stops this task only (re-review N2).** Skip Task 1's code and Op 1. Ship the behind-marker code only if Kevin asks for it as a latent guard. Then **continue with Tasks 2–13**: only the black-swan repair waits for Kevin.
+
 - [ ] **Step 2: Write the gate test.** Cases 1–2 are guards that already pass. Cases 3–8 are red today.
 
 ```js
@@ -742,7 +744,8 @@ Spec §5.1, §11.4 (revised 2026-10-02, review C4). One module decides where a d
   - `DOOR_PROVIDER_HEADER = "x-crow-provider"`, `DOOR_HOP_HEADER = "x-crow-door-hop"`
   - `isDoorUrl(url) -> boolean`: true for `…/llm/v1` and `…/llm/p/<provider>/v1`.
   - `providerDoorUrl(doorBase, providerId) -> string`, in `door.js`: `http://h:3001/llm/v1` → `http://h:3001/llm/p/<id>/v1`.
-  - `isForbiddenTarget(url) -> boolean`: link-local IPv4 (`169.254.0.0/16`) and IPv6 (`fe80::/10`); cloud metadata hosts (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, `metadata`, `metadata.google.internal`, `instance-data`, `instance-data.ec2.internal`); Tailscale's own `100.100.100.100`; and any URL that does not parse.
+  - `canonicalTargetHost(hostname) -> string`: strips brackets and one trailing dot, lower-cases, and unwraps IPv4-mapped/compatible IPv6 to IPv4 (re-review N1).
+  - `isForbiddenTarget(url) -> boolean` (on the canonical host): link-local IPv4 (`169.254.0.0/16`) and IPv6 (`fe80::/10`); cloud metadata hosts (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, `metadata`, `metadata.google.internal`, `instance-data`, `instance-data.ec2.internal`); Tailscale's own `100.100.100.100`; and any URL that does not parse.
   - `doorKindOf(provider) -> "native-owned" | "native-foreign" | "external" | "bundle" | "opt-in" | "unmanaged"`
   - `resolveDoorTarget({ providers, providerHeader, model, companionModelIds, hop }) -> { kind: "companion" } | { kind: "forward", providerId, modelId, url, apiKey, doorKind } | { kind: "error", status, code, message, candidates? }`. `providerHeader` is also how the provider-scoped path `/llm/p/<provider>/v1/…` (Task 4) names a provider.
   - `listDoorModels(providers) -> Array<{ id, object: "model", owned_by: "crow", provider, doorKind }>`, covering forwardable rows only.
@@ -753,7 +756,7 @@ Spec §5.1, §11.4 (revised 2026-10-02, review C4). One module decides where a d
 // tests/door-resolve.test.js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveDoorTarget, listDoorModels, doorKindOf, isDoorUrl, isForbiddenTarget, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../servers/gateway/models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, doorKindOf, isDoorUrl, isForbiddenTarget, canonicalTargetHost, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../servers/gateway/models/door-resolve.js";
 import { providerDoorUrl } from "../servers/gateway/models/door.js";
 
 const P = {
@@ -782,6 +785,17 @@ test("isForbiddenTarget: link-local, metadata hosts, Tailscale's own address, ga
     assert.equal(isForbiddenTarget(u), true, u);
   }
   for (const u of ["http://127.0.0.1:18102/v1", "http://100.64.9.1:8006/v1", "http://10.0.0.126:8030/v1"]) assert.equal(isForbiddenTarget(u), false, u);
+});
+
+test("isForbiddenTarget: IPv4-mapped IPv6 and trailing-dot bypasses are closed (re-review N1)", () => {
+  for (const u of [
+    "http://[::ffff:169.254.169.254]/latest", "http://[::ffff:a9fe:a9fe]/latest", "http://[::ffff:100.100.100.100]/",
+    "http://[::ffff:6464:64c8]/", "http://[::a9fe:a9fe]/", "http://metadata.google.internal./", "http://metadata./",
+    "http://instance-data.ec2.internal./", "http://169.254.169.254./",
+  ]) assert.equal(isForbiddenTarget(u), true, u);
+  assert.equal(canonicalTargetHost("[::ffff:a9fe:a9fe]"), "169.254.169.254");
+  assert.equal(canonicalTargetHost("Metadata.Google.Internal."), "metadata.google.internal");
+  assert.equal(isForbiddenTarget("http://[::ffff:7f00:1]:18102/v1"), false, "a mapped loopback is not forbidden (it maps to 127.0.0.1)");
 });
 
 test("header names are lower-case (express lower-cases incoming headers)", () => {
@@ -919,9 +933,27 @@ export function isDoorUrl(url) {
   try { return /\/llm(\/p\/[^/]+)?\/v1$/.test(new URL(url).pathname.replace(/\/+$/, "")); } catch { return false; }
 }
 
+/** Canonical host for the blocklist (re-review N1): brackets off, lower-case,
+ * ONE trailing dot stripped (`metadata.google.internal.`), and IPv4-mapped /
+ * IPv4-compatible IPv6 unwrapped to IPv4. WHATWG URL rewrites
+ * `[::ffff:169.254.169.254]` to `[::ffff:a9fe:a9fe]`, and Node's dual-stack
+ * socket still reaches the IPv4 metadata address through it. */
+export function canonicalTargetHost(hostname) {
+  let x = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (x.endsWith(".")) x = x.slice(0, -1);
+  const dotted = x.match(/^::(?:ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) return dotted[1];
+  const hex = x.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) {
+    const a = parseInt(hex[1], 16), b = parseInt(hex[2], 16);
+    return `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+  }
+  return x;
+}
+
 export function isForbiddenTarget(url) {
   let h;
-  try { h = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase(); } catch { return true; }
+  try { h = canonicalTargetHost(new URL(url).hostname); } catch { return true; }
   if (!h || FORBIDDEN_HOSTS.has(h)) return true;
   if (/^169\.254\./.test(h)) return true;                   // IPv4 link-local
   if (/^fe[89ab][0-9a-f]?:/.test(h)) return true;           // IPv6 link-local
@@ -1170,6 +1202,18 @@ test("a LAN source is refused for door addressing unless it carries a valid bear
   } finally { remote = "127.0.0.1"; }
 });
 
+test("/llm/acquire: a LAN source is refused, loopback still works", async () => {
+  remote = "10.0.0.50";
+  try {
+    const r = await post("/llm/acquire", { provider: "crow-chat" });
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).error, "DOOR_SOURCE_REFUSED");
+  } finally { remote = "127.0.0.1"; }
+  const ok = await post("/llm/acquire", { provider: "crow-chat" });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).ok, true);
+});
+
 test("the router refuses Funnel-headed requests itself", async () => {
   for (const path of ["/llm/v1/chat/completions", "/llm/p/crow-chat/v1/chat/completions", "/llm/v1/embeddings"]) {
     const r = await post(path, { model: "qwen3.5-4b", messages: [] }, { "tailscale-funnel-request": "?1" });
@@ -1351,6 +1395,15 @@ In `llmRouterRouter`:
 ```
 
 ```js
+  // /llm/acquire starts (and evicts) any local model. Its only caller, the
+  // pi-bots host, comes over loopback, so it gets the door's source check too
+  // (re-review hardening). Register this BEFORE the existing /llm/acquire
+  // handler so it runs first.
+  router.post("/llm/acquire", async (req, res, next) => {
+    if (await doorCallerAllowed(req, deps)) return next();
+    res.status(403).json({ ok: false, error: "DOOR_SOURCE_REFUSED", message: "/llm/acquire is limited to loopback and the tailnet, or a bearer token" });
+  });
+
   // Provider-scoped door: the path names the provider (native rows, alias rows
   // such as crow-local, and pi's managed entries point here).
   for (const op of ["chat/completions", "completions", "embeddings", "rerank"]) {
@@ -1379,7 +1432,9 @@ In `llmRouterRouter`:
   }
 ```
 
-Correct the file-header SECURITY paragraph: the gateway listens on all interfaces (LAN + tailnet + loopback). The companion path is reachable from all three; door addressing is limited to loopback and the tailnet (or a bearer); Funnel is refused here and by the global middleware.
+Correct the file-header SECURITY paragraph: the gateway listens on all interfaces (LAN + tailnet + loopback). The companion path is reachable from all three. Door addressing and `/llm/acquire` are limited to loopback and the tailnet (or a bearer). Funnel is refused here and by the global middleware.
+
+The `/llm/acquire` source-check middleware above must be registered **before** the file's existing `router.post("/llm/acquire", …)` handler. Place the provider-door block, which starts with it, above that handler, or move the middleware there on its own.
 
 In `servers/gateway/models/manager.js` `registerModel`, change `const baseUrl = doorBaseUrl({ tailnetIp, port: gatewayPortFn() });` to:
 
@@ -3118,7 +3173,10 @@ Ask pi-lab to land Steps 1–4 on its working branch and answer in a reply file.
 
 *The lifecycle API*:
 - routes, job states, `NOT_OWNER`/`EXTERNAL_ENGINE`, and the models token at `<CROW_HOME>/models-token`;
-- **what the token does and does not gate**: `/llm/acquire` and the door already start and evict models without it, so it gates `stop`, job polling and the listing.
+- **what the token does and does not gate:**
+  - It does **not gate model start or evict.** The door and `/llm/acquire` start and evict from any loopback or tailnet source without it; it gates `stop`, job polling and the listing.
+  - It is **not a bot boundary.** Bots run as the same uid and can read `~/.crow/models-token`, like every other token file, until S6 (#401's `pi_sandbox.mjs` note: bots can still read "anything the uid can read"). The bwrap sandbox has no network namespace, so a bot reaches `127.0.0.1:3001` as a trusted source anyway.
+  - `door_forward: true` rides `gpu_policy` and syncs, so a paired peer can opt a row into forwarding. That is acceptable under the same-identity trust model, but write it down.
 
 *pi's models.json*:
 - `$crowManaged`;
@@ -3237,7 +3295,7 @@ Checks (each must pass; record outputs on the PR):
 1. `node ~/crow/scripts/ops/box-reserve.mjs status` → `none`. Then `node ~/crow/scripts/ops/box-reserve.mjs hold --owner models-p2-accept --reason "plan 2 acceptance" --minutes 55 --allow qwen3.5-4b`. If Task 1 matched H1, run Op 1 now (it restarts the gateway; the hold file survives the restart).
 2. Door, header addressing to a bundle row: `curl -s -m 60 http://127.0.0.1:3001/llm/v1/chat/completions -H 'content-type: application/json' -H 'X-Crow-Provider: crow-chat' -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8}'` → a completion.
 3. Door from raven (tailnet reach of `:3001`, tailnet source allowed): `ssh raven "curl -s -m 60 http://100.118.41.122:3001/llm/p/crow-chat/v1/chat/completions -H 'content-type: application/json' -d '{\"model\":\"qwen3.6-35b-a3b\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}],\"max_tokens\":8}' | head -c 300"` → a completion. Use the provider path: a bare id can be ambiguous (`qwen3-embedding-0.6b` is served by both `crow-embed` and `grackle-embed`) and answers `400 AMBIGUOUS_MODEL`, which is not a ufw symptom (review C8). Only a timeout means the ufw rule for `:3001` from raven is missing: stop and report (plan 4's W1 depends on it). `crow-embed` itself is an unmanaged row until W1 makes it native, so `/llm/p/crow-embed/v1` correctly answers `400 NOT_FORWARDABLE` today.
-3b. Door from a LAN address is refused: from magpie or any 10.0.0.x host that is not on the tailnet, `curl -s -o /dev/null -w "%{http_code}" http://10.0.0.237:3001/llm/p/crow-chat/v1/chat/completions -H 'content-type: application/json' -d '{"model":"qwen3.6-35b-a3b","messages":[]}'` prints `403`.
+3b. Door from a LAN address is refused: `ssh raven "curl -s -o /dev/null -w '%{http_code}' http://10.0.0.237:3001/llm/p/crow-chat/v1/chat/completions -H 'content-type: application/json' -d '{\"model\":\"qwen3.6-35b-a3b\",\"messages\":[]}'"` prints `403`. Hitting crow's LAN IP gives raven a 10.0.0.x source. Magpie is outbound-only, so a crow session cannot run the check there. The same request to `/llm/acquire` with `{\"provider\":\"crow-chat\"}` also prints `403`.
 4. Provider-scoped path: the same request to `http://127.0.0.1:3001/llm/p/crow-chat/v1/chat/completions` without the header → a completion from the 35B (check the gateway log line `door chat/completions -> crow-chat/…`). Cloud refusal: `-H 'X-Crow-Provider: qwen-cloud'` → HTTP 400 `NOT_FORWARDABLE`.
 5. Lifecycle: `curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:3001/llm/models | head -c 1000` lists `crow-local-27b` as `external_*`; then `POST /llm/models/qwen3.5-4b/start` → job → poll to `resident`; `GET /llm/models` shows it resident with `argv`.
 6. Reservation refusal: `box-reserve.mjs hold --owner models-p2-accept --reason refusal-check --minutes 10` (no allow), `POST /llm/models/qwen3.5-4b/stop`, then `POST …/start` → job `blocked_by_reservation` with owner `models-p2-accept`.
