@@ -1,6 +1,6 @@
 {
   "name": "crow-jellyfin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Jellyfin MCP server — media library search, playback, and remote control",
   "type": "module",
   "main": "server/index.js",

@@ -52,6 +52,7 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
+import { readEnvFile } from "../env-manager.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -387,18 +388,161 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
 }
 
 /**
+ * The bundle-relative path of `manifest.docker.composefile` (default
+ * "docker-compose.yml"), or null when the declared value is not a plain
+ * relative path that stays inside the bundle dir.
+ */
+function manifestComposeFile(manifest) {
+  const declared = manifest?.docker?.composefile;
+  if (declared === undefined || declared === null || declared === "") return "docker-compose.yml";
+  if (typeof declared !== "string" || isAbsolute(declared) || declared.includes("\\") || declared.includes("$")) return null;
+  const rel = relativePath(".", declared);
+  if (!rel || rel.startsWith("..")) return null;
+  return rel;
+}
+
+/**
+ * Compose-style variable expansion of one value: ${V}, ${V:-d}, ${V-d},
+ * ${V:?m}, ${V?m}, ${V:+a}, ${V+a} and bare $V (nesting allowed in the
+ * default). An unset variable expands to "" (what compose substitutes; a `?`
+ * form would have failed the run, so no container holds that mount anyway).
+ */
+function expandComposeVars(value, env) {
+  const str = String(value);
+  let out = "";
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (ch !== "$") { out += ch; i++; continue; }
+    if (str[i + 1] === "$") { out += "$"; i += 2; continue; }
+    if (str[i + 1] === "{") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < str.length && depth > 0) {
+        if (str[j] === "{") depth++;
+        else if (str[j] === "}") depth--;
+        if (depth > 0) j++;
+      }
+      const body = str.slice(i + 2, j);
+      i = j + 1;
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?)([-?+])([\s\S]*))?$/.exec(body);
+      if (!m) continue;
+      const [, name, colon, op, arg = ""] = m;
+      const v = env[name];
+      const isSet = v !== undefined && v !== null;
+      const usable = colon ? isSet && String(v) !== "" : isSet;
+      if (op === "-") out += usable ? String(v) : expandComposeVars(arg, env);
+      else if (op === "+") out += usable ? expandComposeVars(arg, env) : "";
+      else out += isSet ? String(v) : "";
+      continue;
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(str.slice(i + 1));
+    if (!m) { out += ch; i++; continue; }
+    out += env[m[0]] !== undefined && env[m[0]] !== null ? String(env[m[0]]) : "";
+    i += 1 + m[0].length;
+  }
+  return out;
+}
+
+/** The host-side part of a short-syntax volume (`src:dst[:mode]`), brace-aware. */
+function shortVolumeSource(item) {
+  let depth = 0;
+  for (let i = 0; i < item.length; i++) {
+    const ch = item[i];
+    if (ch === "$" && item[i + 1] === "{") { depth++; i++; continue; }
+    if (ch === "}" && depth > 0) { depth--; continue; }
+    if (ch === ":" && depth === 0) return item.slice(0, i);
+  }
+  return item;
+}
+
+/**
+ * Every host path a compose file binds into a container, as absolute paths.
+ * Reads the TEXT (no YAML parser): short-syntax list items (`- ./x:/y`) and
+ * long-syntax `source:` keys. Values are expanded compose-style against
+ * `env`; a relative source resolves against `projectDir` (where compose runs:
+ * the INSTALLED bundle's compose dir), `~` against HOME. Anything that is not
+ * a path after expansion (a named volume, a port, an env entry) is skipped.
+ */
+function composeBindSources(text, projectDir, env) {
+  const out = [];
+  const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+  const consider = (rawSrc) => {
+    let src = expandComposeVars(clean(rawSrc), env).trim();
+    if (!src) return;
+    if (src === "~" || src.startsWith("~/")) src = join(env.HOME || "", src.slice(1));
+    if (!(src.startsWith(".") || src.startsWith("/"))) return;   // named volume, port, …
+    out.push(isAbsolute(src) ? resolvePath(src) : resolvePath(projectDir, src));
+  };
+  for (const line of String(text).split(/\r?\n/)) {
+    const longForm = /^\s*(?:-\s+)?source:\s*(.+)$/.exec(line);
+    if (longForm) { consider(longForm[1]); continue; }
+    const item = /^\s*-\s+(.+)$/.exec(line);
+    if (item) consider(shortVolumeSource(clean(item[1])));
+  }
+  return out;
+}
+
+/**
+ * Bundle-relative compose files whose binds reach the live container: the
+ * installed copy of the compose file itself, and the override files compose
+ * merges from the same directory (docker-compose.override.y[a]ml,
+ * compose.override.y[a]ml, and `<name>.override.<ext>` for a non-default
+ * composefile).
+ */
+function installedComposeFiles(composeRel) {
+  const dir = dirname(composeRel);
+  const at = (name) => (dir === "." ? name : join(dir, name));
+  const files = new Set([composeRel]);
+  for (const n of ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"]) {
+    files.add(at(n));
+  }
+  const m = /^(.*)\.(ya?ml)$/.exec(basename(composeRel));
+  if (m) files.add(at(`${m[1]}.override.${m[2]}`));
+  return [...files];
+}
+
+/** realpath when the path exists, else the lexical path. */
+function realOrSelf(p) {
+  try { return realpathSync(p); } catch { return resolvePath(p); }
+}
+
+/** True when a and b are the same path or one contains the other. */
+function pathsOverlap(a, b) {
+  const ab = relativePath(a, b);
+  const ba = relativePath(b, a);
+  const inside = (rel) => rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return inside(ab) || inside(ba);
+}
+
+/**
  * The compose `build:` contexts of a bundle (`build: ./runner` or
  * `build:\n  context: ./runner`), read from the compose TEXT the same way the
- * rest of this file reads compose (line regexes, no YAML parser). Returns only
- * contexts that are relative, resolve to a directory STRICTLY inside the
- * bundle dir (never the bundle root ".": that would sweep in compose/.env/
- * data), stay inside it after symlink resolution, and are not also a volume
- * bind source (refresh must never mutate a live container's mounts). Each is
- * returned as a bundle-relative path.
+ * rest of this file reads compose (line regexes, no YAML parser). The compose
+ * file is `manifest.docker.composefile` (default docker-compose.yml); contexts
+ * and binds resolve against that file's directory, as compose resolves them.
+ *
+ * Returns only contexts that are relative, resolve to a directory STRICTLY
+ * inside the bundle dir (never the bundle root ".": that would sweep in
+ * compose/.env/data), stay inside it after symlink resolution, and do not
+ * overlap any bind mount of the INSTALLED copy — the context itself, a
+ * subdirectory of it, or a parent of it (refresh must never mutate a live
+ * container's mounts). Bind sources come from short syntax and long-syntax
+ * `source:`, with ${VAR} expanded against the installed .env + process env.
+ * Each context is returned as a bundle-relative path.
+ *
+ * @param {string} appSrc   repo bundle dir (copy source)
+ * @param {object} [opts]
+ * @param {object} [opts.manifest]  repo manifest (for docker.composefile)
+ * @param {string} [opts.destDir]   installed bundle dir (where compose runs); defaults to appSrc
+ * @param {object} [opts.env]       env for ${VAR} expansion; defaults to destDir/.env + process.env
  */
-function composeBuildContexts(appSrc) {
+function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env = null } = {}) {
+  const composeRel = manifestComposeFile(manifest);
+  if (!composeRel) return [];
   let text;
-  try { text = readFileSync(join(appSrc, "docker-compose.yml"), "utf8"); } catch { return []; }
+  try { text = readFileSync(join(appSrc, composeRel), "utf8"); } catch { return []; }
+  const composeDirRel = dirname(composeRel);
   const lines = text.split(/\r?\n/);
   const raw = [];
   const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
@@ -416,20 +560,45 @@ function composeBuildContexts(appSrc) {
       if (c) { raw.push(clean(c[1])); break; }
     }
   }
+  if (raw.length === 0) return [];
   let rootReal;
   try { rootReal = realpathSync(appSrc); } catch { return []; }
+
+  const expandEnv = env || (() => {
+    const fileVars = {};
+    try {
+      for (const [k, { value }] of readEnvFile(join(destDir, ".env")).vars) fileVars[k] = value;
+    } catch { /* no .env → process env only */ }
+    // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
+    // compose run gets (the prod gateway unit may not export it).
+    return composeEnv({ ...fileVars, ...process.env });
+  })();
+  const destReal = realOrSelf(destDir);
+  // The LIVE mounts come from the INSTALLED compose (never refreshed, may be
+  // operator-edited) plus any override compose merges in from that dir — not
+  // only from the repo copy. Scan the union, all against the installed env.
+  const bindTexts = [text];
+  for (const rel of installedComposeFiles(composeRel)) {
+    try {
+      const p = join(destDir, rel);
+      if (existsSync(p)) bindTexts.push(readFileSync(p, "utf8"));
+    } catch { /* unreadable → skip that file */ }
+  }
+  const projectDir = join(destReal, composeDirRel);
+  const binds = bindTexts.flatMap((t) => composeBindSources(t, projectDir, expandEnv)).map(realOrSelf);
+
   const out = new Set();
   for (const ctx of raw) {
     if (!ctx || isAbsolute(ctx) || ctx.includes("$") || ctx.includes("\\")) continue;
-    const rel = relativePath(appSrc, resolvePath(appSrc, ctx));
+    const rel = relativePath(appSrc, resolvePath(appSrc, composeDirRel, ctx));
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
     const src = join(appSrc, rel);
     let real;
     try { real = realpathSync(src); if (!statSync(real).isDirectory()) continue; } catch { continue; }
     const realRel = relativePath(rootReal, real);
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
-    const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`^\\s*-\\s+["']?(\\./)?${escaped}/?(:|["']?\\s*$)`, "m").test(text)) continue;
+    const installedCtx = realOrSelf(join(destReal, rel));
+    if (binds.some((b) => pathsOverlap(b, installedCtx))) continue;
     out.add(rel);
   }
   return [...out];
@@ -552,7 +721,12 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     for (const s of repoManifest.skills) declare(s);
   }
 
+  // manifest.json is the refresh's commit marker: the version it carries is
+  // what makes the NEXT boot skip this bundle. It is copied LAST (below), so
+  // a copy that throws part-way leaves the installed version stale and the
+  // next boot retries the whole refresh instead of blessing a half-copy.
   for (const item of new Set([...topFiles, ...dirs, ...declaredRoots])) {
+    if (item === "manifest.json") continue;
     if (copyBundleRefreshItem(appSrc, destDir, item)) touched.push(item);
   }
 
@@ -561,7 +735,7 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // apply — without this a version bump never ships the image's source.
   // No automatic rebuild: Extensions Restart/Start runs `up -d --build`.
   if (isDocker) {
-    const contexts = composeBuildContexts(appSrc);
+    const contexts = composeBuildContexts(appSrc, { manifest: repoManifest, destDir });
     for (const rel of contexts) {
       cpSync(join(appSrc, rel), join(destDir, rel), {
         recursive: true,
@@ -618,6 +792,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
       console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
     }
   }
+
+  // Commit marker last — see the include loop above.
+  if (copyBundleRefreshItem(appSrc, destDir, "manifest.json")) touched.push("manifest.json");
 
   console.log(`[bundles] refreshed ${id} ${oldVersion} -> ${newVersion}`);
   return { oldVersion, newVersion, touched };
@@ -802,6 +979,23 @@ async function runCompose(composeArgs, opts = {}) {
   if (_composeRunnerForTest) return _composeRunnerForTest(composeArgs, opts);
   const compose = await getComposeCmd();
   return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
+}
+
+/**
+ * True when any of the bundle's compose services is running. A failed `ps`
+ * (no docker, compose error) answers true: callers use this to decide whether
+ * to WARN about a stale container, and a missing warning is the worse error.
+ */
+async function composeServiceRunning(bundleDir) {
+  try {
+    const { stdout } = await runCompose(["ps", "--format", "json"], { cwd: bundleDir });
+    const rows = String(stdout || "").trim().split("\n").filter(Boolean).flatMap((line) => {
+      try { const j = JSON.parse(line); return Array.isArray(j) ? j : [j]; } catch { return []; }
+    });
+    return rows.some((c) => c && c.State === "running");
+  } catch {
+    return true;
+  }
 }
 
 /** Read JSON file with fallback */
@@ -1356,6 +1550,43 @@ export function hardFailComposeKeys(composeText) {
   let m;
   while ((m = re.exec(String(composeText || ""))) !== null) keys.add(m[1]);
   return keys;
+}
+
+/**
+ * The env keys a compose file consumes: every `${KEY…}` / `$KEY` it
+ * interpolates, plus — when a service loads the bundle's own `.env` through
+ * `env_file:` — every key (`all: true`), since that file reaches the
+ * container verbatim. `$$` is a literal dollar, not a reference.
+ */
+export function composeConsumedKeys(composeText) {
+  const text = String(composeText || "");
+  const keys = new Set();
+  const re = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > 0 && text[m.index - 1] === "$") continue;
+    keys.add(m[1] || m[2]);
+  }
+  let all = false;
+  const lines = text.split(/\r?\n/);
+  const isDotEnv = (v) => /^["']?(\.\/)?\.env["']?$/.test(String(v).replace(/\s+#.*$/, "").trim());
+  for (let i = 0; i < lines.length && !all; i++) {
+    const m2 = /^(\s*)env_file:\s*(.*)$/.exec(lines[i]);
+    if (!m2) continue;
+    const inline = m2[2].trim();
+    if (inline) {
+      const flow = /^\[(.*)\]$/.exec(inline.replace(/\s+#.*$/, "").trim());
+      if (flow ? flow[1].split(",").some(isDotEnv) : isDotEnv(inline)) all = true;
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j].trim() || /^\s*#/.test(lines[j])) continue;
+      if (/^(\s*)/.exec(lines[j])[1].length <= m2[1].length) break;
+      const item = /^\s*(?:-\s+)?(?:path:\s*)?(.+)$/.exec(lines[j]);
+      if (item && isDotEnv(item[1])) { all = true; break; }
+    }
+  }
+  return { keys, all };
 }
 
 /**
@@ -2762,6 +2993,9 @@ export default function bundlesRouter() {
       if (action === "start") {
         const content = readFileSync(composePath, "utf8");
         const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
+        // recreate:true (the Configure dialog's explicit Restart): new env only
+        // reaches a container that is re-created, so force it.
+        if (req?.body?.recreate === true) upArgs.push("--force-recreate");
         await runCompose(upArgs, { cwd: bundleDir });
       } else if (action === "stop") {
         await runCompose(["stop"], { cwd: bundleDir });
@@ -2805,71 +3039,119 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/env — Save env vars for an installed bundle
-  router.post("/bundles/api/env", (req, res) => {
-    const { bundle_id, env_vars } = req.body;
+  router.post("/bundles/api/env", async (req, res) => {
+    // async (M8's compose ps) → Express 4 no longer catches a sync throw here:
+    // a rejected handler promise is an unhandled rejection, which the crash
+    // guard re-throws and the gateway dies. Every throw becomes a 500 instead.
+    try {
+      const { bundle_id, env_vars } = req.body;
 
-    if (!bundle_id || !isValidBundleId(bundle_id)) {
-      return res.status(400).json({ error: "Invalid bundle ID" });
-    }
-
-    const bundleDir = join(BUNDLES_DIR, bundle_id);
-    if (!existsSync(bundleDir)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
-    }
-
-    if (!env_vars || typeof env_vars !== "object") {
-      return res.status(400).json({ error: "env_vars must be an object" });
-    }
-    // Validate BEFORE writing either file, so the bundle .env and the gateway
-    // .env can never hold different copies of the same secret.
-    const badEnv = findInvalidEnv(env_vars);
-    if (badEnv) {
-      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
-    }
-
-    // Read existing .env, merge with new values
-    const envPath = join(bundleDir, ".env");
-    const existing = {};
-    if (existsSync(envPath)) {
-      for (const line of readFileSync(envPath, "utf8").split("\n")) {
-        const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-        if (match) existing[match[1]] = match[2];
+      if (!bundle_id || !isValidBundleId(bundle_id)) {
+        return res.status(400).json({ error: "Invalid bundle ID" });
       }
-    }
 
-    Object.assign(existing, env_vars);
-    const envContent = Object.entries(existing)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("\n") + "\n";
-    writeFileSync(envPath, envContent);
+      const bundleDir = join(BUNDLES_DIR, bundle_id);
+      if (!existsSync(bundleDir)) {
+        return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
+      }
 
-    // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-    const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+      if (!env_vars || typeof env_vars !== "object") {
+        return res.status(400).json({ error: "env_vars must be an object" });
+      }
+      // Validate BEFORE writing either file, so the bundle .env and the gateway
+      // .env can never hold different copies of the same secret.
+      const badEnv = findInvalidEnv(env_vars);
+      if (badEnv) {
+        return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+      }
 
-    // And the gateway's own env, exactly as install does for docker bundles:
-    // gateway-side panel routes read their config from process.env (the phone
-    // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
-    // Only keys the manifest declares — never arbitrary request keys.
-    const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
-    const needsRestart = mcpUpdated || gatewayUpdated;
+      // Read existing .env, merge with new values
+      const envPath = join(bundleDir, ".env");
+      const existing = {};
+      if (existsSync(envPath)) {
+        for (const line of readFileSync(envPath, "utf8").split("\n")) {
+          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+          if (match) existing[match[1]] = match[2];
+        }
+      }
 
-    // RE-DERIVE config state from the files we just wrote and hand it back: the
-    // client must not decide "configured" itself. submitConfigureOnly guards only
-    // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
-    // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
-    // that cleared its badge on any 200 would hide a still-unconfigured bundle.
-    // Key NAMES only; never values (D5).
-    res.json({
-      ok: true,
-      message: needsRestart
+      // Keys whose value this save actually changes (names only, never values).
+      const changedKeys = Object.keys(env_vars).filter((k) => {
+        const next = env_vars[k];
+        if (next === undefined) return false;
+        return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
+      });
+
+      Object.assign(existing, env_vars);
+      const envContent = Object.entries(existing)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n") + "\n";
+      writeFileSync(envPath, envContent);
+
+      // Also configure the MCP child, which reads mcp-addons.json — not this .env.
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+
+      // And the gateway's own env, exactly as install does for docker bundles:
+      // gateway-side panel routes read their config from process.env (the phone
+      // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
+      // Only keys the manifest declares — never arbitrary request keys.
+      const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
+      const needsRestart = mcpUpdated || gatewayUpdated;
+
+      // B4: a running container keeps the env it was created with. When the
+      // compose file consumes a key this save changed (minio's root creds: the
+      // gateway's copy moves, the container's does not), say so and name the
+      // keys; the client offers an explicit Restart (start with recreate:true →
+      // `up -d --force-recreate`). Nothing is restarted implicitly here.
+      let bundleRestartKeys = [];
+      const composePathForEnv = join(bundleDir, "docker-compose.yml");
+      if (changedKeys.length > 0 && existsSync(composePathForEnv)) {
+        try {
+          const consumed = composeConsumedKeys(readFileSync(composePathForEnv, "utf8"));
+          bundleRestartKeys = changedKeys.filter((k) => consumed.all || consumed.keys.has(k));
+        } catch { /* unreadable compose → no claim either way */ }
+      }
+      // Only a RUNNING container holds stale values. A stopped one picks the new
+      // .env up on its next start, and offering "Restart now" there would start
+      // a bundle the operator had stopped. Unknown (ps failed) → assume running:
+      // a needless warning beats a silently stale container.
+      let bundleRunning = false;
+      if (bundleRestartKeys.length > 0) {
+        bundleRunning = await composeServiceRunning(bundleDir);
+      }
+      const needsBundleRestart = bundleRestartKeys.length > 0 && bundleRunning;
+      const appliesOnNextStart = bundleRestartKeys.length > 0 && !bundleRunning;
+
+      // RE-DERIVE config state from the files we just wrote and hand it back: the
+      // client must not decide "configured" itself. submitConfigureOnly guards only
+      // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
+      // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
+      // that cleared its badge on any 200 would hide a still-unconfigured bundle.
+      // Key NAMES only; never values (D5).
+      let message = needsRestart
         ? (mcpUpdated
           ? "Environment variables saved — restart the gateway to apply them to the MCP server"
           : "Environment variables saved — restart the gateway to apply them")
-        : "Environment variables saved",
-      needs_restart: needsRestart,
-      needs_config: needsConfigKeys(bundle_id),
-    });
+        : "Environment variables saved";
+      if (needsBundleRestart) {
+        message += `. Restart the bundle to apply ${bundleRestartKeys.join(", ")} to its container — it keeps its old values until then`;
+      } else if (appliesOnNextStart) {
+        message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
+      }
+      res.json({
+        ok: true,
+        message,
+        needs_restart: needsRestart,
+        needs_bundle_restart: needsBundleRestart,
+        applies_on_next_start: appliesOnNextStart,
+        bundle_restart_keys: bundleRestartKeys,
+        needs_config: needsConfigKeys(bundle_id),
+      });
+    } catch (err) {
+      console.warn(`[bundles] POST /bundles/api/env failed: ${err?.message || err}`);
+      if (!res.headersSent) res.status(500).json({ error: `Failed to save environment: ${err?.message || err}` });
+    }
   });
 
   // GET /bundles/api/jobs/:id — Poll job progress

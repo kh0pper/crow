@@ -515,3 +515,209 @@ describe("unreadable/missing installed manifest → missing-only fallback, no th
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// B3 (2026-10-02): build-context refresh hardening.
+//   - a context is never refreshed when ANY bind of the installed copy
+//     overlaps it: a bind of a subdirectory, a long-syntax `source:`, a
+//     parent bind (the bundle root), or a ${VAR} that expands onto it;
+//   - manifest.docker.composefile is honoured;
+//   - a failed copy leaves the installed manifest at the OLD version, so the
+//     next boot retries the refresh.
+// ---------------------------------------------------------------------------
+describe("B3 — build-context refresh hardening", () => {
+  /** A docker bundle at 0.1.0 installed, 0.2.0 in the repo, with runner/ source. */
+  function dockerFixture(id, compose, { manifestExtra = {}, composeName = "docker-compose.yml", installedEnv = null } = {}) {
+    const repoRoot = freshRoot(`crowrepo-${id}-`);
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "B", version: "0.2.0", type: "bundle", category: "misc", description: "d",
+      docker: { composefile: "docker-compose.yml" }, ...manifestExtra,
+    }));
+    put(repoRoot, `${id}/${composeName}`, compose);
+    put(repoRoot, `${id}/runner/src/app.py`, "TIMEOUT = 120\n");
+    put(repoRoot, `${id}/runner/state/seed.txt`, "repo seed\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "0.1.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/runner/src/app.py`, "TIMEOUT = 20\n");
+    if (installedEnv !== null) put(CROW_HOME, `bundles/${id}/.env`, installedEnv);
+    setInstalled([id]);
+    return repoRoot;
+  }
+  const runnerRefreshed = (id) => readAt(destBundleDir(id), "runner/src/app.py") === "TIMEOUT = 120\n";
+
+  const SKIPPED = [
+    ["a bind of a SUBDIRECTORY of the context", "b3-subdir",
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - ./runner/state:/state\n"],
+    ["a long-syntax `source:` bind of the context", "b3-long",
+      "services:\n  r:\n    build:\n      context: ./runner\n    volumes:\n      - type: bind\n        source: ./runner\n        target: /app\n"],
+    ["a long-syntax `source:` bind of a subdirectory (quoted)", "b3-long-sub",
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - type: bind\n        source: \"./runner/state\"\n        target: /state\n"],
+    ["a PARENT bind (the bundle root)", "b3-parent",
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - .:/srv\n"],
+    ["a parent bind written ./", "b3-parent-slash",
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - \"./:/srv:ro\"\n"],
+    ["a ${VAR:-default} bind whose default is the context", "b3-var-default",
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - ${RUNNER_SRC_DIR_UNSET_B3:-./runner}:/app\n"],
+  ];
+  for (const [label, id, compose] of SKIPPED) {
+    test(`${label} → the context is NOT refreshed`, async () => {
+      const repoRoot = dockerFixture(id, compose);
+      const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+      assert.deepEqual(errors, []);
+      assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n", "live-mounted context left alone");
+      assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0", "the rest of the refresh still ran");
+    });
+  }
+
+  test("a ${VAR} bind resolved from the INSTALLED .env onto the context → NOT refreshed", async () => {
+    const id = "b3-var-dotenv";
+    const repoRoot = dockerFixture(id,
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - ${B3_RUNNER_DIR}:/app\n",
+      { installedEnv: "B3_RUNNER_DIR=./runner/src\n" });
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  test("an absolute bind of the installed context → NOT refreshed", async () => {
+    const id = "b3-abs";
+    const repoRoot = dockerFixture(id,
+      `services:\n  r:\n    build: ./runner\n    volumes:\n      - ${join(CROW_HOME, "bundles", id, "runner")}:/app\n`);
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  // Fix round 1 (I1): the live mounts come from the INSTALLED compose and any
+  // override compose merges in — the repo compose alone is not the truth.
+  test("a bind only the INSTALLED compose declares (repo dropped it) → NOT refreshed", async () => {
+    const id = "b3-installed-only";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, "services:\n  r:\n    build: ./runner\n    volumes:\n      - ./runner/src:/app\n");
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0");
+  });
+
+  for (const name of ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml"]) {
+    test(`a bind in an installed ${name} → NOT refreshed`, async () => {
+      const id = "b3-ovr-" + name.replace(/[^a-z]/g, "");
+      const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+      put(CROW_HOME, `bundles/${id}/${name}`, "services:\n  r:\n    volumes:\n      - ./runner/src:/app\n");
+      await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+      assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+    });
+  }
+
+  test("a non-default composefile's installed <name>.override.yml is scanned too", async () => {
+    const id = "b3-ovr-composefile";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ../runner\n",
+      { manifestExtra: { docker: { composefile: "deploy/stack.yml" } }, composeName: "deploy/stack.yml" });
+    put(CROW_HOME, `bundles/${id}/deploy/stack.override.yml`, "services:\n  r:\n    volumes:\n      - ../runner:/app\n");
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  test("an installed compose with only named volumes does not block (control)", async () => {
+    const id = "b3-installed-ctl";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, "services:\n  r:\n    build: ./runner\n    volumes:\n      - data:/d\nvolumes:\n  data:\n");
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.ok(runnerRefreshed(id));
+  });
+
+  // Fix round 1 (M2): compose runs get CROW_HOME from composeEnv() even when
+  // the gateway's own env lacks it — the bind scan must expand it the same way.
+  test("a ${CROW_HOME} bind expands like the compose run does, even with CROW_HOME unset in process.env", async () => {
+    const id = "b3-crowhome";
+    const repoRoot = dockerFixture(id,
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - ${CROW_HOME}/bundles/" + id + "/runner/src:/app\n");
+    const saved = process.env.CROW_HOME;
+    delete process.env.CROW_HOME;
+    try {
+      await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    } finally {
+      process.env.CROW_HOME = saved;
+    }
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  test("named volumes, ports, env entries and binds elsewhere do NOT block the refresh", async () => {
+    const id = "b3-unrelated";
+    const repoRoot = dockerFixture(id, [
+      "services:",
+      "  r:",
+      "    build: ./runner",
+      "    ports:",
+      "      - \"3065:3065\"",
+      "    environment:",
+      "      - DATA_DIR=/data",
+      "    volumes:",
+      "      - runner-data:/data",
+      "      - ./config:/config:ro",
+      "      - ${B3_UNSET_DATA_DIR_X:-./data}:/var/data",
+      "      - type: volume",
+      "        source: other-data",
+      "        target: /other",
+      "volumes:",
+      "  runner-data:",
+      "  other-data:",
+      "",
+    ].join("\n"));
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.ok(runnerRefreshed(id), "an unrelated bind never blocks the context refresh");
+  });
+
+  test("manifest.docker.composefile is honoured (contexts read from the declared file, resolved from its directory)", async () => {
+    const id = "b3-composefile";
+    const repoRoot = dockerFixture(id,
+      "services:\n  r:\n    build: ../runner\n",
+      { manifestExtra: { docker: { composefile: "deploy/stack.yml" } }, composeName: "deploy/stack.yml" });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.ok(runnerRefreshed(id), "build: ../runner from deploy/stack.yml is the bundle's runner/");
+  });
+
+  test("a composefile that escapes the bundle dir is ignored (no contexts refreshed)", async () => {
+    const id = "b3-composefile-escape";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n",
+      { manifestExtra: { docker: { composefile: "../other.yml" } } });
+    put(repoRoot, "other.yml", "services:\n  r:\n    build: ./" + id + "/runner\n");
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  test("the real phone bundle still refreshes its runner/ build context (named volume only)", async () => {
+    const repoBundles = new URL("../bundles", import.meta.url).pathname;
+    put(CROW_HOME, "bundles/phone/manifest.json", JSON.stringify({ id: "phone", version: "0.0.1", type: "bundle" }));
+    setInstalled(["phone"]);
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoBundles, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.ok(repaired.some((r) => r.startsWith("phone: refreshed") && r.includes("build:runner")), JSON.stringify(repaired));
+    assert.ok(existsSync(join(destBundleDir("phone"), "runner", "Dockerfile")));
+  });
+
+  test("a failed build-context copy leaves the installed manifest at the OLD version, and the next boot retries", async () => {
+    const id = "b3-failed-copy";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+    // A regular FILE where the context's subdirectory belongs: cpSync cannot
+    // copy runner/src/ over it, so the build-context copy throws mid-refresh.
+    const { rmSync } = await import("node:fs");
+    rmSync(join(destBundleDir(id), "runner", "src"), { recursive: true, force: true });
+    put(CROW_HOME, `bundles/${id}/runner/src`, "not a directory\n");
+
+    const first = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(first.errors.length, 1, "the failure is reported");
+    assert.equal(first.errors[0].id, id);
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.1.0",
+      "the manifest (the refresh's commit marker) was NOT bumped");
+
+    // Operator clears the blocker; the next boot sees the version delta again.
+    rmSync(join(destBundleDir(id), "runner", "src"), { force: true });
+    const second = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(second.errors, []);
+    assert.ok(second.repaired.some((r) => r.includes(`${id}: refreshed 0.1.0 -> 0.2.0`)), JSON.stringify(second.repaired));
+    assert.ok(runnerRefreshed(id));
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0");
+  });
+});

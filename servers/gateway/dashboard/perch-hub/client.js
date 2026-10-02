@@ -1800,8 +1800,14 @@ export function perchHubJs(lang = "en") {
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
     pendingFilePaths=[];
-    lastSent={sid:mySid,text:text};
+    var rec={sid:mySid,text:text,counted:false,failed:false};
+    lastSent=rec;
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
+      /* B5: a 2xx means pi took this message — every older unsent message
+         of this session now has one more delivered message AFTER it, which
+         is how replayUnsent finds its place again. Counted before the
+         identity guard: it is this session's bookkeeping, viewed or not. */
+      if(r.ok&&!rec.failed){ rec.counted=true; bumpUnsentAfter(mySid,1); }
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409
@@ -1822,21 +1828,97 @@ export function perchHubJs(lang = "en") {
      failure and stays on the Activity rail. One failure per send: the POST's
      pi_gone and the stream's pi_exit frame describe the same death, and
      whichever lands first consumes lastSent. */
-  var lastSent=null;      /* {sid,text} of the last message sent, until a reply proves pi got it */
-  var unsent={};          /* sid -> [{text,note}] messages that never reached the bot */
+  var lastSent=null;      /* {sid,text,counted,failed} of the last message sent, until a reply proves pi got it */
+  /* sid -> [{text,note,after}] messages that never reached the bot. \`after\`
+     counts the messages pi DID receive after this one; it anchors the
+     replay to its original place, counted from the END of the rebuilt
+     transcript so a tail-trimmed history cannot shift it. */
+  var unsent={};
+  function bumpUnsentAfter(sid,delta){
+    (unsent[sid]||[]).forEach(function(u){ u.after=Math.max(0,(u.after||0)+delta); });
+  }
   function showSendFailure(sid,detail){
     if(!lastSent||lastSent.sid!==sid) return;
-    var sent=lastSent.text;
+    var rec=lastSent;
+    var sent=rec.text;
     lastSent=null;
+    rec.failed=true;
+    /* A POST that 2xx'd before the child died stays COUNTED: pi persists the
+       user message at turn start (agent-session appendMessage on the user
+       message_end), so it IS in the on-disk transcript. It is still kept as
+       unsent — the death may have come before pi wrote it — but flagged, so
+       replayUnsent drops it when the rebuilt transcript already has it. */
     var note=BOT_START_FAILED+' '+String(detail||'');
     appendNote(note);
     if(sent==null||sent==='') return;
-    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note});
+    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note,after:0,maybeDelivered:!!rec.counted});
+  }
+  /* B5: replayed at its ORIGINAL position, not at the end. A message with
+     \`after\` = k delivered messages behind it goes right before the k-th
+     user message from the end of the rebuilt transcript (so after the
+     replies to the message before it); k = 0 means it was the newest, and
+     the end is its place. The user rows are read before any replay lands, so
+     they are exactly pi's own. */
+  /* The .what line of a transcript row (its text, without the who label). */
+  function rowWhatText(row){
+    var kids=(row&&row.children)||[];
+    for(var i=0;i<kids.length;i++){
+      if((' '+String(kids[i].className||'')+' ').indexOf(' what ')>=0) return String(kids[i].textContent||'');
+    }
+    return null;
+  }
+  /* A history row's text as the operator typed it: messageText() renders a
+     non-text block (an attached image) as its own trailing "[image]" line,
+     so a text+image send persists as "text\\n[image]". Strip trailing
+     [type] placeholder lines before the dedupe's tail match. */
+  function unsentMatchText(t){
+    if(t==null) return null;
+    var lines=String(t).split('\\n');
+    while(lines.length&&/^\\[[a-zA-Z_]+\\]$/.test(lines[lines.length-1])) lines.pop();
+    return lines.join('\\n');
   }
   function replayUnsent(sid){
-    (unsent[sid]||[]).forEach(function(u){
+    var list=unsent[sid]||[];
+    if(!list.length) return;
+    var tr=el('perch-transcript');
+    var users=[];
+    if(tr){
+      for(var i=0;i<tr.children.length;i++){
+        if((' '+String(tr.children[i].className||'')+' ').indexOf(' user ')>=0) users.push(tr.children[i]);
+      }
+    }
+    /* Newest first, decide each entry's effective anchor and whether pi
+       already has it. A maybe-delivered message (2xx, then the child died)
+       that pi DID persist is the user row right before its anchor: drop it.
+       Tail match — the history copy carries the upload-paths header when
+       files rode along. One that pi did NOT persist was counted as delivered
+       by every older entry, so they take one back off. Only flagged entries
+       are deduped: a refused send (pi_gone) never reached pi, and the
+       operator may well have typed the same words twice.
+       Known limit: identical consecutive texts where the first was persisted
+       and the second 2xx'd but died before pi wrote it — the second's echo is
+       dropped (pi never had it either way; its reason stays on the rail). */
+    var plan=[], missing=0;
+    for(var k=list.length-1;k>=0;k--){
+      var e=list[k], eff=Math.max(0,(e.after||0)-missing), skip=false;
+      if(e.maybeDelivered){
+        var prev=users[users.length-eff-1];
+        var pt=prev?unsentMatchText(rowWhatText(prev)):null;
+        if(pt!=null&&e.text&&pt.slice(-e.text.length)===e.text) skip=true;
+        else missing++;
+      }
+      plan[k]={text:e.text,note:e.note,after:eff,skip:skip};
+    }
+    plan.forEach(function(u){
+      if(u.skip) return;
       appendMessage('user','you',u.text);
       appendNote(u.note);
+      if(!tr||!u.after||!users.length) return;
+      var ref=users[Math.max(0,users.length-u.after)];
+      var kids=tr.children;
+      var noteRow=kids[kids.length-1], msgRow=kids[kids.length-2];
+      tr.removeChild(noteRow); tr.removeChild(msgRow);
+      tr.insertBefore(msgRow,ref); tr.insertBefore(noteRow,ref);
     });
   }
 

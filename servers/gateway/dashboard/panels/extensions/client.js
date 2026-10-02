@@ -22,12 +22,22 @@ export function extensionsClientJS(lang) {
 
         // --- Modal helpers ---
         function showModal() { document.getElementById("modal-overlay").style.display = "flex"; }
-        function hideModal() { document.getElementById("modal-overlay").style.display = "none"; }
+        // window.__extModalHideHook: one-shot callback a modal can register to run
+        // on ANY close (button, backdrop, Escape). On window, not in this
+        // closure, because the Escape listener is bound once per document and
+        // so calls the hideModal of whichever IIFE run bound it.
+        function hideModal() {
+          document.getElementById("modal-overlay").style.display = "none";
+          var hook = window.__extModalHideHook;
+          window.__extModalHideHook = null;
+          if (typeof hook === "function") hook();
+        }
         document.getElementById("modal-overlay").addEventListener("click", function(e) {
           if (e.target === this) hideModal();
         });
 
         function setModalContent(el) {
+          window.__extModalHideHook = null;   // a new modal never inherits the last one's close hook
           var mc = document.getElementById("modal-content");
           mc.replaceChildren();
           mc.appendChild(el);
@@ -105,6 +115,12 @@ export function extensionsClientJS(lang) {
             var installBtnRef = null;      // forward ref so consent UI can enable/disable it
             var requiredNames = [];        // install-BLOCKING keys, from the server (consent-challenge install_required)
             var requiredNoteRef = null;    // "Required: X, Y" line next to the button
+            // The consent-challenge response (which carries install_required) arrives
+            // asynchronously. Until it has arrived — or failed — Install stays
+            // disabled, so a fast click cannot slip past a required-env gate the
+            // client has not learned about yet. configureOnly never fetches it.
+            var challengeSettled = configureOnly;
+            var challengeFailed = false;
 
             // Install-blocking env vars still blank (whitespace counts as blank — the
             // server refuses those with 400 missing_required_env). The list is the
@@ -124,21 +140,52 @@ export function extensionsClientJS(lang) {
             function refreshInstallBtnState() {
               if (!installBtnRef) return;
               var missing = missingRequired();
-              installBtnRef.disabled = !consentSatisfied || missing.length > 0;
+              installBtnRef.disabled = !challengeSettled || !consentSatisfied || missing.length > 0;
               if (requiredNoteRef) {
-                requiredNoteRef.style.display = missing.length > 0 ? "block" : "none";
-                requiredNoteRef.textContent = '${tJs("extensions.requiredMissing", lang)}' + " " + missing.join(", ");
+                if (missing.length > 0) {
+                  requiredNoteRef.style.display = "block";
+                  requiredNoteRef.textContent = '${tJs("extensions.requiredMissing", lang)}' + " " + missing.join(", ");
+                } else if (challengeFailed) {
+                  // The client could not learn the blocking list: the server's
+                  // install-time check (400 missing_required_env) is the gate.
+                  requiredNoteRef.style.display = "block";
+                  requiredNoteRef.textContent = '${tJs("extensions.requirementsUnchecked", lang)}';
+                } else {
+                  requiredNoteRef.style.display = "none";
+                  requiredNoteRef.textContent = "";
+                }
               }
             }
 
             // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
-            if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
-              .then(function(r) { return r.json(); })
+            // A challenge that never answers must not leave Install disabled for
+            // good: after 10 s take the failure path (enabled + note; the
+            // server's install-time check is the gate) and abort the request.
+            var challengeCtl = (!configureOnly && typeof AbortController === "function") ? new AbortController() : null;
+            var challengeFail = function() {
+              if (challengeSettled) return;
+              challengeSettled = true;
+              challengeFailed = true;
+              refreshInstallBtnState();
+            };
+            if (!configureOnly) setTimeout(function() {
+              if (challengeSettled) return;
+              challengeFail();
+              if (challengeCtl) { try { challengeCtl.abort(); } catch (e) {} }
+            }, 10000);
+            if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'),
+              challengeCtl ? { signal: challengeCtl.signal } : undefined)
+              .then(function(r) {
+                if (!r.ok) throw new Error("consent-challenge " + r.status);
+                return r.json();
+              })
               .then(function(data) {
+                if (challengeFailed) return;   // timed out already: the server gates now
+                challengeSettled = true;
                 if (data && Array.isArray(data.install_required)) {
                   requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
-                  refreshInstallBtnState();
                 }
+                refreshInstallBtnState();
                 if (!data || data.required === false) return; // no consent required
                 consentSatisfied = false; // gate the install button
                 refreshInstallBtnState();
@@ -250,8 +297,10 @@ export function extensionsClientJS(lang) {
                 frag.insertBefore(box, frag.children[1] || null);
               })
               .catch(function() {
-                // Network error — leave install enabled (fail-open). The server will reject
-                // the install if consent is actually required (no token) so it's safe.
+                // Network/HTTP error — enable Install (fail-open) and say so. The server
+                // rejects the install if consent is actually required (no token) or a
+                // blocking env key is blank (400 missing_required_env), so it's safe.
+                challengeFail();
               });
 
             if (isCommunity && !configureOnly) {
@@ -363,6 +412,59 @@ export function extensionsClientJS(lang) {
             // (configureOnly never fetches consent, so this is always a no-op there.)
             refreshInstallBtnState();
 
+            // B4: the save changed keys the bundle's compose consumes, so its
+            // running container still holds the OLD values. Say so, and offer an
+            // explicit Restart (start + recreate:true → up -d --force-recreate)
+            // instead of restarting behind the user's back. Cancel becomes
+            // "Later": either way onSaved still repaints the card.
+            function offerBundleRestart(saved) {
+              // Exactly once, however the dialog ends: Later, Restart's
+              // success timer, the backdrop or Escape (via the close hook).
+              var done = false;
+              var finish = function() {
+                if (done) return;
+                done = true;
+                if (window.__extModalHideHook === finish) window.__extModalHideHook = null;
+                if (typeof onSaved === "function") onSaved(saved); else hideModal();
+              };
+              window.__extModalHideHook = finish;
+              statusDiv.style.display = "block";
+              statusDiv.style.color = "var(--crow-warning, #f0ad4e)";
+              statusDiv.className = "ext-configure__restart-note";
+              statusDiv.textContent = '${tJs("extensions.configureNeedsBundleRestart", lang)}' +
+                " " + (saved.bundle_restart_keys || []).join(", ") +
+                (saved.needs_restart ? " " + '${tJs("extensions.configureAlsoGatewayRestart", lang)}' : "");
+
+              var restartBtn = installBtn.cloneNode(false);
+              restartBtn.className = "btn btn-primary ext-configure__restart";
+              restartBtn.disabled = false;
+              restartBtn.textContent = '${tJs("extensions.restartNow", lang)}';
+              installBtn.parentNode.replaceChild(restartBtn, installBtn);
+              cancelBtn.textContent = '${tJs("extensions.restartLater", lang)}';   // its hideModal fires the hook → finish
+
+              restartBtn.addEventListener("click", function() {
+                restartBtn.disabled = true;
+                restartBtn.textContent = '${tJs("extensions.starting", lang)}';
+                apiCall("start", { bundle_id: id, recreate: true }).then(function(r) {
+                  if (r.ok) {
+                    statusDiv.style.color = "var(--crow-accent)";
+                    statusDiv.textContent = '${tJs("extensions.bundleRestarted", lang)}';
+                    setTimeout(finish, 1200);
+                  } else {
+                    statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                    statusDiv.textContent = (r.data && r.data.error) || '${tJs("extensions.failed", lang)}';
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = '${tJs("extensions.retry", lang)}';
+                  }
+                }).catch(function() {
+                  statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                  statusDiv.textContent = '${tJs("extensions.networkError", lang)}';
+                  restartBtn.disabled = false;
+                  restartBtn.textContent = '${tJs("extensions.retry", lang)}';
+                });
+              });
+            }
+
             // --- configureOnly submit path: write-only through /bundles/api/env,
             // never /install (the bundle is already installed; /install would 409).
             function submitConfigureOnly() {
@@ -390,11 +492,16 @@ export function extensionsClientJS(lang) {
               statusDiv.textContent = '${tJs("extensions.saving", lang)}';
 
               apiCall("env", { bundle_id: id, env_vars: envData }).then(function(res) {
-                if (res.ok && res.data && res.data.ok) {
+                if (res.ok && res.data && res.data.ok && res.data.needs_bundle_restart) {
+                  offerBundleRestart(res.data);
+                } else if (res.ok && res.data && res.data.ok) {
                   statusDiv.style.color = "var(--crow-accent)";
-                  statusDiv.textContent = res.data.needs_restart
+                  statusDiv.textContent = (res.data.needs_restart
                     ? '${tJs("extensions.configureNeedsRestart", lang)}'
-                    : '${tJs("extensions.configureSaved", lang)}';
+                    : '${tJs("extensions.configureSaved", lang)}') +
+                    (res.data.applies_on_next_start
+                      ? " " + '${tJs("extensions.configureAppliesOnNextStart", lang)}'
+                      : "");
                   setTimeout(function() {
                     // Hand the WHOLE response to onSaved: needs_config is the server's
                     // re-derived truth about what is still missing, and the only thing
@@ -418,7 +525,7 @@ export function extensionsClientJS(lang) {
             installBtn.addEventListener("click", function() {
               if (configureOnly) { submitConfigureOnly(); return; }
               // Defense in depth: a disabled button can still be clicked programmatically.
-              if (!consentSatisfied || missingRequired().length > 0) { refreshInstallBtnState(); return; }
+              if (!challengeSettled || !consentSatisfied || missingRequired().length > 0) { refreshInstallBtnState(); return; }
 
               installBtn.disabled = true;
               installBtn.textContent = '${tJs("extensions.installing", lang)}';

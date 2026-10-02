@@ -113,13 +113,20 @@ export async function runHealthNotifyCycle({ issues, lastMap, nowMs, notify }) {
 
 // ─── Internal signal collectors ──────────────────────────────────────────────
 
+// df -BM --output=avail,size / — two columns: available MB, total MB.
+// Injectable (like _setTailscaleReader) so a test's `ok` never depends on how
+// full the disk of the machine running it happens to be.
+const defaultDiskReader = () => execFileSync("df", ["-BM", "--output=avail,size", "/"], {
+  encoding: "utf-8", timeout: 5000,
+});
+let _diskReader = defaultDiskReader;
+/** Test seam: replace the df reader (returns df's stdout); null restores the real one. */
+export function _setDiskReader(fn) { _diskReader = fn || defaultDiskReader; }
+
 function diskSignal() {
   let diskFreePct = null;
   try {
-    // df -BM --output=avail,size / — two columns: available MB, total MB
-    const out = execFileSync("df", ["-BM", "--output=avail,size", "/"], {
-      encoding: "utf-8", timeout: 5000,
-    });
+    const out = _diskReader();
     const lines = out.trim().split("\n");
     if (lines.length > 1) {
       const parts = lines[1].trim().split(/\s+/);

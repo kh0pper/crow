@@ -1,7 +1,7 @@
 {
   "id": "plex",
   "name": "Plex",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Connect to Plex Media Server — search library, browse collections, control playback, view active sessions",
   "type": "mcp-server",
   "author": "Crow",
@@ -18,7 +18,7 @@
     { "name": "PLEX_URL", "description": "Plex Media Server URL (e.g., http://localhost:32400)", "required": true },
     { "name": "PLEX_TOKEN", "description": "Plex authentication token (see skill for how to find it)", "required": true, "secret": true },
     { "name": "PLEX_MACHINE_ID", "description": "Plex server machine identifier (optional, for multi-server setups)", "required": false },
-    { "name": "PLEX_MEDIA_PATH", "description": "Host path for media files (Docker self-host mode)", "required": false },
+    { "name": "PLEX_MEDIA_PATH", "description": "Host path for media files (Docker self-host mode)", "required": true },
     { "name": "PLEX_CONFIG_PATH", "description": "Host path for Plex config/database (Docker self-host mode)", "required": false },
     { "name": "PLEX_CLAIM_TOKEN", "description": "Plex claim token for initial server setup (Docker self-host mode, from plex.tv/claim)", "required": false, "secret": true }
   ],
