@@ -43,8 +43,10 @@
  *    replayed verbatim. Fix queued as S6 (read confinement in pi-lab, or
  *    fd-based delivery of the per-turn MCP config so no signature rests on
  *    disk).
- *  - a bot with a docker-group shell (the gateway unit has
- *    SupplementaryGroups=docker), which is root-equivalent.
+ *  - a bot with a docker-group shell, which is root-equivalent (the gateway's
+ *    user is in the docker group). S3 (scripts/pi-bots/pi_sandbox.mjs) masks
+ *    the docker socket and sets no_new_privs for pi children where bubblewrap
+ *    is usable; where it is not, this hole is still open.
  *  - a child replaying its OWN headers (that is its own identity).
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -92,6 +94,26 @@ export function verifyActorSig({ kind = "bot", botId, threadId, gatewayType, sig
   const want = Buffer.from(mac(key, { kind, botId, threadId, gatewayType }), "hex");
   const got = Buffer.from(sig.trim(), "hex");
   return got.length === want.length && timingSafeEqual(got, want);
+}
+
+// ---- board actor headers (S5, 2026-10-02) ----
+//
+// /board/mcp attributes a mutation to X-Crow-Actor-Id and grants the
+// result-service lock exemption by X-Crow-Actor-Id (session rail) or
+// X-Crow-Job-Id (job rail). Same key, same MAC, but the MAC's kind field is
+// "board" and the second field is the job id, so a phone signature (kind
+// "bot") can never be replayed as a board signature or the reverse. jobId is
+// optional (Perch and channel turns carry none); it is still bound, so a
+// signature minted without a job cannot be paired with a job id afterwards.
+
+/** Signature for the board actor headers, or null without a key / bot id. */
+export function signBoardActor({ botId, jobId } = {}) {
+  return signActor({ kind: "board", botId, threadId: jobId, gatewayType: null });
+}
+
+/** Constant-time check of a presented board signature. False without a key. */
+export function verifyBoardActorSig({ botId, jobId, sig } = {}) {
+  return verifyActorSig({ kind: "board", botId, threadId: jobId, gatewayType: null, sig });
 }
 
 /** Child side of the handoff: read the hex key the gateway wrote on stdin.
