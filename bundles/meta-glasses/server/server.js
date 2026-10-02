@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { syncRows, syncSessionAndNote, syncNoteUnlessLive } from "./note-sync.js";
 
 // When this server.js is CP'd into ~/.crow/bundles/meta-glasses/server/
 // (the bundle-install deploy path), its relative `../../../servers/db.js`
@@ -274,6 +275,8 @@ export function createMetaGlassesServer(options = {}) {
             args: [device_id, topic || null, mode, pid, note_id, isContinuous ? 1 : 0],
           });
           const session_id = Number(sessIns.lastInsertRowid);
+          await syncRows(db, "research_notes", note_id, "insert");
+          await syncRows(db, "glasses_note_sessions", session_id, "insert");
           const payload = {
             session_id, note_id, project_id: pid, mode, topic,
             needs_consent: isContinuous,
@@ -356,6 +359,7 @@ export function createMetaGlassesServer(options = {}) {
                      WHERE id = ?`,
               args: [session_id],
             });
+            await syncSessionAndNote(db, session_id);
             return { content: [{ type: "text", text: JSON.stringify({ error: "consent_expired", message: "The 120-second consent window elapsed. Session cancelled — ask the user to re-initiate." }, null, 2) }], isError: true };
           }
           // Accept: clear this session's consent flag and cancel any sibling
@@ -367,16 +371,18 @@ export function createMetaGlassesServer(options = {}) {
                    WHERE id = ?`,
             args: [session_id],
           });
-          await db.execute({
+          const cancelled = await db.execute({
             sql: `UPDATE glasses_note_sessions
                      SET status = 'cancelled', ended_at = datetime('now'),
                          awaiting_consent = 0, consent_expires_at = NULL
                    WHERE device_id = ?
                      AND id != ?
                      AND status = 'active'
-                     AND COALESCE(awaiting_consent, 0) = 1`,
+                     AND COALESCE(awaiting_consent, 0) = 1
+                 RETURNING id`,
             args: [device_id, session_id],
           });
+          await syncRows(db, "glasses_note_sessions", [session_id, ...cancelled.rows.map((r) => r.id)]);
           return {
             content: [{
               type: "text",
@@ -433,6 +439,7 @@ export function createMetaGlassesServer(options = {}) {
             sql: `UPDATE research_notes SET content = COALESCE(content, '') || ?, updated_at = datetime('now') WHERE id = ?`,
             args: [line, noteId],
           });
+          await syncNoteUnlessLive(db, sid);
           return { content: [{ type: "text", text: `Appended: '${line.trim()}'. Say 'undo that' to remove if needed.` }] };
         } finally {
           try { db.close(); } catch {}
@@ -479,6 +486,7 @@ export function createMetaGlassesServer(options = {}) {
               sql: `UPDATE glasses_note_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
               args: [sid],
             });
+            await syncRows(db, "glasses_note_sessions", sid);
             return { content: [{ type: "text", text: "Session has no backing note; ended without summary." }], isError: true };
           }
 
@@ -515,6 +523,9 @@ export function createMetaGlassesServer(options = {}) {
               });
             }
           }
+          // Session end carries the final note text (per-line appends are
+          // not emitted individually — see note-sync.js).
+          await syncSessionAndNote(db, sid);
 
           const out = {
             session_id: Number(sid),
@@ -595,6 +606,7 @@ export function createMetaGlassesServer(options = {}) {
             sql: `UPDATE research_notes SET content = ?, updated_at = datetime('now') WHERE id = ?`,
             args: [newContent, noteId],
           });
+          await syncNoteUnlessLive(db, sid);
           return {
             content: [{
               type: "text",
@@ -664,6 +676,7 @@ export function createMetaGlassesServer(options = {}) {
                     WHERE id = ?`,
               args: [session_id],
             });
+            await syncRows(db, "glasses_note_sessions", session_id);
             const remaining = Math.max(0, CONFIRM_MAX_RETRIES - newRetries);
             if (remaining === 0) {
               return {

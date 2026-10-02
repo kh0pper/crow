@@ -333,6 +333,12 @@ export function shouldSyncRow(table, row) {
     // never ride to paired instances (same convention as providers
     // gpu_policy.local_only above — one gate covers emit AND apply).
     if (row && row.source === "starter") return false;
+    // Maker Lab learner progress is a child's record: its DATA-HANDLING.md
+    // promises it "does not leave your host". The bundle writes these rows
+    // with no emit by design; this gate keeps any OTHER door (a
+    // crow_update_memory edit, a lamport re-emit sweep, a peer that did
+    // emit one) from carrying them across instances.
+    if (row && row.source === "maker-lab") return false;
   }
   if (table === "ramble_marks") {
     // mark_id is the wire key (the AUTOINCREMENT id is stripped) — a row

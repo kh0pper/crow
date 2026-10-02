@@ -73,6 +73,7 @@ function resolveGatewayDir() {
 const gatewayDir = resolveGatewayDir();
 
 async function loadDeviceStore() { return import(pathToFileURL(join(serverDir, "device-store.js")).href); }
+async function loadNoteSync()    { return import(pathToFileURL(join(serverDir, "note-sync.js")).href); }
 async function loadTts()         { return import(pathToFileURL(join(gatewayDir, "ai/tts/index.js")).href); }
 async function loadStt()         { return import(pathToFileURL(join(gatewayDir, "ai/stt/index.js")).href); }
 async function loadProvider()    { return import(pathToFileURL(join(gatewayDir, "ai/provider.js")).href); }
@@ -653,6 +654,9 @@ async function endNoteStream(deviceId, reason, opts = {}) {
             });
           }
         }
+        // Session end carries the final note text to paired instances
+        // (per-line appends are not emitted individually — note-sync.js).
+        await (await loadNoteSync()).syncSessionAndNote(db, state.sessionId);
       }
     } finally { try { db.close(); } catch {} }
   } catch (err) {
@@ -1442,6 +1446,7 @@ export async function runCaptionBackfill(db) {
           sql: `UPDATE research_notes SET content = ?, updated_at = datetime('now') WHERE id = ?`,
           args: [newContent, row.note_id],
         });
+        await (await loadNoteSync()).syncNoteIfIdle(db, row.note_id);
         replaced++;
       }
       await db.execute({
@@ -1678,9 +1683,12 @@ export default function metaGlassesRouter(dashboardAuth) {
       const { rows } = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
       const noteId = rows[0]?.note_id;
       await db.execute({ sql: `DELETE FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
+      const { syncRows } = await loadNoteSync();
+      await syncRows(db, "glasses_note_sessions", sid, "delete");
       if (noteId) {
         await db.execute({ sql: `DELETE FROM research_notes WHERE id = ?`, args: [noteId] });
         await db.execute({ sql: `DELETE FROM glasses_caption_backfill WHERE note_id = ?`, args: [noteId] });
+        await syncRows(db, "research_notes", noteId, "delete");
       }
     } catch (err) {
       console.warn(`[meta-glasses] notes delete for session=${sid} failed: ${err.message}`);
