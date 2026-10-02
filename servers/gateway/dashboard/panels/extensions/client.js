@@ -387,6 +387,51 @@ export function extensionsClientJS(lang) {
             // (configureOnly never fetches consent, so this is always a no-op there.)
             refreshInstallBtnState();
 
+            // B4: the save changed keys the bundle's compose consumes, so its
+            // running container still holds the OLD values. Say so, and offer an
+            // explicit Restart (start + recreate:true → up -d --force-recreate)
+            // instead of restarting behind the user's back. Cancel becomes
+            // "Later": either way onSaved still repaints the card.
+            function offerBundleRestart(saved) {
+              var finish = function() { if (typeof onSaved === "function") onSaved(saved); else hideModal(); };
+              statusDiv.style.display = "block";
+              statusDiv.style.color = "var(--crow-warning, #f0ad4e)";
+              statusDiv.className = "ext-configure__restart-note";
+              statusDiv.textContent = '${tJs("extensions.configureNeedsBundleRestart", lang)}' +
+                " " + (saved.bundle_restart_keys || []).join(", ") +
+                (saved.needs_restart ? " " + '${tJs("extensions.configureAlsoGatewayRestart", lang)}' : "");
+
+              var restartBtn = installBtn.cloneNode(false);
+              restartBtn.className = "btn btn-primary ext-configure__restart";
+              restartBtn.disabled = false;
+              restartBtn.textContent = '${tJs("extensions.restartNow", lang)}';
+              installBtn.parentNode.replaceChild(restartBtn, installBtn);
+              cancelBtn.textContent = '${tJs("extensions.restartLater", lang)}';
+              cancelBtn.addEventListener("click", finish);
+
+              restartBtn.addEventListener("click", function() {
+                restartBtn.disabled = true;
+                restartBtn.textContent = '${tJs("extensions.starting", lang)}';
+                apiCall("start", { bundle_id: id, recreate: true }).then(function(r) {
+                  if (r.ok) {
+                    statusDiv.style.color = "var(--crow-accent)";
+                    statusDiv.textContent = '${tJs("extensions.bundleRestarted", lang)}';
+                    setTimeout(finish, 1200);
+                  } else {
+                    statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                    statusDiv.textContent = (r.data && r.data.error) || '${tJs("extensions.failed", lang)}';
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = '${tJs("extensions.retry", lang)}';
+                  }
+                }).catch(function() {
+                  statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                  statusDiv.textContent = '${tJs("extensions.networkError", lang)}';
+                  restartBtn.disabled = false;
+                  restartBtn.textContent = '${tJs("extensions.retry", lang)}';
+                });
+              });
+            }
+
             // --- configureOnly submit path: write-only through /bundles/api/env,
             // never /install (the bundle is already installed; /install would 409).
             function submitConfigureOnly() {
@@ -414,7 +459,9 @@ export function extensionsClientJS(lang) {
               statusDiv.textContent = '${tJs("extensions.saving", lang)}';
 
               apiCall("env", { bundle_id: id, env_vars: envData }).then(function(res) {
-                if (res.ok && res.data && res.data.ok) {
+                if (res.ok && res.data && res.data.ok && res.data.needs_bundle_restart) {
+                  offerBundleRestart(res.data);
+                } else if (res.ok && res.data && res.data.ok) {
                   statusDiv.style.color = "var(--crow-accent)";
                   statusDiv.textContent = res.data.needs_restart
                     ? '${tJs("extensions.configureNeedsRestart", lang)}'

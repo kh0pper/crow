@@ -329,3 +329,112 @@ test("POST /bundles/api/env propagates manifest-declared keys to the gateway .en
     _setAppEnvPathForTest(null);
   }
 });
+
+// ─── 5. B4: Configure says when the running container needs a restart ───
+
+test("composeConsumedKeys: ${KEY…} and $KEY references, $$ is literal, env_file .env means every key", () => {
+  const r = B.composeConsumedKeys("a: ${A:-x}\nb: $B\nc: $$NOT\nd: ${D:?m}\n");
+  assert.deepEqual([...r.keys].sort(), ["A", "B", "D"]);
+  assert.equal(r.all, false);
+  assert.equal(B.composeConsumedKeys("services:\n  s:\n    env_file:\n      - .env\n").all, true);
+  assert.equal(B.composeConsumedKeys("services:\n  s:\n    env_file: ./.env\n").all, true);
+  assert.equal(B.composeConsumedKeys("services:\n  s:\n    env_file: [other.env, \".env\"]\n").all, true);
+  assert.equal(B.composeConsumedKeys("services:\n  s:\n    env_file:\n      - path: .env\n        required: false\n").all, true);
+  assert.equal(B.composeConsumedKeys("services:\n  s:\n    env_file: [app.env]\n").all, false);
+});
+
+test("POST /bundles/api/env: changing a key the compose consumes reports needs_bundle_restart with the key names (B4)", async () => {
+  const id = "fx-envrestart";
+  buildFixture(id);
+  mkdirSync(join(HOME, "bundles", id), { recursive: true });
+  writeFileSync(join(HOME, "bundles", id, ".env"), "FX_SECRET=old\n");
+  writeFileSync(join(HOME, "bundles", id, "docker-compose.yml"), readFileSync(join(FIXTURES, id, "docker-compose.yml"), "utf8"));
+  writeFileSync(GATEWAY_ENV, "PORT=3001\n");
+  _setAppEnvPathForTest(GATEWAY_ENV);
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  const post = (env_vars) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundle_id: id, env_vars }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  try {
+    const changed = await post({ FX_SECRET: "new-secret-value", FX_TOKEN: "t" });
+    assert.equal(changed.status, 200, JSON.stringify(changed.body));
+    assert.equal(changed.body.needs_bundle_restart, true);
+    assert.deepEqual(changed.body.bundle_restart_keys, ["FX_SECRET"], "FX_TOKEN is not consumed by compose");
+    assert.match(changed.body.message, /Restart the bundle to apply FX_SECRET/);
+    assert.doesNotMatch(JSON.stringify(changed.body), /new-secret-value/, "names only, never values");
+
+    const same = await post({ FX_SECRET: "new-secret-value" });
+    assert.equal(same.body.needs_bundle_restart, false, "an unchanged value needs no container restart");
+    assert.deepEqual(same.body.bundle_restart_keys, []);
+
+    const notConsumed = await post({ FX_TOKEN: "t2" });
+    assert.equal(notConsumed.body.needs_bundle_restart, false, "a key compose never reads needs no container restart");
+  } finally {
+    server.close();
+    _setAppEnvPathForTest(null);
+  }
+});
+
+test("POST /bundles/api/env: a bundle with no compose file never asks for a container restart (B4)", async () => {
+  const id = "fx-envrestart-nocompose";
+  buildFixture(id);
+  mkdirSync(join(HOME, "bundles", id), { recursive: true });
+  writeFileSync(join(HOME, "bundles", id, ".env"), "FX_SECRET=old\n");
+  writeFileSync(GATEWAY_ENV, "PORT=3001\n");
+  _setAppEnvPathForTest(GATEWAY_ENV);
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundle_id: id, env_vars: { FX_SECRET: "new" } }),
+    });
+    const body = await res.json();
+    assert.equal(body.needs_bundle_restart, false);
+  } finally {
+    server.close();
+    _setAppEnvPathForTest(null);
+  }
+});
+
+test("POST /bundles/api/start with recreate:true runs up -d --force-recreate; without it, plain up -d (B4)", async () => {
+  const id = "fx-recreate";
+  buildFixture(id);
+  mkdirSync(join(HOME, "bundles", id), { recursive: true });
+  writeFileSync(join(HOME, "bundles", id, "docker-compose.yml"), "services:\n  app:\n    image: busybox\n");
+  writeFileSync(join(HOME, "bundles", id, "manifest.json"), readFileSync(join(FIXTURES, id, "manifest.json"), "utf8"));
+  const calls = [];
+  _setComposeRunnerForTest(async (args, opts) => { calls.push({ args, cwd: opts?.cwd }); return { stdout: "", stderr: "" }; });
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  const post = (body) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/start`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  try {
+    const r1 = await post({ bundle_id: id, recreate: true });
+    assert.equal(r1.status, 200, JSON.stringify(r1.body));
+    assert.deepEqual(calls[0].args, ["up", "-d", "--force-recreate"]);
+    assert.equal(calls[0].cwd, join(HOME, "bundles", id));
+    const r2 = await post({ bundle_id: id });
+    assert.equal(r2.status, 200, JSON.stringify(r2.body));
+    assert.deepEqual(calls[1].args, ["up", "-d"]);
+  } finally {
+    server.close();
+    _setComposeRunnerForTest(null);
+  }
+});

@@ -1504,6 +1504,43 @@ export function hardFailComposeKeys(composeText) {
 }
 
 /**
+ * The env keys a compose file consumes: every `${KEY…}` / `$KEY` it
+ * interpolates, plus — when a service loads the bundle's own `.env` through
+ * `env_file:` — every key (`all: true`), since that file reaches the
+ * container verbatim. `$$` is a literal dollar, not a reference.
+ */
+export function composeConsumedKeys(composeText) {
+  const text = String(composeText || "");
+  const keys = new Set();
+  const re = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > 0 && text[m.index - 1] === "$") continue;
+    keys.add(m[1] || m[2]);
+  }
+  let all = false;
+  const lines = text.split(/\r?\n/);
+  const isDotEnv = (v) => /^["']?(\.\/)?\.env["']?$/.test(String(v).replace(/\s+#.*$/, "").trim());
+  for (let i = 0; i < lines.length && !all; i++) {
+    const m2 = /^(\s*)env_file:\s*(.*)$/.exec(lines[i]);
+    if (!m2) continue;
+    const inline = m2[2].trim();
+    if (inline) {
+      const flow = /^\[(.*)\]$/.exec(inline.replace(/\s+#.*$/, "").trim());
+      if (flow ? flow[1].split(",").some(isDotEnv) : isDotEnv(inline)) all = true;
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j].trim() || /^\s*#/.test(lines[j])) continue;
+      if (/^(\s*)/.exec(lines[j])[1].length <= m2[1].length) break;
+      const item = /^\s*(?:-\s+)?(?:path:\s*)?(.+)$/.exec(lines[j]);
+      if (item && isDotEnv(item[1])) { all = true; break; }
+    }
+  }
+  return { keys, all };
+}
+
+/**
  * The env keys whose blank value makes `docker compose up` FAIL — and so the
  * only keys that may block an install. A key blocks iff the manifest marks it
  * `required`, it has no non-blank manifest `default`, AND the bundle's compose
@@ -2907,6 +2944,9 @@ export default function bundlesRouter() {
       if (action === "start") {
         const content = readFileSync(composePath, "utf8");
         const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
+        // recreate:true (the Configure dialog's explicit Restart): new env only
+        // reaches a container that is re-created, so force it.
+        if (req?.body?.recreate === true) upArgs.push("--force-recreate");
         await runCompose(upArgs, { cwd: bundleDir });
       } else if (action === "stop") {
         await runCompose(["stop"], { cwd: bundleDir });
@@ -2982,6 +3022,13 @@ export default function bundlesRouter() {
       }
     }
 
+    // Keys whose value this save actually changes (names only, never values).
+    const changedKeys = Object.keys(env_vars).filter((k) => {
+      const next = env_vars[k];
+      if (next === undefined) return false;
+      return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
+    });
+
     Object.assign(existing, env_vars);
     const envContent = Object.entries(existing)
       .filter(([, v]) => v !== undefined)
@@ -2999,20 +3046,41 @@ export default function bundlesRouter() {
     const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
     const needsRestart = mcpUpdated || gatewayUpdated;
 
+    // B4: a running container keeps the env it was created with. When the
+    // compose file consumes a key this save changed (minio's root creds: the
+    // gateway's copy moves, the container's does not), say so and name the
+    // keys; the client offers an explicit Restart (start with recreate:true →
+    // `up -d --force-recreate`). Nothing is restarted implicitly here.
+    let bundleRestartKeys = [];
+    const composePathForEnv = join(bundleDir, "docker-compose.yml");
+    if (changedKeys.length > 0 && existsSync(composePathForEnv)) {
+      try {
+        const consumed = composeConsumedKeys(readFileSync(composePathForEnv, "utf8"));
+        bundleRestartKeys = changedKeys.filter((k) => consumed.all || consumed.keys.has(k));
+      } catch { /* unreadable compose → no claim either way */ }
+    }
+    const needsBundleRestart = bundleRestartKeys.length > 0;
+
     // RE-DERIVE config state from the files we just wrote and hand it back: the
     // client must not decide "configured" itself. submitConfigureOnly guards only
     // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
     // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
     // that cleared its badge on any 200 would hide a still-unconfigured bundle.
     // Key NAMES only; never values (D5).
+    let message = needsRestart
+      ? (mcpUpdated
+        ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+        : "Environment variables saved — restart the gateway to apply them")
+      : "Environment variables saved";
+    if (needsBundleRestart) {
+      message += `. Restart the bundle to apply ${bundleRestartKeys.join(", ")} to its container — it keeps its old values until then`;
+    }
     res.json({
       ok: true,
-      message: needsRestart
-        ? (mcpUpdated
-          ? "Environment variables saved — restart the gateway to apply them to the MCP server"
-          : "Environment variables saved — restart the gateway to apply them")
-        : "Environment variables saved",
+      message,
       needs_restart: needsRestart,
+      needs_bundle_restart: needsBundleRestart,
+      bundle_restart_keys: bundleRestartKeys,
       needs_config: needsConfigKeys(bundle_id),
     });
   });

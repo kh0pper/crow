@@ -617,6 +617,76 @@ test("BEHAVIOR: a FULL Configure save from the card clears the Needs setup badge
   assert.equal(item.querySelector(".bundle-configure"), null, "and so is the Configure button");
 });
 
+test("BEHAVIOR: a save that changed container-consumed keys offers an explicit Restart (recreate) and only then moves on (B4)", async () => {
+  let startResult = { ok: false, status: 500, json: () => Promise.resolve({ error: "compose up failed" }) };
+  const { document, click, settle, flushTimers, calls } = boot({
+    ...CARD_BOOT,
+    fetchImpl: (url) => {
+      if (url.includes("/bundles/api/env")) {
+        return { ok: true, status: 200, json: () => Promise.resolve({
+          ok: true, needs_restart: true, needs_config: [],
+          needs_bundle_restart: true, bundle_restart_keys: ["JELLYFIN_API_KEY"],
+        }) };
+      }
+      if (url.includes("/bundles/api/start")) return startResult;
+      return { ok: true, status: 200, json: () => Promise.resolve({}) };
+    },
+  });
+
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "k";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+
+  const status = document.getElementById("install-status");
+  assert.match(status.textContent, /still uses the old values/);
+  assert.match(status.textContent, /JELLYFIN_API_KEY/);
+  assert.match(status.textContent, /gateway also needs a restart/);
+  assert.ok(card(document).querySelector(".bundle-configure"), "the modal does not move on (onSaved not run) until the user chooses");
+  assert.ok(!calls.some((c) => c.url.includes("/bundles/api/start")), "nothing restarts implicitly");
+
+  const restartBtn = document.querySelector("#modal-content .ext-configure__restart");
+  assert.ok(restartBtn, "an explicit Restart button is offered");
+  assert.equal(restartBtn.disabled, false);
+
+  // A failed restart hands the button back.
+  click(restartBtn);
+  await settle();
+  let startCall = calls.find((c) => c.url.includes("/bundles/api/start"));
+  assert.deepEqual(startCall.body, { bundle_id: "jellyfin", recreate: true });
+  assert.match(status.textContent, /compose up failed/);
+  assert.equal(restartBtn.disabled, false);
+  assert.match(restartBtn.textContent, /Retry/);
+
+  startResult = { ok: true, status: 200, json: () => Promise.resolve({ ok: true }) };
+  click(restartBtn);
+  await settle();
+  assert.match(status.textContent, /Restarted with the new settings/);
+  flushTimers();   // the queued onSaved()
+  assert.equal(card(document).querySelector(".bundle-configure"), null, "onSaved repainted the card after the restart");
+});
+
+test("BEHAVIOR: choosing Later on the restart offer still repaints the card and never restarts (B4)", async () => {
+  const { document, click, settle, flushTimers, calls } = boot({
+    ...CARD_BOOT,
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: [], needs_bundle_restart: true, bundle_restart_keys: ["JELLYFIN_URL"] } }),
+  });
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_URL").value = "http://jf";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+  const later = [...document.querySelectorAll("#modal-content .btn-secondary")].find((b) => /Later/.test(b.textContent));
+  assert.ok(later, "Cancel became Later");
+  click(later);
+  await settle();
+  assert.equal(card(document).querySelector(".bundle-configure"), null, "onSaved ran");
+  assert.ok(!calls.some((c) => c.url.includes("/bundles/api/start")));
+});
+
 test("BEHAVIOR: a PARTIAL Configure save keeps the badge and narrows data-keys to the still-missing keys", async () => {
   const { document, click, settle, flushTimers } = boot({
     ...CARD_BOOT,
