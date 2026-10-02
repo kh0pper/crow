@@ -4001,6 +4001,11 @@ test("phone card polish: once the runner hangs up and wraps up, the live pill sa
   FakeEventSource.instances[0]._serverFrame("phone_call", { type: "phone_call", call_id: "call_1", status: "live", event_seq: 3 });
   await phHops();
   assert.equal(phFind(hub, (n) => n.className === "ph-pill-text").textContent, "Wrapping up…");
+  assert.equal(phFind(hub, (n) => String(n.className).startsWith("ph-pill ")).className, "ph-pill ph-pill-neutral", "no longer the live tone");
+  assert.equal(phFind(hub, (n) => n.className === "ph-dot").hidden, true, "the dot stops pulsing");
+  const comp = phFind(hub, (n) => n.className === "ph-composer");
+  assert.equal(comp.hidden, true, "nothing to type to: the line is down");
+  assert.ok(comp.children.every((n) => n.disabled === true));
   assert.equal(phFind(hub, (n) => n.className === "ph-transcript").children[1].textContent, "— call ended —");
 });
 

@@ -266,7 +266,7 @@ export function perchPhoneCardJs(lang = "en") {
     var tr=el('perch-transcript'); if(!tr) return null;
     var rec=phoneCards[id];
     if(!rec){
-      rec=phoneCards[id]={node:document.createElement('div'),view:'',key:'',hash:'',timer:null,clock:null,tx:null,prompt:null,pill:null,started:NaN,ended:false,totp:null,flash:''};
+      rec=phoneCards[id]={node:document.createElement('div'),view:'',key:'',hash:'',timer:null,clock:null,tx:null,prompt:null,pill:null,comp:null,started:NaN,ended:false,totp:null,flash:''};
       rec.node.className='entry phonecard';
       tr.appendChild(rec.node); tr.scrollTop=tr.scrollHeight;
     }
@@ -317,7 +317,7 @@ export function perchPhoneCardJs(lang = "en") {
       /* S3: a pending plan that changed under the owner says so, and keeps a half-typed 2FA code. */
       if(rec.view==='pending'&&view==='pending'&&rec.hash&&rec.hash!==c.plan_hash) rec.flash=PH_PLAN_CHANGED;
       var keepTotp=(rec.view==='pending'&&rec.totp)?rec.totp.value:'';
-      rec.key=key; rec.view=view; rec.hash=c.plan_hash||''; phoneStopPoll(rec); rec.tx=null; rec.prompt=null; rec.pill=null; rec.totp=null;
+      rec.key=key; rec.view=view; rec.hash=c.plan_hash||''; phoneStopPoll(rec); rec.tx=null; rec.prompt=null; rec.pill=null; rec.comp=null; rec.totp=null;
       clearEl(rec.node);
       var pill=view==='pending'?['wait',PH_ST_PENDING]:view==='queued'?['neutral',PH_STARTING]:view==='live'?['live',PH_LIVE]:phoneTerminalPill(c);
       if(view==='queued'&&phoneQueuedAt(c)) pill[1]=PH_SCHEDULED;
@@ -427,7 +427,7 @@ export function perchPhoneCardJs(lang = "en") {
       comp.onsubmit=function(ev){ ev.preventDefault(); var v=inp.value.trim(); if(!v) return; inp.value=''; phoneAct(c.id,'/farend',{text:v},sid,err); };
     }
     if(ctl.stop){ var b=phoneButton(PH_STOP,'ph-hangup'); b.onclick=function(){ phoneAct(c.id,'/stop',{},sid,err); }; comp.appendChild(b); }
-    n.appendChild(comp);
+    n.appendChild(comp); rec.comp=comp;
     n.appendChild(err);
     phoneLiveUpdate(rec,c);
     /* Frames are hints; polling is the source of truth for the transcript,
@@ -451,8 +451,23 @@ export function perchPhoneCardJs(lang = "en") {
     if(!rec.tx) return;
     phoneFillTx(rec.tx,c.transcript);
     rec.ended=phoneEnded(c.transcript);
+    if(rec.ended) phoneWrapping(rec);
     phoneTick(rec);
     if(rec.prompt) rec.prompt.hidden=!phoneNeedsPrompt(c.transcript);
+  }
+  /* The line is down and the runner is writing its summary: the pill stops
+     pulsing and turns neutral, and the composer goes away (a typed line would
+     reach nobody). */
+  function phoneWrapping(rec){
+    var box=rec.pill&&rec.pill.parentNode;
+    if(box){
+      box.className='ph-pill ph-pill-neutral';
+      for(var i=0;i<box.children.length;i++){ if(box.children[i].className==='ph-dot') box.children[i].hidden=true; }
+    }
+    if(rec.comp){
+      rec.comp.hidden=true;
+      for(var j=0;j<rec.comp.children.length;j++) rec.comp.children[j].disabled=true;
+    }
   }
   function phoneRenderTerminal(rec,c){
     var n=rec.node;
