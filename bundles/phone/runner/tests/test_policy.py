@@ -136,3 +136,37 @@ def test_normalize_number():
     assert policy.normalize_number("+1 512.555.0101") == "+15125550101"
     for bad in ["512-555-0101#", "*67 512 555 0101", "512555", "abc", None]:
         assert policy.normalize_number(bad) is None, bad
+
+
+# ---- spec 2026-10-02: call wrap-up ----
+
+def test_stopped_is_an_outcome_but_not_a_model_outcome():
+    assert "stopped" in policy.OUTCOMES and "stopped" not in policy.MODEL_OUTCOMES
+
+
+def test_is_closing_en_es():
+    yes = [
+        "Thanks, that's what I needed — Saturday hours 9 to 1.",
+        "That's all I needed, thank you.",
+        "Thank you for your help, have a great day.",
+        "Thanks so much for your time. Goodbye!",
+        "Perfect, that’s everything. Bye.",
+        "Muchas gracias, adiós.",
+        "Perfecto, eso es todo. Gracias.",
+        "Gracias por su ayuda, que tenga buen día.",
+    ]
+    no = [
+        "Tuesday October 6th at 3:30 works, thank you.",   # agreeing to a slot
+        "Thanks.",                                          # answering "let me check"
+        "Gracias.",
+        "Thanks. What time do you close?",
+        "Is that all I need to bring?",
+        "¿Eso es todo lo que necesito llevar",
+        "Hello, I'd like to book a cleaning.",
+        "",
+        None,
+    ]
+    for t in yes:
+        assert policy.is_closing(t), t
+    for t in no:
+        assert not policy.is_closing(t), t

@@ -16,6 +16,7 @@ OUTCOMES = [
     "line_lost",
     "taken_over",
     "not_admissible",
+    "stopped",
     "failed",
 ]
 MODEL_OUTCOMES = {"booked", "info_gathered", "needs_callback", "refused"}
@@ -87,6 +88,33 @@ def filler(lang: str) -> str:
 
 def callback_line(lang: str) -> str:
     return _CALLBACK["es" if lang == "es" else "en"]
+
+
+# Spec 2026-10-02 (call wrap-up §1): a model line that closes the call. Strong
+# closing phrases only. A bare "thank you" is NOT a goodbye: "Tuesday at 3:30
+# works, thank you." agrees to a slot, and "Thanks." answers "let me check".
+# Hanging up there would cut the business off mid-task, so a line counts only
+# when it says goodbye / "that's all I needed" / "thanks for your help".
+# Any question mark disqualifies it (the model is still asking).
+_CLOSING = re.compile(
+    r"\b(?:good\s?-?bye|bye(?:\s+now|\s+bye)?"
+    r"|have\s+a\s+(?:great|good|nice|wonderful|lovely)\s+(?:day|one|afternoon|evening|weekend|night)"
+    r"|that'?s\s+(?:all|everything|exactly\s+what|just\s+what|what)\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
+    r"|that'?s\s+all(?:\s+for\s+now)?|that\s+is\s+all|that'?s\s+everything"
+    r"|thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?\s+for\s+(?:your|the|all\s+your)\s+(?:help|time|information|info)"
+    r"|adi[oó]s|hasta\s+luego|que\s+tenga\s+(?:un\s+)?(?:buen|lindo|excelente)\s+(?:d[ií]a|fin\s+de\s+semana)"
+    r"|que\s+tenga\s+(?:una\s+)?buena\s+(?:tarde|noche)"
+    r"|eso\s+es\s+todo|es\s+todo\s+lo\s+que\s+necesitaba|era\s+todo|(?:muchas\s+)?gracias\s+por\s+su\s+(?:ayuda|tiempo|informaci[oó]n))\b",
+    re.I,
+)
+
+
+def is_closing(text) -> bool:
+    """Is this assistant line a goodbye (en/es)? Used to end a call the model forgot to end."""
+    s = str(text or "").replace("\u2019", "'").strip()
+    if not s or "?" in s or "\u00bf" in s:
+        return False
+    return bool(_CLOSING.search(s))
 
 
 _GREETING = {"en": "Hello?", "es": "¿Hola?"}

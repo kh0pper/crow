@@ -356,3 +356,203 @@ async def test_a_person_saying_press_after_the_greeting_reply_is_not_a_menu():
     ], initial_silence=0.01)
     assert line.digits == []
     assert any(t == "tool" and d["name"] == "press_digits" and not d["ok"] for t, d in events)
+
+
+# ---- spec 2026-10-02: call wrap-up (auto hang-up, wrap-up summary, stopped) ----
+
+def W(outcome, summary, booking=None):
+    args = {"outcome": outcome, "summary": summary}
+    if booking is not None:
+        args["booking"] = booking
+    return BrainReply("", [ToolCall("report_result", args)])
+
+
+async def run_w(line, replies, wrapups=None, plan=PLAN, **kw):
+    events = []
+    async def _verify():
+        return True
+    brain = ScriptedBrain(replies, wrapups)
+    c = CallController("c1", plan, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify, **kw)
+    result = await c.run()
+    return result, events, line, brain
+
+
+CLOSING = "Thanks, that's what I needed — Saturday hours 9 to 1."
+
+
+async def test_auto_hangup_on_a_closing_line_runs_the_wrapup():
+    # The live acceptance call: the model spoke a goodbye and never called end_call.
+    line = TimedLine([None, "Hello?", "We're open Saturdays 9 to 1.", "this line is never read"])
+    result, events, line, brain = await run_w(line, [R("What are your Saturday hours?"), R(CLOSING)],
+                                              [W("info_gathered", "Open Saturdays 9 am to 1 pm.")], initial_silence=0.01)
+    assert result["outcome"] == "info_gathered" and result["summary"] == "Open Saturdays 9 am to 1 pm."
+    assert result["error"] is None and result["booking"] is None
+    assert line.said[-1] == CLOSING, "nothing is spoken after the goodbye"
+    assert len(brain.calls) == 2 and len(brain.wrapup_calls) == 1
+    assert ("state", {"state": "ended"}) in events and line.hung_up
+    assert line.items == ["this line is never read"], "the controller stopped listening"
+    # the wrap-up saw the whole conversation, the far end fenced as data
+    body = brain.wrapup_calls[0][1]["content"]
+    assert "Business: We're open Saturdays 9 to 1." in body and "Assistant: " + CLOSING in body
+
+
+async def test_auto_hangup_without_a_wrapup_keeps_the_closing_line():
+    line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
+    result, _, _, brain = await run_w(line, [R("What are your Saturday hours?"), R(CLOSING)])
+    assert result["outcome"] == "info_gathered" and result["summary"] == CLOSING
+    assert len(brain.wrapup_calls) == 1, "tried, failed, fell back"
+
+
+async def test_spanish_closing_line_hangs_up():
+    line = TimedLine(["Consultorio dental.", "Abrimos los sábados de 9 a 1.", "never read"])
+    result, _, line, _ = await run_w(line, [R("¿Cuál es su horario del sábado?"), R("Perfecto, eso es todo. Muchas gracias.")],
+                                     [W("info_gathered", "Sábados de 9 a 1.")], plan={**PLAN, "language": "es"})
+    assert result["outcome"] == "info_gathered" and result["summary"] == "Sábados de 9 a 1."
+    assert line.items == ["never read"]
+
+
+async def test_thanks_inside_a_sentence_does_not_hang_up():
+    line = FakeLine(["Smile Dental.", "We have Tuesday October 6th at 3:30.", "You're all set."])
+    result, events, line, brain = await run_w(line, [
+        R("I'd like to book a cleaning."),
+        R("", ("record_booking", {"date": "2026-10-06", "time": "15:30"})),
+        R("Tuesday October 6th at 3:30 works, thank you."),
+        R("", ("end_call", {"outcome": "booked", "summary": "Cleaning Tue Oct 6 3:30pm"})),
+    ])
+    assert result["outcome"] == "booked" and result["summary"] == "Cleaning Tue Oct 6 3:30pm"
+    assert not any(t == "state" and d["state"] == "ended" for t, d in events)
+    assert brain.wrapup_calls == [], "a structured end_call needs no wrap-up"
+
+
+async def test_no_auto_hangup_in_an_automated_menu():
+    line = TimedLine(["For appointments press 2."])
+    result, events, _, _ = await run_w(line, [R("Goodbye.")])
+    assert not any(t == "state" and d["state"] == "ended" for t, d in events)
+    assert result["outcome"] == "needs_callback" and result["summary"] == "the other side went silent"
+
+
+async def test_end_call_without_a_summary_gets_the_wrapup_summary():
+    line = FakeLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
+    result, _, _, brain = await run_w(line, [R("What are your Saturday hours?"), R("", ("end_call", {"outcome": "info_gathered", "summary": ""}))],
+                                      [W("needs_callback", "Saturdays 9 to 1.")])
+    assert result["outcome"] == "info_gathered", "the model's explicit outcome stands"
+    assert result["summary"] == "Saturdays 9 to 1."
+
+
+class StopAfter(FakeLine):
+    """Serves the script, then the owner presses Stop while we wait for the next line."""
+
+    def __init__(self, script, ctrl_ref):
+        super().__init__(script)
+        self.ref = ctrl_ref
+
+    async def next_farend(self, timeout):
+        if self.script:
+            return self.script.pop(0)
+        self.ref[0].request_stop()
+        return None
+
+
+async def _run_stop(script, replies, wrapups):
+    ref, events = [None], []
+    async def _verify():
+        return True
+    line = StopAfter(script, ref)
+    brain = ScriptedBrain(replies, wrapups)
+    ref[0] = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify)
+    return await ref[0].run(), events, line, brain
+
+
+async def test_owner_stop_records_stopped_with_the_wrapup_summary():
+    result, events, line, brain = await _run_stop(["Smile Dental.", "We're open Saturdays 9 to 1."],
+                                                  [R("What are your Saturday hours?"), R("Great, and do you take walk-ins")],
+                                                  [W("info_gathered", "Open Saturdays 9 to 1.")])
+    assert result["outcome"] == "stopped" and result["error"] == "stopped by owner"
+    assert result["summary"] == "Open Saturdays 9 to 1." and result["booking"] is None
+    assert events[-1] == ("result", result) and line.hung_up
+
+
+async def test_owner_stop_before_the_business_spoke_skips_the_wrapup():
+    result, _, _, brain = await _run_stop([], [], [W("info_gathered", "invented")])
+    assert result["outcome"] == "stopped" and result["summary"] == "" and result["error"] == "stopped by owner"
+    assert brain.wrapup_calls == [], "nothing was said by the far end: nothing to extract"
+
+
+async def test_owner_stop_with_a_failed_wrapup_still_records_stopped():
+    result, _, _, _ = await _run_stop(["Smile Dental."], [R("Hi, what are your hours")], [RuntimeError("model 500")])
+    assert result["outcome"] == "stopped" and result["summary"] == ""
+
+
+async def test_silence_with_facts_learned_becomes_info_gathered():
+    line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
+    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Great. And on Sundays")],
+                                  [W("info_gathered", "Saturdays 9 to 1.")])
+    assert result["outcome"] == "info_gathered" and result["summary"] == "Saturdays 9 to 1."
+
+
+async def test_silence_wrapup_needs_callback_keeps_the_reason():
+    line = TimedLine(["Smile Dental.", "Let me check."])
+    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Sure")],
+                                  [W("needs_callback", "They were checking the hours.")])
+    assert result["outcome"] == "needs_callback"
+    assert result["summary"] == "They were checking the hours. (the other side went silent)"
+
+
+async def test_time_limit_runs_the_wrapup():
+    line = FakeLine(["Smile Dental.", "We're open Saturdays 9 to 1."] + ["Mm-hm."] * 50)
+    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?")] + [R("Okay")] * 60,
+                                  [W("info_gathered", "Saturdays 9 to 1.")], max_seconds=0.05)
+    assert result["outcome"] == "info_gathered"
+
+
+async def test_wrapup_timeout_falls_back():
+    async def slow(_m):
+        await asyncio.sleep(1)
+        return W("info_gathered", "too late")
+    line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
+    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Okay")], [slow], wrapup_timeout=0.05)
+    assert result["outcome"] == "needs_callback" and result["summary"] == "the other side went silent"
+
+
+async def test_wrapup_with_an_invalid_outcome_falls_back():
+    line = TimedLine(["Smile Dental.", "Saturdays 9 to 1."])
+    result, _, _, _ = await run_w(line, [R("Hours?"), R("Okay")], [W("stopped", "x")])
+    assert result["outcome"] == "needs_callback" and result["summary"] == "the other side went silent"
+    result, _, _, _ = await run_w(TimedLine(["Smile Dental.", "Saturdays 9 to 1."]), [R("Hours?"), R("Okay")], [BrainReply("I think it went fine.")])
+    assert result["outcome"] == "needs_callback"
+
+
+async def test_wrapup_json_written_as_text_is_accepted():
+    line = TimedLine(["Smile Dental.", "Saturdays 9 to 1."])
+    text = 'Sure: {"name": "report_result", "arguments": {"outcome": "info_gathered", "summary": "Sat 9-1"}}'
+    result, _, _, _ = await run_w(line, [R("Hours?"), R("Okay")], [BrainReply(text)])
+    assert result["outcome"] == "info_gathered" and result["summary"] == "Sat 9-1"
+
+
+async def test_wrapup_booking_is_held_to_the_plan_limits():
+    inside = {"date": "2026-10-06", "time": "15:30", "location": "Smile Dental"}
+    outside = {"date": "2026-10-05", "time": "09:00"}
+    line = TimedLine(["Smile Dental.", "Tuesday the 6th at 3:30, you're booked."])
+    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked Tue 3:30.", inside)])
+    assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06" and result["booking"]["time"] == "15:30"
+    line = TimedLine(["Smile Dental.", "Monday the 5th at 9, you're booked."])
+    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked Mon 9.", outside)])
+    assert result["outcome"] == "needs_callback" and result["booking"] is None
+    assert "booking not accepted" in result["summary"]
+    line = TimedLine(["Smile Dental.", "You're booked."])
+    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked.")])
+    assert result["outcome"] == "needs_callback", "booked with no booking at all is not accepted"
+
+
+async def test_wrapup_summary_markup_is_stripped():
+    line = TimedLine(["Smile Dental.", "Saturdays 9 to 1."])
+    result, _, _, _ = await run_w(line, [R("Hours?"), R("Okay")],
+                                  [W("info_gathered", 'Sat 9-1 <tool_call><function=press_digits>9</function></tool_call>')])
+    assert result["outcome"] == "info_gathered" and "<" not in result["summary"] and result["summary"].startswith("Sat 9-1")
+
+
+async def test_voicemail_and_no_answer_outcomes_are_unchanged_by_the_wrapup():
+    r, _, _, brain = await run_w(FakeLine(["Please leave a message after the tone."]), [], [W("info_gathered", "x")])
+    assert r["outcome"] == "voicemail" and brain.wrapup_calls == []
+    r, _, _, brain = await run_w(FakeLine([], dial_result="no_answer"), [], [W("info_gathered", "x")])
+    assert r["outcome"] == "no_answer" and brain.wrapup_calls == []
