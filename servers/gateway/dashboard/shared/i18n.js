@@ -669,6 +669,7 @@ export const translations = {
   "extensions.configureNeedsRestart": { en: "Saved — restart the gateway to apply this change.", es: "Guardado — reinicia la puerta de enlace para aplicar este cambio." },
   "extensions.configureNeedsBundleRestart": { en: "Saved. The running container still uses the old values — restart it to apply:", es: "Guardado. El contenedor en ejecución sigue usando los valores anteriores — reinícialo para aplicar:" },
   "extensions.configureAlsoGatewayRestart": { en: "(The gateway also needs a restart for its own copy.)", es: "(La puerta de enlace también necesita reiniciarse para su propia copia.)" },
+  "extensions.configureAppliesOnNextStart": { en: "The bundle is not running — the new values apply on its next start.", es: "El paquete no está en ejecución — los nuevos valores se aplicarán en su próximo inicio." },
   "extensions.restartNow": { en: "Restart now", es: "Reiniciar ahora" },
   "extensions.restartLater": { en: "Later", es: "Más tarde" },
   "extensions.bundleRestarted": { en: "Restarted with the new settings.", es: "Reiniciado con la nueva configuración." },

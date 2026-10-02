@@ -109,6 +109,7 @@ function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}
   const ctx = vm.createContext({
     window, document, location, sessionStorage,
     fetch: fetchStub,
+    AbortController,
     console,
     setTimeout: (fn) => { timers.push(fn); return timers.length; },
     clearTimeout: () => {},
@@ -668,6 +669,74 @@ test("BEHAVIOR: a save that changed container-consumed keys offers an explicit R
   assert.equal(card(document).querySelector(".bundle-configure"), null, "onSaved repainted the card after the restart");
 });
 
+test("BEHAVIOR: closing the restart offer by the backdrop still runs onSaved (M6)", async () => {
+  const { document, click, settle, flushTimers, calls } = boot({
+    ...CARD_BOOT,
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: [], needs_bundle_restart: true, bundle_restart_keys: ["JELLYFIN_URL"] } }),
+  });
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_URL").value = "http://jf";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+  click(document.getElementById("modal-overlay"));   // e.target === overlay → hideModal
+  await settle();
+  assert.equal(card(document).querySelector(".bundle-configure"), null, "the card was repainted on a backdrop close");
+  assert.ok(!calls.some((c) => c.url.includes("/bundles/api/start")));
+});
+
+test("BEHAVIOR: Later during an in-flight Restart, then its success — finish runs once and never closes the NEXT modal (M6)", async () => {
+  let release;
+  const startP = new Promise((r) => { release = r; });
+  const { document, click, settle, flushTimers } = boot({
+    ...CARD_BOOT,
+    fetchImpl: (url) => {
+      if (url.includes("/bundles/api/env")) {
+        return { ok: true, status: 200, json: () => Promise.resolve({ ok: true, needs_config: ["JELLYFIN_URL"], needs_bundle_restart: true, bundle_restart_keys: ["JELLYFIN_API_KEY"] }) };
+      }
+      if (url.includes("/bundles/api/start")) return startP.then(() => ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }));
+      return { ok: true, status: 200, json: () => Promise.resolve({}) };
+    },
+  });
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "k";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+  click(document.querySelector("#modal-content .ext-configure__restart"));   // in flight
+  await settle();
+  const later = [...document.querySelectorAll("#modal-content .btn-secondary")].find((b) => /Later/.test(b.textContent));
+  click(later);
+  await settle();
+  const overlay = document.getElementById("modal-overlay");
+  assert.equal(overlay.style.display, "none");
+
+  // The operator opens Configure again (the card still needs JELLYFIN_URL).
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  assert.equal(overlay.style.display, "flex");
+  release();                    // the old restart now succeeds…
+  await settle();
+  flushTimers();                // …and its queued finish fires
+  assert.equal(overlay.style.display, "flex", "a second finish would have hidden the new modal");
+});
+
+test("BEHAVIOR: a save to a STOPPED bundle says the values apply on next start — no Restart offer (M8)", async () => {
+  const { document, click, settle } = boot({
+    ...CARD_BOOT,
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: [], needs_bundle_restart: false, applies_on_next_start: true, bundle_restart_keys: ["JELLYFIN_URL"] } }),
+  });
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_URL").value = "http://jf";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  assert.match(document.getElementById("install-status").textContent, /apply on its next start/);
+  assert.equal(document.querySelector("#modal-content .ext-configure__restart"), null);
+});
+
 test("BEHAVIOR: choosing Later on the restart offer still repaints the card and never restarts (B4)", async () => {
   const { document, click, settle, flushTimers, calls } = boot({
     ...CARD_BOOT,
@@ -831,6 +900,25 @@ test("BEHAVIOR: a failed consent-challenge enables Install (server gates) and sa
     assert.equal(document.querySelectorAll('#modal-content input[type="checkbox"]').length, 0,
       "an error response never renders a token-less consent box");
   }
+});
+
+test("BEHAVIOR: a consent-challenge that never answers enables Install after the timeout, with the server-gate note (M7)", async () => {
+  const { document, click, settle, flushTimers, calls } = boot({
+    fetchImpl: (url) => (url.includes("/consent-challenge/")
+      ? new Promise(() => {})    // hangs forever
+      : { ok: true, status: 200, json: () => Promise.resolve({}) }),
+  });
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+  const btn = document.querySelector("#modal-content .btn-primary");
+  assert.equal(btn.disabled, true, "still waiting");
+  const challenge = calls.find((c) => c.url.includes("/consent-challenge/"));
+  assert.ok(challenge.init && challenge.init.signal, "the request is abortable");
+  flushTimers();                // the 10 s timeout
+  await settle();
+  assert.equal(btn.disabled, false, "the timeout takes the failure path");
+  assert.match(document.querySelector("#modal-content .ext-install__required").textContent, /Could not check the required settings/);
+  assert.equal(challenge.init.signal.aborted, true, "and aborts the hung request");
 });
 
 test("BEHAVIOR: the required-env gate and the consent gate must BOTH hold", async () => {

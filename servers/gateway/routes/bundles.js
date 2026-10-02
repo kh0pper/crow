@@ -981,6 +981,23 @@ async function runCompose(composeArgs, opts = {}) {
   return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
 }
 
+/**
+ * True when any of the bundle's compose services is running. A failed `ps`
+ * (no docker, compose error) answers true: callers use this to decide whether
+ * to WARN about a stale container, and a missing warning is the worse error.
+ */
+async function composeServiceRunning(bundleDir) {
+  try {
+    const { stdout } = await runCompose(["ps", "--format", "json"], { cwd: bundleDir });
+    const rows = String(stdout || "").trim().split("\n").filter(Boolean).flatMap((line) => {
+      try { const j = JSON.parse(line); return Array.isArray(j) ? j : [j]; } catch { return []; }
+    });
+    return rows.some((c) => c && c.State === "running");
+  } catch {
+    return true;
+  }
+}
+
 /** Read JSON file with fallback */
 function readJsonSafe(path, fallback) {
   try {
@@ -3022,7 +3039,7 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/env — Save env vars for an installed bundle
-  router.post("/bundles/api/env", (req, res) => {
+  router.post("/bundles/api/env", async (req, res) => {
     const { bundle_id, env_vars } = req.body;
 
     if (!bundle_id || !isValidBundleId(bundle_id)) {
@@ -3091,7 +3108,16 @@ export default function bundlesRouter() {
         bundleRestartKeys = changedKeys.filter((k) => consumed.all || consumed.keys.has(k));
       } catch { /* unreadable compose → no claim either way */ }
     }
-    const needsBundleRestart = bundleRestartKeys.length > 0;
+    // Only a RUNNING container holds stale values. A stopped one picks the new
+    // .env up on its next start, and offering "Restart now" there would start
+    // a bundle the operator had stopped. Unknown (ps failed) → assume running:
+    // a needless warning beats a silently stale container.
+    let bundleRunning = false;
+    if (bundleRestartKeys.length > 0) {
+      bundleRunning = await composeServiceRunning(bundleDir);
+    }
+    const needsBundleRestart = bundleRestartKeys.length > 0 && bundleRunning;
+    const appliesOnNextStart = bundleRestartKeys.length > 0 && !bundleRunning;
 
     // RE-DERIVE config state from the files we just wrote and hand it back: the
     // client must not decide "configured" itself. submitConfigureOnly guards only
@@ -3106,12 +3132,15 @@ export default function bundlesRouter() {
       : "Environment variables saved";
     if (needsBundleRestart) {
       message += `. Restart the bundle to apply ${bundleRestartKeys.join(", ")} to its container — it keeps its old values until then`;
+    } else if (appliesOnNextStart) {
+      message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
     }
     res.json({
       ok: true,
       message,
       needs_restart: needsRestart,
       needs_bundle_restart: needsBundleRestart,
+      applies_on_next_start: appliesOnNextStart,
       bundle_restart_keys: bundleRestartKeys,
       needs_config: needsConfigKeys(bundle_id),
     });

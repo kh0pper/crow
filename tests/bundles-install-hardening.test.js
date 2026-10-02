@@ -351,6 +351,13 @@ test("POST /bundles/api/env: changing a key the compose consumes reports needs_b
   writeFileSync(join(HOME, "bundles", id, "docker-compose.yml"), readFileSync(join(FIXTURES, id, "docker-compose.yml"), "utf8"));
   writeFileSync(GATEWAY_ENV, "PORT=3001\n");
   _setAppEnvPathForTest(GATEWAY_ENV);
+  // M8: only a RUNNING container is stale. The stubbed `compose ps` says running.
+  let psState = "running";
+  const psCalls = [];
+  _setComposeRunnerForTest(async (args, opts) => {
+    psCalls.push({ args, cwd: opts?.cwd });
+    return { stdout: psState ? JSON.stringify({ Service: "app", State: psState }) + "\n" : "", stderr: "" };
+  });
   const app = express();
   app.use(express.json());
   app.use(bundlesRouter());
@@ -363,6 +370,9 @@ test("POST /bundles/api/env: changing a key the compose consumes reports needs_b
   }).then(async (r) => ({ status: r.status, body: await r.json() }));
   try {
     const changed = await post({ FX_SECRET: "new-secret-value", FX_TOKEN: "t" });
+    assert.deepEqual(psCalls.at(-1).args, ["ps", "--format", "json"]);
+    assert.equal(psCalls.at(-1).cwd, join(HOME, "bundles", id));
+    assert.equal(changed.body.applies_on_next_start, false);
     assert.equal(changed.status, 200, JSON.stringify(changed.body));
     assert.equal(changed.body.needs_bundle_restart, true);
     assert.deepEqual(changed.body.bundle_restart_keys, ["FX_SECRET"], "FX_TOKEN is not consumed by compose");
@@ -375,9 +385,26 @@ test("POST /bundles/api/env: changing a key the compose consumes reports needs_b
 
     const notConsumed = await post({ FX_TOKEN: "t2" });
     assert.equal(notConsumed.body.needs_bundle_restart, false, "a key compose never reads needs no container restart");
+
+    // M8: a STOPPED bundle (ps lists nothing running) is not offered a restart;
+    // the change applies on its next start, and the message says so.
+    for (const state of ["", "exited"]) {
+      psState = state;
+      const stopped = await post({ FX_SECRET: "v-" + (state || "none") });
+      assert.equal(stopped.body.needs_bundle_restart, false, "stopped (" + JSON.stringify(state) + ") → no Restart offer");
+      assert.equal(stopped.body.applies_on_next_start, true);
+      assert.deepEqual(stopped.body.bundle_restart_keys, ["FX_SECRET"]);
+      assert.match(stopped.body.message, /not running; FX_SECRET will apply on its next start/);
+    }
+
+    // A failed `ps` (no docker) errs toward the warning.
+    _setComposeRunnerForTest(async () => { throw new Error("docker not found"); });
+    const unknown = await post({ FX_SECRET: "v-unknown" });
+    assert.equal(unknown.body.needs_bundle_restart, true);
   } finally {
     server.close();
     _setAppEnvPathForTest(null);
+    _setComposeRunnerForTest(null);
   }
 });
 
