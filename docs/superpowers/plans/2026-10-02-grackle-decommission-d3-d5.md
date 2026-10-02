@@ -47,7 +47,8 @@ node scripts/ops/grackle-d3-import.mjs \
   --mode plan|rehearse|apply|emit-only \
   --report <report.json> [--extract <grackle-d3-extract.db>] \
   [--expect-sha <sha256-of-source>] [--backup-ok <cold-backup-path>] \
-  [--peer-max-memory-id <name>=<n> ...] [--import-media] [--import-data-dashboard]
+  [--peer-max-memory-id <name>=<n> ...] [--peer-max-id <table>:<name>=<n> ...] \
+  [--import-media] [--import-data-dashboard] [--keep-scratch]
 ```
 
 **Rules pinned by tests:**
@@ -69,7 +70,7 @@ node scripts/ops/grackle-d3-import.mjs \
 - **project_spaces:** the source row whose slug and workspace path equal a target row is merged, not inserted (the grackle 6 = crow 6 case). Child rows are remapped to the target id.
 - **ramble_cells / ramble_wallet / ramble_credits / ramble_nest_claims:** insert-or-ignore on the natural key, so a target row is never changed. The report has `wallet_balance_before`/`after` per kind. The test asserts `after - before` = the sum of the inserted rows.
 - **pi_bot_defs:** inserted with `enabled = 0`, whatever the source value.
-- **Tables the target lacks** (media_*, data_case_studies/sections, pir_requests, capstone_*, pipeline_runs, tax_*, crowclaw_*) go to the extract, never `CREATE`d in the target. media and data-dashboard are imported only with `--import-media` or `--import-data-dashboard`, **and only if the table already exists** in the target (created by the bundle). Otherwise the tool refuses with a clear message.
+- **Tables the target lacks** (media_*, data_case_studies/sections, pir_requests, capstone_*, pipeline_runs, tax_*, crowclaw_*) go to the extract, never `CREATE`d in the target. media and data-dashboard are imported only with `--import-media` or `--import-data-dashboard`. **As built (Kevin §9 #4):** if a selected bundle's tables are missing from the target, the importer creates them by calling that bundle's own `init-tables` export inside phase A (never hand DDL), and the report lists it under `bundle_tables_created`. Installing the bundles on crow first (pre-window step) remains the preferred order.
 - **Skipped tables** (notifications, oauth_*, mcp_sessions, sync_conflicts, audit_log, cross_host_calls, and the already-synced contacts, messages, crow_context and providers) are listed in the report with their counts.
 - **Phase A** is one better-sqlite3 transaction. The test injects a throw after half the tables and asserts the target is byte-identical in its row counts.
 - **Phase B** queues synced rows via `emitOrQueue(null, db, table, "insert", row)` from `servers/shared/sync-emit.js`. The tables are memories, research_notes, glasses_note_sessions, ramble_cells and ramble_wallet. Phase B records `(table, key)` in the report.
@@ -238,9 +239,10 @@ Arm on grackle with `sudo systemd-run --on-active=10800 --unit=grackle-freeze-de
 **Pre-window (T-60 → T-0, nothing degraded):**
 - [ ] Confirm the gates in "Global constraints". For A8, after a test revoke on a throwaway row in the A8 PR's own acceptance, `crow_instances.status` stays `revoked` across two proxy reloads.
 - [ ] Get Kevin's answers for spec §8.2 (c) and (d): Ramble import yes or no, and media/data-dashboard bundles. **If he picked install, install those bundles on crow now** (gateway up) so their tables exist.
-- [ ] Collect the peer max memory ids, read-only:
-  - black-swan: `sqlite3 'file:…/crow.db?mode=ro' 'select max(id) from memories'`;
-  - raven: the `python3` read-only query, since raven has no sqlite3 or node.
+- [ ] Collect the peer max ids, read-only, for all three id-keyed synced tables (memories, research_notes, glasses_note_sessions):
+  - black-swan: `sqlite3 'file:…/crow.db?mode=ro' 'select (select max(id) from memories), (select max(id) from research_notes), (select max(id) from glasses_note_sessions)'`;
+  - raven: the same query through `python3`'s read-only sqlite3, since raven has no sqlite3 or node.
+  - An empty table gives NULL: pass 0. A table with no value passed stays un-queued (`peer-id-range-unknown`).
 - [ ] Run a fresh rehearse on a crow API backup with yesterday's grackle backup copy. Expect zero errors, and check the report against the spec §4.2 numbers (memories about 204, blog 31, research_sources 270, ramble deltas).
 - [ ] List the crow.db holders with `lsof /home/kh0pp/.crow/data/crow.db`. End every Claude session holding crow stdio MCP servers, then run the rest of W3 from plain bash (spec §5.3).
 - [ ] Write the schedule row and run `node ~/crow/scripts/ops/box-reserve.mjs hold --owner grackle-d3 --reason "W3 import, gateway stopped" --minutes 150`.
@@ -265,7 +267,10 @@ Arm on grackle with `sudo systemd-run --on-active=10800 --unit=grackle-freeze-de
     --source ~/grackle-decom/d3/<backup>.db --expect-sha <sha> \
     --target /home/kh0pp/.crow/data/crow.db --backup-ok ~/grackle-decom/d3/crow-pre-d3.db \
     --mode apply --report ~/grackle-decom/d3/report.json --extract ~/grackle-decom/d3/grackle-d3-extract.db \
-    --peer-max-memory-id black-swan=<n> --peer-max-memory-id raven=<n> [--import-media] [--import-data-dashboard]
+    --peer-max-memory-id black-swan=<n> --peer-max-memory-id raven=<n> \
+    --peer-max-id research_notes:black-swan=<n> --peer-max-id research_notes:raven=<n> \
+    --peer-max-id glasses_note_sessions:black-swan=<n> --peer-max-id glasses_note_sessions:raven=<n> \
+    [--import-media] [--import-data-dashboard]
   ```
   `CROW_DATA_DIR` must be crow's, so `getOrCreateLocalInstanceId()` returns crow's id. Confirm the report's `emits.instance_id` equals `0867ac2809dedd885ba7769b21966f8e`.
 - [ ] Check the report: `per_table` counts equal the rehearse counts, the wallet delta equals the rehearse delta, and `extract_tables` and `skipped` match the spec.
