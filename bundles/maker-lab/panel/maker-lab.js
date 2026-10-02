@@ -1276,7 +1276,7 @@ function renderSettingsView({ mode, lanExposure, devices, saved, unbound, escape
         Devices that have been bound as solo kiosks. Unbinding forces a device to re-authenticate on next use.
       </p>
       ${devices.length ? `
-        <table class="device-table">
+        <div class="table-scroll"><table class="device-table">
           <thead><tr><th>Fingerprint</th><th>Learner</th><th>Bound</th><th>Last seen</th><th></th></tr></thead>
           <tbody>
             ${devices.map((d) => `
@@ -1295,7 +1295,7 @@ function renderSettingsView({ mode, lanExposure, devices, saved, unbound, escape
               </tr>
             `).join("")}
           </tbody>
-        </table>
+        </table></div>
       ` : `<p>(no bound devices)</p>`}
     </div>
   `;

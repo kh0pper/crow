@@ -324,7 +324,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.3.2",
+      "version": "1.3.3",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -685,7 +685,7 @@
     {
       "id": "campaigns",
       "name": "Campaigns",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
       "type": "mcp-server",
       "author": "Crow",
@@ -1001,7 +1001,7 @@
     {
       "id": "data-dashboard",
       "name": "Data Dashboard",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
       "type": "bundle",
       "author": "Crow",
@@ -2109,7 +2109,7 @@
     {
       "id": "knowledge-base",
       "name": "Knowledge Base",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking and verification workflows",
       "type": "mcp-server",
       "author": "Crow",
@@ -2654,7 +2654,7 @@
     {
       "id": "maker-lab",
       "name": "Maker Lab",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "description": "Scaffolded AI learning companion paired with FOSS maker surfaces (Blockly first). Hint-ladder pedagogy, per-learner memory, age-banded personas, classroom-capable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -2738,7 +2738,7 @@
     {
       "id": "maker-lab-advanced",
       "name": "Maker Lab Advanced",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Self-hosted JupyterHub for older learners (ages 9+) — single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab: Blockly is the 5-9 on-ramp, Scratch is the 8+ step-up, this is the 9+ landing zone with real Python.",
       "type": "bundle",
       "author": "Crow",
@@ -3396,7 +3396,7 @@
     {
       "id": "meeting-recorder",
       "name": "Meeting Recorder",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Record a meeting in the browser (shared tab audio plus microphone) and transcribe it locally with faster-whisper. Nothing leaves the machine.",
       "type": "bundle",
       "author": "Crow",
@@ -4762,7 +4762,7 @@
     {
       "id": "pm-workspace",
       "name": "PM Workspace",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Personal PM workspace — markdown + handwritten drawing notes with OCR, a daily digest email assembled from local boards/trackers and optional cloud adapters, and deterministic Monday.com board sync (mirror or two-way)",
       "type": "mcp-server",
       "author": "Crow",
@@ -4984,7 +4984,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.12.0",
+      "version": "0.12.1",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
@@ -5026,7 +5026,7 @@
     {
       "id": "reader",
       "name": "Reader",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "E-reader for project material — import PDFs, web pages, and files; read in a clean paragraph view; originals kept as archival copies. TTS, annotations, and memory promotion arrive in later milestones.",
       "type": "mcp-server",
       "author": "Crow",
@@ -5702,7 +5702,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",
