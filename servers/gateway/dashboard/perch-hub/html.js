@@ -62,6 +62,10 @@ ${engineBanner(engine, lang)}
            whole task exists to stop shipping. -->
       <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
       <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
+      <!-- "Show more (N)": the picker offers only models that answer
+           (or start on demand) AND that pi can spawn; the rest are one tap
+           away here, never silently dropped. Hidden when there are none. -->
+      <button type="button" class="quiet perch-model-more" id="perch-new-model-more" aria-controls="perch-new-model" aria-expanded="false" hidden></button>
       <!-- Open-anywhere C2: the directory the session about to be started
            runs in. EMPTY means "the bot's default" and the key is never
            sent — the route/engine treat an absent cwd as the world root.
@@ -166,7 +170,8 @@ ${engineBanner(engine, lang)}
     <section id="perch-tab-session" role="tabpanel" aria-labelledby="perch-tab-btn-session" hidden>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
-        <select id="perch-model" aria-labelledby="perch-model-label" disabled></select></div>
+        <select id="perch-model" aria-labelledby="perch-model-label" disabled></select>
+        <button type="button" class="quiet perch-model-more" id="perch-model-more" aria-controls="perch-model" aria-expanded="false" hidden></button></div>
       <div class="field"><span class="field-label" id="perch-thinking-label">${escapeHtml(t("perch.thinkingLabel", lang))}</span>
         <select id="perch-thinking" aria-labelledby="perch-thinking-label" disabled></select></div>
       <div class="field"><span class="field-label" id="perch-permission-label">${escapeHtml(t("perch.permissionLabel", lang))}</span>

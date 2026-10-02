@@ -332,6 +332,11 @@ export function perchHubJs(lang = "en") {
   var MODEL_BOT_DEFAULT='${tJs("perch.modelBotDefault", lang)}';
   var MODEL_BOT_RESOLVES='${tJs("perch.modelBotResolves", lang)}';
   var MODEL_CURRENT_UNLISTED='${tJs("perch.modelCurrentUnlisted", lang)}';
+  var MODEL_GROUP_NETWORK='${tJs("perch.modelGroupNetwork", lang)}';
+  var MODEL_GROUP_CLOUD='${tJs("perch.modelGroupCloud", lang)}';
+  var MODEL_GROUP_UNAVAILABLE='${tJs("perch.modelGroupUnavailable", lang)}';
+  var MODEL_SHOW_UNAVAILABLE='${tJs("perch.modelShowUnavailable", lang)}';
+  var MODEL_HIDE_UNAVAILABLE='${tJs("perch.modelHideUnavailable", lang)}';
   var LAUNCH_MODEL_FAILED='${tJs("perch.launchModelFailed", lang)}';
   var CLOSE_LABEL='${tJs("perch.close", lang)}';
   var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
@@ -612,7 +617,7 @@ export function perchHubJs(lang = "en") {
      on every 10s poll, and repopulating unconditionally would throw away the
      operator's pick mid-tap — the same reason the bot roster itself is
      rebuilt only on a real change. */
-  var launchModels={botId:null,default:null,want:null};
+  var launchModels={botId:null,default:null,want:null,list:null,showAll:false};
 
   /* Which bot the launcher would spawn against right now. startNewSession()
      resolves the same thing for the same reason; both go through here so the
@@ -629,53 +634,55 @@ export function perchHubJs(lang = "en") {
   }
 
   function hideLaunchModels(){
-    var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
+    var sel=el('perch-new-model'), lbl=el('perch-new-model-label'), more=el('perch-new-model-more');
     if(sel){ sel.hidden=true; clearEl(sel); }
     if(lbl) lbl.hidden=true;
+    if(more) more.hidden=true;
     /* want cleared too, so the next poll retries a list that failed to load
        rather than leaving the picker permanently absent. */
-    launchModels={botId:null,default:null,want:null};
+    launchModels={botId:null,default:null,want:null,list:null,showAll:false};
   }
 
   function renderLaunchModels(list,dflt){
     var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
     if(!sel) return;
-    clearEl(sel);
-    var listed=dflt&&list.filter(function(m){ return (m&&m.provider)+'/'+(m&&m.id)===dflt; }).length>0;
+    /* The bot's default is PINNED first, outside the groups, whatever its
+       state: the operator must always see what one tap launches on — an
+       unreachable default reads as unreachable rather than disappearing. */
+    var plan=planModelList(list,dflt);
+    var listed=!!plan.pinned;
     /* NO CONFIGURED DEFAULT — the common case on this instance: 3 of 5 R4 bot
        defs carry models:null, and a def naming a since-disabled provider row
-       lands here too. Without this option nothing was preselected, the browser
-       picked option 0, and startSession() then saw a value different from the
-       (null) default and fired a REAL control() switch — so one tap on
-       "New session" silently moved the session onto whatever sorted first in
-       provider order, where spawn would have resolved model_resolver.mjs's own
-       fallback. An empty value means "send no control at all", which is
+       lands here too. Without the sentinel nothing was preselected, the
+       browser picked option 0, and startSession() then saw a value different
+       from the (null) default and fired a REAL control() switch — so one tap
+       on "New session" silently moved the session onto whatever sorted first
+       in provider order, where spawn would have resolved model_resolver.mjs's
+       own fallback. An empty value means "send no control at all", which is
        exactly what letting the spawn decide has to mean. */
-    if(!listed){
-      var none=document.createElement('option');
-      none.value='';                                   /* startSession(): falsy => no control() */
-      none.textContent=MODEL_BOT_RESOLVES;
-      sel.appendChild(none);
-    }
-    list.forEach(function(m){
-      var opt=document.createElement('option');
-      var key=(m&&m.provider)+'/'+(m&&m.id);
-      opt.value=key;
-      /* modelOptionText carries the availability annotation, so an
-         unavailable model reads as unavailable here exactly as it does in
-         the drawer — never a silently selectable dead choice. */
-      opt.textContent=modelOptionText(m)+(key===dflt?' \u2014 '+MODEL_BOT_DEFAULT:'');
-      sel.appendChild(opt);
-    });
+    fillModelSelect(sel,plan,{sentinel:!listed,pinnedSuffix:' \u2014 '+MODEL_BOT_DEFAULT,showAll:launchModels.showAll});
+    syncModelMore(el('perch-new-model-more'),plan,launchModels.showAll);
     /* Pre-selected on the bot's own configured model when there IS one: an
        operator who does not care taps the button and gets what the bot was
-       built with. With no default the sentinel above is option 0 and the
-       browser selects it unaided — an explicit sel.value='' here was measured
+       built with. With no default the sentinel is option 0 and the browser
+       selects it unaided — an explicit sel.value='' here was measured
        redundant (removing it left every test green), so it is not written. */
     if(listed) sel.value=dflt;
     sel.hidden=false;
     if(lbl) lbl.hidden=false;
   }
+
+  /* "Show more (N)": re-render with the hidden entries in their own
+     group (or without them), keeping the operator's pick when it survives. */
+  var launchMore=el('perch-new-model-more');
+  if(launchMore) launchMore.onclick=function(){
+    var sel=el('perch-new-model');
+    if(!sel||!launchModels.list) return;
+    var keep=String(sel.value||'');
+    launchModels.showAll=!launchModels.showAll;
+    renderLaunchModels(launchModels.list,launchModels.default);
+    if(selectHasValue(sel,keep)) sel.value=keep;
+  };
 
   function syncLaunchModels(){
     var botId=launchBotId();
@@ -685,7 +692,7 @@ export function perchHubJs(lang = "en") {
     perchApi('GET','/bots/'+encodeURIComponent(botId)+'/models').then(function(r){
       if(launchModels.want!==botId) return;      /* the operator moved to another bot */
       if(!r.ok||!r.j||!Array.isArray(r.j.models)||!r.j.models.length){ hideLaunchModels(); return; }
-      launchModels={botId:botId,default:r.j['default']||null,want:null};
+      launchModels={botId:botId,default:r.j['default']||null,want:null,list:r.j.models,showAll:false};
       renderLaunchModels(r.j.models,launchModels.default);
     });
   }
@@ -1247,7 +1254,10 @@ export function perchHubJs(lang = "en") {
          echo of our own switch. It was on the wire all along and ignored —
          which is how the picker came to assert a model nobody measured. */
       var modelSel=el('perch-model');
-      if(modelSel&&d.model&&!modelSel.disabled) selectCurrentModel(modelSel,d.model);
+      if(modelSel&&d.model&&!modelSel.disabled){
+        drawerModels.current=d.model;    /* the toggle's re-render pins what the session is on NOW */
+        selectCurrentModel(modelSel,d.model);
+      }
       if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
       var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
       /* Open-anywhere D2: the Session tab's read-only cwd readout, refreshed
@@ -1583,10 +1593,88 @@ export function perchHubJs(lang = "en") {
      plain default. The name is on the payload; the drawer read m.label, which
      no provider row sets, and every model listed as provider/id for months. */
   function modelOptionText(m){
-    var text=(m&&m.name)||((m&&m.provider)+'/'+(m&&m.id));
-    if(m&&m.availability==='on_demand') text+=' \\u2014 ${tJs("perch.modelOnDemand", lang)}';
+    /* m.label is the server's readable name (perch-model-catalog.js
+       pickerModels: the model's name, the provider appended only when two
+       entries would read the same). A model pi cannot spawn on says so
+       first — that is the reason it cannot be used, whatever answers. */
+    var text=(m&&m.label)||(m&&m.name)||((m&&m.provider)+'/'+(m&&m.id));
+    if(m&&m.runnable===false) text+=' \\u2014 ${tJs("perch.modelNotRunnable", lang)}';
+    else if(m&&m.availability==='on_demand') text+=' \\u2014 ${tJs("perch.modelOnDemand", lang)}';
     else if(m&&m.availability==='unavailable') text+=' \\u2014 ${tJs("perch.modelUnavailable", lang)}';
     return text;
+  }
+
+  function modelKeyOf(m){ return (m&&m.provider)+'/'+(m&&m.id); }
+
+  /* Offered by default: pi can spawn on it (runnable is not false) and
+     something answers or will start (availability is not "unavailable").
+     Everything else waits behind "Show more (N)" — never dropped. */
+  function modelOffered(m){
+    return !!m&&m.runnable!==false&&m.availability!=='unavailable';
+  }
+
+  /* Splits a picker list (already deduped + ordered server-side) into what
+     the select shows: the pinned key (the bot's default in the launcher, the
+     session's current model in the drawer) first and always, then the
+     offered entries by group, and the rest held back for the toggle. */
+  function planModelList(list,pinnedKey){
+    var plan={pinned:null,network:[],cloud:[],hidden:[]};
+    (Array.isArray(list)?list:[]).forEach(function(m){
+      if(!m) return;
+      if(pinnedKey&&!plan.pinned&&modelKeyOf(m)===pinnedKey){ plan.pinned=m; return; }
+      if(!modelOffered(m)) plan.hidden.push(m);
+      else if(m.group==='network') plan.network.push(m);
+      else plan.cloud.push(m);
+    });
+    return plan;
+  }
+
+  /* Builds one model select from a plan: the "bot's own model" sentinel when
+     asked, the pinned entry, then "On your network" and "Cloud" optgroups,
+     and the held-back entries as a "Not usable right now" group only when shown. */
+  function fillModelSelect(sel,plan,o){
+    clearEl(sel);
+    if(o.sentinel){
+      var none=document.createElement('option');
+      none.value='';                                   /* startSession(): falsy => no control() */
+      none.textContent=MODEL_BOT_RESOLVES;
+      sel.appendChild(none);
+    }
+    if(plan.pinned){
+      var pin=document.createElement('option');
+      pin.value=modelKeyOf(plan.pinned);
+      pin.textContent=modelOptionText(plan.pinned)+(o.pinnedSuffix||'');
+      sel.appendChild(pin);
+    }
+    function group(label,items){
+      if(!items.length) return;
+      var g=document.createElement('optgroup');
+      g.label=label;
+      items.forEach(function(m){
+        var opt=document.createElement('option');
+        opt.value=modelKeyOf(m);
+        opt.textContent=modelOptionText(m);
+        g.appendChild(opt);
+      });
+      sel.appendChild(g);
+    }
+    group(MODEL_GROUP_NETWORK,plan.network);
+    group(MODEL_GROUP_CLOUD,plan.cloud);
+    if(o.showAll) group(MODEL_GROUP_UNAVAILABLE,plan.hidden);
+  }
+
+  /* The toggle beside a model select: absent when nothing is held back. */
+  function syncModelMore(btn,plan,showAll){
+    if(!btn) return;
+    var n=plan.hidden.length;
+    btn.hidden=!n;
+    btn.textContent=showAll?MODEL_HIDE_UNAVAILABLE:MODEL_SHOW_UNAVAILABLE+' ('+n+')';
+    btn.setAttribute('aria-expanded',showAll?'true':'false');
+  }
+
+  function selectHasValue(sel,v){
+    for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===v) return true; }
+    return false;
   }
 
   /* One list, one answer: a non-empty array is usable, anything else (null,
@@ -1614,7 +1702,12 @@ export function perchHubJs(lang = "en") {
     }
     var opt=document.createElement('option');
     opt.value=current;
-    opt.textContent=current+' \u2014 '+MODEL_CURRENT_UNLISTED;
+    /* Fix round 1 M8: a model the catalogue DOES know (held back behind the
+       toggle, or an alias of the pinned entry) reads by its label, not as a
+       raw provider/id key. */
+    var known=null, dl=(typeof drawerModels==='object'&&drawerModels&&drawerModels.list)||[];
+    for(var j=0;j<dl.length;j++){ if(dl[j]&&modelKeyOf(dl[j])===current){ known=dl[j]; break; } }
+    opt.textContent=(known?modelOptionText(known):current)+' \u2014 '+MODEL_CURRENT_UNLISTED;
     sel.insertBefore(opt,sel.firstChild);
     sel.value=current;
   }
@@ -1628,24 +1721,23 @@ export function perchHubJs(lang = "en") {
     clearEl(modelSel); clearEl(thinkSel);
     var models=(o&&listUsable(o.models))?o.models:null;
     var levels=(o&&listUsable(o.thinkingLevels))?o.thinkingLevels:null;
+    drawerModels.list=models;
+    drawerModels.current=(o&&o.current)||null;
+    /* Fix round 3 R1: "the bot's own model" (the sentinel) is also the
+       REVOCATION option in the session picker (it already means "choose
+       nothing" in the launcher). Selecting it POSTs control {model:null}:
+       the engine clears the explicit choice and NULLs the row, so the next
+       wake re-resolves from the def. Without this, a legacy row stamped
+       before the column meant "explicit choice" could never be un-pinned
+       from the UI. Same grouped view as the launcher, the session's current
+       model pinned first. */
     if(models){
-      /* Fix round 3 R1: "the bot's own model" is also the REVOCATION option
-         in the session picker (it already means "choose nothing" in the
-         launcher). Selecting it POSTs control {model:null}: the engine clears
-         the explicit choice and NULLs the row, so the next wake re-resolves
-         from the def. Without this, a legacy row stamped before the column
-         meant "explicit choice" could never be un-pinned from the UI. */
-      var none=document.createElement('option');
-      none.value='';
-      none.textContent=MODEL_BOT_RESOLVES;
-      modelSel.appendChild(none);
+      var plan=planModelList(models,drawerModels.current);
+      fillModelSelect(modelSel,plan,{sentinel:true,showAll:drawerModels.showAll});
+      syncModelMore(el('perch-model-more'),plan,drawerModels.showAll);
+    } else {
+      var moreBtn=el('perch-model-more'); if(moreBtn) moreBtn.hidden=true;
     }
-    if(models) models.forEach(function(m){
-      var opt=document.createElement('option');
-      opt.value=(m&&m.provider)+'/'+(m&&m.id);
-      opt.textContent=modelOptionText(m);
-      modelSel.appendChild(opt);
-    });
     if(levels) levels.forEach(function(lv){
       var opt=document.createElement('option');
       opt.value=lv; opt.textContent=lv;
@@ -1657,6 +1749,23 @@ export function perchHubJs(lang = "en") {
     modelSel.disabled=!models; thinkSel.disabled=!levels;
     if(models) selectCurrentModel(modelSel,o&&o.current);
   }
+
+  /* The drawer's model list as last rendered, for its "Show more"
+     toggle (reset per session by resetControls). */
+  var drawerModels={list:null,current:null,showAll:false};
+  var drawerMore=el('perch-model-more');
+  if(drawerMore) drawerMore.onclick=function(){
+    var sel=el('perch-model');
+    if(!sel||!drawerModels.list) return;
+    var keep=String(sel.value||'');
+    drawerModels.showAll=!drawerModels.showAll;
+    var plan=planModelList(drawerModels.list,drawerModels.current);
+    fillModelSelect(sel,plan,{sentinel:true,showAll:drawerModels.showAll});
+    syncModelMore(drawerMore,plan,drawerModels.showAll);
+    /* Setting .value fires no change event: re-rendering never switches. */
+    if(selectHasValue(sel,keep)) sel.value=keep;
+    else selectCurrentModel(sel,drawerModels.current);
+  };
 
   function loadOptions(sid){
     var mySid=sid;
@@ -1674,6 +1783,8 @@ export function perchHubJs(lang = "en") {
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
+    drawerModels={list:null,current:null,showAll:false};   /* nor its model list or toggle */
+    var modelMore=el('perch-model-more'); if(modelMore) modelMore.hidden=true;
     showSessionName(null);       /* the PREVIOUS session's name must not bleed in */
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
