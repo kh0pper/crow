@@ -539,3 +539,8 @@ test("review M6: a successful load from outside the poll (here: settings saved, 
   assert.equal(p.els["phone-lost"].hidden, true, "the notice is gone");
   assert.deepEqual([...p.timers.values()].map(([, d]) => d), [1500], "the poll runs again");
 });
+
+test("re-review N3: a load() that lands after the page changed neither throws on a missing notice nor touches another page's", async () => {
+  const { script } = await panelScript("en");
+  assert.match(script, /var lost = document\.getElementById\('phone-lost'\); if \(lost && !lost\.hidden && window\.__crowPhonePollOwner === pollOwner\)/);
+});

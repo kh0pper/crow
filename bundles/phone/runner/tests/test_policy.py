@@ -171,6 +171,11 @@ def test_is_closing_en_es():
         "Espero su llamada. Adiós.",
         "Esperaré su llamada. Hasta luego.",
         "Espero que tenga buen día. Adiós.",
+        # re-review N1: until/till/hasta + a TIME is still a deferral
+        "I'll wait until tomorrow then. Goodbye.",
+        "I can hold off till next week. Have a great day.",
+        "Esperaré hasta el martes. Adiós.",
+        "Puedo esperar hasta mañana. Hasta luego.",
     ]
     no = [
         # review I-2: a goodbye-ish phrase that does not END the line is not a goodbye
@@ -221,6 +226,15 @@ def test_is_closing_en_es():
         "Sure, no rush. Bye.",
         "Okay, I'll wait. Thanks. Bye.",
         "I'll be right here. Thank you, goodbye.",
+        # re-review N1: until/till/hasta + a clause is a hold, not a deferral
+        "Okay, I'll wait until you check. Bye.",
+        "Sure, I can hold till you find it. Thanks for your time.",
+        "Esperaré hasta que regrese. Adiós.",
+        "Puedo esperar a que lo revise. Hasta luego.",
+        # re-review N2
+        "Sure, I'll wait for your answer. Bye.",
+        "Gracias, espero. Adiós.",
+        "I'll hold. Sure. Bye.",
     ]
     for t in yes:
         assert policy.is_closing(t), t

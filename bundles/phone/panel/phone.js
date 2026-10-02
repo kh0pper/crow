@@ -188,7 +188,7 @@ export default {
       "    box.innerHTML = done.length ? done.map(function (c) { return '<div>' + esc(c.business_name) + ' — ' + esc(c.status) + (c.outcome ? ' / ' + L.outcome + ': ' + esc(L.outcomes[c.outcome] || c.outcome) : '') + (c.booking ? ' — ' + esc([c.booking.date, c.booking.time].join(' ')) : '') + (c.summary ? '<br>' + esc(c.summary) : '') + '</div>'; }).join('') : esc(L.none);" +
       "  }" +
       "  function stopPoll() { pollStopped = true; if (window.__crowPhonePoll) { clearTimeout(window.__crowPhonePoll); window.__crowPhonePoll = null; } }" +
-      "  function load() { return api('GET', '/calls', null, { quiet: true }).then(function (j) { pollFails = 0; var lost = document.getElementById('phone-lost'); if (!lost.hidden) { lost.hidden = true; schedule(); } renderPending(j.calls); renderLive(j.calls); renderHistory(j.calls); }).catch(function (e) { if (e.status === 401) { stopPoll(); return; } pollFails++; }); }" +
+      "  function load() { return api('GET', '/calls', null, { quiet: true }).then(function (j) { pollFails = 0; var lost = document.getElementById('phone-lost'); if (lost && !lost.hidden && window.__crowPhonePollOwner === pollOwner) { lost.hidden = true; schedule(); } renderPending(j.calls); renderLive(j.calls); renderHistory(j.calls); }).catch(function (e) { if (e.status === 401) { stopPoll(); return; } pollFails++; }); }" +
       "  function pollDelay() { return pollFails ? Math.min(1500 * Math.pow(2, pollFails), 30000) : 1500; }" +
       "  function schedule() { if (window.__crowPhonePoll) clearTimeout(window.__crowPhonePoll); window.__crowPhonePoll = setTimeout(tick, pollDelay()); }" +
       "  function tick() {" +
