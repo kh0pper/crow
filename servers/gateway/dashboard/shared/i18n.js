@@ -2541,6 +2541,10 @@ export const translations = {
   },
   "perch.working": { en: "Working…", es: "Trabajando…" },
   "perch.copyMessage": { en: "Copy message", es: "Copiar mensaje" },
+  "perch.textSize": { en: "Text size", es: "Tamaño del texto" },
+  "perch.textSmaller": { en: "Smaller text", es: "Texto más pequeño" },
+  "perch.textDefault": { en: "Default text size", es: "Tamaño de texto predeterminado" },
+  "perch.textLarger": { en: "Larger text", es: "Texto más grande" },
   "perch.copyCode": { en: "Copy code", es: "Copiar código" },
   "perch.waitingBanner": {
     en: "Waiting on your answer — respond to the question card below.",

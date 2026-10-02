@@ -1029,6 +1029,69 @@ export function perchHubJs(lang = "en") {
      that browser. bindOnce handles the modern spelling; the legacy branch
      repeats its bookkeeping because MediaQueryList.addListener is not
      addEventListener. */
+  /* PHONE TRANSCRIPT (2026-10-02, Kevin): under 600px the 64px role gutter
+     beside every message wasted a fifth of the screen. #perch-hub-root gets
+     .perch-narrow there, and css.js lays each message out full width with the
+     role label on its own small line above it. A class (not a bare media
+     query) so the one width rule is measurable from a fake DOM and shared by
+     every narrow-only rule. Re-evaluated on resize (rotation, split-screen),
+     through bindOnce + live() like every other window listener here. */
+  var NARROW_MAX=599;
+  function setToken(node,tok,on){
+    var parts=String(node.className||'').split(/\\s+/).filter(function(x){ return x&&x!==tok; });
+    if(on) parts.push(tok);
+    node.className=parts.join(' ');
+  }
+  function applyNarrow(){
+    var root=el('perch-hub-root'); if(!root) return;
+    var w=window.innerWidth||0;
+    setToken(root,'perch-narrow',w>0&&w<=NARROW_MAX);
+  }
+  applyNarrow();
+  bindOnce(window,'resize','narrowResize',function(){ if(live()) applyNarrow(); });
+
+  /* TEXT SIZE (2026-10-02, Kevin): A− / A / A+ in the Session tab, five steps.
+     The step is written as --perch-text-scale on #perch-hub-root and css.js
+     scales every font size inside the chat tab by it (messages, cards, the ask
+     card, the composer); the rest of the hub keeps its size. Saved per DEVICE
+     in localStorage — a phone and a desktop want different sizes. Storage can
+     be blocked outright (private mode, site-data settings): the ACCESSOR
+     itself throws there, so every touch is inside try/catch and the page just
+     runs at the default. */
+  var TEXT_STEPS=[0.875,1,1.125,1.25,1.4], TEXT_DEFAULT=1, TEXT_KEY='crow.perch.textSize';
+  function readTextStep(){
+    try{
+      var raw=window.localStorage.getItem(TEXT_KEY);
+      var n=parseInt(raw,10);
+      if(raw!=null&&String(n)===String(raw)&&n>=0&&n<TEXT_STEPS.length) return n;
+    }catch(e){}
+    return TEXT_DEFAULT;
+  }
+  function saveTextStep(n){ try{ window.localStorage.setItem(TEXT_KEY,String(n)); }catch(e){} }
+  var textStep=readTextStep();
+  function applyTextStep(){
+    var root=el('perch-hub-root'); if(!root) return;
+    var scale=TEXT_STEPS[textStep];
+    if(root.style&&root.style.setProperty) root.style.setProperty('--perch-text-scale',String(scale));
+    root.setAttribute('data-text-step',String(textStep));
+    var out=el('perch-text-size-value'); if(out) out.textContent=Math.round(scale*100)+'%';
+    var dn=el('perch-text-smaller'), up=el('perch-text-larger'), rs=el('perch-text-reset');
+    if(dn) dn.disabled=(textStep===0);
+    if(up) up.disabled=(textStep===TEXT_STEPS.length-1);
+    if(rs) rs.disabled=(textStep===TEXT_DEFAULT);
+  }
+  function setTextStep(n){
+    if(n<0||n>=TEXT_STEPS.length||n===textStep) return;
+    textStep=n; saveTextStep(n); applyTextStep();
+  }
+  applyTextStep();
+  (function(){
+    var dn=el('perch-text-smaller'), up=el('perch-text-larger'), rs=el('perch-text-reset');
+    if(dn) dn.onclick=function(){ setTextStep(textStep-1); };
+    if(up) up.onclick=function(){ setTextStep(textStep+1); };
+    if(rs) rs.onclick=function(){ setTextStep(TEXT_DEFAULT); };
+  })();
+
   if(SPLIT&&SPLIT.addEventListener){
     bindOnce(SPLIT,'change','splitChange',function(){ if(live()) syncListPolling(); });
   } else if(SPLIT&&SPLIT.addListener){
@@ -2087,6 +2150,10 @@ export function perchHubJs(lang = "en") {
      scrollable past inside the transcript. Built with createElement/
      textContent only — never innerHTML. */
   function setAttn(show){ var b=el('perch-attn'); if(b) b.hidden=!show; }
+  /* A card opening takes height from the transcript, which keeps its old
+     scrollTop and so shows an older slice; re-pin it to the newest row (the
+     running ask_user chip that explains the card). */
+  function pinTranscript(){ var tr=el('perch-transcript'); if(tr) tr.scrollTop=tr.scrollHeight; }
   function renderAsk(card){
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
@@ -2133,6 +2200,7 @@ export function perchHubJs(lang = "en") {
     frame.appendChild(controls);
     pane.appendChild(frame);
     setAttn(true);                             /* Wave 1: say why the bot went quiet */
+    pinTranscript();
   }
 
   /* PR-A (audit item 5): the combined multi-question ask card. Renders every
@@ -2148,6 +2216,10 @@ export function perchHubJs(lang = "en") {
     var qs=Array.isArray(card.questions)?card.questions:[];
     if(!qs.length){ setAttn(false); return; }
     var frame=document.createElement('div'); frame.className='ask-card ask-combined';
+    /* The questions live in their own scroller (.ask-body) so that, when the
+       pane is short (a phone), the options scroll and the Send / Cancel foot
+       below stays on screen — css.js's "THE ASK PANE FITS ITS SPACE". */
+    var qbody=document.createElement('div'); qbody.className='ask-body';
     var sel=qs.map(function(){ return []; });
     var other=qs.map(function(){ return ''; });
     var optBtns=qs.map(function(){ return []; });   /* per question: [{btn,label}] */
@@ -2193,8 +2265,9 @@ export function perchHubJs(lang = "en") {
       var oi=document.createElement('input'); oi.type='text'; oi.className='ask-other'; oi.placeholder=ASK_OTHER_PH;
       oi.oninput=function(){ other[qi]=oi.value; refresh(); };
       qd.appendChild(oi);
-      frame.appendChild(qd);
+      qbody.appendChild(qd);
     });
+    frame.appendChild(qbody);
 
     var foot=document.createElement('div'); foot.className='ask-foot';
     sendBtn=document.createElement('button'); sendBtn.type='button'; sendBtn.className='ask-send primary';
@@ -2216,6 +2289,7 @@ export function perchHubJs(lang = "en") {
 
     pane.appendChild(frame);
     setAttn(true);
+    pinTranscript();
     refresh();
   }
 

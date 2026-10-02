@@ -511,7 +511,9 @@ function makeFakeElement(tag) {
   const node = Object.assign(target, {
     tagName: String(tag || "div").toUpperCase(),
     children: [],
-    style: {},
+    // setProperty: the text-size control writes --perch-text-scale through it.
+    // Non-enumerable, so the style object still reads as plain properties.
+    style: Object.defineProperty({}, "setProperty", { value(k, v) { this[k] = String(v); }, enumerable: false }),
     className: "",
     textContent: "",
     value: "",
@@ -614,7 +616,7 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
-                          legacyMediaQuery = false } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -645,7 +647,9 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-cwd-crumbs", "perch-cwd-list", "perch-file-viewer", "perch-fv-name",
     "perch-fv-close", "perch-fv-body",
     // PR-D (item 15): the Session tab's envelope + narrowing pane.
-    "perch-narrow-toggle", "perch-narrow-body"];
+    "perch-narrow-toggle", "perch-narrow-body",
+    // Text size (Session tab): A− / A / A+ and the readout.
+    "perch-text-smaller", "perch-text-reset", "perch-text-larger", "perch-text-size-value"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -697,6 +701,16 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     visualViewport, innerHeight: 800,
     matchMedia: () => mq,
   });
+  // Phone layout (.perch-narrow) reads innerWidth; left undefined by default
+  // so every older test keeps the wide layout it was written against.
+  if (innerWidth !== undefined) win.innerWidth = innerWidth;
+  // Text size persistence: a fake Storage, or a getter that THROWS (storage
+  // blocked by the browser) — pass { throws: true }.
+  if (localStorage && localStorage.throws) {
+    Object.defineProperty(win, "localStorage", { get() { throw new Error("SecurityError: storage blocked"); } });
+  } else if (localStorage) {
+    win.localStorage = localStorage;
+  }
 
   // history is counted, not simulated: assigning location.hash pushes an entry,
   // location.replace('#') does not. Both fire hashchange — verified in a real
@@ -4458,4 +4472,106 @@ test("review M6: any successful refetch (here a frame's) clears 'lost touch' and
   await phHops();
   assert.equal(phFind(hub, (n) => n.className === "ph-lost"), undefined, "the notice is gone");
   assert.equal(phPollTimer(hub)[1], 1500, "and the poll runs again at the healthy cadence");
+});
+
+// ---------------------------------------------------------------------------
+// Phone transcript (2026-10-02): under 600px the hub root carries
+// .perch-narrow, and css.js drops the role gutter for full-width messages.
+// ---------------------------------------------------------------------------
+
+const hasClass = (node, cls) => String(node.className || "").split(/\s+/).includes(cls);
+
+test("narrow: a 412px window marks the hub root .perch-narrow; 1280 does not", async () => {
+  const phone = await mountHub({ innerWidth: 412 });
+  assert.equal(hasClass(phone.els["perch-hub-root"], "perch-narrow"), true);
+  const desk = await mountHub({ innerWidth: 1280 });
+  assert.equal(hasClass(desk.els["perch-hub-root"], "perch-narrow"), false);
+  const tablet = await mountHub({ innerWidth: 600 });
+  assert.equal(hasClass(tablet.els["perch-hub-root"], "perch-narrow"), false, "600px and up keep the gutter");
+});
+
+test("narrow: rotating / resizing re-evaluates the class, and keeps the root's other classes", async () => {
+  const hub = await mountHub({ innerWidth: 1280 });
+  const root = hub.els["perch-hub-root"];
+  root.className = "keep-me";
+  hub.win.innerWidth = 412; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(root, "perch-narrow"), true);
+  assert.equal(hasClass(root, "keep-me"), true, "only the one token is toggled");
+  hub.win.innerWidth = 915; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(root, "perch-narrow"), false);
+  assert.equal(root.className, "keep-me");
+});
+
+test("narrow: a re-run (Turbo) hub script binds ONE resize listener, and it still works", async () => {
+  const hub = await mountHub({ innerWidth: 1280 });
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  vm.runInContext(perchHubJs("en"), hub.sandbox);   // what a Turbo visit does
+  vm.runInContext(perchHubJs("en"), hub.sandbox);
+  assert.equal(hub.win._listenerCount("resize"), 1, "bindOnce: no listener per visit");
+  hub.win.innerWidth = 412; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(hub.els["perch-hub-root"], "perch-narrow"), true, "the current instance answers the event");
+});
+
+// ---------------------------------------------------------------------------
+// Text size (2026-10-02): A− / A / A+ in the Session tab, five steps, written
+// as --perch-text-scale on the hub root, saved per device in localStorage.
+// ---------------------------------------------------------------------------
+
+function fakeStorage(seed = {}) {
+  const data = { ...seed };
+  return { data, getItem(k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+    setItem(k, v) { data[k] = String(v); }, removeItem(k) { delete data[k]; } };
+}
+const scaleOf = (hub) => hub.els["perch-hub-root"].style["--perch-text-scale"];
+
+test("text size: defaults to 100% with nothing stored; A+ steps up, saves, and updates the readout", async () => {
+  const store = fakeStorage();
+  const hub = await mountHub({ localStorage: store });
+  assert.equal(scaleOf(hub), "1");
+  assert.equal(hub.els["perch-text-size-value"].textContent, "100%");
+  assert.equal(hub.els["perch-text-reset"].disabled, true, "already at the default");
+  hub.els["perch-text-larger"].click();
+  assert.equal(scaleOf(hub), "1.125");
+  assert.equal(store.data["crow.perch.textSize"], "2");
+  assert.equal(hub.els["perch-text-size-value"].textContent, "113%");
+  assert.equal(hub.els["perch-hub-root"].getAttribute("data-text-step"), "2");
+});
+
+test("text size: the stored step is applied on load (per-device persistence)", async () => {
+  const hub = await mountHub({ localStorage: fakeStorage({ "crow.perch.textSize": "4" }) });
+  assert.equal(scaleOf(hub), "1.4");
+  assert.equal(hub.els["perch-text-larger"].disabled, true, "A+ is spent at the largest step");
+  hub.els["perch-text-larger"].click();
+  assert.equal(scaleOf(hub), "1.4", "never past the last step");
+  hub.els["perch-text-reset"].click();
+  assert.equal(scaleOf(hub), "1");
+});
+
+test("text size: A− stops at the smallest step", async () => {
+  const store = fakeStorage();
+  const hub = await mountHub({ localStorage: store });
+  hub.els["perch-text-smaller"].click();
+  hub.els["perch-text-smaller"].click();
+  assert.equal(scaleOf(hub), "0.875");
+  assert.equal(hub.els["perch-text-smaller"].disabled, true);
+  assert.equal(store.data["crow.perch.textSize"], "0");
+});
+
+test("text size: a garbage stored value falls back to the default", async () => {
+  for (const bad of ["9", "-1", "2.5", "big", ""]) {
+    const hub = await mountHub({ localStorage: fakeStorage({ "crow.perch.textSize": bad }) });
+    assert.equal(scaleOf(hub), "1", "stored " + JSON.stringify(bad));
+  }
+});
+
+test("text size: blocked storage (the accessor throws) never breaks the page", async () => {
+  const hub = await mountHub({ localStorage: { throws: true } });
+  assert.equal(scaleOf(hub), "1", "loads at the default");
+  hub.els["perch-text-larger"].click();
+  assert.equal(scaleOf(hub), "1.125", "the control still works for this page view");
+});
+
+test("text size: no storage at all (old harness default) still runs", async () => {
+  const hub = await mountHub();
+  assert.equal(scaleOf(hub), "1");
 });
