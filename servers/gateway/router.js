@@ -102,7 +102,11 @@ export function createRouterServer(options = {}) {
         const { join } = await import("node:path");
         const { pathToFileURL } = await import("node:url");
         const { homedir } = await import("node:os");
-        const installed = join(homedir(), ".crow", "bundles", "media", "server", "server.js");
+        // Instance-scoped: an alternate instance (CROW_HOME=~/.crow-r4) must
+        // load ITS installed media bundle, not the primary's. Read at call
+        // time so a CROW_HOME set only in .env is honored.
+        const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+        const installed = join(crowHome, "bundles", "media", "server", "server.js");
         const repo = join(import.meta.dirname, "../../bundles/media/server/server.js");
         const serverPath = existsSync(installed) ? installed : repo;
         const { createMediaServer } = await import(pathToFileURL(serverPath).href);

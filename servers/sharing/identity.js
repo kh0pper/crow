@@ -11,7 +11,7 @@
  */
 
 import { randomBytes, createHash, createHmac, createCipheriv, createDecipheriv, scryptSync } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, chmodSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as ed from "@noble/ed25519";
@@ -42,6 +42,33 @@ function resolveDataDir() {
 
 const DATA_DIR = resolveDataDir();
 const IDENTITY_PATH = resolve(DATA_DIR, "identity.json");
+
+/**
+ * identity.json holds the master seed every bot/instance key derives from,
+ * so it is owner-only (0600). writeFileSync's `mode` applies only when the
+ * file is created, hence the explicit chmod for the overwrite paths.
+ */
+function writeIdentityFile(path, content) {
+  writeFileSync(path, content, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch {}
+}
+
+/**
+ * Heal identity files written by older builds with the umask default
+ * (0664 on the fleet, 2026-09-24). Called on every load, so an existing
+ * install is fixed by its next gateway start, not by hand.
+ * @returns {boolean} true if the mode was tightened
+ */
+export function tightenIdentityFileMode(path = IDENTITY_PATH) {
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode & 0o077) {
+      chmodSync(path, 0o600);
+      return true;
+    }
+  } catch {}
+  return false;
+}
 
 /**
  * Derive a subkey from the master seed using HKDF-SHA256.
@@ -120,6 +147,7 @@ export function loadOrCreateIdentity(passphrase = "") {
   mkdirSync(DATA_DIR, { recursive: true });
 
   if (existsSync(IDENTITY_PATH)) {
+    tightenIdentityFileMode(IDENTITY_PATH);
     const stored = JSON.parse(readFileSync(IDENTITY_PATH, "utf-8"));
 
     let seed;
@@ -152,7 +180,7 @@ export function loadOrCreateIdentity(passphrase = "") {
     toStore.seed = seed.toString("hex");
   }
 
-  writeFileSync(IDENTITY_PATH, JSON.stringify(toStore, null, 2));
+  writeIdentityFile(IDENTITY_PATH, JSON.stringify(toStore, null, 2));
 
   return identity;
 }
@@ -598,7 +626,7 @@ export async function importIdentity() {
       createdAt: parsed.createdAt || new Date().toISOString(),
       seed: seed.toString("hex"),
     };
-    writeFileSync(IDENTITY_PATH, JSON.stringify(toStore, null, 2));
+    writeIdentityFile(IDENTITY_PATH, JSON.stringify(toStore, null, 2));
     console.log(`Identity ${identity.crowId} imported successfully.`);
     return;
   }
@@ -612,6 +640,6 @@ export async function importIdentity() {
     console.error("Not a valid identity export — a legacy blob must contain a 64-hex `seed`. Nothing was written.");
     process.exit(1);
   }
-  writeFileSync(IDENTITY_PATH, data);
+  writeIdentityFile(IDENTITY_PATH, data);
   console.log("Identity imported successfully.");
 }

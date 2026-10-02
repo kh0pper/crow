@@ -33,6 +33,7 @@ import {
   getInstance,
   updateInstance,
   getOrCreateLocalInstanceId,
+  configuredSelfGatewayUrl,
 } from "../instance-registry.js";
 import {
   setPeerCreds,
@@ -108,7 +109,7 @@ export function instanceEnrollRouter(db) {
         peer_instance_id: localId,
         peer_crow_id: localId,
         peer_name: osHostname(),
-        peer_gateway_url: process.env.CROW_GATEWAY_URL || null,
+        peer_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
         peer_outbound_bearer: peerOutboundBearer,
       });
     } catch (err) {

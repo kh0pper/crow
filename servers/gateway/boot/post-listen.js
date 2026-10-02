@@ -172,13 +172,22 @@ export async function runPostListenSetup(server, app, deps) {
   // Probe and connect to remote Crow instances (federation). Run once at
   // startup, then every 60s — the re-probe refreshes each instance's
   // `last_seen_at` and heals stale-session cases after a peer restarts
-  // (cached mcp-session-id becomes invalid on the other side). For
-  // already-connected instances loadRemoteInstances is effectively a
-  // no-op (the status='connected' guard in the loop short-circuits it),
-  // so re-running is cheap.
-  const runRemoteProbe = () => loadRemoteInstances().catch((err) => {
-    console.warn("[proxy] Remote instance loading:", err.message);
-  });
+  // (cached mcp-session-id becomes invalid on the other side). Already-
+  // connected instances keep their MCP client but still get a /health GET
+  // (up to 5 s each, feeding the nest peers signal), so a cycle can outlast
+  // the interval: the in-flight guard skips a tick rather than overlap.
+  let remoteProbeRunning = false;
+  const runRemoteProbe = async () => {
+    if (remoteProbeRunning) return;
+    remoteProbeRunning = true;
+    try {
+      await loadRemoteInstances();
+    } catch (err) {
+      console.warn("[proxy] Remote instance loading:", err.message);
+    } finally {
+      remoteProbeRunning = false;
+    }
+  };
   runRemoteProbe();
   setInterval(runRemoteProbe, 60_000).unref();
 
@@ -387,14 +396,17 @@ export async function runPostListenSetup(server, app, deps) {
     .catch((err) => console.warn("[crosspost-scheduler] not started:", err.message));
 
   // Register this instance in the instance registry
-  import("../instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {
+  import("../instance-registry.js").then(async ({ ensureLocalInstanceRegistered, configuredSelfGatewayUrl }) => {
     try {
       const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
       const identity = loadOrCreateIdentity();
 
-      // Prefer Tailscale HTTPS serve URL, fall back to Tailscale IP, then localhost
-      let gatewayUrl = `http://localhost:${PORT}`;
-      try {
+      // An operator-set CROW_PEER_GATEWAY_URL wins (and corrects a drifted
+      // self row). Otherwise prefer the Tailscale HTTPS serve URL, fall back to
+      // the Tailscale IP, then localhost.
+      const configuredUrl = configuredSelfGatewayUrl();
+      let gatewayUrl = configuredUrl || `http://localhost:${PORT}`;
+      if (!configuredUrl) try {
         const { execFileSync } = await import("child_process");
         // Check if Tailscale serve is configured (provides HTTPS URLs)
         const serveStatus = execFileSync("tailscale", ["serve", "status"], { timeout: 3000, stdio: "pipe" }).toString();
@@ -424,6 +436,7 @@ export async function runPostListenSetup(server, app, deps) {
       await ensureLocalInstanceRegistered(createDbClient(), {
         crowId: identity.crowId,
         gatewayUrl,
+        gatewayUrlConfigured: Boolean(configuredUrl),
       });
     } catch (err) {
       // Non-fatal — instance registry is optional for basic operation

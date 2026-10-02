@@ -41,7 +41,7 @@ export class PeerManager {
     this.onPeerConnected = null; // callback(crowId, conn)
     this.onPeerData = null; // callback(crowId, data)
     this.onPeerDisconnected = null; // callback(crowId)
-    this.onInstanceConnected = null; // callback(crowId, conn) — instance-to-instance connections
+    this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
     this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
@@ -317,7 +317,7 @@ export class PeerManager {
 
           // Dispatch to the appropriate handler based on connection origin
           if (isInstance && this.onInstanceConnected) {
-            this.onInstanceConnected(msg.crowId, conn);
+            this.onInstanceConnected(msg.crowId, conn, msg.instance_id || null);
           } else if (this.onPeerConnected) {
             this.onPeerConnected(msg.crowId, conn);
           }

@@ -30,6 +30,7 @@ import { WebSocketServer, WebSocket, createWebSocketStream } from "ws";
 import { randomBytes } from "node:crypto";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
 import { sign, verify } from "./identity.js";
+import { livenessStatusSql } from "../shared/instance-status.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -270,7 +271,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   // Mark peer as active now — we just had a successful authenticated connection.
   try {
     await db.execute({
-      sql: "UPDATE crow_instances SET status='active', last_seen_at=datetime('now') WHERE id = ?",
+      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
       args: [remoteInstanceId],
     });
   } catch {}
@@ -282,7 +283,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const wsStream = handoffToStream(ws, frameReader);
   const noiseStream = new NoiseSecretStream(false, wsStream);
   noiseStream.on("error", () => {});
-  await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
+  await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
 }
 
@@ -436,6 +437,20 @@ export class PeerDialer {
           frameReader.detach();
           return;
         }
+        // The server's instance must still be a live paired peer HERE. A
+        // revoked (or paused/unknown) peer is refused before any feed is
+        // armed — otherwise a reconnect between the revoke and the next 60 s
+        // dialer rescan re-opened the revoked peer's feeds (review I2).
+        const { rows: liveRows } = await db.execute({
+          sql: "SELECT 1 FROM crow_instances WHERE id = ? AND status IN ('active','offline') LIMIT 1",
+          args: [remoteInstanceId],
+        });
+        if (liveRows.length === 0) {
+          console.warn(`[tailnet-sync] server ${String(remoteInstanceId).slice(0, 12)}… is not a live paired peer here; closing`);
+          ws.close(1008, "not paired");
+          frameReader.detach();
+          return;
+        }
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
@@ -463,7 +478,7 @@ export class PeerDialer {
 
         // Mark peer as active.
         await db.execute({
-          sql: "UPDATE crow_instances SET status='active', last_seen_at=datetime('now') WHERE id = ?",
+          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
           args: [remoteInstanceId],
         }).catch(() => {});
 
@@ -480,7 +495,7 @@ export class PeerDialer {
         const wsStream = handoffToStream(ws, frameReader);
         const noiseStream = new NoiseSecretStream(true, wsStream);
         noiseStream.on("error", () => {});
-        await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
+        await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side)`);
       } catch (err) {
         console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
