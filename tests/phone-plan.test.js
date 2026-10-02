@@ -81,5 +81,5 @@ test("planHash is stable and changes when anything material changes", () => {
 });
 
 test("OUTCOMES is the spec list", () => {
-  assert.deepEqual(OUTCOMES, ["booked","info_gathered","needs_callback","no_answer","voicemail","busy","not_in_service","refused","phone_busy","phone_unreachable","line_lost","taken_over","not_admissible","failed"]);
+  assert.deepEqual(OUTCOMES, ["booked","info_gathered","needs_callback","no_answer","voicemail","busy","not_in_service","refused","phone_busy","phone_unreachable","line_lost","taken_over","not_admissible","stopped","failed"]);
 });

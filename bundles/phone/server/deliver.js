@@ -5,7 +5,7 @@ import { audit, perchSessionBot } from "./store.js";
 const LABEL = { booked: "Booked", info_gathered: "Information gathered", needs_callback: "Needs a callback", no_answer: "No answer",
   voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
   phone_busy: "Your phone was busy", phone_unreachable: "Phone not reachable", line_lost: "Call moved to your phone",
-  taken_over: "You took over the call", not_admissible: "Could not start (model unavailable)", failed: "Call failed" };
+  taken_over: "You took over the call", not_admissible: "Could not start (model unavailable)", stopped: "Stopped by you", failed: "Call failed" };
 
 const cap = (v) => (v == null ? null : String(v).slice(0, 200));
 

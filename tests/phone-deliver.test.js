@@ -174,3 +174,12 @@ test("C2: enginePerchMessage — no engine is a TRANSIENT no_engine; an engine g
   const busy = enginePerchMessage(() => ({ message: async () => { throw Object.assign(new Error("turn_in_progress"), { code: "turn_in_progress" }); } }));
   await assert.rejects(busy("p1", "hi"), (e) => e.code === "turn_in_progress", "engine codes pass through unchanged");
 });
+
+test("spec 2026-10-02: a stopped call reads 'Stopped by you' to the owner and reaches the bot as the stopped outcome", async () => {
+  const db = await freshDb(); const notes = [];
+  const stopped = { ...call, outcome: "stopped", booking: null, summary: "Open Saturdays 9 to 1.", deliver_to: null };
+  await deliverPhoneResult(db, stopped, { notify: async (_db, n) => notes.push(n) });
+  assert.equal(notes[0].title, "Phone: Stopped by you: Smile Dental");
+  const g = buildUntrustedGoal(stopped);
+  assert.match(g, /"outcome":"stopped"/);
+});
