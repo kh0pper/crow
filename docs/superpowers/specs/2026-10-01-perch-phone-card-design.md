@@ -19,6 +19,7 @@ The whole call happens inside the Perch chat that asked for it:
 2. The owner approves (or rejects, or schedules) from the card, with the **same gates** as the Phone panel.
 3. The card becomes the **live call view**: transcript, "Business says…" input (simulated line), Stop.
 4. The card ends showing the outcome; the bot receives the structured result as today.
+   *Amendment:* summary (≤300 chars, untrusted) added per owner decision 2026-10-02.
 
 The Phone panel stays as the full view (settings, history, calls proposed from non-Perch channels).
 
