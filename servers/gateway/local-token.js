@@ -198,6 +198,45 @@ export async function ensurePhoneToken(db) {
 
 export const PHONE_TOKEN_KEYS = { PHONE_HASH_KEY, PHONE_CREATED_KEY };
 
+// Models token (models arc plan 2, Task 6): path-scoped to the lifecycle API
+// under /llm/models. pi-lab reads it from <crowHome>/models-token. It cannot
+// reach any MCP mount: the MCP middleware never consults it.
+const MODELS_HASH_KEY = "mcp_models_token_hash";
+const MODELS_CREATED_KEY = "mcp_models_token_created";
+export function modelsTokenPath() {
+  return join(crowHome(), "models-token");
+}
+
+export async function generateModelsToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, MODELS_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, MODELS_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = modelsTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validateModelsToken(db, token) {
+  if (!token) return false;
+  const stored = await readSetting(db, MODELS_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensureModelsToken(db) {
+  const hash = await readSetting(db, MODELS_HASH_KEY);
+  if (hash && existsSync(modelsTokenPath())) return { minted: false };
+  await generateModelsToken(db);
+  return { minted: true };
+}
+
+export const MODELS_TOKEN_KEYS = { MODELS_HASH_KEY, MODELS_CREATED_KEY };
+
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
 // /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer

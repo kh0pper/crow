@@ -48,7 +48,7 @@ import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../sh
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
-import { validateLocalToken } from "../local-token.js";
+import { validateLocalToken, validateModelsToken } from "../local-token.js";
 import { resolveDoorTarget, listDoorModels, isDoorUrl, isTrustedDoorSource, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
@@ -129,7 +129,7 @@ const COMPANION_MODEL_IDS = [FAST_KEY, ESC_KEY].map((k) => splitKey(k)[1]).filte
 
 async function defaultDoorAuth(token) {
   if (!token) return false;
-  try { return await validateLocalToken(db(), token); } catch { return false; }
+  try { return (await validateLocalToken(db(), token)) || (await validateModelsToken(db(), token)); } catch { return false; }
 }
 
 /** Non-companion door addressing: loopback/tailnet source, or a valid bearer. */
