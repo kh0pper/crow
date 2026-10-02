@@ -167,6 +167,16 @@ border-radius:0;padding:12px 16px;min-height:44px}
 #perch-hub-root .who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
 #perch-hub-root .entry.user .who{color:var(--teal)}
 #perch-hub-root .what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+/* Phones (client.js adds .perch-narrow to the root under 600px): no gutter.
+   The row wraps — role label (and a bot row's copy button) on one short line,
+   the message on the next at the FULL width; your own messages sit in a quiet
+   card so the two voices stay apart without the column. Cards (tool chips,
+   files, phone calls) are column boxes already and are untouched. */
+#perch-hub-root.perch-narrow .entry{flex-wrap:wrap;column-gap:10px;row-gap:2px}
+#perch-hub-root.perch-narrow .who{flex:1 1 auto;line-height:1.4}
+#perch-hub-root.perch-narrow .copy-msg{order:1}
+#perch-hub-root.perch-narrow .what{flex:1 1 100%;order:2}
+#perch-hub-root.perch-narrow .entry.user{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
 /* Rendered markdown. TWO ids' worth of weight is not needed here (nothing
    competes), but \`white-space:pre-wrap\` from .what above IS: markdown output
    is real block elements, and pre-wrap would double every blank line between

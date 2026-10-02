@@ -61,6 +61,10 @@ test("client: the combined card wraps its questions in .ask-body and the foot is
 // ─── live ──────────────────────────────────────────────────────────────────
 
 let available = false, server = null, port = 0;
+let TRANSCRIPT = [];
+const MD = "Here is the plan:\n\n- **Backups**: nightly DB dumps to local/S3/git\n- Second point with `inline code`\n\n" +
+  "```js\nconst x = await fetch('/dashboard/perch-api/interactive/perchlive-9e2b9bf3/events');\n```\n\n" +
+  "| Model | Context | Notes |\n|---|---|---|\n| crow-local/qwen3.6-35b-a3b | 256K | the default chat model |\n\nWant a demo?";
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -74,7 +78,7 @@ function serveApi(req, res) {
     res.write("event: ask_user\ndata: " + JSON.stringify(CARD) + "\n\n");
     return;                                    // stays open, like the real stream
   }
-  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  if (url.endsWith("/transcript")) return send(200, { events: TRANSCRIPT });
   return send(200, {});
 }
 
@@ -84,6 +88,11 @@ before(async () => {
     available = r.ok;
   } catch { available = false; }
   if (!available) return;
+  const { renderMarkdown } = await import("../servers/blog/renderer.js");
+  TRANSCRIPT = [
+    { type: "message", message: { role: "user", content: "What can Crow do? Give me the overview, with a table." } },
+    { type: "message", message: { role: "assistant", content: MD }, html: renderMarkdown(MD) },
+  ];
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   server = http.createServer(async (req, res) => {
@@ -190,4 +199,45 @@ test("live @1280x900: the desktop card is untouched — full height, nothing scr
   assert.equal(m.sendHit, true);
   assert.equal(m.bodyScrolls, false, "the desktop card must show every option without an inner scroll");
   assert.equal(m.contentBodyScroll, 0);
+});
+
+// ─── phone transcript: full-width messages under 600px ────────────────────
+
+test("css: under .perch-narrow the message row wraps and the body takes the full width", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /#perch-hub-root\.perch-narrow \.entry\{flex-wrap:wrap/);
+  assert.match(css, /#perch-hub-root\.perch-narrow \.what\{flex:1 1 100%;order:2\}/);
+  // The desktop rule is untouched: the 64px gutter is still the default.
+  assert.match(css, /#perch-hub-root \.who\{flex:0 0 64px/);
+});
+
+const MSG_GEOMETRY = `(function(){
+  var tr=document.getElementById('perch-transcript').getBoundingClientRect();
+  var bot=document.querySelector('#perch-transcript .entry.bot');
+  var who=bot.querySelector('.who').getBoundingClientRect(), what=bot.querySelector('.what').getBoundingClientRect();
+  var table=bot.querySelector('table'), pre=bot.querySelector('pre');
+  return JSON.stringify({ narrow:/(^|\\s)perch-narrow(\\s|$)/.test(document.getElementById('perch-hub-root').className),
+    trLeft:tr.left, trWidth:tr.width, whoBottom:who.bottom, whatTop:what.top, whatLeft:what.left, whatWidth:what.width,
+    tableRight:table.getBoundingClientRect().right, preRight:pre.getBoundingClientRect().right, trRight:tr.right,
+    docScrollX:document.documentElement.scrollWidth-innerWidth });
+})()`;
+const MSG_READY = "!!document.querySelector('#perch-transcript .entry.bot table')";
+
+test("live @412x915: messages use the full width, the role label sits above them", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(412, 915, MSG_GEOMETRY, { ready: MSG_READY });
+  assert.equal(m.narrow, true);
+  assert.ok(Math.abs(m.whatLeft - m.trLeft) <= 1, "no gutter: " + JSON.stringify(m));
+  assert.ok(m.whatWidth >= m.trWidth - 30, "the message spans the column: " + JSON.stringify(m));
+  assert.ok(m.whatTop >= m.whoBottom - 1, "the label is on its own line above: " + JSON.stringify(m));
+  assert.ok(m.tableRight <= m.trRight + 1 && m.preRight <= m.trRight + 1, "wide content stays inside: " + JSON.stringify(m));
+  assert.equal(m.docScrollX, 0, "no horizontal page scroll");
+});
+
+test("live @1280x900: the desktop keeps the role gutter", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(1280, 900, MSG_GEOMETRY, { ready: MSG_READY });
+  assert.equal(m.narrow, false);
+  assert.ok(m.whatLeft - m.trLeft >= 64, "the body sits beside the 64px label column: " + JSON.stringify(m));
 });

@@ -614,7 +614,7 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
-                          legacyMediaQuery = false } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -697,6 +697,16 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     visualViewport, innerHeight: 800,
     matchMedia: () => mq,
   });
+  // Phone layout (.perch-narrow) reads innerWidth; left undefined by default
+  // so every older test keeps the wide layout it was written against.
+  if (innerWidth !== undefined) win.innerWidth = innerWidth;
+  // Text size persistence: a fake Storage, or a getter that THROWS (storage
+  // blocked by the browser) — pass { throws: true }.
+  if (localStorage && localStorage.throws) {
+    Object.defineProperty(win, "localStorage", { get() { throw new Error("SecurityError: storage blocked"); } });
+  } else if (localStorage) {
+    win.localStorage = localStorage;
+  }
 
   // history is counted, not simulated: assigning location.hash pushes an entry,
   // location.replace('#') does not. Both fire hashchange — verified in a real
@@ -4458,4 +4468,42 @@ test("review M6: any successful refetch (here a frame's) clears 'lost touch' and
   await phHops();
   assert.equal(phFind(hub, (n) => n.className === "ph-lost"), undefined, "the notice is gone");
   assert.equal(phPollTimer(hub)[1], 1500, "and the poll runs again at the healthy cadence");
+});
+
+// ---------------------------------------------------------------------------
+// Phone transcript (2026-10-02): under 600px the hub root carries
+// .perch-narrow, and css.js drops the role gutter for full-width messages.
+// ---------------------------------------------------------------------------
+
+const hasClass = (node, cls) => String(node.className || "").split(/\s+/).includes(cls);
+
+test("narrow: a 412px window marks the hub root .perch-narrow; 1280 does not", async () => {
+  const phone = await mountHub({ innerWidth: 412 });
+  assert.equal(hasClass(phone.els["perch-hub-root"], "perch-narrow"), true);
+  const desk = await mountHub({ innerWidth: 1280 });
+  assert.equal(hasClass(desk.els["perch-hub-root"], "perch-narrow"), false);
+  const tablet = await mountHub({ innerWidth: 600 });
+  assert.equal(hasClass(tablet.els["perch-hub-root"], "perch-narrow"), false, "600px and up keep the gutter");
+});
+
+test("narrow: rotating / resizing re-evaluates the class, and keeps the root's other classes", async () => {
+  const hub = await mountHub({ innerWidth: 1280 });
+  const root = hub.els["perch-hub-root"];
+  root.className = "keep-me";
+  hub.win.innerWidth = 412; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(root, "perch-narrow"), true);
+  assert.equal(hasClass(root, "keep-me"), true, "only the one token is toggled");
+  hub.win.innerWidth = 915; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(root, "perch-narrow"), false);
+  assert.equal(root.className, "keep-me");
+});
+
+test("narrow: a re-run (Turbo) hub script binds ONE resize listener, and it still works", async () => {
+  const hub = await mountHub({ innerWidth: 1280 });
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  vm.runInContext(perchHubJs("en"), hub.sandbox);   // what a Turbo visit does
+  vm.runInContext(perchHubJs("en"), hub.sandbox);
+  assert.equal(hub.win._listenerCount("resize"), 1, "bindOnce: no listener per visit");
+  hub.win.innerWidth = 412; hub.win._dispatch("resize", {});
+  assert.equal(hasClass(hub.els["perch-hub-root"], "perch-narrow"), true, "the current instance answers the event");
 });

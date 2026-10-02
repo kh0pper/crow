@@ -1029,6 +1029,27 @@ export function perchHubJs(lang = "en") {
      that browser. bindOnce handles the modern spelling; the legacy branch
      repeats its bookkeeping because MediaQueryList.addListener is not
      addEventListener. */
+  /* PHONE TRANSCRIPT (2026-10-02, Kevin): under 600px the 64px role gutter
+     beside every message wasted a fifth of the screen. #perch-hub-root gets
+     .perch-narrow there, and css.js lays each message out full width with the
+     role label on its own small line above it. A class (not a bare media
+     query) so the one width rule is measurable from a fake DOM and shared by
+     every narrow-only rule. Re-evaluated on resize (rotation, split-screen),
+     through bindOnce + live() like every other window listener here. */
+  var NARROW_MAX=599;
+  function setToken(node,tok,on){
+    var parts=String(node.className||'').split(/\\s+/).filter(function(x){ return x&&x!==tok; });
+    if(on) parts.push(tok);
+    node.className=parts.join(' ');
+  }
+  function applyNarrow(){
+    var root=el('perch-hub-root'); if(!root) return;
+    var w=window.innerWidth||0;
+    setToken(root,'perch-narrow',w>0&&w<=NARROW_MAX);
+  }
+  applyNarrow();
+  bindOnce(window,'resize','narrowResize',function(){ if(live()) applyNarrow(); });
+
   if(SPLIT&&SPLIT.addEventListener){
     bindOnce(SPLIT,'change','splitChange',function(){ if(live()) syncListPolling(); });
   } else if(SPLIT&&SPLIT.addListener){
