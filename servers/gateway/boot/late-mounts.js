@@ -27,6 +27,16 @@ export async function mountLateRoutes(app, deps) {
     }
   }
 
+  // --- Mount the models lifecycle API (plan 2 Task 8). Its OWN try/catch: an
+  // import failure here must never stop the companion /llm/v1 router below. ---
+  try {
+    const { default: llmModelsRouter } = await import("../routes/llm-models.js");
+    app.use(llmModelsRouter());
+    console.log("  [llm-models] mounted: GET /llm/models, POST /llm/models/:provider/start|stop, GET /llm/models/jobs/:id");
+  } catch (err) {
+    console.warn("[llm-models] Failed to mount:", err.message);
+  }
+
   // --- Mount LLM-router (folds the standalone companion model-proxy into the
   // gateway). No dashboardAuth: the host-networked companion arrives as loopback,
   // which isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
