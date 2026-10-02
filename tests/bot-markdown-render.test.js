@@ -12,8 +12,8 @@
 // draws a tool result as a finished chip, as the live stream does).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderMarkdown, renderBotMarkdown } from "../servers/blog/renderer.js";
-import { mathRule, mathTex } from "../bundles/browser/server/article-markdown.js";
+import { renderMarkdown, renderBotMarkdown, BOT_MD_MAX_INPUT } from "../servers/blog/renderer.js";
+import { mathRule, mathTex, mathDuplicateRule } from "../bundles/browser/server/article-markdown.js";
 
 /** The exact bytes from the session file (toolResult, line 25), unedited. */
 const OFFENDING =
@@ -84,6 +84,70 @@ test("currency and code spans are left alone", () => {
   assert.equal(text(renderBotMarkdown("escaped \\$x\\$")).trim(), "escaped $x$");
 });
 
+test("I2: shell variables, tickers and template literals keep their dollar signs", () => {
+  for (const src of [
+    "export PATH=$HOME/bin:$PATH",
+    "$AAPL/$MSFT",
+    "${a}|${b}",
+    "$5 and $10",
+    "cd $HOME/$USER",
+    "$5-$10 and $1,000-$2,000",
+    "$$5 and $$10",
+    "min ${min_vram_gb} GB VRAM; host has ~${hostVramGb}",
+  ]) {
+    const html = renderBotMarkdown(src);
+    assert.equal(text(html).trim(), src, "rendered unchanged: " + html);
+    assert.ok(!/class="math"|<code>/.test(html), "no math element for " + JSON.stringify(src) + ": " + html);
+  }
+  // …while a bare number may still touch a letter (LaTeXML's "$126$B").
+  assert.match(renderBotMarkdown("the last $126$B tokens"), /<span class="math">126<\/span>B/);
+});
+
+test("M7: math inside image alt text is plain source, not markup", () => {
+  const html = renderBotMarkdown("![a $x$ b](u.png)");
+  assert.match(html, /alt="a x b"/, html);
+  assert.ok(!/&lt;span|class=&quot;/.test(html), html);
+});
+
+const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
+
+test("I1: 200 KB of unclosed \\[ and \\( renders in under 200 ms", () => {
+  for (const u of ["\\[ x\n", "\\( a ", "\\[ x\n\\( a $$ y\n\n$b "]) {
+    const src = rep(u, 200 * 1024);
+    const t0 = performance.now();
+    const html = renderBotMarkdown(src);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 200, `${JSON.stringify(u)} x200KB took ${ms.toFixed(0)} ms`);
+    assert.equal(html, "", "over BOT_MD_MAX_INPUT the caller's plain-text path takes it");
+  }
+});
+
+test("I1: just under the cap, adversarial delimiter runs stay bounded (was 2.1 s at 60 KB)", () => {
+  const n = BOT_MD_MAX_INPUT - 1;
+  for (const u of ["\\[ x\n", "\\[ x\n\n", "\\( a ", "$$ x\n\n", "x\n\\[ y \\]\n", "\\[ x\n> y\n\n", "$x$ ", "\\(\\("]) {
+    const src = rep(u, n);
+    const t0 = performance.now();
+    const html = renderBotMarkdown(src);
+    const ms = performance.now() - t0;
+    assert.ok(html.length > 0, "still rendered");
+    assert.ok(ms < 600, `${JSON.stringify(u)} x${n} took ${ms.toFixed(0)} ms`);
+  }
+});
+
+test("I1: a display block that interrupts a paragraph still renders", () => {
+  const html = renderBotMarkdown("where\n$$\nx^2\n$$\nso\n\\[\ny\n\\]\ndone");
+  assert.match(html, /<p>where<\/p>\s*<pre class="math"><code>x\^2<\/code><\/pre>/);
+  assert.match(html, /<pre class="math"><code>y<\/code><\/pre>/);
+  assert.match(html, /<p>done<\/p>/);
+});
+
+test("long ordinary prose is not altered by the bounded start() windows", () => {
+  // A paragraph far longer than the 4 KB scan window, with no math in it,
+  // must render exactly as the blog renders it (no <br> from a fake cut).
+  const para = Array.from({ length: 400 }, (_, i) => "word" + i + " costs $" + i).join(" ");
+  assert.equal(renderBotMarkdown(para), renderMarkdown(para));
+});
+
 test("XSS: nothing executable survives, including HTML smuggled inside math", () => {
   const hostile = [
     "<img src=x onerror=\"window.__pwned=1\">",
@@ -134,4 +198,29 @@ test("extractor: a LaTeXML <math> yields its TeX once, not presentation+annotati
   assert.equal(mathTex(fakeMath({ presentation: "x+y", tex: null })), "x+y", "no TeX at all: presentation text");
   assert.equal(mathRule.replacement("", fakeMath({ alttext: "\\sum_i x_i", display: "block", presentation: "∑", tex: "\\sum_i x_i" })),
     "\n\n$$\n\\sum_i x_i\n$$\n\n");
+});
+
+test("extractor: KaTeX's glyph tree and Wikipedia's fallback image are dropped, MathML kept", () => {
+  const el = (cls) => ({ nodeName: "SPAN", getAttribute: (k) => (k === "class" ? cls : null) });
+  assert.equal(mathDuplicateRule.filter(el("katex-html")), true);
+  assert.equal(mathDuplicateRule.filter(el("mwe-math-fallback-image-inline")), true);
+  assert.equal(mathDuplicateRule.filter(el("katex-mathml")), false, "the MathML half stays");
+  assert.equal(mathDuplicateRule.filter(el("katex")), false);
+  assert.equal(mathDuplicateRule.replacement(), "");
+});
+
+test("extractor: Wikipedia's {\\displaystyle …} wrapper is unwrapped", () => {
+  assert.equal(mathTex(fakeMath({ alttext: "{\\displaystyle x^{2}}", presentation: "x2", tex: null })), "x^{2}");
+});
+
+test("extractor: content MathML (annotation-xml) is not appended to the fallback text", () => {
+  const first = { textContent: "x" };
+  const sem = { firstElementChild: first };
+  const node = {
+    nodeName: "math",
+    textContent: "xx",                                   // presentation + annotation-xml
+    getAttribute: () => null,
+    getElementsByTagName: (t) => (t === "semantics" ? [sem] : []),
+  };
+  assert.equal(mathTex(node), "x");
 });

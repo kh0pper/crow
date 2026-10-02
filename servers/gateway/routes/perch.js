@@ -340,9 +340,8 @@ function readTailBytes(file, maxBytes) {
  * `renderBotMarkdown` — the memory panel's renderMarkdown pipeline (marked +
  * the sanitize-html allow-list) plus TeX math shown once as source, and the
  * SAME function the live SSE frames use, so a reload renders identically —
- * because the
- * client cannot import a server module and must never be handed a markdown
- * parser plus untrusted model output.
+ * because the client cannot import a server module and must never be handed
+ * a markdown parser plus untrusted model output.
  *
  * TEXT BLOCKS ONLY, and only for the assistant: a tool-call block renders as
  * the client's own "[tool: name]" line, and the operator's own typing is not
@@ -350,8 +349,14 @@ function readTailBytes(file, maxBytes) {
  * to textContent, which is exactly today's behaviour.
  *
  * Measured cost: 0.075 ms for a typical message, so the 2000-line tail cap
- * above bounds a history load at ~150 ms, and the 2 MB byte cap bounds the
- * pathological case at roughly half a second. Once per session open.
+ * above bounds an ordinary history load at ~150 ms. The pathological case is
+ * bounded per MESSAGE, not by the 2 MB byte cap: renderBotMarkdown refuses
+ * text over BOT_MD_MAX_INPUT (64 KB → no html, textContent), and its math
+ * scans are windowed, so the worst adversarial message measured ~130 ms
+ * (2026-10-02; marked alone ~40 ms on the same input). A 2 MB tail of such
+ * messages (~32) is therefore a few seconds, once per session open — a
+ * bound, not a target; the earlier "half a second" was measured before math
+ * support and against renderMarkdown.
  */
 function assistantHtml(event) {
   const message = event && event.message;

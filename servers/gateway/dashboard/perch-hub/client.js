@@ -1348,6 +1348,15 @@ export function perchHubJs(lang = "en") {
       renderTextFrame(d);
     });
     on('tool',function(d){
+      /* The chip, like text frames, waits for the history batch: a call that
+         finished between subscribe and the fetch is ALSO in the batch (as a
+         toolResult chip), and flushHistBuf drops the frame then. The rail
+         line is not part of history, so it is not buffered. */
+      if(!histSettled){
+        if(d.phase==='start') appendActivity('[tool: '+(d.name||'?')+']');
+        histBuf.push({ toolFrame:true, d:d });
+        return;
+      }
       if(d.phase==='start'){
         appendActivity('[tool: '+(d.name||'?')+']');
         appendToolChip(d);            /* Wave 3: the chat gets the live chip */
@@ -1544,6 +1553,7 @@ export function perchHubJs(lang = "en") {
 
   function loadHistory(botId,sid){
     var mySid=sid;
+    histToolSeen={};
     /* PR-E: the transcript (messages) and the sent-file card history arrive in
        ONE join — the file cards flush only after BOTH land, so a slow history
        fetch can never interleave cards out of order with batch messages. */
@@ -1573,6 +1583,7 @@ export function perchHubJs(lang = "en") {
              with the engine's own 2000-char cap (toolResultSnippet). */
           if(String(m.role||'')==='toolResult'){
             var rt=messageText(m);
+            if(m.toolCallId!=null) histToolSeen[String(m.toolCallId)]=true;
             appendToolChip({ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') });
             finishToolChip({ toolCallId:'hist:'+String(m.toolCallId||''), isError:!!m.isError,
               resultText: rt.length>2000?rt.slice(0,2000)+'\\u2026':rt });
@@ -1605,6 +1616,9 @@ export function perchHubJs(lang = "en") {
      not in the batch, and delaying them delays the composer. */
   var histSettled=false;
   var histBuf=[];
+  /* toolCallIds the history batch drew as chips (flushHistBuf dedupes the
+     buffered live tool frames against it). */
+  var histToolSeen={};
   /* PR-E: name+stored keys of file cards already rendered THIS transcript —
      dies with the transcript everywhere toolChips does (same seam). */
   var fileSeen={};
@@ -1634,6 +1648,13 @@ export function perchHubJs(lang = "en") {
     });
     var buf=histBuf; histBuf=[];
     buf.forEach(function(f){
+      if(f.toolFrame){
+        var td=f.d||{};
+        if(td.toolCallId!=null&&histToolSeen[String(td.toolCallId)]) return;   /* the batch drew it */
+        if(td.phase==='start') appendToolChip(td);
+        else if(td.phase==='end') finishToolChip(td);
+        return;
+      }
       if(f.type==='file'){
         if(fileSeen[fileKey(f)]) return;
         renderFileCard(f);
