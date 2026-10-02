@@ -1,5 +1,4 @@
 // NO bare imports (installed copy; see mcp.js).
-import { audit } from "./store.js";
 
 /** The SSE pointer for one call (spec 2026-10-01 I2). Built here from the DB
  *  row; the Perch client refetches the row by call_id. Nothing a pi child
@@ -31,9 +30,15 @@ export async function pushCallCard(db, call, notifyCard) {
   }
   r = r || { delivered: false, reason: "no_result" };
   if (r.reason === "bot_mismatch") {
+    // Once per call, in ONE statement (backlog P10): a check-then-insert let two
+    // concurrent pushes (a route action racing the dispatcher's flush) both write.
     try {
-      const seen = (await db.execute({ sql: "SELECT 1 FROM phone_audit WHERE call_id=? AND event='card_target_mismatch' LIMIT 1", args: [call.id] })).rows.length;
-      if (!seen) await audit(db, call.id, "service", "card_target_mismatch", { session_id: String(d.session_id), expected_bot: botId, session_bot: r.botId ?? null });
+      await db.execute({
+        sql: `INSERT INTO phone_audit (call_id, actor, event, detail_json)
+              SELECT ?, 'service', 'card_target_mismatch', ?
+              WHERE NOT EXISTS (SELECT 1 FROM phone_audit WHERE call_id=? AND event='card_target_mismatch')`,
+        args: [call.id, JSON.stringify({ session_id: String(d.session_id), expected_bot: botId, session_bot: r.botId ?? null }), call.id],
+      });
     } catch (e) { console.warn(`[phone] mismatch audit failed for ${call.id}: ${e.message}`); }
   }
   return r;

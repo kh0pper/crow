@@ -9,6 +9,20 @@ const DAYS = ["mon","tue","wed","thu","fri","sat","sun"];
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+// Backlog P7: run_after (the owner's AND the bot's proposal) is a strict ISO-8601 instant with an explicit zone
+// (what Date#toISOString sends). Date.parse alone accepts "Tue, 6 Oct 2026",
+// a zone-less time read in the gateway's own clock, and rolls 2026-02-30 over.
+const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.\d{1,9})?)?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+export function parseIsoInstant(v) {
+  if (typeof v !== "string") return null;
+  const m = ISO_INSTANT.exec(v);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const cal = new Date(Date.UTC(y, mo - 1, d));
+  if (mo < 1 || mo > 12 || cal.getUTCFullYear() !== y || cal.getUTCMonth() !== mo - 1 || cal.getUTCDate() !== d) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
 function fail(code, message, extra = {}) { const e = new Error(message); e.code = code; Object.assign(e, extra); return e; }
 
 export function normalizeNumber(raw) {
@@ -93,7 +107,7 @@ export function validatePlan(input) {
   const shareable = {};
   for (const k of SHAREABLE_FIELDS) if (i.shareable?.[k] != null && String(i.shareable[k]).trim()) shareable[k] = String(i.shareable[k]).trim().slice(0, 200);
   let run_after = null;
-  if (i.run_after) { const t = Date.parse(i.run_after); if (!Number.isFinite(t)) throw fail("invalid_plan", "run_after invalid"); run_after = new Date(t).toISOString(); }
+  if (i.run_after) { run_after = parseIsoInstant(i.run_after); if (!run_after) throw fail("invalid_plan", "run_after must be an ISO-8601 date and time with a time zone, e.g. 2026-10-06T15:30:00-05:00"); }
   let number_e164;
   try { number_e164 = normalizeNumber(i.number); } catch (e) { throw fail("invalid_plan", e.message); }
   return {

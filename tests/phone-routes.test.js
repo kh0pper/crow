@@ -266,6 +266,40 @@ test("approve run_after: null clears a proposed time; a bad time is 400", async 
   assert.equal((await store.getCall(s.db, b)).status, "awaiting_approval");
 });
 
+test("backlog P7: run_after must be null, absent, or a strict ISO-8601 instant with a zone", async () => {
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  const mk = async () => (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
+  for (const bad of [0, 1767225600000, false, true, "", "  ", {}, [], "Tue, 6 Oct 2026 15:30:00 GMT", "2030-01-01", "2030-01-01T15:30",
+    "2030-01-01T15:30:00", "2030-02-30T15:30:00Z", "2030-13-01T15:30:00Z", "2030-01-01T24:00:00Z", "2030-01-01 15:30:00Z", "  2030-01-01T15:30:00Z"]) {
+    const id = await mk();
+    const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id), run_after: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+    assert.equal((await r.json()).error, "invalid_run_after", JSON.stringify(bad));
+    assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval", JSON.stringify(bad));
+  }
+  for (const [good, want] of [["2030-01-01T15:30:00.000Z", "2030-01-01T15:30:00.000Z"], ["2030-01-01T15:30Z", "2030-01-01T15:30:00.000Z"],
+    ["2030-01-01T09:30:00-06:00", "2030-01-01T15:30:00.000Z"], ["2028-02-29T12:00:00Z", "2028-02-29T12:00:00.000Z"]]) {
+    const id = await mk();
+    const r = await post(`/api/phone/calls/${id}/approve`, { totp: "123456", business_confirmed: true, plan_hash: await hashOf(id), run_after: good });
+    assert.equal(r.status, 200, good);
+    assert.equal((await store.getCall(s.db, id)).run_after, want, good);
+  }
+  const { parseIsoInstant } = await import("../bundles/phone/server/plan.js");
+  assert.equal(parseIsoInstant("2027-02-29T12:00:00Z"), null, "not a leap year");
+});
+
+test("backlog P13: GET /perch/:sid/calls follows the NEWEST perch-live row — a session now owned by another bot hides the old bot's calls", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT);
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-R13','perch-live');
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('ivy','perch','perch-R13','perch-live');
+    INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind) VALUES ('hank','perch','perch-R13','gateway');`);
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" });
+  await store.createPlan(s.db, p, { kind: "bot", id: "hank" }, { kind: "perch", session_id: "perch-R13" });
+  const ivys = (await store.createPlan(s.db, p, { kind: "bot", id: "ivy" }, { kind: "perch", session_id: "perch-R13" })).call_id;
+  const j = await (await fetch(s.base + "/api/phone/perch/perch-R13/calls", { headers: { "x-test-session": "local" } })).json();
+  assert.deepEqual(j.calls.map((c) => c.id), [ivys], "only the newest perch-live owner's calls; a newer non-perch-live row does not count");
+});
+
 test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null for 'now', and re-renders when the hash changes", async () => {
   const { default: panel } = await import("../bundles/phone/panel/phone.js");
   const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
@@ -274,7 +308,7 @@ test("I4: the Phone panel sends the plan_hash it rendered, sends run_after null 
   assert.match(script, /plan_hash: c\.plan_hash/);
   assert.match(script, /new Date\(f\.run_after\.value\)\.toISOString\(\) : null;/);
   assert.match(script, /return c\.id \+ ':' \+ c\.plan_hash;/);
-  assert.match(script, /if \(e\.status === 409\) \{ lastPendingKey = null; load\(\); \}/);
+  assert.match(script, /if \(e\.status === 409 && e\.data && e\.data\.error === 'plan_changed'\) \{ lastPendingKey = null; load\(\); \}/);
   assert.equal(script.includes("`"), false);
   assert.doesNotThrow(function () { new Function(script); });
 });
@@ -403,4 +437,110 @@ test("spec 2026-10-02: the Phone panel labels every outcome (stopped included) i
   assert.match(script, /esc\(L\.outcomes\[c\.outcome\] \|\| c\.outcome\)/);
   assert.match(script, /c\.summary \? '<br>' \+ esc\(c\.summary\)/);
   assert.doesNotThrow(function () { new Function(script); });
+});
+
+// ---- backlog P5/P6/P8 (2026-10-02 phone polish): the Phone panel's client ----
+
+async function panelScript(lang = "en") {
+  const { default: panel } = await import("../bundles/phone/panel/phone.js");
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang });
+  return { html, script: html.split("<script>")[1].split("</script>")[0] };
+}
+
+/** Runs the panel script against a stub DOM; /api/phone/calls answers with statusFn(). */
+function runPanel(script, statusFn) {
+  const els = {}, timers = new Map(); let seq = 1; const alerts = [];
+  const el = (id) => (els[id] ??= { id, hidden: id === "phone-lost", innerHTML: "", textContent: "", value: "",
+    ownerName: {}, ownerNumber: {}, localModel: {}, cloudModel: {}, dailyCap: {}, tcpaAck: {}, totp: {}, querySelector: () => null });
+  const win = {};
+  const sandbox = {
+    window: win, alert: (m) => alerts.push(m),
+    document: { getElementById: el, querySelector: () => null },
+    setTimeout: (fn, d) => { const id = seq++; timers.set(id, [fn, d]); return id; },
+    clearTimeout: (id) => timers.delete(id), clearInterval: (id) => timers.delete(id),
+    fetch: async (url, opts) => {
+      const u = String(url);
+      if (u.endsWith("/settings")) {
+        if (!settings) return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
+        return { ok: true, status: 200, json: async () => (opts && opts.method === "POST" ? { ok: true } : settings) };
+      }
+      const st = u.endsWith("/calls") ? statusFn() : 500;
+      return { ok: st >= 200 && st < 300, status: st, json: async () => (st === 200 ? { calls: [] } : { error: "boom" }) };
+    },
+  };
+  let settings = null;
+  new Function(...Object.keys(sandbox), script)(...Object.values(sandbox));
+  const hops = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+  const fire = async () => { const [[id, [fn, d]]] = [...timers.entries()]; timers.delete(id); fn(); await hops(); return d; };
+  return { els, timers, alerts, hops, fire, setSettings: (v) => { settings = v; } };
+}
+
+test("backlog P5: the Phone panel poll backs off, stops after five failures in a row, and Retry resumes it", async () => {
+  const { script, html } = await panelScript("en");
+  assert.match(html, /<p id="phone-lost" hidden>Lost touch with Phone — updates stopped\. <button type="button" id="phone-retry">Retry<\/button><\/p>/);
+  let status = 500, gets = 0;
+  const p = runPanel(script, () => { gets++; return status; });
+  await p.hops();
+  assert.equal(gets, 1, "the first load ran at once");
+  const delays = [];
+  while (p.timers.size) delays.push(await p.fire());
+  assert.deepEqual(delays, [3000, 6000, 12000, 24000], "each failure doubles the wait; the fifth stops it");
+  assert.equal(gets, 5);
+  assert.equal(p.els["phone-lost"].hidden, false, "the panel says it lost touch");
+  status = 200;
+  p.els["phone-retry"].onclick();
+  await p.hops();
+  assert.equal(p.els["phone-lost"].hidden, true);
+  assert.equal(gets, 6);
+  assert.deepEqual([...p.timers.values()].map(([, d]) => d), [1500], "healthy again: 1.5 s");
+});
+
+test("backlog P5: a 401 stops the Phone panel poll for good", async () => {
+  const { script } = await panelScript("en");
+  const p = runPanel(script, () => 401);
+  await p.hops();
+  assert.equal(p.timers.size, 0);
+  assert.notEqual(p.els["phone-lost"]?.hidden, false, "a signed-out page is not 'lost touch'");
+});
+
+test("backlog P6/P8: the Phone panel shows refusal codes in the owner's language and only plan_changed re-renders", async () => {
+  const { PHONE_STRINGS } = await import("../bundles/phone/panel/phone.js");
+  assert.deepEqual(Object.keys(PHONE_STRINGS.es.errors).sort(), Object.keys(PHONE_STRINGS.en.errors).sort());
+  for (const code of ["business_confirmation_required", "notice_not_acknowledged", "owner_name_required", "local_login_required",
+    "totp_required", "invalid_run_after", "plan_changed", "not_pending", "not_live", "invalid_model"]) {
+    assert.ok(PHONE_STRINGS.en.errors[code] && PHONE_STRINGS.es.errors[code], code);
+    assert.notEqual(PHONE_STRINGS.en.errors[code], PHONE_STRINGS.es.errors[code], code);
+  }
+  for (const lang of ["en", "es"]) {
+    const { script } = await panelScript(lang);
+    const L = JSON.parse(script.slice(script.indexOf("var L = ") + 8, script.indexOf(";  var lastPendingKey")));
+    const errText = new Function("L", script.slice(script.indexOf("function errText"), script.indexOf("  function api(")) + "; return errText;")(L);
+    assert.equal(errText({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." }), PHONE_STRINGS[lang].errors.notice_not_acknowledged);
+    assert.equal(errText({ error: "brand_new_code", message: "server words" }), "server words");
+    assert.equal(errText({ error: "toString" }), "toString", "no prototype keys");
+    assert.match(script, /alert\(errText\(j\)\)/);
+    assert.ok(!/if \(e\.status === 409\) \{/.test(script), "a bare 409 no longer wipes the typed 2FA");
+  }
+});
+
+test("review M6: a successful load from outside the poll (here: settings saved, cloud model changed) clears 'lost touch' and resumes", async () => {
+  const { script } = await panelScript("en");
+  let status = 500;
+  const p = runPanel(script, () => status);
+  await p.hops();
+  while (p.timers.size) await p.fire();
+  assert.equal(p.els["phone-lost"].hidden, false);
+  status = 200;
+  // Settings save → loadSettings → a changed cloud model → load(): a non-poll success.
+  p.setSettings({ cloudModel: "cld/m" });
+  p.els["phone-settings"].onsubmit({ preventDefault() {}, target: p.els["phone-settings"] });
+  await p.hops(10);
+  assert.equal(p.els["phone-lost"].hidden, true, "the notice is gone");
+  assert.deepEqual([...p.timers.values()].map(([, d]) => d), [1500], "the poll runs again");
+});
+
+test("re-review N3: a load() that lands after the page changed neither throws on a missing notice nor touches another page's", async () => {
+  const { script } = await panelScript("en");
+  assert.match(script, /var lost = document\.getElementById\('phone-lost'\); if \(lost && !lost\.hidden && window\.__crowPhonePollOwner === pollOwner\)/);
 });

@@ -58,8 +58,8 @@ export function createDispatcher({ db, runner, deps, settings }) {
         if (e && BUSY_CODES.has(e.code)) {
           // No card push here: the terminal card went out when the call finalized
           // (flushCards on that tick); a deferral changes nothing the card shows.
-          const r = await store.deferDelivery(db, c.id);
-          if (r.gaveUp) console.warn(`[phone] gave up delivering ${c.id}: the bot could not take a turn for 10 minutes (${e.code})`);
+          const r = await store.deferDelivery(db, c.id, 10, e.code);
+          if (r.gaveUp) console.warn(`[phone] gave up delivering ${c.id} after 10 minutes (${store.deferReason(e.code)}; code ${e.code})`);
           continue;
         }
         await store.bumpDeliveryAttempt(db, c.id);
