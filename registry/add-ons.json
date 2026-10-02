@@ -4491,7 +4491,7 @@
     {
       "id": "phone",
       "name": "Phone",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
       "type": "bundle",
       "author": "Crow",

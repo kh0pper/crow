@@ -28,6 +28,7 @@ import {
   resolveEnvValue,
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
+import { signActor } from "./actor-sig.mjs";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -148,6 +149,11 @@ function phoneBlock(crowHome, { botId, threadId, gatewayType, port } = {}) {
   if (botId) headers["X-Crow-Actor-Id"] = String(botId);
   if (threadId) headers["X-Crow-Actor-Thread"] = String(threadId);
   if (gatewayType) headers["X-Crow-Actor-Gateway"] = String(gatewayType);
+  // S2: bind the actor headers to this (bot, thread, gateway). The key lives
+  // only in this process's memory (actor-sig.mjs); without it no signature is
+  // written and /phone/mcp treats the caller as unattributed.
+  const sig = signActor({ kind: "bot", botId, threadId, gatewayType });
+  if (sig) headers["X-Crow-Actor-Sig"] = sig;
   return { url: `http://127.0.0.1:${gatewayPort}/phone/mcp`, headers };
 }
 

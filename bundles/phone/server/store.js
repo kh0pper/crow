@@ -18,9 +18,14 @@ export async function audit(db, callId, actor, event, detail = null) {
 }
 
 export async function createPlan(db, plan, actor, deliverTo) {
-  if (actor?.kind === "bot") {
-    const pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [actor.id] })).rows[0].n;
-    const day = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE json_extract(created_by,'$.id')=? AND created_at > datetime('now','-1 day')", args: [actor.id] })).rows[0].n;
+  // Per-bot buckets; every unattributed caller (S2: unsigned or forged actor
+  // headers) shares ONE bucket, so a forger cannot dodge the limit by
+  // inventing new bot ids.
+  const bucket = actor?.kind === "bot" ? { where: "json_extract(created_by,'$.id')=?", args: [actor.id] }
+    : actor?.kind === "unattributed" ? { where: "json_extract(created_by,'$.kind')='unattributed'", args: [] } : null;
+  if (bucket) {
+    const pend = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND ${bucket.where}`, args: bucket.args })).rows[0].n;
+    const day = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE ${bucket.where} AND created_at > datetime('now','-1 day')`, args: bucket.args })).rows[0].n;
     if (pend >= 5 || day >= 10) throw fail("rate_limited", "too many call plans from this bot; ask the owner to review pending ones");
   }
   const id = "call_" + randomUUID();
@@ -47,8 +52,9 @@ export async function listCalls(db, { status, limit = 50 } = {}) {
 /** I5 (spec 2026-10-01): the calls a Perch chat may show. BOTH the target
  *  session AND the creating bot must match. That stops a forged THREAD header
  *  (the call names its real bot, which is not this session's) and accidental
- *  mismatches; a child forging BOTH actor headers is out of scope here (spec
- *  "Known limits": real per-session binding is a queued follow-up). */
+ *  mismatches. A child forging BOTH actor headers never gets here: since S2
+ *  (phone 0.2.2) unsigned or mis-signed headers resolve to an unattributed
+ *  actor with no deliver_to (mcp.js resolvePhoneActor). */
 export async function listPerchCalls(db, sessionId, botId, limit = 20) {
   const n = Math.max(1, Math.min(20, Number(limit) || 20));
   const r = await db.execute({
@@ -150,7 +156,7 @@ export async function rejectCall(db, id) {
 export async function cancelCall(db, id, actor) {
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
-  if (actor?.kind === "bot" && row.created_by?.id !== actor.id) throw fail("forbidden", "not your call plan");
+  if (actor && typeof actor === "object" && actor.kind !== "session" && (actor.kind !== "bot" || !actor.id || row.created_by?.id !== actor.id)) throw fail("forbidden", "not your call plan");
   const r = await db.execute({ sql: "UPDATE phone_calls SET status='cancelled', token_hash=NULL, updated_at=datetime('now') WHERE id=? AND status IN ('awaiting_approval','approved')", args: [id] });
   if (!r.rowsAffected) throw fail("not_cancellable", "call is already running or finished");
   await audit(db, id, actor || "owner", "cancelled");
