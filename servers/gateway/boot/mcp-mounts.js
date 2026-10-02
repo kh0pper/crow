@@ -21,7 +21,7 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken } from "../local-token.js";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken } from "../local-token.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -266,6 +266,20 @@ export async function mountMcpServers(app, deps) {
     }
   } catch (err) {
     console.warn(`[gateway] ensureBoardToken failed: ${err.message}`);
+  }
+
+  // Models arc plan 2 Task 6: the path-scoped models token for the lifecycle
+  // API (/llm/models). Same shape as the board token above; best-effort.
+  try {
+    const tokenDb = createDbClient();
+    try {
+      const { minted } = await ensureModelsToken(tokenDb);
+      if (minted) console.log("[gateway] models token minted");
+    } finally {
+      try { tokenDb.close(); } catch {}
+    }
+  } catch (err) {
+    console.warn(`[gateway] ensureModelsToken failed: ${err.message}`);
   }
 
   // S5: board actor headers count only with a signature from the per-boot

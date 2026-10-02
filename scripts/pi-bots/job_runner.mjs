@@ -36,6 +36,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { resolveModel } from "./model_resolver.mjs";
+import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
@@ -326,6 +327,9 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
 
     const resolved = await resolveModel(def, { escalate: !!job.escalate });
+    // M2: fail the job before spawning when pi cannot use the resolved model.
+    const piCheck = await checkPiModel(resolved);
+    if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
     log(`job ${job.job_id} bot=${job.bot_id} model=${resolved.key}`);
 
     // Warm the bundle (no-op for cloud/already-resident) before the turn.

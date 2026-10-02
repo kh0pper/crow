@@ -23,6 +23,7 @@ import {
   serversForProbe,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
+import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalog.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
@@ -152,16 +153,19 @@ export async function remoteInvocationOn(db) {
 }
 
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
-export async function loadModelOptions(db) {
+export async function loadModelOptions(db, { piKeysFn = () => piModelsFileKeys() } = {}) {
   try {
     const all = await listProvidersAll(db);
     const enabled = all.filter((p) => !p.disabled);
+    let known = null;
+    try { known = piKeysFn(); } catch { known = null; }
     const opts = [];
     for (const row of enabled) {
       for (const m of row.models || []) {
         const mid = typeof m === "string" ? m : m.id;
         if (!mid) continue;
-        opts.push({ provider: row.id, key: `${row.id}/${mid}`, label: (m.name || mid) });
+        const key = `${row.id}/${mid}`;
+        opts.push({ provider: row.id, key, label: (m.name || mid), piKnown: known ? known.has(key) : null });
       }
     }
     if (!opts.length) return { error: "No providers configured.", opts: [] };

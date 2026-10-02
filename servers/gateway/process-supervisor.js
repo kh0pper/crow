@@ -83,6 +83,9 @@ export function superviseProcess({
   // closed): a string, or a function returning one. Never the environment,
   // which a same-uid process can read from /proc/<pid>/environ.
   stdinPayload = null,
+  // How many trailing stderr lines to keep (spec §8: a start that dies before
+  // readiness reports them as its cause). Kept across restarts.
+  stderrTailLines = 40,
 }) {
   const idleDisabled = !!keepWarm || !!alwaysResident || !(idleMinutes > 0);
 
@@ -98,6 +101,20 @@ export function superviseProcess({
     _restartTimer: null,
     _stopped: false,
   };
+
+  const tail = [];
+  let partial = "";
+  function pushStderr(chunk) {
+    const text = partial + chunk.toString("utf8");
+    const lines = text.split(/\r?\n/);
+    partial = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line) continue;
+      tail.push(line);
+      if (tail.length > stderrTailLines) tail.shift();
+    }
+  }
+  handle.stderrTail = () => [...tail];
 
   let terminalFired = false;
   function fireTerminal(reason) {
@@ -131,6 +148,10 @@ export function superviseProcess({
       } catch { /* best effort */ }
     }
     handle.child = child;
+    partial = "";
+    if (child.stderr && typeof child.stderr.on === "function") child.stderr.on("data", pushStderr);
+    // stdout is piped but nothing reads it; drain it so a chatty child never blocks on a full pipe.
+    if (child.stdout && typeof child.stdout.resume === "function") child.stdout.resume();
     handle.live = true;
     handle.state = "running";
     handle.startedAt = new Date().toISOString();

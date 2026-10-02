@@ -224,6 +224,48 @@ export function getNativeHandle(providerName) {
   return _nativeHandles.get(providerName) || null;
 }
 
+/** Lifecycle API (plan 2 Task 8): a read-only snapshot of a native handle. */
+export function nativeSnapshot(name) {
+  const h = _nativeHandles.get(name);
+  if (!h) return null;
+  const s = typeof h.status === "function" ? h.status() : {};
+  return { live: !!h.live, argv: h.argv || s.argv || null, stderrTail: s.stderrTail || [] };
+}
+
+/** Mutex siblings of a provider by name (for the listing's wouldEvict). */
+export function mutexSiblingsOf(name) {
+  return getMutexSiblings(name, loadProviders());
+}
+
+/** Stop a native provider this instance owns. */
+export async function stopNativeProvider(name, opts = {}) {
+  const cfg = loadProviders();
+  const p = getProvider(name, cfg);
+  if (!p) { const e = new Error(`no provider "${name}"`); e.code = "UNKNOWN_PROVIDER"; throw e; }
+  if (isExternalEngine(p)) throw new ExternalEngineError(name, externalEngineInfo(p)?.host ?? null);
+  if (!isNativeRuntime(p)) { const e = new Error(`provider "${name}" is not native`); e.code = "NOT_NATIVE"; throw e; }
+  if (!orchestratableHere(p, opts)) {
+    const e = new Error(`provider "${name}" is owned by another instance`);
+    e.code = "NOT_OWNER"; e.owner = p.gpuPolicy?.owner ?? null; e.door = p.doorUrl || p.baseUrl;
+    throw e;
+  }
+  // Through the single-flight queue, so a stop never races an in-flight
+  // acquire or eviction (review). The handle's onTerminal already persists
+  // the wasLive:false liveness marker, so a stopped model is not re-warmed at
+  // boot; idle-revert may still bring back a group's defaultMember (unchanged).
+  const run = _swapInFlight.then(async () => {
+    const h = _nativeHandles.get(name);
+    if (!h || !h.live) return { stopped: false };
+    await stopModel(h);
+    _nativeHandles.delete(name);
+    _lastUsedAt.delete(name);
+    console.log(`[gpu-orchestrator] stopped native ${name} (requested-by=${opts.requester || "-"})`);
+    return { stopped: true };
+  });
+  _swapInFlight = run.catch(() => {});
+  return run;
+}
+
 // -----------------------------------------------------------------------
 // Bundle control
 // -----------------------------------------------------------------------
@@ -1052,6 +1094,9 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   // which (per `acquireOrStartNative`) is ALSO wired to release this same
   // lock — but `release()` is idempotent (see `native-lock.js`), so that
   // and the `finally`'s own release below never double-free anything.
+  // Plan 2 Task 8 (review C6): capture the child's stderr tail BEFORE the
+  // handle is stopped and dropped, so the lifecycle API can report a cause.
+  const stderrTail = typeof handle.status === "function" ? (handle.status().stderrTail || []) : [];
   try {
     await handle.stop();
   } catch (err) {
@@ -1060,11 +1105,15 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   if (_nativeHandles.get(providerName) === handle) _nativeHandles.delete(providerName);
 
   if (result === "conflict") {
-    throw new NativePortConflictError(providerName, nativeLocalUrl(p));
+    const err = new NativePortConflictError(providerName, nativeLocalUrl(p));
+    err.stderrTail = stderrTail;
+    throw err;
   }
   // "down" — the process never reported itself resident within the
   // timeout. Never silently rebind on a different port; surface it.
-  throw new Error(`orchestrator: native provider "${providerName}" failed to bind port ${port} within ${readinessTimeoutMs}ms — refusing to rebind on a different port`);
+  const err = new Error(`orchestrator: native provider "${providerName}" failed to bind port ${port} within ${readinessTimeoutMs}ms — refusing to rebind on a different port`);
+  err.stderrTail = stderrTail;
+  throw err;
 }
 
 /**

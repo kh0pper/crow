@@ -79,7 +79,7 @@ import { allocatePort, loadState, releasePort, saveState, registryKey, findRegis
 import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache, invalidateAndRefreshProvidersCache } from "../../shared/providers.js";
 import { validateLaunch } from "./launch.js";
-import { doorBaseUrl, gatewayPort } from "./door.js";
+import { doorBaseUrl, gatewayPort, providerDoorUrl } from "./door.js";
 import { getOwnTailnetIp } from "../../shared/tailnet-ip.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { isExternalEngine } from "../../shared/provider-engine.js";
@@ -1490,8 +1490,8 @@ export function pickChatMutexGroup(existingRows) {
  * cache LAST, so no reader can observe a cache miss that refetches a
  * still-mid-write row.
  *
- * `base_url` is now the DOOR url (`doorBaseUrl({ tailnetIp, port:
- * gatewayPortFn() })` — routed through the gateway's `/llm/v1`, not the
+ * `base_url` is now the provider-scoped DOOR url (`providerDoorUrl(doorBaseUrl(…),
+ * providerId)` = `…/llm/p/<providerId>/v1` — routed through the gateway, not the
  * model's own port directly). The model's own port still lives at
  * `gpu_policy.port` and is still returned as `port`. When `tailnetIpFn()`
  * has no tailnet ip, the door falls back to loopback and `gpu_policy`
@@ -1753,7 +1753,10 @@ export async function registerModel({
     gpuPolicy.mutexGroup = mutexGroup;
   } // mutexGroup === null -> explicitly none, no key at all
 
-  const baseUrl = doorBaseUrl({ tailnetIp, port: gatewayPortFn() });
+  // Provider-scoped door (plan 2 Task 4): unambiguous to every peer even when
+  // two rows serve the same model id (crow-embed and grackle-embed both serve
+  // qwen3-embedding-0.6b today).
+  const baseUrl = providerDoorUrl(doorBaseUrl({ tailnetIp, port: gatewayPortFn() }), providerId);
   const models = [{
     id: model.id,
     task: model.task,

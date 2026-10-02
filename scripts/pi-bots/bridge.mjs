@@ -796,7 +796,24 @@ export async function handleInbound(opts) {
   // sysFile instead of after the prompt templates — neither reads the other's
   // state, and the model-resolve log line below is still emitted in the same
   // relative order.
-  const spawnPrep = await prepareSpawn(world, { escalate, log });
+  let spawnPrep;
+  try {
+    spawnPrep = await prepareSpawn(world, { escalate, log });
+  } catch (e) {
+    // M2 (plan 2 Task 10): the inbound adapters (bridge_tick, discord_gateway)
+    // only LOG a rejected handleInbound, so an unusable model would be silent
+    // to the operator, and the Gmail tick would re-process the same inbound
+    // every pass. Reply with the reason and record the session as errored.
+    if (!e || e.code !== "PI_MODEL_UNAVAILABLE") throw e;
+    session = upsertSession(Object.assign({}, session || {}, { bot_id, gateway_thread_id, gateway_type, project_id: projectId, status: "error" }));
+    await sendReply("(bridge error: " + e.message + ")");
+    appendAuditBridge(projectId, {
+      actor_type: "bot", actor_id: bot_id, action: "bot.error",
+      target: "thread:" + gateway_thread_id,
+      payload: { error: String(e.message), code: e.code },
+    });
+    return { action: "error", error: e.message };
+  }
   const resolved = spawnPrep.resolved;
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
