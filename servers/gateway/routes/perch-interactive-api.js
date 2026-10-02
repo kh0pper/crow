@@ -54,7 +54,7 @@ import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
-import { providerModelListWarm } from "../perch-model-catalog.js";
+import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
@@ -264,8 +264,16 @@ async function loadBotRow(db, botId) {
  *   resolves to a real, fully-wired engine). An OBJECT is used AS the engine
  *   directly — what every fake-engine test below injects, so a turn is never
  *   driven and no pi is ever spawned.
+ * @param {Function} [seams.piProviders] what pi can resolve as --provider
+ *   (perch-model-catalog.js loadPiProviderNames); null = unknown. Injected by
+ *   tests so the picker's runnable check never reads this host's ~/.pi.
  */
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames } = {}) {
+  /** pi's resolvable providers, or null when that cannot be read — the
+   *  picker then marks nothing unrunnable rather than guess. */
+  function piNames() {
+    try { return piProviders() || null; } catch { return null; }
+  }
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (perch.js / bot-board-api idiom).
@@ -408,9 +416,21 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // selectable (model-availability.js's header).
       // awaited: the catalogue warms a cold provider cache rather than
       // serving the empty list loadProviders() answers on a fresh process.
-      const models = await annotate(await providerModels());
       const dflt = def.models && typeof def.models.default === "string" && def.models.default
         ? def.models.default : null;
+      // The picker view (perch-model-catalog.js pickerModels): grouped
+      // network/cloud, one entry per endpoint+model, ordered default-first,
+      // and each marked whether pi can spawn on it at all. Every bot's
+      // configured keys count as "referenced", so an alias some bot names is
+      // the one kept when its siblings collapse into it.
+      let referenced = new Set();
+      try {
+        const { rows } = await db.execute("SELECT definition FROM pi_bot_defs WHERE enabled = 1");
+        referenced = referencedModelKeys(rows);
+      } catch { /* no bot table is no references, not a failed list */ }
+      const models = pickerModels(await annotate(await providerModels()), {
+        defaultKey: dflt, referenced, pi: piNames(),
+      });
       res.json({ models, default: dflt });
     } catch (err) {
       mapEngineError(res, err);
@@ -793,8 +813,18 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     try {
       const eng = resolveEngine();
       const result = await eng.options(String(req.params.sid));
+      // Same picker view as the launcher's list. A LIVE child's list is pi's
+      // own get_available_models, so every entry is one pi resolved
+      // (runnableAll); the hibernating fallback is the provider catalogue and
+      // gets the real check. The session's current model is "referenced", so
+      // the alias it is actually on is the one that survives the dedupe and
+      // the drawer can still select it.
       const models = Array.isArray(result && result.models)
-        ? await annotate(result.models)
+        ? pickerModels(await annotate(result.models), {
+            referenced: [result.current],
+            runnableAll: result.source === "child",
+            pi: result.source === "child" ? null : piNames(),
+          })
         : (result && result.models) || null;
       res.json({ ...result, models });
     } catch (err) {

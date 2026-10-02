@@ -137,3 +137,157 @@ test("the warm variant does not try to warm an INJECTED loader", async () => {
   assert.deepEqual((await providerModelListWarm(cfg({ p: { baseUrl: "u", models: [{ id: "m" }] } }))).map(modelKey),
     ["p/m"]);
 });
+
+// ---------------------------------------------------------------------------
+// The picker view — pickerModels / scopeOf / loadPiProviderNames
+// (Kevin 2026-10-02: "an outdated list of models … a ton of stale entries",
+// and raven-flash-next, his production model, could not be found in it)
+// ---------------------------------------------------------------------------
+
+const {
+  pickerModels, scopeOf, loadPiProviderNames, referencedModelKeys,
+} = await import("../servers/gateway/perch-model-catalog.js");
+
+test("provider rows stamp managed/external only when true — a plain row keeps its old shape", async () => {
+  const list = providerModelList(cfg({
+    plain: { baseUrl: "u", models: [{ id: "a" }] },
+    bundled: { baseUrl: "u2", bundleId: "b", models: [{ id: "b" }] },
+    gufo: { baseUrl: "http://10.0.0.126:8030/v1", gpuPolicy: { engine: { managed: "external" } }, models: [{ id: "c" }] },
+  }));
+  assert.deepEqual(list[0], { id: "a", provider: "plain", baseUrl: "u" });
+  assert.equal(list[1].managed, true);
+  assert.equal(list[2].managed, true);
+  assert.equal(list[2].external, true);
+});
+
+test("scopeOf: loopback, LAN, tailnet and bare host names are on your network; the rest is cloud", () => {
+  for (const u of ["http://127.0.0.1:18100/v1", "http://localhost:3001/llm/v1", "http://10.0.0.126:8030/v1",
+                   "http://192.168.1.5/v1", "http://172.20.0.2/v1", "http://100.118.41.122:8003/v1",
+                   "https://crow.dachshund-chromatic.ts.net:8444/v1", "http://[::1]:8000/v1",
+                   "http://[fd7a:115c:a1e0::1]/v1", "http://grackle:9100/v1", "http://nas.local/v1"]) {
+    assert.equal(scopeOf(u), "network", u);
+  }
+  for (const u of ["https://api.z.ai/api/coding/paas/v4", "https://coding-intl.dashscope.aliyuncs.com/v1",
+                   "http://8.8.8.8/v1", "http://100.128.0.1/v1", "http://172.32.0.1/v1", null, "", "not a url"]) {
+    assert.equal(scopeOf(u), "cloud", String(u));
+  }
+});
+
+const PI = { custom: new Set(["crow-local", "zai-coding", "raven-flash-next"]), builtin: new Set(["zai"]) };
+const keys = (l) => l.map((m) => m.provider + "/" + m.id);
+
+test("aliases of one endpoint+model collapse to ONE entry, the rest kept as aliases", () => {
+  const out = pickerModels([
+    { provider: "crow-chat", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", managed: true, availability: "up" },
+    { provider: "crow-local", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", name: "Qwen 35B", availability: "up" },
+    { provider: "crow-swap-agentic", id: "q35", baseUrl: "http://100.118.41.122:8003/v1/", managed: true, availability: "up" },
+  ], { pi: PI });
+  assert.deepEqual(keys(out), ["crow-local/q35"],
+    "the one pi can spawn wins over the bundle rows it cannot — a choice that cannot run never wins");
+  assert.deepEqual(out[0].aliases.sort(), ["crow-chat/q35", "crow-swap-agentic/q35"]);
+});
+
+test("among equally runnable aliases the referenced row, then the managed row, is canonical", () => {
+  const rows = [
+    { provider: "a", id: "m", baseUrl: "http://x/v1", availability: "up" },
+    { provider: "b", id: "m", baseUrl: "http://x/v1", availability: "up", managed: true },
+  ];
+  assert.deepEqual(keys(pickerModels(rows)), ["b/m"], "managed wins when nothing references either");
+  assert.deepEqual(keys(pickerModels(rows, { referenced: ["a/m"] })), ["a/m"], "a bot's reference wins over managed");
+  assert.deepEqual(keys(pickerModels(rows, { defaultKey: "a/m" })), ["a/m"], "the default is never folded away");
+});
+
+test("the same model id on DIFFERENT endpoints is two models, not one", () => {
+  const out = pickerModels([
+    { provider: "crow-voice", id: "qwen3.5-4b", baseUrl: "http://100.118.41.122:8011/v1" },
+    { provider: "qwen3.5-4b", id: "qwen3.5-4b", baseUrl: "http://127.0.0.1:18100/v1" },
+  ]);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map((m) => m.label).sort(), ["qwen3.5-4b (crow-voice)", "qwen3.5-4b (qwen3.5-4b)"],
+    "the provider is named only because the two would otherwise read the same");
+});
+
+test("runnable: pi's models.json, then pi's built-ins (case-insensitive), else not", () => {
+  const out = pickerModels([
+    { provider: "crow-local", id: "a", baseUrl: "http://x/v1" },
+    { provider: "ZAI", id: "b", baseUrl: "https://api.z.ai/v4" },
+    { provider: "cloud-openai-08a50004", id: "c", baseUrl: "https://dashscope.example/v1" },
+  ], { pi: PI });
+  const by = Object.fromEntries(out.map((m) => [m.provider, m.runnable]));
+  assert.deepEqual(by, { "crow-local": true, ZAI: true, "cloud-openai-08a50004": false });
+  assert.ok(pickerModels([{ provider: "p", id: "m", baseUrl: "u" }]).every((m) => !("runnable" in m)),
+    "no pi answer is UNKNOWN, never false");
+  assert.equal(pickerModels([{ provider: "nope", id: "m" }], { pi: PI, runnableAll: true })[0].runnable, true,
+    "a live child's own list is runnable by definition");
+});
+
+test("order: the default first, then on-network, then cloud; usable before unusable, then by label", () => {
+  const out = pickerModels([
+    { provider: "zai-coding", id: "glm-5", name: "GLM-5", baseUrl: "https://api.z.ai/v4", availability: "up" },
+    { provider: "cloud-x", id: "dead", name: "Aardvark", baseUrl: "https://c.example/v1", availability: "up" },
+    { provider: "crow-local-27b", id: "27b", name: "Qwen 27B", baseUrl: "http://100.118.41.122:8006/v1", availability: "unavailable" },
+    { provider: "raven-flash-next", id: "fn", name: "Flash Next", baseUrl: "http://10.0.0.126:8030/v1", availability: "up", external: true },
+    { provider: "crow-local", id: "q35", name: "Qwen 35B", baseUrl: "http://100.118.41.122:8003/v1", availability: "up" },
+  ], { pi: { custom: new Set(["zai-coding", "crow-local-27b", "raven-flash-next", "crow-local"]), builtin: new Set() },
+       defaultKey: "zai-coding/glm-5" });
+  assert.deepEqual(keys(out), [
+    "zai-coding/glm-5",                  // the bot's default, whatever group it is in
+    "raven-flash-next/fn", "crow-local/q35",   // network, usable, by label
+    "crow-local-27b/27b",                // network, nothing answering
+    "cloud-x/dead",                      // cloud, pi cannot spawn it
+  ]);
+  assert.deepEqual(out.map((m) => m.group), ["cloud", "network", "network", "network", "cloud"]);
+});
+
+test("an external engine is on your network even when its address would not say so", () => {
+  const [m] = pickerModels([{ provider: "gufo", id: "x", baseUrl: "https://gufo.example.com/v1", external: true }]);
+  assert.equal(m.group, "network");
+});
+
+test("pickerModels never throws on junk and keeps every keyed entry", () => {
+  assert.deepEqual(pickerModels(null), []);
+  assert.deepEqual(pickerModels([null, {}, { provider: "p" }]), []);
+  assert.equal(pickerModels([{ provider: "p", id: "m" }])[0].label, "m");
+});
+
+test("loadPiProviderNames reads pi's models.json (PI_MODELS_JSON wins) and the installed pi's built-ins", () => {
+  const files = {
+    "/pi/models.json": JSON.stringify({ providers: { "Qwen Cloud": {}, "crow-local": {}, $schema: {} } }),
+  };
+  const read = (p) => { if (p in files) return files[p]; const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; };
+  const list = (d) => {
+    if (d === "/g/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers") {
+      return ["zai.models.js", "openai.models.js", "index.js"];
+    }
+    throw new Error("ENOENT");
+  };
+  const cli = () => ({ cliPath: "/g/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" });
+  const r = loadPiProviderNames({ env: { PI_MODELS_JSON: "/pi/models.json", HOME: "/h" }, read, list, cli });
+  assert.deepEqual([...r.custom].sort(), ["crow-local", "qwen cloud"]);
+  assert.deepEqual([...r.builtin].sort(), ["openai", "zai"]);
+
+  // models.json under PI_CODING_AGENT_DIR / HOME; no installed pi → the snapshot.
+  files["/h/.pi/agent/models.json"] = JSON.stringify({ providers: { mine: {} } });
+  const r2 = loadPiProviderNames({ env: { HOME: "/h" }, read, list, cli: () => null });
+  assert.deepEqual([...r2.custom], ["mine"]);
+  assert.ok(r2.builtin.has("zai") && r2.builtin.has("anthropic"), "falls back to the pi 0.85.1 snapshot");
+
+  // No models.json at all: pi has its built-ins only — a known answer.
+  const r3 = loadPiProviderNames({ env: { HOME: "/nowhere" }, read, list, cli: () => null });
+  assert.equal(r3.custom.size, 0);
+
+  // A models.json that does not parse: UNKNOWN, not "nothing runs".
+  files["/bad.json"] = "{ not json";
+  assert.equal(loadPiProviderNames({ env: { PI_MODELS_JSON: "/bad.json" }, read, list, cli: () => null }), null);
+});
+
+test("referencedModelKeys collects every bot's default and escalation keys", () => {
+  const keysOut = referencedModelKeys([
+    { definition: JSON.stringify({ models: { default: "crow-local/q", escalation: "zai-coding/glm-5.1" } }) },
+    { definition: JSON.stringify({ models: null }) },
+    { definition: "{broken" },
+    null,
+  ]);
+  assert.deepEqual([...keysOut].sort(), ["crow-local/q", "zai-coding/glm-5.1"]);
+  assert.equal(referencedModelKeys(null).size, 0);
+});

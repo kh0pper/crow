@@ -56,6 +56,8 @@ let engineCalls;
  * tests/perch-model-catalog.test.js. */
 let catalogueImpl;
 let catalogueCalls;
+/** What the router's piProviders seam answers (see its injection below). */
+let piProvidersImpl = null;
 
 function raw() {
   return new Database(DB_FILE);
@@ -194,6 +196,10 @@ before(async () => {
     engine: () => engineImpl,
     annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
     providerModels: () => { catalogueCalls++; return catalogueImpl; },
+    // What pi can resolve, injected so the picker's runnable check never
+    // reads this host's ~/.pi. null = unknown = nothing marked unrunnable,
+    // the default for every test that is not about that check.
+    piProviders: () => piProvidersImpl,
   }));
 
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
@@ -209,6 +215,7 @@ after(() => {
 beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
   catalogueCalls = 0;
+  piProvidersImpl = null;
   catalogueImpl = [
     { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
     { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
@@ -889,7 +896,8 @@ test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 200);
   assert.deepEqual(body, {
-    models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b", availability: "up" }],
+    models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b", availability: "up",
+      group: "cloud", label: "qwen3.6-35b-a3b" }],
     thinkingLevels: ["low", "high"],
   });
   assert.deepEqual(engineCalls.options, [{ sid: "sess-1" }]);
@@ -1015,8 +1023,10 @@ test("GET /bots/:id/models 200s with the annotated catalogue and the bot's confi
   const { status, body } = await getJson("/bots/chatty/models");
   assert.equal(status, 200);
   assert.deepEqual(body.models, [
-    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1", availability: "up" },
-    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1", availability: "up" },
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1", availability: "up",
+      group: "network", label: "Qwen" },
+    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1", availability: "up",
+      group: "network", label: "Flash" },
   ], "annotated for the same reason the options route annotates: an unavailable model must read as unavailable");
   assert.equal(body.default, "local/qwen", "so the picker can open pre-selected and launching stays one tap");
 });
@@ -1059,6 +1069,72 @@ test("GET /bots/:id/models on a bot with no configured model answers default:nul
   assert.equal(status, 200);
   assert.equal(body.default, null);
   assert.equal(body.models.length, 2);
+});
+
+test("GET /bots/:id/models collapses aliases of one endpoint+model into the row the bot names", async () => {
+  // crow's live shape: crow-local, crow-chat and crow-swap-agentic all serve
+  // qwen3.6-35b-a3b on :8003. The bot names crow-local, so crow-local is the
+  // ONE entry — even though crow-chat is the bundle-managed row.
+  catalogueImpl = [
+    { provider: "crow-chat", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", managed: true },
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
+    { provider: "crow-swap-agentic", id: "qwen", baseUrl: "http://x:8003/v1/", managed: true },
+  ];
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.deepEqual(body.models.map((m) => m.provider + "/" + m.id), ["local/qwen", "crow-chat/q35"],
+    "the default first; its alias folded into it");
+  assert.deepEqual(body.models[0].aliases, ["crow-swap-agentic/qwen"], "folded, not lost");
+});
+
+test("GET /bots/:id/models marks a provider pi cannot resolve as unrunnable, and groups by address", async () => {
+  piProvidersImpl = { custom: new Set(["local"]), builtin: new Set(["zai"]) };
+  catalogueImpl = [
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
+    { provider: "raven-flash-next", id: "flash-next", name: "Flash", baseUrl: "http://10.0.0.126:8030/v1" },
+    { provider: "ZAI", id: "glm-5", baseUrl: "https://api.z.ai/api/coding/paas/v4" },
+  ];
+  const { body } = await getJson("/bots/chatty/models");
+  const by = Object.fromEntries(body.models.map((m) => [m.provider, m]));
+  assert.equal(by.local.runnable, true);
+  assert.equal(by["raven-flash-next"].runnable, false,
+    "missing from pi's models.json and not a pi built-in: a session on it dies at spawn");
+  assert.equal(by.ZAI.runnable, true, "pi matches providers case-insensitively, built-ins included");
+  assert.equal(by["raven-flash-next"].group, "network", "a LAN address is on your network");
+  assert.equal(by.ZAI.group, "cloud");
+});
+
+test("GET /bots/:id/models still answers when pi's providers cannot be read", async () => {
+  piProvidersImpl = null;
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.ok(body.models.every((m) => !("runnable" in m)), "unknown is not 'unrunnable' — nothing is hidden on a guess");
+});
+
+test("GET /interactive/:sid/options: a live child's list is runnable by definition; the current model wins the dedupe", async () => {
+  piProvidersImpl = { custom: new Set(), builtin: new Set() };
+  engineImpl.options = async () => ({
+    models: [
+      { provider: "crow-chat", id: "q", baseUrl: "http://127.0.0.1:8003/v1" },
+      { provider: "crow-local", id: "q", baseUrl: "http://127.0.0.1:8003/v1" },
+    ],
+    thinkingLevels: null, current: "crow-local/q", source: "child",
+  });
+  const { body } = await getJson("/interactive/sess-1/options");
+  assert.deepEqual(body.models.map((m) => m.provider), ["crow-local"],
+    "the alias the session is ON survives, so the drawer can still select it");
+  assert.equal(body.models[0].runnable, true, "pi listed it itself");
+  assert.equal(body.models[0].group, "network");
+});
+
+test("GET /interactive/:sid/options: a hibernating session's catalogue gets the real runnable check", async () => {
+  piProvidersImpl = { custom: new Set(["crow-local"]), builtin: new Set() };
+  engineImpl.options = async () => ({
+    models: [{ provider: "crow-voice", id: "q4", baseUrl: "http://127.0.0.1:8011/v1" }],
+    thinkingLevels: null, current: null, source: "providers",
+  });
+  const { body } = await getJson("/interactive/sess-1/options");
+  assert.equal(body.models[0].runnable, false);
 });
 
 // ---------------------------------------------------------------------------
