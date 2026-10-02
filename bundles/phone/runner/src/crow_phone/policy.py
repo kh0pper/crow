@@ -98,8 +98,8 @@ def callback_line(lang: str) -> str:
 # "thank you" never counts ("Tuesday at 3:30 works, thank you." agrees to a
 # slot; "Thanks." answers "let me check"), nor do bare "that's all" / "era
 # todo" forms, nor agreement forms ("that's (exactly) what I needed" agrees to
-# what was just offered). Any question mark, and any agreement to wait or hold
-# (_WAITING), disqualifies the line.
+# what was just offered). Any question mark disqualifies the line, and so does
+# an agreement to wait or hold in the goodbye sentence or the one before it.
 _CLOSING_TAIL = re.compile(
     r"(?:^|[\s,;:\u2014\u2013-])(?:good\s?-?bye|bye(?:[\s-]+(?:now|bye))?"
     r"|have\s+a\s+(?:great|good|nice|wonderful|lovely)\s+(?:day|one|afternoon|evening|weekend|night)"
@@ -113,15 +113,23 @@ _CLOSING_TAIL = re.compile(
 )
 # Backlog P1 (2026-10-02): agreeing to WAIT or HOLD is never a goodbye, even
 # when the line ends with one ("Okay, I'll wait. Bye", "Sure, I can hold.
-# Thanks for your time."). The business is about to come back; hanging up
-# would drop the call mid-task.
+# Thanks for your time.", "Esperaré. Adiós."). The business is about to come
+# back; hanging up would drop the call mid-task. Checked per sentence, on the
+# goodbye sentence and the one just before it (review I1), so an earlier,
+# unrelated "wait" never vetoes a real goodbye. Deferral and future-contact
+# forms are NOT holds: "I'll hold off", "I can wait until Tuesday", "I will
+# wait for your call", "No rush on the quote", "Espero su llamada".
+_CONTACT_NOUN = r"(?:call|email|e-mail|text|confirmation|reply|quote|message|callback|answer|estimate|invoice)"
 _WAITING = re.compile(
     r"\b(?:i'?ll|i\s+will|i\s+can|i\s+could|i'?m\s+happy\s+to|happy\s+to|i\s+don'?t\s+mind\s+to|i\s+don'?t\s+mind)\s+"
     r"(?:just\s+|gladly\s+)?(?:wait|hold|stay\s+on(?:\s+the\s+line)?|be\s+on\s+hold)\b"
-    r"|\bi'?ll\s+be\s+(?:here|waiting)\b|\btake\s+your\s+time\b|\bno\s+(?:rush|hurry)\b"
-    r"|\b(?:puedo|voy\s+a|con\s+gusto)\s+(?:esperar|aguardar)\b|\b(?:le|lo|la)\s+espero\b"
-    r"|\bespero\s+(?:en\s+la\s+l[ií]nea|aqu[ií])\b|\bno\s+hay\s+(?:prisa|apuro)\b"
-    r"|\bt[oó]mese\s+su\s+tiempo\b|\bsigo\s+en\s+la\s+l[ií]nea\b",
+    r"(?!\s+(?:off|until|till|for\s+(?:your|the|their|his|her|an?)\s+(?:\w+\s+)?" + _CONTACT_NOUN + r"))"
+    r"|\bi'?ll\s+be\s+(?:right\s+)?here\s*$|\btake\s+your\s+time\b|^(?:(?:sure|okay|ok|of\s+course|that'?s\s+fine)[\s,]+)*no\s+(?:rush|hurry)(?:\s+at\s+all)?\s*$"
+    r"|\b(?:puedo|voy\s+a|con\s+gusto)\s+(?:esperar|aguardar)\b(?!\s+(?:hasta|a\s+que|su|tu)\b)|\b(?:le|lo|la)\s+espero\b(?!\s+(?:el|la|ma[nñ]ana|hasta)\b)"
+    r"|\bespero\s+(?:en\s+la\s+l[ií]nea|aqu[ií])\b|\baqu[ií]\s+(?:espero|aguardo)\b|\bno\s+hay\s+(?:prisa|apuro)\s*$"
+    r"|\bt[oó]mese\s+su\s+tiempo\b|\bsigo\s+en\s+la\s+l[ií]nea\b"
+    r"|\b(?:esperar[eé]|aguardar[eé]|aguardo)\b(?!\s+(?:su|tu|sus|tus|que|hasta|a\s+que)\b)"
+    r"|^(?:(?:s[ií]|claro|ok(?:ay)?|bueno|vale|perfecto|est[aá]\s+bien|de\s+acuerdo|no\s+se\s+preocupe)[\s,]+)*(?:yo\s+)?espero\b(?!\s+(?:que|su|tu|sus|tus|verl[oa]s?|poder|hablar|saber)\b)",
     re.I,
 )
 _THANKS_SENTENCE = re.compile(r"^(?:(?:ok(?:ay)?|great|perfect|perfecto)[\s,]+)?(?:thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?|thank\s+you|(?:muchas\s+)?gracias)$", re.I)
@@ -131,13 +139,17 @@ _SENTENCE_END = re.compile(r"[.!\u2026]+")
 def is_closing(text) -> bool:
     """Does this assistant line END with a goodbye (en/es)? Used to end a call the model forgot to end."""
     s = str(text or "").replace("\u2019", "'").strip()
-    if not s or "?" in s or "\u00bf" in s or _WAITING.search(s):
+    if not s or "?" in s or "\u00bf" in s:
         return False
     parts = [p.strip(" \t\n,;:") for p in _SENTENCE_END.split(s)]
     parts = [p for p in parts if p]
     while parts and _THANKS_SENTENCE.match(parts[-1]):
         parts.pop()
-    return bool(parts) and bool(_CLOSING_TAIL.search(parts[-1]))
+    if not parts or not _CLOSING_TAIL.search(parts[-1]):
+        return False
+    # The goodbye sentence and the sentence before it (thanks-only sentences skipped).
+    before = [p for p in parts[:-1] if not _THANKS_SENTENCE.match(p)][-1:]
+    return not any(_WAITING.search(p) for p in [parts[-1]] + before)
 
 
 _GREETING = {"en": "Hello?", "es": "¿Hola?"}

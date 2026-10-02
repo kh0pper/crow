@@ -156,6 +156,21 @@ def test_is_closing_en_es():
         "Muchas gracias, adiós.",
         "Perfecto, eso es todo. Gracias.",
         "Gracias por su ayuda, que tenga buen día.",
+        # review I1: deferral / future-contact forms are not holds
+        "I will wait for your call. Bye.",
+        "Okay, I will wait for your call. Bye.",
+        "Thanks, I will wait for your email. Goodbye.",
+        "I'll hold off for now. Have a great day.",
+        "I'll hold off on booking for now. Thank you, goodbye.",
+        "I can wait until Tuesday\u2026 goodbye.",
+        "Okay, I can wait until Tuesday for the part. Thanks for your help, goodbye.",
+        "No rush on the quote\u2026 Goodbye.",
+        "No rush on the quote, thanks for your help. Goodbye.",
+        "Great, I'll be here waiting for the confirmation text. Have a great day.",
+        "I'll hold. Okay, they found it, that's all I needed. Thank you, goodbye.",  # the hold is two sentences back
+        "Espero su llamada. Adiós.",
+        "Esperaré su llamada. Hasta luego.",
+        "Espero que tenga buen día. Adiós.",
     ]
     no = [
         # review I-2: a goodbye-ish phrase that does not END the line is not a goodbye
@@ -196,6 +211,16 @@ def test_is_closing_en_es():
         "Claro, puedo esperar. Gracias por su tiempo.",
         "Está bien, lo espero. Adiós.",
         "No hay apuro, sigo en la línea. Hasta luego.",
+        # review I2: bare Spanish hold agreements
+        "Esperaré. Adiós.",
+        "Ok, espero. Gracias, adiós.",
+        "Sí, espero. Hasta luego.",
+        "Aquí espero. Adiós.",
+        "Espero, no se preocupe. Hasta luego.",
+        "Claro, aguardo. Gracias por su tiempo.",
+        "Sure, no rush. Bye.",
+        "Okay, I'll wait. Thanks. Bye.",
+        "I'll be right here. Thank you, goodbye.",
     ]
     for t in yes:
         assert policy.is_closing(t), t
