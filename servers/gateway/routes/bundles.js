@@ -3040,110 +3040,118 @@ export default function bundlesRouter() {
 
   // POST /bundles/api/env — Save env vars for an installed bundle
   router.post("/bundles/api/env", async (req, res) => {
-    const { bundle_id, env_vars } = req.body;
+    // async (M8's compose ps) → Express 4 no longer catches a sync throw here:
+    // a rejected handler promise is an unhandled rejection, which the crash
+    // guard re-throws and the gateway dies. Every throw becomes a 500 instead.
+    try {
+      const { bundle_id, env_vars } = req.body;
 
-    if (!bundle_id || !isValidBundleId(bundle_id)) {
-      return res.status(400).json({ error: "Invalid bundle ID" });
-    }
-
-    const bundleDir = join(BUNDLES_DIR, bundle_id);
-    if (!existsSync(bundleDir)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
-    }
-
-    if (!env_vars || typeof env_vars !== "object") {
-      return res.status(400).json({ error: "env_vars must be an object" });
-    }
-    // Validate BEFORE writing either file, so the bundle .env and the gateway
-    // .env can never hold different copies of the same secret.
-    const badEnv = findInvalidEnv(env_vars);
-    if (badEnv) {
-      return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
-    }
-
-    // Read existing .env, merge with new values
-    const envPath = join(bundleDir, ".env");
-    const existing = {};
-    if (existsSync(envPath)) {
-      for (const line of readFileSync(envPath, "utf8").split("\n")) {
-        const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-        if (match) existing[match[1]] = match[2];
+      if (!bundle_id || !isValidBundleId(bundle_id)) {
+        return res.status(400).json({ error: "Invalid bundle ID" });
       }
+
+      const bundleDir = join(BUNDLES_DIR, bundle_id);
+      if (!existsSync(bundleDir)) {
+        return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
+      }
+
+      if (!env_vars || typeof env_vars !== "object") {
+        return res.status(400).json({ error: "env_vars must be an object" });
+      }
+      // Validate BEFORE writing either file, so the bundle .env and the gateway
+      // .env can never hold different copies of the same secret.
+      const badEnv = findInvalidEnv(env_vars);
+      if (badEnv) {
+        return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+      }
+
+      // Read existing .env, merge with new values
+      const envPath = join(bundleDir, ".env");
+      const existing = {};
+      if (existsSync(envPath)) {
+        for (const line of readFileSync(envPath, "utf8").split("\n")) {
+          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+          if (match) existing[match[1]] = match[2];
+        }
+      }
+
+      // Keys whose value this save actually changes (names only, never values).
+      const changedKeys = Object.keys(env_vars).filter((k) => {
+        const next = env_vars[k];
+        if (next === undefined) return false;
+        return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
+      });
+
+      Object.assign(existing, env_vars);
+      const envContent = Object.entries(existing)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n") + "\n";
+      writeFileSync(envPath, envContent);
+
+      // Also configure the MCP child, which reads mcp-addons.json — not this .env.
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+
+      // And the gateway's own env, exactly as install does for docker bundles:
+      // gateway-side panel routes read their config from process.env (the phone
+      // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
+      // Only keys the manifest declares — never arbitrary request keys.
+      const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
+      const needsRestart = mcpUpdated || gatewayUpdated;
+
+      // B4: a running container keeps the env it was created with. When the
+      // compose file consumes a key this save changed (minio's root creds: the
+      // gateway's copy moves, the container's does not), say so and name the
+      // keys; the client offers an explicit Restart (start with recreate:true →
+      // `up -d --force-recreate`). Nothing is restarted implicitly here.
+      let bundleRestartKeys = [];
+      const composePathForEnv = join(bundleDir, "docker-compose.yml");
+      if (changedKeys.length > 0 && existsSync(composePathForEnv)) {
+        try {
+          const consumed = composeConsumedKeys(readFileSync(composePathForEnv, "utf8"));
+          bundleRestartKeys = changedKeys.filter((k) => consumed.all || consumed.keys.has(k));
+        } catch { /* unreadable compose → no claim either way */ }
+      }
+      // Only a RUNNING container holds stale values. A stopped one picks the new
+      // .env up on its next start, and offering "Restart now" there would start
+      // a bundle the operator had stopped. Unknown (ps failed) → assume running:
+      // a needless warning beats a silently stale container.
+      let bundleRunning = false;
+      if (bundleRestartKeys.length > 0) {
+        bundleRunning = await composeServiceRunning(bundleDir);
+      }
+      const needsBundleRestart = bundleRestartKeys.length > 0 && bundleRunning;
+      const appliesOnNextStart = bundleRestartKeys.length > 0 && !bundleRunning;
+
+      // RE-DERIVE config state from the files we just wrote and hand it back: the
+      // client must not decide "configured" itself. submitConfigureOnly guards only
+      // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
+      // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
+      // that cleared its badge on any 200 would hide a still-unconfigured bundle.
+      // Key NAMES only; never values (D5).
+      let message = needsRestart
+        ? (mcpUpdated
+          ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+          : "Environment variables saved — restart the gateway to apply them")
+        : "Environment variables saved";
+      if (needsBundleRestart) {
+        message += `. Restart the bundle to apply ${bundleRestartKeys.join(", ")} to its container — it keeps its old values until then`;
+      } else if (appliesOnNextStart) {
+        message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
+      }
+      res.json({
+        ok: true,
+        message,
+        needs_restart: needsRestart,
+        needs_bundle_restart: needsBundleRestart,
+        applies_on_next_start: appliesOnNextStart,
+        bundle_restart_keys: bundleRestartKeys,
+        needs_config: needsConfigKeys(bundle_id),
+      });
+    } catch (err) {
+      console.warn(`[bundles] POST /bundles/api/env failed: ${err?.message || err}`);
+      if (!res.headersSent) res.status(500).json({ error: `Failed to save environment: ${err?.message || err}` });
     }
-
-    // Keys whose value this save actually changes (names only, never values).
-    const changedKeys = Object.keys(env_vars).filter((k) => {
-      const next = env_vars[k];
-      if (next === undefined) return false;
-      return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
-    });
-
-    Object.assign(existing, env_vars);
-    const envContent = Object.entries(existing)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("\n") + "\n";
-    writeFileSync(envPath, envContent);
-
-    // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-    const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
-
-    // And the gateway's own env, exactly as install does for docker bundles:
-    // gateway-side panel routes read their config from process.env (the phone
-    // bundle's PHONE_RUNNER_SECRET), so a value entered here never reached them.
-    // Only keys the manifest declares — never arbitrary request keys.
-    const gatewayUpdated = propagateBundleEnvToGateway(bundle_id, env_vars);
-    const needsRestart = mcpUpdated || gatewayUpdated;
-
-    // B4: a running container keeps the env it was created with. When the
-    // compose file consumes a key this save changed (minio's root creds: the
-    // gateway's copy moves, the container's does not), say so and name the
-    // keys; the client offers an explicit Restart (start with recreate:true →
-    // `up -d --force-recreate`). Nothing is restarted implicitly here.
-    let bundleRestartKeys = [];
-    const composePathForEnv = join(bundleDir, "docker-compose.yml");
-    if (changedKeys.length > 0 && existsSync(composePathForEnv)) {
-      try {
-        const consumed = composeConsumedKeys(readFileSync(composePathForEnv, "utf8"));
-        bundleRestartKeys = changedKeys.filter((k) => consumed.all || consumed.keys.has(k));
-      } catch { /* unreadable compose → no claim either way */ }
-    }
-    // Only a RUNNING container holds stale values. A stopped one picks the new
-    // .env up on its next start, and offering "Restart now" there would start
-    // a bundle the operator had stopped. Unknown (ps failed) → assume running:
-    // a needless warning beats a silently stale container.
-    let bundleRunning = false;
-    if (bundleRestartKeys.length > 0) {
-      bundleRunning = await composeServiceRunning(bundleDir);
-    }
-    const needsBundleRestart = bundleRestartKeys.length > 0 && bundleRunning;
-    const appliesOnNextStart = bundleRestartKeys.length > 0 && !bundleRunning;
-
-    // RE-DERIVE config state from the files we just wrote and hand it back: the
-    // client must not decide "configured" itself. submitConfigureOnly guards only
-    // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
-    // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
-    // that cleared its badge on any 200 would hide a still-unconfigured bundle.
-    // Key NAMES only; never values (D5).
-    let message = needsRestart
-      ? (mcpUpdated
-        ? "Environment variables saved — restart the gateway to apply them to the MCP server"
-        : "Environment variables saved — restart the gateway to apply them")
-      : "Environment variables saved";
-    if (needsBundleRestart) {
-      message += `. Restart the bundle to apply ${bundleRestartKeys.join(", ")} to its container — it keeps its old values until then`;
-    } else if (appliesOnNextStart) {
-      message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
-    }
-    res.json({
-      ok: true,
-      message,
-      needs_restart: needsRestart,
-      needs_bundle_restart: needsBundleRestart,
-      applies_on_next_start: appliesOnNextStart,
-      bundle_restart_keys: bundleRestartKeys,
-      needs_config: needsConfigKeys(bundle_id),
-    });
   });
 
   // GET /bundles/api/jobs/:id — Poll job progress

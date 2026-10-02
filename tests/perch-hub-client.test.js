@@ -1094,6 +1094,16 @@ test("B5 fix: the 2xx'd send's history copy carries the upload-paths header — 
   assert.equal(rows.filter((t) => t.includes("second lost")).length, 1, JSON.stringify(rows));
 });
 
+test("N2: a persisted text+image send (history reads 'text\\n[image]') is still deduped, and the older unsent keeps its place", async () => {
+  const rows = await twoLostThenResync([
+    msgEvent("user", "u1"), msgEvent("assistant", "r1"),
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "second lost" }, { type: "image", data: "x", mimeType: "image/png" }] } },
+  ]);
+  const at = (needle) => rows.findIndex((t) => t.includes(needle));
+  assert.equal(rows.filter((t) => t.includes("second lost")).length, 1, "no duplicate: " + JSON.stringify(rows));
+  assert.ok(at("r1") < at("first lost") && at("first lost") < at("second lost"), JSON.stringify(rows));
+});
+
 test("B5 fix: a 2xx'd send that died BEFORE pi wrote it is replayed once, at the end", async () => {
   const rows = await twoLostThenResync([msgEvent("user", "u1"), msgEvent("assistant", "r1")]);
   const at = (needle) => rows.findIndex((t) => t.includes(needle));

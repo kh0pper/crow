@@ -465,3 +465,37 @@ test("POST /bundles/api/start with recreate:true runs up -d --force-recreate; wi
     _setComposeRunnerForTest(null);
   }
 });
+
+// ─── N1: the async env route must never reject (Express 4 + crash guard = gateway death) ───
+
+test("POST /bundles/api/env: a sync throw inside the handler (.env is a directory) is a 500, not an unhandled rejection", async () => {
+  const id = "fx-env-throws";
+  buildFixture(id);
+  mkdirSync(join(HOME, "bundles", id, ".env"), { recursive: true });   // readFileSync → EISDIR
+  const rejections = [];
+  const onRejection = (err) => rejections.push(err);
+  process.on("unhandledRejection", onRejection);
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  const post = (bundle_id) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundle_id, env_vars: { FX_SECRET: "x" } }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  try {
+    const r = await post(id);
+    assert.equal(r.status, 500, JSON.stringify(r.body));
+    assert.match(r.body.error, /Failed to save environment/);
+    await new Promise((res) => setImmediate(res));
+    assert.deepEqual(rejections, [], "no unhandled rejection escaped the handler");
+    // The server (and process) are still serving.
+    const again = await post("no-such-bundle-n1");
+    assert.equal(again.status, 404);
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    server.close();
+  }
+});

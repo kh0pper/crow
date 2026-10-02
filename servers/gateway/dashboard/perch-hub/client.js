@@ -1867,6 +1867,16 @@ export function perchHubJs(lang = "en") {
     }
     return null;
   }
+  /* A history row's text as the operator typed it: messageText() renders a
+     non-text block (an attached image) as its own trailing "[image]" line,
+     so a text+image send persists as "text\\n[image]". Strip trailing
+     [type] placeholder lines before the dedupe's tail match. */
+  function unsentMatchText(t){
+    if(t==null) return null;
+    var lines=String(t).split('\\n');
+    while(lines.length&&/^\\[[a-zA-Z_]+\\]$/.test(lines[lines.length-1])) lines.pop();
+    return lines.join('\\n');
+  }
   function replayUnsent(sid){
     var list=unsent[sid]||[];
     if(!list.length) return;
@@ -1884,13 +1894,16 @@ export function perchHubJs(lang = "en") {
        files rode along. One that pi did NOT persist was counted as delivered
        by every older entry, so they take one back off. Only flagged entries
        are deduped: a refused send (pi_gone) never reached pi, and the
-       operator may well have typed the same words twice. */
+       operator may well have typed the same words twice.
+       Known limit: identical consecutive texts where the first was persisted
+       and the second 2xx'd but died before pi wrote it — the second's echo is
+       dropped (pi never had it either way; its reason stays on the rail). */
     var plan=[], missing=0;
     for(var k=list.length-1;k>=0;k--){
       var e=list[k], eff=Math.max(0,(e.after||0)-missing), skip=false;
       if(e.maybeDelivered){
         var prev=users[users.length-eff-1];
-        var pt=prev?rowWhatText(prev):null;
+        var pt=prev?unsentMatchText(rowWhatText(prev)):null;
         if(pt!=null&&e.text&&pt.slice(-e.text.length)===e.text) skip=true;
         else missing++;
       }
