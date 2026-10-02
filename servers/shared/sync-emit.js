@@ -22,6 +22,7 @@ import {
   bumpCounterSql,
   floorCounterSql,
   stampSql,
+  ensureLamportOriginColumn,
 } from "./sync-stamp.js";
 
 /** Spec-verbatim: outbox depth should never reach this on a healthy instance. */
@@ -85,7 +86,10 @@ async function isDeploymentEligible(db) {
  * @returns {{sql: string, args: any[]} | null}
  */
 function subselectStampSql(table, row, instanceId) {
-  const probe = stampSql(table, row, 0); // 0: shape-detection placeholder only, never bound
+  // 0: shape-detection placeholder only, never bound. instanceId: this
+  // Crow's origin for an LWW Ramble row (its second placeholder, after the
+  // lamport — so the args[0] swap below still lines up).
+  const probe = stampSql(table, row, 0, instanceId);
   if (!probe) return null;
   const qIdx = probe.sql.indexOf("?");
   const sql =
@@ -202,6 +206,9 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
 
     await ensureSyncTables(db);
     const instanceId = getOrCreateLocalInstanceId();
+    // The stamp below writes lamport_origin on an LWW Ramble row; make sure
+    // the column exists first (an installed bundle copy may predate it).
+    await ensureLamportOriginColumn(db, table);
 
     await enforceOutboxCap(db);
 
@@ -213,7 +220,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
       // INSERT — all with the caller's literal value, still one atomic batch.
       const statements = [seedCounterSql(instanceId), floorCounterSql(instanceId, preserveLamport)];
       if (op !== "delete") {
-        const stampStmt = stampSql(table, row, preserveLamport);
+        const stampStmt = stampSql(table, row, preserveLamport, instanceId);
         if (stampStmt) statements.push(stampStmt);
       }
       statements.push(outboxInsertLiteralSql(table, op, row, preserveLamport));

@@ -26,7 +26,7 @@ import { groupTombstoneStatement, isGroupTombstoned } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
-import { mintLamport, advanceCounter, stampSql } from "../shared/sync-stamp.js";
+import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 
 /**
  * Build the canonical wire row for a crow_context DB row.
@@ -431,6 +431,20 @@ export function stdioCompanionEnv(env = {}) {
 /* ------------------------------------------------- ramble natural-key apply */
 
 /**
+ * The local row's Lamport and the instance that wrote it (fix round 2, I-2).
+ * Ensures the guarded `lamport_origin` column first — core depends on it, and
+ * an installed bundle copy may predate it.
+ */
+async function readRambleStamp(db, table, keyCol, key, extraCols = "") {
+  await ensureLamportOriginColumn(db, table);
+  const { rows } = await db.execute({
+    sql: `SELECT lamport_ts, lamport_origin${extraCols} FROM ${table} WHERE ${keyCol} = ?`,
+    args: [key],
+  });
+  return rows[0] ?? null;
+}
+
+/**
  * Columns of `ramble_marks` that may be written from a wire row, in schema
  * order. Everything else on the table is per-instance: `id` (AUTOINCREMENT
  * rowid), `publish_state`/`origin` (the authoring instance's Nostr
@@ -486,15 +500,11 @@ const RAMBLE_MARK_UPDATE_COLUMNS = RAMBLE_MARK_WIRE_COLUMNS.filter(
  * @param {object} row - wire row (no id/origin/publish_state/lamport_ts)
  * @param {number} lamportTs - incoming envelope Lamport timestamp
  */
-export async function applyRambleMark(db, op, row, lamportTs) {
+export async function applyRambleMark(db, op, row, lamportTs, origin = null) {
   if (!row || !row.mark_id) return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts FROM ramble_marks WHERE mark_id = ?`,
-    args: [row.mark_id],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_marks", "mark_id", row.mark_id);
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   if (op === "delete") {
     await db.execute({
@@ -509,13 +519,14 @@ export async function applyRambleMark(db, op, row, lamportTs) {
   const setClauses = [
     ...updatable.map((c) => `${c} = excluded.${c}`),
     "lamport_ts = excluded.lamport_ts",
+    "lamport_origin = excluded.lamport_origin",
   ];
 
   await db.execute({
-    sql: `INSERT INTO ramble_marks (${cols.join(", ")}, origin, publish_state, lamport_ts)
-          VALUES (${cols.map(() => "?").join(", ")}, 'sync', 'synced', ?)
+    sql: `INSERT INTO ramble_marks (${cols.join(", ")}, origin, publish_state, lamport_ts, lamport_origin)
+          VALUES (${cols.map(() => "?").join(", ")}, 'sync', 'synced', ?, ?)
           ON CONFLICT(mark_id) DO UPDATE SET ${setClauses.join(", ")}`,
-    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+    args: [...cols.map((c) => row[c] ?? null), lamportTs, origin ?? null],
   });
 }
 
@@ -524,15 +535,11 @@ export async function applyRambleMark(db, op, row, lamportTs) {
  * `applyRambleMark`. `local.`-prefixed keys never reach here — shouldSyncRow
  * drops them on both the emit and the apply side.
  */
-export async function applyRambleSetting(db, op, row, lamportTs) {
+export async function applyRambleSetting(db, op, row, lamportTs, origin = null) {
   if (!row || !row.key) return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts FROM ramble_settings WHERE key = ?`,
-    args: [row.key],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_settings", "key", row.key);
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   if (op === "delete") {
     await db.execute({ sql: `DELETE FROM ramble_settings WHERE key = ?`, args: [row.key] });
@@ -540,10 +547,10 @@ export async function applyRambleSetting(db, op, row, lamportTs) {
   }
 
   await db.execute({
-    sql: `INSERT INTO ramble_settings (key, value, lamport_ts) VALUES (?, ?, ?)
+    sql: `INSERT INTO ramble_settings (key, value, lamport_ts, lamport_origin) VALUES (?, ?, ?, ?)
           ON CONFLICT(key) DO UPDATE SET
-            value = excluded.value, lamport_ts = excluded.lamport_ts`,
-    args: [row.key, row.value ?? null, lamportTs],
+            value = excluded.value, lamport_ts = excluded.lamport_ts, lamport_origin = excluded.lamport_origin`,
+    args: [row.key, row.value ?? null, lamportTs, origin ?? null],
   });
 }
 
@@ -555,15 +562,11 @@ export async function applyRambleSetting(db, op, row, lamportTs) {
  * before any column binding. `created_at` is NOT NULL — a wire row that omits
  * it gets local receipt time rather than failing the whole apply.
  */
-export async function applyRambleBlock(db, op, row, lamportTs) {
+export async function applyRambleBlock(db, op, row, lamportTs, origin = null) {
   if (!row || !row.persona) return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts FROM ramble_blocks WHERE persona = ?`,
-    args: [row.persona],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_blocks", "persona", row.persona);
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   if (op === "delete") {
     await db.execute({ sql: `DELETE FROM ramble_blocks WHERE persona = ?`, args: [row.persona] });
@@ -571,11 +574,11 @@ export async function applyRambleBlock(db, op, row, lamportTs) {
   }
 
   await db.execute({
-    sql: `INSERT INTO ramble_blocks (persona, reason, created_at, lamport_ts) VALUES (?, ?, ?, ?)
+    sql: `INSERT INTO ramble_blocks (persona, reason, created_at, lamport_ts, lamport_origin) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(persona) DO UPDATE SET
             reason = excluded.reason, created_at = excluded.created_at,
-            lamport_ts = excluded.lamport_ts`,
-    args: [row.persona, row.reason ?? null, row.created_at ?? Date.now(), lamportTs],
+            lamport_ts = excluded.lamport_ts, lamport_origin = excluded.lamport_origin`,
+    args: [row.persona, row.reason ?? null, row.created_at ?? Date.now(), lamportTs, origin ?? null],
   });
 }
 
@@ -784,15 +787,12 @@ const RAMBLE_EGG_REPROMOTE_SQL = `
  * @param {object} row - wire row (no lamport_ts)
  * @param {number} lamportTs - incoming envelope Lamport timestamp
  */
-export async function applyRambleEgg(db, op, row, lamportTs) {
+export async function applyRambleEgg(db, op, row, lamportTs, origin = null) {
   if (!row || !row.egg_id) return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts, created_at, status, shelf_origin FROM ramble_eggs WHERE egg_id = ?`,
-    args: [row.egg_id],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_eggs", "egg_id", row.egg_id, ", created_at, status, shelf_origin");
+  const existing = local ? [local] : [];
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   if (op === "delete") {
     // Batched with the re-promotion: deleting the incubating egg empties the
@@ -867,13 +867,14 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   const setClauses = [
     ...cols.filter((c) => RAMBLE_EGG_UPDATE_COLUMNS.includes(c)).map(rambleEggSetClause),
     "lamport_ts = excluded.lamport_ts",
+    "lamport_origin = excluded.lamport_origin",
   ];
 
   statements.push({
-    sql: `INSERT INTO ramble_eggs (${cols.join(", ")}, lamport_ts)
-          VALUES (${cols.map(() => "?").join(", ")}, ?)
+    sql: `INSERT INTO ramble_eggs (${cols.join(", ")}, lamport_ts, lamport_origin)
+          VALUES (${cols.map(() => "?").join(", ")}, ?, ?)
           ON CONFLICT(egg_id) DO UPDATE SET ${setClauses.join(", ")}`,
-    args: [...values, lamportTs],
+    args: [...values, lamportTs, origin ?? null],
   });
 
   // A peer's USER shelve is half of an "incubate" swap: the replacement egg's
@@ -907,28 +908,25 @@ const RAMBLE_PET_UPDATE_COLUMNS = RAMBLE_PET_WIRE_COLUMNS.filter((c) => c !== "o
  * silently reset the user's companion (mood, energy, weekly counters and the
  * `active_egg_id` pointing at their hatched bird) on every instance.
  */
-export async function applyRamblePet(db, op, row, lamportTs) {
+export async function applyRamblePet(db, op, row, lamportTs, origin = null) {
   if (!row || !row.owner) return;
   if (op === "delete") return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts FROM ramble_pet WHERE owner = ?`,
-    args: [row.owner],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_pet", "owner", row.owner);
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   const cols = RAMBLE_PET_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
   const setClauses = [
     ...cols.filter((c) => RAMBLE_PET_UPDATE_COLUMNS.includes(c)).map((c) => `${c} = excluded.${c}`),
     "lamport_ts = excluded.lamport_ts",
+    "lamport_origin = excluded.lamport_origin",
   ];
 
   await db.execute({
-    sql: `INSERT INTO ramble_pet (${cols.join(", ")}, lamport_ts)
-          VALUES (${cols.map(() => "?").join(", ")}, ?)
+    sql: `INSERT INTO ramble_pet (${cols.join(", ")}, lamport_ts, lamport_origin)
+          VALUES (${cols.map(() => "?").join(", ")}, ?, ?)
           ON CONFLICT(owner) DO UPDATE SET ${setClauses.join(", ")}`,
-    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+    args: [...cols.map((c) => row[c] ?? null), lamportTs, origin ?? null],
   });
 }
 
@@ -950,15 +948,11 @@ const RAMBLE_TRADE_UPDATE_COLUMNS = RAMBLE_TRADE_WIRE_COLUMNS.filter((c) => c !=
  * never touch ramble_eggs: the egg movements of a completed swap ride the
  * wire as their own ramble_eggs ops from the instance that completed it.
  */
-export async function applyRambleTrade(db, op, row, lamportTs) {
+export async function applyRambleTrade(db, op, row, lamportTs, origin = null) {
   if (!row || !row.trade_id) return;
 
-  const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts FROM ramble_trades WHERE trade_id = ?`,
-    args: [row.trade_id],
-  });
-  const localTs = Number(existing[0]?.lamport_ts) || 0;
-  if (lamportTs < localTs) return;
+  const local = await readRambleStamp(db, "ramble_trades", "trade_id", row.trade_id);
+  if (incomingLosesLww(lamportTs, Number(local?.lamport_ts) || 0, origin, local?.lamport_origin)) return;
 
   if (op === "delete") {
     await db.execute({ sql: `DELETE FROM ramble_trades WHERE trade_id = ?`, args: [row.trade_id] });
@@ -969,12 +963,13 @@ export async function applyRambleTrade(db, op, row, lamportTs) {
   const setClauses = [
     ...cols.filter((c) => RAMBLE_TRADE_UPDATE_COLUMNS.includes(c)).map((c) => `${c} = excluded.${c}`),
     "lamport_ts = excluded.lamport_ts",
+    "lamport_origin = excluded.lamport_origin",
   ];
   await db.execute({
-    sql: `INSERT INTO ramble_trades (${cols.join(", ")}, lamport_ts)
-          VALUES (${cols.map(() => "?").join(", ")}, ?)
+    sql: `INSERT INTO ramble_trades (${cols.join(", ")}, lamport_ts, lamport_origin)
+          VALUES (${cols.map(() => "?").join(", ")}, ?, ?)
           ON CONFLICT(trade_id) DO UPDATE SET ${setClauses.join(", ")}`,
-    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+    args: [...cols.map((c) => row[c] ?? null), lamportTs, origin ?? null],
   });
 }
 
@@ -988,15 +983,17 @@ export async function applyRambleTrade(db, op, row, lamportTs) {
  * @param {"insert"|"update"|"delete"} op
  * @param {object} row
  * @param {number} [lamportTs]
+ * @param {string|null} [origin] - the sync entry's `instance_id` (the writer);
+ *   breaks an equal-Lamport tie on the LWW tables (fix round 2, I-2)
  */
-export async function applyRemoteOp(db, table, op, row, lamportTs = 0) {
+export async function applyRemoteOp(db, table, op, row, lamportTs = 0, origin = null) {
   switch (table) {
-    case "ramble_marks":    return applyRambleMark(db, op, row, lamportTs);
-    case "ramble_settings": return applyRambleSetting(db, op, row, lamportTs);
-    case "ramble_blocks":   return applyRambleBlock(db, op, row, lamportTs);
-    case "ramble_eggs":     return applyRambleEgg(db, op, row, lamportTs);
-    case "ramble_pet":      return applyRamblePet(db, op, row, lamportTs);
-    case "ramble_trades":   return applyRambleTrade(db, op, row, lamportTs);
+    case "ramble_marks":    return applyRambleMark(db, op, row, lamportTs, origin);
+    case "ramble_settings": return applyRambleSetting(db, op, row, lamportTs, origin);
+    case "ramble_blocks":   return applyRambleBlock(db, op, row, lamportTs, origin);
+    case "ramble_eggs":     return applyRambleEgg(db, op, row, lamportTs, origin);
+    case "ramble_pet":      return applyRamblePet(db, op, row, lamportTs, origin);
+    case "ramble_trades":   return applyRambleTrade(db, op, row, lamportTs, origin);
     case "ramble_cells":    return applyRambleCell(db, op, row, lamportTs);
     case "ramble_wallet":   return applyRambleWallet(db, op, row, lamportTs);
     default:
@@ -2296,7 +2293,10 @@ export class InstanceSyncManager {
     // emitOrQueue (Task 2) stamps rows the same way this manager does.
     if (op !== "delete" && preservedTs === null) {
       try {
-        const stmt = stampSql(table, row, lamportTs);
+        // An LWW Ramble row also records that THIS instance wrote the
+        // Lamport (fix round 2, I-2), so a tie breaks the same everywhere.
+        await ensureLamportOriginColumn(this.db, table);
+        const stmt = stampSql(table, row, lamportTs, this.localInstanceId);
         if (stmt) await this.db.execute(stmt);
       } catch {
         // Non-fatal — row may not have lamport_ts column yet
@@ -2524,7 +2524,7 @@ export class InstanceSyncManager {
     // settings above (before the signature verify).
     if (table === "ramble_marks") {
       try {
-        await applyRambleMark(this.db, op, row, lamport_ts);
+        await applyRambleMark(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_marks:`, err.message);
       }
@@ -2533,7 +2533,7 @@ export class InstanceSyncManager {
 
     if (table === "ramble_settings") {
       try {
-        await applyRambleSetting(this.db, op, row, lamport_ts);
+        await applyRambleSetting(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_settings:`, err.message);
       }
@@ -2542,7 +2542,7 @@ export class InstanceSyncManager {
 
     if (table === "ramble_blocks") {
       try {
-        await applyRambleBlock(this.db, op, row, lamport_ts);
+        await applyRambleBlock(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_blocks:`, err.message);
       }
@@ -2551,7 +2551,7 @@ export class InstanceSyncManager {
 
     if (table === "ramble_eggs") {
       try {
-        await applyRambleEgg(this.db, op, row, lamport_ts);
+        await applyRambleEgg(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_eggs:`, err.message);
       }
@@ -2560,7 +2560,7 @@ export class InstanceSyncManager {
 
     if (table === "ramble_pet") {
       try {
-        await applyRamblePet(this.db, op, row, lamport_ts);
+        await applyRamblePet(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_pet:`, err.message);
       }
@@ -2569,7 +2569,7 @@ export class InstanceSyncManager {
 
     if (table === "ramble_trades") {
       try {
-        await applyRambleTrade(this.db, op, row, lamport_ts);
+        await applyRambleTrade(this.db, op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_trades:`, err.message);
       }

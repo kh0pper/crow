@@ -287,4 +287,14 @@ export async function initRambleTables(db) {
   // instance seeds from its own history, and the MIN() apply makes any
   // resulting asymmetry benign.
   await backfillCellsOnce(db);
+
+  // Which instance wrote each LWW row's current Lamport (core's tie-break,
+  // servers/shared/sync-stamp.js `incomingLosesLww`). Additive and guarded,
+  // no SCHEMA_GENERATION bump; existing rows keep NULL, which loses a tie to
+  // any stamped write. Core adds the same column lazily before it stamps or
+  // applies, in case this bundle copy is older than core.
+  for (const t of ["ramble_marks", "ramble_settings", "ramble_blocks", "ramble_eggs", "ramble_pet", "ramble_trades"]) {
+    // eslint-disable-next-line no-await-in-loop
+    await ensureColumn(db, t, "lamport_origin", "TEXT");
+  }
 }

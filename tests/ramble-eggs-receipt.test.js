@@ -17,10 +17,11 @@
  *     share one Nostr identity — servers/sharing/nostr.js), so each Crow runs
  *     the receive path itself, as in production.
  *
- * Race tests run with the counters ordered BOTH ways. An EQUAL-Lamport tie
- * between two different writes of one row is the open core defect I-2
- * (applyRambleEgg applies an incoming op on a tie, on both sides), which is
- * awaiting a decision; those cases are deliberately not pinned here.
+ * Race tests run with the counters ordered BOTH ways, and at the offsets that
+ * make the two Crows write the same row at an EQUAL Lamport (the reviewer's
+ * R2: 13 vs 10). Fix round 2 (I-2) breaks such a tie by `lamport_origin` —
+ * the greater writing instance id wins on every Crow — so each simulated
+ * Crow has its own instance id, stamps it, and sends it with every op.
  *
  * The ways an egg can appear while the slot is empty, and the answer for
  * each (mirrored in the comment above `promoteFromShelf` in eggs.js):
@@ -61,8 +62,9 @@ import {
 const T0 = Date.UTC(2026, 9, 2, 12);
 const FRIEND = "crow:friend";
 const ME = "crow:me";
-/** Counter starts for the two of the user's Crows, both orderings. Chosen so no op can tie (I-2). */
-const ORDERS = [[200, 10], [10, 200]];
+/** Counter starts for the two of the user's Crows: both orderings, plus the R2 offsets that tie. */
+const ORDERS = [[200, 10], [10, 200], [13, 10], [10, 13]];
+const IDS = ["11111111-0000-4000-8000-00000000000a", "22222222-0000-4000-8000-00000000000b"];
 
 async function freshDb() { const c = createClient({ url: "file::memory:" }); await initRambleTables(c); return c; }
 
@@ -92,26 +94,26 @@ async function tradeState(db, id) {
  * One of the user's Crows: its own Lamport counter, and an emit that mints,
  * stamps the local row (production `stampSql`) and records the wire op.
  */
-function crow(db, start) {
-  const c = { db, counter: start, ops: [], sent: new Map() };
+function crow(db, start, id = IDS[0]) {
+  const c = { db, id, counter: start, ops: [], sent: new Map() };
   c.emit = async (table, op, row) => {
     const ts = ++c.counter;
     if (op !== "delete") {
-      const st = stampSql(table, row, ts);
+      const st = stampSql(table, row, ts, id);
       if (st) await db.execute(st);
     }
-    const { lamport_ts: _ignored, ...wire } = row;
-    c.ops.push([table, op, wire, ts]);
+    const { lamport_ts: _ignored, lamport_origin: _o, ...wire } = row;
+    c.ops.push([table, op, wire, ts, id]);
   };
   return c;
 }
 /** Deliver every op `from` has not yet sent to `to`, advancing `to`'s counter like _advanceCounter. */
 async function deliver(from, to) {
   const already = from.sent.get(to) ?? 0;
-  for (const [table, op, row, ts] of from.ops.slice(already)) {
+  for (const [table, op, row, ts, origin] of from.ops.slice(already)) {
     to.counter = Math.max(to.counter, ts + 1);
     // eslint-disable-next-line no-await-in-loop
-    await applyRemoteOp(to.db, table, op, row, ts);
+    await applyRemoteOp(to.db, table, op, row, ts, origin);
   }
   from.sent.set(to, from.ops.length);
 }
@@ -132,7 +134,7 @@ const asParsed = (env) => ({ ...env.trade, egg: env.egg ?? null });
 /** Two of the user's Crows, converged: a hatched bird, an empty slot. */
 async function twoEgglessCrows([aStart, bStart]) {
   const a = crow(await freshDb(), aStart);
-  const b = crow(await freshDb(), bStart);
+  const b = crow(await freshDb(), bStart, IDS[1]);
   for (const c of [a, b]) await put(c.db, "bird", "hatched", T0 - 86400e3);
   return { a, b };
 }
@@ -163,10 +165,10 @@ for (const order of ORDERS) {
     // B hatches `warming` (its shelf is empty, so its slot empties) and then
     // the friend's gift DM reaches BOTH Crows: B promotes it, A — whose slot
     // still holds `warming` — leaves it received. Which write wins is LWW's
-    // call; the assertion is that both Crows agree on it. (On an exact
-    // Lamport tie they do not — I-2, pending a decision.)
+    // call; the assertion is that both Crows agree on it — including on an
+    // exact Lamport tie (13 vs 10), which lamport_origin now breaks (I-2).
     const a = crow(await freshDb(), order[0]);
-    const b = crow(await freshDb(), order[1]);
+    const b = crow(await freshDb(), order[1], IDS[1]);
     for (const c of [a, b]) await put(c.db, "warming", "incubating", T0 - 2000, { warmth: 100 });
     await hatchIfReady(b.db, { now: T0, emit: b.emit });
     await receiveGift(b.db, giftEnvelope("gift-6").egg, { fromCrowId: FRIEND, now: T0 + 1, emit: b.emit });
@@ -273,7 +275,7 @@ for (const order of ORDERS) {
  */
 async function proposerPair(order) {
   const me = crow(await freshDb(), order[0]);
-  const peer = crow(await freshDb(), order[1]);
+  const peer = crow(await freshDb(), order[1], IDS[1]);
   for (const c of [me, peer]) {
     await put(c.db, "mine", "shelf", T0 - 3000, { origin: "user" });
     await put(c.db, "warming", "incubating", T0 - 2000, { warmth: 100 });
@@ -316,7 +318,7 @@ for (const order of ORDERS) {
 
   test(`MULTI-INSTANCE (counters ${order}): a completed swap (acceptor side) incubates the incoming egg on both Crows`, async () => {
     const me = crow(await freshDb(), order[0]);
-    const peer = crow(await freshDb(), order[1]);
+    const peer = crow(await freshDb(), order[1], IDS[1]);
     const friend = await freshDb();
     for (const c of [me, peer]) {
       await put(c.db, "mine", "shelf", T0 - 3000, { origin: "user" });
