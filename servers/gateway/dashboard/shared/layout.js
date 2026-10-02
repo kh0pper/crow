@@ -1187,7 +1187,10 @@ function dashboardCss() {
   }
   .card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    /* min(280px,100%): a container narrower than one 280px track (a phone,
+       or a grid nested in a card) gets one full-width column instead of a
+       280px column overflowing it. */
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
     gap: 1rem;
   }
   .stat-card {

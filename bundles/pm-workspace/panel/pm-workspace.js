@@ -139,10 +139,10 @@ export default {
           <a class="pm-btn" href="/pm/notes/new">+ Drawing note</a>
           <a class="pm-btn" href="/pm/notes/new-md">+ Markdown note</a>
         </div>
-        <table class="pm-table">
+        <div class="table-scroll"><table class="pm-table">
           <thead><tr><th>Title</th><th>Kind</th><th>OCR</th><th>Tags</th><th>Updated</th></tr></thead>
           <tbody>${rowsHtml || '<tr><td colspan="5" class="pm-muted" style="text-align:center;padding:2rem">No notes yet.</td></tr>'}</tbody>
-        </table>`;
+        </table></div>`;
     }
 
     // ── DIGESTS ──
@@ -190,10 +190,10 @@ export default {
             <span id="pm-digest-status" class="pm-muted"></span>
           </div>
           <pre id="pm-digest-preview" style="display:none;white-space:pre-wrap;background:var(--crow-bg-surface,#f7f7f7);border:1px solid var(--crow-border,#ddd);border-radius:8px;padding:1rem;max-height:50vh;overflow:auto"></pre>
-          <table class="pm-table">
+          <div class="table-scroll"><table class="pm-table">
             <thead><tr><th>Date</th><th>Summary</th><th>Sent</th></tr></thead>
             <tbody>${rowsHtml || '<tr><td colspan="3" class="pm-muted" style="text-align:center;padding:2rem">No digests yet.</td></tr>'}</tbody>
-          </table>`;
+          </table></div>`;
       }
     }
 
@@ -235,15 +235,15 @@ export default {
           <span id="pm-sync-status" class="pm-muted"></span>
         </div>
         <h3>Mapped boards</h3>
-        <table class="pm-table">
+        <div class="table-scroll"><table class="pm-table">
           <thead><tr><th>Board</th><th>Target</th><th>Items</th><th>Last synced</th></tr></thead>
           <tbody>${stateHtml || '<tr><td colspan="4" class="pm-muted" style="text-align:center;padding:1.5rem">No boards synced yet.</td></tr>'}</tbody>
-        </table>
+        </table></div>
         <h3>Recent activity</h3>
-        <table class="pm-table">
+        <div class="table-scroll"><table class="pm-table">
           <thead><tr><th>When</th><th>Action</th><th>Item</th><th>Detail</th></tr></thead>
           <tbody>${logHtml || '<tr><td colspan="4" class="pm-muted" style="text-align:center;padding:1.5rem">No sync activity yet.</td></tr>'}</tbody>
-        </table>`;
+        </table></div>`;
     }
 
     // ── PLANNER (approval queue) ──
@@ -305,10 +305,10 @@ export default {
         <span class="pm-muted">${escapeHtml(e.status)}${e.decided_via ? ` via ${escapeHtml(e.decided_via)}` : ""}</span>`)).join("");
 
       const table = (rows, empty) => `
-        <table class="pm-table">
+        <div class="table-scroll"><table class="pm-table">
           <thead><tr><th>Block</th><th>When (${escapeHtml(tz)})</th><th>Source</th><th></th></tr></thead>
           <tbody>${rows || `<tr><td colspan="4" class="pm-muted" style="text-align:center;padding:1.5rem">${empty}</td></tr>`}</tbody>
-        </table>`;
+        </table></div>`;
 
       body = plannerErr
         ? `<p class="pm-muted">planner unavailable: ${escapeHtml(plannerErr)}</p>`

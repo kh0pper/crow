@@ -52,10 +52,10 @@ export default {
         <button type="submit" class="btn btn-secondary btn-sm">Reset Refcounts</button>
       </form>
     </div>
-    <table class="llm-lifecycle-table">
+    <div class="table-scroll"><table class="llm-lifecycle-table">
       <thead><tr><th>Model</th><th style="text-align:center">Refs</th><th>Status</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table></div>`;
   },
 
   async handleAction({ res, action }) {

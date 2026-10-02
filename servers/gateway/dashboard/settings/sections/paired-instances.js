@@ -103,12 +103,12 @@ export default {
       + a trust flag that gates remote bundle lifecycle RPC.
     </div>
 
-    <table class="pi-table">
+    <div class="table-scroll"><table class="pi-table">
       <thead><tr>
         <th>ID</th><th>Name</th><th>Status</th><th>Trust</th><th>Gateway URL</th><th>Last seen</th><th>${escapeHtml(t("settings.pairedActions", lang))}</th>
       </tr></thead>
       <tbody>${tableRows}</tbody>
-    </table>
+    </table></div>
 
     <form method="POST" action="/dashboard/settings" style="margin-top:1.25rem;padding:0.85rem 1rem;background:var(--crow-bg-deep);border-radius:6px">
       <input type="hidden" name="_csrf" value="${req?.csrfToken || ""}" />

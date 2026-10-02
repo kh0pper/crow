@@ -61,10 +61,10 @@ export default {
     </div>
 
     <div class="llm-card">
-      <table class="llm-providers-table">
+      <div class="table-scroll"><table class="llm-providers-table">
         <thead><tr><th>ID</th><th>Status</th><th>Endpoint</th><th>Discovered models</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="4" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">No providers reachable.</td></tr>`}</tbody>
-      </table>
+      </table></div>
     </div>
 
     ${result.error ? `<div style="margin-top:0.75rem;font-size:0.82rem;color:var(--crow-error)">Matrix error: ${escapeHtml(result.error)}</div>` : ""}`;

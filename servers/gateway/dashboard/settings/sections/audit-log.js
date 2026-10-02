@@ -61,7 +61,7 @@ export default {
       Last ${rows.length} cross-host RPC events. HMAC column: ✓ validated, ✗ rejected, - n/a.
     </div>
 
-    <div style="overflow-x:auto">
+    <div class="table-scroll">
       <table class="al-table">
         <thead><tr>
           <th>When</th><th>Dir</th><th>Action</th><th>Source</th><th>Target</th><th style="text-align:center">HMAC</th><th style="text-align:center">HTTP</th><th>Detail</th>

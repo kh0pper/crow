@@ -83,10 +83,10 @@ export default {
       });
 
       returnsContent = `
-        <table class="table">
+        <div class="table-scroll"><table class="table">
           <thead><tr><th>ID</th><th>Year</th><th>Filing</th><th>Status</th><th>Summary</th><th>Updated</th></tr></thead>
           <tbody>${rows.join("")}</tbody>
-        </table>
+        </table></div>
       `;
     }
 
@@ -247,7 +247,7 @@ export default {
             return `<tr><td style="font-weight:500">${escapeHtml(label)}</td><td>${display}</td></tr>`;
           }).join("");
           detailHtml = `<div style="margin-top:0.5rem;">
-            <table class="table" style="font-size:0.85rem;"><tbody>${summaryRows}</tbody></table>
+            <div class="table-scroll"><table class="table" style="font-size:0.85rem;"><tbody>${summaryRows}</tbody></table></div>
             <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
               <form method="POST" action="/api/tax/documents/${d.id}/edit" style="display:inline">
                 <button type="submit" class="btn btn-sm">Edit</button>

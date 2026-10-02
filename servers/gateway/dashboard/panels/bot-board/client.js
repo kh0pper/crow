@@ -979,7 +979,12 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
-      bbListWrap.appendChild(table);
+      // The shared .table-scroll wrapper: a wide list (many context fields)
+      // scrolls inside the board instead of past the card on a phone.
+      var scroller=document.createElement('div');
+      scroller.className='table-scroll';
+      scroller.appendChild(table);
+      bbListWrap.appendChild(scroller);
     }
 
     function cardSortVal(card,key){

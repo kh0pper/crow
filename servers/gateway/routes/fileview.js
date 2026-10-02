@@ -76,6 +76,8 @@ function page(title, bodyHtml) {
     `article pre code{background:none;padding:0}` +
     `article a{color:#58a6ff}` +
     `article table{border-collapse:collapse}article th,article td{border:1px solid #30363d;padding:.4em .7em}` +
+    // renderMarkdown() wraps tables in .table-scroll; this page has no dashboard CSS.
+    `.table-scroll{max-width:100%;overflow-x:auto}@media print{.table-scroll{overflow:visible;max-width:none}}` +
     `article blockquote{border-left:3px solid #30363d;margin:0;padding:.1em 1em;color:#8b949e}` +
     `</style></head><body><div class="wrap">${bodyHtml}</div></body></html>`;
 }

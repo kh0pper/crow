@@ -1,7 +1,7 @@
 {
   "id": "maker-lab-advanced",
   "name": "Maker Lab Advanced",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-hosted JupyterHub for older learners (ages 9+) — single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab: Blockly is the 5-9 on-ramp, Scratch is the 8+ step-up, this is the 9+ landing zone with real Python.",
   "type": "bundle",
   "author": "Crow",

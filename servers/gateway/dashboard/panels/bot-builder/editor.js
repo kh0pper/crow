@@ -657,9 +657,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           `<input id="bb-tdef-statuses" value="${escapeHtml(svText)}" class="btb-input" placeholder="pending, processing, received, done"></div>` +
           `<p class="btb-hint" style="margin-top:-.5rem">${t("botbuilder.hintTrackerColumns", lang)}</p>` +
           `<div class="btb-group"><label>${t("botbuilder.tdefLabelDataFields", lang)}</label>` +
-          `<table class="btb-table">` +
+          `<div class="table-scroll"><table class="btb-table">` +
           `<thead><tr><th>Key</th><th>Label</th><th>Type</th><th>Req</th></tr></thead>` +
-          `<tbody id="bb-tdef-cols">${colRows}</tbody></table></div>` +
+          `<tbody id="bb-tdef-cols">${colRows}</tbody></table></div></div>` +
           `<button type="button" class="btb-btn btb-btn-sec btb-btn-sm" id="bb-tdef-add-col">+ Add field</button>` +
           `<div style="margin-top:.75rem">` +
           `<button type="button" class="btb-btn" id="bb-tdef-save">Save tracker definition</button>` +
@@ -827,7 +827,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           `<div class="btb-group"><label>${t("botbuilder.labelSelfLearningHistory", lang)}</label>` +
           `<p class="btb-hint">${t("botbuilder.hintSelfLearningFeed", lang)}</p>` +
           (events.length
-            ? `<table class="btb-table"><thead><tr><th>when</th><th>action</th><th>skill</th><th>mode</th><th>&#9888;</th></tr></thead><tbody>${rows}</tbody></table>`
+            ? `<div class="table-scroll"><table class="btb-table"><thead><tr><th>when</th><th>action</th><th>skill</th><th>mode</th><th>&#9888;</th></tr></thead><tbody>${rows}</tbody></table></div>`
             : `<p class="btb-hint">${t("botbuilder.noticeNoSelfLearning", lang)}</p>`) +
           `</div>`;
       })();
@@ -894,7 +894,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       return "btb-muted";
     };
     const sessHtml = sessions.length
-      ? `<table class="btb-table">
+      ? `<div class="table-scroll"><table class="btb-table">
               <thead><tr>
               <th>${t("botbuilder.thId", lang)}</th>
               <th>${t("botbuilder.thStatus", lang)}</th>
@@ -920,7 +920,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
                 <td class="btb-muted">${escapeHtml(s.updated_at || "")}</td>
                 <td>${actions.join(" ")}</td>
               </tr>`;
-        }).join("") + `</tbody></table>`
+        }).join("") + `</tbody></table></div>`
       : `<p class="btb-muted">${t("botbuilder.noticeNoSessions", lang)}</p>`;
     // Send-message form (shown via JS when Send button clicked)
     const sendForm =
@@ -985,7 +985,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       const subAllowed = maOn && capable;
       effHtml =
         `<div class="btb-group"><b>${t("botbuilder.reviewEffectiveDecision", lang)}</b> <span class="btb-hint" style="display:inline">(computed via model_resolver.mjs + pi_extensions_allowlist.mjs)</span></div>` +
-        `<table class="btb-review-table">` +
+        `<div class="table-scroll"><table class="btb-review-table">` +
         `<tr><td>Default model</td><td><code>${escapeHtml(rDef.key)}</code> <span class="btb-review-source">source=${escapeHtml(rDef.source)}</span>${fb(rDef)}</td></tr>` +
         `<tr><td>Escalation model</td><td>` +
           (escConfigured
@@ -996,7 +996,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<tr><td>multi_agent flag</td><td>${maOn ? `<b class="btb-ok">on</b>` : `<span class="btb-muted">off</span>`}</td></tr>` +
         `<tr><td>isMultiAgentCapable(default)</td><td>${capable ? `<b class="btb-ok">true</b>` : `<span class="btb-err">false</span>`}</td></tr>` +
         `<tr><td>&rarr; <code>subagent</code> at runtime</td><td>${subAllowed ? `<b class="btb-ok">ALLOWED</b>` : `<b class="btb-err">BLOCKED</b> <span class="btb-muted">(${escapeHtml(!maOn ? "multi_agent off" : "model not MULTI_AGENT_CAPABLE")})</span>`}</td></tr>` +
-        `</table>` +
+        `</table></div>` +
         `<p class="btb-hint">${t("botbuilder.hintSubagentGate", lang)}</p>`;
     } catch (e) {
       effHtml = `<p class="btb-notice-warn">${escapeHtml(String(e.message || e))}</p>`;

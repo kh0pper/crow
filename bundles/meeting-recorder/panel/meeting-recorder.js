@@ -171,8 +171,8 @@ export default {
 
 ${section(
   "Recent recordings",
-  `<table class="data-table"><thead><tr><th>Meeting</th><th>Started</th><th>Length</th>
-     <th>State</th><th></th><th>Session</th></tr></thead><tbody>${rows}</tbody></table>`
+  `<div class="table-scroll"><table class="data-table"><thead><tr><th>Meeting</th><th>Started</th><th>Length</th>
+     <th>State</th><th></th><th>Session</th></tr></thead><tbody>${rows}</tbody></table></div>`
 )}
 </div>
 

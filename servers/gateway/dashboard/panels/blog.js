@@ -218,7 +218,7 @@ export default {
           `${editBtn} ${previewBtn} ${actions} ${deleteBtn}`,
         ];
       });
-      postTable = dataTable([t("blog.tableTitle", lang), t("blog.tableStatus", lang), t("blog.tableSlug", lang), t("blog.tableDate", lang), t("blog.tableActions", lang)], rows);
+      postTable = dataTable([t("blog.tableTitle", lang), t("blog.tableStatus", lang), t("blog.tableSlug", lang), t("blog.tableDate", lang), t("blog.tableActions", lang)], rows, { stack: true });
     }
 
     // Pagination controls. Omitted when only one page exists.

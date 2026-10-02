@@ -71,10 +71,10 @@ export default {
       Narrower profiles limit what flows to that peer.
     </div>
 
-    <table class="sp-table">
+    <div class="table-scroll"><table class="sp-table">
       <thead><tr><th>Peer</th><th>Sync profile</th><th>State</th></tr></thead>
       <tbody>${tableRows}</tbody>
-    </table>
+    </table></div>
 
     <div class="sp-status" id="sp-status"></div>
 

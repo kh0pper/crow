@@ -1,7 +1,7 @@
 {
   "id": "tax",
   "name": "Tax Filing Assistant",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
   "type": "mcp-server",
   "author": "Crow",

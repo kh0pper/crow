@@ -1,7 +1,7 @@
 {
   "id": "meeting-recorder",
   "name": "Meeting Recorder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Record a meeting in the browser (shared tab audio plus microphone) and transcribe it locally with faster-whisper. Nothing leaves the machine.",
   "type": "bundle",
   "author": "Crow",

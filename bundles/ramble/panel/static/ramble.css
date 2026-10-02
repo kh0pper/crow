@@ -577,6 +577,9 @@
 #ramble .rb-grid input { width: 26px; height: 26px; accent-color: var(--rb-accent-2); cursor: pointer; }
 
 #ramble .rb-grid { border-collapse: collapse; width: 100%; }
+/* The shared .table-scroll edge hint paints its covers in the dashboard's surface
+   colour; inside the sheet the surface is Ramble's own. */
+#ramble .table-scroll { --table-scroll-bg: var(--rb-surface); }
 #ramble .rb-grid th,
 #ramble .rb-grid td { padding: 8px 6px; text-align: center; border-bottom: 2px solid var(--rb-surface-2); }
 #ramble .rb-grid thead th { font: 800 12px var(--rb-font-display); text-transform: uppercase; letter-spacing: .1em; color: var(--rb-muted); }

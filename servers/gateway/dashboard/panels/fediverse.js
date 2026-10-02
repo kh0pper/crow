@@ -207,10 +207,10 @@ function renderModerationSection(lang, items, filter) {
   return `
     <section class="fd-section">
       <div class="fd-filter-bar">${filterLinks}</div>
-      <table class="fd-table">
+      <div class="table-scroll"><table class="fd-table">
         <thead><tr><th>#</th><th>Bundle / Action</th><th>Payload</th><th>Timing</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>
+      </table></div>
       <p class="fd-help">Pending actions auto-expire after 72h via the F.13 GC sweeper. Confirming here records your approval but DOES NOT yet auto-fire the action against the federated app — a follow-up scheduler PR wires that end-to-end; for now, confirming + then invoking the bundle's own moderation verb by hand is the expected flow.</p>
     </section>`;
 }
@@ -267,10 +267,10 @@ function renderCrosspostSection(lang, items, filter) {
   return `
     <section class="fd-section">
       <div class="fd-filter-bar">${filterLinks}</div>
-      <table class="fd-table">
+      <div class="table-scroll"><table class="fd-table">
         <thead><tr><th>#</th><th>Route</th><th>Preview</th><th>Timing</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>
+      </table></div>
       <p class="fd-help">The F.13 scheduler polls every 15s, auto-publishes <code>ready</code>/<code>queued</code> entries to mastodon/gotosocial/crow-blog, and marks media-heavy / context-specific targets as <code>manual</code>. Cancel a queued entry before <code>scheduled_at</code> arrives to prevent publication.</p>
     </section>`;
 }

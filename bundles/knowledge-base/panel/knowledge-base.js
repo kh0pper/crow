@@ -106,7 +106,7 @@ export default {
       }).join("");
 
       tabContent = `
-        <table style="width:100%;border-collapse:collapse">
+        <div class="table-scroll"><table style="width:100%;border-collapse:collapse">
           <thead>
             <tr style="border-bottom:1px solid var(--crow-border);text-align:left">
               <th style="padding:0.5rem 0.75rem">Title</th>
@@ -117,7 +117,7 @@ export default {
             </tr>
           </thead>
           <tbody>${rows || '<tr><td colspan="5" style="padding:2rem;text-align:center;color:var(--crow-text-muted)">No articles yet. Use your AI to create knowledge base articles.</td></tr>'}</tbody>
-        </table>`;
+        </table></div>`;
     }
 
     // ─── EDIT TAB ───
@@ -184,7 +184,7 @@ export default {
             </div>
             ${resources.rows.length > 0 ? `
               <h3 style="margin-bottom:0.5rem">Structured Resources (${resources.rows.length})</h3>
-              <table style="width:100%;border-collapse:collapse;margin-bottom:1rem">
+              <div class="table-scroll"><table style="width:100%;border-collapse:collapse;margin-bottom:1rem">
                 <thead><tr style="border-bottom:1px solid var(--crow-border);text-align:left">
                   <th style="padding:0.5rem">Name</th>
                   <th style="padding:0.5rem">Phone</th>
@@ -192,7 +192,7 @@ export default {
                   <th style="padding:0.5rem">Verified</th>
                 </tr></thead>
                 <tbody>${resourceRows}</tbody>
-              </table>` : ""}
+              </table></div>` : ""}
             <p style="font-size:0.85rem;color:var(--crow-text-muted)">Use your AI to edit articles, manage resources, and publish. The AI has full access to all KB tools.</p>`;
         } else {
           tabContent = '<p style="color:var(--crow-text-muted)">Article not found.</p>';
@@ -230,14 +230,14 @@ export default {
       }).join("");
 
       tabContent = `
-        <table style="width:100%;border-collapse:collapse">
+        <div class="table-scroll"><table style="width:100%;border-collapse:collapse">
           <thead><tr style="border-bottom:1px solid var(--crow-border);text-align:left">
             <th style="padding:0.5rem 0.75rem">Slug</th>
             <th style="padding:0.5rem 0.75rem">Names</th>
             <th style="padding:0.5rem 0.75rem">Order</th>
           </tr></thead>
           <tbody>${rows || '<tr><td colspan="3" style="padding:2rem;text-align:center;color:var(--crow-text-muted)">No categories. Use your AI to create categories.</td></tr>'}</tbody>
-        </table>`;
+        </table></div>`;
     }
 
     // ─── FLAGGED TAB ───

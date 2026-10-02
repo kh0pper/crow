@@ -188,9 +188,9 @@ async function reviewBody(db, state, lang) {
       t(`botbuilder.wizGw_${gwType.replace(/-/g, "_")}`, lang) +
       (finishLater ? ` — ${t("botbuilder.wizGwFinishLaterShort", lang)}` : "")],
   ];
-  return `<table class="btb-review-table">` +
+  return `<div class="table-scroll"><table class="btb-review-table">` +
     rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
-    `</table>` +
+    `</table></div>` +
     `<p class="btb-hint">${t("botbuilder.wizReviewHint", lang)}</p>`;
 }
 

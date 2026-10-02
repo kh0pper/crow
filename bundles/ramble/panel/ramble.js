@@ -376,10 +376,10 @@ export default {
 
             <label class="rb-switch"><input type="checkbox" id="rb-master"><span>I&rsquo;m visible (master switch)</span></label>
 
-            <table class="rb-grid">
+            <div class="table-scroll"><table class="rb-grid">
               <thead><tr><th></th>${CHANNELS.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
               <tbody>${gridRows}</tbody>
-            </table>
+            </table></div>
 
             <div class="rb-row">
               <label class="rb-label" for="rb-identity">Name</label>

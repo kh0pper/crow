@@ -522,7 +522,7 @@ export function renderRuntimeStrip(data, lang) {
   }).join("");
 
   const table = runtimeModels.length
-    ? `<table class="data-table" style="margin-top:0.75rem"><thead><tr>
+    ? `<div class="table-scroll"><table class="data-table" style="margin-top:0.75rem"><thead><tr>
         <th>${escapeHtml(t("models.runtimeColModel", lang))}</th>
         <th>${escapeHtml(t("models.runtimeColState", lang))}</th>
         <th>${escapeHtml(t("models.runtimeColPort", lang))}</th>
@@ -530,7 +530,7 @@ export function renderRuntimeStrip(data, lang) {
         <th>${escapeHtml(t("models.runtimeColRestarts", lang))}</th>
         <th>${escapeHtml(t("models.runtimeColLastError", lang))}</th>
         <th>${escapeHtml(t("models.runtimeColActions", lang))}</th>
-      </tr></thead><tbody>${rowsHtml}</tbody></table>`
+      </tr></thead><tbody>${rowsHtml}</tbody></table></div>`
     : "";
 
   const noticesHtml = notices.map((n) => `<div class="mcat-strip__notice">${escapeHtml(n)}</div>`).join("");

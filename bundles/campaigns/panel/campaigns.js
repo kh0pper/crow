@@ -121,7 +121,7 @@ export default {
       if (creds.length > 0) {
         credsHtml = `<div style="margin-bottom:1.5rem">
           <h3 style="margin:0 0 0.5rem">Saved Credentials</h3>
-          <table class="data-table"><thead><tr>
+          <div class="table-scroll"><table class="data-table"><thead><tr>
             <th>Platform</th><th>Username</th><th>Status</th><th>Added</th>
           </tr></thead><tbody>`;
         for (const c of creds) {
@@ -135,7 +135,7 @@ export default {
             <td>${escapeHtml(c.created_at || "")}</td>
           </tr>`;
         }
-        credsHtml += `</tbody></table></div>`;
+        credsHtml += `</tbody></table></div></div>`;
       }
 
       const content = `
@@ -259,7 +259,7 @@ export default {
           No posts yet. Use <code>crow_campaign_draft_post</code> to create one.
         </div>`;
       } else {
-        postsHtml = `<table class="data-table"><thead><tr>
+        postsHtml = `<div class="table-scroll"><table class="data-table"><thead><tr>
           <th>Subreddit</th><th>Title</th><th>Type</th><th>Status</th><th>Scheduled</th><th>Actions</th>
         </tr></thead><tbody>`;
         for (const p of posts) {
@@ -297,7 +297,7 @@ export default {
             <td>${actions}</td>
           </tr>`;
         }
-        postsHtml += `</tbody></table>`;
+        postsHtml += `</tbody></table></div>`;
       }
 
       // Campaign header

@@ -1,7 +1,7 @@
 {
   "id": "pm-workspace",
   "name": "PM Workspace",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Personal PM workspace — markdown + handwritten drawing notes with OCR, a daily digest email assembled from local boards/trackers and optional cloud adapters, and deterministic Monday.com board sync (mirror or two-way)",
   "type": "mcp-server",
   "author": "Crow",

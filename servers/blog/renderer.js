@@ -23,7 +23,7 @@ export function renderMarkdown(markdown) {
     /(<img\s[^>]*src=")storage:([^"]+)(")/g,
     '$1/blog/media/$2$3'
   );
-  return sanitizeHtml(processed, {
+  const clean = sanitizeHtml(processed, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
       "img", "h1", "h2", "h3", "h4", "h5", "h6",
       "details", "summary", "figure", "figcaption",
@@ -59,6 +59,25 @@ export function renderMarkdown(markdown) {
     },
     selfClosing: ["img", "br", "hr", "input"],
   });
+  return wrapTables(clean);
+}
+
+/**
+ * Put every table in the shared horizontal-scroll wrapper, so a wide
+ * markdown table scrolls inside its column instead of widening the page on
+ * a phone (public blog, blog preview, federated memory view, KB preview,
+ * file viewer, Perch). Runs AFTER sanitizing: the sanitizer allows no
+ * attributes on <table>, so the markup here is exactly "<table>", and the
+ * wrapper is added by us, never taken from the author's markdown. Each
+ * <table> opens one wrapper and each </table> closes one, so nested tables
+ * stay balanced. The wrapper's CSS lives in the dashboard's componentsCss()
+ * and, for pages without it, in each page's own stylesheet (blog-public
+ * designCss, fileview).
+ */
+export function wrapTables(html) {
+  return String(html)
+    .replace(/<table>/g, '<div class="table-scroll"><table>')
+    .replace(/<\/table>/g, "</table></div>");
 }
 
 /**
