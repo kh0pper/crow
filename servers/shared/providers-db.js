@@ -41,16 +41,20 @@ import { isExternalEngine, engineShapeError, externalEngineConflict } from "./pr
 function readModelsJson() {
   const merged = { providers: {} };
   const paths = [];
+  const managedIds = new Set();
   for (const p of modelsJsonSearchPaths()) {
     try {
       const j = JSON.parse(readFileSync(p, "utf-8"));
+      if (j && Array.isArray(j.$crowManaged)) {
+        for (const id of j.$crowManaged) if (typeof id === "string") managedIds.add(id);
+      }
       if (j && j.providers) {
         Object.assign(merged.providers, j.providers);
         paths.push(p);
       }
     } catch {}
   }
-  return { path: paths.join(", ") || null, config: merged };
+  return { path: paths.join(", ") || null, config: merged, managedIds };
 }
 
 const API_TO_PROVIDER_TYPE = {
@@ -67,20 +71,24 @@ function inferProviderType(apiField) {
 /**
  * Seed the providers table from models.json IF the table is currently empty.
  * Idempotent: after first run, edits live in the DB, not in models.json.
- * Returns { seeded: number, source: path|null }.
+ * Returns { seeded: number, skipped_managed: number, source: path|null }.
  */
 export async function seedProvidersFromModelsJson(db) {
   const dbClient = db || createDbClient();
   const { rows } = await dbClient.execute("SELECT COUNT(*) AS n FROM providers");
-  if (Number(rows[0].n) > 0) return { seeded: 0, source: null };
+  if (Number(rows[0].n) > 0) return { seeded: 0, skipped_managed: 0, source: null };
 
-  const { path, config } = readModelsJson();
-  if (!config?.providers) return { seeded: 0, source: path };
+  const { path, config, managedIds } = readModelsJson();
+  if (!config?.providers) return { seeded: 0, skipped_managed: 0, source: path };
 
   const instanceId = getOrCreateLocalInstanceId();
   let count = 0;
+  let skippedManaged = 0;
   for (const [id, p] of Object.entries(config.providers)) {
     if (id.startsWith("$")) continue; // JSON-schema meta keys
+    // §11.7: M1's own output is never re-imported (a DB restore would turn a
+    // native row into a self-pointing door row).
+    if (managedIds.has(id)) { skippedManaged++; continue; }
     await dbClient.execute({
       sql: `INSERT OR IGNORE INTO providers
             (id, base_url, api_key, host, bundle_id, description, models, lamport_ts, instance_id)
@@ -98,7 +106,7 @@ export async function seedProvidersFromModelsJson(db) {
     });
     count++;
   }
-  return { seeded: count, source: path };
+  return { seeded: count, skipped_managed: skippedManaged, source: path };
 }
 
 /**
@@ -652,7 +660,8 @@ export async function repairProviderHosts(db, {
  * @param {object} db
  * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
  * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
- *                     skipped_unowned: number, reenabled: number, repaired: number,
+ *                     skipped_unowned: number, skipped_native: number, skipped_managed: number,
+ *                     reenabled: number, repaired: number,
  *                     failed: number, source: string|null }>}
  *   `upserted` counts actual writes; `unchanged` counts owned entries whose
  *   content already converged (D2 no-op suppression); `failed` counts entries
@@ -662,8 +671,8 @@ export async function repairProviderHosts(db, {
 export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs } = {}) {
   const dbClient = db || createDbClient();
   const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
-  const { path, config } = readModelsJson();
-  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0, repaired: 0, failed: 0 };
+  const { path, config, managedIds } = readModelsJson();
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, skipped_native: 0, skipped_managed: 0, reenabled: 0, repaired: 0, failed: 0 };
   const entries = config?.providers
     ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
     : [];
@@ -676,7 +685,12 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
     // a models.json entry that would newly give a marked external engine a
     // bundle — must not abort the rest of the pass or the host repair below.
     try {
+      // §11.7: M1's own output is never an input (it would loop).
+      if (managedIds.has(id)) { counters.skipped_managed++; continue; }
       const cur = existing.get(id);
+      // §11.7 / I5: a native row is owned by the model manager; models.json
+      // must never rebuild its gpu_policy or base_url.
+      if (cur && parseStoredPolicy(cur.gpu_policy)?.runtime === "native") { counters.skipped_native++; continue; }
       const decision = reconcileDecision({
         owned: isLocallyOrchestratable({ baseUrl: p.baseUrl }, addrs),
         present: cur !== undefined,
