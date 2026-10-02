@@ -5,7 +5,7 @@
  * every label is built with createElement + textContent, and the only markup
  * this file ever mounts is the bird; a caller-built art element is appended, never parsed.
  *
- * Contract: renderAr({ anchors, pose, bird, camera }) -> frame. It knows
+ * Contract: renderAr({ anchors, pose, bird, camera, hasEgg }) -> frame. It knows
  * nothing about maps, marks or nests. An anchor is
  *   { id, kind, lat, lon, accuracy_m, approx_m, locked, title, reach_m?, art? }
  * and the frame says where each label goes as FRACTIONS of the viewport, so
@@ -226,6 +226,7 @@
       visible: visible.map(function (it) { return it.id; }),
       say: sayFor(mode, reason, items, visible, coarse.length),
       bird: s.bird || null,
+      hasEgg: !!s.hasEgg,
     };
   }
 
@@ -372,10 +373,12 @@
       }
     }
 
-    function paintBird(bird) {
+    function paintBird(bird, hasEgg) {
       var valid = !!(engine && bird && typeof engine.isValidBird === "function" && engine.isValidBird({ species: bird.species, seed: bird.seed }));
       if (e.bird) setHidden(e.bird, !valid);
-      if (e.egg) setHidden(e.egg, valid);
+      // Phase 3: with no bird AND no egg there is nothing to draw. Without the
+      // hasEgg term this un-hides a phantom seed-0 egg on every frame.
+      if (e.egg) setHidden(e.egg, valid || !hasEgg);
       if (!valid) { birdKey = null; return; }
       var key = bird.species + ":" + bird.seed + ":" + (bird.mood || "happy");
       if (key === birdKey) return;
@@ -432,7 +435,7 @@
         e.more.textContent = more.join(" · ");
       }
       paintRadar(frame);
-      paintBird(frame.bird);
+      paintBird(frame.bird, frame.hasEgg);
       if (e.say) e.say.textContent = frame.say;
       var entered = false;
       var nowVisible = {};

@@ -65,7 +65,39 @@ El barrido corre en el mismo tick de 15 s. Las filas expiradas se borran localme
 
 ## Tu huevo y tu pájaro
 
-Cada instancia siempre tiene un huevo incubando. La actividad real acredita **calor** hacia él; cuando el calor alcanza el umbral de eclosión, el huevo eclosiona en un pájaro.
+Tú eres el huevo. La actividad real acredita **calor** hacia él; cuando el calor alcanza el umbral de eclosión, eclosionas en un pájaro, y el huevo incubando después de eso eres **tú de nuevo**.
+
+Los huevos vienen de tres lugares, y ninguno es gratis:
+
+- **Nidos** — camina a uno en el mapa, un reclamo por día local, dentro de 75 m.
+- **Regalos e intercambios** de contactos.
+- **Poner** — mientras no tengas ningún huevo, cada día local que termines feliz cuenta como uno. En
+  `lay.days` (predeterminado 14) pones uno tú misma. Los días no necesitan ser consecutivos, y el conteo solo
+  corre mientras estés sin huevo, así que esto es un piso más que un caño.
+
+Siempre que tu ranura de incubación esté vacía y un huevo pase a ser tuyo para calentar, el más
+viejo de tu estante entra automáticamente — así que solo te quedas sin huevo cuando de verdad no
+tienes ninguno. Eso ocurre cuando un huevo **eclosiona**, cuando llega un **regalo**, cuando se
+**completa un intercambio**, cuando un intercambio se **rechaza** o se retira y te devuelve tu
+huevo, y cuando **recoges un nido**. Ocurre en el Crow que recibió el huevo, y tus otros Crows
+simplemente copian el resultado.
+
+Dos casos esperan en cambio, y la página de tu mascota ofrece un **Calentarlo** de un toque para
+ellos:
+
+- Una oferta que **caduca** a los siete días libera su huevo sin calentarlo. La respuesta del
+  otro lado todavía puede llegar y completar el intercambio; si llega, el huevo que ofreciste se
+  va aunque mientras tanto hayas empezado a calentarlo.
+- Si uno de tus Crows hace eclosionar un huevo en el mismo momento en que otro recibe un regalo,
+  los dos pueden quedar con la ranura vacía y el regalo en tu estante. Ambos Crows coinciden;
+  simplemente te dejan la elección a ti.
+
+**El calor ganado con la ranura vacía desaparece, incluso si tienes huevos esperando en tu
+estante** — así que calienta un huevo en espera antes de salir a caminar.
+
+| Configuración | Predeterminado | Rige |
+|---|---|---|
+| `lay.days` | 14 | Días felices sin huevo antes de poner uno tú misma |
 
 | Evento | Calor |
 |---|---|
@@ -85,7 +117,7 @@ Cada evento es idempotente según su propia clave, así que repetir la misma acc
 
 Encontrarte con Crows tiene además un tope de **5 acreditaciones por día calendario local** (`MEET_CROW_DAILY_CAP` en `bundles/ramble/server/eggs.js`): una persona no es más que una clave pública que cualquiera puede generar, así que sin ese techo una avalancha de personas falsas podría forzar eclosión tras eclosión; los encuentros por encima del tope no acreditan nada ni dejan fila en el registro.
 
-Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una semilla del lado del servidor (`crypto.randomInt`, nunca `Math.random`, para que la tirada no se pueda predecir ni repetir); el aspecto del pájaro es único para esa semilla. Un huevo nuevo empieza a incubar de inmediato.
+Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una semilla del lado del servidor (`crypto.randomInt`, nunca `Math.random`, para que la tirada no se pueda predecir ni repetir); el aspecto del pájaro es único para esa semilla. Si tienes un huevo esperando en la repisa, pasa al hueco; si no, no empieza nada nuevo, y el siguiente hay que encontrarlo, recibirlo o ponerlo.
 
 Tu pájaro activo viaja en tus caws y marcas **públicas** — el JSON del cable lleva `bird: { species, seed }`, así que otras personas lo ven en tus pines. Las marcas de contactos y "solo para mí" nunca llegan al cable de Nostr (ver abajo), así que el pájaro se omite solo del **cable**: esas filas siguen guardando `bird_species` / `bird_seed` localmente y se replican, con pájaro incluido, a tus propias instancias enlazadas.
 
@@ -109,7 +141,7 @@ Tres tareas — **alimentar** (`feed`), **acicalar** (`preen`), **jugar** (`play
 
 Los nidos son puntos de aparición en el mundo. Cada semana ISO, cada celda geohash-7 (unos 150 m de lado) tiene un nido o no, decidido por una fórmula pública — `sha256("ramble-nest-v1:" + celda + ":" + semana)`, hay nido cuando los primeros 32 bits mod `nest.rate` (24 por defecto) dan 0 — así que todo el mundo ve los mismos nidos sin ninguna intervención del servidor y sin que se revele nada sobre las personas. El mapa los muestra como pines de huevo en cuanto haces zoom (nivel 15 o más cerca), obtenidos de `GET /api/ramble/nests?bbox=south,west,north,east`.
 
-Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`POST /api/ramble/nests/claim`): un huevo nuevo llega a tu **estante** (sin eclosionar, calor 0, marcado con la celda y la semana en que se encontró). Límites: **una recogida por día local** y un **tope de estante de 5** (`shelf.cap`); ambos rechazos vuelven como una razón amistosa, no como un error. Recoger el mismo nido dos veces devuelve el mismo huevo. Recoger un huevo no acredita **nada** de calor ni alimenta **nada** de energía — el huevo mismo es la recompensa. Las recogidas se registran por instancia (`ramble_nest_claims`) y nunca se replican; el huevo sí.
+Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`POST /api/ramble/nests/claim`): un huevo nuevo llega a tu **estante** (sin eclosionar, calor 0, marcado con la celda y la semana en que se encontró), o entra directamente en la ranura de incubación si no hay nada calentándose. Límites: **una recogida por día local** y un **tope de estante de 5** (`shelf.cap`); ambos rechazos vuelven como una razón amistosa, no como un error. Recoger el mismo nido dos veces devuelve el mismo huevo. Recoger un huevo no acredita **nada** de calor ni alimenta **nada** de energía — el huevo mismo es la recompensa. Las recogidas se registran por instancia (`ramble_nest_claims`) y nunca se replican; el huevo sí.
 
 Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incubar** cualquier huevo del estante (`POST /api/ramble/eggs/:id/incubate`); el que reemplaza pasa al estante conservando su calor. Instance sync distingue un huevo que *tú* aparcaste (`shelf_origin = 'user'`) de uno que la capa de sincronización dejó en el estante al reconciliar dos instancias (`'sync'`): solo este último se recupera automáticamente a la ranura de incubación.
 
@@ -229,14 +261,15 @@ Una eclosión disparada a través de estas herramientas nunca envía una actuali
 
 ## Notas de operación
 
-El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), no en el bundle, porque debe reutilizar el único gestor Nostr vivo del gateway. Arranca en **cualquier gateway que tenga el directorio del bundle ramble y un gestor Nostr**. El arranque imprime una de estas líneas:
+El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), no en el bundle, porque debe reutilizar el único gestor Nostr vivo del gateway. Arranca solo en un gateway donde el bundle de Ramble esté **instalado** (existe `~/.crow/bundles/ramble/server`) y haya un gestor Nostr activo. Un gateway sin el bundle instalado crea las tablas de Ramble, para que el estado de Ramble replicado desde tus otros Crows siga llegando, pero nunca envía ni procesa mensajes de Ramble. El arranque imprime una de estas líneas:
 
 ```
 [ramble] transport started
 [ramble] transport not started: no nostrManager (sharing disabled or boot order)
+[ramble] transport not started: bundle not installed on this instance (tables only)
 ```
 
-La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
+La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. La tercera es normal en un Crow donde no instalaste Ramble. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
 
 El límite de una recogida por día y el tope del estante se comprueban por instancia (las recogidas no se replican), así que un usuario con dos Crows puede recoger un huevo por día en cada una.
 
@@ -244,7 +277,9 @@ El mapa de los lugares que has desbloqueado, y tus saldos de alpiste y de corazo
 
 El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
 
-Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Vuelve a cambiar una vez que ambas estén sincronizadas.
+Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Lo mismo puede pasar si llega un regalo, o recoges un nido, en el otro Crow antes de que tu cambio llegue allí: ese Crow rellena su ranura con tu huevo más antiguo, y el huevo que elegiste vuelve al estante. Vuelve a cambiar una vez que ambas estén sincronizadas.
+
+Durante la actualización que introdujo `lamport_origin`, hay un caso más en el que dos de tus Crows pueden discrepar brevemente sobre un huevo: un cambio hecho en un Crow justo antes de actualizarlo, que todavía no ha llegado al otro, puede empatar con un cambio que el otro hizo justo después de su actualización. El cambio anterior no tiene origen registrado, así que cada Crow puede quedarse con uno distinto. No se pierde nada, y el siguiente cambio a ese huevo en cualquiera de los dos Crows (calor, una eclosión, un intercambio) los vuelve a poner de acuerdo. No puede pasar una vez que todos los Crows corren el código nuevo y su cola pendiente se ha vaciado.
 
 La entrega a contactos, los regalos y los intercambios necesitan todos los gateways en el código nuevo: un gateway con la fase 2 guarda un sobre de ramble como un mensaje de chat. Reinícialos todos antes de que nadie envíe. El transporte registra `dropping <kind> delivery to <crow_id>: not a deliverable contact` cuando un destinatario encolado fue borrado o bloqueado, y `gave up after 20 attempts` cuando ningún relay acepta un DM. Durante un reinicio escalonado, un gateway que sigue en la fase 2 descarta en silencio las operaciones de sincronización entrantes de `ramble_trades` (una tabla desconocida avanza su punto de control sin aplicarla); una fila de intercambio emitida en esa ventana llega a ese Crow solo cuando una operación posterior toca el mismo intercambio. Reinicia todos los gateways uno tras otro para que la ventana dure segundos.
 

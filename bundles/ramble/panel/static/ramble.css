@@ -600,6 +600,34 @@
   #ramble .rb-meter-bar i { transition: none; }
 }
 
+/* ------------------------------------------------------------- the prologue */
+
+#ramble .rb-prologue {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 22, 36, .5);
+  padding: 24px;
+}
+#ramble .rb-prologue[hidden] { display: none; }
+#ramble .rb-prologue-card {
+  max-width: 30rem;
+  border-radius: var(--rb-radius);
+  padding: 22px 20px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+  box-shadow: var(--rb-pop);
+  animation: rb-sheet-up .22s ease-out;
+}
+#ramble .rb-prologue-card p { margin: 0 0 12px; line-height: 1.5; }
+#ramble .rb-prologue-lead { font: 800 1.15rem var(--rb-font-display); }
+@media (prefers-reduced-motion: reduce) {
+  #ramble .rb-prologue-card { animation: none; }
+}
+
 /* ------------------------------------------------------------- narrow phones */
 
 @media (max-width: 420px) {
@@ -1011,3 +1039,7 @@
   #ramble .rb-ar-label.rb-ar-fx-collect,
   #ramble .rb-ar-row.rb-ar-fx-collect { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent-2) 55%, transparent); }
 }
+
+#ramble #rb-nextegg-empty,
+#ramble #rb-nextegg-lay,
+#ramble #rb-egg-empty { margin-top: 6px; }

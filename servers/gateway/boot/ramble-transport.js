@@ -534,6 +534,13 @@ export async function startRambleTransport({
       }
       const result = await phase3.receiveEnvelope(db, msg, { now: Date.now(), emit });
       if (!result) return;
+      // An egg that arrived (a gift, a swap, a decline that freed one) can be
+      // promoted straight into the slot already ripe and hatch on the spot —
+      // the panel's reveal (and the first-bird beat) hang off this event.
+      if (result.hatched && result.hatched.egg_id) {
+        try { bus.emit("ramble:hatched", { egg_id: result.hatched.egg_id, species: result.hatched.species, seed: result.hatched.seed }); }
+        catch (hatchErr) { console.warn("[ramble] ramble:hatched subscriber threw:", hatchErr?.message ?? hatchErr); }
+      }
       if (result.kind === "mark" && result.inserted) {
         if (!result.gone) {
           try {

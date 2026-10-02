@@ -20,7 +20,7 @@
  * its own decay independently); last-writer-wins on the next sync settles it.
  */
 
-import { localDay } from "./eggs.js";
+import { localDay, recordHappyDay } from "./eggs.js";
 import { maxEnergy, ENERGY_MAX_BASE_DEFAULT } from "./hearts.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -158,6 +158,12 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
 
   const updated = await ensureRow(db);
   await safeEmit(emit, "ramble_pet", "update", updated);
+
+  // Phase 3 (spec §4.3): a day counts when the bird is happy while wholly
+  // eggless. Idempotent per local day, and a no-op the moment the player
+  // holds any egg. `doChore` reaches this through feed(), so chores and the
+  // daily check-in both count.
+  await recordHappyDay(db, { now, mood, emit });
 
   return { owner: "self", mood, energy, energy_max: max, places_week, unlocks_week, crows_week, week_start, last_fed_at };
 }

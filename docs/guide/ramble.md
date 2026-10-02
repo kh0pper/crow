@@ -65,7 +65,38 @@ The sweep runs on the same 15 s drain tick. Expired rows are deleted locally and
 
 ## Your egg and your bird
 
-Every instance always has one egg incubating. Real-world activity credits **warmth** toward it; once warmth reaches the hatch threshold, the egg hatches into a bird.
+You are the egg. Real-world activity credits **warmth** toward it; at the hatch threshold you hatch
+into a bird, and the incubating egg after that is the **next you**.
+
+Eggs come from three places, and none of them is free:
+
+- **Nests** — walk to one on the map, one claim per local day, within 75 m.
+- **Gifts and swaps** from contacts.
+- **Laying** — while you hold no egg at all, every local day you end happy counts one. At
+  `lay.days` (default 14) you lay one yourself. Days need not be consecutive, and the count only
+  runs while you are eggless, so this is a floor rather than a faucet.
+
+Whenever your incubating slot is empty and an egg becomes yours to warm, the oldest egg on your
+shelf moves in automatically — so you are only ever eggless when you genuinely hold none. That
+happens when an egg **hatches**, when a **gift** lands, when a **swap completes**, when a swap is
+**declined** or withdrawn and hands your egg back, and when you **claim a nest**. It happens on the
+Crow that received the egg, and your other Crows simply copy the result.
+
+Two cases wait instead, and the pet page offers a one-tap **Warm it** for them:
+
+- An offer that **lapses** after seven days frees its egg without warming it. The other side's
+  reply can still arrive and complete the swap; if it does, the egg you offered leaves even if
+  you have started warming it in the meantime.
+- If one of your Crows hatches an egg at the same moment another one receives a gift, the two can
+  settle with the slot empty and the gift on your shelf. Both Crows agree; they just leave the
+  choice to you.
+
+**Warmth earned with an empty slot vanishes, even if you are holding eggs on your shelf** — so warm
+a waiting egg before you go walking.
+
+| Setting | Default | Governs |
+|---|---|---|
+| `lay.days` | 14 | Happy days while eggless before you lay one yourself |
 
 | Event | Warmth |
 |---|---|
@@ -85,7 +116,7 @@ Each event is idempotent per its own key, so repeating the same real-world actio
 
 Meeting crows is additionally capped at **5 credits per local calendar day** (`MEET_CROW_DAILY_CAP` in `bundles/ramble/server/eggs.js`) — a persona is just a pubkey anyone can mint, so without that ceiling a flood of spoofed personas could force hatch after hatch; meetings past the cap credit nothing and leave no ledger row.
 
-When warmth reaches the hatch threshold, a species and a seed are rolled server-side (`crypto.randomInt`, never `Math.random`, so the roll can't be predicted or replayed); the bird's look is unique to that seed. A new egg starts incubating immediately.
+When warmth reaches the hatch threshold, a species and a seed are rolled server-side (`crypto.randomInt`, never `Math.random`, so the roll can't be predicted or replayed); the bird's look is unique to that seed. If an egg is waiting on your shelf it moves into the slot; otherwise nothing new starts, and the next one has to be found, given, or laid.
 
 Your active bird rides on your **public** caws and marks — the wire JSON carries `bird: { species, seed }` so other people see it on your pins. Contacts and "Just me" marks never reach the Nostr wire (see below), so the bird is omitted from the **wire** only: those rows still store `bird_species` / `bird_seed` locally and replicate, bird and all, to your own linked instances.
 
@@ -109,7 +140,7 @@ Three chores — **feed**, **preen**, **play** — are yours to do once each per
 
 Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 15 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
 
-Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in). Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
+Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in), or goes straight into the incubating slot if nothing is warming. Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
 
 Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
 
@@ -229,14 +260,15 @@ A hatch triggered through these tools never sends a live update to an open dashb
 
 ## Operating notes
 
-The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in the bundle, because it must reuse the gateway's one live Nostr manager. It starts on **any gateway that has the ramble bundle directory and a Nostr manager**. Boot prints one of:
+The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in the bundle, because it must reuse the gateway's one live Nostr manager. It starts only on a gateway where the Ramble bundle is **installed** (`~/.crow/bundles/ramble/server` exists) and a Nostr manager is up. A gateway without the bundle installed creates the Ramble tables, so your other Crows' replicated Ramble state still lands there, but it never sends or processes Ramble messages. Boot prints one of:
 
 ```
 [ramble] transport started
 [ramble] transport not started: no nostrManager (sharing disabled or boot order)
+[ramble] transport not started: bundle not installed on this instance (tables only)
 ```
 
-The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. No Ramble failure can block gateway boot; every problem is a warning.
+The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. The third is normal on a Crow where you have not installed Ramble. No Ramble failure can block gateway boot; every problem is a warning.
 
 The one-claim-per-day limit and the shelf cap are checked per instance (claims do not replicate), so a user with two Crows can claim once per day on each.
 
@@ -244,7 +276,9 @@ The map of places you have unlocked, and your seed and heart balances, replicate
 
 The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
 
-Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). Swap again once both are in sync.
+Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). The same can happen if a gift arrives, or you claim a nest, on the other Crow before your swap has reached it: that Crow refills its slot with your oldest egg, and the egg you chose ends up back on the shelf. Swap again once both are in sync.
+
+During the upgrade that introduced `lamport_origin`, one more case can leave two of your Crows briefly disagreeing about an egg: a change made on one Crow just before it was upgraded, still waiting to reach the other, can tie with a change the other made just after its upgrade. The older change has no recorded origin, so each Crow may keep a different one. Nothing is lost, and the next change to that egg on either Crow (warmth, a hatch, a swap) brings them back into step. It cannot happen once every Crow runs the new code and its backlog has drained.
 
 Contacts delivery, gifts and swaps need every gateway on the new code: a gateway running phase 2 stores a ramble envelope as a chat message. Restart all of them before anyone sends. The transport logs `dropping <kind> delivery to <crow_id>: not a deliverable contact` when a queued recipient was deleted or blocked, and `gave up after 20 attempts` when no relay accepts a DM. During a rolling restart, a gateway still on phase 2 silently drops incoming `ramble_trades` sync ops (an unknown table advances its checkpoint without applying); a swap row emitted in that window reaches that Crow only when a later op touches the same trade. Restart all gateways back-to-back to keep the window to seconds.
 

@@ -27,7 +27,7 @@ import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
 import { petState, doChore } from "./pet.js";
 import { heartsBalance } from "./hearts.js";
-import { eggState, activeBird, isoWeek } from "./eggs.js";
+import { eggState, activeBird, isoWeek, layProgress, nextPromotable } from "./eggs.js";
 import { feedAll } from "./feed.js";
 import { flockState, listNests, claimNest } from "./flock.js";
 import { resolveContact, resolveAudience, enqueueMark, contactsByPubkey, CROW_ID_RE, ID_RE } from "./delivery.js";
@@ -303,7 +303,15 @@ export function createRambleServer(db, options = {}) {
     async () => {
       try {
         const [state, bird, egg] = await Promise.all([petState(db), activeBird(db), eggState(db, { now: Date.now() })]);
-        return text(JSON.stringify({ ...state, bird, hearts: await heartsBalance(db), egg: { percent: egg.egg.percent } }));
+        // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state — a read
+        // must not throw for it, so an absent egg is reported as `null`, not
+        // dereferenced.
+        return text(JSON.stringify({
+          ...state, bird, hearts: await heartsBalance(db),
+          egg: egg.egg ?? null,
+          lay: await layProgress(db),
+          shelf_waiting: (await nextPromotable(db))?.egg_id ?? null,
+        }));
       } catch (err) {
         return errorText(err.message);
       }
@@ -316,7 +324,10 @@ export function createRambleServer(db, options = {}) {
     {},
     async () => {
       try {
-        return text(JSON.stringify(await eggState(db, { now: Date.now() })));
+        const state = await eggState(db, { now: Date.now() });
+        // `lay` matches GET /api/ramble/egg. NOT `shelf_waiting` here — that
+        // affordance belongs to ramble_pet_state / GET /api/ramble/pet only.
+        return text(JSON.stringify({ ...state, lay: await layProgress(db) }));
       } catch (err) {
         return errorText(err.message);
       }
@@ -383,7 +394,7 @@ export function createRambleServer(db, options = {}) {
 
   register(
     "ramble_claim_nest",
-    "Claim the nest at your location (or at an explicit 7-character geohash cell you are within 75 m of) for an egg on your shelf. One claim per day; shelf holds 5. Claiming credits no warmth.",
+    "Claim the nest at your location (or at an explicit 7-character geohash cell you are within 75 m of) for an egg. It goes on your shelf, or straight into the incubating slot if that is empty. One claim per day; shelf holds 5. Claiming credits no warmth.",
     {
       lat: z.number().min(-90).max(90),
       lon: z.number().min(-180).max(180),
