@@ -1376,9 +1376,10 @@
     if (hasNext) { eggPercent = nextPct; eggSeedId = nextEgg.egg_id; }
     else { eggPercent = 0; eggSeedId = null; }
 
-    /* Nothing auto-promotes a shelf egg into an empty slot (see the server's
-     * promoteFromShelf note), so offer it here rather than leaving the player
-     * with no signal and no way back. It also means they are NOT eggless, so
+    /* The server promotes on every write that delivers or frees an egg, but
+     * not on a lapsed swap or a cross-instance race (see the server's
+     * promoteFromShelf inventory), so offer what is left here rather than
+     * leaving the player with no signal and no way back. It also means they are NOT eggless, so
      * the lay line must not claim they are — and NOR may the empty line,
      * which must not say "Nothing warming just now." while the waiting line
      * says one is. */
@@ -1401,7 +1402,7 @@
     var warmEl = $("rb-nextegg-warm");
     setHidden(warmEl, vis.warm);
     /* incubate()'s own .catch only re-enables on FAILURE. A successful warm
-     * leaves this disabled, and a later gift / claimed nest / lapsed swap
+     * leaves this disabled, and a later lapsed swap or sync arrival
      * can repaint the card visible again with no incubate() call in
      * between — clear it here, every time the card comes back visible, so
      * the button is never shown dead. */
@@ -1544,7 +1545,8 @@
     }).then(function (out) {
       btn.classList.remove("is-busy");
       if (out && out.claimed) {
-        lineEl.textContent = out.already ? "Already yours." : "You found an egg. It's on your shelf.";
+        lineEl.textContent = out.already ? "Already yours."
+          : (out.egg && out.egg.status === "incubating" ? "You found an egg. It's warming now." : "You found an egg. It's on your shelf.");
         btn.remove();
         if (out.already) { collectFx(nest.cell, "clear"); refreshNests(); return refreshFlock(); }
         collectFx(nest.cell, "done");

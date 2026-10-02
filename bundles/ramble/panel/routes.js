@@ -811,8 +811,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
     const lay = await mods.eggsMod.layProgress(db);
-    // The egg sitting on the shelf that a tap would incubate, or null. Nothing
-    // auto-promotes it (see promoteFromShelf's note), so the card offers it.
+    // The egg sitting on the shelf that a tap would incubate, or null. Every
+    // local write that delivers or frees an egg promotes on its own (spec
+    // §4.2); what is left — a lapsed swap, or a cross-instance race — waits
+    // here, and the card offers it (see promoteFromShelf's inventory).
     const waiting = await mods.eggsMod.nextPromotable(db);
     res.json({
       ...pet,
@@ -844,7 +846,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   router.get("/api/ramble/egg", handle(async (req, res) => {
     // No promote here. A GET must never queue a sync op, and see
     // promoteFromShelf's note: a read-path promote both races the drain and
-    // launders shelf_origin. hatchIfReady is the only local emptier.
+    // launders shelf_origin. Promotes happen on the write paths only.
     const state = await mods.eggsMod.eggState(db, { now: Date.now() });
     const lay = await mods.eggsMod.layProgress(db);
     res.json({ ...state, lay });

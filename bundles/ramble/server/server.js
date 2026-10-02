@@ -394,7 +394,7 @@ export function createRambleServer(db, options = {}) {
 
   register(
     "ramble_claim_nest",
-    "Claim the nest at your location (or at an explicit 7-character geohash cell you are within 75 m of) for an egg on your shelf. One claim per day; shelf holds 5. Claiming credits no warmth.",
+    "Claim the nest at your location (or at an explicit 7-character geohash cell you are within 75 m of) for an egg. It goes on your shelf, or straight into the incubating slot if that is empty. One claim per day; shelf holds 5. Claiming credits no warmth.",
     {
       lat: z.number().min(-90).max(90),
       lon: z.number().min(-180).max(180),

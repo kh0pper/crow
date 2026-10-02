@@ -68,6 +68,9 @@ test("claimNest: in range -> one 'user' shelf egg; idempotent; stale week / no n
   const d = await freshDb();
   const [cell] = nestCells(WEEK, 1);
   const nest = nestFor(cell, WEEK);
+  // An egg is already warming, so the claimed one stays on the shelf (with an
+  // empty slot it would warm at once — spec §4.2, the next test).
+  await mintIncubatingEgg(d, { now: T0 - 1 });
   const emitted = [];
   const emit = async (t, op, row) => emitted.push([t, op, row]);
 
@@ -82,7 +85,7 @@ test("claimNest: in range -> one 'user' shelf egg; idempotent; stale week / no n
   const again = await claimNest(d, { cell, week: WEEK, here: { lat: 0, lon: 0 }, now: T0 + 3600e3, emit });
   assert.equal(again.claimed, true); assert.equal(again.already, true); assert.equal(again.egg.egg_id, r.egg.egg_id);
   assert.equal(emitted.length, 1);
-  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs")).rows[0].n, 1);
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs")).rows[0].n, 2, "the warming egg and the one claim");
 
   const [, other] = nestCells(WEEK, 2);
   const o = nestFor(other, WEEK);
@@ -94,8 +97,27 @@ test("claimNest: in range -> one 'user' shelf egg; idempotent; stale week / no n
   assert.ok(CLAIM_RANGE_M === 75);
 });
 
+test("claimNest: with an EMPTY slot the claimed egg goes straight in and warms (spec §4.2), emitted as a second op", async () => {
+  const d = await freshDb();
+  const [cell] = nestCells(WEEK, 1);
+  const nest = nestFor(cell, WEEK);
+  const emitted = [];
+  const emit = async (t, op, row) => emitted.push([t, op, row.egg_id, row.status]);
+  const r = await claimNest(d, { cell, week: WEEK, here: { lat: nest.lat, lon: nest.lon }, now: T0, emit });
+  assert.equal(r.claimed, true);
+  assert.equal(r.egg.status, "incubating", "the response says it is warming, so the panel can say so");
+  assert.equal(r.egg.shelf_origin, null);
+  assert.deepEqual(emitted, [["ramble_eggs", "insert", r.egg.egg_id, "shelf"], ["ramble_eggs", "update", r.egg.egg_id, "incubating"]]);
+  // A re-claim of the same nest is still a pure read.
+  const again = await claimNest(d, { cell, week: WEEK, here: { lat: 0, lon: 0 }, now: T0 + 1, emit });
+  assert.equal(again.already, true);
+  assert.equal(emitted.length, 2);
+});
+
 test("claimNest: one claim per local day, and the shelf cap refuses the sixth", async () => {
   const d = await freshDb();
+  // Keep the slot full so every claim below lands on the SHELF the cap counts.
+  await mintIncubatingEgg(d, { now: T0 - 1 });
   const cells = nestCells(WEEK, 8);
   const at = (c) => { const n = nestFor(c, WEEK); return { lat: n.lat, lon: n.lon }; };
   assert.equal((await claimNest(d, { cell: cells[0], week: WEEK, here: at(cells[0]), now: T0 })).claimed, true);

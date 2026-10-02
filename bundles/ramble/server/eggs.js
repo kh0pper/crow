@@ -214,54 +214,74 @@ async function ensurePetRow(db) {
  *
  * Writes NOTHING when the slot is occupied or nothing is promotable.
  *
- * ⚠ CALLED FROM EXACTLY ONE PLACE: `hatchIfReady`. Never from a read path.
+ * ⚠ CALLED ONLY FROM LOCAL WRITE PATHS, after the write that freed or
+ * delivered an egg has fully landed — never from a read path, and never from
+ * the sync apply. Callers: `hatchIfReady`, `claimNest` (flock.js), and in
+ * trades.js `receiveGift`, both swap hand-overs and every decline
+ * (`refillSlot`). The promote EMITS, so the user's other Crows receive the
+ * result rather than re-deriving it.
  *
- * Two earlier drafts of this plan called it from `eggState`/`flockState` too,
- * so that a slot emptied by a sync arrival would refill without waiting for a
- * hatch. Both were wrong, and the second was wrong in a subtler way than the
- * first:
+ * Why not from a read path (`eggState`/`flockState`)? Two drafts did, so that
+ * a slot emptied by a sync arrival would refill without waiting for a hatch.
+ * Both were wrong:
  *
  *   1. It is a write during a GET, and `applyRambleEgg` carries an explicit
- *      carve-out (instance-sync.js:855-860) refusing to re-promote on a peer's
- *      USER shelve, because the replacement egg's row "follows in the same
- *      drain" — a GET landing in that window drafts the egg the user just
- *      parked, and it then out-ranks their real choice on both machines.
+ *      carve-out refusing to re-promote on a peer's USER shelve, because the
+ *      replacement egg's row "follows in the same drain" — a GET landing in
+ *      that window drafts the egg the user just parked, and it then out-ranks
+ *      their real choice on both machines.
  *   2. The attempted fix — marking such a promote `shelf_origin = 'sync'` so
- *      it ranks below a real choice — LAUNDERS PROVENANCE. `flock.js:126`
- *      counts `status='shelf' AND shelf_origin='user'` for the nest shelf cap
- *      and `flock.js:253` for `shelf_count`; `instance-sync.js:831` rewrites
- *      a demoted egg to `'sync'` unconditionally; and
- *      `RAMBLE_EGG_REPROMOTE_SQL` drafts `'sync'` eggs only. A user egg
- *      relabelled 'sync' therefore stops consuming a shelf slot, is
- *      under-reported to the user, becomes draftable by the very sync rule
- *      the 'user' mark exists to protect it from, and is mislabelled "came
- *      back from another of your Crows" at `static/ramble.js:1776`.
+ *      it ranks below a real choice — LAUNDERS PROVENANCE. `flock.js` counts
+ *      `status='shelf' AND shelf_origin='user'` for the nest shelf cap and for
+ *      `shelf_count`; `instance-sync.js` rewrites a demoted egg to `'sync'`
+ *      unconditionally; and `RAMBLE_EGG_REPROMOTE_SQL` drafts `'sync'` eggs
+ *      only. A user egg relabelled 'sync' stops consuming a shelf slot, is
+ *      under-reported, becomes draftable by the sync rule the 'user' mark
+ *      exists to protect it from, and is mislabelled "came back from another
+ *      of your Crows" in the panel.
  *
- * Honest inventory of every way the slot can empty, and what covers it:
+ * Inventory of every way the slot can empty, or an egg can appear beside an
+ * empty slot, and what covers it (spec §4.2; Kevin 2026-09-22 rejected the
+ * earlier "wait on the shelf" deviation; tests/ramble-eggs-receipt.test.js
+ * pins each row multi-instance):
  *
- *   - a hatch                  -> covered HERE, and this is the main loop
+ *   - a hatch                  -> promoted HERE (`hatchIfReady`)
  *   - `incubateEgg` swap       -> never empties the slot (one conditional
  *                                 UPDATE), and it ends in `hatchIfReady`
  *   - gifting / swapping away  -> the incubating egg is not giftable
  *                                 (`GIFTABLE = {shelf, received}`)
- *   - a gift or swap ARRIVING, or a swap expiring/declining and unlocking
- *     the last shelf egg, while the slot is empty
- *                              -> NOT auto-promoted. The egg sits on the
- *                                 shelf and the panel says so, with a button
- *                                 that incubates it in one tap (Task 7).
- *   - a slot emptied by `applyRambleEgg` while the user holds ONLY 'user'
- *     shelf eggs -> same: `RAMBLE_EGG_REPROMOTE_SQL` drafts
- *                   `shelf_origin='sync'` rows only.
- *
- * ⚠ An earlier draft promoted from `trades.js`'s closing paths to auto-cover
- * rows 4 and 5. It was reverted: promoting inside `expireTrades` strands an
- * in-flight `completed` envelope — the hand-over UPDATE (`WHERE status IN
- * ('shelf','received')`) then matches nothing while `receivedEggStatement`
- * still inserts, so the user keeps BOTH eggs. Manufacturing a free-egg race
- * in the phase whose whole purpose is removing the free egg is not a trade
- * worth making, and the underlying complaint was never "the slot is empty" —
- * it was "the player has no signal and no way back". That is an affordance
- * problem, and it is fixed with an affordance.
+ *   - a gift ARRIVING          -> promoted on receipt (`receiveGift`)
+ *   - a swap COMPLETING        -> promoted after the hand-over batch, on the
+ *                                 proposer's 'accepted' and the acceptor's
+ *                                 'completed'
+ *   - a swap DECLINED (inbound, our own withdrawal, or the "cannot honour"
+ *     reply), unlocking the egg it held
+ *                              -> promoted. 'declined' is terminal for the
+ *                                 hand-over: both hand-over branches return
+ *                                 early on it, so nothing can be stranded.
+ *   - a NEST claimed           -> promoted (`claimNest`)
+ *   - a swap LAPSING (`expireTrades`) unlocking the last shelf egg
+ *                              -> NOT promoted, deliberately. 'expired' is
+ *                                 NOT terminal: a `completed` can still land
+ *                                 on an expired acceptor row, its hand-over
+ *                                 UPDATE (`WHERE status IN ('shelf',
+ *                                 'received')`) would then miss an egg moved
+ *                                 into the slot while `receivedEggStatement`
+ *                                 still inserts — the user keeps BOTH eggs.
+ *                                 The egg waits and the pet card offers a
+ *                                 one-tap Warm it (`nextPromotable`).
+ *   - the SYNC APPLY           -> never promotes a 'user'/received egg
+ *                                 (`RAMBLE_EGG_REPROMOTE_SQL` drafts 'sync'
+ *                                 losers only). The Crow whose write changed
+ *                                 the slot promoted and emitted; the peer
+ *                                 receives that op. A promote on apply would
+ *                                 not emit, could pick a different egg than
+ *                                 the origin did, and nothing would reconcile
+ *                                 them. The residue is a true cross-instance
+ *                                 race — a hatch on one Crow while a gift
+ *                                 lands on another, in the same sync window —
+ *                                 which converges to the SAME state on both:
+ *                                 slot empty, the egg offered by Warm it.
  */
 /**
  * The egg that WOULD be promoted, or null — a pure read, no writes.
