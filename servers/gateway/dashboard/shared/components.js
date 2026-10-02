@@ -26,19 +26,36 @@ export function statGrid(cards) {
 }
 
 /**
- * Data table.
+ * Data table. Always emitted inside the shared .table-scroll wrapper, so a
+ * table wider than its card scrolls inside the card instead of overflowing
+ * it (tests/dashboard-table-scroll.test.js keeps every dashboard table in a
+ * wrapper).
  * @param {string[]} headers
  * @param {string[][]} rows - Each row is array of cell HTML (not escaped)
+ * @param {{stack?: boolean}} [opts] - stack: below a 600px-wide container,
+ *   render each row as a stacked label/value card (for tables that ARE the
+ *   page's main list). Cells under an empty header are treated as action
+ *   cells and share one line.
  */
-export function dataTable(headers, rows) {
+export function dataTable(headers, rows, opts = {}) {
   if (rows.length === 0) {
     return `<div class="empty-state"><h3>No data</h3></div>`;
   }
+  const stack = !!opts.stack;
   const ths = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const td = (c, i) => {
+    if (!stack) return `<td>${c}</td>`;
+    const label = headers[i] == null ? "" : String(headers[i]);
+    return label
+      ? `<td data-label="${escapeHtml(label)}">${c}</td>`
+      : `<td class="dt-action">${c}</td>`;
+  };
   const trs = rows.map((cells) =>
-    `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`
+    `<tr>${cells.map(td).join("")}</tr>`
   ).join("");
-  return `<table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  const wrapExtra = stack ? " table-stack" : "";
+  const tableCls = stack ? "data-table data-table--stack" : "data-table";
+  return `<div class="table-scroll${wrapExtra}"><table class="${tableCls}"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
 }
 
 /**

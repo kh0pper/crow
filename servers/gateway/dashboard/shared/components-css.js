@@ -57,7 +57,7 @@ export function componentsCss() {
   .step-active .step-num { border-color:var(--crow-accent); color:var(--crow-accent); }
 
   /* Tabs */
-  .tab-list { display:flex; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
+  .tab-list { display:flex; flex-wrap:wrap; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
   .tab-trigger { background:transparent; border:none; border-bottom:2px solid transparent;
     color:var(--crow-text-secondary); font-family:inherit; font-size:var(--crow-text-base);
     padding:var(--crow-space-2) var(--crow-space-4); cursor:pointer; }
@@ -65,6 +65,75 @@ export function componentsCss() {
   .tab-trigger.tab-active { color:var(--crow-accent); border-bottom-color:var(--crow-accent); }
   .tab-panel { display:none; }
   .tab-panel.tab-active { display:block; }
+
+  /* ─── Responsive overflow (mobile overflow fix, 2026-10) ───
+     Wide content must scroll or wrap INSIDE its card, never push past it
+     (Pixel 9a: 412px portrait, ~915px landscape with the sidebar open).
+
+     .table-scroll is THE wrapper every dashboard table sits in — dataTable()
+     emits it, hand-built tables wrap themselves, and
+     tests/dashboard-table-scroll.test.js fails on any table outside it. The
+     background layers are the scroll hint: the two "cover" gradients scroll
+     WITH the content (local) and hide the two edge shadows (scroll) when that
+     edge is reached, so a shadow shows only on a side that has more table.
+     A panel whose table sits on a non-surface background can retint the
+     covers with --table-scroll-bg. */
+  .table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    background:
+      linear-gradient(to right, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) left center / 32px 100% no-repeat local,
+      linear-gradient(to left, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) right center / 32px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.22), transparent) left center / 12px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.22), transparent) right center / 12px 100% no-repeat scroll;
+  }
+  .table-scroll > table { margin-top: 0; }
+
+  /* Stacked variant (dataTable(..., { stack: true })): a list table whose
+     container is narrower than 600px renders each row as a small card —
+     label / value pairs, action links on one line. A CONTAINER query, not a
+     viewport one: on a 915px landscape phone with the sidebar open the card
+     is ~570px wide, which a viewport query cannot see. */
+  .table-scroll.table-stack { container: crow-table / inline-size; }
+  /* Selectors carry .table-stack so they outrank layout.js's .data-table
+     th/td rules, which load after this sheet. */
+  @container crow-table (max-width: 600px) {
+    .table-stack .data-table--stack, .table-stack .data-table--stack tbody, .table-stack .data-table--stack tr, .table-stack .data-table--stack td { display: block; width: 100%; }
+    .table-stack .data-table--stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .table-stack .data-table--stack tr { border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card);
+      padding: var(--crow-space-2) var(--crow-space-3); margin-bottom: var(--crow-space-3); }
+    .table-stack .data-table--stack tr:hover td { background: transparent; }
+    /* Block + floated label (not flex): a cell's mixed inline content (a
+       link plus text, a badge) stays one inline run, right-aligned. */
+    .table-stack .data-table--stack td { padding: var(--crow-space-1) 0; border-bottom: none; text-align: right; overflow-wrap: anywhere; }
+    .table-stack .data-table--stack td::after { content: ""; display: table; clear: both; }
+    .table-stack .data-table--stack td::before { content: attr(data-label); float: left; margin-right: var(--crow-space-3); text-align: left;
+      font-size: var(--crow-text-xs); color: var(--crow-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .table-stack .data-table--stack td:empty { display: none; }
+    .table-stack .data-table--stack td.dt-action { display: inline-block; width: auto; margin-right: var(--crow-space-4); text-align: left; }
+    .table-stack .data-table--stack td.dt-action::before, .table-stack .data-table--stack td.dt-action::after { content: none; }
+  }
+
+  /* Long unbreakable tokens (ids, model ids like crow-local/qwen3.6-35b-a3b,
+     hashes, URLs). break-word (inherited) wraps only what would otherwise
+     overflow and does NOT change min-content sizing, so tables and flex rows
+     size exactly as before. .cell-break / .mono opt a cell into "anywhere",
+     which also lets the column itself shrink. */
+  .content-body { overflow-wrap: break-word; }
+  .cell-break, .data-table .mono, .content-body :not(pre) > code { overflow-wrap: anywhere; }
+
+  /* Zero-specificity safety net (:where) — any panel rule overrides it.
+     Flex/grid items default to min-width:auto (= their min-content width),
+     which is how one long id inflates a whole card. min-width:0 is a no-op
+     for every other box. Block containers + form controls only: icons,
+     buttons and badges keep their intrinsic size. */
+  :where(.content-body) :where(div, section, article, aside, form, fieldset, details, li, label, select, input, textarea) { min-width: 0; }
+  :where(.content-body) :where(select) { max-width: 100%; }
+  :where(.content-body) :where(img, video, canvas, iframe, embed, object) { max-width: 100%; }
+  :where(.content-body) :where(pre) { max-width: 100%; overflow-x: auto; }
 
   /* ─── Focus-visible baseline (W3-5a) ─── */
   .btn:focus-visible, .btn-primary:focus-visible, .btn-secondary:focus-visible,
