@@ -140,7 +140,7 @@ test("S12: the two unlabelled inputs carry aria-labels", () => {
 test("every perch.phone* key the card uses exists in EN and ES and they differ", () => {
   const src = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/phone-card.js", import.meta.url), "utf8");
   const keys = [...src.matchAll(/tJs\("(perch\.phone[A-Za-z]+)"/g)].map((m) => m[1]);
-  assert.equal(keys.length, 71);
+  assert.equal(keys.length, 76);
   for (const k of keys) {
     assert.ok(translations[k] && translations[k].en && translations[k].es, k);
     assert.notEqual(translations[k].en, translations[k].es, k);
@@ -257,4 +257,11 @@ test("P3: --dim text is WCAG AA (4.5:1) on --card and --sky in both themes", () 
     const tok = (n) => block.match(new RegExp("--" + n + ":(#[0-9a-fA-F]{3,6})"))[1];
     for (const bg of ["card", "sky"]) assert.ok(ratio(tok("dim"), tok(bg)) >= 4.5, "--dim on --" + bg + " " + ratio(tok("dim"), tok(bg)).toFixed(2));
   }
+});
+
+test("review M8: each scheduled poll carries an epoch; a stopped or superseded poll's reply is ignored", () => {
+  const js = perchPhoneCardJs("en");
+  assert.match(js, /var ep=rec\.pollEp=\(rec\.pollEp\|\|0\)\+1;/);
+  assert.match(js, /if\(phoneCards\[id\]!==rec\|\|rec\.view!=='live'\|\|ep!==rec\.pollEp\) return;/);
+  assert.match(js, /function phoneStopPoll\(rec\)\{\n    if\(!rec\) return;\n    rec\.pollEp=\(rec\.pollEp\|\|0\)\+1;/);
 });

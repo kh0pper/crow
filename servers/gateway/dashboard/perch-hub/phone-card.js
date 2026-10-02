@@ -85,7 +85,12 @@ export function perchPhoneCardJs(lang = "en") {
     not_live:'${tJs("perch.phoneErrNotLive", lang)}',
     rate_limited:'${tJs("perch.phoneErrRateLimited", lang)}',
     not_found:'${tJs("perch.phoneErrNotFound", lang)}',
-    invalid_plan:'${tJs("perch.phoneErrInvalidPlan", lang)}'
+    invalid_plan:'${tJs("perch.phoneErrInvalidPlan", lang)}',
+    plan_hash_required:'${tJs("perch.phoneErrPlanHashRequired", lang)}',
+    empty:'${tJs("perch.phoneErrEmpty", lang)}',
+    invalid_number:'${tJs("perch.phoneErrInvalidNumber", lang)}',
+    number_blocked:'${tJs("perch.phoneErrNumberBlocked", lang)}',
+    forbidden:'${tJs("perch.phoneErrForbidden", lang)}'
   };
   /* Backlog P5: the live poll backs off on failures and stops after this many in a row. */
   var PH_POLL_MS=1500, PH_POLL_MAX_MS=30000, PH_POLL_MAX_FAILS=5;
@@ -308,6 +313,7 @@ export function perchPhoneCardJs(lang = "en") {
   }
   function phoneStopPoll(rec){
     if(!rec) return;
+    rec.pollEp=(rec.pollEp||0)+1;   /* an in-flight poll reply from before this stop is ignored */
     if(rec.timer){ clearTimeout(rec.timer); rec.timer=null; }
     if(rec.clock){ clearInterval(rec.clock); rec.clock=null; }
   }
@@ -321,7 +327,13 @@ export function perchPhoneCardJs(lang = "en") {
     var gen=phoneGen;
     return phoneApi('GET','/calls/'+encodeURIComponent(id)).then(function(r){
       if(!live()||current.sid!==sid||gen!==phoneGen) return r;
-      if(r.ok&&r.j&&r.j.call){ upsertPhoneCard(r.j.call,sid,false); return r; }
+      if(r.ok&&r.j&&r.j.call){
+        upsertPhoneCard(r.j.call,sid,false);
+        /* Review M6: any success (a frame's refetch, an action) clears "lost touch" and resumes the poll. */
+        var lr=phoneCards[id];
+        if(lr&&lr.lost&&lr.view==='live') phoneResumePoll(lr,id,sid);
+        return r;
+      }
       /* Not a local password session: a status-only card from the gateway's
          own frame (never child bytes), with Hang up while live (I7). */
       if(r.status===403&&hint) phonePointer(id,hint,sid);
@@ -481,11 +493,13 @@ export function perchPhoneCardJs(lang = "en") {
      stop the poll and offer Retry. A success resets the count. */
   function phoneLivePoll(rec,id,sid){
     if(rec.timer) clearTimeout(rec.timer);
+    /* Review M8: one epoch per scheduled poll; a reply from an older one is ignored. */
+    var ep=rec.pollEp=(rec.pollEp||0)+1;
     rec.timer=setTimeout(function(){
       rec.timer=null;
       if(!live()||current.sid!==sid||phoneCards[id]!==rec||rec.view!=='live'){ phoneStopPoll(rec); return; }
       phoneRefetch(id,sid,'').then(function(r){
-        if(phoneCards[id]!==rec||rec.view!=='live'||rec.timer) return;
+        if(phoneCards[id]!==rec||rec.view!=='live'||ep!==rec.pollEp) return;
         rec.fails=(r&&r.ok)?0:rec.fails+1;
         if(rec.fails>=PH_POLL_MAX_FAILS){ phonePollLost(rec,id,sid); return; }
         phoneLivePoll(rec,id,sid);
@@ -497,12 +511,13 @@ export function perchPhoneCardJs(lang = "en") {
     var box=document.createElement('div'); box.className='ph-lost';
     box.appendChild(line('ph-err',PH_POLL_LOST));
     var b=phoneButton(PH_RETRY,'ph-link ph-retry');
-    b.onclick=function(){
-      if(rec.lost&&rec.lost.parentNode) rec.lost.parentNode.removeChild(rec.lost);
-      rec.lost=null; rec.fails=0;
-      phoneLivePoll(rec,id,sid);
-    };
+    b.onclick=function(){ phoneResumePoll(rec,id,sid); };
     box.appendChild(b); rec.node.appendChild(box); rec.lost=box;
+  }
+  function phoneResumePoll(rec,id,sid){
+    if(rec.lost&&rec.lost.parentNode) rec.lost.parentNode.removeChild(rec.lost);
+    rec.lost=null; rec.fails=0;
+    phoneLivePoll(rec,id,sid);
   }
   function phoneTick(rec){
     if(!rec.pill) return;

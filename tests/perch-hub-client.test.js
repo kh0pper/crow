@@ -4279,3 +4279,19 @@ test("P12: a refetch in flight across a same-sid reconnect never draws a card ab
   await phHops(6);
   assert.equal(phCards(hub).length, 0, "the stale answer is dropped: the reloaded history decides what shows");
 });
+
+test("review M6: any successful refetch (here a frame's) clears 'lost touch' and resumes the poll", async () => {
+  let status = 500;
+  const liveCall = phCall({ status: "live", started_at: "2030-01-01 00:00:00", event_seq: 2, transcript: [{ type: "state", state: "answered" }] });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [liveCall], call: liveCall, callStatus: () => status }) });
+  await openChatSession(hub);
+  await phHops();
+  for (let i = 0; i < 5; i++) await phFirePoll(hub);
+  assert.ok(phFind(hub, (n) => n.className === "ph-lost"));
+  assert.equal(phPollTimer(hub), undefined);
+  status = 200;
+  FakeEventSource.instances[FakeEventSource.instances.length - 1]._serverFrame("phone_call", { type: "phone_call", call_id: "call_1", status: "live", event_seq: 2 });
+  await phHops();
+  assert.equal(phFind(hub, (n) => n.className === "ph-lost"), undefined, "the notice is gone");
+  assert.equal(phPollTimer(hub)[1], 1500, "and the poll runs again at the healthy cadence");
+});
