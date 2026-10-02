@@ -50,7 +50,8 @@ import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/m
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { resolveDoorTarget, listDoorModels, isDoorUrl, isTrustedDoorSource, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { providerDoorUrl } from "../models/door.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -135,9 +136,15 @@ async function defaultDoorAuth(token) {
 
 /** Non-companion door addressing: loopback/tailnet source, or a valid bearer. */
 async function doorCallerAllowed(req, deps) {
-  if (isTrustedDoorSource(deps.remoteAddressFn(req))) return true;
+  // Socket AND every forwarded address must be loopback/tailnet (final review I1).
+  if (isTrustedDoorRequest(deps.remoteAddressFn(req), req.headers)) return true;
   const h = req.headers.authorization || "";
   return h.startsWith("Bearer ") ? !!(await deps.doorAuthFn(h.slice(7))) : false;
+}
+
+function incomingHop(req) {
+  const n = Number.parseInt(String(req.headers[DOOR_HOP_HEADER] || "0"), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /** Forward one door request and stream the response back. */
@@ -147,10 +154,20 @@ async function forwardDoor(req, res, target, op, deps) {
   }
   const body = { ...(req.body || {}), model: target.modelId };
   const headers = { "Content-Type": "application/json", Accept: req.headers.accept || "application/json", ...authHeaders(target.apiKey) };
-  if (target.doorKind === "native-foreign") headers[DOOR_PROVIDER_HEADER] = target.providerId;
-  // Any forward to a door URL is a hop; the receiving door refuses a second one (508).
-  if (isDoorUrl(target.url)) headers[DOOR_HOP_HEADER] = "1";
-  const url = `${target.url}/${op}`;
+  let base = target.url;
+  if (target.doorKind === "native-foreign") {
+    headers[DOOR_PROVIDER_HEADER] = target.providerId;
+    // Final review minor 5: a pre-plan-2 row stores the BARE /llm/v1 door. A
+    // peer on an old router ignores X-Crow-Provider and would answer with its
+    // companion heuristics (the wrong model, silently); the provider-scoped
+    // path makes an old peer answer 404 instead (loud), a new one routes it.
+    if (/\/llm\/v1$/i.test(base)) base = providerDoorUrl(base.replace(/\/llm\/v1$/i, "/llm/v1"), target.providerId);
+  }
+  // Every door forward carries hop+1 (upstream model servers ignore it); the
+  // receiving door refuses a forward to another door at hop >= 1 and anything
+  // at hop >= 2 (508), so even a non-door-shaped self-loop terminates.
+  headers[DOOR_HOP_HEADER] = String(incomingHop(req) + 1);
+  const url = `${base}/${op}`;
   let upstream;
   try {
     const t = connectTimeout(LLM_CONNECT_TIMEOUT_MS);
@@ -181,7 +198,7 @@ function doorTargetFor(req, deps) {
     providerHeader: (req.params && req.params.provider) || req.headers[DOOR_PROVIDER_HEADER] || null,
     model: req.body && req.body.model,
     companionModelIds: COMPANION_MODEL_IDS,
-    hop: Number(req.headers[DOOR_HOP_HEADER] || 0),
+    hop: incomingHop(req),
   });
 }
 

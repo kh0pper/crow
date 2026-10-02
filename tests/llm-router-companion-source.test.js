@@ -95,3 +95,24 @@ test("GET /llm/v1/models follows the same rule; the health probes stay open", as
     assert.equal((await fetch(`${appUrl}/llm/v1/models`)).status, 200);
   });
 });
+
+test("I1: loopback carrying a forwarded public client is refused on the companion path, the door and /llm/acquire", async () => {
+  const xff = { "x-forwarded-for": "168.171.4.20, 100.90.185.114" };
+  const r = await chat(xff);
+  assert.equal(r.status, 403);
+  assert.equal(forwarded, 0);
+  assert.equal((await fetch(`${appUrl}/llm/p/anything/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json", ...xff }, body: "{}" })).status, 403);
+  const a = await fetch(`${appUrl}/llm/acquire`, { method: "POST", headers: { "content-type": "application/json", "x-real-ip": "8.8.8.8" }, body: JSON.stringify({ provider: "crow-chat" }) });
+  assert.equal(a.status, 403);
+  assert.equal((await chat({ forwarded: "for=203.0.113.9" })).status, 403);
+});
+
+test("I1: loopback with a tailnet forwarded client is allowed; plain loopback is allowed", async () => {
+  assert.equal((await chat({ "x-forwarded-for": "100.67.188.54" })).status, 200);
+  assert.equal(forwarded, 1);
+  assert.equal((await chat()).status, 200);
+});
+
+test("I1: a public forwarded client with a valid bearer is still allowed (the bearer is the credential)", async () => {
+  assert.equal((await chat({ "x-forwarded-for": "8.8.8.8", authorization: "Bearer good-token" })).status, 200);
+});

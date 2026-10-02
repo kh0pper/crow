@@ -33,6 +33,8 @@ before(async () => {
     "crow-local-27b-copilot": { baseUrl: upUrl, apiKey: "none", models: [{ id: "qwen3.8-27b" }], gpuPolicy: { engine: { managed: "external", host: "crow" } } },
     "peer-door": { baseUrl: "http://127.0.0.1:9/llm/p/peer-door/v1", apiKey: "none", models: [{ id: "far" }], gpuPolicy: { runtime: "native", owner: "other", port: 3 } },
     "qwen-cloud": { baseUrl: "https://example.com/v1", apiKey: "sk-x", models: [{ id: "qwen3.8-max" }] },
+    // A pre-plan-2 foreign native row: its door is the BARE /llm/v1 of the stub.
+    "peer-old": { baseUrl: upUrl.replace(/\/v1$/, "/llm/v1"), apiKey: "none", models: [{ id: "old-m" }], gpuPolicy: { runtime: "native", owner: "other", port: 6 } },
     "crow-reserved": { baseUrl: upUrl, doorUrl: "http://d/llm/p/crow-reserved/v1", apiKey: "none", models: [{ id: "r" }], gpuPolicy: { runtime: "native", owner: "me", port: 4 } },
     "crow-wedge": { baseUrl: upUrl, doorUrl: "http://d/llm/p/crow-wedge/v1", apiKey: "none", models: [{ id: "w" }], gpuPolicy: { runtime: "native", owner: "me", port: 5 } },
   };
@@ -170,4 +172,16 @@ test("GET /llm/v1/models lists companion ids then forwardable door models", asyn
   assert.ok(ids.includes("qwen3.5-4b") && ids.includes("qwen3.6-35b-a3b"));
   assert.ok(ids.includes("crow-local-27b-copilot/qwen3.8-27b"));
   assert.equal(ids.some((i) => i.startsWith("qwen-cloud/")), false);
+});
+
+test("every door forward carries hop+1; a foreign bare /llm/v1 door is rewritten to the provider-scoped door (final review minors 1 and 5)", async () => {
+  const r = await post("/llm/v1/chat/completions", { model: "peer-old/old-m", messages: [] });
+  assert.equal(r.status, 200);
+  assert.equal(seen[0].path, "/llm/p/peer-old/v1/chat/completions");
+  assert.equal(seen[0].headers["x-crow-door-hop"], "1");
+  assert.equal(seen[0].headers["x-crow-provider"], "peer-old");
+  await post("/llm/p/crow-local-27b/v1/chat/completions", { model: "qwen3.8-27b", messages: [] }, { "X-Crow-Door-Hop": "1" });
+  assert.equal(seen[0].headers["x-crow-door-hop"], "2", "a non-door upstream still gets the incremented hop");
+  const third = await post("/llm/p/crow-local-27b/v1/chat/completions", { model: "qwen3.8-27b", messages: [] }, { "X-Crow-Door-Hop": "2" });
+  assert.equal(third.status, 508);
 });

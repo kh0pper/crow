@@ -131,3 +131,56 @@ test("listDoorModels lists forwardable models only, qualified", () => {
   assert.ok(ids.includes("lan-optin/optin-model"));
   assert.equal(ids.some((id) => id.startsWith("qwen-cloud/") || id.startsWith("lan-box/") || id.startsWith("evil-bundle/")), false);
 });
+
+// Final fix wave I1: a reverse proxy on the same box (r4's public sslip.io
+// front door: black-swan Caddy -> crow Serve :8449 -> r4 on loopback) delivers
+// outside clients as 127.0.0.1. A forwarding header is trusted only if EVERY
+// address it names is itself loopback or tailnet.
+test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain must be all-trusted", async () => {
+  const { isTrustedDoorRequest } = await import("../servers/gateway/models/door-resolve.js");
+  assert.equal(isTrustedDoorRequest("127.0.0.1", {}), true, "plain loopback");
+  assert.equal(isTrustedDoorRequest("::ffff:127.0.0.1", {}), true);
+  assert.equal(isTrustedDoorRequest("100.90.185.114", {}), true, "plain tailnet");
+  assert.equal(isTrustedDoorRequest("10.0.0.50", {}), false, "LAN socket");
+  assert.equal(isTrustedDoorRequest("10.0.0.50", { "x-forwarded-for": "127.0.0.1" }), false, "a header never upgrades an untrusted socket");
+  // public client behind Caddy + Serve (Serve appends the black-swan hop)
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.90.185.114" }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "8.8.8.8" }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-real-ip": "8.8.8.8" }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for=192.0.2.60;proto=https;by=203.0.113.43' }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for="[2001:db8:cafe::17]:4711"' }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "unknown" }), false, "an unparseable entry is untrusted");
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "" }), true, "an empty header names nobody");
+  // tailnet clients through Serve
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.67.188.54" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.67.188.54:51234, 127.0.0.1" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for="[fd7a:115c:a1e0::5]:443", for=100.64.0.9' }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": ["100.64.0.1", "8.8.8.8"] }), false, "repeated headers: every value counts");
+});
+
+test("isDoorUrl is case-insensitive (Express routing is)", () => {
+  assert.equal(isDoorUrl("http://100.64.9.1:3001/LLM/V1"), true);
+  assert.equal(isDoorUrl("http://100.64.9.1:3001/Llm/P/x/v1"), true);
+});
+
+test("a third hop is refused whatever the target looks like", () => {
+  const r = resolveDoorTarget({ providers: P, providerHeader: "crow-voice", model: "qwen3.5-4b", companionModelIds: [], hop: 2 });
+  assert.equal(r.status, 508);
+  assert.equal(r.code, "DOOR_LOOP");
+  assert.equal(resolveDoorTarget({ providers: P, providerHeader: "crow-voice", model: "qwen3.5-4b", companionModelIds: [], hop: 1 }).kind, "forward", "one hop to a non-door target is the normal foreign-native case");
+});
+
+test("a forwardable-looking row on a public address is refused (the cloud allowlist cannot be bypassed by door_forward or a bundleId)", () => {
+  const P3 = {
+    "cloud-optin": { baseUrl: "https://api.z.ai/api/coding/paas/v4", apiKey: "sk-paid", models: [{ id: "glm" }], gpuPolicy: { door_forward: true } },
+    "cloud-bundle": { baseUrl: "https://maas.example.com/v1", apiKey: "sk-paid", bundleId: "x", models: [{ id: "q" }] },
+    "ts-host": { baseUrl: "http://crow.dachshund-chromatic.ts.net:8011/v1", apiKey: "none", bundleId: "y", models: [{ id: "v" }] },
+  };
+  for (const id of ["cloud-optin", "cloud-bundle"]) {
+    const r = resolveDoorTarget({ providers: P3, providerHeader: id, model: null, companionModelIds: [] });
+    assert.equal(r.code, "NOT_FORWARDABLE", id);
+    assert.equal(JSON.stringify(r).includes("sk-paid"), false);
+  }
+  assert.equal(resolveDoorTarget({ providers: P3, providerHeader: "ts-host", model: "v", companionModelIds: [] }).kind, "forward", "a tailnet hostname is local");
+  assert.deepEqual(listDoorModels(P3).map((m) => m.id), ["ts-host/v"]);
+});

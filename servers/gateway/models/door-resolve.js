@@ -27,7 +27,8 @@ const FORBIDDEN_HOSTS = new Set([
 ]);
 
 export function isDoorUrl(url) {
-  try { return /\/llm(\/p\/[^/]+)?\/v1$/.test(new URL(url).pathname.replace(/\/+$/, "")); } catch { return false; }
+  // Case-insensitive: Express routes /LLM/v1 to the same handler (final review minor 1).
+  try { return /\/llm(\/p\/[^/]+)?\/v1$/i.test(new URL(url).pathname.replace(/\/+$/, "")); } catch { return false; }
 }
 
 /** Canonical host for the blocklist (re-review N1): brackets off, lower-case,
@@ -87,10 +88,19 @@ function forward(providers, providerId, modelId, hop) {
     return { kind: "error", status: 404, code: "MODEL_NOT_SERVED", message: `provider "${providerId}" does not serve "${modelId}"`, candidates: ids.map((i) => `${providerId}/${i}`) };
   }
   const url = String(p.baseUrl || "").replace(/\/+$/, "");
+  if (!isForbiddenTarget(url) && !isLocalClassTarget(url)) {
+    // Final review minor 2: a managed marker (door_forward, bundleId) on a
+    // public-address row must not turn the door into a proxy for a paid cloud
+    // key — the cloud allowlist is the consent gate, and the door has none.
+    return { kind: "error", status: 400, code: "NOT_FORWARDABLE", message: `provider "${providerId}" is not on a loopback, private or tailnet address; the door never forwards to the internet` };
+  }
   if (isForbiddenTarget(url)) {
     return { kind: "error", status: 400, code: "FORBIDDEN_TARGET", message: `provider "${providerId}" points at a link-local or metadata address; the door refuses it` };
   }
-  if (isDoorUrl(url) && Number(hop) >= 1) {
+  // One door hop is the normal foreign-native case; a forward to another door
+  // at hop >= 1, or ANY forward at hop >= 2 (every door forward now carries
+  // hop+1), is a loop (final review minor 1).
+  if ((isDoorUrl(url) && Number(hop) >= 1) || Number(hop) >= 2) {
     return { kind: "error", status: 508, code: "DOOR_LOOP", message: `refusing a second door hop to ${providerId}` };
   }
   return { kind: "forward", providerId, modelId: mid, url, apiKey: p.apiKey || "none", doorKind };
@@ -124,7 +134,7 @@ export function resolveDoorTarget({ providers = {}, providerHeader = null, model
 export function listDoorModels(providers = {}) {
   const out = [];
   for (const [pid, p] of Object.entries(providers)) {
-    if (!forwardable(p) || isForbiddenTarget(p.baseUrl)) continue;
+    if (!forwardable(p) || isForbiddenTarget(p.baseUrl) || !isLocalClassTarget(p.baseUrl)) continue;
     const doorKind = doorKindOf(p);
     for (const mid of modelIdsOf(p)) out.push({ id: `${pid}/${mid}`, object: "model", owned_by: "crow", provider: pid, doorKind });
   }
@@ -138,4 +148,74 @@ export function isTrustedDoorSource(addr) {
   const m = a.match(/^100\.(\d+)\.\d+\.\d+$/);
   if (m && Number(m[1]) >= 64 && Number(m[1]) <= 127) return true;
   return /^fd7a:115c:a1e0:/i.test(a);
+}
+
+/** Is this target on loopback, a private range, or the tailnet? Decided on the
+ * canonical host as an ADDRESS (never the display-only isPrivateHost): IPv4
+ * 127/8, 10/8, 172.16/12, 192.168/16, 100.64/10; IPv6 ::1, fc00::/7
+ * (incl. Tailscale's fd7a:115c:a1e0::/48); the names `localhost` and
+ * `*.ts.net`. Any other DNS name counts as public (final review minor 2). */
+export function isLocalClassTarget(url) {
+  let h;
+  try { h = canonicalTargetHost(new URL(url).hostname); } catch { return false; }
+  if (!h) return false;
+  if (h === "localhost" || h.endsWith(".ts.net")) return true;
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (h === "::1") return true;
+  return /^f[cd][0-9a-f]{0,2}:/.test(h);
+}
+
+/** One forwarding-header value -> the bare address it names, or null when it
+ * names something that is not an address ("unknown", an obfuscated token). */
+function bareForwardedAddr(v) {
+  let x = String(v || "").trim().replace(/^"|"$/g, "");
+  if (!x) return "";
+  const br = x.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (br) return br[1];
+  const v4port = x.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  if (v4port) return v4port[1];
+  if (/^[0-9a-f:.]+$/i.test(x) && (x.includes(".") || x.includes(":"))) return x;
+  return null;
+}
+
+function headerValues(h) {
+  if (h == null) return [];
+  return (Array.isArray(h) ? h : [h]).flatMap((v) => String(v).split(","));
+}
+
+/** Every address a request's forwarding headers name (X-Forwarded-For,
+ * X-Real-IP, RFC 7239 Forwarded `for=`). `null` entries mark values that are
+ * not addresses. Empty values are skipped. */
+export function forwardedAddrs(headers = {}) {
+  const out = [];
+  for (const v of headerValues(headers["x-forwarded-for"])) { const a = bareForwardedAddr(v); if (a !== "") out.push(a); }
+  for (const v of headerValues(headers["x-real-ip"])) { const a = bareForwardedAddr(v); if (a !== "") out.push(a); }
+  for (const el of headerValues(headers["forwarded"])) {
+    for (const pair of el.split(";")) {
+      const m = pair.trim().match(/^for=(.*)$/i);
+      if (m) { const a = bareForwardedAddr(m[1]); if (a !== "") out.push(a); }
+    }
+  }
+  return out;
+}
+
+/** The ONE source check for /llm (door, companion /llm/v1, /llm/acquire).
+ * `remoteAddr` is req.socket.remoteAddress — the TCP peer, which Express's
+ * `trust proxy` setting (index.js sets 1) never changes; `req.ip` is the value
+ * that setting rewrites from X-Forwarded-For, so it is never consulted here.
+ * The socket must be loopback or tailnet, AND — because a same-box reverse
+ * proxy (Tailscale Serve, or r4's sslip.io front door: black-swan Caddy ->
+ * crow Serve :8449 -> r4 on loopback) makes every client look like loopback —
+ * every address any forwarding header names must be loopback or tailnet too.
+ * A header can only take trust away, never grant it (final review I1). */
+export function isTrustedDoorRequest(remoteAddr, headers = {}) {
+  if (!isTrustedDoorSource(remoteAddr)) return false;
+  for (const a of forwardedAddrs(headers || {})) {
+    if (a === null || !isTrustedDoorSource(a)) return false;
+  }
+  return true;
 }
