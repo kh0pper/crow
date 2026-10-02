@@ -377,7 +377,7 @@ async def run_w(line, replies, wrapups=None, plan=PLAN, **kw):
     return result, events, line, brain
 
 
-CLOSING = "Thanks, that's what I needed — Saturday hours 9 to 1."
+CLOSING = "Great, Saturday 9 to 1 is what I needed. Thank you, goodbye."
 
 
 async def test_auto_hangup_on_a_closing_line_runs_the_wrapup():
@@ -396,11 +396,21 @@ async def test_auto_hangup_on_a_closing_line_runs_the_wrapup():
     assert "Business: We're open Saturdays 9 to 1." in body and "Assistant: " + CLOSING in body
 
 
-async def test_auto_hangup_without_a_wrapup_keeps_the_closing_line():
+async def test_auto_hangup_without_a_wrapup_keeps_the_closing_line_but_claims_nothing():
     line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
     result, _, _, brain = await run_w(line, [R("What are your Saturday hours?"), R(CLOSING)])
-    assert result["outcome"] == "info_gathered" and result["summary"] == CLOSING
+    assert result["outcome"] == "needs_callback" and result["summary"] == CLOSING, "a goodbye alone is no proof of success"
     assert len(brain.wrapup_calls) == 1, "tried, failed, fell back"
+
+
+async def test_the_live_acceptance_line_no_longer_hangs_up_but_its_facts_survive():
+    # "Thanks, that's what I needed — Saturday hours 9 to 1." does not END with the
+    # goodbye, so the call waits; the silence ending's wrap-up still records the facts.
+    line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
+    result, events, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Thanks, that's what I needed — Saturday hours 9 to 1.")],
+                                       [W("info_gathered", "Saturdays 9 to 1.")])
+    assert result["outcome"] == "info_gathered" and result["summary"] == "Saturdays 9 to 1."
+    assert ("state", {"state": "ended"}) in events, "the silence ending also shows Wrapping up"
 
 
 async def test_spanish_closing_line_hangs_up():
@@ -426,8 +436,8 @@ async def test_thanks_inside_a_sentence_does_not_hang_up():
 
 async def test_no_auto_hangup_in_an_automated_menu():
     line = TimedLine(["For appointments press 2."])
-    result, events, _, _ = await run_w(line, [R("Goodbye.")])
-    assert not any(t == "state" and d["state"] == "ended" for t, d in events)
+    result, events, line, _ = await run_w(line, [R("Goodbye.")])
+    assert len(line.timeouts) == 2, "after the menu goodbye the controller kept listening"
     assert result["outcome"] == "needs_callback" and result["summary"] == "the other side went silent"
 
 
@@ -485,7 +495,7 @@ async def test_owner_stop_with_a_failed_wrapup_still_records_stopped():
 
 async def test_silence_with_facts_learned_becomes_info_gathered():
     line = TimedLine(["Smile Dental.", "We're open Saturdays 9 to 1."])
-    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Great. And on Sundays")],
+    result, _, _, _ = await run_w(line, [R("What are your Saturday hours?"), R("Great, and on Sundays")],
                                   [W("info_gathered", "Saturdays 9 to 1.")])
     assert result["outcome"] == "info_gathered" and result["summary"] == "Saturdays 9 to 1."
 
@@ -529,19 +539,33 @@ async def test_wrapup_json_written_as_text_is_accepted():
     assert result["outcome"] == "info_gathered" and result["summary"] == "Sat 9-1"
 
 
-async def test_wrapup_booking_is_held_to_the_plan_limits():
-    inside = {"date": "2026-10-06", "time": "15:30", "location": "Smile Dental"}
-    outside = {"date": "2026-10-05", "time": "09:00"}
+async def test_wrapup_never_creates_a_booking():
+    # review I-1: booked comes ONLY from a booking recorded during the call.
     line = TimedLine(["Smile Dental.", "Tuesday the 6th at 3:30, you're booked."])
-    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked Tue 3:30.", inside)])
-    assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06" and result["booking"]["time"] == "15:30"
-    line = TimedLine(["Smile Dental.", "Monday the 5th at 9, you're booked."])
-    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked Mon 9.", outside)])
+    result, _, _, brain = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked Tue 3:30.")])
     assert result["outcome"] == "needs_callback" and result["booking"] is None
-    assert "booking not accepted" in result["summary"]
-    line = TimedLine(["Smile Dental.", "You're booked."])
-    result, _, _, _ = await run_w(line, [R("A cleaning please."), R("Great")], [W("booked", "Booked.")])
-    assert result["outcome"] == "needs_callback", "booked with no booking at all is not accepted"
+    assert result["summary"] == "Booked Tue 3:30. (booking not confirmed during the call) (the other side went silent)"
+    assert "none (never report booked)" in brain.wrapup_calls[0][1]["content"]
+
+
+async def test_wrapup_booked_uses_the_recorded_booking():
+    line = TimedLine(["Smile Dental.", "Tuesday the 6th at 3:30 is open.", "Great, you're all set."])
+    result, _, _, brain = await run_w(line, [
+        R("A cleaning please."),
+        R("", ("record_booking", {"date": "2026-10-06", "time": "15:30", "location": "Smile Dental"})),
+        R("Tuesday the 6th at 3:30 works for me"),
+        R("Okay"),
+    ], [W("booked", "Booked Tue Oct 6 3:30.")])
+    assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06" and result["booking"]["time"] == "15:30"
+    assert '"date": "2026-10-06"' in brain.wrapup_calls[0][1]["content"]
+
+
+async def test_owner_stop_keeps_a_recorded_booking():
+    result, _, _, _ = await _run_stop(["Smile Dental.", "Tuesday the 6th at 3:30 is open."],
+                                      [R("A cleaning please."), R("", ("record_booking", {"date": "2026-10-06", "time": "15:30"})), R("That works")],
+                                      [W("info_gathered", "Booked Tue 3:30.")])
+    assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06"
+    assert result["error"] == "stopped by owner" and result["summary"] == "Booked Tue 3:30."
 
 
 async def test_wrapup_summary_markup_is_stripped():

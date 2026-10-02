@@ -262,18 +262,23 @@ class CallController:
         return self.state.mode == "human" and self._human_n > 0 and self._disclosed_for_segment and policy.is_closing(spoken)
 
     async def _auto_hangup(self, spoken):
-        self.emit("state", {"state": "ended"})
         w = await self._wrapup()
         if w:
             outcome, summary, booking = w
             return self.result(outcome, summary, booking=booking)
-        # No wrap-up: the closing line is the best record of what was learned.
-        return self.result("booked" if self.state.booking else "info_gathered", spoken[:500])
+        # No wrap-up: never claim success from a goodbye alone. The closing line
+        # is kept as the best record; a booking recorded during the call stands.
+        if self.state.booking:
+            return self.result("booked", spoken[:500])
+        return self.result("needs_callback", spoken[:500])
 
     async def _stopped(self):
-        self.emit("state", {"state": "ended"})
         w = await self._wrapup()
-        return self.result("stopped", w[1] if w else "", error="stopped by owner")
+        summary = w[1] if w else ""
+        # A booking recorded (and limit-checked) during the call survives the stop.
+        if self.state.booking:
+            return self.result("booked", summary, error="stopped by owner")
+        return self.result("stopped", summary, error="stopped by owner")
 
     async def _callback(self, reason):
         w = await self._wrapup()
@@ -291,18 +296,22 @@ class CallController:
         if not self._farend_n:
             return None
         await self._hangup()
+        # Every ending that waits on a wrap-up says so (the card's "Wrapping up…").
+        self.emit("state", {"state": "ended"})
         fn = getattr(self.brain, "wrapup", None)
         if fn is None:
             return None
         try:
-            reply = await asyncio.wait_for(fn(wrapup_messages(self.plan, self.owner, self._transcript), [WRAPUP_TOOL]), self.wrapup_timeout)
+            msgs = wrapup_messages(self.plan, self.owner, self._transcript, self.state.booking)
+            reply = await asyncio.wait_for(fn(msgs, [WRAPUP_TOOL]), self.wrapup_timeout)
         except Exception:
             return None
         return self._validate_wrapup(_wrapup_args(reply))
 
     def _validate_wrapup(self, a):
-        """Authority stays in code, as for end_call: a known model outcome, a
-        sanitized summary, and a booking only inside the plan limits."""
+        """Authority stays in code, as for end_call: a known model outcome and a
+        sanitized summary. `booked` stands ONLY on a booking recorded (and
+        limit-checked) during the call; the wrap-up never supplies one."""
         if not isinstance(a, dict) or a.get("outcome") not in policy.MODEL_OUTCOMES:
             return None
         outcome = a["outcome"]
@@ -310,13 +319,11 @@ class CallController:
         summary = sanitize(raw).clean.strip()[:500] if isinstance(raw, str) else ""
         booking = None
         if outcome == "booked":
-            cand = self.state.booking or a.get("booking")
-            ok, reason = policy.booking_within_limits(cand, self.plan.get("limits") or {}) if isinstance(cand, dict) else (False, "no booking")
-            if ok:
-                booking = {k: cand.get(k) for k in ("date", "time", "location", "price", "confirmation", "notes")}
+            if self.state.booking:
+                booking = self.state.booking
             else:
                 outcome = "needs_callback"
-                summary = (summary + " " if summary else "") + f"(booking not accepted: {reason})"
+                summary = (summary + " " if summary else "") + "(booking not confirmed during the call)"
         return outcome, summary[:500], booking
 
     def _note(self, text):
