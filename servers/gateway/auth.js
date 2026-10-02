@@ -13,6 +13,19 @@ import { createDbClient, auditLog } from "../db.js";
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
 /**
+ * client_id of the dashboard's own session rows. Dashboard sessions are stored
+ * in oauth_tokens as token_type 'access' (servers/gateway/dashboard/auth.js),
+ * so the two credential kinds share a table and must be told apart by this id
+ * on BOTH sides (S4, 2026-10-02):
+ *  - verifyAccessToken (MCP bearer, /introspect) refuses rows with this id,
+ *    so a dashboard session cookie value is not an MCP bearer token;
+ *  - verifySession only accepts rows with this id, and registerClient refuses
+ *    to store an OAuth client under it, so no OAuth-issued token can ever
+ *    carry it and pass as a dashboard session.
+ */
+export const DASHBOARD_CLIENT_ID = "dashboard";
+
+/**
  * Epoch ms for an oauth_tokens timestamp. SQLite's datetime('now') shape is UTC
  * "YYYY-MM-DD HH:MM:SS" with no zone, and `new Date()` reads that shape as
  * LOCAL time, which on a US-Central host put every MCP token's expiry 5-6 h
@@ -43,6 +56,9 @@ export class CrowOAuthClientsStore {
   }
 
   async registerClient(clientMetadata) {
+    if (clientMetadata && clientMetadata.client_id === DASHBOARD_CLIENT_ID) {
+      throw new Error("client_id is reserved");
+    }
     await this.db.execute({
       sql: "INSERT OR REPLACE INTO oauth_clients (client_id, metadata, created_at) VALUES (?, ?, datetime('now'))",
       args: [clientMetadata.client_id, JSON.stringify(clientMetadata)],
@@ -203,8 +219,8 @@ export class CrowOAuthProvider {
   async verifyAccessToken(token) {
     const hashedToken = hashToken(token);
     const { rows } = await this.db.execute({
-      sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access'",
-      args: [hashedToken],
+      sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access' AND client_id != ?",
+      args: [hashedToken, DASHBOARD_CLIENT_ID],
     });
 
     if (rows.length === 0) throw new InvalidTokenError("Invalid token");
