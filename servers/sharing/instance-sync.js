@@ -255,6 +255,19 @@ function _scheduleStorageReset() {
 // Exported for real (not just the ForTest alias below): sync-emit.js's
 // emitOrQueue (Task 2) is a second, production, door into this same gate —
 // a row the live emitChange path would filter must never be queued either.
+/**
+ * Memory sources that are per-install and never cross instances:
+ *  - "starter": onboarding demo content (C1).
+ *  - "maker-lab": a child's learner record — bundles/maker-lab/DATA-HANDLING.md
+ *    promises it "does not leave your host".
+ * Enforced on emit and on apply (shouldSyncRow, the incoming row) AND against
+ * the local row an inbound update/delete would hit (_isLocallyProtected).
+ */
+export const LOCAL_ONLY_MEMORY_SOURCES = Object.freeze(["starter", "maker-lab"]);
+export function isLocalOnlyMemorySource(source) {
+  return LOCAL_ONLY_MEMORY_SOURCES.includes(source);
+}
+
 export function shouldSyncRow(table, row) {
   if (table === "contacts") {
     if (!row) return false;
@@ -336,16 +349,11 @@ export function shouldSyncRow(table, row) {
     return false;
   }
   if (table === "memories") {
-    // Starter/demo content seeded by onboarding (C1) is per-install: it must
-    // never ride to paired instances (same convention as providers
-    // gpu_policy.local_only above — one gate covers emit AND apply).
-    if (row && row.source === "starter") return false;
-    // Maker Lab learner progress is a child's record: its DATA-HANDLING.md
-    // promises it "does not leave your host". The bundle writes these rows
-    // with no emit by design; this gate keeps any OTHER door (a
-    // crow_update_memory edit, a lamport re-emit sweep, a peer that did
-    // emit one) from carrying them across instances.
-    if (row && row.source === "maker-lab") return false;
+    // Starter/demo content (C1) and maker-lab learner records are per-install:
+    // they never ride to paired instances (LOCAL_ONLY_MEMORY_SOURCES; same
+    // convention as providers gpu_policy.local_only above — one gate covers
+    // emit AND apply of the incoming row).
+    if (row && isLocalOnlyMemorySource(row.source)) return false;
   }
   if (table === "ramble_marks") {
     // mark_id is the wire key (the AUTOINCREMENT id is stripped) — a row
@@ -2625,6 +2633,16 @@ export class InstanceSyncManager {
       return;
     }
 
+    // Locally protected rows (review I1): a maker-lab learner memory or a
+    // starter row never syncs OUT, and must not be overwritten or deleted by
+    // an inbound op whose id merely collides (memory ids are per-instance
+    // AUTOINCREMENT). The incoming row's own source is checked by
+    // shouldSyncRow above; this checks the LOCAL row it would hit.
+    if ((op === "update" || op === "delete") && row.id !== undefined && await this._isLocallyProtected(table, row.id)) {
+      console.warn(`[instance-sync] skipped inbound ${op} on protected local ${table} id=${row.id}`);
+      return;
+    }
+
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
     if ((op === "update" || op === "delete") && row.id !== undefined) {
@@ -3901,6 +3919,16 @@ export class InstanceSyncManager {
    * un-revoke (boot.js eagerInitPairedPeers / tailnet-sync paths gate on status
    * and will reopen when the instance is un-revoked).
    */
+  async _isLocallyProtected(table, id) {
+    if (table !== "memories") return false;
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
+      return isLocalOnlyMemorySource(rows?.[0]?.source);
+    } catch {
+      return false;
+    }
+  }
+
   async _isPeerRevoked(remoteInstanceId) {
     try {
       const { rows } = await this.db.execute({
