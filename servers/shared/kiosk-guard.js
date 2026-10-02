@@ -18,7 +18,7 @@ export async function isKioskActive(db) {
   try {
     const r = await db.execute({
       sql: `SELECT 1 FROM maker_sessions
-            WHERE state != 'revoked' AND expires_at > datetime('now')
+            WHERE state != 'revoked' AND julianday(expires_at) > julianday('now')
             LIMIT 1`,
       args: [],
     });

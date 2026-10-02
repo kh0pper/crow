@@ -9,12 +9,31 @@ const CHANNEL_GATEWAYS = new Set(["discord", "telegram", "slack"]);
 
 function header(h, k) { const v = h?.[k]; const s = Array.isArray(v) ? v[0] : v; return s == null ? null : String(s); }
 
-export function resolvePhoneActor(extra) {
-  if (extra?.authInfo?.clientId === "local-mcp") {
+/** S2: the actor a request is attributed to.
+ *  - "bot": local-mcp auth AND X-Crow-Actor-Sig verifies for exactly these
+ *    (bot, thread, gateway) headers. `verifyActor` is injected by the gateway,
+ *    which alone holds the signing key (scripts/pi-bots/actor-sig.mjs).
+ *  - "unattributed": bot headers with a missing or bad signature, or the
+ *    path-scoped phone token with no actor at all. It may still propose a call
+ *    (the owner approves every call) but it cannot target a Perch chat or a
+ *    channel thread, cannot read or cancel any call, and has its own rate
+ *    bucket. Without a verifier every bot header is unattributed: fail closed.
+ *  - "session": the owner (dashboard, OAuth, or the full local token without
+ *    actor headers). */
+export const UNATTRIBUTED = Object.freeze({ kind: "unattributed", id: null, thread: null, gateway: null });
+export function resolvePhoneActor(extra, verifyActor) {
+  const auth = extra?.authInfo;
+  if (auth?.clientId === "local-mcp") {
     const h = extra?.requestInfo?.headers || {};
     if (header(h, "x-crow-actor-kind") === "bot") {
-      return { kind: "bot", id: header(h, "x-crow-actor-id"), thread: header(h, "x-crow-actor-thread"), gateway: header(h, "x-crow-actor-gateway") };
+      const a = { kind: "bot", id: header(h, "x-crow-actor-id"), thread: header(h, "x-crow-actor-thread"), gateway: header(h, "x-crow-actor-gateway") };
+      const sig = header(h, "x-crow-actor-sig");
+      let valid = false;
+      try { valid = !!(a.id && sig && typeof verifyActor === "function" && verifyActor({ kind: "bot", botId: a.id, threadId: a.thread, gatewayType: a.gateway, sig })); } catch { valid = false; }
+      // claimed_id only keys the rate bucket (M2); it grants nothing.
+      return valid ? a : { ...UNATTRIBUTED, claimed_id: a.id || null };
     }
+    if (auth?.extra?.tokenScope === "phone") return { ...UNATTRIBUTED };
   }
   return { kind: "session", id: null, thread: null, gateway: null };
 }
@@ -29,7 +48,7 @@ export function deliverToFromActor(a) {
 const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
 const err = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
 function assertReadable(c, actor) {
-  if (actor.kind === "bot" && c.created_by?.id !== actor.id) {
+  if (actor.kind !== "session" && (actor.kind !== "bot" || !actor.id || c.created_by?.id !== actor.id)) {
     throw Object.assign(new Error("not your call"), { code: "forbidden" });
   }
 }
@@ -44,7 +63,8 @@ const limitsSchema = (z) => z.object({
   notes: z.string().optional(),
 }).optional();
 
-export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, notifyCard } = {}) {
+export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, notifyCard, verifyActor } = {}) {
+  const actorOf = (extra) => resolvePhoneActor(extra, verifyActor);
   // Spec 2026-10-01 §4.2: keep the requesting Perch chat's call card current (I3-checked).
   const pushCard = async (id) => {
     if (!notifyCard) return;
@@ -52,7 +72,7 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
   };
   if (!McpServer || !z) throw new Error("createPhoneMcpServer needs the gateway's McpServer and z (dependency injection)");
-  const server = new McpServer({ name: "crow-phone", version: "0.2.1" });
+  const server = new McpServer({ name: "crow-phone", version: "0.2.2" });
 
   server.tool("phone_plan_call",
     "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan (in this chat's call card, or in Crow's Nest → Phone). Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
@@ -62,11 +82,11 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     wrap(async (a, extra) => {
       const plan = validatePlan(a);
       checkNumberPolicy(plan.number_e164, { ownerNumber: typeof ownerNumber === "function" ? await ownerNumber() : ownerNumber, suppressed: await store.suppressedSet(db) });
-      const actor = resolvePhoneActor(extra);
+      const actor = actorOf(extra);
       const { call_id } = await store.createPlan(db, plan, actor, deliverToFromActor(actor));
       if (notify) {
         try {
-          await notify(db, { title: `Phone: ${actor.kind === "bot" && actor.id ? actor.id : "A bot"} wants to call ${plan.business_name}`,
+          await notify(db, { title: `Phone: ${actor.kind === "bot" && actor.id ? actor.id : actor.kind === "unattributed" ? "An unverified bot" : "A bot"} wants to call ${plan.business_name}`,
             body: null, type: "system", source: "phone", priority: "high", action_url: `/dashboard/phone?call=${call_id}` });
         } catch (e) { console.warn(`[phone] plan notification failed for ${call_id}: ${e.message}`); }
       }
@@ -79,7 +99,7 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     wrap(async ({ call_id }, extra) => {
       const c = await store.getCall(db, call_id);
       if (!c) throw Object.assign(new Error("no such call"), { code: "not_found" });
-      assertReadable(c, resolvePhoneActor(extra));
+      assertReadable(c, actorOf(extra));
       return { call_id, status: c.status, outcome: c.outcome || null, business_name: c.business_name };
     }));
 
@@ -88,14 +108,14 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     wrap(async ({ call_id }, extra) => {
       const c = await store.getCall(db, call_id);
       if (!c) throw Object.assign(new Error("no such call"), { code: "not_found" });
-      assertReadable(c, resolvePhoneActor(extra));
+      assertReadable(c, actorOf(extra));
       if (c.status !== "done") return { call_id, status: c.status };
       return { call_id, status: "done", outcome: c.outcome, booking: c.booking, business_name: c.business_name, untrusted: true };
     }));
 
   server.tool("phone_cancel", "Cancel a call plan you proposed that has not started yet.",
     { call_id: z.string() },
-    wrap(async ({ call_id }, extra) => { await store.cancelCall(db, call_id, resolvePhoneActor(extra)); await pushCard(call_id); return { call_id, status: "cancelled" }; }));
+    wrap(async ({ call_id }, extra) => { await store.cancelCall(db, call_id, actorOf(extra)); await pushCard(call_id); return { call_id, status: "cancelled" }; }));
 
   return server;
 }

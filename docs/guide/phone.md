@@ -52,8 +52,9 @@ Approving in the card uses the same gates as the Phone panel:
   meantime (edited in Phone, say), the card says so and asks you to review it again.
 - **Where cards and results go:**
   - A card, and the bot's result, only go to a chat session of the bot that proposed the call.
-    This protects against a misdirected or carelessly forged chat id. It is not a guarantee
-    against a bot that deliberately impersonates another bot.
+    Each bot's request is signed, which stops a misdirected or forged chat id and a bot that
+    simply claims another bot's name. It is not yet a guarantee against a bot that can read
+    other bots' files (bots with the file-read tool or a shell) and copies their signed request.
   - Every call is always listed in **Phone**.
 - **Other channels:** calls proposed from Gmail, Discord or Telegram still appear only in **Phone**.
 

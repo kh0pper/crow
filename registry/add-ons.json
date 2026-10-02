@@ -2654,7 +2654,7 @@
     {
       "id": "maker-lab",
       "name": "Maker Lab",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "description": "Scaffolded AI learning companion paired with FOSS maker surfaces (Blockly first). Hint-ladder pedagogy, per-learner memory, age-banded personas, classroom-capable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -4491,7 +4491,7 @@
     {
       "id": "phone",
       "name": "Phone",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
       "type": "bundle",
       "author": "Crow",

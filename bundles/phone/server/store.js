@@ -17,11 +17,24 @@ export async function audit(db, callId, actor, event, detail = null) {
     args: [callId, typeof actor === "string" ? actor : J(actor), event, J(detail)] });
 }
 
+export const UNATTRIBUTED_GLOBAL_PENDING = 15;
+export const UNATTRIBUTED_GLOBAL_DAY = 30;
+
 export async function createPlan(db, plan, actor, deliverTo) {
-  if (actor?.kind === "bot") {
-    const pend = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.id')=?", args: [actor.id] })).rows[0].n;
-    const day = (await db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE json_extract(created_by,'$.id')=? AND created_at > datetime('now','-1 day')", args: [actor.id] })).rows[0].n;
-    if (pend >= 5 || day >= 10) throw fail("rate_limited", "too many call plans from this bot; ask the owner to review pending ones");
+  // Per-bot buckets. Unattributed callers (S2: unsigned or forged actor
+  // headers) are bucketed by the id they CLAIM (or "none"), so one forger
+  // cannot exhaust everyone's limit, AND share a global cap so rotating
+  // claimed ids does not lift it.
+  const U = "json_extract(created_by,'$.kind')='unattributed'";
+  const buckets = actor?.kind === "bot" ? [{ where: "json_extract(created_by,'$.id')=?", args: [actor.id], pend: 5, day: 10 }]
+    : actor?.kind === "unattributed" ? [
+      { where: `${U} AND COALESCE(json_extract(created_by,'$.claimed_id'),'none')=?`, args: [actor.claimed_id || "none"], pend: 5, day: 10 },
+      { where: U, args: [], pend: UNATTRIBUTED_GLOBAL_PENDING, day: UNATTRIBUTED_GLOBAL_DAY },
+    ] : [];
+  for (const b of buckets) {
+    const pend = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND ${b.where}`, args: b.args })).rows[0].n;
+    const day = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE ${b.where} AND created_at > datetime('now','-1 day')`, args: b.args })).rows[0].n;
+    if (pend >= b.pend || day >= b.day) throw fail("rate_limited", "too many call plans from this bot; ask the owner to review pending ones");
   }
   const id = "call_" + randomUUID();
   await db.execute({
@@ -47,8 +60,11 @@ export async function listCalls(db, { status, limit = 50 } = {}) {
 /** I5 (spec 2026-10-01): the calls a Perch chat may show. BOTH the target
  *  session AND the creating bot must match. That stops a forged THREAD header
  *  (the call names its real bot, which is not this session's) and accidental
- *  mismatches; a child forging BOTH actor headers is out of scope here (spec
- *  "Known limits": real per-session binding is a queued follow-up). */
+ *  mismatches. Since S2 (phone 0.2.2), unsigned or mis-signed actor headers
+ *  resolve to an unattributed actor with no deliver_to, so those never get
+ *  here. A child REPLAYING another bot's signed headers (read from that bot's
+ *  .mcp.json; the S6 gap) DOES get here, and this per-session check then
+ *  matches the impersonated bot, so it does not stop that case. */
 export async function listPerchCalls(db, sessionId, botId, limit = 20) {
   const n = Math.max(1, Math.min(20, Number(limit) || 20));
   const r = await db.execute({
@@ -150,7 +166,7 @@ export async function rejectCall(db, id) {
 export async function cancelCall(db, id, actor) {
   const row = await getCall(db, id);
   if (!row) throw fail("not_found", "no such call");
-  if (actor?.kind === "bot" && row.created_by?.id !== actor.id) throw fail("forbidden", "not your call plan");
+  if (actor && typeof actor === "object" && actor.kind !== "session" && (actor.kind !== "bot" || !actor.id || row.created_by?.id !== actor.id)) throw fail("forbidden", "not your call plan");
   const r = await db.execute({ sql: "UPDATE phone_calls SET status='cancelled', token_hash=NULL, updated_at=datetime('now') WHERE id=? AND status IN ('awaiting_approval','approved')", args: [id] });
   if (!r.rowsAffected) throw fail("not_cancellable", "call is already running or finished");
   await audit(db, id, actor || "owner", "cancelled");

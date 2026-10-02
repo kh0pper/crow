@@ -86,7 +86,7 @@ async function tick() {
     // in the future and silently skip, losing the run (see the 2026-04-22
     // MPA briefing miss).
     const { rows } = await db.execute({
-      sql: "SELECT id, cron_expression, task, next_run FROM schedules WHERE enabled = 1 AND (next_run IS NOT NULL AND next_run <= ?) AND task NOT LIKE 'pipeline:%'",
+      sql: "SELECT id, cron_expression, task, next_run FROM schedules WHERE enabled = 1 AND (next_run IS NOT NULL AND julianday(next_run) <= julianday(?)) AND task NOT LIKE 'pipeline:%'",
       args: [now],
     });
 

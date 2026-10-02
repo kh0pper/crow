@@ -12,6 +12,17 @@ import { createDbClient, auditLog } from "../db.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
+/**
+ * Epoch ms for an oauth_tokens timestamp. SQLite's datetime('now') shape is UTC
+ * "YYYY-MM-DD HH:MM:SS" with no zone, and `new Date()` reads that shape as
+ * LOCAL time, which on a US-Central host put every MCP token's expiry 5-6 h
+ * late. ISO strings (with a zone) pass through unchanged.
+ */
+export function dbTimeMs(v) {
+  const s = String(v ?? "");
+  return Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s) ? s.replace(" ", "T") + "Z" : s);
+}
+
 export class CrowOAuthClientsStore {
   constructor(db) {
     this.db = db;
@@ -147,14 +158,14 @@ export class CrowOAuthProvider {
 
     if (rows.length === 0) throw new Error("Invalid refresh token");
     const row = rows[0];
-    if (new Date(row.expires_at) < new Date()) {
+    if (!(dbTimeMs(row.expires_at) > Date.now())) {
       await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedRefresh] });
       throw new Error("Refresh token expired");
     }
 
     // Absolute session expiration — reject if token was created more than 30 days ago
     if (row.created_at) {
-      const createdAt = new Date(row.created_at);
+      const createdAt = new Date(dbTimeMs(row.created_at));
       const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
       if (Date.now() - createdAt.getTime() > thirtyDaysMs) {
         await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedRefresh] });
@@ -198,7 +209,7 @@ export class CrowOAuthProvider {
 
     if (rows.length === 0) throw new InvalidTokenError("Invalid token");
     const row = rows[0];
-    if (new Date(row.expires_at) < new Date()) {
+    if (!(dbTimeMs(row.expires_at) > Date.now())) {
       await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedToken] });
       throw new InvalidTokenError("Token expired");
     }
@@ -207,7 +218,7 @@ export class CrowOAuthProvider {
       token,
       clientId: row.client_id,
       scopes: row.scopes ? row.scopes.split(" ") : [],
-      expiresAt: Math.floor(new Date(row.expires_at).getTime() / 1000),
+      expiresAt: Math.floor(dbTimeMs(row.expires_at) / 1000),
       resource: row.resource,
     };
   }
@@ -241,7 +252,7 @@ export async function initOAuthTables(dbPath) {
   `);
 
   // Clean up expired tokens on startup
-  await db.execute("DELETE FROM oauth_tokens WHERE expires_at < datetime('now')");
+  await db.execute("DELETE FROM oauth_tokens WHERE julianday(expires_at) < julianday('now')");
 
   db.close();
 }

@@ -61,6 +61,7 @@ import { runtimeGate } from "../../scripts/pi-bots/runtime-gate.mjs";
 import { runBridgeTick as defaultRunBridgeTick } from "../../scripts/pi-bots/bridge_tick_lib.mjs";
 import { superviseProcess as defaultSuperviseProcess } from "./process-supervisor.js";
 import { setBreakerSource } from "./bot-engine-status.js";
+import { initGatewayActorKey } from "../../scripts/pi-bots/actor-sig.mjs";
 
 const DISCORD_GATEWAY_PATH = fileURLToPath(
   new URL("../../scripts/pi-bots/discord_gateway.mjs", import.meta.url)
@@ -254,7 +255,9 @@ export async function initBotRuntime({
       key: "pibot-discord",
       command: process.execPath,
       args: [DISCORD_GATEWAY_PATH],
-      env: process.env,
+      // S2: the actor-signing key goes over stdin, never env (see actor-sig.mjs).
+      env: { ...process.env, CROW_ACTOR_KEY_STDIN: "1" },
+      stdinPayload: () => initGatewayActorKey().toString("hex") + "\n",
       maxRestarts: 10,
       idleMinutes: 0,
       registry: discordRegistry,
