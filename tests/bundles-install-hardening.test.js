@@ -99,6 +99,31 @@ test("real bundles: phone is blocked on PHONE_RUNNER_SECRET; gitea's post-instal
   }
 });
 
+test("real bundles: media-path / admin-password compose hard-fail keys are required, so they block install (B1)", async () => {
+  // Found 2026-10-02: jellyfin/navidrome/plex/miniflux interpolate these as
+  // ${KEY:?…} but marked them required:false, so a blank install reached
+  // `docker compose up` and failed there.
+  _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
+  try {
+    const expected = {
+      jellyfin: "JELLYFIN_MEDIA_PATH",
+      navidrome: "NAVIDROME_MUSIC_PATH",
+      plex: "PLEX_MEDIA_PATH",
+      miniflux: "MINIFLUX_ADMIN_PASSWORD",
+    };
+    for (const [id, key] of Object.entries(expected)) {
+      assert.deepEqual(installBlockingEnvKeys(id), [key], id + " blocks on " + key);
+      const r = await validateInstall(id, { envVars: {}, requireEnv: true, forceInstall: true });
+      assert.equal(r.code, "missing_required_env", id + ": " + JSON.stringify(r));
+      assert.deepEqual(r.extra.missing_env, [key]);
+      const ok = await validateInstall(id, { envVars: { [key]: "/srv/x" }, requireEnv: true, forceInstall: true });
+      assert.notEqual(ok.code, "missing_required_env", id + " with " + key + " set");
+    }
+  } finally {
+    _setAppBundlesForTest(FIXTURES);
+  }
+});
+
 test("a required key with a manifest default (even compose hard-fail) and a required key compose ignores both install", async () => {
   buildFixture("fx-defaulted");
   const r = await validateInstall("fx-defaulted", { envVars: { FX_SECRET: "s" }, requireEnv: true, forceInstall: true });

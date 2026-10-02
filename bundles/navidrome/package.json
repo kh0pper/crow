@@ -1,6 +1,6 @@
 {
   "name": "crow-navidrome",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Navidrome MCP server — music streaming, library browsing, and playlist management",
   "type": "module",
   "main": "server/index.js",

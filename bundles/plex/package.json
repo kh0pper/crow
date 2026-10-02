@@ -1,6 +1,6 @@
 {
   "name": "crow-plex",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Plex MCP server — media library search, browsing, and playback control",
   "type": "module",
   "main": "server/index.js",
