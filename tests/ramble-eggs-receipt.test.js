@@ -9,7 +9,7 @@
  * database and wrong after replication is the failure this project has
  * already paid for once.
  *
- * The four ways an egg can appear while the slot is empty, and the answer for
+ * The ways an egg can appear while the slot is empty, and the answer for
  * each (mirrored in the comment above `promoteFromShelf` in eggs.js):
  *
  *   1. a GIFT arrives                 -> promoted on receipt, replicates
@@ -23,6 +23,8 @@
  *                                        an expired row; promoting there hands
  *                                        the user BOTH eggs. The egg waits and
  *                                        the pet card offers Warm it.
+ *   5. a NEST is claimed              -> promoted (nothing is in flight; not a
+ *                                        gift, but the same §4.2 promise)
  *
  * And the sync-apply path: an apply NEVER promotes a user/received egg. The
  * Crow whose own write changed the slot promotes and emits; the peer receives
@@ -36,7 +38,10 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { applyRemoteOp } from "../servers/sharing/instance-sync.js";
-import { hatchIfReady, nextPromotable } from "../bundles/ramble/server/eggs.js";
+import { hatchIfReady, nextPromotable, isoWeek } from "../bundles/ramble/server/eggs.js";
+import { claimNest } from "../bundles/ramble/server/flock.js";
+import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
+import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
 import { pendingDeliveries, deleteDelivery } from "../bundles/ramble/server/delivery.js";
 import {
   receiveEnvelope, receiveGift, proposeSwap, acceptSwap, declineSwap, receiveTrade, expireTrades, TRADE_TTL_MS,
@@ -114,6 +119,28 @@ test("MULTI-INSTANCE: a gift arriving at an empty slot is incubated, and the use
   assert.deepEqual(await snapshot(b), await snapshot(a), "both Crows hold the same eggs in the same places");
 });
 
+test("MULTI-INSTANCE: every Crow hears the same gift DM (one shared identity); both promote it and their emits agree", async () => {
+  // servers/sharing/nostr.js: all of a user's Crows share one Nostr identity,
+  // so one DM is decrypted and applied by EVERY instance, each at its own
+  // clock. Both promote; the promote picks by replicated rows, so both pick
+  // the same egg, and replaying each one's emits into the other changes
+  // nothing — no contest for the slot, no 'sync'-relabelled loser.
+  const { a, b } = await twoEgglessCrows();
+  const wa = wire();
+  const wb = wire();
+  await receiveEnvelope(a, { crowId: FRIEND, payload: giftEnvelope("gift-both") }, { now: T0, emit: wa.emit });
+  await receiveEnvelope(b, { crowId: FRIEND, payload: giftEnvelope("gift-both") }, { now: T0 + 700, emit: wb.emit });
+  await replay(wa.ops, b);
+  await replay(wb.ops, a);
+  for (const db of [a, b]) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.deepEqual(await incubating(db), ["gift-both"]);
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal((await egg(db, "gift-both")).shelf_origin, null, "never relabelled 'sync' by a convergence demotion");
+  }
+  assert.deepEqual(await snapshot(a), await snapshot(b));
+});
+
 test("a gift arriving while an egg is already warming waits on the shelf — it never displaces it", async () => {
   const db = await freshDb();
   await put(db, "warming", "incubating", T0 - 1000, { warmth: 40 });
@@ -155,6 +182,30 @@ test("the daily per-contact gift ceiling still counts a gift that was promoted o
   assert.deepEqual(await incubating(db), ["flood-0"]);
   const over = await receiveGift(db, giftEnvelope("flood-20").egg, { fromCrowId: FRIEND, now: T0 + 30 });
   assert.equal(over.reason, "capped", "promoting one must not open a 21st slot in the ceiling");
+});
+
+/* ------------------------------------------------------------------ nests */
+
+test("MULTI-INSTANCE: an egg claimed from a nest with the slot empty warms at once, on both Crows", async () => {
+  // Not a gift, but the same §4.2 promise and the commonest way back from
+  // eggless: walk to a nest. Replayed through the apply door, the claim's
+  // 'user' shelf insert is a user shelve (no sync re-promote), and the
+  // promote op that follows lands the egg in the peer's slot.
+  const { a, b } = await twoEgglessCrows();
+  const week = isoWeek(T0);
+  let cell = null;
+  for (let i = 0; i < 5000 && !cell; i += 1) {
+    const c = encodeGeohash(30.46 + i * CELL7_LAT_STEP, -98.08, 7);
+    if (nestFor(c, week)) cell = c;
+  }
+  const nest = nestFor(cell, week);
+  const w = wire();
+  const r = await claimNest(a, { cell, week, here: { lat: nest.lat, lon: nest.lon }, now: T0, emit: w.emit });
+  assert.equal(r.claimed, true);
+  assert.deepEqual(await incubating(a), [r.egg.egg_id]);
+  await replay(w.ops, b);
+  assert.deepEqual(await incubating(b), [r.egg.egg_id]);
+  assert.deepEqual(await snapshot(b), await snapshot(a));
 });
 
 /* ------------------------------------------------------------------ swaps */

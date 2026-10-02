@@ -25,11 +25,20 @@
  *
  * An egg named by an open trade is LOCKED: it cannot be incubated, gifted or
  * offered again until the trade closes (flock.js asks isEggLocked).
+ *
+ * Spec §4.2 (promote-on-gift-receipt, Kevin 2026-09-22): every path here that
+ * makes an egg AVAILABLE — a gift landing, a swap hand-over, a decline that
+ * unlocks an egg — ends with `refillSlot`, so an empty incubating slot takes
+ * the oldest promotable egg at once. `expireTrades` deliberately does NOT: an
+ * expired row can still receive a late `completed`, and an egg promoted out
+ * of the shelf in between would be missed by the hand-over UPDATE while the
+ * received egg still landed (the user keeps both). See eggs.js
+ * `promoteFromShelf` for the full inventory, including the sync-apply path.
  */
 import { randomUUID } from "node:crypto";
 import { insertRemoteMark, getMark } from "./marks.js";
 import { xOnly } from "./persona.js";
-import { startOfLocalDay } from "./eggs.js";
+import { startOfLocalDay, promoteFromShelf } from "./eggs.js";
 import {
   CROW_ID_RE, isRambleEnvelope, parseEggPayload, giftPayload, tradePayload, parseTradePayload,
   payloadToMark, enqueueDeliveries,
@@ -75,6 +84,18 @@ const LOCK_GUARD_SQL = `NOT EXISTS (SELECT 1 FROM ramble_trades WHERE my_egg_id 
 /** Binds ONE ?: the egg must still be giftable at write time (a gift racing a propose must not lock a gone egg — S1). */
 const GIFTABLE_GUARD_SQL = "EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status IN ('shelf', 'received'))";
 
+/**
+ * Spec §4.2: an egg just became available on THIS Crow, so an empty slot takes
+ * the oldest promotable egg now (`promoteFromShelf` decides which — the same
+ * rule a hatch and the Warm it card use). Emitted, so the user's other Crows
+ * receive the result rather than re-deriving it on apply. A no-op when the
+ * slot is full or nothing is promotable. Only ever called AFTER the write that
+ * freed or delivered the egg has fully landed (a hand-over is one db.batch).
+ */
+async function refillSlot(db, now, emit) {
+  await promoteFromShelf(db, { now, emit });
+}
+
 /** The "receive an egg" upsert shared by gifts and swap completion: insert if new, revive if it was gifted away, else no-op. */
 function receivedEggStatement(egg, fromCrowId, now) {
   return {
@@ -114,16 +135,18 @@ export async function giftEgg(db, { eggId, toCrowId, now = Date.now(), emit } = 
 export async function receiveGift(db, eggIn, { fromCrowId, now = Date.now(), emit } = {}) {
   const egg = parseEggPayload(eggIn);
   if (!egg || typeof fromCrowId !== "string" || !CROW_ID_RE.test(fromCrowId)) return { inserted: false, reason: "malformed" };
+  // Any status, not just 'received': a gift promoted straight into the slot
+  // (spec §4.2) is still a gift from this contact today and must count.
   const { rows: today } = await db.execute({
-    sql: "SELECT count(*) AS n FROM ramble_eggs WHERE from_crow_id = ? AND status = 'received' AND created_at >= ?",
+    sql: "SELECT count(*) AS n FROM ramble_eggs WHERE from_crow_id = ? AND created_at >= ?",
     args: [fromCrowId, startOfLocalDay(now)],
   });
   if (Number(today[0]?.n ?? 0) >= MAX_GIFTS_PER_CONTACT_PER_DAY) return { inserted: false, reason: "capped", egg_id: egg.egg_id };
   const { rowsAffected } = await db.execute(receivedEggStatement(egg, fromCrowId, now));
   if (rowsAffected === 0) return { inserted: false, egg_id: egg.egg_id };
-  const row = await getEgg(db, egg.egg_id);
-  await safeEmit(emit, "ramble_eggs", "insert", row);
-  return { inserted: true, egg: row };
+  await safeEmit(emit, "ramble_eggs", "insert", await getEgg(db, egg.egg_id));
+  await refillSlot(db, now, emit);
+  return { inserted: true, egg: await getEgg(db, egg.egg_id) };
 }
 
 /* ---------------------------------------------------------------- swaps */
@@ -191,6 +214,9 @@ export async function declineSwap(db, { tradeId, now = Date.now(), emit } = {}) 
     toCrowIds: [trade.counterpart], kind: "trade", refId: tradeId,
     payload: tradePayload({ trade_id: tradeId, state: "declined" }), now,
   });
+  // Our withdrawn offer unlocks our egg. A declined row can never complete
+  // (both hand-over branches return early on it), so warming it is safe.
+  await refillSlot(db, now, emit);
   return { ok: true, trade: updated };
 }
 
@@ -252,6 +278,8 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
       await setState(db, t.trade_id, "declined", now);
       await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
       await enqueueDeliveries(db, { toCrowIds: [fromCrowId], kind: "trade", refId: t.trade_id, payload: tradePayload({ trade_id: t.trade_id, state: "declined" }), now });
+      // 'declined' is terminal for the hand-over, so the egg it held may warm.
+      await refillSlot(db, now, emit);
       return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 1 };
     }
     await db.batch([
@@ -266,6 +294,7 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
       toCrowIds: [fromCrowId], kind: "trade", refId: t.trade_id,
       payload: tradePayload({ trade_id: t.trade_id, state: "completed", my_egg_id: mine.egg_id, want_egg_id: t.egg.egg_id }, mine), now,
     });
+    await refillSlot(db, now, emit);
     return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 1 };
   }
 
@@ -282,6 +311,7 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
     await safeEmit(emit, "ramble_eggs", "update", await getEgg(db, existing.my_egg_id));
     await safeEmit(emit, "ramble_eggs", "insert", await getEgg(db, t.egg.egg_id));
     await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
+    await refillSlot(db, now, emit);
     return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 0 };
   }
 
@@ -289,13 +319,21 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
     if (!existing || !OPEN_STATES.includes(existing.state)) return none();
     await setState(db, t.trade_id, "declined", now);
     await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
+    await refillSlot(db, now, emit);
     return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 0 };
   }
 
   return none(); // 'expired' never travels
 }
 
-/** Local sweep: open rows past expires_at become 'expired' (emitted). Returns how many. */
+/**
+ * Local sweep: open rows past expires_at become 'expired' (emitted). Returns how many.
+ *
+ * ⚠ Does NOT refill the slot, unlike every other path that frees an egg.
+ * 'expired' is not terminal for the hand-over: a `completed` can still land on
+ * an expired acceptor row, and its UPDATE only moves an egg still on the shelf.
+ * The freed egg waits; the pet card's Warm it offers it (Kevin, 2026-09-22).
+ */
 export async function expireTrades(db, now = Date.now(), { emit } = {}) {
   const { rows } = await db.execute({ sql: `SELECT trade_id FROM ramble_trades WHERE ${OPEN_SQL} AND expires_at <= ?`, args: [now] });
   if (rows.length === 0) return 0;
