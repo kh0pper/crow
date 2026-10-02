@@ -83,3 +83,15 @@ test("planHash is stable and changes when anything material changes", () => {
 test("OUTCOMES is the spec list", () => {
   assert.deepEqual(OUTCOMES, ["booked","info_gathered","needs_callback","no_answer","voicemail","busy","not_in_service","refused","phone_busy","phone_unreachable","line_lost","taken_over","not_admissible","stopped","failed"]);
 });
+
+
+test("review M3: a bot-proposed run_after is held to the same strict ISO-8601 check as the owner's", async () => {
+  const { validatePlan, parseIsoInstant } = await import("../bundles/phone/server/plan.js");
+  const base = { business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en" };
+  for (const bad of ["Tue, 6 Oct 2026", "2030-01-01T15:30", "2030-01-01", "2030-02-30T15:30:00Z", 1767225600000]) {
+    assert.throws(() => validatePlan({ ...base, run_after: bad }), (e) => e.code === "invalid_plan", String(bad));
+  }
+  assert.equal(validatePlan({ ...base, run_after: "2030-01-01T09:30:00-06:00" }).run_after, "2030-01-01T15:30:00.000Z");
+  assert.equal(validatePlan({ ...base, run_after: "" }).run_after, null, "empty means no proposal");
+  assert.equal(parseIsoInstant("2028-02-29T12:00:00Z"), "2028-02-29T12:00:00.000Z");
+});

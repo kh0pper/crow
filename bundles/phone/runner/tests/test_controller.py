@@ -580,3 +580,39 @@ async def test_voicemail_and_no_answer_outcomes_are_unchanged_by_the_wrapup():
     assert r["outcome"] == "voicemail" and brain.wrapup_calls == []
     r, _, _, brain = await run_w(FakeLine([], dial_result="no_answer"), [], [W("info_gathered", "x")])
     assert r["outcome"] == "no_answer" and brain.wrapup_calls == []
+
+
+# ---- backlog P4: a Stop during a model reply is honoured before speaking ----
+
+async def _run_stop_mid_reply(script, make_replies, wrapups=None):
+    """make_replies(stop) builds the script; stop(reply) is a reply during which the owner presses Stop."""
+    ref, events = [None], []
+    async def _verify():
+        return True
+    def stop(reply):
+        def _r(_messages):
+            ref[0].request_stop()
+            return reply
+        return _r
+    line = FakeLine(script)
+    brain = ScriptedBrain(make_replies(stop), wrapups)
+    ref[0] = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify)
+    return await ref[0].run(), events, line
+
+
+async def test_stop_during_a_model_reply_is_not_spoken():
+    result, events, line = await _run_stop_mid_reply(
+        ["Smile Dental.", "We're open Saturdays 9 to 1.", "never read"],
+        lambda stop: [R("What are your Saturday hours?"), stop(R("Great, and do you take walk-ins"))],
+        [W("info_gathered", "Saturdays 9 to 1.")])
+    assert result["outcome"] == "stopped" and result["summary"] == "Saturdays 9 to 1."
+    assert line.said[-1] == "What are your Saturday hours?", "the reply produced after Stop is never spoken"
+    assert not any(t == "agent" and d["text"].startswith("Great, and") for t, d in events)
+
+
+async def test_stop_during_a_model_reply_presses_no_digits_and_records_nothing():
+    result, events, line = await _run_stop_mid_reply(
+        ["For appointments press 2.", "never read"],
+        lambda stop: [stop(R("", ("press_digits", {"digits": "2"})))])
+    assert result["outcome"] == "stopped" and line.digits == []
+    assert not any(t == "tool" for t, _ in events), "no tool call is applied after Stop"

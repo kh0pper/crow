@@ -56,6 +56,17 @@ test("I3: a mismatched target is audited ONCE per call, however many pushes foll
   assert.deepEqual(JSON.parse(rows[0].detail_json), { session_id: "hanks-session", expected_bot: "mallory", session_bot: "hank" });
 });
 
+test("backlog P10: concurrent mismatched pushes still audit once (one INSERT ... WHERE NOT EXISTS)", async () => {
+  const db = await fresh();
+  const { call_id } = await store.createPlan(db, plan(), { kind: "bot", id: "mallory" }, { kind: "perch", session_id: "hanks-session" });
+  const call = await store.getCall(db, call_id);
+  const engine = async () => ({ delivered: false, botId: "hank", reason: "bot_mismatch" });
+  await Promise.all(Array.from({ length: 8 }, () => pushCallCard(db, call, engine)));
+  assert.equal((await audits(db, call_id)).length, 1);
+  const actor = (await db.execute({ sql: "SELECT actor FROM phone_audit WHERE call_id=? AND event='card_target_mismatch'", args: [call_id] })).rows[0].actor;
+  assert.equal(actor, "service");
+});
+
 test("a missing session is not audited; a throwing hook never throws out", async () => {
   const db = await fresh();
   const { call_id } = await store.createPlan(db, plan(), { kind: "bot", id: "hank" }, { kind: "perch", session_id: "gone" });

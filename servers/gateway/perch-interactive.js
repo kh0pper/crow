@@ -3139,7 +3139,10 @@ export function createInteractiveEngine({
    *    chat text/reply/ask_user frame or a nested payload.
    *  - Not persisted: cards are rebuilt from the DB on load.
    */
-  const CARD_FRAME_TYPES = new Set(["phone_call"]);
+  // Backlog P9: per type, the ONLY keys a card frame may carry (defence in
+  // depth: card.js builds exactly these), and numbers must be finite.
+  const CARD_FRAME_KEYS = { phone_call: new Set(["type", "call_id", "status", "event_seq"]) };
+  const CARD_FRAME_TYPES = new Set(Object.keys(CARD_FRAME_KEYS));
   function notifyCard(sessionId, frame, opts) {
     const s = sessions.get(String(sessionId));
     if (!s) return { delivered: false, botId: null, reason: "no_session" };
@@ -3147,8 +3150,11 @@ export function createInteractiveEngine({
     if (!want) return { delivered: false, botId: s.botId, reason: "bot_required" };
     if (want !== s.botId) return { delivered: false, botId: s.botId, reason: "bot_mismatch" };
     if (!frame || typeof frame !== "object" || !CARD_FRAME_TYPES.has(frame.type)) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    const keys = CARD_FRAME_KEYS[frame.type];
     const out = {};
     for (const [k, v] of Object.entries(frame)) {
+      if (!keys.has(k)) continue;
+      if (typeof v === "number" && !Number.isFinite(v)) return { delivered: false, botId: s.botId, reason: "bad_frame" };
       if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
     }
     emit(s, out);

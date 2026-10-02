@@ -154,14 +154,14 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     const st = await readSettings(db);
     if (!st.tcpaAck) return res.status(409).json({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." });
     if (!String(st.ownerName || "").trim()) return res.status(409).json({ error: "owner_name_required", message: "Set your first name in Phone settings first (the assistant says who it is calling for)." });
-    // "Approve now" sends run_after:null and clears any proposed time; a string
-    // schedules it; an absent field keeps what is stored.
+    // "Approve now" sends run_after:null and clears any proposed time; an ISO
+    // instant schedules it; an absent field keeps what is stored. Anything else
+    // (a number, false, "", a loose date string) is refused, never ignored.
     let runAfter;
     if (b.run_after === null) runAfter = null;
-    else if (typeof b.run_after === "string" && b.run_after) {
-      const t = Date.parse(b.run_after);
-      if (!Number.isFinite(t)) return res.status(400).json({ error: "invalid_run_after", message: "run_after must be a date and time." });
-      runAfter = new Date(t).toISOString();
+    else if (b.run_after !== undefined) {
+      runAfter = mods.plan.parseIsoInstant(b.run_after);
+      if (!runAfter) return res.status(400).json({ error: "invalid_run_after", message: "run_after must be an ISO-8601 date and time with a time zone (or null for now)." });
     }
     // I4: the hash check runs last, after every other gate, so a refused session
     // or a missing 2FA code never learns whether the plan changed.

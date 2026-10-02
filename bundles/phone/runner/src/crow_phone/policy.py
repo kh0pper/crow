@@ -97,11 +97,13 @@ def callback_line(lang: str) -> str:
 # like to book..." and "Bye the way, I need the price" are NOT goodbyes. Bare
 # "thank you" never counts ("Tuesday at 3:30 works, thank you." agrees to a
 # slot; "Thanks." answers "let me check"), nor do bare "that's all" / "era
-# todo" forms. Any question mark disqualifies the line.
+# todo" forms, nor agreement forms ("that's (exactly) what I needed" agrees to
+# what was just offered). Any question mark disqualifies the line, and so does
+# an agreement to wait or hold in the goodbye sentence or the one before it.
 _CLOSING_TAIL = re.compile(
     r"(?:^|[\s,;:\u2014\u2013-])(?:good\s?-?bye|bye(?:[\s-]+(?:now|bye))?"
     r"|have\s+a\s+(?:great|good|nice|wonderful|lovely)\s+(?:day|one|afternoon|evening|weekend|night)"
-    r"|that'?s\s+(?:exactly\s+what|just\s+what|what|all)\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
+    r"|that'?s\s+all\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
     r"|thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?\s+for\s+(?:your|all\s+your)\s+(?:help|time)"
     r"|adi[oó]s|hasta\s+luego|que\s+tenga\s+(?:un\s+)?(?:buen|lindo|excelente)\s+(?:d[ií]a|fin\s+de\s+semana)"
     r"|que\s+tenga\s+(?:una\s+)?buena\s+(?:tarde|noche)"
@@ -109,7 +111,38 @@ _CLOSING_TAIL = re.compile(
     r"(?:[\s,]+(?:thanks|thank\s+you|thanks\s+so\s+much|thank\s+you\s+so\s+much|gracias|muchas\s+gracias|bye|adi[oó]s))?\s*$",
     re.I,
 )
+# Backlog P1 (2026-10-02): agreeing to WAIT or HOLD is never a goodbye, even
+# when the line ends with one ("Okay, I'll wait. Bye", "Sure, I can hold.
+# Thanks for your time.", "Esperaré. Adiós."). The business is about to come
+# back; hanging up would drop the call mid-task. Checked per sentence, on the
+# goodbye sentence and the one just before it (review I1), so an earlier,
+# unrelated "wait" never vetoes a real goodbye. Deferral and future-contact
+# forms are NOT holds: "I'll hold off", "I can wait until Tuesday", "I will
+# wait for your call", "No rush on the quote", "Espero su llamada".
+_CONTACT_NOUN = r"(?:call|email|e-mail|text|confirmation|reply|quote|message|callback|estimate|invoice)"
+# Review N1: "until/till/hasta" is a deferral ONLY before a time ("wait until
+# Tuesday", "hasta mañana"); before a clause ("until you check", "hasta que
+# regrese") it is a hold.
+_EN_TIME = (r"(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tonight|next\b|later\b|then\b|the\s+(?:\d|end|morning|afternoon|evening|weekend|first|next)"
+            r"|this\s+(?:afternoon|evening|week|weekend|month)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|noon|\d)")
+_ES_TIME = (r"(?:ma[nñ]ana|el\s+(?:pr[oó]ximo|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|\d|fin)|la\s+(?:pr[oó]xima|semana|tarde)"
+            r"|el\s+\w+\s+\d|(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b|\d)")
+_WAITING = re.compile(
+    r"\b(?:i'?ll|i\s+will|i\s+can|i\s+could|i'?m\s+happy\s+to|happy\s+to|i\s+don'?t\s+mind\s+to|i\s+don'?t\s+mind)\s+"
+    r"(?:just\s+|gladly\s+)?(?:wait|hold|stay\s+on(?:\s+the\s+line)?|be\s+on\s+hold)\b"
+    r"(?!\s+(?:off|(?:until|till)\s+" + _EN_TIME + r"|for\s+(?:your|the|their|his|her|an?)\s+(?:\w+\s+)?" + _CONTACT_NOUN + r"))"
+    r"|\bi'?ll\s+be\s+(?:right\s+)?here\s*$|\btake\s+your\s+time\b|^(?:(?:sure|okay|ok|of\s+course|that'?s\s+fine)[\s,]+)*no\s+(?:rush|hurry)(?:\s+at\s+all)?\s*$"
+    r"|\b(?:puedo|voy\s+a|con\s+gusto)\s+(?:esperar|aguardar)\b(?!\s+(?:hasta\s+" + _ES_TIME + r"|(?:su|tu)\b))|\b(?:le|lo|la)\s+espero\b(?!\s+(?:el|la|ma[nñ]ana|hasta)\b)"
+    r"|\bespero\s+(?:en\s+la\s+l[ií]nea|aqu[ií])\b|\baqu[ií]\s+(?:espero|aguardo)\b|\bno\s+hay\s+(?:prisa|apuro)\s*$"
+    r"|\bt[oó]mese\s+su\s+tiempo\b|\bsigo\s+en\s+la\s+l[ií]nea\b"
+    r"|\b(?:esperar[eé]|aguardar[eé]|aguardo)\b(?!\s+(?:hasta\s+" + _ES_TIME + r"|(?:su|tu|sus|tus|que)\b))"
+    r"|^(?:(?:s[ií]|claro|ok(?:ay)?|bueno|vale|perfecto|est[aá]\s+bien|de\s+acuerdo|no\s+se\s+preocupe|(?:muchas\s+)?gracias)[\s,]+)*(?:yo\s+)?espero\b(?!\s+(?:que|su|tu|sus|tus|verl[oa]s?|poder|hablar|saber)\b)",
+    re.I,
+)
 _THANKS_SENTENCE = re.compile(r"^(?:(?:ok(?:ay)?|great|perfect|perfecto)[\s,]+)?(?:thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?|thank\s+you|(?:muchas\s+)?gracias)$", re.I)
+# Review N2: one-word acknowledgements are skipped like thanks-only sentences
+# when picking "the sentence before the goodbye" ("I'll hold. Sure. Bye.").
+_ACK_SENTENCE = re.compile(r"^(?:sure|okay|ok|alright|all\s+right|right|yes|yeah|great|perfect|claro|vale|bueno|s[ií]|perfecto|de\s+acuerdo)$", re.I)
 _SENTENCE_END = re.compile(r"[.!\u2026]+")
 
 
@@ -122,7 +155,11 @@ def is_closing(text) -> bool:
     parts = [p for p in parts if p]
     while parts and _THANKS_SENTENCE.match(parts[-1]):
         parts.pop()
-    return bool(parts) and bool(_CLOSING_TAIL.search(parts[-1]))
+    if not parts or not _CLOSING_TAIL.search(parts[-1]):
+        return False
+    # The goodbye sentence and the sentence before it (thanks-only sentences skipped).
+    before = [p for p in parts[:-1] if not (_THANKS_SENTENCE.match(p) or _ACK_SENTENCE.match(p))][-1:]
+    return not any(_WAITING.search(p) for p in [parts[-1]] + before)
 
 
 _GREETING = {"en": "Hello?", "es": "¿Hola?"}

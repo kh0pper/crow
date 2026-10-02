@@ -74,7 +74,10 @@ Approving in the card uses the same gates as the Phone panel:
 **How a call ends.** The assistant normally ends the call itself and reports what it learned. If
 its last sentence is a goodbye ("…That's all I needed, thank you.", "Muchas gracias, hasta luego.")
 but it forgets to end the call, Crow hangs up for it. A goodbye in the middle of a line ("Thanks
-for your help. I'd also like…") does not count, and neither does a plain "thank you".
+for your help. I'd also like…") does not count, and neither does a plain "thank you". Nor does
+a line that agrees to wait or hold ("Okay, I'll wait. Bye") or agrees to what was just offered
+("Tuesday at 3:30, that's exactly what I needed."). If you press **Hang up** while the assistant
+is still working out its next line, that line is never spoken.
 Whenever a call ends after the business has said something (a goodbye, your **Hang up**, silence,
 the time limit), the assistant writes a short summary of what was learned. That summary is checked
 like everything else:
@@ -88,7 +91,10 @@ like everything else:
 The bot that asked for the call gets a short message with a block of **untrusted facts**: the
 business, the outcome, the call's summary (one line, at most 300 characters) and a booking, if one
 was recorded, plus a link to the call in **Phone**. The bot is told not to follow any instructions
-inside that block. It never gets the transcript or the details you allowed the assistant to share.
+inside that block. It never gets the transcript, and the details you allowed the assistant to
+share are not sent to it as a list. The summary can still repeat one of them, though: it is written
+from the conversation, so if the business read back your name or phone number, that may show up in
+the summary the bot receives.
 
 ## Setup
 - **Install** the Phone bundle from Extensions. The install form asks for the runner

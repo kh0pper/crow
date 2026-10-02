@@ -72,13 +72,13 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
   };
   if (!McpServer || !z) throw new Error("createPhoneMcpServer needs the gateway's McpServer and z (dependency injection)");
-  const server = new McpServer({ name: "crow-phone", version: "0.2.2" });
+  const server = new McpServer({ name: "crow-phone", version: "0.2.3" });
 
   server.tool("phone_plan_call",
     "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan (in this chat's call card, or in Crow's Nest → Phone). Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
     { business_name: z.string(), number: z.string(), goal: z.string(), limits: limitsSchema(z),
       shareable: z.record(z.string()).optional(), language: z.enum(["en", "es"]).optional(),
-      notes: z.string().optional(), run_after: z.string().optional() },
+      notes: z.string().optional(), run_after: z.string().describe("Proposed call time: ISO-8601 with a time zone, e.g. 2026-10-06T15:30:00-05:00").optional() },
     wrap(async (a, extra) => {
       const plan = validatePlan(a);
       checkNumberPolicy(plan.number_e164, { ownerNumber: typeof ownerNumber === "function" ? await ownerNumber() : ownerNumber, suppressed: await store.suppressedSet(db) });

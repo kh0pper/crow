@@ -189,6 +189,10 @@ class CallController:
         bad_markup = 0
         for _ in range(3):
             reply = await self.brain.reply(self.messages, TOOLS)
+            # Backlog P4: a Stop pressed while the model was thinking wins over
+            # its reply. Nothing more is spoken, pressed or recorded.
+            if self._stop:
+                return await self._stopped()
             calls = list(reply.tool_calls)
             spoken = ""
             if reply.text:
@@ -225,7 +229,11 @@ class CallController:
                 continue
             if spoken:
                 await self._ensure_disclosed()
+                if self._stop:  # the disclosure itself takes time to speak
+                    return await self._stopped()
                 await self.say(spoken)
+            if self._stop:
+                return await self._stopped()
             if not calls:
                 if spoken and self._closing_ok(spoken):
                     return await self._auto_hangup(spoken)
@@ -233,6 +241,8 @@ class CallController:
             for c in calls:
                 if c.name == "press_digits":
                     for d in str(c.args["digits"]):
+                        if self._stop:
+                            return await self._stopped()
                         await self.line.send_digit(d)
                         self.emit("dtmf", {"digits": d})
                         await asyncio.sleep(0)
