@@ -3806,19 +3806,21 @@ function phoneFetch({ who = { local: true, totp_required: false, cloud_model: nu
   });
 }
 
-test("phone card (a): Approve now POSTs the shown plan_hash, run_after null and the CSRF header", async () => {
+test("phone card (a): Approve and call now POSTs the shown plan_hash, run_after null and the CSRF header", async () => {
   const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall({ run_after: "2030-01-01T15:00:00.000Z" })] }) });
   await openChatSession(hub);
   await phHops();
   const cards = phCards(hub);
   assert.equal(cards.length, 1);
   const nodes = phWalk(cards[0]);
-  assert.ok(nodes.some((n) => n.textContent === "Language: English"), "the call language is shown");
+  assert.ok(nodes.some((n) => n.className === "ph-meta" && n.textContent === "(512) 555-0101 · English"), "number formatted for display · language");
   assert.ok(nodes.some((n) => String(n.textContent).startsWith("Proposed time: ")), "the bot's proposed time is shown");
   const when = nodes.find((n) => n.type === "datetime-local");
-  assert.ok(when && when.value, "Approve for… is prefilled with the proposed time");
-  assert.equal(when.getAttribute("aria-label"), "Approve for…");
-  nodes.find((n) => n.tagName === "BUTTON" && n.textContent === "Approve now").onclick();
+  assert.ok(when && when.value, "the schedule field is prefilled with the proposed time");
+  assert.equal(when.getAttribute("aria-label"), "When to call");
+  const primary = nodes.find((n) => n.tagName === "BUTTON" && n.textContent === "Approve and call now");
+  assert.match(primary.className, /\bprimary\b/); assert.match(primary.className, /\bph-primary\b/);
+  primary.onclick();
   await phHops();
   const post = hub.fetchCalls.find((c) => c.method === "POST" && c.path === "/api/phone/calls/call_1/approve");
   assert.ok(post, "approve went to the existing phone route");
@@ -3829,7 +3831,7 @@ test("phone card (a): Approve now POSTs the shown plan_hash, run_after null and 
   assert.equal(post.opts.headers["X-Crow-Csrf"], "test-csrf-token");
 });
 
-test("phone card (b): a non-local viewer gets no form, textarea or farend input — a pointer card with Stop only while live", async () => {
+test("phone card (b): a non-local viewer gets no form, textarea or farend input — a pointer card with Hang up only while live", async () => {
   const hub = await mountHub({ fetchImpl: phoneFetch({ who: { local: false, totp_required: false, cloud_model: null }, listStatus: 403, callStatus: 403 }) });
   await openChatSession(hub);
   await phHops();
@@ -3840,8 +3842,12 @@ test("phone card (b): a non-local viewer gets no form, textarea or farend input 
   assert.equal(cards.length, 1);
   const nodes = phWalk(cards[0]);
   assert.ok(!nodes.some((n) => ["FORM", "TEXTAREA", "INPUT"].includes(n.tagName)), "no controls and no inputs");
-  assert.deepEqual(nodes.filter((n) => n.tagName === "BUTTON").map((n) => n.textContent), ["Stop call"]);
+  assert.deepEqual(nodes.filter((n) => n.tagName === "BUTTON").map((n) => n.textContent), ["Hang up"]);
   assert.ok(!nodes.some((n) => String(n.className).includes("ph-transcript")), "no transcript for a non-local viewer");
+  // the same visual treatment as a local card: head + pill, Hang up in the composer row
+  assert.ok(nodes.some((n) => n.className === "ph-head"));
+  assert.ok(nodes.some((n) => n.className === "ph-pill ph-pill-live"));
+  assert.equal(nodes.find((n) => n.tagName === "BUTTON").className, "ph-hangup");
 });
 
 test("phone card (c): a frame that arrives before the history settles lands ONCE, after the history", async () => {
@@ -3889,6 +3895,134 @@ test("phone card (e): a plan edited elsewhere redraws with 'plan changed' and ke
   await phHops();
   const nodes = phWalk(phCards(hub)[0]);
   assert.ok(nodes.some((n) => n.textContent === "The plan changed — review it again before approving."));
-  assert.ok(nodes.some((n) => n.textContent === "Goal: Book two cleanings"));
+  assert.ok(nodes.some((n) => n.className === "ph-goal" && n.textContent === "Book two cleanings"));
   assert.equal(nodes.find((n) => n.tagName === "INPUT" && n.inputMode === "numeric").value, "123");
+});
+
+// ---- spec 2026-10-02: the polished call card ----
+
+const phFind = (hub, pred) => phWalk(phCards(hub)[0]).find(pred);
+const phAll = (hub, pred) => phWalk(phCards(hub)[0]).filter(pred);
+
+test("phone card polish: checkboxes are rows (box left, label right) and the cloud row names the model on a second line", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ who: { local: true, totp_required: false, cloud_model: "qwen-cloud/qwen3.8-flash" }, calls: [phCall()] }) });
+  await openChatSession(hub);
+  await phHops();
+  const rows = phAll(hub, (n) => n.tagName === "LABEL" && n.className === "ph-check");
+  assert.equal(rows.length, 2);
+  for (const r of rows) {
+    assert.equal(r.children[0].tagName, "INPUT"); assert.equal(r.children[0].type, "checkbox", "the box comes first");
+    assert.equal(r.children[1].className, "ph-check-text");
+  }
+  assert.equal(deepText(rows[0]).trim(), "This is a business");
+  const sub = phWalk(rows[1]).find((n) => n.className === "ph-check-sub");
+  assert.equal(sub.textContent, "qwen-cloud/qwen3.8-flash");
+  assert.equal(rows[1].children[0].disabled, false);
+  // GOAL / LIMITS are labelled sections; MAY SHARE is open because there is something to share
+  const labels = phAll(hub, (n) => n.className === "ph-label").map((n) => n.textContent);
+  assert.deepEqual(labels.slice(0, 3), ["Goal", "Limits", "May share"]);
+  const share = phFind(hub, (n) => n.tagName === "DETAILS" && String(n.className).includes("ph-sharebox"));
+  assert.equal(share.open, true);
+  assert.ok(phWalk(share).some((n) => n.tagName === "TEXTAREA" && n.value === "Kevin"), "editable when expanded");
+  // the head: business name + a "Needs approval" pill
+  assert.equal(phFind(hub, (n) => n.className === "ph-title").textContent, "Smile Dental");
+  assert.equal(phFind(hub, (n) => String(n.className).startsWith("ph-pill ")).className, "ph-pill ph-pill-wait");
+  assert.equal(phFind(hub, (n) => n.className === "ph-pill-text").textContent, "Needs approval");
+});
+
+test("phone card polish: MAY SHARE is collapsed when the plan shares nothing", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall({ shareable: {} })] }) });
+  await openChatSession(hub);
+  await phHops();
+  const share = phFind(hub, (n) => n.tagName === "DETAILS" && String(n.className).includes("ph-sharebox"));
+  assert.equal(share.open, false);
+  assert.ok(!phWalk(share).some((n) => n.tagName === "TEXTAREA"));
+});
+
+test("phone card polish: 'Schedule for later' reveals the time field, and 'Approve for this time' sends that time", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall({ run_after: "2030-01-01T15:00:00.000Z" })] }) });
+  await openChatSession(hub);
+  await phHops();
+  const sched = phFind(hub, (n) => n.className === "ph-sched");
+  assert.equal(sched.hidden, true, "hidden until asked for");
+  const toggle = phFind(hub, (n) => n.tagName === "BUTTON" && String(n.textContent).startsWith("Schedule for later"));
+  assert.equal(toggle.textContent, "Schedule for later ▸");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  const reject = phFind(hub, (n) => n.tagName === "BUTTON" && n.textContent === "Reject");
+  assert.ok(reject.className.includes("ph-link"), "Reject is a secondary, text-style action");
+  toggle.onclick();
+  assert.equal(sched.hidden, false);
+  assert.equal(toggle.textContent, "Schedule for later ▾");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  phWalk(sched).find((n) => n.tagName === "BUTTON" && n.textContent === "Approve for this time").onclick();
+  await phHops();
+  const body = JSON.parse(hub.fetchCalls.find((c) => c.method === "POST" && c.path === "/api/phone/calls/call_1/approve").opts.body);
+  assert.equal(body.run_after, "2030-01-01T15:00:00.000Z", "the prefilled proposal round-trips");
+  toggle.onclick();
+  assert.equal(sched.hidden, true);
+});
+
+test("phone card polish: a live call shows bubbles, a clock pill and the Business says / Send / Hang up composer", async () => {
+  const startedAt = new Date(Date.now() - 42000).toISOString().replace("T", " ").slice(0, 19);
+  const liveCall = phCall({ status: "live", started_at: startedAt, event_seq: 5, transcript: [
+    { type: "state", state: "dialing" }, { type: "state", state: "answered" },
+    { type: "agent", text: "Hi, I'm an automated assistant." }, { type: "farend", text: "We're open Saturdays 9 to 1." },
+    { type: "dtmf", digits: "2" }] });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [liveCall], call: liveCall }) });
+  await openChatSession(hub);
+  await phHops();
+  const tx = phFind(hub, (n) => n.className === "ph-transcript");
+  assert.deepEqual(tx.children.map((n) => n.className),
+    ["ph-t ph-t-state", "ph-t ph-t-state", "ph-t ph-t-agent", "ph-t ph-t-farend", "ph-t ph-t-dtmf"]);
+  assert.equal(tx.children[1].textContent, "— answered —", "line states are small notes");
+  assert.equal(tx.children[4].textContent, "— Keys: 2 —");
+  assert.equal(tx.children[3].children[0].className, "ph-sr", "who is said to screen readers");
+  assert.deepEqual(tx.children[3].children.map((n) => n.textContent), ["Business: ", "We're open Saturdays 9 to 1."]);
+  assert.equal(phFind(hub, (n) => String(n.className).startsWith("ph-pill ")).className, "ph-pill ph-pill-live");
+  assert.ok(phFind(hub, (n) => n.className === "ph-dot"), "a pulsing dot");
+  assert.match(phFind(hub, (n) => n.className === "ph-pill-text").textContent, /^Live 0:4[2-4]$/, "mm:ss from started_at (UTC)");
+  const comp = phFind(hub, (n) => n.className === "ph-composer");
+  assert.equal(comp.tagName, "FORM");
+  assert.deepEqual(comp.children.map((n) => n.tagName + ":" + (n.textContent || n.placeholder)), ["INPUT:Business says…", "BUTTON:Send", "BUTTON:Hang up"]);
+  assert.equal(comp.children[2].className, "ph-hangup");
+  const card = phCards(hub)[0];
+  assert.equal(card.children.indexOf(comp), card.children.length - 2, "the composer is the last row (only the error line follows)");
+  comp.children[2].onclick();
+  await phHops();
+  assert.ok(hub.fetchCalls.some((c) => c.method === "POST" && c.path === "/api/phone/calls/call_1/stop"));
+});
+
+test("phone card polish: once the runner hangs up and wraps up, the live pill says so", async () => {
+  let cur = phCall({ status: "live", started_at: "2030-01-01 00:00:00", event_seq: 2, transcript: [{ type: "state", state: "answered" }] });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [cur], call: () => cur }) });
+  await openChatSession(hub);
+  await phHops();
+  cur = phCall({ status: "live", event_seq: 3, transcript: [{ type: "state", state: "answered" }, { type: "state", state: "ended" }] });
+  FakeEventSource.instances[0]._serverFrame("phone_call", { type: "phone_call", call_id: "call_1", status: "live", event_seq: 3 });
+  await phHops();
+  assert.equal(phFind(hub, (n) => n.className === "ph-pill-text").textContent, "Wrapping up…");
+  assert.equal(phFind(hub, (n) => n.className === "ph-transcript").children[1].textContent, "— call ended —");
+});
+
+test("phone card polish: a finished call shows a coloured outcome pill, the answer large, and the transcript collapsed", async () => {
+  const cases = [["info_gathered", "ph-pill-ok", "Got the info"], ["booked", "ph-pill-ok", "Booked"], ["needs_callback", "ph-pill-warn", "Needs a callback"],
+    ["stopped", "ph-pill-neutral", "Stopped by you"], ["failed", "ph-pill-err", "Failed"], ["not_in_service", "ph-pill-err", "Number not in service"]];
+  for (const [outcome, cls, label] of cases) {
+    const done = phCall({ status: "done", outcome, summary: "Open Saturdays 9 to 1.", error: outcome === "stopped" ? "stopped by owner" : null,
+      booking: outcome === "booked" ? { date: "2026-10-06", time: "15:30", location: "Main St" } : null,
+      transcript: [{ type: "agent", text: "Hi" }, { type: "farend", text: "Saturdays 9 to 1." }] });
+    const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [done], call: done }) });
+    await openChatSession(hub);
+    await phHops();
+    assert.equal(phFind(hub, (n) => String(n.className).startsWith("ph-pill ")).className, "ph-pill " + cls, outcome);
+    assert.equal(phFind(hub, (n) => n.className === "ph-pill-text").textContent, label, outcome);
+    assert.equal(phFind(hub, (n) => n.className === "ph-answer").textContent, "Open Saturdays 9 to 1.");
+    if (outcome === "booked") assert.equal(phFind(hub, (n) => n.className === "ph-booking").textContent, "2026-10-06 · 15:30 · Main St");
+    const box = phFind(hub, (n) => n.tagName === "DETAILS" && String(n.className).includes("ph-txbox"));
+    assert.ok(box && !box.open, "transcript collapsed");
+    assert.equal(box.children[0].textContent, "Show transcript");
+    assert.equal(phWalk(box).find((n) => n.className === "ph-transcript").children.length, 2);
+    assert.equal(phFind(hub, (n) => n.className === "ph-open").textContent, "Open in Phone");
+    assert.equal(!!phFind(hub, (n) => n.className === "ph-note" && n.textContent === "stopped by owner"), false, "a stop is not shown as an error");
+  }
 });
