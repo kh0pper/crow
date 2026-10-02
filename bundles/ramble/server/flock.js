@@ -17,9 +17,9 @@
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
-import { isoWeek, startOfLocalDay, hatchIfReady, ensureIncubatingEgg, readWarmthWeights } from "./eggs.js";
+import { isoWeek, startOfLocalDay, hatchIfReady, readWarmthWeights, promoteFromShelf } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
-import { isEggLocked, lockedEggIds } from "./trades.js";
+import { isEggLocked, lockedEggIds } from "./egg-locks.js";
 
 const require = createRequire(import.meta.url);
 const { ROSTER } = require("./bird-svg.cjs");
@@ -139,7 +139,13 @@ export async function claimNest(db, { cell, week, here, now = Date.now(), emit }
     return { claimed: true, already: true, egg };
   }
   const egg = await insertClaimedEgg(db, eggId, cell, week, now, emit);
-  return { claimed: true, already: false, egg };
+  // Spec §4.2: an egg just arrived, so an empty slot takes the oldest
+  // promotable egg now (usually this one) instead of leaving the player to
+  // find a Warm it button. Nothing is in flight on a nest claim, so unlike a
+  // lapsing swap there is no hand-over this could strand. The returned egg is
+  // re-read, so `egg.status` tells the caller whether it is warming already.
+  if (await promoteFromShelf(db, { now, emit })) await hatchIfReady(db, { now, emit });
+  return { claimed: true, already: false, egg: (await getEgg(db, egg.egg_id)) ?? egg };
 }
 
 async function insertClaimedEgg(db, eggId, cell, week, now, emit) {
@@ -222,7 +228,10 @@ export async function activateBird(db, eggId, { emit } = {}) {
 
 /** The flock screen's data: hatched birds, unhatched eggs, and the species score. */
 export async function flockState(db, { now = Date.now() } = {}) {
-  await ensureIncubatingEgg(db, { now });
+  // Phase 3: a flock screen is a READ, and now genuinely is one. It used to
+  // mint the incubating egg, so opening this view recreated one. It does NOT
+  // promote either: see promoteFromShelf's note on why a write during a GET
+  // both races the sync drain and launders shelf_origin provenance.
   const weights = await readWarmthWeights(db);
   const { shelfCap } = await readFlockSettings(db);
   const pet = await getPetRow(db);

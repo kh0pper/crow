@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { pendingDeliveries, deleteDelivery } from "../bundles/ramble/server/delivery.js";
 import {
   TRADE_TTL_MS, giftEgg, receiveGift, proposeSwap, acceptSwap, declineSwap, receiveTrade, expireTrades,
@@ -21,6 +21,17 @@ const PK = "ab".repeat(32);
 async function freshDb() { const c = createClient({ url: "file::memory:" }); await initRambleTables(c); return c; }
 async function shelf(db, eggId, warmth = 10, extra = "") {
   await db.execute({ sql: `INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, found_cell, found_week, created_at) VALUES (?, 'shelf', 'user', ?, '9v6m21h', '2026-W37', ?)`, args: [eggId, warmth, T0] });
+}
+/**
+ * An egg already warming in the slot. The trade-mechanics tests below assert
+ * exactly where an egg lands ('received', 'shelf') and exactly which emits a
+ * step makes; with an EMPTY slot, spec §4.2's promote-on-receipt would move
+ * the arriving egg into it. That behaviour has its own multi-instance file
+ * (ramble-eggs-receipt.test.js); here the slot is kept full so these tests
+ * keep measuring the trade itself.
+ */
+async function warming(db) {
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('warming', 'incubating', 5, ?)", args: [T0 - 1] });
 }
 async function egg(db, id) { return (await db.execute({ sql: "SELECT * FROM ramble_eggs WHERE egg_id = ?", args: [id] })).rows[0] ?? null; }
 async function trade(db, id) { return (await db.execute({ sql: "SELECT * FROM ramble_trades WHERE trade_id = ?", args: [id] })).rows[0] ?? null; }
@@ -36,7 +47,7 @@ const emitter = () => { const calls = []; return { calls, emit: async (t, op, ro
 test("giftEgg: shelf/received only, egg leaves as 'gifted', one queued ramble.egg without species/seed", async () => {
   const db = await freshDb();
   await shelf(db, "g1", 30);
-  await ensureIncubatingEgg(db, { now: T0 });
+  await mintIncubatingEgg(db, { now: T0 });
   assert.deepEqual(await giftEgg(db, { eggId: "g1", toCrowId: "bad id", now: T0 }), { ok: false, reason: "bad-recipient" });
   assert.equal((await egg(db, "g1")).status, "shelf", "a bad recipient never touches the egg");
   const { calls, emit } = emitter();
@@ -54,6 +65,7 @@ test("giftEgg: shelf/received only, egg leaves as 'gifted', one queued ramble.eg
 
 test("receiveGift: lands as received/user with from_crow_id; re-delivery is a no-op; an egg gifted away comes back revived", async () => {
   const db = await freshDb();
+  await warming(db);
   const { calls, emit } = emitter();
   const r = await receiveGift(db, { egg_id: "in1", warmth: 44, found_cell: "9v6m21h", found_week: "2026-W37", species: "crow", seed: 9 }, { fromCrowId: "crow:friend", now: T0, emit });
   assert.equal(r.inserted, true);
@@ -80,6 +92,7 @@ test("receiveGift: lands as received/user with from_crow_id; re-delivery is a no
 test("a full swap: propose (A) -> accept (B) -> complete (A) -> complete (B); eggs cross exactly once; every envelope is idempotent", async () => {
   const A = await freshDb(); const B = await freshDb();
   await shelf(A, "a-egg", 20); await shelf(B, "b-egg", 60);
+  await warming(A); await warming(B);
   const ea = emitter(); const eb = emitter();
 
   // A proposes.
@@ -163,6 +176,7 @@ test("a full swap: propose (A) -> accept (B) -> complete (A) -> complete (B); eg
 test("decline: either side while proposed; the counterpart's egg unlocks; an accept after decline is refused", async () => {
   const A = await freshDb(); const B = await freshDb();
   await shelf(A, "a1"); await shelf(B, "b1");
+  await warming(A); await warming(B);
   assert.deepEqual(await proposeSwap(A, { eggId: "a1", toCrowId: "", now: T0 }), { ok: false, reason: "bad-recipient" });
   assert.equal(await isEggLocked(A, "a1"), false, "a bad recipient never locks the egg");
   const p = await proposeSwap(A, { eggId: "a1", toCrowId: "crow:B", now: T0 });
@@ -196,6 +210,7 @@ test("decline: either side while proposed; the counterpart's egg unlocks; an acc
 test("an 'accepted' that arrives after the offer lapsed (expired or egg gone) is answered with 'declined', not completed", async () => {
   const A = await freshDb();
   await shelf(A, "a1");
+  await warming(A);
   const p = await proposeSwap(A, { eggId: "a1", toCrowId: "crow:B", now: T0 });
   await popDelivery(A);
   assert.equal(await expireTrades(A, T0 + TRADE_TTL_MS, {}), 1);
@@ -220,6 +235,7 @@ test("C3: an offer, an acceptance or a completion naming an egg we still hold is
   const B = await freshDb();
   await shelf(B, "b1", 15);
   await shelf(B, "held", 20);
+  await warming(B);
   // A proposal offering an egg we hold: ignored, no row.
   let r = await receiveTrade(B, { trade_id: "t-held", state: "proposed", my_egg_id: "held", want_egg_id: null, egg: { egg_id: "held", warmth: 1, found_cell: null, found_week: null } }, { fromCrowId: "crow:A", now: T0 });
   assert.equal(r.changed, false);
@@ -233,6 +249,7 @@ test("C3: an offer, an acceptance or a completion naming an egg we still hold is
   // An acceptance (we proposed) that names an egg we hold: declined reply, our egg untouched.
   const A = await freshDb();
   await shelf(A, "a1"); await shelf(A, "mine-too", 3);
+  await warming(A);
   const p = await proposeSwap(A, { eggId: "a1", toCrowId: "crow:B", now: T0 });
   await popDelivery(A);
   r = await receiveTrade(A, { trade_id: p.trade.trade_id, state: "accepted", my_egg_id: "mine-too", want_egg_id: "a1", egg: { egg_id: "mine-too", warmth: 1, found_cell: null, found_week: null } }, { fromCrowId: "crow:B", now: T0 + 1 });
@@ -268,6 +285,7 @@ test("S2: inbound ceilings — at most 20 open proposals per contact and 20 rece
 test("expiry sweeps proposed AND accepted rows, emits them, and a 'completed' still lands on an acceptor whose row expired if the egg is still theirs", async () => {
   const B = await freshDb();
   await shelf(B, "b1", 15);
+  await warming(B);
   await B.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, my_egg_id, their_egg_id, offer_json, state, created_at, updated_at, expires_at) VALUES ('t-acc','crow:A','acceptor','b1','a1','{}','accepted',?,?,?)", args: [T0, T0, T0 + 100] });
   await B.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, my_egg_id, their_egg_id, offer_json, state, created_at, updated_at, expires_at) VALUES ('t-prop','crow:A','acceptor',NULL,'a2','{}','proposed',?,?,?)", args: [T0, T0, T0 + 100] });
   const { calls, emit } = emitter();

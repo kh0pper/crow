@@ -143,6 +143,68 @@ export async function advanceCounter(db, instanceId, floorValue) {
 }
 
 /**
+ * The Ramble tables whose apply is last-writer-wins on the envelope Lamport.
+ * Each row records WHICH instance wrote its current Lamport in
+ * `lamport_origin`, so an equal-Lamport tie can be broken the same way on
+ * every Crow (greater origin id wins; NULL loses; two NULLs keep the old
+ * apply-on-tie behaviour). `ramble_cells` / `ramble_wallet` are not here:
+ * they merge by MIN/MAX, which is order-independent already.
+ */
+export const RAMBLE_LWW_TABLES = Object.freeze([
+  "ramble_marks", "ramble_settings", "ramble_blocks", "ramble_eggs", "ramble_pet", "ramble_trades",
+]);
+
+const _originColumnReady = new WeakMap(); // db -> Set<table>
+
+/**
+ * Guarded, additive `lamport_origin TEXT` on one LWW Ramble table (fix round
+ * 2, I-2). Core owns it as well as the bundle's init-tables, because core's
+ * stamp and apply paths depend on the column and an installed bundle copy may
+ * predate it. No SCHEMA_GENERATION bump: existing rows keep NULL, which the
+ * tie rule treats as "loses to any stamped write". Memoised per db handle;
+ * returns false (and remembers nothing) while the table does not exist yet.
+ */
+export async function ensureLamportOriginColumn(db, table) {
+  if (!RAMBLE_LWW_TABLES.includes(table)) return false;
+  let ready = _originColumnReady.get(db);
+  if (!ready) { ready = new Set(); _originColumnReady.set(db, ready); }
+  if (ready.has(table)) return true;
+  try {
+    const { rows } = await db.execute(`PRAGMA table_info(${table})`);
+    if (rows.length === 0) return false;
+    if (!rows.some((r) => r.name === "lamport_origin")) {
+      try {
+        await db.execute(`ALTER TABLE ${table} ADD COLUMN lamport_origin TEXT`);
+      } catch (err) {
+        if (!/duplicate column/i.test(String(err?.message))) throw err;
+      }
+    }
+    ready.add(table);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does an incoming op LOSE to the local row? Strictly older loses, strictly
+ * newer wins. On an equal Lamport: the greater origin id wins, a NULL origin
+ * loses to a non-null one, two NULLs (or the same origin — a re-delivery)
+ * keep the old behaviour and apply. Every Crow evaluates the same pair, so a
+ * tie converges instead of each side taking the other's write.
+ */
+export function incomingLosesLww(lamportTs, localTs, incomingOrigin, localOrigin) {
+  if (lamportTs < localTs) return true;
+  if (lamportTs > localTs) return false;
+  const inc = incomingOrigin ?? null;
+  const loc = localOrigin ?? null;
+  if (inc === null && loc === null) return false;
+  if (inc === null) return true;
+  if (loc === null) return false;
+  return String(inc) < String(loc);
+}
+
+/**
  * Build the per-table row-stamp statement for a fresh Lamport value.
  * Table-specific rules (identical to the historical emitChange block):
  *   - dashboard_settings: stamped by `key`
@@ -158,9 +220,19 @@ export async function advanceCounter(db, instanceId, floorValue) {
  * @param {string} table
  * @param {object} row
  * @param {number} lamportTs
+ * @param {string|null} [origin] - the writing instance id, for an LWW Ramble
+ *   table only; omit it (undefined) for the pre-origin stamp shape
  * @returns {{sql: string, args: any[]} | null}
  */
-export function stampSql(table, row, lamportTs) {
+export function stampSql(table, row, lamportTs, origin) {
+  // For an LWW Ramble table, also record WHO wrote this Lamport — but only
+  // when the caller says (emitChange / the queue door pass the local instance
+  // id; the outbox cap's NULL re-stamp passes none and leaves it alone). The
+  // origin is always the SECOND placeholder, after the lamport, so
+  // sync-emit's subselect swap of args[0] still lines up.
+  const withOrigin = origin !== undefined && RAMBLE_LWW_TABLES.includes(table);
+  const o = withOrigin ? ", lamport_origin = ?" : "";
+  const oa = withOrigin ? [origin ?? null] : [];
   if (table === "dashboard_settings" && row.key !== undefined) {
     return {
       sql: `UPDATE dashboard_settings SET lamport_ts = ? WHERE key = ?`,
@@ -181,14 +253,14 @@ export function stampSql(table, row, lamportTs) {
   // (an incoming remote op would beat a strictly newer local edit forever).
   if (table === "ramble_settings" && row.key !== undefined) {
     return {
-      sql: `UPDATE ramble_settings SET lamport_ts = ? WHERE key = ?`,
-      args: [lamportTs, row.key],
+      sql: `UPDATE ramble_settings SET lamport_ts = ?${o} WHERE key = ?`,
+      args: [lamportTs, ...oa, row.key],
     };
   }
   if (table === "ramble_blocks" && row.persona !== undefined) {
     return {
-      sql: `UPDATE ramble_blocks SET lamport_ts = ? WHERE persona = ?`,
-      args: [lamportTs, row.persona],
+      sql: `UPDATE ramble_blocks SET lamport_ts = ?${o} WHERE persona = ?`,
+      args: [lamportTs, ...oa, row.persona],
     };
   }
   // Same story for the flock tables (Task 6): `ramble_eggs` is keyed on
@@ -197,21 +269,21 @@ export function stampSql(table, row, lamportTs) {
   // the source row is never stamped while its outbox entry carries the lamport.
   if (table === "ramble_eggs" && row.egg_id !== undefined) {
     return {
-      sql: `UPDATE ramble_eggs SET lamport_ts = ? WHERE egg_id = ?`,
-      args: [lamportTs, row.egg_id],
+      sql: `UPDATE ramble_eggs SET lamport_ts = ?${o} WHERE egg_id = ?`,
+      args: [lamportTs, ...oa, row.egg_id],
     };
   }
   if (table === "ramble_pet" && row.owner !== undefined) {
     return {
-      sql: `UPDATE ramble_pet SET lamport_ts = ? WHERE owner = ?`,
-      args: [lamportTs, row.owner],
+      sql: `UPDATE ramble_pet SET lamport_ts = ?${o} WHERE owner = ?`,
+      args: [lamportTs, ...oa, row.owner],
     };
   }
   // Phase 3: swaps are keyed on trade_id (no `id` column) — same story.
   if (table === "ramble_trades" && row.trade_id !== undefined) {
     return {
-      sql: `UPDATE ramble_trades SET lamport_ts = ? WHERE trade_id = ?`,
-      args: [lamportTs, row.trade_id],
+      sql: `UPDATE ramble_trades SET lamport_ts = ?${o} WHERE trade_id = ?`,
+      args: [lamportTs, ...oa, row.trade_id],
     };
   }
   // Phase 1 of the reward economy: both new tables are id-less natural-key
@@ -226,8 +298,8 @@ export function stampSql(table, row, lamportTs) {
   }
   if (row.id !== undefined) {
     return {
-      sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
-      args: [lamportTs, row.id],
+      sql: `UPDATE ${table} SET lamport_ts = ?${o} WHERE id = ?`,
+      args: [lamportTs, ...oa, row.id],
     };
   }
   return null;

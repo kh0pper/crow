@@ -664,14 +664,15 @@ test("phase 4: a re-sent mark that is pruned on arrival credits meet_crow but po
   assert.equal(Number(rows[0].n), 50);
 });
 
-test("phase 3: an inbound gift lands as received and pokes ramble:trade; an accepted swap completes and its reply drains immediately", async () => {
+test("phase 3: an inbound gift lands (and, the slot being empty, warms — spec §4.2) and pokes ramble:trade; an accepted swap completes and its reply drains immediately", async () => {
   const h = await makeHarness();
   await seedContacts(h.db);
   const trades = [];
   h.bus.on("ramble:trade", (p) => trades.push(p));
   await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "gift-in", warmth: 12, found_cell: null, found_week: null } } });
   const { rows } = await h.db.execute({ sql: "SELECT status, shelf_origin, from_crow_id FROM ramble_eggs WHERE egg_id = 'gift-in'", args: [] });
-  assert.deepEqual(rows[0], { status: "received", shelf_origin: "user", from_crow_id: "crow:one" });
+  assert.deepEqual(rows[0], { status: "incubating", shelf_origin: null, from_crow_id: "crow:one" },
+    "a fresh instance has an empty slot, so the gift is promoted on receipt (spec §4.2)");
   assert.deepEqual(trades, [{ kind: "gift", trade_id: null, egg_id: "gift-in", state: "received" }]);
 
   await h.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('mine','shelf','user',3,1)", args: [] });
@@ -683,6 +684,21 @@ test("phase 3: an inbound gift lands as received and pokes ramble:trade; an acce
   assert.ok(await new Promise((r) => setTimeout(() => r(h.sent.at(-1).content.trade.state === "completed"), 50)), "the completion reply drained without waiting for a tick");
   assert.equal((await h.db.execute("SELECT status FROM ramble_eggs WHERE egg_id='mine'")).rows[0].status, "gifted");
   assert.equal((await h.db.execute("SELECT status FROM ramble_eggs WHERE egg_id='theirs'")).rows[0].status, "received");
+});
+
+test("a gift that arrives ripe hatches on receipt AND fires ramble:hatched, so the panel's reveal runs (review N-4)", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  const hatched = [];
+  h.bus.on("ramble:hatched", (p) => hatched.push(p));
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "ripe-in", warmth: 100, found_cell: null, found_week: null } } });
+  const { rows } = await h.db.execute({ sql: "SELECT status, species, seed FROM ramble_eggs WHERE egg_id = 'ripe-in'", args: [] });
+  assert.equal(rows[0].status, "hatched", "promoted into the empty slot and hatched at once");
+  assert.deepEqual(hatched, [{ egg_id: "ripe-in", species: rows[0].species, seed: rows[0].seed }]);
+
+  // An unripe gift fires no hatch.
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "green-in", warmth: 3, found_cell: null, found_week: null } } });
+  assert.equal(hatched.length, 1);
 });
 
 test("phase 3 S3: a reply queued while a drain is in flight goes out right after it, not a tick later", async () => {
@@ -874,7 +890,10 @@ test("phase 4: two of a user's instances over one bus and identity both apply on
     const t = (await h.db.execute({ sql: "SELECT state, their_egg_id FROM ramble_trades WHERE trade_id = ?", args: [p.trade.trade_id] })).rows[0];
     assert.deepEqual([t.state, t.their_egg_id], ["completed", "theirs"]);
     const eggs = (await h.db.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id")).rows.map((r) => [r.egg_id, r.status]);
-    assert.deepEqual(eggs, [["mine", "gifted"], ["theirs", "received"]], "one completed trade and one egg per instance");
+    // Both instances heard the same DM and both promoted (spec §4.2): the
+    // promote is a pure function of replicated rows, so they chose the SAME
+    // egg and their emits will agree rather than contest the slot.
+    assert.deepEqual(eggs, [["mine", "gifted"], ["theirs", "incubating"]], "one completed trade and one egg per instance");
     assert.equal((await pendingDeliveries(h.db, 50)).length, 0, "each instance's reply drained");
   }
   assert.equal(tradeEvents.filter((e) => e.state === "completed").length, 2, "one ramble:trade per instance");
@@ -889,7 +908,9 @@ test("phase 4: two of a user's instances over one bus and identity both apply on
   assert.equal(bEvents.length, 1, "the duplicate completion is a no-op");
   assert.equal((await B.db.execute({ sql: "SELECT state FROM ramble_trades WHERE trade_id = ?", args: [p.trade.trade_id] })).rows[0].state, "completed");
   const bEggs = (await B.db.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id")).rows.map((r) => [r.egg_id, r.status]);
-  assert.deepEqual(bEggs, [["mine", "received"], ["theirs", "gifted"]], "one egg per side on the counterpart, no duplicate rows");
+  // B's slot was empty, so the egg it received warms at once (spec §4.2); the
+  // duplicate completion did not promote or insert a second time.
+  assert.deepEqual(bEggs, [["mine", "incubating"], ["theirs", "gifted"]], "one egg per side on the counterpart, no duplicate rows");
   assert.equal(B.sent.length, 1, "B never replies to a completion");
 
   A1.transport.stop(); A2.transport.stop(); B.transport.stop();
