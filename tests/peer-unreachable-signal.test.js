@@ -31,7 +31,11 @@ function db(rows) {
 async function peers(rows, nowMs) {
   invalidateHealthCache();
   const r = await collectHealthSignals(db(rows), { now: () => nowMs });
-  return { detail: r.details.find((d) => d.id === "peers"), issue: r.issues.find((i) => i.id === "peers") };
+  return {
+    detail: r.details.find((d) => d.id === "peers"),
+    issue: r.issues.find((i) => i.id === "peers" || i.id.startsWith("peers:")),
+    issues: r.issues.filter((i) => i.id === "peers" || i.id.startsWith("peers:")),
+  };
 }
 
 const grackle = (nowMs, status = "offline") => ({
@@ -61,8 +65,9 @@ test("a peer failing /health past the threshold warns even with a fresh last_see
   assert.match(issue.label, /Tailscale/);
 
   // ...and the health monitor pushes it.
+  assert.equal(issue.id, "peers:g1", "per-peer issue id");
   const cycle = await runHealthNotifyCycle({ issues: [issue], lastMap: {}, nowMs: now, notify: async () => {} });
-  assert.deepEqual(cycle.pushed, ["peers"]);
+  assert.deepEqual(cycle.pushed, ["peers:g1"]);
 });
 
 test("a short blip (under the threshold) does not warn", async () => {
@@ -93,7 +98,25 @@ test("es strings render", async () => {
   const now = T0 + PEER_UNREACHABLE_WARN_MS;
   invalidateHealthCache();
   const r = await collectHealthSignals(db([grackle(now)]), { now: () => now, lang: "es" });
-  const i = r.issues.find((x) => x.id === "peers");
+  const i = r.issues.find((x) => x.id === "peers:g1");
   assert.match(i.label, /inaccesible/);
   assert.match(i.label, /Primary/);
+});
+
+test("each unreachable peer has its own issue id, so a second outage inside the first's 24 h window still pushes", async () => {
+  _resetPeerProbeHealth();
+  recordPeerProbe("g1", false, { nowMs: T0 });
+  const t1 = T0 + PEER_UNREACHABLE_WARN_MS;
+  const first = await peers([grackle(t1)], t1);
+  let cycle = await runHealthNotifyCycle({ issues: first.issues, lastMap: {}, nowMs: t1, notify: async () => {} });
+  assert.deepEqual(cycle.pushed, ["peers:g1"]);
+
+  recordPeerProbe("r2", false, { nowMs: t1 });
+  const t2 = t1 + PEER_UNREACHABLE_WARN_MS; // well inside 24 h of the first push
+  const raven = { ...grackle(t2), id: "r2", name: "raven" };
+  const second = await peers([grackle(t2), raven], t2);
+  assert.equal(second.detail.state, "warn");
+  assert.equal(second.issues.length, 2);
+  cycle = await runHealthNotifyCycle({ issues: second.issues, lastMap: cycle.lastMap, nowMs: t2, notify: async () => {} });
+  assert.deepEqual(cycle.pushed, ["peers:r2"], "the new peer pushes; the already-notified one is deduped");
 });

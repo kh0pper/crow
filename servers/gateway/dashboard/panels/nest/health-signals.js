@@ -263,7 +263,7 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
     for (const r of rows) {
       const p = probe[r.id];
       if (r.gateway_url && p?.failingSince != null && now - p.failingSince >= PEER_UNREACHABLE_WARN_MS) {
-        unreachable.push({ name: r.name || String(r.id).slice(0, 12), hours: Math.floor((now - p.failingSince) / 3_600_000) });
+        unreachable.push({ id: r.id, name: r.name || String(r.id).slice(0, 12), hours: Math.floor((now - p.failingSince) / 3_600_000) });
         continue;
       }
       if (!r.last_seen_at) continue;
@@ -279,16 +279,29 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
 
   const label = t("signals.peers.label", lang);
   if (unreachable.length > 0) {
-    return {
-      id: "peers",
-      severity: "warn",
-      state: "warn",
-      label,
-      value: fill(t("signals.peers.unreachableCount", lang), { n: unreachable.length }),
-      issueLabel: fill(t("signals.peers.unreachable", lang), unreachable[0]),
-      actionLabel: t("signals.peers.action", lang),
-      actionHref: "/dashboard/settings?section=paired-instances",
-    };
+    // One card, plus one warn issue PER peer (id "peers:<instanceId>"), so a
+    // second peer going down inside the first one's 24 h dedupe window still
+    // pushes (review M4).
+    return [
+      {
+        id: "peers",
+        severity: "warn",
+        state: "warn",
+        cardOnly: true,
+        label,
+        value: fill(t("signals.peers.unreachableCount", lang), { n: unreachable.length }),
+      },
+      ...unreachable.map((u) => ({
+        id: `peers:${u.id}`,
+        severity: "warn",
+        state: "warn",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.peers.unreachable", lang), u),
+        actionLabel: t("signals.peers.action", lang),
+        actionHref: "/dashboard/settings?section=paired-instances",
+      })),
+    ];
   }
 
   if (stale.length === 0) {
@@ -952,7 +965,9 @@ export async function collectHealthSignals(db, opts = {}) {
     messagesSignal(db, lang, nowFn),
     providersSignal(lang, nowFn),
     externalEnginesSignal(lang, nowFn),
-    reservationSignal(lang, nowFn),
+    // Deferred so a throwing reader lands in the per-signal catch below
+    // instead of escaping the array literal (review M8).
+    Promise.resolve().then(() => reservationSignal(lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
@@ -963,8 +978,11 @@ export async function collectHealthSignals(db, opts = {}) {
   }))));
 
   // A signal may opt out by returning null (externalEngines when nothing is watched).
-  const present = rawSignals.filter(Boolean);
-  const details = present.map(s => ({
+  // A signal may also return an ARRAY: one card plus per-subject issue
+  // entries (issueOnly: true — an issue, not a card), e.g. one unreachable
+  // peer per issue id so each peer gets its own 24 h push window.
+  const present = rawSignals.flat().filter(Boolean);
+  const details = present.filter(s => !s.issueOnly).map(s => ({
     id: s.id,
     label: s.label,
     value: s.value,
@@ -972,7 +990,7 @@ export async function collectHealthSignals(db, opts = {}) {
   }));
 
   const issues = present
-    .filter(s => s.state === "warn" || s.state === "info")
+    .filter(s => !s.cardOnly && (s.state === "warn" || s.state === "info"))
     .map(s => ({
       id: s.id,
       severity: s.severity ?? s.state,

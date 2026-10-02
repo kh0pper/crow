@@ -4,6 +4,10 @@
 # CROW_BROWSER_CONTAINER_NAME (see container_name below), so the project follows
 # it; the primary keeps "browser". COMPOSE_PROJECT_NAME / `-p` still override.
 # The value must be a valid project name: lowercase letters, digits, - and _.
+# Upgrading an instance that set CROW_BROWSER_CONTAINER_NAME but NOT
+# COMPOSE_PROJECT_NAME: its running container is labelled project "browser",
+# so stop it under the old name first (`docker compose -p browser down`) or the
+# next `up` fails with "container name already in use".
 name: ${CROW_BROWSER_CONTAINER_NAME:-browser}
 services:
   crow-browser:
