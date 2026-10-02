@@ -1,0 +1,193 @@
+// Perch on a phone: the pending ask_user card must fit between the banner and
+// the composer (Kevin's Pixel 9a report, 2026-10-02 — the bottom tab bar and the
+// composer were painted over Send answer / Cancel, and the transcript was
+// squeezed to a 24px sliver under the banner).
+//
+// Two layers:
+//   • static assertions on the emitted CSS / client script (always run);
+//   • a live layout check in the shared CDP Chrome (skips without one).
+//
+// The live part is hermetic on purpose (see the F1b note in
+// tests/perch-hub-render.test.js): its own http server on an ephemeral port,
+// its own tab, its own scripted perch-api whose SSE stream pushes the card,
+// and it POLLS for the rendered card instead of sleeping a fixed budget — the
+// suite's CDP tests share one Chrome, and fixed sleeps are what flake there.
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+
+const CDP = process.env.CROW_CDP_URL ||
+  ("http://127.0.0.1:" + (process.env.CROW_BROWSER_CDP_PORT || "9223"));
+const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
+const SID = "perchlive-9e2b9bf3";
+
+// The exact card in Kevin's screenshot: one question, four options + Other.
+const CARD = {
+  requestId: "req-1", method: "questions",
+  questions: [{
+    header: "Onboarding", question: "What kind of onboarding do you need?",
+    options: [
+      { label: "Walk me through features", description: "A guided tour of how Crow works — memory, sharing, messaging, research" },
+      { label: "Connect a new contact", description: "Generate an invite or pairing code for someone new" },
+      { label: "Set up a new device", description: "Point another Crow installation at your existing network" },
+      { label: "Onboard someone else", description: "Help a friend/colleague get started with their own Crow" },
+    ],
+  }],
+};
+
+// ─── static ────────────────────────────────────────────────────────────────
+
+test("css: the ask pane can shrink, its questions scroll, its foot stays", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /#perch-ask\{[^}]*flex:0 1 auto[^}]*min-height:0/,
+    "#perch-ask must be shrinkable (min-height:0) — without it the flex default min-height:auto keeps the whole card and overflows the column");
+  assert.match(css, /#perch-ask:not\(:empty\)\{min-height:/,
+    "a floor keeps Send answer in the pane on a landscape phone");
+  assert.match(css, /\.ask-body\{[^}]*min-height:0[^}]*overflow-y:auto/, "the questions scroll inside the card");
+  assert.match(css, /\.ask-combined \.ask-foot\{flex-shrink:0\}/, "Send answer / Cancel never shrink away");
+  assert.match(css, /#perch-tab-chat > #perch-transcript\{min-height:min\(/, "the transcript keeps a readable floor");
+});
+
+test("client: the combined card wraps its questions in .ask-body and the foot is outside it", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const js = perchHubJs("en");
+  assert.match(js, /qbody\.className='ask-body'/);
+  assert.match(js, /qbody\.appendChild\(qd\)/);
+  assert.match(js, /frame\.appendChild\(qbody\)/);
+  assert.match(js, /frame\.appendChild\(foot\)/);
+});
+
+// ─── live ──────────────────────────────────────────────────────────────────
+
+let available = false, server = null, port = 0;
+
+function serveApi(req, res) {
+  const url = req.url.split("?")[0];
+  const send = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+  if (url.endsWith("/roost")) return send(200, { birds: [{ id: "hank", name: "Hank", perch_attached: true, state: "working",
+    sessions: [{ sessionId: SID, state: "awake", cardId: null, pendingUi: true, label: null }] }], occupiedCardIds: [] });
+  if (url.endsWith("/events")) {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    res.write(": open\n\n");
+    res.write("event: tool\ndata: " + JSON.stringify({ phase: "start", name: "ask_user", id: "t1", toolCallId: "t1" }) + "\n\n");
+    res.write("event: ask_user\ndata: " + JSON.stringify(CARD) + "\n\n");
+    return;                                    // stays open, like the real stream
+  }
+  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  return send(200, {});
+}
+
+before(async () => {
+  try {
+    const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
+    available = r.ok;
+  } catch { available = false; }
+  if (!available) return;
+  const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
+  const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  server = http.createServer(async (req, res) => {
+    if (req.url.startsWith("/dashboard/perch-api/")) return serveApi(req, res);
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
+    const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
+    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
+  });
+  await new Promise((r) => server.listen(0, "0.0.0.0", r));
+  port = server.address().port;
+});
+
+after(() => { if (server) server.close(); });
+
+/** Open a tab at w x h on the session deep link, wait (by polling) until
+ *  `ready` is true in the page, run `expression`, close the tab. `css` is
+ *  appended to <head> first, so a test can knock a rule out. */
+async function measure(w, h, expression, { css = "", ready = "!!document.querySelector('#perch-ask .ask-send')" } = {}) {
+  const tab = await (await fetch(CDP + "/json/new?about:blank", { method: "PUT" })).json();
+  const { default: WebSocket } = await import("ws");
+  const ws = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((r, j) => { ws.once("open", r); ws.once("error", j); });
+  let id = 0;
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const mine = ++id;
+    const onMsg = (raw) => {
+      const m = JSON.parse(raw);
+      if (m.id !== mine) return;
+      ws.off("message", onMsg);
+      m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result || {});
+    };
+    ws.on("message", onMsg);
+    ws.send(JSON.stringify({ id: mine, method, params }));
+  });
+  const evalIn = async (expr) => {
+    const out = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
+    if (out.exceptionDetails) throw new Error("page threw: " + JSON.stringify(out.exceptionDetails));
+    return out.result.value;
+  };
+  try {
+    await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 2, mobile: w < 900 });
+    await send("Page.enable");
+    await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch#${SID}` });
+    let ok = false;
+    for (let i = 0; i < 75 && !ok; i++) {          // up to 15s, typically < 1s
+      await new Promise((r) => setTimeout(r, 200));
+      try { ok = await evalIn(ready); } catch { ok = false; }
+    }
+    assert.ok(ok, "the page never reached its ready state: " + ready);
+    if (css) await evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(css)};document.head.appendChild(s);return 1;})()`);
+    // Two frames so a class toggle or the appended style has been laid out.
+    await evalIn("new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})");
+    return JSON.parse(await evalIn(expression));
+  } finally {
+    ws.close();
+    await fetch(CDP + "/json/close/" + tab.id).catch(() => {});
+  }
+}
+
+const ASK_GEOMETRY = `(function(){
+  function box(e){ var b=e.getBoundingClientRect(); return {top:b.top,bottom:b.bottom,h:b.height}; }
+  function hit(e){ var b=e.getBoundingClientRect(); var x=b.left+b.width/2, y=b.top+b.height/2;
+    var t=document.elementFromPoint(x,y); return !!t&&(t===e||e.contains(t)); }
+  var send=document.querySelector('#perch-ask .ask-send');
+  var cancel=document.querySelector('#perch-ask .ask-foot .quiet');
+  var tc=document.getElementById('perch-tab-chat');
+  var tr=document.getElementById('perch-transcript');
+  var body=document.querySelector('#perch-ask .ask-body');
+  var cb=document.querySelector('.content-body');
+  return JSON.stringify({ vh:innerHeight,
+    send:box(send), sendHit:hit(send), cancelHit:hit(cancel),
+    ask:box(document.getElementById('perch-ask')), composer:box(document.getElementById('perch-composer')),
+    tabs:box(document.getElementById('perch-tabs')), transcriptH:tr.getBoundingClientRect().height,
+    tabChatOverflow:tc.scrollHeight-tc.clientHeight, contentBodyScroll:cb.scrollHeight-cb.clientHeight,
+    bodyScrolls:body.scrollHeight>body.clientHeight+1 });
+})()`;
+
+// 412x760 is the Pixel 9a's portrait viewport with the browser's own bars
+// showing — the size that reproduced the report on both 6445b583 and #404.
+for (const [w, h] of [[412, 760], [412, 915]]) {
+  test(`live @${w}x${h}: Send answer and Cancel sit above the composer and the tab bar, and are tappable`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    const m = await measure(w, h, ASK_GEOMETRY);
+    assert.equal(m.sendHit, true, "Send answer is covered: " + JSON.stringify(m));
+    assert.equal(m.cancelHit, true, "Cancel is covered: " + JSON.stringify(m));
+    assert.ok(m.ask.bottom <= m.composer.top + 0.5, "the card runs under the composer: " + JSON.stringify(m));
+    assert.ok(m.composer.bottom <= m.tabs.top + 0.5, "the composer runs under the tab bar: " + JSON.stringify(m));
+    assert.equal(m.tabChatOverflow, 0, "the chat column overflows");
+    assert.equal(m.contentBodyScroll, 0, "the page itself scrolls");
+    assert.ok(m.transcriptH >= 40, "the transcript was squeezed to " + m.transcriptH + "px");
+  });
+}
+
+test("live @412x760: the test reaches the mechanism — without the pane's min-height:0 Send answer is covered again", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(412, 760, ASK_GEOMETRY, { css: "#perch-ask{min-height:auto !important}" });
+  assert.equal(m.sendHit && m.cancelHit, false,
+    "with the fix knocked out the bug must come back, or the tests above prove nothing: " + JSON.stringify(m));
+});
+
+test("live @1280x900: the desktop card is untouched — full height, nothing scrolls inside it", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(1280, 900, ASK_GEOMETRY);
+  assert.equal(m.sendHit, true);
+  assert.equal(m.bodyScrolls, false, "the desktop card must show every option without an inner scroll");
+  assert.equal(m.contentBodyScroll, 0);
+});

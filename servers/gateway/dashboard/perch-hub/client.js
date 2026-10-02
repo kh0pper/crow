@@ -2087,6 +2087,10 @@ export function perchHubJs(lang = "en") {
      scrollable past inside the transcript. Built with createElement/
      textContent only — never innerHTML. */
   function setAttn(show){ var b=el('perch-attn'); if(b) b.hidden=!show; }
+  /* A card opening takes height from the transcript, which keeps its old
+     scrollTop and so shows an older slice; re-pin it to the newest row (the
+     running ask_user chip that explains the card). */
+  function pinTranscript(){ var tr=el('perch-transcript'); if(tr) tr.scrollTop=tr.scrollHeight; }
   function renderAsk(card){
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
@@ -2133,6 +2137,7 @@ export function perchHubJs(lang = "en") {
     frame.appendChild(controls);
     pane.appendChild(frame);
     setAttn(true);                             /* Wave 1: say why the bot went quiet */
+    pinTranscript();
   }
 
   /* PR-A (audit item 5): the combined multi-question ask card. Renders every
@@ -2148,6 +2153,10 @@ export function perchHubJs(lang = "en") {
     var qs=Array.isArray(card.questions)?card.questions:[];
     if(!qs.length){ setAttn(false); return; }
     var frame=document.createElement('div'); frame.className='ask-card ask-combined';
+    /* The questions live in their own scroller (.ask-body) so that, when the
+       pane is short (a phone), the options scroll and the Send / Cancel foot
+       below stays on screen — css.js's "THE ASK PANE FITS ITS SPACE". */
+    var qbody=document.createElement('div'); qbody.className='ask-body';
     var sel=qs.map(function(){ return []; });
     var other=qs.map(function(){ return ''; });
     var optBtns=qs.map(function(){ return []; });   /* per question: [{btn,label}] */
@@ -2193,8 +2202,9 @@ export function perchHubJs(lang = "en") {
       var oi=document.createElement('input'); oi.type='text'; oi.className='ask-other'; oi.placeholder=ASK_OTHER_PH;
       oi.oninput=function(){ other[qi]=oi.value; refresh(); };
       qd.appendChild(oi);
-      frame.appendChild(qd);
+      qbody.appendChild(qd);
     });
+    frame.appendChild(qbody);
 
     var foot=document.createElement('div'); foot.className='ask-foot';
     sendBtn=document.createElement('button'); sendBtn.type='button'; sendBtn.className='ask-send primary';
@@ -2216,6 +2226,7 @@ export function perchHubJs(lang = "en") {
 
     pane.appendChild(frame);
     setAttn(true);
+    pinTranscript();
     refresh();
   }
 

@@ -241,6 +241,40 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .ask-foot{display:flex;gap:8px;align-items:center}
 #perch-hub-root .ask-send{flex:1}
 #perch-hub-root .ask-send:disabled{opacity:.45;cursor:default}
+/* THE ASK PANE FITS ITS SPACE (2026-10-02, Kevin's Pixel 9a report). #perch-ask
+   is a flex child of the #perch-tab-chat column, between the transcript and
+   the composer. Before this it had no rule at all, so it kept the flex default
+   min-height:auto (= its full content height): a five-option card at 412px
+   was taller than the room left over, the column overflowed, the transcript
+   was squeezed to its 24px of padding (the half-hidden tool chip under the
+   banner), and the composer and the bottom tab bar were painted over the
+   card's Send answer / Cancel. Pre-existing — identical on 6445b583, before
+   #404's overflow safety net (measured, see the regression test).
+
+   Decision: keep the card in its own pane above the composer (an unanswered
+   ask_user blocks the turn, so it must not scroll away inside the
+   transcript), but let the pane SHRINK. min-height:0 lets it give up height
+   only when the column is out of room — on a desktop it fits and nothing
+   moves — and inside it the questions scroll while the Send answer / Cancel
+   foot stays put. The single-question cards (confirm/select/input) have no
+   separate foot; the whole card scrolls inside the pane there. */
+#perch-ask{flex:0 1 auto;min-height:0;display:flex;flex-direction:column}
+/* ...but never below the foot plus a row of options: on a landscape phone
+   (915x412) there is no room at all once the banner and composer are placed,
+   and a pane shrunk to 0px hid Send answer outright. With this floor the
+   column overflows instead and the page scrolls to it (the same backstop the
+   composer's sticky rule is for). */
+#perch-ask:not(:empty){min-height:min(120px,30vh)}
+/* Short screens (a phone on its side): the banner takes one line and the
+   composer starts at two lines, so the card keeps what room there is. */
+@media (max-height:500px){
+  #perch-hub-root .attn-banner{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;padding:6px 12px}
+  #perch-hub-root #perch-composer textarea{min-height:44px}
+}
+#perch-hub-root #perch-ask > .ask-card{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+#perch-hub-root #perch-ask > .ask-combined{display:flex;flex-direction:column;overflow:hidden}
+#perch-hub-root .ask-body{display:grid;gap:13px;flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+#perch-hub-root .ask-combined .ask-foot{flex-shrink:0}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page
@@ -254,6 +288,11 @@ body[data-view="chat"] #perch-list{display:none}
 body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min-height:0}
 #perch-hub-root .hub-split{display:flex;flex-direction:column;flex:1;min-height:0}
 #perch-transcript{flex:1;overflow:auto;min-height:0;display:grid;gap:9px;padding:12px 0}
+/* Never squeezed to a sliver by the ask pane: the floor keeps the last row
+   (the running ask_user chip) readable. min(): 56px is under the 63px the
+   transcript has with a card open at 1280x900, so the desktop is unchanged,
+   and a short landscape phone gives up the extra first. */
+#perch-tab-chat > #perch-transcript{min-height:min(56px,10vh)}
 /* Send must be reachable at ANY scroll position, not only at the bottom of a
    long transcript. That was the drawer's defining mobile failure — but this
    rule is the BACKSTOP for it, not the mechanism. In the shipped
