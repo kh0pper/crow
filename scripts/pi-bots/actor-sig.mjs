@@ -30,9 +30,22 @@
  *    A process with no key signs nothing; its bots' phone plans are then
  *    unattributed (owner notification only, no Perch card, no thread reply).
  *
- * What this stops: a child impersonating OTHER bots or sessions. What it does
- * not stop: a child replaying its OWN signed headers (it can read its own
- * .mcp.json), or a child that is root-equivalent anyway (see the report).
+ * What this stops (exactly):
+ *  - forging only the thread/gateway headers, or naming a bot id without
+ *    that bot's signature;
+ *  - owner-level access through the bare phone token (no actor headers);
+ *  - impersonation by bots that have neither a file-read tool nor an open
+ *    shell, since they cannot see any signature but their own.
+ * What it does NOT stop:
+ *  - a bot that can READ another bot's world files. The signed headers sit in
+ *    that bot's <session_dir>/.mcp.json (and /tmp/pibot-job-*), same uid, and
+ *    pi's default `read` tool is not path-confined, so the headers can be
+ *    replayed verbatim. Fix queued as S6 (read confinement in pi-lab, or
+ *    fd-based delivery of the per-turn MCP config so no signature rests on
+ *    disk).
+ *  - a bot with a docker-group shell (the gateway unit has
+ *    SupplementaryGroups=docker), which is root-equivalent.
+ *  - a child replaying its OWN headers (that is its own identity).
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
@@ -60,22 +73,24 @@ export function _resetActorKeyForTest() { key = null; }
 
 function mac(k, { kind = "bot", botId, threadId, gatewayType }) {
   // JSON array, not a joined string: no field value can shift a boundary.
-  const msg = JSON.stringify(["crow-actor-v1", kind || "", botId == null ? "" : String(botId),
-    threadId == null ? "" : String(threadId), gatewayType == null ? "" : String(gatewayType)]);
+  // Fields are trimmed on BOTH sides: HTTP strips edge whitespace from header
+  // values, so an untrimmed MAC would silently fail for such an id.
+  const f = (v) => (v == null ? "" : String(v).trim());
+  const msg = JSON.stringify(["crow-actor-v1", f(kind), f(botId), f(threadId), f(gatewayType)]);
   return createHmac("sha256", k).update(msg).digest("hex");
 }
 
 /** Signature for the actor headers, or null when this process holds no key. */
 export function signActor(actor) {
-  if (!key || !actor || actor.botId == null || actor.botId === "") return null;
+  if (!key || !actor || actor.botId == null || String(actor.botId).trim() === "") return null;
   return mac(key, actor);
 }
 
 /** Constant-time check of a presented signature. False without a key. */
 export function verifyActorSig({ kind = "bot", botId, threadId, gatewayType, sig }) {
-  if (!key || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig) || botId == null || botId === "") return false;
+  if (!key || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig.trim()) || botId == null || String(botId).trim() === "") return false;
   const want = Buffer.from(mac(key, { kind, botId, threadId, gatewayType }), "hex");
-  const got = Buffer.from(sig, "hex");
+  const got = Buffer.from(sig.trim(), "hex");
   return got.length === want.length && timingSafeEqual(got, want);
 }
 

@@ -17,16 +17,24 @@ export async function audit(db, callId, actor, event, detail = null) {
     args: [callId, typeof actor === "string" ? actor : J(actor), event, J(detail)] });
 }
 
+export const UNATTRIBUTED_GLOBAL_PENDING = 15;
+export const UNATTRIBUTED_GLOBAL_DAY = 30;
+
 export async function createPlan(db, plan, actor, deliverTo) {
-  // Per-bot buckets; every unattributed caller (S2: unsigned or forged actor
-  // headers) shares ONE bucket, so a forger cannot dodge the limit by
-  // inventing new bot ids.
-  const bucket = actor?.kind === "bot" ? { where: "json_extract(created_by,'$.id')=?", args: [actor.id] }
-    : actor?.kind === "unattributed" ? { where: "json_extract(created_by,'$.kind')='unattributed'", args: [] } : null;
-  if (bucket) {
-    const pend = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND ${bucket.where}`, args: bucket.args })).rows[0].n;
-    const day = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE ${bucket.where} AND created_at > datetime('now','-1 day')`, args: bucket.args })).rows[0].n;
-    if (pend >= 5 || day >= 10) throw fail("rate_limited", "too many call plans from this bot; ask the owner to review pending ones");
+  // Per-bot buckets. Unattributed callers (S2: unsigned or forged actor
+  // headers) are bucketed by the id they CLAIM (or "none"), so one forger
+  // cannot exhaust everyone's limit, AND share a global cap so rotating
+  // claimed ids does not lift it.
+  const U = "json_extract(created_by,'$.kind')='unattributed'";
+  const buckets = actor?.kind === "bot" ? [{ where: "json_extract(created_by,'$.id')=?", args: [actor.id], pend: 5, day: 10 }]
+    : actor?.kind === "unattributed" ? [
+      { where: `${U} AND COALESCE(json_extract(created_by,'$.claimed_id'),'none')=?`, args: [actor.claimed_id || "none"], pend: 5, day: 10 },
+      { where: U, args: [], pend: UNATTRIBUTED_GLOBAL_PENDING, day: UNATTRIBUTED_GLOBAL_DAY },
+    ] : [];
+  for (const b of buckets) {
+    const pend = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND ${b.where}`, args: b.args })).rows[0].n;
+    const day = (await db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE ${b.where} AND created_at > datetime('now','-1 day')`, args: b.args })).rows[0].n;
+    if (pend >= b.pend || day >= b.day) throw fail("rate_limited", "too many call plans from this bot; ask the owner to review pending ones");
   }
   const id = "call_" + randomUUID();
   await db.execute({

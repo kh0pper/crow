@@ -30,7 +30,8 @@ export function resolvePhoneActor(extra, verifyActor) {
       const sig = header(h, "x-crow-actor-sig");
       let valid = false;
       try { valid = !!(a.id && sig && typeof verifyActor === "function" && verifyActor({ kind: "bot", botId: a.id, threadId: a.thread, gatewayType: a.gateway, sig })); } catch { valid = false; }
-      return valid ? a : { ...UNATTRIBUTED };
+      // claimed_id only keys the rate bucket (M2); it grants nothing.
+      return valid ? a : { ...UNATTRIBUTED, claimed_id: a.id || null };
     }
     if (auth?.extra?.tokenScope === "phone") return { ...UNATTRIBUTED };
   }

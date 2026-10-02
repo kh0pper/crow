@@ -377,9 +377,36 @@ test("S2: the bot catalog signs the phone headers with the in-memory key", () =>
   rmSync(home, { recursive: true, force: true });
 });
 
-test("S2: every unattributed caller shares ONE rate bucket", async () => {
+test("S2/M2: unattributed callers are rate-limited per claimed id, under a global cap", async () => {
+  const { UNATTRIBUTED_GLOBAL_PENDING } = await import("../bundles/phone/server/store.js");
   const plan = { business_name: "X", number_e164: "+15125550111", goal: "g", limits: {}, shareable: {}, language: "en", notes: null, run_after: null };
-  const before = (await s.db.execute({ sql: "SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.kind')='unattributed'", args: [] })).rows[0].n;
-  for (let i = before; i < 5; i++) await createPlan(s.db, plan, { kind: "unattributed", id: null, thread: null, gateway: null }, null);
-  await assert.rejects(createPlan(s.db, plan, { kind: "unattributed", id: null, thread: null, gateway: null }, null), /too many call plans/);
+  const U = (claimed) => ({ kind: "unattributed", id: null, thread: null, gateway: null, claimed_id: claimed });
+  const pending = async (where, args = []) => (await s.db.execute({ sql: `SELECT COUNT(*) n FROM phone_calls WHERE status='awaiting_approval' AND json_extract(created_by,'$.kind')='unattributed' ${where}`, args })).rows[0].n;
+  // One forger exhausts only its own claimed id.
+  for (let i = 0; i < 5; i++) await createPlan(s.db, plan, U("spammer"), null);
+  await assert.rejects(createPlan(s.db, plan, U("spammer"), null), /too many call plans/);
+  await createPlan(s.db, plan, U(null), null); // "none" bucket still open
+  await createPlan(s.db, plan, U("someone-else"), null);
+  // Rotating claimed ids hits the global cap.
+  let n = await pending("");
+  let i = 0;
+  while (n < UNATTRIBUTED_GLOBAL_PENDING) { await createPlan(s.db, plan, U("rot-" + i++), null); n++; }
+  assert.equal(await pending(""), UNATTRIBUTED_GLOBAL_PENDING);
+  await assert.rejects(createPlan(s.db, plan, U("rot-new"), null), /too many call plans/);
+  // A signed bot is unaffected by the unattributed buckets.
+  await createPlan(s.db, plan, { kind: "bot", id: "dora", thread: null, gateway: null }, null);
+});
+
+test("S2/M2: the claimed id is recorded but grants nothing", async () => {
+  const cards = []; const http = await mountWithCards(fakeEngine(cards));
+  try {
+    // global cap is full from the previous test; clear unattributed pending rows first
+    await s.db.execute({ sql: "UPDATE phone_calls SET status='cancelled' WHERE json_extract(created_by,'$.kind')='unattributed'", args: [] });
+    const row = await planRow(http, { ...hankInPerch, "X-Crow-Actor-Id": "mallory" });
+    assert.equal(row.created_by.kind, "unattributed");
+    assert.equal(row.created_by.claimed_id, "mallory");
+    assert.equal(row.created_by.id, null);
+    assert.equal(row.deliver_to, null);
+    assert.equal(cards.length, 0);
+  } finally { await new Promise((r2) => http.close(r2)); }
 });

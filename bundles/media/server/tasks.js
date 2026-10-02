@@ -315,7 +315,7 @@ export function registerMediaTasks(runner, db) {
       const { rows: due } = await db.execute({
         sql: `SELECT * FROM schedules
               WHERE task = 'media:briefing' AND enabled = 1
-                AND (next_run IS NULL OR julianday(next_run) <= julianday('now'))`,
+                AND (next_run IS NULL OR next_run <= datetime('now'))`,
         args: [],
       });
       if (due.length === 0) return;

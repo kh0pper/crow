@@ -12,6 +12,8 @@ import {
 } from "../scripts/pi-bots/actor-sig.mjs";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
 import { superviseProcess } from "../servers/gateway/process-supervisor.js";
+import { jobActor } from "../scripts/pi-bots/job_runner.mjs";
+import { pathToFileURL } from "node:url";
 
 const A = { kind: "bot", botId: "bobby", threadId: "discord:42", gatewayType: "discord" };
 
@@ -109,4 +111,60 @@ test("bot runtime hands the key to the Discord child over stdin, never env", () 
   assert.match(src, /CROW_ACTOR_KEY_STDIN: "1"/);
   const dg = readFileSync(new URL("../scripts/pi-bots/discord_gateway.mjs", import.meta.url), "utf8");
   assert.match(dg, /await readActorKeyFromStdin\(\)/);
+});
+
+test("M7: fields are trimmed the same way on both sides", () => {
+  _resetActorKeyForTest();
+  initGatewayActorKey();
+  const sig = signActor({ botId: " bobby ", threadId: "discord:42 ", gatewayType: " discord" });
+  assert.equal(verifyActorSig({ ...A, sig }), true, "HTTP-stripped values verify a sig made over padded ones");
+  const sig2 = signActor(A);
+  assert.equal(verifyActorSig({ botId: "bobby\t", threadId: " discord:42", gatewayType: "discord ", sig: sig2 + " " }), true);
+  assert.equal(signActor({ botId: "   " }), null, "a whitespace-only bot id signs nothing");
+});
+
+test("M1: generic bot jobs are signed as the bot on gateway 'job' and the runner passes that actor", () => {
+  _resetActorKeyForTest();
+  initGatewayActorKey();
+  const job = { bot_id: "hank", job_id: "j123" };
+  assert.deepEqual(jobActor(job), { botId: "hank", threadId: "job-j123", gatewayType: "job" });
+  const home = mkdtempSync(join(tmpdir(), "actor-sig-job-"));
+  writeFileSync(join(home, "phone-token"), "tok", { mode: 0o600 });
+  const h = crowServerCatalog(home, jobActor(job)).servers.phone.headers;
+  assert.equal(h["X-Crow-Actor-Id"], "hank");
+  assert.equal(verifyActorSig({ botId: h["X-Crow-Actor-Id"], threadId: h["X-Crow-Actor-Thread"], gatewayType: h["X-Crow-Actor-Gateway"], sig: h["X-Crow-Actor-Sig"] }), true);
+  rmSync(home, { recursive: true, force: true });
+  const src = readFileSync(new URL("../scripts/pi-bots/job_runner.mjs", import.meta.url), "utf8");
+  assert.match(src, /peerGatewayUrls: \{\}, \.\.\.jobActor\(job\) \}\)/);
+});
+
+test("M4/M5: a real supervised child gets the key on stdin, signs with it, and never sees it in its env", async () => {
+  _resetActorKeyForTest();
+  const key = initGatewayActorKey();
+  const hex = key.toString("hex");
+  const dir = mkdtempSync(join(tmpdir(), "actor-sig-child-"));
+  const script = join(dir, "child.mjs");
+  const mod = pathToFileURL(new URL("../scripts/pi-bots/actor-sig.mjs", import.meta.url).pathname).href;
+  writeFileSync(script, `
+    import { readFileSync } from "node:fs";
+    import { readActorKeyFromStdin, signActor } from ${JSON.stringify(mod)};
+    const ok = process.env.CROW_ACTOR_KEY_STDIN === "1" && await readActorKeyFromStdin();
+    const environ = readFileSync("/proc/self/environ", "utf8");
+    process.stdout.write(JSON.stringify({ ok, environ, sig: signActor(${JSON.stringify(A)}) }) + "\\n");
+    process.exit(0);
+  `);
+  let out = "", err = "";
+  await new Promise((resolve) => {
+    const h = superviseProcess({ key: "actor-sig-child", command: process.execPath, args: [script],
+      env: { ...process.env, CROW_ACTOR_KEY_STDIN: "1" }, stdinPayload: () => hex + "\n", maxRestarts: 0 });
+    h.child.stdout.on("data", (d) => { out += d; });
+    h.child.stderr.on("data", (d) => { err += d; });
+    h.child.once("close", () => resolve()); // after stdio drains, unlike "exit"
+  });
+  rmSync(dir, { recursive: true, force: true });
+  assert.ok(out.trim(), "child printed nothing; stderr: " + err);
+  const r = JSON.parse(out.trim().split("\n").pop());
+  assert.equal(r.ok, true);
+  assert.equal(r.environ.includes(hex), false, "the key is not in the child's /proc/self/environ");
+  assert.equal(verifyActorSig({ ...A, sig: r.sig }), true, "the child signs with the gateway's key");
 });

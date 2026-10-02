@@ -193,9 +193,17 @@ container ends a running call).
     attributes a bot only when the signature verifies. A missing or wrong signature, or the phone
     token with no actor, is `unattributed`: it can propose a call (owner notification only, no
     card, no thread reply) but cannot read or cancel any call, and all such callers share one rate
-    bucket. A child can still replay its OWN headers; it can no longer pose as another bot or
-    session. Bot worlds built outside the gateway process (`pibot-gateways@`, the CLI) hold no key,
-    so their plans are unattributed.
+    bucket per claimed id plus a global cap.
+  - **What S2 stops:** forging only the thread/gateway (or a bot id without that bot's
+    signature); owner access through the bare phone token; impersonation by bots with neither a
+    file-read tool nor an open shell.
+  - **What S2 does not stop:** a bot that can read another bot's world files. Signed headers rest
+    in each bot's `.mcp.json` (same uid; pi's `read` tool is not path-confined), so they can be
+    replayed. A docker-group shell is root-equivalent. Queued as S6: pi-lab read confinement or
+    fd-based delivery of the per-turn MCP config.
+  - Bot worlds built outside the gateway process (`pibot-gateways@`, the CLI) hold no key, so their
+    plans are unattributed. Generic scheduled jobs are signed as gateway `job` (no delivery
+    target) when they run in the gateway process.
 
 ## 7. Dependencies / ordering
 The fixes PR (`fix/phone-install-and-perch-polish`, #393) has merged, and this branch is rebased
