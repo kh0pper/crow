@@ -120,7 +120,7 @@ test("a second hop answers 508", async () => {
   assert.equal(r.status, 508);
 });
 
-test("a LAN source is refused for door addressing unless it carries a valid bearer; companion is unchanged", async () => {
+test("a LAN source is refused for door addressing unless it carries a valid bearer; the companion path too (Kevin decision 2026-10-02)", async () => {
   remote = "10.0.0.50";
   try {
     const r = await post("/llm/p/crow-chat/v1/chat/completions", { model: "qwen3.6-35b-a3b", messages: [] });
@@ -130,7 +130,8 @@ test("a LAN source is refused for door addressing unless it carries a valid bear
     const ok = await post("/llm/p/crow-chat/v1/chat/completions", { model: "qwen3.6-35b-a3b", messages: [] }, { authorization: "Bearer good-token" });
     assert.equal(ok.status, 200);
     const c = await post("/llm/v1/chat/completions", { model: "qwen3.5-4b", messages: [{ role: "user", content: "hi" }] });
-    assert.equal(c.status, 200, "companion path keeps today's exposure");
+    assert.equal(c.status, 403, "the companion path is source-checked too (Kevin decision 2026-10-02)");
+    assert.deepEqual(acquired, [], "nothing was started for the refused companion turn");
   } finally { remote = "127.0.0.1"; }
 });
 

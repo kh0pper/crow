@@ -26,9 +26,10 @@
  * loopback (auth.js), and the host-networked companion arrives as loopback, so
  * password/network auth here would 403 every legitimate turn. The gateway
  * listens on ALL interfaces (LAN + tailnet + loopback), so binding is not a
- * boundary. The companion path is reachable from all three. Door addressing
- * (provider path /llm/p/<provider>/v1, the X-Crow-Provider header, a
- * qualified "<provider>/<model>" id, or a bare id that resolves to a
+ * boundary. Every /llm/v1 and /llm/p request — the companion path included
+ * (Kevin decision 2026-10-02: every companion device is on Tailscale) — door
+ * addressing (provider path /llm/p/<provider>/v1, the X-Crow-Provider header,
+ * a qualified "<provider>/<model>" id, or a bare id that resolves to a
  * forwardable row) and /llm/acquire are limited to loopback and the tailnet
  * (100.64.0.0/10, fd7a:115c:a1e0::/48) or a bearer token. Funnel is refused
  * here (first middleware, so CROW_DASHBOARD_PUBLIC cannot bypass it) and by
@@ -495,6 +496,21 @@ export default function llmRouterRouter(opts = {}) {
     if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: { code: "FUNNEL_REFUSED", message: "/llm is never reachable through Funnel" } });
     next();
   });
+  // Kevin decision 2026-10-02: every device that uses the voice companion is
+  // on Tailscale, and r4 reaches the gateway over loopback, so the WHOLE
+  // model surface (/llm/v1 — the companion path included — and the
+  // provider-scoped door /llm/p) gets the door's source check: loopback or
+  // the tailnet, or a valid bearer. LAN and container-bridge sources get 403
+  // before anything is acquired or forwarded. /llm and /llm/health (probes)
+  // stay open; /llm/acquire has its own identical check below.
+  const sourceGate = async (req, res, next) => {
+    try {
+      if (await doorCallerAllowed(req, deps)) return next();
+    } catch { /* fall through to the refusal */ }
+    res.status(403).json({ error: { code: "DOOR_SOURCE_REFUSED", message: "/llm is limited to loopback and the tailnet, or a bearer token" } });
+  };
+  router.use("/llm/v1", sourceGate);
+  router.use("/llm/p", sourceGate);
   // Route-scoped 10mb JSON limit: the global parser is 1mb and a multi-turn
   // companion/glasses transcript (with tool history + base64 image parts) can
   // exceed that and 413.
