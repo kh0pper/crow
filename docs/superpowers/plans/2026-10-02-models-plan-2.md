@@ -2597,7 +2597,7 @@ git commit servers/shared/pi-models-sync.js servers/shared/providers-db.js serve
   - `listPiModels({ execFileFn, nowFn, ttlMs = 300000, force = false, resolvePiCliFn, resolveNodeBinFn }) -> Promise<{ ok: true, keys: Set } | { ok: false, error }>`. Concurrent callers share one spawn.
   - `piModelsFileKeys({ path, readFileFn }) -> Set<"provider/model"> | null`: what pi's `models.json` declares, with no spawn. Task 11 uses it.
   - `invalidatePiModelCache()`
-  - `checkPiModel({ provider, model }, deps) -> Promise<{ ok: true } | { ok: true, unverified: true } | { ok: false, message }>`. The message is exactly `model "<provider>/<model>" is not available to the bot engine`. A failed listing lets the turn proceed.
+  - `checkPiModel({ provider, model }, deps) -> Promise<{ ok: true } | { ok: true, unverified: true } | { ok: false, message }>`. A key that pi's `models.json` declares passes without a spawn; only other keys pay for the listing. This keeps `tests/perch-interactive.test.js`'s `prepareSpawn` cases, which write `PI_MODELS_JSON`, from spawning a real pi. The message is exactly `model "<provider>/<model>" is not available to the bot engine`. A failed listing lets the turn proceed.
   - `class PiModelUnavailableError extends Error { code = "PI_MODEL_UNAVAILABLE" }`
 
 - [ ] **Step 1: Write the failing test.**
@@ -2609,7 +2609,7 @@ import assert from "node:assert/strict";
 import { parsePiListModels, listPiModels, checkPiModel, invalidatePiModelCache, piModelsFileKeys } from "../scripts/pi-bots/pi-model-catalog.mjs";
 
 // CI has no pi installed: every call injects the resolvers.
-const R = { resolvePiCliFn: () => ({ cliPath: "/fake/pi/cli.js", source: "env" }), resolveNodeBinFn: () => "/fake/node" };
+const R = { resolvePiCliFn: () => ({ cliPath: "/fake/pi/cli.js", source: "env" }), resolveNodeBinFn: () => "/fake/node", piKeysFn: () => null };
 const OUT = [
   "provider         model              context  max-out  thinking  images",
   "crow-chat        qwen3.6-35b-a3b    262K     32K      yes       yes",
@@ -2659,6 +2659,14 @@ test("a failed listing or a missing pi lets the turn proceed (unverified)", asyn
 test("a known model passes", async () => {
   invalidatePiModelCache();
   assert.deepEqual(await checkPiModel({ provider: "zai-coding", model: "glm-5.1" }, { ...R, execFileFn: okExec() }), { ok: true });
+});
+
+test("a key declared in pi's models.json passes without spawning pi", async () => {
+  invalidatePiModelCache();
+  const c = { n: 0 };
+  const r = await checkPiModel({ provider: "crow-chat", model: "qwen3.6-35b-a3b" }, { ...R, piKeysFn: () => new Set(["crow-chat/qwen3.6-35b-a3b"]), execFileFn: okExec(c) });
+  assert.deepEqual(r, { ok: true });
+  assert.equal(c.n, 0);
 });
 
 test("piModelsFileKeys reads models.json without spawning; unreadable → null", () => {
@@ -2740,12 +2748,17 @@ export function piModelsFileKeys({ path = process.env.PI_MODELS_JSON || `${proce
 }
 
 export async function checkPiModel({ provider, model }, deps = {}) {
+  const key = `${provider}/${model}`;
+  // Fast path, no spawn: a key pi's models.json declares (every M1 entry and
+  // every hand-written one) is usable. Only a key absent from the file (a pi
+  // built-in, or a genuinely unknown model) pays for `pi --list-models`.
+  const fileKeys = (deps.piKeysFn || piModelsFileKeys)();
+  if (fileKeys && fileKeys.has(key)) return { ok: true };
   const l = await listPiModels(deps);
   if (!l.ok) {
     if (!_warned) { _warned = true; console.warn(`[pi-model-catalog] pi --list-models failed, not validating models: ${l.error}`); }
     return { ok: true, unverified: true };
   }
-  const key = `${provider}/${model}`;
   if (l.keys.has(key)) return { ok: true };
   if (!deps.force) {
     const again = await listPiModels({ ...deps, force: true });
