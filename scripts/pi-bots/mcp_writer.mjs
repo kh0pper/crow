@@ -277,9 +277,11 @@ export function writeBotMcp(def, opts = {}) {
   // botId/jobId (Track 1 Task 7): threaded into the catalog's board entry so
   // its X-Crow-Actor-Id/X-Crow-Job-Id headers carry THIS turn's identity —
   // see crow-server-catalog.mjs's boardBlock(). Absent for callers that
-  // predate the job_id plumbing (job_runner's generic runJob, the GUI regen
-  // handler, the CLI): the board entry then omits those headers and
-  // board-mcp.js's resolveActor falls back to actor_kind='session'.
+  // predate the job_id plumbing (the GUI regen handler, the CLI): the board
+  // entry then omits those headers. S5: board-mcp.js's resolveActor honours
+  // the headers only with the X-Crow-Actor-Sig the catalog adds when this
+  // process holds the actor key; anything else on the board token resolves
+  // to an unattributed bot (never 'session').
   const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, {
     binding, botId: opts.botId, jobId: opts.jobId, threadId: opts.threadId, gatewayType: opts.gatewayType,
   });

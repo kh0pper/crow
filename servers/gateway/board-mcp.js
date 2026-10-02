@@ -30,6 +30,21 @@
  * Any non-token caller (OAuth, peer-instance) always gets 'session' — headers
  * are never honored off the token rail.
  *
+ * S5 (2026-10-02): the bot's id and job id are honoured ONLY with a valid
+ * X-Crow-Actor-Sig (scripts/pi-bots/actor-sig.mjs signBoardActor, keyed by
+ * the gateway's per-boot in-memory key). Every token holder is a bot or the
+ * operator, and the board token sits in every bot's .mcp.json, so an unsigned
+ * id proves nothing. Rules:
+ *  - signed bot headers → { kind:'bot', id, jobId } (attribution + the
+ *    result-service lock exemption);
+ *  - bot headers with a missing/bad signature, or no verifier injected (fail
+ *    closed) → UNATTRIBUTED { kind:'bot', id:null, jobId:null }: no lock
+ *    exemption, no attribution to any bot;
+ *  - the BOARD token (tokenScope 'board') with no actor headers → also
+ *    unattributed: that token is only ever handed to bots, so stripping the
+ *    headers must not turn a bot into the owner 'session';
+ *  - the operator's full local token with no actor headers → 'session'.
+ *
  * Error idiom: every service throws `Object.assign(new Error(msg), {code,
  * http})` (card-service.js's `fail()`). `tool()` below catches that and
  * returns an MCP `isError: true` result with text `[<http> <code>] <msg>` —
@@ -92,21 +107,31 @@ function headerValue(headers, key) {
   return s == null ? null : String(s);
 }
 
-export function resolveActor(extra) {
-  const tokenAuthed = extra?.authInfo?.clientId === "local-mcp";
+const UNATTRIBUTED_BOT = Object.freeze({ kind: "bot", id: null, jobId: null });
+
+/** @param verifyActor ({botId, jobId, sig}) => boolean — the gateway injects
+ *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed). */
+export function resolveActor(extra, verifyActor) {
+  const auth = extra?.authInfo;
+  const tokenAuthed = auth?.clientId === "local-mcp";
   if (tokenAuthed) {
     const headers = extra?.requestInfo?.headers || {};
     const kind = headerValue(headers, "x-crow-actor-kind");
     if (kind === "bot") {
-      return {
-        kind: "bot",
-        id: headerValue(headers, "x-crow-actor-id"),
-        jobId: headerValue(headers, "x-crow-job-id"),
-      };
+      const id = headerValue(headers, "x-crow-actor-id");
+      const jobId = headerValue(headers, "x-crow-job-id");
+      const sig = headerValue(headers, "x-crow-actor-sig");
+      let ok = false;
+      try { ok = typeof verifyActor === "function" && !!id && !!sig && verifyActor({ botId: id, jobId, sig }) === true; } catch { ok = false; }
+      return ok ? { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim() } : { ...UNATTRIBUTED_BOT };
     }
+    if (auth?.extra?.tokenScope === "board") return { ...UNATTRIBUTED_BOT };
   }
   return { kind: "session", id: null, jobId: null };
 }
+// Module-level alias: createBoardMcpServer shadows the name with a closure
+// that binds its injected verifier.
+const resolveActorWith = resolveActor;
 
 // ---- card/item dispatch (D-T1.8) ----
 
@@ -265,6 +290,9 @@ async function briefingSnapshotImpl(tdb) {
 export function createBoardMcpServer(options = {}) {
   const tdb = options.tdb || createDbClient(TASKS_DB);
   const cdb = options.cdb || createDbClient();
+  // S5: every handler resolves its actor through the injected verifier.
+  const verifyActor = options.verifyActor;
+  const resolveActor = (extra) => resolveActorWith(extra, verifyActor);
 
   const server = new McpServer(
     { name: "crow-board", version: "0.1.0" },

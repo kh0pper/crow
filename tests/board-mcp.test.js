@@ -35,7 +35,10 @@ import {
   ensureBoardToken, BOARD_TOKEN_KEYS,
 } from "../servers/gateway/local-token.js";
 import { isSyncable } from "../servers/gateway/dashboard/settings/registry.js";
-import { createBoardMcpServer } from "../servers/gateway/board-mcp.js";
+import { createBoardMcpServer, resolveActor } from "../servers/gateway/board-mcp.js";
+import {
+  initGatewayActorKey, signBoardActor, signActor, verifyBoardActorSig,
+} from "../scripts/pi-bots/actor-sig.mjs";
 
 const MIGRATIONS_DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
@@ -149,7 +152,9 @@ before(async () => {
     jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "unauthorized" },
   });
   const sessionManager = new SessionManager();
-  mountMcpServer(app, "/board", () => createBoardMcpServer({ tdb, cdb }), sessionManager, noAuth);
+  // S5: the real gateway mounts with verifyBoardActorSig and a per-boot key.
+  initGatewayActorKey();
+  mountMcpServer(app, "/board", () => createBoardMcpServer({ tdb, cdb, verifyActor: verifyBoardActorSig }), sessionManager, noAuth);
   // Stub /memory mount: only the auth boundary is under test here, not the
   // real memory server (which pulls in embeddings/providers machinery this
   // file has no reason to load).
@@ -379,12 +384,26 @@ test("board_update_item: plain fields, and parent_id re-parents + re-inherits pr
 
 // ---- provenance (D-T1.3 actor resolution) ----
 
-test("actor headers land in board_mutations (bot + job id) on a token-authed request", async () => {
-  const client = await connectClient("/board/mcp", state.localToken, {
-    "X-Crow-Actor-Kind": "bot",
-    "X-Crow-Actor-Id": "bot-wire-test",
-    "X-Crow-Job-Id": "job-wire-42",
-  });
+// S5: headers exactly as crow-server-catalog.mjs's boardBlock emits them.
+const signedBoard = (botId, jobId) => {
+  const h = { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": botId };
+  if (jobId) h["X-Crow-Job-Id"] = jobId;
+  h["X-Crow-Actor-Sig"] = signBoardActor({ botId, jobId });
+  return h;
+};
+
+async function createVia(token, headers, title) {
+  const client = await connectClient("/board/mcp", token, headers);
+  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title, project_id: 1 } }));
+  await client.close();
+  return (await state.tdb.execute({
+    sql: "SELECT actor_kind, actor_id, job_id FROM board_mutations WHERE item_id=? AND verb='create'",
+    args: [created.id],
+  })).rows[0];
+}
+
+test("signed actor headers land in board_mutations (bot + job id) on a token-authed request", async () => {
+  const client = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-wire-test", "job-wire-42"));
   const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "bot-created card", project_id: 1 } }));
   await client.close();
 
@@ -397,18 +416,92 @@ test("actor headers land in board_mutations (bot + job id) on a token-authed req
   assert.equal(row.job_id, "job-wire-42");
 });
 
-test("a headerless token call records actor_kind 'session'", async () => {
-  const client = await connectClient("/board/mcp", state.boardToken);
-  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "session-created card", project_id: 1 } }));
-  await client.close();
-
-  const row = (await state.tdb.execute({
-    sql: "SELECT actor_kind, actor_id, job_id FROM board_mutations WHERE item_id=? AND verb='create'",
-    args: [created.id],
-  })).rows[0];
+test("a headerless call on the operator's full local token records actor_kind 'session'", async () => {
+  const row = await createVia(state.localToken, {}, "session-created card");
   assert.equal(row.actor_kind, "session");
   assert.equal(row.actor_id, null);
   assert.equal(row.job_id, null);
+});
+
+test("S5: a headerless call on the BOARD token is an unattributed bot, never 'session'", async () => {
+  const row = await createVia(state.boardToken, {}, "stripped-headers card");
+  assert.equal(row.actor_kind, "bot");
+  assert.equal(row.actor_id, null);
+  assert.equal(row.job_id, null);
+});
+
+test("S5: unsigned, forged, re-bound and cross-protocol signatures are unattributed", async () => {
+  const unattributed = (row, why) => {
+    assert.equal(row.actor_kind, "bot", why);
+    assert.equal(row.actor_id, null, why);
+    assert.equal(row.job_id, null, why);
+  };
+  // No signature at all (both tokens).
+  for (const tok of [state.boardToken, state.localToken]) {
+    unattributed(await createVia(tok, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1" }, "unsigned"), "unsigned");
+  }
+  // Another bot's signature with this bot's id.
+  unattributed(await createVia(state.boardToken, { ...signedBoard("crow-home", "j-1"), "X-Crow-Actor-Id": "hank" }, "forged id"), "forged id");
+  // A no-job signature paired with a job id afterwards (the lock-exemption grab).
+  unattributed(await createVia(state.boardToken, { ...signedBoard("hank"), "X-Crow-Job-Id": "j-9" }, "rebound job"), "rebound job");
+  // A job signature with a different job id.
+  unattributed(await createVia(state.boardToken, { ...signedBoard("hank", "j-1"), "X-Crow-Job-Id": "j-2" }, "other job"), "other job");
+  // A PHONE signature for the same bot is not a board signature.
+  const phoneSig = signActor({ kind: "bot", botId: "hank", threadId: "j-1", gatewayType: null });
+  unattributed(await createVia(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "j-1", "X-Crow-Actor-Sig": phoneSig }, "phone sig"), "phone sig");
+  // Garbage signature.
+  unattributed(await createVia(state.boardToken, { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Actor-Sig": "zz" }, "garbage"), "garbage");
+  // And the genuine article still attributes (no job).
+  const good = await createVia(state.boardToken, signedBoard("hank"), "signed no job");
+  assert.equal(good.actor_kind, "bot");
+  assert.equal(good.actor_id, "hank");
+  assert.equal(good.job_id, null);
+});
+
+test("S5: resolveActor fails closed without a verifier; OAuth callers stay 'session'", () => {
+  const extra = (headers, scope) => ({
+    authInfo: { clientId: "local-mcp", ...(scope ? { extra: { tokenScope: scope } } : {}) },
+    requestInfo: { headers },
+  });
+  const h = { "x-crow-actor-kind": "bot", "x-crow-actor-id": "hank", "x-crow-actor-sig": signBoardActor({ botId: "hank" }) };
+  assert.deepEqual(resolveActor(extra(h)), { kind: "bot", id: null, jobId: null }, "no verifier → unattributed");
+  assert.deepEqual(resolveActor(extra(h), () => { throw new Error("boom"); }), { kind: "bot", id: null, jobId: null }, "throwing verifier → unattributed");
+  assert.deepEqual(resolveActor(extra(h), verifyBoardActorSig), { kind: "bot", id: "hank", jobId: null });
+  assert.deepEqual(resolveActor({ authInfo: { clientId: "some-oauth-client" }, requestInfo: { headers: h } }, verifyBoardActorSig),
+    { kind: "session", id: null, jobId: null }, "headers never honoured off the token rail");
+  assert.deepEqual(resolveActor(extra({}, "board"), verifyBoardActorSig), { kind: "bot", id: null, jobId: null });
+  assert.deepEqual(resolveActor(extra({}), verifyBoardActorSig), { kind: "session", id: null, jobId: null });
+});
+
+test("S5: the job-rail lock exemption needs the job's SIGNED headers", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const mk = async (title) => payload(await client.callTool({ name: "board_create_item", arguments: { title, project_id: 1, autonomy: "auto" } }));
+  const a = await mk("job-locked auto card A");
+  const b = await mk("job-locked auto card B");
+  await client.close();
+  for (const [card, job] of [[a.id, "job-lock-a"], [b.id, "job-lock-b"]]) {
+    await state.cdb.execute({
+      sql: "INSERT INTO bot_jobs (job_id, bot_id, card_id, card_action, status, worker_pid, started_at) VALUES (?,?,?,?,?,?,datetime('now'))",
+      args: [job, "hank", card, "run", "running", 1],
+    });
+  }
+  const report = async (headers, id) => {
+    const c = await connectClient("/board/mcp", state.boardToken, headers);
+    const r = await c.callTool({ name: "board_report_result", arguments: { item_id: id, outcome: "success", summary_md: "done" } });
+    await c.close();
+    return r;
+  };
+  // Unsigned job headers: the lock holds.
+  const refused = await report({ "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "hank", "X-Crow-Job-Id": "job-lock-a" }, a.id);
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /locked/);
+  // Signed for the job that holds the lock: auto-closes.
+  const okRes = await report(signedBoard("hank", "job-lock-b"), b.id);
+  assert.ok(!okRes.isError, okRes.content?.[0]?.text);
+  const status = (await state.tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [b.id] })).rows[0].status;
+  assert.equal(status, "done");
+  const stillOpen = (await state.tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [a.id] })).rows[0].status;
+  assert.notEqual(stillOpen, "done");
 });
 
 // ---- board_report_result 409 -> MCP isError (Task 7 session-done detection) ----

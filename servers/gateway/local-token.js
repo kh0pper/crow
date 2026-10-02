@@ -237,7 +237,10 @@ export function localTokenAuthMiddleware(db) {
       // registers only board_* tools, so there is no separate tool-level
       // allowlist to apply.
       if (BOARD_PATH_RE.test(req.path) && await validateBoardToken(db, token)) {
-        req.localTokenAuth = { token: "local-mcp" };
+        // S5: scope "board" lets board-mcp tell the bots' shared token from
+        // the operator's full local token (a board-token caller is never the
+        // owner 'session' actor). Same mechanism as the phone scope below.
+        req.localTokenAuth = { token: "local-mcp", scope: "board" };
       }
       if (!req.localTokenAuth && PHONE_PATH_RE.test(req.path) && await validatePhoneToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp", scope: "phone" };

@@ -22,7 +22,7 @@ import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken, ensurePhoneToken } from "../local-token.js";
-import { initGatewayActorKey, verifyActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -268,7 +268,11 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[gateway] ensureBoardToken failed: ${err.message}`);
   }
 
-  mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions }), sessionManager, authMiddleware, peerExposureGate);
+  // S5: board actor headers count only with a signature from the per-boot
+  // in-memory key, so the key must exist before any bot world is built in
+  // this process (idempotent; the phone mount below reuses it).
+  initGatewayActorKey();
+  mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig }), sessionManager, authMiddleware, peerExposureGate);
   // Phone bundle (plan A): core-mounted like /board, but only when the bundle
   // is installed. The server factory is imported by PATH from the installed
   // copy (ramble-transport precedent). A failure here never blocks boot.

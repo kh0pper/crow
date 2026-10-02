@@ -1226,6 +1226,22 @@ test("lease file: written on spawn, refreshed every 60 s, emptied on the last cl
   assert.deepEqual(empty.leases, {}, "the last close leaves an EMPTY lease set, not a stale pid");
 });
 
+test("S3 I1: a sandboxed child leases BOTH the bwrap wrapper pid and pi's own pid", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  pi.piPid = pi.proc.pid + 100_000; // bwrap reported pi's pid on --info-fd
+  clock.advance(60_000);
+  await tick();
+  const l = JSON.parse(readFileSync(LEASE_PATH, "utf8")).leases;
+  assert.ok(l[String(pi.proc.pid)], "the wrapper pid is leased (new reapers fold to it)");
+  assert.ok(l[String(pi.piPid)], "pi's own pid is leased (old reapers see only it)");
+  assert.equal(l[String(pi.piPid)].sessionId, s.sessionId);
+  assert.equal(l[String(pi.piPid)].expiresAt, l[String(pi.proc.pid)].expiresAt);
+  await engine.stop(s.sessionId);
+  assert.deepEqual(JSON.parse(readFileSync(LEASE_PATH, "utf8")).leases, {});
+});
+
 // ---------------------------------------------------------------------------
 // 10. child crash
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import {
   initGatewayActorKey, setActorKey, hasActorKey, signActor, verifyActorSig,
-  readActorKeyFromStdin, _resetActorKeyForTest,
+  readActorKeyFromStdin, _resetActorKeyForTest, signBoardActor, verifyBoardActorSig,
 } from "../scripts/pi-bots/actor-sig.mjs";
 import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
 import { superviseProcess } from "../servers/gateway/process-supervisor.js";
@@ -167,4 +167,32 @@ test("M4/M5: a real supervised child gets the key on stdin, signs with it, and n
   assert.equal(r.ok, true);
   assert.equal(r.environ.includes(hex), false, "the key is not in the child's /proc/self/environ");
   assert.equal(verifyActorSig({ ...A, sig: r.sig }), true, "the child signs with the gateway's key");
+});
+
+test("S5: the catalog's board block is signed over (bot, job) and only verifies as a board signature", () => {
+  const home = mkdtempSync(join(tmpdir(), "actor-sig-board-"));
+  writeFileSync(join(home, "board-token"), "btok", { mode: 0o600 });
+  try {
+    _resetActorKeyForTest();
+    let h = crowServerCatalog(home, { botId: "hank", jobId: "j7" }).servers.board.headers;
+    assert.equal(h["X-Crow-Actor-Sig"], undefined, "no key → no board signature");
+    assert.equal(signBoardActor({ botId: "hank", jobId: "j7" }), null);
+
+    initGatewayActorKey();
+    h = crowServerCatalog(home, { botId: "hank", jobId: "j7" }).servers.board.headers;
+    assert.equal(h["X-Crow-Actor-Id"], "hank");
+    assert.equal(h["X-Crow-Job-Id"], "j7");
+    const sig = h["X-Crow-Actor-Sig"];
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j7", sig }), true);
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j8", sig }), false, "bound to the job");
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: null, sig }), false, "a job sig is not a no-job sig");
+    assert.equal(verifyBoardActorSig({ botId: "crow-home", jobId: "j7", sig }), false, "bound to the bot");
+    assert.equal(verifyActorSig({ kind: "bot", botId: "hank", threadId: "j7", gatewayType: null, sig }), false, "not a phone signature");
+
+    const noJob = crowServerCatalog(home, { botId: "hank" }).servers.board.headers;
+    assert.ok(!("X-Crow-Job-Id" in noJob));
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: null, sig: noJob["X-Crow-Actor-Sig"] }), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

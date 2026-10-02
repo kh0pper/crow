@@ -123,6 +123,91 @@ Supporting endpoints (all behind the same `dashboardAuth` as every perch-api rou
 
 The hub's chat surface is four tabs (Chat / Session / Files / Activity). Tab switching is pure visibility toggling on the client — it never touches the SSE lifecycle, which belongs to the session, not the tab. Log/tool/error frames route to the Activity rail; the Chat transcript keeps only messages, ask cards, and hard failures.
 
+## The pi sandbox (defense in depth, not containment)
+
+Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever started it (channel turns, Perch sessions, background jobs, skill review, the Discord child). That spawn runs through `scripts/pi-bots/pi_sandbox.mjs`.
+
+**What it is:** defense in depth that removes the casual routes from a bot's shell to docker and sudo. **What it is not:** a containment boundary. The filesystem stays writable, so a bot with an open shell still has the escape routes listed below. A real boundary needs a dedicated unprivileged bot user, which is an operator decision.
+
+When bubblewrap can create a user namespace, pi starts as:
+
+```
+bwrap --dev-bind / / --unshare-user \
+  --tmpfs /run/user --tmpfs /tmp/tmux-<uid> --tmpfs /tmp/cc-daemon-<uid> --tmpfs /tmp/.X11-unix \
+  --ro-bind /dev/null <docker.sock> \
+  --ro-bind ~/.config/systemd ~/.config/systemd --ro-bind ~/.local/share/systemd ~/.local/share/systemd \
+  --info-fd 3 -- node cli.js …
+```
+
+The session paths are masked even when nothing is running at spawn time:
+
+- `/run/user` is masked whole whenever it exists.
+- The tmux and cc-daemon dirs are pre-created on the host with mode 0700.
+- `/tmp/.X11-unix` is masked only when present, because it must stay root-owned for X servers. X is reachable through abstract sockets anyway.
+
+The two systemd dirs are created empty when missing.
+
+- **Docker:** the docker socket is masked, so a bot's shell, MCP servers and allowlisted interpreters cannot reach the daemon. The gateway itself keeps docker.
+- **The user session is hidden.** That covers:
+  - the session D-Bus and the systemd user manager, so `systemd-run --user` is no longer a way out of the sandbox;
+  - gnupg, keyring, pipewire and pulse;
+  - the tmux server;
+  - the Claude Code daemon socket;
+  - X11 path sockets.
+
+  The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
+- **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
+- **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
+- **No reading other processes:** other processes' `/proc/<pid>/{root,environ,mem}` are refused, including the gateway's and other bots'.
+- **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
+- **Unchanged:** uid, network, cwd and the rest of the filesystem (read-write). Inside, files owned by other uids/gids show as `nobody`/`nogroup`, which affects owner-checking tools such as sudo and git's `safe.directory` on root-owned trees.
+
+**Escape routes that remain** (all of them need the dedicated user to close):
+
+- **Writable files that something unsandboxed runs later:**
+  - `~/.bashrc` and other rc files;
+  - `~/crow`, the gateway's own source, which runs on the next restart or auto-update;
+  - desktop autostart entries;
+  - `~/.ssh/authorized_keys`;
+  - any script a privileged process executes.
+- **`ssh localhost`** (or another lab host) using a readable private key in `~/.ssh`. That gives an unsandboxed shell.
+- **Renaming an ancestor of the user unit dirs.** `mv ~/.config ~/.config.x && mkdir -p ~/.config/systemd/user` moves the read-only mount away. A unit written to the fresh dir (or to `~/.config/environment.d`) is loaded at the next reload or boot. This is the same persistence class as rc files.
+- **The system D-Bus** (`/run/dbus/system_bus_socket`). Privileged methods are polkit-gated, and the setuid polkit helper cannot run under `no_new_privs`, so no escalation is known. It is still open.
+- **Abstract unix sockets**, because there is no network namespace (for example `@/tmp/.X11-unix/X*`).
+- **Reading anything the uid can read:** crow.db, tokens, `~/.claude`. That is S6, which is pi-lab read confinement.
+
+Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_SETGID). `id -G` inside shows the docker gid as 65534, but the group is still in the credential; only the objects it opens are masked.
+
+**Without bubblewrap** (for example black-swan, where Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` also applies), pi starts as `setpriv --no-new-privs -- node cli.js …` when `setpriv` exists. sudo and setuid are blocked; docker and the user session are not.
+
+**The probe:**
+- A failed probe is retried after 5 minutes, so a transient failure doesn't leave the process unsandboxed until restart.
+- A success is kept for the life of the process.
+- `piSandboxStatus()` reports `active`, `nnp-only: …`, `fallback: …` or `off`.
+
+`CROW_PI_SANDBOX` is read from the gateway's own environment only. A bot def's `spawn_env` cannot set it; it is stripped like `PI_BOT_*`. The values:
+
+- `auto` (the default) uses bwrap when it can, otherwise the setpriv fallback, otherwise a plain spawn. It warns once per reason.
+- `required` refuses to spawn pi without bwrap.
+- `off` never wraps.
+
+**Process accounting under bwrap:**
+- `proc.pid` is the wrapper. `PiRpc.piPid` is pi itself, read from bwrap's `--info-fd`.
+- Under the setpriv fallback, `proc.pid` is pi.
+- `listBridgePi()` folds a wrapper and its pi into one entry: the wrapper's pid/ppid (lease and orphan rules unchanged) and pi's RSS.
+- The reaper signals the wrapper's process group and pi itself.
+- Perch leases list **both** the wrapper pid and pi's pid, so a reaper from an older build (which doesn't fold wrappers) still sees the inner pi as leased.
+
+**Docker-backed tools inside a bot turn:**
+- `crow_browser_launch` fails on its container recreate/restart path; a plain launch over CDP works.
+- `crow_browser_status` reports `container_running: "unknown (no docker access)"` and keeps the VNC url.
+- The same tools work from the gateway and from operator sessions.
+
+**Gateway restart:**
+- crow-gateway.service uses the default control-group KillMode, so every in-gateway pi dies with it.
+- Jobs whose `worker_pid` is dead are re-queued and rerun with a `.mcp.json` signed by the new per-boot key.
+- The supervised Discord child receives the new key over stdin.
+
 ## See also
 
 - [Self-Hosted Bundles](./bundles) — the general bundle contract this bundle follows.
