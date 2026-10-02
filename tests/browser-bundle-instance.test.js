@@ -282,3 +282,21 @@ test("entrypoint.sh re-checks the Xvfb process after the readiness loop, not onl
       "alone isn't enough; declaring ready without re-checking lets x11vnc attach to the other instance's display",
   );
 });
+
+// A23 (per-instance browser leftovers): the compose PROJECT name used to be the
+// directory basename, "browser", for every instance — so a second instance's
+// compose up/down acted on the first one's project unless it happened to set
+// COMPOSE_PROJECT_NAME. It now follows CROW_BROWSER_CONTAINER_NAME (which a
+// co-hosted instance must set anyway) and keeps "browser" for the primary.
+test("docker-compose.yml derives the project name from CROW_BROWSER_CONTAINER_NAME, default 'browser'", () => {
+  const compose = readFileSync(new URL("../bundles/browser/docker-compose.yml", import.meta.url), "utf8");
+  assert.match(compose, /^name: \$\{CROW_BROWSER_CONTAINER_NAME:-browser\}$/m);
+});
+
+// A23: the gateway's media category loader read ~/.crow/bundles/media for
+// every instance; it must resolve the installed bundle under CROW_HOME.
+test("router.js resolves the installed media bundle under CROW_HOME", () => {
+  const src = readFileSync(new URL("../servers/gateway/router.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /homedir\(\),\s*"\.crow",\s*"bundles",\s*"media"/);
+  assert.match(src, /process\.env\.CROW_HOME \|\| join\(homedir\(\), "\.crow"\)/);
+});

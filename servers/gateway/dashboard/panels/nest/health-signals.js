@@ -10,13 +10,17 @@
  *   disk      — df-based free % (<10% → warn)
  *   storage   — MinIO availability (MINIO_ENDPOINT unset → info/off; unreachable → warn)
  *   agents    — pi_bot_defs enabled count (always ok, count display)
- *   peers     — crow_instances unseen >24h (info)
+ *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
+ *               else trusted peers unseen >24h (info)
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
  *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
  *               info at most — never warn, never a push; no card when none
  *   syncOutbox — stdio→gateway outbox depth + oldest-row age (stuck >15min → warn)
+ *   reservation — box reservation held (info; no card when the box is free).
+ *               Box-reservation scope §3.5: "Box reserved by <owner> until
+ *               <time>" for as long as the file exists.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -38,6 +42,8 @@ import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
+import { getPeerProbeHealth } from "../../../peer-probe-health.js";
+import { readReservation } from "../../../box-reservation.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
@@ -229,34 +235,82 @@ async function agentsSignal(db) {
   };
 }
 
-async function peersSignal(db) {
-  const issues = [];
+// A paired peer whose gateway URL has failed /health this long is a WARN
+// (pushed via the health monitor, 24 h dedupe). Long enough that a rolling
+// restart or a reboot never pages; short enough that a box logged out of
+// Tailscale is caught the same day, not 5 days later (grackle, 2026-09).
+export const PEER_UNREACHABLE_WARN_MS = 2 * 60 * 60 * 1000;
+
+function parseSqliteUtc(ts) {
+  if (!ts) return NaN;
+  const s = String(ts);
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(" ", "T") + "Z").getTime();
+}
+
+async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
   const LAG_MS = 24 * 60 * 60 * 1000;
+  const now = nowFn();
+  const stale = [];
+  const unreachable = [];
   try {
+    // 'offline' rows count too: offline is exactly the state an unreachable
+    // peer is in, and the old status='active' filter hid it.
     const { rows } = await db.execute({
-      sql: "SELECT name, last_seen_at FROM crow_instances WHERE trusted=1 AND status='active'",
+      sql: "SELECT id, name, last_seen_at, gateway_url FROM crow_instances WHERE trusted=1 AND status IN ('active','offline')",
       args: [],
     });
-    const now = Date.now();
+    const probe = getPeerProbeHealth();
     for (const r of rows) {
+      const p = probe[r.id];
+      if (r.gateway_url && p?.failingSince != null && now - p.failingSince >= PEER_UNREACHABLE_WARN_MS) {
+        unreachable.push({ id: r.id, name: r.name || String(r.id).slice(0, 12), hours: Math.floor((now - p.failingSince) / 3_600_000) });
+        continue;
+      }
       if (!r.last_seen_at) continue;
-      const seenAt = new Date(r.last_seen_at).getTime();
+      const seenAt = parseSqliteUtc(r.last_seen_at);
       if (now - seenAt > LAG_MS) {
-        const when = new Date(r.last_seen_at).toLocaleDateString("en-US", {
+        const when = new Date(seenAt).toLocaleDateString("en-US", {
           month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
         });
-        issues.push({ name: r.name, when });
+        stale.push({ name: r.name, when });
       }
     }
   } catch {}
 
-  if (issues.length === 0) {
+  const label = t("signals.peers.label", lang);
+  if (unreachable.length > 0) {
+    // One card, plus one warn issue PER peer (id "peers:<instanceId>"), so a
+    // second peer going down inside the first one's 24 h dedupe window still
+    // pushes (review M4).
+    return [
+      {
+        id: "peers",
+        severity: "warn",
+        state: "warn",
+        cardOnly: true,
+        label,
+        value: fill(t("signals.peers.unreachableCount", lang), { n: unreachable.length }),
+      },
+      ...unreachable.map((u) => ({
+        id: `peers:${u.id}`,
+        severity: "warn",
+        state: "warn",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.peers.unreachable", lang), u),
+        actionLabel: t("signals.peers.action", lang),
+        actionHref: "/dashboard/settings?section=paired-instances",
+      })),
+    ];
+  }
+
+  if (stale.length === 0) {
     return {
       id: "peers",
       severity: null,
       state: "ok",
-      label: "Peers",
-      value: "all online",
+      label,
+      value: t("signals.peers.ok", lang),
     };
   }
 
@@ -264,11 +318,39 @@ async function peersSignal(db) {
     id: "peers",
     severity: "info",
     state: "info",
-    label: "Peers",
-    value: `${issues.length} offline`,
-    issueLabel: `Peer ${issues[0].name} hasn't been seen since ${issues[0].when}`,
-    actionLabel: "View instances",
+    label,
+    value: fill(t("signals.peers.staleCount", lang), { n: stale.length }),
+    issueLabel: fill(t("signals.peers.stale", lang), stale[0]),
+    actionLabel: t("signals.peers.action", lang),
     actionHref: "/dashboard/settings?section=paired-instances",
+  };
+}
+
+let _reservationReader = (nowMs) => readReservation({ now: nowMs });
+/** Test seam: replace the reservation reader; null restores the real one. */
+export function _setReservationReader(fn) {
+  _reservationReader = fn || ((nowMs) => readReservation({ now: nowMs }));
+}
+
+function reservationSignal(lang, nowFn) {
+  const r = _reservationReader(nowFn());
+  if (!r) return null; // box is free: no card (the scope asks for a card only while held)
+  const label = t("signals.reservation.label", lang);
+  if (r.corrupt) {
+    return {
+      id: "reservation", severity: "info", state: "info", label,
+      value: t("signals.reservation.value", lang),
+      issueLabel: t("signals.reservation.corrupt", lang),
+    };
+  }
+  const until = new Date(r.expires_at).toLocaleString(lang === "es" ? "es" : "en-US", {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+  const base = fill(t("signals.reservation.held", lang), { owner: r.owner, until });
+  return {
+    id: "reservation", severity: "info", state: "info", label,
+    value: t("signals.reservation.value", lang),
+    issueLabel: r.reason ? `${base} (${r.reason})` : base,
   };
 }
 
@@ -871,7 +953,7 @@ export async function collectHealthSignals(db, opts = {}) {
     diskSignal(),
     storageSignal(),
     agentsSignal(db),
-    peersSignal(db),
+    peersSignal(db, lang, nowFn),
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
     syncConflictsSignal(db),
@@ -883,6 +965,9 @@ export async function collectHealthSignals(db, opts = {}) {
     messagesSignal(db, lang, nowFn),
     providersSignal(lang, nowFn),
     externalEnginesSignal(lang, nowFn),
+    // Deferred so a throwing reader lands in the per-signal catch below
+    // instead of escaping the array literal (review M8).
+    Promise.resolve().then(() => reservationSignal(lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
@@ -893,8 +978,11 @@ export async function collectHealthSignals(db, opts = {}) {
   }))));
 
   // A signal may opt out by returning null (externalEngines when nothing is watched).
-  const present = rawSignals.filter(Boolean);
-  const details = present.map(s => ({
+  // A signal may also return an ARRAY: one card plus per-subject issue
+  // entries (issueOnly: true — an issue, not a card), e.g. one unreachable
+  // peer per issue id so each peer gets its own 24 h push window.
+  const present = rawSignals.flat().filter(Boolean);
+  const details = present.filter(s => !s.issueOnly).map(s => ({
     id: s.id,
     label: s.label,
     value: s.value,
@@ -902,7 +990,7 @@ export async function collectHealthSignals(db, opts = {}) {
   }));
 
   const issues = present
-    .filter(s => s.state === "warn" || s.state === "info")
+    .filter(s => !s.cardOnly && (s.state === "warn" || s.state === "info"))
     .map(s => ({
       id: s.id,
       severity: s.severity ?? s.state,

@@ -138,6 +138,14 @@ export const INSTANCE_SCOPE_KEYS = {
   language:                   "Dashboard language default (per install)",
   "blog_*":                   "Blog config — the blog is hosted per instance",
   tts_voice:                  "Legacy TTS voice mirror (per install)",
+  // Memory embedding/rerank provider pins. The reader
+  // (servers/shared/provider-task.js resolveProviderForTask) queries the
+  // global row directly; a writeSetting save would otherwise land in an
+  // overrides row it never reads. Each install picks its own embedding
+  // backend, so these are per install, never fleet-synced (queued minor,
+  // 2026-09-24).
+  embed_provider:             "Memory embedding provider pin (per install)",
+  rerank_provider:            "Memory rerank provider pin (per install)",
 };
 
 /**

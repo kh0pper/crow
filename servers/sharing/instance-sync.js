@@ -255,6 +255,19 @@ function _scheduleStorageReset() {
 // Exported for real (not just the ForTest alias below): sync-emit.js's
 // emitOrQueue (Task 2) is a second, production, door into this same gate —
 // a row the live emitChange path would filter must never be queued either.
+/**
+ * Memory sources that are per-install and never cross instances:
+ *  - "starter": onboarding demo content (C1).
+ *  - "maker-lab": a child's learner record — bundles/maker-lab/DATA-HANDLING.md
+ *    promises it "does not leave your host".
+ * Enforced on emit and on apply (shouldSyncRow, the incoming row) AND against
+ * the local row an inbound update/delete would hit (_isLocallyProtected).
+ */
+export const LOCAL_ONLY_MEMORY_SOURCES = Object.freeze(["starter", "maker-lab"]);
+export function isLocalOnlyMemorySource(source) {
+  return LOCAL_ONLY_MEMORY_SOURCES.includes(source);
+}
+
 export function shouldSyncRow(table, row) {
   if (table === "contacts") {
     if (!row) return false;
@@ -328,11 +341,19 @@ export function shouldSyncRow(table, row) {
     if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
     return true;
   }
+  if (table === "crow_instances") {
+    // The peer registry is per-instance trust state (status, trusted,
+    // gateway_url). Nothing emits it, and an inbound entry must never be able
+    // to un-revoke a peer or repoint the URL the 60 s probe fetches (review
+    // M2). Gated in both directions.
+    return false;
+  }
   if (table === "memories") {
-    // Starter/demo content seeded by onboarding (C1) is per-install: it must
-    // never ride to paired instances (same convention as providers
-    // gpu_policy.local_only above — one gate covers emit AND apply).
-    if (row && row.source === "starter") return false;
+    // Starter/demo content (C1) and maker-lab learner records are per-install:
+    // they never ride to paired instances (LOCAL_ONLY_MEMORY_SOURCES; same
+    // convention as providers gpu_policy.local_only above — one gate covers
+    // emit AND apply of the incoming row).
+    if (row && isLocalOnlyMemorySource(row.source)) return false;
   }
   if (table === "ramble_marks") {
     // mark_id is the wire key (the AUTOINCREMENT id is stripped) — a row
@@ -1041,6 +1062,11 @@ export class InstanceSyncManager {
     // successor feed to connections that predate the key receipt (hyperswarm
     // delivers keys and streams in either order — this closes that hole).
     this._activeStreams = new Map(); // remoteInstanceId → Set<stream>
+    // Streams that carry ONLY this peer's feeds (tailnet-sync: one WebSocket
+    // per peer instance). A Hyperswarm connection is shared by every
+    // same-crow_id sibling, so it is never in here and a revoke never
+    // destroys it — closing the revoked peer's feeds detaches them instead.
+    this._dedicatedStreams = new WeakSet();
 
     // 2d C1: live in-feed key-rotation bookkeeping.
     this._inFeedListeners = new Map();  // remoteInstanceId → append handler (2d C1: removable on swap)
@@ -2083,7 +2109,8 @@ export class InstanceSyncManager {
    * @param {string} remoteInstanceId
    * @param {object} stream - NoiseSecretStream (Hypercore reads .noiseStream from it)
    */
-  async replicate(remoteInstanceId, stream) {
+  async replicate(remoteInstanceId, stream, { dedicated = false } = {}) {
+    if (dedicated) this._dedicatedStreams.add(stream);
     // 2d C3: track live streams so a rotation can attach the successor feed
     // to connections that predate the key receipt (hyperswarm ordering hole).
     let set = this._activeStreams.get(remoteInstanceId);
@@ -2312,16 +2339,21 @@ export class InstanceSyncManager {
     // boot-window fix; previously they were silently dropped while the caller
     // saw a valid lamport).
     let pairedIds = [];
+    let revokedIds = new Set();
     try {
       const { rows } = await this.db.execute({
-        sql: "SELECT id FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: "SELECT id, status FROM crow_instances WHERE status IN ('active','offline','revoked') AND id != ?",
         args: [this.localInstanceId],
       });
-      pairedIds = rows.map((r) => r.id);
+      pairedIds = rows.filter((r) => r.status !== "revoked").map((r) => r.id);
+      revokedIds = new Set(rows.filter((r) => r.status === "revoked").map((r) => r.id));
     } catch {
       pairedIds = []; // degraded: armed feeds below still get the entry
     }
-    const targets = new Set([...pairedIds, ...this.outFeeds.keys()]);
+    // A revoked peer gets nothing, even if its out-feed is still armed — the
+    // revoke may have come from another process (the stdio crow-sharing MCP
+    // tool) whose in-process feed teardown never reached this manager.
+    const targets = new Set([...pairedIds, ...this.outFeeds.keys()].filter((id) => !revokedIds.has(id)));
 
     if (!opts.strict) {
       await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
@@ -2396,6 +2428,10 @@ export class InstanceSyncManager {
     // still processes — only a swapped-out feed bails.
     const current = this.inFeeds.get(remoteInstanceId);
     if (current !== undefined && current !== feed) return;
+    // A revoked peer's entries are never applied (same cross-process reason
+    // as emitChange's target filter). The seq is NOT advanced: nothing from
+    // a revoked peer is consumed.
+    if (await this._isPeerRevoked(remoteInstanceId)) return;
     const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
     // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
     const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
@@ -2594,6 +2630,16 @@ export class InstanceSyncManager {
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_wallet:`, err.message);
       }
+      return;
+    }
+
+    // Locally protected rows (review I1): a maker-lab learner memory or a
+    // starter row never syncs OUT, and must not be overwritten or deleted by
+    // an inbound op whose id merely collides (memory ids are per-instance
+    // AUTOINCREMENT). The incoming row's own source is checked by
+    // shouldSyncRow above; this checks the LOCAL row it would hit.
+    if ((op === "update" || op === "delete") && row.id !== undefined && await this._isLocallyProtected(table, row.id)) {
+      console.warn(`[instance-sync] skipped inbound ${op} on protected local ${table} id=${row.id}`);
       return;
     }
 
@@ -3873,6 +3919,44 @@ export class InstanceSyncManager {
    * un-revoke (boot.js eagerInitPairedPeers / tailnet-sync paths gate on status
    * and will reopen when the instance is un-revoked).
    */
+  async _isLocallyProtected(table, id) {
+    if (table !== "memories") return false;
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
+      return isLocalOnlyMemorySource(rows?.[0]?.source);
+    } catch {
+      return false;
+    }
+  }
+
+  async _isPeerRevoked(remoteInstanceId) {
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT status FROM crow_instances WHERE id = ?",
+        args: [remoteInstanceId],
+      });
+      return rows?.[0]?.status === "revoked";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Revoke teardown for one peer: close its feeds (which detaches them from
+   * every stream, including a shared Hyperswarm connection) and destroy any
+   * stream dedicated to that peer (its tailnet-sync WebSocket). Called by
+   * servers/sharing/revoke-peer.js — the one revoke path for the MCP tool and
+   * the dashboard.
+   */
+  async teardownRevokedPeer(remoteInstanceId) {
+    const dedicated = [...(this._activeStreams.get(remoteInstanceId) ?? [])]
+      .filter((st) => this._dedicatedStreams.has(st));
+    await this.closeInstanceFeeds(remoteInstanceId);
+    for (const st of dedicated) {
+      try { st.destroy(); } catch {}
+    }
+  }
+
   async closeInstanceFeeds(remoteInstanceId) {
     const prior = this._initLocks.get(remoteInstanceId) || Promise.resolve();
     const next = prior

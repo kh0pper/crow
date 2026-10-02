@@ -166,6 +166,17 @@ export const translations = {
 
   // ── Security-maintenance health signals (W2) — plain language, no jargon ──
   // logins
+  "signals.reservation.label": { en: "Box reservation", es: "Reserva del equipo" },
+  "signals.reservation.value": { en: "reserved", es: "reservado" },
+  "signals.reservation.held": { en: "Box reserved by {owner} until {until}; local models can't start except the exempt ones", es: "Equipo reservado por {owner} hasta {until}; los modelos locales no pueden iniciarse salvo los exentos" },
+  "signals.reservation.corrupt": { en: "The box reservation file can't be read, so it counts as reserved. Check it with scripts/ops/box-reserve.mjs status", es: "No se puede leer el archivo de reserva del equipo, así que cuenta como reservado. Revísalo con scripts/ops/box-reserve.mjs status" },
+  "signals.peers.label": { en: "Peers", es: "Pares" },
+  "signals.peers.ok": { en: "all online", es: "todos en línea" },
+  "signals.peers.staleCount": { en: "{n} offline", es: "{n} sin conexión" },
+  "signals.peers.stale": { en: "Peer {name} hasn't been seen since {when}", es: "El par {name} no se ha visto desde {when}" },
+  "signals.peers.unreachableCount": { en: "{n} unreachable", es: "{n} inaccesibles" },
+  "signals.peers.unreachable": { en: "Peer {name} has been unreachable at its gateway URL for {hours} h. Check that it is powered on and still logged in to Tailscale.", es: "El par {name} lleva {hours} h inaccesible en su URL de gateway. Comprueba que esté encendido y siga conectado a Tailscale." },
+  "signals.peers.action": { en: "View instances", es: "Ver instancias" },
   "signals.logins.label": { en: "Sign-ins", es: "Inicios de sesión" },
   "signals.logins.none": { en: "no failed attempts", es: "sin intentos fallidos" },
   "signals.logins.count": { en: "{n} failed in 24h", es: "{n} fallidos en 24h" },
@@ -1781,6 +1792,12 @@ export const translations = {
   "settings.section.navGroups": { en: "Navigation", es: "Navegación" },
   // Multi-Instance group
   "settings.section.pairedInstances": { en: "Paired Instances", es: "Instancias emparejadas" },
+  "settings.pairedActions": { en: "Actions", es: "Acciones" },
+  "settings.pairedRevoke": { en: "Revoke", es: "Revocar" },
+  "settings.pairedThisInstance": { en: "this instance", es: "esta instancia" },
+  "settings.pairedRevokeConfirm": { en: "Revoke {name}? It stops syncing with this instance right away and its auth token is cleared. Re-pairing alone does not undo this: after re-pairing, its status must also be set back to active (crow_update_instance).", es: "¿Revocar {name}? Deja de sincronizar con esta instancia de inmediato y se borra su token de autenticación. Volver a emparejar no basta para deshacerlo: después de emparejar, también hay que devolver su estado a activo (crow_update_instance)." },
+  "settings.pairedRevokeRefused": { en: "That instance can't be revoked from here (it is this instance, the home instance, or no longer exists).", es: "Esa instancia no se puede revocar desde aquí (es esta instancia, la instancia principal o ya no existe)." },
+  "settings.pairedRevokeDone": { en: "Instance revoked. Sync with it has stopped.", es: "Instancia revocada. La sincronización con ella se ha detenido." },
   "settings.section.syncConflicts": { en: "Sync Conflicts", es: "Conflictos de sincronización" },
   "settings.section.syncProfiles": { en: "Sync Profiles", es: "Perfiles de sincronización" },
   "settings.section.auditLog": { en: "Cross-Host Audit", es: "Auditoría entre hosts" },

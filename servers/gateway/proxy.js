@@ -19,10 +19,44 @@ import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
+import { livenessStatusSql } from "../shared/instance-status.js";
+import { recordPeerProbe } from "./peer-probe-health.js";
+import bus from "../shared/event-bus.js";
+
+/** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
+async function probePeerHealth(gatewayUrl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(`${gatewayUrl}/health`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`Health check returned ${resp.status}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
 export { connectedServers };
+
+/** Drop the federated MCP client for a remote instance (revoke teardown). */
+export function dropRemoteInstance(instanceId) {
+  const key = `instance-${instanceId}`;
+  const entry = connectedServers.get(key);
+  if (!entry) return false;
+  connectedServers.delete(key);
+  try { entry.client?.close?.(); } catch {}
+  return true;
+}
+
+// Revoke teardown (review C1): an in-process revoke drops the peer's live
+// federated client at once. A revoke from another process is caught by the
+// 60 s probe below, which drops connections for rows no longer probed.
+bus.on("crow_instances:row_updated", (evt) => {
+  try {
+    if (evt?.fields?.status === "revoked" && evt.id) dropRemoteInstance(evt.id);
+  } catch {}
+});
 
 /**
  * Resolve the Crow instance home directory. Primary gateway leaves this
@@ -527,6 +561,16 @@ export async function loadRemoteInstances() {
       args: [localId],
     });
 
+    // A connection whose row is no longer probed (revoked, or deleted) is
+    // dropped — otherwise a revoked peer kept a live federated MCP client.
+    const liveIds = new Set(rows.map((r) => r.id));
+    for (const key of [...connectedServers.keys()]) {
+      const entry = connectedServers.get(key);
+      if (entry?.isRemote && entry.instanceId && !liveIds.has(entry.instanceId)) {
+        dropRemoteInstance(entry.instanceId);
+      }
+    }
+
     if (rows.length === 0) return;
 
     console.log(`[proxy] Probing ${rows.length} remote instance(s)...`);
@@ -534,29 +578,30 @@ export async function loadRemoteInstances() {
     for (const inst of rows) {
       const instanceKey = `instance-${inst.id}`;
 
-      // Skip if already connected — but refresh last_seen_at so the
-      // dashboard doesn't drift into "offline since X" for live peers.
+      // Already connected: keep the MCP client, but still probe /health so
+      // last_seen_at and the peer-probe record reflect real contact. (This
+      // used to refresh last_seen_at unconditionally, so a peer that dropped
+      // after connecting looked alive forever.)
       const existing = connectedServers.get(instanceKey);
       if (existing && existing.status === "connected") {
-        await db.execute({
-          sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ?",
-          args: [inst.id],
-        });
+        try {
+          await probePeerHealth(inst.gateway_url);
+          recordPeerProbe(inst.id, true);
+          await db.execute({
+            sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ?",
+            args: [inst.id],
+          });
+        } catch (err) {
+          recordPeerProbe(inst.id, false, { error: err.message });
+        }
         continue;
       }
 
+      let healthOk = false;
       try {
-        // Probe health endpoint with timeout
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const healthUrl = `${inst.gateway_url}/health`;
-
-        const resp = await fetch(healthUrl, { signal: controller.signal });
-        clearTimeout(timeout);
-
-        if (!resp.ok) {
-          throw new Error(`Health check returned ${resp.status}`);
-        }
+        await probePeerHealth(inst.gateway_url);
+        healthOk = true;
+        recordPeerProbe(inst.id, true);
 
         console.log(`  [proxy] Instance "${inst.name}" (${inst.hostname}): reachable, connecting...`);
 
@@ -586,11 +631,12 @@ export async function loadRemoteInstances() {
 
         // Update last_seen
         await db.execute({
-          sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), status = 'active', updated_at = datetime('now') WHERE id = ?",
+          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ?`,
           args: [inst.id],
         });
       } catch (err) {
         console.warn(`  [proxy] Instance "${inst.name}" (${inst.hostname}): unreachable — ${err.message}`);
+        if (!healthOk) recordPeerProbe(inst.id, false, { error: err.message });
         connectedServers.set(instanceKey, {
           client: null,
           tools: [],
@@ -604,7 +650,9 @@ export async function loadRemoteInstances() {
         });
 
         await db.execute({
-          sql: "UPDATE crow_instances SET status = 'offline', updated_at = datetime('now') WHERE id = ?",
+          // Never overwrite a revoke/pause that landed while this probe was
+          // in flight (MPA retirement defect 4).
+          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ?`,
           args: [inst.id],
         }).catch(() => {});
       }
