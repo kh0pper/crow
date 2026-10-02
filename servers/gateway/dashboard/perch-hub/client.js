@@ -1800,8 +1800,14 @@ export function perchHubJs(lang = "en") {
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
     pendingFilePaths=[];
-    lastSent={sid:mySid,text:text};
+    var rec={sid:mySid,text:text,counted:false,failed:false};
+    lastSent=rec;
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
+      /* B5: a 2xx means pi took this message — every older unsent message
+         of this session now has one more delivered message AFTER it, which
+         is how replayUnsent finds its place again. Counted before the
+         identity guard: it is this session's bookkeeping, viewed or not. */
+      if(r.ok&&!rec.failed){ rec.counted=true; bumpUnsentAfter(mySid,1); }
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409
@@ -1822,21 +1828,54 @@ export function perchHubJs(lang = "en") {
      failure and stays on the Activity rail. One failure per send: the POST's
      pi_gone and the stream's pi_exit frame describe the same death, and
      whichever lands first consumes lastSent. */
-  var lastSent=null;      /* {sid,text} of the last message sent, until a reply proves pi got it */
-  var unsent={};          /* sid -> [{text,note}] messages that never reached the bot */
+  var lastSent=null;      /* {sid,text,counted,failed} of the last message sent, until a reply proves pi got it */
+  /* sid -> [{text,note,after}] messages that never reached the bot. \`after\`
+     counts the messages pi DID receive after this one; it anchors the
+     replay to its original place, counted from the END of the rebuilt
+     transcript so a tail-trimmed history cannot shift it. */
+  var unsent={};
+  function bumpUnsentAfter(sid,delta){
+    (unsent[sid]||[]).forEach(function(u){ u.after=Math.max(0,(u.after||0)+delta); });
+  }
   function showSendFailure(sid,detail){
     if(!lastSent||lastSent.sid!==sid) return;
-    var sent=lastSent.text;
+    var rec=lastSent;
+    var sent=rec.text;
     lastSent=null;
+    rec.failed=true;
+    /* The POST 2xx'd (and was counted as delivered) before the child died:
+       it was not delivered after all, so take it back off the older ones. */
+    if(rec.counted){ rec.counted=false; bumpUnsentAfter(sid,-1); }
     var note=BOT_START_FAILED+' '+String(detail||'');
     appendNote(note);
     if(sent==null||sent==='') return;
-    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note});
+    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note,after:0});
   }
+  /* B5: replayed at its ORIGINAL position, not at the end. A message with
+     \`after\` = k delivered messages behind it goes right before the k-th
+     user message from the end of the rebuilt transcript (so after the
+     replies to the message before it); k = 0 means it was the newest, and
+     the end is its place. The user rows are read before any replay lands, so
+     they are exactly pi's own. */
   function replayUnsent(sid){
-    (unsent[sid]||[]).forEach(function(u){
+    var list=unsent[sid]||[];
+    if(!list.length) return;
+    var tr=el('perch-transcript');
+    var users=[];
+    if(tr){
+      for(var i=0;i<tr.children.length;i++){
+        if((' '+String(tr.children[i].className||'')+' ').indexOf(' user ')>=0) users.push(tr.children[i]);
+      }
+    }
+    list.forEach(function(u){
       appendMessage('user','you',u.text);
       appendNote(u.note);
+      if(!tr||!u.after||!users.length) return;
+      var ref=users[Math.max(0,users.length-u.after)];
+      var kids=tr.children;
+      var noteRow=kids[kids.length-1], msgRow=kids[kids.length-2];
+      tr.removeChild(noteRow); tr.removeChild(msgRow);
+      tr.insertBefore(msgRow,ref); tr.insertBefore(noteRow,ref);
     });
   }
 
