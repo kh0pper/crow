@@ -1,7 +1,7 @@
 {
   "id": "dozzle",
   "name": "Dozzle",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
   "type": "bundle",
   "author": "Crow",

@@ -1,6 +1,6 @@
 {
   "name": "crow-dozzle",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Dozzle MCP server — Docker log viewer status and shortcuts",
   "type": "module",
   "main": "server/index.js",
