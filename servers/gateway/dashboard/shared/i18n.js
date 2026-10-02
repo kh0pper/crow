@@ -1268,6 +1268,7 @@ export const translations = {
   "botbuilder.engineGateNetworkError": { en: "Network error. Check the connection and retry.", es: "Error de red. Verifica la conexión e intenta de nuevo." },
   "botbuilder.engineGateWorking": { en: "Working...", es: "Trabajando..." },
   "botbuilder.engineGateDone": { en: "Installed. Continuing your save...", es: "Instalado. Continuando tu guardado..." },
+  "botbuilder.modelNotInEngine": { en: "not available to the bot engine", es: "no disponible para el motor de bots" },
 
   // ─── Bot Board Panel (W3-4 + W4-3 i18n sweep) ───
   // Status label keys — display counterparts to the frozen CARD_STATUSES data values
