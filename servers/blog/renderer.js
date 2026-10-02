@@ -4,7 +4,7 @@
  * Uses marked for Markdown parsing and sanitize-html for XSS prevention.
  */
 
-import { marked } from "marked";
+import { marked, Marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 
 // Configure marked for GFM
@@ -17,7 +17,103 @@ marked.setOptions({ gfm: true, breaks: true });
  */
 export function renderMarkdown(markdown) {
   if (!markdown) return "";
-  const raw = marked.parse(markdown);
+  return sanitizeRendered(marked.parse(markdown));
+}
+
+// ---------------------------------------------------------------------------
+// Bot output (Perch) — the same pipeline plus TeX math delimiters.
+//
+// Models write math as `$x$`, `$$…$$`, `\(…\)` and `\[…\]`. Plain marked
+// treats that as prose: `\{` loses its backslash (a CommonMark escape),
+// `a_1 … b_1` can become emphasis, and `\(x\)` reads as "(x)". There is no
+// math renderer in the dashboard (no KaTeX/MathJax is shipped), so the
+// decision is: SHOW THE SOURCE ONCE, untouched by markdown —
+//   - inline math whose body is plain (digits, letters, spaces and ordinary
+//     punctuation, no TeX syntax) renders as its text in <span class="math">,
+//     so `$126$B` reads "126B";
+//   - any other inline math renders as its TeX source in <code>;
+//   - display math renders as a <pre class="math"><code> block.
+// Delimiters are dropped; the body is HTML-escaped here and the result still
+// goes through the same sanitizer as everything else, so no raw HTML can pass.
+//
+// A SEPARATE Marked instance, so the public blog's parser (and every other
+// renderMarkdown caller) is untouched — a blog post about prices keeps its
+// dollar signs exactly as before.
+//
+// Inline `$…$` follows pandoc's tex_math_dollars rule so currency is not
+// eaten: the opening `$` must be followed by a non-space, the closing `$`
+// preceded by a non-space and NOT followed by a digit ("$5 and $10" and
+// "$5-$10" stay text). `\$` stays an escaped dollar.
+// ---------------------------------------------------------------------------
+
+function escapeMathHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/** No TeX syntax at all — safe to show as ordinary text. */
+const PLAIN_MATH = /^[A-Za-z0-9 .,:;%+\-=()/]+$/;
+
+const INLINE_DOLLAR = /^\$(?![\s$])((?:\\.|[^\\$\n])+?)(?<![\s\\])\$(?!\d)/;
+const INLINE_DOUBLE = /^\$\$(?!\s)([^$]+?)\$\$/;
+const INLINE_PAREN = /^\\\(([\s\S]+?)\\\)/;
+const BLOCK_DOLLARS = /^ {0,3}\$\$([\s\S]+?)\$\$[ \t]*(?:\n+|$)/;
+const BLOCK_BRACKETS = /^ {0,3}\\\[([\s\S]+?)\\\][ \t]*(?:\n+|$)/;
+
+const mathExtensions = [
+  {
+    name: "mathBlock",
+    level: "block",
+    start(src) {
+      const m = src.match(/(?:^|\n) {0,3}(?:\$\$|\\\[)/);
+      return m ? m.index + (m[0].startsWith("\n") ? 1 : 0) : undefined;
+    },
+    tokenizer(src) {
+      const m = BLOCK_DOLLARS.exec(src) || BLOCK_BRACKETS.exec(src);
+      if (m && m[1].trim()) return { type: "mathBlock", raw: m[0], text: m[1].trim() };
+      return undefined;
+    },
+    renderer(token) {
+      return '<pre class="math"><code>' + escapeMathHtml(token.text) + "</code></pre>\n";
+    },
+  },
+  {
+    name: "mathInline",
+    level: "inline",
+    start(src) {
+      const m = src.match(/\$|\\\(/);
+      return m ? m.index : undefined;
+    },
+    tokenizer(src) {
+      const m = INLINE_DOUBLE.exec(src) || INLINE_DOLLAR.exec(src) || INLINE_PAREN.exec(src);
+      if (m && m[1].trim()) return { type: "mathInline", raw: m[0], text: m[1].trim() };
+      return undefined;
+    },
+    renderer(token) {
+      return PLAIN_MATH.test(token.text)
+        ? '<span class="math">' + escapeMathHtml(token.text) + "</span>"
+        : "<code>" + escapeMathHtml(token.text) + "</code>";
+    },
+  },
+];
+
+const botMarked = new Marked({ gfm: true, breaks: true, extensions: mathExtensions });
+
+/**
+ * Render a bot's markdown (Perch live frames and transcript history — both
+ * paths call this, so they render identically) to sanitized HTML: everything
+ * renderMarkdown does, plus math delimiters shown once as source.
+ * @param {string} markdown untrusted model output
+ * @returns {string} Safe HTML
+ */
+export function renderBotMarkdown(markdown) {
+  if (!markdown) return "";
+  return sanitizeRendered(botMarked.parse(String(markdown)));
+}
+
+/** The shared post-parse half: storage: rewrite, allow-list sanitize, tables. */
+function sanitizeRendered(raw) {
   // Rewrite storage: URLs to public blog media route
   const processed = raw.replace(
     /(<img\s[^>]*src=")storage:([^"]+)(")/g,

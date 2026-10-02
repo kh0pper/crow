@@ -1031,6 +1031,61 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
 }
 
 // ---------------------------------------------------------------------------
+// 2026-10-02, live — hank's reload (perchlive-9e2b9bf3). A toolResult in the
+// history batch was drawn as a plain-text BOT row: a 157k-char article with
+// literal "#####". It must arrive as a finished tool chip (what the live
+// stream shows), capped at 2000 chars, and prose beside it renders h5/math.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730]]) {
+  test(`MD2 live @${w}x${h}: a reloaded tool result is a chip, not a bot message; h5 and math render`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    const { renderBotMarkdown } = await import("../servers/blog/renderer.js");
+    resetApi();
+    const article = "##### Verification at the Production Run.\n\nthe last 126126B tokens " + "x".repeat(5000);
+    const prose = "##### Findings\n\nThe last $126$B tokens; a rolling $1000$\\-step window.";
+    transcriptEvents = [
+      { type: "message", message: { role: "user", content: "read the paper" } },
+      { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "mcp__browser__crow_browser_extract_article", arguments: {} }] } },
+      { type: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "mcp__browser__crow_browser_extract_article",
+        content: [{ type: "text", text: article }], isError: false } },
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: prose }] },
+        html: renderBotMarkdown(prose) },
+    ];
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 1200));
+      const seen = await s.json(`(function(){
+        var tr=document.getElementById('perch-transcript');
+        var bots=Array.prototype.map.call(tr.querySelectorAll('.entry.bot'),function(n){return n.textContent;});
+        var chips=tr.querySelectorAll('.tool-chip');
+        var pre=tr.querySelector('.tool-details pre');
+        return JSON.stringify({
+          botRows: bots,
+          chips: chips.length,
+          chipText: chips.length?chips[0].textContent:null,
+          detailsHidden: chips.length?tr.querySelector('.tool-details').hidden:null,
+          resultLen: pre?pre.textContent.length:null,
+          h5: Array.prototype.map.call(tr.querySelectorAll('.what.md h5'),function(n){return n.textContent;}),
+          math: Array.prototype.map.call(tr.querySelectorAll('.what.md .math'),function(n){return n.textContent;}),
+          mdText: (tr.querySelector('.what.md')||{}).textContent||null
+        });
+      })()`);
+      assert.equal(seen.botRows.some((r) => r.includes("#####") || r.includes("126126")), false,
+        "the tool result must not be drawn as a bot message: " + JSON.stringify(seen.botRows));
+      assert.equal(seen.chips, 1, "it is a tool chip, as on the live stream");
+      assert.match(seen.chipText, /crow_browser_extract_article/);
+      assert.equal(seen.detailsHidden, true, "collapsed until tapped");
+      assert.equal(seen.resultLen, 2001, "the engine's 2000-char cap plus the ellipsis");
+      assert.deepEqual(seen.h5, ["Findings"]);
+      assert.deepEqual(seen.math, ["126", "1000"]);
+      assert.match(seen.mdText, /The last 126B tokens; a rolling 1000-step window\./);
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Fix round 2 N2, live — the state the operator is actually in.
 //
 // A session hibernating after a gateway restart: options() answers from the

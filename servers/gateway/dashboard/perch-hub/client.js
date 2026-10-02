@@ -1566,6 +1566,18 @@ export function perchHubJs(lang = "en") {
         var batchTexts=[];
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
+          /* A TOOL RESULT is not bot prose. Rendered as a 'bot' row it dumped
+             a whole extracted article (157k chars, literal '#####' and all)
+             into the chat on every reload, while the live stream shows the
+             same result as a finished chip — so history draws the chip too,
+             with the engine's own 2000-char cap (toolResultSnippet). */
+          if(String(m.role||'')==='toolResult'){
+            var rt=messageText(m);
+            appendToolChip({ name:m.toolName, toolCallId:'hist:'+String(m.toolCallId||'') });
+            finishToolChip({ toolCallId:'hist:'+String(m.toolCallId||''), isError:!!m.isError,
+              resultText: rt.length>2000?rt.slice(0,2000)+'\\u2026':rt });
+            return;
+          }
           /* e.html is present only for an ASSISTANT message that had text
              (routes/perch.js's assistantHtml) — the operator's own typing is
              not markdown, and a pure tool-call message still renders as
@@ -2746,9 +2758,9 @@ export function perchHubJs(lang = "en") {
   /* ---- Wave 3: inline tool chips -----------------------------------------
      pi-lab's shape: a pill per tool call with a spinner while running, tap
      to expand args/result. Chips are LIVE-TURN UI: they exist in the
-     transcript only while this client watched them happen — a reload or a
-     resync drops them (the transcript endpoint carries messages, not tool
-     calls), and the Activity rail keeps the durable record. Args/results
+     transcript while this client watched them happen; a reload or a resync
+     redraws each from its toolResult message (loadHistory), finished and
+     without args, and the Activity rail keeps the durable record. Args/results
      arrive pre-truncated by the engine (600/2000 chars) and land via
      textContent only — child-controlled bytes never reach a markup sink. */
   var toolChips={};

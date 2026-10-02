@@ -63,7 +63,7 @@ import { sessionBirdState, foldBirdStates } from "../dashboard/panels/bot-board/
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
-import { renderMarkdown } from "../../blog/renderer.js";
+import { renderBotMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -336,9 +336,11 @@ function readTailBytes(file, maxBytes) {
  * The markdown rendering of an assistant message, or null.
  *
  * Bot output IS markdown — headings, tables, bold, code fences — and rendered
- * as literal text until this. It is rendered on the SERVER, by the same
- * `renderMarkdown` (marked + sanitize-html with an explicit allow-list) the
- * memory panel already uses (dashboard/panels/memory.js:20), because the
+ * as literal text until this. It is rendered on the SERVER, by
+ * `renderBotMarkdown` — the memory panel's renderMarkdown pipeline (marked +
+ * the sanitize-html allow-list) plus TeX math shown once as source, and the
+ * SAME function the live SSE frames use, so a reload renders identically —
+ * because the
  * client cannot import a server module and must never be handed a markdown
  * parser plus untrusted model output.
  *
@@ -373,7 +375,7 @@ function assistantHtml(event) {
   // message, which is most of a busy turn.
   if (!text.trim()) return null;
   try {
-    return renderMarkdown(text) || null;
+    return renderBotMarkdown(text) || null;
   } catch {
     // A render failure must not cost the operator the message: the client
     // falls back to textContent whenever `html` is absent.
