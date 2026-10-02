@@ -19,7 +19,9 @@ const T = {
       not_pending: "This call is no longer waiting for approval.", not_editable: "This call can no longer be edited.",
       not_live: "This call is not live any more.", not_found: "This call no longer exists.", invalid_plan: "The call plan is not valid.",
       invalid_model: "Model must be \u201cprovider/model\u201d with an existing, enabled provider (the local model cannot use a cloud provider).",
-      rate_limited: "Too many call plans from this bot right now.", empty: "Type what the business said first." },
+      rate_limited: "Too many call plans from this bot right now.", empty: "Type what the business said first.",
+      plan_hash_required: "This page is out of date — reload it and review the plan again.", invalid_number: "That phone number is not valid.",
+      number_blocked: "That number cannot be called.", not_cancellable: "This call is already running or finished." },
     outcomes: { booked: "Booked", info_gathered: "Got the info", needs_callback: "Needs a callback", no_answer: "No answer",
       voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
       phone_busy: "Your phone was busy", phone_unreachable: "Phone not reachable", line_lost: "Call moved to your phone",
@@ -43,7 +45,9 @@ const T = {
       not_pending: "Esta llamada ya no espera aprobación.", not_editable: "Esta llamada ya no se puede editar.",
       not_live: "Esta llamada ya no está en curso.", not_found: "Esta llamada ya no existe.", invalid_plan: "El plan de la llamada no es válido.",
       invalid_model: "El modelo debe ser \u201cproveedor/modelo\u201d con un proveedor existente y activo (el modelo local no puede usar un proveedor en la nube).",
-      rate_limited: "Demasiados planes de llamada de este bot por ahora.", empty: "Primero escribe lo que dijo el negocio." },
+      rate_limited: "Demasiados planes de llamada de este bot por ahora.", empty: "Primero escribe lo que dijo el negocio.",
+      plan_hash_required: "Esta página está desactualizada — recárgala y revisa el plan de nuevo.", invalid_number: "Ese número de teléfono no es válido.",
+      number_blocked: "No se puede llamar a ese número.", not_cancellable: "Esta llamada ya está en curso o terminó." },
     outcomes: { booked: "Cita reservada", info_gathered: "Información obtenida", needs_callback: "Hay que volver a llamar", no_answer: "No contestaron",
       voicemail: "Buzón de voz", busy: "Línea ocupada", not_in_service: "Número fuera de servicio", refused: "El negocio se negó",
       phone_busy: "Tu teléfono estaba ocupado", phone_unreachable: "Teléfono no disponible", line_lost: "La llamada pasó a tu teléfono",
@@ -184,7 +188,7 @@ export default {
       "    box.innerHTML = done.length ? done.map(function (c) { return '<div>' + esc(c.business_name) + ' — ' + esc(c.status) + (c.outcome ? ' / ' + L.outcome + ': ' + esc(L.outcomes[c.outcome] || c.outcome) : '') + (c.booking ? ' — ' + esc([c.booking.date, c.booking.time].join(' ')) : '') + (c.summary ? '<br>' + esc(c.summary) : '') + '</div>'; }).join('') : esc(L.none);" +
       "  }" +
       "  function stopPoll() { pollStopped = true; if (window.__crowPhonePoll) { clearTimeout(window.__crowPhonePoll); window.__crowPhonePoll = null; } }" +
-      "  function load() { return api('GET', '/calls', null, { quiet: true }).then(function (j) { pollFails = 0; renderPending(j.calls); renderLive(j.calls); renderHistory(j.calls); }).catch(function (e) { if (e.status === 401) { stopPoll(); return; } pollFails++; }); }" +
+      "  function load() { return api('GET', '/calls', null, { quiet: true }).then(function (j) { pollFails = 0; var lost = document.getElementById('phone-lost'); if (!lost.hidden) { lost.hidden = true; schedule(); } renderPending(j.calls); renderLive(j.calls); renderHistory(j.calls); }).catch(function (e) { if (e.status === 401) { stopPoll(); return; } pollFails++; }); }" +
       "  function pollDelay() { return pollFails ? Math.min(1500 * Math.pow(2, pollFails), 30000) : 1500; }" +
       "  function schedule() { if (window.__crowPhonePoll) clearTimeout(window.__crowPhonePoll); window.__crowPhonePoll = setTimeout(tick, pollDelay()); }" +
       "  function tick() {" +

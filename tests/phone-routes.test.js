@@ -284,7 +284,7 @@ test("backlog P7: run_after must be null, absent, or a strict ISO-8601 instant w
     assert.equal(r.status, 200, good);
     assert.equal((await store.getCall(s.db, id)).run_after, want, good);
   }
-  const { parseIsoInstant } = await import("../bundles/phone/panel/routes.js");
+  const { parseIsoInstant } = await import("../bundles/phone/server/plan.js");
   assert.equal(parseIsoInstant("2027-02-29T12:00:00Z"), null, "not a leap year");
 });
 
@@ -459,15 +459,21 @@ function runPanel(script, statusFn) {
     document: { getElementById: el, querySelector: () => null },
     setTimeout: (fn, d) => { const id = seq++; timers.set(id, [fn, d]); return id; },
     clearTimeout: (id) => timers.delete(id), clearInterval: (id) => timers.delete(id),
-    fetch: async (url) => {
-      const st = String(url).endsWith("/calls") ? statusFn() : 500;
+    fetch: async (url, opts) => {
+      const u = String(url);
+      if (u.endsWith("/settings")) {
+        if (!settings) return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
+        return { ok: true, status: 200, json: async () => (opts && opts.method === "POST" ? { ok: true } : settings) };
+      }
+      const st = u.endsWith("/calls") ? statusFn() : 500;
       return { ok: st >= 200 && st < 300, status: st, json: async () => (st === 200 ? { calls: [] } : { error: "boom" }) };
     },
   };
+  let settings = null;
   new Function(...Object.keys(sandbox), script)(...Object.values(sandbox));
   const hops = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
   const fire = async () => { const [[id, [fn, d]]] = [...timers.entries()]; timers.delete(id); fn(); await hops(); return d; };
-  return { els, timers, alerts, hops, fire };
+  return { els, timers, alerts, hops, fire, setSettings: (v) => { settings = v; } };
 }
 
 test("backlog P5: the Phone panel poll backs off, stops after five failures in a row, and Retry resumes it", async () => {
@@ -516,4 +522,20 @@ test("backlog P6/P8: the Phone panel shows refusal codes in the owner's language
     assert.match(script, /alert\(errText\(j\)\)/);
     assert.ok(!/if \(e\.status === 409\) \{/.test(script), "a bare 409 no longer wipes the typed 2FA");
   }
+});
+
+test("review M6: a successful load from outside the poll (here: settings saved, cloud model changed) clears 'lost touch' and resumes", async () => {
+  const { script } = await panelScript("en");
+  let status = 500;
+  const p = runPanel(script, () => status);
+  await p.hops();
+  while (p.timers.size) await p.fire();
+  assert.equal(p.els["phone-lost"].hidden, false);
+  status = 200;
+  // Settings save → loadSettings → a changed cloud model → load(): a non-poll success.
+  p.setSettings({ cloudModel: "cld/m" });
+  p.els["phone-settings"].onsubmit({ preventDefault() {}, target: p.els["phone-settings"] });
+  await p.hops(10);
+  assert.equal(p.els["phone-lost"].hidden, true, "the notice is gone");
+  assert.deepEqual([...p.timers.values()].map(([, d]) => d), [1500], "the poll runs again");
 });
