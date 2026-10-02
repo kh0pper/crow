@@ -85,8 +85,8 @@ Crow that received the egg, and your other Crows simply copy the result.
 Two cases wait instead, and the pet page offers a one-tap **Warm it** for them:
 
 - An offer that **lapses** after seven days frees its egg without warming it. The other side's
-  reply can still arrive and complete the swap, and warming the egg in between would leave you
-  holding both.
+  reply can still arrive and complete the swap; if it does, the egg you offered leaves even if
+  you have started warming it in the meantime.
 - If one of your Crows hatches an egg at the same moment another one receives a gift, the two can
   settle with the slot empty and the gift on your shelf. Both Crows agree; they just leave the
   choice to you.
@@ -260,14 +260,15 @@ A hatch triggered through these tools never sends a live update to an open dashb
 
 ## Operating notes
 
-The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in the bundle, because it must reuse the gateway's one live Nostr manager. It starts on **any gateway that has the ramble bundle directory and a Nostr manager**. Boot prints one of:
+The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in the bundle, because it must reuse the gateway's one live Nostr manager. It starts only on a gateway where the Ramble bundle is **installed** (`~/.crow/bundles/ramble/server` exists) and a Nostr manager is up. A gateway without the bundle installed creates the Ramble tables, so your other Crows' replicated Ramble state still lands there, but it never sends or processes Ramble messages. Boot prints one of:
 
 ```
 [ramble] transport started
 [ramble] transport not started: no nostrManager (sharing disabled or boot order)
+[ramble] transport not started: bundle not installed on this instance (tables only)
 ```
 
-The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. No Ramble failure can block gateway boot; every problem is a warning.
+The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. The third is normal on a Crow where you have not installed Ramble. No Ramble failure can block gateway boot; every problem is a warning.
 
 The one-claim-per-day limit and the shelf cap are checked per instance (claims do not replicate), so a user with two Crows can claim once per day on each.
 
@@ -275,7 +276,7 @@ The map of places you have unlocked, and your seed and heart balances, replicate
 
 The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
 
-Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). Swap again once both are in sync.
+Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). The same can happen if a gift arrives, or you claim a nest, on the other Crow before your swap has reached it: that Crow refills its slot with your oldest egg, and the egg you chose ends up back on the shelf. Swap again once both are in sync.
 
 Contacts delivery, gifts and swaps need every gateway on the new code: a gateway running phase 2 stores a ramble envelope as a chat message. Restart all of them before anyone sends. The transport logs `dropping <kind> delivery to <crow_id>: not a deliverable contact` when a queued recipient was deleted or blocked, and `gave up after 20 attempts` when no relay accepts a DM. During a rolling restart, a gateway still on phase 2 silently drops incoming `ramble_trades` sync ops (an unknown table advances its checkpoint without applying); a swap row emitted in that window reaches that Crow only when a later op touches the same trade. Restart all gateways back-to-back to keep the window to seconds.
 

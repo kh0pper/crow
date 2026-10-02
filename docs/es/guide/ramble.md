@@ -86,8 +86,8 @@ Dos casos esperan en cambio, y la página de tu mascota ofrece un **Calentarlo**
 ellos:
 
 - Una oferta que **caduca** a los siete días libera su huevo sin calentarlo. La respuesta del
-  otro lado todavía puede llegar y completar el intercambio, y calentar el huevo mientras tanto te
-  dejaría con los dos.
+  otro lado todavía puede llegar y completar el intercambio; si llega, el huevo que ofreciste se
+  va aunque mientras tanto hayas empezado a calentarlo.
 - Si uno de tus Crows hace eclosionar un huevo en el mismo momento en que otro recibe un regalo,
   los dos pueden quedar con la ranura vacía y el regalo en tu estante. Ambos Crows coinciden;
   simplemente te dejan la elección a ti.
@@ -261,14 +261,15 @@ Una eclosión disparada a través de estas herramientas nunca envía una actuali
 
 ## Notas de operación
 
-El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), no en el bundle, porque debe reutilizar el único gestor Nostr vivo del gateway. Arranca en **cualquier gateway que tenga el directorio del bundle ramble y un gestor Nostr**. El arranque imprime una de estas líneas:
+El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), no en el bundle, porque debe reutilizar el único gestor Nostr vivo del gateway. Arranca solo en un gateway donde el bundle de Ramble esté **instalado** (existe `~/.crow/bundles/ramble/server`) y haya un gestor Nostr activo. Un gateway sin el bundle instalado crea las tablas de Ramble, para que el estado de Ramble replicado desde tus otros Crows siga llegando, pero nunca envía ni procesa mensajes de Ramble. El arranque imprime una de estas líneas:
 
 ```
 [ramble] transport started
 [ramble] transport not started: no nostrManager (sharing disabled or boot order)
+[ramble] transport not started: bundle not installed on this instance (tables only)
 ```
 
-La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
+La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. La tercera es normal en un Crow donde no instalaste Ramble. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
 
 El límite de una recogida por día y el tope del estante se comprueban por instancia (las recogidas no se replican), así que un usuario con dos Crows puede recoger un huevo por día en cada una.
 
@@ -276,7 +277,7 @@ El mapa de los lugares que has desbloqueado, y tus saldos de alpiste y de corazo
 
 El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
 
-Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Vuelve a cambiar una vez que ambas estén sincronizadas.
+Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Lo mismo puede pasar si llega un regalo, o recoges un nido, en el otro Crow antes de que tu cambio llegue allí: ese Crow rellena su ranura con tu huevo más antiguo, y el huevo que elegiste vuelve al estante. Vuelve a cambiar una vez que ambas estén sincronizadas.
 
 La entrega a contactos, los regalos y los intercambios necesitan todos los gateways en el código nuevo: un gateway con la fase 2 guarda un sobre de ramble como un mensaje de chat. Reinícialos todos antes de que nadie envíe. El transporte registra `dropping <kind> delivery to <crow_id>: not a deliverable contact` cuando un destinatario encolado fue borrado o bloqueado, y `gave up after 20 attempts` cuando ningún relay acepta un DM. Durante un reinicio escalonado, un gateway que sigue en la fase 2 descarta en silencio las operaciones de sincronización entrantes de `ramble_trades` (una tabla desconocida avanza su punto de control sin aplicarla); una fila de intercambio emitida en esa ventana llega a ese Crow solo cuando una operación posterior toca el mismo intercambio. Reinicia todos los gateways uno tras otro para que la ventana dure segundos.
 
