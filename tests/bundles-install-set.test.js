@@ -40,9 +40,13 @@ test("needsConfigKeys reports manifest-required keys that are EMPTY in the writt
   const keys = needsConfigKeys("jellyfin", {
     JELLYFIN_URL: "http://localhost:8096",
     JELLYFIN_API_KEY: "",
+    JELLYFIN_MEDIA_PATH: "/srv/media",
   });
   assert.deepEqual(keys, ["JELLYFIN_API_KEY"]);
-  assert.deepEqual(needsConfigKeys("jellyfin", { JELLYFIN_URL: "http://x", JELLYFIN_API_KEY: "abc" }), []);
+  assert.deepEqual(needsConfigKeys("jellyfin", { JELLYFIN_URL: "http://x", JELLYFIN_API_KEY: "abc", JELLYFIN_MEDIA_PATH: "/srv/media" }), []);
+  // B1: the media path is compose hard-fail, so a collection install that left
+  // it blank surfaces it under Needs setup too.
+  assert.deepEqual(needsConfigKeys("jellyfin", { JELLYFIN_URL: "http://x", JELLYFIN_API_KEY: "abc", JELLYFIN_MEDIA_PATH: "" }), ["JELLYFIN_MEDIA_PATH"]);
 });
 
 test("server-side re-validation REFUSES a community-origin member (provenance: collections are first-party only)", () => {

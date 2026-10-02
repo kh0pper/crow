@@ -1948,7 +1948,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2009,7 +2009,7 @@
         {
           "name": "JELLYFIN_MEDIA_PATH",
           "description": "Host path for media files (Docker mode)",
-          "required": false
+          "required": true
         },
         {
           "name": "JELLYFIN_CONFIG_PATH",
@@ -3556,7 +3556,7 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
       "type": "bundle",
       "author": "Crow",
@@ -3616,7 +3616,7 @@
         {
           "name": "MINIFLUX_ADMIN_PASSWORD",
           "description": "Admin password for Docker setup",
-          "required": false,
+          "required": true,
           "secret": true
         },
         {
@@ -3810,7 +3810,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -3871,7 +3871,7 @@
         {
           "name": "NAVIDROME_MUSIC_PATH",
           "description": "Host path for music files (Docker mode)",
-          "required": false
+          "required": true
         }
       ],
       "ports": [
@@ -4673,7 +4673,7 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Connect to Plex Media Server — search library, browse collections, control playback, view active sessions",
       "type": "mcp-server",
       "author": "Crow",
@@ -4733,7 +4733,7 @@
         {
           "name": "PLEX_MEDIA_PATH",
           "description": "Host path for media files (Docker self-host mode)",
-          "required": false
+          "required": true
         },
         {
           "name": "PLEX_CONFIG_PATH",

@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  collectHealthSignals, invalidateHealthCache, _setTailscaleReader,
+  collectHealthSignals, invalidateHealthCache, _setTailscaleReader, _setDiskReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
@@ -23,6 +23,16 @@ import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 // reflects only the externalEngines signal under test, on any host.
 process.env.CROW_BACKUP_DIR = "/tmp/__crow_test_nonexistent_backup_dir__";
 _setTailscaleReader(() => { throw new Error("no tailscale"); });
+// diskSignal ran the real `df /`: on a host whose root fs is >90% full it
+// warns, `all.ok` goes false, and the "nest stays ok" assertion failed
+// locally while passing on CI's roomy runners (B6, 2026-10-02). Feed it a
+// fixed half-full reading instead. The other env-driven siblings are pinned
+// for the same reason: MINIO_ENDPOINT makes storageSignal probe the network
+// (warn when unreachable); the exposure flags warn when set in the shell.
+_setDiskReader(() => "Avail Size\n500000M 1000000M\n");
+delete process.env.MINIO_ENDPOINT;
+delete process.env.CROW_DASHBOARD_PUBLIC;
+delete process.env.CROW_CSRF_STRICT;
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
@@ -53,6 +63,7 @@ test("no external engines watched → no externalEngines card at all", async () 
   const { ext: card, all } = await signals({ now: at(NOW) });
   assert.equal(card, undefined);
   assert.ok(all.details.some((d) => d.id === "disk"), "siblings unaffected by the null filter");
+  assert.equal(all.details.find((d) => d.id === "disk").value, "50% used", "the fixed disk reading, never the host's df");
 });
 
 test("up → ok card 'halogen on raven: up', no issue", async () => {
@@ -135,5 +146,20 @@ test("EN and ES render for the 5 externalEngines keys", () => {
   ]) {
     for (const lang of ["en", "es"]) assert.notEqual(t(key, lang), key, `missing i18n for ${key} (${lang})`);
     assert.notEqual(t(key, "es"), t(key, "en"), `${key}: es must be a real translation`);
+  }
+});
+
+test("B6: a full disk (sibling warn) is what flips ok — the externalEngines issue stays info either way", async () => {
+  _resetProviderHealth();
+  setResidencyInitialized();
+  ext(false, NOW);
+  _setDiskReader(() => "Avail Size\n10000M 1000000M\n");   // 1% free
+  try {
+    const { extIssue, all } = await signals({ now: at(NOW + 10 * HOUR) });
+    assert.equal(all.ok, false, "the disk warn drives ok");
+    assert.equal(extIssue.severity, "info", "never a warn from the external engine");
+    assert.ok(all.issues.some((i) => i.id === "disk" && i.severity === "warn"));
+  } finally {
+    _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
   }
 });

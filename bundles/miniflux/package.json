@@ -1,6 +1,6 @@
 {
   "name": "crow-miniflux",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Miniflux MCP server — RSS feed management, article reading, and news tracking",
   "type": "module",
   "main": "server/index.js",

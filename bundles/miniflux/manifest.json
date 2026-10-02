@@ -1,7 +1,7 @@
 {
   "id": "miniflux",
   "name": "Miniflux",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
   "type": "bundle",
   "author": "Crow",
@@ -18,7 +18,7 @@
     { "name": "MINIFLUX_URL", "description": "Miniflux server URL", "default": "http://localhost:8085", "required": true },
     { "name": "MINIFLUX_API_KEY", "description": "Miniflux API key (Settings > API Keys)", "required": true, "secret": true },
     { "name": "MINIFLUX_ADMIN_USER", "description": "Admin username for Docker setup", "default": "admin", "required": false },
-    { "name": "MINIFLUX_ADMIN_PASSWORD", "description": "Admin password for Docker setup", "required": false, "secret": true },
+    { "name": "MINIFLUX_ADMIN_PASSWORD", "description": "Admin password for Docker setup", "required": true, "secret": true },
     { "name": "MINIFLUX_DB_PASSWORD", "description": "PostgreSQL password for Docker setup", "required": false, "secret": true }
   ],
   "ports": [8085],
