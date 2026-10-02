@@ -251,6 +251,11 @@ function designCss(settings) {
     border-radius: 8px;
     margin: 1.25rem 0;
   }
+  /* renderMarkdown() wraps every table in .table-scroll: a wide table
+     scrolls inside the post column instead of widening the page. This page
+     does not load the dashboard's componentsCss(), so the rule lives here. */
+  .table-scroll { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  @media print { .table-scroll { overflow: visible; max-width: none; } }
   .post-single .body table {
     width: 100%;
     border-collapse: collapse;

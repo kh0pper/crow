@@ -59,7 +59,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
   const list = section(t("botbuilder.listTitle", lang),
     notice + wizCta + (rows.length
-      ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows, { stack: true })
+      ? dataTable(["listThBotId", "listThName", "listThState", "listThModel", "listThProject", "listThSessions", "listThUpdated", "listThBoard"].map((k) => t("botbuilder." + k, lang)).concat(["", ""]), rows, { stack: true })
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];

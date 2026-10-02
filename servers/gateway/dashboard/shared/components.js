@@ -32,30 +32,39 @@ export function statGrid(cards) {
  * wrapper).
  * @param {string[]} headers
  * @param {string[][]} rows - Each row is array of cell HTML (not escaped)
- * @param {{stack?: boolean}} [opts] - stack: below a 600px-wide container,
- *   render each row as a stacked label/value card (for tables that ARE the
- *   page's main list). Cells under an empty header are treated as action
- *   cells and share one line.
+ * @param {{stack?: boolean, wide?: number[]}} [opts]
+ *   stack: for tables that ARE the page's main list. When the table does
+ *     not fit a phone-sized container (measured client-side by
+ *     componentsJs(), which adds .is-stacked), each row renders as a stacked
+ *     label/value card. Cells under an empty header are action cells and
+ *     share one line. Explicit ARIA roles keep the table semantics that
+ *     display:block would otherwise drop.
+ *   wide: column indexes holding long free text — stacked, the label sits on
+ *     its own line above full-width text; unstacked, the column takes a fair
+ *     share of the table and wraps long tokens.
  */
 export function dataTable(headers, rows, opts = {}) {
   if (rows.length === 0) {
     return `<div class="empty-state"><h3>No data</h3></div>`;
   }
   const stack = !!opts.stack;
-  const ths = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const wide = new Set(opts.wide || []);
+  const r = (role) => (stack ? ` role="${role}"` : "");
+  const ths = headers.map((h) => `<th${r("columnheader")}>${escapeHtml(h)}</th>`).join("");
   const td = (c, i) => {
-    if (!stack) return `<td>${c}</td>`;
+    const cls = wide.has(i) ? ` class="dt-wide"` : "";
+    if (!stack) return `<td${cls}>${c}</td>`;
     const label = headers[i] == null ? "" : String(headers[i]);
     return label
-      ? `<td data-label="${escapeHtml(label)}">${c}</td>`
-      : `<td class="dt-action">${c}</td>`;
+      ? `<td role="cell"${cls} data-label="${escapeHtml(label)}">${c}</td>`
+      : `<td role="cell" class="dt-action">${c}</td>`;
   };
   const trs = rows.map((cells) =>
-    `<tr>${cells.map(td).join("")}</tr>`
+    `<tr${r("row")}>${cells.map(td).join("")}</tr>`
   ).join("");
   const wrapExtra = stack ? " table-stack" : "";
   const tableCls = stack ? "data-table data-table--stack" : "data-table";
-  return `<div class="table-scroll${wrapExtra}"><table class="${tableCls}"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+  return `<div class="table-scroll${wrapExtra}"><table class="${tableCls}"${r("table")}><thead${r("rowgroup")}><tr${r("row")}>${ths}</tr></thead><tbody${r("rowgroup")}>${trs}</tbody></table></div>`;
 }
 
 /**
