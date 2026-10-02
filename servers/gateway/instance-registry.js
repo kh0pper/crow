@@ -367,16 +367,49 @@ export function getOrCreateLocalInstanceId() {
 }
 
 /**
+ * The operator-configured URL paired instances should dial for this gateway
+ * (the self row's gateway_url), from CROW_PEER_GATEWAY_URL — or null when
+ * unset or unusable as a peer address (unparseable, not http(s), or a
+ * wildcard bind like http://0.0.0.0:3001). Trailing slash stripped so
+ * comparisons are stable.
+ *
+ * Deliberately NOT CROW_GATEWAY_URL: that is the PUBLIC URL (OAuth issuer,
+ * blog links, push click-through). On crow it is the Funnel host, which
+ * serves only public paths, so using it as the peer address would point
+ * every peer at a door that refuses private routes.
+ */
+export function configuredSelfGatewayUrl(env = process.env) {
+  const raw = String(env.CROW_PEER_GATEWAY_URL || "").trim();
+  if (!raw) return null;
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (!u.hostname || u.hostname === "0.0.0.0" || u.hostname === "[::]") return null;
+  return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+}
+
+/**
  * Auto-register the current instance if not already registered.
  * Called on gateway startup.
+ *
+ * `gatewayUrlConfigured: true` marks gatewayUrl as operator-set
+ * (CROW_PEER_GATEWAY_URL): it then also corrects an EXISTING self row whose
+ * gateway_url drifted (raven's and r4's rows kept the first auto-detected
+ * Serve URL, 2026-09-24). An auto-detected URL never overwrites an existing
+ * row — detection can pick the wrong Serve port.
  */
-export async function ensureLocalInstanceRegistered(db, { crowId, gatewayUrl, name } = {}) {
+export async function ensureLocalInstanceRegistered(db, { crowId, gatewayUrl, name, gatewayUrlConfigured = false } = {}) {
   const instanceId = getOrCreateLocalInstanceId();
 
   const existing = await getInstance(db, instanceId);
   if (existing) {
     // Update heartbeat
     await heartbeatInstance(db, instanceId);
+    if (gatewayUrlConfigured && gatewayUrl && existing.gateway_url !== gatewayUrl) {
+      await updateInstance(db, instanceId, { gateway_url: gatewayUrl });
+      console.log(`[instance-registry] self gateway_url ${existing.gateway_url || "(none)"} -> ${gatewayUrl} (CROW_PEER_GATEWAY_URL)`);
+      return { ...existing, gateway_url: gatewayUrl };
+    }
     return existing;
   }
 

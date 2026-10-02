@@ -28,6 +28,7 @@ import {
   getInstance,
   updateInstance,
   getOrCreateLocalInstanceId,
+  configuredSelfGatewayUrl,
 } from "../../servers/gateway/instance-registry.js";
 import {
   setPeerCreds,
@@ -95,7 +96,7 @@ async function networkPair(db, { peerUrl, peerName }) {
     // HOSTNAME is a bash variable, not exported to node — the old
     // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
     source_name: process.env.HOSTNAME || osHostname() || "unknown",
-    source_gateway_url: process.env.CROW_GATEWAY_URL || null,
+    source_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
     otc: process.env.CROW_ENROLL_OTC || undefined,
@@ -152,7 +153,7 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
     // HOSTNAME is a bash variable, not exported to node — the old
     // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
     source_name: process.env.HOSTNAME || osHostname() || "unknown",
-    source_gateway_url: process.env.CROW_GATEWAY_URL || null,
+    source_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
   }, null, 2));

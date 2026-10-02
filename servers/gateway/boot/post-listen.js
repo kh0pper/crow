@@ -387,14 +387,17 @@ export async function runPostListenSetup(server, app, deps) {
     .catch((err) => console.warn("[crosspost-scheduler] not started:", err.message));
 
   // Register this instance in the instance registry
-  import("../instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {
+  import("../instance-registry.js").then(async ({ ensureLocalInstanceRegistered, configuredSelfGatewayUrl }) => {
     try {
       const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
       const identity = loadOrCreateIdentity();
 
-      // Prefer Tailscale HTTPS serve URL, fall back to Tailscale IP, then localhost
-      let gatewayUrl = `http://localhost:${PORT}`;
-      try {
+      // An operator-set CROW_PEER_GATEWAY_URL wins (and corrects a drifted
+      // self row). Otherwise prefer the Tailscale HTTPS serve URL, fall back to
+      // the Tailscale IP, then localhost.
+      const configuredUrl = configuredSelfGatewayUrl();
+      let gatewayUrl = configuredUrl || `http://localhost:${PORT}`;
+      if (!configuredUrl) try {
         const { execFileSync } = await import("child_process");
         // Check if Tailscale serve is configured (provides HTTPS URLs)
         const serveStatus = execFileSync("tailscale", ["serve", "status"], { timeout: 3000, stdio: "pipe" }).toString();
@@ -424,6 +427,7 @@ export async function runPostListenSetup(server, app, deps) {
       await ensureLocalInstanceRegistered(createDbClient(), {
         crowId: identity.crowId,
         gatewayUrl,
+        gatewayUrlConfigured: Boolean(configuredUrl),
       });
     } catch (err) {
       // Non-fatal — instance registry is optional for basic operation
