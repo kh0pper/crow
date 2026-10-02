@@ -585,6 +585,61 @@ describe("B3 — build-context refresh hardening", () => {
     assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
   });
 
+  // Fix round 1 (I1): the live mounts come from the INSTALLED compose and any
+  // override compose merges in — the repo compose alone is not the truth.
+  test("a bind only the INSTALLED compose declares (repo dropped it) → NOT refreshed", async () => {
+    const id = "b3-installed-only";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, "services:\n  r:\n    build: ./runner\n    volumes:\n      - ./runner/src:/app\n");
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0");
+  });
+
+  for (const name of ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml"]) {
+    test(`a bind in an installed ${name} → NOT refreshed`, async () => {
+      const id = "b3-ovr-" + name.replace(/[^a-z]/g, "");
+      const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+      put(CROW_HOME, `bundles/${id}/${name}`, "services:\n  r:\n    volumes:\n      - ./runner/src:/app\n");
+      await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+      assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+    });
+  }
+
+  test("a non-default composefile's installed <name>.override.yml is scanned too", async () => {
+    const id = "b3-ovr-composefile";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ../runner\n",
+      { manifestExtra: { docker: { composefile: "deploy/stack.yml" } }, composeName: "deploy/stack.yml" });
+    put(CROW_HOME, `bundles/${id}/deploy/stack.override.yml`, "services:\n  r:\n    volumes:\n      - ../runner:/app\n");
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
+  test("an installed compose with only named volumes does not block (control)", async () => {
+    const id = "b3-installed-ctl";
+    const repoRoot = dockerFixture(id, "services:\n  r:\n    build: ./runner\n");
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, "services:\n  r:\n    build: ./runner\n    volumes:\n      - data:/d\nvolumes:\n  data:\n");
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.ok(runnerRefreshed(id));
+  });
+
+  // Fix round 1 (M2): compose runs get CROW_HOME from composeEnv() even when
+  // the gateway's own env lacks it — the bind scan must expand it the same way.
+  test("a ${CROW_HOME} bind expands like the compose run does, even with CROW_HOME unset in process.env", async () => {
+    const id = "b3-crowhome";
+    const repoRoot = dockerFixture(id,
+      "services:\n  r:\n    build: ./runner\n    volumes:\n      - ${CROW_HOME}/bundles/" + id + "/runner/src:/app\n");
+    const saved = process.env.CROW_HOME;
+    delete process.env.CROW_HOME;
+    try {
+      await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    } finally {
+      process.env.CROW_HOME = saved;
+    }
+    assert.equal(readAt(destBundleDir(id), "runner/src/app.py"), "TIMEOUT = 20\n");
+  });
+
   test("named volumes, ports, env entries and binds elsewhere do NOT block the refresh", async () => {
     const id = "b3-unrelated";
     const repoRoot = dockerFixture(id, [

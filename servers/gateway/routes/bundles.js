@@ -483,6 +483,25 @@ function composeBindSources(text, projectDir, env) {
   return out;
 }
 
+/**
+ * Bundle-relative compose files whose binds reach the live container: the
+ * installed copy of the compose file itself, and the override files compose
+ * merges from the same directory (docker-compose.override.y[a]ml,
+ * compose.override.y[a]ml, and `<name>.override.<ext>` for a non-default
+ * composefile).
+ */
+function installedComposeFiles(composeRel) {
+  const dir = dirname(composeRel);
+  const at = (name) => (dir === "." ? name : join(dir, name));
+  const files = new Set([composeRel]);
+  for (const n of ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"]) {
+    files.add(at(n));
+  }
+  const m = /^(.*)\.(ya?ml)$/.exec(basename(composeRel));
+  if (m) files.add(at(`${m[1]}.override.${m[2]}`));
+  return [...files];
+}
+
 /** realpath when the path exists, else the lexical path. */
 function realOrSelf(p) {
   try { return realpathSync(p); } catch { return resolvePath(p); }
@@ -550,10 +569,23 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
     try {
       for (const [k, { value }] of readEnvFile(join(destDir, ".env")).vars) fileVars[k] = value;
     } catch { /* no .env → process env only */ }
-    return { ...fileVars, ...process.env };   // compose: shell env wins over .env
+    // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
+    // compose run gets (the prod gateway unit may not export it).
+    return composeEnv({ ...fileVars, ...process.env });
   })();
   const destReal = realOrSelf(destDir);
-  const binds = composeBindSources(text, join(destReal, composeDirRel), expandEnv).map(realOrSelf);
+  // The LIVE mounts come from the INSTALLED compose (never refreshed, may be
+  // operator-edited) plus any override compose merges in from that dir — not
+  // only from the repo copy. Scan the union, all against the installed env.
+  const bindTexts = [text];
+  for (const rel of installedComposeFiles(composeRel)) {
+    try {
+      const p = join(destDir, rel);
+      if (existsSync(p)) bindTexts.push(readFileSync(p, "utf8"));
+    } catch { /* unreadable → skip that file */ }
+  }
+  const projectDir = join(destReal, composeDirRel);
+  const binds = bindTexts.flatMap((t) => composeBindSources(t, projectDir, expandEnv)).map(realOrSelf);
 
   const out = new Set();
   for (const ctx of raw) {
