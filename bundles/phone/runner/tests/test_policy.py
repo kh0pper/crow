@@ -184,8 +184,27 @@ def test_is_closing_en_es():
         "Hello, I'd like to book a cleaning.",
         "",
         None,
+        # backlog P1: agreeing to wait/hold, or agreeing to an offer, is not a goodbye
+        "Okay, I'll wait. Bye",
+        "Sure, I can hold. Thanks for your time.",
+        "Tuesday at 3:30, that's exactly what I needed.",
+        "That's what I needed. Thank you.",
+        "That's just what I was looking for, thanks.",
+        "No problem, I'll hold. Have a great day.",
+        "Sure, take your time. Thank you, goodbye.",
+        "I'm happy to wait, thanks for your help.",
+        "Claro, puedo esperar. Gracias por su tiempo.",
+        "Está bien, lo espero. Adiós.",
+        "No hay apuro, sigo en la línea. Hasta luego.",
     ]
     for t in yes:
         assert policy.is_closing(t), t
     for t in no:
         assert not policy.is_closing(t), t
+
+
+def test_greeting_literals_are_pinned():
+    # backlog P14: the speak-first greeting is a fixed literal, never model text.
+    assert policy.greeting("en") == "Hello?"
+    assert policy.greeting("es") == "\u00bfHola?"
+    assert policy.greeting("fr") == "Hello?"  # unknown languages fall back to English

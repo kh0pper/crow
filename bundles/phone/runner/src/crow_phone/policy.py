@@ -97,16 +97,31 @@ def callback_line(lang: str) -> str:
 # like to book..." and "Bye the way, I need the price" are NOT goodbyes. Bare
 # "thank you" never counts ("Tuesday at 3:30 works, thank you." agrees to a
 # slot; "Thanks." answers "let me check"), nor do bare "that's all" / "era
-# todo" forms. Any question mark disqualifies the line.
+# todo" forms, nor agreement forms ("that's (exactly) what I needed" agrees to
+# what was just offered). Any question mark, and any agreement to wait or hold
+# (_WAITING), disqualifies the line.
 _CLOSING_TAIL = re.compile(
     r"(?:^|[\s,;:\u2014\u2013-])(?:good\s?-?bye|bye(?:[\s-]+(?:now|bye))?"
     r"|have\s+a\s+(?:great|good|nice|wonderful|lovely)\s+(?:day|one|afternoon|evening|weekend|night)"
-    r"|that'?s\s+(?:exactly\s+what|just\s+what|what|all)\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
+    r"|that'?s\s+all\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
     r"|thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?\s+for\s+(?:your|all\s+your)\s+(?:help|time)"
     r"|adi[oó]s|hasta\s+luego|que\s+tenga\s+(?:un\s+)?(?:buen|lindo|excelente)\s+(?:d[ií]a|fin\s+de\s+semana)"
     r"|que\s+tenga\s+(?:una\s+)?buena\s+(?:tarde|noche)"
     r"|eso\s+es\s+todo|es\s+todo\s+lo\s+que\s+necesitaba|(?:muchas\s+)?gracias\s+por\s+su\s+(?:ayuda|tiempo))"
     r"(?:[\s,]+(?:thanks|thank\s+you|thanks\s+so\s+much|thank\s+you\s+so\s+much|gracias|muchas\s+gracias|bye|adi[oó]s))?\s*$",
+    re.I,
+)
+# Backlog P1 (2026-10-02): agreeing to WAIT or HOLD is never a goodbye, even
+# when the line ends with one ("Okay, I'll wait. Bye", "Sure, I can hold.
+# Thanks for your time."). The business is about to come back; hanging up
+# would drop the call mid-task.
+_WAITING = re.compile(
+    r"\b(?:i'?ll|i\s+will|i\s+can|i\s+could|i'?m\s+happy\s+to|happy\s+to|i\s+don'?t\s+mind\s+to|i\s+don'?t\s+mind)\s+"
+    r"(?:just\s+|gladly\s+)?(?:wait|hold|stay\s+on(?:\s+the\s+line)?|be\s+on\s+hold)\b"
+    r"|\bi'?ll\s+be\s+(?:here|waiting)\b|\btake\s+your\s+time\b|\bno\s+(?:rush|hurry)\b"
+    r"|\b(?:puedo|voy\s+a|con\s+gusto)\s+(?:esperar|aguardar)\b|\b(?:le|lo|la)\s+espero\b"
+    r"|\bespero\s+(?:en\s+la\s+l[ií]nea|aqu[ií])\b|\bno\s+hay\s+(?:prisa|apuro)\b"
+    r"|\bt[oó]mese\s+su\s+tiempo\b|\bsigo\s+en\s+la\s+l[ií]nea\b",
     re.I,
 )
 _THANKS_SENTENCE = re.compile(r"^(?:(?:ok(?:ay)?|great|perfect|perfecto)[\s,]+)?(?:thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?|thank\s+you|(?:muchas\s+)?gracias)$", re.I)
@@ -116,7 +131,7 @@ _SENTENCE_END = re.compile(r"[.!\u2026]+")
 def is_closing(text) -> bool:
     """Does this assistant line END with a goodbye (en/es)? Used to end a call the model forgot to end."""
     s = str(text or "").replace("\u2019", "'").strip()
-    if not s or "?" in s or "\u00bf" in s:
+    if not s or "?" in s or "\u00bf" in s or _WAITING.search(s):
         return False
     parts = [p.strip(" \t\n,;:") for p in _SENTENCE_END.split(s)]
     parts = [p for p in parts if p]
