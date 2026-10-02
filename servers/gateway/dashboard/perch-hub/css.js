@@ -330,6 +330,11 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    transcript has with a card open at 1280x900, so the desktop is unchanged,
    and a short landscape phone gives up the extra first. */
 #perch-tab-chat > #perch-transcript{min-height:min(56px,10vh)}
+/* A scrolled transcript shows a sliver of the row above in its 12px top
+   padding, flush against the banner — which read as the banner covering the
+   chat (Kevin's screenshot). Fade exactly that padding band: at scrollTop 0 it
+   is empty, so nothing at rest changes. */
+#perch-transcript{-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 12px);mask-image:linear-gradient(to bottom,transparent 0,#000 12px)}
 /* Send must be reachable at ANY scroll position, not only at the bottom of a
    long transcript. That was the drawer's defining mobile failure — but this
    rule is the BACKSTOP for it, not the mechanism. In the shipped
@@ -353,6 +358,9 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    is the signal here, so the honest reduction is "calmer", not "frozen". */
 #perch-working{display:flex;align-items:center;gap:8px;padding:6px 2px 0;color:var(--dim);font-size:12.5px;flex-shrink:0}
 #perch-working[hidden]{display:none}
+/* While a question card is up the bot is waiting on YOU (the banner says so):
+   "Working…" would be wrong, and on a phone its row is height the card needs. */
+#perch-ask:not(:empty) ~ #perch-working{display:none}
 #perch-working svg{width:15px;height:15px;color:var(--teal);flex-shrink:0;animation:perch-spin 1.4s linear infinite}
 @keyframes perch-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){#perch-working svg{animation-duration:6s}}

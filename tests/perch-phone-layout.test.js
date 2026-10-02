@@ -47,6 +47,9 @@ test("css: the ask pane can shrink, its questions scroll, its foot stays", async
   assert.match(css, /\.ask-body\{[^}]*min-height:0[^}]*overflow-y:auto/, "the questions scroll inside the card");
   assert.match(css, /\.ask-combined \.ask-foot\{flex-shrink:0\}/, "Send answer / Cancel never shrink away");
   assert.match(css, /#perch-tab-chat > #perch-transcript\{min-height:min\(/, "the transcript keeps a readable floor");
+  assert.match(css, /#perch-ask:not\(:empty\) ~ #perch-working\{display:none\}/, "no Working… strip while the bot waits on you");
+  assert.match(css, /#perch-transcript\{-webkit-mask-image:linear-gradient\(to bottom,transparent 0,#000 12px\)/,
+    "the scrolled-away sliver under the banner is faded, not drawn flush against it");
 });
 
 test("client: the combined card wraps its questions in .ask-body and the foot is outside it", async () => {
