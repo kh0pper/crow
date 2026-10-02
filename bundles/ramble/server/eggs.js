@@ -261,15 +261,16 @@ async function ensurePetRow(db) {
  *                                 early on it, so nothing can be stranded.
  *   - a NEST claimed           -> promoted (`claimNest`)
  *   - a swap LAPSING (`expireTrades`) unlocking the last shelf egg
- *                              -> NOT promoted, deliberately. 'expired' is
- *                                 NOT terminal: a `completed` can still land
- *                                 on an expired acceptor row, its hand-over
- *                                 UPDATE (`WHERE status IN ('shelf',
- *                                 'received')`) would then miss an egg moved
- *                                 into the slot while `receivedEggStatement`
- *                                 still inserts — the user keeps BOTH eggs.
- *                                 The egg waits and the pet card offers a
- *                                 one-tap Warm it (`nextPromotable`).
+ *                              -> NOT promoted by the sweep (Kevin,
+ *                                 2026-09-22). The egg waits and the pet card
+ *                                 offers a one-tap Warm it (`nextPromotable`).
+ *                                 'expired' is NOT terminal: a `completed`
+ *                                 can still land on an expired acceptor row.
+ *                                 Any other promote (or Warm it) may draft
+ *                                 the egg first, so the hand-over
+ *                                 (trades.js `HANDOVER_SQL`) takes the
+ *                                 promised egg from the slot too — the user
+ *                                 never keeps both (fix round 1, I-1).
  *   - the SYNC APPLY           -> never promotes a 'user'/received egg
  *                                 (`RAMBLE_EGG_REPROMOTE_SQL` drafts 'sync'
  *                                 losers only). The Crow whose write changed
@@ -638,7 +639,16 @@ export async function readPrologue(db) {
     intro_seen: (await readSetting(db, PROLOGUE_INTRO_KEY)) === "1",
     hatch_seen: (await readSetting(db, PROLOGUE_HATCH_KEY)) === "1",
     granted: await anyEggEverExisted(db),
+    // How many birds have hatched, fleet-wide (ramble_eggs replicates). The
+    // hatch beat is for a FIRST hatch; a veteran whose Crow predates the
+    // prologue (no flags set) must not get it on their eighteenth bird.
+    hatched_count: await hatchedCount(db),
   };
+}
+
+async function hatchedCount(db) {
+  const { rows } = await db.execute({ sql: "SELECT count(*) AS n FROM ramble_eggs WHERE status = 'hatched'", args: [] });
+  return Number(rows[0]?.n ?? 0);
 }
 
 export async function setPrologueSeen(db, which, { emit } = {}) {

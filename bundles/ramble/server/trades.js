@@ -29,16 +29,16 @@
  * Spec §4.2 (promote-on-gift-receipt, Kevin 2026-09-22): every path here that
  * makes an egg AVAILABLE — a gift landing, a swap hand-over, a decline that
  * unlocks an egg — ends with `refillSlot`, so an empty incubating slot takes
- * the oldest promotable egg at once. `expireTrades` deliberately does NOT: an
- * expired row can still receive a late `completed`, and an egg promoted out
- * of the shelf in between would be missed by the hand-over UPDATE while the
- * received egg still landed (the user keeps both). See eggs.js
- * `promoteFromShelf` for the full inventory, including the sync-apply path.
+ * the oldest promotable egg at once. `expireTrades` deliberately does NOT
+ * (Kevin, 2026-09-22): an expired row can still receive a late `completed`.
+ * The freed egg is promotable by every OTHER path, though, so the hand-over
+ * (`HANDOVER_SQL`) takes the promised egg from the slot too — the user never
+ * keeps both. See eggs.js `promoteFromShelf` for the full inventory.
  */
 import { randomUUID } from "node:crypto";
 import { insertRemoteMark, getMark } from "./marks.js";
 import { xOnly } from "./persona.js";
-import { startOfLocalDay, promoteFromShelf } from "./eggs.js";
+import { startOfLocalDay, promoteFromShelf, hatchIfReady } from "./eggs.js";
 import {
   CROW_ID_RE, isRambleEnvelope, parseEggPayload, giftPayload, tradePayload, parseTradePayload,
   payloadToMark, enqueueDeliveries,
@@ -93,8 +93,26 @@ const GIFTABLE_GUARD_SQL = "EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? A
  * freed or delivered the egg has fully landed (a hand-over is one db.batch).
  */
 async function refillSlot(db, now, emit) {
-  await promoteFromShelf(db, { now, emit });
+  // A promoted egg can already be at the hatch threshold (a gift carries its
+  // warmth, up to MAX_WARMTH). Hatch it now, as incubateEgg does, rather than
+  // leaving it at 100% until some unrelated credit arrives (review M-4).
+  if (await promoteFromShelf(db, { now, emit })) await hatchIfReady(db, { now, emit });
 }
+
+/**
+ * The swap hand-over: our promised egg leaves. It matches 'incubating' too
+ * (fix round 1, I-1). An EXPIRED acceptor row no longer locks its egg, so a
+ * gift, a nest claim, a decline, a hatch or Warm it may have drafted it into
+ * the slot before the late `completed` arrives. Matching only the shelf
+ * statuses then missed it while `receivedEggStatement` still inserted the
+ * incoming egg — the user kept BOTH. The egg was promised; it goes wherever
+ * it is, and `refillSlot` after the batch fills the slot again.
+ *
+ * Residue: an egg that already HATCHED in that window cannot be handed over
+ * (a bird is not an egg), so that case still yields a duplicate — accepted
+ * under spec §9 ("no scarcity ledger, no value").
+ */
+const HANDOVER_SQL = "UPDATE ramble_eggs SET status = 'gifted' WHERE egg_id = ? AND status IN ('shelf', 'received', 'incubating')";
 
 /** The "receive an egg" upsert shared by gifts and swap completion: insert if new, revive if it was gifted away, else no-op. */
 function receivedEggStatement(egg, fromCrowId, now) {
@@ -283,7 +301,7 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
       return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 1 };
     }
     await db.batch([
-      { sql: "UPDATE ramble_eggs SET status = 'gifted' WHERE egg_id = ? AND status IN ('shelf', 'received')", args: [mine.egg_id] },
+      { sql: HANDOVER_SQL, args: [mine.egg_id] },
       receivedEggStatement(t.egg, fromCrowId, now),
       { sql: "UPDATE ramble_trades SET state = 'completed', their_egg_id = ?, offer_json = ?, updated_at = ? WHERE trade_id = ?", args: [t.egg.egg_id, JSON.stringify(t.egg), now, t.trade_id] },
     ]);
@@ -304,7 +322,7 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
     if (!t.egg || t.egg.egg_id !== existing.their_egg_id || t.want_egg_id !== existing.my_egg_id) return none();
     if (t.egg.egg_id === existing.my_egg_id || (await stillOurs(t.egg.egg_id))) return none();
     await db.batch([
-      { sql: "UPDATE ramble_eggs SET status = 'gifted' WHERE egg_id = ? AND status IN ('shelf', 'received')", args: [existing.my_egg_id] },
+      { sql: HANDOVER_SQL, args: [existing.my_egg_id] },
       receivedEggStatement(t.egg, fromCrowId, now),
       { sql: "UPDATE ramble_trades SET state = 'completed', updated_at = ? WHERE trade_id = ?", args: [now, t.trade_id] },
     ]);
@@ -329,10 +347,11 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
 /**
  * Local sweep: open rows past expires_at become 'expired' (emitted). Returns how many.
  *
- * ⚠ Does NOT refill the slot, unlike every other path that frees an egg.
- * 'expired' is not terminal for the hand-over: a `completed` can still land on
- * an expired acceptor row, and its UPDATE only moves an egg still on the shelf.
- * The freed egg waits; the pet card's Warm it offers it (Kevin, 2026-09-22).
+ * ⚠ Does NOT refill the slot, unlike every other path that frees an egg
+ * (Kevin, 2026-09-22). 'expired' is not terminal for the hand-over: a
+ * `completed` can still land on an expired acceptor row. The freed egg waits
+ * and the pet card's Warm it offers it; if anything drafts it first, the late
+ * hand-over takes it from the slot (`HANDOVER_SQL`).
  */
 export async function expireTrades(db, now = Date.now(), { emit } = {}) {
   const { rows } = await db.execute({ sql: `SELECT trade_id FROM ramble_trades WHERE ${OPEN_SQL} AND expires_at <= ?`, args: [now] });

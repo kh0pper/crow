@@ -144,7 +144,7 @@ export async function claimNest(db, { cell, week, here, now = Date.now(), emit }
   // find a Warm it button. Nothing is in flight on a nest claim, so unlike a
   // lapsing swap there is no hand-over this could strand. The returned egg is
   // re-read, so `egg.status` tells the caller whether it is warming already.
-  await promoteFromShelf(db, { now, emit });
+  if (await promoteFromShelf(db, { now, emit })) await hatchIfReady(db, { now, emit });
   return { claimed: true, already: false, egg: (await getEgg(db, egg.egg_id)) ?? egg };
 }
 

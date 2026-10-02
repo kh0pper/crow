@@ -35,7 +35,7 @@ async function eggCount(db) {
 
 test("a fresh player is granted exactly one starter egg, into the slot", async () => {
   const db = await freshDb();
-  assert.deepEqual(await readPrologue(db), { intro_seen: false, hatch_seen: false, granted: false });
+  assert.deepEqual(await readPrologue(db), { intro_seen: false, hatch_seen: false, granted: false, hatched_count: 0 });
 
   const egg = await grantStarterEgg(db, { now: T0 });
   assert.ok(egg, "granted");
@@ -69,20 +69,20 @@ test("wiping the eggs makes the prologue replayable — K1's reset", async () =>
   await grantStarterEgg(db, { now: T0 });
   await setPrologueSeen(db, "intro");
   await setPrologueSeen(db, "hatch");
-  assert.deepEqual(await readPrologue(db), { intro_seen: true, hatch_seen: true, granted: true });
+  assert.deepEqual(await readPrologue(db), { intro_seen: true, hatch_seen: true, granted: true, hatched_count: 0 });
 
   // A game reset clears both the eggs and the two flags.
   await db.execute({ sql: "DELETE FROM ramble_eggs", args: [] });
   await db.execute({ sql: "DELETE FROM ramble_settings WHERE key LIKE 'prologue.%'", args: [] });
 
-  assert.deepEqual(await readPrologue(db), { intro_seen: false, hatch_seen: false, granted: false });
+  assert.deepEqual(await readPrologue(db), { intro_seen: false, hatch_seen: false, granted: false, hatched_count: 0 });
   assert.ok(await grantStarterEgg(db, { now: T0 + 5000 }), "the prologue genuinely replays");
 });
 
 test("the two flags are independent and survive as replicated settings", async () => {
   const db = await freshDb();
   await setPrologueSeen(db, "intro");
-  assert.deepEqual(await readPrologue(db), { intro_seen: true, hatch_seen: false, granted: false });
+  assert.deepEqual(await readPrologue(db), { intro_seen: true, hatch_seen: false, granted: false, hatched_count: 0 });
   await setPrologueSeen(db, "hatch");
   assert.equal((await readPrologue(db)).hatch_seen, true);
 
@@ -93,4 +93,16 @@ test("the two flags are independent and survive as replicated settings", async (
 test("setPrologueSeen refuses an unknown beat rather than writing junk", async () => {
   const db = await freshDb();
   await assert.rejects(() => setPrologueSeen(db, "nonsense"));
+});
+
+test("readPrologue reports how many birds have hatched, fleet-wide (the hatch beat skips veterans)", async () => {
+  const db = await freshDb();
+  for (const id of ["b1", "b2"]) {
+    // eslint-disable-next-line no-await-in-loop
+    await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, species, seed, warmth, created_at, hatched_at) VALUES (?, 'hatched', 'crow', 1, 100, ?, ?)", args: [id, T0, T0] });
+  }
+  await mintIncubatingEgg(db, { now: T0 });
+  const p = await readPrologue(db);
+  assert.equal(p.hatched_count, 2, "the incubating egg is not a bird");
+  assert.equal(p.granted, true);
 });

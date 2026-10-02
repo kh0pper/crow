@@ -2174,9 +2174,16 @@
 
   /* Beat two rides the existing hatch reveal: the bird is already on screen,
    * so this names what just happened rather than interrupting it. */
+  /* Beat two is for a player's FIRST bird. A Crow that predates the prologue
+   * has no flags set but may already have a flock; counting this hatch, more
+   * than one bird means it is not the first. */
+  function shouldShowHatchBeat(p) {
+    return !!(p && !p.hatch_seen && !(Number(p.hatched_count) > 1));
+  }
+
   function maybeHatchBeat(bird) {
     jsonFetch("/api/ramble/prologue").then(function (p) {
-      if (!p || p.hatch_seen) return;
+      if (!shouldShowHatchBeat(p)) return;
       var lead = $("rb-prologue-hatch-lead");
       if (lead && bird && bird.species) {
         /* Same lookup as handleHatched's reveal line: species is a lowercase

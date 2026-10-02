@@ -2127,6 +2127,19 @@ test("shouldShowIntro: beat one shows only for a player who has never had an egg
   assert.equal(shouldShowIntro({ intro_seen: true, granted: true }), false);
 });
 
+test("shouldShowHatchBeat: beat two is for a FIRST bird only, never a veteran's next one (review M-5)", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fnSrc = extractFunction(src, "shouldShowHatchBeat");
+  assert.ok(fnSrc, "shouldShowHatchBeat must be defined and extractable");
+  const shouldShowHatchBeat = new Function(fnSrc + "\nreturn shouldShowHatchBeat;")();
+  assert.equal(shouldShowHatchBeat({ hatch_seen: false, hatched_count: 1 }), true, "the first bird: show it");
+  assert.equal(shouldShowHatchBeat({ hatch_seen: true, hatched_count: 1 }), false, "already dismissed");
+  assert.equal(shouldShowHatchBeat({ hatch_seen: false, hatched_count: 18 }), false,
+    "a Crow that predates the prologue (crow: 17 birds, no flags) must not get the first-bird beat");
+  assert.equal(shouldShowHatchBeat({ hatch_seen: false }), true, "an older server without the count still shows it once");
+  assert.equal(shouldShowHatchBeat(null), false);
+});
+
 test("the hatch beat hooks the rb-meet-bird handler, not clearHatch", () => {
   const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
 
