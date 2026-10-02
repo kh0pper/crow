@@ -271,8 +271,8 @@ async function loadBotRow(db, botId) {
 export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
-  function piNames() {
-    try { return piProviders() || null; } catch { return null; }
+  async function piNames(env) {
+    try { return (await piProviders(env ? { env } : undefined)) || null; } catch { return null; }
   }
   const router = Router();
 
@@ -428,8 +428,13 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         const { rows } = await db.execute("SELECT definition FROM pi_bot_defs WHERE enabled = 1");
         referenced = referencedModelKeys(rows);
       } catch { /* no bot table is no references, not a failed list */ }
+      // The env the bot's pi will actually get: the gateway's plus the bot's
+      // own spawn_env (bridge.mjs merges it), which may point pi at another
+      // agent dir or carry a provider key (fix round 1 M6).
+      const spawnEnv = def.spawn_env && typeof def.spawn_env === "object" ? def.spawn_env : null;
       const models = pickerModels(await annotate(await providerModels()), {
-        defaultKey: dflt, referenced, pi: piNames(),
+        defaultKey: dflt, referenced,
+        pi: await piNames(spawnEnv ? { ...process.env, ...spawnEnv } : null),
       });
       res.json({ models, default: dflt });
     } catch (err) {
@@ -823,7 +828,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         ? pickerModels(await annotate(result.models), {
             referenced: [result.current],
             runnableAll: result.source === "child",
-            pi: result.source === "child" ? null : piNames(),
+            pi: result.source === "child" ? null : await piNames(),
           })
         : (result && result.models) || null;
       res.json({ ...result, models });

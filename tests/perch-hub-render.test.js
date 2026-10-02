@@ -633,12 +633,12 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.value, "crow-local/qwen3.6-35b-a3b", "opened on the bot's configured model");
       assert.equal(seen.selectedText, seen.options[0],
         "and the browser really shows that entry, not merely stores the value");
-      // The unavailable model is held back behind "Show unavailable (1)" —
+      // The unavailable model is held back behind "Show more (1)" —
       // and that toggle is a real, thumb-sized control that brings it back
       // reading as unavailable, never a silently selectable dead choice.
       assert.equal(seen.options.length, 1, "only what can run is offered by default");
       assert.equal(seen.more.hidden, false);
-      assert.equal(seen.more.text, "Show unavailable (1)");
+      assert.equal(seen.more.text, "Show more (1)");
       assert.equal(seen.more.inViewport, true);
       assert.ok(seen.more.h >= 44, `toggle ${seen.more.w}x${seen.more.h} is too small for a thumb`);
       const shown = await s.json(`(function(){

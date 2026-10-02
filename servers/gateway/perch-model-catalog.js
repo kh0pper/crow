@@ -45,6 +45,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { loadProviders } from "../shared/providers.js";
@@ -190,18 +191,47 @@ const PI_BUILTIN_PROVIDERS_SNAPSHOT = [
   "xiaomi-token-plan-sgp", "zai", "zai-coding-cn",
 ];
 
-/** The installed pi's built-in providers: pi-ai ships one
- *  `dist/providers/<name>.models.js` per provider. Searched next to the CLI
- *  the bot engine actually spawns (pi_resolver.mjs), nested or hoisted. */
-function builtinProvidersNear(cliPath, list) {
+/**
+ * The env vars pi reads for each built-in provider's API key — pi-ai
+ * env-api-keys.js getApiKeyEnvVars() as of pi 0.85.1. Only the FALLBACK:
+ * loadPiProviderNames() asks the installed pi-ai's own getEnvApiKey() when it
+ * can load it, so a newer pi is not judged against this copy.
+ */
+const PI_ENV_KEYS_SNAPSHOT = {
+  "github-copilot": ["COPILOT_GITHUB_TOKEN"],
+  anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+  "amazon-bedrock": ["AWS_PROFILE", "AWS_BEARER_TOKEN_BEDROCK", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE"],
+  "ant-ling": ["ANT_LING_API_KEY"], "qwen-token-plan": ["QWEN_TOKEN_PLAN_API_KEY"],
+  "qwen-token-plan-cn": ["QWEN_TOKEN_PLAN_CN_API_KEY"], "qwen-token-plan-individual": ["QWEN_TOKEN_PLAN_API_KEY"],
+  openai: ["OPENAI_API_KEY"], "azure-openai-responses": ["AZURE_OPENAI_API_KEY"], nvidia: ["NVIDIA_API_KEY"],
+  deepseek: ["DEEPSEEK_API_KEY"], google: ["GEMINI_API_KEY"], "google-vertex": ["GOOGLE_CLOUD_API_KEY"],
+  groq: ["GROQ_API_KEY"], cerebras: ["CEREBRAS_API_KEY"], xai: ["XAI_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"], "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"], zai: ["ZAI_API_KEY"],
+  "zai-coding-cn": ["ZAI_CODING_CN_API_KEY"], mistral: ["MISTRAL_API_KEY"], minimax: ["MINIMAX_API_KEY"],
+  "minimax-cn": ["MINIMAX_CN_API_KEY"], moonshotai: ["MOONSHOT_API_KEY"], "moonshotai-cn": ["MOONSHOT_API_KEY"],
+  huggingface: ["HF_TOKEN"], fireworks: ["FIREWORKS_API_KEY"], together: ["TOGETHER_API_KEY"],
+  baseten: ["BASETEN_API_KEY"], opencode: ["OPENCODE_API_KEY"], "opencode-go": ["OPENCODE_API_KEY"],
+  "kimi-coding": ["KIMI_API_KEY"], "cloudflare-workers-ai": ["CLOUDFLARE_API_KEY"],
+  "cloudflare-ai-gateway": ["CLOUDFLARE_API_KEY"], xiaomi: ["XIAOMI_API_KEY"],
+  "xiaomi-token-plan-cn": ["XIAOMI_TOKEN_PLAN_CN_API_KEY"], "xiaomi-token-plan-ams": ["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+  "xiaomi-token-plan-sgp": ["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
+};
+
+/** The installed pi's pi-ai package dir, searched next to the CLI the bot
+ *  engine actually spawns (pi_resolver.mjs), nested or hoisted. Recognized by
+ *  its `dist/providers/<name>.models.js` files, which also name pi's
+ *  built-in providers. */
+function piAiNear(cliPath, list) {
   let dir = dirname(cliPath);
   for (let up = 0; up < 5; up++) {
     for (const rel of [["node_modules", "@earendil-works", "pi-ai"], ["..", "pi-ai"]]) {
+      const root = join(dir, ...rel);
       try {
-        const names = list(join(dir, ...rel, "dist", "providers"))
+        const names = list(join(root, "dist", "providers"))
           .filter((f) => f.endsWith(".models.js"))
           .map((f) => f.slice(0, -".models.js".length));
-        if (names.length) return names;
+        if (names.length) return { root, names };
       } catch { /* not here */ }
     }
     dir = dirname(dir);
@@ -211,18 +241,33 @@ function builtinProvidersNear(cliPath, list) {
 
 /**
  * What pi can resolve as `--provider`, lower-cased (pi's own lookup is
- * case-insensitive). `custom` is pi's models.json (the file a bot's pi reads:
- * PI_CODING_AGENT_DIR or ~/.pi/agent; PI_MODELS_JSON wins, as in
- * model_resolver.mjs); `builtin` is pi's own provider set.
+ * case-insensitive), and which of its built-ins it holds a key for.
  *
- * Returns null when the answer is UNKNOWN (a models.json that exists but does
- * not parse) — callers then mark nothing unrunnable rather than guess. A
+ * - `custom`: pi's models.json (the file a bot's pi reads:
+ *   PI_CODING_AGENT_DIR or ~/.pi/agent; PI_MODELS_JSON wins, as in
+ *   model_resolver.mjs).
+ * - `builtin`: pi's own provider set.
+ * - `keyed`: the built-ins pi has auth for — an entry in pi's auth.json, or
+ *   the API-key env var pi reads (asked of the installed pi-ai's own
+ *   getEnvApiKey(), the check behind pi's auth-filtered available-models
+ *   list; a snapshot of its env-var map otherwise). A built-in without a key
+ *   resolves at spawn and then fails every turn on auth, so it is not
+ *   runnable. Fix round 1 I2: `zai` on crow is exactly that.
+ *
+ * `env` is the environment the bot's pi would get (the gateway's, plus the
+ * bot's spawn_env when the caller has one).
+ *
+ * Resolves null when the answer is UNKNOWN (a models.json that exists but
+ * does not parse) — callers then mark nothing unrunnable rather than guess. A
  * missing models.json is not unknown: pi then has its built-ins only.
  *
  * @param {object} [deps] test seams
- * @returns {{custom: Set<string>, builtin: Set<string>} | null}
+ * @returns {Promise<{custom: Set<string>, builtin: Set<string>, keyed: Set<string>} | null>}
  */
-export function loadPiProviderNames({ env = process.env, read = readFileSync, list = readdirSync, cli = resolvePiCli } = {}) {
+export async function loadPiProviderNames({
+  env = process.env, read = readFileSync, list = readdirSync, cli = resolvePiCli,
+  importer = (p) => import(pathToFileURL(p).href),
+} = {}) {
   const agentDir = env.PI_CODING_AGENT_DIR || join(env.HOME || homedir(), ".pi", "agent");
   const file = env.PI_MODELS_JSON || join(agentDir, "models.json");
   const custom = new Set();
@@ -238,13 +283,35 @@ export function loadPiProviderNames({ env = process.env, read = readFileSync, li
       return null;
     }
   }
-  let names = null;
+  let ai = null;
   try {
     const r = cli({ env });
-    if (r && r.cliPath) names = builtinProvidersNear(r.cliPath, list);
-  } catch { names = null; }
-  const builtin = new Set((names || PI_BUILTIN_PROVIDERS_SNAPSHOT).map((n) => n.toLowerCase()));
-  return { custom, builtin };
+    if (r && r.cliPath) ai = piAiNear(r.cliPath, list);
+  } catch { ai = null; }
+  const builtin = new Set(((ai && ai.names) || PI_BUILTIN_PROVIDERS_SNAPSHOT).map((n) => n.toLowerCase()));
+
+  // auth.json: { "<provider>": { type, key | access … } } — any entry counts.
+  const authed = new Set();
+  try {
+    const a = JSON.parse(read(join(agentDir, "auth.json"), "utf8"));
+    for (const [k, v] of Object.entries(a || {})) if (v) authed.add(k.toLowerCase());
+  } catch { /* no auth.json is no stored keys */ }
+
+  let envKey = null;
+  if (ai) {
+    try {
+      const m = await importer(join(ai.root, "dist", "env-api-keys.js"));
+      if (m && typeof m.getEnvApiKey === "function") envKey = (p) => !!m.getEnvApiKey(p, env);
+    } catch { envKey = null; }
+  }
+  if (!envKey) envKey = (p) => (PI_ENV_KEYS_SNAPSHOT[p] || []).some((v) => !!env[v]);
+  const keyed = new Set();
+  for (const p of builtin) {
+    let ok = authed.has(p);
+    if (!ok) { try { ok = envKey(p); } catch { ok = false; } }
+    if (ok) keyed.add(p);
+  }
+  return { custom, builtin, keyed };
 }
 
 function ipv4InNetwork(h) {
@@ -294,15 +361,19 @@ function endpointKey(baseUrl) {
 
 /**
  * The picker's list: grouped, de-duplicated, ordered and labelled (see the
- * block comment above). Never throws; never drops a model except as an alias
- * of a kept one with the same endpoint and id.
+ * block comment above). Never throws. Drops an entry only as an alias of a
+ * kept one (same endpoint, id and runnability), or when it has no
+ * provider/id to address it by — nothing could select such an entry.
  *
- * Canonical row among aliases, in order: the bot's default; a key something
- * references (another bot's default/escalation, the session's current
- * model); a row pi resolves through models.json, then through a built-in, then
- * not at all (a choice that cannot spawn never wins over one that can); a
- * managed row (bundle / native runtime); the better availability; a row that
- * names the model; first seen.
+ * Aliases are only ever entries of the same runnability: a model pi can
+ * spawn on is never folded into one it cannot (fix round 1 I1), so the same
+ * endpoint+model can appear twice — once runnable, once "can't run in a bot".
+ * Canonical row among aliases, in order: the bot's default; a row pi resolves
+ * through models.json over one it resolves through a keyed built-in; a key
+ * something references (another bot's default/escalation, the session's
+ * current model); a managed row (bundle / native runtime); the better
+ * availability; a row that names the model; first seen. The kept entry
+ * carries the best availability of its group.
  *
  * Order: the default first, then network, then cloud; inside a group usable
  * entries before unusable ones, then by label.
@@ -322,7 +393,10 @@ export function pickerModels(models, { defaultKey = null, referenced = [], pi = 
     if (!pi) return null;
     const p = String(provider || "").toLowerCase();
     if (pi.custom.has(p)) return 2;
-    if (pi.builtin.has(p)) return 1;
+    // A built-in counts only when pi holds a key for it (fix round 1 I2).
+    // A caller with no `keyed` answer predates that check: resolvable is
+    // all it can claim.
+    if (pi.builtin.has(p)) return !pi.keyed || pi.keyed.has(p) ? 1 : 0;
     return 0;
   };
 
@@ -335,15 +409,20 @@ export function pickerModels(models, { defaultKey = null, referenced = [], pi = 
       m, i, key, rank,
       score: [
         key === defaultKey ? 1 : 0,
-        refs.has(key) ? 1 : 0,
         rank == null ? 1 : rank,
+        refs.has(key) ? 1 : 0,
         m.managed ? 1 : 0,
         AVAIL_RANK[m.availability] || 0,
         m.name ? 1 : 0,                           // a row that names its model reads better
         -i,
       ],
     };
-    const dk = m.baseUrl ? endpointKey(m.baseUrl) + "\n" + m.id : "key:" + key;
+    // Runnability is part of the identity (fix round 1 I1): an entry pi can
+    // spawn on is NEVER folded into one it cannot. Otherwise a bot naming an
+    // unrunnable alias (crow-chat) would make it canonical and swallow the
+    // runnable one (crow-local) from every other bot's picker.
+    const runClass = rank == null ? "" : rank > 0 ? "\nrun" : "\nnorun";
+    const dk = (m.baseUrl ? endpointKey(m.baseUrl) + "\n" + m.id : "key:" + key) + runClass;
     const g = groups.get(dk);
     if (!g) { groups.set(dk, { best: cand, all: [cand] }); return; }
     g.all.push(cand);
@@ -357,6 +436,12 @@ export function pickerModels(models, { defaultKey = null, referenced = [], pi = 
   for (const g of groups.values()) {
     const { m, key, rank } = g.best;
     const e = { ...m, group: m.external ? "network" : scopeOf(m.baseUrl) };
+    // Fix round 1 M1: one endpoint, one answer — the group's best
+    // availability (an alias the gateway can warm makes the model on_demand
+    // even when the canonical row itself is not warmable).
+    for (const c of g.all) {
+      if ((AVAIL_RANK[c.m.availability] || 0) > (AVAIL_RANK[e.availability] || 0)) e.availability = c.m.availability;
+    }
     if (rank != null) e.runnable = rank > 0;
     const aliases = g.all.filter((c) => c !== g.best).map((c) => c.key);
     if (aliases.length) e.aliases = aliases;

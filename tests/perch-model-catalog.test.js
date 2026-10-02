@@ -173,7 +173,8 @@ test("scopeOf: loopback, LAN, tailnet and bare host names are on your network; t
   }
 });
 
-const PI = { custom: new Set(["crow-local", "zai-coding", "raven-flash-next"]), builtin: new Set(["zai"]) };
+const PI = { custom: new Set(["crow-local", "zai-coding", "raven-flash-next"]), builtin: new Set(["zai", "openai"]),
+  keyed: new Set(["openai"]) };
 const keys = (l) => l.map((m) => m.provider + "/" + m.id);
 
 test("aliases of one endpoint+model collapse to ONE entry, the rest kept as aliases", () => {
@@ -182,9 +183,38 @@ test("aliases of one endpoint+model collapse to ONE entry, the rest kept as alia
     { provider: "crow-local", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", name: "Qwen 35B", availability: "up" },
     { provider: "crow-swap-agentic", id: "q35", baseUrl: "http://100.118.41.122:8003/v1/", managed: true, availability: "up" },
   ], { pi: PI });
-  assert.deepEqual(keys(out), ["crow-local/q35"],
-    "the one pi can spawn wins over the bundle rows it cannot — a choice that cannot run never wins");
-  assert.deepEqual(out[0].aliases.sort(), ["crow-chat/q35", "crow-swap-agentic/q35"]);
+  // Fix round 1 I1: aliases fold only within the same runnability, so the one
+  // pi can spawn stays its own entry and the two bundle rows fold together.
+  assert.deepEqual(keys(out), ["crow-local/q35", "crow-chat/q35"]);
+  assert.equal(out[0].runnable, true);
+  assert.equal(out[0].aliases, undefined);
+  assert.equal(out[1].runnable, false);
+  assert.deepEqual(out[1].aliases, ["crow-swap-agentic/q35"]);
+});
+
+test("I1: a bot naming an unrunnable alias never swallows the runnable one from another bot's picker", () => {
+  const rows = [
+    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", managed: true, availability: "up" },
+    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", availability: "up" },
+  ];
+  // Bot A is set to crow-chat/…; this is bot B's launcher (default elsewhere).
+  const forB = pickerModels(rows, { pi: PI, referenced: ["crow-chat/qwen3.6-35b-a3b"], defaultKey: "zai-coding/glm-5" });
+  const local = forB.find((m) => m.provider === "crow-local");
+  assert.ok(local, "crow-local is still offered");
+  assert.equal(local.runnable, true);
+  // And bot A's own launcher keeps its (unrunnable) default visible too.
+  const forA = pickerModels(rows, { pi: PI, defaultKey: "crow-chat/qwen3.6-35b-a3b" });
+  assert.deepEqual(keys(forA), ["crow-chat/qwen3.6-35b-a3b", "crow-local/qwen3.6-35b-a3b"]);
+  assert.equal(forA[0].runnable, false);
+});
+
+test("the kept entry carries its group's best availability", () => {
+  const [m] = pickerModels([
+    { provider: "a", id: "m", baseUrl: "http://x/v1", availability: "unavailable", managed: true },
+    { provider: "b", id: "m", baseUrl: "http://x/v1", availability: "on_demand" },
+  ]);
+  assert.equal(m.provider, "a");
+  assert.equal(m.availability, "on_demand");
 });
 
 test("among equally runnable aliases the referenced row, then the managed row, is canonical", () => {
@@ -207,14 +237,16 @@ test("the same model id on DIFFERENT endpoints is two models, not one", () => {
     "the provider is named only because the two would otherwise read the same");
 });
 
-test("runnable: pi's models.json, then pi's built-ins (case-insensitive), else not", () => {
+test("runnable: pi's models.json, then pi's KEYED built-ins (case-insensitive), else not", () => {
   const out = pickerModels([
     { provider: "crow-local", id: "a", baseUrl: "http://x/v1" },
     { provider: "ZAI", id: "b", baseUrl: "https://api.z.ai/v4" },
+    { provider: "OpenAI", id: "d", baseUrl: "https://api.openai.com/v1" },
     { provider: "cloud-openai-08a50004", id: "c", baseUrl: "https://dashscope.example/v1" },
   ], { pi: PI });
   const by = Object.fromEntries(out.map((m) => [m.provider, m.runnable]));
-  assert.deepEqual(by, { "crow-local": true, ZAI: true, "cloud-openai-08a50004": false });
+  assert.deepEqual(by, { "crow-local": true, ZAI: false, OpenAI: true, "cloud-openai-08a50004": false },
+    "fix round 1 I2: zai is a pi built-in, but with no key pi fails every turn — can't run in a bot");
   assert.ok(pickerModels([{ provider: "p", id: "m", baseUrl: "u" }]).every((m) => !("runnable" in m)),
     "no pi answer is UNKNOWN, never false");
   assert.equal(pickerModels([{ provider: "nope", id: "m" }], { pi: PI, runnableAll: true })[0].runnable, true,
@@ -250,35 +282,53 @@ test("pickerModels never throws on junk and keeps every keyed entry", () => {
   assert.equal(pickerModels([{ provider: "p", id: "m" }])[0].label, "m");
 });
 
-test("loadPiProviderNames reads pi's models.json (PI_MODELS_JSON wins) and the installed pi's built-ins", () => {
+test("loadPiProviderNames reads pi's models.json (PI_MODELS_JSON wins) and the installed pi's built-ins", async () => {
   const files = {
     "/pi/models.json": JSON.stringify({ providers: { "Qwen Cloud": {}, "crow-local": {}, $schema: {} } }),
   };
   const read = (p) => { if (p in files) return files[p]; const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; };
+  const AI = "/g/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai";
   const list = (d) => {
-    if (d === "/g/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers") {
-      return ["zai.models.js", "openai.models.js", "index.js"];
-    }
+    if (d === AI + "/dist/providers") return ["zai.models.js", "openai.models.js", "index.js"];
     throw new Error("ENOENT");
   };
   const cli = () => ({ cliPath: "/g/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" });
-  const r = loadPiProviderNames({ env: { PI_MODELS_JSON: "/pi/models.json", HOME: "/h" }, read, list, cli });
+  const imported = [];
+  const importer = async (p) => { imported.push(p); return { getEnvApiKey: (prov, env) => (prov === "openai" ? env.OPENAI_API_KEY : undefined) }; };
+  const r = await loadPiProviderNames({ env: { PI_MODELS_JSON: "/pi/models.json", HOME: "/h", OPENAI_API_KEY: "k" },
+    read, list, cli, importer });
   assert.deepEqual([...r.custom].sort(), ["crow-local", "qwen cloud"]);
   assert.deepEqual([...r.builtin].sort(), ["openai", "zai"]);
+  assert.deepEqual([...r.keyed], ["openai"], "the installed pi-ai's own getEnvApiKey decides");
+  assert.deepEqual(imported, [AI + "/dist/env-api-keys.js"]);
 
-  // models.json under PI_CODING_AGENT_DIR / HOME; no installed pi → the snapshot.
+  // models.json under PI_CODING_AGENT_DIR / HOME; no installed pi → the snapshots.
   files["/h/.pi/agent/models.json"] = JSON.stringify({ providers: { mine: {} } });
-  const r2 = loadPiProviderNames({ env: { HOME: "/h" }, read, list, cli: () => null });
+  const r2 = await loadPiProviderNames({ env: { HOME: "/h", ZAI_API_KEY: "z" }, read, list, cli: () => null });
   assert.deepEqual([...r2.custom], ["mine"]);
   assert.ok(r2.builtin.has("zai") && r2.builtin.has("anthropic"), "falls back to the pi 0.85.1 snapshot");
+  assert.deepEqual([...r2.keyed], ["zai"], "the env-var snapshot: ZAI_API_KEY keys zai");
 
-  // No models.json at all: pi has its built-ins only — a known answer.
-  const r3 = loadPiProviderNames({ env: { HOME: "/nowhere" }, read, list, cli: () => null });
+  // auth.json keys a built-in too.
+  files["/a/auth.json"] = JSON.stringify({ groq: { type: "api_key", key: "x" } });
+  const r4 = await loadPiProviderNames({ env: { PI_CODING_AGENT_DIR: "/a" }, read, list, cli: () => null });
+  assert.deepEqual([...r4.keyed], ["groq"]);
+
+  // No models.json and no keys: built-ins only, none keyed — a known answer.
+  const r3 = await loadPiProviderNames({ env: { HOME: "/nowhere" }, read, list, cli: () => null });
   assert.equal(r3.custom.size, 0);
+  assert.equal(r3.keyed.size, 0);
 
   // A models.json that does not parse: UNKNOWN, not "nothing runs".
   files["/bad.json"] = "{ not json";
-  assert.equal(loadPiProviderNames({ env: { PI_MODELS_JSON: "/bad.json" }, read, list, cli: () => null }), null);
+  assert.equal(await loadPiProviderNames({ env: { PI_MODELS_JSON: "/bad.json" }, read, list, cli: () => null }), null);
+});
+
+test("loadPiProviderNames against the real installed pi: zai with no key is not keyed", async () => {
+  const r = await loadPiProviderNames({ env: { HOME: "/nonexistent-home", PATH: process.env.PATH } });
+  assert.ok(r && r.builtin.has("zai"));
+  assert.equal(r.keyed.has("zai"), false);
+  assert.equal((await loadPiProviderNames({ env: { HOME: "/nonexistent-home", ZAI_API_KEY: "z" } })).keyed.has("zai"), true);
 });
 
 test("referencedModelKeys collects every bot's default and escalation keys", () => {

@@ -62,7 +62,7 @@ ${engineBanner(engine, lang)}
            whole task exists to stop shipping. -->
       <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
       <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
-      <!-- "Show unavailable (N)": the picker offers only models that answer
+      <!-- "Show more (N)": the picker offers only models that answer
            (or start on demand) AND that pi can spawn; the rest are one tap
            away here, never silently dropped. Hidden when there are none. -->
       <button type="button" class="quiet perch-model-more" id="perch-new-model-more" aria-controls="perch-new-model" aria-expanded="false" hidden></button>

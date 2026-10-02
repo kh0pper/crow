@@ -672,7 +672,7 @@ export function perchHubJs(lang = "en") {
     if(lbl) lbl.hidden=false;
   }
 
-  /* "Show unavailable (N)": re-render with the hidden entries in their own
+  /* "Show more (N)": re-render with the hidden entries in their own
      group (or without them), keeping the operator's pick when it survives. */
   var launchMore=el('perch-new-model-more');
   if(launchMore) launchMore.onclick=function(){
@@ -1608,7 +1608,7 @@ export function perchHubJs(lang = "en") {
 
   /* Offered by default: pi can spawn on it (runnable is not false) and
      something answers or will start (availability is not "unavailable").
-     Everything else waits behind "Show unavailable (N)" — never dropped. */
+     Everything else waits behind "Show more (N)" — never dropped. */
   function modelOffered(m){
     return !!m&&m.runnable!==false&&m.availability!=='unavailable';
   }
@@ -1631,7 +1631,7 @@ export function perchHubJs(lang = "en") {
 
   /* Builds one model select from a plan: the "bot's own model" sentinel when
      asked, the pinned entry, then "On your network" and "Cloud" optgroups,
-     and the held-back entries as an "Unavailable" group only when shown. */
+     and the held-back entries as a "Not usable right now" group only when shown. */
   function fillModelSelect(sel,plan,o){
     clearEl(sel);
     if(o.sentinel){
@@ -1702,7 +1702,12 @@ export function perchHubJs(lang = "en") {
     }
     var opt=document.createElement('option');
     opt.value=current;
-    opt.textContent=current+' \u2014 '+MODEL_CURRENT_UNLISTED;
+    /* Fix round 1 M8: a model the catalogue DOES know (held back behind the
+       toggle, or an alias of the pinned entry) reads by its label, not as a
+       raw provider/id key. */
+    var known=null, dl=(typeof drawerModels==='object'&&drawerModels&&drawerModels.list)||[];
+    for(var j=0;j<dl.length;j++){ if(dl[j]&&modelKeyOf(dl[j])===current){ known=dl[j]; break; } }
+    opt.textContent=(known?modelOptionText(known):current)+' \u2014 '+MODEL_CURRENT_UNLISTED;
     sel.insertBefore(opt,sel.firstChild);
     sel.value=current;
   }
@@ -1745,7 +1750,7 @@ export function perchHubJs(lang = "en") {
     if(models) selectCurrentModel(modelSel,o&&o.current);
   }
 
-  /* The drawer's model list as last rendered, for its "Show unavailable"
+  /* The drawer's model list as last rendered, for its "Show more"
      toggle (reset per session by resetControls). */
   var drawerModels={list:null,current:null,showAll:false};
   var drawerMore=el('perch-model-more');

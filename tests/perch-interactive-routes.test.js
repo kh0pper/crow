@@ -1088,7 +1088,7 @@ test("GET /bots/:id/models collapses aliases of one endpoint+model into the row 
 });
 
 test("GET /bots/:id/models marks a provider pi cannot resolve as unrunnable, and groups by address", async () => {
-  piProvidersImpl = { custom: new Set(["local"]), builtin: new Set(["zai"]) };
+  piProvidersImpl = { custom: new Set(["local"]), builtin: new Set(["zai"]), keyed: new Set(["zai"]) };
   catalogueImpl = [
     { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
     { provider: "raven-flash-next", id: "flash-next", name: "Flash", baseUrl: "http://10.0.0.126:8030/v1" },
@@ -1102,6 +1102,62 @@ test("GET /bots/:id/models marks a provider pi cannot resolve as unrunnable, and
   assert.equal(by.ZAI.runnable, true, "pi matches providers case-insensitively, built-ins included");
   assert.equal(by["raven-flash-next"].group, "network", "a LAN address is on your network");
   assert.equal(by.ZAI.group, "cloud");
+});
+
+test("fix round 1 I1: bot A on crow-chat/qwen3.6-35b-a3b does not take crow-local out of bot B's launcher", async () => {
+  // crow-chat is not in pi's models.json (unrunnable); crow-local is. Bot A
+  // names crow-chat — every enabled bot's key counts as "referenced".
+  seedBot("bot-a", { gateways: [{ type: "perch" }], tools: {}, models: { default: "crow-chat/qwen3.6-35b-a3b" } });
+  seedBot("bot-b", { gateways: [{ type: "perch" }], tools: {}, models: { default: "zai-coding/glm-5.1" } });
+  piProvidersImpl = { custom: new Set(["crow-local", "zai-coding"]), builtin: new Set(), keyed: new Set() };
+  catalogueImpl = [
+    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", managed: true },
+    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1" },
+    { provider: "zai-coding", id: "glm-5.1", baseUrl: "https://api.z.ai/api/coding/paas/v4" },
+  ];
+  try {
+    const b = (await getJson("/bots/bot-b/models")).body;
+    const local = b.models.find((m) => m.provider === "crow-local");
+    assert.ok(local, "bot B's launcher still offers crow-local");
+    assert.equal(local.runnable, true);
+    const a = (await getJson("/bots/bot-a/models")).body;
+    assert.equal(a.models[0].provider + "/" + a.models[0].id, "crow-chat/qwen3.6-35b-a3b", "A's default stays visible");
+    assert.equal(a.models[0].runnable, false);
+    assert.ok(a.models.some((m) => m.provider === "crow-local" && m.runnable === true));
+  } finally {
+    const c = raw(); c.prepare("DELETE FROM pi_bot_defs WHERE bot_id IN ('bot-a','bot-b')").run(); c.close();
+  }
+});
+
+test("fix round 1 I2: a pi built-in with no key is \"can't run in a bot\"", async () => {
+  piProvidersImpl = { custom: new Set(["local"]), builtin: new Set(["zai"]), keyed: new Set() };
+  catalogueImpl = [{ provider: "zai", id: "glm-4.7-flash", baseUrl: "https://api.z.ai/api/coding/paas/v4" }];
+  const { body } = await getJson("/bots/chatty/models");
+  assert.equal(body.models[0].runnable, false);
+});
+
+test("fix round 1 M6: the launcher asks with the env the bot's pi will get (gateway env + spawn_env)", async () => {
+  let seen = null;
+  const { default: router } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: express } = await import("express");
+  const app = express();
+  app.use(router((req, res, next) => next(), {
+    engine: () => engineImpl,
+    annotate: async (models) => models,
+    providerModels: () => [{ provider: "p", id: "m", baseUrl: "http://x/v1" }],
+    piProviders: (opts) => { seen = opts; return null; },
+  }));
+  seedBot("envy", { gateways: [{ type: "perch" }], tools: {}, spawn_env: { PI_CODING_AGENT_DIR: "/elsewhere" } });
+  const srv = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  try {
+    const res = await fetch("http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/bots/envy/models");
+    assert.equal(res.status, 200);
+    assert.equal(seen.env.PI_CODING_AGENT_DIR, "/elsewhere");
+    assert.equal(seen.env.PATH, process.env.PATH, "merged over the gateway's own env, not instead of it");
+  } finally {
+    srv.close();
+    const c = raw(); c.prepare("DELETE FROM pi_bot_defs WHERE bot_id='envy'").run(); c.close();
+  }
 });
 
 test("GET /bots/:id/models still answers when pi's providers cannot be read", async () => {

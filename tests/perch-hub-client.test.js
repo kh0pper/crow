@@ -2075,14 +2075,14 @@ test("the picker lists the bot's models, opens on its configured default, and sa
   // ...but never silently lost: one tap shows it, visibly unavailable.
   const more = hub.els["perch-new-model-more"];
   assert.equal(more.hidden, false);
-  assert.equal(more.textContent, "Show unavailable (1)");
+  assert.equal(more.textContent, "Show more (1)");
   more.onclick();
   assert.deepEqual(sel.options.map((o) => o.textContent), [
     "Qwen — bot default",
     "Flash Next — starts on demand",
     "DeepSeek V4 — not running",
   ], "an unavailable model must be visibly unavailable, never silently selectable");
-  assert.equal(more.textContent, "Hide unavailable");
+  assert.equal(more.textContent, "Show less");
   assert.equal(sel.value, "crow-local/qwen", "toggling keeps the pick");
 });
 
@@ -2109,14 +2109,14 @@ test("the launcher groups models: default first, then On your network, then Clou
   assert.equal(sel.options[0].textContent, "GLM-5.1 — bot default");
 
   const more = hub.els["perch-new-model-more"];
-  assert.equal(more.textContent, "Show unavailable (2)");
+  assert.equal(more.textContent, "Show more (2)");
   assert.equal(more.getAttribute("aria-expanded"), "false");
   sel.value = "raven-flash-next/qwen3.8-flash-next";       // the operator's pick
   more.onclick();
   assert.deepEqual(shape(), [
     "zai-coding/glm-5.1",
     { group: "On your network", options: ["crow-local/qwen", "raven-flash-next/qwen3.8-flash-next"] },
-    { group: "Unavailable", options: ["crow-local-27b/q27", "cloud-openai-08a50004/glm-5"] },
+    { group: "Not usable right now", options: ["crow-local-27b/q27", "cloud-openai-08a50004/glm-5"] },
   ]);
   assert.deepEqual(sel.options.slice(-2).map((o) => o.textContent),
     ["Qwen 27B — not running", "glm-5 — can't run in a bot"]);
@@ -2126,7 +2126,7 @@ test("the launcher groups models: default first, then On your network, then Clou
   sel.value = "crow-local-27b/q27";                        // picked a held-back one, then hid them again
   more.onclick();
   assert.equal(sel.value, "zai-coding/glm-5.1", "a pick that is no longer listed falls back to the default, never to a phantom");
-  assert.equal(more.textContent, "Show unavailable (2)");
+  assert.equal(more.textContent, "Show more (2)");
 });
 
 test("a default that is unreachable is still pinned first, and says so", async () => {
@@ -2136,7 +2136,7 @@ test("a default that is unreachable is still pinned first, and says so", async (
   const sel = hub.els["perch-new-model"];
   assert.equal(sel.options[0].value, "crow-local-27b/q27");
   assert.equal(sel.options[0].textContent, "Qwen 27B — not running — bot default");
-  assert.equal(hub.els["perch-new-model-more"].textContent, "Show unavailable (1)", "the pinned default is not counted twice");
+  assert.equal(hub.els["perch-new-model-more"].textContent, "Show more (1)", "the pinned default is not counted twice");
 });
 
 test("with nothing held back there is no toggle", async () => {
@@ -2159,12 +2159,25 @@ test("the drawer's picker uses the same groups, pins the current model, and its 
   ], "sentinel, the model the session is ON (even unreachable), then network, then cloud");
   assert.equal(sel.value, "crow-local-27b/q27");
   const more = hub.els["perch-model-more"];
-  assert.equal(more.textContent, "Show unavailable (1)");
+  assert.equal(more.textContent, "Show more (1)");
   const before = hub.fetchCalls.length;
   more.onclick();
   assert.equal(sel.options.length, 6);
   assert.equal(sel.value, "crow-local-27b/q27", "the current model stays selected");
   assert.equal(hub.fetchCalls.length, before, "re-rendering is not a model switch — no control() POST");
+});
+
+test("fix round 1 M8: a live model held back behind the toggle is named by its label, not a raw key", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
+      models: GROUPED_MODELS, thinkingLevels: null, current: null, source: "providers" }) }),
+  });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", model: "cloud-openai-08a50004/glm-5" });
+  await new Promise((r) => setTimeout(r, 0));
+  const sel = hub.els["perch-model"];
+  assert.equal(sel.value, "cloud-openai-08a50004/glm-5");
+  assert.equal(sel.options[0].textContent, "glm-5 — can't run in a bot — current");
 });
 
 test("a new session's drawer does not inherit the last one's toggle", async () => {
@@ -2180,10 +2193,10 @@ test("a new session's drawer does not inherit the last one's toggle", async () =
   });
   await openChatSession(hub);
   hub.els["perch-model-more"].onclick();
-  assert.equal(hub.els["perch-model-more"].textContent, "Hide unavailable");
+  assert.equal(hub.els["perch-model-more"].textContent, "Show less");
   assert.equal(hub.els["perch-model"].options.length, 6);
   await openChatSession(hub, "perchlive-bbbbbbbb");
-  assert.equal(hub.els["perch-model-more"].textContent, "Show unavailable (2)");
+  assert.equal(hub.els["perch-model-more"].textContent, "Show more (2)");
   assert.equal(hub.els["perch-model"].options.length, 4, "session B opens on the default view");
 });
 
@@ -2566,10 +2579,10 @@ test("a model the list does not carry is added and selected, not silently droppe
   assert.equal(sel.options[0].value, "retired-provider/old-model", "prepended, so it reads first");
   assert.equal(sel.options[0].textContent, "retired-provider/old-model — current");
   // Round 3 R1: +1 for the revocation sentinel the picker now always leads with.
-  // The catalogue's unavailable entry sits behind "Show unavailable (1)".
+  // The catalogue's unavailable entry sits behind "Show more (1)".
   assert.equal(sel.options.length, 4, "and every offered model is still there");
   assert.equal(hub.els["perch-model-more"].hidden, false);
-  assert.equal(hub.els["perch-model-more"].textContent, "Show unavailable (1)");
+  assert.equal(hub.els["perch-model-more"].textContent, "Show more (1)");
 });
 
 test("the drawer's picker leads with 'the bot's own model', and picking it POSTs the revocation", async () => {
