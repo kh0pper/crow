@@ -187,6 +187,7 @@ def test_stop_is_immediate(tmp_path):
         ev = wait_for(c, "c4", lambda ev: ev["done"], timeout=3)
         assert time.time() - t0 < 2
         assert ev["events"][-1]["data"]["error"] == "stopped by owner"
+        assert ev["events"][-1]["data"]["outcome"] == "stopped"
 
 
 def test_controller_crash_still_emits_result(tmp_path):

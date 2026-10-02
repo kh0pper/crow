@@ -201,7 +201,7 @@ test("reject and edit require a local password session (403 local_login_required
   assert.equal((await store.getCall(s.db, id)).status, "rejected");
 });
 
-test("stop on an orphaned call (runner not running it) finalizes it failed 'stopped by owner'", async () => {
+test("stop on an orphaned call (runner not running it) finalizes it stopped 'stopped by owner'", async () => {
   const id = await newPlan();
   await s.db.execute({ sql: "UPDATE phone_calls SET status='live', started_at=datetime('now') WHERE id=?", args: [id] });
   s.runnerActive = false;
@@ -210,7 +210,7 @@ test("stop on an orphaned call (runner not running it) finalizes it failed 'stop
   } finally { s.runnerActive = true; }
   assert.ok(s.stops.includes(id));
   const c = await store.getCall(s.db, id);
-  assert.equal(c.status, "done"); assert.equal(c.outcome, "failed"); assert.equal(c.error, "stopped by owner");
+  assert.equal(c.status, "done"); assert.equal(c.outcome, "stopped"); assert.equal(c.error, "stopped by owner");
 });
 
 test("stop on an active call only asks the runner (the runner's result finalizes it)", async () => {
@@ -388,4 +388,19 @@ test("stop finalizing an orphaned call pushes the terminal state; a stop the run
   try { assert.equal((await post(`/api/phone/calls/${a}/stop`, {}, "sso")).status, 200); }
   finally { s.runnerActive = true; }
   assert.deepEqual(s.cards.map(([, f]) => [f.call_id, f.status]), [[a, "done"]]);
+});
+
+test("spec 2026-10-02: the Phone panel labels every outcome (stopped included) in EN and ES, shows the summary, and says Hang up", async () => {
+  const { OUTCOMES } = await import("../bundles/phone/server/plan.js");
+  const { default: panel, PHONE_STRINGS } = await import("../bundles/phone/panel/phone.js");
+  for (const lang of ["en", "es"]) assert.deepEqual(Object.keys(PHONE_STRINGS[lang].outcomes).sort(), [...OUTCOMES].sort(), lang);
+  assert.equal(PHONE_STRINGS.en.outcomes.stopped, "Stopped by you");
+  assert.equal(PHONE_STRINGS.es.outcomes.stopped, "Detenida por ti");
+  assert.equal(PHONE_STRINGS.en.stop, "Hang up");
+  const layout = ({ content, scripts }) => `${content}<script>${scripts || ""}</script>`;
+  const html = await panel.handler({ query: {} }, {}, { db: s.db, layout, appRoot: process.env.CROW_APP_ROOT, lang: "en" });
+  const script = html.split("<script>")[1].split("</script>")[0];
+  assert.match(script, /esc\(L\.outcomes\[c\.outcome\] \|\| c\.outcome\)/);
+  assert.match(script, /c\.summary \? '<br>' \+ esc\(c\.summary\)/);
+  assert.doesNotThrow(function () { new Function(script); });
 });

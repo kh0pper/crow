@@ -189,7 +189,7 @@ export default function phoneRouter(authMiddleware, seams = {}) {
       let r = null;
       try { r = await runner.events(id, c.event_seq); } catch { /* unreachable: the dispatcher times it out */ }
       if (r && r.active === false && !r.done) {
-        if (await mods.store.finalizeCall(db, id, { outcome: "failed", booking: null, summary: null, error: "stopped by owner" })) await pushCard(id);
+        if (await mods.store.finalizeCall(db, id, { outcome: "stopped", booking: null, summary: null, error: "stopped by owner" })) await pushCard(id);
       }
     }
     res.json({ ok: true });

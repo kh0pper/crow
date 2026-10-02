@@ -16,6 +16,7 @@ OUTCOMES = [
     "line_lost",
     "taken_over",
     "not_admissible",
+    "stopped",
     "failed",
 ]
 MODEL_OUTCOMES = {"booked", "info_gathered", "needs_callback", "refused"}
@@ -87,6 +88,41 @@ def filler(lang: str) -> str:
 
 def callback_line(lang: str) -> str:
     return _CALLBACK["es" if lang == "es" else "en"]
+
+
+# Spec 2026-10-02 (call wrap-up §1): a model line that closes the call.
+# The goodbye must END the line: only the last sentence counts (trailing
+# sentences that are nothing but thanks are skipped first), and the closing
+# phrase must be the end of that sentence. "Thanks for your help. I'd also
+# like to book..." and "Bye the way, I need the price" are NOT goodbyes. Bare
+# "thank you" never counts ("Tuesday at 3:30 works, thank you." agrees to a
+# slot; "Thanks." answers "let me check"), nor do bare "that's all" / "era
+# todo" forms. Any question mark disqualifies the line.
+_CLOSING_TAIL = re.compile(
+    r"(?:^|[\s,;:\u2014\u2013-])(?:good\s?-?bye|bye(?:[\s-]+(?:now|bye))?"
+    r"|have\s+a\s+(?:great|good|nice|wonderful|lovely)\s+(?:day|one|afternoon|evening|weekend|night)"
+    r"|that'?s\s+(?:exactly\s+what|just\s+what|what|all)\s+i\s+(?:needed|need|wanted|was\s+looking\s+for)"
+    r"|thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?\s+for\s+(?:your|all\s+your)\s+(?:help|time)"
+    r"|adi[oó]s|hasta\s+luego|que\s+tenga\s+(?:un\s+)?(?:buen|lindo|excelente)\s+(?:d[ií]a|fin\s+de\s+semana)"
+    r"|que\s+tenga\s+(?:una\s+)?buena\s+(?:tarde|noche)"
+    r"|eso\s+es\s+todo|es\s+todo\s+lo\s+que\s+necesitaba|(?:muchas\s+)?gracias\s+por\s+su\s+(?:ayuda|tiempo))"
+    r"(?:[\s,]+(?:thanks|thank\s+you|thanks\s+so\s+much|thank\s+you\s+so\s+much|gracias|muchas\s+gracias|bye|adi[oó]s))?\s*$",
+    re.I,
+)
+_THANKS_SENTENCE = re.compile(r"^(?:(?:ok(?:ay)?|great|perfect|perfecto)[\s,]+)?(?:thanks?(?:\s+you)?(?:\s+(?:so|very)\s+much)?|thank\s+you|(?:muchas\s+)?gracias)$", re.I)
+_SENTENCE_END = re.compile(r"[.!\u2026]+")
+
+
+def is_closing(text) -> bool:
+    """Does this assistant line END with a goodbye (en/es)? Used to end a call the model forgot to end."""
+    s = str(text or "").replace("\u2019", "'").strip()
+    if not s or "?" in s or "\u00bf" in s:
+        return False
+    parts = [p.strip(" \t\n,;:") for p in _SENTENCE_END.split(s)]
+    parts = [p for p in parts if p]
+    while parts and _THANKS_SENTENCE.match(parts[-1]):
+        parts.pop()
+    return bool(parts) and bool(_CLOSING_TAIL.search(parts[-1]))
 
 
 _GREETING = {"en": "Hello?", "es": "¿Hola?"}

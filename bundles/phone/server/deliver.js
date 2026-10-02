@@ -5,15 +5,25 @@ import { audit, perchSessionBot } from "./store.js";
 const LABEL = { booked: "Booked", info_gathered: "Information gathered", needs_callback: "Needs a callback", no_answer: "No answer",
   voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
   phone_busy: "Your phone was busy", phone_unreachable: "Phone not reachable", line_lost: "Call moved to your phone",
-  taken_over: "You took over the call", not_admissible: "Could not start (model unavailable)", failed: "Call failed" };
+  taken_over: "You took over the call", not_admissible: "Could not start (model unavailable)", stopped: "Stopped by you", failed: "Call failed" };
 
 const cap = (v) => (v == null ? null : String(v).slice(0, 200));
+// Owner decision 2026-10-02: the requesting bot also gets the call's short
+// summary, still inside the UNTRUSTED FACTS block. One line (control chars and
+// newlines collapsed to single spaces), at most 300 characters, null if empty.
+const CTRL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
+export function factsSummary(v) {
+  if (v == null) return null;
+  const s = String(v).replace(CTRL, " ").replace(/\s+/g, " ").trim().slice(0, 300).trim();
+  return s || null;
+}
 
 export function buildUntrustedGoal(call) {
   const b = call.booking;
   const facts = {
     business: cap(call.business_name),
     outcome: call.outcome,
+    summary: factsSummary(call.summary),
     booking: b ? { date: cap(b.date || null), time: cap(b.time || null), location: cap(b.location || null), price: b.price ?? null, confirmation: cap(b.confirmation || null) } : null,
   };
   return [

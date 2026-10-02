@@ -29,9 +29,17 @@ export const PERCH_SPLIT_MIN_WIDTH = 900;
 export function perchHubCss() {
   return `
 #perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#6b7c88;--teal:#0e6b62;--teal-soft:#dcecea;
---wire:#94a4ae;--alive:#2fa36b;--attn:#d1633e;--line:#dde4e8}
+--wire:#94a4ae;--alive:#2fa36b;--attn:#d1633e;--line:#dde4e8;
+--ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6}
 @media (prefers-color-scheme:dark){#perch-hub-root{--sky:#131a1f;--card:#1b242b;--ink:#e4ebef;--dim:#8fa0ab;
---teal:#4fbdb0;--teal-soft:#16322f;--wire:#46565f;--line:#2a353d}}
+--teal:#4fbdb0;--teal-soft:#16322f;--wire:#46565f;--line:#2a353d;
+--ok:#6fd39b;--ok-soft:#173326;--warn:#f0b955;--warn-soft:#3a2d12;--err:#ff8f84;--err-soft:#3d1f1c}}
+/* Status tokens (spec 2026-10-02). --attn (#d1633e) is 3.8:1 on --card in the
+   light theme, under WCAG AA for text; these are AA in both themes (measured):
+   each text colour on its own -soft tint 5.5:1+ light / 6.7:1+ dark, and on
+   --card 6.3:1+ light / 7.1:1+ dark. --card on --teal / --err (a filled
+   button's label) is 6.4:1+ in both. Error TEXT uses --err; --attn stays
+   for borders and the attention banner. */
 #perch-hub-root,#perch-hub-root *{box-sizing:border-box;margin:0}
 /* #perch-hub-root is the flex-column height owner for its two children
    (the small header block above, and .hub-split below) — this is what lets
@@ -336,7 +344,7 @@ font-family:"JetBrains Mono",ui-monospace,monospace}
 #perch-hub-root .narrow-locked{color:var(--dim);font-size:13px;padding:6px 4px}
 #perch-hub-root .narrow-note{color:var(--dim);font-size:12px;margin-top:8px;line-height:1.45}
 #perch-hub-root .narrow-msg{font-size:12.5px;margin-top:6px}
-#perch-hub-root .narrow-msg.err{color:var(--attn)}
+#perch-hub-root .narrow-msg.err{color:var(--err)}
 /* Files tab rows: the whole row is the download link (thumb target), name
    breaks long, meta never does. */
 #perch-hub-root .files-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0}
@@ -415,7 +423,7 @@ border:1px solid var(--line);border-radius:999px;padding:5px 12px;min-height:32p
 font:12px "JetBrains Mono",ui-monospace,monospace;color:var(--dim);cursor:pointer;text-align:left}
 #perch-hub-root .tool-chip .tn{color:var(--teal);font-weight:600;word-break:break-all}
 #perch-hub-root .tool-chip.err{border-color:var(--attn)}
-#perch-hub-root .tool-chip.err .tn{color:var(--attn)}
+#perch-hub-root .tool-chip.err .tn{color:var(--err)}
 #perch-hub-root .tool-chip .spin{width:10px;height:10px;border:2px solid var(--line);
 border-top-color:var(--teal);border-radius:50%;animation:perch-spin .8s linear infinite;flex-shrink:0}
 #perch-hub-root .tool-details{background:var(--card);border:1px solid var(--line);border-radius:10px;
@@ -439,23 +447,82 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9
 #perch-hub-root .filecard .file-note{font-size:12px;color:var(--dim)}
 #perch-hub-root .filecard .file-dl{display:inline-block;margin-top:4px;color:var(--teal);font-size:13px;text-decoration:none}
 #perch-hub-root .filecard .file-img{max-width:100%;height:auto;border-radius:6px;margin-bottom:4px}
-/* Spec 2026-10-01: the phone call card (same box as a file card). */
-#perch-hub-root .phonecard{flex-direction:column;gap:4px;align-self:stretch;width:100%;min-width:0;
-background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin:2px 0}
-#perch-hub-root .phonecard .ph-title{font-weight:600;font-size:13.5px;color:var(--ink);word-break:break-word}
-#perch-hub-root .phonecard .ph-meta,#perch-hub-root .phonecard .ph-status,#perch-hub-root .phonecard .ph-note,#perch-hub-root .phonecard .ph-lang,#perch-hub-root .phonecard .ph-proposed{font-size:13px;color:var(--dim)}
-#perch-hub-root .phonecard .ph-goal,#perch-hub-root .phonecard .ph-limits,#perch-hub-root .phonecard .ph-summary{font-size:13px;color:var(--ink);white-space:pre-wrap;word-break:break-word}
-#perch-hub-root .phonecard label{display:block;font-size:13px;margin:3px 0}
-#perch-hub-root .phonecard textarea,#perch-hub-root .phonecard input[type=text]{width:100%;box-sizing:border-box}
-#perch-hub-root .phonecard .ph-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px}
-#perch-hub-root .phonecard .ph-transcript{max-height:240px;overflow-y:auto;font-size:13px;display:flex;flex-direction:column;gap:2px}
-#perch-hub-root .phonecard .ph-t-farend{color:var(--teal)}
-#perch-hub-root .phonecard .ph-t-state{color:var(--dim)}
+/* Spec 2026-10-01: the phone call card (same box as a file card), laid out
+   for a phone by the 2026-10-02 polish. min-width:0 + overflow-wrap:anywhere:
+   the card never grows past the transcript column, whatever a bot or a
+   business typed. */
+#perch-hub-root .phonecard{flex-direction:column;gap:8px;align-self:stretch;width:100%;min-width:0;max-width:100%;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
+#perch-hub-root .phonecard>*{min-width:0;max-width:100%}
+#perch-hub-root .phonecard .ph-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+#perch-hub-root .phonecard .ph-title{font-weight:600;font-size:15px;color:var(--ink);min-width:0;word-break:break-word}
+#perch-hub-root .phonecard .ph-meta{font-size:13px;color:var(--dim);margin-top:-6px}
+/* The status pill: tinted background, AA text (tokens above). */
+#perch-hub-root .phonecard .ph-pill{flex:none;display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;
+font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;font-variant-numeric:tabular-nums}
+#perch-hub-root .phonecard .ph-pill-ok,#perch-hub-root .phonecard .ph-pill-live{background:var(--ok-soft);color:var(--ok)}
+#perch-hub-root .phonecard .ph-pill-warn,#perch-hub-root .phonecard .ph-pill-wait{background:var(--warn-soft);color:var(--warn)}
+#perch-hub-root .phonecard .ph-pill-err{background:var(--err-soft);color:var(--err)}
+#perch-hub-root .phonecard .ph-pill-neutral{background:var(--sky);color:var(--ink);border:1px solid var(--line)}
+#perch-hub-root .phonecard .ph-dot{width:8px;height:8px;border-radius:50%;background:currentColor;animation:perch-ph-pulse 1.4s ease-in-out infinite}
+@keyframes perch-ph-pulse{50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){#perch-hub-root .phonecard .ph-dot{animation:none}}
+/* Sections: a small-caps label (the .field-label look) over its value. */
+#perch-hub-root .phonecard .ph-sec{display:flex;flex-direction:column;gap:3px}
+#perch-hub-root .phonecard .ph-label{font:11px/1.2 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+#perch-hub-root .phonecard .ph-goal,#perch-hub-root .phonecard .ph-limits,#perch-hub-root .phonecard .ph-share{font-size:14px;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+#perch-hub-root .phonecard .ph-status,#perch-hub-root .phonecard .ph-note,#perch-hub-root .phonecard .ph-proposed,#perch-hub-root .phonecard .ph-hint{font-size:13px;color:var(--dim)}
+#perch-hub-root .phonecard .ph-form{display:flex;flex-direction:column;gap:8px;min-width:0}
+#perch-hub-root .phonecard details.ph-more>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;min-height:32px}
+#perch-hub-root .phonecard details.ph-more>summary::-webkit-details-marker{display:none}
+#perch-hub-root .phonecard details.ph-more>summary::after{content:"▸";font-size:12px;color:var(--dim)}
+#perch-hub-root .phonecard details.ph-more[open]>summary::after{content:"▾"}
+#perch-hub-root .phonecard .ph-field{display:flex;flex-direction:column;gap:3px;font-size:13px;margin:2px 0}
+#perch-hub-root .phonecard .ph-fname{font-size:13px;color:var(--dim)}
+#perch-hub-root .phonecard textarea,#perch-hub-root .phonecard input[type=text],#perch-hub-root .phonecard input[type=datetime-local]{width:100%;min-width:0;box-sizing:border-box}
+/* Checkbox rows: box left, text right, the whole row is a 44px target. The
+   shared "#perch-hub-root input" rule gives every input width:100% — undone
+   here, or the box stretches onto its own line above its label. */
+#perch-hub-root .phonecard label.ph-check{display:flex;align-items:center;gap:12px;min-height:44px;margin:0;padding:4px 0;cursor:pointer;font-size:14px}
+#perch-hub-root .phonecard label.ph-check input[type=checkbox]{width:20px;height:20px;flex:none;margin:0;padding:0;accent-color:var(--teal)}
+#perch-hub-root .phonecard .ph-check-text{display:flex;flex-direction:column;min-width:0}
+#perch-hub-root .phonecard .ph-check-sub{font-size:12px;color:var(--dim);word-break:break-word}
+/* One full-width primary action, then quiet secondary ones. */
+#perch-hub-root .phonecard button{min-height:44px}
+#perch-hub-root .phonecard button.ph-primary{width:100%;background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600;font-size:15px}
+#perch-hub-root .phonecard .ph-secondary{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#perch-hub-root .phonecard button.ph-link{background:none;border-color:transparent;color:var(--teal);padding:10px 4px}
+#perch-hub-root .phonecard button.ph-reject{color:var(--ink)}
+#perch-hub-root .phonecard .ph-sched{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#perch-hub-root .phonecard .ph-sched input{flex:1 1 180px}
+#perch-hub-root .phonecard .ph-sched button{flex:none}
+/* Live transcript as chat bubbles: the assistant left and neutral, the
+   business right and tinted, line states and keys as small centred notes. */
+#perch-hub-root .phonecard .ph-transcript{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:2px 0;min-width:0}
+#perch-hub-root .phonecard .ph-t-agent,#perch-hub-root .phonecard .ph-t-farend{max-width:85%;padding:7px 11px;font-size:14px;line-height:1.4;
+white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+#perch-hub-root .phonecard .ph-t-agent{align-self:flex-start;background:var(--sky);border:1px solid var(--line);border-radius:14px 14px 14px 4px}
+#perch-hub-root .phonecard .ph-t-farend{align-self:flex-end;background:var(--teal-soft);border-radius:14px 14px 4px 14px}
+#perch-hub-root .phonecard .ph-t-state,#perch-hub-root .phonecard .ph-t-dtmf{align-self:center;font-size:12px;color:var(--dim);text-align:center}
+#perch-hub-root .phonecard .ph-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 #perch-hub-root .phonecard .ph-prompt{font-weight:600;color:var(--teal);font-size:13px}
-#perch-hub-root .phonecard .ph-farend{display:flex;gap:6px}
-#perch-hub-root .phonecard .ph-err{color:var(--attn);font-size:13px}
+/* The composer is the card's last row; it wraps to two lines at narrow widths
+   (input on its own line, Send + Hang up below) instead of overflowing. */
+#perch-hub-root .phonecard .ph-composer{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+#perch-hub-root .phonecard .ph-composer input{flex:1 1 180px;min-width:0}
+#perch-hub-root .phonecard .ph-composer button{flex:none}
+#perch-hub-root .phonecard button.ph-hangup{background:var(--err);border-color:var(--err);color:var(--card);font-weight:600}
+/* Terminal: the answer in large text, booking under it, transcript collapsed. */
+#perch-hub-root .phonecard .ph-answer{font-size:17px;line-height:1.45;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+#perch-hub-root .phonecard .ph-booking{font-size:15px;font-weight:600;color:var(--ink)}
+#perch-hub-root .phonecard .ph-toggle{font-size:13px;color:var(--teal)}
+#perch-hub-root .phonecard .ph-txbox .ph-transcript{margin-top:6px}
+#perch-hub-root .phonecard .ph-err{color:var(--err);font-size:13px}
 #perch-hub-root .phonecard .ph-err:empty{display:none}
-#perch-hub-root .phonecard .ph-open{color:var(--teal);font-size:13px;text-decoration:none}
+#perch-hub-root .phonecard .ph-open{color:var(--teal);font-size:12px;text-decoration:none;align-self:flex-start}
+/* Last in the block: [hidden] must beat every display rule above (same
+   specificity, later source order). */
+#perch-hub-root .phonecard [hidden]{display:none}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

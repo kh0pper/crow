@@ -133,14 +133,14 @@ test("six identity guards in the snippet (perch-hub-client.test.js counts them h
 
 test("S12: the two unlabelled inputs carry aria-labels", () => {
   const js = perchPhoneCardJs("en");
-  assert.match(js, /when\.setAttribute\('aria-label',PH_APPROVE_AT\)/);
+  assert.match(js, /when\.setAttribute\('aria-label',PH_WHEN\)/);
   assert.match(js, /inp\.setAttribute\('aria-label',PH_SAYS\)/);
 });
 
 test("every perch.phone* key the card uses exists in EN and ES and they differ", () => {
   const src = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/phone-card.js", import.meta.url), "utf8");
   const keys = [...src.matchAll(/tJs\("(perch\.phone[A-Za-z]+)"/g)].map((m) => m[1]);
-  assert.equal(keys.length, 35);
+  assert.equal(keys.length, 57);
   for (const k of keys) {
     assert.ok(translations[k] && translations[k].en && translations[k].es, k);
     assert.notEqual(translations[k].en, translations[k].es, k);
@@ -151,4 +151,69 @@ test("every perch.phone* key the card uses exists in EN and ES and they differ",
 
 test("the card has its own styles", () => {
   assert.match(perchHubCss(), /#perch-hub-root \.phonecard\{/);
+});
+
+// ---- spec 2026-10-02: card polish ----
+import { OUTCOMES } from "../bundles/phone/server/plan.js";
+
+test("numbers display as (512) 555-0101 for US/Canada and stay E.164 otherwise", () => {
+  const f = extract(perchPhoneCardJs("en"), "phoneNumberText");
+  assert.equal(f("+15125550101"), "(512) 555-0101");
+  assert.equal(f("+442071234567"), "+442071234567");
+  assert.equal(f(null), "");
+});
+
+test("the live clock reads SQLite UTC timestamps and formats m:ss", () => {
+  const js = perchPhoneCardJs("en");
+  const utc = extract(js, "phoneUtcMs");
+  assert.equal(utc("2026-10-02 15:04:05"), Date.parse("2026-10-02T15:04:05Z"), "datetime('now') is UTC, not local");
+  assert.equal(utc("2026-10-02T15:04:05.000Z"), Date.parse("2026-10-02T15:04:05Z"));
+  assert.ok(Number.isNaN(utc(null)));
+  const clock = extract(js, "phoneClock");
+  assert.equal(clock(42000), "0:42"); assert.equal(clock(605000), "10:05"); assert.equal(clock(-5), "0:00");
+});
+
+test("the wrap-up shows while the row is still live: the last line state is 'ended'", () => {
+  const ended = extract(perchPhoneCardJs("en"), "phoneEnded");
+  assert.equal(ended([{ type: "state", state: "answered" }, { type: "agent", text: "Bye" }, { type: "state", state: "ended" }]), true);
+  assert.equal(ended([{ type: "state", state: "ended" }, { type: "state", state: "answered" }]), false);
+  assert.equal(ended(null), false);
+});
+
+test("every outcome has a pill tone and a label: green success, amber follow-up, grey stopped, red failure", () => {
+  const js = perchPhoneCardJs("en");
+  const map = new Function(js.slice(js.indexOf("var PH_OUTCOMES="), js.indexOf("/* call_id ->")) + "; return PH_OUTCOMES;")();
+  assert.deepEqual(Object.keys(map).sort(), [...OUTCOMES].sort(), "one entry per plan.js outcome, stopped included");
+  for (const o of OUTCOMES) assert.ok(["ok", "warn", "neutral", "err"].includes(map[o][0]) && map[o][1], o);
+  assert.equal(map.info_gathered[0], "ok"); assert.equal(map.booked[0], "ok");
+  assert.equal(map.needs_callback[0], "warn"); assert.equal(map.no_answer[0], "warn"); assert.equal(map.voicemail[0], "warn");
+  assert.equal(map.stopped[0], "neutral");
+  assert.equal(map.failed[0], "err"); assert.equal(map.not_in_service[0], "err");
+  assert.equal(map.stopped[1], "Stopped by you"); assert.equal(map.info_gathered[1], "Got the info");
+  const es = perchPhoneCardJs("es");
+  const mapEs = new Function(es.slice(es.indexOf("var PH_OUTCOMES="), es.indexOf("/* call_id ->")) + "; return PH_OUTCOMES;")();
+  assert.equal(mapEs.stopped[1], "Detenida por ti");
+});
+
+test("the primary and Hang up labels match the spec in both languages", () => {
+  assert.equal(translations["perch.phoneApprove"].en, "Approve and call now");
+  assert.equal(translations["perch.phoneApprove"].es, "Aprobar y llamar ahora");
+  assert.equal(translations["perch.phoneStop"].en, "Hang up");
+  assert.equal(translations["perch.phoneStop"].es, "Colgar");
+});
+
+test("styles: checkbox rows undo the shared input width, status tokens exist in both themes, the dot respects reduced motion", () => {
+  const css = perchHubCss();
+  assert.match(css, /label\.ph-check\{display:flex;[^}]*min-height:44px/);
+  assert.match(css, /label\.ph-check input\[type=checkbox\]\{width:20px;height:20px;flex:none/);
+  assert.ok(!/\.phonecard label\{display:block/.test(css), "the rule that stacked the box above its label is gone");
+  const [light, dark] = [css.slice(0, css.indexOf("@media (prefers-color-scheme:dark)")), css.slice(css.indexOf("@media (prefers-color-scheme:dark)"))];
+  for (const t of ["--ok:", "--ok-soft:", "--warn:", "--warn-soft:", "--err:", "--err-soft:"]) {
+    assert.ok(light.includes(t), "light " + t);
+    assert.ok(dark.slice(0, dark.indexOf("}}")).includes(t), "dark " + t);
+  }
+  assert.match(css, /\.phonecard \.ph-err\{color:var\(--err\)/, "error text uses the AA token, not --attn");
+  assert.match(css, /@media \(prefers-reduced-motion:reduce\)\{#perch-hub-root \.phonecard \.ph-dot\{animation:none\}\}/);
+  assert.match(css, /#perch-hub-root \.phonecard\{[^}]*min-width:0;[^}]*overflow-wrap:anywhere/);
+  assert.ok(css.lastIndexOf("#perch-hub-root .phonecard [hidden]{display:none}") > css.lastIndexOf(".ph-sched{"), "[hidden] wins by source order");
 });

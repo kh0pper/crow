@@ -1,14 +1,18 @@
 const T = {
   en: { title: "Phone", pending: "Waiting for your approval", live: "Live call", history: "History", settings: "Settings",
     business: "This is a business", cloud: "Allow cloud model for this call", totp: "2FA code", approve: "Approve now",
-    approveAt: "Approve for", reject: "Reject", stop: "Stop call", says: "Business says…", send: "Send",
+    approveAt: "Approve for", reject: "Reject", stop: "Hang up", says: "Business says…", send: "Send",
     notice: "I understand the assistant places AI-voice calls on my behalf, only to businesses I approve, and discloses that it is automated.",
     ownerName: "Your first name (used in the disclosure)", ownerNumber: "Your phone number (never dialed)",
     localModel: "Local model (provider/model)", cloudModel: "Cloud model (provider/model)", cap: "Daily call limit", save: "Save",
     none: "Nothing here yet.", queued: "Queued", goal: "Goal", limits: "Limits", share: "May share", outcome: "Outcome",
     noLimits: "none", dates: "dates", days: "days", hours: "hours", maxPrice: "max price", duration: "duration", minutes: "min", limitNotes: "notes",
     editShare: "Edit what may be shared (clear a field to withhold it)", cloudIs: "cloud model", noCloud: "no cloud model configured",
-    proposed: "Proposed time" },
+    proposed: "Proposed time",
+    outcomes: { booked: "Booked", info_gathered: "Got the info", needs_callback: "Needs a callback", no_answer: "No answer",
+      voicemail: "Reached voicemail", busy: "Line busy", not_in_service: "Number not in service", refused: "Business declined",
+      phone_busy: "Your phone was busy", phone_unreachable: "Phone not reachable", line_lost: "Call moved to your phone",
+      taken_over: "You took over the call", not_admissible: "Could not start", stopped: "Stopped by you", failed: "Failed" } },
   es: { title: "Teléfono", pending: "Esperando tu aprobación", live: "Llamada en curso", history: "Historial", settings: "Ajustes",
     business: "Es un negocio", cloud: "Permitir modelo en la nube para esta llamada", totp: "Código 2FA", approve: "Aprobar ahora",
     approveAt: "Aprobar para", reject: "Rechazar", stop: "Colgar", says: "El negocio dice…", send: "Enviar",
@@ -18,7 +22,11 @@ const T = {
     none: "Nada por ahora.", queued: "En cola", goal: "Objetivo", limits: "Límites", share: "Puede compartir", outcome: "Resultado",
     noLimits: "ninguno", dates: "fechas", days: "días", hours: "horario", maxPrice: "precio máximo", duration: "duración", minutes: "min", limitNotes: "notas",
     editShare: "Edita lo que se puede compartir (vacía un campo para no compartirlo)", cloudIs: "modelo en la nube", noCloud: "no hay modelo en la nube configurado",
-    proposed: "Hora propuesta" },
+    proposed: "Hora propuesta",
+    outcomes: { booked: "Cita reservada", info_gathered: "Información obtenida", needs_callback: "Hay que volver a llamar", no_answer: "No contestaron",
+      voicemail: "Buzón de voz", busy: "Línea ocupada", not_in_service: "Número fuera de servicio", refused: "El negocio se negó",
+      phone_busy: "Tu teléfono estaba ocupado", phone_unreachable: "Teléfono no disponible", line_lost: "La llamada pasó a tu teléfono",
+      taken_over: "Tomaste la llamada", not_admissible: "No se pudo iniciar", stopped: "Detenida por ti", failed: "Falló" } },
 };
 
 export { T as PHONE_STRINGS };
@@ -149,7 +157,7 @@ export default {
       "  function renderHistory(calls) {" +
       "    var box = document.getElementById('phone-history');" +
       "    var done = calls.filter(function (c) { return c.status === 'done' || c.status === 'rejected' || c.status === 'expired' || c.status === 'cancelled'; });" +
-      "    box.innerHTML = done.length ? done.map(function (c) { return '<div>' + esc(c.business_name) + ' — ' + esc(c.status) + (c.outcome ? ' / ' + L.outcome + ': ' + esc(c.outcome) : '') + (c.booking ? ' — ' + esc([c.booking.date, c.booking.time].join(' ')) : '') + '</div>'; }).join('') : esc(L.none);" +
+      "    box.innerHTML = done.length ? done.map(function (c) { return '<div>' + esc(c.business_name) + ' — ' + esc(c.status) + (c.outcome ? ' / ' + L.outcome + ': ' + esc(L.outcomes[c.outcome] || c.outcome) : '') + (c.booking ? ' — ' + esc([c.booking.date, c.booking.time].join(' ')) : '') + (c.summary ? '<br>' + esc(c.summary) : '') + '</div>'; }).join('') : esc(L.none);" +
       "  }" +
       "  function load() { return api('GET', '/calls', null, { quiet: true }).then(function (j) { renderPending(j.calls); renderLive(j.calls); renderHistory(j.calls); }).catch(function (e) { if (e.status === 401) { if (window.__crowPhonePoll) clearInterval(window.__crowPhonePoll); } }); }" +
       "  function loadSettings() {" +

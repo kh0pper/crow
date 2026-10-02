@@ -50,10 +50,10 @@ test("installed mcp.js builds a server with the injected McpServer and z", async
   assert.ok(server instanceof McpServer);
 });
 
-test("bundle version 0.2.0 (Perch call card) — the manifest and the MCP server agree", async () => {
+test("bundle version 0.2.1 (call card polish + wrap-up) — the manifest and the MCP server agree", async () => {
   const { readFileSync } = await import("node:fs");
   const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", "phone", "manifest.json"), "utf8"));
-  assert.equal(manifest.version, "0.2.0");
+  assert.equal(manifest.version, "0.2.1");
   const mcpSrc = readFileSync(join(SRC, "mcp.js"), "utf8");
-  assert.match(mcpSrc, /new McpServer\(\{ name: "crow-phone", version: "0\.2\.0" \}\)/);
+  assert.match(mcpSrc, /new McpServer\(\{ name: "crow-phone", version: "0\.2\.1" \}\)/);
 });
