@@ -113,7 +113,7 @@ const catalog = { version: 3, runtime: { release: "b10068", assets: {} }, models
   quants: [{ file: "Qwen3-Embedding-0.6B-Q8_0.gguf", quant: "Q8_0", size_mb: W.length / 1e6, min_ram_mb: 1, min_vram_mb: 0, sha256: sha(W) }],
 }] };
 const OPTS = (h) => ({ db: h.db, dir: h.dir, allocatePortFn: async (s, id) => { s.reservations[id] = { port: 18101, owner: {} }; return 18101; },
-  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001 });
+  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001, ownAddrsFn: () => new Set(["100.118.41.122", "127.0.0.1"]) });
 
 test("an unmanaged local row converts only with convertUnmanaged, and is snapshotted", async () => {
   const h = freshLibsql();
@@ -125,7 +125,7 @@ test("an unmanaged local row converts only with convertUnmanaged, and is snapsho
     await assert.rejects(adoptModel(args), (e) => e instanceof ProviderIdConflictError);
     await adoptModel({ ...args, convertUnmanaged: true });
     const row = (await listProvidersAll(h.db)).find((r) => r.id === "crow-embed");
-    assert.equal(row.baseUrl, "http://100.118.41.122:3001/llm/v1");
+    assert.equal(row.baseUrl, "http://100.118.41.122:3001/llm/p/crow-embed/v1", "native rows advertise their provider door (plan 2 Task 4)");
     assert.equal(row.gpuPolicy.runtime, "native");
     assert.equal(row.gpuPolicy.alwaysResident, true);
     const snap = loadState(h.dir).conversions["crow-embed"];
@@ -181,14 +181,15 @@ and in `validateLaunch` replace `else if (Number.isFinite(contextLen) && ctx > c
 
 In `gpu-orchestrator.js`, replace the `launch.ctx > catalogEntry.context_len` comparison with `launch.ctx > contextCeiling(launch, catalogEntry.context_len)` (import `contextCeiling` from `./models/launch.js`; keep the error code and message).
 
-`manager.js` `registerModel`: add `convertUnmanaged = false` to the parameters, import `doorKindOf` from `./door-resolve.js`, and change the guard to:
+`manager.js` `registerModel`: add `convertUnmanaged = false` and `ownAddrsFn = getOwnAddresses` (from `../../shared/locality.js`) to the parameters, import `doorKindOf` from `./door-resolve.js` and `isLocallyOrchestratable` from `../../shared/locality.js`, and change the guard to the following. The unmanaged row must point at **this** host. Plan 2 revision 2 removed the address-based `local` door kind, and an address proves locality only when checked against this host's own addresses.
 
 ```js
     const isBundleRow = !!existingRow.bundleId;
     const isUnmanagedLocal = convertUnmanaged === true
       && !isOurs && !isBundleRow
       && existingRow.gpuPolicy?.runtime !== NATIVE_RUNTIME
-      && doorKindOf({ baseUrl: existingRow.baseUrl, gpuPolicy: existingRow.gpuPolicy }) === "local";
+      && doorKindOf({ baseUrl: existingRow.baseUrl, gpuPolicy: existingRow.gpuPolicy }) === "unmanaged"
+      && isLocallyOrchestratable({ baseUrl: existingRow.baseUrl }, ownAddrsFn());
     if (!isOurs && !isBundleRow && !isUnmanagedLocal) throw new ProviderIdConflictError(providerId);
     converted = isBundleRow || isUnmanagedLocal;
 ```
@@ -264,7 +265,7 @@ function harness() {
     dir, dbFactory: () => db, loadCatalogFn: () => catalog,
     out: (s) => out.push(s), err: (s) => err.push(s),
     registerOpts: { allocatePortFn: async (s, id) => { s.reservations[id] = { port: 18101, owner: {} }; return 18101; },
-      ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001 },
+      ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001, ownAddrsFn: () => new Set(["100.118.41.122", "127.0.0.1"]) },
   };
   return { dir, db, deps, out, err, weights, cleanup() { setProviderSyncManager(null); if (prev === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prev; try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); rmSync(weights, { recursive: true, force: true }); } };
 }
@@ -1289,7 +1290,7 @@ ssh raven 'curl -s -m 10 -o /dev/null -w "%{http_code}\n" http://100.118.41.122:
 2. Vectors match the container's: `embed_dump http://127.0.0.1:3001/llm/p/crow-embed/v1 ~/llm/bench/embed-new.json`, then
    `node -e 'const a=require(process.env.HOME+"/llm/bench/embed-baseline.json"), b=require(process.env.HOME+"/llm/bench/embed-new.json"); const cos=(x,y)=>{let d=0,n=0,m=0;for(let i=0;i<x.length;i++){d+=x[i]*y[i];n+=x[i]*x[i];m+=y[i]*y[i];}return d/Math.sqrt(n*m)}; const c=a.map((v,i)=>cos(v,b[i])); console.log(c); process.exit(c.every((x)=>x>=0.999)?0:1)'` exits 0.
 3. The allow-list exemption works: the start in step 5 succeeded while the box was held by `models-w1` (spec §7 step 1).
-4. From raven: `ssh raven "curl -s -m 20 http://100.118.41.122:3001/llm/v1/embeddings -H 'content-type: application/json' -d '{\"model\":\"qwen3-embedding-0.6b\",\"input\":\"hello\"}' | head -c 120"` returns an embedding.
+4. From raven: `ssh raven "curl -s -m 20 http://100.118.41.122:3001/llm/p/crow-embed/v1/embeddings -H 'content-type: application/json' -d '{\"model\":\"qwen3-embedding-0.6b\",\"input\":\"hello\"}' | head -c 120"` returns an embedding. Use the provider path: the bare id is ambiguous while `grackle-embed` is enabled. raven's own consumers use the row's `base_url`, which is already the provider door.
 5. A memory recall on crow (`crow_search_memories` with a query known to hit) returns results, and `journalctl -u crow-gateway --since "-10 min" | grep -i embed` shows no errors; on r4, `journalctl --user -u crow-r4-gateway --since "-10 min" | grep -i embed` (or the system unit, whichever r4 runs as) shows no errors.
 
 **Close:** `$MW disarm --window w1`; `curl -sf http://100.118.41.122:8003/health` and `curl -sf http://100.118.41.122:8011/v1/models` are 200; move the row to Done with the acceptance results. Leave `$EMBED_CT` stopped (not removed) until W6.
@@ -1441,9 +1442,11 @@ grep -rn ASK_LLM_URL ~/r4-tehcy ~/.config/systemd/user ~/.crow-r4 2>/dev/null | 
 1. `$MW preflight`; `node scripts/ops/box-reserve.mjs hold --owner models-w5 --reason "models arc W5 (gemma for r4)" --minutes 55 --allow gemma-4-e2b-it`
 2. Deadman, armed before anything stops:
    ```bash
-   R4TOK=$(cat ~/.crow-r4/models-token)
+   # Absolute node path (nvm is not on the user manager's PATH); the token is read
+   # INSIDE the unit's shell, never placed on its command line.
    systemd-run --user --unit=models-w5-deadman --on-active=45min --collect /bin/sh -c \
-     "curl -s -m 30 -X POST -H 'authorization: Bearer $R4TOK' http://127.0.0.1:3008/llm/models/gemma-4-e2b-it/stop; docker start llamacpp-vulkan-gemma4-e2b; node /home/kh0pp/crow/scripts/ops/box-reserve.mjs release"
+     'curl -s -m 30 -X POST -H "authorization: Bearer $(cat /home/kh0pp/.crow-r4/models-token)" http://127.0.0.1:3008/llm/models/gemma-4-e2b-it/stop; docker start llamacpp-vulkan-gemma4-e2b; /home/kh0pp/.nvm/versions/node/v24.21.0/bin/node /home/kh0pp/crow/scripts/ops/box-reserve.mjs release'
+   R4TOK=$(cat ~/.crow-r4/models-token)   # for the operator's own curls below only
    ```
 3. `CROW_DATA_DIR=/home/kh0pp/.crow-r4/data CROW_GATEWAY_PORT=3008 $MM adopt --catalog gemma-4-e2b-it --quant Q4_0 --path "$GEMMA" --mmproj "$GEMMA_MMPROJ" --provider gemma-4-e2b-it --no-group --always-resident` (`CROW_GATEWAY_PORT=3008` makes the row's door r4's gateway, not crow's).
 4. `docker stop llamacpp-vulkan-gemma4-e2b`; `sleep 35`; start the row through **r4's** lifecycle API: `curl -s -X POST -H "authorization: Bearer $R4TOK" http://127.0.0.1:3008/llm/models/gemma-4-e2b-it/start`, then poll `http://127.0.0.1:3008/llm/models/jobs/<id>` with the same bearer until `resident`.

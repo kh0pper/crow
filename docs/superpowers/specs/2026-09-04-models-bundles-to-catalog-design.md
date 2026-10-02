@@ -431,9 +431,27 @@ the 35B; pi-lab's `localModels` group/evicts rules keep governing that, as they 
   alias: without it, a DB-side consumer of `crow-local` would fall into the fast/escalate heuristics.
 - **Endpoints forwarded:** `POST /llm/v1/chat/completions`, `/llm/v1/completions`, `/llm/v1/embeddings`,
   `/llm/v1/rerank`. Embeddings matter: `crow-embed` becomes a door row and r4/raven embed through it.
-- **What may be forwarded:** owned native rows (to `127.0.0.1:<gpu_policy.port>`), foreign-owned native rows (to the
-  owner's door, header carried), external-engine rows and still-bundled local rows (to `base_url`). **Cloud rows
-  are refused** (`400 NOT_LOCAL`) so the tailnet door never becomes an unauthenticated proxy for paid keys.
+- **What may be forwarded (revised 2026-10-02 after the staff review, C4).** Only rows Crow manages:
+  - owned native rows (to `127.0.0.1:<gpu_policy.port>`);
+  - foreign-owned native rows (to the owner's door, header carried);
+  - external-engine rows and bundle rows (to `base_url`);
+  - rows with the explicit opt-in `gpu_policy.door_forward: true`.
+
+  Everything else is refused with `400 NOT_FORWARDABLE`: cloud rows with paid keys, LAN boxes, and any row merely
+  on a private address. Any paired peer can write `base_url` through sync, so a private address proves nothing.
+  Link-local and cloud-metadata targets (`169.254.0.0/16`, `fe80::/10`, `169.254.169.254`, `fd00:ec2::254`,
+  `100.100.100.200`, `metadata.google.internal`) and Tailscale's own `100.100.100.100` are refused for every row
+  (`FORBIDDEN_TARGET`). The display-only `isPrivateHost` helper is never used for routing.
+- **Who may address the door (C4).** `:3001` listens on all interfaces and crow's ufw allows the LAN, so the
+  exposure is LAN + tailnet + loopback, not "tailnet only". Non-companion addressing (provider path, header,
+  qualified id, or a bare id that resolves to a forwardable row) is limited to loopback and tailnet sources
+  (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) or requests carrying a valid bearer (local MCP token or models token)
+  (`403 DOOR_SOURCE_REFUSED`). The companion path keeps its existing exposure (open question). `/llm` and
+  `/llm/models` refuse any `Tailscale-Funnel-Request` themselves (`403 FUNNEL_REFUSED`), even when
+  `CROW_DASHBOARD_PUBLIC=true` bypasses the global middleware.
+- **Native rows advertise their provider-scoped door** (`http://<tailnet ip>:<port>/llm/p/<providerId>/v1`), so
+  peers never need a model id to be unique. Today `crow-embed` and `grackle-embed` both serve
+  `qwen3-embedding-0.6b`.
 - **Loop guard:** the door sets `X-Crow-Door-Hop: 1` when it forwards to any door URL (`/llm/v1` or `/llm/p/…/v1`);
   a request that arrives with the header and resolves to a door again gets **508**.
 
@@ -449,24 +467,35 @@ If vLLM wins, `crow-voice` stays a bundle and `vllm-rocm-qwen35-4b` is excluded 
 
 §5.3 gains the work from the 2026-10-02 follow-ups backlog (M1–M3):
 
-- **M1:** the primary gateway maintains crow-managed provider entries in pi's `models.json`: every enabled
-  local or OpenAI-compatible DB provider not already hand-written in the file, with its base URL (a native row's
-  provider-scoped door `/llm/p/<id>/v1`) and model ids from the row. A top-level `$crowManaged` array lists the ids
-  it owns; hand-written entries are never touched; a managed id whose row is deleted or disabled is removed. Written
-  atomically, mode 0600, at boot and after any provider write (debounced). *(ruling)* Only the instance whose
-  `CROW_HOME` is `~/.crow` writes `~/.pi/agent/models.json` by default; another instance writes only with an explicit
+- **M1 (revised after the review):** the gateway maintains crow-managed provider entries in pi's `models.json`.
+  - **Entries:** every enabled OpenAI-compatible row that Crow manages (native, external engine, bundle, door
+    opt-in) and is not already hand-written in the file. Cloud rows are included only when listed in
+    `CROW_PI_MODELS_SYNC_CLOUD`; scope is an open question for Kevin.
+  - **URL:** a native row's entry points at this gateway's provider-scoped door, built from the door base.
+  - **Models:** embedding and rerank models are dropped.
+  - **Concurrency:** the writer re-reads the file before its atomic rename and retries if it changed (pi-lab and the
+    windows hand-edit it).
+  - **When it runs:** at boot, after local provider writes, and hourly, so replicated changes arrive too. Only in
+    the authenticated gateway branch.
+  - **Ownership:** a top-level `$crowManaged` array lists the ids it owns. Hand-written entries are never touched.
+    A managed id whose row is deleted or disabled is removed. Written atomically, mode 0600. *(ruling)* Writes happen only where pi actually runs: the primary `CROW_HOME`
+  (`~/.crow`), with `~/.pi/agent` present and the pi CLI resolvable. Another instance writes only with an explicit
   `CROW_PI_MODELS_SYNC_PATH`; `CROW_PI_MODELS_SYNC=0` disables it.
-- **M2:** before spawning pi, a bot turn checks that its resolved provider/model is known to pi (`pi --list-models`,
-  cached 5 minutes and re-listed once, uncached, on a miss, so a provider M1 just wrote is found); an unknown model fails the turn with "model X is not available to
-  the bot engine" instead of spawning. If the listing itself fails, the turn proceeds and the failure is logged.
-- **M3:** the Bot Builder model picker marks models pi cannot resolve.
+- **M2:** before spawning pi, a bot turn checks that its resolved provider/model is known to pi.
+  - **How:** `pi --list-models` run **asynchronously** (about 1.1 s, and it starts pi's MCP servers), with one shared
+    in-flight promise, cached 5 minutes in the bot process, and re-listed once on a miss.
+  - **Outcome:** an unknown model fails the turn with "model X is not available to the bot engine". If the listing
+    itself fails, the turn proceeds and the failure is logged.
+- **M3:** the Bot Builder model picker marks models pi cannot resolve, from pi's `models.json`. The gateway never
+  spawns pi (review C9).
 
 ### 11.7 I5 guard (carry from plan 1's final review)
 
 The hourly `syncProvidersFromModelsJson` reconciler must never rebuild `gpu_policy` for a row whose stored
 `gpu_policy.runtime === "native"` (it would de-native a converted row registered under a `models.json` id) and must
 never import an id listed in `$crowManaged` (it would re-import M1's own output and start a loop). Both are skipped
-and counted (`skipped_native`, `skipped_managed`). External-engine rows keep their existing marker preservation.
+and counted (`skipped_native`, `skipped_managed`). The first-boot seed (`seedProvidersFromModelsJson`, which runs
+whenever `providers` is empty, e.g. after a DB restore) skips `$crowManaged` ids too. External-engine rows keep their existing marker preservation.
 
 ### 11.8 Replication step 0, restated
 
@@ -475,7 +504,13 @@ The 2026-09-04 "disables did not replicate" finding splits into three causes, an
 1. **r4** is a separate identity with no crow peer row (Kevin 2026-09-24: leave as is). r4 rows are written on r4.
 2. **grackle** is being decommissioned and its gateway did not answer during the audit. Not fixed here.
 3. **black-swan** stopped applying crow's changes around 2026-08-20, across tables. Plan 2 task 1 diagnoses it
-   read-only, writes a failing two-instance test at the stage that broke, and fixes it.
+   read-only, comparing crow's out-feed length, black-swan's in-feed length and applied seq, the outbox and both
+   ends' transport logs. Only if the evidence isolates H1 (crow never appended while black-swan's feed was
+   unarmed) does it write the failing two-instance test and fix it. A transport stall (H5) or any other outcome
+   stops and is reported. The H1 fix is a durable "behind" marker plus a catch-up that re-delivers providers rows
+   to **that peer only**, read inside its append chain. The receiver skips any re-delivery not newer than its own
+   copy, so it is conflict-free. Black-swan's historical gap is seeded at lamport 0 and consumed by a gateway
+   restart inside a registered window.
 
 ### 11.9 Migration sequence, amended (supersedes §7 steps 1–6 where they differ)
 
@@ -499,7 +534,7 @@ The 2026-09-04 "disables did not replicate" finding splits into three causes, an
 | D17 | Voice runtime decided after the benchmark of §11.5 (Kevin 2026-10-02). |
 | D18 | The providers↔models.json sync lives in the pi contract, plan 2 (Kevin 2026-10-02). |
 | D19 | The black-swan replication fix is plan 2 task 1 and starts with a failing two-instance test (Kevin 2026-10-02). |
-| D20 | Door addressing by provider path or header, cloud rows refused, embeddings forwarded *(ruling, §11.4)*. |
+| D20 | Door addressing by provider path or header; only Crow-managed rows forwarded; link-local/metadata refused; non-companion addressing from loopback/tailnet or with a bearer; Funnel refused in-router *(ruling, §11.4; Kevin 2026-10-02 on C4)*. |
 
 ### 11.11 Open questions for Kevin
 
@@ -513,3 +548,10 @@ The 2026-09-04 "disables did not replicate" finding splits into three causes, an
 4. vLLM vs llama.cpp for voice, after the benchmark.
 5. Does r4 keep its own `crow-embed` row (pointed at the door by a one-shot) or get a crow peer row? (Kevin said
    "leave as is" on 2026-09-24; the plan assumes the one-shot.)
+6. **M1 scope** (staff review Q1): today's DB holds five paid cloud providers. Should pi's `models.json` carry only
+   managed local rows (the plan's default), an explicit allowlist, or every OpenAI-compatible row?
+7. **LAN exposure of `:3001`** (ufw allows `eno1`/`wlp195s0` from anywhere): deliberate? The companion path is still
+   reachable from the LAN without auth.
+8. **Tailnet membership:** are there shared nodes, or the Dayane container, that should not reach the door?
+9. **Transport stalls:** if the black-swan diagnosis lands on H5, is a fix in scope for plan 2?
+

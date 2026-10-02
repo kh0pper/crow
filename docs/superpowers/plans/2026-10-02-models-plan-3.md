@@ -1541,7 +1541,8 @@ export function buildRegisteredRows({ rows = [], snapshotOf = () => null, extern
       // Spec §6: role ids (crow-chat, crow-voice, crow-embed, …) are suggested
       // when a convertible row (a bundle row, or an unmanaged local row) exists.
       const roles = all.filter((r) => !r.disabled && r.gpuPolicy?.runtime !== "native" && !r.gpuPolicy?.engine
-        && (r.bundleId || doorKindOf({ baseUrl: r.baseUrl, gpuPolicy: r.gpuPolicy }) === "local")).map((r) => r.id).sort();
+        // plan 2 rev 2: unmanaged rows are no longer split into local/cloud by address; a row on THIS host is.
+        && (r.bundleId || (doorKindOf({ baseUrl: r.baseUrl, gpuPolicy: r.gpuPolicy }) === "unmanaged" && r.host === "local"))).map((r) => r.id).sort();
       res.json({ rows, groups, roles, orchestrationDisabled: isModelOrchestrationDisabled() });
     } catch (err) { sendErr(res, err); } finally { try { db.close(); } catch {} }
   });
