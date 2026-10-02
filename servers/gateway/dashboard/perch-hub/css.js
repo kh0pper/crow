@@ -104,6 +104,9 @@ border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-wid
    it leaves every M1 measurement green, because the shared select rule's
    140px basis plus flex-wrap already keeps New session on screen at 412px. */
 #perch-launch #perch-new-model{min-height:44px;flex:1 1 100%}
+/* The "Show unavailable (N)" toggle under each model picker: a thumb-sized
+   text button, never wider than its label. */
+#perch-hub-root .perch-model-more{min-height:44px;flex:0 0 auto;align-self:flex-start}
 /* By id, for the same reason as #perch-close above: "#perch-launch .empty" is
    (1,1,0) and ties with "#perch-hub-root .empty" further down, which then wins
    on source order. Measured dead: computed padding stayed 16px. */

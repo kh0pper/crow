@@ -2331,6 +2331,12 @@ export const translations = {
     es: "El modelo propio del bot",
   },
   "perch.modelCurrentUnlisted": { en: "current", es: "actual" },
+  "perch.modelGroupNetwork": { en: "On your network", es: "En tu red" },
+  "perch.modelGroupCloud": { en: "Cloud", es: "En la nube" },
+  "perch.modelGroupUnavailable": { en: "Unavailable", es: "No disponibles" },
+  "perch.modelShowUnavailable": { en: "Show unavailable", es: "Mostrar no disponibles" },
+  "perch.modelHideUnavailable": { en: "Hide unavailable", es: "Ocultar no disponibles" },
+  "perch.modelNotRunnable": { en: "can't run in a bot", es: "no se puede usar en un bot" },
   "perch.launchModelFailed": {
     en: "The session started on the bot's own model; the switch did not take.",
     es: "La sesión se inició con el modelo propio del bot; el cambio no se aplicó.",

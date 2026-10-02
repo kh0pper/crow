@@ -618,7 +618,9 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
                                     return !!el && (el===e || e.contains(el)); })() }; };
         var sel=document.getElementById('perch-new-model');
         var doc=document.documentElement;
-        return JSON.stringify({ model:box('perch-new-model'), newBtn:box('perch-new'),
+        var more=box('perch-new-model-more');
+        more.text=document.getElementById('perch-new-model-more').textContent;
+        return JSON.stringify({ model:box('perch-new-model'), newBtn:box('perch-new'), more:more,
           value: sel.value, options: Array.prototype.map.call(sel.options,function(o){return o.textContent;}),
           selectedText: sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].textContent:null,
           hScroll: doc.scrollWidth > doc.clientWidth });
@@ -631,7 +633,22 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.value, "crow-local/qwen3.6-35b-a3b", "opened on the bot's configured model");
       assert.equal(seen.selectedText, seen.options[0],
         "and the browser really shows that entry, not merely stores the value");
-      assert.match(seen.options[1], /not running/, "an unavailable model must read as unavailable");
+      // The unavailable model is held back behind "Show unavailable (1)" —
+      // and that toggle is a real, thumb-sized control that brings it back
+      // reading as unavailable, never a silently selectable dead choice.
+      assert.equal(seen.options.length, 1, "only what can run is offered by default");
+      assert.equal(seen.more.hidden, false);
+      assert.equal(seen.more.text, "Show unavailable (1)");
+      assert.equal(seen.more.inViewport, true);
+      assert.ok(seen.more.h >= 44, `toggle ${seen.more.w}x${seen.more.h} is too small for a thumb`);
+      const shown = await s.json(`(function(){
+        document.getElementById('perch-new-model-more').click();
+        var sel=document.getElementById('perch-new-model');
+        return JSON.stringify({ value: sel.value,
+          options: Array.prototype.map.call(sel.options,function(o){return o.textContent;}) });
+      })()`);
+      assert.match(shown.options[1], /not running/, "an unavailable model must read as unavailable");
+      assert.equal(shown.value, "crow-local/qwen3.6-35b-a3b", "showing more never moves the pick");
       // The regression a long model name would cause.
       assert.equal(seen.newBtn.inViewport, true,
         `New session at ${seen.newBtn.top}-${seen.newBtn.bottom} in a ${h}px viewport`);
@@ -863,7 +880,8 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.count, 3, "fixture check: the sentinel plus the two catalogue entries");
       assert.equal(seen.first, "", "option 0 is the revocation sentinel");
       assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
-      assert.equal(seen.index, 2, "the browser's own selection, not just an attribute we set");
+      // The model the session is ON is pinned right under the sentinel.
+      assert.equal(seen.index, 1, "the browser's own selection, not just an attribute we set");
       assert.match(seen.shown, /Flash Next/,
         "what the operator actually reads off the control this feature exists for");
     } finally { await s.close(); }
@@ -891,7 +909,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
           shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
           count: sel.options.length });
       })()`);
-      assert.equal(seen.count, 3, "the sentinel plus the two catalogue entries");
+      assert.equal(seen.count, 2, "the sentinel plus the one runnable catalogue entry (the other waits behind the toggle)");
       assert.equal(seen.index, 0);
       assert.equal(seen.value, "", "an empty value is what makes startSession send no control()");
       assert.equal(seen.shown, "The bot's own model");
@@ -1047,7 +1065,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       // assertion below still demands the real model instead.
       assert.equal(seen.first, "", "option 0 is the revocation sentinel");
       assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
-      assert.equal(seen.index, 2, "the browser's own selection");
+      assert.equal(seen.index, 1, "the browser's own selection (the current model is pinned under the sentinel)");
       assert.match(seen.shown, /Flash Next/,
         "what the operator reads after a restart — measured as the FIRST option before the fix");
     } finally { resetApi(); await s.close(); }
