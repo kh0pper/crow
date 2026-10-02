@@ -1054,7 +1054,9 @@ test("B5: the newest unsent message (nothing delivered after it) still lands at 
   assert.ok(rows.at(-1).startsWith("Bot could not start:"), JSON.stringify(rows));
 });
 
-test("B5: a send whose 2xx was followed by the child's death is NOT counted as delivered", async () => {
+/** Mount, send "first lost" (pi_gone), then "second" (202) followed by a
+ *  pi_exit death, then reconnect with the given post-resync transcript. */
+async function twoLostThenResync(afterEvents, { first = "first lost", second = "second lost" } = {}) {
   let transcriptCalls = 0;
   let sends = 0;
   const hub = await mountHub({
@@ -1063,26 +1065,65 @@ test("B5: a send whose 2xx was followed by the child's death is NOT counted as d
         ? makeResponse(409, { error: "pi_gone", detail: UNKNOWN_PROVIDER })
         : makeResponse(202, { turnId: "t2" })),
       "/options": () => Promise.reject(new Error("network down")),
-      "/transcript": () => makeResponse(200, { events: ++transcriptCalls === 1 ? []
-        : [msgEvent("user", "u1"), msgEvent("assistant", "r1")] }),
+      "/transcript": () => makeResponse(200, { events: ++transcriptCalls === 1 ? [] : afterEvents }),
     }),
   });
   await openChatSession(hub);
-  hub.els["perch-input"].value = "first lost";
+  hub.els["perch-input"].value = first;
   hub.els["perch-send"].onclick();
   await new Promise((r) => setTimeout(r, 0));
-  // The 2nd send 202s, then the stream reports the child died: it never got it either.
-  hub.els["perch-input"].value = "second lost";
+  hub.els["perch-input"].value = second;
   hub.els["perch-send"].onclick();
   await new Promise((r) => setTimeout(r, 0));
   FakeEventSource.instances[FakeEventSource.instances.length - 1]._serverFrame("error", { text: UNKNOWN_PROVIDER, reason: "pi_exit" });
   await new Promise((r) => setTimeout(r, 0));
+  await reconnectAndResync(hub);
+  return transcriptTexts(hub);
+}
 
+test("B5 fix: a send that 2xx'd then died IS in pi's transcript (persisted at turn start) — replayed zero times, and the older unsent lands before it", async () => {
+  const rows = await twoLostThenResync([msgEvent("user", "u1"), msgEvent("assistant", "r1"), msgEvent("user", "second lost")]);
+  const at = (needle) => rows.findIndex((t) => t.includes(needle));
+  assert.equal(rows.filter((t) => t.includes("second lost")).length, 1, "no duplicate of the persisted message: " + JSON.stringify(rows));
+  assert.ok(at("r1") < at("first lost"), JSON.stringify(rows));
+  assert.ok(at("first lost") < at("second lost"), "the older unsent stays BEFORE the message pi received after it: " + JSON.stringify(rows));
+});
+
+test("B5 fix: the 2xx'd send's history copy carries the upload-paths header — still deduped (tail match)", async () => {
+  const rows = await twoLostThenResync([msgEvent("user", "Uploaded files:\n- /tmp/a.txt\n\nsecond lost")]);
+  assert.equal(rows.filter((t) => t.includes("second lost")).length, 1, JSON.stringify(rows));
+});
+
+test("B5 fix: a 2xx'd send that died BEFORE pi wrote it is replayed once, at the end", async () => {
+  const rows = await twoLostThenResync([msgEvent("user", "u1"), msgEvent("assistant", "r1")]);
+  const at = (needle) => rows.findIndex((t) => t.includes(needle));
+  assert.equal(rows.filter((t) => t.includes("second lost")).length, 1, JSON.stringify(rows));
+  assert.ok(at("r1") < at("first lost") && at("first lost") < at("second lost"), JSON.stringify(rows));
+});
+
+test("B5 fix: a REFUSED send (pi_gone) is never deduped, even when the previous user row has the same words", async () => {
+  let transcriptCalls = 0;
+  let sends = 0;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({
+      "/message": () => (++sends === 1 ? makeResponse(202, { turnId: "t1" })
+        : makeResponse(409, { error: "pi_gone", detail: UNKNOWN_PROVIDER })),
+      "/options": () => Promise.reject(new Error("network down")),
+      "/transcript": () => makeResponse(200, { events: ++transcriptCalls === 1 ? []
+        : [msgEvent("user", "again"), msgEvent("assistant", "ok")] }),
+    }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "again";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[FakeEventSource.instances.length - 1]._serverFrame("reply", { text: "ok", turnId: "t1" });
+  hub.els["perch-input"].value = "again";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
   await reconnectAndResync(hub);
   const rows = transcriptTexts(hub);
-  const at = (needle) => rows.findIndex((t) => t.includes(needle));
-  // Neither reached pi, so both belong after everything pi has, oldest first.
-  assert.ok(at("r1") < at("first lost") && at("first lost") < at("second lost"), JSON.stringify(rows));
+  assert.equal(rows.filter((t) => t.includes("again")).length, 2, "the refused repeat is replayed: " + JSON.stringify(rows));
 });
 
 // ---- I3: a native connection error must not masquerade as an engine frame ----

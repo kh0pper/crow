@@ -1843,13 +1843,15 @@ export function perchHubJs(lang = "en") {
     var sent=rec.text;
     lastSent=null;
     rec.failed=true;
-    /* The POST 2xx'd (and was counted as delivered) before the child died:
-       it was not delivered after all, so take it back off the older ones. */
-    if(rec.counted){ rec.counted=false; bumpUnsentAfter(sid,-1); }
+    /* A POST that 2xx'd before the child died stays COUNTED: pi persists the
+       user message at turn start (agent-session appendMessage on the user
+       message_end), so it IS in the on-disk transcript. It is still kept as
+       unsent — the death may have come before pi wrote it — but flagged, so
+       replayUnsent drops it when the rebuilt transcript already has it. */
     var note=BOT_START_FAILED+' '+String(detail||'');
     appendNote(note);
     if(sent==null||sent==='') return;
-    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note,after:0});
+    (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note,after:0,maybeDelivered:!!rec.counted});
   }
   /* B5: replayed at its ORIGINAL position, not at the end. A message with
      \`after\` = k delivered messages behind it goes right before the k-th
@@ -1857,6 +1859,14 @@ export function perchHubJs(lang = "en") {
      replies to the message before it); k = 0 means it was the newest, and
      the end is its place. The user rows are read before any replay lands, so
      they are exactly pi's own. */
+  /* The .what line of a transcript row (its text, without the who label). */
+  function rowWhatText(row){
+    var kids=(row&&row.children)||[];
+    for(var i=0;i<kids.length;i++){
+      if((' '+String(kids[i].className||'')+' ').indexOf(' what ')>=0) return String(kids[i].textContent||'');
+    }
+    return null;
+  }
   function replayUnsent(sid){
     var list=unsent[sid]||[];
     if(!list.length) return;
@@ -1867,7 +1877,27 @@ export function perchHubJs(lang = "en") {
         if((' '+String(tr.children[i].className||'')+' ').indexOf(' user ')>=0) users.push(tr.children[i]);
       }
     }
-    list.forEach(function(u){
+    /* Newest first, decide each entry's effective anchor and whether pi
+       already has it. A maybe-delivered message (2xx, then the child died)
+       that pi DID persist is the user row right before its anchor: drop it.
+       Tail match — the history copy carries the upload-paths header when
+       files rode along. One that pi did NOT persist was counted as delivered
+       by every older entry, so they take one back off. Only flagged entries
+       are deduped: a refused send (pi_gone) never reached pi, and the
+       operator may well have typed the same words twice. */
+    var plan=[], missing=0;
+    for(var k=list.length-1;k>=0;k--){
+      var e=list[k], eff=Math.max(0,(e.after||0)-missing), skip=false;
+      if(e.maybeDelivered){
+        var prev=users[users.length-eff-1];
+        var pt=prev?rowWhatText(prev):null;
+        if(pt!=null&&e.text&&pt.slice(-e.text.length)===e.text) skip=true;
+        else missing++;
+      }
+      plan[k]={text:e.text,note:e.note,after:eff,skip:skip};
+    }
+    plan.forEach(function(u){
+      if(u.skip) return;
       appendMessage('user','you',u.text);
       appendNote(u.note);
       if(!tr||!u.after||!users.length) return;
