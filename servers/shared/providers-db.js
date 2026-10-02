@@ -160,8 +160,16 @@ export async function loadProvidersFromDb(db, { ownInstanceId = getOrCreateLocal
 let _syncManager = null;
 export function setProviderSyncManager(mgr) { _syncManager = mgr || null; }
 
+let _providerChangeHook = null;
+/** M1: called (fire-and-forget) after every LOCAL provider write that reaches emitSync.
+ * Replicated applies do not pass through here; the hourly tick covers them. */
+export function setProviderChangeHook(fn) { _providerChangeHook = typeof fn === "function" ? fn : null; }
+
 async function emitSync(db, op, row) {
   await emitOrQueue(_syncManager, db, "providers", op, row);
+  if (_providerChangeHook) {
+    try { _providerChangeHook({ op, id: row?.id }); } catch (err) { console.warn(`[providers] change hook failed: ${err.message}`); }
+  }
 }
 
 /**

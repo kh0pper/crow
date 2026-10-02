@@ -164,6 +164,30 @@ export async function mountAdminApi(app, deps) {
     // never holds the process open.
     const t = setInterval(reconcile, reconcileIntervalMs());
     t.unref();
+
+    // --- M1 (plan 2 Task 9): crow-managed entries in pi's models.json. Only in
+    // this authenticated branch, so a --no-auth companion sharing ~/.crow is
+    // never a second writer. ---
+    try {
+      const { syncPiModelsJson, piModelsSyncPath } = await import("../../shared/pi-models-sync.js");
+      const { setProviderChangeHook } = await import("../../shared/providers-db.js");
+      const { doorBaseUrl, gatewayPort } = await import("../models/door.js");
+      const { getOwnTailnetIp } = await import("../../shared/tailnet-ip.js");
+      const target = piModelsSyncPath();
+      if (target) {
+        let timer = null;
+        const run = () => syncPiModelsJson(createDbClient(), { path: target, doorBase: doorBaseUrl({ tailnetIp: getOwnTailnetIp(), port: gatewayPort() }) })
+          .then((r) => { if (r.added?.length || r.updated?.length || r.removed?.length) console.log(`[pi-models-sync] ${target}: +${r.added.length} ~${r.updated.length} -${r.removed.length}`); })
+          .catch((err) => console.warn(`[pi-models-sync] ${err.message}`));
+        setProviderChangeHook(() => { clearTimeout(timer); timer = setTimeout(run, 2000); timer.unref?.(); });
+        setInterval(run, reconcileIntervalMs()).unref(); // replicated changes reach pi within the hour
+        await run();
+      } else {
+        console.log("[pi-models-sync] off on this host (no pi here, not the primary CROW_HOME, or CROW_PI_MODELS_SYNC=0)");
+      }
+    } catch (err) {
+      console.warn(`[pi-models-sync] boot failed: ${err.message}`);
+    }
   }
 
   // --- Wire storage client to DB + identity (DB-first precedence over env) ---
