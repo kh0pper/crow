@@ -686,6 +686,21 @@ test("phase 3: an inbound gift lands (and, the slot being empty, warms — spec 
   assert.equal((await h.db.execute("SELECT status FROM ramble_eggs WHERE egg_id='theirs'")).rows[0].status, "received");
 });
 
+test("a gift that arrives ripe hatches on receipt AND fires ramble:hatched, so the panel's reveal runs (review N-4)", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  const hatched = [];
+  h.bus.on("ramble:hatched", (p) => hatched.push(p));
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "ripe-in", warmth: 100, found_cell: null, found_week: null } } });
+  const { rows } = await h.db.execute({ sql: "SELECT status, species, seed FROM ramble_eggs WHERE egg_id = 'ripe-in'", args: [] });
+  assert.equal(rows[0].status, "hatched", "promoted into the empty slot and hatched at once");
+  assert.deepEqual(hatched, [{ egg_id: "ripe-in", species: rows[0].species, seed: rows[0].seed }]);
+
+  // An unripe gift fires no hatch.
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "green-in", warmth: 3, found_cell: null, found_week: null } } });
+  assert.equal(hatched.length, 1);
+});
+
 test("phase 3 S3: a reply queued while a drain is in flight goes out right after it, not a tick later", async () => {
   const h = await makeHarness();
   await seedContacts(h.db);

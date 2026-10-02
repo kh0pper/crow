@@ -2295,8 +2295,11 @@ export class InstanceSyncManager {
       try {
         // An LWW Ramble row also records that THIS instance wrote the
         // Lamport (fix round 2, I-2), so a tie breaks the same everywhere.
-        await ensureLamportOriginColumn(this.db, table);
-        const stmt = stampSql(table, row, lamportTs, this.localInstanceId);
+        // Only when the column is really there: if the guarded ALTER failed
+        // (BUSY, read-only), stamp the pre-origin shape rather than lose the
+        // Lamport stamp altogether (review N-2).
+        const hasOrigin = await ensureLamportOriginColumn(this.db, table);
+        const stmt = stampSql(table, row, lamportTs, hasOrigin ? this.localInstanceId : undefined);
         if (stmt) await this.db.execute(stmt);
       } catch {
         // Non-fatal — row may not have lamport_ts column yet

@@ -83,13 +83,15 @@ async function isDeploymentEligible(db) {
  * @param {string} table
  * @param {object} row
  * @param {string} instanceId
+ * @param {string|undefined} origin
  * @returns {{sql: string, args: any[]} | null}
  */
-function subselectStampSql(table, row, instanceId) {
-  // 0: shape-detection placeholder only, never bound. instanceId: this
-  // Crow's origin for an LWW Ramble row (its second placeholder, after the
-  // lamport — so the args[0] swap below still lines up).
-  const probe = stampSql(table, row, 0, instanceId);
+function subselectStampSql(table, row, instanceId, origin) {
+  // 0: shape-detection placeholder only, never bound. origin: this Crow's id
+  // for an LWW Ramble row when its lamport_origin column exists (undefined
+  // otherwise); it is the second placeholder, after the lamport, so the
+  // args[0] swap below still lines up.
+  const probe = stampSql(table, row, 0, origin);
   if (!probe) return null;
   const qIdx = probe.sql.indexOf("?");
   const sql =
@@ -208,7 +210,9 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     const instanceId = getOrCreateLocalInstanceId();
     // The stamp below writes lamport_origin on an LWW Ramble row; make sure
     // the column exists first (an installed bundle copy may predate it).
-    await ensureLamportOriginColumn(db, table);
+    // Only pass the origin when the column is really there: a failed ALTER
+    // must leave the pre-origin stamp, not sink the whole atomic batch (N-2).
+    const origin = (await ensureLamportOriginColumn(db, table)) ? instanceId : undefined;
 
     await enforceOutboxCap(db);
 
@@ -220,7 +224,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
       // INSERT — all with the caller's literal value, still one atomic batch.
       const statements = [seedCounterSql(instanceId), floorCounterSql(instanceId, preserveLamport)];
       if (op !== "delete") {
-        const stampStmt = stampSql(table, row, preserveLamport, instanceId);
+        const stampStmt = stampSql(table, row, preserveLamport, origin);
         if (stampStmt) statements.push(stampStmt);
       }
       statements.push(outboxInsertLiteralSql(table, op, row, preserveLamport));
@@ -237,7 +241,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     const statements = [seedCounterSql(instanceId)];
     const bumpIdx = statements.push(bumpCounterSql(instanceId)) - 1;
     if (op !== "delete") {
-      const stampStmt = subselectStampSql(table, row, instanceId);
+      const stampStmt = subselectStampSql(table, row, instanceId, origin);
       if (stampStmt) statements.push(stampStmt);
     }
     statements.push(outboxInsertSql(table, op, row, instanceId));

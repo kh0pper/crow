@@ -96,7 +96,10 @@ async function refillSlot(db, now, emit) {
   // A promoted egg can already be at the hatch threshold (a gift carries its
   // warmth, up to MAX_WARMTH). Hatch it now, as incubateEgg does, rather than
   // leaving it at 100% until some unrelated credit arrives (review M-4).
-  if (await promoteFromShelf(db, { now, emit })) await hatchIfReady(db, { now, emit });
+  // Returns the hatched egg (or null) so the transport can fire the panel's
+  // hatch reveal for it (review N-4).
+  if (!(await promoteFromShelf(db, { now, emit }))) return null;
+  return hatchIfReady(db, { now, emit });
 }
 
 /**
@@ -163,8 +166,8 @@ export async function receiveGift(db, eggIn, { fromCrowId, now = Date.now(), emi
   const { rowsAffected } = await db.execute(receivedEggStatement(egg, fromCrowId, now));
   if (rowsAffected === 0) return { inserted: false, egg_id: egg.egg_id };
   await safeEmit(emit, "ramble_eggs", "insert", await getEgg(db, egg.egg_id));
-  await refillSlot(db, now, emit);
-  return { inserted: true, egg: await getEgg(db, egg.egg_id) };
+  const hatched = await refillSlot(db, now, emit);
+  return { inserted: true, egg: await getEgg(db, egg.egg_id), hatched };
 }
 
 /* ---------------------------------------------------------------- swaps */
@@ -234,8 +237,8 @@ export async function declineSwap(db, { tradeId, now = Date.now(), emit } = {}) 
   });
   // Our withdrawn offer unlocks our egg. A declined row can never complete
   // (both hand-over branches return early on it), so warming it is safe.
-  await refillSlot(db, now, emit);
-  return { ok: true, trade: updated };
+  const hatched = await refillSlot(db, now, emit);
+  return { ok: true, trade: updated, hatched };
 }
 
 async function setState(db, tradeId, state, now) {
@@ -297,8 +300,8 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
       await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
       await enqueueDeliveries(db, { toCrowIds: [fromCrowId], kind: "trade", refId: t.trade_id, payload: tradePayload({ trade_id: t.trade_id, state: "declined" }), now });
       // 'declined' is terminal for the hand-over, so the egg it held may warm.
-      await refillSlot(db, now, emit);
-      return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 1 };
+      const hatched = await refillSlot(db, now, emit);
+      return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 1, hatched };
     }
     await db.batch([
       { sql: HANDOVER_SQL, args: [mine.egg_id] },
@@ -312,8 +315,8 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
       toCrowIds: [fromCrowId], kind: "trade", refId: t.trade_id,
       payload: tradePayload({ trade_id: t.trade_id, state: "completed", my_egg_id: mine.egg_id, want_egg_id: t.egg.egg_id }, mine), now,
     });
-    await refillSlot(db, now, emit);
-    return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 1 };
+    const hatched = await refillSlot(db, now, emit);
+    return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 1, hatched };
   }
 
   if (t.state === "completed") {
@@ -329,16 +332,16 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
     await safeEmit(emit, "ramble_eggs", "update", await getEgg(db, existing.my_egg_id));
     await safeEmit(emit, "ramble_eggs", "insert", await getEgg(db, t.egg.egg_id));
     await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
-    await refillSlot(db, now, emit);
-    return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 0 };
+    const hatched = await refillSlot(db, now, emit);
+    return { changed: true, state: "completed", trade_id: t.trade_id, egg_id: t.egg.egg_id, deliveries: 0, hatched };
   }
 
   if (t.state === "declined") {
     if (!existing || !OPEN_STATES.includes(existing.state)) return none();
     await setState(db, t.trade_id, "declined", now);
     await safeEmit(emit, "ramble_trades", "update", await getTrade(db, t.trade_id));
-    await refillSlot(db, now, emit);
-    return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 0 };
+    const hatched = await refillSlot(db, now, emit);
+    return { changed: true, state: "declined", trade_id: t.trade_id, deliveries: 0, hatched };
   }
 
   return none(); // 'expired' never travels
@@ -429,7 +432,7 @@ export async function receiveEnvelope(db, { crowId, pubkey, payload, eventId = n
   }
   if (payload.type === "ramble.egg") {
     const r = await receiveGift(db, payload.egg, { fromCrowId: crowId, now, emit });
-    return { kind: "egg", inserted: r.inserted, egg_id: r.egg?.egg_id ?? r.egg_id ?? null, deliveries: 0 };
+    return { kind: "egg", inserted: r.inserted, egg_id: r.egg?.egg_id ?? r.egg_id ?? null, deliveries: 0, hatched: r.hatched ?? null };
   }
   if (payload.type === "ramble.trade") {
     const parsed = parseTradePayload(payload);

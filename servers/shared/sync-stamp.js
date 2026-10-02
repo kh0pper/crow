@@ -143,24 +143,6 @@ export async function advanceCounter(db, instanceId, floorValue) {
 }
 
 /**
- * Build the per-table row-stamp statement for a fresh Lamport value.
- * Table-specific rules (identical to the historical emitChange block):
- *   - dashboard_settings: stamped by `key`
- *   - crow_context: stamped by composite (section_key, device_id, project_id),
- *     using MAX(COALESCE(lamport_ts, 0), ?) to guard against out-of-order
- *     concurrent stamps (plain MAX(NULL, x) is NULL in SQLite)
- *   - everything else: stamped by `id`, if present
- * Returns null when the row doesn't match any known shape — in particular
- * deletes, whose row payloads (e.g. `{ crow_id }`, `{ group_uid }`) never
- * carry `key`/`section_key`/`id`. Callers must still gate on op !== "delete"
- * themselves (this function has no op parameter — it only reflects row shape).
- *
- * @param {string} table
- * @param {object} row
- * @param {number} lamportTs
- * @returns {{sql: string, args: any[]} | null}
- */
-/**
  * The Ramble tables whose apply is last-writer-wins on the envelope Lamport.
  * Each row records WHICH instance wrote its current Lamport in
  * `lamport_origin`, so an equal-Lamport tie can be broken the same way on
@@ -222,6 +204,26 @@ export function incomingLosesLww(lamportTs, localTs, incomingOrigin, localOrigin
   return String(inc) < String(loc);
 }
 
+/**
+ * Build the per-table row-stamp statement for a fresh Lamport value.
+ * Table-specific rules (identical to the historical emitChange block):
+ *   - dashboard_settings: stamped by `key`
+ *   - crow_context: stamped by composite (section_key, device_id, project_id),
+ *     using MAX(COALESCE(lamport_ts, 0), ?) to guard against out-of-order
+ *     concurrent stamps (plain MAX(NULL, x) is NULL in SQLite)
+ *   - everything else: stamped by `id`, if present
+ * Returns null when the row doesn't match any known shape — in particular
+ * deletes, whose row payloads (e.g. `{ crow_id }`, `{ group_uid }`) never
+ * carry `key`/`section_key`/`id`. Callers must still gate on op !== "delete"
+ * themselves (this function has no op parameter — it only reflects row shape).
+ *
+ * @param {string} table
+ * @param {object} row
+ * @param {number} lamportTs
+ * @param {string|null} [origin] - the writing instance id, for an LWW Ramble
+ *   table only; omit it (undefined) for the pre-origin stamp shape
+ * @returns {{sql: string, args: any[]} | null}
+ */
 export function stampSql(table, row, lamportTs, origin) {
   // For an LWW Ramble table, also record WHO wrote this Lamport — but only
   // when the caller says (emitChange / the queue door pass the local instance
