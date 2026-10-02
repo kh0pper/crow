@@ -1050,6 +1050,48 @@ export function perchHubJs(lang = "en") {
   applyNarrow();
   bindOnce(window,'resize','narrowResize',function(){ if(live()) applyNarrow(); });
 
+  /* TEXT SIZE (2026-10-02, Kevin): A− / A / A+ in the Session tab, five steps.
+     The step is written as --perch-text-scale on #perch-hub-root and css.js
+     scales every font size inside the chat tab by it (messages, cards, the ask
+     card, the composer); the rest of the hub keeps its size. Saved per DEVICE
+     in localStorage — a phone and a desktop want different sizes. Storage can
+     be blocked outright (private mode, site-data settings): the ACCESSOR
+     itself throws there, so every touch is inside try/catch and the page just
+     runs at the default. */
+  var TEXT_STEPS=[0.875,1,1.125,1.25,1.4], TEXT_DEFAULT=1, TEXT_KEY='crow.perch.textSize';
+  function readTextStep(){
+    try{
+      var raw=window.localStorage.getItem(TEXT_KEY);
+      var n=parseInt(raw,10);
+      if(raw!=null&&String(n)===String(raw)&&n>=0&&n<TEXT_STEPS.length) return n;
+    }catch(e){}
+    return TEXT_DEFAULT;
+  }
+  function saveTextStep(n){ try{ window.localStorage.setItem(TEXT_KEY,String(n)); }catch(e){} }
+  var textStep=readTextStep();
+  function applyTextStep(){
+    var root=el('perch-hub-root'); if(!root) return;
+    var scale=TEXT_STEPS[textStep];
+    if(root.style&&root.style.setProperty) root.style.setProperty('--perch-text-scale',String(scale));
+    root.setAttribute('data-text-step',String(textStep));
+    var out=el('perch-text-size-value'); if(out) out.textContent=Math.round(scale*100)+'%';
+    var dn=el('perch-text-smaller'), up=el('perch-text-larger'), rs=el('perch-text-reset');
+    if(dn) dn.disabled=(textStep===0);
+    if(up) up.disabled=(textStep===TEXT_STEPS.length-1);
+    if(rs) rs.disabled=(textStep===TEXT_DEFAULT);
+  }
+  function setTextStep(n){
+    if(n<0||n>=TEXT_STEPS.length||n===textStep) return;
+    textStep=n; saveTextStep(n); applyTextStep();
+  }
+  applyTextStep();
+  (function(){
+    var dn=el('perch-text-smaller'), up=el('perch-text-larger'), rs=el('perch-text-reset');
+    if(dn) dn.onclick=function(){ setTextStep(textStep-1); };
+    if(up) up.onclick=function(){ setTextStep(textStep+1); };
+    if(rs) rs.onclick=function(){ setTextStep(TEXT_DEFAULT); };
+  })();
+
   if(SPLIT&&SPLIT.addEventListener){
     bindOnce(SPLIT,'change','splitChange',function(){ if(live()) syncListPolling(); });
   } else if(SPLIT&&SPLIT.addListener){

@@ -168,6 +168,20 @@ ${engineBanner(engine, lang)}
          it to the browse modal + control({cwd})), and the state pill beside
          rename/close. -->
     <section id="perch-tab-session" role="tabpanel" aria-labelledby="perch-tab-btn-session" hidden>
+    <!-- Text size for the chat tab (2026-10-02): five steps, saved per device
+         (localStorage). Lives here, not in the chat header: at 412px the
+         header has no room for three more 44px targets, and this tab is
+         where the per-session view settings already are. client.js writes
+         --perch-text-scale onto #perch-hub-root; css.js scales the chat tab. -->
+    <div class="field-row">
+      <div class="field"><span class="field-label" id="perch-text-size-label">${escapeHtml(t("perch.textSize", lang))}</span>
+        <div class="text-size" role="group" aria-labelledby="perch-text-size-label">
+          <button type="button" class="quiet" id="perch-text-smaller" aria-label="${escapeHtml(t("perch.textSmaller", lang))}" title="${escapeHtml(t("perch.textSmaller", lang))}">A−</button>
+          <button type="button" class="quiet" id="perch-text-reset" aria-label="${escapeHtml(t("perch.textDefault", lang))}" title="${escapeHtml(t("perch.textDefault", lang))}">A</button>
+          <button type="button" class="quiet" id="perch-text-larger" aria-label="${escapeHtml(t("perch.textLarger", lang))}" title="${escapeHtml(t("perch.textLarger", lang))}">A+</button>
+          <span class="text-size-value" id="perch-text-size-value" aria-live="polite">100%</span>
+        </div></div>
+    </div>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
         <select id="perch-model" aria-labelledby="perch-model-label" disabled></select>

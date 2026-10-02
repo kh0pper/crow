@@ -145,7 +145,11 @@ async function measure(w, h, expression, { css = "", ready = "!!document.querySe
     if (css) await evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(css)};document.head.appendChild(s);return 1;})()`);
     // Two frames so a class toggle or the appended style has been laid out.
     await evalIn("new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})");
-    return JSON.parse(await evalIn(expression));
+    const value = JSON.parse(await evalIn(expression));
+    // Hermetic: the text-size step persists in this origin's localStorage, and
+    // every test here shares one origin. Leave nothing behind for the next.
+    await evalIn("(function(){try{localStorage.removeItem('crow.perch.textSize');}catch(e){}return 1;})()");
+    return value;
   } finally {
     ws.close();
     await fetch(CDP + "/json/close/" + tab.id).catch(() => {});
@@ -240,4 +244,72 @@ test("live @1280x900: the desktop keeps the role gutter", async (t) => {
   const m = await measure(1280, 900, MSG_GEOMETRY, { ready: MSG_READY });
   assert.equal(m.narrow, false);
   assert.ok(m.whatLeft - m.trLeft >= 64, "the body sits beside the 64px label column: " + JSON.stringify(m));
+});
+
+// ─── text size ─────────────────────────────────────────────────────────────
+
+test("css: every font size is scaled by --pts, which only the chat tab changes", async () => {
+  const { perchHubCss, scaleFontSizes } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  assert.equal(scaleFontSizes("a{font-size:13px}b{font:500 14px/1 Inter}c{font:11px/1.6 mono}d{font:inherit}"),
+    "a{font-size:calc(13px * var(--pts,1))}b{font:500 calc(14px * var(--pts,1))/1 Inter}c{font:calc(11px * var(--pts,1))/1.6 mono}d{font:inherit}");
+  const css = perchHubCss().replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(css, /font-size:\s*\d+(\.\d+)?px/, "an unscaled font-size would ignore the text-size control");
+  assert.doesNotMatch(css, /font:(\s*\d{3})?\s*\d+(\.\d+)?px/, "an unscaled font shorthand would ignore it too");
+  assert.match(css, /#perch-hub-root\{--pts:1\}/);
+  assert.match(css, /#perch-tab-chat\{--pts:var\(--perch-text-scale,1\)/);
+});
+
+test("html: the Session tab carries A− / A / A+ with translated aria-labels (en + es)", async () => {
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  for (const key of ["perch.textSize", "perch.textSmaller", "perch.textDefault", "perch.textLarger"]) {
+    for (const lang of ["en", "es"]) {
+      const v = t(key, lang);
+      assert.ok(v && v !== key, key + " has a " + lang + " string");
+    }
+    assert.notEqual(t(key, "es"), t(key, "en"), key + " is actually translated");
+  }
+  const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/dashboard/perch-hub/html.js", import.meta.url), "utf8");
+  const session = src.slice(src.indexOf('id="perch-tab-session"'), src.indexOf('id="perch-tab-files"'));
+  for (const id of ["perch-text-smaller", "perch-text-reset", "perch-text-larger", "perch-text-size-value"]) {
+    assert.ok(session.includes('id="' + id + '"'), id + " lives in the Session tab");
+  }
+  assert.match(session, /id="perch-text-smaller" aria-label="\$\{escapeHtml\(t\("perch\.textSmaller", lang\)\)\}"/);
+  assert.match(session, /id="perch-text-larger" aria-label="\$\{escapeHtml\(t\("perch\.textLarger", lang\)\)\}"/);
+});
+
+const BIGGEST = `(function(){ var b=document.getElementById('perch-text-larger'); for(var i=0;i<6;i++) b.click(); return 1; })()`;
+const TEXT_GEOMETRY = `(function(){
+  function fs(sel){ var e=document.querySelector(sel); return e?parseFloat(getComputedStyle(e).fontSize):null; }
+  function hit(e){ var b=e.getBoundingClientRect(); var x=b.left+b.width/2, y=b.top+b.height/2;
+    var t=document.elementFromPoint(x,y); return !!t&&(t===e||e.contains(t)); }
+  var send=document.getElementById('perch-send');
+  return JSON.stringify({ step:document.getElementById('perch-hub-root').getAttribute('data-text-step'),
+    entry:fs('#perch-transcript .entry.bot'), input:fs('#perch-input'), sendFs:fs('#perch-send'),
+    tabs:fs('#perch-tabs button'), close:fs('#perch-close'),
+    sendHit:hit(send), docScrollX:document.documentElement.scrollWidth-innerWidth,
+    trScrollX:(function(){var t=document.getElementById('perch-transcript'); return t.scrollWidth-t.clientWidth;})(),
+    contentBodyScroll:(function(){var c=document.querySelector('.content-body'); return c.scrollHeight-c.clientHeight;})() });
+})()`;
+
+test("live @412x915: the largest text step scales the chat tab only, and nothing breaks", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const base = await measure(412, 915, TEXT_GEOMETRY, { ready: MSG_READY });
+  const m = await measure(412, 915, "(function(){" + "var x=" + BIGGEST + ";return " + TEXT_GEOMETRY + "})()", { ready: MSG_READY });
+  assert.equal(m.step, "4");
+  assert.ok(Math.abs(m.entry - base.entry * 1.4) < 0.2, "message text x1.4: " + base.entry + " -> " + m.entry);
+  assert.ok(Math.abs(m.input - base.input * 1.4) < 0.2, "composer x1.4: " + base.input + " -> " + m.input);
+  assert.equal(m.tabs, base.tabs, "the tab bar keeps its size");
+  assert.equal(m.close, base.close, "the Session tab keeps its size");
+  assert.equal(m.sendHit, true, "Send stays reachable");
+  assert.equal(m.docScrollX, 0, "no horizontal page scroll");
+  assert.equal(m.trScrollX, 0, "the transcript does not scroll sideways");
+  assert.equal(m.contentBodyScroll, 0, "the page does not scroll");
+});
+
+test("live @412x760: at the largest text step the ask card's Send answer / Cancel are still tappable", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(412, 760, "(function(){var x=" + BIGGEST + ";return " + ASK_GEOMETRY + "})()");
+  assert.equal(m.sendHit, true, JSON.stringify(m));
+  assert.equal(m.cancelHit, true, JSON.stringify(m));
+  assert.equal(m.tabChatOverflow, 0);
 });

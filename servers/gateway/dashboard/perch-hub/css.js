@@ -26,8 +26,24 @@
  *  first time this one moved. */
 export const PERCH_SPLIT_MIN_WIDTH = 900;
 
+/** TEXT SIZE (2026-10-02). Every px font size in this sheet is emitted as
+ *  calc(Npx * var(--pts,1)). --pts is 1 everywhere in the hub except inside
+ *  the chat tab, where it follows --perch-text-scale (client.js writes that
+ *  onto #perch-hub-root from the Session tab's A− / A / A+, saved per device).
+ *  So the chat tab — messages, tool/file/phone cards, the ask card, the
+ *  banner, the composer — scales as one, and the list, tabs and Session tab
+ *  keep their size. Done as one transform rather than hand-editing ~90 rules
+ *  so a rule added later is covered without anyone remembering to. Only
+ *  "font-size:" and the size inside a "font:" shorthand are touched; spacing
+ *  stays fixed. Exported for tests/perch-phone-layout.test.js. */
+export function scaleFontSizes(css) {
+  return css
+    .replace(/(font-size:\s*)(\d+(?:\.\d+)?)px/g, "$1calc($2px * var(--pts,1))")
+    .replace(/(font:\s*(?:\d{3}\s+)?)(\d+(?:\.\d+)?)px/g, "$1calc($2px * var(--pts,1))");
+}
+
 export function perchHubCss() {
-  return `
+  return scaleFontSizes(`
 #perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#5d6d78;--teal:#0e6b62;--teal-soft:#dcecea;
 --wire:#94a4ae;--alive:#2fa36b;--attn:#d1633e;--line:#dde4e8;
 --ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6}
@@ -45,6 +61,17 @@ export function perchHubCss() {
    Dark --dim #8fa0ab is 5.84:1 / 6.51:1. tests/perch-phone-card.test.js
    measures both themes. */
 #perch-hub-root,#perch-hub-root *{box-sizing:border-box;margin:0}
+/* Text size: --pts is the multiplier scaleFontSizes() writes into every font
+   size. 1 across the hub; the chat tab follows the operator's step. The
+   chat tab also gets an explicit base size so the text that inherits (the ask
+   card's question, plain notes) scales with the rest. */
+#perch-hub-root{--pts:1}
+#perch-tab-chat{--pts:var(--perch-text-scale,1);font-size:15px}
+/* The control itself (Session tab). */
+#perch-hub-root .text-size{display:flex;align-items:center;gap:6px}
+#perch-hub-root .text-size button{min-width:44px;min-height:44px;padding:8px 10px}
+#perch-hub-root .text-size button:disabled{opacity:.45;cursor:default}
+#perch-hub-root .text-size-value{color:var(--dim);font-size:13px;margin-left:4px;font-variant-numeric:tabular-nums}
 /* #perch-hub-root is the flex-column height owner for its two children
    (the small header block above, and .hub-split below) — this is what lets
    .hub-split hand a definite height down to #perch-chat, which is what lets
@@ -636,5 +663,5 @@ border-top:1px solid var(--line);flex-shrink:0}
   #perch-tabs{order:0;border-top:none;border-bottom:1px solid var(--line);padding:6px 0}
   #perch-hub-root #perch-tabs button{flex:0 0 auto;flex-direction:row;gap:6px;font-size:13px;padding:8px 14px}
 }
-`;
+`);
 }
