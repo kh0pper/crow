@@ -192,10 +192,10 @@ export default {
     </div>
 
     <div class="llm-card">
-      <table class="llm-providers-table">
+      <div class="table-scroll"><table class="llm-providers-table">
         <thead><tr><th></th><th>ID</th><th>Host</th><th>Endpoint</th><th>Models</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="6" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">No providers registered.</td></tr>`}</tbody>
-      </table>
+      </table></div>
     </div>
 
     <details style="margin-top:1.25rem">

@@ -328,7 +328,7 @@ export default {
 
     ${overLimitNotice}
 
-    <div style="overflow-x:auto">
+    <div class="table-scroll">
       <table class="sc-table">
         ${cols}
         ${theadUnresolved}
@@ -343,7 +343,7 @@ export default {
         ${escapeHtml(t("syncConflicts.resolvedHeading", lang))}
         ${resolvedTotal > 0 ? `(${resolvedTotal})` : ""}
       </summary>
-      <div style="overflow-x:auto;margin-top:0.5rem">
+      <div class="table-scroll" style="margin-top:0.5rem">
         <table class="sc-table">
           ${cols}
           ${theadResolved}

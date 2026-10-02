@@ -387,14 +387,14 @@ export default {
         const isLong = content.length > 200;
         const previewText = isLong ? content.slice(0, 200) + "…" : content;
         const contentCell = isLong
-          ? `<details style="font-size:0.9rem">
+          ? `<details class="cell-break" style="font-size:0.9rem">
                <summary style="cursor:pointer;list-style:none;outline:none">
                  <span style="font-size:0.9rem">${escapeHtml(previewText)}</span>
                  <span style="color:var(--crow-text-muted);font-size:0.8rem;margin-left:0.5rem" class="expand-label">(show more)</span>
                </summary>
                <pre style="white-space:pre-wrap;font-family:inherit;line-height:1.5;margin:0.5rem 0 0;padding:0.75rem;background:var(--crow-bg-elevated);border-radius:0.25rem">${escapeHtml(content)}</pre>
              </details>`
-          : `<span style="font-size:0.9rem">${escapeHtml(content)}</span>`;
+          : `<span class="cell-break" style="font-size:0.9rem">${escapeHtml(content)}</span>`;
 
         return [
           categoryBadge,

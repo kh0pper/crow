@@ -59,7 +59,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
   const list = section(t("botbuilder.listTitle", lang),
     notice + wizCta + (rows.length
-      ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows)
+      ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows, { stack: true })
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];
@@ -125,11 +125,11 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     : `<tr><td colspan="9" class="btb-muted" style="padding:.5rem">${t("botbuilder.monitorEmpty", lang)}</td></tr>`;
   const monitor = section(t("botbuilder.monitorTitle", lang),
     `<turbo-stream-source src="/dashboard/streams/bot-sessions"></turbo-stream-source>` +
-    `<table class="btb-monitor"><thead><tr>` +
+    `<div class="table-scroll"><table class="btb-monitor"><thead><tr>` +
     `<th>${t("botbuilder.monThId", lang)}</th><th>${t("botbuilder.monThBot", lang)}</th><th>${t("botbuilder.monThStatus", lang)}</th>` +
     `<th>${t("botbuilder.monThModel", lang)}</th><th>${t("botbuilder.monThEsc", lang)}</th>` +
     `<th>${t("botbuilder.monThControl", lang)}</th><th>${t("botbuilder.monThCard", lang)}</th><th>${t("botbuilder.monThThread", lang)}</th>` +
     `<th>${t("botbuilder.monThUpdated", lang)}</th></tr></thead>` +
-    `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table>`);
+    `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table></div>`);
   return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + monitor + form }));
 }
