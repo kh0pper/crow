@@ -30,6 +30,7 @@ import { WebSocketServer, WebSocket, createWebSocketStream } from "ws";
 import { randomBytes } from "node:crypto";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
 import { sign, verify } from "./identity.js";
+import { livenessStatusSql } from "../shared/instance-status.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -270,7 +271,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   // Mark peer as active now — we just had a successful authenticated connection.
   try {
     await db.execute({
-      sql: "UPDATE crow_instances SET status='active', last_seen_at=datetime('now') WHERE id = ?",
+      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
       args: [remoteInstanceId],
     });
   } catch {}
@@ -463,7 +464,7 @@ export class PeerDialer {
 
         // Mark peer as active.
         await db.execute({
-          sql: "UPDATE crow_instances SET status='active', last_seen_at=datetime('now') WHERE id = ?",
+          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
           args: [remoteInstanceId],
         }).catch(() => {});
 

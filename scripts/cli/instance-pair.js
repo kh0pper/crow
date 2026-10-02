@@ -35,6 +35,7 @@ import {
   peerTokensPath,
 } from "../../servers/shared/peer-credentials.js";
 import { createInterface } from "readline";
+import { hostname as osHostname } from "os";
 
 function parseArgs(argv) {
   const out = {};
@@ -91,7 +92,9 @@ async function networkPair(db, { peerUrl, peerName }) {
 
   const reqBody = {
     source_instance_id: localId,
-    source_name: process.env.HOSTNAME || "unknown",
+    // HOSTNAME is a bash variable, not exported to node — the old
+    // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
+    source_name: process.env.HOSTNAME || osHostname() || "unknown",
     source_gateway_url: process.env.CROW_GATEWAY_URL || null,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
@@ -146,7 +149,9 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
   console.log("=== Give these to the peer operator ===");
   console.log(JSON.stringify({
     source_instance_id: localId,
-    source_name: process.env.HOSTNAME || "unknown",
+    // HOSTNAME is a bash variable, not exported to node — the old
+    // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
+    source_name: process.env.HOSTNAME || osHostname() || "unknown",
     source_gateway_url: process.env.CROW_GATEWAY_URL || null,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,

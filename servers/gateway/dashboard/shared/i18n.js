@@ -1781,6 +1781,10 @@ export const translations = {
   "settings.section.navGroups": { en: "Navigation", es: "Navegación" },
   // Multi-Instance group
   "settings.section.pairedInstances": { en: "Paired Instances", es: "Instancias emparejadas" },
+  "settings.pairedActions": { en: "Actions", es: "Acciones" },
+  "settings.pairedRevoke": { en: "Revoke", es: "Revocar" },
+  "settings.pairedThisInstance": { en: "this instance", es: "esta instancia" },
+  "settings.pairedRevokeConfirm": { en: "Revoke {name}? It stops syncing with this instance and its auth token is cleared. Re-pairing is the only way back.", es: "¿Revocar {name}? Deja de sincronizar con esta instancia y se borra su token de autenticación. Solo se puede volver a emparejar." },
   "settings.section.syncConflicts": { en: "Sync Conflicts", es: "Conflictos de sincronización" },
   "settings.section.syncProfiles": { en: "Sync Profiles", es: "Perfiles de sincronización" },
   "settings.section.auditLog": { en: "Cross-Host Audit", es: "Auditoría entre hosts" },

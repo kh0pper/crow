@@ -19,6 +19,7 @@ import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
+import { livenessStatusSql } from "../shared/instance-status.js";
 
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
@@ -586,7 +587,7 @@ export async function loadRemoteInstances() {
 
         // Update last_seen
         await db.execute({
-          sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), status = 'active', updated_at = datetime('now') WHERE id = ?",
+          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ?`,
           args: [inst.id],
         });
       } catch (err) {
@@ -604,7 +605,9 @@ export async function loadRemoteInstances() {
         });
 
         await db.execute({
-          sql: "UPDATE crow_instances SET status = 'offline', updated_at = datetime('now') WHERE id = ?",
+          // Never overwrite a revoke/pause that landed while this probe was
+          // in flight (MPA retirement defect 4).
+          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ?`,
           args: [inst.id],
         }).catch(() => {});
       }
