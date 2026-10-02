@@ -166,6 +166,13 @@ export const translations = {
 
   // ── Security-maintenance health signals (W2) — plain language, no jargon ──
   // logins
+  "signals.peers.label": { en: "Peers", es: "Pares" },
+  "signals.peers.ok": { en: "all online", es: "todos en línea" },
+  "signals.peers.staleCount": { en: "{n} offline", es: "{n} sin conexión" },
+  "signals.peers.stale": { en: "Peer {name} hasn't been seen since {when}", es: "El par {name} no se ha visto desde {when}" },
+  "signals.peers.unreachableCount": { en: "{n} unreachable", es: "{n} inaccesibles" },
+  "signals.peers.unreachable": { en: "Peer {name} has been unreachable at its gateway URL for {hours} h. Check that it is powered on and still logged in to Tailscale.", es: "El par {name} lleva {hours} h inaccesible en su URL de gateway. Comprueba que esté encendido y siga conectado a Tailscale." },
+  "signals.peers.action": { en: "View instances", es: "Ver instancias" },
   "signals.logins.label": { en: "Sign-ins", es: "Inicios de sesión" },
   "signals.logins.none": { en: "no failed attempts", es: "sin intentos fallidos" },
   "signals.logins.count": { en: "{n} failed in 24h", es: "{n} fallidos en 24h" },

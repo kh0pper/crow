@@ -10,7 +10,8 @@
  *   disk      — df-based free % (<10% → warn)
  *   storage   — MinIO availability (MINIO_ENDPOINT unset → info/off; unreachable → warn)
  *   agents    — pi_bot_defs enabled count (always ok, count display)
- *   peers     — crow_instances unseen >24h (info)
+ *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
+ *               else trusted peers unseen >24h (info)
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
@@ -38,6 +39,7 @@ import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
+import { getPeerProbeHealth } from "../../../peer-probe-health.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
@@ -229,34 +231,69 @@ async function agentsSignal(db) {
   };
 }
 
-async function peersSignal(db) {
-  const issues = [];
+// A paired peer whose gateway URL has failed /health this long is a WARN
+// (pushed via the health monitor, 24 h dedupe). Long enough that a rolling
+// restart or a reboot never pages; short enough that a box logged out of
+// Tailscale is caught the same day, not 5 days later (grackle, 2026-09).
+export const PEER_UNREACHABLE_WARN_MS = 2 * 60 * 60 * 1000;
+
+function parseSqliteUtc(ts) {
+  if (!ts) return NaN;
+  const s = String(ts);
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(" ", "T") + "Z").getTime();
+}
+
+async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
   const LAG_MS = 24 * 60 * 60 * 1000;
+  const now = nowFn();
+  const stale = [];
+  const unreachable = [];
   try {
+    // 'offline' rows count too: offline is exactly the state an unreachable
+    // peer is in, and the old status='active' filter hid it.
     const { rows } = await db.execute({
-      sql: "SELECT name, last_seen_at FROM crow_instances WHERE trusted=1 AND status='active'",
+      sql: "SELECT id, name, last_seen_at, gateway_url FROM crow_instances WHERE trusted=1 AND status IN ('active','offline')",
       args: [],
     });
-    const now = Date.now();
+    const probe = getPeerProbeHealth();
     for (const r of rows) {
+      const p = probe[r.id];
+      if (r.gateway_url && p?.failingSince != null && now - p.failingSince >= PEER_UNREACHABLE_WARN_MS) {
+        unreachable.push({ name: r.name || String(r.id).slice(0, 12), hours: Math.floor((now - p.failingSince) / 3_600_000) });
+        continue;
+      }
       if (!r.last_seen_at) continue;
-      const seenAt = new Date(r.last_seen_at).getTime();
+      const seenAt = parseSqliteUtc(r.last_seen_at);
       if (now - seenAt > LAG_MS) {
-        const when = new Date(r.last_seen_at).toLocaleDateString("en-US", {
+        const when = new Date(seenAt).toLocaleDateString("en-US", {
           month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
         });
-        issues.push({ name: r.name, when });
+        stale.push({ name: r.name, when });
       }
     }
   } catch {}
 
-  if (issues.length === 0) {
+  const label = t("signals.peers.label", lang);
+  if (unreachable.length > 0) {
+    return {
+      id: "peers",
+      severity: "warn",
+      state: "warn",
+      label,
+      value: fill(t("signals.peers.unreachableCount", lang), { n: unreachable.length }),
+      issueLabel: fill(t("signals.peers.unreachable", lang), unreachable[0]),
+      actionLabel: t("signals.peers.action", lang),
+      actionHref: "/dashboard/settings?section=paired-instances",
+    };
+  }
+
+  if (stale.length === 0) {
     return {
       id: "peers",
       severity: null,
       state: "ok",
-      label: "Peers",
-      value: "all online",
+      label,
+      value: t("signals.peers.ok", lang),
     };
   }
 
@@ -264,10 +301,10 @@ async function peersSignal(db) {
     id: "peers",
     severity: "info",
     state: "info",
-    label: "Peers",
-    value: `${issues.length} offline`,
-    issueLabel: `Peer ${issues[0].name} hasn't been seen since ${issues[0].when}`,
-    actionLabel: "View instances",
+    label,
+    value: fill(t("signals.peers.staleCount", lang), { n: stale.length }),
+    issueLabel: fill(t("signals.peers.stale", lang), stale[0]),
+    actionLabel: t("signals.peers.action", lang),
     actionHref: "/dashboard/settings?section=paired-instances",
   };
 }
@@ -871,7 +908,7 @@ export async function collectHealthSignals(db, opts = {}) {
     diskSignal(),
     storageSignal(),
     agentsSignal(db),
-    peersSignal(db),
+    peersSignal(db, lang, nowFn),
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
     syncConflictsSignal(db),
