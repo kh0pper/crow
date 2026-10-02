@@ -1,3 +1,10 @@
+# Compose project name. Without it the project defaults to the directory name,
+# "browser", for EVERY instance, so a second instance's `compose up/down` would
+# act on the first one's project. A co-hosted instance must already set
+# CROW_BROWSER_CONTAINER_NAME (see container_name below), so the project follows
+# it; the primary keeps "browser". COMPOSE_PROJECT_NAME / `-p` still override.
+# The value must be a valid project name: lowercase letters, digits, - and _.
+name: ${CROW_BROWSER_CONTAINER_NAME:-browser}
 services:
   crow-browser:
     build:
