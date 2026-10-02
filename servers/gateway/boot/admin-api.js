@@ -176,9 +176,19 @@ export async function mountAdminApi(app, deps) {
       const target = piModelsSyncPath();
       if (target) {
         let timer = null;
-        const run = () => syncPiModelsJson(createDbClient(), { path: target, doorBase: doorBaseUrl({ tailnetIp: getOwnTailnetIp(), port: gatewayPort() }) })
-          .then((r) => { if (r.added?.length || r.updated?.length || r.removed?.length) console.log(`[pi-models-sync] ${target}: +${r.added.length} ~${r.updated.length} -${r.removed.length}`); })
-          .catch((err) => console.warn(`[pi-models-sync] ${err.message}`));
+        // One short-lived DB client per run, always closed (final review minor 3:
+        // this runs at boot, hourly and after every local provider write).
+        const run = async () => {
+          const db = createDbClient();
+          try {
+            const r = await syncPiModelsJson(db, { path: target, doorBase: doorBaseUrl({ tailnetIp: getOwnTailnetIp(), port: gatewayPort() }) });
+            if (r.added?.length || r.updated?.length || r.removed?.length) console.log(`[pi-models-sync] ${target}: +${r.added.length} ~${r.updated.length} -${r.removed.length}`);
+          } catch (err) {
+            console.warn(`[pi-models-sync] ${err.message}`);
+          } finally {
+            try { db.close(); } catch { /* already closed */ }
+          }
+        };
         setProviderChangeHook(() => { clearTimeout(timer); timer = setTimeout(run, 2000); timer.unref?.(); });
         setInterval(run, reconcileIntervalMs()).unref(); // replicated changes reach pi within the hour
         await run();
