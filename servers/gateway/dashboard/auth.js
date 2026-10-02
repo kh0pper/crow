@@ -365,7 +365,7 @@ export async function verifySession(token) {
   const db = createDbClient();
   try {
     const result = await db.execute({
-      sql: "SELECT token FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND expires_at > datetime('now')",
+      sql: "SELECT token FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND julianday(expires_at) > julianday('now')",
       args: [hashToken(token)],
     });
     return result.rows.length > 0;

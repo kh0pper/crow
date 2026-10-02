@@ -56,7 +56,7 @@ export async function mintInvite(db, botId, { expiresAt = null, maxUses = null }
 export async function getActiveInvite(db, botId) {
   const { rows } = await db.execute({
     sql: "SELECT id, token, expires_at, max_uses, uses, revoked, created_at FROM bot_message_invites "
-       + "WHERE bot_id=? AND revoked=0 AND (expires_at IS NULL OR expires_at > datetime('now')) "
+       + "WHERE bot_id=? AND revoked=0 AND (expires_at IS NULL OR julianday(expires_at) > julianday('now')) "
        + "ORDER BY id DESC LIMIT 1",
     args: [botId],
   });
