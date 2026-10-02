@@ -52,6 +52,7 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
+import { readEnvFile } from "../env-manager.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -387,18 +388,142 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
 }
 
 /**
+ * The bundle-relative path of `manifest.docker.composefile` (default
+ * "docker-compose.yml"), or null when the declared value is not a plain
+ * relative path that stays inside the bundle dir.
+ */
+function manifestComposeFile(manifest) {
+  const declared = manifest?.docker?.composefile;
+  if (declared === undefined || declared === null || declared === "") return "docker-compose.yml";
+  if (typeof declared !== "string" || isAbsolute(declared) || declared.includes("\\") || declared.includes("$")) return null;
+  const rel = relativePath(".", declared);
+  if (!rel || rel.startsWith("..")) return null;
+  return rel;
+}
+
+/**
+ * Compose-style variable expansion of one value: ${V}, ${V:-d}, ${V-d},
+ * ${V:?m}, ${V?m}, ${V:+a}, ${V+a} and bare $V (nesting allowed in the
+ * default). An unset variable expands to "" (what compose substitutes; a `?`
+ * form would have failed the run, so no container holds that mount anyway).
+ */
+function expandComposeVars(value, env) {
+  const str = String(value);
+  let out = "";
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (ch !== "$") { out += ch; i++; continue; }
+    if (str[i + 1] === "$") { out += "$"; i += 2; continue; }
+    if (str[i + 1] === "{") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < str.length && depth > 0) {
+        if (str[j] === "{") depth++;
+        else if (str[j] === "}") depth--;
+        if (depth > 0) j++;
+      }
+      const body = str.slice(i + 2, j);
+      i = j + 1;
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?)([-?+])([\s\S]*))?$/.exec(body);
+      if (!m) continue;
+      const [, name, colon, op, arg = ""] = m;
+      const v = env[name];
+      const isSet = v !== undefined && v !== null;
+      const usable = colon ? isSet && String(v) !== "" : isSet;
+      if (op === "-") out += usable ? String(v) : expandComposeVars(arg, env);
+      else if (op === "+") out += usable ? expandComposeVars(arg, env) : "";
+      else out += isSet ? String(v) : "";
+      continue;
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(str.slice(i + 1));
+    if (!m) { out += ch; i++; continue; }
+    out += env[m[0]] !== undefined && env[m[0]] !== null ? String(env[m[0]]) : "";
+    i += 1 + m[0].length;
+  }
+  return out;
+}
+
+/** The host-side part of a short-syntax volume (`src:dst[:mode]`), brace-aware. */
+function shortVolumeSource(item) {
+  let depth = 0;
+  for (let i = 0; i < item.length; i++) {
+    const ch = item[i];
+    if (ch === "$" && item[i + 1] === "{") { depth++; i++; continue; }
+    if (ch === "}" && depth > 0) { depth--; continue; }
+    if (ch === ":" && depth === 0) return item.slice(0, i);
+  }
+  return item;
+}
+
+/**
+ * Every host path a compose file binds into a container, as absolute paths.
+ * Reads the TEXT (no YAML parser): short-syntax list items (`- ./x:/y`) and
+ * long-syntax `source:` keys. Values are expanded compose-style against
+ * `env`; a relative source resolves against `projectDir` (where compose runs:
+ * the INSTALLED bundle's compose dir), `~` against HOME. Anything that is not
+ * a path after expansion (a named volume, a port, an env entry) is skipped.
+ */
+function composeBindSources(text, projectDir, env) {
+  const out = [];
+  const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+  const consider = (rawSrc) => {
+    let src = expandComposeVars(clean(rawSrc), env).trim();
+    if (!src) return;
+    if (src === "~" || src.startsWith("~/")) src = join(env.HOME || "", src.slice(1));
+    if (!(src.startsWith(".") || src.startsWith("/"))) return;   // named volume, port, …
+    out.push(isAbsolute(src) ? resolvePath(src) : resolvePath(projectDir, src));
+  };
+  for (const line of String(text).split(/\r?\n/)) {
+    const longForm = /^\s*(?:-\s+)?source:\s*(.+)$/.exec(line);
+    if (longForm) { consider(longForm[1]); continue; }
+    const item = /^\s*-\s+(.+)$/.exec(line);
+    if (item) consider(shortVolumeSource(clean(item[1])));
+  }
+  return out;
+}
+
+/** realpath when the path exists, else the lexical path. */
+function realOrSelf(p) {
+  try { return realpathSync(p); } catch { return resolvePath(p); }
+}
+
+/** True when a and b are the same path or one contains the other. */
+function pathsOverlap(a, b) {
+  const ab = relativePath(a, b);
+  const ba = relativePath(b, a);
+  const inside = (rel) => rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return inside(ab) || inside(ba);
+}
+
+/**
  * The compose `build:` contexts of a bundle (`build: ./runner` or
  * `build:\n  context: ./runner`), read from the compose TEXT the same way the
- * rest of this file reads compose (line regexes, no YAML parser). Returns only
- * contexts that are relative, resolve to a directory STRICTLY inside the
- * bundle dir (never the bundle root ".": that would sweep in compose/.env/
- * data), stay inside it after symlink resolution, and are not also a volume
- * bind source (refresh must never mutate a live container's mounts). Each is
- * returned as a bundle-relative path.
+ * rest of this file reads compose (line regexes, no YAML parser). The compose
+ * file is `manifest.docker.composefile` (default docker-compose.yml); contexts
+ * and binds resolve against that file's directory, as compose resolves them.
+ *
+ * Returns only contexts that are relative, resolve to a directory STRICTLY
+ * inside the bundle dir (never the bundle root ".": that would sweep in
+ * compose/.env/data), stay inside it after symlink resolution, and do not
+ * overlap any bind mount of the INSTALLED copy — the context itself, a
+ * subdirectory of it, or a parent of it (refresh must never mutate a live
+ * container's mounts). Bind sources come from short syntax and long-syntax
+ * `source:`, with ${VAR} expanded against the installed .env + process env.
+ * Each context is returned as a bundle-relative path.
+ *
+ * @param {string} appSrc   repo bundle dir (copy source)
+ * @param {object} [opts]
+ * @param {object} [opts.manifest]  repo manifest (for docker.composefile)
+ * @param {string} [opts.destDir]   installed bundle dir (where compose runs); defaults to appSrc
+ * @param {object} [opts.env]       env for ${VAR} expansion; defaults to destDir/.env + process.env
  */
-function composeBuildContexts(appSrc) {
+function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env = null } = {}) {
+  const composeRel = manifestComposeFile(manifest);
+  if (!composeRel) return [];
   let text;
-  try { text = readFileSync(join(appSrc, "docker-compose.yml"), "utf8"); } catch { return []; }
+  try { text = readFileSync(join(appSrc, composeRel), "utf8"); } catch { return []; }
+  const composeDirRel = dirname(composeRel);
   const lines = text.split(/\r?\n/);
   const raw = [];
   const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
@@ -416,20 +541,32 @@ function composeBuildContexts(appSrc) {
       if (c) { raw.push(clean(c[1])); break; }
     }
   }
+  if (raw.length === 0) return [];
   let rootReal;
   try { rootReal = realpathSync(appSrc); } catch { return []; }
+
+  const expandEnv = env || (() => {
+    const fileVars = {};
+    try {
+      for (const [k, { value }] of readEnvFile(join(destDir, ".env")).vars) fileVars[k] = value;
+    } catch { /* no .env → process env only */ }
+    return { ...fileVars, ...process.env };   // compose: shell env wins over .env
+  })();
+  const destReal = realOrSelf(destDir);
+  const binds = composeBindSources(text, join(destReal, composeDirRel), expandEnv).map(realOrSelf);
+
   const out = new Set();
   for (const ctx of raw) {
     if (!ctx || isAbsolute(ctx) || ctx.includes("$") || ctx.includes("\\")) continue;
-    const rel = relativePath(appSrc, resolvePath(appSrc, ctx));
+    const rel = relativePath(appSrc, resolvePath(appSrc, composeDirRel, ctx));
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
     const src = join(appSrc, rel);
     let real;
     try { real = realpathSync(src); if (!statSync(real).isDirectory()) continue; } catch { continue; }
     const realRel = relativePath(rootReal, real);
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
-    const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`^\\s*-\\s+["']?(\\./)?${escaped}/?(:|["']?\\s*$)`, "m").test(text)) continue;
+    const installedCtx = realOrSelf(join(destReal, rel));
+    if (binds.some((b) => pathsOverlap(b, installedCtx))) continue;
     out.add(rel);
   }
   return [...out];
@@ -552,7 +689,12 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     for (const s of repoManifest.skills) declare(s);
   }
 
+  // manifest.json is the refresh's commit marker: the version it carries is
+  // what makes the NEXT boot skip this bundle. It is copied LAST (below), so
+  // a copy that throws part-way leaves the installed version stale and the
+  // next boot retries the whole refresh instead of blessing a half-copy.
   for (const item of new Set([...topFiles, ...dirs, ...declaredRoots])) {
+    if (item === "manifest.json") continue;
     if (copyBundleRefreshItem(appSrc, destDir, item)) touched.push(item);
   }
 
@@ -561,7 +703,7 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // apply — without this a version bump never ships the image's source.
   // No automatic rebuild: Extensions Restart/Start runs `up -d --build`.
   if (isDocker) {
-    const contexts = composeBuildContexts(appSrc);
+    const contexts = composeBuildContexts(appSrc, { manifest: repoManifest, destDir });
     for (const rel of contexts) {
       cpSync(join(appSrc, rel), join(destDir, rel), {
         recursive: true,
@@ -618,6 +760,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
       console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
     }
   }
+
+  // Commit marker last — see the include loop above.
+  if (copyBundleRefreshItem(appSrc, destDir, "manifest.json")) touched.push("manifest.json");
 
   console.log(`[bundles] refreshed ${id} ${oldVersion} -> ${newVersion}`);
   return { oldVersion, newVersion, touched };
