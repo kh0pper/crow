@@ -239,11 +239,17 @@ Arm on grackle with `sudo systemd-run --on-active=10800 --unit=grackle-freeze-de
 **Pre-window (T-60 → T-0, nothing degraded):**
 - [ ] Confirm the gates in "Global constraints". For A8, after a test revoke on a throwaway row in the A8 PR's own acceptance, `crow_instances.status` stays `revoked` across two proxy reloads.
 - [ ] Get Kevin's answers for spec §8.2 (c) and (d): Ramble import yes or no, and media/data-dashboard bundles. **If he picked install, install those bundles on crow now** (gateway up) so their tables exist.
-- [ ] Collect the peer max ids, read-only, for all three id-keyed synced tables (memories, research_notes, glasses_note_sessions):
+- [ ] Collect the peer max ids, read-only, for all three id-keyed synced tables (memories, research_notes, glasses_note_sessions), **for every live peer the importer names**. The rehearse report's `peers.required` lists them by instance id: every crow `crow_instances` row with status active/offline except crow itself and grackle. On 10-02 that was black-swan `77ac9c01d04232ac21498959394a6896`, raven (named "unknown") `1ed44a83420076c087c6576cd179f206`, and MPA `520a862972ac32b60e737c458b5e050c`. MPA is retired, so it is excluded with `--peer-exclude`. apply refuses unless every required peer has a value or an exclude (review I3).
   - black-swan: `sqlite3 'file:…/crow.db?mode=ro' 'select (select max(id) from memories), (select max(id) from research_notes), (select max(id) from glasses_note_sessions)'`;
   - raven: the same query through `python3`'s read-only sqlite3, since raven has no sqlite3 or node.
-  - An empty table gives NULL: pass 0. A table with no value passed stays un-queued (`peer-id-range-unknown`).
-- [ ] Run a fresh rehearse on a crow API backup with yesterday's grackle backup copy. Expect zero errors, and check the report against the spec §4.2 numbers (memories about 204, blog 31, research_sources 270, ramble deltas).
+  - An empty table gives NULL: pass 0.
+- [ ] Run a fresh rehearse on a crow API backup with yesterday's grackle backup copy, **as kh0pp (never sudo)**, with `CROW_DATA_DIR=/home/kh0pp/.crow/data`. rehearse simulates grackle's revoke on its scratch copy, so phase B is exercised. Expect `rehearse.ok: true` and check the report against the spec §4.2 numbers (memories about 204, blog 31, research_sources 270, ramble deltas).
+- [ ] **Go/no-go with Kevin**, from the rehearse report's `go_no_go` section:
+  - `unclassified_with_rows`: tables the map never classified that hold rows. They go to the extract only. Kevin either accepts this, and apply then gets exactly this list as `--ack-unclassified`, or the map grows a row first.
+  - `extract_only_tables`: every table that stays behind, with its row count. That includes bot_* history, pir/capstone, tax, crowclaw, the media feed, and the skipped tables.
+  - `content_drift`: memories and notes that replicated by id and were later edited on one side. crow's version is kept by default. Kevin picks per row; any change is a manual, attended edit after W3.
+  - `synced_tables_missing_on_crow`: rows of the "already synced" tables that are only on grackle (contacts, messages, crow_context, ramble_*). These get imported.
+  - `renamed_project_slugs`, `imported_schedules`, the wallet delta, and `rows_sent_to_extract`.
 - [ ] List the crow.db holders with `lsof /home/kh0pp/.crow/data/crow.db`. End every Claude session holding crow stdio MCP servers, then run the rest of W3 from plain bash (spec §5.3).
 - [ ] Write the schedule row and run `node ~/crow/scripts/ops/box-reserve.mjs hold --owner grackle-d3 --reason "W3 import, gateway stopped" --minutes 150`.
 
@@ -260,21 +266,28 @@ Arm on grackle with `sudo systemd-run --on-active=10800 --unit=grackle-freeze-de
 **Import (crow gateway DOWN from here):**
 - [ ] Arm deadman A and confirm it with `systemctl list-timers --all | grep w3-deadman`.
 - [ ] `sudo systemctl stop crow-gateway` (the bundle children exit with it). Confirm `lsof /home/kh0pp/.crow/data/crow.db` is empty.
-- [ ] Take the cold backup: `sqlite3 /home/kh0pp/.crow/data/crow.db ".backup /home/kh0pp/grackle-decom/d3/crow-pre-d3.db"`, followed by `sqlite3 …/crow-pre-d3.db 'pragma integrity_check'`, which must print `ok`. The gateway is stopped, so an offline `.backup` is safe here.
-- [ ] Run the importer:
+- [ ] Take the cold backup: first `sqlite3 /home/kh0pp/.crow/data/crow.db 'pragma wal_checkpoint(TRUNCATE)'`. If the gateway stopped uncleanly, the checkpoint would otherwise land after the backup, and the importer refuses a backup older than the target's last write (review minor 11). Then `sqlite3 /home/kh0pp/.crow/data/crow.db ".backup /home/kh0pp/grackle-decom/d3/crow-pre-d3.db"`, followed by `sqlite3 …/crow-pre-d3.db 'pragma integrity_check'`, which must print `ok`. The gateway is stopped, so an offline `.backup` is safe here.
+- [ ] Run the importer **as kh0pp, never with sudo**. apply refuses root and a target owned by another uid, because root-owned `-wal`/`-shm` would keep the gateway down (review I5):
   ```
+  BS=77ac9c01d04232ac21498959394a6896; RV=1ed44a83420076c087c6576cd179f206; MPA=520a862972ac32b60e737c458b5e050c
   cd ~/crow && CROW_DATA_DIR=/home/kh0pp/.crow/data node scripts/ops/grackle-d3-import.mjs \
     --source ~/grackle-decom/d3/<backup>.db --expect-sha <sha> \
+    --source-instance-id 49cf71ca878643ba7717f344329266fd \
     --target /home/kh0pp/.crow/data/crow.db --backup-ok ~/grackle-decom/d3/crow-pre-d3.db \
     --mode apply --report ~/grackle-decom/d3/report.json --extract ~/grackle-decom/d3/grackle-d3-extract.db \
-    --peer-max-memory-id black-swan=<n> --peer-max-memory-id raven=<n> \
-    --peer-max-id research_notes:black-swan=<n> --peer-max-id research_notes:raven=<n> \
-    --peer-max-id glasses_note_sessions:black-swan=<n> --peer-max-id glasses_note_sessions:raven=<n> \
-    [--import-media] [--import-data-dashboard]
+    --peer-max-id memories:$BS=<n> --peer-max-id memories:$RV=<n> \
+    --peer-max-id research_notes:$BS=<n> --peer-max-id research_notes:$RV=<n> \
+    --peer-max-id glasses_note_sessions:$BS=<n> --peer-max-id glasses_note_sessions:$RV=<n> \
+    --peer-exclude $MPA \
+    --ack-unclassified <exactly the go/no-go unclassified_with_rows list, comma-separated> \
+    --import-media --import-data-dashboard
   ```
-  `CROW_DATA_DIR` must be crow's, so `getOrCreateLocalInstanceId()` returns crow's id. Confirm the report's `emits.instance_id` equals `0867ac2809dedd885ba7769b21966f8e`.
+  - `CROW_DATA_DIR` must be crow's. The importer reads `instance-id` and never creates it, and it refuses if the file is missing or the id isn't a row in crow's `crow_instances`.
+  - Confirm the report's `emits.instance_id` equals `0867ac2809dedd885ba7769b21966f8e`.
+  - **Phase B runs only if crow's row for grackle reads `revoked`** (review I4). If the report has `phase_b_refused`, phase A is committed and nothing is queued. Fix the revoke, confirm it sticks, then run the same command with `--mode emit-only`, keeping `--target`, `--report`, `--expect-sha` and the peer flags; the `--source` flag isn't needed. emit-only accepts only this apply's report, against this target and this sha. It resumes item by item, and nothing is queued twice.
 - [ ] Check the report: `per_table` counts equal the rehearse counts, the wallet delta equals the rehearse delta, and `extract_tables` and `skipped` match the spec.
 - [ ] Run `sqlite3 crow.db 'pragma integrity_check; pragma foreign_key_check;'`. It must print `ok` and no FK rows.
+- [ ] Copy grackle's board DB `~/.crow/data/tasks.db` (board_plans/results) into `~/grackle-decom/d3/` for the archive. It's extract-only (fix-round ruling); nothing imports it.
 - [ ] Copy the project files: `rsync -a --ignore-existing` from grackle `~/.crow/data/projects/{1,5,6}/` into crow's matching dirs. For project 6 clashes, copy as `*.grackle` and list them. Also copy kb-media.
 - [ ] `touch ~/grackle-decom/IMPORT-COMMITTED`.
 - [ ] `sudo systemctl start crow-gateway`, then wait for `/health` 200.
