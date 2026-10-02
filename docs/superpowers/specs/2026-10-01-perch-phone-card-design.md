@@ -210,8 +210,12 @@ container ends a running call).
     a valid signature; unsigned or forged headers, and the board token with no headers, become an
     unattributed bot (`actor_kind` bot, no id). Bots run by key-less hosts (`pibot-gateways@`)
     therefore lose the lock exemption: a job-rail card they finish stays locked for the owner.
-  - **S3 (done, fix/bot-isolation):** pi children run under bubblewrap where usable: the docker
-    socket is masked and no_new_privs blocks sudo. See `scripts/pi-bots/pi_sandbox.mjs`.
+  - **S3 (fix/bot-isolation, defense in depth, NOT closed):** pi children run under bubblewrap
+    where usable. The docker socket and the user session (D-Bus, systemd user manager, tmux) are
+    masked, user units are read-only, and no_new_privs blocks sudo. This removes the casual
+    docker/sudo routes but is not containment: the writable filesystem (rc files, `~/crow`) and
+    `ssh localhost` remain escape routes until a dedicated bot user exists. See
+    `scripts/pi-bots/pi_sandbox.mjs`.
 
 ## 7. Dependencies / ordering
 The fixes PR (`fix/phone-install-and-perch-polish`, #393) has merged, and this branch is rebased

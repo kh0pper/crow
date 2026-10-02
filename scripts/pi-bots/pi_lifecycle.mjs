@@ -261,8 +261,12 @@ export function reapStalePi(opts = {}) {
       /* already gone */
     }
     // S3: a sandboxed entry's pid is the bwrap wrapper; signal pi too.
+    // bwrap does not forward signals. The wrapper is its process group's
+    // leader (PiRpc spawns detached), so the group signal also reaches pi's
+    // MCP children; the direct signals cover a wrapper that is not a leader.
     if (p.innerPid) {
       victims[victims.length - 1].innerPid = p.innerPid;
+      try { kill(-p.pid, "SIGTERM"); } catch { /* no such group */ }
       try { kill(p.innerPid, "SIGTERM"); } catch { /* already gone */ }
     }
   }

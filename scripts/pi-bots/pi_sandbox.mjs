@@ -1,55 +1,74 @@
 /**
- * S3 (2026-10-02): run pi children without the gateway's docker access.
+ * S3 (2026-10-02): defense in depth for pi children. It removes the CASUAL
+ * routes from a bot's shell to docker and sudo. It is NOT a containment
+ * boundary (see "What it does not stop" below).
  *
  * Why: pi children run as the gateway's uid with the gateway's groups. On
- * crow that user is in the `docker` group (crow-gateway.service also says
- * SupplementaryGroups=docker), and `docker run -v /:/host` is root. A bot with
- * an open shell (or an allowlisted python/uv) is therefore root-equivalent,
- * which also defeats the in-memory actor key (actor-sig.mjs). The same user is
- * in `sudo`, so a child that finds the password can escalate too.
+ * crow that user is in the `docker` group, and `docker run -v /:/host` is root.
+ * The same user is in `sudo`, and the password sits in files the uid can read.
  *
  * What does NOT work unprivileged (verified on crow, util-linux 2.39.3):
- *  - `setpriv --clear-groups` / `--groups`: setgroups(2) needs CAP_SETGID
- *    ("setgroups failed: Operation not permitted").
+ *  - `setpriv --clear-groups` / `--groups`: setgroups(2) needs CAP_SETGID.
  *  - Node's spawn `uid`/`gid`: same syscall, same refusal.
- *  - a bare user namespace (`unshare -U`): the unmapped groups show up as
- *    65534 but the kernel still counts them for access checks, so the docker
- *    socket stays reachable.
- *  The real fixes (a dedicated unprivileged user, or granting the gateway
- *  CAP_SETGID) need root to set up, which is an operator decision.
+ *  - a bare user namespace (`unshare -U`): unmapped groups show up as 65534
+ *    but still count for access checks, so the docker socket stays reachable.
+ *  A real boundary needs a dedicated unprivileged bot user (root to set up).
+ *  That is an operator decision, not made here.
  *
- * What this does instead, with no privilege: when bubblewrap is usable, pi is
- * spawned as
- *     bwrap --dev-bind / / --unshare-user --ro-bind /dev/null <docker.sock> -- node cli.js ...
- *  - the docker socket path is replaced by /dev/null inside the child's mount
- *    namespace. The mount is locked (made in a less-privileged userns from
- *    the child's view), so the child cannot unmount it;
- *  - the child is in its own user namespace, so the /proc/<pid>/root and
- *    /proc/<pid>/environ of processes outside it are refused (the kernel's
- *    ptrace check needs CAP_SYS_PTRACE in the target's namespace). That closes
- *    the "reach the socket through the gateway's /proc/<pid>/root" path;
- *  - bubblewrap always sets no_new_privs, so sudo and other setuid binaries
- *    cannot raise privilege in the child;
- *  - everything else is unchanged: same filesystem (read-write), network,
- *    uid, cwd, env, process group. `id -G` shows the docker gid as 65534
- *    (nogroup). It is still in the credential, but the one object it opens is
- *    masked.
+ * What this does, with no privilege, when bubblewrap is usable:
+ *     bwrap --dev-bind / / --unshare-user
+ *           --ro-bind /dev/null <docker.sock>...          docker API
+ *           --tmpfs /run/user/<uid>                       user bus, systemd
+ *                                                         user manager, gnupg,
+ *                                                         keyring, pipewire,
+ *                                                         pulse, pk-debconf
+ *           --tmpfs /tmp/tmux-<uid>, /tmp/cc-daemon-<uid>, /tmp/.X11-unix
+ *                                                         (when present)
+ *           --ro-bind ~/.config/systemd ~/.config/systemd   user units are
+ *           --ro-bind ~/.local/share/systemd ...            read-only
+ *           --info-fd 3 -- node cli.js ...
+ *  and the child env loses DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR,
+ *  SSH_AUTH_SOCK, TMUX, TMUX_PANE, DISPLAY, WAYLAND_DISPLAY and every *_SOCK.
+ *  - The masks are locked mounts: the child cannot unmount them, even from a
+ *    nested user namespace (verified).
+ *  - In its own user namespace the child is refused other processes'
+ *    /proc/<pid>/{root,environ,mem} (the gateway's and other bots').
+ *  - bubblewrap sets no_new_privs, so sudo and setuid/setgid binaries
+ *    (crontab, at, pkexec) cannot raise privilege.
+ *  - uid, network, cwd and the rest of the filesystem (read-write) are
+ *    unchanged. Inside, files owned by other uids/gids show as nobody/nogroup.
  *
- * Modes (CROW_PI_SANDBOX): "auto" (default) wraps when bwrap is usable and
- * otherwise spawns as before with a one-time warning; "required" refuses to
- * spawn pi without the sandbox; "off" never wraps.
+ * What it does not stop (known escape routes, all need a dedicated user):
+ *  - the writable filesystem: ~/.bashrc and other rc files, ~/crow (the
+ *    gateway's own source, run on the next restart/auto-update), autostart
+ *    entries, ~/.ssh/authorized_keys, any script a privileged process runs;
+ *  - `ssh localhost` (or another lab host) with a readable private key in
+ *    ~/.ssh, which gives an unsandboxed shell;
+ *  - abstract unix sockets (no network namespace), e.g. @/tmp/.X11-unix/X*;
+ *  - reading anything the uid can read (crow.db, tokens, ~/.claude) - S6.
+ *
+ * Without bubblewrap (e.g. black-swan), the fallback is
+ * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
+ *
+ * Modes, from the GATEWAY's env only (process.env; a bot def's spawn_env
+ * cannot change it): CROW_PI_SANDBOX = "auto" (default: bwrap, else the
+ * setpriv fallback, else plain, with a one-time warning), "required" (refuse
+ * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
+const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
+export const PROBE_RETRY_MS = 5 * 60 * 1000;
 
-let probeCache = null; // { ok, bwrap, reason }
-let warned = false;
+let probeCache = null; // { ok, bwrap, setpriv, reason, at }
+let warnedFor = null;
 
 /** Test seam only. */
-export function _resetPiSandboxForTest() { probeCache = null; warned = false; }
+export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; }
 
 export function piSandboxMode(env = process.env) {
   const v = String(env.CROW_PI_SANDBOX || "auto").trim().toLowerCase();
@@ -59,11 +78,15 @@ export function piSandboxMode(env = process.env) {
 function isSocket(p) {
   try { return statSync(p).isSocket(); } catch { return false; }
 }
+function isDir(p) {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
 
 /**
  * Docker API sockets reachable on this host, as real paths (so /var/run ->
  * /run duplicates collapse). DOCKER_HOST=unix://..., the system sockets, and a
- * rootless daemon's socket in XDG_RUNTIME_DIR.
+ * rootless daemon's socket in XDG_RUNTIME_DIR (covered by the /run/user tmpfs
+ * too).
  */
 export function dockerSocketPaths(env = process.env) {
   const cands = ["/run/docker.sock", "/var/run/docker.sock"];
@@ -80,50 +103,114 @@ export function dockerSocketPaths(env = process.env) {
   return out;
 }
 
-/** Can this process start a bubblewrap user-namespace sandbox? Cached. */
-export function probePiSandbox(opts = {}) {
-  if (probeCache && !opts.force) return probeCache;
-  const bwrap = opts.bwrap || BWRAP_CANDIDATES.find((p) => existsSync(p)) || null;
-  if (!bwrap) {
-    probeCache = { ok: false, bwrap: null, reason: "bubblewrap (bwrap) is not installed" };
-    return probeCache;
+/** Per-user IPC directories to hide behind an empty tmpfs (existing only). */
+export function userRuntimeDirs(uid = process.getuid()) {
+  return [`/run/user/${uid}`, `/tmp/tmux-${uid}`, `/tmp/cc-daemon-${uid}`, "/tmp/.X11-unix"].filter(isDir);
+}
+
+/** Dirs the systemd user manager loads units from, made read-only inside.
+ *  Created (empty) when missing so a bot cannot create them itself. */
+export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
+  const dirs = [join(home, ".config", "systemd"), join(home, ".local", "share", "systemd")];
+  const out = [];
+  for (const d of dirs) {
+    if (!isDir(d) && create) { try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch {} }
+    if (isDir(d)) out.push(d);
   }
-  const r = spawnSync(bwrap, ["--dev-bind", "/", "/", "--unshare-user", "--", "/bin/true"],
-    { timeout: 5000, stdio: ["ignore", "ignore", "pipe"] });
-  probeCache = r.status === 0
-    ? { ok: true, bwrap, reason: null }
-    : { ok: false, bwrap, reason: "bwrap cannot create a user namespace here: " +
-        String((r.stderr && r.stderr.toString().trim()) || (r.error && r.error.message) || ("exit " + r.status)).slice(0, 200) };
-  return probeCache;
+  return out;
+}
+
+const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX"]);
+
+/** Copy of env without user-session IPC pointers (and the sandbox switch). */
+export function scrubSandboxEnv(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    if (SCRUB_EXACT.has(k) || /_SOCK$/.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function runProbe(bin, args) {
+  const r = spawnSync(bin, args, { timeout: 5000, stdio: ["ignore", "ignore", "pipe"] });
+  return r.status === 0 ? null
+    : String((r.stderr && r.stderr.toString().trim()) || (r.error && r.error.message) || ("exit " + r.status)).slice(0, 200);
 }
 
 /**
- * The command line to spawn pi with.
- * @returns {{cmd:string, args:string[], sandboxed:boolean, reason:string|null, masked:string[]}}
- * @throws when mode is "required" and the sandbox is unavailable.
+ * Can this process start a bubblewrap user-namespace sandbox? A success is
+ * cached for the life of the process; a failure is re-probed after
+ * PROBE_RETRY_MS (a transient spawn timeout must not leave every later pi
+ * unsandboxed until restart).
+ */
+export function probePiSandbox(opts = {}) {
+  const now = opts.now ?? Date.now();
+  if (probeCache && !opts.force && (probeCache.ok || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
+  const bwrap = opts.bwrap !== undefined ? opts.bwrap : (BWRAP_CANDIDATES.find((p) => existsSync(p)) || null);
+  const setpriv = opts.setpriv !== undefined ? opts.setpriv : (SETPRIV_CANDIDATES.find((p) => existsSync(p)) || null);
+  let ok = false, reason;
+  if (!bwrap) reason = "bubblewrap (bwrap) is not installed";
+  else {
+    const err = runProbe(bwrap, ["--dev-bind", "/", "/", "--unshare-user", "--", "/bin/true"]);
+    if (err == null) ok = true; else reason = "bwrap cannot create a user namespace here: " + err;
+  }
+  let setprivOk = false;
+  if (!ok && setpriv) setprivOk = runProbe(setpriv, ["--no-new-privs", "/bin/true"]) == null;
+  probeCache = { ok, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason, at: now };
+  return probeCache;
+}
+
+/** Current state for status surfaces: "active" | "nnp-only: ..." | "off" | "fallback: ...". */
+export function piSandboxStatus() {
+  const mode = piSandboxMode(process.env);
+  if (mode === "off") return "off";
+  const p = probePiSandbox();
+  if (p.ok) return "active";
+  return (p.setpriv ? "nnp-only: " : "fallback: ") + p.reason;
+}
+
+/**
+ * The command line (and env) to spawn pi with.
+ * @returns {{cmd, args, env, sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, reason, masked:string[]}}
+ * @throws when mode is "required" and bwrap is unavailable.
  */
 export function wrapPiSpawn(cmd, args, opts = {}) {
+  // M1: the mode and the socket list come from the GATEWAY's env, never from
+  // the child env (which carries the bot def's spawn_env).
+  const mode = opts.mode || piSandboxMode(process.env);
   const env = opts.env || process.env;
-  const mode = opts.mode || piSandboxMode(env);
-  const plain = (reason) => ({ cmd, args, sandboxed: false, reason, masked: [] });
+  const plain = (reason) => ({ cmd, args, env, sandboxed: false, wrapper: null, reason, masked: [] });
   if (mode === "off") return plain("CROW_PI_SANDBOX=off");
   const probe = opts.probe || probePiSandbox();
   if (!probe.ok) {
     if (mode === "required") {
       throw new Error("pi sandbox required (CROW_PI_SANDBOX=required) but unavailable: " + probe.reason);
     }
-    if (!warned) {
-      warned = true;
-      console.error("[pi-sandbox] WARNING: pi children run WITHOUT the sandbox (" + probe.reason +
-        "). They keep this process's groups (docker, if present) and can use sudo.");
+    const key = probe.reason + "|" + !!probe.setpriv;
+    if (warnedFor !== key) {
+      warnedFor = key;
+      console.error("[pi-sandbox] WARNING: pi children run WITHOUT the bubblewrap sandbox (" + probe.reason + "). " +
+        (probe.setpriv ? "Falling back to setpriv --no-new-privs: sudo/setuid are blocked, docker is NOT."
+          : "They keep this process's groups (docker, if present) and can use sudo."));
+    }
+    if (probe.setpriv) {
+      return { cmd: probe.setpriv, args: ["--no-new-privs", cmd, ...args], env: scrubSandboxEnv(env),
+        sandboxed: false, wrapper: "setpriv", reason: probe.reason, masked: [] };
     }
     return plain(probe.reason);
   }
-  const masked = opts.sockets || dockerSocketPaths(env);
+  const sockets = opts.sockets || dockerSocketPaths(process.env);
+  const tmpfs = opts.runtimeDirs || userRuntimeDirs();
+  const roDirs = opts.roDirs || systemdUserUnitDirs();
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
-  for (const s of masked) pre.push("--ro-bind", "/dev/null", s);
+  for (const d of tmpfs) pre.push("--tmpfs", d);
+  for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
+  for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
-  return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], sandboxed: true, reason: null, masked };
+  return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
+    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...roDirs] };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

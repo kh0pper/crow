@@ -43,10 +43,13 @@
  *    replayed verbatim. Fix queued as S6 (read confinement in pi-lab, or
  *    fd-based delivery of the per-turn MCP config so no signature rests on
  *    disk).
- *  - a bot with a docker-group shell, which is root-equivalent (the gateway's
- *    user is in the docker group). S3 (scripts/pi-bots/pi_sandbox.mjs) masks
- *    the docker socket and sets no_new_privs for pi children where bubblewrap
- *    is usable; where it is not, this hole is still open.
+ *  - a bot with an open shell. The gateway's user is in the docker and sudo
+ *    groups. S3 (scripts/pi-bots/pi_sandbox.mjs) is defense in depth that
+ *    removes the casual docker/sudo routes (docker socket and user-session
+ *    IPC masked, no_new_privs) where bubblewrap is usable. It is NOT
+ *    containment: the filesystem stays writable (rc files, ~/crow, ssh keys),
+ *    so a shell can still persist or escape. Only a dedicated bot user closes
+ *    this.
  *  - a child replaying its OWN headers (that is its own identity).
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
