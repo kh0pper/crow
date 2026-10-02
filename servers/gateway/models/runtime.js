@@ -1029,6 +1029,7 @@ export function startModel({
       lastError: s.lastError,
       startedAt: s.startedAt,
       pid: s.pid,
+      stderrTail: handle.stderrTail ? handle.stderrTail() : [],
     };
   };
 

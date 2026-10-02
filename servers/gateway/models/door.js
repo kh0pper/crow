@@ -20,3 +20,9 @@ export function gatewayPort(env = process.env) {
 }
 export function doorBaseUrl({ tailnetIp, port }) { return `http://${tailnetIp || "127.0.0.1"}:${port}/llm/v1`; }
 export function nativeLoopbackUrl(port) { return `http://127.0.0.1:${port}/v1`; }
+
+/** The provider-scoped door: a base URL that names its provider, so a client
+ * needs no header and no qualified model id (native rows, alias rows, pi). */
+export function providerDoorUrl(doorBase, providerId) {
+  return String(doorBase).replace(/\/llm\/v1\/?$/, `/llm/p/${encodeURIComponent(providerId)}/v1`);
+}

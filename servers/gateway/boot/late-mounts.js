@@ -27,6 +27,16 @@ export async function mountLateRoutes(app, deps) {
     }
   }
 
+  // --- Mount the models lifecycle API (plan 2 Task 8). Its OWN try/catch: an
+  // import failure here must never stop the companion /llm/v1 router below. ---
+  try {
+    const { default: llmModelsRouter } = await import("../routes/llm-models.js");
+    app.use(llmModelsRouter());
+    console.log("  [llm-models] mounted: GET /llm/models, POST /llm/models/:provider/start|stop, GET /llm/models/jobs/:id");
+  } catch (err) {
+    console.warn("[llm-models] Failed to mount:", err.message);
+  }
+
   // --- Mount LLM-router (folds the standalone companion model-proxy into the
   // gateway). No dashboardAuth: the host-networked companion arrives as loopback,
   // which isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
@@ -34,7 +44,7 @@ export async function mountLateRoutes(app, deps) {
   try {
     const { default: llmRouterRouter } = await import("../routes/llm-router.js");
     app.use(llmRouterRouter());
-    console.log("  [llm-router] mounted: POST /llm/v1/chat/completions, GET /llm/v1/models");
+    console.log("  [llm-router] mounted: POST /llm/v1/{chat/completions,completions,embeddings,rerank}, POST /llm/p/:provider/v1/{chat/completions,completions,embeddings,rerank}, GET /llm/v1/models, GET /llm/p/:provider/v1/models, POST /llm/acquire");
   } catch (err) {
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[llm-router] Failed to mount:", err.message);

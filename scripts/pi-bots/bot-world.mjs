@@ -41,6 +41,7 @@ import { join } from "node:path";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
+import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
@@ -251,6 +252,9 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
 
   // Phase 3.0 (R3/R4/R5): resolve provider/model for THIS turn.
   const resolved = await resolveModel(def, { escalate });
+  // M2: fail the turn before spawning when pi cannot use the resolved model.
+  const piCheck = await checkPiModel(resolved);
+  if (!piCheck.ok) throw new PiModelUnavailableError(piCheck.message);
 
   return {
     sysFile,

@@ -103,12 +103,31 @@ test("rejectFunneled middleware: private paths blocked with Funnel header", asyn
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/"]) {
+    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/dashboard/motioneye", "/llm/v1/chat/completions", "/llm/v1/models", "/llm/p/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/models", "/"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }
   } finally {
     server.close();
+  }
+});
+
+test("/llm routers refuse Funnel themselves, even with CROW_DASHBOARD_PUBLIC=true", async () => {
+  const prev = process.env.CROW_DASHBOARD_PUBLIC;
+  process.env.CROW_DASHBOARD_PUBLIC = "true";
+  const { default: llmRouterRouter } = await import("../servers/gateway/routes/llm-router.js");
+  const app = express();
+  app.use(llmRouterRouter({ acquireFn: async () => true, resolveKeyFn: async () => ({ baseUrl: "http://127.0.0.1:9/v1", model: "m" }), loadProvidersFn: () => ({ providers: {} }) }));
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  try {
+    for (const path of ["/llm/v1/chat/completions", "/llm/p/x/v1/chat/completions", "/llm/v1/embeddings", "/llm/v1/models"]) {
+      const r = await request(server.address().port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, path);
+    }
+  } finally {
+    server.close();
+    if (prev === undefined) delete process.env.CROW_DASHBOARD_PUBLIC; else process.env.CROW_DASHBOARD_PUBLIC = prev;
   }
 });
 

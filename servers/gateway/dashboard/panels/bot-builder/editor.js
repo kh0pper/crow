@@ -97,7 +97,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           (p) =>
             `<optgroup label="${escapeHtml(p)}">` +
             byProv[p]
-              .map((m) => `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}</option>`)
+              .map((m) => `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}${m.piKnown === false ? " (" + escapeHtml(t("botbuilder.modelNotInEngine", lang)) + ")" : ""}</option>`)
               .join("") +
             `</optgroup>`
         )
