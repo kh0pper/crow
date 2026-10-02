@@ -377,7 +377,8 @@ function countCsvTools(csv) {
  *  a facts row that cannot be measured renders as "—", never as a guess. */
 function childMemoryMB(s) {
   try {
-    const pid = s.pi && s.pi.proc && s.pi.proc.pid;
+    // S3: under the pi sandbox proc.pid is the bwrap wrapper; piPid is pi.
+    const pid = (s.pi && s.pi.piPid) || (s.pi && s.pi.proc && s.pi.proc.pid);
     if (!pid) return null;
     const fields = readFileSync("/proc/" + pid + "/statm", "utf8").trim().split(/\s+/);
     const pages = Number(fields[1]);

@@ -45,6 +45,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
+import { isSandboxWrapperArgs } from "./pi_sandbox.mjs";
 
 // Must match LEASE_FILENAME in servers/gateway/perch-interactive.js.
 const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -64,11 +65,20 @@ export const LIFECYCLE_DEFAULTS = {
 
 /**
  * One ps scan -> the bridge-spawned pi processes.
- * Returns [{ pid, ppid, etimes, rssKb, args }].
+ * Returns [{ pid, ppid, etimes, rssKb, args, innerPid? }].
+ *
+ * S3: a sandboxed pi (pi_sandbox.mjs) is TWO processes whose argv both carry
+ * the cli path: the bwrap wrapper (PiRpc's proc.pid, the pid perch leases
+ * name) and pi itself, its child. They are reported as ONE entry so the
+ * concurrency count stays right: pid/ppid/etimes from the wrapper (a dead
+ * gateway orphans the wrapper, so ppid 1 still means orphan, and the lease pid
+ * still matches), rssKb from pi (the wrapper's RSS is tiny), and innerPid = pi,
+ * which the reaper signals too.
  */
-export function listBridgePi() {
+export function listBridgePi(opts = {}) {
   let out = "";
-  try {
+  if (typeof opts._psOutput === "string") out = opts._psOutput;
+  else try {
     out = execFileSync(
       "ps",
       ["-eo", "pid=,ppid=,etimes=,rss=,args="],
@@ -77,6 +87,27 @@ export function listBridgePi() {
   } catch {
     return [];
   }
+  const raw = parsePsLines(out);
+  const wrappers = new Map();
+  for (const p of raw) if (isSandboxWrapperArgs(p.args)) wrappers.set(p.pid, p);
+  const procs = [];
+  const claimed = new Set();
+  for (const p of raw) {
+    if (wrappers.has(p.pid)) continue;
+    const w = wrappers.get(p.ppid);
+    if (w && !claimed.has(w.pid)) {
+      claimed.add(w.pid);
+      procs.push({ pid: w.pid, ppid: w.ppid, etimes: w.etimes, rssKb: p.rssKb, args: p.args, innerPid: p.pid });
+    } else {
+      procs.push(p);
+    }
+  }
+  // A wrapper whose pi has not exec'd yet (or already exited) still counts.
+  for (const w of wrappers.values()) if (!claimed.has(w.pid)) procs.push(w);
+  return procs;
+}
+
+function parsePsLines(out) {
   const procs = [];
   for (const line of out.split("\n")) {
     const s = line.trim();
@@ -229,6 +260,11 @@ export function reapStalePi(opts = {}) {
     } catch {
       /* already gone */
     }
+    // S3: a sandboxed entry's pid is the bwrap wrapper; signal pi too.
+    if (p.innerPid) {
+      victims[victims.length - 1].innerPid = p.innerPid;
+      try { kill(p.innerPid, "SIGTERM"); } catch { /* already gone */ }
+    }
   }
   if (victims.length) {
     // give SIGTERM a moment, then SIGKILL any survivor in the same sweep
@@ -239,13 +275,14 @@ export function reapStalePi(opts = {}) {
       } catch {
         break;
       }
-      if (!victims.some((v) => isAlive(v.pid))) break;
+      if (!victims.some((v) => isAlive(v.pid) || (v.innerPid && isAlive(v.innerPid)))) break;
     }
     for (const v of victims) {
-      if (isAlive(v.pid)) {
+      for (const pid of [v.pid, v.innerPid]) {
+        if (!pid || !isAlive(pid)) continue;
         try {
-          kill(v.pid, "SIGKILL");
-          const m = `SIGKILL pi pid=${v.pid} (survived SIGTERM)`;
+          kill(pid, "SIGKILL");
+          const m = `SIGKILL pi pid=${pid} (survived SIGTERM)`;
           log(m);
           syslog(m);
         } catch {

@@ -123,6 +123,29 @@ Supporting endpoints (all behind the same `dashboardAuth` as every perch-api rou
 
 The hub's chat surface is four tabs (Chat / Session / Files / Activity). Tab switching is pure visibility toggling on the client — it never touches the SSE lifecycle, which belongs to the session, not the tab. Log/tool/error frames route to the Activity rail; the Chat transcript keeps only messages, ask cards, and hard failures.
 
+## The pi sandbox (no docker, no sudo)
+
+Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever started it (channel turns, Perch sessions, background jobs, skill review, the Discord child). That spawn runs through `scripts/pi-bots/pi_sandbox.mjs`. When bubblewrap can create a user namespace, pi starts as `bwrap --dev-bind / / --unshare-user --ro-bind /dev/null <docker.sock> --info-fd 3 -- node cli.js …`. Its effects:
+
+- The docker socket is masked, so a bot's shell, MCP servers and allowlisted interpreters cannot reach the docker daemon (root-equivalent). The gateway itself keeps docker.
+- `no_new_privs` is set, so sudo and setuid binaries cannot raise privilege.
+- Other processes' `/proc/<pid>/{root,environ,mem}` are refused.
+- The filesystem, network, uid, cwd and env are unchanged.
+
+Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_SETGID). `id -G` inside shows the docker gid as 65534, but the group is still in the credential; only its socket is masked.
+
+`CROW_PI_SANDBOX` controls the sandbox:
+
+- `auto` (the default) wraps when bwrap works, and otherwise spawns as before with a one-time warning.
+- `required` refuses to spawn pi without the sandbox.
+- `off` never wraps.
+
+Bubblewrap must be installed, and unprivileged user namespaces must be allowed. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` blocks them unless an AppArmor profile allows bwrap.
+
+Under the sandbox, `proc.pid` is the bwrap wrapper. `PiRpc.piPid` is pi itself, read from bwrap's `--info-fd`. `listBridgePi()` folds a wrapper and its pi into one entry: the wrapper's pid/ppid (lease and orphan rules unchanged) and pi's RSS. The reaper signals both.
+
+A bundle MCP tool that shells out to `docker` fails inside a bot turn. Today that is the browser bundle's `crow_browser_launch` (its container recreate/restart path) and `crow_browser_status` (which then reports `container_running: false`). The same tools work from the gateway and from operator sessions.
+
 ## See also
 
 - [Self-Hosted Bundles](./bundles) — the general bundle contract this bundle follows.

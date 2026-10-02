@@ -38,6 +38,7 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
+import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
 // bot-world.mjs so P2's interactive engine can build the SAME world without
@@ -317,7 +318,31 @@ export class PiRpc {
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
     // running indefinitely — observed leak of ~5 MCP procs per turn.
-    this.proc = spawn(nodeBin, args, { cwd: spawnCwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    //
+    // S3: through the pi sandbox (pi_sandbox.mjs) when it is usable — bwrap
+    // masks the docker socket and sets no_new_privs for pi and everything it
+    // starts (MCP servers, bash). The wrapper stays in the same process group,
+    // so the group kill in close() still reaches pi and its children. With a
+    // wrapper, proc.pid is bwrap's; bwrap reports pi's own pid on fd 3
+    // (--info-fd), kept as this.piPid for per-process reads like RSS.
+    // CROW_PI_SANDBOX=required throws here, which callers surface as a
+    // failed turn.
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3 });
+    this.sandboxed = launch.sandboxed;
+    this.piPid = null;
+    this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env,
+      stdio: launch.sandboxed ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"], detached: true });
+    if (!launch.sandboxed) this.piPid = this.proc.pid;
+    else if (this.proc.stdio[3]) {
+      let info = "";
+      const fd3 = this.proc.stdio[3];
+      fd3.on("error", () => {});
+      fd3.on("data", (d) => {
+        info += d.toString("utf8");
+        const m = info.match(/"child-pid"\s*:\s*(\d+)/);
+        if (m && this.piPid == null) this.piPid = Number(m[1]);
+      });
+    }
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
     this._exitCode = null;
     // C-12: monotonic per-message sequence number, stamped on every parsed
