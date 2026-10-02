@@ -79,6 +79,10 @@ export function superviseProcess({
   clearTimeoutFn = clearTimeout,
   onTerminal = () => {},
   registry = null,
+  // Optional secret handed to EACH spawned child on stdin (then stdin is
+  // closed): a string, or a function returning one. Never the environment,
+  // which a same-uid process can read from /proc/<pid>/environ.
+  stdinPayload = null,
 }) {
   const idleDisabled = !!keepWarm || !!alwaysResident || !(idleMinutes > 0);
 
@@ -113,13 +117,19 @@ export function superviseProcess({
   }
 
   function spawnChild() {
-    const spawnOpts = { detached: true, stdio: ["ignore", "pipe", "pipe"] };
+    const spawnOpts = { detached: true, stdio: [stdinPayload ? "pipe" : "ignore", "pipe", "pipe"] };
     if (env !== undefined) spawnOpts.env = env;
     if (cwd !== undefined) spawnOpts.cwd = cwd;
     const [cmd, cmdArgs] = setprivAvailable
       ? ["setpriv", ["--pdeathsig=SIGTERM", command, ...args]]
       : [command, args];
     const child = spawn(cmd, cmdArgs, spawnOpts);
+    if (stdinPayload && child.stdin) {
+      try {
+        child.stdin.on("error", () => { /* child exited before reading: it respawns and gets a fresh copy */ });
+        child.stdin.end(typeof stdinPayload === "function" ? stdinPayload() : stdinPayload);
+      } catch { /* best effort */ }
+    }
     handle.child = child;
     handle.live = true;
     handle.state = "running";

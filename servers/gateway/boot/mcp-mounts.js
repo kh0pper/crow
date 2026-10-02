@@ -22,6 +22,7 @@ import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken, ensurePhoneToken } from "../local-token.js";
+import { initGatewayActorKey, verifyActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -291,7 +292,10 @@ export async function mountMcpServers(app, deps) {
         if (r && r.reason === "no_engine") { if (!warnedNoEngine) { warnedNoEngine = true; console.warn("[phone] no Perch engine in this process yet: call cards appear when the chat is opened"); } }
         return r;
       };
-      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification, notifyCard }), sessionManager, authMiddleware, peerExposureGate);
+      // S2: bot actor headers count only with a signature from the per-boot
+      // key that lives in this process's memory (scripts/pi-bots/actor-sig.mjs).
+      initGatewayActorKey();
+      mountMcpServer(app, "/phone", () => createPhoneMcpServer({ db: phoneDb, ownerNumber, McpServer, z, notify: createNotification, notifyCard, verifyActor: verifyActorSig }), sessionManager, authMiddleware, peerExposureGate);
       console.log("[gateway] phone MCP mounted at /phone/mcp");
     }
   } catch (err) {

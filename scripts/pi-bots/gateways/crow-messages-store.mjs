@@ -49,7 +49,7 @@ export function consumeInvite(db, botId, token) {
   if (!row) return false;
   if (Number(row.revoked) === 1) return false;
   if (row.expires_at) {
-    const exp = db.prepare("SELECT (datetime('now') > ?) AS expired").get(row.expires_at);
+    const exp = db.prepare("SELECT (julianday('now') > julianday(?)) AS expired").get(row.expires_at);
     if (Number(exp.expired) === 1) return false;
   }
   if (row.max_uses != null && Number(row.uses) >= Number(row.max_uses)) return false;

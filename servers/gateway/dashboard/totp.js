@@ -261,7 +261,7 @@ export async function createPending2faToken(meta = null) {
     });
     // Clean up expired pending tokens
     await db.execute({
-      sql: "DELETE FROM dashboard_pending_2fa WHERE expires_at < datetime('now')",
+      sql: "DELETE FROM dashboard_pending_2fa WHERE julianday(expires_at) < julianday('now')",
       args: [],
     });
     return token;
@@ -281,7 +281,7 @@ export async function getPending2faContext(token) {
   const db = createDbClient();
   try {
     const result = await db.execute({
-      sql: "SELECT meta FROM dashboard_pending_2fa WHERE token = ? AND expires_at > datetime('now')",
+      sql: "SELECT meta FROM dashboard_pending_2fa WHERE token = ? AND julianday(expires_at) > julianday('now')",
       args: [sha256(token)],
     });
     const raw = result.rows[0]?.meta;
@@ -301,7 +301,7 @@ export async function verifyPending2faToken(token) {
   const db = createDbClient();
   try {
     const result = await db.execute({
-      sql: "SELECT token FROM dashboard_pending_2fa WHERE token = ? AND expires_at > datetime('now')",
+      sql: "SELECT token FROM dashboard_pending_2fa WHERE token = ? AND julianday(expires_at) > julianday('now')",
       args: [sha256(token)],
     });
     if (result.rows.length === 0) return false;

@@ -47,7 +47,7 @@ async function runOnce(db) {
     await db.execute({
       sql: `DELETE FROM maker_sessions
             WHERE is_guest = 1
-              AND (state = 'revoked' OR expires_at < datetime('now'))`,
+              AND (state = 'revoked' OR julianday(expires_at) < julianday('now'))`,
       args: [],
     });
   } catch {

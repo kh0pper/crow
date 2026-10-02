@@ -78,8 +78,8 @@ export async function createNotification(db, opts) {
     const { rows } = await db.execute({
       sql: `SELECT COUNT(*) AS count FROM notifications
             WHERE is_read = 0 AND is_dismissed = 0
-              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
-              AND (expires_at IS NULL OR expires_at > datetime('now'))`,
+              AND (snoozed_until IS NULL OR julianday(snoozed_until) <= julianday('now'))
+              AND (expires_at IS NULL OR julianday(expires_at) > julianday('now'))`,
       args: [],
     });
     const unreadCount = Number(rows?.[0]?.count ?? 0);

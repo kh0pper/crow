@@ -215,7 +215,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     const r = await db.execute({
       sql: `UPDATE maker_redemption_codes
             SET used_at = datetime('now'), claimed_by_fingerprint = ?
-            WHERE code = ? AND used_at IS NULL AND expires_at > datetime('now')
+            WHERE code = ? AND used_at IS NULL AND julianday(expires_at) > julianday('now')
             RETURNING session_token`,
       args: [fp, code],
     });

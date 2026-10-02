@@ -278,6 +278,14 @@ async function runCardExecute(job, { log, bridge }) {
  * the bridge; see runCardJob. `bridge` is injectable so tests can prove the
  * routing without spawning a real engine.
  */
+/** S2 (M1): the actor a generic job's phone block is signed as. The bot is
+ *  attributed (it can follow up on its own calls); the "job" gateway has no
+ *  delivery target, so results stay notify-only. Signed only when this process
+ *  holds the gateway's actor key (in-gateway); elsewhere it stays unattributed. */
+export function jobActor(job) {
+  return { botId: job.bot_id, threadId: "job-" + job.job_id, gatewayType: "job" };
+}
+
 export async function runJob(job, { log = () => {}, bridge: injectedBridge = null } = {}) {
   // loadBot is exported from bridge.mjs (S1). Lazy-import the whole module so we
   // also get PiRpc without a static cycle.
@@ -314,7 +322,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     // Per-job .mcp.json so the bot has its configured tools. Remote disabled for
     // background jobs (no peer fan-out without an explicit live operator turn).
     try {
-      writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {} });
+      writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job) });
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
 
     const resolved = await resolveModel(def, { escalate: !!job.escalate });

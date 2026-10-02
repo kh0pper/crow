@@ -94,13 +94,18 @@ export async function validateLocalToken(db, token) {
  *  The 300s expiry is NOT a session lifetime: skipAuthForInstance re-runs and
  *  re-synthesizes per request, exactly like the peer branch (mcp.js:247).
  *  Nothing downstream re-checks expiresAt. */
-export function localOperatorAuth() {
-  return {
+export function localOperatorAuth(tokenScope) {
+  const auth = {
     token: "local-mcp",
     clientId: "local-mcp",
     scopes: ["mcp:tools"],
     expiresAt: Math.floor(Date.now() / 1000) + 300,
   };
+  // S2: which static token authenticated ("phone" for the path-scoped phone
+  // token). Lets /phone/mcp tell a bot's shared token from the operator's full
+  // local token; the full token carries no scope, exactly as before.
+  if (tokenScope) auth.extra = { tokenScope };
+  return auth;
 }
 
 /** Turn a validated local-token flag into a full-access req.auth. Returns true
@@ -110,7 +115,7 @@ export function localOperatorAuth() {
  *  skipAuthForInstance in routes/mcp.js, after the instance branch. */
 export function applyLocalTokenAuth(req) {
   if (!req.localTokenAuth) return false;
-  req.auth = localOperatorAuth();
+  req.auth = localOperatorAuth(req.localTokenAuth.scope);
   return true;
 }
 
@@ -235,7 +240,7 @@ export function localTokenAuthMiddleware(db) {
         req.localTokenAuth = { token: "local-mcp" };
       }
       if (!req.localTokenAuth && PHONE_PATH_RE.test(req.path) && await validatePhoneToken(db, token)) {
-        req.localTokenAuth = { token: "local-mcp" };
+        req.localTokenAuth = { token: "local-mcp", scope: "phone" };
       }
     } catch (err) {
       // Treat a DB/read error as non-fatal: log and fall through to the other

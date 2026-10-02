@@ -33,6 +33,7 @@ import { handleInbound } from "./bridge.mjs";
 import { chunkedSend, downloadImages, passesAllowlist, SerialQueue, typingHeartbeat } from "./gateways/base.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { runtimeGate } from "./runtime-gate.mjs";
+import { readActorKeyFromStdin } from "./actor-sig.mjs";
 
 const CROW_DB = botsDbPath();
 const MAX_QUEUE = 5;
@@ -217,7 +218,13 @@ function shutdown() {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-(function main() {
+(async function main() {
+  // S2: the gateway hands this process its actor-signing key on stdin (never
+  // env). Without it phone plans from Discord turns are unattributed.
+  if (process.env.CROW_ACTOR_KEY_STDIN === "1") {
+    const ok = await readActorKeyFromStdin();
+    if (!ok) log("no actor key on stdin: phone plans from Discord turns will be unattributed");
+  }
   // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
   _gate = runtimeGate(db(), { start: startAllDiscord, stop: stopAllDiscord, logTag: "discord" });
   setInterval(() => {}, 1 << 30);

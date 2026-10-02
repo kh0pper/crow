@@ -346,7 +346,7 @@ export async function initMakerLabTables(db) {
 
   // Boot-time sweep: remove orphaned guest sessions from a crash.
   try {
-    await db.execute("DELETE FROM maker_sessions WHERE is_guest = 1 AND (revoked_at IS NOT NULL OR state = 'revoked' OR expires_at < datetime('now'))");
+    await db.execute("DELETE FROM maker_sessions WHERE is_guest = 1 AND (revoked_at IS NOT NULL OR state = 'revoked' OR julianday(expires_at) < julianday('now'))");
   } catch (err) {
     // Non-fatal — table may not yet have rows.
   }

@@ -620,7 +620,7 @@ export default {
                    rp.name AS learner_name
             FROM maker_sessions s
             LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
-            WHERE s.state != 'revoked' AND s.expires_at > datetime('now')
+            WHERE s.state != 'revoked' AND julianday(s.expires_at) > julianday('now')
             ORDER BY s.started_at DESC LIMIT 50`,
       args: [],
     });

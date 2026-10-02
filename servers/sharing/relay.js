@@ -111,7 +111,7 @@ export function createRelayHandlers(db) {
         // Get pending blobs (not expired)
         const result = await db.execute({
           sql: `SELECT blob, sender_pubkey, created_at FROM relay_blobs
-                WHERE recipient_pubkey = ? AND expires_at > datetime('now')
+                WHERE recipient_pubkey = ? AND julianday(expires_at) > julianday('now')
                 ORDER BY created_at ASC`,
           args: [pubkey],
         });
@@ -146,7 +146,7 @@ export function createRelayHandlers(db) {
 export async function cleanupExpiredBlobs(db) {
   try {
     const result = await db.execute({
-      sql: "DELETE FROM relay_blobs WHERE expires_at <= datetime('now')",
+      sql: "DELETE FROM relay_blobs WHERE julianday(expires_at) <= julianday('now')",
       args: [],
     });
     if (result.rowsAffected > 0) {
