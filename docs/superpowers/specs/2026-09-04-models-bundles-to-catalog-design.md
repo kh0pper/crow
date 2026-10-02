@@ -1,6 +1,9 @@
 # Model bundles → catalog + Hugging Face browser — DESIGN (2026-09-04)
 
 Status: **DESIGN APPROVED in brainstorm 2026-09-04** (Kevin, section by section); step-time decisions D12–D14 taken 2026-09-05; **plan 1 of 4 written**: `docs/superpowers/plans/2026-09-05-models-core-launch-roles-adopt.md` (its tail fixes the scope of plans 2–4).
+**Amended 2026-10-02 (§11):** D1/D2 rewritten for gufo, the gufo slots become external engines for now, the voice
+runtime waits on a benchmark, the I5 guard and the pi models.json sync join plan 2. Plans 2–4:
+`docs/superpowers/plans/2026-10-02-models-plan-{2,3,4}.md`.
 Predecessors: `docs/superpowers/handoffs/2026-09-04-catalog-v2-shipped-next-bundles-to-catalog-arc.md`
 (seed facts), `docs/superpowers/plans/2026-09-04-model-catalog-curation.md` (catalog v2 + stale
 bundle retirement, shipped as PRs #303/#304), `docs/architecture/box-reservation.md`.
@@ -330,3 +333,183 @@ grackle's vLLM specialists and the CUDA asset publication; deleting the orchestr
 branch and the `inference` contract; the 512k-27B bot-model UI exposure beyond registering the row;
 the persistent "box reserved" health card; per-bot `X-Crow-Client` from the bridge; MCP OAuth for
 remote doors.
+
+---
+
+## 11. Amendment A (2026-10-02): gufo, external-engine interim, voice pending, I5 guard
+
+Status: **decisions by Kevin 2026-10-02**; the rulings marked *(ruling)* were made while writing plans 2–4 and
+are listed for review in the plan report. Plans: `docs/superpowers/plans/2026-10-02-models-plan-2.md` (doors,
+replication, pi contract), `…-plan-3.md` (runtimes and panels), `…-plan-4.md` (migration and retirement).
+
+What changed since §2 was written:
+
+- On 2026-10-02 the 27B solo (`:8006`) and copilot (`:8010`) slots moved from llama.cpp to **gufo**
+  (`gufo-org/gufo`, MIT, gfx1151-only C++/HIP). They run as `docker.io/nixos/nix:latest` containers with the
+  host build mounted from `~/gufo-prod/current` and the ROCm closure from the `gufo-nix` volume (crow-addons
+  `bd8baeb`). Measured on crow, same Q6 file: prefill 547/427/253 vs 265/179/85 t/s at depth 0/32k/131k, decode
+  15.4/12.7/8.5 vs 12.4/11.6/5.5 t/s, GTT ~20 vs 36–49 GiB. The 512k slot (`:8014`) stays on llama.cpp because
+  gufo's dense path has no YaRN and refuses any context above the model's native 262,144.
+- raven production moved from halogen to gufo on 2026-09-30. crow's `raven-flash-next` row still says
+  `gpu_policy.engine.label = "halogen"`.
+- `crow-voice` was re-imaged to vLLM 0.23 on 2026-09-29 to stop the ROCm idle HSA spin (PR #390, open).
+- #385 shipped the Strix Halo runtime profile (GTT probe, per-model runtime override, gfx1151 launch layer) and
+  #386 the external-engine provider kind (`gpu_policy.engine = {managed:"external", host, label}`).
+- The audit of 2026-10-02 found black-swan's provider rows stalled since 2026-08-20 (max lamport 5054 vs crow
+  6641; it lacks `crow-embed` and `raven-flash-next`; it also holds 1 memory vs crow's 59, so the stall is not
+  provider-specific).
+
+### 11.1 D1 and D2, rewritten
+
+| # | Was | Now |
+|---|---|---|
+| **D1′** | llama.cpp is the only runtime. | **A runtime is a pluggable unit; two exist: `llama-server` (every host) and `gufo` (gfx1151 only).** On a gfx1151 host the catalog launches gufo for a model whose catalog entry declares gufo support, when a gufo install is recorded on the host and the requested launch fits gufo's limits; everywhere else it launches llama-server. vLLM is not a catalog runtime (the voice question is open, §11.5). |
+| **D2′** | Stock release plus a per-host operator override; no containers in the model path. | **llama-server: unchanged** (stock release, per-host and per-model override). **gufo: an operator-recorded install** (a build root such as `~/gufo-prod`, the runtime image, the nix volume) that may launch **inside a container**, because gufo's host build links against a `/nix` closure the host does not carry. The container is a launch shape owned by the runtime, supervised exactly like a native process (same port pool, loopback bind, identity probe, process group, mutex lock). No other runtime may use the container shape without a spec change. |
+
+D9 (bundle fate) is unchanged. D12 (voice quant Q8_0) is **suspended** until §11.5 resolves.
+
+### 11.2 The runtime abstraction
+
+A runtime is a module under `servers/gateway/models/runtimes/` exporting:
+
+| member | meaning |
+|---|---|
+| `id` | `"llama-server"` or `"gufo"` |
+| `launchShape` | `"exec"` (spawn a host binary) or `"container"` (spawn `docker run --rm --name crow-rt-<provider> …` attached, so the supervisor's SIGTERM reaches the engine through `--sig-proxy`) |
+| `probeVersion(install, deps)` | returns a version string or throws `RuntimeOverrideError` (`NOT_EXECUTABLE`, `VERSION_FAILED`); llama-server keeps `parseLlamaServerVersion`; gufo reads `BUILD-INFO` beside the binary (`base=<sha>`) and falls back to `gufo --version` run through its launch shape |
+| `buildCommand({ install, ggufPath, alias, port, launch, companions, task })` | returns `{ command, args, containerName? }`; the only place that knows a runtime's flags |
+| `supports({ catalogEntry, launch, probe })` | returns `{ ok: true }` or `{ ok: false, reason }` |
+| `healthPath` | the readiness path the identity probe polls before `/v1/models` (`/health` for both) |
+
+Selection (`selectRuntime`, pure): a provider's `gpu_policy.runtimeId` pins a runtime when set; otherwise gufo is
+chosen when **all** hold: `probe.gpuArch === "gfx1151"`, the catalog entry has a `runtimes.gufo` block, a gufo install
+record exists on this host, and `supports()` is ok (gufo refuses `ctx` above `context_len` and any YaRN
+`extra_args`); otherwise llama-server. A pinned gufo that does not support the launch refuses the start
+(`RUNTIME_UNSUPPORTED`) instead of silently falling back, because a pin is an operator decision.
+
+Catalog (`registry/model-catalog.json`), per model, optional:
+
+```jsonc
+"runtimes": {
+  "gufo": {
+    "launch": { "ctx": 262144, "sessions": 1, "max_pending_per_client": 16, "speculative": "dflash2" },
+    "assets": [
+      { "kind": "dflash", "file": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf", "size_mb": 1143.01, "sha256": "1a25c568…" },
+      { "kind": "mmproj", "file": "mmproj-BF16.gguf", "size_mb": 931.15, "sha256": "83ee4f4f…" }
+    ]
+  }
+}
+```
+
+The gufo knob set is its own (`ctx`, `sessions`, `max_pending_per_client`, `speculative`, `think`, `extra_args`)
+and is validated by the gufo module, not by `launch.js`. Host-local install records live in
+`state.json.runtimeInstalls.gufo = { root, bin, image, nixVolume, version, setAt }` and, like the llama-server
+override, never replicate.
+
+### 11.3 External-engine interim for the gufo slots (now)
+
+Until plan 3's gufo runtime ships and a window moves them, `crow-local-27b` (`:8006`) and `crow-local-27b-copilot`
+(`:8010`) are **external-engine rows**: `gpu_policy.engine = { managed: "external", host: "crow", label: "gufo" }`.
+Crow routes to them (door forwarding, §11.4) and shows their health (the #386 read-only poll), but never starts,
+stops, warms or evicts them. pi-lab owns their deploy (`docker compose` in crow-addons). `raven-flash-next` gets
+`label: "gufo"`. The one-shot write is plan 2's operational step 1.
+
+Consequence accepted: while a slot is external, Crow's mutex logic does not know that starting the solo 27B evicts
+the 35B; pi-lab's `localModels` group/evicts rules keep governing that, as they do today.
+
+### 11.4 Door additions *(rulings)*
+
+§5.1 stands; these fill its gaps.
+
+- **Addressing order:** the provider named by a **provider-scoped door path** `/llm/p/<provider>/v1/…` or by the
+  `X-Crow-Provider` request header, then a qualified `model` (`<provider>/<model>`), then a bare id that matches
+  exactly one enabled non-companion local row, then the companion heuristics (which keep owning the two companion
+  alias ids and any unknown id such as `"crow"`). A bare id matching two or more rows that are not companion aliases
+  returns **400** with the qualified forms. Alias rows (`crow-local`) and pi's managed entries use the
+  provider-scoped path as their `base_url`, so no client needs a custom header and model ids stay bare (the
+  identity probe is unchanged). The path form exists because the bare id `qwen3.6-35b-a3b` is also a companion
+  alias: without it, a DB-side consumer of `crow-local` would fall into the fast/escalate heuristics.
+- **Endpoints forwarded:** `POST /llm/v1/chat/completions`, `/llm/v1/completions`, `/llm/v1/embeddings`,
+  `/llm/v1/rerank`. Embeddings matter: `crow-embed` becomes a door row and r4/raven embed through it.
+- **What may be forwarded:** owned native rows (to `127.0.0.1:<gpu_policy.port>`), foreign-owned native rows (to the
+  owner's door, header carried), external-engine rows and still-bundled local rows (to `base_url`). **Cloud rows
+  are refused** (`400 NOT_LOCAL`) so the tailnet door never becomes an unauthenticated proxy for paid keys.
+- **Loop guard:** the door sets `X-Crow-Door-Hop: 1` when it forwards to any door URL (`/llm/v1` or `/llm/p/…/v1`);
+  a request that arrives with the header and resolves to a door again gets **508**.
+
+### 11.5 Voice runtime: pending a benchmark
+
+Kevin has not decided between vLLM 0.23 (BF16, current) and llama.cpp Q8_0 for `crow-voice`. A ~30-minute
+benchmark window measures the same Qwen3.5-4B under both at 1, 4 and 8 concurrent users: time to first token
+(p50/p95) and decode tok/s (per stream and aggregate), plus a tool-call sanity check. Kevin decides from the
+table. Until then: plan 4's voice window is conditional on the result, PR #390 stays open, and D12 is suspended.
+If vLLM wins, `crow-voice` stays a bundle and `vllm-rocm-qwen35-4b` is excluded from §7 step 6's deletions.
+
+### 11.6 The pi contract absorbs the providers↔models.json sync
+
+§5.3 gains the work from the 2026-10-02 follow-ups backlog (M1–M3):
+
+- **M1:** the primary gateway maintains crow-managed provider entries in pi's `models.json`: every enabled
+  local or OpenAI-compatible DB provider not already hand-written in the file, with its base URL (a native row's
+  provider-scoped door `/llm/p/<id>/v1`) and model ids from the row. A top-level `$crowManaged` array lists the ids
+  it owns; hand-written entries are never touched; a managed id whose row is deleted or disabled is removed. Written
+  atomically, mode 0600, at boot and after any provider write (debounced). *(ruling)* Only the instance whose
+  `CROW_HOME` is `~/.crow` writes `~/.pi/agent/models.json` by default; another instance writes only with an explicit
+  `CROW_PI_MODELS_SYNC_PATH`; `CROW_PI_MODELS_SYNC=0` disables it.
+- **M2:** before spawning pi, a bot turn checks that its resolved provider/model is known to pi (`pi --list-models`,
+  cached 5 minutes and re-listed once, uncached, on a miss, so a provider M1 just wrote is found); an unknown model fails the turn with "model X is not available to
+  the bot engine" instead of spawning. If the listing itself fails, the turn proceeds and the failure is logged.
+- **M3:** the Bot Builder model picker marks models pi cannot resolve.
+
+### 11.7 I5 guard (carry from plan 1's final review)
+
+The hourly `syncProvidersFromModelsJson` reconciler must never rebuild `gpu_policy` for a row whose stored
+`gpu_policy.runtime === "native"` (it would de-native a converted row registered under a `models.json` id) and must
+never import an id listed in `$crowManaged` (it would re-import M1's own output and start a loop). Both are skipped
+and counted (`skipped_native`, `skipped_managed`). External-engine rows keep their existing marker preservation.
+
+### 11.8 Replication step 0, restated
+
+The 2026-09-04 "disables did not replicate" finding splits into three causes, and only one is in scope:
+
+1. **r4** is a separate identity with no crow peer row (Kevin 2026-09-24: leave as is). r4 rows are written on r4.
+2. **grackle** is being decommissioned and its gateway did not answer during the audit. Not fixed here.
+3. **black-swan** stopped applying crow's changes around 2026-08-20, across tables. Plan 2 task 1 diagnoses it
+   read-only, writes a failing two-instance test at the stage that broke, and fixes it.
+
+### 11.9 Migration sequence, amended (supersedes §7 steps 1–6 where they differ)
+
+0. Replication fix (plan 2) and the external-engine marking of the two gufo slots.
+1. **crow-embed**: adopt in place, convert (the row is unmanaged, not a bundle: plan 4 teaches `registerModel` to
+   convert an unmanaged local row with a snapshot), start native, point r4's own `crow-embed` row at the door.
+2. **Voice benchmark** (~30 min), then Kevin decides. Only if llama.cpp wins: **crow-voice** to Q8_0.
+3. **crow-chat**: 35B from the MTP repo, acceptance within 10% of ~70 tok/s single-stream.
+4. **27B 512k** (`crow-local-27b-512k`) to native llama-server with YaRN `extra_args`. The solo and copilot slots stay
+   external. **4b (optional, after plan 3 and a 27B weights decision):** move solo and copilot from external to
+   catalog-managed gufo.
+5. **gemma for r4.**
+6. **Retire** what migrated: never a bundle whose role did not move.
+
+### 11.10 New decisions
+
+| # | Decision |
+|---|---|
+| D15 | gufo is the gfx1151 runtime for the models it supports; selection per §11.2 (Kevin 2026-10-02). |
+| D16 | The gufo slots are external-engine rows until a migration window moves them (Kevin 2026-10-02). |
+| D17 | Voice runtime decided after the benchmark of §11.5 (Kevin 2026-10-02). |
+| D18 | The providers↔models.json sync lives in the pi contract, plan 2 (Kevin 2026-10-02). |
+| D19 | The black-swan replication fix is plan 2 task 1 and starts with a failing two-instance test (Kevin 2026-10-02). |
+| D20 | Door addressing by provider path or header, cloud rows refused, embeddings forwarded *(ruling, §11.4)*. |
+
+### 11.11 Open questions for Kevin
+
+1. 27B weights for the gufo runtime: the on-disk Q6 (`73920218…`) is 25.92 GB, 2.4 % larger than the catalog's
+   current UD-Q6_K_XL (`701d8fa9…`, 25.30 GB), so it cannot be adopted even unverified (the size gate is 0.5 %).
+   Add a second catalog quant entry for the on-disk build, or re-download the current file?
+2. The DFlash2 draft (`Qwen3.8-27B-DFlash2-Q4_K_M.gguf`, sha `1a25c568…`) has no recorded Hugging Face repo. Which
+   repo should the catalog cite, or is it adopt-only?
+3. If the black-swan stall turns out to be the parked-emit drop (plan 2 task 1, H1), should the catch-up cover only
+   `providers` (this arc) or every synced table (memories too)?
+4. vLLM vs llama.cpp for voice, after the benchmark.
+5. Does r4 keep its own `crow-embed` row (pointed at the door by a one-shot) or get a crow peer row? (Kevin said
+   "leave as is" on 2026-09-24; the plan assumes the one-shot.)
