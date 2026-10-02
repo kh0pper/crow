@@ -18,17 +18,18 @@
  * What this does, with no privilege, when bubblewrap is usable:
  *     bwrap --dev-bind / / --unshare-user
  *           --ro-bind /dev/null <docker.sock>...          docker API
- *           --tmpfs /run/user/<uid>                       user bus, systemd
+ *           --tmpfs /run/user                             user bus, systemd
  *                                                         user manager, gnupg,
  *                                                         keyring, pipewire,
  *                                                         pulse, pk-debconf
- *           --tmpfs /tmp/tmux-<uid>, /tmp/cc-daemon-<uid>, /tmp/.X11-unix
- *                                                         (when present)
- *           --ro-bind ~/.config/systemd ~/.config/systemd   user units are
- *           --ro-bind ~/.local/share/systemd ...            read-only
+ *           --tmpfs /tmp/tmux-<uid>, /tmp/cc-daemon-<uid> (always),
+ *                   /tmp/.X11-unix (when present)
+ *           --ro-bind ~/.config/systemd ~/.config/systemd   user units not
+ *           --ro-bind ~/.local/share/systemd ...            directly writable
  *           --info-fd 3 -- node cli.js ...
  *  and the child env loses DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR,
- *  SSH_AUTH_SOCK, TMUX, TMUX_PANE, DISPLAY, WAYLAND_DISPLAY and every *_SOCK.
+ *  SSH_AUTH_SOCK, TMUX, TMUX_PANE, DISPLAY, WAYLAND_DISPLAY and every *_SOCK,
+ *  *_SOCKET and *_SOCKET_PATH.
  *  - The masks are locked mounts: the child cannot unmount them, even from a
  *    nested user namespace (verified).
  *  - In its own user namespace the child is refused other processes'
@@ -45,6 +46,13 @@
  *  - `ssh localhost` (or another lab host) with a readable private key in
  *    ~/.ssh, which gives an unsandboxed shell;
  *  - abstract unix sockets (no network namespace), e.g. @/tmp/.X11-unix/X*;
+ *  - the user-unit dirs are only not DIRECTLY writable: renaming an ancestor
+ *    (mv ~/.config ~/.config.x; mkdir -p ~/.config/systemd/user) moves the
+ *    read-only mount away and a unit dropped in the fresh dir loads at the
+ *    next reload or boot (same persistence class as rc files);
+ *  - the system D-Bus (/run/dbus/system_bus_socket): reachable; privileged
+ *    methods are polkit-gated and the setuid polkit helper cannot run under
+ *    no_new_privs, so no escalation was found, but it stays open;
  *  - reading anything the uid can read (crow.db, tokens, ~/.claude) - S6.
  *
  * Without bubblewrap (e.g. black-swan), the fallback is
@@ -103,9 +111,28 @@ export function dockerSocketPaths(env = process.env) {
   return out;
 }
 
-/** Per-user IPC directories to hide behind an empty tmpfs (existing only). */
-export function userRuntimeDirs(uid = process.getuid()) {
-  return [`/run/user/${uid}`, `/tmp/tmux-${uid}`, `/tmp/cc-daemon-${uid}`, "/tmp/.X11-unix"].filter(isDir);
+/**
+ * Per-user IPC directories to hide behind an empty tmpfs. N2: masked whether
+ * or not the service is running at spawn time, so a session (a long-lived
+ * Perch child) cannot reach a tmux server or Claude Code daemon started later.
+ *  - /run/user as a whole (when it exists): covers /run/user/<uid> even if the
+ *    user manager starts after the spawn. Nothing under it is a bot's business.
+ *  - /tmp/tmux-<uid> and /tmp/cc-daemon-<uid>: created on the host first
+ *    (mode 0700, the shape tmux and Claude Code create themselves) so the
+ *    mount point exists and a bot cannot pre-create them for a later server.
+ *  - /tmp/.X11-unix only when present: it must be root-owned for X servers,
+ *    so it is never created here, and X is reachable through abstract sockets
+ *    anyway (a documented remaining route).
+ */
+export function userRuntimeDirs(uid = process.getuid(), { create = true } = {}) {
+  const out = [];
+  if (isDir("/run/user")) out.push("/run/user");
+  for (const d of [`/tmp/tmux-${uid}`, `/tmp/cc-daemon-${uid}`]) {
+    if (!isDir(d) && create) { try { mkdirSync(d, { mode: 0o700 }); } catch {} }
+    if (isDir(d)) out.push(d);
+  }
+  if (isDir("/tmp/.X11-unix")) out.push("/tmp/.X11-unix");
+  return out;
 }
 
 /** Dirs the systemd user manager loads units from, made read-only inside.
@@ -127,7 +154,7 @@ const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH
 export function scrubSandboxEnv(env) {
   const out = {};
   for (const [k, v] of Object.entries(env || {})) {
-    if (SCRUB_EXACT.has(k) || /_SOCK$/.test(k)) continue;
+    if (SCRUB_EXACT.has(k) || /_SOCK(ET)?(_PATH)?$/.test(k)) continue;
     out[k] = v;
   }
   return out;

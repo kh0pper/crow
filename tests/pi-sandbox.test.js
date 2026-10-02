@@ -9,7 +9,7 @@
 // holds in the PARENT, so each assertion proves the sandbox took it away.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer } from "node:net";
@@ -79,7 +79,7 @@ test("integration: a PiRpc child loses the casual docker, user-session and sudo 
     'const tmux = await tryConn(process.env.CROW_TEST_TMUX);',
     'const sd = spawnSync("systemd-run", ["--user", "--pipe", "--quiet", "true"], { env: { ...process.env, XDG_RUNTIME_DIR: process.env.CROW_TEST_RUN_USER }, timeout: 15000, encoding: "utf8" });',
     'let unitWrite = "ok"; try { writeFileSync(homedir() + "/.config/systemd/user/crow-sandbox-probe.service", "[Unit]\\n"); } catch (e) { unitWrite = e.code || "denied"; }',
-    'const keys = Object.keys(process.env).filter((k) => /^(DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|SSH_AUTH_SOCK|TMUX|CROW_PI_SANDBOX)$|_SOCK$/.test(k));',
+    'const keys = Object.keys(process.env).filter((k) => /^(DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|SSH_AUTH_SOCK|TMUX|CROW_PI_SANDBOX)$|_SOCK(ET)?$/.test(k));',
     'out({ type: "report", idG, nnp: field("NoNewPrivs"), direct, viaProc, parentEnv, tmux, sdStatus: sd.status, unitWrite, keys, pid: process.pid });',
     'process.stdin.resume();',
   ].join("\n"));
@@ -87,7 +87,7 @@ test("integration: a PiRpc child loses the casual docker, user-session and sudo 
     CROW_TEST_PARENT_PID: String(process.pid), CROW_TEST_SOCK: SOCKS[0] || "", CROW_TEST_TMUX: TMUX_SOCK, CROW_TEST_RUN_USER: RUN_USER,
     // Planted in the gateway env: the child must not see any of them.
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${RUN_USER}/bus`, XDG_RUNTIME_DIR: RUN_USER, SSH_AUTH_SOCK: "/tmp/x-agent.sock",
-    TMUX: TMUX_SOCK + ",1,0", SOME_TOOL_SOCK: "/tmp/y.sock",
+    TMUX: TMUX_SOCK + ",1,0", SOME_TOOL_SOCK: "/tmp/y.sock", SOME_TOOL_SOCKET: "/tmp/z.sock",
   };
   const prevEnv = Object.fromEntries(Object.keys(setEnv).map((k) => [k, process.env[k]]));
   Object.assign(process.env, setEnv);
@@ -257,9 +257,28 @@ test("M3: the real setpriv fallback sets no_new_privs on pi", { skip: REAL_SETPR
   } finally { console.error = origErr; _resetPiSandboxForTest(); }
 });
 
-test("userRuntimeDirs lists only existing dirs", () => {
-  for (const d of userRuntimeDirs(UID)) assert.ok(existsSync(d), d);
-  assert.deepEqual(userRuntimeDirs(4_000_123).filter((d) => d.includes("4000123")), []);
+test("N2: session paths are masked even when nothing is running at spawn time", () => {
+  for (const d of userRuntimeDirs(UID, { create: false })) assert.ok(existsSync(d), d);
+  const fake = 4_000_123;
+  const made = [`/tmp/tmux-${fake}`, `/tmp/cc-daemon-${fake}`];
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+  try {
+    assert.deepEqual(userRuntimeDirs(fake, { create: false }).filter((d) => d.includes(String(fake))), [], "create:false does not invent them");
+    const dirs = userRuntimeDirs(fake);
+    for (const d of made) {
+      assert.ok(dirs.includes(d), d + " is masked though absent at spawn");
+      assert.equal(statSync(d).mode & 0o777, 0o700, d + " pre-created 0700");
+    }
+    if (existsSync("/run/user")) assert.ok(dirs.includes("/run/user"), "/run/user is masked whole");
+    assert.ok(!dirs.some((d) => d.startsWith("/run/user/")), "no per-uid entry needed under the whole-/run/user mask");
+  } finally {
+    for (const d of made) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("N3: *_SOCKET and *_SOCKET_PATH are scrubbed too", () => {
+  assert.deepEqual(scrubSandboxEnv({ KEEP: "1", CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/x", FOO_SOCKET_PATH: "/tmp/y", SOCKET_TIMEOUT_MS: "5" }),
+    { KEEP: "1", SOCKET_TIMEOUT_MS: "5" });
 });
 
 test("piSandboxMode parses CROW_PI_SANDBOX, defaulting to auto", () => {

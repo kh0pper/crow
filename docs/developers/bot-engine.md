@@ -133,13 +133,19 @@ When bubblewrap can create a user namespace, pi starts as:
 
 ```
 bwrap --dev-bind / / --unshare-user \
-  --tmpfs /run/user/<uid> --tmpfs /tmp/tmux-<uid> --tmpfs /tmp/cc-daemon-<uid> --tmpfs /tmp/.X11-unix \
+  --tmpfs /run/user --tmpfs /tmp/tmux-<uid> --tmpfs /tmp/cc-daemon-<uid> --tmpfs /tmp/.X11-unix \
   --ro-bind /dev/null <docker.sock> \
   --ro-bind ~/.config/systemd ~/.config/systemd --ro-bind ~/.local/share/systemd ~/.local/share/systemd \
   --info-fd 3 -- node cli.js …
 ```
 
-(The `--tmpfs` entries are added only for dirs that exist. The two systemd dirs are created empty when missing, so a bot cannot create them itself.)
+The session paths are masked even when nothing is running at spawn time:
+
+- `/run/user` is masked whole whenever it exists.
+- The tmux and cc-daemon dirs are pre-created on the host with mode 0700.
+- `/tmp/.X11-unix` is masked only when present, because it must stay root-owned for X servers. X is reachable through abstract sockets anyway.
+
+The two systemd dirs are created empty when missing.
 
 - **Docker:** the docker socket is masked, so a bot's shell, MCP servers and allowlisted interpreters cannot reach the daemon. The gateway itself keeps docker.
 - **The user session is hidden.** That covers:
@@ -149,8 +155,8 @@ bwrap --dev-bind / / --unshare-user \
   - the Claude Code daemon socket;
   - X11 path sockets.
 
-  The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`.
-- **User units are read-only**, so a bot cannot install a unit for the user manager to start later.
+  The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
+- **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
 - **No reading other processes:** other processes' `/proc/<pid>/{root,environ,mem}` are refused, including the gateway's and other bots'.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
@@ -165,6 +171,8 @@ bwrap --dev-bind / / --unshare-user \
   - `~/.ssh/authorized_keys`;
   - any script a privileged process executes.
 - **`ssh localhost`** (or another lab host) using a readable private key in `~/.ssh`. That gives an unsandboxed shell.
+- **Renaming an ancestor of the user unit dirs.** `mv ~/.config ~/.config.x && mkdir -p ~/.config/systemd/user` moves the read-only mount away. A unit written to the fresh dir (or to `~/.config/environment.d`) is loaded at the next reload or boot. This is the same persistence class as rc files.
+- **The system D-Bus** (`/run/dbus/system_bus_socket`). Privileged methods are polkit-gated, and the setuid polkit helper cannot run under `no_new_privs`, so no escalation is known. It is still open.
 - **Abstract unix sockets**, because there is no network namespace (for example `@/tmp/.X11-unix/X*`).
 - **Reading anything the uid can read:** crow.db, tokens, `~/.claude`. That is S6, which is pi-lab read confinement.
 

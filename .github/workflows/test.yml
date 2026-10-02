@@ -39,6 +39,23 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # S3 (M7): the pi sandbox tests (tests/pi-sandbox.test.js) need
+      # bubblewrap and unprivileged user namespaces. ubuntu-24.04 runners
+      # restrict those through AppArmor, so lift that for this throwaway VM.
+      # Best effort: if it still cannot work, the sandbox tests self-skip and
+      # every other PiRpc test runs unwrapped, exactly as before.
+      - name: Enable the pi sandbox (bubblewrap + unprivileged userns)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq bubblewrap || { sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap; }
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if bwrap --dev-bind / / --unshare-user -- /bin/true; then
+            echo "pi sandbox available: sandbox tests will run"
+          else
+            echo "::warning::pi sandbox unavailable on this runner; tests/pi-sandbox.test.js integration cases will skip"
+          fi
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
       # host-bound tests self-skip via in-file capability guards instead.
       - run: npm test
