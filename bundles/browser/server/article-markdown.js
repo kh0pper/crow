@@ -13,22 +13,38 @@
  */
 
 /** The TeX for a <math> element: alttext, else its x-tex annotation, else
- *  the presentation text with every annotation removed. */
+ *  the presentation tree alone — the first child of <semantics> (which
+ *  excludes every <annotation> and <annotation-xml>), or the element's own
+ *  text when there is no <semantics>. */
 export function mathTex(node) {
-  const attr = (n, k) => (n && typeof n.getAttribute === "function" ? n.getAttribute(k) : null);
-  const alt = attr(node, "alttext");
-  if (alt && alt.trim()) return alt.trim();
-  const anns = node && typeof node.getElementsByTagName === "function"
-    ? Array.from(node.getElementsByTagName("annotation")) : [];
-  const tex = anns.find((a) => /tex/i.test(String(attr(a, "encoding") || "")));
-  if (tex && tex.textContent && tex.textContent.trim()) return tex.textContent.trim();
-  let text = String((node && node.textContent) || "");
-  for (const a of anns) text = text.replace(a.textContent || "", "");
-  return text.replace(/\s+/g, " ").trim();
+  return unwrapStyle(rawMathTex(node));
 }
 
+/** Wikipedia wraps every formula as `{\displaystyle …}`; the wrapper is
+ *  presentation, and a leading `${` reads as template syntax downstream. */
+function unwrapStyle(tex) {
+  const m = /^\{\\(?:displaystyle|textstyle|scriptstyle)\b\s*([\s\S]*)\}$/.exec(tex);
+  return m ? m[1].trim() : tex;
+}
+
+function rawMathTex(node) {
+  const attr = (n, k) => (n && typeof n.getAttribute === "function" ? n.getAttribute(k) : null);
+  const byTag = (n, t) => (n && typeof n.getElementsByTagName === "function"
+    ? Array.from(n.getElementsByTagName(t)) : []);
+  const alt = attr(node, "alttext");
+  if (alt && alt.trim()) return alt.trim();
+  const tex = byTag(node, "annotation").find((a) => /tex/i.test(String(attr(a, "encoding") || "")));
+  if (tex && tex.textContent && tex.textContent.trim()) return tex.textContent.trim();
+  const sem = byTag(node, "semantics")[0];
+  const first = sem && sem.firstElementChild;
+  const text = first ? first.textContent : (node && node.textContent);
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+const isMath = (node) => String((node && node.nodeName) || "").toLowerCase() === "math";
+
 export const mathRule = {
-  filter: (node) => String((node && node.nodeName) || "").toLowerCase() === "math",
+  filter: isMath,
   replacement: (_content, node) => {
     const tex = mathTex(node);
     if (!tex) return "";
@@ -37,10 +53,36 @@ export const mathRule = {
   },
 };
 
+/** The VISUAL duplicate a math renderer ships beside its MathML: KaTeX's
+ *  aria-hidden glyph tree (`.katex-html`), and Wikipedia's fallback image
+ *  (`img.mwe-math-fallback-image-*`, whose alt is the TeX again). The
+ *  MathML half is kept — mathRule turns it into TeX once. */
+export const mathDuplicateRule = {
+  filter: (node) => {
+    const cls = String((node && typeof node.getAttribute === "function" && node.getAttribute("class")) || "");
+    return /(?:^|\s)katex-html(?:\s|$)/.test(cls) || /(?:^|\s)mwe-math-fallback-image-/.test(cls);
+  },
+  replacement: () => "",
+};
+
 /** A configured Turndown instance (the class is injected — the bundle
  *  imports it lazily, exactly as before). */
 export function articleTurndown(Turndown) {
-  const td = new Turndown({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  const td = new Turndown({
+    headingStyle: "atx",
+    codeBlockStyle: "fenced",
+    // Turndown tests "blank" BEFORE custom rules, so a <math> carrying only
+    // alttext (no presentation text) never reached mathRule. Default
+    // behaviour otherwise (turndown's own blankReplacement).
+    // Padded with spaces: a blank node has no flanking whitespace of its
+    // own, so the space after it would otherwise collapse into "$z$alt".
+    blankReplacement: (content, node) => {
+      if (!isMath(node)) return node.isBlock ? "\n\n" : "";
+      const md = mathRule.replacement(content, node);
+      return md && !md.startsWith("\n") ? " " + md + " " : md;
+    },
+  });
+  td.addRule("mathDuplicate", mathDuplicateRule);
   td.addRule("mathml", mathRule);
   return td;
 }
