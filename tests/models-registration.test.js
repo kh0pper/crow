@@ -172,7 +172,7 @@ test("registerModel: writes a provider row with the FINAL base_url, models[], an
     // base_url is now the DOOR url (routed through the gateway's
     // /llm/v1), not the model's own port directly -- the model's own
     // port lives at gpu_policy.port / the `port` return field instead.
-    assert.match(result.baseUrl, /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/llm\/v1$/);
+    assert.match(result.baseUrl, /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/llm\/p\/[^/]+\/v1$/);
 
     const row = await dbRow(db, "chat-test-model");
     assert.ok(row, "provider row exists");
@@ -813,12 +813,12 @@ test("registerModel: row carries the door base_url, owner, port, catalogId/quant
   const h = freshLibsql();
   try {
     const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h) });
-    assert.equal(r.baseUrl, "http://100.118.41.122:3001/llm/v1");
+    assert.equal(r.baseUrl, "http://100.118.41.122:3001/llm/p/chat-test-model/v1");
     assert.equal(r.port, 18150);
     assert.equal(r.registryKey, "chat-test-model@Q4_K_M");
     const row = await dbRow(h.db, "chat-test-model");
     const gp = JSON.parse(row.gpu_policy);
-    assert.equal(row.base_url, "http://100.118.41.122:3001/llm/v1");
+    assert.equal(row.base_url, "http://100.118.41.122:3001/llm/p/chat-test-model/v1");
     assert.deepEqual({ runtime: gp.runtime, catalogId: gp.catalogId, quant: gp.quant, port: gp.port, owner: gp.owner, alwaysResident: gp.alwaysResident, defaultMember: gp.defaultMember },
       { runtime: "native", catalogId: "chat-test-model", quant: "Q4_K_M", port: 18150, owner: "inst-A", alwaysResident: false, defaultMember: false });
     assert.ok(loadState(h.dir).registry["chat-test-model@Q4_K_M"]);
@@ -830,7 +830,7 @@ test("registerModel: no tailnet ip -> loopback door and local_only:true", async 
   const h = freshLibsql();
   try {
     const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h), tailnetIpFn: () => null });
-    assert.equal(r.baseUrl, "http://127.0.0.1:3001/llm/v1");
+    assert.equal(r.baseUrl, "http://127.0.0.1:3001/llm/p/chat-test-model/v1");
     assert.equal(JSON.parse((await dbRow(h.db, "chat-test-model")).gpu_policy).local_only, true);
   } finally { h.cleanup(); }
 });

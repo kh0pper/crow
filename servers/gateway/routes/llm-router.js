@@ -4,7 +4,10 @@
  * loopback :11435) INTO the gateway as an OpenAI-compatible route.
  *
  *   POST /llm/v1/chat/completions   pick fast vs escalate, forward + stream
- *   GET  /llm/v1/models             advertise both model ids (probe-safe)
+ *                                   (or a door forward when explicitly addressed)
+ *   POST /llm/v1/{completions,embeddings,rerank}   door forwards only
+ *   POST /llm/p/<provider>/v1/...    the provider-scoped door
+ *   GET  /llm/v1/models             companion ids + forwardable door models
  *
  * It does ONE job: choose which local model answers each turn, then forward the
  * request verbatim and stream the response straight back. The companion
@@ -21,12 +24,16 @@
  *
  * SECURITY: mounted WITHOUT dashboardAuth. isAllowedNetwork() rejects bare
  * loopback (auth.js), and the host-networked companion arrives as loopback, so
- * password/network auth here would 403 every legitimate turn. This route is
- * instead protected by (1) the global rejectFunneledMiddleware (it is NOT in
- * PUBLIC_FUNNEL_PREFIXES, so any Tailscale-Funnel request 403s — asserted in
- * tests/auth-network.test.js) and (2) binding/exposure: the gateway is only
- * reachable on the tailnet + loopback, never funneled. Mirrors
- * routes/companion-proxy.js. NOT a pi gateway: it never spawns pi.
+ * password/network auth here would 403 every legitimate turn. The gateway
+ * listens on ALL interfaces (LAN + tailnet + loopback), so binding is not a
+ * boundary. The companion path is reachable from all three. Door addressing
+ * (provider path /llm/p/<provider>/v1, the X-Crow-Provider header, a
+ * qualified "<provider>/<model>" id, or a bare id that resolves to a
+ * forwardable row) and /llm/acquire are limited to loopback and the tailnet
+ * (100.64.0.0/10, fd7a:115c:a1e0::/48) or a bearer token. Funnel is refused
+ * here (first middleware, so CROW_DASHBOARD_PUBLIC cannot bypass it) and by
+ * the global rejectFunneledMiddleware (asserted in tests/auth-network.test.js).
+ * Mirrors routes/companion-proxy.js. NOT a pi gateway: it never spawns pi.
  */
 
 import express from "express";
@@ -40,6 +47,9 @@ import { ServingClassError } from "../models/serving-class.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
+import { loadProviders } from "../../shared/providers.js";
+import { validateLocalToken } from "../local-token.js";
+import { resolveDoorTarget, listDoorModels, isDoorUrl, isTrustedDoorSource, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -113,6 +123,90 @@ async function resolveKey(key) {
 
 function authHeaders(apiKey) {
   return apiKey && apiKey !== "none" ? { Authorization: `Bearer ${apiKey}` } : {};
+}
+
+const COMPANION_MODEL_IDS = [FAST_KEY, ESC_KEY].map((k) => splitKey(k)[1]).filter(Boolean);
+
+async function defaultDoorAuth(token) {
+  if (!token) return false;
+  try { return await validateLocalToken(db(), token); } catch { return false; }
+}
+
+/** Non-companion door addressing: loopback/tailnet source, or a valid bearer. */
+async function doorCallerAllowed(req, deps) {
+  if (isTrustedDoorSource(deps.remoteAddressFn(req))) return true;
+  const h = req.headers.authorization || "";
+  return h.startsWith("Bearer ") ? !!(await deps.doorAuthFn(h.slice(7))) : false;
+}
+
+/** Forward one door request and stream the response back. */
+async function forwardDoor(req, res, target, op, deps) {
+  if (target.doorKind === "native-owned" || target.doorKind === "bundle") {
+    await deps.acquireFn(target.providerId, { requester: requesterTag(req) });
+  }
+  const body = { ...(req.body || {}), model: target.modelId };
+  const headers = { "Content-Type": "application/json", Accept: req.headers.accept || "application/json", ...authHeaders(target.apiKey) };
+  if (target.doorKind === "native-foreign") headers[DOOR_PROVIDER_HEADER] = target.providerId;
+  // Any forward to a door URL is a hop; the receiving door refuses a second one (508).
+  if (isDoorUrl(target.url)) headers[DOOR_HOP_HEADER] = "1";
+  const url = `${target.url}/${op}`;
+  let upstream;
+  try {
+    const t = connectTimeout(LLM_CONNECT_TIMEOUT_MS);
+    upstream = t.disarm(await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: t.signal }));
+  } catch (e) {
+    const msg = isTimeoutError(e) ? `upstream connect timeout after ${Math.round(LLM_CONNECT_TIMEOUT_MS / 1000)}s` : `upstream ${target.providerId} unreachable: ${e.message}`;
+    return res.status(502).json({ error: { code: "UPSTREAM_UNREACHABLE", message: msg } });
+  }
+  console.log(`[llm-router] door ${op} -> ${target.providerId}/${target.modelId} (${target.doorKind}) requester=${requesterTag(req)}`);
+  res.status(upstream.status);
+  res.set("Content-Type", upstream.headers.get("content-type") || "application/json");
+  if (!upstream.body) return res.end();
+  await new Promise((resolve) => {
+    const s = Readable.fromWeb(upstream.body);
+    s.on("error", (e) => { console.error(`[llm-router] door stream error: ${e.message}`); if (!res.writableEnded) res.end(); resolve(); });
+    // A client abort destroys the stream with "close", not "error", and res never
+    // emits "finish": resolve on close too, or one promise leaks per aborted stream.
+    res.on("close", () => { s.destroy(); resolve(); });
+    res.on("finish", resolve);
+    s.pipe(res);
+  });
+}
+
+function doorTargetFor(req, deps) {
+  const cfg = deps.loadProvidersFn() || { providers: {} };
+  return resolveDoorTarget({
+    providers: cfg.providers || {},
+    providerHeader: (req.params && req.params.provider) || req.headers[DOOR_PROVIDER_HEADER] || null,
+    model: req.body && req.body.model,
+    companionModelIds: COMPANION_MODEL_IDS,
+    hop: Number(req.headers[DOOR_HOP_HEADER] || 0),
+  });
+}
+
+function sendDoorError(res, t) {
+  return res.status(t.status).json({ error: { code: t.code, message: t.message, ...(t.candidates ? { candidates: t.candidates } : {}) } });
+}
+
+/** Program-facing door: orchestrator refusals answer 409, as /llm/acquire does. */
+function sendAcquireError(res, err) {
+  if (err instanceof ReservedError) {
+    return res.status(409).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at } });
+  }
+  if (err instanceof ServingClassError) {
+    return res.status(409).json({ error: { code: "serving_class_refused", message: err.message, serving_class: err.servingClass } });
+  }
+  return res.status(502).json({ error: { code: "router_error", message: err?.message || String(err) } });
+}
+
+/** One door request: resolve, gate the caller, forward. */
+async function handleDoor(req, res, op, deps, door) {
+  if (!(await doorCallerAllowed(req, deps))) {
+    return res.status(403).json({ error: { code: "DOOR_SOURCE_REFUSED", message: "door addressing is limited to loopback and the tailnet, or a bearer token" } });
+  }
+  if (door.kind === "error") return sendDoorError(res, door);
+  try { await forwardDoor(req, res, door, op, deps); }
+  catch (err) { if (!res.headersSent) sendAcquireError(res, err); }
 }
 
 // Flatten the latest user message to plain text (string or multi-part content).
@@ -198,6 +292,10 @@ async function defaultProbeReady(baseUrl) {
 async function handleChat(req, res, deps) {
   const body = req.body && typeof req.body === "object" ? req.body : null;
   if (!body) return res.status(400).json({ error: { message: "invalid JSON body" } });
+
+  const door = doorTargetFor(req, deps);
+  if (door.kind !== "companion") return handleDoor(req, res, "chat/completions", deps, door);
+  // door.kind === "companion": fall through to the fast/escalate heuristics, unchanged.
 
   const manualEsc = wantsEscalation(body);
   if (manualEsc) stripEscalate(body); // only the typed token is stripped
@@ -357,17 +455,17 @@ async function handleChat(req, res, deps) {
   }
 }
 
-async function handleModels(res) {
-  // Advertise both ids so a client's startup/model-selector probe never 404s.
+async function handleModels(res, deps) {
   const out = [];
   for (const key of [FAST_KEY, ESC_KEY]) {
     try {
-      const up = await resolveKey(key);
+      const up = await deps.resolveKeyFn(key);
       out.push({ id: up.model, object: "model", owned_by: "crow", created: 0 });
-    } catch {
-      /* skip unresolved */
-    }
+    } catch { /* skip unresolved */ }
   }
+  try {
+    for (const m of listDoorModels((deps.loadProvidersFn() || {}).providers || {})) out.push({ id: m.id, object: "model", owned_by: "crow", created: 0 });
+  } catch { /* the companion ids alone are still a valid listing */ }
   res.json({ object: "list", data: out });
 }
 
@@ -385,14 +483,23 @@ export default function llmRouterRouter(opts = {}) {
     resolveKeyFn: resolveKey,
     probeReadyFn: defaultProbeReady,
     warmFn: warmProviderByName,
+    loadProvidersFn: loadProviders,
+    remoteAddressFn: (req) => req.socket?.remoteAddress || "",
+    doorAuthFn: defaultDoorAuth,
     ...opts,
   };
   const router = express.Router();
+  // Defense in depth (review C4): the global rejectFunneledMiddleware can be
+  // bypassed by CROW_DASHBOARD_PUBLIC=true; /llm never is.
+  router.use("/llm", (req, res, next) => {
+    if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: { code: "FUNNEL_REFUSED", message: "/llm is never reachable through Funnel" } });
+    next();
+  });
   // Route-scoped 10mb JSON limit: the global parser is 1mb and a multi-turn
   // companion/glasses transcript (with tool history + base64 image parts) can
   // exceed that and 413.
   router.use("/llm", express.json({ limit: "10mb" }));
-  router.get("/llm/v1/models", (req, res) => handleModels(res));
+  router.get("/llm/v1/models", (req, res) => handleModels(res, deps));
   router.post("/llm/v1/chat/completions", (req, res) => {
     handleChat(req, res, deps).catch((err) => {
       console.error(`[llm-router] chat handler failed: ${err?.stack || err}`);
@@ -400,6 +507,42 @@ export default function llmRouterRouter(opts = {}) {
       res.status(502).json({ error: { code: "router_error", message: `model routing failed: ${err?.message || err}` } });
     });
   });
+  // /llm/acquire starts (and evicts) any local model. Its only caller, the
+  // pi-bots host, comes over loopback, so it gets the door's source check too
+  // (re-review hardening). Register this BEFORE the existing /llm/acquire
+  // handler so it runs first.
+  router.post("/llm/acquire", async (req, res, next) => {
+    if (await doorCallerAllowed(req, deps)) return next();
+    res.status(403).json({ ok: false, error: "DOOR_SOURCE_REFUSED", message: "/llm/acquire is limited to loopback and the tailnet, or a bearer token" });
+  });
+
+  // Provider-scoped door: the path names the provider (native rows, alias rows
+  // such as crow-local, and pi's managed entries point here).
+  for (const op of ["chat/completions", "completions", "embeddings", "rerank"]) {
+    router.post(`/llm/p/:provider/v1/${op}`, (req, res) => {
+      handleDoor(req, res, op, deps, doorTargetFor(req, deps)).catch((err) => {
+        if (!res.headersSent) res.status(502).json({ error: { code: "router_error", message: err.message } });
+      });
+    });
+  }
+  router.get("/llm/p/:provider/v1/models", (req, res) => {
+    const p = ((deps.loadProvidersFn() || {}).providers || {})[req.params.provider];
+    const listed = p ? listDoorModels({ [req.params.provider]: p }) : [];
+    if (!listed.length) return res.status(404).json({ error: { code: "UNKNOWN_PROVIDER", message: `no forwardable provider "${req.params.provider}"` } });
+    res.json({ object: "list", data: listed.map((m) => ({ id: m.id.slice(req.params.provider.length + 1), object: "model", owned_by: "crow", created: 0 })) });
+  });
+  for (const op of ["completions", "embeddings", "rerank"]) {
+    router.post(`/llm/v1/${op}`, (req, res) => {
+      const door = doorTargetFor(req, deps);
+      if (door.kind === "companion") {
+        return res.status(404).json({ error: { code: "MODEL_NOT_FOUND", message: `no forwardable local model "${req.body?.model ?? ""}" for /${op}` } });
+      }
+      handleDoor(req, res, op, deps, door).catch((err) => {
+        if (!res.headersSent) res.status(502).json({ error: { code: "router_error", message: err.message } });
+      });
+    });
+  }
+
   // POST /llm/acquire { provider } — warm a local model bundle and wait until it's
   // ready. The gateway chat path warms inline before a turn; this gives the same
   // capability to the pi-bots host (background jobs + bridge) which runs in a

@@ -130,3 +130,12 @@ export function listDoorModels(providers = {}) {
   }
   return out.sort((a, b) => a.id.localeCompare(b.id));
 }
+
+/** Loopback or the tailnet (Tailscale CGNAT 100.64.0.0/10, ULA fd7a:115c:a1e0::/48). */
+export function isTrustedDoorSource(addr) {
+  const a = String(addr || "").replace(/^::ffff:/i, "");
+  if (a === "::1" || /^127\./.test(a)) return true;
+  const m = a.match(/^100\.(\d+)\.\d+\.\d+$/);
+  if (m && Number(m[1]) >= 64 && Number(m[1]) <= 127) return true;
+  return /^fd7a:115c:a1e0:/i.test(a);
+}

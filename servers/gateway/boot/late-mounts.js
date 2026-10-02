@@ -34,7 +34,7 @@ export async function mountLateRoutes(app, deps) {
   try {
     const { default: llmRouterRouter } = await import("../routes/llm-router.js");
     app.use(llmRouterRouter());
-    console.log("  [llm-router] mounted: POST /llm/v1/chat/completions, GET /llm/v1/models");
+    console.log("  [llm-router] mounted: POST /llm/v1/{chat/completions,completions,embeddings,rerank}, POST /llm/p/:provider/v1/{chat/completions,completions,embeddings,rerank}, GET /llm/v1/models, GET /llm/p/:provider/v1/models, POST /llm/acquire");
   } catch (err) {
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[llm-router] Failed to mount:", err.message);
