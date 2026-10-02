@@ -60,9 +60,11 @@ export async function listCalls(db, { status, limit = 50 } = {}) {
 /** I5 (spec 2026-10-01): the calls a Perch chat may show. BOTH the target
  *  session AND the creating bot must match. That stops a forged THREAD header
  *  (the call names its real bot, which is not this session's) and accidental
- *  mismatches. A child forging BOTH actor headers never gets here: since S2
- *  (phone 0.2.2) unsigned or mis-signed headers resolve to an unattributed
- *  actor with no deliver_to (mcp.js resolvePhoneActor). */
+ *  mismatches. Since S2 (phone 0.2.2), unsigned or mis-signed actor headers
+ *  resolve to an unattributed actor with no deliver_to, so those never get
+ *  here. A child REPLAYING another bot's signed headers (read from that bot's
+ *  .mcp.json; the S6 gap) DOES get here, and this per-session check then
+ *  matches the impersonated bot, so it does not stop that case. */
 export async function listPerchCalls(db, sessionId, botId, limit = 20) {
   const n = Math.max(1, Math.min(20, Number(limit) || 20));
   const r = await db.execute({

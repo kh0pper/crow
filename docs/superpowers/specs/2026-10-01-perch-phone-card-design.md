@@ -192,8 +192,8 @@ container ends a running call).
     (`scripts/pi-bots/actor-sig.mjs`; the Discord child gets it on stdin, never env). `/phone/mcp`
     attributes a bot only when the signature verifies. A missing or wrong signature, or the phone
     token with no actor, is `unattributed`: it can propose a call (owner notification only, no
-    card, no thread reply) but cannot read or cancel any call, and all such callers share one rate
-    bucket per claimed id plus a global cap.
+    card, no thread reply) but cannot read or cancel any call, and such callers are
+    rate-limited per claimed id, under a global cap.
   - **What S2 stops:** forging only the thread/gateway (or a bot id without that bot's
     signature); owner access through the bare phone token; impersonation by bots with neither a
     file-read tool nor an open shell.
@@ -204,6 +204,8 @@ container ends a running call).
   - Bot worlds built outside the gateway process (`pibot-gateways@`, the CLI) hold no key, so their
     plans are unattributed. Generic scheduled jobs are signed as gateway `job` (no delivery
     target) when they run in the gateway process.
+  - **S5 note:** board lock exemption now keyed by the real bot id for scheduled jobs; signing
+    board headers (S5) must cover this.
 
 ## 7. Dependencies / ordering
 The fixes PR (`fix/phone-install-and-perch-polish`, #393) has merged, and this branch is rebased
