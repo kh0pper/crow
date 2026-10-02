@@ -281,12 +281,26 @@ export async function bumpDeliveryAttempt(db, id) {
  *  pending and back off 5,10,20,40,60,60… s, for up to `windowMinutes` after
  *  the call ended. Then give up (the result is still in Phone and on the chat
  *  card) and audit it. */
-export async function deferDelivery(db, id, windowMinutes = 10) {
+// Backlog P11: the give-up audit names what actually blocked delivery. Only
+// the engine codes mean "the bot could not take a turn".
+const DEFER_REASONS = {
+  turn_in_progress: "the bot was mid-turn the whole time",
+  cycle_busy: "the bot's session was restarting the whole time",
+  interactive_capacity: "no room for another live Perch session",
+  pi_capacity: "no room for another bot process",
+  no_engine: "the Perch engine was not running in this gateway",
+  db_busy: "the database was busy: the chat's owner could not be looked up",
+};
+export function deferReason(code) {
+  return Object.prototype.hasOwnProperty.call(DEFER_REASONS, code) ? DEFER_REASONS[code] : "delivery kept being deferred";
+}
+
+export async function deferDelivery(db, id, windowMinutes = 10, code = null) {
   const row = (await db.execute({ sql: "SELECT delivery_busy, (julianday('now') - julianday(ended_at)) * 1440 AS age_min FROM phone_calls WHERE id=?", args: [id] })).rows[0];
   if (!row) return { gaveUp: true };
   if (row.age_min != null && row.age_min >= windowMinutes) {
     await db.execute({ sql: "UPDATE phone_calls SET delivery_attempts=5, delivery_retry_at=NULL WHERE id=?", args: [id] });
-    await audit(db, id, "service", "delivery_gave_up", { reason: "the bot could not take a turn", minutes: windowMinutes });
+    await audit(db, id, "service", "delivery_gave_up", { reason: deferReason(code), code: code || null, minutes: windowMinutes });
     return { gaveUp: true };
   }
   const n = Number(row.delivery_busy || 0);

@@ -13,6 +13,20 @@ function serverDir() {
 }
 const bundleImport = (f) => import(pathToFileURL(join(serverDir(), f)).href);
 const appImport = (rel) => import(pathToFileURL(join(process.env.CROW_APP_ROOT || join(homedir(), "crow"), rel)).href);
+// Backlog P7: run_after is a strict ISO-8601 instant with an explicit zone
+// (what Date#toISOString sends). Date.parse alone accepts "Tue, 6 Oct 2026",
+// a zone-less time read in the gateway's own clock, and rolls 2026-02-30 over.
+const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.\d{1,9})?)?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+export function parseIsoInstant(v) {
+  if (typeof v !== "string") return null;
+  const m = ISO_INSTANT.exec(v);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const cal = new Date(Date.UTC(y, mo - 1, d));
+  if (mo < 1 || mo > 12 || cal.getUTCFullYear() !== y || cal.getUTCMonth() !== mo - 1 || cal.getUTCDate() !== d) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
 const eqSecret = (a, b) => { const x = createHash("sha256").update(String(a)).digest(), y = createHash("sha256").update(String(b)).digest(); return timingSafeEqual(x, y); };
 
 async function readSettings(db) {
@@ -154,14 +168,14 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     const st = await readSettings(db);
     if (!st.tcpaAck) return res.status(409).json({ error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." });
     if (!String(st.ownerName || "").trim()) return res.status(409).json({ error: "owner_name_required", message: "Set your first name in Phone settings first (the assistant says who it is calling for)." });
-    // "Approve now" sends run_after:null and clears any proposed time; a string
-    // schedules it; an absent field keeps what is stored.
+    // "Approve now" sends run_after:null and clears any proposed time; an ISO
+    // instant schedules it; an absent field keeps what is stored. Anything else
+    // (a number, false, "", a loose date string) is refused, never ignored.
     let runAfter;
     if (b.run_after === null) runAfter = null;
-    else if (typeof b.run_after === "string" && b.run_after) {
-      const t = Date.parse(b.run_after);
-      if (!Number.isFinite(t)) return res.status(400).json({ error: "invalid_run_after", message: "run_after must be a date and time." });
-      runAfter = new Date(t).toISOString();
+    else if (b.run_after !== undefined) {
+      runAfter = parseIsoInstant(b.run_after);
+      if (!runAfter) return res.status(400).json({ error: "invalid_run_after", message: "run_after must be an ISO-8601 date and time with a time zone (or null for now)." });
     }
     // I4: the hash check runs last, after every other gate, so a refused session
     // or a missing 2FA code never learns whether the plan changed.

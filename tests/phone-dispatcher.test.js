@@ -355,8 +355,20 @@ test("transient for 10 minutes: delivery gives up (audited), the result stays in
   await d.tick(); await d.tick();
   const c = await store.getCall(db, call_id);
   assert.equal(c.delivered, 0); assert.equal(c.delivery_attempts, 5); assert.equal(tries, 1);
-  const ev = (await db.execute({ sql: "SELECT event FROM phone_audit WHERE call_id=? AND event='delivery_gave_up'", args: [call_id] })).rows;
+  const ev = (await db.execute({ sql: "SELECT event, detail_json FROM phone_audit WHERE call_id=? AND event='delivery_gave_up'", args: [call_id] })).rows;
   assert.equal(ev.length, 1);
+  // backlog P11: the reason names what blocked delivery (here: no engine), not "the bot could not take a turn".
+  assert.deepEqual(JSON.parse(ev[0].detail_json), { reason: "the Perch engine was not running in this gateway", code: "no_engine", minutes: 10 });
+});
+
+test("backlog P11: each transient code gets its own give-up reason; db_busy is not blamed on the bot", () => {
+  assert.equal(store.deferReason("db_busy"), "the database was busy: the chat's owner could not be looked up");
+  assert.equal(store.deferReason("turn_in_progress"), "the bot was mid-turn the whole time");
+  assert.equal(store.deferReason("toString"), "delivery kept being deferred");
+  assert.equal(store.deferReason(undefined), "delivery kept being deferred");
+  for (const c of ["turn_in_progress", "cycle_busy", "interactive_capacity", "pi_capacity", "no_engine", "db_busy"]) {
+    assert.ok(!/could not take a turn/.test(store.deferReason(c)), c);
+  }
 });
 
 // ---- spec 2026-10-02: an owner stop is its own outcome ----
