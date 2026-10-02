@@ -166,6 +166,10 @@ export const translations = {
 
   // ── Security-maintenance health signals (W2) — plain language, no jargon ──
   // logins
+  "signals.reservation.label": { en: "Box reservation", es: "Reserva del equipo" },
+  "signals.reservation.value": { en: "reserved", es: "reservado" },
+  "signals.reservation.held": { en: "Box reserved by {owner} until {until}; local models can't start except the exempt ones", es: "Equipo reservado por {owner} hasta {until}; los modelos locales no pueden iniciarse salvo los exentos" },
+  "signals.reservation.corrupt": { en: "The box reservation file can't be read, so it counts as reserved. Check it with scripts/ops/box-reserve.mjs status", es: "No se puede leer el archivo de reserva del equipo, así que cuenta como reservado. Revísalo con scripts/ops/box-reserve.mjs status" },
   "signals.peers.label": { en: "Peers", es: "Pares" },
   "signals.peers.ok": { en: "all online", es: "todos en línea" },
   "signals.peers.staleCount": { en: "{n} offline", es: "{n} sin conexión" },

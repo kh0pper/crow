@@ -18,6 +18,9 @@
  *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
  *               info at most — never warn, never a push; no card when none
  *   syncOutbox — stdio→gateway outbox depth + oldest-row age (stuck >15min → warn)
+ *   reservation — box reservation held (info; no card when the box is free).
+ *               Box-reservation scope §3.5: "Box reserved by <owner> until
+ *               <time>" for as long as the file exists.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -40,6 +43,7 @@ import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
+import { readReservation } from "../../../box-reservation.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
@@ -306,6 +310,34 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
     issueLabel: fill(t("signals.peers.stale", lang), stale[0]),
     actionLabel: t("signals.peers.action", lang),
     actionHref: "/dashboard/settings?section=paired-instances",
+  };
+}
+
+let _reservationReader = (nowMs) => readReservation({ now: nowMs });
+/** Test seam: replace the reservation reader; null restores the real one. */
+export function _setReservationReader(fn) {
+  _reservationReader = fn || ((nowMs) => readReservation({ now: nowMs }));
+}
+
+function reservationSignal(lang, nowFn) {
+  const r = _reservationReader(nowFn());
+  if (!r) return null; // box is free: no card (the scope asks for a card only while held)
+  const label = t("signals.reservation.label", lang);
+  if (r.corrupt) {
+    return {
+      id: "reservation", severity: "info", state: "info", label,
+      value: t("signals.reservation.value", lang),
+      issueLabel: t("signals.reservation.corrupt", lang),
+    };
+  }
+  const until = new Date(r.expires_at).toLocaleString(lang === "es" ? "es" : "en-US", {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+  const base = fill(t("signals.reservation.held", lang), { owner: r.owner, until });
+  return {
+    id: "reservation", severity: "info", state: "info", label,
+    value: t("signals.reservation.value", lang),
+    issueLabel: r.reason ? `${base} (${r.reason})` : base,
   };
 }
 
@@ -920,6 +952,7 @@ export async function collectHealthSignals(db, opts = {}) {
     messagesSignal(db, lang, nowFn),
     providersSignal(lang, nowFn),
     externalEnginesSignal(lang, nowFn),
+    reservationSignal(lang, nowFn),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
