@@ -120,7 +120,7 @@ describe("plan mode", () => {
     assert.equal(g.extract_only_tables.pir_requests, 2);
     assert.equal(g.extract_only_tables.media_articles, 2);
     assert.equal(g.content_drift.memories.count, 1);
-    assert.deepEqual(g.imported_schedules.map((r) => r.task), ["blog-digest"]);
+    assert.deepEqual(g.imported_schedules.map((r) => r.task).sort(), ["blog-digest", "pipeline:botcron:grackle-assistant"]);
   });
 });
 
@@ -396,9 +396,10 @@ describe("apply: what lands where", () => {
     // a grant to a local-bot contact goes to the extract, never NULL
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM project_members WHERE uuid = 'g-pm-3'")[0].n, 0);
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM contacts WHERE crow_id = 'crow:gbot'")[0].n, 0);
-    const why = query(s.applyOpts.extract, "SELECT reason FROM _not_imported_rows WHERE table_name = 'project_members'");
-    assert.equal(why.length, 1);
+    const why = query(s.applyOpts.extract, "SELECT reason FROM _not_imported_rows WHERE table_name = 'project_members' ORDER BY reason");
+    assert.equal(why.length, 2);
     assert.match(why[0].reason, /contact_id=11/);
+    assert.equal(why[1].reason, "tombstoned");
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM project_members WHERE contact_id IS NULL AND role != 'owner'")[0].n, 0);
   });
 
@@ -406,7 +407,7 @@ describe("apply: what lands where", () => {
     const m = report.go_no_go.synced_tables_missing_on_crow;
     assert.deepEqual(m.messages.keys, [{ nostr_event_id: "ev-grackle" }]);
     assert.deepEqual(m.crow_context.keys, [{ section_key: "grackle_notes", device_id: null, project_id: null }]);
-    assert.deepEqual(m.ramble_eggs.keys, [{ egg_id: "egg-g1" }]);
+    assert.deepEqual(m.ramble_eggs.keys, [{ egg_id: "egg-g1" }, { egg_id: "egg-g2" }]);
     assert.deepEqual(m.ramble_marks.keys, [{ mark_id: "mark-g1" }]);
     assert.deepEqual(m.ramble_settings.keys, [{ key: "only_grackle" }]);
     assert.deepEqual(m.contacts.keys, [{ crow_id: "crow:nobody" }]);
@@ -424,7 +425,7 @@ describe("apply: what lands where", () => {
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM schedules WHERE task = 'blog-digest'")[0].n, 1);
     const item = query(s.target, "SELECT i.post_id, p.slug FROM songbook_setlist_items i JOIN blog_posts p ON p.id = i.post_id")[0];
     assert.equal(item.slug, "post-nine");
-    assert.deepEqual(query(s.target, "SELECT contact_id, content FROM blog_comments"), [{ contact_id: 3, content: "nice" }]);
+    assert.deepEqual(query(s.target, "SELECT contact_id, content FROM blog_comments WHERE content = 'nice'"), [{ contact_id: 3, content: "nice" }]);
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM crosspost_rules")[0].n, 1);
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM bot_runs")[0].n, 0, "bot history is extract-only");
     assert.equal(query(s.applyOpts.extract, "SELECT COUNT(*) AS n FROM bot_runs")[0].n, 1);
@@ -432,7 +433,7 @@ describe("apply: what lands where", () => {
   });
 
   it("storage_files.reference_id follows its remapped blog post (minor 3)", () => {
-    assert.deepEqual(query(s.target, "SELECT reference_type, reference_id FROM storage_files"), [{ reference_type: "blog_post", reference_id: 8 }]);
+    assert.deepEqual(query(s.target, "SELECT reference_type, reference_id FROM storage_files"), [{ reference_type: "blog_post", reference_id: 20 }]);
   });
 
   it("ramble: insert-or-ignore on natural keys; crow's rows never change; wallet delta = inserted sum; clash reported", () => {
@@ -516,6 +517,76 @@ describe("apply: what lands where", () => {
   it("the integrity of the result holds", () => {
     assert.deepEqual(query(s.target, "PRAGMA integrity_check"), [{ integrity_check: "ok" }]);
     assert.deepEqual(query(s.target, "PRAGMA foreign_key_check"), []);
+  });
+});
+
+/* ------------------------------------------------------- fix round 2 */
+
+describe("fix round 2", () => {
+  let s, report;
+  before(async () => {
+    s = await setup();
+    const res = await run(s.applyOpts, { probes: OK_PROBES, emitter });
+    assert.equal(res.exitCode, 0, JSON.stringify(res.refused));
+    report = res.report;
+  });
+  const reasons = (table) => query(s.applyOpts.extract, "SELECT reason FROM _not_imported_rows WHERE table_name = ?", table).map((r) => r.reason);
+
+  it("N1: a contact tombstoned on crow is not resurrected; its messages, comments and grants go to the extract as 'tombstoned'", () => {
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM contacts WHERE crow_id = 'crow:deleted'")[0].n, 0);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM messages WHERE nostr_event_id = 'ev-deleted'")[0].n, 0);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM blog_comments WHERE content = 'gone'")[0].n, 0);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM project_members WHERE uuid = 'g-pm-4'")[0].n, 0);
+    for (const t of ["contacts", "messages", "blog_comments", "project_members"]) assert.ok(reasons(t).includes("tombstoned"), `${t}: ${reasons(t)}`);
+    assert.deepEqual(report.go_no_go.tombstoned_contacts, [{ crow_id: "crow:deleted" }]);
+  });
+
+  it("N2: schedules import disabled with next_run cleared, and are listed for Kevin", () => {
+    const rows = query(s.target, "SELECT task, enabled, next_run FROM schedules ORDER BY task");
+    assert.deepEqual(rows, [
+      { task: "blog-digest", enabled: 0, next_run: null },
+      { task: "pipeline:botcron:grackle-assistant", enabled: 0, next_run: null },
+    ]);
+    assert.deepEqual(report.go_no_go.imported_schedules.map((r) => [r.task, r.enabled_on_grackle]).sort(),
+      [["blog-digest", 1], ["pipeline:botcron:grackle-assistant", 1]]);
+  });
+
+  it("N2 (minor e): cross-post rules import inactive and are listed", () => {
+    assert.deepEqual(query(s.target, "SELECT active FROM crosspost_rules"), [{ active: 0 }]);
+    assert.deepEqual(report.go_no_go.imported_crosspost_rules.map((r) => [r.source_app, r.target_app, r.active_on_grackle]), [["blog", "mastodon", 1]]);
+  });
+
+  it("N3: a missing incubating egg is shelved (shelf_origin 'sync') when crow already incubates one", () => {
+    assert.deepEqual(query(s.target, "SELECT egg_id FROM ramble_eggs WHERE status = 'incubating'"), [{ egg_id: "egg-c1" }]);
+    assert.deepEqual(query(s.target, "SELECT status, shelf_origin FROM ramble_eggs WHERE egg_id = 'egg-g2'"), [{ status: "shelf", shelf_origin: "sync" }]);
+    assert.deepEqual(report.go_no_go.eggs_shelved, [{ egg_id: "egg-g2", kept_incubating: "egg-c1" }]);
+  });
+
+  it("minor b: a setlist item matches on (setlist, post) — another position does not abort phase A", () => {
+    assert.deepEqual(query(s.target, "SELECT setlist_id, post_id, position FROM songbook_setlist_items"), [{ setlist_id: 3, post_id: 20, position: 5 }]);
+    assert.equal(report.per_table.songbook_setlist_items.matched_existing, 1);
+  });
+
+  it("minor c: a comment from a contact not on crow keeps the comment, contact NULL, author name preserved", () => {
+    assert.deepEqual(query(s.target, "SELECT contact_id, author_name FROM blog_comments WHERE content = 'beep'"), [{ contact_id: null, author_name: "A bot" }]);
+  });
+
+  it("minor d: a slug-matched post that is a DIFFERENT post adopts no children", () => {
+    assert.deepEqual(query(s.target, "SELECT title FROM blog_posts WHERE slug = 'post-eight'"), [{ title: "Crow eight" }]);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM blog_comments WHERE post_id = 21")[0].n, 0);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM blog_post_embeddings WHERE post_id = 21")[0].n, 0);
+    assert.equal(query(s.applyOpts.extract, "SELECT COUNT(*) AS n FROM blog_posts WHERE slug = 'post-eight'")[0].n, 1, "grackle's post archived");
+    assert.deepEqual(report.go_no_go.blog_slug_conflicts.map((c) => c.slug), ["post-eight"]);
+  });
+
+  it("minor a: emit-only skips items the drain already delivered (unless requeue is asked for)", async () => {
+    exec(s.target, "DELETE FROM sync_outbox"); // the gateway drain delivered and removed them
+    const r = await run({ mode: "emit-only", target: s.target, report: s.applyOpts.report, expectSha: s.applyOpts.expectSha }, { emitter, probes: OK_PROBES });
+    assert.equal(r.exitCode, 0, JSON.stringify(r.refused));
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM sync_outbox")[0].n, 0);
+    const rq = await run({ mode: "emit-only", target: s.target, report: s.applyOpts.report, expectSha: s.applyOpts.expectSha, requeue: true }, { emitter, probes: OK_PROBES });
+    assert.equal(rq.exitCode, 0);
+    assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM sync_outbox")[0].n, 13);
   });
 });
 
@@ -607,12 +678,12 @@ describe("idempotency and emit-only", () => {
     assert.deepEqual(query(s.target, "SELECT table_name, row_json, lamport_ts FROM sync_outbox ORDER BY id"), ob0);
   });
 
-  it("emit-only re-queues an item whose outbox row is gone, keeping its lamport", async () => {
+  it("emit-only --requeue re-queues an item whose outbox row is gone, keeping its lamport", async () => {
     const s = await setup();
     await run(s.applyOpts, { probes: OK_PROBES, emitter });
     const victim = query(s.target, "SELECT id, lamport_ts FROM sync_outbox WHERE table_name = 'ramble_cells' LIMIT 1")[0];
     exec(s.target, `DELETE FROM sync_outbox WHERE id = ${victim.id}`);
-    const r = await run({ mode: "emit-only", target: s.target, report: s.applyOpts.report, expectSha: s.applyOpts.expectSha }, { emitter, probes: OK_PROBES });
+    const r = await run({ mode: "emit-only", target: s.target, report: s.applyOpts.report, expectSha: s.applyOpts.expectSha, requeue: true }, { emitter, probes: OK_PROBES });
     assert.equal(r.exitCode, 0);
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM sync_outbox WHERE table_name = 'ramble_cells' AND lamport_ts = ?", victim.lamport_ts)[0].n, 1);
   });

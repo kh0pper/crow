@@ -104,6 +104,16 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
     INSERT INTO ramble_credits (kind, key, credited_at) VALUES ('visit_place', '9vg4zzz:w1', 100);
     INSERT INTO ramble_settings (key, value) VALUES ('shared', 'crow-value');
     INSERT INTO ramble_pet (owner, mood) VALUES ('self', 'crow-mood');
+    -- crow's own incubating egg (one per user; N3)
+    INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-c1', 'incubating', 'wren', 90);
+    -- a contact Kevin deleted on crow; the delete never reached grackle (N1)
+    INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at) VALUES ('crow:deleted', 7, 1700000000);
+    -- blog: crow already has a post at slug post-nine (same post) and a DIFFERENT post at post-eight (minor d)
+    INSERT INTO blog_posts (id, slug, title, content, status) VALUES (20, 'post-nine', 'Nine', 'body nine', 'draft');
+    INSERT INTO blog_posts (id, slug, title, content, status) VALUES (21, 'post-eight', 'Crow eight', 'a crow post', 'draft');
+    INSERT INTO songbook_setlists (id, name, created_at) VALUES (3, 'Sunday', '2026-05-01 00:00:00');
+    -- the same song at another position (unique index is (setlist_id, post_id); minor b)
+    INSERT INTO songbook_setlist_items (setlist_id, post_id, position) VALUES (3, 20, 5);
     INSERT INTO dashboard_settings (key, value) VALUES ('blog_title', 'Crow blog');
     INSERT INTO dashboard_settings (key, value) VALUES ('tts_voice', 'crow-voice');
     INSERT INTO dashboard_settings (key, value) VALUES ('theme', 'crow-theme');
@@ -152,6 +162,7 @@ export async function buildSource(dir) {
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (9, 'crow:dayane', 'Dayane', 'ed', 'secp');
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, verified) VALUES (10, 'crow:nobody', 'Nobody', 'ed2', 'secp2', 1);
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, origin) VALUES (11, 'crow:gbot', 'Grackle bot', 'ed3', 'secp3', 'local-bot');
+    INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (12, 'crow:deleted', 'Deleted on crow', 'ed4', 'secp4');
 
     -- projects: 1 and 5 are new; 6 is the same project as crow 6; 7 clashes on slug only
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (1, 'g-uuid-1', 'proj-one', 'One', '/home/kh0pp/.crow/data/projects/1');
@@ -169,6 +180,7 @@ export async function buildSource(dir) {
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-pm-2', 1, 10, 'viewer');
     -- a local-bot contact (never synced) → the grant goes to the extract, NEVER becomes "local user"
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-pm-3', 5, 11, 'editor');
+    INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-pm-4', 1, 12, 'viewer');
     INSERT INTO project_audit_log (project_id, actor_type, action, created_at) VALUES (5, 'local', 'create', '2026-05-01 00:00:00');
 
     -- memories: 1 matches crow's content (different created_at); 2 and 3 collide on id only;
@@ -197,23 +209,28 @@ export async function buildSource(dir) {
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (9, 'ev-shared', 'hello both', 'received', '2026-02-01 00:00:00');
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (9, 'ev-grackle', 'only on grackle', 'sent', '2026-02-02 00:00:00');
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (11, 'ev-bot', 'bot chatter', 'received', '2026-02-03 00:00:00');
+    INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (12, 'ev-deleted', 'from a deleted contact', 'received', '2026-02-04 00:00:00');
     INSERT INTO crow_context (section_key, section_title, content) VALUES ('grackle_notes', 'Grackle notes', 'only on grackle');
 
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (8, 'post-eight', 'Eight', 'body eight', 'draft');
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (9, 'post-nine', 'Nine', 'body nine', 'draft');
     INSERT INTO blog_post_embeddings (post_id, model, dim, vec) VALUES (8, 'qwen3-embedding-0.6b', 4, x'08080808');
-    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (8, 9, 'Dayane', 'nice', 'approved', '2026-05-05 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 9, 'Dayane', 'nice', 'approved', '2026-05-05 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 11, 'A bot', 'beep', 'approved', '2026-05-06 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 12, 'Deleted', 'gone', 'approved', '2026-05-07 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (8, 9, 'Dayane', 'on grackle post eight', 'approved', '2026-05-08 00:00:00');
     INSERT INTO songbook_setlists (id, name, created_at) VALUES (1, 'Sunday', '2026-05-01 00:00:00');
     INSERT INTO songbook_setlist_items (setlist_id, post_id, position) VALUES (1, 9, 1);
     INSERT INTO crosspost_rules (source_app, source_trigger, target_app, created_at, updated_at) VALUES ('blog', 'publish', 'mastodon', 1, 1);
-    INSERT INTO schedules (task, cron_expression, description) VALUES ('blog-digest', '0 9 * * 1', 'weekly digest');
+    INSERT INTO schedules (task, cron_expression, description, enabled, next_run) VALUES ('blog-digest', '0 9 * * 1', 'weekly digest', 1, '2026-09-21 09:00:00');
+    INSERT INTO schedules (task, cron_expression, enabled, next_run) VALUES ('pipeline:botcron:grackle-assistant', '*/30 * * * *', 1, '2026-09-20 00:00:00');
 
     INSERT INTO chat_conversations (id, title, provider, model, created_at) VALUES (1, 'chat', 'crow-chat', 'qwen', '2026-05-02 00:00:00');
     INSERT INTO chat_messages (id, content, role, conversation_id, created_at) VALUES (1, 'hello', 'user', 1, '2026-05-02 00:00:01');
     INSERT INTO chat_messages (id, content, role, conversation_id, created_at) VALUES (2, 'hi there', 'assistant', 1, '2026-05-02 00:00:02');
 
     INSERT INTO glasses_photos (id, device_id, captured_at, minio_key, mime, size_bytes) VALUES (1, 'glasses-1', '2026-06-01 10:01:00', 'glasses/p1.jpg', 'image/jpeg', 10);
-    INSERT INTO storage_files (id, s3_key, original_name, project_id, reference_type, reference_id) VALUES (1, 'files/a.pdf', 'a.pdf', 6, 'blog_post', 8);
+    INSERT INTO storage_files (id, s3_key, original_name, project_id, reference_type, reference_id) VALUES (1, 'files/a.pdf', 'a.pdf', 6, 'blog_post', 9);
     INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('grackle-assistant', 'Grackle Assistant', '{}', 1, 5);
     INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('home-search', 'Home search', '{}', 1);
     INSERT INTO bot_runs (run_id, bot_id, status) VALUES ('run-1', 'grackle-assistant', 'done');
@@ -232,6 +249,8 @@ export async function buildSource(dir) {
     INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9vg4yyy', '2026-W30', 'egg-g1', 60);
     -- synced ramble rows that never reached crow (I7)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at, lamport_ts, lamport_origin) VALUES ('egg-g1', 'shelf', 'robin', 60, 41, '${GRACKLE_ID}');
+    -- grackle minted its own incubating egg while cut off (N3)
+    INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-g2', 'incubating', 'finch', 95);
     INSERT INTO ramble_settings (key, value) VALUES ('shared', 'grackle-value');
     INSERT INTO ramble_settings (key, value) VALUES ('only_grackle', 'g');
     INSERT INTO ramble_pet (owner, mood) VALUES ('self', 'grackle-mood');

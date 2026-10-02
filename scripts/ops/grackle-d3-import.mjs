@@ -12,7 +12,7 @@
  *     [--source-instance-id <grackle-instance-id>] \
  *     [--peer-max-id <table>:<instance-id>=<n> ...] [--peer-max-memory-id <instance-id>=<n> ...] \
  *     [--peer-exclude <instance-id> ...] [--ack-unclassified <t1,t2,...>] \
- *     [--import-media] [--import-data-dashboard] [--keep-scratch]
+ *     [--import-media] [--import-data-dashboard] [--keep-scratch] [--requeue]
  *
  * Modes:
  *   plan      reads both DBs (the source as bytes, the target as an
@@ -113,6 +113,7 @@ export const IMPORT_SPECS = [
     dedupe: [{ cols: ["crow_id"], strict: true }],
     dropCols: CONTACT_LOCAL_COLS,
     syncKey: ["crow_id"],
+    transform: "contactTombstone",
   },
   // ---- projects: everything else points at them
   {
@@ -191,12 +192,19 @@ export const IMPORT_SPECS = [
     fks: { project_id: fk("project_spaces", "skip") },
     syncKey: ["section_key", "device_id", "project_id"],
   },
-  { table: "blog_posts", group: "core", pk: "id", idPolicy: "keep-if-free", dedupe: [{ cols: ["slug"] }] },
+  {
+    // a slug match whose title differs is a DIFFERENT post: no remap, so its
+    // children never attach to crow's post (minor d) — reported in go_no_go
+    table: "blog_posts", group: "core", pk: "id", idPolicy: "keep-if-free",
+    dedupe: [{ cols: ["slug"], conflictIf: ["title"] }],
+  },
   { table: "blog_post_embeddings", group: "core", pk: ["post_id"], fks: { post_id: fk("blog_posts", "skip") } },
   {
     table: "blog_comments", group: "core", pk: "id", idPolicy: "keep-if-free",
     dedupe: [{ cols: ["nostr_event_id"], strict: true }, { cols: ["post_id", "content", "created_at"] }],
-    fks: { post_id: fk("blog_posts", "skip"), contact_id: fk("contacts", "skip") },
+    // ON DELETE SET NULL + author_name carries the display: an unknown contact
+    // keeps the comment (minor c). A TOMBSTONED contact still sends it to the extract.
+    fks: { post_id: fk("blog_posts", "skip"), contact_id: fk("contacts", "null") },
   },
   {
     table: "songbook_setlists", group: "core", pk: "id", idPolicy: "keep-if-free",
@@ -204,17 +212,23 @@ export const IMPORT_SPECS = [
   },
   {
     table: "songbook_setlist_items", group: "core", pk: "id", idPolicy: "keep-if-free",
-    dedupe: [{ cols: ["setlist_id", "post_id", "position"] }],
+    dedupe: [{ cols: ["setlist_id", "post_id"] }], // the unique index (minor b)
     fks: { setlist_id: fk("songbook_setlists", "skip"), post_id: fk("blog_posts", "skip") },
   },
   {
+    // imported INACTIVE and listed: Kevin confirms the target integration exists on crow (minor e)
     table: "crosspost_rules", group: "core", pk: "id", idPolicy: "keep-if-free",
     dedupe: [{ cols: ["source_app", "source_trigger", "target_app"] }],
+    transform: (row) => ({ row: { ...row, active: 0 } }),
+    goNoGo: (row, original) => ({ id: row.id, source_app: row.source_app, source_trigger: row.source_trigger, target_app: row.target_app, active_on_grackle: original.active }),
   },
   {
+    // nothing grackle-scheduled runs on crow until someone switches it on (N2):
+    // pipeline:botcron rows would otherwise fire every overdue run at once
     table: "schedules", group: "core", pk: "id", idPolicy: "keep-if-free",
     dedupe: [{ cols: ["task", "cron_expression"] }],
-    listInGoNoGo: true,
+    transform: (row) => ({ row: { ...row, enabled: 0, next_run: null } }),
+    goNoGo: (row, original) => ({ id: row.id, task: row.task, cron_expression: row.cron_expression, enabled_on_grackle: original.enabled }),
   },
   {
     table: "chat_conversations", group: "core", pk: "id", idPolicy: "keep-if-free",
@@ -252,7 +266,7 @@ export const IMPORT_SPECS = [
   },
   { table: "ramble_settings", group: "ramble", pk: ["key"], syncKey: ["key"] },
   { table: "ramble_blocks", group: "ramble", pk: ["persona"], syncKey: ["persona"] },
-  { table: "ramble_eggs", group: "ramble", pk: ["egg_id"], syncKey: ["egg_id"] },
+  { table: "ramble_eggs", group: "ramble", pk: ["egg_id"], syncKey: ["egg_id"], transform: "oneIncubatingEgg" },
   { table: "ramble_pet", group: "ramble", pk: ["owner"], syncKey: ["owner"] },
   { table: "ramble_trades", group: "ramble", pk: ["trade_id"], syncKey: ["trade_id"] },
   { table: "ramble_groups", group: "ramble", pk: ["group_id"] },
@@ -565,6 +579,25 @@ class Remaps {
 }
 
 const TRANSFORMS = {
+  /** A contact Kevin deleted on crow stays deleted (N1); its children follow it to the extract. */
+  contactTombstone(row, ctx) {
+    if (tableExists(ctx.tgt, "contact_tombstones") &&
+        ctx.tgt.prepare("SELECT 1 FROM contact_tombstones WHERE crow_id = ?").get(row.crow_id)) {
+      ctx.tombstonedContacts.add(row.id);
+      ctx.tombstonedList.push({ crow_id: row.crow_id });
+      return { drop: "tombstoned" };
+    }
+    return { row };
+  },
+  /** One incubating egg (N3): mirror applyRambleEgg's loser rule — shelve, origin 'sync'. */
+  oneIncubatingEgg(row, ctx) {
+    if (row.status !== "incubating") return { row };
+    if (ctx.tgt.prepare("SELECT 1 FROM ramble_eggs WHERE egg_id = ?").get(row.egg_id)) return { row }; // crow has it: matched below
+    const cur = ctx.tgt.prepare("SELECT egg_id FROM ramble_eggs WHERE status = 'incubating' LIMIT 1").get();
+    if (!cur) return { row };
+    ctx.eggsShelved.push({ egg_id: row.egg_id, kept_incubating: cur.egg_id });
+    return { row: { ...row, status: "shelf", shelf_origin: "sync" } };
+  },
   mediaPlaylistItem(row, ctx) {
     if (row.item_type === "article") return { drop: "article items point at the rolling feed (not imported)" };
     if (row.item_type === "briefing") {
@@ -612,6 +645,7 @@ function driftOf(tgt, table, keyWhere, keyArgs, row, cols) {
  */
 function importTable(spec, src, tgt, ctx) {
   const { table } = spec;
+  ctx.tgt = tgt;
   const stat = {
     group: spec.group, classification: "import", source_rows: 0, inserted: 0, matched_existing: 0,
     filtered: 0, fk_skipped: 0, kept_ids: 0, remapped_ids: 0,
@@ -669,6 +703,7 @@ function importTable(spec, src, tgt, ctx) {
     for (const [col, rule] of Object.entries(spec.fks || {})) {
       const v = row[col];
       if (v == null) continue;
+      if (rule.parent === "contacts" && ctx.tombstonedContacts.has(v)) { skip = "tombstoned"; break; }
       const mapped = ctx.remaps.get(rule.parent, v);
       if (mapped !== undefined) { row[col] = mapped; continue; }
       if (rule.onMissing === "skip") { skip = `${col}=${v} has no imported/matched ${rule.parent} row`; break; }
@@ -676,17 +711,24 @@ function importTable(spec, src, tgt, ctx) {
     }
     if (skip) { stat.fk_skipped++; ctx.notImported(table, original, skip); continue; }
 
+
     const t = applyTransform(spec, row, ctx);
     if (t.drop) { stat.filtered++; ctx.notImported(table, original, t.drop); continue; }
     row = t.row;
 
     // dedupe onto an existing target row
     let matched;
+    let conflict = null;
     for (const d of dedupeStmts) {
       if (d.when && !d.when(row)) continue;
       const vals = d.cols.map((c) => row[c] ?? null);
       if (d.strict && vals.some((v) => v == null)) continue;
       const hit = d.stmt.get(...vals);
+      if (hit && d.conflictIf) {
+        const ex = tgt.prepare(`SELECT * FROM ${q(table)} WHERE ${d.whereSql} LIMIT 1`).get(...vals);
+        const diff = d.conflictIf.filter((c) => (row[c] ?? null) !== (ex[c] ?? null));
+        if (diff.length) { matched = null; conflict = { on: d.cols, differs: diff, crow_id: hit.id }; break; }
+      }
       if (hit) {
         matched = hit.id;
         if (d.drift) {
@@ -702,6 +744,12 @@ function importTable(spec, src, tgt, ctx) {
         const dr = driftOf(tgt, table, naturalWhere, naturalPk.map((c) => row[c] ?? null), row, spec.naturalDrift);
         if (dr) ctx.drift(table, { key: Object.fromEntries(naturalPk.map((c) => [c, row[c]])), ...dr });
       }
+    }
+    if (conflict) {
+      stat.conflicts = (stat.conflicts || 0) + 1;
+      ctx.conflicts(table, { source_id: original.id, ...Object.fromEntries(conflict.on.map((c) => [c, row[c]])), crow_id: conflict.crow_id, differs: conflict.differs });
+      ctx.notImported(table, original, `${conflict.on.join(",")} taken on crow by a different row (${conflict.differs.join(",")} differ)`);
+      continue;
     }
     if (matched !== undefined) {
       stat.matched_existing++;
@@ -732,7 +780,7 @@ function importTable(spec, src, tgt, ctx) {
     stat.inserted++;
     ctx.inserted(table, key);
     if (spec.syncKey) ctx.syncedMissing(table, Object.fromEntries(spec.syncKey.map((c) => [c, row[c] ?? null])));
-    if (spec.listInGoNoGo) ctx.listed(table, { id: key.id, ...Object.fromEntries(cols.filter((c) => c !== "id").slice(0, 4).map((c) => [c, row[c]])) });
+    if (spec.goNoGo) ctx.listed(table, spec.goNoGo(row, original));
     if (table === "ramble_wallet") {
       ctx.wallet.inserted_sum[row.kind] = (ctx.wallet.inserted_sum[row.kind] || 0) + Number(row.delta || 0);
     }
@@ -911,9 +959,11 @@ function outboxLamport(tgt, table, key) {
  * recorded as queued, never queued twice. `persist()` is called after every
  * item so a crash leaves an accurate report for emit-only (I8).
  */
-export async function phaseB(tgt, emits, { emitOrQueue }, persist = () => {}) {
+export async function phaseB(tgt, emits, { emitOrQueue }, persist = () => {}, { requeue = false } = {}) {
   const adapter = libsqlAdapter(tgt);
   for (const item of emits.items) {
+    // already queued once: the drain may have delivered and removed it (minor a)
+    if (item.status === "queued" && item.lamport != null && !requeue) continue;
     // a closed gate queues nothing — not even a re-queue of an already-queued item
     if (item.status === "gated" || emits.gates?.[item.table]?.open === false) continue;
     const existing = outboxLamport(tgt, item.table, item.key);
@@ -1180,7 +1230,12 @@ function newCtx(peerMax) {
     synced: {},
     renamed: [],
     listedRows: {},
+    tombstonedContacts: new Set(),
+    tombstonedList: [],
+    eggsShelved: [],
+    conflictRows: {},
   };
+  ctx.conflicts = (table, c) => { (ctx.conflictRows[table] ||= []).push(c); };
   ctx.warn = (m) => ctx.warnings.push(m);
   ctx.inserted = (table, key) => { (ctx.insertedKeys[table] ||= []).push(key); };
   ctx.notImported = (table, row, reason) => ctx.notImportedRows.push({ table, row, reason });
@@ -1252,6 +1307,10 @@ function buildGoNoGo(ctx, emits, extra = {}) {
     synced_tables_missing_on_crow: ctx.synced,
     renamed_project_slugs: ctx.renamed,
     imported_schedules: ctx.listedRows.schedules || [],
+    imported_crosspost_rules: ctx.listedRows.crosspost_rules || [],
+    tombstoned_contacts: ctx.tombstonedList,
+    eggs_shelved: ctx.eggsShelved,
+    blog_slug_conflicts: ctx.conflictRows.blog_posts || [],
     phase_b_gates: emits?.gates ?? null,
     warnings: ctx.warnings.length,
     ...extra,
@@ -1600,7 +1659,7 @@ async function runEmitOnly(opts, deps, peerMax, probes) {
     if (sourceStatus !== "revoked") report.phase_b_refused = `crow's row for the source reads '${sourceStatus ?? "missing"}', not 'revoked'`;
     const persist = () => writeJsonAtomic(opts.report, report);
     const emitter = await loadEmitter(deps.emitter);
-    await phaseB(tgt, emits, emitter, persist);
+    await phaseB(tgt, emits, emitter, persist, { requeue: !!opts.requeue });
     report.phase_b = summarizeEmits(emits);
     persist();
     return { exitCode: 0, report };
@@ -1635,6 +1694,7 @@ export function parseArgs(argv) {
       case "--import-media": opts.importMedia = true; break;
       case "--import-data-dashboard": opts.importDataDashboard = true; break;
       case "--keep-scratch": opts.keepScratch = true; break;
+      case "--requeue": opts.requeue = true; break;
       default: throw new UsageError(`unknown argument '${a}'`);
     }
   }
