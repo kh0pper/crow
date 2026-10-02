@@ -75,13 +75,25 @@ Los huevos vienen de tres lugares, y ninguno es gratis:
   `lay.days` (predeterminado 14) pones uno tú misma. Los días no necesitan ser consecutivos, y el conteo solo
   corre mientras estés sin huevo, así que esto es un piso más que un caño.
 
-La repisa rellena la ranura de incubación cuando un huevo **eclosiona** — el más viejo de tu repisa
-entra automáticamente. Si un huevo llega mientras tu ranura está vacía en cambio — un regalo, un
-intercambio, o uno liberado cuando un intercambio caduca y desbloquea el último de tu repisa —
-**no** se promueve automáticamente: espera en tu repisa, y la página de tu mascota ofrece un
-**Calentarlo** de un toque para traerlo. **El calor ganado con la ranura vacía desaparece, incluso
-si tienes huevos esperando en tu repisa** — así que calienta un huevo en espera antes de salir a
-caminar.
+Siempre que tu ranura de incubación esté vacía y un huevo pase a ser tuyo para calentar, el más
+viejo de tu estante entra automáticamente — así que solo te quedas sin huevo cuando de verdad no
+tienes ninguno. Eso ocurre cuando un huevo **eclosiona**, cuando llega un **regalo**, cuando se
+**completa un intercambio**, cuando un intercambio se **rechaza** o se retira y te devuelve tu
+huevo, y cuando **recoges un nido**. Ocurre en el Crow que recibió el huevo, y tus otros Crows
+simplemente copian el resultado.
+
+Dos casos esperan en cambio, y la página de tu mascota ofrece un **Calentarlo** de un toque para
+ellos:
+
+- Una oferta que **caduca** a los siete días libera su huevo sin calentarlo. La respuesta del
+  otro lado todavía puede llegar y completar el intercambio, y calentar el huevo mientras tanto te
+  dejaría con los dos.
+- Si uno de tus Crows hace eclosionar un huevo en el mismo momento en que otro recibe un regalo,
+  los dos pueden quedar con la ranura vacía y el regalo en tu estante. Ambos Crows coinciden;
+  simplemente te dejan la elección a ti.
+
+**El calor ganado con la ranura vacía desaparece, incluso si tienes huevos esperando en tu
+estante** — así que calienta un huevo en espera antes de salir a caminar.
 
 | Configuración | Predeterminado | Rige |
 |---|---|---|
@@ -129,7 +141,7 @@ Tres tareas — **alimentar** (`feed`), **acicalar** (`preen`), **jugar** (`play
 
 Los nidos son puntos de aparición en el mundo. Cada semana ISO, cada celda geohash-7 (unos 150 m de lado) tiene un nido o no, decidido por una fórmula pública — `sha256("ramble-nest-v1:" + celda + ":" + semana)`, hay nido cuando los primeros 32 bits mod `nest.rate` (24 por defecto) dan 0 — así que todo el mundo ve los mismos nidos sin ninguna intervención del servidor y sin que se revele nada sobre las personas. El mapa los muestra como pines de huevo en cuanto haces zoom (nivel 15 o más cerca), obtenidos de `GET /api/ramble/nests?bbox=south,west,north,east`.
 
-Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`POST /api/ramble/nests/claim`): un huevo nuevo llega a tu **estante** (sin eclosionar, calor 0, marcado con la celda y la semana en que se encontró). Límites: **una recogida por día local** y un **tope de estante de 5** (`shelf.cap`); ambos rechazos vuelven como una razón amistosa, no como un error. Recoger el mismo nido dos veces devuelve el mismo huevo. Recoger un huevo no acredita **nada** de calor ni alimenta **nada** de energía — el huevo mismo es la recompensa. Las recogidas se registran por instancia (`ramble_nest_claims`) y nunca se replican; el huevo sí.
+Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`POST /api/ramble/nests/claim`): un huevo nuevo llega a tu **estante** (sin eclosionar, calor 0, marcado con la celda y la semana en que se encontró), o entra directamente en la ranura de incubación si no hay nada calentándose. Límites: **una recogida por día local** y un **tope de estante de 5** (`shelf.cap`); ambos rechazos vuelven como una razón amistosa, no como un error. Recoger el mismo nido dos veces devuelve el mismo huevo. Recoger un huevo no acredita **nada** de calor ni alimenta **nada** de energía — el huevo mismo es la recompensa. Las recogidas se registran por instancia (`ramble_nest_claims`) y nunca se replican; el huevo sí.
 
 Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incubar** cualquier huevo del estante (`POST /api/ramble/eggs/:id/incubate`); el que reemplaza pasa al estante conservando su calor. Instance sync distingue un huevo que *tú* aparcaste (`shelf_origin = 'user'`) de uno que la capa de sincronización dejó en el estante al reconciliar dos instancias (`'sync'`): solo este último se recupera automáticamente a la ranura de incubación.
 

@@ -76,11 +76,23 @@ Eggs come from three places, and none of them is free:
   `lay.days` (default 14) you lay one yourself. Days need not be consecutive, and the count only
   runs while you are eggless, so this is a floor rather than a faucet.
 
-The shelf refills the incubating slot when an egg **hatches** — the oldest egg on your shelf moves
-in automatically. If an egg arrives while your slot is empty instead — a gift, a swap, or one freed
-when a lapsed swap unlocks it — it does **not** auto-promote: it waits on your shelf, and the pet
-page offers a one-tap **Warm it** to bring it in. **Warmth earned with an empty slot vanishes, even
-if you are holding eggs on your shelf** — so warm a waiting egg before you go walking.
+Whenever your incubating slot is empty and an egg becomes yours to warm, the oldest egg on your
+shelf moves in automatically — so you are only ever eggless when you genuinely hold none. That
+happens when an egg **hatches**, when a **gift** lands, when a **swap completes**, when a swap is
+**declined** or withdrawn and hands your egg back, and when you **claim a nest**. It happens on the
+Crow that received the egg, and your other Crows simply copy the result.
+
+Two cases wait instead, and the pet page offers a one-tap **Warm it** for them:
+
+- An offer that **lapses** after seven days frees its egg without warming it. The other side's
+  reply can still arrive and complete the swap, and warming the egg in between would leave you
+  holding both.
+- If one of your Crows hatches an egg at the same moment another one receives a gift, the two can
+  settle with the slot empty and the gift on your shelf. Both Crows agree; they just leave the
+  choice to you.
+
+**Warmth earned with an empty slot vanishes, even if you are holding eggs on your shelf** — so warm
+a waiting egg before you go walking.
 
 | Setting | Default | Governs |
 |---|---|---|
@@ -128,7 +140,7 @@ Three chores — **feed**, **preen**, **play** — are yours to do once each per
 
 Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 15 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
 
-Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in). Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
+Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in), or goes straight into the incubating slot if nothing is warming. Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
 
 Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
 
