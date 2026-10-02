@@ -355,3 +355,20 @@ See the stream report. In short:
 | Two Discord bots or two HA instances | stop on grackle first, always (§6.4, §6.5) |
 | Silent alert loss | every deadman sends ntfy plus email |
 | Wiping something unarchived | 7-day soak, manifest verification, and Kevin's explicit OK |
+
+## 9. Kevin's decisions (2026-10-02, recorded by the crow session)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | When reachable | Kevin is at grackle all day on 2026-10-02 (Fri). W0 starts as soon as grackle has a stable link (a reboot, preferably on Ethernet). W3 runs after A8 is merged and deployed and Task 1 (the importer) is built. |
+| 2 | sudo on crow | **Yes**, for windows registered in CROW-SCHEDULE.md that have a deadman. |
+| 3 | Ramble | **Import the grackle progress, and install Ramble on crow during W3.** This settles A6: the deploy target is crow. |
+| 4 | media / data-dashboard | **Install both on crow and import their data**. They are not archive-only. |
+| 5 | travel-planner | **Archive only**: tarball to /mnt/external, not added to the repo. |
+| 6 | Credential copies (W0) | **All approved.** Copies go to 0600 locations on crow and each is listed in the W0 log. The Android keystore is NOT needed: crow's `~/.crow/android-keystore/crow-release.jks` is valid and signed app 1.5.2 on 2026-10-02 (cert SHA-256 6d5aeff1…4352). |
+| 7 | GitHub PAT in the ai-edu-suite remote | **Rotate it.** Kevin revokes it on GitHub, and the remote is switched to SSH or a credential helper. |
+| 8 | Seagate USB | **Keep it** (it stays with Kevin and is not wiped). |
+| 9 | Windows C: | **Nothing to rescue.** |
+| 10 | 16 research s3 objects | **Not accepted as lost.** W0 tries to copy them. |
+| 11 | Home Assistant access | **LAN and tailnet** (a Serve HTTPS port). |
+| 12 | Wipe | Still needs Kevin's explicit OK after W5 plus the 7-day soak. |
