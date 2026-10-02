@@ -358,3 +358,12 @@ test("transient for 10 minutes: delivery gives up (audited), the result stays in
   const ev = (await db.execute({ sql: "SELECT event FROM phone_audit WHERE call_id=? AND event='delivery_gave_up'", args: [call_id] })).rows;
   assert.equal(ev.length, 1);
 });
+
+// ---- spec 2026-10-02: an owner stop is its own outcome ----
+test("a runner 'stopped' result finalizes as stopped with its wrap-up summary and the stop error", async () => {
+  const { db, call_id, d } = await setup({ runner: mkRunner({ events: async () => okResult({ outcome: "stopped", summary: "Open Saturdays 9 to 1.", error: "stopped by owner" }) }) });
+  await d.tick(); await d.tick();
+  const c = await store.getCall(db, call_id);
+  assert.equal(c.status, "done"); assert.equal(c.outcome, "stopped");
+  assert.equal(c.summary, "Open Saturdays 9 to 1."); assert.equal(c.error, "stopped by owner");
+});

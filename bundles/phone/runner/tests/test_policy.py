@@ -136,3 +136,56 @@ def test_normalize_number():
     assert policy.normalize_number("+1 512.555.0101") == "+15125550101"
     for bad in ["512-555-0101#", "*67 512 555 0101", "512555", "abc", None]:
         assert policy.normalize_number(bad) is None, bad
+
+
+# ---- spec 2026-10-02: call wrap-up ----
+
+def test_stopped_is_an_outcome_but_not_a_model_outcome():
+    assert "stopped" in policy.OUTCOMES and "stopped" not in policy.MODEL_OUTCOMES
+
+
+def test_is_closing_en_es():
+    yes = [
+        "Thank you, goodbye.",
+        "Muchas gracias, hasta luego.",
+        "Great, Saturday 9 to 1 is what I needed. Thank you, goodbye.",
+        "That's all I needed, thank you.",
+        "Thank you for your help, have a great day.",
+        "Thanks so much for your time. Goodbye!",
+        "Perfect, that’s everything. Bye.",
+        "Muchas gracias, adiós.",
+        "Perfecto, eso es todo. Gracias.",
+        "Gracias por su ayuda, que tenga buen día.",
+    ]
+    no = [
+        # review I-2: a goodbye-ish phrase that does not END the line is not a goodbye
+        "Thanks for your help. I'd also like to book a cleaning for Tuesday.",
+        "Thanks for the info. I also need to know if you take Aetna.",
+        "That's all good. I'd also like to ask about pricing.",
+        "Great, that's all set. Next, I need to confirm the address.",
+        "Okay, that is all clear. One more thing: I need the price.",
+        "Perfect, that's all I needed for Saturday. Please also tell me Sunday hours.",
+        "Bye the way, I need the price too.",
+        "Gracias por su ayuda. También necesito saber el precio.",
+        "Eso es todo lo que tengo anotado. Ahora, el precio, por favor.",
+        "Pensé que era todo, pero también necesito el precio.",
+        "Hasta luego no puedo, prefiero el martes a las tres.",
+        "No hay prisa, que tenga buen día mientras revisa. Espero en la línea.",
+        "Great, and do you take walk-ins",                  # a question without its '?'
+        "Thanks, that's what I needed — Saturday hours 9 to 1.",  # the facts come after the phrase
+        "That's all.",                                      # bare forms dropped
+        "Era todo.",
+        "Tuesday October 6th at 3:30 works, thank you.",   # agreeing to a slot
+        "Thanks.",                                          # answering "let me check"
+        "Gracias.",
+        "Thanks. What time do you close?",
+        "Is that all I need to bring?",
+        "¿Eso es todo lo que necesito llevar",
+        "Hello, I'd like to book a cleaning.",
+        "",
+        None,
+    ]
+    for t in yes:
+        assert policy.is_closing(t), t
+    for t in no:
+        assert not policy.is_closing(t), t

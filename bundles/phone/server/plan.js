@@ -2,7 +2,7 @@
 // (plan time and dispatch time) and mirrored in the runner (policy.py).
 import { createHash } from "node:crypto";
 
-export const OUTCOMES = ["booked","info_gathered","needs_callback","no_answer","voicemail","busy","not_in_service","refused","phone_busy","phone_unreachable","line_lost","taken_over","not_admissible","failed"];
+export const OUTCOMES = ["booked","info_gathered","needs_callback","no_answer","voicemail","busy","not_in_service","refused","phone_busy","phone_unreachable","line_lost","taken_over","not_admissible","stopped","failed"];
 const NANP = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
 const SHAREABLE_FIELDS = ["name","callback_number","date_of_birth","insurance_member_id","address","email"];
 const DAYS = ["mon","tue","wed","thu","fri","sat","sun"];

@@ -52,7 +52,7 @@ export function createPhoneMcpServer({ db, ownerNumber, McpServer, z, notify, no
     catch (e) { console.warn(`[phone] card push failed for ${id}: ${e.message}`); }
   };
   if (!McpServer || !z) throw new Error("createPhoneMcpServer needs the gateway's McpServer and z (dependency injection)");
-  const server = new McpServer({ name: "crow-phone", version: "0.2.0" });
+  const server = new McpServer({ name: "crow-phone", version: "0.2.1" });
 
   server.tool("phone_plan_call",
     "Propose a phone call to a BUSINESS for the owner. This never dials: the owner must approve the plan (in this chat's call card, or in Crow's Nest → Phone). Give the goal, the limits the agent may agree to, and only the personal details the business needs.",
