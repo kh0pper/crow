@@ -60,16 +60,16 @@ export default {
     const crowBody = crow.length
       ? crow.map(rowHtml).join("")
       : `<tr><td colspan="5" style="text-align:center;color:var(--crow-text-muted);padding:1rem">No ports registered.</td></tr>`;
-    const crowTable = `<table class="settings-table" style="width:100%;border-collapse:collapse">
+    const crowTable = `<div class="table-scroll"><table class="settings-table" style="width:100%;border-collapse:collapse">
       <thead><tr style="text-align:left;border-bottom:1px solid var(--crow-border)">
         <th>Port</th><th>App / Service</th><th>Bind</th><th>Status</th><th>Type</th>
-      </tr></thead><tbody>${crowBody}</tbody></table>`;
+      </tr></thead><tbody>${crowBody}</tbody></table></div>`;
 
     const foreignTable = foreign.length
       ? `<details style="margin-top:1rem"><summary style="cursor:pointer;color:var(--crow-text-muted)">Other host listeners (${foreign.length})</summary>
-         <table class="settings-table" style="width:100%;border-collapse:collapse;margin-top:.5rem"><tbody>
+         <div class="table-scroll"><table class="settings-table" style="width:100%;border-collapse:collapse;margin-top:.5rem"><tbody>
          ${foreign.map((r) => `<tr><td style="font-variant-numeric:tabular-nums">${r.port ?? ""}</td><td style="color:var(--crow-text-muted)">${escapeHtml(r.boundAddr || "")}</td></tr>`).join("")}
-         </tbody></table></details>`
+         </tbody></table></div></details>`
       : "";
 
     return `<p style="color:var(--crow-text-muted);margin:.2rem 0 1rem">${t("settings.ports.description", lang)}</p>

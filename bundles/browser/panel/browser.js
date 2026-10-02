@@ -134,12 +134,12 @@ export default {
 
     // --- Sessions tab ---
     const sessionsContent = sessions.length > 0 ? `
-      <table class="table">
+      <div class="table-scroll"><table class="table">
         <thead><tr><th>Session Name</th><th>Last Modified</th></tr></thead>
         <tbody>
           ${sessions.map(s => `<tr><td><code>${escapeHtml(s.name)}</code></td><td>${escapeHtml(s.modified)}</td></tr>`).join("")}
         </tbody>
-      </table>
+      </table></div>
     ` : `<div class="empty-state" style="padding:2rem; text-align:center; color:var(--text-muted);">
       <p>No saved sessions. Use <code>crow_browser_save_session</code> to save cookies and storage state.</p>
     </div>`;

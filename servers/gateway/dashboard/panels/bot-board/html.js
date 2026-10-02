@@ -703,11 +703,11 @@ export async function renderKanbanBoard(req, res, {
       content: botBoardStyles() + section(
         `Card #${cid} — ${escapeHtml(String(card.title || ""))} ${badge(card.status, STATUS_BADGE[card.status] || "draft")}${locked ? " " + badge("bot working", "info") : ""}`,
         `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">${t("botboard.backToBoard", lang)}</a></p>` +
-        `<table style="font-size:.9rem;border-collapse:collapse">` +
+        `<div class="table-scroll"><table style="font-size:.9rem;border-collapse:collapse">` +
         fieldRow(t("botboard.fieldPriority", lang), card.priority) + fieldRow(t("botboard.fieldDue", lang), card.due_date) +
         fieldRow(t("botboard.fieldOwner", lang), card.owner) + fieldRow(t("botboard.fieldTags", lang), card.tags) +
         fieldRow(t("botboard.fieldParent", lang), card.parent_id) + fieldRow(t("botboard.fieldUpdated", lang), card.updated_at) +
-        `</table>` +
+        `</table></div>` +
         (card.description ? `<p style="margin-top:.6rem">${escapeHtml(String(card.description))}</p>` : "") +
         moveForm + `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
     });

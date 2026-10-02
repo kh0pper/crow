@@ -387,7 +387,7 @@ async function renderDetailView(db, projectId, layout, lang) {
       s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" style="color:var(--crow-accent);font-size:0.8rem">link</a>` : "",
       `<span style="font-size:0.75rem">${formatDate(s.created_at, lang)}</span>`,
     ]);
-    sourcesHtml = dataTable(["Title", "Type", "Status", "URL", "Added"], rows);
+    sourcesHtml = dataTable(["Title", "Type", "Status", "URL", "Added"], rows, { stack: true });
   }
 
   // Notes list
@@ -504,7 +504,7 @@ async function renderDetailView(db, projectId, layout, lang) {
       const colorMap = { local: "info", bot: "connected", contact: "info", system: "draft" };
       return badge(t, colorMap[t] || "draft");
     };
-    auditHtml = `<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+    auditHtml = `<div class="table-scroll"><table style="width:100%;border-collapse:collapse;font-size:0.85rem">
       <thead><tr style="color:var(--crow-text-muted);text-align:left;border-bottom:1px solid var(--crow-border)">
         <th style="padding:0.25rem 0.5rem;width:170px">When</th>
         <th style="padding:0.25rem 0.5rem;width:90px">Actor</th>
@@ -527,7 +527,7 @@ async function renderDetailView(db, projectId, layout, lang) {
         </tr>`;
       }).join("")}
       </tbody>
-    </table>
+    </table></div>
     ${auditEntries.length === 50 ? `<p style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">Showing latest 50 entries. Use the <code>crow_audit_log</code> MCP tool for filtering / older entries.</p>` : ""}`;
   }
 

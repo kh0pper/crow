@@ -191,7 +191,7 @@ export async function renderReadiness(db, bot, def, lang) {
     : t("botbuilder.checkStatusDisabled", lang);
   rows.push(row(bot.enabled ? OK : WARN, t("botbuilder.checkStatus", lang), statusDetail, null, ""));
 
-  return `<table class="btb-checklist">` +
+  return `<div class="table-scroll"><table class="btb-checklist">` +
     `<thead><tr><th></th><th>${t("botbuilder.checkColItem", lang)}</th><th>${t("botbuilder.checkColState", lang)}</th><th></th></tr></thead>` +
-    `<tbody>${rows.join("")}</tbody></table>`;
+    `<tbody>${rows.join("")}</tbody></table></div>`;
 }

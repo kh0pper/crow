@@ -57,7 +57,7 @@ export function componentsCss() {
   .step-active .step-num { border-color:var(--crow-accent); color:var(--crow-accent); }
 
   /* Tabs */
-  .tab-list { display:flex; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
+  .tab-list { display:flex; flex-wrap:wrap; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
   .tab-trigger { background:transparent; border:none; border-bottom:2px solid transparent;
     color:var(--crow-text-secondary); font-family:inherit; font-size:var(--crow-text-base);
     padding:var(--crow-space-2) var(--crow-space-4); cursor:pointer; }
@@ -65,6 +65,93 @@ export function componentsCss() {
   .tab-trigger.tab-active { color:var(--crow-accent); border-bottom-color:var(--crow-accent); }
   .tab-panel { display:none; }
   .tab-panel.tab-active { display:block; }
+
+  /* ─── Responsive overflow (mobile overflow fix, 2026-10) ───
+     Wide content must scroll or wrap INSIDE its card, never push past it
+     (Pixel 9a: 412px portrait, ~915px landscape with the sidebar open).
+
+     .table-scroll is THE wrapper every dashboard table sits in — dataTable()
+     emits it, hand-built tables wrap themselves, renderMarkdown() wraps
+     markdown tables, and tests/dashboard-table-scroll.test.js fails on any
+     table outside it.
+
+     The scroll hint is drawn ONLY while the wrapper can actually scroll:
+     componentsJs() measures each wrapper (ResizeObserver) and toggles
+     .is-scrollable. The two "cover" gradients scroll WITH the content
+     (local) and hide the edge shadows (scroll) once that edge is reached, so
+     a shadow shows only on a side with more table. The covers must match
+     what is behind the wrapper: --table-scroll-bg follows context (page
+     background vs card) and the script refines it to the wrapper's actual
+     backdrop, so no band ever shows. */
+  .content-body { --table-scroll-bg: var(--crow-bg-deep); }
+  .card, .stat-card { --table-scroll-bg: var(--crow-bg-surface); }
+  .table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+  .table-scroll.is-scrollable {
+    background:
+      linear-gradient(to right, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) left center / 32px 100% no-repeat local,
+      linear-gradient(to left, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) right center / 32px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.22), transparent) left center / 12px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.22), transparent) right center / 12px 100% no-repeat scroll;
+  }
+  @media print {
+    .table-scroll, .table-scroll.is-scrollable { overflow: visible; background: none; max-width: none; }
+  }
+
+  /* Stacked variant (dataTable(..., { stack: true })): when — and only when —
+     the table genuinely does not fit a phone-sized container (<= 720px wide),
+     componentsJs() adds .is-stacked and each row renders as a small card:
+     label / value pairs, action links on one line. Measured, not a fixed
+     breakpoint: Skills fits a landscape phone and stays a table; the bot
+     list does not and stacks. min-width keeps a stacked list from
+     collapsing inside a shrink-to-fit parent. Selectors carry .table-stack
+     so they outrank layout.js's .data-table th/td rules (loaded later). */
+  .table-stack.is-stacked { min-width: 14rem; }
+  .table-stack.is-stacked .data-table--stack, .table-stack.is-stacked .data-table--stack tbody, .table-stack.is-stacked .data-table--stack tr, .table-stack.is-stacked .data-table--stack td { display: block; width: 100%; }
+  .table-stack.is-stacked .data-table--stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .table-stack.is-stacked .data-table--stack tr { border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card);
+    padding: var(--crow-space-2) var(--crow-space-3); margin-bottom: var(--crow-space-3); }
+  .table-stack.is-stacked .data-table--stack tr:hover td { background: transparent; }
+  /* Block + floated label (not flex): a cell's mixed inline content (a
+     link plus text, a badge) stays one inline run, right-aligned. */
+  .table-stack.is-stacked .data-table--stack td { padding: var(--crow-space-1) 0; border-bottom: none; text-align: right; overflow-wrap: anywhere; }
+  .table-stack.is-stacked .data-table--stack td::after { content: ""; display: table; clear: both; }
+  .table-stack.is-stacked .data-table--stack td::before { content: attr(data-label); float: left; margin-right: var(--crow-space-3); text-align: left;
+    font-size: var(--crow-text-xs); color: var(--crow-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .table-stack.is-stacked .data-table--stack td:empty { display: none; }
+  .table-stack.is-stacked .data-table--stack td.dt-action { display: inline-block; width: auto; margin-right: var(--crow-space-4); text-align: left; }
+  .table-stack.is-stacked .data-table--stack td.dt-action::before, .table-stack.is-stacked .data-table--stack td.dt-action::after { content: none; }
+  /* A wide free-text cell (dataTable opts.wide): label on its own line, text
+     full width and left-aligned. Unstacked, the column claims a fair share
+     of the table and wraps long tokens instead of widening the table. */
+  .table-stack.is-stacked .data-table--stack td.dt-wide { text-align: left; }
+  .table-stack.is-stacked .data-table--stack td.dt-wide::before { float: none; display: block; margin: 0 0 var(--crow-space-1); }
+  .data-table td.dt-wide { width: 45%; overflow-wrap: anywhere; }
+
+  /* Long unbreakable tokens (ids, model ids like crow-local/qwen3.6-35b-a3b,
+     hashes, URLs). break-word (inherited) wraps only what would otherwise
+     overflow and does NOT change min-content sizing, so tables and flex rows
+     size exactly as before. .cell-break / .mono opt a cell into "anywhere",
+     which also lets the column itself shrink. Inline code inside a table
+     cell is left alone: a cell keeps its tokens intact and the table
+     scrolls (Perch's markdown-table rule depends on this). */
+  .content-body { overflow-wrap: break-word; }
+  .cell-break, .data-table .mono, .content-body :not(pre, td, th) > code { overflow-wrap: anywhere; }
+
+  /* Zero-specificity safety net (:where) — any panel rule overrides it.
+     Flex/grid items default to min-width:auto (= their min-content width),
+     which is how one long id inflates a whole card. min-width:0 is a no-op
+     for every other box. Block containers + form controls only: icons,
+     buttons and badges keep their intrinsic size. */
+  :where(.content-body) :where(div, section, article, aside, form, fieldset, details, li, label, select, input, textarea) { min-width: 0; }
+  :where(.content-body) :where(select) { max-width: 100%; }
+  :where(.content-body) :where(img, video, canvas, iframe, embed, object) { max-width: 100%; }
+  :where(.content-body) :where(pre) { max-width: 100%; overflow-x: auto; }
 
   /* ─── Focus-visible baseline (W3-5a) ─── */
   .btn:focus-visible, .btn-primary:focus-visible, .btn-secondary:focus-visible,
@@ -112,6 +199,71 @@ export function componentsJs() {
         root.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.toggle("tab-active", p.getAttribute("data-tab-panel") === id); });
       }
     });
+  }
+  // Table wrappers (.table-scroll): toggle .is-scrollable (draws the edge
+  // hint only when there is something to scroll) and, for stacked list
+  // tables, .is-stacked when the table genuinely does not fit a phone-sized
+  // container. Runs once per document; a MutationObserver on <html> picks up
+  // Turbo body swaps and client-built tables. Work is deferred to the next
+  // frame so a class toggle never resizes an element mid-callback.
+  if (!window.__crowTableScrollBound && "ResizeObserver" in window) {
+    window.__crowTableScrollBound = true;
+    (function () {
+      var STACK_MAX = 720;
+      var seen = new WeakSet();
+      var pending = new Set();
+      var queued = false;
+      function backdrop(el) {
+        for (var a = el.parentElement; a; a = a.parentElement) {
+          var c = getComputedStyle(a).backgroundColor;
+          if (c && c !== "transparent" && c.replace(/ /g, "").slice(-3) !== ",0)") return c;
+        }
+        return "";
+      }
+      function check(w) {
+        if (!w.isConnected) return;
+        var t = w.querySelector("table");
+        if (w.classList.contains("table-stack") && t) {
+          var was = w.classList.contains("is-stacked");
+          if (was) w.classList.remove("is-stacked");
+          var stack = w.clientWidth > 0 && w.clientWidth <= STACK_MAX && t.offsetWidth > w.clientWidth + 1;
+          if (stack) w.classList.add("is-stacked");
+        }
+        var scrollable = w.scrollWidth > w.clientWidth + 1;
+        w.classList.toggle("is-scrollable", scrollable);
+        if (scrollable) {
+          var bg = backdrop(w);
+          if (bg) w.style.setProperty("--table-scroll-bg", bg);
+        }
+      }
+      function flush() { queued = false; var list = Array.from(pending); pending.clear(); list.forEach(check); }
+      function queue(w) { pending.add(w); if (!queued) { queued = true; requestAnimationFrame(flush); } }
+      var ro = new ResizeObserver(function (entries) {
+        entries.forEach(function (en) {
+          var w = en.target.classList && en.target.classList.contains("table-scroll") ? en.target : en.target.closest(".table-scroll");
+          if (w) queue(w);
+        });
+      });
+      function watch(w) {
+        if (seen.has(w)) { queue(w); return; }
+        seen.add(w);
+        ro.observe(w);
+        var t = w.querySelector("table");
+        if (t) ro.observe(t);
+        queue(w);
+      }
+      function scan(root) {
+        if (!root || root.nodeType !== 1) return;
+        if (root.matches(".table-scroll")) watch(root);
+        root.querySelectorAll(".table-scroll").forEach(watch);
+      }
+      new MutationObserver(function (muts) {
+        muts.forEach(function (m) { m.addedNodes.forEach(scan); });
+      }).observe(document.documentElement, { childList: true, subtree: true });
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function () { scan(document.body); });
+      } else { scan(document.body); }
+    })();
   }
   </script>`;
 }

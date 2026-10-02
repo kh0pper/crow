@@ -26,19 +26,45 @@ export function statGrid(cards) {
 }
 
 /**
- * Data table.
+ * Data table. Always emitted inside the shared .table-scroll wrapper, so a
+ * table wider than its card scrolls inside the card instead of overflowing
+ * it (tests/dashboard-table-scroll.test.js keeps every dashboard table in a
+ * wrapper).
  * @param {string[]} headers
  * @param {string[][]} rows - Each row is array of cell HTML (not escaped)
+ * @param {{stack?: boolean, wide?: number[]}} [opts]
+ *   stack: for tables that ARE the page's main list. When the table does
+ *     not fit a phone-sized container (measured client-side by
+ *     componentsJs(), which adds .is-stacked), each row renders as a stacked
+ *     label/value card. Cells under an empty header are action cells and
+ *     share one line. Explicit ARIA roles keep the table semantics that
+ *     display:block would otherwise drop.
+ *   wide: column indexes holding long free text — stacked, the label sits on
+ *     its own line above full-width text; unstacked, the column takes a fair
+ *     share of the table and wraps long tokens.
  */
-export function dataTable(headers, rows) {
+export function dataTable(headers, rows, opts = {}) {
   if (rows.length === 0) {
     return `<div class="empty-state"><h3>No data</h3></div>`;
   }
-  const ths = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const stack = !!opts.stack;
+  const wide = new Set(opts.wide || []);
+  const r = (role) => (stack ? ` role="${role}"` : "");
+  const ths = headers.map((h) => `<th${r("columnheader")}>${escapeHtml(h)}</th>`).join("");
+  const td = (c, i) => {
+    const cls = wide.has(i) ? ` class="dt-wide"` : "";
+    if (!stack) return `<td${cls}>${c}</td>`;
+    const label = headers[i] == null ? "" : String(headers[i]);
+    return label
+      ? `<td role="cell"${cls} data-label="${escapeHtml(label)}">${c}</td>`
+      : `<td role="cell" class="dt-action">${c}</td>`;
+  };
   const trs = rows.map((cells) =>
-    `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`
+    `<tr${r("row")}>${cells.map(td).join("")}</tr>`
   ).join("");
-  return `<table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  const wrapExtra = stack ? " table-stack" : "";
+  const tableCls = stack ? "data-table data-table--stack" : "data-table";
+  return `<div class="table-scroll${wrapExtra}"><table class="${tableCls}"${r("table")}><thead${r("rowgroup")}><tr${r("row")}>${ths}</tr></thead><tbody${r("rowgroup")}>${trs}</tbody></table></div>`;
 }
 
 /**

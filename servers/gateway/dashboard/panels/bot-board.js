@@ -146,7 +146,7 @@ export default {
       const peerBotsHtml = peerBots.length === 0 ? "" :
         section(t("botboard.peerBotsSection", lang),
           peerStatus +
-          `<table class="bb-list-table"><thead><tr><th>${t("botboard.colBot", lang)}</th><th>${t("botboard.colInstance", lang)}</th><th>${t("botboard.colModel", lang)}</th><th>${t("botboard.colStatus", lang)}</th><th></th></tr></thead><tbody>` +
+          `<div class="table-scroll"><table class="bb-list-table"><thead><tr><th>${t("botboard.colBot", lang)}</th><th>${t("botboard.colInstance", lang)}</th><th>${t("botboard.colModel", lang)}</th><th>${t("botboard.colStatus", lang)}</th><th></th></tr></thead><tbody>` +
           peerBots.map((b) =>
             `<tr><td>${escapeHtml(b.display_name || b.bot_id)}</td>` +
             `<td>${escapeHtml(b.instanceName)}</td>` +
@@ -163,7 +163,7 @@ export default {
                 ` <a class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem" href="/dashboard/bot-builder?peer=${encodeURIComponent(b.instanceId)}&bot=${encodeURIComponent(b.bot_id)}">${t("botboard.btnEdit", lang)}</a>`
               : `<span style="font-size:.72rem;color:var(--crow-text-muted)">${t("botboard.peerReadOnly", lang)}</span>`}</td></tr>`
           ).join("") +
-          `</tbody></table><p class="bb-msg">${t("botboard.peerBotsHelp", lang)}</p>`);
+          `</tbody></table></div><p class="bb-msg">${t("botboard.peerBotsHelp", lang)}</p>`);
       return layout({
         title: "Bot Board",
         content: botBoardStyles() + section(t("botboard.notInitTitle", lang),

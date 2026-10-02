@@ -86,12 +86,12 @@ export default {
 
         <section class="ma-card">
           <h2>Where this sits in the ladder</h2>
-          <table class="ma-tbl">
+          <div class="table-scroll"><table class="ma-tbl">
             <tr><th>Ages</th><th>Surface</th><th>Tutor persona</th></tr>
             <tr><td>5-9</td><td>Blockly (maker-lab)</td><td>kid-tutor</td></tr>
             <tr><td>8+</td><td>Scratch (scratch-offline)</td><td>kid-tutor → tween-tutor</td></tr>
             <tr><td>9+</td><td>JupyterLab (this bundle)</td><td>tween-tutor → adult-tutor</td></tr>
-          </table>
+          </table></div>
         </section>
       </div>
     `;

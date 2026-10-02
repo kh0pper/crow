@@ -189,7 +189,7 @@ async function renderSqlTab(db, backendId, queryParam, lang, { escapeHtml, dataT
           })
         );
         resultHtml = `<div style="margin-top:0.5rem;font-size:0.75rem;color:var(--crow-text-muted)">${result.rowCount} rows · ${result.executionMs}ms</div>` +
-          `<div style="overflow-x:auto">${dataTable(headers, rows)}</div>`;
+          dataTable(headers, rows);
       }
     } catch (err) {
       resultHtml = `<div style="padding:1rem;color:var(--crow-error)">Error: ${escapeHtml(err.message)}</div>`;

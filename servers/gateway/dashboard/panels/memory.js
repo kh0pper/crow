@@ -404,7 +404,7 @@ export default {
           `${editBtn} ${deleteBtn}`,
         ];
       });
-      memoryList = dataTable([t("memory.categoryLabel", lang), t("memory.importanceLabel", lang), t("memory.contentLabel", lang), t("memory.updatedLabel", lang), t("memory.actionsLabel", lang)], rows);
+      memoryList = dataTable([t("memory.categoryLabel", lang), t("memory.importanceLabel", lang), t("memory.contentLabel", lang), t("memory.updatedLabel", lang), t("memory.actionsLabel", lang)], rows, { stack: true, wide: [2] });
     }
 
     // Pagination — page links preserve q + category params.

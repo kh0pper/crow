@@ -126,10 +126,10 @@ export default {
       </div>
 
       <h3>Library</h3>
-      <table class="pm-table">
+      <div class="table-scroll"><table class="pm-table">
         <thead><tr><th>Title</th><th>Source</th><th>Status</th><th>Progress</th><th>Tags</th><th>Updated</th></tr></thead>
         <tbody>${rowsHtml || '<tr><td colspan="6" class="pm-muted" style="text-align:center;padding:2rem">No documents yet. Import a file or URL above.</td></tr>'}</tbody>
-      </table>
+      </table></div>
 
       <script>
         (function () {
