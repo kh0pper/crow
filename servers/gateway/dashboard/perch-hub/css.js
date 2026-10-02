@@ -26,8 +26,24 @@
  *  first time this one moved. */
 export const PERCH_SPLIT_MIN_WIDTH = 900;
 
+/** TEXT SIZE (2026-10-02). Every px font size in this sheet is emitted as
+ *  calc(Npx * var(--pts,1)). --pts is 1 everywhere in the hub except inside
+ *  the chat tab, where it follows --perch-text-scale (client.js writes that
+ *  onto #perch-hub-root from the Session tab's A− / A / A+, saved per device).
+ *  So the chat tab — messages, tool/file/phone cards, the ask card, the
+ *  banner, the composer — scales as one, and the list, tabs and Session tab
+ *  keep their size. Done as one transform rather than hand-editing ~90 rules
+ *  so a rule added later is covered without anyone remembering to. Only
+ *  "font-size:" and the size inside a "font:" shorthand are touched; spacing
+ *  stays fixed. Exported for tests/perch-phone-layout.test.js. */
+export function scaleFontSizes(css) {
+  return css
+    .replace(/(font-size:\s*)(\d+(?:\.\d+)?)px/g, "$1calc($2px * var(--pts,1))")
+    .replace(/(font:\s*(?:\d{3}\s+)?)(\d+(?:\.\d+)?)px/g, "$1calc($2px * var(--pts,1))");
+}
+
 export function perchHubCss() {
-  return `
+  return scaleFontSizes(`
 #perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#5d6d78;--teal:#0e6b62;--teal-soft:#dcecea;
 --wire:#94a4ae;--alive:#2fa36b;--attn:#d1633e;--line:#dde4e8;
 --ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6}
@@ -45,6 +61,17 @@ export function perchHubCss() {
    Dark --dim #8fa0ab is 5.84:1 / 6.51:1. tests/perch-phone-card.test.js
    measures both themes. */
 #perch-hub-root,#perch-hub-root *{box-sizing:border-box;margin:0}
+/* Text size: --pts is the multiplier scaleFontSizes() writes into every font
+   size. 1 across the hub; the chat tab follows the operator's step. The
+   chat tab also gets an explicit base size so the text that inherits (the ask
+   card's question, plain notes) scales with the rest. */
+#perch-hub-root{--pts:1}
+#perch-tab-chat{--pts:var(--perch-text-scale,1);font-size:15px}
+/* The control itself (Session tab). */
+#perch-hub-root .text-size{display:flex;align-items:center;gap:6px}
+#perch-hub-root .text-size button{min-width:44px;min-height:44px;padding:8px 10px}
+#perch-hub-root .text-size button:disabled{opacity:.45;cursor:default}
+#perch-hub-root .text-size-value{color:var(--dim);font-size:13px;margin-left:4px;font-variant-numeric:tabular-nums}
 /* #perch-hub-root is the flex-column height owner for its two children
    (the small header block above, and .hub-split below) — this is what lets
    .hub-split hand a definite height down to #perch-chat, which is what lets
@@ -167,6 +194,16 @@ border-radius:0;padding:12px 16px;min-height:44px}
 #perch-hub-root .who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
 #perch-hub-root .entry.user .who{color:var(--teal)}
 #perch-hub-root .what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+/* Phones (client.js adds .perch-narrow to the root under 600px): no gutter.
+   The row wraps — role label (and a bot row's copy button) on one short line,
+   the message on the next at the FULL width; your own messages sit in a quiet
+   card so the two voices stay apart without the column. Cards (tool chips,
+   files, phone calls) are column boxes already and are untouched. */
+#perch-hub-root.perch-narrow .entry{flex-wrap:wrap;column-gap:10px;row-gap:2px}
+#perch-hub-root.perch-narrow .who{flex:1 1 auto;line-height:1.4}
+#perch-hub-root.perch-narrow .copy-msg{order:1}
+#perch-hub-root.perch-narrow .what{flex:1 1 100%;order:2}
+#perch-hub-root.perch-narrow .entry.user{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
 /* Rendered markdown. TWO ids' worth of weight is not needed here (nothing
    competes), but \`white-space:pre-wrap\` from .what above IS: markdown output
    is real block elements, and pre-wrap would double every blank line between
@@ -241,6 +278,40 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .ask-foot{display:flex;gap:8px;align-items:center}
 #perch-hub-root .ask-send{flex:1}
 #perch-hub-root .ask-send:disabled{opacity:.45;cursor:default}
+/* THE ASK PANE FITS ITS SPACE (2026-10-02, Kevin's Pixel 9a report). #perch-ask
+   is a flex child of the #perch-tab-chat column, between the transcript and
+   the composer. Before this it had no rule at all, so it kept the flex default
+   min-height:auto (= its full content height): a five-option card at 412px
+   was taller than the room left over, the column overflowed, the transcript
+   was squeezed to its 24px of padding (the half-hidden tool chip under the
+   banner), and the composer and the bottom tab bar were painted over the
+   card's Send answer / Cancel. Pre-existing — identical on 6445b583, before
+   #404's overflow safety net (measured, see the regression test).
+
+   Decision: keep the card in its own pane above the composer (an unanswered
+   ask_user blocks the turn, so it must not scroll away inside the
+   transcript), but let the pane SHRINK. min-height:0 lets it give up height
+   only when the column is out of room — on a desktop it fits and nothing
+   moves — and inside it the questions scroll while the Send answer / Cancel
+   foot stays put. The single-question cards (confirm/select/input) have no
+   separate foot; the whole card scrolls inside the pane there. */
+#perch-ask{flex:0 1 auto;min-height:0;display:flex;flex-direction:column}
+/* ...but never below the foot plus a row of options: on a landscape phone
+   (915x412) there is no room at all once the banner and composer are placed,
+   and a pane shrunk to 0px hid Send answer outright. With this floor the
+   column overflows instead and the page scrolls to it (the same backstop the
+   composer's sticky rule is for). */
+#perch-ask:not(:empty){min-height:min(120px,30vh)}
+/* Short screens (a phone on its side): the banner takes one line and the
+   composer starts at two lines, so the card keeps what room there is. */
+@media (max-height:500px){
+  #perch-hub-root .attn-banner{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;padding:6px 12px}
+  #perch-hub-root #perch-composer textarea{min-height:44px}
+}
+#perch-hub-root #perch-ask > .ask-card{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+#perch-hub-root #perch-ask > .ask-combined{display:flex;flex-direction:column;overflow:hidden}
+#perch-hub-root .ask-body{display:grid;gap:13px;flex:0 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+#perch-hub-root .ask-combined .ask-foot{flex-shrink:0}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page
@@ -254,6 +325,16 @@ body[data-view="chat"] #perch-list{display:none}
 body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min-height:0}
 #perch-hub-root .hub-split{display:flex;flex-direction:column;flex:1;min-height:0}
 #perch-transcript{flex:1;overflow:auto;min-height:0;display:grid;gap:9px;padding:12px 0}
+/* Never squeezed to a sliver by the ask pane: the floor keeps the last row
+   (the running ask_user chip) readable. min(): 56px is under the 63px the
+   transcript has with a card open at 1280x900, so the desktop is unchanged,
+   and a short landscape phone gives up the extra first. */
+#perch-tab-chat > #perch-transcript{min-height:min(56px,10vh)}
+/* A scrolled transcript shows a sliver of the row above in its 12px top
+   padding, flush against the banner — which read as the banner covering the
+   chat (Kevin's screenshot). Fade exactly that padding band: at scrollTop 0 it
+   is empty, so nothing at rest changes. */
+#perch-transcript{-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 12px);mask-image:linear-gradient(to bottom,transparent 0,#000 12px)}
 /* Send must be reachable at ANY scroll position, not only at the bottom of a
    long transcript. That was the drawer's defining mobile failure — but this
    rule is the BACKSTOP for it, not the mechanism. In the shipped
@@ -277,6 +358,9 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    is the signal here, so the honest reduction is "calmer", not "frozen". */
 #perch-working{display:flex;align-items:center;gap:8px;padding:6px 2px 0;color:var(--dim);font-size:12.5px;flex-shrink:0}
 #perch-working[hidden]{display:none}
+/* While a question card is up the bot is waiting on YOU (the banner says so):
+   "Working…" would be wrong, and on a phone its row is height the card needs. */
+#perch-ask:not(:empty) ~ #perch-working{display:none}
 #perch-working svg{width:15px;height:15px;color:var(--teal);flex-shrink:0;animation:perch-spin 1.4s linear infinite}
 @keyframes perch-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){#perch-working svg{animation-duration:6s}}
@@ -587,5 +671,5 @@ border-top:1px solid var(--line);flex-shrink:0}
   #perch-tabs{order:0;border-top:none;border-bottom:1px solid var(--line);padding:6px 0}
   #perch-hub-root #perch-tabs button{flex:0 0 auto;flex-direction:row;gap:6px;font-size:13px;padding:8px 14px}
 }
-`;
+`);
 }
