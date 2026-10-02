@@ -662,6 +662,7 @@ export const translations = {
   "extensions.configure": { en: "Configure", es: "Configurar" },
   "extensions.configureDesc": { en: "This add-on is already installed. Fill in the value below and save.", es: "Este complemento ya está instalado. Completa el valor a continuación y guarda." },
   "extensions.requiredMissing": { en: "Required before installing:", es: "Obligatorio antes de instalar:" },
+  "extensions.requirementsUnchecked": { en: "Could not check the required settings — the server will verify them when you install.", es: "No se pudieron comprobar los ajustes obligatorios — el servidor los verificará al instalar." },
   "extensions.configureEmpty": { en: "Fill in at least one value before saving.", es: "Completa al menos un valor antes de guardar." },
   "extensions.saving": { en: "Saving...", es: "Guardando..." },
   "extensions.configureSaved": { en: "Saved.", es: "Guardado." },

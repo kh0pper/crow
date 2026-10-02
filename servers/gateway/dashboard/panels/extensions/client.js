@@ -105,6 +105,12 @@ export function extensionsClientJS(lang) {
             var installBtnRef = null;      // forward ref so consent UI can enable/disable it
             var requiredNames = [];        // install-BLOCKING keys, from the server (consent-challenge install_required)
             var requiredNoteRef = null;    // "Required: X, Y" line next to the button
+            // The consent-challenge response (which carries install_required) arrives
+            // asynchronously. Until it has arrived — or failed — Install stays
+            // disabled, so a fast click cannot slip past a required-env gate the
+            // client has not learned about yet. configureOnly never fetches it.
+            var challengeSettled = configureOnly;
+            var challengeFailed = false;
 
             // Install-blocking env vars still blank (whitespace counts as blank — the
             // server refuses those with 400 missing_required_env). The list is the
@@ -124,21 +130,35 @@ export function extensionsClientJS(lang) {
             function refreshInstallBtnState() {
               if (!installBtnRef) return;
               var missing = missingRequired();
-              installBtnRef.disabled = !consentSatisfied || missing.length > 0;
+              installBtnRef.disabled = !challengeSettled || !consentSatisfied || missing.length > 0;
               if (requiredNoteRef) {
-                requiredNoteRef.style.display = missing.length > 0 ? "block" : "none";
-                requiredNoteRef.textContent = '${tJs("extensions.requiredMissing", lang)}' + " " + missing.join(", ");
+                if (missing.length > 0) {
+                  requiredNoteRef.style.display = "block";
+                  requiredNoteRef.textContent = '${tJs("extensions.requiredMissing", lang)}' + " " + missing.join(", ");
+                } else if (challengeFailed) {
+                  // The client could not learn the blocking list: the server's
+                  // install-time check (400 missing_required_env) is the gate.
+                  requiredNoteRef.style.display = "block";
+                  requiredNoteRef.textContent = '${tJs("extensions.requirementsUnchecked", lang)}';
+                } else {
+                  requiredNoteRef.style.display = "none";
+                  requiredNoteRef.textContent = "";
+                }
               }
             }
 
             // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
             if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
-              .then(function(r) { return r.json(); })
+              .then(function(r) {
+                if (!r.ok) throw new Error("consent-challenge " + r.status);
+                return r.json();
+              })
               .then(function(data) {
+                challengeSettled = true;
                 if (data && Array.isArray(data.install_required)) {
                   requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
-                  refreshInstallBtnState();
                 }
+                refreshInstallBtnState();
                 if (!data || data.required === false) return; // no consent required
                 consentSatisfied = false; // gate the install button
                 refreshInstallBtnState();
@@ -250,8 +270,12 @@ export function extensionsClientJS(lang) {
                 frag.insertBefore(box, frag.children[1] || null);
               })
               .catch(function() {
-                // Network error — leave install enabled (fail-open). The server will reject
-                // the install if consent is actually required (no token) so it's safe.
+                // Network/HTTP error — enable Install (fail-open) and say so. The server
+                // rejects the install if consent is actually required (no token) or a
+                // blocking env key is blank (400 missing_required_env), so it's safe.
+                challengeSettled = true;
+                challengeFailed = true;
+                refreshInstallBtnState();
               });
 
             if (isCommunity && !configureOnly) {
@@ -418,7 +442,7 @@ export function extensionsClientJS(lang) {
             installBtn.addEventListener("click", function() {
               if (configureOnly) { submitConfigureOnly(); return; }
               // Defense in depth: a disabled button can still be clicked programmatically.
-              if (!consentSatisfied || missingRequired().length > 0) { refreshInstallBtnState(); return; }
+              if (!challengeSettled || !consentSatisfied || missingRequired().length > 0) { refreshInstallBtnState(); return; }
 
               installBtn.disabled = true;
               installBtn.textContent = '${tJs("extensions.installing", lang)}';

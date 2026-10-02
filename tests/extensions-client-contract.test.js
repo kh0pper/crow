@@ -717,6 +717,52 @@ test("BEHAVIOR: a manifest-required key the server does NOT list as blocking lea
   assert.equal(document.querySelector("#modal-content .ext-install__required").style.display, "none");
 });
 
+test("BEHAVIOR: Install stays disabled until the consent-challenge (install_required) response has arrived (B2)", async () => {
+  // Hold the consent-challenge response open: before it lands, the client does
+  // not yet know which keys block, so a fast click must not reach /install.
+  let release;
+  const pending = new Promise((r) => { release = r; });
+  const { document, click, settle, calls } = boot({
+    fetchImpl: (url) => {
+      if (url.includes("/consent-challenge/")) {
+        return pending.then(() => ({ ok: true, status: 200, json: () => Promise.resolve({ required: false, install_required: [] }) }));
+      }
+      return { ok: true, status: 200, json: () => Promise.resolve({ job_id: "j1" }) };
+    },
+  });
+  click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+  await settle();
+  const btn = document.querySelector("#modal-content .btn-primary");
+  assert.equal(btn.disabled, true, "challenge still in flight → Install disabled");
+  click(btn);
+  await settle();
+  assert.ok(!calls.some((c) => c.url.includes("/bundles/api/install")), "an early click never POSTs /install");
+
+  release();
+  await settle();
+  assert.equal(btn.disabled, false, "challenge arrived with nothing blocking → enabled");
+});
+
+test("BEHAVIOR: a failed consent-challenge enables Install (server gates) and says the requirements were not checked (B2)", async () => {
+  for (const failing of [
+    () => Promise.reject(new Error("network down")),
+    () => ({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) }),
+  ]) {
+    const { document, click, settle } = boot({
+      fetchImpl: (url) => (url.includes("/consent-challenge/") ? failing() : { ok: true, status: 200, json: () => Promise.resolve({}) }),
+    });
+    click(document.querySelector('.bundle-install[data-id="jellyfin"]'));
+    await settle();
+    const btn = document.querySelector("#modal-content .btn-primary");
+    const note = document.querySelector("#modal-content .ext-install__required");
+    assert.equal(btn.disabled, false, "fail-open: the server's 400 missing_required_env is the gate");
+    assert.notEqual(note.style.display, "none", "the note is shown");
+    assert.match(note.textContent, /Could not check the required settings/);
+    assert.equal(document.querySelectorAll('#modal-content input[type="checkbox"]').length, 0,
+      "an error response never renders a token-less consent box");
+  }
+});
+
 test("BEHAVIOR: the required-env gate and the consent gate must BOTH hold", async () => {
   const { window, document, click, settle } = boot({
     fetchImpl: consentFetch({ required: true, privileged: false, token: "tok", message: "m", install_required: ["JELLYFIN_API_KEY"] }),
