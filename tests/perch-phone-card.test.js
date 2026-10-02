@@ -140,7 +140,7 @@ test("S12: the two unlabelled inputs carry aria-labels", () => {
 test("every perch.phone* key the card uses exists in EN and ES and they differ", () => {
   const src = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/phone-card.js", import.meta.url), "utf8");
   const keys = [...src.matchAll(/tJs\("(perch\.phone[A-Za-z]+)"/g)].map((m) => m[1]);
-  assert.equal(keys.length, 57);
+  assert.equal(keys.length, 71);
   for (const k of keys) {
     assert.ok(translations[k] && translations[k].en && translations[k].es, k);
     assert.notEqual(translations[k].en, translations[k].es, k);
@@ -216,4 +216,45 @@ test("styles: checkbox rows undo the shared input width, status tokens exist in 
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)\{#perch-hub-root \.phonecard \.ph-dot\{animation:none\}\}/);
   assert.match(css, /#perch-hub-root \.phonecard\{[^}]*min-width:0;[^}]*overflow-wrap:anywhere/);
   assert.ok(css.lastIndexOf("#perch-hub-root .phonecard [hidden]{display:none}") > css.lastIndexOf(".ph-sched{"), "[hidden] wins by source order");
+});
+
+// ---- backlog P5/P6 (2026-10-02 phone polish) ----
+
+test("P6: refusal codes read in the viewer's language; unknown codes fall back to the message, then the code", () => {
+  for (const [lang, want] of [["en", translations["perch.phoneErrNotice"].en], ["es", translations["perch.phoneErrNotice"].es]]) {
+    const js = perchPhoneCardJs(lang);
+    const errs = js.slice(js.indexOf("var PH_ERRORS="), js.indexOf("/* Backlog P5: the live poll"));
+    const f = extract(js, "phoneErrText", errs);
+    assert.equal(f({ status: 409, j: { error: "notice_not_acknowledged", message: "Acknowledge the AI-call notice in Phone settings first." } }), want);
+    assert.equal(f({ status: 400, j: { error: "something_new", message: "Server words." } }), "Server words.");
+    assert.equal(f({ status: 400, j: { error: "something_new" } }), "something_new");
+    assert.equal(f({ status: 0, j: null }), "0");
+    assert.equal(f({ status: 400, j: { error: "toString" } }), "toString", "no prototype keys");
+  }
+  for (const code of ["local_login_required", "totp_required", "business_confirmation_required", "notice_not_acknowledged",
+    "owner_name_required", "invalid_run_after", "not_pending", "not_live"]) {
+    assert.ok(perchPhoneCardJs("es").includes(code + ":'"), code);
+  }
+});
+
+test("P5: the poll delay doubles per failure from 1.5 s and caps at 30 s", () => {
+  const js = perchPhoneCardJs("en");
+  const f = extract(js, "phonePollDelay", "var PH_POLL_MS=1500, PH_POLL_MAX_MS=30000;");
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map(f), [1500, 3000, 6000, 12000, 24000, 30000, 30000]);
+  assert.match(js, /var PH_POLL_MS=1500, PH_POLL_MAX_MS=30000, PH_POLL_MAX_FAILS=5;/);
+});
+
+test("P3: --dim text is WCAG AA (4.5:1) on --card and --sky in both themes", () => {
+  const css = perchHubCss();
+  const lum = (h) => {
+    const x = h.length === 4 ? "#" + [...h.slice(1)].map((c) => c + c).join("") : h;
+    const c = [1, 3, 5].map((i) => parseInt(x.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)]; return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const dark = css.indexOf("@media (prefers-color-scheme:dark)");
+  for (const block of [css.slice(0, dark), css.slice(dark, css.indexOf("}}", dark))]) {
+    const tok = (n) => block.match(new RegExp("--" + n + ":(#[0-9a-fA-F]{3,6})"))[1];
+    for (const bg of ["card", "sky"]) assert.ok(ratio(tok("dim"), tok(bg)) >= 4.5, "--dim on --" + bg + " " + ratio(tok("dim"), tok(bg)).toFixed(2));
+  }
 });

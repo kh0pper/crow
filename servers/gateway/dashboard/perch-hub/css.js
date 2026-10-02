@@ -28,7 +28,7 @@ export const PERCH_SPLIT_MIN_WIDTH = 900;
 
 export function perchHubCss() {
   return `
-#perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#6b7c88;--teal:#0e6b62;--teal-soft:#dcecea;
+#perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#5d6d78;--teal:#0e6b62;--teal-soft:#dcecea;
 --wire:#94a4ae;--alive:#2fa36b;--attn:#d1633e;--line:#dde4e8;
 --ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6}
 @media (prefers-color-scheme:dark){#perch-hub-root{--sky:#131a1f;--card:#1b242b;--ink:#e4ebef;--dim:#8fa0ab;
@@ -39,7 +39,11 @@ export function perchHubCss() {
    each text colour on its own -soft tint 5.5:1+ light / 6.7:1+ dark, and on
    --card 6.3:1+ light / 7.1:1+ dark. --card on --teal / --err (a filled
    button's label) is 6.4:1+ in both. Error TEXT uses --err; --attn stays
-   for borders and the attention banner. */
+   for borders and the attention banner.
+   --dim (backlog P3): #6b7c88 was 4.32:1 on the light --card, under AA for
+   the card's small text; #5d6d78 is 5.35:1 on --card and 4.72:1 on --sky.
+   Dark --dim #8fa0ab is 5.84:1 / 6.51:1. tests/perch-phone-card.test.js
+   measures both themes. */
 #perch-hub-root,#perch-hub-root *{box-sizing:border-box;margin:0}
 /* #perch-hub-root is the flex-column height owner for its two children
    (the small header block above, and .hub-split below) — this is what lets
@@ -518,6 +522,7 @@ white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 #perch-hub-root .phonecard .ph-toggle{font-size:13px;color:var(--teal)}
 #perch-hub-root .phonecard .ph-txbox .ph-transcript{margin-top:6px}
 #perch-hub-root .phonecard .ph-err{color:var(--err);font-size:13px}
+#perch-hub-root .phonecard .ph-lost{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 #perch-hub-root .phonecard .ph-err:empty{display:none}
 #perch-hub-root .phonecard .ph-open{color:var(--teal);font-size:12px;text-decoration:none;align-self:flex-start}
 /* Last in the block: [hidden] must beat every display rule above (same

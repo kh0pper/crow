@@ -2428,6 +2428,31 @@ export const translations = {
   },
   "perch.phonePlanChanged": { en: "The plan changed — review it again before approving.", es: "El plan cambió — revísalo de nuevo antes de aprobar." },
   "perch.phoneActionFailed": { en: "That did not work:", es: "No funcionó:" },
+  /* Backlog P5: the live card's poll gave up after repeated failures. */
+  "perch.phonePollLost": { en: "Lost touch with this call — updates stopped.", es: "Se perdió el contacto con esta llamada — ya no se actualiza." },
+  "perch.phoneRetry": { en: "Retry", es: "Reintentar" },
+  /* Backlog P6: the phone routes' refusal codes. */
+  "perch.phoneErrLocalLogin": {
+    en: "Sign in on this Crow with your password to do this (peer sign-in is not enough).",
+    es: "Inicia sesión en este Crow con tu contraseña para hacer esto (el inicio de sesión de un par no basta).",
+  },
+  "perch.phoneErrTotp": { en: "Enter your current 2FA code.", es: "Escribe tu código 2FA actual." },
+  "perch.phoneErrBusinessConfirm": { en: "Tick \u201cThis is a business\u201d first.", es: "Marca primero \u201cEs un negocio\u201d." },
+  "perch.phoneErrNotice": {
+    en: "Acknowledge the AI-call notice in Phone settings first.",
+    es: "Primero acepta el aviso de llamadas con IA en los ajustes de Teléfono.",
+  },
+  "perch.phoneErrOwnerName": {
+    en: "Set your first name in Phone settings first (the assistant says who it is calling for).",
+    es: "Primero pon tu nombre en los ajustes de Teléfono (el asistente dice de parte de quién llama).",
+  },
+  "perch.phoneErrRunAfter": { en: "That is not a valid date and time.", es: "Esa no es una fecha y hora válida." },
+  "perch.phoneErrNotPending": { en: "This call is no longer waiting for approval.", es: "Esta llamada ya no espera aprobación." },
+  "perch.phoneErrNotEditable": { en: "This call can no longer be edited.", es: "Esta llamada ya no se puede editar." },
+  "perch.phoneErrNotLive": { en: "This call is not live any more.", es: "Esta llamada ya no está en curso." },
+  "perch.phoneErrRateLimited": { en: "Too many call plans from this bot right now.", es: "Demasiados planes de llamada de este bot por ahora." },
+  "perch.phoneErrNotFound": { en: "This call no longer exists.", es: "Esta llamada ya no existe." },
+  "perch.phoneErrInvalidPlan": { en: "The call plan is not valid.", es: "El plan de la llamada no es válido." },
   "perch.phoneStatusPending": { en: "Needs approval", es: "Necesita aprobación" },
   "perch.phoneStatusRejected": { en: "Rejected", es: "Rechazada" },
   "perch.phoneStatusExpired": { en: "Expired (not approved within 24 h)", es: "Vencida (sin aprobar en 24 h)" },

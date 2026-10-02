@@ -2001,6 +2001,18 @@ test("notifyCard: nested values are dropped — only primitive fields reach the 
   assert.deepEqual(sink.ofType("phone_call"), [CARD]);
 });
 
+test("notifyCard (backlog P9): only allowlisted keys pass, and a non-finite number rejects the frame", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  engine.notifyCard(s.sessionId, { ...CARD, text: "Approve now!", summary: "x", ok: true, extra: 1 }, { botId: "hank" });
+  assert.deepEqual(sink.ofType("phone_call"), [CARD], "primitive but unlisted keys are dropped");
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    assert.equal(engine.notifyCard(s.sessionId, { ...CARD, event_seq: bad }, { botId: "hank" }).reason, "bad_frame", String(bad));
+  }
+  assert.equal(sink.ofType("phone_call").length, 1, "nothing more was emitted");
+});
+
 test("notifyCard: never adopts or wakes — a non-resident session gets nothing", async () => {
   const a = makeEngine();
   const s = await spawned(a.engine, "hank");           // writes the bot_sessions row

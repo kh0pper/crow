@@ -90,7 +90,7 @@ export function designTokensCss() {
 // Decision 15 (Track 2): Crow is the authority for the Perch palette — these
 // tokens drive the board's roost strip + session drawer (Track 3).
 export const PERCH_TOKENS = {
-  light: { sky: "#eef1f3", card: "#fff", ink: "#22303a", dim: "#6b7c88",
+  light: { sky: "#eef1f3", card: "#fff", ink: "#22303a", dim: "#5d6d78",
            teal: "#0e6b62", tealSoft: "#dcecea", wire: "#94a4ae",
            alive: "#2fa36b", attn: "#d1633e", line: "#dde4e8" },
   dark:  { sky: "#131a1f", card: "#1b242b", ink: "#e4ebef", dim: "#8fa0ab",

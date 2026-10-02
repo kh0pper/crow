@@ -3956,7 +3956,7 @@ function phoneFetch({ who = { local: true, totp_required: false, cloud_model: nu
     "/api/phone/whoami": () => makeResponse(whoStatus, who),
     "/api/phone/perch/": () => makeResponse(listStatus, { calls }),
     "/api/phone/calls/": (method, path) => {
-      if (method === "GET") return makeResponse(callStatus, { call: typeof call === "function" ? call() : call });
+      if (method === "GET") return makeResponse(typeof callStatus === "function" ? callStatus() : callStatus, { call: typeof call === "function" ? call() : call });
       const verb = path.split("/").pop();
       return posts[verb] ? posts[verb]() : makeResponse(200, { ok: true });
     },
@@ -4188,4 +4188,94 @@ test("phone card polish: a finished call shows a coloured outcome pill, the answ
     assert.equal(phFind(hub, (n) => n.className === "ph-open").textContent, "Open in Phone");
     assert.equal(!!phFind(hub, (n) => n.className === "ph-note" && n.textContent === "stopped by owner"), false, "a stop is not shown as an error");
   }
+});
+
+
+// ---- backlog P5/P6/P12 (2026-10-02 phone polish) ----
+
+/** The live card's poll timer: the pending timer on the poll's delay ladder (1.5 s doubling, 30 s cap). */
+const PH_POLL_LADDER = [1500, 3000, 6000, 12000, 24000, 30000];
+const phPollTimer = (hub) => [...hub.timerDelays.entries()].find(([, d]) => PH_POLL_LADDER.includes(d));
+async function phFirePoll(hub) {
+  const [id, delay] = phPollTimer(hub);
+  const fn = hub.timers.get(id);
+  hub.timers.delete(id); hub.timerDelays.delete(id); fn();
+  await phHops();
+  return delay;
+}
+
+test("P5: the live poll backs off on failures, stops after five in a row with Retry, and Retry resumes it", async () => {
+  let status = 200;
+  const liveCall = phCall({ status: "live", started_at: "2030-01-01 00:00:00", event_seq: 2, transcript: [{ type: "state", state: "answered" }] });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [liveCall], call: liveCall, callStatus: () => status }) });
+  await openChatSession(hub);
+  await phHops();
+  assert.equal(phPollTimer(hub)[1], 1500, "healthy cadence");
+  status = 500;
+  const delays = [];
+  for (let i = 0; i < 5; i++) delays.push(await phFirePoll(hub));
+  assert.deepEqual(delays, [1500, 3000, 6000, 12000, 24000], "each failure doubles the wait");
+  assert.equal(phPollTimer(hub), undefined, "five failures in a row stop the poll");
+  const lost = phFind(hub, (n) => n.className === "ph-lost");
+  assert.ok(lost, "the card says it lost touch");
+  assert.equal(lost.children[0].textContent, "Lost touch with this call — updates stopped.");
+  const retry = phFind(hub, (n) => String(n.className).includes("ph-retry"));
+  assert.equal(retry.textContent, "Retry");
+  status = 200;
+  retry.onclick();
+  assert.equal(phPollTimer(hub)[1], 1500, "Retry restarts at the healthy cadence");
+  assert.equal(phFind(hub, (n) => n.className === "ph-lost"), undefined, "and clears the notice");
+  assert.equal(await phFirePoll(hub), 1500);
+  assert.equal(phPollTimer(hub)[1], 1500, "a success keeps polling at 1.5 s");
+});
+
+test("P5: a success between failures resets the backoff", async () => {
+  let status = 500;
+  const liveCall = phCall({ status: "live", started_at: "2030-01-01 00:00:00", event_seq: 2, transcript: [] });
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [liveCall], call: liveCall, callStatus: () => status }) });
+  await openChatSession(hub);
+  await phHops();
+  await phFirePoll(hub); await phFirePoll(hub);
+  assert.equal(phPollTimer(hub)[1], 6000);
+  status = 200;
+  await phFirePoll(hub);
+  assert.equal(phPollTimer(hub)[1], 1500);
+});
+
+test("P6: a refusal code is shown in the viewer's words, not as the raw code", async () => {
+  const hub = await mountHub({ fetchImpl: phoneFetch({ calls: [phCall()],
+    posts: { approve: () => makeResponse(400, { error: "business_confirmation_required" }) } }) });
+  await openChatSession(hub);
+  await phHops();
+  phFind(hub, (n) => n.tagName === "BUTTON" && n.textContent === "Approve and call now").onclick();
+  await phHops();
+  const err = phWalk(phCards(hub)[0]).filter((n) => n.className === "ph-err").find((n) => n.textContent);
+  assert.equal(err.textContent, "That did not work: Tick \u201cThis is a business\u201d first.");
+  assert.ok(!err.textContent.includes("business_confirmation_required"));
+});
+
+test("P12: a refetch in flight across a same-sid reconnect never draws a card above the reloaded transcript", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let gets = 0;
+  const hub = await mountHub({ fetchImpl: stdFetch({
+    "/options": () => Promise.reject(new Error("network down")),   // probe fails → scheduleReconnect
+    "/api/phone/whoami": () => makeResponse(200, { local: true, totp_required: false, cloud_model: null }),
+    "/api/phone/perch/": () => makeResponse(200, { calls: [] }),
+    "/api/phone/calls/": (method) => {
+      if (method !== "GET") return makeResponse(200, { ok: true });
+      gets++;
+      return gate.then(() => makeResponse(200, { call: phCall() }));
+    },
+  }) });
+  await openChatSession(hub);
+  await phHops();
+  FakeEventSource.instances[FakeEventSource.instances.length - 1]._serverFrame("phone_call",
+    { type: "phone_call", call_id: "call_1", status: "awaiting_approval", event_seq: 0 });
+  await phHops();
+  assert.equal(gets, 1, "the frame's refetch is in flight");
+  await reconnectAndResync(hub);
+  release();
+  await phHops(6);
+  assert.equal(phCards(hub).length, 0, "the stale answer is dropped: the reloaded history decides what shows");
 });
