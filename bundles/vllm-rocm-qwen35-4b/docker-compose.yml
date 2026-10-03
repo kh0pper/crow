@@ -1,6 +1,8 @@
 services:
   vllm-rocm-qwen35-4b:
-    image: ${VLLM_ROCM_IMAGE:-rocm/vllm-dev:nightly_main_20260413}
+    # vLLM >= 0.21 is required on ROCm: older builds leave the HSA event thread spinning
+    # at 100% CPU after the first request (vllm-project/vllm#41964).
+    image: ${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.14.1_rdna_ubuntu24.04_py3.14_pytorch_2.11_vllm_0.23.0}
     container_name: vllm-rocm-qwen35-4b
     devices:
       - /dev/kfd
