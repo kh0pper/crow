@@ -1,42 +1,20 @@
 {
   "id": "nextcloud",
-  "name": "Nextcloud",
-  "version": "1.0.0",
-  "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
-  "type": "bundle",
+  "name": "Nextcloud (connect existing)",
+  "version": "1.1.0",
+  "description": "Deprecated: connect Crow to a Nextcloud you already run, over WebDAV. To host your own files, documents and calendars, install Crow Workspace instead.",
+  "type": "skill",
   "author": "Crow",
   "category": "productivity",
-  "tags": ["files", "sync", "self-hosted", "webdav", "documents"],
+  "tags": ["files", "webdav", "documents", "deprecated"],
   "icon": "cloud",
-  "docker": {
-    "composefile": "docker-compose.yml"
-  },
+  "deprecated": { "since": "2026-10-02", "superseded_by": "workspace" },
   "skills": ["skills/nextcloud.md"],
-  "requires": {
-    "env": ["NEXTCLOUD_URL", "NEXTCLOUD_USER", "NEXTCLOUD_PASSWORD"],
-    "min_ram_mb": 512,
-    "min_disk_mb": 1024
-  },
+  "requires": { "min_ram_mb": 64, "min_disk_mb": 10 },
   "env_vars": [
-    {
-      "name": "NEXTCLOUD_URL",
-      "description": "Nextcloud server URL (e.g., http://localhost:8080)",
-      "required": true
-    },
-    {
-      "name": "NEXTCLOUD_USER",
-      "description": "Nextcloud admin username",
-      "default": "admin",
-      "required": true
-    },
-    {
-      "name": "NEXTCLOUD_PASSWORD",
-      "description": "Nextcloud admin password",
-      "required": true,
-      "secret": true
-    }
+    { "name": "NEXTCLOUD_URL", "description": "Your Nextcloud server URL (e.g., https://cloud.example.com)", "required": true },
+    { "name": "NEXTCLOUD_USER", "description": "Your Nextcloud login", "required": true },
+    { "name": "NEXTCLOUD_PASSWORD", "description": "A Nextcloud app password (Settings → Security)", "required": true, "secret": true }
   ],
-  "ports": [8080],
-  "webUI": { "port": 8080, "path": "/", "label": "Nextcloud" },
-  "notes": "Disk usage depends on files stored. Includes MariaDB for metadata."
+  "notes": "Connect-only. This entry no longer deploys a server (its old compose shipped default database passwords and collided with LocalAI on port 8080). For a self-hosted suite use Crow Workspace."
 }

@@ -11,6 +11,7 @@ Este documento es la **única fuente de verdad** para cada puerto del host consu
 - Las filas "existente" son bundles que ya se publicaron antes de que se introdujera este registro — se registran aquí para que los bundles futuros los eviten.
 - Las filas "reservado" están reclamadas por bundles próximos de la Fase 2; no las consumas para trabajo no relacionado.
 - Las filas "MVP" están reclamadas por los bundles del plan MVP actual.
+- Subredes Docker: `crow-workspace` fija 10.89.70.0/24 (scratch: 10.89.71.0/24 smoke, 10.89.72.0/24 restore). No las reutilices.
 
 ## Conflictos conocidos en el `bundles/` actual
 
@@ -18,7 +19,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 
 | Puerto | Conflicto |
 |---|---|
-| 8080 | LocalAI y Nextcloud se vinculan ambos a 127.0.0.1:8080 — no pueden ejecutarse simultáneamente |
+| — | ninguno. El conflicto 8080 LocalAI/Nextcloud se resolvió el 2026-10-02 (el bundle nextcloud ya no despliega; Crow Workspace usa 3070/3071). |
 
 ## Tabla de asignación
 
@@ -61,7 +62,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 6875 | 127.0.0.1 | bookstack (existente) | existente |
 | 8000 | 127.0.0.1 | paperless (existente) | existente |
 | 8004 | 127.0.0.1 | faster-whisper-server (STT local) | existente |
-| 8080 | 127.0.0.1 | localai (existente) — **también nextcloud, conflicto** | existente |
+| 8080 | 127.0.0.1 | localai (existente) | existente |
 | 8081 | 127.0.0.1 | calibre-server (existente) | existente |
 | 8083 | 127.0.0.1 | calibre-web (existente) | existente |
 | 8084 | 127.0.0.1 | wallabag (existente) | existente |
@@ -75,6 +76,8 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8096 | 127.0.0.1 | jellyfin (existente) | existente |
 | 8097 | 127.0.0.1 | vaultwarden | MVP PR 5 |
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
+| 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; nunca Funnel) | W1 2026-10 |
+| 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (editor de Workspace; nunca Funnel) | W1 2026-10 |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
 | 8554 | 127.0.0.1 | frigate (retransmisión RTSP) | existente |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existente |

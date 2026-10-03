@@ -221,3 +221,12 @@ test("CROW_HOME is honored: the installed tree read is the scratch one, not ~/.c
   writeMcpAddons({});
   assert.deepEqual(needsConfigKeys("fx-crowhome"), ["FX_H"]);
 });
+
+test("a required key with generate is never reported (the Configure route strips it)", () => {
+  const vars = [{ name: "FX_URL", required: true }, { name: "FX_GEN", required: true, generate: "secret" }];
+  repoBundle("fx-generate", vars);
+  installedBundle("fx-generate", vars);
+  writeDotEnv("fx-generate", { FX_URL: "", FX_GEN: "" });
+  writeMcpAddons({});
+  assert.deepEqual(needsConfigKeys("fx-generate"), ["FX_URL"]);
+});

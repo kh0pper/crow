@@ -24,16 +24,19 @@ if (process.env.CROW_DATA_DIR) mkdirSync(process.env.CROW_DATA_DIR, { recursive:
 const B = await import("../servers/gateway/routes/bundles.js");
 const {
   validateInstall, installBlockingEnvKeys, hardFailComposeKeys, findInvalidEnv, runInstallJob, addPanelEnabled, removePanelEnabled,
-  _setAppBundlesForTest, _setComposeRunnerForTest, _setAppEnvPathForTest,
+  _setAppBundlesForTest, _setComposeRunnerForTest, _setAppEnvPathForTest, _setDockerRunnerForTest,
   _createJobForTest, _finishJobForTest,
 } = B;
 const bundlesRouter = B.default;
+// Hermetic: the compose-project ownership guard must never shell out to the real docker.
+_setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
 
 const FIXTURES = mkdtempSync(join(tmpdir(), "crow-fx-bundles-"));
 const GATEWAY_ENV = join(mkdtempSync(join(tmpdir(), "crow-fx-appenv-")), ".env");
 
 after(() => {
   _setComposeRunnerForTest(null);
+  _setDockerRunnerForTest(null);
   _setAppEnvPathForTest(null);
   rmSync(FIXTURES, { recursive: true, force: true });
   rmSync(HOME, { recursive: true, force: true });

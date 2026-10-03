@@ -21,6 +21,15 @@
     "notes": { "type": "string" },
     "panel": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "object" }] },
     "panelRoutes": { "type": "string", "minLength": 1 },
+    "postInstall": {
+      "type": "object", "required": ["script"], "additionalProperties": false,
+      "properties": {
+        "script": { "type": "string", "minLength": 1, "pattern": "\\.sh$" },
+        "timeout_s": { "type": "integer", "minimum": 1, "maximum": 1800 }
+      }
+    },
+    "images": { "type": "array", "items": { "type": "string", "pattern": "^[^\\s]+:[^\\s]+$" } },
+    "deprecated": { "type": "object", "additionalProperties": true, "properties": { "since": { "type": "string" }, "superseded_by": { "type": "string" } } },
     "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "ports": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
@@ -28,7 +37,11 @@
       "type": "object",
       "required": ["composefile"],
       "additionalProperties": true,
-      "properties": { "composefile": { "type": "string", "minLength": 1 } }
+      "properties": {
+        "composefile": { "type": "string", "minLength": 1 },
+        "precreate": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "pull_timeout_s": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
     },
     "server": {
       "type": ["object", "null"],
@@ -62,6 +75,12 @@
           "description": { "type": "string" },
           "required": { "type": "boolean" },
           "secret": { "type": "boolean" },
+          "generate": { "type": "string", "enum": ["secret"] },
+          "propagate": { "type": "boolean" },
+          "install_required": { "type": "boolean" },
+          "check": { "type": "string", "enum": ["not_breached"] },
+          "pattern": { "type": "string", "pattern": "^\\^.*\\$$" },
+          "pattern_hint": { "type": "string" },
           "default": {}
         }
       }
