@@ -29,6 +29,7 @@ import { runtimeGate } from "../runtime-gate.mjs";
 import { tickJobs } from "../job_runner.mjs";
 import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
+import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
@@ -163,6 +164,9 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 (function main() {
+  // S6-CROW: declare the pi-lab minimum (MIN_PI_LAB_REV) at boot — a clear
+  // warning when the pi-lab that pi loads predates bot read confinement.
+  warnIfPiLabIncompatible((m) => log(m));
   startReaper();
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).

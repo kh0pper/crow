@@ -65,7 +65,7 @@ export const GUARDRAIL_PATTERNS = Object.freeze([
   { label: "act without confirmation", re: /\b(without|no|skip(ping)?|don'?t|do not)\b[^.\n]{0,20}\b(confirm|confirmation|ask(ing)?|approval|permission)\b/i },
   { label: "external send / publish", re: /\b(send|publish|post|email|e-mail|deliver)\b[^.\n]{0,30}\b(email|e-mail|message|externally|to the public|the post|gmail)\b/i },
   { label: "you may send (override draft_only)", re: /\byou (may|can|should|are allowed to)\b[^.\n]{0,20}\b(send|publish|post|email)\b/i },
-  { label: "permission_policy / write_paths / external_send mutation", re: /\b(permission_policy|write_paths|external_send|bash_allow|self_authoring|multi_agent)\b/i },
+  { label: "permission_policy / write_paths / external_send mutation", re: /\b(permission_policy|write_paths|read_paths|external_send|bash_allow|self_authoring|multi_agent)\b/i },
   { label: "destructive shell", re: /\b(sudo\b|rm\s+-[a-z]*[rf]|mkfs|dd\s+if=|--no-preserve-root)/i },
   { label: "treat-as-exception phrasing", re: /\b(as an exception|just this once|in this case only|trust me|no need to (check|verify|ask))\b/i },
 ]);

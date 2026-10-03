@@ -35,7 +35,7 @@
  * loadBridge()). Everything taken from bridge is part of its public export
  * surface — which job_runner.mjs also consumes, so those names are stable.
  */
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp } from "./mcp_writer.mjs";
@@ -45,6 +45,7 @@ import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
+import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
 function loadBridge() { return import("./bridge.mjs"); }
@@ -143,13 +144,20 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     remoteEnabled = B.readRemoteInvocationEnabled(_conn);
     if (remoteEnabled) peerGatewayUrls = B.readPeerGatewayUrls(_conn);
   } finally { _conn.close(); }
+  // S6-CROW: fd delivery (mcp-delivery.mjs) builds the same config but keeps
+  // it in memory — PiRpc pipes it to pi on an inherited fd — and removes any
+  // stale on-disk copy. file delivery is the pre-S6 write, unchanged.
+  const mcpDelivery = mcpConfigDelivery();
+  let mcpConfig = null;
   try {
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted.
     const w = writeBotMcp(def, {
       sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
       ensureServers: (jobId || cardBound) ? ["board"] : [],
+      write: mcpDelivery === "file",
     });
+    mcpConfig = w.json || null;
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.remoteWarnings && w.remoteWarnings.length) {
       for (const warn of w.remoteWarnings) log("remote-tool: " + warn);
@@ -158,6 +166,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     if (w.minted && w.minted.length) log("mcp.json minted from extensions: " + w.minted.join(","));
   } catch (e) {
     log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
+    // fd mode: a failed build must still not leave an earlier turn's signed
+    // file behind (pi ignores it — no PI_BOT_MCP_CONFIG — but another reader
+    // would not). The child then gets an empty bot layer, as a missing file did.
+    if (mcpDelivery === "fd") { try { unlinkSync(join(sessionDir, ".mcp.json")); } catch { /* absent */ } }
   }
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
@@ -181,9 +193,12 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // caller that only holds the world still knows which channel asked for it.
   // cwd: the resolved working directory (=== sessionDir when not chosen).
   // mcpConfigPath: the per-bot closed-world config, always under the world
-  // root; the bridge hands it to pi via PI_BOT_MCP_CONFIG.
+  // root; the bridge hands it to pi via PI_BOT_MCP_CONFIG. null in fd mode —
+  // there is no file; mcpConfig (the built JSON) is what PiRpc pipes instead.
+  // mcpDelivery: "fd" | "file" (S6-CROW).
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
-    cwd: resolvedCwd, mcpConfigPath: join(sessionDir, ".mcp.json"), tasksDbPath, remoteEnabled, peerGatewayUrls, session,
+    cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
+    mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
     narrowedTools, gatewayType };
 }
 
@@ -268,6 +283,13 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       remoteEnabled: world.remoteEnabled,
       narrowedTools: world.narrowedTools,
       appendSystemPromptFile: sysFile,
+      // S6-CROW: the bot's project workspace joins its read roots (PiRpc,
+      // bot-read-paths.mjs); null for a bot without a project.
+      projectWorkspaceDir: (world.projectId != null && world.projectSpace && world.projectSpace.workspace_dir) || null,
+      // S6-CROW: how the MCP config reaches pi. Absent on a hand-built world
+      // (test seams) => PiRpc's pre-S6 file env.
+      mcpDelivery: world.mcpDelivery,
+      mcpConfig: world.mcpConfig,
     },
   };
 }

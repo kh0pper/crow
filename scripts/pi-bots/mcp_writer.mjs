@@ -34,12 +34,13 @@
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
+import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 
 const HOME = process.env.HOME || homedir();
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -309,11 +310,23 @@ export function writeBotMcp(def, opts = {}) {
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
   }
-  mkdirSync(sessionDir, { recursive: true });
+  // S6-CROW: opts.write === false is fd delivery (mcp-delivery.mjs) — the
+  // config is returned for the bridge to pipe to pi, NOTHING is written, and a
+  // stale <sessionDir>/.mcp.json left by an earlier file-mode turn is removed
+  // (its signed headers are exactly what fd delivery keeps off disk).
+  // Absent/true keeps the file write byte-identical to before.
   const path = join(sessionDir, ".mcp.json");
-  writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
+  let removedStale = false;
+  if (opts.write === false) {
+    try { unlinkSync(path); removedStale = true; } catch { /* absent */ }
+  } else {
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
+  }
   return {
-    path,
+    path: opts.write === false ? null : path,
+    json: built.json,
+    removedStale,
     servers: built.servers,
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,
@@ -530,8 +543,12 @@ if (import.meta.url === "file://" + process.argv[1]) {
       const def = JSON.parse(row.definition || "{}");
       // A5: thread the active instance (CROW_HOME env -> ~/.crow-mpa on MPA)
       // so minted addon blocks resolve against the same instance as CROW_DB.
-      const res = writeBotMcp(def, { crowHome: resolveCrowHome() });
-      console.log(JSON.stringify(res, null, 2));
+      // S6-CROW: honour the delivery mode — in fd mode the bridge pipes the
+      // config per turn, so this only validates (and removes a stale file).
+      // Never print the built config: it carries signed headers and tokens.
+      const res = writeBotMcp(def, { crowHome: resolveCrowHome(), write: mcpConfigDelivery() === "file" });
+      const { json: _omit, ...printable } = res;
+      console.log(JSON.stringify(printable, null, 2));
       process.exit(0);
     });
   } else {

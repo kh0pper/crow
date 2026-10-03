@@ -39,6 +39,8 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
+import { effectiveReadPaths } from "./bot-read-paths.mjs";
+import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
 // bot-world.mjs so P2's interactive engine can build the SAME world without
@@ -155,6 +157,8 @@ export class PiRpc {
     // .mcp.json stays in the world root (buildBotWorld writes it there) and
     // reaches pi through PI_BOT_MCP_CONFIG below, so a chosen project
     // directory's own .mcp.json is neither read by the bot nor overwritten.
+    // S6-CROW: in fd delivery mode there is no file at all — the config is
+    // piped on fd 4 (PI_BOT_MCP_CONFIG_FD), see the fdMode block below.
     const spawnCwd = opts.cwd || sessionDir;
     // Phase 3.0 (R3): provider+model are resolved per-turn by
     // model_resolver.resolveModel() and passed in via opts.resolved — there
@@ -281,6 +285,30 @@ export class PiRpc {
       piPolicy.write_paths = ["/"];
       delete piPolicy.external_send;
     }
+    // S6-CROW: MCP config delivery. "fd" (opts.mcpDelivery, set by
+    // prepareSpawn from mcp-delivery.mjs) pipes opts.mcpConfig to pi on fd
+    // MCP_CONFIG_FD — nothing on disk. Anything else is the pre-S6 file env
+    // (callers that never pass mcpDelivery — skill_review, the spike scripts,
+    // hand-built test worlds — are unchanged).
+    const fdMode = opts.mcpDelivery === "fd";
+    // S6-CROW: read roots. pi-lab (>= c8bbb02) confines read/grep/find/ls to
+    // cwd + dirname(PI_BOT_MCP_CONFIG) + write_paths + read_paths. The
+    // effective read_paths = the def's explicit entries + the bot's project
+    // workspace (only when it has a project) + in fd mode the world root when
+    // pi's cwd is elsewhere (with no PI_BOT_MCP_CONFIG the world root is no
+    // longer implied; a perch session's uploads/outputs live there). Computed
+    // on the COPY; the stored def is never mutated. A bot with no project and
+    // no explicit entries gets no read_paths key at all (policy unchanged).
+    // bypass reads everything — the same "/" pi-lab documents.
+    if (opts.permissionMode === "bypass") {
+      piPolicy.read_paths = ["/"];
+    } else {
+      const readPaths = effectiveReadPaths(def, {
+        projectWorkspaceDir: opts.projectWorkspaceDir || null,
+        extra: (fdMode && spawnCwd !== sessionDir) ? [sessionDir] : [],
+      });
+      if (readPaths.length || Object.prototype.hasOwnProperty.call(piPolicy, "read_paths")) piPolicy.read_paths = readPaths;
+    }
     // C-12 spawn_env hygiene (r1 S3 — security): a bot def could otherwise set
     // PI_BOT_INTERACTIVE (flipping a channel turn's ask_user into an
     // unanswerable "ui" hang) or clobber PI_BOT_PERMISSION_POLICY (a
@@ -316,6 +344,16 @@ export class PiRpc {
       // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
       // computed defaults above and the (already-stripped) def.spawn_env.
       opts.extraEnv || {});
+    // S6-CROW: exactly one delivery variable reaches pi, whatever the
+    // gateway's own env or the merges above carried. pi-lab lets the fd win
+    // over the file, and dirname(PI_BOT_MCP_CONFIG) would otherwise still be a
+    // read root pointing at a file that no longer exists.
+    if (fdMode) {
+      delete env.PI_BOT_MCP_CONFIG;
+      env.PI_BOT_MCP_CONFIG_FD = String(MCP_CONFIG_FD);
+    } else {
+      delete env.PI_BOT_MCP_CONFIG_FD;
+    }
     // detached:true puts pi in its own process group so close() can SIGTERM
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
@@ -335,8 +373,28 @@ export class PiRpc {
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
-    this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env,
-      stdio: launch.sandboxed ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"], detached: true });
+    // S6-CROW: in fd mode the child gets one more pipe at MCP_CONFIG_FD (4;
+    // 3 is the sandbox's --info-fd, "ignore" when unsandboxed). bwrap and
+    // setpriv both pass inherited fds through to pi.
+    const stdio = launch.sandboxed ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"];
+    if (fdMode) {
+      while (stdio.length < MCP_CONFIG_FD) stdio.push("ignore");
+      stdio.push("pipe");
+    }
+    this.mcpDelivery = fdMode ? "fd" : "file";
+    this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
+    if (fdMode) {
+      // Write the config and CLOSE our end: pi-lab reads the fd to EOF once.
+      // A config that could not be built (writeBotMcp failed — logged by the
+      // world builder) is an empty bot layer, as a missing file was before.
+      // An early pi exit raises EPIPE here asynchronously; the exit handler
+      // below surfaces the real cause.
+      const cfgPipe = this.proc.stdio[MCP_CONFIG_FD];
+      if (cfgPipe) {
+        cfgPipe.on("error", () => {});
+        cfgPipe.end(JSON.stringify(opts.mcpConfig || { mcpServers: {} }));
+      }
+    }
     if (!launch.sandboxed) this.piPid = this.proc.pid;
     else if (this.proc.stdio[3]) {
       let info = "";

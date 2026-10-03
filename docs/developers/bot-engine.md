@@ -105,6 +105,23 @@ Five gateway types need the engine — `gmail`, `discord`, `telegram`, `slack`, 
 
 Every mode above assumes a child that lives for exactly one turn: spawn, one `promptTurn`, close. Perch's interactive sessions (the `/dashboard/perch` hub) are the one exception — a child spawned by `servers/gateway/perch-interactive.js` stays up across many turns, hibernating (closing) when idle and waking (respawning, resuming the same pi session file) on the next message. It is assembled through the same `buildBotWorld`/`prepareSpawn` path as every other engine channel and is gated by the same `ENGINE_CHANNELS` / attach-time engine check as a `perch` gateway generally, so nothing above this section changes for it. What is specific to the long-lived shape — its own state machine, its capacity accounting against this same `PIBOT_MAX_PI` budget, its stall/abort policy, and the `PI_BOT_INTERACTIVE` env marker it alone sets — lives entirely in `perch-interactive.js`'s own header comment, since none of it is reachable outside a spawned interactive session.
 
+### Read confinement and MCP config delivery (S6)
+
+With pi-lab at or after `c8bbb02` (declared as `MIN_PI_LAB_REV` in `scripts/pi-bots/pi-lab-compat.mjs`), a bot's read tools (`read`, `grep`, `find`, `ls`, `send_user_file`) reach only its spawn cwd, its world root, its `write_paths`, and `permission_policy.read_paths`. Any `.mcp.json` is unreadable to a bot, whatever its roots.
+
+**The effective `read_paths`** are computed per spawn in `scripts/pi-bots/bot-read-paths.mjs` (PiRpc applies them to the policy copy; the stored def is never changed). They are:
+- the operator's entries (Bot Builder › Permissions › *Folders this bot can read*: absolute paths, validated on save);
+- the bot's project `workspace_dir`, added automatically and only when the bot has a project (the Permissions tab shows it read-only);
+- in fd mode, the world root when pi's cwd is somewhere else.
+
+`bypass` sends `["/"]`. A bot with no project and no entries sends no `read_paths` key at all.
+
+**MCP config delivery** is set by `PIBOT_MCP_CONFIG_DELIVERY` (`scripts/pi-bots/mcp-delivery.mjs`), which takes `fd`, `file` or `auto`; the default is `auto`. `auto` picks `fd` when the pi-lab that pi loads passes the compat check, and `file` otherwise. An older pi-lab ignores the fd, so in fd mode it would run the bot with no MCP servers.
+- In `fd` mode the bridge spawns pi with `PI_BOT_MCP_CONFIG_FD=4`, pipes the built config on fd 4 and closes its end. pi-lab reads it to EOF once and closes it. Nothing is written: not `<world>/.mcp.json`, and not `/tmp/pibot-job-*/.mcp.json` for background jobs. A stale file left by an earlier file-mode turn is removed. This keeps the signed actor headers (`actor-sig.mjs`) off disk entirely.
+- `file` mode is the pre-S6 path described below.
+
+Both the gateway and `pibot-gateways` log the pi-lab check once at boot, with a clear WARNING when pi-lab is older. One caveat stays: a bot with an allowlisted file-reading bash command (`cat`, `python3`, …) can still read anything, so keep those out of `bash_allow` for confined bots.
+
 ### Open-anywhere: cwd is split from the world root
 
 A Perch session runs in **any directory the operator picks**, not only its bot's configured workspace. Two values that used to be one are now separate (`buildBotWorld` returns both):
