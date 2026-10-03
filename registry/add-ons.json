@@ -6394,6 +6394,7 @@
         "script": "ops/bootstrap.sh",
         "timeout_s": 1500
       },
+      "panel": "panel/workspace.js",
       "images": [
         "mariadb:11.8.9",
         "nextcloud:34.0.4-apache",
