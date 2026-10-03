@@ -1,0 +1,21 @@
+## Used ONLY by ops/restore-scratch.sh: a restored copy never restarts by itself
+## (no lingering second Nextcloud), publishes no host ports, and uses its own subnet
+## (the live project pins 10.89.70.0/24).
+services:
+  nextcloud:
+    restart: "no"
+    ports: !reset []
+  nextcloud-cron:
+    restart: "no"
+  nextcloud-db:
+    restart: "no"
+  nextcloud-redis:
+    restart: "no"
+  onlyoffice:
+    restart: "no"
+    ports: !reset []
+networks:
+  default:
+    ipam:
+      config: !override
+        - subnet: 10.89.72.0/24
