@@ -1756,6 +1756,7 @@ export function createVoiceTurnRunner(deps) {
         const ctx = await deps.contextLenFor(result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey), db);
         const estPrompt = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.2);
         const maxTokens = ctx ? Math.max(64, Math.min(roundMax, ctx - estPrompt - 128)) : roundMax;
+        timings.est_prompt_tokens = estPrompt; timings.max_tokens = maxTokens;   // in [kiosk-metrics]; the smoke records both
         for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal })) {
           if (aborted()) break;
           if (ev.type === "content_delta" && ev.text) {
@@ -5540,7 +5541,7 @@ export const CLIENT_SCRIPT = `
     card.appendChild(head);
     card.appendChild(el('p', 'kk-dim', d.last_seen ? fill(S.last_seen, { when: new Date(d.last_seen).toLocaleString() }) : S.never_seen));
     var lat = d.latency || {};
-    card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms, p90: lat.p90_ms, n: lat.n }) : S.no_latency));
+    card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms == null ? '>' + 3000 : lat.median_ms, p90: lat.p90_ms == null ? '>' + 3000 : lat.p90_ms, n: lat.n }) + (lat.no_audio ? ' · ' + lat.no_audio + ' ✗' : '') : S.no_latency));   // Infinity serializes as null
     var bot = el('select'); data.bots.forEach(function (b) { opt(bot, b.bot_id, b.display_name || b.bot_id, b.bot_id === d.bound_bot_id); });
     var stt = el('select'); data.stt_profiles.forEach(function (p) { opt(stt, p.id, p.name, p.id === d.stt_profile_id); });
     var tts = el('select'); data.tts_profiles.forEach(function (p) { opt(tts, p.id, p.name, p.id === d.tts_profile_id); });
@@ -5958,6 +5959,8 @@ Then compute the gate from the server log. The last 20 eligible turns are the 20
 ```bash
 source /tmp/claude-1000/kiosk-smoke/vars.sh
 journalctl --user -u kiosk-smoke-gw --since "$(cat $SMOKE/a2-start.txt)" -o cat | grep '^\[kiosk-metrics\] ' | sed 's/^\[kiosk-metrics\] //' > $SMOKE/a2.jsonl
+# Cross-check: every phone tap must have a metrics row. Compare against the Diagnostics turn list (server rows incl. those with no client metrics);
+# a row with route=fast, tts_first_chunk_ms set and NO e2e/vad_reason counts as a FAILURE (Infinity) in the A2 verdict, never as excluded.
 cd $REPO && $NODE --input-type=module -e '
 import { readFileSync } from "node:fs";
 import { median, percentile } from "./bundles/kiosk/server/metrics.js";
@@ -5965,6 +5968,8 @@ const rows = readFileSync(process.env.SMOKE + "/a2.jsonl", "utf8").trim().split(
 // Same rule as metrics.summary: degraded (cold-fallback) turns are excluded; an eligible turn with NO audio counts as Infinity (a failure).
 const ok = (r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && r.vad_reason === "silence";
 const bad = rows.filter((r) => !ok(r));
+// A fast-route turn that sent audio but never got turn_metrics back (playback/decode failure, disconnect) is a FAILURE too.
+const journal = process.env.SMOKE + "/a2-turns.jsonl";   // server-side turn_done rows, see the grep below
 const use = rows.filter(ok).slice(-20);
 const s = (k) => use.map((r) => (k === "e2e_ms" ? r.e2e_ms : r.timings?.[k])).filter(Number.isFinite).sort((a, b) => a - b);
 const e = use.map((r) => (Number.isFinite(r.e2e_ms) ? r.e2e_ms : Infinity)).sort((a, b) => a - b);
@@ -6205,7 +6210,8 @@ A kiosk escalation can now start the 35B on demand: `maybeAcquireLocalProvider(�
 The device-store move, the `llm-router` refactor and the Bot Builder unbind helper reach every instance on its next auto-update (6 h). After that pull, check the one instance with meta-glasses installed (grackle, while it lives) and a Bot Builder device-binding save:
 
 ```bash
-grackle "cd ~/crow && git log -1 --format=%h && journalctl --user -u crow-gateway --since '-30 min' -o cat 2>/dev/null | grep -iE 'meta-glasses|device-store|ERR' | tail -5"
+grackle "systemctl status crow-gateway --no-pager 2>/dev/null | head -3; systemctl --user status crow-gateway --no-pager 2>/dev/null | head -3"   # find whether it is a system or user unit first
+grackle "cd ~/crow && git log -1 --format=%h && (journalctl -u crow-gateway --since '-30 min' -o cat 2>/dev/null; journalctl --user -u crow-gateway --since '-30 min' -o cat 2>/dev/null) | grep -iE 'meta-glasses|device-store|ERR' | tail -5"
 grackle 'sqlite3 -readonly ~/.crow/data/crow.db "select value from dashboard_settings where key = '"'"'meta_glasses_devices'"'"'" | grep -o "\"bound_bot_id\":[^,]*"'    # bindings unchanged vs before the pull
 ```
 
@@ -6265,6 +6271,8 @@ Not dry-run: the partial snippets (`bird-svg.cjs`, `llm-router.js`, `local-token
 - M8 (standing automation, timer fast path) → Task 14 Step 9 + fast path.
 - Minors: rate key by Tailscale identity, `complete()` check, pre-roll in the worklet, long-press close-all, smoke env flags + `INVOCATION_ID`, measured whisper cap, fleet check, last-20 summary, non-vacuous tests, R19 wording.
 - Not taken: `getOutputTimestamp()`. The bias is stated in R8 instead.
+
+**Scoped re-review: APPROVE.** C1–C3 and M1–M8 are verified resolved. Its four new minors are folded in: the panel renders no-audio failures instead of "null ms"; a turn missing client metrics counts as a failure in A2; `est_prompt_tokens`/`max_tokens` are logged per turn; the fleet check detects the grackle unit type.
 
 ## Execution handoff
 
