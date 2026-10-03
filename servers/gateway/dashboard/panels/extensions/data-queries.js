@@ -243,9 +243,14 @@ export function fetchBundleStatus(installed) {
         const composePath = join(bundlesDir, id, "docker-compose.yml");
         if (existsSync(composePath)) {
           try {
+            // Same env the installer/start path uses (routes/bundles.js composeEnv):
+            // bundles whose compose file requires `${CROW_HOME:?…}` (workspace,
+            // browser) fail `ps` without it, and a failed `ps` read as "stopped" —
+            // the badge said Stopped while all five Workspace containers ran.
             const out = execFileSync(composeCmd.cmd, [...composeCmd.prefix, "ps", "--format", "json"], {
               cwd: join(bundlesDir, id),
               timeout: 5000,
+              env: { ...process.env, CROW_HOME: CROW_DIR },
             }).toString().trim();
             const containers = out.split("\n").filter(Boolean).map((line) => {
               try { return JSON.parse(line); } catch { return null; }
