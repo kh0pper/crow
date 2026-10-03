@@ -1,117 +1,177 @@
 # Crow Keychain: Generated Passwords, Wider Charset and a Local Password Store (Design)
 
-**Date:** 2026-10-03
-**Status:** Approved in chat by Kevin, 2026-10-03 (decisions 1-7 below are his and are binding). This document grounds them in the code on `main` @ `ec197558` (#408, Crow Workspace W1) and records the rulings the decisions left open.
+**Date:** 2026-10-03.
+**Revision 2** follows the adversarial review `~/crow-weekend-push/reports/keychain-plan-review.md` (C1–C8, S1–S10) and Kevin's answers to its questions Q1–Q6.
+
+**Status:** Approved in chat by Kevin, 2026-10-03.
+- Decisions 1–7 below are his and are binding, as amended by his review answers.
+- This document grounds them in the code on `main` @ `ec197558` (#408, Crow Workspace W1).
+- It records the rulings the decisions left open.
+
 **Plan:** `docs/superpowers/plans/2026-10-03-crow-keychain.md`
 
 ## 1. Problem
 
 Installing an extension that needs a human password today means:
 
-- inventing a strong password yourself, under a narrow charset. Workspace refuses `$`, spaces, quotes and `#` because `writeInstallEnv` writes `KEY=value` raw and Docker Compose would interpolate or truncate those characters;
-- remembering it somewhere outside Crow. The Workspace bootstrap deliberately scrubs `WORKSPACE_ADMIN_PASSWORD` from `.env` after first use, so Crow forgets it;
-- for Vaultwarden, running terminal commands (`openssl rand`, then `vaultwarden hash` inside the container) and pasting the result.
+- **Inventing a strong password yourself, under a narrow charset.** Workspace refuses `$`, spaces, quotes and `#`. The reason: `writeInstallEnv` writes `KEY=value` raw, and Docker Compose would interpolate or truncate those characters.
+- **Remembering it outside Crow.** The Workspace bootstrap deliberately scrubs `WORKSPACE_ADMIN_PASSWORD` from `.env` after first use.
+- **For Vaultwarden, running terminal commands** (`openssl rand`, then `vaultwarden hash` inside the container) and pasting the result.
 
-Kevin's decisions turn this into: a Generate button, any printable character, a local encrypted keychain, a re-auth-gated Settings page, and an optional copy into the user's own Vaultwarden vault.
+Kevin's decisions turn this into: a Generate button on the extension's own password fields, any printable character, a local encrypted keychain with its own key, a re-auth-gated Settings page with a passphrase Export/Import, and an optional copy into the user's own Vaultwarden vault.
 
 ## 2. Decisions (Kevin, 2026-10-03; binding)
 
-1. **Generate button** on every human password field in any extension's install/configure form. A human password field is an `env_vars` entry with `secret: true` that is not installer-generated (`!generate`). It produces a 24-char strong password from the field's allowed charset. The field gets show/hide and copy, and the user may still type their own.
-2. **Wider charset.** The installer writes bundle `.env` values with correct docker-compose `.env` quoting, so nearly any printable character works. It refuses only newline/NUL and what compose quoting truly cannot express. Bundle ops scripts read values safely (no shell eval). Relax the Workspace `WORKSPACE_ADMIN_PASSWORD` pattern and audit its ops scripts. Compose's rules are verified against the installed compose (v5.1.2) with real `docker compose config`.
-3. **Crow keychain.** It is local-only and NEVER synced, encrypted at rest with `servers/sharing/secret-box.js`, and holds human-facing passwords only:
-   - human secret fields from install/configure (checkbox "Save to Crow keychain", default on);
-   - manual "add" entries (e.g. Workspace phone app passwords).
-
-   Entries are labelled by extension + field and carry: label, bundle_id, env key, username, url, created/updated, and a status (e.g. "extension removed" after uninstall, kept until the user deletes it). It is not a general password manager.
-4. **Settings → Passwords page.**
-   - It lists the entries.
-   - Reveal/copy needs a fresh re-auth: the TOTP code if dashboard 2FA is on, otherwise the dashboard password. The re-auth is valid 5 minutes.
-   - Every reveal/copy/delete goes in the audit log.
-   - Strings are en+es.
-   - Plaintext reaches the browser only on an explicit reveal/copy after re-auth, and never appears in logs.
+1. **Generate button** on human password fields in an extension's install/configure form.
+   - *Amended by Q1 / review C1:* only on fields the manifest opts in with `generatable: true`. Third-party credentials (API keys, tokens; 80+ of them across the store) get Show/Hide/Copy but no Generate.
+   - The password is 24 characters, from the field's allowed charset.
+   - The user may still type their own.
+2. **Wider charset.**
+   - The installer writes bundle `.env` values with correct docker-compose quoting, so nearly any printable character works.
+   - It refuses only newline/NUL, plus what quoting cannot express safely (§5.1).
+   - Bundle ops scripts read values without shell eval.
+   - Relax Workspace's `WORKSPACE_ADMIN_PASSWORD` pattern accordingly.
+   - Verify the rules against the installed compose (v5.1.2).
+3. **Crow keychain.**
+   - Local-only and NEVER synced; human-facing passwords only; not a general password manager.
+   - *Amended by Kevin (review C7):* encrypted with **its own random key file**, never the identity seed, and **never backed up**. An explicit passphrase-encrypted **Export / Import** on the Passwords page is the way to keep a copy. A crow.db restored without the key shows entries as "unreadable — key missing" and never crashes.
+   - "Save to Crow keychain" (default on) follows the same opt-in as Generate (`generatable` or `keychain`), plus manual "add" (Q1).
+   - Entries carry: label, bundle, env key, username, URL, created/updated, and a status. After uninstall the status is "extension removed", and the entry is kept until the user deletes it.
+4. **Settings → Passwords.**
+   - List, reveal, copy and delete.
+   - Reveal/copy/delete/export/import need a fresh re-auth, valid 5 minutes: the TOTP code if dashboard 2FA is on, otherwise the dashboard password.
+   - *Q6:* with neither, those actions are disabled with an explanation. There is no bypass.
+   - Every reveal/copy/delete/export/import is audited.
+   - en+es strings.
+   - No plaintext reaches the browser except on an explicit, re-authenticated request (plus the one-time first view, §5.4). No plaintext in logs.
 5. **Optional "Also save to my Vaultwarden vault"** when the vaultwarden bundle is installed.
-   - The user types the vault email + master password once per save. They are never stored, never in argv, never logged.
-   - Crow uses the official Bitwarden CLI (`@bitwarden/cli`, an npm dependency) pointed at the local Vaultwarden to log in, create a login item and log out.
-   - BW session/appdata live in a private temp dir that is removed afterwards.
+   - Email and master password are typed per save: never stored, never logged; the master password is never in argv.
+   - Uses the official Bitwarden CLI (`@bitwarden/cli`) against the local Vaultwarden.
+   - Private appdata, removed afterwards.
    - A failure does not fail the install; it is reported.
-6. **Generated-and-known secrets.** A new generic env_vars capability, `generate: "secret"` + `keychain: true` (+ optional `store_as: "argon2id"`):
-   - Crow generates the token, saves the plaintext to the keychain and shows it once with copy.
-   - The bundle `.env` gets either the plaintext or a PHC Argon2id hash computed with Node 24's built-in `crypto.argon2`.
-   - First adopters: Vaultwarden `VAULTWARDEN_ADMIN_TOKEN` (replacing its terminal instructions) and Workspace `WORKSPACE_ADMIN_PASSWORD` (Generate button + keychain save).
-   - Both manifest versions are bumped and the registry rebuilt.
-7. **Follow-ups to list, not build:** Vaultwarden default URL localhost-only → Serve/tailnet address, and the manual "signups allowed" flip (§9).
+6. **Generated-and-known secrets.** A new capability, `generate: "secret"` + `keychain: true`, optionally with `store_as: "argon2id"`.
+   - Crow generates the token, saves the plaintext to the keychain, and shows it once.
+   - The `.env` gets the plaintext or a PHC Argon2id hash (Node 24 `crypto.argon2Sync`).
+   - First adopters: Vaultwarden `VAULTWARDEN_ADMIN_TOKEN` and Workspace `WORKSPACE_ADMIN_PASSWORD`, both with version bumps and a registry rebuild.
+7. **Follow-ups** are listed in §9, not built.
 
 ## 3. Ground truth (verified 2026-10-03)
 
-**Compose `.env` parsing, Docker Compose v5.1.2 on crow** (probed with `docker compose config --environment` and `--format json`):
+### Compose `.env` parsing (Docker Compose v5.1.2 on crow)
 
-| line in `.env` | value compose sees |
+Probed with `docker compose config --environment` and `--format json`:
+
+| line in `.env` | compose sees |
 |---|---|
-| ``A='p$a ss#w"d\n`x'`` | ``p$a ss#w"d\n`x`` literally: no `$` interpolation, no escapes |
+| ``A='p$a ss#w"d\n`x'`` | literal: no `$` interpolation, no escapes |
 | `A='a\'b'` | `a'b` (the one escape inside single quotes) |
 | `A='\'` | **parse error** (unterminated) |
 | `A="a\$b"` / `A="d$$x"` | `a$b` / `d$x` |
-| `A="q\nz"` | `q`, a newline, `z` |
-| `A="a\zb"` | `a\zb` (unknown escapes stay literal) |
+| `A="q\nz"` | `q`, newline, `z` |
+| `A="a\zb"` | `a\zb` (unknown escapes kept) |
 | `A=x #c` / `A=x#c` | `x` / `x#c` |
-| `A='$argon2id$v=19$m=65540,t=3,p=4$abc$def'` | the PHC string, verbatim |
+| `A='$argon2id$v=19$m=65540,t=3,p=4$abc$def'` | verbatim |
 
-A fuzz of 604 random printable/unicode values run through the chosen encoder (§5.1) gave 0 mismatches across all three readers: `${VAR}` interpolation, `env_file: .env`, and bash `set -a; . ./.env`.
+### Bash vs compose on a bare tilde (review C2)
 
-**Bundle `.env` writers and readers on `main`:**
-- `writeInstallEnv` (raw `${k}=${v}`);
-- the Configure route `POST /bundles/api/env` (raw regex read, raw write);
-- `appendManagedBlock` (shared storage);
-- `resolveGeneratedEnv`'s retained copy;
-- `parseEnvText` (raw);
-- `composeBuildContexts` via `env-manager.readEnvFile` (strips quotes, no unescape);
-- `bundles-config.parseEnvFile` (raw);
-- `extension-proxy.readBundleEnv` (raw, trimmed);
-- `port-inventory` (numeric regex only).
+| `.env` line | bash sees | compose sees |
+|---|---|---|
+| `A=~` | `/home/kh0pp` | `~` |
+| `B=~/x` | `/home/kh0pp/x` | `~/x` |
+| `C=ab:~/y` | `ab:/home/kh0pp/y` | `ab:~/y` |
+| `D=~+` | `$PWD` | `~+` |
 
-The **gateway's own** `.env` is loaded literally by `servers/gateway/index.js` (`/^([A-Z_][A-Z0-9_]*)=(.*)$/`, no unquoting) and is not a compose file.
+Eight manifest defaults are bare `~/` paths: caddy, frigate×2, homepage, iptv, motioneye×2, rookery. The frigate and motioneye post-install scripts rely on bash expanding them.
 
-**Bundle scripts.**
-- Eleven bundle post-install scripts run `set -a; . "$ENV_FILE"; set +a`: motioneye, writefreely, frigate, lemmy, mastodon, funkwhale, peertube, gotosocial, pixelfed, matrix-bridges, matrix-dendrite. None is wired as a manifest `postInstall`; they are run by hand.
-- The Workspace bootstrap reads with `sed -n "s/^KEY=//p"`, which returns the encoded form, not the value.
+### Who reads and writes bundle `.env` files
 
-**secret-box.** `sealSecret` / `openSecret` use AES-256-GCM with a key HKDF'd from the identity seed (`crow-secret-box-v1`). Instances that share a Crow identity derive the same key. Keeping keychain rows local therefore rests on **non-replication**, not on the key.
+**Writers:**
+- `writeInstallEnv`
+- the Configure route
+- `appendManagedBlock`
+- the retained-secrets copy
+- companion `settings-section.js`
+- the four `configure-storage.mjs` scripts (peertube, pixelfed, funkwhale, mastodon)
 
-**Sync.** `servers/sharing/instance-sync.js` `SYNCED_TABLES` gates both `emitChange` and `_applyEntry`, and `servers/shared/sync-emit.js` gates the stdio queue door on the same list.
+**Raw readers:**
+- `parseEnvText`
+- `composeBuildContexts` (via `env-manager.readEnvFile`)
+- `bundles-config.parseEnvFile`
+- `extension-proxy.readBundleEnv`
+- browser `server/instance.js` (reads the typed `CROW_BROWSER_VNC_PASSWORD`)
+- companion `settings-section.js`
+- `migrations.js readCompanionEnv`
+- workspace `panel/workspace.js`
+- the four `configure-storage.mjs` scripts
+- workspace `ops/bootstrap.sh` and `ops/restore-scratch.sh` (sed)
 
-**Auth.**
-- `servers/gateway/dashboard/auth.js` holds `verifyPassword(password, stored)` (scrypt) over `dashboard_settings.password_hash`.
-- `servers/gateway/dashboard/totp.js` holds `is2faEnabled()`, `getTotpSecret()` and `verifyTotp(code, secret)`.
-- `dashboardAuth` sets `req.dashboardSession` (the raw session token).
-- CSRF is a double-submit `X-Crow-Csrf` header or `_csrf` field.
+Out of scope: `port-inventory.js` (digits only).
 
-**Audit.** `servers/db.js` `auditLog(db, eventType, { actor, ip, details })` writes the `audit_log` table, which already exists in `scripts/init-db.js`.
+**Scripts that source `.env`:** eleven post-install scripts run `set -a; . .env`. They are run by hand; none is a manifest `postInstall`.
 
-**Vaultwarden 1.32.7** (`src/api/admin.rs`, `src/config.rs` at tag 1.32.7):
-- `ADMIN_TOKEN` starting `$argon2` is parsed as a PHC string by `argon2::password_hash::PasswordHash::new` and verified against the trimmed submitted token. Hash params come from the PHC string.
-- The admin API is authenticated **only by the `VW_ADMIN` cookie** set by `POST /admin` (form field `token`). The bundle's `vaultwarden_user_count` MCP tool sends `Authorization: Bearer`, so it can never have worked on this version (pre-existing bug).
-- Wiki presets: Bitwarden `m=65540,t=3,p=4`; OWASP `m=19456,t=2,p=1`.
+The **gateway's own** `.env` is loaded literally by `servers/gateway/index.js`. It is not a compose file.
 
-**Node 24.21.0.** `crypto.argon2Sync("argon2id", { message, nonce, parallelism, tagLength, memory, passes })` exists, as does async `crypto.argon2`. It takes about 58 ms at m=65540,t=3,p=4 on crow.
+### Backups and the identity seed (review C7)
 
-**`@bitwarden/cli` 2026.9.1** (npm; `bin: build/bw.js`, engines node >= 22; ~18 MB unpacked). From `apps/cli/src/program.ts` / `vault.program.ts`:
-- `login [email] [password]` takes `--passwordenv <ENV>`;
-- global `--raw` prints the bare session key;
-- `create item [encodedJson]` reads the base64 JSON from stdin when the argument is omitted;
-- `BITWARDENCLI_APPDATA_DIR` relocates `data.json`;
-- `BW_SESSION` carries the session.
+- `secret-box` derives its key from the identity seed, and same-identity instances share it.
+- These paths copy crow.db and/or `identity.json`:
+  - product `/api/admin/backup` + Nest "Run backup now": crow.db → `~/backups/crow`;
+  - the onboarding identity export: the seed;
+  - `~/r4-tehcy/scripts/r4-backup.sh`: crow.db + `identity.json` + `~/.crow-r4/env`, uploaded to Google Drive;
+  - `pi-lab/scripts/crow-db-backup.sh`: crow.db only, to `/mnt/external`.
+- **None of them copies `<CROW_HOME>/secrets/`.** That is where the keychain key lives (§5.3).
+
+### Vaultwarden
+
+**1.32.7** (the bundle's pin) parses an `ADMIN_TOKEN` that starts `$argon2` as a PHC string and verifies the trimmed submitted token against it. Its admin API is authenticated only by the `VW_ADMIN` cookie from `POST /admin`. The bundle's `vaultwarden_user_count` MCP tool sends `Authorization: Bearer`, so it never worked.
+
+**1.37.0 release notes:**
+
+> This update is required for support with clients with version 2026.7.0+
+
+`@bitwarden/cli` 2026.9.1 is such a client. **1.37.3** is the current stable release (2026-09-13, Docker Hub digest `sha256:1587c45f…`). Its `admin.rs` `validate_token` uses the same PHC path and the same cookie-only admin guard. Its image ships `curl` for the healthcheck.
+
+Vaultwarden is not installed on any fleet host, so the pin can move freely.
+
+### Node 24.21.0
+
+`crypto.argon2Sync("argon2id", …)` exists and takes about 58 ms at m=65540, t=3, p=4.
+
+### `@bitwarden/cli` 2026.9.1
+
+From `apps/cli/src/program.ts` and `vault.program.ts`:
+- `login [email] --passwordenv <ENV>`;
+- global `--raw`;
+- `create item` reads base64 JSON from stdin;
+- `BITWARDENCLI_APPDATA_DIR`;
+- `BW_SESSION`.
+
+Its dependencies are pure JS (no native modules), so the installer's `--ignore-scripts` is fine.
+
+### Bundle refresh (review C6)
+
+`refreshVersionedBundle` copied only `manifest.json` and `settings-section.js` at the top level of **docker** bundles, so a dependency added in a version bump was never installed. Today no compose file bind-mounts a bundle's `package.json`.
+
+### Configure registry blob
+
+The Extensions client builds the Configure form from `#addon-registry`. That blob dropped every env_vars field except name/description/default/required/secret, so `generatable`, `keychain` and `pattern` never reached Configure. Found while dry-running the plan; fixed in the plan's Task 9.
 
 ## 4. Scope
 
 **In scope:**
-- the `.env` codec and the reader/writer switch;
-- the env_vars capability (`keychain`, `store_as`, `keychain_username`, `keychain_url`) with Argon2id PHC;
-- the keychain store (local-only table), the re-auth gate and the JSON API;
+- the `.env` codec and every reader/writer above;
+- the env_vars capability (`generatable`, `keychain`, `store_as`, `keychain_label`, `keychain_username`, `keychain_url`, `path`) with Argon2id PHC;
+- the keychain key file;
+- the store (local-only table) and Export/Import;
+- the re-auth gate and JSON API;
 - Settings → Passwords;
-- the Extensions modal (Generate, show/hide, copy, keychain checkbox, vault option) and the first-view banner;
+- the Extensions modal (Generate, Show/Hide, Copy, keychain checkbox, vault option) and the first-view banner;
 - the Bitwarden-CLI vault save;
-- Workspace and Vaultwarden adoption;
-- a pre-merge live smoke, then PR/merge/deploy.
+- the docker-bundle refresh fix;
+- Vaultwarden (pin 1.37.3) and Workspace adoption;
+- a live compatibility spike before the vault-save code;
+- a pre-merge live smoke;
+- PR, merge and deploy.
 
 **Out of scope:** everything in §9.
 
@@ -119,199 +179,269 @@ The **gateway's own** `.env` is loaded literally by `servers/gateway/index.js` (
 
 ### 5.1 Compose-exact `.env` codec (`servers/gateway/bundle-env-codec.js`)
 
-Encoding, applied to every value Crow writes into a bundle `.env` and to the retained-secrets copy:
-
 | value | written as |
 |---|---|
-| only `A-Z a-z 0-9 _ . / : @ % + , = ~ ^ ! ? * -` (incl. empty) | bare, **byte-identical to what Crow writes today**, so existing files never churn |
-| anything else, with no `'` and not ending in `\` | `'value'`: literal in compose AND in bash |
-| the rest | `"value"` with `\`, `"` and `$` backslash-escaped: identical in compose and bash |
+| only `A-Z a-z 0-9 _ . / : @ % + , = ^ ! ? * -` (incl. empty) | bare, byte-identical to before |
+| `~/…` made of those characters, in a **path field** | bare: bash expands it, as the post-install scripts expect |
+| anything else without `'` and not ending in `\` (every other tilde form included) | `'value'`: literal in compose AND bash |
+| the rest | `"value"` with `\ " $` escaped |
 
-Refused, with the existing 400 `invalid_env` (key named, value never echoed):
-- CR, LF or NUL;
-- a backtick in a value that needs double quotes (it contains `'` or ends in `\`).
+A **path field** is one whose manifest declares `path: true`, or whose `default` starts with `~/`. No existing manifest needs an edit (Kevin Q4).
 
-Compose could express the backtick case, but bash's `. ./.env` (the eleven manual post-install scripts) would execute it there. Refusing that one combination keeps every line Crow writes safe to source. That is the only refusal beyond Kevin's "newline/NUL".
+**Refused** with the existing 400 `invalid_env` (key named, value never echoed):
+- CR, LF, NUL;
+- a backtick in a value that needs double quotes, because `. ./.env` would execute it.
 
-Decoding (`parseEnvText` / `decodeEnvValue`) mirrors compose for every form Crow writes, plus hand edits:
-- an `export ` prefix;
-- a trailing ` #comment` on bare values;
-- `\n \t \r` in double quotes;
-- unknown escapes kept literal.
+**Decoding** mirrors compose: `export ` prefix, trailing ` #comment` on bare values, `\n \t \r`, unknown escapes kept.
 
-Every bundle-`.env` reader listed in §3 switches to it, except `port-inventory` (digits only). The gateway's own `.env` is **not** a compose file and keeps its literal writer and reader.
+**Line-preserving updates** (review C4): `updateEnvText` changes only the requested keys and keeps every other line byte-for-byte. Configure and the installer's `.env`/`.env.example` seeding use it, so:
+- a legacy unquoted `P=p$ss` that compose already interpolated (possibly into a database) is never silently re-quoted;
+- a legacy line the codec would refuse never turns Configure into a 500.
+
+All bundle-`.env` readers in §3 switch to the codec:
+- shell scripts through `bundles/workspace/ops/envfile.py`, a decoder byte-identical to the codec;
+- bundle code that runs outside the gateway module graph through the maker-lab `CROW_APP_ROOT` resolver pattern.
+
+Each touched bundle gets a version bump: browser 1.3.4, companion 1.0.1, peertube, pixelfed, funkwhale and mastodon 1.0.1, workspace 0.1.2.
 
 ### 5.2 Manifest capability
 
 `env_vars[]` gains:
 
-- `keychain: true`. With `generate: "secret"`, the minted plaintext is saved to the keychain (origin `generated`) with a 30-minute first-view grant.
-- `store_as: "argon2id"`. Needs `generate` + `keychain`. The bundle `.env` and the retained copy hold `$argon2id$v=19$m=65540,t=3,p=4$<salt b64>$<hash b64>`:
-  - 16-byte random salt and 32-byte tag;
-  - standard base64 without padding (PHC);
-  - Bitwarden preset params.
+- `generatable: true` — a human password field. The forms offer Generate and "Save to Crow keychain". Requires `secret: true`, no `generate`, and `propagate: false`, so a human password is never copied into the gateway `.env` or `mcp-addons.json` (review S6).
+- `keychain: true`:
+  - with `generate: "secret"`, the minted plaintext goes to the keychain (with a 30-minute first-view grant);
+  - on a typed `secret` field, it offers "Save to Crow keychain" without Generate.
+- `store_as: "argon2id"` — needs `generate` + `keychain`. The `.env` and the retained copy hold `$argon2id$v=19$m=65540,t=3,p=4$<salt>$<hash>`: 16-byte salt, 32-byte tag, unpadded standard base64.
+- `keychain_label`, `keychain_username`, `keychain_url` — `${VAR}` templates over the install env, manifest defaults included. A blank var drops the field.
+- `path: true` — see §5.1.
 
-  The `$` characters survive because the codec single-quotes the value.
-- `keychain_label` / `keychain_username` / `keychain_url`. The label names the entry "<extension name> — <keychain_label or env key>". The other two are templates with `${VAR}` substitution from the install env (manifest defaults included); an unset or blank var drops that field. All three apply to human fields too.
+**Generator.** 24 characters from `a-z A-Z 2-9 ! % * + , - . / : = ? @ ^ _` (look-alikes dropped). Every symbol is codec-bare, so a generated password is written byte-identically to before and is never bash-expanded (review C2/C3).
 
-The generated plaintext is the existing 43-char base64url `newSecretValue()`; generated tokens are not the 24-char human generator. A token is minted only when neither the installed `.env` nor the retained copy has a value, as today. So **a reinstall never mints a new token**: it reuses the stored hash and reactivates the existing keychain entry.
+**Generated tokens** stay the existing 43-character base64url `newSecretValue()`.
 
-`registry/manifest.schema.json` and `scripts/lib/bundle-contract.mjs` enforce the combinations.
+**Keychain before persistence** (review C5):
+- `planGeneratedEnv` mints without writing anything.
+- The installer saves `minted` to the keychain first, then calls `persist()` (retained copy) and writes `.env`.
+- If the keychain save fails, the install fails and leaves nothing behind, so a retry mints a fresh token.
+- `resolveGeneratedEnv` (the old one-call API) refuses `keychain` manifests.
+- A reinstall reuses the stored hash and reactivates the existing entry.
 
-### 5.3 The keychain store (`crow_keychain`)
+### 5.3 The keychain key, the store, Export/Import
+
+**Key file** (`keychain/key.js`):
+- `<CROW_HOME>/secrets/keychain.key`, file 600 in a 700 dir;
+- JSON `{v:1, id, key}`: 32 random bytes and a 16-hex fingerprint id;
+- created only on the first save;
+- **never overwritten**: a corrupt file is left alone and saves report "key missing".
+
+Entries are sealed with the existing `secret-box` (AES-256-GCM, HKDF), using this key as its seed.
+
+**Why no backup carries the key:** the file is outside the data dir and outside `identity.json`. No product backup, identity export or sync path references it, and a test pins that.
+
+**Store** (`crow_keychain`):
 
 ```
-id INTEGER PK, kind 'extension'|'manual', label, bundle_id, env_key, username, url,
-secret_sealed (secret-box "enc:v1:…"), origin 'typed'|'generated'|'manual',
-status 'active'|'extension_removed', first_view_until, created_at, updated_at
-UNIQUE (bundle_id, env_key) WHERE kind='extension'
+id, kind, label, bundle_id, env_key, username, url, secret_sealed, key_id, origin,
+status, first_view_until, created_at, updated_at
+UNIQUE (bundle_id, env_key) WHERE kind = 'extension'
 ```
 
-**Schema.** The table is created by `scripts/init-db.js` (fresh installs) **and** lazily by `ensureKeychainTable(db)` on first use (existing installs), with `CREATE TABLE IF NOT EXISTS`. That makes it additive, with **no `SCHEMA_GENERATION` bump** and no migration-guard expectations. This follows the precedent of `sync-outbox-drain.js` `ensureSyncTables`.
+- No CHECK constraints (review S8): enums are validated in `store.js`.
+- The table is created by `scripts/init-db.js` and lazily by `ensureKeychainTable`. It is additive: **no `SCHEMA_GENERATION` bump**.
+- Rows whose `key_id` differs from the present key (or with no key at all) list as `readable:false`. Opening them throws `KEYCHAIN_KEY_MISSING`, and the API answers 409 `key_missing`. They can still be deleted.
 
 **Local-only, made impossible to replicate:**
-- `LOCAL_ONLY_TABLES = ["crow_keychain"]` is exported by `instance-sync.js`;
-- a module-load assertion throws if any of them is in `SYNCED_TABLES`;
-- `shouldSyncRow` returns false for them;
-- a test drives the outbound (`emitChange`, `emitOrQueue`) and inbound (`_applyEntry`) doors with a `crow_keychain` row and asserts nothing is emitted, queued or written.
+- `LOCAL_ONLY_TABLES = ["crow_keychain"]` in `instance-sync.js`;
+- a load-time assertion that it is disjoint from `SYNCED_TABLES`;
+- a `shouldSyncRow` refusal;
+- a test over the live emit, stdio-queue and inbound-apply doors;
+- the grackle D3 importer skips the table, with a reason that points at Export/Import.
 
-**Extension saves** upsert on (bundle_id, env_key). Uninstall flips the bundle's entries to `extension_removed`, and they are kept until the user deletes them. A later save, or a reinstall that reuses a generated value, flips them back to `active`.
+**Export / Import** (`keychain/export.js`):
+- Export writes every readable entry into `{format:"crow-keychain-export", version:1, created_at, count, kdf:{argon2id, m=65536, t=3, p=4, salt}, cipher:"aes-256-gcm", nonce, ciphertext, tag}`. The passphrase is at least 12 characters.
+- Import never overwrites a readable entry.
+  - An extension entry is skipped when its bundle+key has a readable row. It **replaces** an unreadable row (that is the new-machine recovery path).
+  - A manual entry is skipped when an identical label+username+URL exists.
+- Both are re-auth gated and audited, with counts only.
 
 ### 5.4 Re-auth gate and the keychain API
 
-**Re-auth gate.** `POST /dashboard/keychain/api/reauth` takes `{ totp_code }` when `is2faEnabled()`, else `{ password }`. On success it grants **this dashboard session** (keyed by sha256 of `req.dashboardSession`) a 5-minute window.
-- Five failures in a row lock re-auth for that session for 15 minutes.
-- Grants and locks live in memory, so a gateway restart simply asks again.
-- The API is mounted after `dashboardAuth` + `csrfMiddleware` and refuses HMAC-signed peer requests.
+**Re-auth gate:**
+- `method()` is `totp` when 2FA is on, else `password` when a dashboard password exists, else `none` (Q6).
+- A success grants **this dashboard session** (sha256 of the session token) 5 minutes.
+- 5 consecutive failures lock that session for 15 minutes.
+- **Instance-wide ceiling** (review S1, because peers can mint fresh SSO sessions): 20 failures in an hour lock re-auth for everyone. That is audited as `keychain_reauth_lockout` and raises one dashboard notification.
+- TOTP codes have no replay tracking (`totp.js:69-89`). That is accepted, given the 5-minute grant and session binding.
+
+**API** (`/dashboard/keychain/api/*`, mounted after `dashboardAuth` + `csrfMiddleware`; refuses `x-crow-signature`; every response `no-store`):
 
 | route | needs grant | effect / audit event |
 |---|---|---|
-| `GET /entries` | no | metadata only, never secrets |
-| `POST /reauth` | — | `keychain_reauth_ok` / `keychain_reauth_failed` |
-| `POST /reveal {id, purpose: reveal\|copy}` | yes | returns `{ secret }`; `keychain_reveal` / `keychain_copy` |
-| `POST /first-view {id}` | no (one-time) | atomically consumes a live first-view grant; `keychain_first_view` |
-| `POST /add {label, username, url, secret}` | no | manual entry; `keychain_add` |
-| `POST /delete {id}` | yes | `keychain_delete` |
-| `POST /vault-save {id, vault_email, vault_password}` | yes | §5.6; `keychain_vault_save` (ok / reason) |
+| `GET /entries` | no | metadata + `readable`, `key_present`, `reauth_method`, `vault_available` |
+| `POST /reauth` | — | `keychain_reauth_ok` / `_failed` / `_lockout` |
+| `POST /reveal {id, purpose}` | yes | `{secret}`; `keychain_reveal` / `keychain_copy` |
+| `POST /first-view {id}` | no (one-time, ≤30 min) | `keychain_first_view` |
+| `POST /add` | no | `keychain_add` |
+| `POST /delete {id, confirm_generated?}` | yes | an active generated token needs `confirm_generated` (C5); `keychain_delete` |
+| `POST /export {passphrase}` | yes | the export file as an attachment; `keychain_export` |
+| `POST /import {file, passphrase}` | yes | `{imported, skipped}`; `keychain_import` |
+| `POST /vault-save {id, vault_email, vault_password}` | yes | §5.6; `keychain_vault_save` |
 | `GET /activity` | no | last 25 `keychain_*` audit rows |
 
-Audit `details` carry `{ entry_id, label, bundle_id, env_key }` and never a secret. Responses that carry a secret set `Cache-Control: no-store`.
+With `method()==="none"`, every grant-requiring route answers 403 `reauth_unavailable`.
 
 ### 5.5 UI
 
-**Extensions install/configure modal** (`client.js`, template-literal rules: no backticks):
-- every human secret field gets **Generate**, **Show/Hide** and **Copy**;
-- below each one, **"Save to Crow keychain"** (checked);
-- when the vaultwarden bundle is installed, one **"Also save to my Vaultwarden vault"** block with email + master password inputs (`autocomplete="off"`, never persisted client-side);
-- the request carries `keychain: { save: [KEY…], vault: { email, password } }` beside `env_vars`.
+**Extensions modal** (template-literal rules):
+- Show/Hide/Copy on every typed secret.
+- Generate only where `generatable`.
+- "Save to Crow keychain" (checked) only where `generatable` or `keychain`.
+- One vault block when the vaultwarden bundle is installed.
+- Configure gets the same, because the registry blob now carries `generatable`, `keychain` and `pattern`.
+- Configure shows the keychain/vault outcome before the modal closes (review S4).
 
-**Generator** (`dashboard/shared/password-generator.js`): 24 chars from `a-z A-Z 2-9` plus `!#%*+,-./:=?@^_~` (look-alikes dropped), with at least one of each class and rejection-sampled `crypto.getRandomValues`. When the field has a `pattern`, it retries until the result matches, then falls back to alphanumerics, then hides the button. The same function is embedded in the client via `Function.prototype.toString` and unit-tested in Node.
+**First-view banner:**
+- server-rendered, so it survives the post-install reload and restart;
+- readable entries only;
+- the plaintext is wiped after 30 s and on `pagehide` (review S2).
 
-**First-view banner.** The Extensions page renders a banner for each entry with a live first-view grant: "A password was generated for <label>. Show once / Copy", via `/first-view`. It is server-rendered, so it survives the reload and gateway restart that follow an install.
+**Settings → Passwords** (account group, after Two-Factor):
+- the table: label, extension, user, URL, status, with "Unreadable — key missing";
+- Reveal/Copy/Delete/Save-to-vault, all behind the re-auth panel;
+- revealed values are wiped after 30 s and on `pagehide`;
+- Add;
+- Export (passphrase + confirm, downloaded as a file) and Import (file + passphrase);
+- recent activity;
+- the page HTML is sent `no-store`;
+- with `method==="none"`, an explanation and disabled re-auth actions.
 
-**Settings → Passwords** (group `account`, after Two-Factor):
-- the entries table (label, extension, username, URL, status, updated);
-- Reveal / Copy / Delete / Save to vault per row, all behind a re-auth dialog (TOTP or password) whose 5-minute grant is shown with a countdown;
-- an "Add a password" form;
-- recent activity.
-
-All strings are en+es under `passwords.*` and pass `tests/i18n-global-parity.test.js`.
+All strings are en+es.
 
 ### 5.6 Vaultwarden save (`servers/gateway/keychain/vault-save.js`)
 
-**Availability.** The vaultwarden bundle is installed **and** `~/.crow/bundles/vaultwarden/node_modules/@bitwarden/cli/build/bw.js` exists. `@bitwarden/cli` is pinned exactly (`2026.9.1`) in **`bundles/vaultwarden/package.json`**, so the installer's `npm install` puts it next to the bundle. Root `package.json` stays lean, and CI's prod audit is unaffected. The server URL is `VAULTWARDEN_URL` from the bundle `.env`, decoded, defaulting to `http://localhost:8097`.
+**Availability:**
+- the bundle is installed and `node_modules/@bitwarden/cli/build/bw.js` exists;
+- the CLI is pinned `2026.9.1` in `bundles/vaultwarden/package.json`;
+- the manifest sets `npm_required: true` + `verify_paths`, so the installer uses `npm ci` with the lock file (300 s) and hard-fails rather than leaving the MCP server half-installed (review S5).
 
-**Flow.** Each step is run as `process.execPath bw.js …` with a 60 s timeout, `env = { PATH, HOME=tmp, BITWARDENCLI_APPDATA_DIR=tmp, BW_NOINTERACTION=true, NODE_OPTIONS="" }`, inside `mkdtemp` (mode 700):
-1. `config server <url>`;
-2. `login <email> --passwordenv CROW_BW_MASTER --raw`, with the master password only in that env var;
-3. `create item` with base64 JSON on **stdin**, session in `BW_SESSION`;
-4. `logout`;
-5. `rm -rf` the temp dir in `finally`.
+**Flow:**
+1. Steps run as `node bw.js …` under `prlimit --core=0` when present (review S3), with env `{PATH, HOME=tmp, BITWARDENCLI_APPDATA_DIR=tmp, BW_NOINTERACTION=true, NODE_OPTIONS=""}`.
+2. The temp dir is under **`<CROW_HOME>/tmp`** (mode 700). Stale `crow-bw-*` dirs older than 10 minutes are swept first.
+3. `config server <VAULTWARDEN_URL>` (default `http://localhost:8097`).
+4. `login <email> --passwordenv CROW_BW_MASTER --raw`.
+5. `create item` with base64 JSON on stdin and `BW_SESSION`.
+6. `logout`.
+7. `rm -rf` the temp dir.
 
-**Outcome.** It returns `{ ok }` or `{ ok:false, reason }`. The reason is a fixed, sanitized sentence (wrong credentials / vault unreachable / two-step login enabled / CLI missing / timeout); CLI output is never echoed.
+**Bounds and errors:**
+- One overall 90 s deadline (review S4).
+- Errors are fixed sentences: wrong credentials / two-step login / unreachable / timeout / create failed / CLI missing.
 
-**During install,** the vault save runs right after the keychain save (before images are pulled), then the credentials are dropped. **On the Passwords page** it is a per-entry action (re-auth required).
+**Devices:** each save logs in with fresh appdata, so Vaultwarden may register a new device each time. The spike (plan Task 6) measures this; pinning a per-instance device id is a §9 follow-up if it does.
+
+**Where it runs:** during install, right after the keychain save and before images are pulled (the credentials are then dropped). On the Passwords page it is a per-entry action.
 
 ### 5.7 Installer wiring
 
-- `/bundles/api/install` and `/bundles/api/env` accept `keychain`.
-- Human-field saves and vault saves are honoured **only for a local dashboard session**. Peer-signed (`req.crossHostAuth`) requests never write human secrets to the keychain and never touch a vault.
-- Generated `keychain: true` tokens are always saved: otherwise the plaintext would be lost.
-- Job logs say "Saved N password(s) to Crow keychain" and "Vaultwarden: saved" / "Vaultwarden save did not complete: <reason>". Values never appear.
-- Uninstall calls `markBundleRemoved`.
+- `/bundles/api/install` and `/bundles/api/env` accept `keychain: {save:[KEY…], vault?:{email,password}}`.
+- Typed saves and vault saves happen only for a **local dashboard session**. Peer-signed requests never write typed secrets or touch a vault.
+- Generated `keychain` tokens are always saved, first (§5.2).
+- Uninstall marks the bundle's entries "extension removed".
+- Job logs carry counts and fixed sentences, never values.
+- The docker-bundle refresh now copies `package.json` + `package-lock.json`, which are never container-mounted (review C6).
 
 ### 5.8 Adopters
 
-**Vaultwarden** (`1.0.0 → 1.1.0`):
-- `VAULTWARDEN_ADMIN_TOKEN` becomes `generate:"secret"`, `keychain:true`, `store_as:"argon2id"`, `keychain_url:"${VAULTWARDEN_DOMAIN}/admin"`, with a new description;
-- the skill's step 1 is rewritten;
-- the consent text no longer says "plaintext";
-- `server.envKeys` drops the token, because the MCP child never receives generated values;
-- `vaultwarden_user_count` returns an explanation instead of a request that could never authenticate;
-- `@bitwarden/cli` is added.
+**Vaultwarden** `1.0.0 → 1.1.0`:
+- image `1.32.7 → 1.37.3` (§3);
+- `VAULTWARDEN_ADMIN_TOKEN` becomes `generate:"secret"`, `keychain`, `store_as:"argon2id"`, `keychain_url:"${VAULTWARDEN_DOMAIN}/admin"`;
+- skill step 1 is rewritten, and the consent text no longer says "plaintext";
+- `server.envKeys` drops the token, and `requires.env` drops it too;
+- `vaultwarden_user_count` explains instead of calling;
+- the CLI dependency is added with `npm_required` + `verify_paths`.
 
-Existing installs keep their typed token: it is reused from the installed `.env`.
+**Workspace** `0.1.1 → 0.1.2`:
+- `WORKSPACE_ADMIN_PASSWORD` becomes `generatable`, with pattern `^[^\x00-\x1f\x7f]{12,128}$` and `keychain_username:"${WORKSPACE_ADMIN_USER}"`;
+- the ops scripts read through `envfile.py`;
+- `reset-password.sh` counts length in UTF-16 units like the form's RegExp (review S10), refuses control characters, and still passes the password on stdin only.
 
-**Workspace** (`0.1.1 → 0.1.2`):
-- `WORKSPACE_ADMIN_PASSWORD` pattern becomes `^[^\x00-\x1f\x7f]{12,128}$` (any printable character incl. space and unicode; no control chars), with `keychain_username: "${WORKSPACE_ADMIN_USER}"`;
-- the ops scripts read `.env` through `ops/envfile.py`, a no-eval decoder byte-identical to the codec;
-- `reset-password.sh` accepts the same set;
-- secrets still travel by `printf '%s\n' | … IFS= read -r`, which is byte-exact for every allowed character.
+## 6. Security properties and threat model
 
-## 6. Security properties
+**Plaintext at rest:**
+- Bundle `.env` files (600), as today. Workspace scrubs its admin password, and Vaultwarden now stores only a hash.
+- Typed secrets **without** `propagate:false` are also copied into the gateway `.env` and `mcp-addons.json`, as today (review S6). `generatable` fields must be `propagate:false`, so human passwords never are.
+- The keychain itself is AES-256-GCM sealed under its own key file.
 
-- Plaintext at rest only in bundle `.env` files (mode 600, as today). Workspace scrubs its admin password, and Vaultwarden now stores only a hash. The keychain is AES-256-GCM sealed.
-- Plaintext reaches the browser only on reveal/copy after re-auth, or once via first-view (≤30 min, single use, audited).
-- Never in argv: the master password goes through `--passwordenv`, item JSON through stdin, the session through env. The vault email IS in `bw login` argv (ruling R11).
-- Never logged: job logs, audit details and errors carry key names and labels only.
-- Never replicated: `LOCAL_ONLY_TABLES` plus the test.
-- Same-identity peers could decrypt a stolen ciphertext, but no code path ever sends one.
+**Off-host:**
+- No backup path copies the key, so backups carry ciphertext only.
+- Rows never replicate.
+- The only way entries leave the machine is the user's passphrase Export.
 
-## 7. Rulings (where Kevin's decisions were silent)
+**Browser:**
+- Plaintext reaches it only on a re-authed reveal/copy/export, or the one-time first view (≤30 min, single use, audited).
+- It is wiped from the page after 30 s or on navigation.
+- Any dashboard session, including an agent driving the crow-browser, can consume a pending first view; that is why it is short and single-use (review S7).
 
-- **R1** The encoder is bare / single / double as in §5.1. Bare output is byte-identical to today's, so existing `.env` files never change. The backtick+(quote or trailing backslash) refusal is the only extra refusal.
-- **R2** The gateway `.env` is untouched (it is not a compose file and has a literal loader).
-- **R3** Workspace pattern: `^[^\x00-\x1f\x7f]{12,128}$`. Tabs are refused as unprintable. `not_breached` stays.
-- **R4** The table is additive (init-db + lazy ensure). No SCHEMA_GENERATION bump, so no dry-run rail.
-- **R5** It uses secret-box's existing key, per Kevin. Locality is enforced by non-replication plus the test.
-- **R6** Re-auth is per dashboard session and held in memory: a 5-minute grant; 5 failures lock for 15 minutes. With 2FA on, only TOTP is accepted (recovery codes stay a login-only tool).
-- **R7** Delete also requires re-auth: it is destructive and audited.
-- **R8** First view: generated tokens get `first_view_until = created + 30 min`, consumed atomically, so it survives the post-install reload/restart.
-- **R9** Peer-signed requests never save human fields and never use the vault.
-- **R10** `keychain_label` plus the `keychain_username` / `keychain_url` templates; unset vars drop the field.
-- **R11** The vault email is passed as the `bw login` positional argument. `bw` has no env/stdin option for it, and the interactive prompt is disabled. It is an identifier, not a secret, and visible to local `ps` for at most 60 s. **Flagged for Kevin.**
-- **R12** Two-step-login vault accounts are not driven. The save reports "your vault account uses two-step login; add the password from Settings → Passwords by hand".
-- **R13** `vaultwarden_user_count` explains instead of calling: it never worked on 1.32.7 (cookie-only admin API), and the token is now hashed.
-- **R14** Argon2id: m=65540, t=3, p=4, 16-byte salt, 32-byte tag, unpadded standard base64. It is computed with `argon2Sync` (~60 ms, once per install).
-- **R15** No regenerate/rotate action in this arc (§9).
-- **R16** Kevin's definition of "human field" (`secret && !generate`) is applied as written, so API-key fields also get the button and the checkbox. Harmless; the user can ignore them. **Flagged.**
-- **R17** The pre-merge smoke needs one **[KEVIN]** step: registering a throwaway vault account in the web vault over a temporary Serve port (8461). `bw` has no `register` command, and the web vault needs HTTPS for WebCrypto.
+**Argv:** the vault master password goes through `--passwordenv`, item JSON through stdin and the session through env. The vault email IS in `bw login` argv (R11).
+
+**Not protected against:** code running as the same OS user (including a pi-bot with a shell) can read the key file and crow.db and decrypt everything. The keychain protects against off-host copies, not against the local account (review S7).
+
+## 7. Rulings
+
+- **R1** Encoder: bare / path-bare / single / double, as in §5.1. The only refusals beyond CR/LF/NUL are a backtick combined with `'` or a trailing `\`.
+- **R2** The gateway `.env` is untouched: it is literal, not a compose file.
+- **R3** Workspace pattern: `^[^\x00-\x1f\x7f]{12,128}$`. `not_breached` stays.
+- **R4** The table is additive. No SCHEMA_GENERATION bump, so no dry-run rail.
+- **R5** *(revised, Kevin C7)* The keychain has its own key file and is never backed up. Export/Import is the user's own copy.
+- **R6** Re-auth: per session, 5-minute grant, 5 failures → 15-minute lock, plus a 20/hour instance-wide ceiling. TOTP only when 2FA is on; `none` disables (Q6).
+- **R7** Delete requires re-auth. An active generated token also needs `confirm_generated`.
+- **R8** First view: 30 minutes, single use, server-rendered, readable entries only.
+- **R9** Peer-signed requests never save typed fields and never use the vault.
+- **R10** `keychain_label` and the `keychain_username` / `keychain_url` templates; blank vars drop the field.
+- **R11** The vault email is the `bw login` positional argument: the CLI has no env/stdin form and its prompt is disabled. **Flagged for Kevin.**
+- **R12** Two-step-login vault accounts are not driven. The save reports it. The spike captures the real CLI text.
+- **R13** `vaultwarden_user_count` explains instead of calling.
+- **R14** Argon2id: m=65540, t=3, p=4, `argon2Sync` (about 60 ms).
+- **R15** No rotate action (§9).
+- **R16** *(revised, Kevin Q1 / review C1)* Generate and "Save to Crow keychain" are opt-in per field (`generatable` / `keychain`). Show/Hide/Copy go on every typed secret.
+- **R17** The pre-merge smoke and the spike each need one **[KEVIN]** step: registering a throwaway vault account in the web vault.
+- **R18** *(C8 / Q3)* The Vaultwarden pin moves to 1.37.3 on release-note evidence. A live spike (plan Task 6) confirms CLI 2026.9.1 against it **before** the vault-save code. Fallback, decided now: if 2026.9.1 fails against 1.37.3, pin the newest CLI release that passes the same spike, and record it.
+- **R19** *(C4)* Configure and install seeding are line-preserving.
+- **R20** *(C6)* Docker-bundle refresh copies `package.json` + lock.
+- **R21** *(S5)* Not adopted as written: one `package.json` instead of a separate `cli/` package. Adopted instead: `npm_required` + `verify_paths` (lock-file `npm ci`, 300 s, hard-fail) and a blocking critical-tier `npm audit` of `bundles/vaultwarden` in CI.
 
 ## 8. Testing
 
-Unit tests (no containers) cover:
-- the codec, including a real `docker compose config` round-trip that is skipped when compose is absent;
-- argon2 PHC;
-- the generated-keychain resolve path;
-- the store and the locality guard;
-- the re-auth gate and API;
+**Unit tests** (no containers):
+- the codec, with real `docker compose config` and real bash round-trips (tilde forms included);
+- the other readers;
+- argon2 and plan/persist;
+- the key file, store, Export/Import and locality guard (incl. D3);
+- re-auth and the API (Q6, global ceiling, key_missing, export/import);
 - vault-save with a fake `bw`;
-- installer wiring;
-- the extensions client run in linkedom/vm;
+- the refresh fix;
+- installer wiring (C5 failure path);
+- the extensions client (C1/Q1, S2, S4);
 - the Passwords section;
-- the Workspace ops scripts with the fake compose;
-- the Vaultwarden bundle;
+- the adopters;
 - i18n parity.
 
-Live pre-merge smoke on crow, registered in `~/CROW-SCHEDULE.md` with a deadman, in a throwaway `CROW_HOME`:
-- a throwaway Vaultwarden on 127.0.0.1:18097 with a generated argon2 token: log in to `/admin` with the keychain plaintext;
-- `bw` save into a throwaway account;
-- wide-charset values end-to-end through `docker compose`.
+The plan's code was dry-run in full: 6050/6050 on a staged copy.
+
+**Live:**
+- the spike (Vaultwarden 1.37.3 + CLI 2026.9.1) before the vault-save task;
+- the pre-merge smoke: argon2 `/admin` login, `bw` save through `http://localhost`, two-step text, wide-charset values through a running container;
+- post-deploy acceptance.
 
 ## 9. Follow-ups (listed, not built)
 
-1. **Vaultwarden default URL** is `http://localhost:8097` (loopback-only). It should default to a Tailscale Serve HTTPS address on the tailnet: phones' Bitwarden apps and the web vault's WebCrypto need HTTPS.
-2. **Vaultwarden "signups allowed"** is still a manual `.env` flip + restart after creating the first account. A guided "Close signups" action belongs in the panel.
-3. Regenerate/rotate a keychain-held generated token (today: delete the retained line and reinstall).
-4. Moving the eleven `set -a; . .env` post-install scripts onto the no-eval reader.
-5. Optional per-field opt-out of the Generate button for non-password API tokens (`generate_button: false`).
+1. **Vaultwarden default URL** is `http://localhost:8097` (loopback-only). It should default to a Tailscale Serve HTTPS address: phones and the web vault's WebCrypto need HTTPS.
+2. **Vaultwarden "signups allowed"** is still a manual `.env` flip + restart after the first account. It needs a guided "Close signups" action.
+3. Regenerate/rotate a keychain-held generated token.
+4. Move the eleven `set -a; . .env` post-install scripts onto `envfile.py`. The codec already makes every line Crow writes safe to source.
+5. A stable per-instance Bitwarden device id for vault saves, if the spike shows a new device per save.
+6. Mark more extension-created passwords `generatable`: `CROW_BROWSER_VNC_PASSWORD`, `MINIO_ROOT_PASSWORD`, `MINIFLUX_ADMIN_PASSWORD`, `MLA_ADMIN_PASSWORD`. Move `*_DB_PASSWORD` fields to `generate:"secret"`.
+7. **Operator (not product):**
+   - If `~/r4-tehcy/scripts/r4-backup.sh` or `pi-lab/scripts/crow-db-backup.sh` ever start copying `<CROW_HOME>/secrets/`, they would carry the keychain key. Today neither does. The owners keep it that way, or exclude `secrets/keychain.key` explicitly.
+   - The dayane container instance is pinned (deliberate rebuild only): it picks this up on its next rebuild.
