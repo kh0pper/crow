@@ -1,10 +1,12 @@
 /**
  * ntfy Push — Self-hosted push notification sender
  *
- * Publishes notifications to a local ntfy server instance.
- * Requires NTFY_TOPIC env var. NTFY_HOST defaults to localhost; NTFY_PORT defaults to 2586.
- * NTFY_AUTH_TOKEN is optional (for private topics).
+ * Publishes notifications to a local ntfy server instance. Where it publishes comes from
+ * resolveNtfyConfig() (ntfy-config.js): the NTFY_* environment when NTFY_TOPIC is set
+ * (unchanged pre-autowire behavior), else the instance's autowired ntfy-push.json.
+ * DB-free by design — the corruption/migration alerts call this directly.
  */
+import { resolveNtfyConfig, recordNtfyStatus } from "./ntfy-config.js";
 
 const PRIORITY_MAP = {
   low: "2",
@@ -47,14 +49,15 @@ function encodeNtfyHeader(value) {
   return `=?utf-8?B?${b64}?=`;
 }
 
+/**
+ * @returns {Promise<{ok:boolean, status?:number, error?:string, skipped?:boolean}>} never throws
+ */
 export async function sendNtfyNotification({ title, body, url, priority = "normal", type = "system" }) {
-  const topic = process.env.NTFY_TOPIC;
-  if (!topic) return;
+  let cfg;
+  try { cfg = resolveNtfyConfig(); } catch { cfg = null; }
+  if (!cfg) return { ok: false, skipped: true };
 
-  const host = process.env.NTFY_HOST || "localhost";
-  const port = process.env.NTFY_PORT || "2586";
-  const authToken = process.env.NTFY_AUTH_TOKEN;
-  const ntfyUrl = `http://${host}:${port}/${encodeURIComponent(topic)}`;
+  const ntfyUrl = `http://${cfg.publishHost}:${cfg.publishPort}/${encodeURIComponent(cfg.topic)}`;
 
   const headers = {
     "X-Title": encodeNtfyHeader(title),
@@ -80,8 +83,8 @@ export async function sendNtfyNotification({ title, body, url, priority = "norma
     headers["X-Tags"] = tag;
   }
 
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
+  if (cfg.publishToken) {
+    headers["Authorization"] = `Bearer ${cfg.publishToken}`;
   }
 
   // Bound the send (2c follow-up F2/C2a): createNotification awaits this
@@ -91,16 +94,29 @@ export async function sendNtfyNotification({ title, body, url, priority = "norma
   const timeoutMs = parseInt(process.env.CROW_PUSH_SEND_TIMEOUT_MS, 10) || 10_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let result;
   try {
-    await fetch(ntfyUrl, {
+    const res = await fetch(ntfyUrl, {
       method: "POST",
       headers,
       body: body || title,
       signal: controller.signal,
     });
-  } catch {
-    // ntfy server not available or send timed out — fail silently
+    // A refused publish (401/403 from an auth-enabled server) used to vanish here.
+    result = res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status, error: `ntfy answered HTTP ${res.status}` };
+    try { await res.body?.cancel?.(); } catch { /* nothing to drain */ }
+  } catch (err) {
+    // ntfy server not available or send timed out — never propagate
+    result = { ok: false, error: err?.name === "AbortError" ? `timed out after ${timeoutMs} ms` : String(err?.message || err) };
   } finally {
     clearTimeout(timer);
   }
+  recordNtfyStatus({
+    lastPushAt: new Date().toISOString(),
+    lastPushOk: result.ok,
+    lastPushStatus: result.status ?? null,
+    lastPushError: result.ok ? null : String(result.error).slice(0, 200),
+    lastPushSource: cfg.source,
+  });
+  return result;
 }

@@ -114,7 +114,7 @@ export default {
     // so section AJAX handlers work from any dashboard page)
     if (req.method === "POST") {
       const { action } = req.body;
-      const handled = await dispatchAction(getSettingsSections(), { req, res, db, action });
+      const handled = await dispatchAction(getSettingsSections(), { req, res, db, action, lang });
       if (handled) return;
     }
 

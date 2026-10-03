@@ -73,10 +73,10 @@ export function getSettingsSection(id) {
  * Dispatch a POST action to sections sequentially until one handles it.
  * @returns {boolean} true if a section handled the action
  */
-export async function dispatchAction(sectionsList, { req, res, db, action }) {
+export async function dispatchAction(sectionsList, { req, res, db, action, lang }) {
   for (const section of sectionsList) {
     if (section.handleAction) {
-      const handled = await section.handleAction({ req, res, db, action });
+      const handled = await section.handleAction({ req, res, db, action, lang });
       if (handled) return true;
     }
   }

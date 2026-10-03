@@ -9,6 +9,7 @@ import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
 import { getVapidPublicKey } from "../../../push/web-push.js";
+import { renderNtfyPushPanel, handleNtfyPushAction, NTFY_ACTIONS } from "../ntfy-push-panel.js";
 
 export default {
   id: "notifications",
@@ -220,11 +221,13 @@ export default {
       ${checkboxes}
       <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("common.save", lang)}</button>
     </form>
+    ${renderNtfyPushPanel({ csrf: req.csrfToken, lang, flash: String(req.query?.ntfy || "") })}
     ${pushSection}
     ${pushJs}`;
   },
 
-  async handleAction({ req, res, db, action }) {
+  async handleAction({ req, res, db, action, lang }) {
+    if (NTFY_ACTIONS.has(action)) return handleNtfyPushAction({ req, res, action, lang });
     if (action !== "save_notification_prefs") return false;
 
     const typesEnabled = [];
