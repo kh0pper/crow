@@ -49,6 +49,14 @@ export function createReauthGate({
     if (f && f.lockedUntil > t) {
       return { ok: false, locked: true, locked_until: f.lockedUntil, error: "Too many wrong attempts. Try again later." };
     }
+    // Reserve this attempt SYNCHRONOUSLY (no await between the lock checks above and here),
+    // so concurrent requests cannot all pass the checks before any failure is recorded.
+    const prevCount = f && f.lockedUntil <= t && f.lockedUntil !== 0 ? 0 : (f?.count || 0);
+    const count = prevCount + 1;
+    const lockedByMe = count >= maxFailures;
+    failures.set(k, lockedByMe ? { count: 0, lockedUntil: t + lockMs } : { count, lockedUntil: 0 });
+    recentFailures.push(t);
+    const justLockedGlobally = recentFailures.length === globalMaxFailures;
     let ok = false;
     try {
       ok = m === "totp"
@@ -58,14 +66,13 @@ export function createReauthGate({
       ok = false;
     }
     if (!ok) {
-      const count = (f && f.lockedUntil <= t && f.lockedUntil !== 0 ? 0 : (f?.count || 0)) + 1;
-      if (count >= maxFailures) failures.set(k, { count: 0, lockedUntil: t + lockMs });
-      else failures.set(k, { count, lockedUntil: 0 });
-      recentFailures.push(t);
-      const justLockedGlobally = recentFailures.length === globalMaxFailures;
       return { ok: false, method: m, global_lock_started: justLockedGlobally, error: m === "totp" ? "That code is not valid." : "That password is not correct." };
     }
-    failures.delete(k);
+    // Success: roll the reservation back.
+    const i = recentFailures.indexOf(t);
+    if (i >= 0) recentFailures.splice(i, 1);
+    const cur = failures.get(k);
+    if (lockedByMe || !cur || cur.lockedUntil === 0) failures.delete(k);
     grants.set(k, t + ttlMs);
     return { ok: true, method: m, expires_at: t + ttlMs };
   }

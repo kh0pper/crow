@@ -18,7 +18,7 @@ const K = await import("../servers/gateway/keychain/store.js");
 
 const AUDIT_DDL = "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, actor TEXT, ip_address TEXT, details TEXT, created_at TEXT DEFAULT (datetime('now')))";
 
-async function setup({ twoFa = false, hasPassword = true, clock = { t: Date.parse("2026-10-03T12:00:00Z") }, vault } = {}) {
+async function setup({ twoFa = false, hasPassword = true, verifier, clock = { t: Date.parse("2026-10-03T12:00:00Z") }, vault } = {}) {
   const dbPath = join(mkdtempSync(join(tmpdir(), "crow-kcapi-db-")), "crow.db");
   const crowHome = mkdtempSync(join(tmpdir(), "crow-kcapi-home-"));
   const seedDb = createDbClient(dbPath);
@@ -28,7 +28,7 @@ async function setup({ twoFa = false, hasPassword = true, clock = { t: Date.pars
     is2faEnabled: async () => twoFa,
     hasDashboardPassword: async () => hasPassword,
     verifyTotpCode: async (c) => c === "123456",
-    verifyDashboardPassword: async (p) => p === "right-password",
+    verifyDashboardPassword: verifier || (async (p) => p === "right-password"),
   });
   const vaultCalls = [];
   const notes = [];
@@ -259,5 +259,24 @@ test("m1/m2 — a damaged key with entries refuses saves (409 key_invalid); a lo
     assert.equal(s.notes.length, 1, "the user is told the older entries need an Import");
     assert.match(s.notes[0].body, /1 saved password/);
     assert.ok((await s.audits()).some((e) => e.event_type === "keychain_key_created"));
+  } finally { s.close(); }
+});
+
+test("S2 — concurrent wrong /reauth calls cannot bypass the per-session or the instance-wide lockout", async () => {
+  let calls = 0;
+  const slow = async (p) => { calls++; await new Promise((r) => setTimeout(r, 50)); return p === "right-password"; };
+  const s = await setup({ verifier: slow });
+  try {
+    const rs = await Promise.all(Array.from({ length: 10 }, () => s.call("/reauth", { session: "BURST", body: { password: "wrong" } })));
+    assert.ok(calls <= 5, `at most 5 verifier calls allowed, got ${calls}`);
+    assert.equal(rs.filter((r) => r.status === 429).length, 10 - calls);
+    assert.equal((await s.call("/reauth", { session: "BURST", body: { password: "right-password" } })).status, 429);
+
+    calls = 0;
+    const g = await Promise.all(Array.from({ length: 40 }, (_, i) => s.call("/reauth", { session: `G${i}`, body: { password: "wrong" } })));
+    assert.ok(calls <= 20 - 5, `global ceiling counts in-flight attempts, got ${calls}`);
+    assert.equal(g.filter((r) => r.status === 429).length, 40 - calls);
+    assert.equal(s.notes.length, 1, "lockout notification once");
+    assert.equal((await s.call("/reauth", { session: "FRESH", body: { password: "right-password" } })).status, 429);
   } finally { s.close(); }
 });
