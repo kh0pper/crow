@@ -42,6 +42,8 @@ test("skill and MCP server no longer describe the old flow", () => {
   assert.match(skill, /VAULTWARDEN_DOMAIN=https:\/\/<host>\.<tailnet>\.ts\.net:<port>/);
   const domain = manifest.env_vars.find((v) => v.name === "VAULTWARDEN_DOMAIN");
   assert.match(domain.description, /vault.*needs this to be a secure https URL/is);
+  assert.doesNotMatch(skill, /how many accounts, via the admin API/, "the skill must not claim user_count returns a count");
+  assert.match(skill, /vaultwarden_user_count.*explains where to see accounts/);
   assert.doesNotMatch(server, /Bearer/, "the admin API is cookie-only on 1.32.7; a Bearer call can never work");
 });
 

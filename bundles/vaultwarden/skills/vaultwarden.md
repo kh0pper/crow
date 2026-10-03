@@ -75,7 +75,7 @@ connect to it over HTTP(S).
 
 The MCP tools here are intentionally minimal:
 - `vaultwarden_status` — is the server up?
-- `vaultwarden_user_count` — how many accounts, via the admin API
+- `vaultwarden_user_count` — explains where to see accounts: Vaultwarden's admin API only accepts the browser session from its `/admin` login page, so the tool cannot list or count them itself
 - `vaultwarden_backup_info` — size and age of the data directory
 
 **Vaultwarden does not have a "read my passwords" API and Crow does not
