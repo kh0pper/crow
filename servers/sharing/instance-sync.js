@@ -3959,6 +3959,19 @@ export class InstanceSyncManager {
    * servers/sharing/revoke-peer.js — the one revoke path for the MCP tool and
    * the dashboard.
    */
+  /** True when ANY replication stream (tailnet or Hyperswarm) to the peer is live. */
+  hasActiveStream(remoteInstanceId) {
+    return (this._activeStreams.get(remoteInstanceId)?.size ?? 0) > 0;
+  }
+
+  /** True when a tailnet-sync (dedicated) stream to the peer is live, in either direction. */
+  hasDedicatedStream(remoteInstanceId) {
+    for (const st of this._activeStreams.get(remoteInstanceId) ?? []) {
+      if (this._dedicatedStreams.has(st)) return true;
+    }
+    return false;
+  }
+
   async teardownRevokedPeer(remoteInstanceId) {
     const dedicated = [...(this._activeStreams.get(remoteInstanceId) ?? [])]
       .filter((st) => this._dedicatedStreams.has(st));

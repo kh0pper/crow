@@ -12,7 +12,9 @@
  *     [--source-instance-id <grackle-instance-id>] \
  *     [--peer-max-id <table>:<instance-id>=<n> ...] [--peer-max-memory-id <instance-id>=<n> ...] \
  *     [--peer-exclude <instance-id> ...] [--ack-unclassified <t1,t2,...>] \
- *     [--import-media] [--import-data-dashboard] [--keep-scratch] [--requeue]
+ *     [--import-media] [--import-data-dashboard] [--keep-scratch] [--requeue] \
+ *     [--target-crow-home <dir>]   (bot world roots rebase onto <dir>/pi-bots/<bot>;
+ *                                   default CROW_HOME, else the target data dir's parent)
  *
  * Modes:
  *   plan      reads both DBs (the source as bytes, the target as an
@@ -251,9 +253,12 @@ export const IMPORT_SPECS = [
   },
   {
     // Two bridges must never run one bot: always imported disabled (spec §4.2).
+    // The bot's world root (session_dir + the write/read paths under it) is
+    // rebased onto the TARGET's <CROW_HOME>/pi-bots/<bot_id> — the source
+    // host's paths do not exist here (IMPORTER-BOT-PATHS, 2026-10-02).
     table: "pi_bot_defs", group: "core", pk: ["bot_id"],
     fks: { project_id: fk("project_spaces") },
-    transform: (row) => ({ row: { ...row, enabled: 0 } }),
+    transform: "piBotDef",
   },
 
   // ---- ramble: natural keys, insert-or-ignore, crow's row always wins.
@@ -581,6 +586,14 @@ class Remaps {
 }
 
 const TRANSFORMS = {
+  piBotDef(row, ctx) {
+    const r = rebaseBotDefinition(row.definition, row.bot_id, ctx.targetCrowHome);
+    if (r.changes.length) (ctx.rebasedBots ||= []).push({ bot_id: row.bot_id, changes: r.changes });
+    if (r.foreign.length) {
+      ctx.warn(`pi_bot_defs ${row.bot_id}: kept non-world-root path(s) verbatim — check they exist on the target: ${r.foreign.map((f) => f.path).join(", ")}`);
+    }
+    return { row: { ...row, definition: r.definition, enabled: 0 } };
+  },
   /** A contact Kevin deleted on crow stays deleted (N1); its children follow it to the extract. */
   contactTombstone(row, ctx) {
     if (tableExists(ctx.tgt, "contact_tombstones") &&
@@ -627,6 +640,72 @@ const TRANSFORMS = {
     return { row: { ...row, reference_id: t } };
   },
 };
+
+/**
+ * Rebase a pi bot definition's world root onto the target instance.
+ *
+ * The old root is def.session_dir when set; otherwise any path ending in
+ * /pi-bots/<bot_id> found in permission_policy.write_paths/read_paths. The
+ * new root is <targetCrowHome>/pi-bots/<bot_id> (the bridge's own default
+ * world root, scripts/pi-bots/bot-world.mjs). session_dir and every policy
+ * path equal to or under the old root move with it; any OTHER absolute path
+ * (a project workspace, an operator directory) is left as-is and reported,
+ * because the importer cannot know its equivalent on the target.
+ * Pure; exported for tests. Returns { definition, changes, foreign }.
+ */
+export function rebaseBotDefinition(definitionJson, botId, targetCrowHome) {
+  const out = { definition: definitionJson, changes: [], foreign: [] };
+  if (!definitionJson || !targetCrowHome || !botId) return out;
+  let def;
+  try { def = JSON.parse(definitionJson); } catch { return out; }
+  if (!def || typeof def !== "object" || Array.isArray(def)) return out;
+  const newRoot = join(targetCrowHome, "pi-bots", String(botId));
+  const tail = `/pi-bots/${botId}`;
+  const pol = def.permission_policy && typeof def.permission_policy === "object" ? def.permission_policy : null;
+  const policyLists = pol ? ["write_paths", "read_paths"].filter((k) => Array.isArray(pol[k])) : [];
+  let oldRoot = typeof def.session_dir === "string" && def.session_dir.startsWith("/")
+    ? def.session_dir.replace(/\/+$/, "") : null;
+  if (!oldRoot) {
+    for (const k of policyLists) {
+      const hit = pol[k].find((p) => typeof p === "string" && p.replace(/\/+$/, "").endsWith(tail));
+      if (hit) { oldRoot = hit.replace(/\/+$/, ""); break; }
+    }
+  }
+  if (!oldRoot) return out;
+  const rebase = (p) => {
+    if (typeof p !== "string") return p;
+    const trimmed = p.replace(/\/+$/, "");
+    if (trimmed === oldRoot) return newRoot;
+    if (trimmed.startsWith(oldRoot + "/")) return newRoot + trimmed.slice(oldRoot.length);
+    return p;
+  };
+  if (typeof def.session_dir === "string" && def.session_dir !== rebase(def.session_dir)) {
+    out.changes.push({ field: "session_dir", from: def.session_dir, to: rebase(def.session_dir) });
+    def.session_dir = rebase(def.session_dir);
+  }
+  for (const k of policyLists) {
+    pol[k] = pol[k].map((p) => {
+      const np = rebase(p);
+      if (np !== p) out.changes.push({ field: `permission_policy.${k}`, from: p, to: np });
+      else if (typeof p === "string" && p.startsWith("/") && p !== "/") out.foreign.push({ field: `permission_policy.${k}`, path: p });
+      return np;
+    });
+  }
+  if (out.changes.length) out.definition = JSON.stringify(def);
+  return out;
+}
+
+/**
+ * The target instance's CROW_HOME: --target-crow-home, else CROW_HOME, else
+ * the parent of the data dir the target instance id is read from
+ * (CROW_DATA_DIR, default ~/.crow/data) — the same instance the importer
+ * already resolves for the target.
+ */
+export function resolveTargetCrowHome(opts = {}) {
+  if (opts.targetCrowHome) return resolve(opts.targetCrowHome);
+  if (process.env.CROW_HOME) return resolve(process.env.CROW_HOME);
+  return dirname(dirname(instanceIdPath()));
+}
 
 function applyTransform(spec, row, ctx) {
   if (!spec.transform) return { row };
@@ -1311,6 +1390,7 @@ function buildGoNoGo(ctx, emits, extra = {}) {
     imported_schedules: ctx.listedRows.schedules || [],
     imported_crosspost_rules: ctx.listedRows.crosspost_rules || [],
     tombstoned_contacts: ctx.tombstonedList,
+    rebased_bot_paths: ctx.rebasedBots || [],
     eggs_shelved: ctx.eggsShelved,
     blog_slug_conflicts: ctx.conflictRows.blog_posts || [],
     phase_b_gates: emits?.gates ?? null,
@@ -1347,6 +1427,7 @@ function setupCtx(src, target, opts, peerMax) {
   ctx.classification = classify(src, target, opts);
   ctx.sourceInstanceId = resolveSourceId(src, opts);
   ctx.targetInstanceId = readLocalInstanceId();
+  ctx.targetCrowHome = resolveTargetCrowHome(opts);
   ctx.sourceCounts = countAll(src);
   return ctx;
 }
@@ -1697,6 +1778,7 @@ export function parseArgs(argv) {
       case "--import-data-dashboard": opts.importDataDashboard = true; break;
       case "--keep-scratch": opts.keepScratch = true; break;
       case "--requeue": opts.requeue = true; break;
+      case "--target-crow-home": opts.targetCrowHome = val(i, a); i++; break;
       default: throw new UsageError(`unknown argument '${a}'`);
     }
   }

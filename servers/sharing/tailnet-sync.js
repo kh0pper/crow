@@ -28,29 +28,219 @@
 
 import { WebSocketServer, WebSocket, createWebSocketStream } from "ws";
 import { randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
 import { sign, verify } from "./identity.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
+import { getOwnTailnetIp } from "../shared/tailnet-ip.js";
+import {
+  recordDialAttempt, recordDialFailure, recordLinkUp, recordLinkClosed,
+  recordNoDialAddress, clearNoDialAddress, recordAddressBackfill, forgetPeerDialHealth,
+} from "../shared/peer-dial-health.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
+// DIALER-RETRY: a dialer with nothing to do right now (no dial address yet,
+// not the elected dialer, or already linked) re-checks on this cadence
+// instead of returning for good. Before, a peer that booted with no address
+// was never dialed again until a gateway restart, even after its row was fixed.
+const IDLE_RECHECK_MS = 15_000;
+// Dialer election picks the lower instance id. If the elected side cannot
+// reach us (it has no address for us — black-swan's shape, 2026-08..10) no
+// link would ever form. After this long with no link at all, the other side
+// dials as a fallback. Long enough that the elected side always wins a normal
+// boot race; the accept side refuses a fallback dial while a link is up.
+const FALLBACK_DIAL_AFTER_MS = 120_000;
 
-function buildHandshakePayload(identity, localInstanceId) {
+/* ------------------------------------------------------- signed addresses */
+
+let _allowLoopbackAddresses = false;
+/** Test seam: the two-instance tests run both gateways on 127.0.0.1. */
+export function _setAllowLoopbackAddressesForTest(v) { _allowLoopbackAddresses = !!v; }
+
+function isLoopbackOrUnspecifiedHost(host) {
+  const h = String(host).replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127\./.test(h)
+    || h === "0.0.0.0" || h === "::" || h === "";
+}
+
+/** A tailscale_ip a peer may advertise: a literal IP, not loopback/unspecified. */
+export function sanitizeAdvertisedIp(ip) {
+  if (typeof ip !== "string") return null;
+  const v = ip.trim();
+  if (!v || v.length > 64 || !isIP(v)) return null;
+  if (!_allowLoopbackAddresses && isLoopbackOrUnspecifiedHost(v)) return null;
+  return v;
+}
+
+/**
+ * A gateway_url a peer may advertise: http(s), a real host, and DIALABLE by
+ * this transport (a :443 Funnel URL is not — see peerToWsUrlCandidates).
+ */
+export function sanitizeAdvertisedGatewayUrl(url) {
+  if (typeof url !== "string") return null;
+  const v = url.trim();
+  if (!v || v.length > 500) return null;
+  let u;
+  try { u = new URL(v); } catch { return null; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  if (u.username || u.password) return null;
+  if (!_allowLoopbackAddresses && isLoopbackOrUnspecifiedHost(u.hostname)) return null;
+  const clean = `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+  return peerToWsUrlCandidates({ gateway_url: clean }).length > 0 ? clean : null;
+}
+
+function canonicalAddr(addr) {
+  return JSON.stringify({ gateway_url: addr?.gateway_url ?? null, tailscale_ip: addr?.tailscale_ip ?? null });
+}
+
+/**
+ * The address block rides the handshake with its OWN signature, bound to the
+ * sender's instance_id and this connection's nonce, so it cannot be spliced
+ * onto another handshake. Older peers ignore the extra fields; a peer that
+ * sends none simply teaches us nothing.
+ */
+function addrMessage(instanceId, nonce, addr) {
+  return `addr:${instanceId}:${nonce}:${canonicalAddr(addr)}`;
+}
+
+function buildHandshakePayload(identity, localInstanceId, addr = null) {
   const nonce = randomBytes(16).toString("hex");
   const message = `${localInstanceId}:${nonce}`;
-  return {
+  const payload = {
     instance_id: localInstanceId,
     nonce_hex: nonce,
     sig_hex: sign(message, identity.ed25519Priv),
   };
+  if (addr && (addr.gateway_url || addr.tailscale_ip)) {
+    const clean = { gateway_url: addr.gateway_url || null, tailscale_ip: addr.tailscale_ip || null };
+    payload.addr = clean;
+    payload.addr_sig = sign(addrMessage(localInstanceId, nonce, clean), identity.ed25519Priv);
+  }
+  return payload;
 }
 
 function verifyHandshakePayload(payload, expectedPubkeyHex) {
   if (!payload?.instance_id || !payload?.nonce_hex || !payload?.sig_hex) return false;
   const message = `${payload.instance_id}:${payload.nonce_hex}`;
-  return verify(message, payload.sig_hex, expectedPubkeyHex);
+  try { return verify(message, payload.sig_hex, expectedPubkeyHex); } catch { return false; }
+}
+
+/**
+ * The peer's self-advertised dial address from an ALREADY-VERIFIED handshake,
+ * or null when absent, unsigned, badly signed, or not a usable address.
+ */
+export function verifiedAdvertisedAddress(payload, expectedPubkeyHex) {
+  if (!payload?.addr || typeof payload.addr !== "object" || typeof payload.addr_sig !== "string") return null;
+  const raw = { gateway_url: payload.addr.gateway_url ?? null, tailscale_ip: payload.addr.tailscale_ip ?? null };
+  let ok = false;
+  try { ok = verify(addrMessage(payload.instance_id, payload.nonce_hex, raw), payload.addr_sig, expectedPubkeyHex); } catch { ok = false; }
+  if (!ok) return null;
+  const out = {};
+  const gw = sanitizeAdvertisedGatewayUrl(raw.gateway_url);
+  const ip = sanitizeAdvertisedIp(raw.tailscale_ip);
+  if (gw) out.gateway_url = gw;
+  if (ip) out.tailscale_ip = ip;
+  return Object.keys(out).length ? out : null;
+}
+
+let _ownIpFailedAt = 0;
+/**
+ * This instance's dial address to advertise: its own crow_instances row
+ * (gateway_url is the operator's CROW_PEER_GATEWAY_URL, set at boot), plus
+ * this host's tailnet IP. ctx.selfAddress overrides (tests). Never throws.
+ */
+async function resolveSelfAddress(ctx) {
+  try {
+    if (typeof ctx.selfAddress === "function") {
+      const a = (await ctx.selfAddress()) || {};
+      return { gateway_url: sanitizeAdvertisedGatewayUrl(a.gateway_url), tailscale_ip: sanitizeAdvertisedIp(a.tailscale_ip) };
+    }
+    let row = null;
+    try {
+      const { rows } = await ctx.db.execute({
+        sql: "SELECT gateway_url, tailscale_ip FROM crow_instances WHERE id = ? LIMIT 1",
+        args: [ctx.instanceSyncManager.localInstanceId],
+      });
+      row = rows[0] || null;
+    } catch { row = null; }
+    let ip = sanitizeAdvertisedIp(row?.tailscale_ip);
+    // `tailscale ip -4` blocks for up to 3 s when tailscaled is wedged; a
+    // failed probe is retried at most every 10 minutes from here.
+    if (!ip && Date.now() - _ownIpFailedAt > 600_000) {
+      ip = sanitizeAdvertisedIp(getOwnTailnetIp());
+      if (!ip) _ownIpFailedAt = Date.now();
+    }
+    return { gateway_url: sanitizeAdvertisedGatewayUrl(row?.gateway_url), tailscale_ip: ip };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Backfill a peer's MISSING dial address from its verified handshake.
+ * Only empty columns are filled — an operator-set value is never
+ * overwritten — and only for a live paired row. Refreshes the running
+ * dialer's snapshot so the learned address is dialed without a restart.
+ * Never throws. Returns the fields written ({} when none).
+ */
+export async function backfillPeerAddress(ctx, peerId, addr) {
+  const written = {};
+  if (!addr || !peerId) return written;
+  const { db } = ctx;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT gateway_url, tailscale_ip FROM crow_instances WHERE id = ? AND status IN ('active','offline') LIMIT 1",
+      args: [peerId],
+    });
+    const row = rows[0];
+    if (!row) return written;
+    for (const col of ["gateway_url", "tailscale_ip"]) {
+      if (!addr[col] || (row[col] != null && String(row[col]).trim() !== "")) continue;
+      const r = await db.execute({
+        sql: `UPDATE crow_instances SET ${col} = ?, updated_at = datetime('now') WHERE id = ? AND (${col} IS NULL OR TRIM(${col}) = '')`,
+        args: [addr[col], peerId],
+      });
+      if (Number(r.rowsAffected ?? 0) > 0) written[col] = addr[col];
+    }
+  } catch (err) {
+    console.warn(`[tailnet-sync] address backfill for ${String(peerId).slice(0, 12)}… failed: ${err.message}`);
+    return written;
+  }
+  if (Object.keys(written).length) {
+    console.log(`[tailnet-sync] learned dial address for ${String(peerId).slice(0, 12)}… from its signed handshake: ${JSON.stringify(written)}`);
+    recordAddressBackfill(peerId, written);
+    // Refresh the running dialer's snapshot WITHOUT waking it: the address
+    // arrived on a handshake that is about to become the link, and a kick
+    // here would race it into a second, duplicate link. The idle re-check
+    // dials the learned address only if that link is gone.
+    const dialer = ctx.dialers?.get?.(peerId);
+    if (dialer) dialer.peer = { ...dialer.peer, ...written };
+  }
+  return written;
+}
+
+/**
+ * Human-readable reasons a peer row yields no dial candidate — the text the
+ * health notification and the Instances page show.
+ */
+export function describeMissingDialAddress(peer) {
+  const out = [];
+  const raw = peer?.gateway_url ? String(peer.gateway_url).trim() : "";
+  if (!raw) out.push("gateway_url is empty");
+  else {
+    let u = null;
+    try { u = new URL(raw.includes("://") ? raw : `https://${raw}`); } catch { u = null; }
+    if (!u?.hostname) out.push("gateway_url is malformed");
+    else {
+      const port = u.port ? parseInt(u.port, 10) : (u.protocol === "http:" ? 80 : 443);
+      if (port === 443) out.push(`gateway_url ${u.host} is on port 443 (public Funnel), which instance sync never dials`);
+    }
+  }
+  if (!peer?.tailscale_ip) out.push("tailscale_ip is empty");
+  return out;
 }
 
 /**
@@ -76,7 +266,7 @@ function verifyHandshakePayload(payload, expectedPubkeyHex) {
  * (the gateway listens plain HTTP), never Serve HTTPS ports. Bare IPv6
  * addresses are bracketed for the URL (#144 minor).
  */
-export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
+export function peerToWsUrlCandidates(peer, fallbackPort = 3002, standardPorts = [3001, 3002]) {
   const candidates = [];
   const raw = peer?.gateway_url ? String(peer.gateway_url).trim() : "";
   if (raw) {
@@ -94,7 +284,7 @@ export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
   if (peer?.tailscale_ip) {
     const ip = String(peer.tailscale_ip);
     const host = ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
-    for (const port of new Set([fallbackPort, 3001, 3002])) {
+    for (const port of new Set([fallbackPort, ...standardPorts])) {
       const direct = `ws://${host}:${port}${WS_PATH}`;
       if (!candidates.includes(direct)) candidates.push(direct);
     }
@@ -206,8 +396,9 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const { identity, instanceSyncManager, db, log = console } = ctx;
   const remoteInstanceId = peerHandshake.instance_id;
 
-  // Send our own handshake (proves to client we hold the same identity).
-  ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId)));
+  // Send our own handshake (proves to client we hold the same identity), with
+  // our signed dial address so a peer that lacks it can learn it.
+  ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(ctx))));
 
   // Refuse self-loopback (same instance_id — no value in syncing with self).
   if (remoteInstanceId === instanceSyncManager.localInstanceId) {
@@ -234,6 +425,17 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     ws.close(1011, "db error");
     return;
   }
+
+  // A FALLBACK dial (from the side that lost the dialer election — its id
+  // sorts after ours) is refused while a tailnet link already exists: one
+  // dedicated link per pair. The elected direction is always accepted.
+  if (remoteInstanceId > instanceSyncManager.localInstanceId && instanceSyncManager.hasDedicatedStream?.(remoteInstanceId)) {
+    ws.close(1013, "already linked");
+    return;
+  }
+
+  // Learn the peer's dial address if our row lacks it (signed, verified above).
+  await backfillPeerAddress(ctx, remoteInstanceId, verifiedAdvertisedAddress(peerHandshake, identity.ed25519Pubkey));
 
   // Ensure our outFeed exists, then exchange feed keys.
   // 2d F3: pass NO key here. This call's only job is arming the out-feed for
@@ -283,7 +485,9 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const wsStream = handoffToStream(ws, frameReader);
   const noiseStream = new NoiseSecretStream(false, wsStream);
   noiseStream.on("error", () => {});
+  noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
   await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
+  recordLinkUp(remoteInstanceId, { direction: "inbound" });
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
 }
 
@@ -317,7 +521,17 @@ export function setupTailnetSyncServer(server, ctx) {
           frameReader.detach();
           return;
         }
-        await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
+        // Mark the peer's inbound handshake in flight (until it becomes a
+        // replicating link or fails) so our own dialer does not race it.
+        const pending = (ctx.inboundPending ||= new Map());
+        const pid = String(peerHs.instance_id);
+        pending.set(pid, (pending.get(pid) || 0) + 1);
+        try {
+          await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
+        } finally {
+          const n = (pending.get(pid) || 1) - 1;
+          if (n > 0) pending.set(pid, n); else pending.delete(pid);
+        }
       } catch (err) {
         log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}`);
         frameReader.detach();
@@ -331,6 +545,12 @@ export function setupTailnetSyncServer(server, ctx) {
 
 /**
  * Outbound dialer state per peer.
+ *
+ * Never parks for good (DIALER-RETRY): every branch that has nothing to do
+ * right now — no dial address, not the elected dialer, already linked —
+ * re-checks on an idle timer, and a refreshed row with a usable address is
+ * dialed at once (updatePeer). A peer with no usable address and no link is
+ * recorded in peer-dial-health, which raises a health warning.
  */
 // Exported for tests (backoff-cycle behavior); production callers construct
 // it only via startTailnetSyncClients' refresh loop.
@@ -344,6 +564,9 @@ export class PeerDialer {
     this.stopped = false;
     this.attempt = 0; // rotates through dial candidates
     this.failCount = 0; // consecutive failures, for rate-limited logging
+    this.idle = false; // parked on the idle re-check (nothing to dial right now)
+    this.passiveSince = Date.now(); // non-elected side: when we last saw a link (or booted)
+    this._noAddrLogged = false;
   }
 
   // Dial failures land in ws.on("error") — historically swallowed, which hid
@@ -351,6 +574,7 @@ export class PeerDialer {
   // 10th thereafter so a dead transport is visible without spamming journald.
   _noteDialFailure(wsUrl, err) {
     this.failCount += 1;
+    recordDialFailure(this.peer.id, `${wsUrl}: ${err?.message || err}`);
     if (this.failCount === 1 || this.failCount % 10 === 0) {
       console.warn(`[tailnet-sync] dial ${wsUrl} failed (attempt ${this.failCount}): ${err?.message || err}`);
     }
@@ -361,12 +585,20 @@ export class PeerDialer {
   stop() {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
     if (this.ws) try { this.ws.terminate(); } catch {}
+  }
+
+  _setTimer(fn, ms) {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = null; fn(); }, ms);
+    this.timer.unref?.();
   }
 
   scheduleRetry() {
     if (this.stopped) return;
-    this.timer = setTimeout(() => this.connect(), this.retryMs);
+    this.idle = false;
+    this._setTimer(() => this.connect(), this.retryMs);
     // #144 minor: grow the backoff only after a FULL ladder cycle, so a
     // healthy candidate later in the ladder gets its first try at the base
     // delay instead of inheriting the exponential penalty earned by the
@@ -377,28 +609,85 @@ export class PeerDialer {
     }
   }
 
+  scheduleIdle() {
+    if (this.stopped) return;
+    this.idle = true;
+    this._setTimer(() => this.connect(), this.ctx.idleRecheckMs ?? IDLE_RECHECK_MS);
+  }
+
+  /**
+   * Swap in a fresher crow_instances snapshot (refresh loop, or an address
+   * learned from a signed handshake). A dialer parked idle for lack of an
+   * address dials immediately once the row yields a candidate.
+   */
+  updatePeer(row) {
+    this.peer = row;
+    if (this.stopped || this.ws || !this.idle) return;
+    if (peerToWsUrlCandidates(row, this.ctx.gatewayPort, this.ctx.standardPorts).length === 0) return;
+    this.connect();
+  }
+
   async connect() {
     if (this.stopped) return;
+    // One timeline per dialer: a direct call (refresh kick) supersedes any
+    // pending timer, and a socket still connecting/open is never doubled.
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (this.ws && this.ws.readyState <= WebSocket.OPEN) return;
     const { identity, instanceSyncManager, db } = this.ctx;
-    const candidates = peerToWsUrlCandidates(this.peer, this.ctx.gatewayPort);
-    this._candCount = candidates.length; // backoff grows once per full ladder cycle
-    if (candidates.length === 0) {
-      // No tailnet endpoint to dial; leave for Hyperswarm.
-      return;
-    }
-    // Ladder through candidates across retries (Serve endpoint first, then
-    // the direct backend dial) so one broken path doesn't kill the transport.
-    const wsUrl = candidates[this.attempt % candidates.length];
-    this.attempt += 1;
     if (this.peer.id === instanceSyncManager.localInstanceId) return; // self
+    const peerId = this.peer.id;
+    const candidates = peerToWsUrlCandidates(this.peer, this.ctx.gatewayPort, this.ctx.standardPorts);
+    this._candCount = candidates.length; // backoff grows once per full ladder cycle
+    const anyLink = instanceSyncManager.hasActiveStream?.(peerId) ?? false;
+    const tailnetLink = instanceSyncManager.hasDedicatedStream?.(peerId) ?? false;
+
+    if (candidates.length === 0) {
+      // No tailnet endpoint to dial. Fine while ANY link carries sync (the
+      // peer dialed us, or Hyperswarm connected); otherwise it is a health
+      // condition, not a silent no-op.
+      if (anyLink) {
+        clearNoDialAddress(peerId);
+      } else {
+        const missing = describeMissingDialAddress(this.peer);
+        recordNoDialAddress(peerId, missing);
+        if (!this._noAddrLogged) {
+          this._noAddrLogged = true;
+          console.warn(`[tailnet-sync] no dial address for peer ${String(peerId).slice(0, 12)}… (${this.peer.name || "unnamed"}): ${missing.join("; ")} — will re-check`);
+        }
+      }
+      return this.scheduleIdle();
+    }
+    clearNoDialAddress(peerId);
+    this._noAddrLogged = false;
+
+    if (tailnetLink || this.ctx.inboundPending?.has(peerId)) {
+      // Already linked (in either direction), or the peer's inbound
+      // handshake is mid-flight — one dedicated link per pair.
+      this.passiveSince = Date.now();
+      return this.scheduleIdle();
+    }
+
     // Deterministic dialer election: exactly one side dials, the other side
     // accepts. We dial only when our id sorts BEFORE the peer's id. This
     // prevents both sides from opening their own connection (and calling
     // feed.replicate on the same feed twice, which throws inside Hypercore).
-    if (instanceSyncManager.localInstanceId >= this.peer.id) {
-      // Wait passively for the peer's inbound dial.
-      return;
+    // The non-elected side dials only as a FALLBACK after a long stretch with
+    // no link at all (the elected side may simply not know our address); the
+    // accept side refuses a fallback while any tailnet link is up.
+    let role = "dialer";
+    if (instanceSyncManager.localInstanceId >= peerId) {
+      if (anyLink) this.passiveSince = Date.now();
+      const after = this.ctx.fallbackDialAfterMs ?? FALLBACK_DIAL_AFTER_MS;
+      if (anyLink || Date.now() - this.passiveSince < after) return this.scheduleIdle();
+      role = "fallback";
     }
+
+    // Ladder through candidates across retries (Serve endpoint first, then
+    // the direct backend dial) so one broken path doesn't kill the transport.
+    const wsUrl = candidates[this.attempt % candidates.length];
+    this.attempt += 1;
+    this.idle = false;
+    recordDialAttempt(peerId, { url: wsUrl, role });
 
     let ws;
     // TLS verification is ON for wss candidates (#144 follow-up): every wss
@@ -411,19 +700,22 @@ export class PeerDialer {
     try { ws = new WebSocket(wsUrl, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS }); }
     catch (err) {
       console.warn(`[tailnet-sync] dial failed for ${wsUrl}: ${err.message}`);
+      recordDialFailure(peerId, `${wsUrl}: ${err.message}`);
       return this.scheduleRetry();
     }
     this.ws = ws;
+    let linked = false;
 
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
       try {
-        // Send our handshake.
-        ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId)));
+        // Send our handshake (with our signed dial address).
+        ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(this.ctx))));
         // Read server handshake.
         const serverHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(serverHs, identity.ed25519Pubkey)) {
           console.warn(`[tailnet-sync] server handshake sig invalid from ${wsUrl}`);
+          recordDialFailure(peerId, `${wsUrl}: server handshake signature invalid`);
           ws.close(1008, "bad sig");
           frameReader.detach();
           return;
@@ -433,6 +725,7 @@ export class PeerDialer {
         const remoteInstanceId = serverHs.instance_id;
         if (remoteInstanceId === instanceSyncManager.localInstanceId) {
           console.warn(`[tailnet-sync] server claims our own instance_id; closing`);
+          recordDialFailure(peerId, `${wsUrl}: answered with this instance's own id`);
           ws.close(1008, "self");
           frameReader.detach();
           return;
@@ -447,10 +740,14 @@ export class PeerDialer {
         });
         if (liveRows.length === 0) {
           console.warn(`[tailnet-sync] server ${String(remoteInstanceId).slice(0, 12)}… is not a live paired peer here; closing`);
+          recordDialFailure(peerId, `${wsUrl}: answered as ${String(remoteInstanceId).slice(0, 12)}…, not a live paired peer`);
           ws.close(1008, "not paired");
           frameReader.detach();
           return;
         }
+
+        // Learn the server's dial address if our row lacks it.
+        await backfillPeerAddress(this.ctx, remoteInstanceId, verifiedAdvertisedAddress(serverHs, identity.ed25519Pubkey));
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
@@ -495,17 +792,27 @@ export class PeerDialer {
         const wsStream = handoffToStream(ws, frameReader);
         const noiseStream = new NoiseSecretStream(true, wsStream);
         noiseStream.on("error", () => {});
+        noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
         await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
-        console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side)`);
+        linked = true;
+        recordLinkUp(remoteInstanceId, { direction: "outbound" });
+        console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side${role === "fallback" ? ", fallback dial" : ""})`);
       } catch (err) {
         console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
+        recordDialFailure(peerId, `${wsUrl}: ${err.message}`);
         frameReader.detach();
         try { ws.close(); } catch {}
       }
     });
 
-    ws.on("close", () => {
-      this.ws = null;
+    ws.on("close", (code, reason) => {
+      if (this.ws === ws) this.ws = null;
+      if (!linked && code && code !== 1000 && code !== 1005 && code !== 1006) {
+        // Refused by the peer (bad sig, unknown peer, already linked, …).
+        recordDialFailure(peerId, `${wsUrl}: closed by peer (${code}${reason?.length ? ` ${reason}` : ""})`);
+      }
+      if (linked) this.passiveSince = Date.now();
+      if (code === 1013) return this.scheduleIdle(); // peer already linked to us — nothing to retry
       this.scheduleRetry();
     });
     ws.on("error", (err) => {
@@ -524,6 +831,9 @@ export class PeerDialer {
 export async function startTailnetSyncClients(ctx) {
   const { db, instanceSyncManager } = ctx;
   const dialers = new Map();
+  // Shared with the accept side (same ctx object at boot) so an address
+  // learned from an inbound handshake reaches the running dialer at once.
+  ctx.dialers = dialers;
   // Per-peer heal-failure counters (peerId → consecutive failure count). A
   // wedged initInstance (e.g. a held rocksdb dir lock) used to warn on EVERY
   // 60s rescan — one line per minute per peer, forever. Same observability
@@ -537,7 +847,7 @@ export async function startTailnetSyncClients(ctx) {
     let rows;
     try {
       const r = await db.execute({
-        sql: "SELECT id, gateway_url, tailscale_ip, sync_url, status FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: "SELECT id, name, gateway_url, tailscale_ip, sync_url, status FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
         args: [instanceSyncManager.localInstanceId],
       });
       rows = r.rows;
@@ -576,13 +886,15 @@ export async function startTailnetSyncClients(ctx) {
           console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}…: ${err.message} (#${n})`);
         }
       }
-      if (!peer.gateway_url) continue;
+      // DIALER-RETRY: EVERY live peer gets a dialer, address or not. The old
+      // `if (!peer.gateway_url) continue` meant a tailscale_ip-only peer was
+      // never dialed, and a peer with no address at all was never reported.
       if (dialers.has(peer.id)) {
         // #144 minor: keep the dialer's row snapshot fresh — a changed
         // gateway_url/tailscale_ip previously kept dialing the OLD address
-        // until a gateway restart. connect() re-derives candidates from
-        // this.peer on every attempt, so updating the reference suffices.
-        dialers.get(peer.id).peer = peer;
+        // until a gateway restart. updatePeer also wakes a dialer parked for
+        // lack of an address the moment the row gains one.
+        dialers.get(peer.id).updatePeer(peer);
         continue;
       }
       const dialer = new PeerDialer(peer, ctx);
@@ -591,7 +903,7 @@ export async function startTailnetSyncClients(ctx) {
     }
     // Stop dialers for peers no longer in scope (revoked, etc.)
     for (const [id, dialer] of dialers) {
-      if (!seenIds.has(id)) { dialer.stop(); dialers.delete(id); }
+      if (!seenIds.has(id)) { dialer.stop(); dialers.delete(id); forgetPeerDialHealth(id); }
     }
     for (const id of healFailures.keys()) {
       if (!seenIds.has(id)) healFailures.delete(id);

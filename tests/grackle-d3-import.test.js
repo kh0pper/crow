@@ -20,7 +20,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { run, sha256File, idGate, ackProblems } from "../scripts/ops/grackle-d3-import.mjs";
+import { run, sha256File, idGate, ackProblems, rebaseBotDefinition, resolveTargetCrowHome } from "../scripts/ops/grackle-d3-import.mjs";
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import {
@@ -724,6 +724,84 @@ describe("idempotency and emit-only", () => {
     const root = await run({ mode: "emit-only", target: s.target, report: s.applyOpts.report, expectSha: s.applyOpts.expectSha }, { emitter, probes: { ...OK_PROBES, uid: () => 0 } });
     assert.equal(root.exitCode, 2);
     assert.match(root.refused.join("\n"), /running as root/);
+  });
+});
+
+/* ------------------------------------------- bot world roots (IMPORTER-BOT-PATHS) */
+
+describe("pi bot definitions: world roots rebase onto the target", () => {
+  const GRACKLE_ROOT = "/home/kh0pp/.crow-mpa/pi-bots/home-search";
+  const DEF = JSON.stringify({
+    engine: "pi",
+    session_dir: GRACKLE_ROOT,
+    permission_policy: {
+      bash: "deny",
+      write_paths: [GRACKLE_ROOT, `${GRACKLE_ROOT}/outputs`, "/srv/shared-projects/alpha"],
+      read_paths: [`${GRACKLE_ROOT}/notes/`],
+    },
+  });
+
+  it("unit: session_dir and every path under it move; foreign paths are kept and reported", () => {
+    const r = rebaseBotDefinition(DEF, "home-search", "/home/kh0pp/.crow");
+    const def = JSON.parse(r.definition);
+    assert.equal(def.session_dir, "/home/kh0pp/.crow/pi-bots/home-search");
+    assert.deepEqual(def.permission_policy.write_paths, [
+      "/home/kh0pp/.crow/pi-bots/home-search", "/home/kh0pp/.crow/pi-bots/home-search/outputs", "/srv/shared-projects/alpha",
+    ]);
+    assert.deepEqual(def.permission_policy.read_paths, ["/home/kh0pp/.crow/pi-bots/home-search/notes"]);
+    assert.equal(def.permission_policy.bash, "deny", "other fields untouched");
+    assert.equal(r.changes.length, 4);
+    assert.deepEqual(r.foreign, [{ field: "permission_policy.write_paths", path: "/srv/shared-projects/alpha" }]);
+  });
+
+  it("unit: no session_dir → the root is found in the policy by its /pi-bots/<bot> tail; a sibling bot's path is not", () => {
+    const def = { permission_policy: { write_paths: ["/x/.crow/pi-bots/other-bot", "/x/.crow/pi-bots/b1/out"] } };
+    const r = rebaseBotDefinition(JSON.stringify(def), "b1", "/t");
+    // "/x/.crow/pi-bots/b1/out" does not END in /pi-bots/b1, so no root is inferred.
+    assert.equal(r.changes.length, 0);
+    const def2 = { permission_policy: { write_paths: ["/x/.crow/pi-bots/other-bot", "/x/.crow/pi-bots/b1"] } };
+    const r2 = rebaseBotDefinition(JSON.stringify(def2), "b1", "/t");
+    assert.deepEqual(JSON.parse(r2.definition).permission_policy.write_paths, ["/x/.crow/pi-bots/other-bot", "/t/pi-bots/b1"]);
+  });
+
+  it("unit: empty / non-JSON / pathless definitions pass through byte-identical", () => {
+    for (const d of ["{}", "not json", null, JSON.stringify({ engine: "pi" })]) {
+      assert.equal(rebaseBotDefinition(d, "b", "/t").definition, d);
+    }
+  });
+
+  it("resolveTargetCrowHome: flag > CROW_HOME > parent of the target data dir", () => {
+    const prevHome = process.env.CROW_HOME;
+    const prevData = process.env.CROW_DATA_DIR;
+    try {
+      delete process.env.CROW_HOME;
+      process.env.CROW_DATA_DIR = "/srv/inst/data";
+      assert.equal(resolveTargetCrowHome({}), "/srv/inst");
+      process.env.CROW_HOME = "/srv/home2";
+      assert.equal(resolveTargetCrowHome({}), "/srv/home2");
+      assert.equal(resolveTargetCrowHome({ targetCrowHome: "/srv/flag" }), "/srv/flag");
+    } finally {
+      if (prevHome === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prevHome;
+      if (prevData === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevData;
+    }
+  });
+
+  it("apply: the imported row carries the TARGET's world root, still disabled, and the report lists the rebase", async () => {
+    const s = await setup();
+    exec(s.source, `UPDATE pi_bot_defs SET definition = '${DEF.replace(/'/g, "''")}' WHERE bot_id = 'home-search'`);
+    const targetHome = join(s.root, "crow-home");
+    const opts = { ...s.applyOpts, expectSha: sha256File(s.source), targetCrowHome: targetHome };
+    const res = await run(opts, { probes: OK_PROBES, emitter });
+    assert.equal(res.exitCode, 0, JSON.stringify(res.refused));
+    const [row] = query(s.target, "SELECT definition, enabled FROM pi_bot_defs WHERE bot_id = 'home-search'");
+    assert.equal(row.enabled, 0);
+    const def = JSON.parse(row.definition);
+    assert.equal(def.session_dir, join(targetHome, "pi-bots", "home-search"));
+    assert.ok(!row.definition.includes(".crow-mpa"), "no source world-root path survives");
+    assert.ok(def.permission_policy.write_paths.includes("/srv/shared-projects/alpha"), "foreign path kept");
+    const rb = res.report.go_no_go.rebased_bot_paths;
+    assert.deepEqual(rb.map((b) => b.bot_id), ["home-search"]);
+    assert.ok(res.report.warnings.some((w) => /home-search.*\/srv\/shared-projects\/alpha/.test(w)));
   });
 });
 
