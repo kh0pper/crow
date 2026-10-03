@@ -192,7 +192,9 @@ export async function importEntries(db, key, entries) {
   const current = await listEntries(db, { keyId: key.id });
   let imported = 0;
   let skipped = 0;
-  for (const e of Array.isArray(entries) ? entries : []) {
+  for (let e of Array.isArray(entries) ? entries : []) {
+    // A non-http(s) url is dropped (not the entry) so an otherwise-good export still imports.
+    if (e && typeof e.url === "string" && e.url && !/^https?:\/\//i.test(e.url)) e = { ...e, url: null };
     if (!e || typeof e.secret !== "string" || e.secret === "" || !KINDS.has(e.kind) || !cleanText(e.label)) { skipped++; continue; }
     if (e.kind === "extension") {
       if (!e.bundle_id || !e.env_key) { skipped++; continue; }

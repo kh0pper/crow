@@ -23,7 +23,8 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
     const status = e.readable === false
       ? `<span class="pw-unreadable">${t("passwords.statusUnreadable", lang)}</span>`
       : e.status === "extension_removed" ? t("passwords.statusRemoved", lang) : t("passwords.statusActive", lang);
-    const url = e.url ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.url)}</a>` : "";
+    // Only http(s) becomes a link: escapeHtml stops attribute breakout, not javascript: URLs.
+    const url = e.url ? (/^https?:\/\//i.test(String(e.url)) ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.url)}</a>` : escapeHtml(e.url)) : "";
     const readable = e.readable !== false;
     const rdis = readable ? dis : " disabled";
     return `<tr class="pw-row" data-id="${Number(e.id)}" data-origin="${escapeHtml(e.origin || "")}" data-status="${escapeHtml(e.status || "")}">
@@ -145,6 +146,17 @@ export function passwordsClientJS(lang) {
       }
       // Revealed plaintext stays on screen 30 s at most and never into bfcache (review S2).
       window.addEventListener("pagehide", wipeShown);
+      // Turbo caches the live DOM on in-dashboard navigation (pagehide does not fire there), so
+      // also wipe on turbo:before-cache and when the tab is hidden; both listeners remove
+      // themselves on the cache event so Turbo visits never accumulate them.
+      function onVis() { if (document.visibilityState === "hidden") wipeShown(); }
+      function onCache() {
+        wipeShown();
+        document.removeEventListener("turbo:before-cache", onCache);
+        document.removeEventListener("visibilitychange", onVis);
+      }
+      document.addEventListener("turbo:before-cache", onCache);
+      document.addEventListener("visibilitychange", onVis);
       function showGrant(expiresAt) {
         if (!expiresAt) return;
         var d = new Date(expiresAt);

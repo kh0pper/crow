@@ -1826,9 +1826,17 @@ export function extensionsClientJS(lang) {
                 var wipe = function() {
                   code.textContent = ""; code.hidden = true; copyBtn.hidden = true;
                   note.textContent = '${tJs("keychain.firstViewSpent", lang)}';
+                  document.removeEventListener("turbo:before-cache", wipe);
+                  document.removeEventListener("visibilitychange", onVis);
+                  window.removeEventListener("pagehide", wipe);
                 };
+                // Turbo snapshots the live DOM into its page cache and pagehide does not fire on
+                // Turbo visits, so also wipe on turbo:before-cache and when the tab is hidden.
+                var onVis = function() { if (document.visibilityState === "hidden") wipe(); };
                 setTimeout(wipe, 30000);
                 window.addEventListener("pagehide", wipe);
+                document.addEventListener("turbo:before-cache", wipe);
+                document.addEventListener("visibilitychange", onVis);
               } else {
                 note.textContent = '${tJs("keychain.firstViewSpent", lang)}';
               }

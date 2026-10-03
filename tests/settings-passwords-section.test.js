@@ -228,3 +228,35 @@ test("[hidden] carry — a scoped rule keeps toggled elements hidden despite dis
   assert.ok(hiddens.length >= 3);
   for (const el of hiddens) assert.ok(el.closest("#pw-root"), "hidden element outside #pw-root");
 });
+
+test("S2/Turbo — revealed plaintext is wiped on turbo:before-cache and when the tab is hidden", async () => {
+  const reveal = { "/reveal": () => ({ status: 200, d: { secret: "shown" } }), "/activity": () => ({ status: 200, d: { events: [] } }) };
+  for (const how of ["cache", "hidden"]) {
+    const s = boot({ routes: reveal });
+    s.click(s.document.querySelector('tr.pw-row[data-id="1"] .pw-reveal'));
+    await s.settle();
+    const cell = s.document.querySelector('tr.pw-row[data-id="1"] .pw-secret');
+    assert.equal(cell.textContent, "shown");
+    if (how === "cache") s.document.dispatchEvent(new s.document.defaultView.Event("turbo:before-cache"));
+    else {
+      Object.defineProperty(s.document, "visibilityState", { value: "visible", configurable: true });
+      s.document.dispatchEvent(new s.document.defaultView.Event("visibilitychange"));
+      assert.equal(cell.textContent, "shown", "visible tab keeps it");
+      Object.defineProperty(s.document, "visibilityState", { value: "hidden", configurable: true });
+      s.document.dispatchEvent(new s.document.defaultView.Event("visibilitychange"));
+    }
+    assert.equal(cell.textContent, "", how);
+    assert.equal(cell.hidden, true, how);
+  }
+});
+
+test("a javascript: entry url renders as plain text, never an href; http(s) stays a link", () => {
+  const entries = [
+    { id: 1, kind: "manual", label: "a", url: "javascript:alert(1)", origin: "manual", status: "active", updated_at: "" },
+    { id: 2, kind: "manual", label: "b", url: "HTTPS://ok.example/x", origin: "manual", status: "active", updated_at: "" },
+  ];
+  const html = renderPasswordsPage({ entries, method: "password", vaultAvailable: false, lang: "en" });
+  assert.ok(!/href="javascript:/i.test(html));
+  assert.ok(html.includes("javascript:alert(1)"), "shown as text");
+  assert.match(html, /<a href="HTTPS:\/\/ok\.example\/x"/);
+});

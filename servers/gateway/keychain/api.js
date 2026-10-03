@@ -153,6 +153,7 @@ export function keychainApiRouter({
     if (!label || !secret || /[\0]/.test(secret)) return res.status(400).json({ error: "A label and a password are required." });
     const username = str(req.body?.username, 256);
     const url = str(req.body?.url, 2048);
+    if (url && !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "The address must start with http:// or https://." });
     const { id } = await addManualSecret(db, await writeKey(db, req.ip), { label, username, url, secret });
     await audit(db, "keychain_add", { ip: req.ip, details: { entry_id: id, label } });
     res.json({ ok: true, id });

@@ -225,3 +225,24 @@ test("hidden really hides in the first-view banner: scoped rule beats .btn displ
   for (const sel of [".ext-firstview-show", ".ext-firstview-copy", ".ext-firstview__secret"]) assert.ok(banner.querySelector(sel), sel + " lives inside .ext-firstview");
   assert.equal(banner.querySelector(".ext-firstview-copy").hasAttribute("hidden"), true);
 });
+
+test("S2/Turbo — the first-view plaintext is wiped on turbo:before-cache and when the tab is hidden", async () => {
+  for (const how of ["cache", "hidden"]) {
+    const s = boot({
+      keychainPending: [{ id: 7, label: "Vaultwarden — admin token" }],
+      fetchImpl: (url) => ({ ok: true, status: 200, json: () => Promise.resolve(url.endsWith("/first-view") ? { secret: "tok-xyz" } : {}) }),
+    });
+    const banner = s.document.querySelector('.ext-firstview[data-entry-id="7"]');
+    s.click(banner.querySelector(".ext-firstview-show"));
+    await s.settle();
+    const cell = banner.querySelector(".ext-firstview__secret");
+    assert.equal(cell.textContent, "tok-xyz");
+    if (how === "cache") s.document.dispatchEvent(new s.window.Event("turbo:before-cache"));
+    else {
+      Object.defineProperty(s.document, "visibilityState", { value: "hidden", configurable: true });
+      s.document.dispatchEvent(new s.window.Event("visibilitychange"));
+    }
+    assert.equal(cell.textContent, "", how);
+    assert.equal(cell.hidden, true, how);
+  }
+});

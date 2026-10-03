@@ -280,3 +280,13 @@ test("S2 — concurrent wrong /reauth calls cannot bypass the per-session or the
     assert.equal((await s.call("/reauth", { session: "FRESH", body: { password: "right-password" } })).status, 429);
   } finally { s.close(); }
 });
+
+test("add rejects a non-http(s) url with a value-free 400", async () => {
+  const s = await setup();
+  try {
+    const r = await s.call("/add", { body: { label: "x", url: "javascript:alert(1)", secret: "abcd-efgh" } });
+    assert.equal(r.status, 400);
+    assert.ok(!JSON.stringify(r.body).includes("javascript"));
+    assert.equal((await s.call("/add", { body: { label: "x", url: "http://ok.example", secret: "abcd-efgh" } })).status, 200);
+  } finally { s.close(); }
+});

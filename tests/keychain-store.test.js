@@ -238,3 +238,16 @@ test("B2 — a crafted export is refused fast: only the v1 KDF constants and exa
   assert.ok(Date.now() - t0 < 1000, "refused before any key derivation");
   assert.equal((await X.openExport(good, "correct horse battery")).length, 1, "the genuine file still opens");
 });
+
+test("import drops a non-http(s) url but still imports the entry", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  const out = await K.importEntries(db, key, [
+    { kind: "manual", label: "Evil link", username: null, url: "javascript:alert(1)", secret: "s1" },
+    { kind: "manual", label: "Good link", username: null, url: "HTTPS://ok.example", secret: "s2" },
+  ]);
+  assert.deepEqual(out, { imported: 2, skipped: 0 });
+  const list = await K.listEntries(db, { keyId: key.id });
+  assert.equal(list.find((e) => e.label === "Evil link").url, null);
+  assert.equal(list.find((e) => e.label === "Good link").url, "HTTPS://ok.example");
+});
