@@ -9,6 +9,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { formatEnvLines } from "../servers/gateway/bundle-env-codec.js";
+import { randomInt } from "node:crypto";
 
 const OPS = join(import.meta.dirname, "..", "bundles", "workspace", "ops");
 
@@ -300,4 +302,52 @@ test("restore-scratch.sh refuses a glob that matched several archives", () => {
   const r2 = run("restore-scratch.sh", ctx, ["a.tar", "b.tar"], { env: { WORKSPACE_SCRATCH_DIR: join(ctx.root, "scr") } });
   assert.notEqual(r2.status, 0);
   assert.match(r2.out, /looks like an archive/);
+});
+
+const WIDE_PW = "p a$s'w\"d #1 \\ é😀 ok";
+
+test("REVIEW FOCUS 1 (ops) — bootstrap pipes the exact wide-charset admin password", () => {
+  const ctx = setup();
+  const vars = { WORKSPACE_ADMIN_USER: "admin", ...SECRETS, WORKSPACE_ADMIN_PASSWORD: WIDE_PW, WORKSPACE_PUBLIC_HOST: "", WORKSPACE_NC_SERVE_PORT: "8456", WORKSPACE_OO_SERVE_PORT: "8457" };
+  writeFileSync(join(ctx.bundle, ".env"), formatEnvLines(vars), { mode: 0o600 });
+  const r = run("bootstrap.sh", ctx);
+  assert.equal(r.status, 0, r.out);
+  assert.ok(read(ctx, "stdin.log").includes(`user:resetpassword --password-from-env admin] ${vars.WORKSPACE_ADMIN_PASSWORD}\n`), "byte-exact on stdin");
+  assert.ok(!read(ctx, "calls.log").includes("p a$s"), "never argv");
+  assert.ok(!r.out.includes("p a$s"), "never printed");
+});
+
+test("reset-password.sh accepts any printable 12-128 chars, refuses control characters", () => {
+  const ctx = setup();
+  const ok = run("reset-password.sh", ctx, ["admin"], { input: "it's a $ \"wide\" pass #1\n" });
+  assert.equal(ok.status, 0, ok.out);
+  assert.match(read(ctx, "stdin.log"), /user:resetpassword --password-from-env admin\] it's a \$ "wide" pass #1/);
+  assert.notEqual(run("reset-password.sh", ctx, ["admin"], { input: "tab\there-123456\n" }).status, 0);
+  assert.notEqual(run("reset-password.sh", ctx, ["admin"], { input: "short\n" }).status, 0);
+});
+
+test("envfile.py decodes exactly what the gateway codec writes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ws-envfile-"));
+  const pool = []; for (let c = 0x20; c < 0x7f; c++) pool.push(String.fromCharCode(c)); pool.push("é", "😀");
+  const vals = {};
+  for (let i = 0; i < 40; i++) {
+    let s = ""; const n = randomInt(1, 24); for (let j = 0; j < n; j++) s += pool[randomInt(pool.length)];
+    if (s.includes("`") && (s.includes("'") || s.endsWith("\\"))) s = s.replace(/`/g, "");
+    vals[`K${i}`] = s;
+  }
+  writeFileSync(join(dir, ".env"), "# comment\nexport KX=plain\n" + formatEnvLines(vals));
+  for (const [k, v] of Object.entries({ ...vals, KX: "plain" })) {
+    const r = spawnSync("python3", [join(OPS, "envfile.py"), "get", join(dir, ".env"), k], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, v, `${k} ${JSON.stringify(v)}`);
+  }
+  assert.equal(spawnSync("python3", [join(OPS, "envfile.py"), "get", join(dir, ".env"), "MISSING"], { encoding: "utf8" }).stdout, "");
+});
+
+test("F5 — every ops script that reads the .env through envfile.py guards python3 with an honest error", () => {
+  for (const f of ["lib.sh", "restore-scratch.sh"]) {
+    const src = readFileSync(join(OPS, f), "utf8");
+    assert.match(src, /command -v python3 >\/dev\/null 2>&1 \|\| die "python3 is required/, f);
+    assert.ok(src.indexOf("command -v python3") < src.indexOf("envfile.py\" get") , f + ": guard comes before the first use");
+  }
 });

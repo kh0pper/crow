@@ -4,6 +4,13 @@
  *   env_vars[].generate: "secret"   → 32 random bytes, base64url (43 chars; no `$`,
  *                                     quotes or spaces: safe in compose .env, URLs, bash)
  *
+ *   env_vars[].keychain: true        → the minted plaintext goes to the Crow keychain BEFORE
+ *                                     anything is persisted (planGeneratedEnv → persist())
+ *   env_vars[].store_as: "argon2id"  → the .env and the retained copy hold an Argon2id PHC
+ *                                     hash of it instead (Vaultwarden ADMIN_TOKEN)
+ *   env_vars[].generatable: true     → a HUMAN password field: the forms offer Generate and
+ *                                     "Save to Crow keychain" (keychainEligibleKeys)
+ *
  * NEVER regenerated on reinstall: bundles bind-mount their data and the kept DB still
  * expects the old password. Order: installed .env → retained copy at
  * <CROW_HOME>/secrets/bundle-env/<id>.env (dir 700, file 600; uninstall never deletes
@@ -13,17 +20,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { parseEnvText, formatEnvLines } from "./bundle-env-codec.js";
+export { parseEnvText };
+import { argon2idPhc } from "./keychain/argon2-phc.js";
 
 const GENERATE_KINDS = new Set(["secret"]);
 
-export function parseEnvText(text) {
-  const out = {};
-  for (const line of String(text || "").split("\n")) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m) out[m[1]] = m[2];
-  }
-  return out;
-}
 
 function readEnvSafe(path) {
   try { return existsSync(path) ? parseEnvText(readFileSync(path, "utf8")) : {}; } catch { return {}; }
@@ -59,28 +61,88 @@ export function retainedEnvPath(crowHome, bundleId) {
   return join(crowHome, "secrets", "bundle-env", `${bundleId}.env`);
 }
 
-export function resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome }) {
+export function keychainGeneratedKeys(manifest) {
+  return (manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && GENERATE_KINDS.has(v.generate) && v.keychain === true)
+    .map((v) => v.name);
+}
+
+/** Typed fields the forms may offer to save to the keychain: opt-in only (Kevin Q1). */
+export function keychainEligibleKeys(manifest) {
+  return (manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.secret === true && !v.generate && (v.generatable === true || v.keychain === true))
+    .map((v) => v.name);
+}
+
+/**
+ * Mint or reuse every generated secret WITHOUT persisting anything (C5). Returns
+ * { env, minted, persist }:
+ *   env      values for the bundle .env (a PHC hash for store_as:"argon2id")
+ *   minted   plaintext of keychain:true keys created by THIS call (empty on reinstall)
+ *   persist  writes the retained copy; call it only after `minted` is safely in the
+ *            keychain — otherwise a lost plaintext would leave an unusable hash behind.
+ * Order per key: installed .env → retained copy → new value (never regenerated).
+ */
+export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome }) {
   const keys = generatedEnvKeys(manifest);
-  if (keys.length === 0) return {};
+  if (keys.length === 0) return { env: {}, minted: {}, persist() {} };
   if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) {
     throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`);
   }
+  const byName = new Map((manifest.env_vars || []).map((v) => [v.name, v]));
   const installed = readEnvSafe(join(destDir, ".env"));
   const retainedPath = retainedEnvPath(crowHome, bundleId);
   const retained = readEnvSafe(retainedPath);
-  const out = {};
-  for (const k of keys) out[k] = installed[k] || retained[k] || newSecretValue();
-  const dir = dirname(retainedPath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(dir, 0o700);
-  const merged = { ...retained, ...out };
-  writePrivateFile(
-    retainedPath,
-    `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
-      `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-      Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
-  );
-  return out;
+  const env = {};
+  const minted = {};
+  for (const k of keys) {
+    const existing = installed[k] || retained[k];
+    if (existing) { env[k] = existing; continue; }
+    const plain = newSecretValue();
+    const spec = byName.get(k) || {};
+    env[k] = spec.store_as === "argon2id" ? argon2idPhc(plain) : plain;
+    if (spec.keychain === true) minted[k] = plain;
+  }
+  const persist = () => {
+    const dir = dirname(retainedPath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    writePrivateFile(
+      retainedPath,
+      `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
+        `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
+        formatEnvLines({ ...retained, ...env }),
+    );
+  };
+  return { env, minted, persist };
+}
+
+/**
+ * Back-compat: mint/reuse AND persist in one call. Refuses keychain:true manifests —
+ * their plaintext must reach the keychain first (planGeneratedEnv), never be dropped.
+ */
+export function resolveGeneratedEnv(bundleId, manifest, opts) {
+  if (keychainGeneratedKeys(manifest).length > 0) {
+    throw new Error("resolveGeneratedEnv cannot handle keychain:true env vars; use planGeneratedEnv and save `minted` first");
+  }
+  const plan = planGeneratedEnv(bundleId, manifest, opts);
+  plan.persist();
+  return plan.env;
+}
+
+/**
+ * `keychain_label` / `keychain_username` / `keychain_url` templates: `${VAR}` from the
+ * install env. Any referenced var that is unset or blank → null (the field is dropped).
+ */
+export function expandKeychainTemplate(template, env) {
+  if (typeof template !== "string" || template === "") return null;
+  let blank = false;
+  const out = template.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
+    const v = env && env[name];
+    if (v === undefined || v === null || String(v) === "") { blank = true; return ""; }
+    return String(v);
+  });
+  return blank ? null : out;
 }
 
 export function stripGeneratedKeys(manifest, envVars) {

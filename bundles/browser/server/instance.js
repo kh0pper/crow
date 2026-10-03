@@ -9,6 +9,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
+import { appImport } from "./app-root.js";
+const { parseEnvText } = await appImport("servers/gateway/bundle-env-codec.js");
 
 /** This instance's home. Falls back to the primary, which is correct only for the primary. */
 export function stateRoot() {
@@ -32,15 +34,11 @@ let envCache = null;
 function bundleEnv() {
   const path = join(stateRoot(), "bundles", "browser", ".env");
   if (envCache && envCache.path === path) return envCache.values;
-  const values = {};
+  let values = {};
   try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq === -1) continue;
-      values[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-    }
+    // Compose-exact decoding (bundle-env-codec.js): the installer quotes a typed
+    // CROW_BROWSER_VNC_PASSWORD with spaces or symbols; the container sees it unquoted.
+    values = parseEnvText(readFileSync(path, "utf8"));
   } catch {
     // No .env (fresh checkout, bundle not installed) — defaults apply.
   }

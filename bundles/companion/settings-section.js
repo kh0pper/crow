@@ -14,7 +14,8 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { homedir } from "os";
 import { execFileSync } from "child_process";
 
@@ -61,23 +62,34 @@ const BUNDLE_DIR = join(homedir(), ".crow", "bundles", "companion");
 
 /* ---------- .env helpers ---------- */
 
+// Compose-exact .env codec from the Crow app (bundle-env-codec.js). This file is loaded
+// from ~/.crow/bundles/companion/, so resolve the app root the way maker-lab does.
+const __companionAppRoot = (() => {
+  const ok = (p) => !!p && existsSync(join(p, "servers", "db.js"));
+  const guess = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  return ok(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT : guess;
+})();
+const { parseEnvText, updateEnvText } = await import(pathToFileURL(join(__companionAppRoot, "servers", "gateway", "bundle-env-codec.js")).href);
+
 function readBundleEnv() {
   const envPath = join(BUNDLE_DIR, ".env");
   if (!existsSync(envPath)) return {};
-  const env = {};
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (match) env[match[1]] = match[2];
-  }
-  return env;
+  return parseEnvText(readFileSync(envPath, "utf8"));
 }
 
+/** Line-preserving: only keys whose value changed are rewritten; blanked/removed keys are dropped. */
 function writeBundleEnv(env) {
   const envPath = join(BUNDLE_DIR, ".env");
-  const lines = Object.entries(env)
-    .filter(([, v]) => v !== undefined && v !== "")
-    .map(([k, v]) => `${k}=${v}`);
-  writeFileSync(envPath, lines.join("\n") + "\n");
+  const oldText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const old = parseEnvText(oldText);
+  const updates = {};
+  const remove = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined || v === "") { if (Object.hasOwn(old, k)) remove.push(k); }
+    else if (old[k] !== String(v)) updates[k] = v;
+  }
+  for (const k of Object.keys(old)) if (!Object.hasOwn(env, k)) remove.push(k);
+  writeFileSync(envPath, updateEnvText(oldText, updates, { remove }));
 }
 
 function escapeHtml(s) {

@@ -1,7 +1,7 @@
 {
   "id": "pixelfed",
   "name": "Pixelfed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Federated photo-sharing server over ActivityPub — Instagram-alternative on the fediverse. Publish photos/stories/collections; remote Mastodon/GoToSocial/Funkwhale followers see your posts in their timelines.",
   "type": "bundle",
   "author": "Crow",

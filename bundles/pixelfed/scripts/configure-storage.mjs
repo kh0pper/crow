@@ -15,18 +15,28 @@
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENV_PATH = resolve(__dirname, "..", ".env");
 
-function parseEnv(text) {
-  const out = {};
-  for (const line of text.split("\n")) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) out[m[1]] = m[2].replace(/^"|"$/g, "");
+// Compose-exact .env codec (servers/gateway/bundle-env-codec.js): the installer quotes values
+// with spaces, quotes, $ or #. An INSTALLED copy runs from ~/.crow/bundles/<id>/scripts/, where
+// the repo-relative path does not exist — so resolve the app from CROW_APP_ROOT, then the
+// in-repo location, and otherwise use the copy shipped beside this script. A failed import
+// must never leave S3 storage silently unconfigured.
+async function loadCodec() {
+  for (const root of [process.env.CROW_APP_ROOT, resolve(__dirname, "..", "..", "..")]) {
+    if (!root) continue;
+    const p = resolve(root, "servers", "gateway", "bundle-env-codec.js");
+    if (!existsSync(p)) continue;
+    try { return await import(pathToFileURL(p).href); } catch { /* try the next location */ }
   }
-  return out;
+  return import(new URL("./env-codec-fallback.mjs", import.meta.url).href);
+}
+const codec = await loadCodec();
+function parseEnv(text) {
+  return codec.parseEnvText(text);
 }
 
 function loadEnv() {
@@ -74,7 +84,7 @@ async function main() {
 
   const BEGIN = "# crow-pixelfed-storage BEGIN (managed by scripts/configure-storage.mjs — do not edit)";
   const END = "# crow-pixelfed-storage END";
-  const block = [BEGIN, ...Object.entries(mapped).map(([k, v]) => `${k}=${v}`), END, ""].join("\n");
+  const block = [BEGIN, ...Object.entries(mapped).map(([k, v]) => `${k}=${codec.encodeEnvValue(v)}`), END, ""].join("\n");
 
   let cur = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf8") : "";
   if (cur.includes(BEGIN)) {
