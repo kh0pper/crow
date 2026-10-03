@@ -796,7 +796,9 @@ export function createInteractiveEngine({
    */
   function mintedSummary(world) {
     try {
-      const j = JSON.parse(readFileSync(join(world.sessionDir, ".mcp.json"), "utf8"));
+      // S6-CROW: in fd delivery mode there is no file — the world carries
+      // the built config it will pipe to pi; count off that.
+      const j = world.mcpConfig || JSON.parse(readFileSync(join(world.sessionDir, ".mcp.json"), "utf8"));
       const names = Object.keys((j && j.mcpServers) || {}).filter((n) => !(j.mcpServers[n] && j.mcpServers[n].disabled));
       return ": " + names.length + " MCP server(s) minted";
     } catch {

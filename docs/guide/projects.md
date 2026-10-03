@@ -97,6 +97,7 @@ Every project gets a directory at `~/.crow/data/projects/<slug>/workspace/`. Thi
 
 - Where bots assigned to the project write artifacts (`<workspace>/bots/<bot_id>/`)
 - The default `write_paths` entry for bots in the project
+- Readable by every bot in the project: Crow adds it to the bot's read folders automatically. Bots outside the project cannot read it unless you list it under **Permissions › Folders this bot can read**.
 - Available to agents via the `crow_workspace_dir` MCP tool
 
 The directory persists across project archive (it's only deleted on hard delete).

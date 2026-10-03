@@ -40,6 +40,7 @@ import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
+import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
@@ -320,11 +321,26 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     const { sections } = resolveSkills(def.skills || [], { crowHome });
     for (const s of sections) appendFileSync(sysFile, "\n\n" + s.text);
 
-    // Per-job .mcp.json so the bot has its configured tools. Remote disabled for
+    // Per-job MCP config so the bot has its configured tools. Remote disabled for
     // background jobs (no peer fan-out without an explicit live operator turn).
+    // S6-CROW: in fd mode (mcp-delivery.mjs) nothing is written to the
+    // /tmp/pibot-job-* dir — PiRpc pipes the built JSON to pi instead.
+    const mcpDelivery = mcpConfigDelivery();
+    let mcpConfig = null;
     try {
-      writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job) });
+      const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job),
+        write: mcpDelivery === "file" });
+      mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
+    // S6-CROW: a project bot's background job reads its project workspace,
+    // exactly like its channel turns (bot-read-paths.mjs). No project => none.
+    let projectWorkspaceDir = null;
+    if (bot.project_id != null && typeof bridge.loadProjectSpace === "function") {
+      try {
+        const space = bridge.loadProjectSpace(Number(bot.project_id));
+        projectWorkspaceDir = (space && space.workspace_dir) || null;
+      } catch (e) { log("job project lookup failed (non-fatal): " + ((e && e.message) || e)); }
+    }
 
     const resolved = await resolveModel(def, { escalate: !!job.escalate });
     // M2: fail the job before spawning when pi cannot use the resolved model.
@@ -338,6 +354,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     const pi = new bridge.PiRpc({
       def, sessionDir, resolved, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
+      projectWorkspaceDir, mcpDelivery, mcpConfig,
     });
     try {
       const st0 = await pi.getState().catch(() => null);

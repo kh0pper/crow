@@ -97,6 +97,7 @@ Cada proyecto obtiene un directorio en `~/.crow/data/projects/<slug>/workspace/`
 
 - Donde los bots asignados al proyecto escriben artefactos (`<workspace>/bots/<bot_id>/`)
 - La entrada `write_paths` predeterminada para los bots del proyecto
+- Legible por todos los bots del proyecto: Crow la añade automáticamente a sus carpetas de lectura. Los bots fuera del proyecto no pueden leerla a menos que la añadas en **Permisos › Carpetas que este bot puede leer**.
 - Disponible para los agentes vía la herramienta MCP `crow_workspace_dir`
 
 El directorio persiste cuando el proyecto se archiva (solo se elimina con el borrado definitivo).

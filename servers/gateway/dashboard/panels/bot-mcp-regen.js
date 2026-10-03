@@ -5,6 +5,7 @@
  */
 import { writeBotMcp } from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import { resolveCrowHome } from "../../../../scripts/pi-bots/ext_registry.mjs";
+import { mcpConfigDelivery } from "../../../../scripts/pi-bots/mcp-delivery.mjs";
 
 /** Resolve the sessionDir pi runs from: project workspace wins over def.session_dir. */
 export async function resolveBotSessionDir(db, botId, def, projectId) {
@@ -19,7 +20,14 @@ export async function resolveBotSessionDir(db, botId, def, projectId) {
   return sessionDir;
 }
 
-/** Regenerate the bot's .mcp.json from its current def+project. Returns writeBotMcp's result. */
+/**
+ * Regenerate the bot's .mcp.json from its current def+project. Returns
+ * writeBotMcp's result WITHOUT the built config (`json` carries signed actor
+ * headers and bearer tokens; callers only report path/servers/warnings).
+ * S6-CROW: in fd delivery mode nothing is written — the bridge builds and
+ * pipes the config per turn — so this validates the selection, removes any
+ * stale on-disk copy, and returns path: null.
+ */
 export async function regenerateBotMcp(db, botId) {
   const row = (await db.execute({
     sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?",
@@ -28,5 +36,7 @@ export async function regenerateBotMcp(db, botId) {
   if (!row) throw new Error("bot_not_found");
   const def = JSON.parse(row.definition || "{}");
   const sessionDir = await resolveBotSessionDir(db, botId, def, row.project_id);
-  return writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome() });
+  const r = writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome(), write: mcpConfigDelivery() === "file" });
+  const { json: _omit, ...safe } = r;
+  return safe;
 }
