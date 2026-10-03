@@ -98,20 +98,36 @@ Install from the Extensions page or via CLI:
 crow bundle install ntfy
 ```
 
-### Configuration
+### Automatic setup
+
+Crow wires itself to the server — there is nothing to copy into `.env`:
+
+1. After the extension installs (and once at gateway start, if it is installed but not set up yet), Crow creates its **own login** on the ntfy server — a publish-only user and a read-only user, each with a token — and a **private topic** named after this instance (`crow-<instance id>`). The server runs with deny-all default access and the topic is closed to anonymous users, so only Crow and your phone can use it.
+2. The Crow Android app fetches the server address, topic and the **read-only** token from `GET /api/push/ntfy-config` after you sign in. The publish token never leaves the gateway.
+3. **Settings › Notifications › Phone notifications** shows the channel, the address phones use, when a phone last fetched the settings, and whether the last notification was accepted — plus **Send test notification** and **Check and repair**.
+
+Set **Address phones use** to the HTTPS address your phone reaches the server at (for example a Tailscale Serve port such as `https://your-computer.your-tailnet.ts.net:8445`). Left empty, Crow uses this gateway's address with the server's port, which matches the Tailscale HTTPS rule the installer adds.
+
+Several Crow instances on one computer can share one ntfy server: each instance gets its own login, topic and tokens (keyed by its instance id). The settings live in `<data dir>/ntfy-push.json` (mode 0600) — outside the database on purpose, so corruption alerts can still be pushed when the database is damaged.
+
+### Configuring by environment (advanced)
+
+If `NTFY_TOPIC` is set in the gateway's environment, Crow uses the environment exactly as before and does not set anything up automatically:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NTFY_TOPIC` | `crow` | Topic name (unique to your instance) |
-| `NTFY_PORT` | `2586` | Server port (localhost only) |
-| `NTFY_AUTH_TOKEN` | *(empty)* | Access token for private topics |
+| `NTFY_TOPIC` | *(unset)* | Topic to publish to; setting it turns automatic setup off |
+| `NTFY_AUTH_TOKEN` | *(empty)* | Token used to publish (and handed to apps unless `NTFY_SUBSCRIBER_TOKEN` is set) |
+| `NTFY_SUBSCRIBER_TOKEN` | *(empty)* | Read-only token handed to apps instead of `NTFY_AUTH_TOKEN` |
+| `NTFY_EXTRA_TOPICS` | *(empty)* | Extra topics the app subscribes to (comma-separated; environment mode only) |
+| `NTFY_EXTERNAL_URL` | *(derived)* | Address phones use; overrides the Settings field |
+| `NTFY_HOST` / `NTFY_PORT` | `localhost` / `2586` | Where the gateway publishes |
 
-### Phone setup
+`CROW_DISABLE_NTFY_AUTOWIRE=1` turns off the boot-time setup. Uninstalling the extension revokes this Crow's notification tokens.
 
-1. Install the ntfy app on your phone
-2. In the app, add a server: `http://<your-tailscale-ip>:2586`
-3. Subscribe to your topic (default: `crow`)
-4. All Crow notifications now push instantly to your phone
+### Other ntfy apps
+
+The standalone ntfy app works too: add the server address, then subscribe to the topic shown in Settings with a read-only token (`docker exec crow-ntfy ntfy token list crow-<id>-app`).
 
 ### Priority mapping
 

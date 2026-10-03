@@ -55,6 +55,8 @@ import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../share
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
+import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
+import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
@@ -2438,6 +2440,19 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
+    // ntfy autowire (spec 2026-10-03): Crow creates its own login + private topic on the
+    // server it just started. Non-fatal — Settings › Notifications can re-run it.
+    if (manifest?.autowire === AUTOWIRE_KIND && !composeFailure) {
+      if (process.env.NTFY_TOPIC) {
+        appendLog(job, "Phone notifications: NTFY_TOPIC is set in this gateway's environment, so it keeps using that configuration");
+      } else {
+        let port;
+        try { port = parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8")).NTFY_PORT; } catch { /* no .env */ }
+        const wired = await provisionNtfy({ runner: _dockerRunnerForTest || run, port, log: (m) => appendLog(job, m) });
+        if (!wired.ok) appendLog(job, `Phone notifications are not set up yet: ${wired.reason} (Settings › Notifications can retry)`);
+      }
+    }
+
     // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
     if (manifest?.ports && Array.isArray(manifest.ports)) {
       const { execFileSync: efs } = await import("node:child_process");
@@ -2948,6 +2963,11 @@ export default function bundlesRouter() {
             if (own.refusal) {
               appendLog(job, `Containers left running: ${own.refusal}`);
             } else {
+              if (manifest?.autowire === AUTOWIRE_KIND && readStoredNtfyConfig()) {
+                // Revoke this instance's tokens while the server is still up, then forget them.
+                await deprovisionNtfy({ runner: _dockerRunnerForTest || run });
+                appendLog(job, "Phone notifications turned off (this Crow's notification tokens were revoked)");
+              }
               appendLog(job, "Stopping containers...");
               const downArgs = ["down", "--remove-orphans"];
               if (delete_data) downArgs.push("-v");
