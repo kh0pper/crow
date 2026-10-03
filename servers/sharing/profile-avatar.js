@@ -9,10 +9,20 @@
  * (what the gateway runs), then the repo tree — using only `rollGenome` and
  * `drawBird`, exports that have existed since the engine shipped, so an older
  * installed copy still renders (Plan A ruling R1-1: core needs no NEW bundle
- * export). Triggers: the in-process bus events `ramble:hatched` (the panel
- * routes and the transport already poke it) and `ramble:bird-activated` (the
- * activate route). A hatch inside the stdio Ramble MCP process has no bus to
- * this process; the next gateway-side hatch/activation/profile save repaints.
+ * export). Phase 4: the portrait carries the bird's REAL mood (D2 — a
+ * neglected bird looks it to contacts; core keeps its own copy of pet.js's
+ * decay-on-read) and its outfit (spec §5.3), drawn with the engine's
+ * `applyOutfit` when the loaded engine has it — an older engine draws the
+ * plain bird and never overwrites a dressed picture. Triggers: the in-process
+ * bus events `ramble:hatched` (the panel routes and the transport already
+ * poke it), `ramble:bird-activated` (the activate route) and
+ * `ramble:outfit-changed` (the wear route), plus a periodic tick for what has
+ * no event (decay crossing a mood threshold, an outfit changed on another
+ * instance arriving by sync). Triggers are COALESCED (§5.4) into one settled
+ * refresh, and the tick and debounced runs are GATED on this instance's own
+ * render inputs, so the user's instances never ping-pong the replicated
+ * picture. A hatch inside the stdio Ramble MCP process has no bus to this
+ * process; the next gateway-side trigger or tick repaints.
  */
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -36,8 +46,31 @@ export function birdEngineCandidates() {
   ];
 }
 
+/* Core's own copy of pet.js's decay-on-read and moodFor — core never imports
+ * a bundle module at runtime (an installed copy may be older or absent).
+ * tests/profile-avatar-bird.test.js pins these to pet.js's exports. */
+const DECAY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DECAY_PER_INTERVAL = 10;
+const MOODS = new Set(["happy", "tired", "alarmed"]);
+export const AVATAR_SETTLE_MS = 20_000;
+export const AVATAR_TICK_MS = 30 * 60_000;
+
+/* Deploy day: the gateway can load the bird engine BEFORE bundle repair
+ * copies the new installed bird-svg.cjs in (boot order: sharing boot runs
+ * the hooks' boot repaint before mcp-mounts' repairInstalledBundleAssets),
+ * and require() caches the module — so an engine without applyOutfit is
+ * re-probed, at most once a minute, with its require-cache entries dropped.
+ * Implemented inside loadBirdEngine's DEFAULT-candidates path only. */
+const ENGINE_REPROBE_MS = 60_000;
+
+/* What THIS instance last rendered, per db handle. In memory on purpose: it
+ * is a per-process anti-ping-pong memo, not state — a restart's boot repaint
+ * is ungated and re-establishes it. */
+let _lastInputs = new WeakMap();
+
 let _engine; // undefined = not tried yet; null = unavailable
-export function loadBirdEngine({ candidates, fresh = false } = {}) {
+let _engineProbedAt = 0;
+export function loadBirdEngine({ candidates, fresh = false, now = Date.now() } = {}) {
   // Fix round 1, Finding 4: a probe called with EXPLICIT candidates (a test
   // deliberately pointing at a nonexistent path) must never write the
   // module-level cache — only a call using the real default candidate list
@@ -46,17 +79,22 @@ export function loadBirdEngine({ candidates, fresh = false } = {}) {
   // `renderBirdAvatar(bird)`), so a bird would silently stop rendering until
   // something happened to re-warm the cache.
   const usingDefaults = candidates === undefined;
-  if (usingDefaults && _engine !== undefined && !fresh) return _engine;
+  if (usingDefaults && _engine !== undefined && !fresh) {
+    const stale = _engine && typeof _engine.applyOutfit !== "function" && now - _engineProbedAt >= ENGINE_REPROBE_MS;
+    if (!stale) return _engine;
+    fresh = true; // fall through to a re-probe
+  }
   const list = usingDefaults ? birdEngineCandidates() : candidates;
   let found = null;
   for (const p of list) {
     try {
       if (!existsSync(p)) continue;
+      if (fresh) { try { delete require.cache[require.resolve(p)]; } catch {} }
       const mod = require(p);
       if (typeof mod?.rollGenome === "function" && typeof mod?.drawBird === "function") { found = mod; break; }
     } catch { /* try the next candidate */ }
   }
-  if (usingDefaults) _engine = found;
+  if (usingDefaults) { _engine = found; _engineProbedAt = now; }
   return found;
 }
 
@@ -75,18 +113,57 @@ export async function readActiveBird(db) {
   } catch { return null; }
 }
 
-/** Pure: the "happy" portrait as an SVG data URI, validated; null on any engine complaint. */
+/** D2: the mood pet.js's petState would report on read (decay applied, nothing written). Never throws. */
+export function portraitMood(energy, lastFedAt, now = Date.now()) {
+  let e = Number(energy);
+  if (energy == null || !Number.isFinite(e)) return "happy";
+  const fed = Number(lastFedAt);
+  if (lastFedAt != null && Number.isFinite(fed) && now - fed >= DECAY_INTERVAL_MS) {
+    e = Math.max(0, e - Math.floor((now - fed) / DECAY_INTERVAL_MS) * DECAY_PER_INTERVAL);
+  }
+  return e >= 60 ? "happy" : e >= 30 ? "tired" : "alarmed";
+}
+
+/** The active bird as it should look to contacts: mood + outfit. Never throws. */
+export async function readPortrait(db, { now = Date.now() } = {}) {
+  const bird = await readActiveBird(db);
+  if (!bird) return null;
+  let mood = "happy";
+  try {
+    const { rows } = await db.execute({ sql: "SELECT energy, last_fed_at FROM ramble_pet WHERE owner = 'self'", args: [] });
+    if (rows[0]) mood = portraitMood(rows[0].energy, rows[0].last_fed_at, now);
+  } catch { /* default bird */ }
+  let outfit = null;
+  try {
+    // Its own query: on an older bundle's table the column is absent, and that
+    // must cost the outfit, never the whole portrait.
+    const { rows } = await db.execute({ sql: "SELECT outfit_json FROM ramble_eggs WHERE egg_id = ?", args: [bird.egg_id] });
+    const raw = rows[0]?.outfit_json;
+    if (typeof raw === "string" && raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) outfit = parsed;
+    }
+  } catch { outfit = null; }
+  return { ...bird, mood, outfit };
+}
+
+/** Pure: the portrait (mood default "happy", outfit default none) as an SVG data URI, validated; null on any engine complaint. */
 export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
   if (!bird || !engine) return null;
   try {
+    let genome = engine.rollGenome(bird.seed, bird.species);
+    // applyOutfit validates against its own slot table; an older installed
+    // engine without it simply draws the plain bird.
+    if (bird.outfit && typeof engine.applyOutfit === "function") genome = engine.applyOutfit(genome, bird.outfit);
+    const mood = MOODS.has(bird.mood) ? bird.mood : "happy";
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
-      + engine.drawBird(engine.rollGenome(bird.seed, bird.species), "happy") + "</svg>";
+      + engine.drawBird(genome, mood) + "</svg>";
     return validateAvatar("data:image/svg+xml;base64," + Buffer.from(svg, "utf8").toString("base64"));
   } catch { return null; }
 }
 
-export async function renderActiveBirdAvatar(db) {
-  return renderBirdAvatar(await readActiveBird(db));
+export async function renderActiveBirdAvatar(db, { now = Date.now() } = {}) {
+  return renderBirdAvatar(await readPortrait(db, { now }));
 }
 
 async function readProfilePictureSettings(db) {
@@ -114,8 +191,21 @@ async function readProfilePictureSettings(db) {
  * unaffected by this change). Otherwise: re-render; if the portrait differs
  * from what is stored, store it and broadcast ONCE; if it is the same but
  * the last fan-out was incomplete (pending flag), re-send. Never throws.
+ *
+ * Phase 4 options (the defaults keep every existing direct-call behaviour):
+ * - `resend: false` never re-sends a stuck pending fan-out (neither the
+ *   picture-source nor the bird-source branch) — the periodic tick uses it so
+ *   a dead contact's pending flag never turns every tick into a fan-out.
+ * - `gate: true` returns `inputs-same` when THIS instance's own render inputs
+ *   ([species, seed, mood, outfit]) are unchanged since it last rendered,
+ *   without comparing to the stored picture — that picture is REPLICATED and
+ *   another of the user's instances may legitimately draw it differently
+ *   (engine skew, local decay skew); comparing would make them ping-pong.
+ * - A bird wearing a non-empty outfit + an engine without `applyOutfit`
+ *   returns `engine-too-old`: an instance that cannot draw the outfit never
+ *   overwrites a dressed picture with a plain one.
  */
-export async function refreshBirdAvatar(db, managers) {
+export async function refreshBirdAvatar(db, managers, { gate = false, resend = true, now = Date.now(), engine = loadBirdEngine() } = {}) {
   try {
     const { avatar, source } = await readProfilePictureSettings(db);
     if (source !== "bird") {
@@ -123,20 +213,40 @@ export async function refreshBirdAvatar(db, managers) {
       // the profile save handler, so a fan-out left incomplete while the
       // source was picture would otherwise sit unsent until the user next
       // opens My Profile. Self-heal it here too, same as the bird path below.
-      if (await readBroadcastPending(db)) {
+      if (resend && (await readBroadcastPending(db))) {
         return { changed: false, reason: "resend", sent: await broadcastProfile(db, managers?.nostrManager) };
       }
       return { changed: false, reason: "source-picture" };
     }
-    const uri = await renderActiveBirdAvatar(db);
+    const bird = await readPortrait(db, { now });
+    if (!bird || !engine) return { changed: false, reason: "no-bird" };
+    // An engine that cannot dress the bird must not replace a dressed
+    // picture with a plain one (the user's other, newer instance drew it).
+    const dressed = !!bird.outfit && Object.keys(bird.outfit).length > 0;
+    if (dressed && typeof engine.applyOutfit !== "function") return { changed: false, reason: "engine-too-old" };
+    const inputs = JSON.stringify([bird.species, bird.seed, bird.mood, bird.outfit || {}]);
+    if (gate && _lastInputs.get(db) === inputs) {
+      // The stored picture is REPLICATED: another of the user's instances may
+      // have drawn it from slightly different inputs. Only a change in our own
+      // inputs is a reason to repaint — never "stored differs from mine".
+      if (resend && (await readBroadcastPending(db))) {
+        return { changed: false, reason: "resend", sent: await broadcastProfile(db, managers?.nostrManager) };
+      }
+      return { changed: false, reason: "inputs-same" };
+    }
+    const uri = renderBirdAvatar(bird, engine);
     if (!uri) return { changed: false, reason: "no-bird" };
     if (uri === avatar) {
+      _lastInputs.set(db, inputs);
       // R2-S3: the picture is right, but did the last fan-out reach everyone?
-      if (!(await readBroadcastPending(db))) return { changed: false, reason: "same" };
+      if (!resend || !(await readBroadcastPending(db))) return { changed: false, reason: "same" };
       const sent = await broadcastProfile(db, managers?.nostrManager);
       return { changed: false, reason: "resend", sent };
     }
     await upsertSetting(db, "profile_avatar_url", uri);
+    // Memo only AFTER the store succeeded: a busy-db throw above must leave
+    // the next gated run free to try again, not freeze a stale picture.
+    _lastInputs.set(db, inputs);
     // Fix round 1, Finding 3: a stale local override for this key is
     // cosmetic; losing the broadcast between "picture stored" and "fan-out
     // sent" is not. deleteLocalSetting touches the filesystem (instance id)
@@ -153,8 +263,20 @@ export async function refreshBirdAvatar(db, managers) {
 }
 
 let _hooksInstalled = false;
-/** Once per process: repaint on a hatch or an activation. Idempotent inside, so a hatch that changed nothing is free. */
-export function installBirdAvatarHooks(managers, { emitter = bus } = {}) {
+let _settleTimer = null;
+let _tickTimer = null;
+/**
+ * Once per process. §5.4: outfits and mood both feed the picture, and every
+ * change re-broadcasts to every contact — so triggers are COALESCED: each
+ * (re)arms one settle timer and only its firing runs a refresh, so trying on
+ * four hats sends one picture. Runs stay serialized (the promise chain, fix
+ * round 1 Finding 2). Debounced runs are GATED on this instance's own inputs
+ * (no ping-pong between the user's instances over the replicated picture).
+ * The tick covers what has no event — decay crossing a mood threshold, an
+ * outfit changed on another instance arriving by sync — and never re-sends a
+ * stuck pending fan-out; only a real bus event retries that.
+ */
+export function installBirdAvatarHooks(managers, { emitter = bus, settleMs = AVATAR_SETTLE_MS, tickMs = AVATAR_TICK_MS } = {}) {
   if (_hooksInstalled) return false;
   _hooksInstalled = true;
   // Fix round 1, Finding 2: two triggers landing in the same tick (two
@@ -166,12 +288,37 @@ export function installBirdAvatarHooks(managers, { emitter = bus } = {}) {
   // read-render-write-broadcast has finished, so it re-reads the
   // already-updated picture and takes the no-op/resend branch instead.
   let inflight = Promise.resolve();
-  const run = () => { inflight = inflight.then(() => refreshBirdAvatar(managers?.db, managers)).catch(() => {}); };
-  emitter.on("ramble:hatched", run);
-  emitter.on("ramble:bird-activated", run);
+  const run = (opts) => { inflight = inflight.then(() => refreshBirdAvatar(managers?.db, managers, opts)).catch(() => {}); };
+  // True only if at least one bus EVENT (not just the tick) armed the
+  // current settle window — the tick alone never re-sends a pending fan-out.
+  let wantResend = false;
+  const schedule = (fromEvent) => {
+    if (fromEvent) wantResend = true;
+    if (_settleTimer) clearTimeout(_settleTimer);
+    _settleTimer = setTimeout(() => {
+      _settleTimer = null;
+      const resend = wantResend;
+      wantResend = false;
+      run({ gate: true, resend });
+    }, Math.max(0, Number(settleMs) || 0));
+    _settleTimer.unref?.();
+  };
+  const onEvent = () => schedule(true);
+  emitter.on("ramble:hatched", onEvent);
+  emitter.on("ramble:bird-activated", onEvent);
+  emitter.on("ramble:outfit-changed", onEvent);
+  if (Number(tickMs) > 0) {
+    _tickTimer = setInterval(() => schedule(false), Number(tickMs));
+    _tickTimer.unref?.();
+  }
   // R1-Q2: the bird may have changed while this gateway was down (or in the
-  // stdio MCP process, which has no bus to us) — one idempotent repaint at boot.
-  run();
+  // stdio MCP process, which has no bus to us) — one idempotent repaint at
+  // boot, not debounced and not gated.
+  run({});
   return true;
 }
-export function __resetBirdAvatarHooksForTest() { _hooksInstalled = false; _engine = undefined; }
+export function __resetBirdAvatarHooksForTest() {
+  _hooksInstalled = false; _engine = undefined; _lastInputs = new WeakMap();
+  if (_settleTimer) { clearTimeout(_settleTimer); _settleTimer = null; }
+  if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
+}

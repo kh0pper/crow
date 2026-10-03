@@ -10,19 +10,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { createClient } from "@libsql/client";
 
 import {
   birdEngineCandidates, loadBirdEngine, readActiveBird, renderBirdAvatar, renderActiveBirdAvatar,
   refreshBirdAvatar, installBirdAvatarHooks, __resetBirdAvatarHooksForTest,
+  portraitMood, readPortrait, AVATAR_SETTLE_MS, AVATAR_TICK_MS,
 } from "../servers/sharing/profile-avatar.js";
 import { validateAvatar, AVATAR_MAX_BYTES } from "../servers/sharing/avatar.js";
 import { setSettingsSyncManager } from "../servers/gateway/dashboard/settings/registry.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { PROFILE_BROADCAST_PENDING_KEY, readBroadcastPending } from "../servers/sharing/peer-profile.js";
+import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";
 
 const REPO_ENGINE = join(import.meta.dirname, "..", "bundles", "ramble", "server", "bird-svg.cjs");
 
@@ -222,8 +224,8 @@ test("installBirdAvatarHooks: a hatch or an activation on the bus refreshes; ins
     await putSetting(db, "profile_avatar_source", "bird");
     const sent = [];
     const emitter = new EventEmitter();
-    assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter }), true);
-    assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter }), false, "second install is a no-op");
+    assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 0 }), true);
+    assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 0 }), false, "second install is a no-op");
     const first = renderBirdAvatar({ species: "penguin", seed: 11 });
     await settle(db, "profile_avatar_url", first);
     assert.equal(await setting(db, "profile_avatar_url"), first, "installing repaints once (a bird that changed while we were down)");
@@ -252,7 +254,7 @@ test("installBirdAvatarHooks: two triggers landing in the same tick serialize â€
     await putSetting(db, "profile_avatar_source", "bird");
     const sent = [];
     const emitter = new EventEmitter();
-    installBirdAvatarHooks(mgrsWith(db, sent), { emitter });
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 0 });
     const first = renderBirdAvatar({ species: "crow", seed: 77 });
     await settle(db, "profile_avatar_url", first);
     assert.equal(sent.length, 1, "the install-time repaint");
@@ -271,4 +273,248 @@ test("installBirdAvatarHooks: two triggers landing in the same tick serialize â€
     assert.equal(await setting(db, "profile_avatar_url"), second);
     assert.equal(sent.length, 2, "exactly one NEW broadcast for the two overlapping triggers, not two");
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("portraitMood is exactly pet.js's decay-on-read + moodFor (core keeps its own copy for skew; this pins them together)", () => {
+  assert.equal(DECAY_INTERVAL_MS, 6 * 60 * 60 * 1000);
+  assert.equal(DECAY_PER_INTERVAL, 10);
+  const T = 1_760_000_000_000;
+  for (const energy of [0, 29, 30, 59, 60, 61, 100, 250]) for (const k of [0, 1, 2, 3, 7]) {
+    const expected = moodFor(Math.max(0, energy - k * DECAY_PER_INTERVAL));
+    assert.equal(portraitMood(energy, T, T + k * DECAY_INTERVAL_MS + 1), expected, `${energy}/${k}`);
+  }
+  assert.equal(portraitMood(10, null, T), "alarmed", "never fed = no decay, mood from energy");
+  assert.equal(portraitMood("junk", null, T), "happy", "junk energy reads as the default bird, never throws");
+});
+
+test("readPortrait: mood from the pet row with decay, outfit from the bird row; tolerates a missing outfit column", async () => {
+  const db = createClient({ url: "file::memory:" });
+  await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+  const T = 1_760_000_000_000;
+  await db.execute({ sql: "UPDATE ramble_pet SET energy = 65, last_fed_at = ? WHERE owner = 'self'", args: [T] });
+  assert.equal((await readPortrait(db, { now: T })).mood, "happy");
+  assert.equal((await readPortrait(db, { now: T + DECAY_INTERVAL_MS })).mood, "tired", "one decay step crosses 60");
+  await db.execute(`UPDATE ramble_eggs SET outfit_json = '{"scarf":"knit"}' WHERE egg_id = 'b1'`);
+  assert.deepEqual((await readPortrait(db, { now: T })).outfit, { scarf: "knit" });
+  await db.execute(`UPDATE ramble_eggs SET outfit_json = '{broken' WHERE egg_id = 'b1'`);
+  assert.equal((await readPortrait(db, { now: T })).outfit, null, "corrupt = no outfit, no throw");
+  await db.execute("ALTER TABLE ramble_eggs DROP COLUMN outfit_json");
+  const p = await readPortrait(db, { now: T });
+  assert.equal(p.species, "crow");
+  assert.equal(p.outfit, null, "an older bundle's table still gives a portrait");
+});
+
+test("renderBirdAvatar honours mood and outfit; the defaults are byte-identical to the old portrait", () => {
+  const plain = renderBirdAvatar({ species: "crow", seed: 2 });
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, mood: "happy", outfit: null }), plain);
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, mood: "nonsense" }), plain, "unknown mood = happy");
+  assert.notEqual(renderBirdAvatar({ species: "crow", seed: 2, mood: "alarmed" }), plain, "D2: a neglected bird looks it");
+  assert.notEqual(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "round" } }), plain);
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "monocle" } }), plain, "unknown value ignored");
+  const full = loadBirdEngine();
+  const oldEngine = { rollGenome: full.rollGenome, drawBird: full.drawBird };
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "round" } }, oldEngine), plain, "an engine without applyOutfit draws the plain bird, never throws");
+});
+
+test("gate: an unchanged OWN input set never repaints, even when the replicated stored picture differs (no instance ping-pong)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered", "first gated run has no memo, so it renders");
+    assert.equal(sent.length, 1);
+    // Another of the user's instances (older engine, different local decay)
+    // wrote a different picture and it synced in.
+    await putSetting(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2, mood: "tired" }));
+    assert.deepEqual(await refreshBirdAvatar(db, m, { gate: true }), { changed: false, reason: "inputs-same" });
+    assert.equal(sent.length, 1, "no counter-broadcast");
+    // A real change of THIS instance's inputs does repaint.
+    await db.execute({ sql: "UPDATE ramble_pet SET energy = 61, last_fed_at = ? WHERE owner = 'self'", args: [Date.now() - 4 * DECAY_INTERVAL_MS - 1000] });
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered");
+    assert.equal(sent.length, 2);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("an engine that cannot draw a worn outfit never overwrites the dressed picture", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await db.execute(`UPDATE ramble_eggs SET outfit_json = '{"hat":"beanie"}' WHERE egg_id = 'b1'`);
+    await putSetting(db, "profile_avatar_source", "bird");
+    const dressed = renderBirdAvatar({ species: "crow", seed: 2, outfit: { hat: "beanie" } });
+    await putSetting(db, "profile_avatar_url", dressed);
+    const full = loadBirdEngine();
+    const sent = [];
+    const r = await refreshBirdAvatar(db, mgrsWith(db, sent), { engine: { rollGenome: full.rollGenome, drawBird: full.drawBird } });
+    assert.deepEqual(r, { changed: false, reason: "engine-too-old" });
+    assert.equal(await setting(db, "profile_avatar_url"), dressed);
+    assert.equal(sent.length, 0);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("resend:false never re-sends a stuck pending fan-out (bird and picture sources)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    assert.deepEqual(await refreshBirdAvatar(db, m, { resend: false }), { changed: false, reason: "source-picture" });
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    await putSetting(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    assert.deepEqual(await refreshBirdAvatar(db, m, { resend: false }), { changed: false, reason: "same" });
+    assert.equal(sent.length, 0, "a dead contact's pending flag does not turn the tick into a fan-out");
+    assert.equal(await readBroadcastPending(db), true, "still pending for an event-driven refresh to retry");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("Â§5.4 coalescing: four try-ons inside the settle window = ONE broadcast of the final outfit", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 400, tickMs: 0 });
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    assert.equal(sent.length, 1, "boot repaint");
+    // No sleeps between try-ons: four writes + four triggers well inside 400 ms.
+    for (const hat of ["bow", "leaf", "beanie", "leaf"]) {
+      await db.execute({ sql: "UPDATE ramble_eggs SET outfit_json = ? WHERE egg_id = 'b1'", args: [JSON.stringify({ hat })] });
+      emitter.emit("ramble:outfit-changed", { egg_id: "b1" });
+    }
+    assert.equal(sent.length, 1, "nothing sent while still trying things on");
+    const final = renderBirdAvatar({ species: "crow", seed: 2, outfit: { hat: "leaf" } });
+    await settle(db, "profile_avatar_url", final);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(sent.length, 2, "exactly one broadcast for the settled outfit");
+    assert.equal(JSON.parse(sent[1].content).payload.avatar, final);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+// Regression guard: with the inputs memo, the second run is also deduped by
+// the gate, so this does not ISOLATE the promise chain â€” it pins the
+// observable contract (one broadcast) for the boot/event overlap.
+test("the boot repaint and an immediate trigger overlap: ONE broadcast", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "raven", seed: 5 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 0 });
+    emitter.emit("ramble:bird-activated", { egg_id: "b1" }); // same tick as the boot run
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "raven", seed: 5 }));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(sent.length, 1);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("the tick: a decay-driven mood change reaches the picture with no event; idle ticks send nothing", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter: new EventEmitter(), settleMs: 0, tickMs: 60 });
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    await new Promise((r) => setTimeout(r, 250)); // several ticks, nothing changed
+    assert.equal(sent.length, 1, "idle ticks broadcast nothing");
+    // Fed a day ago from 61: four decay steps -> 21 -> alarmed.
+    await db.execute({ sql: "UPDATE ramble_pet SET energy = 61, last_fed_at = ? WHERE owner = 'self'", args: [Date.now() - 4 * DECAY_INTERVAL_MS - 1000] });
+    const sad = renderBirdAvatar({ species: "crow", seed: 2, mood: "alarmed" });
+    await settle(db, "profile_avatar_url", sad);
+    assert.equal(await setting(db, "profile_avatar_url"), sad);
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(sent.length, 2, "one broadcast for the crossing, then quiet");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("the tick never re-sends a pending fan-out; a bus event does", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 40 });
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    // The boot run's broadcastProfile still writes pending 1 -> send -> 0 after
+    // the URL lands; wait for it to finish before planting our own flag.
+    for (let i = 0; i < 50 && (sent.length < 1 || await readBroadcastPending(db)); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sent.length, 1);
+    assert.equal(await readBroadcastPending(db), false);
+    const base = sent.length;
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(sent.length, base, "ticks leave a stuck pending flag alone");
+    emitter.emit("ramble:outfit-changed", { egg_id: "b1" });
+    for (let i = 0; i < 50 && sent.length === base; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sent.length, base + 1, "a real event retries the pending fan-out (existing R2-S3 behaviour)");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("a failed store does not freeze the picture: the next gated run renders again", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    let failOnce = true;
+    const flaky = new Proxy(db, { get(t, k) {
+      if (k === "execute") return async (q) => {
+        const sql = typeof q === "string" ? q : q?.sql;
+        if (failOnce && /dashboard_settings/.test(sql || "") && /^\s*(INSERT|UPDATE)/i.test(sql || "")) { failOnce = false; throw new Error("SQLITE_BUSY"); }
+        return t.execute(q);
+      };
+      const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+    } });
+    const sent = [];
+    assert.equal((await refreshBirdAvatar(flaky, mgrsWith(flaky, sent), { gate: true })).reason, "error");
+    assert.equal((await refreshBirdAvatar(flaky, mgrsWith(flaky, sent), { gate: true })).reason, "rendered", "not inputs-same");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("deploy day: a cached engine without applyOutfit is re-probed (default path), at most once a minute", async () => {
+  __resetBirdAvatarHooksForTest();
+  const dir = mkdtempSync(join(tmpdir(), "bird-engine-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = dir;
+    const target = join(dir, "bundles", "ramble", "server", "bird-svg.cjs");
+    mkdirSync(dirname(target), { recursive: true });
+    // An "0.12" engine: the real one with applyOutfit removed.
+    writeFileSync(target, `const real = require(${JSON.stringify(REPO_ENGINE)}); module.exports = { rollGenome: real.rollGenome, drawBird: real.drawBird };`);
+    const T = 1_760_000_000_000;
+    const old = loadBirdEngine({ now: T });
+    assert.equal(typeof old.applyOutfit, "undefined");
+    writeFileSync(target, readFileSync(REPO_ENGINE, "utf8")); // bundle repair copies 0.13 in
+    assert.equal(loadBirdEngine({ now: T + 1000 }), old, "within the minute: still cached");
+    const fresh = loadBirdEngine({ now: T + 61_000 });
+    assert.equal(typeof fresh.applyOutfit, "function", "re-probed and picked up the new copy");
+    assert.equal(loadBirdEngine({ now: T + 200_000 }), fresh, "a capable engine is never re-probed");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    __resetBirdAvatarHooksForTest();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaults: a short settle and a half-hourly tick", () => {
+  assert.equal(AVATAR_SETTLE_MS, 20_000);
+  assert.equal(AVATAR_TICK_MS, 30 * 60_000);
 });
