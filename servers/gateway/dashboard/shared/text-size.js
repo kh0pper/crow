@@ -13,7 +13,8 @@
  *   - textSizeHeadScript() runs as the FIRST thing in <head>, before any CSS
  *     is parsed and long before first paint, and writes
  *     <html data-text-size="small|default|large|xlarge">. No flash.
- *   - textSizeCss() maps that attribute to --crow-text-scale on :root and sets
+ *   - textSizeCss() maps that attribute to --crow-text-scale on :root (the
+ *     default of 1 lives with the other tokens in design-tokens.js) and sets
  *     html{font-size:calc(100% * var(--crow-text-scale))}. 100% is the
  *     BROWSER's own font-size setting, so a user who already raised it in the
  *     browser gets their size times ours, and browser zoom is untouched — we
@@ -46,12 +47,12 @@ export const TEXT_SIZES = [
 export const LEGACY_PERCH_STEP_MAP = ["small", "default", "large", "large", "xlarge"];
 
 /** CSS: the attribute → scale map, and the rem root that the dashboard
- *  inherits. :root carries the default so a page without the attribute (or
- *  with scripts blocked) renders at exactly the browser's own size. */
+ *  inherits. design-tokens.js's :root carries the default of 1, so a page
+ *  without the attribute (or with scripts blocked) renders at exactly the
+ *  browser's own size. */
 export function textSizeCss() {
   const rules = TEXT_SIZES.map((s) => `:root[data-text-size="${s.id}"]{--crow-text-scale:${s.scale}}`).join("\n  ");
-  return `:root{--crow-text-scale:1}
-  ${rules}
+  return `${rules}
   html{font-size:calc(100% * var(--crow-text-scale,1))}`;
 }
 

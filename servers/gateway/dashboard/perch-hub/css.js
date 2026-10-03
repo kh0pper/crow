@@ -30,7 +30,7 @@ export const PERCH_SPLIT_MIN_WIDTH = 900;
  *  calc(Npx * var(--pts,1)). --pts is 1 everywhere in the hub except inside
  *  the chat tab, where it follows --crow-text-scale — the DASHBOARD-WIDE text
  *  size (shared/text-size.js: one per-device preference, set from Settings ›
- *  Text size or from the Session tab's A− / A / A+, applied on <html> before
+ *  Text size or from the Session tab's A− / A / A+, applied on the html element before
  *  first paint). So the chat tab — messages, tool/file/phone cards, the ask card, the
  *  banner, the composer — scales as one, and the list, tabs and Session tab
  *  keep their size. Done as one transform rather than hand-editing ~90 rules

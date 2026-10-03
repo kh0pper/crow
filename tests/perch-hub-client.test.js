@@ -4543,7 +4543,8 @@ test("text size: defaults to Default with nothing stored; A+ steps up, saves the
   assert.equal(store.data[NEW_KEY], "large");
   assert.equal(store.data[OLD_KEY], undefined, "the old per-chat key is never written");
   assert.equal(hub.els["perch-text-size-value"].textContent, "Large");
-  assert.equal(hub.els["perch-hub-root"].getAttribute("data-text-size"), "large");
+  assert.equal(hub.els["perch-text-size-value"].getAttribute("aria-live"), "polite",
+    "the readout becomes a live region only after its first (load-time) fill");
 });
 
 test("text size: the stored dashboard-wide size is applied on load", async () => {

@@ -1007,7 +1007,7 @@ function dashboardCss() {
 
   /* Sidebar */
   .sidebar {
-    width: 240px;
+    width: var(--crow-sidebar-width);
     background: var(--crow-bg-surface);
     border-right: 1px solid var(--crow-border);
     display: flex;
@@ -1146,7 +1146,7 @@ function dashboardCss() {
        min-width:0 lets the column shrink and forces descendants to handle
        their own overflow. */
     min-width: 0;
-    margin-left: 240px;
+    margin-left: var(--crow-sidebar-width);
     min-height: 100vh;
     transition: margin-left 0.2s ease-out;
   }
@@ -1490,7 +1490,7 @@ function dashboardCss() {
   /* Desktop sidebar collapse — a persisted-per-viewer preference, entirely
      separate from the ≤768px overlay above (disjoint breakpoints, so the
      two never contend for the same .sidebar/.main-content declarations).
-     Collapsed = sidebar off-canvas, .main-content reclaims its 240px.
+     Collapsed = sidebar off-canvas, .main-content reclaims its width.
 
      "not all and (max-width: 768px)", not "(min-width: 769px)": those are
      NOT the same range. A width of 768.5px — reachable through browser zoom

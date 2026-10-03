@@ -1054,8 +1054,8 @@ export function perchHubJs(lang = "en") {
   /* TEXT SIZE. #407 (2026-10-02) gave Perch its own five-step A− / A / A+;
      since A11Y-TEXTSIZE (2026-10-03) the control is a CONSUMER of the
      dashboard-wide text size (shared/text-size.js): one per-device
-     preference, also set from Settings › Text size, applied on <html> as
-     data-text-size before first paint. The layout's head script already made
+     preference, also set from Settings › Text size, applied on the html element
+     as data-text-size before first paint. The layout's head script already made
      window.crowTextSize; the fallback below is the SAME runtime source,
      interpolated, for a page without that head (and for the test harness).
      The chat tab's css (--pts) reads --crow-text-scale, so stepping here
@@ -1066,8 +1066,13 @@ export function perchHubJs(lang = "en") {
   function applyTextStep(){
     var cur=TS.get(), ids=TS.ids, i=ids.indexOf(cur);
     TS.apply(cur);
-    var root=el('perch-hub-root'); if(root) root.setAttribute('data-text-size',cur);
-    var out=el('perch-text-size-value'); if(out) out.textContent=TEXT_NAMES[cur]||cur;
+    var out=el('perch-text-size-value');
+    if(out){
+      out.textContent=TEXT_NAMES[cur]||cur;
+      /* Live region only AFTER this first fill: the server renders Default,
+         and announcing the stored size on every page load is noise. */
+      if(!out.getAttribute('aria-live')) out.setAttribute('aria-live','polite');
+    }
     var dn=el('perch-text-smaller'), up=el('perch-text-larger'), rs=el('perch-text-reset');
     if(dn) dn.disabled=(i<=0);
     if(up) up.disabled=(i===ids.length-1);
@@ -1086,7 +1091,7 @@ export function perchHubJs(lang = "en") {
     if(rs) rs.onclick=function(){ TS.set('${TEXT_SIZE_DEFAULT}'); applyTextStep(); };
   })();
   /* Changed in another tab (the head script's storage listener re-applies
-     <html> and fires this): refresh the readout and the button states. */
+     the html element and fires this): refresh the readout and the button states. */
   bindOnce(window,'crow:text-size','textSize',function(){ if(live()) applyTextStep(); });
 
   if(SPLIT&&SPLIT.addEventListener){

@@ -40,9 +40,11 @@ for (const [name, render] of Object.entries(SHELLS)) {
   });
 }
 
-test("css: each step maps to --crow-text-scale; the root is 100% (the browser's own size) times the scale", () => {
+test("css: each step maps to --crow-text-scale; the root is 100% (the browser's own size) times the scale", async () => {
   const css = TS.textSizeCss();
-  assert.match(css, /:root\{--crow-text-scale:1\}/, "no attribute = exactly the browser's size");
+  const { designTokensCss } = await import("../servers/gateway/dashboard/shared/design-tokens.js");
+  assert.match(designTokensCss(), /--crow-text-scale: 1;/, "no attribute = exactly the browser's size");
+  assert.match(designTokensCss(), /--crow-sidebar-width: 15rem;/, "the sidebar grows with the text, not clipping nav labels");
   for (const s of TS.TEXT_SIZES) {
     assert.ok(css.includes(`:root[data-text-size="${s.id}"]{--crow-text-scale:${s.scale}}`), s.id);
   }
@@ -168,6 +170,10 @@ let available = false, server = null, port = 0;
 const PROBE = "<script>window.__atBodyStart={size:document.documentElement.getAttribute('data-text-size'),"
   + "root:parseFloat(getComputedStyle(document.documentElement).fontSize)};</script>";
 
+// Real nav entries (labels resolve through i18n), so the sidebar has text to clip.
+const NAV = ["messages", "contacts", "extensions", "models", "skills", "settings"].map((id, i) =>
+  ({ id, name: id, icon: id, route: "/dashboard/" + id, navOrder: i }));
+
 before(async () => {
   try {
     const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
@@ -177,7 +183,7 @@ before(async () => {
   const { default: section } = await import("../servers/gateway/dashboard/settings/sections/text-size.js");
   const content = await section.render({ lang: "en" });
   server = http.createServer((req, res) => {
-    const html = layout.renderLayout({ title: "Text size", content, activePanel: "settings", panels: [], lang: "en" })
+    const html = layout.renderLayout({ title: "Text size", content, activePanel: "settings", panels: NAV, lang: "en" })
       .replace(/<body([^>]*)>/, (m) => m + PROBE);
     res.writeHead(200, { "content-type": "text/html" });
     res.end(html);
@@ -187,7 +193,7 @@ before(async () => {
 });
 after(() => { if (server) server.close(); });
 
-async function withTab(fn) {
+async function withTab(fn, { width = 1280, height = 900 } = {}) {
   const tab = await (await fetch(CDP + "/json/new?about:blank", { method: "PUT" })).json();
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
@@ -219,6 +225,7 @@ async function withTab(fn) {
     throw new Error("page never loaded");
   };
   try {
+    await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 900 });
     await send("Page.enable");
     return await fn({ evalIn, load });
   } finally {
@@ -260,4 +267,37 @@ test("live: picking a size in Settings applies at once; the old Perch key migrat
     assert.equal(await evalIn("localStorage.getItem('crow-text-size')"), "large");
     assert.ok(Math.abs(after - before * (1.2 / 0.875)) < 0.1, `${before} -> ${after}`);
   });
+});
+
+const FIT = `(function(){
+  var spans=[].slice.call(document.querySelectorAll('.sidebar .nav-item span'));
+  var clipped=spans.filter(function(e){ return e.scrollWidth>e.clientWidth+1||e.getBoundingClientRect().height>parseFloat(getComputedStyle(e).lineHeight)*1.5; })
+    .map(function(e){ return e.textContent; });
+  var sb=document.querySelector('.sidebar').getBoundingClientRect().width;
+  var mc=parseFloat(getComputedStyle(document.querySelector('.main-content')).marginLeft);
+  return { n:spans.length, clipped:clipped, sidebar:sb, mainLeft:mc,
+    docScrollX:document.documentElement.scrollWidth-innerWidth };
+})()`;
+
+test("live: at Extra large the sidebar grows with the text — no clipped nav labels, no sideways scroll", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  for (const width of [1280, 412]) {
+    await withTab(async ({ evalIn, load }) => {
+      const OPEN = "(function(){document.getElementById('sidebar').classList.add('open');return 1;})()";
+      await load();
+      await evalIn("localStorage.removeItem('crow-text-size'),1");
+      await load();
+      if (width < 900) await evalIn(OPEN);
+      const base = await evalIn(FIT);
+      await evalIn("localStorage.setItem('crow-text-size','xlarge'),1");
+      await load();
+      if (width < 900) await evalIn(OPEN);
+      const m = await evalIn(FIT);
+      assert.ok(Math.abs(m.sidebar - base.sidebar * 1.4) < 1, width + "px: sidebar " + base.sidebar + " -> " + m.sidebar + " (follows the text)");
+      assert.equal(m.n, NAV.length, "the nav rendered");
+      assert.deepEqual(m.clipped, [], width + "px: " + JSON.stringify(m));
+      assert.equal(m.docScrollX, 0, width + "px: no horizontal page scroll");
+      if (width >= 900) assert.ok(Math.abs(m.sidebar - m.mainLeft) < 1, "content starts where the wider sidebar ends");
+    }, { width });
+  }
 });

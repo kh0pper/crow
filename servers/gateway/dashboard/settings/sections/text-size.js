@@ -31,7 +31,13 @@ export default {
           <input type="radio" name="crow_text_size" value="${s.id}"${s.id === TEXT_SIZE_DEFAULT ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto">
           ${escapeHtml(t(s.labelKey, lang))}
         </label>`).join("");
-    return `<form id="crow-text-size-form" onsubmit="return false">
+    // The chosen size gets an accent border, and keyboard focus a visible
+    // ring on the whole option (the native radio dot alone is a weak cue).
+    return `<style>
+      .crow-text-size-option:has(input:checked){border-color:var(--crow-accent);background:var(--crow-accent-muted)}
+      .crow-text-size-option:has(input:focus-visible){outline:2px solid var(--crow-accent);outline-offset:2px}
+    </style>
+    <form id="crow-text-size-form" onsubmit="return false">
       <fieldset style="border:0;padding:0;margin:0 0 1rem">
         <legend style="font-size:0.85rem;color:var(--crow-text-secondary);margin-bottom:0.5rem;font-weight:500">${escapeHtml(t("settings.textSize.legend", lang))}</legend>
         <div style="display:flex;flex-wrap:wrap;gap:0.5rem">${options}
