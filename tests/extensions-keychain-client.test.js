@@ -26,6 +26,11 @@ const AVAILABLE = [
       { name: "DEMO_API_KEY", description: "a third-party API key", secret: true },
       { name: "DEMO_TOKEN", description: "generated", secret: true, generate: "secret", keychain: true },
     ] },
+  { id: "once", name: "Once", description: "d", type: "bundle", category: "productivity", version: "1.0.0", author: "Crow", tags: [],
+    env_vars: [
+      { name: "ONCE_PASSWORD", description: "applied once at setup", secret: true, generatable: true, propagate: false, keychain_configure: false, pattern: WIDE },
+      { name: "ONCE_OTHER", description: "other", secret: true, generatable: true, propagate: false, pattern: WIDE },
+    ] },
   { id: "vaultwarden", name: "Vaultwarden", description: "vault", type: "bundle", category: "infrastructure", version: "1.1.0", author: "Crow", tags: [] },
 ];
 
@@ -245,4 +250,39 @@ test("S2/Turbo — the first-view plaintext is wiped on turbo:before-cache and w
     assert.equal(cell.textContent, "", how);
     assert.equal(cell.hidden, true, how);
   }
+});
+
+test("F1 — keychain_configure:false: Install still offers Generate + keychain tick; Configure shows neither (Show/Copy stay)", async () => {
+  const inst = boot({ fetchImpl: consentOk });
+  inst.click(inst.document.querySelector('.bundle-install[data-id="once"]'));
+  await inst.settle();
+  assert.ok(inst.document.querySelector('.ext-secret-generate[data-key="ONCE_PASSWORD"]'), "install: Generate");
+  assert.ok(inst.document.querySelector('.ext-keychain-save[data-key="ONCE_PASSWORD"]'), "install: keychain tick");
+  const cfg = boot({ installed: { once: { version: "1.0.0" } }, needsConfig: { once: ["ONCE_PASSWORD", "ONCE_OTHER"] }, fetchImpl: consentOk });
+  cfg.click(cfg.document.querySelector('.bundle-configure[data-id="once"]'));
+  await cfg.settle();
+  assert.equal(cfg.document.querySelector('.ext-secret-generate[data-key="ONCE_PASSWORD"]'), null, "configure: no Generate");
+  assert.equal(cfg.document.querySelector('.ext-keychain-save[data-key="ONCE_PASSWORD"]'), null, "configure: no keychain tick");
+  assert.ok(cfg.document.querySelector('.ext-secret-generate[data-key="ONCE_OTHER"]'), "other generatable field unaffected");
+  assert.ok(cfg.document.querySelector('.ext-keychain-save[data-key="ONCE_OTHER"]'));
+  const ph = cfg.document.getElementById("env_ONCE_PASSWORD").parentNode;
+  assert.ok(ph.querySelector(".ext-secret-toggle") && ph.querySelector(".ext-secret-copy"), "Show/Copy stay");
+});
+
+test("F3/Turbo — a generated or revealed secret goes back to type=password on turbo:before-cache", async () => {
+  const s = boot({ fetchImpl: consentOk });
+  s.click(s.document.querySelector('.bundle-install[data-id="demo"]'));
+  await s.settle();
+  const input = s.document.getElementById("env_DEMO_PASSWORD");
+  const toggle = s.document.querySelector(".ext-secret-toggle");
+  s.click(s.document.querySelector(".ext-secret-generate"));
+  assert.equal(input.type, "text");
+  s.document.dispatchEvent(new s.window.Event("turbo:before-cache"));
+  assert.equal(input.type, "password", "generated value hidden before the snapshot");
+  assert.equal(toggle.textContent, "Show");
+  assert.ok(input.value.length === 24, "the value itself is kept");
+  s.click(toggle);
+  assert.equal(input.type, "text");
+  s.document.dispatchEvent(new s.window.Event("turbo:before-cache"));
+  assert.equal(input.type, "password", "Show-revealed value hidden before the snapshot");
 });

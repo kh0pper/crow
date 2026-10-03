@@ -457,7 +457,7 @@ All strings are en+es.
 - **R21** *(S5)* Not adopted as written: one `package.json` instead of a separate `cli/` package. Adopted instead: `npm_required` + `verify_paths` (lock-file `npm ci`, 300 s, hard-fail) and a blocking critical-tier `npm audit` of `bundles/vaultwarden` in CI.
 - **R22** *(B1)* Installed storage scripts fall back to a shipped codec copy. `scripts/` bumps reach fresh installs only, as stated.
 - **R23** *(B2)* Import accepts only the v1 KDF constants and exact lengths; Argon2 runs async.
-- **R24** *(B3)* dayane's backup excludes the key, as an operator step in `~/crow-dayane` (§9.7).
+- **R24** *(B3)* dayane's backup excludes the whole secrets dir and in-flight bw temp dirs, as an operator step in `~/crow-dayane` (§9.7).
 - **R25** *(m1/m2)* Crash-atomic key creation; an invalid key is replaced only while the table is empty; re-keying is reported.
 - **R26** *(m4/m7)* `npm_required` refresh mirrors install and retries. An outdated Vaultwarden server is reported. If no CLI passes the spike, ship without the vault option.
 
@@ -504,9 +504,9 @@ The plan's code was dry-run in full: 6059/6059 on a staged copy (revision 3).
      with
 
      ```bash
-     docker exec crow-dayane tar -C / --exclude=crow/secrets/keychain.key -cf - crow | gzip > "$DEST/volume-$TS.tar.gz.part"
+     docker exec crow-dayane tar -C / --exclude=crow/secrets --exclude='crow/tmp/crow-bw-*' -cf - crow | gzip > "$DEST/volume-$TS.tar.gz.part"
      ```
 
-     The archive layout is unchanged, and the container has `/usr/bin/tar`. Verify with `tar -tzf <newest volume-*.tar.gz> | grep -c keychain.key` → `0`.
-   - If `~/r4-tehcy/scripts/r4-backup.sh` or `pi-lab/scripts/crow-db-backup.sh` ever start copying `<CROW_HOME>/secrets/`, they would carry the key. Today neither does; their owners keep it that way, or exclude `secrets/keychain.key` explicitly.
+     The archive layout is unchanged, and the container has `/usr/bin/tar`. The whole secrets dir is excluded (it also holds the vault device id) along with any in-flight Bitwarden temp dirs. Verify with `tar -tzf <newest volume-*.tar.gz> | grep -cE 'crow/secrets|crow-bw-'` → `0`.
+   - If `~/r4-tehcy/scripts/r4-backup.sh` or `pi-lab/scripts/crow-db-backup.sh` ever start copying `<CROW_HOME>/secrets/`, they would carry the key. Today neither does; their owners keep it that way, or exclude `secrets/` explicitly.
    - **Existing Vaultwarden installs:** reinstall to move off 1.32.7. Today none exist on the fleet.

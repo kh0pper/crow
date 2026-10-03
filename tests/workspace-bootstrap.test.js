@@ -343,3 +343,11 @@ test("envfile.py decodes exactly what the gateway codec writes", () => {
   }
   assert.equal(spawnSync("python3", [join(OPS, "envfile.py"), "get", join(dir, ".env"), "MISSING"], { encoding: "utf8" }).stdout, "");
 });
+
+test("F5 — every ops script that reads the .env through envfile.py guards python3 with an honest error", () => {
+  for (const f of ["lib.sh", "restore-scratch.sh"]) {
+    const src = readFileSync(join(OPS, f), "utf8");
+    assert.match(src, /command -v python3 >\/dev\/null 2>&1 \|\| die "python3 is required/, f);
+    assert.ok(src.indexOf("command -v python3") < src.indexOf("envfile.py\" get") , f + ": guard comes before the first use");
+  }
+});

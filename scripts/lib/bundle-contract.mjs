@@ -187,6 +187,10 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
     if (v.keychain === true && v.secret !== true && v.generate !== "secret") {
       errors.push(`env_vars ${v.name}: keychain needs secret: true or generate: "secret"`);
     }
+    if (v.keychain_configure !== undefined) {
+      if (typeof v.keychain_configure !== "boolean") errors.push(`env_vars ${v.name}: keychain_configure must be a boolean`);
+      else if (v.keychain !== true && v.generatable !== true) errors.push(`env_vars ${v.name}: keychain_configure only applies with keychain: true or generatable: true`);
+    }
     if (v.generatable === true) {
       if (v.secret !== true) errors.push(`env_vars ${v.name}: generatable needs secret: true`);
       if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);

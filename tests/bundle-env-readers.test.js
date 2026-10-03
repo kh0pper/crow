@@ -84,7 +84,7 @@ test("B1 — an INSTALLED copy (outside the repo, no CROW_APP_ROOT) still runs a
       `${prefix}_S3_ENDPOINT='http://minio.example:9000'`,
       `${prefix}_S3_BUCKET=media`,
       `${prefix}_S3_ACCESS_KEY='access key'`,
-      `${prefix}_S3_SECRET_KEY='s3cr3t with space $x'`,
+      `${prefix}_S3_SECRET_KEY="pa\\"ss \\$x"`,
       "",
     ].join("\n"));
     const env = { ...process.env };
@@ -93,6 +93,10 @@ test("B1 — an INSTALLED copy (outside the repo, no CROW_APP_ROOT) still runs a
     assert.equal(r.status, 0, `${b}: ${r.stderr}`);
     const out = readFileSync(join(root, ".env"), "utf8");
     assert.match(out, /BEGIN/, `${b}: managed block written`);
-    assert.ok(out.includes("'s3cr3t with space $x'"), `${b}: the secret is decoded, then re-encoded (not double-quoted text)`);
+    // The input line is double-quoted with escapes (decoded: pa"ss $x). A decoding script re-encodes
+    // it single-quoted in the translated block; the old raw-text script copied pa\"ss \$x verbatim.
+    const outLines = out.split("\n").filter((l) => !l.startsWith(`${prefix}_S3_`));
+    assert.ok(outLines.some((l) => /^[A-Z0-9_]+='pa"ss \$x'$/.test(l)), `${b}: decoded then re-encoded; got: ${outLines.filter((l) => /pa/.test(l)).join(" | ")}`);
+    assert.ok(!out.split("\n").some((l) => !l.startsWith(`${prefix}_S3_`) && l.includes('pa\\"ss')), `${b}: raw escaped text never copied`);
   }
 });

@@ -36,6 +36,9 @@ connect to it over HTTP(S).
    its older Vaultwarden server image until you reinstall the extension (your vault data
    in `~/.crow/vaultwarden/data` is kept); saving passwords to the vault from Crow needs
    Vaultwarden 1.37 or newer, and Crow tells you when a reinstall is needed.
+   A pre-1.1.0 install may also still have that typed token in the gateway `.env` and
+   `mcp-addons.json` (older versions copied it there); only new installs get a generated,
+   keychain-held token.
 
 2. **Start the bundle** from the Extensions panel.
 

@@ -290,3 +290,10 @@ test("add rejects a non-http(s) url with a value-free 400", async () => {
     assert.equal((await s.call("/add", { body: { label: "x", url: "http://ok.example", secret: "abcd-efgh" } })).status, 200);
   } finally { s.close(); }
 });
+
+test("F2 — /entries vault_available is false for an insecure (http) vault, true only when secure", async () => {
+  for (const [secure, want] of [[true, true], [false, false], [undefined, false]]) {
+    const s = await setup({ vault: { status: () => ({ installed: true, cliPath: "/x/bw.js", serverUrl: "https://v.example", secure }), save: async () => ({ ok: true }) } });
+    try { assert.equal((await s.call("/entries")).body.vault_available, want, "secure=" + secure); } finally { s.close(); }
+  }
+});

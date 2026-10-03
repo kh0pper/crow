@@ -6430,6 +6430,7 @@
           "propagate": false,
           "check": "not_breached",
           "generatable": true,
+          "keychain_configure": false,
           "pattern": "^[^\\x00-\\x1f\\x7f]{12,128}$",
           "pattern_hint": "12-128 characters, without tabs or line breaks",
           "keychain_label": "admin password",

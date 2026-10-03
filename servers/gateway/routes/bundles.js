@@ -3275,6 +3275,10 @@ export default function bundlesRouter() {
       Object.assign(existing, env_vars); // the effective env after this save
       writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
       const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+      // keychain_configure:false fields (Workspace admin password): setup applied the stored value
+      // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
+      const noConfigureKc = new Set((getInstalledFirstManifest(bundle_id)?.env_vars || []).filter((v) => v && v.keychain_configure === false).map((v) => v.name));
+      keychainReq.save = keychainReq.save.filter((k) => !noConfigureKc.has(k));
       const kcLog = [];
       const kc = keychainReq.save.length
         ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })

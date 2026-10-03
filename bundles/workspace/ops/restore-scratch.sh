@@ -28,6 +28,7 @@ ARCHIVE="${1:?usage: restore-scratch.sh <archive.tar> [passphrase-file] | --clea
 case "${2:-}" in *.tar) die "second argument looks like an archive ($2); usage: restore-scratch.sh <archive.tar> [passphrase-file]";; esac
 [ ! -e "$SCRATCH" ] || die "$SCRATCH already exists. Run: $0 --clean"
 bash "$BUNDLE_DIR/ops/restore.sh" "$ARCHIVE" "$SCRATCH/unpacked" "${2:-${CROW_HOME:-$HOME/.crow}/workspace/backup-passphrase}"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read the restored bundle.env (ops/envfile.py); install it and re-run"
 ADMIN="$(python3 "$(dirname "${BASH_SOURCE[0]}")/envfile.py" get "$SCRATCH/unpacked/bundle.env" WORKSPACE_ADMIN_USER)"; ADMIN="${ADMIN:-admin}"
 mkdir -p "$SCRATCH/workspace/nextcloud" "$SCRATCH/workspace/db"
 docker run --rm -v "$SCRATCH/workspace/nextcloud:/dst" -v "$SCRATCH/unpacked:/src:ro" "$IMAGE" \

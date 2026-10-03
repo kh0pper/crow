@@ -414,7 +414,10 @@ export function extensionsClientJS(lang) {
                   // Show/Hide/Copy on every typed secret; Generate and "Save to Crow keychain"
                   // only where the manifest opts in (generatable / keychain — review C1, Kevin Q1).
                   input.setAttribute("autocomplete", "new-password");
-                  var canKeychain = ev.generatable === true || ev.keychain === true;
+                  // keychain_configure:false (setup applies it once; Configure cannot re-apply it): no
+                  // Generate and no keychain tick when configuring an installed bundle.
+                  var noKcHere = configureOnly && ev.keychain_configure === false;
+                  var canKeychain = !noKcHere && (ev.generatable === true || ev.keychain === true);
                   if (canKeychain) keychainKeys.push(ev.name);
                   var tools = document.createElement("div");
                   tools.className = "ext-secret-tools";
@@ -432,19 +435,35 @@ export function extensionsClientJS(lang) {
                   copyBtn.type = "button";
                   copyBtn.className = "btn btn-sm btn-secondary ext-secret-copy";
                   copyBtn.textContent = '${tJs("keychain.copy", lang)}';
-                  if (ev.generatable !== true || !CAN_GENERATE || crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32) === null) genBtn = null;
+                  // Turbo snapshots the live DOM into its page cache: a revealed secret must go back to
+                  // type=password before the snapshot is taken (self-removing, like the first-view banner).
+                  var recacheArmed = false;
+                  function recache() {
+                    input.type = "password";
+                    showBtn.textContent = '${tJs("keychain.show", lang)}';
+                    recacheArmed = false;
+                    document.removeEventListener("turbo:before-cache", recache);
+                  }
+                  function armRecache() {
+                    if (recacheArmed) return;
+                    recacheArmed = true;
+                    document.addEventListener("turbo:before-cache", recache);
+                  }
+                  if (noKcHere || ev.generatable !== true || !CAN_GENERATE || crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32) === null) genBtn = null;
                   if (genBtn) genBtn.addEventListener("click", function() {
                     var pw = crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32);
                     if (!pw) return;
                     input.value = pw;
                     input.type = "text";
                     showBtn.textContent = '${tJs("keychain.hide", lang)}';
+                    armRecache();
                     refreshInstallBtnState();
                   });
                   showBtn.addEventListener("click", function() {
                     var hidden = input.type === "password";
                     input.type = hidden ? "text" : "password";
                     showBtn.textContent = hidden ? '${tJs("keychain.hide", lang)}' : '${tJs("keychain.show", lang)}';
+                    if (hidden) armRecache();
                   });
                   copyBtn.addEventListener("click", function() { copyText(input.value, copyBtn); });
                   if (genBtn) tools.appendChild(genBtn);

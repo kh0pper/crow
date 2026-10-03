@@ -108,7 +108,7 @@ export function keychainApiRouter({
       key_present: !!key,
       reauth_method: await gate.method(),
       granted_until: gate.expiresAt(req.dashboardSession),
-      vault_available: !!(st && st.installed && st.cliPath && !st.serverOutdated),
+      vault_available: !!(st && st.installed && st.cliPath && st.secure && !st.serverOutdated),
     });
   }));
 

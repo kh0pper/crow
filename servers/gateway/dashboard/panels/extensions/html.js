@@ -459,7 +459,7 @@ export function buildExtensionsHTML({
         name: ev.name, description: ev.description,
         default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
         // Configure builds its form from THIS blob: it needs the same opt-ins as Install.
-        generatable: ev.generatable === true, keychain: ev.keychain === true,
+        generatable: ev.generatable === true, keychain: ev.keychain === true, keychain_configure: ev.keychain_configure === false ? false : undefined,
         pattern: typeof ev.pattern === "string" ? ev.pattern : undefined,
       })),
       official: !addon._community,

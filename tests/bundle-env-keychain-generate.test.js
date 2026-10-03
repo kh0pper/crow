@@ -101,6 +101,10 @@ test("bundle contract: store_as / keychain / generatable combinations", () => {
   assert.match(errs([{ name: "A", generatable: true, propagate: false }]), /generatable needs secret/);
   assert.match(errs([{ name: "A", generatable: true, secret: true }]), /generatable needs propagate: false/);
   assert.match(errs([{ name: "A", generatable: true, secret: true, propagate: false, generate: "secret" }]), /cannot be combined with generate/);
+  // F1: keychain_configure is a boolean, only meaningful on keychain/generatable fields
+  assert.match(errs([{ name: "A", generatable: true, secret: true, propagate: false, keychain_configure: "no" }]), /keychain_configure.*boolean/);
+  assert.match(errs([{ name: "A", secret: true, keychain_configure: false }]), /keychain_configure only applies/);
+  assert.doesNotMatch(errs([{ name: "A", generatable: true, secret: true, propagate: false, keychain_configure: false }]), /keychain_configure/);
   assert.doesNotMatch(errs([
     { name: "A", secret: true, generate: "secret", keychain: true, store_as: "argon2id" },
     { name: "B", secret: true, generatable: true, propagate: false },

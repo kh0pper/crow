@@ -223,3 +223,28 @@ test("R-B — an insecure (non-https) vault URL: vault outcome is insecureUrl, n
     H._setKeychainDepsForTest({ vault: { status: () => ({ installed: true, cliPath: "/fake/bw.js", serverUrl: "https://vault.example.ts.net:8450", secure: true }), save: async (o) => { vaultCalls.push(o); return vaultResult; } } });
   }
 });
+
+test("F1 — Configure never saves a keychain_configure:false field over the stored copy (install unchanged)", async () => {
+  const id = "demo-kc-h"; const manifest = { ...MANIFEST(id), env_vars: [{ name: "DEMO_USER", default: "admin" }, { name: "DEMO_ONCE", secret: true, generatable: true, propagate: false, keychain_configure: false, keychain_label: "once" }] };
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+  writeFileSync(join(dir, ".env"), "DEMO_USER=admin\n");
+  const d0 = db();
+  try { await K.saveExtensionSecret(d0, ID(), { bundleId: id, envKey: "DEMO_ONCE", label: "once", username: "admin", secret: "Real-Original-Pw-1", origin: "typed" }); } finally { d0.close(); }
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { req.dashboardSession = "S"; next(); });
+  app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const r = await fetch(`${base}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id, env_vars: { DEMO_ONCE: "Never-Applied-Pw-2" }, keychain: { save: ["DEMO_ONCE"] } }) });
+    assert.equal(r.status, 200);
+    const d = db();
+    try {
+      const rows = (await K.listEntries(d, { keyId: ID().id })).filter((e) => e.bundle_id === id && e.env_key === "DEMO_ONCE");
+      assert.equal(rows.length, 1);
+      assert.equal(await K.openEntrySecret(d, ID(), rows[0].id), "Real-Original-Pw-1");
+    } finally { d.close(); }
+  } finally { server.close(); }
+});

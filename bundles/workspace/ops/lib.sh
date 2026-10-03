@@ -16,6 +16,7 @@ OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 env_get() {
   local f="${ENV_FILE:-$BUNDLE_DIR/.env}"
   [ -f "$f" ] || return 0
+  command -v python3 >/dev/null 2>&1 || die "python3 is required to read the bundle .env (ops/envfile.py); install it and re-run"
   python3 "$OPS_DIR/envfile.py" get "$f" "$1"
 }
 
