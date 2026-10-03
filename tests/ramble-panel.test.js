@@ -2174,6 +2174,20 @@ test("birdGenome: the rolled bird plus its outfit; plain without one; null on ju
   assert.deepEqual(birdGenome(oldEngine, { species: "crow", seed: 1, outfit: { hat: "beanie" } }), rolled, "older engine: plain bird");
 });
 
+test("wornSuffix: worn items by catalogue name, in slot order; unknown values skipped", () => {
+  const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  const fnSrc = extractFunction(src, "wornSuffix");
+  assert.ok(fnSrc, "wornSuffix must be defined and extractable");
+  const wornSuffix = new Function(fnSrc + "\nreturn wornSuffix;")();
+  assert.equal(wornSuffix(undefined), "");
+  assert.equal(wornSuffix(null), "");
+  assert.equal(wornSuffix({}), "");
+  assert.equal(wornSuffix({ hat: "beanie", glasses: "shades" }), " \u00b7 wearing beanie, shades");
+  assert.equal(wornSuffix({ scarf: "stripe" }), " \u00b7 wearing striped scarf");
+  assert.equal(wornSuffix({ glasses: "round", scarf: "knit" }), " \u00b7 wearing knitted scarf, round glasses");
+  assert.equal(wornSuffix({ glasses: "monocle" }), "");
+});
+
 test("wardrobeRowState: buy / wear / take off, and when each is disabled", () => {
   const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
   const wardrobeRowState = new Function(extractFunction(src, "wardrobeRowState") + "\nreturn wardrobeRowState;")();

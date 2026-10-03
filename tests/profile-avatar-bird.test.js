@@ -24,6 +24,7 @@ import { validateAvatar, AVATAR_MAX_BYTES } from "../servers/sharing/avatar.js";
 import { setSettingsSyncManager } from "../servers/gateway/dashboard/settings/registry.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { PROFILE_BROADCAST_PENDING_KEY, readBroadcastPending } from "../servers/sharing/peer-profile.js";
+import { applyRambleEgg } from "../servers/sharing/instance-sync.js";
 import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";
 
 const REPO_ENGINE = join(import.meta.dirname, "..", "bundles", "ramble", "server", "bird-svg.cjs");
@@ -335,6 +336,29 @@ test("gate: an unchanged OWN input set never repaints, even when the replicated 
     await db.execute({ sql: "UPDATE ramble_pet SET energy = 61, last_fed_at = ? WHERE owner = 'self'", args: [Date.now() - 4 * DECAY_INTERVAL_MS - 1000] });
     assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered");
     assert.equal(sent.length, 2);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("cross-instance: an outfit applied by a sync peer repaints the portrait once", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 11 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    let r = await refreshBirdAvatar(db, m, { gate: true });
+    assert.equal(r.reason, "rendered");
+    assert.equal(sent.length, 1);
+    const row = (await db.execute("SELECT * FROM ramble_eggs WHERE egg_id = 'b1'")).rows[0];
+    const wire = {};
+    for (const k of Object.keys(row)) if (k !== "lamport_ts" && k !== "lamport_origin" && isNaN(Number(k))) wire[k] = row[k];
+    wire.outfit_json = '{"glasses":"round"}';
+    await applyRambleEgg(db, "update", wire, 9999999999, "peer");
+    r = await refreshBirdAvatar(db, m, { gate: true });
+    assert.equal(r.reason, "rendered");
+    assert.equal(await setting(db, "profile_avatar_url"), renderBirdAvatar({ species: "crow", seed: 11, outfit: { glasses: "round" } }));
+    assert.equal(sent.length, 2, "exactly one more broadcast");
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 

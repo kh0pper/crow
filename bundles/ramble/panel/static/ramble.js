@@ -72,11 +72,18 @@
   /* " · wearing a beanie, round glasses" — the worn items, in slot order. */
   function wornSuffix(outfit) {
     if (!outfit) return "";
+    var NAMES = {
+      hat: { bow: "bow", leaf: "leaf", beanie: "beanie" },
+      scarf: { knit: "knitted scarf", stripe: "striped scarf" },
+      glasses: { round: "round glasses", shades: "shades" }
+    };
+    var slots = ["hat", "scarf", "glasses"];
     var parts = [];
-    if (outfit.hat) parts.push(outfit.hat);
-    if (outfit.scarf) parts.push(outfit.scarf + " scarf");
-    if (outfit.glasses) parts.push(outfit.glasses + " glasses");
-    return parts.length ? " · wearing " + parts.join(", ") : "";
+    for (var i = 0; i < slots.length; i++) {
+      var name = outfit[slots[i]] && NAMES[slots[i]][outfit[slots[i]]];
+      if (typeof name === "string") parts.push(name);
+    }
+    return parts.length ? " \u00b7 wearing " + parts.join(", ") : "";
   }
 
   /* ------------------------------------------------------------------ net */

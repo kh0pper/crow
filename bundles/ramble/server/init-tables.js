@@ -189,7 +189,7 @@ export async function initRambleTables(db) {
     args: [],
   });
   // Phase 4 (spec 2026-09-08 §5, §6.2): what a hatched bird is wearing, as a
-  // JSON object of slot -> value (bird-svg.cjs OUTFIT_SLOTS), NULL for nothing.
+  // JSON object of slot -> value (bird-svg.cjs OUTFIT_SLOTS).
   // '{}' = wearing nothing; NULL = never dressed / unknown (the sync apply
   // COALESCEs, so only a non-NULL value can change a stored outfit).
   // A column on the bird row, which already replicates, so an outfit follows
