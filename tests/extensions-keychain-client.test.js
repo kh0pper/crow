@@ -9,6 +9,7 @@ import { webcrypto, randomInt } from "node:crypto";
 import { parseHTML } from "linkedom";
 
 import { buildExtensionsHTML } from "../servers/gateway/dashboard/panels/extensions/html.js";
+import { extensionStyles } from "../servers/gateway/dashboard/panels/extensions/css.js";
 import { extensionsClientJS } from "../servers/gateway/dashboard/panels/extensions/client.js";
 import { generatePassword, PASSWORD_LENGTH } from "../servers/gateway/dashboard/shared/password-generator.js";
 
@@ -215,4 +216,12 @@ test("R-B — secure Vaultwarden renders data-vault-secure=1; no Vaultwarden ren
   assert.equal(a.document.getElementById("ext-keychain-config").getAttribute("data-vault-secure"), "1");
   const b = boot({ vaultSecure: true });
   assert.equal(b.document.getElementById("ext-keychain-config").getAttribute("data-vault-secure"), "0");
+});
+
+test("hidden really hides in the first-view banner: scoped rule beats .btn display, and the banner carries the scoped class", () => {
+  assert.match(extensionStyles(), /\.ext-firstview \[hidden\]\s*\{\s*display:\s*none\s*!important/);
+  const { document } = boot({ keychainPending: [{ id: 7, label: "X" }] });
+  const banner = document.querySelector(".ext-firstview");
+  for (const sel of [".ext-firstview-show", ".ext-firstview-copy", ".ext-firstview__secret"]) assert.ok(banner.querySelector(sel), sel + " lives inside .ext-firstview");
+  assert.equal(banner.querySelector(".ext-firstview-copy").hasAttribute("hidden"), true);
 });
