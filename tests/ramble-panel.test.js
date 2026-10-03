@@ -1476,7 +1476,7 @@ test("POST /api/ramble/birds/:id/activate 200s a hatched bird, emits the pet, an
   assert.deepEqual(activated, [{ egg_id: "panel-bird" }], "activation pokes the bus so core can repaint a bird avatar (spec §5)");
   assert.equal(emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length, petUpdatesBefore + 1, "activation must emit the pet row");
   const pet = await (await req("/api/ramble/pet")).json();
-  assert.deepEqual(pet.bird, { egg_id: "panel-bird", species: "magpie", seed: 4242 });
+  assert.deepEqual(pet.bird, { egg_id: "panel-bird", species: "magpie", seed: 4242, outfit: {} });
   const flock = await (await req("/api/ramble/flock")).json();
   assert.equal(flock.birds.find((b) => b.egg_id === "panel-bird")?.active, true);
   assert.equal(flock.birds.filter((b) => b.active).length, 1, "exactly one active bird");
