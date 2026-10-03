@@ -18,6 +18,9 @@ import { decodeGeohash } from "./anchors.js";
 
 export const SEED_KIND = "seed";
 export const SEED_SALT = "ramble-seed-v1:";
+
+/** Phase 4: a purchase. One row per purchase, negative delta (spec §6.1). */
+export const SPEND_KIND = "spend";
 const RESPAWN_HOURS_DEFAULT = 24;
 const PER_PICKUP_DEFAULT = 1;
 const SEED_RATE_DEFAULT = 4;
@@ -164,12 +167,15 @@ export async function harvestableCells(db, cells, { now = Date.now() } = {}) {
   }
 }
 
-/** The derived balance: every earn minus every spend. */
+/** The derived balance: every earn minus every spend. Spends are their own
+ * kind so nothing that counts seed PICKUPS (harvestableCells' suffix match)
+ * ever sees them. Can be negative: two of the user's instances may each have
+ * spent the same seed while out of contact; that is the truth, so show it. */
 export async function seedBalance(db) {
   try {
     const { rows } = await db.execute({
-      sql: "SELECT COALESCE(SUM(delta), 0) AS total FROM ramble_wallet WHERE kind = ?",
-      args: [SEED_KIND],
+      sql: "SELECT COALESCE(SUM(delta), 0) AS total FROM ramble_wallet WHERE kind IN (?, ?)",
+      args: [SEED_KIND, SPEND_KIND],
     });
     return Number(rows?.[0]?.total) || 0;
   } catch { return 0; }
