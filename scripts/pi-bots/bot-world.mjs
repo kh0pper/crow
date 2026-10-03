@@ -35,10 +35,10 @@
  * loadBridge()). Everything taken from bridge is part of its public export
  * surface — which job_runner.mjs also consumes, so those names are stable.
  */
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeBotMcp } from "./mcp_writer.mjs";
+import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
@@ -169,7 +169,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     // fd mode: a failed build must still not leave an earlier turn's signed
     // file behind (pi ignores it — no PI_BOT_MCP_CONFIG — but another reader
     // would not). The child then gets an empty bot layer, as a missing file did.
-    if (mcpDelivery === "fd") { try { unlinkSync(join(sessionDir, ".mcp.json")); } catch { /* absent */ } }
+    if (mcpDelivery === "fd") removeStaleBotMcp(join(sessionDir, ".mcp.json"));
   }
 
   // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
@@ -194,7 +194,8 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // cwd: the resolved working directory (=== sessionDir when not chosen).
   // mcpConfigPath: the per-bot closed-world config, always under the world
   // root; the bridge hands it to pi via PI_BOT_MCP_CONFIG. null in fd mode —
-  // there is no file; mcpConfig (the built JSON) is what PiRpc pipes instead.
+  // no file is written (PiRpc still names the absent path, see its fdMode
+  // block); mcpConfig (the built JSON) is what PiRpc pipes instead.
   // mcpDelivery: "fd" | "file" (S6-CROW).
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,

@@ -112,12 +112,15 @@ With pi-lab at or after `c8bbb02` (declared as `MIN_PI_LAB_REV` in `scripts/pi-b
 **The effective `read_paths`** are computed per spawn in `scripts/pi-bots/bot-read-paths.mjs` (PiRpc applies them to the policy copy; the stored def is never changed). They are:
 - the operator's entries (Bot Builder › Permissions › *Folders this bot can read*: absolute paths, validated on save);
 - the bot's project `workspace_dir`, added automatically and only when the bot has a project (the Permissions tab shows it read-only);
-- in fd mode, the world root when pi's cwd is somewhere else.
 
 `bypass` sends `["/"]`. A bot with no project and no entries sends no `read_paths` key at all.
 
+A project bot's world sits under `<workspace>/bots/<id>`, so adding the workspace also lets every bot in a project read its sibling bots' worlds: transcripts, outputs and uploads, but never their `.mcp.json`. This is a deliberate, known trade-off; the alternative is moving project bot worlds out of the workspace.
+
 **MCP config delivery** is set by `PIBOT_MCP_CONFIG_DELIVERY` (`scripts/pi-bots/mcp-delivery.mjs`), which takes `fd`, `file` or `auto`; the default is `auto`. `auto` picks `fd` when the pi-lab that pi loads passes the compat check, and `file` otherwise. An older pi-lab ignores the fd, so in fd mode it would run the bot with no MCP servers.
-- In `fd` mode the bridge spawns pi with `PI_BOT_MCP_CONFIG_FD=4`, pipes the built config on fd 4 and closes its end. pi-lab reads it to EOF once and closes it. Nothing is written: not `<world>/.mcp.json`, and not `/tmp/pibot-job-*/.mcp.json` for background jobs. A stale file left by an earlier file-mode turn is removed. This keeps the signed actor headers (`actor-sig.mjs`) off disk entirely.
+- In `fd` mode the bridge spawns pi with `PI_BOT_MCP_CONFIG_FD=4`, pipes the built config on fd 4 and closes its end. pi-lab reads it to EOF once and closes it. Nothing is written: not `<world>/.mcp.json`, and not `/tmp/pibot-job-*/.mcp.json` for background jobs. This keeps the signed actor headers (`actor-sig.mjs`) off disk entirely.
+- `PI_BOT_MCP_CONFIG` stays set to the world root's (absent) `.mcp.json`. For a current pi-lab the fd wins and `dirname()` keeps the world root readable. An older pi-lab pins to the missing file and gets an empty bot layer, so it never walks the cwd ancestors for `.mcp.json`.
+- A stale file left by an earlier file-mode turn is removed once it is older than 10 minutes (`removeStaleBotMcp`). Delivery is chosen per process, and a file-mode process's pi may not have read a fresh file yet. The pi-lab check is cached for 5 minutes per process.
 - `file` mode is the pre-S6 path described below.
 
 Both the gateway and `pibot-gateways` log the pi-lab check once at boot, with a clear WARNING when pi-lab is older. One caveat stays: a bot with an allowlisted file-reading bash command (`cat`, `python3`, …) can still read anything, so keep those out of `bash_allow` for confined bots.

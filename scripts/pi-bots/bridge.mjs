@@ -294,19 +294,15 @@ export class PiRpc {
     // S6-CROW: read roots. pi-lab (>= c8bbb02) confines read/grep/find/ls to
     // cwd + dirname(PI_BOT_MCP_CONFIG) + write_paths + read_paths. The
     // effective read_paths = the def's explicit entries + the bot's project
-    // workspace (only when it has a project) + in fd mode the world root when
-    // pi's cwd is elsewhere (with no PI_BOT_MCP_CONFIG the world root is no
-    // longer implied; a perch session's uploads/outputs live there). Computed
-    // on the COPY; the stored def is never mutated. A bot with no project and
+    // workspace (only when it has a project). The world root stays a read root
+    // in BOTH delivery modes through dirname(PI_BOT_MCP_CONFIG) (kept set in fd
+    // mode, below). Computed on the COPY; the stored def is never mutated. A bot with no project and
     // no explicit entries gets no read_paths key at all (policy unchanged).
     // bypass reads everything — the same "/" pi-lab documents.
     if (opts.permissionMode === "bypass") {
       piPolicy.read_paths = ["/"];
     } else {
-      const readPaths = effectiveReadPaths(def, {
-        projectWorkspaceDir: opts.projectWorkspaceDir || null,
-        extra: (fdMode && spawnCwd !== sessionDir) ? [sessionDir] : [],
-      });
+      const readPaths = effectiveReadPaths(def, { projectWorkspaceDir: opts.projectWorkspaceDir || null });
       if (readPaths.length || Object.prototype.hasOwnProperty.call(piPolicy, "read_paths")) piPolicy.read_paths = readPaths;
     }
     // C-12 spawn_env hygiene (r1 S3 — security): a bot def could otherwise set
@@ -344,12 +340,19 @@ export class PiRpc {
       // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
       // computed defaults above and the (already-stripped) def.spawn_env.
       opts.extraEnv || {});
-    // S6-CROW: exactly one delivery variable reaches pi, whatever the
-    // gateway's own env or the merges above carried. pi-lab lets the fd win
-    // over the file, and dirname(PI_BOT_MCP_CONFIG) would otherwise still be a
-    // read root pointing at a file that no longer exists.
+    // S6-CROW: in fd mode PI_BOT_MCP_CONFIG STAYS SET, pointing at the world
+    // root's .mcp.json that fd mode never writes (and removes when stale):
+    //   - pi-lab >= c8bbb02 lets the fd win, and dirname() of the path keeps
+    //     the world root (uploads/outputs of a perch session in another cwd)
+    //     a read root;
+    //   - an OLDER pi-lab (checked out from under a running gateway, or a
+    //     forced PIBOT_MCP_CONFIG_DELIVERY=fd) ignores the fd but still pins
+    //     to that absent file: an empty bot layer, never the cwd-ancestor
+    //     .mcp.json walk (which would load e.g. a planted /tmp/.mcp.json for
+    //     a job in /tmp/pibot-job-*).
+    // In file mode an inherited FD variable is stripped so it cannot win.
     if (fdMode) {
-      delete env.PI_BOT_MCP_CONFIG;
+      env.PI_BOT_MCP_CONFIG = join(sessionDir, ".mcp.json");
       env.PI_BOT_MCP_CONFIG_FD = String(MCP_CONFIG_FD);
     } else {
       delete env.PI_BOT_MCP_CONFIG_FD;

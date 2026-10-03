@@ -9,6 +9,7 @@
  *   (incl. every gateway credential) throws. Enforced regardless of what the
  *   remote UI sends.
  */
+import { isValidReadPath, parseReadPathsInput } from "../../scripts/pi-bots/bot-read-paths.mjs";
 
 const REDACT = (v) => ({ __redacted: true, set: v != null && v !== "" });
 
@@ -91,10 +92,17 @@ function setByPath(obj, path, value) {
  */
 export function applyPeerPatch(currentDef, patch) {
   const out = JSON.parse(JSON.stringify(currentDef || {}));
-  for (const [path, value] of Object.entries(patch || {})) {
+  for (let [path, value] of Object.entries(patch || {})) {
     if (path === "enabled") continue; // routed to the column by the caller
     if (!isPatchable(path)) {
       throw new Error(`field not patchable from a peer: ${path}`);
+    }
+    // S6-CROW: read folders get the same validation as the Bot Builder save.
+    if (path === "permission_policy.read_paths") {
+      if (!Array.isArray(value) || !value.every(isValidReadPath)) {
+        throw new Error("permission_policy.read_paths must be an array of absolute paths without '..'");
+      }
+      value = parseReadPathsInput(value.join("\n")).paths;
     }
     setByPath(out, path, value);
   }

@@ -135,7 +135,7 @@ test("M1: generic bot jobs are signed as the bot on gateway 'job' and the runner
   assert.equal(verifyActorSig({ botId: h["X-Crow-Actor-Id"], threadId: h["X-Crow-Actor-Thread"], gatewayType: h["X-Crow-Actor-Gateway"], sig: h["X-Crow-Actor-Sig"] }), true);
   rmSync(home, { recursive: true, force: true });
   const src = readFileSync(new URL("../scripts/pi-bots/job_runner.mjs", import.meta.url), "utf8");
-  assert.match(src, /peerGatewayUrls: \{\}, \.\.\.jobActor\(job\) \}\)/);
+  assert.match(src, /peerGatewayUrls: \{\}, \.\.\.jobActor\(job\),/);
 });
 
 test("M4/M5: a real supervised child gets the key on stdin, signs with it, and never sees it in its env", async () => {

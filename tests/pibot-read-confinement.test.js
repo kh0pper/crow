@@ -10,7 +10,9 @@
  *     workspace, ONLY for a bot with a project) — bot-read-paths.mjs;
  *   - fd delivery: PI_BOT_MCP_CONFIG_FD=4, the JSON piped and the write end
  *     closed, no .mcp.json anywhere on disk (world root and /tmp/pibot-job-*),
- *     a stale file from an earlier file-mode turn removed — mcp-delivery.mjs;
+ *     a stale file from an earlier file-mode turn removed once past the grace
+ *     age, PI_BOT_MCP_CONFIG still pinned at the absent world file (so an
+ *     older pi-lab gets an empty bot layer, never the cwd walk) — mcp-delivery.mjs;
  *   - the file fallback (PIBOT_MCP_CONFIG_DELIVERY=file) unchanged;
  *   - the pi-lab minimum (pi-lab-compat.mjs).
  *
@@ -26,7 +28,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, sep } from "node:path";
 import Database from "better-sqlite3";
@@ -107,7 +109,10 @@ const { runJob } = await import("../scripts/pi-bots/job_runner.mjs");
 const { effectiveReadPaths, parseReadPathsInput, isValidReadPath } = await import("../scripts/pi-bots/bot-read-paths.mjs");
 const { mcpConfigDelivery, MCP_CONFIG_FD } = await import("../scripts/pi-bots/mcp-delivery.mjs");
 const { checkPiLabCompat, findPiLabDir, MIN_PI_LAB_REV } = await import("../scripts/pi-bots/pi-lab-compat.mjs");
-const { writeBotMcp } = await import("../scripts/pi-bots/mcp_writer.mjs");
+const { writeBotMcp, STALE_MCP_GRACE_MS } = await import("../scripts/pi-bots/mcp_writer.mjs");
+const { applyPeerPatch } = await import("../servers/gateway/bot-federation.js");
+/** Backdate a file past the stale grace age. */
+const age = (p) => { const t = (Date.now() - STALE_MCP_GRACE_MS - 60000) / 1000; utimesSync(p, t, t); };
 
 // ---- fixture: two projects, three bots -------------------------------------
 const W1 = join(dir, "projects", "alpha");       // bot A's project workspace
@@ -242,9 +247,13 @@ test("pi-lab compat: declares c8bbb02; finds pi-lab via settings.json packages[]
   assert.match(none.reason, /not found/);
 });
 
-test("writeBotMcp write:false builds the config, writes nothing, removes a stale file", () => {
+test("writeBotMcp write:false builds the config, writes nothing, removes a stale file (but not a fresh one)", () => {
   const sd = mkdtempSync(join(dir, "wb-"));
-  writeFileSync(join(sd, ".mcp.json"), '{"stale":true}');
+  writeFileSync(join(sd, ".mcp.json"), '{"fresh":true}');
+  const keep = writeBotMcp(baseDef([]), { sessionDir: sd, crowHome: process.env.CROW_HOME, write: false });
+  assert.equal(keep.removedStale, false, "a file written moments ago (a file-mode process's pi may not have read it yet) survives");
+  assert.ok(existsSync(join(sd, ".mcp.json")));
+  age(join(sd, ".mcp.json"));
   const r = writeBotMcp(baseDef(["marker-srv/x"]), { sessionDir: sd, crowHome: process.env.CROW_HOME, write: false });
   assert.equal(r.path, null);
   assert.equal(r.removedStale, true);
@@ -263,6 +272,7 @@ test("ACCEPTANCE (fd): bot A's read roots cover its own world + project + explic
   // A stale file-mode config in A's world must be gone after an fd turn.
   mkdirSync(A_WORLD, { recursive: true });
   writeFileSync(join(A_WORLD, ".mcp.json"), '{"mcpServers":{"stale":{"command":"x"}}}');
+  age(join(A_WORLD, ".mcp.json"));
 
   const a = await channelTurn("bota", "a-fd");
   const b = await channelTurn("botb", "b-fd");
@@ -271,7 +281,9 @@ test("ACCEPTANCE (fd): bot A's read roots cover its own world + project + explic
   // delivery: fd only, consumed to EOF, then gone; nothing on disk
   for (const [name, cap] of [["A", a], ["B", b], ["C", c]]) {
     assert.equal(cap.env.PI_BOT_MCP_CONFIG_FD, "4", name + ": config over fd 4");
-    assert.equal(cap.env.PI_BOT_MCP_CONFIG, undefined, name + ": no config FILE variable in fd mode");
+    assert.equal(cap.env.PI_BOT_MCP_CONFIG, join(cap.cwd, ".mcp.json"),
+      name + ": the file variable stays pinned at the world root (older pi-lab => empty layer, never the cwd walk)");
+    assert.equal(cap.mcpJsonAtEnvPath, false, name + ": ...and that file does not exist");
     assert.equal(cap.fdErr, null, name + ": fd 4 readable");
     assert.ok(cap.cfgText && JSON.parse(cap.cfgText).mcpServers, name + ": the whole config arrived (EOF => bridge closed its end)");
     assert.equal(cap.fdGoneAfterClose, true, name + ": the fd is consumed — closed after the one read");
@@ -314,7 +326,8 @@ test("ACCEPTANCE (fd): a background job writes no /tmp/pibot-job-*/.mcp.json and
   const cap = readCap();
   assert.match(cap.cwd, /pibot-job-/);
   assert.equal(cap.env.PI_BOT_MCP_CONFIG_FD, "4");
-  assert.equal(cap.env.PI_BOT_MCP_CONFIG, undefined);
+  assert.equal(cap.env.PI_BOT_MCP_CONFIG, join(cap.cwd, ".mcp.json"));
+  assert.equal(cap.mcpJsonAtEnvPath, false);
   assert.equal(cap.mcpJsonInCwd, false, "the job dir holds no config file");
   assert.ok(JSON.parse(cap.cfgText).mcpServers["marker-srv"], "the job's bot still gets its tools");
   assert.equal(cap.fdGoneAfterClose, true);
@@ -334,6 +347,7 @@ test("FALLBACK (file): PIBOT_MCP_CONFIG_DELIVERY=file keeps the pre-S6 file + en
       "read_paths are sent in file mode too (an older pi-lab ignores the key)");
   } finally {
     process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+    rmSync(join(A_WORLD, ".mcp.json"), { force: true }); // later legs scan for configs on disk
   }
 });
 
@@ -350,13 +364,14 @@ test("PiRpc: fd mode with a chosen cwd adds the world root to read_paths; bypass
     return readCap();
   };
   const fd = await spawnOnce("pirpc-fd", { cwd: chosen, mcpDelivery: "fd", mcpConfig: { mcpServers: { z: { command: "y" } } } });
-  assert.deepEqual(JSON.parse(fd.env.PI_BOT_PERMISSION_POLICY).read_paths, [world],
-    "with no PI_BOT_MCP_CONFIG the world root (uploads/outputs) must still be a read root");
+  assert.equal(fd.env.PI_BOT_MCP_CONFIG, join(world, ".mcp.json"),
+    "the world root (uploads/outputs) stays a read root via dirname(PI_BOT_MCP_CONFIG) even with cwd elsewhere");
+  assert.equal(fd.cwd, chosen);
+  assert.equal(JSON.parse(fd.env.PI_BOT_PERMISSION_POLICY).read_paths, undefined, "nothing else added");
   assert.deepEqual(JSON.parse(fd.cfgText), { mcpServers: { z: { command: "y" } } });
 
   const empty = await spawnOnce("pirpc-empty", { mcpDelivery: "fd", mcpConfig: null });
   assert.deepEqual(JSON.parse(empty.cfgText), { mcpServers: {} }, "an unbuildable config is an empty bot layer, never a stale file");
-  assert.equal(JSON.parse(empty.env.PI_BOT_PERMISSION_POLICY).read_paths, undefined, "cwd === world root: nothing added");
 
   const bypass = await spawnOnce("pirpc-bypass", { mcpDelivery: "fd", mcpConfig: {}, permissionMode: "bypass", projectWorkspaceDir: "/w" });
   assert.deepEqual(JSON.parse(bypass.env.PI_BOT_PERMISSION_POLICY).read_paths, ["/"]);
@@ -379,4 +394,24 @@ test("Bot Builder: invalid read folders refuse the save; the field round-trips (
   assert.deepEqual(ok, { paths: ["/home/u/notes"], invalid: [] });
   const bad = parseReadPathsInput("/home/u/notes\nDocuments");
   assert.deepEqual(bad.invalid, ["Documents"]);
+});
+
+test("same-project siblings: the shared workspace is readable to both (by design — project bots share their project folder), but neither's MCP config is ever on disk", async () => {
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  const c = new Database(DB_FILE);
+  c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,?,?)")
+    .run("bota2", "Bot A2", JSON.stringify(baseDef([])), 1, 101);
+  c.close();
+  const a2 = await channelTurn("bota2", "a2-fd");
+  assert.deepEqual(JSON.parse(a2.env.PI_BOT_PERMISSION_POLICY).read_paths, [W1]);
+  assert.equal(readable(a2, join(A_WORLD, "sessions", "x.jsonl")), true,
+    "KNOWN, documented: a project bot reads its siblings' worlds under <workspace>/bots/ — operator decision");
+  assert.deepEqual(findMcpJson(W1), [], "but no sibling config exists to read (and pi-lab blocks .mcp.json structurally)");
+});
+
+test("federation PATCH validates permission_policy.read_paths like the Bot Builder save", () => {
+  assert.deepEqual(applyPeerPatch({}, { "permission_policy.read_paths": ["/a/", "/a", "/b"] }).permission_policy.read_paths, ["/a", "/b"]);
+  for (const bad of [["rel"], ["/x/../y"], "/a", [7]]) {
+    assert.throws(() => applyPeerPatch({}, { "permission_policy.read_paths": bad }), /absolute paths/);
+  }
 });

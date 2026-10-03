@@ -89,12 +89,20 @@ export function checkPiLabCompat({ env = process.env, dir: dirOverride } = {}) {
 }
 
 let _cached = null;
-let _warned = false;
+let _cachedAt = 0;
+let _warnedKey = null;
 
-/** Cached per process. `_reset` is a test seam. */
+/** Re-check interval: a pi-lab checkout changed under a long-lived gateway
+ *  is picked up within this window, without a restart. */
+export const PI_LAB_COMPAT_TTL_MS = 5 * 60 * 1000;
+
+/** Cached per process for PI_LAB_COMPAT_TTL_MS. `_reset` is a test seam. */
 export function piLabCompat({ _reset = false } = {}) {
-  if (_reset) { _cached = null; _warned = false; }
-  if (!_cached) _cached = checkPiLabCompat();
+  if (_reset) { _cached = null; _cachedAt = 0; _warnedKey = null; }
+  if (!_cached || Date.now() - _cachedAt > PI_LAB_COMPAT_TTL_MS) {
+    _cached = checkPiLabCompat();
+    _cachedAt = Date.now();
+  }
   return _cached;
 }
 
@@ -102,10 +110,13 @@ export function piLabCompat({ _reset = false } = {}) {
  * Boot-time check: log ONE clear line, a warning when pi-lab is older than
  * MIN_PI_LAB_REV. Never throws, never blocks boot. Returns the result.
  */
-export function warnIfPiLabIncompatible(log = (m) => console.warn(m)) {
+export function warnIfPiLabIncompatible(log = (m) => console.warn(m), { onlyProblems = false } = {}) {
   const r = piLabCompat();
-  if (_warned) return r;
-  _warned = true;
+  // Once per process per distinct result, so a pi-lab change is announced
+  // too. onlyProblems: the per-turn caller stays silent while all is well.
+  const key = (r.ok ? "ok:" : "bad:") + (r.dir || "") + ":" + (r.reason || "");
+  if (_warnedKey === key || (onlyProblems && r.ok)) return r;
+  _warnedKey = key;
   if (r.ok) {
     log("[pi-lab] " + r.dir + " is at or after " + MIN_PI_LAB_REV + " (" + r.how + ") — bot read confinement + MCP config over fd available");
   } else {

@@ -34,7 +34,7 @@
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
@@ -253,6 +253,25 @@ export function buildBotMcp(def, canonical, opts = {}) {
 }
 
 /**
+ * S6-CROW: remove a file-mode `.mcp.json` left behind, once it is older than
+ * a grace age. The grace exists because delivery mode is chosen per process:
+ * a file-mode process may have JUST written this file for a pi that has not
+ * read it yet (warmModel can take tens of seconds), and an fd-mode turn or a
+ * Bot Builder save for the same bot must not pull it out from under that pi.
+ * Signatures are per gateway boot, so a stale file outlives its value at the
+ * next restart anyway. Returns true when a file was removed.
+ */
+export const STALE_MCP_GRACE_MS = 10 * 60 * 1000;
+export function removeStaleBotMcp(path, graceMs = STALE_MCP_GRACE_MS) {
+  try {
+    const st = statSync(path);
+    if (Date.now() - st.mtimeMs < graceMs) return false;
+    unlinkSync(path);
+    return true;
+  } catch { return false; }
+}
+
+/**
  * Write `<session_dir>/.mcp.json` for a bot. Idempotent (full rewrite each
  * call). Throws only on a missing session_dir in the def or an unreadable
  * canonical; a selected-but-absent server is a soft warning (returned).
@@ -313,12 +332,12 @@ export function writeBotMcp(def, opts = {}) {
   // S6-CROW: opts.write === false is fd delivery (mcp-delivery.mjs) — the
   // config is returned for the bridge to pipe to pi, NOTHING is written, and a
   // stale <sessionDir>/.mcp.json left by an earlier file-mode turn is removed
-  // (its signed headers are exactly what fd delivery keeps off disk).
+  // once past the grace age (removeStaleBotMcp; opts.staleGraceMs overrides).
   // Absent/true keeps the file write byte-identical to before.
   const path = join(sessionDir, ".mcp.json");
   let removedStale = false;
   if (opts.write === false) {
-    try { unlinkSync(path); removedStale = true; } catch { /* absent */ }
+    removedStale = removeStaleBotMcp(path, opts.staleGraceMs);
   } else {
     mkdirSync(sessionDir, { recursive: true });
     writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });

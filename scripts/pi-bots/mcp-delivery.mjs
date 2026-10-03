@@ -28,12 +28,18 @@ export const MCP_CONFIG_FD = 4;
 export function mcpConfigDelivery({ env = process.env, compat = piLabCompat } = {}) {
   const v = String(env.PIBOT_MCP_CONFIG_DELIVERY || "auto").trim().toLowerCase();
   if (v === "file") return "file";
-  if (v === "fd") return "fd";
+  if (v === "fd") {
+    // Forced fd on a pi-lab that cannot read it leaves the bot with no MCP
+    // servers (PiRpc keeps PI_BOT_MCP_CONFIG pinned, so never the cwd walk).
+    if (compat === piLabCompat) warnIfPiLabIncompatible(undefined, { onlyProblems: true });
+    return "fd";
+  }
   let ok = false;
-  // The real check also logs the boot-style pi-lab line once per process, so
-  // every process that spawns bots (gateway, pibot-gateways, gmail tick,
-  // discord child) says which delivery it chose and why.
-  const check = compat === piLabCompat ? () => warnIfPiLabIncompatible() : compat;
+  // The real check also logs the pi-lab WARNING (once per process per
+  // result) when it fails, so every process that spawns bots (gateway,
+  // pibot-gateways, the minute gmail tick, discord child) says why it fell
+  // back to the file. A passing check stays silent here (boot logs it).
+  const check = compat === piLabCompat ? () => warnIfPiLabIncompatible(undefined, { onlyProblems: true }) : compat;
   try { ok = !!(check() || {}).ok; } catch { ok = false; }
   return ok ? "fd" : "file";
 }
