@@ -23,15 +23,34 @@ connect to it over HTTP(S).
 
 ## One-time setup (do this in order)
 
-1. **Generate an admin token:**
-   ```
-   openssl rand -base64 48
-   ```
-   Store the output in `.env` as `VAULTWARDEN_ADMIN_TOKEN`. Vaultwarden
-   accepts the raw token (simplest) or a hashed form — for MVP, use the
-   raw token and keep `.env` readable only by your user.
+1. **Admin token: nothing to do.** Crow generates it when you install the
+   extension, keeps only an Argon2id hash in the extension's settings, and
+   saves the token itself in **Settings → Passwords** (encrypted, this machine
+   only). The Extensions page shows it to you once right after install; later,
+   reveal it from Settings → Passwords (Crow asks you to confirm it's you).
+   Use it to sign in at `/admin`.
+
+   **Installed before Crow generated tokens?** Your typed token keeps working: Crow
+   reuses it as it is (plaintext in the extension's settings, not in the keychain) — add
+   it to Settings → Passwords yourself if you want it there. Such an install also keeps
+   its older Vaultwarden server image until you reinstall the extension (your vault data
+   in `~/.crow/vaultwarden/data` is kept); saving passwords to the vault from Crow needs
+   Vaultwarden 1.37 or newer, and Crow tells you when a reinstall is needed.
 
 2. **Start the bundle** from the Extensions panel.
+
+   **Give it a secure https address (needed to save passwords to the vault from
+   Crow).** The Bitwarden CLI that Crow uses refuses plain `http://` servers, and
+   phones and the web vault need https too. You run this step yourself (it needs
+   sudo). Check which Serve ports are taken, then pick a free one:
+   ```
+   tailscale serve status
+   sudo tailscale serve --bg --https=<port> http://127.0.0.1:8097
+   ```
+   Then, in this extension's settings, set
+   `VAULTWARDEN_DOMAIN=https://<host>.<tailnet>.ts.net:<port>` (your machine's
+   Tailscale name and the port you chose) and restart the bundle. Until you do,
+   Crow tells you that vault saving needs a secure https address.
 
 3. **Create your account** at `http://localhost:8097` — this becomes your
    personal vault. Use a long, memorable master password you will
@@ -70,8 +89,8 @@ Vaultwarden binds to `127.0.0.1:8097`. To reach it from other devices:
 
 - **Best:** install the Caddy bundle and add a site mapping, e.g.
   `vault.yourdomain.com -> http://127.0.0.1:8097`. Caddy handles TLS.
-- **Tailscale:** connect your phone to the same Tailscale network and
-  use the host's Tailscale IP + `:8097`.
+- **Tailscale:** use the Serve step in setup (step 2): an https address on your
+  tailnet, which also works for saving to the vault from Crow.
 - **Do not** bind Vaultwarden directly to `0.0.0.0` on the public
   internet without TLS — vault sync is fine over HTTP, but logins are
   not.

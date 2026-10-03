@@ -6,7 +6,7 @@
  * are for. The tools here only surface operational health:
  *
  *   - vaultwarden_status       Is the server reachable? Build version?
- *   - vaultwarden_user_count   How many accounts exist? (via /admin)
+ *   - vaultwarden_user_count   Explains where to see accounts (the admin API is browser-session only)
  *   - vaultwarden_backup_info  Size and age of ~/.crow/vaultwarden/data
  *
  * Any tool that could expose secrets is intentionally not provided.
@@ -19,7 +19,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const VAULTWARDEN_URL = () => (process.env.VAULTWARDEN_URL || "http://localhost:8097").replace(/\/+$/, "");
-const ADMIN_TOKEN = () => process.env.VAULTWARDEN_ADMIN_TOKEN || "";
 
 function resolveDataDir() {
   const env = process.env.VAULTWARDEN_DATA_DIR;
@@ -124,43 +123,14 @@ export function createVaultwardenServer(options = {}) {
 
   server.tool(
     "vaultwarden_user_count",
-    "Return the number of registered Vaultwarden users. Requires a valid VAULTWARDEN_ADMIN_TOKEN — the admin API does not expose passwords, only account metadata.",
+    "Explain how to see Vaultwarden's accounts. Vaultwarden's admin API only accepts the browser session created by its /admin login page, and Crow keeps the admin token as a hash, so this tool cannot list accounts itself.",
     {},
-    async () => {
-      try {
-        const token = ADMIN_TOKEN();
-        if (!token) {
-          return { content: [{ type: "text", text: "Error: VAULTWARDEN_ADMIN_TOKEN is not set" }] };
-        }
-        const res = await vwFetch("/admin/users", {
-          headers: { "Authorization": `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) {
-            return { content: [{ type: "text", text: "Error: admin token rejected — check VAULTWARDEN_ADMIN_TOKEN" }] };
-          }
-          return { content: [{ type: "text", text: `Error: admin API returned ${res.status}` }] };
-        }
-        const users = await res.json();
-        const list = Array.isArray(users) ? users : [];
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              user_count: list.length,
-              accounts: list.map((u) => ({
-                email: u.Email || u.email || null,
-                disabled: !!(u.Disabled ?? u.disabled),
-                two_factor: !!(u.TwoFactorEnabled ?? u.two_factor_enabled),
-                last_active: u.LastActive || u.last_active || null,
-              })),
-            }, null, 2),
-          }],
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
-      }
-    },
+    async () => ({
+      content: [{
+        type: "text",
+        text: `Not available from here: Vaultwarden's admin API only accepts the browser session created by its /admin login page, and Crow stores the admin token as an Argon2id hash. Open ${VAULTWARDEN_URL()}/admin and sign in with the token from Crow's Settings → Passwords to see accounts.`,
+      }],
+    }),
   );
 
   server.tool(

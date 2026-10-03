@@ -9,6 +9,15 @@
 BUNDLE_DIR="${CROW_BUNDLE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export CROW_HOME="${CROW_HOME:-$HOME/.crow}"
 DC="${WORKSPACE_DC:-docker compose}"
+OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# env_get KEY: the value compose would see, decoded by ops/envfile.py (no eval, no sed):
+# the installer quotes values with spaces, quotes, $ or # (bundle-env-codec.js), so a
+# raw `sed s/^KEY=//` would return the QUOTED text. ENV_FILE defaults to the bundle .env.
+env_get() {
+  local f="${ENV_FILE:-$BUNDLE_DIR/.env}"
+  [ -f "$f" ] || return 0
+  python3 "$OPS_DIR/envfile.py" get "$f" "$1"
+}
 
 log() { printf '[workspace] %s\n' "$*"; }
 die() { printf '[workspace] ERROR: %s\n' "$*" >&2; exit 1; }

@@ -10,7 +10,8 @@
 
 services:
   vaultwarden:
-    image: vaultwarden/server:1.32.7
+    # 1.37.0+ is required by Bitwarden clients 2026.7.0+ (release notes), incl. the CLI Crow uses.
+    image: vaultwarden/server:1.37.3
     container_name: crow-vaultwarden
     ports:
       - "127.0.0.1:8097:80"

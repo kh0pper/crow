@@ -135,7 +135,7 @@ The **gateway's own** `.env` is loaded literally by `servers/gateway/index.js`. 
 
 > This update is required for support with clients with version 2026.7.0+
 
-`@bitwarden/cli` 2026.9.1 is such a client. **1.37.3** is the current stable release (2026-09-13, Docker Hub digest `sha256:1587c45f…`). Its `admin.rs` `validate_token` uses the same PHC path and the same cookie-only admin guard. Its image ships `curl` for the healthcheck.
+`@bitwarden/cli` 2026.9.1 is such a client (superseded: the Task 6 spike pinned 2026.8.0, see §9). **1.37.3** is the current stable release (2026-09-13, Docker Hub digest `sha256:1587c45f…`). Its `admin.rs` `validate_token` uses the same PHC path and the same cookie-only admin guard. Its image ships `curl` for the healthcheck.
 
 Vaultwarden is not installed on any fleet host, so the pin can move freely.
 
@@ -143,7 +143,7 @@ Vaultwarden is not installed on any fleet host, so the pin can move freely.
 
 `crypto.argon2Sync("argon2id", …)` exists and takes about 58 ms at m=65540, t=3, p=4.
 
-### `@bitwarden/cli` 2026.9.1
+### `@bitwarden/cli` 2026.9.1 (surveyed; the pin is now 2026.8.0 per the Task 6 spike)
 
 From `apps/cli/src/program.ts` and `vault.program.ts`:
 - `login [email] --passwordenv <ENV>`;
@@ -357,7 +357,7 @@ All strings are en+es.
 
 **Availability:**
 - the bundle is installed and `node_modules/@bitwarden/cli/build/bw.js` exists;
-- the CLI is pinned `2026.9.1` in `bundles/vaultwarden/package.json`;
+- the CLI is pinned `2026.8.0` (Task 6 spike; was 2026.9.1) in `bundles/vaultwarden/package.json`;
 - the manifest sets `npm_required: true` + `verify_paths`, so the installer uses `npm ci` with the lock file (300 s) and hard-fails rather than leaving the MCP server half-installed (review S5).
 
 **Flow:**
@@ -451,7 +451,7 @@ All strings are en+es.
 - **R15** No rotate action (§9).
 - **R16** *(revised, Kevin Q1 / review C1)* Generate and "Save to Crow keychain" are opt-in per field (`generatable` / `keychain`). Show/Hide/Copy go on every typed secret.
 - **R17** The pre-merge smoke and the spike each need one **[KEVIN]** step: registering a throwaway vault account in the web vault.
-- **R18** *(C8 / Q3)* The Vaultwarden pin moves to 1.37.3 on release-note evidence. A live spike (plan Task 6) confirms CLI 2026.9.1 against it **before** the vault-save code. Fallback, decided now: if 2026.9.1 fails against 1.37.3, pin the newest CLI release that passes the same spike, and record it.
+- **R18** *(C8 / Q3)* The Vaultwarden pin moves to 1.37.3 on release-note evidence. A live spike (plan Task 6) confirms the CLI against it (the spike ruled 2026.8.0, not 2026.9.1) **before** the vault-save code. Fallback, decided now: if 2026.9.1 fails against 1.37.3, pin the newest CLI release that passes the same spike, and record it.
 - **R19** *(C4)* Configure and install seeding are line-preserving.
 - **R20** *(C6)* Docker-bundle refresh copies `package.json` + lock.
 - **R21** *(S5)* Not adopted as written: one `package.json` instead of a separate `cli/` package. Adopted instead: `npm_required` + `verify_paths` (lock-file `npm ci`, 300 s, hard-fail) and a blocking critical-tier `npm audit` of `bundles/vaultwarden` in CI.
@@ -480,7 +480,7 @@ All strings are en+es.
 The plan's code was dry-run in full: 6059/6059 on a staged copy (revision 3).
 
 **Live:**
-- the spike (Vaultwarden 1.37.3 + CLI 2026.9.1) before the vault-save task;
+- the spike (Vaultwarden 1.37.3 + CLI 2026.8.0 after the spike) before the vault-save task;
 - the pre-merge smoke: argon2 `/admin` login, `bw` save through `http://localhost`, two-step text, wide-charset values through a running container;
 - post-deploy acceptance.
 
@@ -490,9 +490,11 @@ The plan's code was dry-run in full: 6059/6059 on a staged copy (revision 3).
 2. **Vaultwarden "signups allowed"** is still a manual `.env` flip + restart after the first account. It needs a guided "Close signups" action.
 3. Regenerate/rotate a keychain-held generated token.
 4. Move the eleven `set -a; . .env` post-install scripts onto `envfile.py`. The codec already makes every line Crow writes safe to source.
-5. A stable per-instance Bitwarden device id for vault saves, if the spike shows a new device per save.
+5. A stable per-instance Bitwarden device id for vault saves, if the spike shows a new device per save. (Done: the CLI device id is a per-instance GUID in `<CROW_HOME>/secrets/vault-device-id`.)
 6. Mark more extension-created passwords `generatable`: `CROW_BROWSER_VNC_PASSWORD`, `MINIO_ROOT_PASSWORD`, `MINIFLUX_ADMIN_PASSWORD`, `MLA_ADMIN_PASSWORD`. Move `*_DB_PASSWORD` fields to `generate:"secret"`.
-7. **Operator (not product):**
+7. **Bump `@bitwarden/cli` to 2026.9.x and Vaultwarden together** once a Vaultwarden release ships `/accounts/key-management/user-key-id` (vaultwarden #7693, on main since 2026-09-18, after 1.37.3). CLI 2026.9.x logins fail against 1.37.3 because of it.
+8. **Vault saving requires an https Vaultwarden URL** (the CLI refuses http); the operator exposes it with `sudo tailscale serve` and sets `VAULTWARDEN_DOMAIN` (see the Vaultwarden skill). Automating the Serve step is not built.
+9. **Operator (not product):**
    - **dayane backup (required before dayane's next rebuild; re-review B3).** In `~/crow-dayane/backup.sh` (Gitea `kh0pp/crow-dayane`), replace
 
      ```bash

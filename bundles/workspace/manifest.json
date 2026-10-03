@@ -1,7 +1,7 @@
 {
   "id": "workspace",
   "name": "Crow Workspace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
   "type": "bundle",
   "author": "Crow",
@@ -32,10 +32,12 @@
     },
     {
       "name": "WORKSPACE_ADMIN_PASSWORD",
-      "description": "Password for that administrator account. Used once by setup, then removed from this machine's config; change it later inside Workspace (Settings, Security). 12-128 characters: letters, digits and ! % * + , - . / : = ? @ ^ _ ~ (no spaces, quotes, $ or #).",
-      "install_required": true, "secret": true, "propagate": false, "check": "not_breached",
-      "pattern": "^[A-Za-z0-9!%*+,./:=?@^_~-]{12,128}$",
-      "pattern_hint": "12-128 letters, digits or ! % * + , - . / : = ? @ ^ _ ~"
+      "description": "Password for that administrator account. Use Generate for a strong one or type your own: 12-128 characters, any letters, digits, spaces or symbols. Keep 'Save to Crow keychain' ticked to find it later in Settings → Passwords. Setup uses it once, then removes it from this machine's config; change it later inside Workspace (Settings, Security).",
+      "install_required": true, "secret": true, "propagate": false, "check": "not_breached", "generatable": true,
+      "pattern": "^[^\\x00-\\x1f\\x7f]{12,128}$",
+      "pattern_hint": "12-128 characters, without tabs or line breaks",
+      "keychain_label": "admin password",
+      "keychain_username": "${WORKSPACE_ADMIN_USER}"
     },
     { "name": "WORKSPACE_FIRSTRUN_ADMIN_PASSWORD", "description": "Throwaway password for the image's first install (generated; replaced by setup).", "required": true, "secret": true, "generate": "secret" },
     { "name": "WORKSPACE_DB_ROOT_PASSWORD", "description": "MariaDB root password (generated).", "required": true, "secret": true, "generate": "secret" },
