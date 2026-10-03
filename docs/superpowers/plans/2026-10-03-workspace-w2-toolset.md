@@ -21,7 +21,7 @@
 - **Implementation worktree:** `git -C ~/crow fetch -q origin && git -C ~/crow worktree add ~/crow-wt-w2-impl -b feat/workspace-w2-toolset origin/main`, then `npm ci` inside it. Never `git checkout` a branch in `~/crow`: a parked checkout silently disables fleet auto-update.
 - Node 24 only (`engines` + CI). Tests run through `npm test -- tests/<file>.test.js` (scratch env). **Never** run raw `node --test` against the live `~/.crow`.
 - **Commits.** Commit with a positional path: `git add <new files>` and then `git commit <paths> -m "…"`. Check `git show --stat HEAD` after each commit. **Never** attribute Claude as a co-author.
-- **Tool names** are exactly the 74 names of spec §4 (`ws_<drive|docs|sheets|slides|cal|contacts>_<verb>` + `ws_undo_last_change`). The surface test in Task 12 pins the list.
+- **Tool names** are exactly the 76 names of spec §4 (74 + `ws_change_status`, `ws_cancel_change`; internal `ws__*` inverse ops are never registered as MCP tools) (`ws_<drive|docs|sheets|slides|cal|contacts>_<verb>` + `ws_undo_last_change`). The surface test in Task 14 pins the list.
 - **Result envelope:** `{success:true,data}` / `{success:false,code,error,data?}` as one JSON text block. `isError:true` on failure.
 - **No tool reads or writes a host filesystem path.** Every DAV URL is built by `server/nc/paths.js` only.
 - **Credentials.**
@@ -36,7 +36,7 @@
   - zip ≤ 5,000 entries, ≤ 200 MB uncompressed, ratio ≤ 200:1;
   - XML part ≤ 30 MB;
   - `<!DOCTYPE` rejected.
-- **Lock policy:** wait ≤ 30 s (poll 2 s) by default. `if_open:"proceed"` only drops ONLYOFFICE editor sessions, never a person's manual lock. Quick edit waits 10 s.
+- **Lock policy (K5, Kevin 2026-10-03, supersedes the earlier "wait then ask"):** default `if_open:"queue"` with `wait_s` 0. A write to an open or locked file is queued and applied live by the Crow ONLYOFFICE plugin, or at close. `if_open:"wait"` returns `open_in_editor` instead (non-queueable tools always do). `if_open:"force_close"` is the explicit user override; it drops only ONLYOFFICE editor sessions, never a person's manual lock, and never twice without asking.
 - **Same-file write spacing:** ≥ 1.1 s between two writes to the same file (version ids are mtimes).
 - **Bundle code changes** bump `bundles/workspace/manifest.json` to **0.2.0**. The registry entry in `registry/add-ons.json` must match (`build-registry --check`).
 - **Dependencies:** bundle deps are declared in `bundles/workspace/package.json` (`tests/bundle-server-deps.test.js`) AND in root `devDependencies` (CI resolves bundle imports through root `node_modules`).
@@ -64,7 +64,9 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 
 ## Rulings (decided here; deviations need Kevin)
 
-- **R-PROCEED:** `if_open:"proceed"` = ONLYOFFICE `drop` for the session users from `info`, then wait ≤ 30 s for the lock to clear, then write. If Task 1 finds `drop` doesn't release the lock, or loses typing, proceed returns `could_not_close_editor` (no other escalation) and the skill says "try later". Kevin is told in the Task 1 results.
+- **R-QUEUE (K5):** the queue (crow.db `workspace_pending_changes`) is the default for open files. Exactly-once comes from compare-and-set state transitions; a lease expiry → `unknown_after_claim` → postcondition check, never a blind re-apply.
+- **R-LIVE (K5):** live apply is a `type:"system"` ONLYOFFICE plugin, bind-mounted into the documentserver container. It reaches Crow same-origin through the Tailscale Serve path `/crow-live` on 8457, authenticates with the session's editor JWT (verified with the shared ONLYOFFICE secret), and claims with a short-lived per-change token. If Task 1 S9 shows `info.jwt` is unavailable or the plugin can't edit, live is disabled and everything applies at close.
+- **R-PROCEED (now `force_close`, override only):** ONLYOFFICE `drop` for the session users from `info`, then wait ≤ 30 s for the lock to clear, then write. If Task 1 finds `drop` doesn't release the lock, or loses typing, proceed returns `could_not_close_editor` (no other escalation) and the skill says "try later". Kevin is told in the Task 1 results.
 - **R-EXPIRY:** if Task 1 shows labeled versions are **not** exempt from expiry, nothing changes in code. Undo already returns `version_gone` honestly. Note it in the spike results and the skill.
 - **R-COLLIDE:** writes to one file are spaced ≥ 1.1 s. If Task 1 shows Nextcloud skips a version for two quick PUTs even 1.1 s apart, raise the spacing to the smallest observed safe gap + 0.5 s and record it.
 - **R-HOST:** no `Host` header override. Loopback DAV answers 207 without it (verified 2026-10-03).
@@ -79,20 +81,22 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 
 | # | Finding | Disposition | Where |
 |---|---|---|---|
-| C1 | The secret-skip would break kodi, media and tax Configure | Opt-in `server.configureEnv: "envKeys-only"`; kodi regression test | Task 2, Task 12 manifest |
+| C1 | The secret-skip would break kodi, media and tax Configure | Opt-in `server.configureEnv: "envKeys-only"`; kodi regression test | Task 2, Task 14 manifest |
 | C2 | Same-second version overwrite across processes; after-etag taken from a later stat | Spacing measured against the server mtime; after-etag from the PUT's `ETag`/`OC-ETag`; fake models same-second overwrite; tests for two distinct versions and a sneaky later write | Task 5 |
 | C3 | Undo/restore could overwrite typing saved by a proceed-drop | Etag re-checked inside the serialized section after the lock settles (restore and created-file undo); test | Task 5 |
 | C4 | Spike gaps | S2c (etag after labeling current), S3b (restore touches mtime back; the fake now models it), S6b (drop → unlock → bot PUT → distinct versions), S8 (calendar delete → re-create same href), visible folder name, real SPIKE check via fflate, notes master forced in the template | Task 1 |
 | I5 | Review Focus 1 not really NFD | Partly wrong: the plan file already held literal combining marks (U+0301/U+0303, verified with `od`). Converted them to `\u` escapes so no editor can normalize them away, and added an NFD event summary | Tasks 4, 7, 10 |
-| I6 | Quick edit could hit the wrong paragraph or drop links/images | Forms post back `shown`; `stale_view` refusal; `not_plain_text` for paragraphs with links/images/fields | Task 12 |
+| I6 | Quick edit could hit the wrong paragraph or drop links/images | Forms post back `shown`; `stale_view` refusal; `not_plain_text` for paragraphs with links/images/fields | Task 14 |
 | I7 | TZID series drifted after an update | Updates keep the existing TZID; DST update test | Task 10 |
-| I8 | A failed npm install bricks the server | `npm_required: true` + bundle `package-lock.json` | Tasks 3, 12 |
+| I8 | A failed npm install bricks the server | `npm_required: true` + bundle `package-lock.json` | Tasks 3, 14 |
 | I9 | Crow labels overwrote human labels | Label only empty or Crow-written versions; test | Task 5 |
-| I10 | The secret test scanned the wrong thing; redirect `msg` unredacted | The test now scans results and errors, with a forced 500 that echoes secrets; route redacts | Tasks 5, 12 |
-| I11 | pi-spawned server may lack `CROW_APP_ROOT` | `~/crow` fallback + spawn-from-copy test; pi-bot acceptance step | Tasks 3, 14 |
+| I10 | The secret test scanned the wrong thing; redirect `msg` unredacted | The test now scans results and errors, with a forced 500 that echoes secrets; route redacts | Tasks 5, 14 |
+| I11 | pi-spawned server may lack `CROW_APP_ROOT` | `~/crow` fallback + spawn-from-copy test; pi-bot acceptance step | Tasks 3, 16 |
 | I12 | Contact delete journaled after the DELETE | Journal first (calendar too) | Task 10 |
 | I13 | Calendar re-create after delete unverified | Spike S8, with a fallback ruling | Task 1 |
-| r2 | Spike imported fflate before it was installed; the after-version label overwrote human labels on restore; the fake's restore kept pre-restore content under the wrong id; browser CRLF caused stale_view | System `unzip` in the spike; `mayLabel` applied to the after row too; fake keeps `cur` at its id; undo-of-undo + CRLF tests | Tasks 1, 5, 12 |
+| r2-rereview | B1: "newest id = current" is wrong after undo/restore. B2: no audit of the bundle lock file. Minors: second drop, undo-after-override wording, 423 on move/rename/folder trash, stale spike line | `current` flag + Quick edit filters the current row; blocking `npm audit --prefix bundles/workspace` CI step; retry runs with `wait`; skill wording; `explain423`; spike text fixed | Tasks 1, 3, 5, 14 |
+| K5 | Kevin's design change (2026-10-03): smooth writes to open docs | Default queue; live apply through a system ONLYOFFICE plugin (bind-mounted, same-origin Serve path, editor-JWT auth, per-change apply tokens, CAS claims); close-time apply; notifications; `force_close` only as an explicit override; spike S9 gates the live path | Tasks 1, 5, 12, 13, 14, 15, 16 |
+| r2 | Spike imported fflate before it was installed; the after-version label overwrote human labels on restore; the fake's restore kept pre-restore content under the wrong id; browser CRLF caused stale_view | System `unzip` in the spike; `mayLabel` applied to the after row too; fake keeps `cur` at its id; undo-of-undo + CRLF tests | Tasks 1, 5, 14 |
 | minor | Colon names, SEARCH scope encoding, xlsx soffice check, proceed double-wait, share-root trash | All fixed (`share_root` refusal added) | Tasks 4, 5, 8 |
 
 ## File map
@@ -139,6 +143,13 @@ bundles/workspace/
   panel/workspace.js                MODIFY  tabs Setup | Quick edit
   panel/routes.js                   CREATE  /api/workspace/quick/*
   skills/workspace.md               CREATE
+  server/init-tables.js, server/db.js                       CREATE (Task 12)
+  server/queue/{store,conditions,apply,worker,notify,provider}.js   CREATE (Task 12)
+  server/tools/{queue.js,all.js}                            CREATE (Task 12)
+  server/live/{jwt.js,routes-live.js}                       CREATE (Task 13)
+  onlyoffice-plugin/{config.json,index.html,crow-live.js,ops.js,icon.png}   CREATE (Task 13)
+  docker-compose.yml                MODIFY  read-only plugin bind mount (Task 13)
+  ops/bootstrap.sh                  MODIFY  "Crow live plugin" cache-flush step (Task 13)
 servers/gateway/routes/bundles.js   MODIFY  secret-skip in applyEnvToMcpAddons; refresh registers missing MCP entry
 registry/add-ons.json               MODIFY  workspace entry
 package.json / package-lock.json    MODIFY  root devDependencies
@@ -166,9 +177,11 @@ tests/workspace-bundle.test.js      MODIFY  walk skips node_modules + binaries
 9. Slides tools
 10. Calendar + Contacts + journal
 11. Doc comments + read_file text extraction
-12. Quick edit page + skill + docs + registry + surface test
-13. PR, CI, merge, deploy on crow
-14. Live acceptance on crow ([KEVIN] steps)
+12. Pending-change queue + close-time apply + notifications (K5)
+13. Crow ONLYOFFICE live-edit plugin + live endpoints (K5)
+14. Quick edit page + skill + docs + registry + surface test
+15. PR, CI, merge, deploy on crow (incl. the documentserver recreate window + Serve path)
+16. Live acceptance on crow ([KEVIN] steps: laptop live, phone close-time, override)
 
 ---
 
@@ -460,7 +473,7 @@ Expected:
 - `S5_info_no_session.error` = 1;
 - `S2c_etag_unchanged_by_labeling_current` true (undo tokens depend on it; if false, `finish()` must take the after-etag from a stat AFTER labeling and the spec's §5.4 note changes);
 - `S3b_mtime_after_restore_equals_revision` true (the fake models it; if false, change the fake's MOVE-restore);
-- `S8_cal_recreate_same_href_after_delete_status` 201 (or "skipped"; then Task 14 Step 3 re-runs the spike's S8 after Menu is shared). If it is not 201, calendar undo-of-delete must re-create under a NEW href with the same UID: change `pimUndo`'s delete branch to `putObject(cfg, newObjectHref(coll, uid + "-restored"…)` and record it.
+- `S8_cal_recreate_same_href_after_delete_status` 201 (or "skipped"; then Task 16 Step 3 re-runs the spike's S8 after Menu is shared). If it is not 201, calendar undo-of-delete must re-create under a NEW href with the same UID: change `pimUndo`'s delete branch to `putObject(cfg, newObjectHref(coll, uid + "-restored"…)` and record it.
 
 Any other value: stop. Record it in the results file and apply R-COLLIDE / R-EXPIRY.
 
@@ -479,7 +492,8 @@ Expected:
 - `S6_drop.error` = 0;
 - `S6b_bot_put_after_unlock_status` 204 and `S6b_person_save_and_bot_write_are_distinct_versions` true;
 - `S6_seconds_until_unlock` ≤ 30;
-- Kevin's `SPIKE` is in the saved file. If the byte check prints `check-manually`, run `unzip -p` on a downloaded copy and grep `word/document.xml` for SPIKE.
+- `S6_typing_saved_contains_SPIKE` true (Kevin's typing is in the saved file);
+- after a drop, record whether the dropped tab can still VIEW and whether that keeps the session alive. The docs say dropped users "can still view"; if status 2 never fires, proceed returns `could_not_close_editor`, the results file says so, and Kevin is told. The temp copy in `/tmp` is deleted at the end of the run.
 
 Kevin's description of the tab is recorded. **If unlock > 30 s or the typing is lost → R-PROCEED fallback.**
 
@@ -487,6 +501,35 @@ Kevin's description of the tab is recorded. **If unlock > 30 s or the typing is 
 
 Run: `node scripts/workspace-w2-spike.mjs --capture-fixtures` and follow the prompt.
 Expected: `tests/fixtures/workspace/oo-rich.{docx,xlsx,pptx}` exist and differ from `rich.*` (`cmp` reports a difference).
+
+- [ ] **Step 8b: [KEVIN] S9: ONLYOFFICE plugin probe (gates K5's live path)**
+
+Purpose: before Task 13, prove the live-plugin assumptions on the real 9.4 CE editor. Read `~/CROW-SCHEDULE.md` first. Nothing in this step degrades prod. The probe is copied into the running container only (**not** persistent; removed at the end), and a temporary Serve path points at a probe listener.
+
+1. `scripts/workspace-w2-plugin-probe/`:
+   - `config.json`: the same shape as Task 13's (`type:"system"`, `isViewer:true`, word/cell/slide), but its own GUID `{0C0FFEE0-5EED-4C8B-9B57-000000000001}`;
+   - `index.html`: the same base-script includes as a bundled plugin (copy them from `{9DC93CDB-…}/index.html`);
+   - `probe.js`. On init it POSTs to `/crow-live/probe`:
+     - `{documentId, userId, editorType, isViewMode, isMobileMode, has_jwt: !!info.jwt, jwt_header_payload: first two segments only}`;
+     - a `typeof` report for every builder method `ops.js` intends to use: `Api.GetDocument, ApiDocument.SearchAndReplace/Search/Push/GetAllParagraphs/GetAllHeadingParagraphs/GetStyle, Api.CreateParagraph, ApiParagraph.AddText/SetStyle/InsertParagraph/GetText/RemoveAllElements, ApiRange.SetBold/SetItalic/SetUnderline/SetColor/AddComment, ApiRun.GetTextPr/SetTextPr` for word; `Api.GetSheet/GetActiveSheet/AddSheet, ApiWorksheet.GetRange/GetUsedRange/SetName, ApiRange.SetValue/GetValue/SetNumberFormat` for cell; `Api.GetPresentation, ApiPresentation.GetSlideByIndex, ApiSlide.GetAllShapes, ApiShape.GetDocContent` for slide. It obtains them inside one `callCommand` that returns `Object.keys`-style presence flags.
+   - Then, if not view mode, one `callCommand` that appends a paragraph "CROW-PROBE" (word) or sets `Z99` (cell), and `executeMethod("StartAction", ["Information", "Crow probe…"])` / `EndAction`.
+2. `node scripts/workspace-w2-plugin-probe/listener.mjs` listens on 127.0.0.1:3399. It verifies `has_jwt` and that the JWT signature checks with `WORKSPACE_ONLYOFFICE_JWT_SECRET`, by re-signing header.payload on the server side; the browser never sends the signature. It prints facts and writes them to the results file.
+3. `sudo tailscale serve --bg --https=8457 --set-path=/crow-live/probe http://127.0.0.1:3399` (removed in step 6).
+4. `docker cp scripts/workspace-w2-plugin-probe crow-workspace-onlyoffice-1:/var/www/onlyoffice/documentserver/sdkjs-plugins/{0C0FFEE0-5EED-4C8B-9B57-000000000001}`, then `docker exec crow-workspace-onlyoffice-1 documentserver-flush-cache.sh`.
+5. **[KEVIN]** opens the spike `editor.docx`, an .xlsx and a .pptx on the **laptop** (edit), then the .docx on the **phone** (view). He reports whether "Crow probe…" appeared and whether "CROW-PROBE" showed in the laptop doc and survived close/save.
+6. Cleanup (always, also on failure):
+   - `docker exec … rm -rf …/{0C0FFEE0-…}` and flush the cache again;
+   - `sudo tailscale serve --https=8457 --set-path=/crow-live/probe off`;
+   - kill the listener.
+
+Record in the results file:
+- `S9_has_jwt`, `S9_jwt_signature_valid`, `S9_documentId_equals_key` (compare with the OCS config key);
+- `S9_view_mode_on_phone`, `S9_edit_applied_and_saved`, `S9_indicator_method` (StartAction worked: yes/no);
+- **`API present: <comma list>`** (the exact line `tests/workspace-plugin-ops.test.js` parses).
+
+**Gate:**
+- `has_jwt` false or the signature invalid → R-LIVE fallback (live disabled, close-time only). Task 13 still ships the plugin code but `LIVE_OPS` is empty, and Kevin is told.
+- An individual method missing → that op leaves `LIVE_OPS`.
 
 - [ ] **Step 9: Write the results file**
 
@@ -939,7 +982,7 @@ export const WORKSPACE_INSTRUCTIONS = [
   "Crow Workspace tools (ws_*): files, .docx/.xlsx/.pptx, calendars and contacts in the household's private Nextcloud, as the 'Crow bot' account.",
   "Guardrails: no full-document replace; inserted text never inherits heading styles; comments are listed completely; batch find/replace is atomic; replace_section works heading-to-heading.",
   "Every write returns version_id: tell the user, and pass it to ws_undo_last_change to revert.",
-  "If a result says open_in_editor, ask the user before calling again with if_open:'proceed'.",
+  "If a write returns queued:true, the file is open: tell the user it will apply in their editor or when it closes (ws_change_status reports the outcome). Use if_open:'force_close' only if the user explicitly says to apply now even if it closes the other person's editor.",
 ].join("\n");
 
 export function createWorkspaceServer({ clock = realClock } = {}) {
@@ -970,18 +1013,37 @@ const walk = (dir) => readdirSync(dir).flatMap((n) => {
 });
 ```
 
+- [ ] **Step 3b: Blocking CI audit for the bundle lock file (re-review B2)**
+
+The root audit is `--omit=dev`, so it skips these packages (they are root devDependencies), and nothing audits the bundle lock file that production `npm ci` installs. In `.github/workflows/test.yml`, right after the vaultwarden step, add:
+
+```yaml
+      # The workspace bundle parses untrusted office files (fflate, xmldom, ical.js): its own lock file
+      # gets the same blocking critical-tier audit as vaultwarden.
+      - name: npm audit (blocking, critical, workspace bundle production deps)
+        run: |
+          for i in 1 2 3; do
+            npm audit --prefix bundles/workspace --omit=dev --audit-level=critical && exit 0
+            echo "npm audit failed, retry $i/3"; sleep $((i*10))
+          done
+          exit 1
+```
+
+Locally: `npm audit --prefix bundles/workspace --omit=dev --audit-level=critical`
+Expected: 0 critical.
+
 - [ ] **Step 4: Run the tests**
 
 Run: `npm test -- tests/workspace-config.test.js tests/workspace-bundle.test.js tests/bundle-server-deps.test.js tests/bundle-env-readers.test.js`
-Expected: PASS. If `bundle-server-deps` complains, the manifest `server` block is not in yet; that is fine until Task 12. The test only walks bundles whose manifest declares `server`.
+Expected: PASS. If `bundle-server-deps` complains, the manifest `server` block is not in yet; that is fine until Task 14. The test only walks bundles whose manifest declares `server`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-# npm_required (Task 12) uses `npm ci` when a lock file exists: generate and commit one now
+# npm_required (Task 16) uses `npm ci` when a lock file exists: generate and commit one now
 (cd bundles/workspace && npm install --package-lock-only --ignore-scripts)
 git add bundles/workspace/package-lock.json bundles/workspace/package.json bundles/workspace/server/index.js bundles/workspace/server/server.js bundles/workspace/server/app-root.js bundles/workspace/server/result.js bundles/workspace/server/config.js tests/workspace-config.test.js
-git commit package.json package-lock.json bundles/workspace/package.json bundles/workspace/package-lock.json bundles/workspace/server tests/workspace-config.test.js tests/workspace-bundle.test.js -m "feat(workspace): W2 server scaffold — lazy .env config via codec, result envelope, deps"
+git commit .github/workflows/test.yml package.json package-lock.json bundles/workspace/package.json bundles/workspace/package-lock.json bundles/workspace/server tests/workspace-config.test.js tests/workspace-bundle.test.js -m "feat(workspace): W2 server scaffold — lazy .env config via codec, result envelope, deps"
 git show --stat HEAD
 ```
 
@@ -1322,12 +1384,13 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
         writeContent(n, body); const putTag = n.etag; state.afterPutHook?.(n); return send(204, "", { ETag: putTag, "OC-ETag": putTag });
       }
       if (req.method === "MKCOL") { if (n) return send(405); mkNode(p, "dir"); return send(201); }
-      if (req.method === "DELETE") { if (!n) return send(404); if (lockBlocks(n)) return send(423); for (const k of [...nodes.keys()]) if (k === p || k.startsWith(`${p}/`)) { state.trash.push(nodes.get(k)); nodes.delete(k); } return send(204); }
+      const lockedInside = (p0) => [...nodes.values()].some((x) => (x.path === p0 || x.path.startsWith(`${p0}/`)) && lockBlocks(x));
+      if (req.method === "DELETE") { if (!n) return send(404); if (lockedInside(p)) return send(423); for (const k of [...nodes.keys()]) if (k === p || k.startsWith(`${p}/`)) { state.trash.push(nodes.get(k)); nodes.delete(k); } return send(204); }
       if (req.method === "MOVE" || req.method === "COPY") {
         if (!n) return send(404);
         const dest = pathFromUrl(new URL(req.headers.destination).pathname, "/remote.php/dav/files/crow-bot/");
         if (nodes.has(dest) && req.headers.overwrite === "F") return send(412);
-        if (req.method === "MOVE" && lockBlocks(n)) return send(423);
+        if (req.method === "MOVE" && [...nodes.values()].some((x) => (x.path === p || x.path.startsWith(`${p}/`)) && lockBlocks(x))) return send(423);
         for (const k of [...nodes.keys()].filter((k) => k === p || k.startsWith(`${p}/`))) {
           const src = nodes.get(k); const nk = dest + k.slice(p.length);
           if (req.method === "MOVE") { nodes.delete(k); src.path = nk; nodes.set(nk, src); }
@@ -1358,7 +1421,8 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
       if (req.method === "PROPPATCH") { v.label = (body.toString().match(/<nc:version-label>([\s\S]*?)<\/nc:version-label>/) || [])[1] || null; return send(207, ms("")); }
       // Real NC restore touches the file back to the revision's mtime (files_versions Storage.php:408).
       // The pre-restore content stays as version <current mtime> (Storage.php:383-386); the restored revision's row
-      // becomes current again (mtime touched back to it). Order rows by id so "current" = max id stays meaningful.
+      // becomes current again (mtime touched back to it). Rows stay ordered by id. NOTE: after a restore, current = the restored row X (old id), and the
+      // max id M is the content that was just undone; "newest id = current" is FALSE (re-review B1). Consumers compare with the file mtime.
       if (req.method === "MOVE") { if (lockBlocks(n)) return send(423); n.bytes = Buffer.from(v.bytes); n.etag = `"e${++etagN}"`; n.mtime = v.id; n.versions.sort((a, b) => a.id - b.id); return send(201); }
     }
     // ---- principals ----
@@ -1690,7 +1754,8 @@ import { handler } from "../result.js";
 /** Register tool defs; returns the names (the surface test compares them to spec §4). */
 export function defineTools(server, ctx, defs) {
   for (const d of defs) {
-    server.tool(d.name, d.description, d.schema, handler((args) => d.run(args, ctx), { redactWith: () => { try { return ctx.getConfig(); } catch { return null; } } }));
+    // __tool (non-enumerable) lets writeOptsOf find the queue descriptor for queueable tools (K5).
+    server.tool(d.name, d.description, d.schema, handler((args) => d.run(Object.defineProperty({ ...args }, "__tool", { value: d.name }), ctx), { redactWith: () => { try { return ctx.getConfig(); } catch { return null; } } }));
   }
   return defs.map((d) => d.name);
 }
@@ -1706,15 +1771,18 @@ export const fileRef = {
   file_id: z.number().int().positive().optional().describe("Nextcloud file id (alternative to path)"),
 };
 export const writeOpts = {
-  wait_s: z.number().int().min(0).max(30).optional().describe("Seconds to wait if the file is open in the editor (default 30)"),
-  if_open: z.enum(["wait", "proceed"]).optional().describe("'proceed' only after the user agreed: closes the editor session (their typing is saved first), then writes"),
+  wait_s: z.number().int().min(0).max(30).optional().describe("Seconds to wait if the file is open before queueing (default 0)"),
+  if_open: z.enum(["queue", "wait", "force_close"]).optional().describe("queue (default): if open, the change waits and applies live or when closed. force_close ONLY if the user explicitly said to apply now even if it closes their editor"),
 };
+/** K5: the queue provider is installed by registerQueue (Task 12); until then (and for non-queueable tools) queue = null → "wait" semantics. */
+let queueProvider = null;
+export const setQueueProvider = (fn) => { queueProvider = fn; };
 export function refOf(args) {
   if (args.file_id !== undefined) return { file_id: args.file_id };
   if (typeof args.path === "string") return { path: args.path };
   throw new WsError("bad_ref", "give a path (or file_id)");
 }
-export const writeOptsOf = (args) => ({ waitS: args.wait_s ?? 30, ifOpen: args.if_open ?? "wait" });
+export const writeOptsOf = (args) => ({ waitS: args.wait_s ?? 0, ifOpen: args.if_open ?? "queue", queue: queueProvider && args.__tool ? queueProvider(args.__tool, args) : null });
 export function toPublic(e, cfg) {
   return { path: e.path, name: e.name, file_id: e.fileId, type: e.isFolder ? "folder" : "file", size: e.size, modified: e.modified, mime: e.mime, locked: e.lock, web_url: `${cfg.webBase}/f/${e.fileId}` };
 }
@@ -1866,21 +1934,32 @@ test("editor lock clears inside 30 s → waits, then writes", async () => {
   fake.addFile("S/w.docx", Buffer.from("d"));
   fake.openInEditor("S/w.docx", ["admin"]);
   fake.state.pendingReleases.push({ at: fake.state.now + 6000, fn: () => { fake.node("S/w.docx").lock = null; } });
-  const r = await W.withFileWrite(cfg, { path: "S/w.docx" }, appendMut("!"), { clock });
+  const r = await W.withFileWrite(cfg, { path: "S/w.docx" }, appendMut("!"), { clock, ifOpen: "wait", waitS: 30 });
   assert.equal(r.changed, 1);
 });
 
-test("still open after 30 s → open_in_editor naming the person, can_proceed", async () => {
+test("default with no queue provider = no wait, open_in_editor at once; queue provider → enqueue is called, nothing written", async () => {
+  fake.addFile("S/q.docx", Buffer.from("d")); fake.openInEditor("S/q.docx", ["dayane"]);
+  const t0 = clock.now();
+  await assert.rejects(W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock }), (e) => e.code === "open_in_editor");
+  assert.equal(clock.now(), t0, "default wait_s is 0");
+  let got = null; const puts = fake.calls.filter((c) => c.method === "PUT").length;
+  const r = await W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_x" }; } } });
+  assert.deepEqual(r, { queued: true, change_id: "pc_x" }); assert.equal(got.lock.data.open_by[0], "Dayane");
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
+});
+
+test("still open after 30 s (if_open wait) → open_in_editor naming the person, can_proceed", async () => {
   fake.addFile("S/o.docx", Buffer.from("d"));
   fake.openInEditor("S/o.docx", ["dayane"]);
-  await assert.rejects(W.withFileWrite(cfg, { path: "S/o.docx" }, appendMut("!"), { clock }),
-    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Dayane" && e.data.can_proceed === true && /go ahead anyway/.test(e.message));
+  await assert.rejects(W.withFileWrite(cfg, { path: "S/o.docx" }, appendMut("!"), { clock, ifOpen: "wait", waitS: 30 }),
+    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Dayane" && e.data.can_proceed === true && /open in the editor/.test(e.message));
 });
 
 test("proceed → drop → editor saves its typing first → bot change on top", async () => {
   fake.addFile("S/p.docx", Buffer.from("base"));
   fake.openInEditor("S/p.docx", ["admin"], { releaseAfterMs: 5000, typed: Buffer.from("base+kevin") });
-  const r = await W.withFileWrite(cfg, { path: "S/p.docx" }, appendMut("+bot"), { clock, ifOpen: "proceed" });
+  const r = await W.withFileWrite(cfg, { path: "S/p.docx" }, appendMut("+bot"), { clock, ifOpen: "force_close" });
   assert.equal(text(fake.node("S/p.docx").bytes), "base+kevin+bot");
   assert.ok(fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.users[0] === "ocinst_admin"));
   assert.ok(r.version_id);
@@ -1889,19 +1968,19 @@ test("proceed → drop → editor saves its typing first → bot change on top",
 test("drop that never releases → could_not_close_editor", async () => {
   fake.addFile("S/n.docx", Buffer.from("d"));
   fake.openInEditor("S/n.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
-  await assert.rejects(W.withFileWrite(cfg, { path: "S/n.docx" }, appendMut("!"), { clock, ifOpen: "proceed" }), (e) => e.code === "could_not_close_editor");
+  await assert.rejects(W.withFileWrite(cfg, { path: "S/n.docx" }, appendMut("!"), { clock, ifOpen: "force_close" }), (e) => e.code === "could_not_close_editor");
 });
 
 test("a person's manual lock is never overridden, even with proceed", async () => {
   fake.addFile("S/m.docx", Buffer.from("d"), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
-  await assert.rejects(W.withFileWrite(cfg, { path: "S/m.docx" }, appendMut("!"), { clock, ifOpen: "proceed", waitS: 0 }),
+  await assert.rejects(W.withFileWrite(cfg, { path: "S/m.docx" }, appendMut("!"), { clock, ifOpen: "force_close", waitS: 0 }),
     (e) => e.code === "locked_by_person" && e.data.can_proceed === false);
   assert.ok(!fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.key === "k" + fake.node("S/m.docx").fileId));
 });
 
 test("editor lock with no live session → stale_editor_lock, no drop", async () => {
   fake.addFile("S/s.docx", Buffer.from("d"), { owner: "admin", lock: { type: 1, owner: "onlyoffice", displayName: "ONLYOFFICE" } });
-  await assert.rejects(W.withFileWrite(cfg, { path: "S/s.docx" }, appendMut("!"), { clock, waitS: 0, ifOpen: "proceed" }),
+  await assert.rejects(W.withFileWrite(cfg, { path: "S/s.docx" }, appendMut("!"), { clock, waitS: 0, ifOpen: "force_close" }),
     (e) => e.code === "stale_editor_lock" && /Unlock/.test(e.message));
 });
 
@@ -1943,7 +2022,7 @@ test("undo with proceed: the editor's drop-save changes the file → changed_sin
   fake.addFile("S/up.docx", Buffer.from("orig"));
   const r = await W.withFileWrite(cfg, { path: "S/up.docx" }, appendMut("+bot"), { clock });
   fake.openInEditor("S/up.docx", ["admin"], { releaseAfterMs: 3000, typed: Buffer.from("orig+bot+kevin") });
-  await assert.rejects(W.undoFileChange(cfg, { path: "S/up.docx" }, r.version_id, { clock, ifOpen: "proceed" }), (e) => e.code === "changed_since");
+  await assert.rejects(W.undoFileChange(cfg, { path: "S/up.docx" }, r.version_id, { clock, ifOpen: "force_close" }), (e) => e.code === "changed_since");
   assert.equal(text(fake.node("S/up.docx").bytes), "orig+bot+kevin");
 });
 
@@ -1952,7 +2031,7 @@ test("proceed: the person's save and the bot write become two DISTINCT versions 
   fake.addFile("S/two.docx", Buffer.from("base"));
   fake.openInEditor("S/two.docx", ["admin"], { releaseAfterMs: 500, typed: Buffer.from("base+kevin") });
   const v0 = fake.versionsOf("S/two.docx").length;
-  await W.withFileWrite(cfg, { path: "S/two.docx" }, appendMut("+bot"), { clock, ifOpen: "proceed" });
+  await W.withFileWrite(cfg, { path: "S/two.docx" }, appendMut("+bot"), { clock, ifOpen: "force_close" });
   const vs = fake.versionsOf("S/two.docx");
   assert.equal(vs.length, v0 + 2, "kevin's save and the bot write are separate rows");
   assert.equal(vs.at(-2).bytes.toString(), "base+kevin");
@@ -2099,7 +2178,7 @@ export async function classifyLock(cfg, e) {
   const who = await Promise.all(s.uids.map((u) => displayName(cfg, u)));
   return {
     code: "open_in_editor", key: s.key, users: s.users,
-    message: `${names(who)} ${who.length > 1 ? "have" : "has"} "${e.name}" open in the editor. Ask the user: go ahead anyway (their editor reloads; their typing is saved first) or try later?`,
+    message: `${names(who)} ${who.length > 1 ? "have" : "has"} "${e.name}" open in the editor.`,
     data: { open_by: who, since: l.since, lock_type: "editor", can_proceed: true },
   };
 }
@@ -2154,11 +2233,15 @@ async function waitUnlocked(cfg, segs, waitS, clock) {
   }
 }
 
-async function settleLock(cfg, segs, { waitS, ifOpen, clock }) {
+/** K5: thrown by settleLock when the write should be queued instead (caught by the with* wrappers). */
+export class QueueSignal { constructor(entry, lock) { this.entry = entry; this.lock = lock; } }
+
+async function settleLock(cfg, segs, { waitS, ifOpen, clock, queue = null }) {
   let e = await waitUnlocked(cfg, segs, waitS, clock);
   if (!e.lock) return e;
   const c = await classifyLock(cfg, e);
-  if (ifOpen !== "proceed" || !c.data.can_proceed) throw new WsError(c.code, c.message, c.data);
+  if (ifOpen === "queue" && queue) throw new QueueSignal(e, c); // default: smooth, nobody is kicked out
+  if (ifOpen !== "force_close" || !c.data.can_proceed) throw new WsError(c.code, c.message, c.data);
   await dropUsers(cfg, c.key, c.users);
   e = await waitUnlocked(cfg, segs, 30, clock);
   if (e.lock) throw new WsError("could_not_close_editor", "The editor did not close within 30 seconds. Try again later.", { open_by: c.data.open_by });
@@ -2210,18 +2293,23 @@ async function mtimeGap(cur, clock) {
   if (ageMs < WRITE_SPACING_MS) await clock.sleep(WRITE_SPACING_MS - Math.max(0, ageMs));
 }
 
-export async function withFileWrite(cfg, ref, mutate, { waitS = 30, ifOpen = "wait", label = "Crow", clock }) {
+export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen: ifOpenIn = "queue", label = "Crow", clock, queue = null }) {
+  let ifOpen = ifOpenIn;
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
     for (let attempt = 0; ; attempt++) {
-      const e = await settleLock(cfg, segs, { waitS: ifOpen === "proceed" ? 0 : waitS, ifOpen, clock });
+      let e;
+      try { e = await settleLock(cfg, segs, { waitS: ifOpen === "force_close" ? 0 : waitS, ifOpen, clock, queue }); }
+      catch (sig) { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; }
       await spacing(e.fileId, clock);
       let cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
       if (clock.now() - cur.mtime * 1000 < WRITE_SPACING_MS) { await mtimeGap(cur, clock); cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES }); }
       const out = await mutate(cur.bytes, e);
       if (!out || !out.changed) return { ...(out?.data || {}), path: e.path, file_id: e.fileId, changed: 0, version_id: null };
       const res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag });
-      if ((res.status === 412 || res.status === 423) && attempt === 0) continue;
+      // re-review minor: a 423 on the retry must NOT drop the editor a second time without asking again;
+      // the retry runs with ifOpen "wait" so a re-opened editor surfaces as open_in_editor.
+      if ((res.status === 412 || res.status === 423) && attempt === 0) { if (res.status === 423) ifOpen = "wait"; continue; }
       if (res.status === 412) throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`);
       if (res.status === 423) { const again = await stat(cfg, segs); if (again.lock) { const c = await classifyLock(cfg, again); throw new WsError(c.code, c.message, c.data); } throw new WsError("locked", "The file is locked; try again."); }
       if (!res.ok) throw httpFail(res, "save the change");
@@ -2232,14 +2320,16 @@ export async function withFileWrite(cfg, ref, mutate, { waitS = 30, ifOpen = "wa
   });
 }
 
-export async function withFileRestore(cfg, ref, versionId, { waitS = 30, ifOpen = "wait", label = "Crow", summary = "restore", clock, expectEtag = null }) {
+export async function withFileRestore(cfg, ref, versionId, { waitS = 0, ifOpen = "queue", label = "Crow", summary = "restore", clock, expectEtag = null, queue = null }) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
     for (let attempt = 0; ; attempt++) {
       // NOTE (review C4b): a restore touches the file back to the revision's mtime, so after a restore the
       // "current" version id equals the restored revision's id. finish() then labels that row "Undo: …",
       // which is the intended reading in the version sidebar ("this content is current again because of undo").
-      const e = await settleLock(cfg, segs, { waitS: ifOpen === "proceed" ? 0 : waitS, ifOpen, clock });
+      let e;
+      try { e = await settleLock(cfg, segs, { waitS: ifOpen === "force_close" ? 0 : waitS, ifOpen, clock, queue }); }
+      catch (sig) { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; }
       await spacing(e.fileId, clock);
       await mtimeGap(e, clock);
       // Review C3: re-check AFTER the lock settled (a proceed-drop saves the person's typing, which
@@ -2270,7 +2360,7 @@ export async function undoFileChange(cfg, ref, versionId, opts) {
   if (normEtag(e.etag) !== v.a) throw new WsError("changed_since", `"${e.name}" changed after that edit (last modified ${e.modified}). Nothing was undone. To go back anyway, use ws_drive_list_versions and ws_drive_restore_version.`, { modified: e.modified });
   if (v.b === "0") {
     return serialized(e.fileId, async () => {
-      await settleLock(cfg, segs, { waitS: opts.ifOpen === "proceed" ? 0 : opts.waitS ?? 30, ifOpen: opts.ifOpen ?? "wait", clock: opts.clock });
+      await settleLock(cfg, segs, { waitS: opts.ifOpen === "force_close" ? 0 : opts.waitS ?? 30, ifOpen: opts.ifOpen ?? "wait", clock: opts.clock });
       const now = await stat(cfg, segs); // review C3: re-check after the lock settled
       if (normEtag(now.etag) !== v.a) throw new WsError("changed_since", `"${now.name}" was changed after Crow created it; it was not removed.`, { modified: now.modified });
       await remove(cfg, segs);
@@ -2363,6 +2453,24 @@ test("versions: list, restore (undoable), undo via ws_undo_last_change", async (
   assert.equal(fake.node("S/n.txt").bytes.toString(), "one"); assert.ok(rs.data.version_id);
 });
 
+test("after an undo, list_versions flags the restored row as current and still lists the undone content (B1)", async () => {
+  fake.addFile("S/b1.txt", Buffer.from("x1"));
+  const w = await call("ws_drive_upload_new_version", { path: "S/b1.txt", text: "x2" });
+  await call("ws_undo_last_change", { path: "S/b1.txt", version_id: w.data.version_id });
+  const l = (await call("ws_drive_list_versions", { path: "S/b1.txt" })).data.versions;
+  const cur = l.filter((v) => v.current);
+  assert.equal(cur.length, 1); assert.notEqual(cur[0].version_id, l[0].version_id, "current is not the newest id after an undo");
+  assert.ok(l.some((v) => !v.current && fake.versionsOf("S/b1.txt").find((x) => String(x.id) === v.version_id).bytes.toString() === "x2"));
+});
+
+test("move/rename/trash of an open file (or a folder with an open child) explain who has it open (re-review minor)", async () => {
+  fake.addFile("S/mv.docx", Buffer.from("PK")); fake.openInEditor("S/mv.docx", ["dayane"]);
+  assert.equal((await call("ws_drive_rename", { path: "S/mv.docx", new_name: "x.docx" })).code, "open_in_editor");
+  fake.addFolder("S/dir"); fake.addFile("S/dir/in.docx", Buffer.from("PK")); fake.openInEditor("S/dir/in.docx", ["dayane"]);
+  const t = await call("ws_drive_trash_file", { path: "S/dir", wait_s: 0 });
+  assert.equal(t.code, "locked_inside"); assert.match(t.error, /open/);
+});
+
 test("trash refuses an open file and names who has it", async () => {
   fake.addFile("S/open.docx", Buffer.from("PK"));
   fake.openInEditor("S/open.docx", ["dayane"]);
@@ -2425,6 +2533,14 @@ export async function uniqueName(cfg, folderSegs, name) {
   throw new WsError("exists", "too many files with that name");
 }
 
+/** re-review minor: a 423 from MOVE/DELETE means the item (or something inside a folder) is open/locked. */
+async function explain423(cfg, segs, err) {
+  if (err?.code !== "locked") throw err;
+  const e = await stat(cfg, segs).catch(() => null);
+  if (e?.lock) { const c = await classifyLock(cfg, e); throw new WsError(c.code, c.message, { ...c.data, can_proceed: false }); }
+  throw new WsError("locked_inside", `Something inside "${segs.at(-1)}" is open in the editor or locked; try again after it is closed.`);
+}
+
 async function refuseIfOpen(cfg, e, waitS, clock) {
   const deadline = clock.now() + waitS * 1000;
   let cur = e;
@@ -2438,13 +2554,13 @@ export const driveWriteDefs = [
     run: async ({ name, parent }, { getConfig }) => { const cfg = getConfig(); const segs = [...splitFolder(parent), checkName(name)]; const created = await mkcol(cfg, segs); const e = await stat(cfg, segs); return { created, path: e.path, file_id: e.fileId }; } },
   { name: "ws_drive_move_file", description: "Move a file or folder into another folder (never overwrites).",
     schema: { path: z.string().max(4096), new_parent: z.string().max(4096) },
-    run: async ({ path, new_parent }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const to = [...splitFolder(new_parent), from.at(-1)]; if (joinPath(from) === joinPath(to)) return { moved: false, path }; await move(cfg, from, to); return { moved: true, path: joinPath(to) }; } },
+    run: async ({ path, new_parent }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const to = [...splitFolder(new_parent), from.at(-1)]; if (joinPath(from) === joinPath(to)) return { moved: false, path }; await move(cfg, from, to).catch((err) => explain423(cfg, from, err)); return { moved: true, path: joinPath(to) }; } },
   { name: "ws_drive_copy_file", description: "Copy a file (adds ' (2)' etc. on a name clash).",
     schema: { path: z.string().max(4096), new_name: z.string().max(255).optional(), parent: z.string().max(4096).optional() },
     run: async ({ path, new_name, parent }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const folder = parent === undefined ? from.slice(0, -1) : splitFolder(parent); const name = await uniqueName(cfg, folder, checkName(new_name || from.at(-1))); await copy(cfg, from, [...folder, name]); const e = await stat(cfg, [...folder, name]); return { path: e.path, file_id: e.fileId }; } },
   { name: "ws_drive_rename", description: "Rename a file or folder in place (id unchanged).",
     schema: { path: z.string().max(4096), new_name: z.string().min(1).max(255) },
-    run: async ({ path, new_name }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const name = checkName(new_name); await move(cfg, from, [...from.slice(0, -1), name]); return { old_name: from.at(-1), name, path: joinPath([...from.slice(0, -1), name]) }; } },
+    run: async ({ path, new_name }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const name = checkName(new_name); await move(cfg, from, [...from.slice(0, -1), name]).catch((err) => explain423(cfg, from, err)); return { old_name: from.at(-1), name, path: joinPath([...from.slice(0, -1), name]) }; } },
   { name: "ws_drive_trash_file", description: "Move a file or folder to the Workspace trash (recoverable). Destructive: confirm intent with the user first.",
     schema: { ...fileRef, wait_s: writeOpts.wait_s },
     run: async (args, { getConfig, clock }) => {
@@ -2454,7 +2570,7 @@ export const driveWriteDefs = [
       const parent = segs.length > 1 ? await stat(cfg, segs.slice(0, -1)) : null;
       const isShareRoot = e.ownerId && e.ownerId !== cfg.user && (!parent || parent.ownerId !== e.ownerId);
       if (isShareRoot) throw new WsError("share_root", `"${e.name}" is shared with Crow bot by ${e.ownerName || e.ownerId}; deleting it would only remove Crow's access, not the files. Ask the owner to delete it, or trash items inside it.`);
-      await refuseIfOpen(cfg, e, args.wait_s ?? 30, clock); await remove(cfg, segs); return { trashed: true, path: e.path };
+      await refuseIfOpen(cfg, e, args.wait_s ?? 30, clock); await remove(cfg, segs).catch((err) => explain423(cfg, segs, err)); return { trashed: true, path: e.path };
     } },
   { name: "ws_drive_upload_file", description: "Create a NEW file from text or base64 (max 10 MB). Never overwrites.",
     schema: { folder: z.string().max(4096), name: z.string().min(1).max(255), text: z.string().optional(), base64: z.string().optional() },
@@ -2488,9 +2604,10 @@ export const driveWriteDefs = [
       const s = await createUserShare(cfg, segs, args.user, permissions);
       return { shared: true, path: e.path, with: args.user, role: args.role, share_id: String(s.id) };
     } },
-  { name: "ws_drive_list_versions", description: "List a file's saved versions (newest first): version_id, time, author, label.",
+  { name: "ws_drive_list_versions", description: "List a file's saved versions (newest first): version_id, current (the one in use now; after an undo it is not the newest), time, author, label.",
     schema: { ...fileRef, limit: z.number().int().min(1).max(100).optional().default(20) },
-    run: async (args, { getConfig }) => { const cfg = getConfig(); const e = await stat(cfg, refOf(args)); const v = await listVersions(cfg, e.fileId); return { path: e.path, versions: v.slice(0, args.limit).map((x) => ({ version_id: x.versionId, modified: x.modified, author: x.author, label: x.label, size: x.size })) }; } },
+    // re-review B1: after undo/restore the current row is NOT the newest id; mark it from the file's mtime.
+    run: async (args, { getConfig }) => { const cfg = getConfig(); const e = await stat(cfg, refOf(args)); const v = await listVersions(cfg, e.fileId); return { path: e.path, versions: v.slice(0, args.limit).map((x) => ({ version_id: x.versionId, current: x.versionId === String(e.mtime), modified: x.modified, author: x.author, label: x.label, size: x.size })) }; } },
   { name: "ws_drive_restore_version", description: "Restore a listed version. The current content is kept as a version first, so this can be undone too.",
     schema: { ...fileRef, version_id: z.string().regex(/^\d{1,12}$/), ...writeOpts },
     run: async (args, { getConfig, clock }) => withFileRestore(getConfig(), refOf(args), args.version_id, { ...writeOptsOf(args), clock, summary: `restore version ${args.version_id}` }) },
@@ -2514,7 +2631,7 @@ export function registerUndo(server, ctx) {
   return defineTools(server, ctx, [{
     name: "ws_undo_last_change",
     description: "Undo one Crow change: pass the path (or the cal:/contacts: ref) and the version_id that change returned. Refuses if someone changed it since.",
-    schema: { path: z.string().max(4096), version_id: z.string().max(2048), wait_s: z.number().int().min(0).max(30).optional(), if_open: z.enum(["wait", "proceed"]).optional() },
+    schema: { path: z.string().max(4096), version_id: z.string().max(2048), wait_s: z.number().int().min(0).max(30).optional(), if_open: z.enum(["wait", "force_close"]).optional() },
     run: async (args, c) => {
       const kind = String(args.version_id).split(".")[0];
       const h = undoHandlers[kind];
@@ -5789,7 +5906,781 @@ git show --stat HEAD
 
 ---
 
-### Task 12: Quick edit page, skill, manifest/registry, docs, and the MCP surface test
+### Task 12: Pending-change queue, close-time apply, notifications (K5)
+
+**Files:**
+- Create: `bundles/workspace/server/init-tables.js`, `bundles/workspace/server/db.js`, `bundles/workspace/server/queue/{store.js,conditions.js,apply.js,worker.js,notify.js}`, `bundles/workspace/server/tools/queue.js`
+- Modify: `bundles/workspace/server/server.js` (init tables, `setQueueProvider`, register queue tools), `bundles/workspace/server/tools/undo.js` (queue undo; inverse of live changes), `bundles/workspace/server/ooxml/docx-edit.js` + `docx-comments.js` + `xlsx.js` (internal inverse ops)
+- Test: `tests/workspace-queue.test.js`
+
+**Interfaces:**
+- Consumes: `withFileWrite`/`withFileRestore` + `QueueSignal` (Task 5), all tool def arrays (Tasks 4–11), `createNotification` (`servers/shared/notifications.js`), `createDbClient` (`servers/db.js`) via `appImport`.
+- Produces `queue/store.js`:
+  - `STATES`
+  - `enqueue(db, {fileId, path, key, tool, args, precondition, openBy, requestedBy}) → row`
+  - `cas(db, id, fromState, toState, patch) → boolean`
+  - `nextApplicable(db, fileId) → row|null` (lowest `seq` whose earlier rows are all terminal)
+  - `filesWithWork(db) → [{file_id, path}]`, `byKey(db, key)`, `get(db, id)`
+  - `expireOld(db, now)`
+- Produces `queue/conditions.js`:
+  - `QUEUEABLE` (Set of tool names), `LIVE_OPS` (Set)
+  - `snapshot(tool, args, bytes) → precondition`
+  - `checkPre(tool, args, pre, bytes) → {ok, reason}`, `checkPost(tool, args, result, bytes) → true|false|null` (null = can't tell)
+- Produces `queue/apply.js`: `applyQueued(ctx, row) → {state, version_id?, reason?}`. It runs the tool's own `run()` with `if_open:"wait"` and the queue off, after `checkPre`.
+- Produces `queue/worker.js`: `startQueueWorker({db, getConfig, clock, intervalMs=15000}) → stop()`. It is idempotent per process.
+- Produces `queue/notify.js`: `notifyChange(db, row, event)`.
+- Produces `tools/queue.js`: `ws_change_status`, `ws_cancel_change`.
+- `setQueueProvider((tool, args) => QUEUEABLE.has(tool) ? { enqueue: (sig) => … } : null)`. The provider computes the precondition snapshot from the saved file at enqueue time and stores `key` = the current ONLYOFFICE document key (`docSession`).
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/workspace-queue.test.js` (uses the fake Nextcloud, a scratch crow.db, and the virtual clock):
+
+```js
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
+import { connectWorkspace } from "./helpers/workspace-client.js";
+
+const FIX = join(import.meta.dirname, "fixtures", "workspace");
+let fake, call, close, Q, W, db, getConfig;
+before(async () => {
+  fake = await startFakeNextcloud(); fake.addFolder("S", { owner: "admin" });
+  ({ call, close } = await connectWorkspace(fake));
+  Q = await import("../bundles/workspace/server/queue/store.js");
+  W = await import("../bundles/workspace/server/queue/worker.js");
+  db = await (await import("../bundles/workspace/server/db.js")).openWorkspaceDb();
+  ({ getConfig } = await import("../bundles/workspace/server/config.js"));
+});
+after(async () => { await close(); fake.close(); });
+const put = (n) => fake.addFile(`S/${n}`, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
+const notifs = async () => (await db.execute("SELECT title, body FROM notifications ORDER BY id")).rows;
+
+test("open file → queued (success, who, change_id), nothing written, notification created", async () => {
+  put("q1.docx"); fake.openInEditor("S/q1.docx", ["dayane"]);
+  const puts = fake.calls.filter((c) => c.method === "PUT").length;
+  const r = await call("ws_docs_find_replace", { path: "S/q1.docx", find: "Tortillas", replace: "Totopos" });
+  assert.equal(r.success, true); assert.equal(r.data.queued, true); assert.match(r.data.change_id, /^pc_/);
+  assert.deepEqual(r.data.open_by, ["Dayane"]); assert.equal(r.data.apply, "live_or_on_close");
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
+  assert.ok((await notifs()).some((n) => /change waiting for q1\.docx/.test(n.title)));
+  assert.equal((await call("ws_change_status", { change_id: r.data.change_id })).data.state, "pending");
+});
+
+test("close-time: nothing while the session lives; after release it applies in seq order with an undo id", async () => {
+  put("q2.docx"); const key = fake.openInEditor("S/q2.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const a = await call("ws_docs_find_replace", { path: "S/q2.docx", find: "Tortillas", replace: "Totopos" });
+  const b = await call("ws_docs_find_replace", { path: "S/q2.docx", find: "Totopos", replace: "Tostadas" });
+  const tick = W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } });
+  await tick();
+  assert.equal((await call("ws_change_status", { change_id: a.data.change_id })).data.state, "pending", "session alive → untouched");
+  fake.node("S/q2.docx").lock = null; fake.state.sessions.delete(key);
+  await tick();
+  const sa = (await call("ws_change_status", { change_id: a.data.change_id })).data, sb = (await call("ws_change_status", { change_id: b.data.change_id })).data;
+  assert.equal(sa.state, "applied_close"); assert.equal(sb.state, "applied_close"); assert.match(sa.version_id, /^v1\./);
+  assert.match((await call("ws_docs_read", { path: "S/q2.docx" })).data.markdown, /Tostadas/);
+  assert.ok((await notifs()).some((n) => /applied/.test(n.title) && /v1\./.test(n.body)));
+});
+
+test("precondition fails at close → failed: target_changed, file untouched, notified", async () => {
+  fake.addFile("S/q3.xlsx", readFileSync(join(FIX, "oo-rich.xlsx")), { owner: "admin" });
+  const key = fake.openInEditor("S/q3.xlsx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const c = await call("ws_sheets_write", { path: "S/q3.xlsx", range: "Recetas!B2", values: [[9]] });
+  const { openXlsx, writeRange } = await import("../bundles/workspace/server/ooxml/xlsx.js");
+  const wb = openXlsx(fake.node("S/q3.xlsx").bytes); writeRange(wb, "Recetas!B2", [[5]], "RAW");
+  fake.node("S/q3.xlsx").bytes = Buffer.from(wb.pkg.save()); fake.node("S/q3.xlsx").etag = '"human"'; // the person changed B2 meanwhile
+  fake.node("S/q3.xlsx").lock = null; fake.state.sessions.delete(key);
+  await W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+  const s = (await call("ws_change_status", { change_id: c.data.change_id })).data;
+  assert.equal(s.state, "failed"); assert.equal(s.reason, "target_changed");
+});
+
+test("exactly once: CAS claims; an expired live lease becomes unknown_after_claim and the postcondition decides", async () => {
+  put("q4.docx"); const key = fake.openInEditor("S/q4.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const r = await call("ws_docs_find_replace", { path: "S/q4.docx", find: "Tortillas", replace: "Totopos" });
+  const id = r.data.change_id;
+  assert.equal(await Q.cas(db, id, "pending", "claimed_live", { lease_until: Date.now() - 1, lease_owner: "plugin" }), true);
+  assert.equal(await Q.cas(db, id, "pending", "applying_close", {}), false, "second claimer loses");
+  // the plugin applied it in the editor, then crashed before ack; the editor saved:
+  const { openDocx } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+  const { findReplace } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+  const d = openDocx(fake.node("S/q4.docx").bytes); findReplace(d, [{ find: "Tortillas", replace: "Totopos" }]);
+  fake.node("S/q4.docx").bytes = Buffer.from(d.pkg.save()); fake.node("S/q4.docx").etag = '"saved-by-editor"';
+  fake.node("S/q4.docx").lock = null; fake.state.sessions.delete(key);
+  await W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+  const s = (await call("ws_change_status", { change_id: id })).data;
+  assert.equal(s.state, "applied_live"); assert.equal(s.detected, true, "found by postcondition, NOT applied twice");
+  assert.equal(((await call("ws_docs_read", { path: "S/q4.docx" })).data.markdown.match(/Totopos/g) || []).length, 1);
+});
+
+test("a person's manual lock: queued, applied only after unlock; force_close refused", async () => {
+  fake.addFile("S/q5.docx", readFileSync(join(FIX, "oo-rich.docx")), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
+  const r = await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota." });
+  assert.equal(r.data.queued, true);
+  assert.equal((await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota.", if_open: "force_close" })).code, "locked_by_person");
+});
+
+test("cancel only while pending; non-queueable tools still answer open_in_editor; expiry after 7 days", async () => {
+  put("q6.docx"); fake.openInEditor("S/q6.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const r = await call("ws_docs_append", { path: "S/q6.docx", markdown: "x" });
+  assert.equal((await call("ws_cancel_change", { change_id: r.data.change_id })).data.state, "cancelled");
+  assert.equal((await call("ws_cancel_change", { change_id: r.data.change_id })).code, "not_pending");
+  assert.equal((await call("ws_drive_rename", { path: "S/q6.docx", new_name: "z.docx" })).code, "open_in_editor");
+  const r2 = await call("ws_docs_append", { path: "S/q6.docx", markdown: "y" });
+  await Q.expireOld(db, Date.now() + 8 * 86400e3);
+  assert.equal((await call("ws_change_status", { change_id: r2.data.change_id })).data.state, "expired");
+});
+```
+
+(`makeTick(opts)` returns one worker pass, for tests; `startQueueWorker` loops it. `workspaceDb()` returns a singleton `createDbClient()` with tables initialised. Under `scripts/run-suite.mjs` the scratch `CROW_DATA_DIR` isolates it.)
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm test -- tests/workspace-queue.test.js`
+Expected: FAIL (modules missing).
+
+- [ ] **Step 3: Tables and DB client**
+
+`server/init-tables.js`:
+
+```js
+export async function initWorkspaceTables(db) {
+  await db.executeMultiple(`
+CREATE TABLE IF NOT EXISTS workspace_pending_changes (
+  id TEXT PRIMARY KEY, file_id INTEGER NOT NULL, path TEXT NOT NULL, seq INTEGER NOT NULL, doc_key TEXT,
+  tool TEXT NOT NULL, args_json TEXT NOT NULL, precondition_json TEXT, state TEXT NOT NULL DEFAULT 'pending',
+  lease_until INTEGER, lease_owner TEXT, claim_count INTEGER NOT NULL DEFAULT 0, result_json TEXT, version_id TEXT,
+  inverse_json TEXT, open_by_json TEXT, requested_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_wpc_file_seq ON workspace_pending_changes(file_id, seq);
+CREATE INDEX IF NOT EXISTS ix_wpc_state ON workspace_pending_changes(state);
+CREATE INDEX IF NOT EXISTS ix_wpc_key ON workspace_pending_changes(doc_key);`);
+}
+```
+
+`server/db.js`:
+
+```js
+import { appImport } from "./app-root.js";
+import { initWorkspaceTables } from "./init-tables.js";
+let client = null, ready = null;
+export function workspaceDb() { return client; }
+export async function openWorkspaceDb() {
+  if (!ready) ready = (async () => { const { createDbClient } = await appImport("servers/db.js"); client = createDbClient(); await initWorkspaceTables(client); return client; })();
+  return ready;
+}
+```
+
+(The DB is opened **lazily**: `createWorkspaceServer` stays synchronous, and every queue path does `await openWorkspaceDb()`. In `server.js` add:
+- `import { setQueueProvider } from "./tools/common.js"; import { queueDescriptor } from "./queue/provider.js"; import { registerQueue } from "./tools/queue.js";`
+- `setQueueProvider(queueDescriptor); names.push(...registerQueue(server, ctx));`)
+
+- [ ] **Step 4: Store, conditions, apply, notify, worker**
+
+`queue/store.js`:
+
+```js
+import { randomBytes } from "node:crypto";
+import { WsError } from "../result.js";
+export const TERMINAL = new Set(["applied_live", "applied_close", "failed", "cancelled", "expired"]);
+const now = () => Date.now();
+const newId = () => `pc_${Date.now().toString(36)}${randomBytes(6).toString("hex")}`;
+export async function enqueue(db, r) {
+  const id = newId(); const t = now();
+  // seq = max+1 per file, inside one statement (single writer DB; UNIQUE(file_id,seq) guards races → retry once)
+  for (let i = 0; i < 2; i++) {
+    try {
+      await db.execute({ sql: `INSERT INTO workspace_pending_changes (id,file_id,path,seq,doc_key,tool,args_json,precondition_json,state,open_by_json,requested_by,created_at,updated_at)
+        VALUES (?,?,?,(SELECT COALESCE(MAX(seq),0)+1 FROM workspace_pending_changes WHERE file_id=?),?,?,?,?,'pending',?,?,?,?)`,
+        args: [id, r.fileId, r.path, r.fileId, r.key ?? null, r.tool, JSON.stringify(r.args), JSON.stringify(r.precondition ?? null), JSON.stringify(r.openBy ?? []), r.requestedBy ?? null, t, t] });
+      return get(db, id);
+    } catch (e) { if (i === 1 || !/UNIQUE/.test(String(e.message))) throw e; }
+  }
+}
+export async function get(db, id) { const r = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE id=?", args: [id] })).rows[0]; return r || null; }
+export async function cas(db, id, from, to, patch = {}) {
+  const cols = Object.keys(patch); const sets = ["state=?", "updated_at=?", ...cols.map((c) => `${c}=?`)];
+  const res = await db.execute({ sql: `UPDATE workspace_pending_changes SET ${sets.join(",")} WHERE id=? AND state=?`, args: [to, now(), ...cols.map((c) => patch[c]), id, from] });
+  return res.rowsAffected === 1;
+}
+export async function nextApplicable(db, fileId, states = ["pending", "unknown_after_claim"]) {
+  const rows = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? ORDER BY seq", args: [fileId] })).rows;
+  for (const r of rows) { if (TERMINAL.has(r.state)) continue; return states.includes(r.state) ? r : null; } // earlier non-terminal blocks
+  return null;
+}
+export async function filesWithWork(db) { return (await db.execute({ sql: "SELECT DISTINCT file_id, path FROM workspace_pending_changes WHERE state IN ('pending','unknown_after_claim','claimed_live')", args: [] })).rows; }
+export async function expireOld(db, at = now()) {
+  const cut = at - 7 * 86400e3;
+  const rows = (await db.execute({ sql: "SELECT id FROM workspace_pending_changes WHERE state='pending' AND created_at < ?", args: [cut] })).rows;
+  for (const r of rows) await cas(db, r.id, "pending", "expired");
+  return rows.map((r) => r.id);
+}
+export async function releaseExpiredLeases(db, at = now()) {
+  const rows = (await db.execute({ sql: "SELECT id FROM workspace_pending_changes WHERE state='claimed_live' AND lease_until < ?", args: [at] })).rows;
+  for (const r of rows) await cas(db, r.id, "claimed_live", "unknown_after_claim");
+}
+export const publicRow = (r) => ({ change_id: r.id, path: r.path, tool: r.tool, state: r.state, open_by: JSON.parse(r.open_by_json || "[]"), version_id: r.version_id || null, ...(r.result_json ? JSON.parse(r.result_json) : {}), created: new Date(Number(r.created_at)).toISOString() });
+export const notPending = () => new WsError("not_pending", "That change is no longer pending (it was applied, failed, expired or cancelled).");
+```
+
+`queue/conditions.js`:
+
+```js
+/**
+ * K5 exactly-once guards. pre = "anchor" checks (does the target still exist) + "snapshot" checks (is the
+ * targeted value still what it was when queued). post = was this change already applied (for crashes after a
+ * live claim). Evaluated on SAVED bytes (close-time) — the plugin evaluates the same rules on the live doc.
+ */
+import { openDocx, allParagraphs, textMap, paragraphText } from "../ooxml/docx-model.js";
+import { structure } from "../ooxml/docx-read.js";
+import { openXlsx, readRange } from "../ooxml/xlsx.js";
+import { openPptx, shapeById, shapeText } from "../ooxml/pptx.js";
+
+export const QUEUEABLE = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_docs_insert_at_heading", "ws_docs_replace_section", "ws_docs_rewrite_passages", "ws_docs_format_text", "ws_docs_insert_image",
+  "ws_docs_add_comment", "ws_docs_reply_comment", "ws_docs_resolve_comment", "ws_docs_apply_comment_edit",
+  "ws_sheets_write", "ws_sheets_append", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_sheets_delete_tab", "ws_sheets_set_number_format", "ws_sheets_batch_update",
+  "ws_slides_find_replace", "ws_slides_add_slide", "ws_slides_duplicate_slide", "ws_slides_delete_slide", "ws_slides_reorder_slides", "ws_slides_add_text_box", "ws_slides_add_image", "ws_slides_format_text", "ws_slides_format_paragraph", "ws_slides_edit_text", "ws_slides_edit_notes", "ws_slides_batch_update",
+  "ws_drive_upload_new_version", "ws_drive_restore_version", "ws_undo_last_change"]);
+export const LIVE_OPS = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_docs_insert_at_heading", "ws_docs_rewrite_passages", "ws_docs_format_text", "ws_docs_add_comment",
+  "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_slides_edit_text"]);
+const docText = (bytes) => allParagraphs(openDocx(bytes)).map(({ p }) => textMap(p).text).join("\n").normalize("NFC");
+const pairsOf = (a) => a.pairs || [{ find: a.find, replace: a.replace }];
+
+export function snapshot(tool, args, bytes) {
+  if (tool === "ws_sheets_write") return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values };
+  if (tool === "ws_slides_edit_text") { const deck = openPptx(bytes); return { text: shapeText(shapeById(deck, args.object_id).sp) }; }
+  return null;
+}
+export function checkPre(tool, args, pre, bytes) {
+  switch (tool) {
+    case "ws_docs_find_replace": return docText(bytes).includes(String(pairsOf(args)[0].find).normalize("NFC")) ? { ok: true } : { ok: false, reason: "target_changed" };
+    case "ws_docs_insert_at_heading": case "ws_docs_replace_section": return structure(openDocx(bytes)).some((h) => h.text.toLowerCase() === String(args.heading).trim().toLowerCase()) ? { ok: true } : { ok: false, reason: "target_changed" };
+    case "ws_docs_rewrite_passages": { const t = docText(bytes); return args.passages.some((p) => t.split("\n").some((line) => line.trimStart().startsWith(String(p.match_prefix).trim()))) ? { ok: true } : { ok: false, reason: "target_changed" }; }
+    case "ws_docs_format_text": case "ws_docs_add_comment": { const needle = args.find ?? args.quoted_text; return !needle || docText(bytes).includes(needle) ? { ok: true } : { ok: false, reason: "target_changed" }; }
+    case "ws_sheets_write": return JSON.stringify(readRange(openXlsx(bytes), args.range, "FORMULA").values) === JSON.stringify(pre?.cells ?? []) ? { ok: true } : { ok: false, reason: "target_changed" };
+    case "ws_slides_edit_text": { try { const deck = openPptx(bytes); return shapeText(shapeById(deck, args.object_id).sp) === pre?.text ? { ok: true } : { ok: false, reason: "target_changed" }; } catch { return { ok: false, reason: "target_changed" }; } }
+    default: return { ok: true }; // the tool's own validation (not_found, heading_not_found, slide_not_found…) is the anchor check
+  }
+}
+export function checkPost(tool, args, bytes) {
+  switch (tool) {
+    case "ws_docs_find_replace": { const t = docText(bytes); const p = pairsOf(args).at(-1); return !t.includes(String(pairsOf(args)[0].find)) && t.includes(String(p.replace)); }
+    case "ws_docs_append": return docText(bytes).includes(String(args.markdown).replace(/[#*_`>|-]/g, "").trim().split("\n")[0].trim());
+    case "ws_docs_rewrite_passages": { const t = docText(bytes); return args.passages.every((p) => t.includes(String(p.new_text).split("\n")[0])); }
+    case "ws_sheets_write": { const want = (Array.isArray(args.values[0]) ? args.values : [args.values]).map((r) => r.map((v) => String(v ?? ""))); const got = readRange(openXlsx(bytes), args.range, "FORMULA").values.map((r) => r.map((v) => String(v ?? ""))); return JSON.stringify(got) === JSON.stringify(want); }
+    case "ws_slides_edit_text": { try { return shapeText(shapeById(openPptx(bytes), args.object_id).sp) === args.new_text; } catch { return null; } }
+    default: return null; // cannot tell → ambiguous (never re-applied blindly)
+  }
+}
+export { paragraphText };
+```
+
+`queue/apply.js`:
+
+```js
+import { getFile, stat } from "../nc/dav.js";
+import { splitPath } from "../nc/paths.js";
+import { MAX_EDIT_BYTES } from "../write-protocol.js";
+import { checkPre, checkPost } from "./conditions.js";
+import { cas } from "./store.js";
+import { ALL_DEFS } from "../tools/all.js";
+
+/** Close-time apply of one claimed row (state already applying_close or unknown_after_claim handled by caller). */
+export async function applyQueued(ctx, db, row) {
+  const cfg = ctx.getConfig(); const args = JSON.parse(row.args_json); const segs = splitPath(row.path);
+  const { bytes } = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
+  if (row.state === "unknown_after_claim") {
+    const post = checkPost(row.tool, args, bytes);
+    if (post === true) { await cas(db, row.id, "unknown_after_claim", "applied_live", { result_json: JSON.stringify({ detected: true }) }); return { state: "applied_live", detected: true }; }
+    if (post === null) { await cas(db, row.id, "unknown_after_claim", "failed", { result_json: JSON.stringify({ reason: "ambiguous" }) }); return { state: "failed", reason: "ambiguous" }; }
+    if (!(await cas(db, row.id, "unknown_after_claim", "applying_close"))) return { state: "skipped" };
+  } else if (!(await cas(db, row.id, "pending", "applying_close"))) return { state: "skipped" };
+  const pre = checkPre(row.tool, args, JSON.parse(row.precondition_json || "null"), bytes);
+  if (!pre.ok) { await cas(db, row.id, "applying_close", "failed", { result_json: JSON.stringify({ reason: pre.reason }) }); return { state: "failed", reason: pre.reason }; }
+  const def = ALL_DEFS.get(row.tool);
+  try {
+    const out = await def.run(Object.defineProperty({ ...args, if_open: "wait", wait_s: 0 }, "__tool", { value: null }), ctx);
+    if (out?.changed === 0) { await cas(db, row.id, "applying_close", "failed", { result_json: JSON.stringify({ reason: "target_changed" }) }); return { state: "failed", reason: "target_changed" }; }
+    await cas(db, row.id, "applying_close", "applied_close", { version_id: out?.version_id ?? null, result_json: JSON.stringify({ changed: out?.changed ?? 1 }) });
+    return { state: "applied_close", version_id: out?.version_id };
+  } catch (e) {
+    if (["open_in_editor", "locked_by_person", "stale_editor_lock", "locked"].includes(e.code)) { await cas(db, row.id, "applying_close", "pending"); return { state: "pending" }; } // re-opened meanwhile
+    await cas(db, row.id, "applying_close", "failed", { result_json: JSON.stringify({ reason: e.code || "error", message: String(e.message).slice(0, 300) }) });
+    return { state: "failed", reason: e.code || "error" };
+  }
+}
+```
+
+(`__tool: null` turns the queue provider off for the re-run, so a re-opened file surfaces `open_in_editor` and the row goes back to `pending`. `tools/all.js` exports `ALL_DEFS = new Map([...driveReadDefs, ...driveWriteDefs, ...docsReadDefs, ...docsWriteDefs, ...commentDefs, ...sheetsDefs, ...slidesDefs].map((d) => [d.name, d]))`, plus the undo def.)
+
+`queue/notify.js`:
+
+```js
+import { appImport } from "../app-root.js";
+const TITLES = { queued: (r) => `Crow has a change waiting for ${r.path.split("/").pop()}`, applied_live: (r) => `Crow's change to ${r.path.split("/").pop()} was applied`, applied_close: (r) => `Crow's change to ${r.path.split("/").pop()} was applied`, failed: (r) => `Crow's change to ${r.path.split("/").pop()} could not be applied`, expired: (r) => `Crow's change to ${r.path.split("/").pop()} expired` };
+export async function notifyChange(db, r, event, extra = {}) {
+  try {
+    const { createNotification } = await appImport("servers/shared/notifications.js");
+    const openBy = JSON.parse(r.open_by_json || "[]");
+    const body = event === "queued" ? `Open by ${openBy.join(", ") || "someone"}. It will appear in their editor, or when they close it.`
+      : event.startsWith("applied") ? `${extra.detected ? "Found already applied in the editor." : ""} Undo id: ${extra.version_id || r.version_id || "(applied live; say “undo” to revert)"}`
+      : `Reason: ${extra.reason || "unknown"}.`;
+    await createNotification(db, { title: TITLES[event](r), body, type: "system", source: "workspace:queue", action_url: `/dashboard/workspace?view=quick&path=${encodeURIComponent(r.path)}`, metadata: { change_id: r.id, event } });
+  } catch (e) { console.warn(`[workspace] notification failed: ${e.message}`); }
+}
+```
+
+`queue/worker.js`:
+
+```js
+import { stat } from "../nc/dav.js";
+import { splitPath } from "../nc/paths.js";
+import { docSession } from "../nc/onlyoffice.js";
+import { filesWithWork, nextApplicable, releaseExpiredLeases, expireOld, get } from "./store.js";
+import { applyQueued } from "./apply.js";
+import { notifyChange } from "./notify.js";
+
+export function makeTick({ db, getConfig, clock }) {
+  return async function tick() {
+    const cfg = getConfig(); const ctx = { getConfig, clock };
+    await releaseExpiredLeases(db, clock.now());
+    for (const id of await expireOld(db, clock.now())) notifyChange(db, await get(db, id), "expired");
+    for (const f of await filesWithWork(db)) {
+      let e; try { e = await stat(cfg, splitPath(f.path)); } catch { continue; }
+      if (e.lock) {
+        if (e.lockType !== 1) continue;                       // person's lock: wait for unlock
+        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true }));
+        if (s.live) continue;                                 // session alive: the plugin may still apply live
+        continue;                                             // stale editor lock: Nextcloud refuses writes anyway
+      }
+      for (let row = await nextApplicable(db, f.file_id); row; row = await nextApplicable(db, f.file_id)) {
+        const r = await applyQueued(ctx, db, row);
+        if (r.state === "skipped" || r.state === "pending") break;
+        notifyChange(db, await get(db, row.id), r.state, r);
+      }
+    }
+  };
+}
+let running = null;
+export function startQueueWorker({ db, getConfig, clock, intervalMs = 15000 }) {
+  if (running) return running;
+  const tick = makeTick({ db, getConfig, clock }); let busy = false;
+  const t = setInterval(() => { if (busy) return; busy = true; tick().catch((e) => console.warn(`[workspace] queue tick: ${e.message}`)).finally(() => { busy = false; }); }, intervalMs);
+  t.unref(); running = () => { clearInterval(t); running = null; }; return running;
+}
+```
+
+The gateway `startQueueWorker` runs from `panel/routes.js` at router creation, only when `getConfig()` is ready; otherwise it retries every 5 min. The MCP server **does not** run the worker: there is only one applier per host. Because it is CAS-guarded, a second applier would still be safe.
+
+- [ ] **Step 5: The queue provider, the tools, and undo of live changes**
+
+`server/queue/provider.js` exports `queueDescriptor(tool, args)`, used by both the MCP server and Quick edit (in the gateway). In `server.js`, after `await openWorkspaceDb()`, call `setQueueProvider(queueDescriptor)`:
+
+```js
+// server/queue/provider.js
+export const queueDescriptor = (tool, args) => !QUEUEABLE.has(tool) ? null : {
+  enqueue: async ({ entry, lock }) => {
+    const cfg = getConfig(); const db = workspaceDb();
+    const { bytes } = await getFile(cfg, splitPath(entry.path), { maxBytes: MAX_EDIT_BYTES });
+    const key = lock.key || (await docSession(cfg, entry.fileId).then((s) => s.key, () => null));
+    const clean = Object.fromEntries(Object.entries(args).filter(([k]) => !["if_open", "wait_s"].includes(k)));
+    const row = await enqueue(db, { fileId: entry.fileId, path: entry.path, key, tool, args: clean, precondition: snapshot(tool, clean, bytes), openBy: lock.data.open_by || [], requestedBy: "bot" });
+    notifyChange(db, row, "queued");
+    return { queued: true, change_id: row.id, path: entry.path, file_id: entry.fileId, open_by: lock.data.open_by || [], lock_type: lock.data.lock_type, apply: LIVE_OPS.has(tool) && lock.data.lock_type === "editor" ? "live_or_on_close" : "on_close", message: `${(lock.data.open_by || []).join(", ") || "Someone"} has "${entry.name}" open. Crow's change is waiting and will appear ${LIVE_OPS.has(tool) && lock.data.lock_type === "editor" ? "in their editor, or " : ""}when it is closed.` };
+  },
+};
+// (imports: getConfig, openWorkspaceDb/workspaceDb, getFile, splitPath, MAX_EDIT_BYTES, docSession, enqueue, snapshot, QUEUEABLE, LIVE_OPS, notifyChange;
+//  `const db = workspaceDb() || await openWorkspaceDb();` so the gateway opens its own client lazily)
+```
+
+The first test asserts `apply: "live_or_on_close"` (a docs find_replace on an editor lock). The manual-lock test gets `"on_close"`.
+
+`tools/queue.js`:
+
+```js
+import { z } from "zod";
+import { defineTools } from "./define.js";
+import { openWorkspaceDb } from "../db.js";
+import { get, cas, publicRow, notPending } from "../queue/store.js";
+const idS = z.string().regex(/^pc_[0-9a-z]{6,40}$/);
+export const queueDefs = [
+  { name: "ws_change_status", description: "Status of a queued change (pending, applied_live, applied_close with version_id, failed with reason, expired, cancelled).", schema: { change_id: idS },
+    run: async ({ change_id }) => { const r = await get(await openWorkspaceDb(), change_id); if (!r) throw notPending(); return publicRow(r); } },
+  { name: "ws_cancel_change", description: "Cancel a queued change that has not been applied yet.", schema: { change_id: idS },
+    run: async ({ change_id }) => { const db = await openWorkspaceDb(); if (!(await cas(db, change_id, "pending", "cancelled"))) throw notPending(); return publicRow(await get(db, change_id)); } },
+];
+export const registerQueue = (server, ctx) => defineTools(server, ctx, queueDefs);
+```
+
+**Undo of live-applied changes.** The plugin's ack stores `inverse_json`: a `{tool, args}` list that reverts it, built from what it actually replaced or inserted. `ws_undo_last_change` accepts `version_id` = `change_id` (`pc_…`):
+- `applied_close` → its stored `version_id` → the normal file undo;
+- `applied_live` → **enqueue the inverse** (`requested_by: "undo"`), which applies live or at close like any change;
+- otherwise `not_applied`.
+
+Inverse ops, internal (registered in `ALL_DEFS`, **not** exposed as MCP tools):
+
+| Op | Inverse |
+|---|---|
+| `find_replace` | swapped pairs, `occurrences`-limited |
+| `rewrite_passages` | old texts |
+| `append` / `insert_at_heading` | `ws__docs_remove_paragraphs_exact({texts, after_heading?})` |
+| `format_text` | the previous flags |
+| `add_comment` | `ws__docs_delete_comment({comment_id})` |
+| `sheets_write` | old values |
+| `sheets_append` | `ws__sheets_clear_rows_exact({sheet, from_row, values})` |
+| `add_tab` | `delete_tab`, precondition: the tab is still empty or unchanged |
+| `rename_tab` | rename back |
+| `set_number_format` | `ws__sheets_restore_styles({range, s_attrs})` |
+| `slides_edit_text` | old text |
+
+Each internal op lives next to its engine:
+- `removeParagraphsExact(d, texts, afterHeading)` in `docx-edit.js` removes the first consecutive run of top-level paragraphs whose texts equal `texts` exactly, else throws `target_changed`;
+- `deleteComment(d, id)` in `docx-comments.js` removes the comment, its range markers, its reference run and its `commentEx`;
+- `clearRowsExact(wb, sheet, fromRow, values)` and `restoreStyles(wb, range, sAttrs)` in `xlsx.js`.
+
+Write one unit test per internal op in `tests/workspace-queue.test.js`: apply op → apply inverse → the part XML equals the original.
+
+- [ ] **Step 6: Run the tests**
+
+Run: `npm test -- tests/workspace-queue.test.js tests/workspace-write-protocol.test.js tests/workspace-docs-edit.test.js`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add bundles/workspace/server/init-tables.js bundles/workspace/server/db.js bundles/workspace/server/queue bundles/workspace/server/tools/queue.js bundles/workspace/server/tools/all.js tests/workspace-queue.test.js
+git commit bundles/workspace/server tests/workspace-queue.test.js -m "feat(workspace): pending-change queue — exactly-once CAS states, close-time apply, notifications, status/cancel, live-change undo (K5)"
+git show --stat HEAD
+```
+
+---
+
+### Task 13: The Crow ONLYOFFICE plugin and the live endpoints (K5)
+
+**Files:**
+- Create: `bundles/workspace/onlyoffice-plugin/{config.json,index.html,crow-live.js,ops.js,icon.png}`, `bundles/workspace/server/live/{jwt.js,routes-live.js}`
+- Modify: `bundles/workspace/docker-compose.yml` (read-only bind mount), `bundles/workspace/ops/bootstrap.sh` (step "Crow live plugin": flush the cache), `bundles/workspace/panel/routes.js` (mount the live routes + start the worker), `bundles/workspace/panel/workspace.js` (admin block: Serve path command), `docs/developers/port-allocation.md` (note: the new Serve path, no new port), `tests/auth-network.test.js` (Funnel never reaches `/api/workspace/live`)
+- Test: `tests/workspace-live.test.js`, `tests/workspace-plugin-ops.test.js`
+
+**Interfaces:**
+- Consumes: queue store/conditions (Task 12), `WORKSPACE_ONLYOFFICE_JWT_SECRET` via `getConfig().jwtSecret`, `docSession`.
+- Produces `live/jwt.js`:
+  - `verifyEditorJwt(token, secret, nowMs) → payload | throws`. Accepts HS256 only; `exp` checked; returns `{key, userId, userName, canEdit}`.
+  - `mintApplyToken(changeId, key, leaseUntil, secret) → string`, `checkApplyToken(...)`. The secret is per-boot random, from `crypto.randomBytes`.
+- Produces `live/routes-live.js`: `mountLive(router, {db, getConfig, clock})` with:
+  - `GET /api/workspace/live/v1/pending?key=&pv=` → `[{change_id, tool, args, pre}]`, live ops only, in order, the first applicable per file;
+  - `POST /api/workspace/live/v1/claim {change_id}` → `{lease_until, apply_token}`;
+  - `POST /api/workspace/live/v1/ack {change_id, apply_token, outcome:"applied"|"failed", reason?, inverse?}`.
+- Produces the plugin: `ops.js` exports `LIVE` = `{ [tool]: function (args, pre) /* runs INSIDE callCommand via Asc.scope */ }` and `liveCommand(tool)`, which returns the `callCommand` body. Under Node, `ops.js` is importable for the stub test (UMD: `if (typeof module !== "undefined") module.exports = …`).
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/workspace-live.test.js`:
+
+```js
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import express from "express";
+import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
+import { connectWorkspace } from "./helpers/workspace-client.js";
+
+const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const sign = (payload, secret = "jwt") => { const h = `${b64({ alg: "HS256", typ: "JWT" })}.${b64(payload)}`; return `${h}.${createHmac("sha256", secret).update(h).digest("base64url")}`; };
+const editorJwt = (key, extra = {}) => sign({ document: { key, permissions: { edit: true } }, editorConfig: { user: { id: "ocinst_admin", name: "Kevin" }, mode: "edit" }, exp: Math.floor(Date.now() / 1000) + 3600, ...extra });
+let fake, call, close, base, server, key, changeId;
+before(async () => {
+  fake = await startFakeNextcloud(); fake.addFolder("S", { owner: "admin" });
+  fake.addFile("S/l.docx", readFileSync(join(import.meta.dirname, "fixtures", "workspace", "oo-rich.docx")), { owner: "admin" });
+  ({ call, close } = await connectWorkspace(fake));
+  key = fake.openInEditor("S/l.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  changeId = (await call("ws_docs_find_replace", { path: "S/l.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  const { default: router } = await import("../bundles/workspace/panel/routes.js");
+  const app = express(); app.use(router((req, res, next) => res.status(401).end(), { startWorker: false }));
+  server = app.listen(0); base = `http://127.0.0.1:${server.address().port}`;
+});
+after(async () => { server.close(); await close(); fake.close(); });
+const get = (path, jwt) => fetch(`${base}${path}`, { headers: jwt ? { Authorization: `Bearer ${jwt}` } : {} });
+const post = (path, jwt, body, headers = {}) => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}), ...headers }, body: JSON.stringify(body) });
+
+test("pending requires a valid editor JWT for THAT key; never the dashboard session", async () => {
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`)).status, 401);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`, sign({ document: { key }, exp: 9e9 }, "wrong"))).status, 401);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`, editorJwt("other-key"))).status, 401);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`, editorJwt(key, { exp: 1 }))).status, 401);
+  const ok = await get(`/api/workspace/live/v1/pending?key=${key}`, editorJwt(key));
+  assert.equal(ok.status, 200);
+  const list = await ok.json();
+  assert.deepEqual(list.map((x) => [x.change_id, x.tool]), [[changeId, "ws_docs_find_replace"]]);
+  assert.doesNotMatch(JSON.stringify(list), /pw-secret|jwt|S\/l\.docx/, "no secrets, no paths");
+});
+
+test("claim: one winner, view-mode JWT refused, apply token required on ack; ack applied → applied_live", async () => {
+  assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key, { editorConfig: { mode: "view", user: { id: "x" } } }), { change_id: changeId })).status, 403);
+  const c1 = await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: changeId });
+  const c2 = await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: changeId });
+  assert.equal(c1.status, 200); assert.equal(c2.status, 409);
+  const { apply_token } = await c1.json();
+  assert.equal((await post("/api/workspace/live/v1/ack", editorJwt(key), { change_id: changeId, apply_token: "forged", outcome: "applied" })).status, 403);
+  const a = await post("/api/workspace/live/v1/ack", editorJwt(key), { change_id: changeId, apply_token, outcome: "applied", inverse: [{ tool: "ws_docs_find_replace", args: { find: "Totopos", replace: "Tortillas" } }] });
+  assert.equal(a.status, 200);
+  assert.equal((await call("ws_change_status", { change_id: changeId })).data.state, "applied_live");
+});
+
+test("a failed live apply returns the change to pending ONCE (claim_count ≤ 1), then close-time only", async () => {
+  const id = (await call("ws_docs_append", { path: "S/l.docx", markdown: "Línea" })).data.change_id;
+  const { apply_token } = await (await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: id })).json();
+  await post("/api/workspace/live/v1/ack", editorJwt(key), { change_id: id, apply_token, outcome: "failed", reason: "api_error" });
+  assert.equal((await call("ws_change_status", { change_id: id })).data.state, "pending");
+  assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: id })).status, 409, "no second live attempt");
+});
+
+test("Funnel-tagged requests never reach the live API; old plugin versions get 426", async () => {
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`, editorJwt(key)).then(() => fetch(`${base}/api/workspace/live/v1/pending?key=${key}`, { headers: { Authorization: `Bearer ${editorJwt(key)}`, "Tailscale-Funnel-Request": "?1" } }))).status, 403);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}&pv=0.0.1`, editorJwt(key))).status, 426);
+});
+```
+
+`tests/workspace-plugin-ops.test.js` runs each `LIVE` op against a **builder stub**: a tiny in-memory `Api` that implements exactly the methods the ops call, recording calls. It asserts:
+- semantics: heading reset (`SetStyle(Normal)`), the first run's text properties copied on rewrite, the precondition checked first;
+- the returned `{ok, inverse}`;
+- that `ops.js` uses only the methods listed in `docs/superpowers/specs/2026-10-03-workspace-w2-spike-results.md` S9 ("API present" list). Parse that list from the results file and fail if `ops.js` calls a method S9 did not find.
+
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+const require = createRequire(import.meta.url);
+const { LIVE } = require("../bundles/workspace/onlyoffice-plugin/ops.js");
+const S9 = readFileSync(join(import.meta.dirname, "..", "docs", "superpowers", "specs", "2026-10-03-workspace-w2-spike-results.md"), "utf8");
+
+function wordStub(paras) {
+  const calls = []; const mk = (text, style = "Normal") => ({ text, style, GetText: () => text, GetStyle: () => ({ GetName: () => style }), SetStyle: (s) => { calls.push(["SetStyle", s.GetName()]); }, AddText: (t) => { calls.push(["AddText", t]); } });
+  const doc = { paras: paras.map((p) => mk(p.text, p.style)), GetAllParagraphs() { return this.paras; }, SearchAndReplace: (o) => { calls.push(["SearchAndReplace", o]); }, Search: (t) => doc.paras.filter((p) => p.text.includes(t)).map(() => ({ SetBold: (v) => calls.push(["SetBold", v]) })), Push: (p) => calls.push(["Push", p]), GetStyle: (n) => ({ GetName: () => n }) };
+  return { Api: { GetDocument: () => doc, CreateParagraph: () => mk("") }, calls };
+}
+test("find_replace: precondition first, then SearchAndReplace per pair, inverse = swapped pairs", () => {
+  const { Api, calls } = wordStub([{ text: "Tortillas" }]);
+  const r = LIVE.ws_docs_find_replace(Api, { pairs: [{ find: "Tortillas", replace: "Totopos" }] }, null);
+  assert.equal(r.ok, true); assert.deepEqual(calls[0], ["SearchAndReplace", { searchString: "Tortillas", replaceString: "Totopos", matchCase: true }]);
+  assert.deepEqual(r.inverse, [{ tool: "ws_docs_find_replace", args: { pairs: [{ find: "Totopos", replace: "Tortillas" }] } }]);
+  assert.equal(LIVE.ws_docs_find_replace(wordStub([{ text: "nada" }]).Api, { find: "Tortillas", replace: "x" }, null).reason, "target_changed");
+});
+test("append: every new paragraph gets the Normal style explicitly (heading reset)", () => {
+  const { Api, calls } = wordStub([]);
+  LIVE.ws_docs_append(Api, { markdown: "Uno\n\nDos" }, null);
+  assert.deepEqual(calls.filter((c) => c[0] === "SetStyle").map((c) => c[1]), ["Normal", "Normal"]);
+});
+test("ops.js only calls builder methods the S9 probe found", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "onlyoffice-plugin", "ops.js"), "utf8");
+  const present = new Set((S9.match(/API present: (.*)/) || [, ""])[1].split(/,\s*/).filter(Boolean));
+  for (const m of new Set([...src.matchAll(/\.(Get[A-Z]\w+|Set[A-Z]\w+|Search\w*|Create\w+|Push|Add\w+|Insert\w+)\(/g)].map((x) => x[1]))) assert.ok(present.has(m), `ops.js uses ${m}, which S9 did not verify`);
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `npm test -- tests/workspace-live.test.js tests/workspace-plugin-ops.test.js`
+Expected: FAIL.
+
+- [ ] **Step 3: `live/jwt.js` and `live/routes-live.js`**
+
+```js
+// live/jwt.js
+import { createHmac, timingSafeEqual, randomBytes } from "node:crypto";
+import { WsError } from "../result.js";
+const BOOT_SECRET = randomBytes(32);
+const sig = (secret, data) => createHmac("sha256", secret).update(data).digest("base64url");
+const eq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+export function verifyEditorJwt(token, secret, nowMs = Date.now()) {
+  const parts = String(token || "").split("."); if (parts.length !== 3 || !secret) throw new WsError("unauthorized", "editor session token required");
+  const head = JSON.parse(Buffer.from(parts[0], "base64url").toString() || "{}");
+  if (head.alg !== "HS256" || !eq(parts[2], sig(secret, `${parts[0]}.${parts[1]}`))) throw new WsError("unauthorized", "bad editor session token");
+  const p = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  if (!p.exp || p.exp * 1000 < nowMs) throw new WsError("unauthorized", "editor session token expired");
+  const key = p.document?.key; if (!key) throw new WsError("unauthorized", "token has no document");
+  return { key: String(key), userId: String(p.editorConfig?.user?.id || ""), userName: String(p.editorConfig?.user?.name || ""), canEdit: p.editorConfig?.mode !== "view" && p.document?.permissions?.edit !== false };
+}
+export function mintApplyToken(changeId, key, leaseUntil) { const d = `${changeId}.${key}.${leaseUntil}`; return `${leaseUntil}.${sig(BOOT_SECRET, d)}`; }
+export function checkApplyToken(token, changeId, key, nowMs = Date.now()) { const [lease, s] = String(token || "").split("."); return Number(lease) >= nowMs - 120000 && eq(s, sig(BOOT_SECRET, `${changeId}.${key}.${lease}`)); }
+```
+
+```js
+// live/routes-live.js
+import express from "express";
+import { verifyEditorJwt, mintApplyToken, checkApplyToken } from "./jwt.js";
+import { cas, get } from "../queue/store.js";
+import { LIVE_OPS } from "../queue/conditions.js";
+import { docSession } from "../nc/onlyoffice.js";
+import { notifyChange } from "../queue/notify.js";
+export const MIN_PLUGIN_VERSION = "0.2.0";
+const LEASE_MS = 60000;
+const newer = (a, b) => a.split(".").map(Number).reduce((r, x, i) => r || Math.sign(x - (b.split(".").map(Number)[i] || 0)), 0) >= 0;
+
+export function mountLive(router, { db, getConfig, clock }) {
+  const hits = new Map(); // key → [timestamps] (60/min)
+  const auth = (req, res, next) => {
+    if (req.headers["tailscale-funnel-request"]) return res.status(403).end();
+    try {
+      const key = String(req.query.key || req.body?.key || "");
+      const t = verifyEditorJwt((req.headers.authorization || "").replace(/^Bearer /, ""), getConfig().jwtSecret, clock.now());
+      if (key && t.key !== key) return res.status(401).json({ error: "token is for another document" });
+      const h = (hits.get(t.key) || []).filter((x) => x > clock.now() - 60000); h.push(clock.now()); hits.set(t.key, h);
+      if (h.length > 60) return res.status(429).end();
+      if (req.query.pv && !newer(String(req.query.pv), MIN_PLUGIN_VERSION)) return res.status(426).json({ error: "plugin outdated" });
+      req.editor = t; next();
+    } catch { res.status(401).json({ error: "unauthorized" }); }
+  };
+  const mapKey = async (key) => {
+    const byKey = (await db.execute({ sql: "SELECT DISTINCT file_id FROM workspace_pending_changes WHERE doc_key=? AND state='pending'", args: [key] })).rows;
+    if (byKey.length) return byKey[0].file_id;
+    for (const f of (await db.execute({ sql: "SELECT DISTINCT file_id FROM workspace_pending_changes WHERE state='pending'", args: [] })).rows) {
+      const s = await docSession(getConfig(), f.file_id).catch(() => null);
+      if (s?.key === key) { await db.execute({ sql: "UPDATE workspace_pending_changes SET doc_key=? WHERE file_id=? AND state='pending'", args: [key, f.file_id] }); return f.file_id; }
+    }
+    return null;
+  };
+  router.use("/api/workspace/live/v1", express.json({ limit: "32kb" }), auth);
+  router.get("/api/workspace/live/v1/pending", async (req, res) => {
+    const fileId = await mapKey(req.editor.key); if (!fileId) return res.json([]);
+    const rows = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? ORDER BY seq", args: [fileId] })).rows;
+    const out = [];
+    for (const r of rows) { if (["applied_live", "applied_close", "failed", "cancelled", "expired"].includes(r.state)) continue; if (r.state === "pending" && LIVE_OPS.has(r.tool) && Number(r.claim_count) < 1) out.push({ change_id: r.id, tool: r.tool, args: JSON.parse(r.args_json), pre: JSON.parse(r.precondition_json || "null") }); break; }
+    res.json(out);
+  });
+  router.post("/api/workspace/live/v1/claim", async (req, res) => {
+    if (!req.editor.canEdit) return res.status(403).json({ error: "view-only session" });
+    const r = await get(db, String(req.body?.change_id || "")); const fileId = await mapKey(req.editor.key);
+    if (!r || r.file_id !== fileId || !LIVE_OPS.has(r.tool) || Number(r.claim_count) >= 1) return res.status(409).end();
+    const lease = clock.now() + LEASE_MS;
+    if (!(await cas(db, r.id, "pending", "claimed_live", { lease_until: lease, lease_owner: req.editor.userId, claim_count: Number(r.claim_count) + 1 }))) return res.status(409).end();
+    res.json({ lease_until: lease, apply_token: mintApplyToken(r.id, req.editor.key, lease) });
+  });
+  router.post("/api/workspace/live/v1/ack", async (req, res) => {
+    const b = req.body || {}; const r = await get(db, String(b.change_id || ""));
+    if (!r || !checkApplyToken(b.apply_token, r.id, req.editor.key, clock.now())) return res.status(403).end();
+    if (b.outcome === "applied") {
+      if (!(await cas(db, r.id, "claimed_live", "applied_live", { inverse_json: JSON.stringify(Array.isArray(b.inverse) ? b.inverse.slice(0, 50) : []), result_json: JSON.stringify({ by: req.editor.userName }) }))) return res.status(409).end();
+      notifyChange(db, await get(db, r.id), "applied_live");
+    } else if (!(await cas(db, r.id, "claimed_live", "pending", { result_json: JSON.stringify({ live_failed: String(b.reason || "error").slice(0, 60) }) }))) return res.status(409).end();
+    res.json({ ok: true });
+  });
+}
+```
+
+(The panel router calls `mountLive(router, …)` **before** its dashboard-auth middleware, which is path-scoped to `/api/workspace/quick` anyway. With `seams.startWorker !== false` it also calls `startQueueWorker`. `inverse` entries are validated on use: only `{tool, args}` with `tool` in `QUEUEABLE` ∪ the internal inverse ops, and args re-validated by that tool's zod schema at apply time.)
+
+- [ ] **Step 4: The plugin**
+
+`bundles/workspace/onlyoffice-plugin/config.json`:
+
+```json
+{
+  "name": "Crow live edits",
+  "guid": "asc.{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1}",
+  "version": "0.2.0",
+  "minVersion": "8.0.0",
+  "variations": [{
+    "description": "Applies changes Crow queued for this document, in the open editor.",
+    "url": "index.html", "icons": ["icon.png"], "isViewer": true,
+    "EditorsSupport": ["word", "cell", "slide"], "type": "system", "initDataType": "none",
+    "buttons": [], "events": ["onDocumentContentReady"]
+  }]
+}
+```
+
+`index.html` loads `../v1/plugins.js` and `../v1/plugins-ui.js` (the document server's own plugin base, the same as the bundled plugins; check the exact relative path against `{9DC93CDB-…}/index.html` in S9), then `ops.js` and `crow-live.js`. No other scripts.
+
+`crow-live.js`:
+
+```js
+(function (window) {
+  var VERSION = "0.2.0", BASE = "/crow-live/v1", timer = null, idleSince = Date.now(), busy = false;
+  function api(path, opts) { opts = opts || {}; opts.headers = Object.assign({ Authorization: "Bearer " + window.Asc.plugin.info.jwt, "Content-Type": "application/json" }, opts.headers || {}); return fetch(BASE + path, opts).then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); }); }
+  function key() { return encodeURIComponent(window.Asc.plugin.info.documentId || ""); }
+  function indicator(on) { try { window.Asc.plugin.executeMethod(on ? "StartAction" : "EndAction", ["Information", "Crow is editing…"]); } catch (e) {} }
+  function schedule(ms) { clearTimeout(timer); timer = setTimeout(poll, ms); }
+  function poll() {
+    var info = window.Asc.plugin.info;
+    if (!info || info.isViewMode || !info.jwt || Date.now() - idleSince > 8 * 3600e3) return;
+    if (busy) return schedule(10000);
+    api("/pending?key=" + key() + "&pv=" + VERSION).then(function (list) {
+      if (!list.length) return schedule(Math.min(60000, 10000 + (Date.now() - idleSince) / 60));
+      idleSince = Date.now(); busy = true; var ch = list[0];
+      return api("/claim", { method: "POST", body: JSON.stringify({ change_id: ch.change_id }) }).then(function (cl) {
+        indicator(true);
+        window.Asc.scope.crow = { tool: ch.tool, args: ch.args, pre: ch.pre };
+        window.Asc.plugin.callCommand(window.CrowLive.command, false, true, function (res) {
+          indicator(false); res = res || { ok: false, reason: "no_result" };
+          api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", reason: res.reason, inverse: res.inverse }) })
+            .catch(function () {}).then(function () { busy = false; schedule(1000); });
+        });
+      });
+    }).catch(function () { busy = false; schedule(60000); });
+  }
+  window.Asc.plugin.init = function () { schedule(3000); };
+  window.Asc.plugin.event_onDocumentContentReady = function () { schedule(1000); };
+  window.Asc.plugin.button = function () {};
+})(window);
+```
+
+`ops.js` defines `LIVE` as plain functions taking `(Api, args, pre)`. `CrowLive.command` is the `callCommand` body: it reads `Asc.scope.crow`, dispatches to `LIVE[tool](Api, args, pre)` and returns `{ok, reason?, inverse?}`. `callCommand` serialises the function, so `ops.js` ships the op table **inside** the command as `Asc.scope.crowOps` (the stringified `LIVE` source from `ops.js`), which the command revives with `new Function`. That source is static plugin code from the same file, never server data. The op table follows §5.7's live list. Each op:
+1. checks its precondition on the live document (anchor exists; snapshot equals);
+2. applies the change with the S9-verified builder methods;
+3. returns its inverse.
+
+The stub test pins the details. **Any op whose required method S9 did not find is removed from `LIVE_OPS`** (and from the spec table) in this step, so it applies at close.
+
+- [ ] **Step 5: Install the plugin (compose, bootstrap, Serve path)**
+
+`docker-compose.yml`, `onlyoffice` service:
+
+```yaml
+    volumes:
+      # Crow live-edit plugin (K5): read-only, served from the document server's own origin.
+      - ./onlyoffice-plugin:/var/www/onlyoffice/documentserver/sdkjs-plugins/{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1}:ro
+```
+
+(Compose resolves `./` against the installed bundle dir, `~/.crow/bundles/workspace`. The version refresh copies `onlyoffice-plugin/`: add it to the refresh include list, i.e. `refreshVersionedBundle`'s docker-surface set in `bundles.js`, with a test in `tests/bundle-version-refresh.test.js`.)
+
+`ops/bootstrap.sh`, a new idempotent step after the connector step:
+
+```bash
+step "Crow live plugin"
+# K5: plugin files are served immutable for a year; a new plugin version needs a cache flush.
+PV=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$BUNDLE_DIR/onlyoffice-plugin/config.json")
+if [ "$(env_get WORKSPACE_LIVE_PLUGIN_FLUSHED)" != "$PV" ]; then
+  docker exec crow-workspace-onlyoffice-1 documentserver-flush-cache.sh >/dev/null && env_set WORKSPACE_LIVE_PLUGIN_FLUSHED "$PV"
+  log "live plugin $PV: editor cache flushed"
+else log "live plugin $PV: up to date"; fi
+```
+
+Office panel admin block, a new line with the command: `sudo tailscale serve --bg --https=${u.ooPort} --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`, and a sentence: "Lets Crow's live-edit plugin reach Crow. Tailnet only; never use funnel."
+
+`tests/auth-network.test.js`: add a case asserting a Funnel-tagged request to `/api/workspace/live/v1/pending` is rejected by the gateway middleware (it is not in `PUBLIC_FUNNEL_PREFIXES`).
+
+- [ ] **Step 6: Run the tests**
+
+Run: `npm test -- tests/workspace-live.test.js tests/workspace-plugin-ops.test.js tests/auth-network.test.js tests/bundle-version-refresh.test.js tests/workspace-bundle.test.js`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add bundles/workspace/onlyoffice-plugin bundles/workspace/server/live tests/workspace-live.test.js tests/workspace-plugin-ops.test.js
+git commit bundles/workspace servers/gateway/routes/bundles.js docs/developers/port-allocation.md tests/workspace-live.test.js tests/workspace-plugin-ops.test.js tests/auth-network.test.js tests/bundle-version-refresh.test.js -m "feat(workspace): Crow ONLYOFFICE live-edit plugin + JWT-authenticated live queue endpoints (K5)"
+git show --stat HEAD
+```
+
+---
+
+### Task 14: Quick edit page, skill, manifest/registry, docs, and the MCP surface test
 
 **Files:**
 - Create: `bundles/workspace/server/quick/{view.js,actions.js}`, `bundles/workspace/panel/routes.js`, `bundles/workspace/skills/workspace.md`, `docs/guide/workspace.md`
@@ -5831,16 +6722,16 @@ const EXPECTED = [
   "ws_slides_read", "ws_slides_get_structure", "ws_slides_read_notes", "ws_slides_find_replace", "ws_slides_create", "ws_slides_add_slide", "ws_slides_duplicate_slide", "ws_slides_delete_slide", "ws_slides_reorder_slides", "ws_slides_add_text_box", "ws_slides_add_image", "ws_slides_format_text", "ws_slides_format_paragraph", "ws_slides_edit_text", "ws_slides_edit_notes", "ws_slides_batch_update",
   "ws_cal_list_calendars", "ws_cal_list_events", "ws_cal_get_event", "ws_cal_create_event", "ws_cal_update_event", "ws_cal_delete_event", "ws_cal_respond_to_event",
   "ws_contacts_list_addressbooks", "ws_contacts_search", "ws_contacts_get", "ws_contacts_create", "ws_contacts_update", "ws_contacts_delete",
-  "ws_undo_last_change",
+  "ws_undo_last_change", "ws_change_status", "ws_cancel_change",
 ];
 const DESTRUCTIVE = ["ws_drive_trash_file", "ws_sheets_delete_tab", "ws_slides_delete_slide", "ws_cal_delete_event", "ws_contacts_delete"];
 let fake, client, close;
 before(async () => { fake = await startFakeNextcloud(); ({ client, close } = await connectWorkspace(fake)); });
 after(async () => { await close(); fake.close(); });
 
-test("exactly the 74 spec §4 tools are registered", async () => {
+test("exactly the 76 spec §4 tools are registered (no internal ws__ ops)", async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.equal(EXPECTED.length, 74);
+  assert.equal(EXPECTED.length, 76);
   assert.deepEqual(names, [...EXPECTED].sort());
 });
 test("descriptions: ≤1024 chars, destructive tools say confirm, useful first 120 chars", async () => {
@@ -5943,13 +6834,16 @@ test("stale view and paragraphs with links/images are refused, nothing written (
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
 });
 
-test("file open in the editor → choice page naming who, with Save anyway (proceed)", async () => {
+test("file open in the editor → queued page naming who, with Cancel and a confirm-gated Apply now (K5)", async () => {
   fake.openInEditor("Shared with Crow/Casa/r.docx", ["dayane"], { releaseAfterMs: 3000, typed: null });
+  const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x" });
   assert.equal(r.status, 200);
   const html = await r.text();
-  assert.match(html, /Dayane/); assert.match(html, /name="if_open" value="proceed"/); assert.match(html, /data-turbo="false"/);
-  const p = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x", if_open: "proceed" });
+  assert.match(html, /Dayane/); assert.match(html, /waiting/i); assert.match(html, /action="\/api\/workspace\/quick\/cancel"/);
+  assert.match(html, /name="if_open" value="force_close"/); assert.match(html, /data-turbo="false"/);
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts, "queued, not written");
+  const p = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x", if_open: "force_close" });
   assert.equal(p.status, 303);
 });
 
@@ -5982,11 +6876,18 @@ import { kids } from "../ooxml/xml.js";
 import { NS } from "../ooxml/xml.js";
 import { openXlsx, writeRange, readRange } from "../ooxml/xlsx.js";
 import { openPptx, editShapeText, shapeById, shapeText } from "../ooxml/pptx.js";
+import { queueDescriptor } from "../queue/provider.js";
 
 export const QUICK_MAX_BYTES = 20 * 1024 * 1024;
-const opts = (form, clock, summary) => ({ label: "Quick edit", waitS: 10, ifOpen: form.if_open === "proceed" ? "proceed" : "wait", clock, summary });
+// K5: an open file → the edit is queued as the equivalent tool op (applies live through the plugin, or at close).
+const asToolOp = (form, value) => form.kind === "docx" ? { tool: "ws_docs_rewrite_passages", args: { path: form.path, passages: [{ match_prefix: String(form.shown).slice(0, 100), new_text: value }] } }
+  : form.kind === "xlsx" ? { tool: "ws_sheets_write", args: { path: form.path, range: String(form.target), values: [[value]] } }
+  : { tool: "ws_slides_edit_text", args: { path: form.path, object_id: String(form.target), new_text: value } };
+const opts = (form, clock, summary, value) => { const op = asToolOp(form, value ?? ""); return { label: "Quick edit", waitS: 0, ifOpen: form.if_open === "force_close" ? "force_close" : "queue", queue: form.if_open === "force_close" ? null : queueDescriptor(op.tool, op.args), clock, summary }; };
 export async function quickSave(cfg, formIn, clock) {
   let form = formIn;
+  // "Yes, apply now" from the queued page: cancel the queued twin first so it can never apply a second time.
+  if (form.if_open === "force_close" && /^pc_[0-9a-z]+$/.test(String(form.cancel_first || ""))) { const { queueDefs } = await import("../tools/queue.js"); await queueDefs[1].run({ change_id: form.cancel_first }).catch(() => {}); }
   const segs = splitPath(String(form.path || ""));
   // Browsers submit textarea/hidden values with CRLF: normalize both, or every multi-line target is "stale".
   const nl = (x) => String(x ?? "").replace(/\r\n?/g, "\n");
@@ -6012,9 +6913,9 @@ export async function quickSave(cfg, formIn, clock) {
     const deck = openPptx(bytes);
     if (shapeText(shapeById(deck, String(form.target)).sp) !== String(form.shown ?? "")) throw new WsError("stale_view", "The slide changed since this page loaded; reload and try again.");
     editShapeText(deck, String(form.target), value); return { bytes: deck.pkg.save(), changed: 1, summary: "slide text" };
-  }, opts(form, clock));
+  }, opts(form, clock, undefined, value));
 }
-export const quickUndo = (cfg, form, clock) => undoFileChange(cfg, { path: String(form.path || "") }, String(form.version_id || ""), { clock, waitS: 10, ifOpen: form.if_open === "proceed" ? "proceed" : "wait" });
+export const quickUndo = (cfg, form, clock) => undoFileChange(cfg, { path: String(form.path || "") }, String(form.version_id || ""), { clock, waitS: 10, ifOpen: form.if_open === "force_close" ? "force_close" : "wait" });
 export function quickRestore(cfg, form, clock) {
   if (!/^\d{1,12}$/.test(String(form.version_id || ""))) throw new WsError("bad_version_id", "not a version");
   return withFileRestore(cfg, splitPath(String(form.path || "")), String(form.version_id), { ...opts(form, clock, `restore version ${form.version_id}`), label: "Quick edit" });
@@ -6048,7 +6949,7 @@ const STYLE = `<style>.wq a.btn,.wq button{display:inline-block;min-height:44px;
 const hidden = (csrf, o) => `<input type="hidden" name="_csrf" value="${esc(csrf)}">${Object.entries(o).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join("")}`;
 
 async function versionsBlock(cfg, t, csrf, e) {
-  const vs = (await listVersions(cfg, e.fileId).catch(() => [])).slice(1, 21);
+  const vs = (await listVersions(cfg, e.fileId).catch(() => [])).filter((v) => v.versionId !== String(e.mtime)).slice(0, 20); // B1: hide the CURRENT row, keep the undone one (redo)
   if (!vs.length) return "";
   return `<h3>${esc(t.versions)}</h3><ul>${vs.map((v) => `<li><span>${esc(new Date(v.modified).toLocaleString())} · ${esc(v.author)}${v.label ? ` · ${esc(v.label)}` : ""}</span><form method="post" action="/api/workspace/quick/restore" data-turbo="false">${hidden(csrf, { path: e.path, version_id: v.versionId })}<button>${esc(t.restore)}</button></form></li>`).join("")}</ul>`;
 }
@@ -6094,6 +6995,18 @@ export async function renderQuick({ lang, csrf, query }) {
   }
 }
 
+/** K5: the change was queued (the file is open). No choice is needed; the override sits behind its own confirm. */
+export function renderQueued({ lang, csrf, form, r }) {
+  const es = lang === "es"; const who = (r.open_by || []).join(", ") || (es ? "Alguien" : "Someone");
+  const keep = { path: form.path, kind: form.kind, target: form.target, value: form.value, shown: form.shown };
+  return `<!doctype html><html lang="${es ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crow</title><style>body{font-family:system-ui,sans-serif;margin:16px;max-width:40rem}button{min-height:44px;padding:.55rem .9rem;font-size:1rem;margin:.25rem 0;width:100%}details{margin-top:1rem}</style></head><body>
+<p><strong>${esc(who)}</strong> ${es ? "tiene este archivo abierto. Tu cambio está esperando: aparecerá en su editor o cuando lo cierre." : "has this file open. Your change is waiting: it will appear in their editor, or when they close it."}</p>
+<form method="post" action="/api/workspace/quick/cancel" data-turbo="false">${hidden(csrf, { path: form.path, change_id: r.change_id })}<button>${es ? "Cancelar el cambio" : "Cancel change"}</button></form>
+<details><summary>${es ? "Aplicar ahora (cierra su editor)" : "Apply now (closes their editor)"}</summary><p>${es ? "Lo que escribió se guarda primero, pero su editor se cerrará." : "Their typing is saved first, but their editor will close."}</p>
+<form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, { ...keep, if_open: "force_close", cancel_first: r.change_id })}<button>${es ? "Sí, aplicar ahora" : "Yes, apply now"}</button></form></details>
+<p><a href="${esc(q({ path: form.path }))}">${es ? "Volver" : "Back"}</a></p></body></html>`;
+}
+
 export function renderChoice({ lang, csrf, form, err }) {
   const t = QUICK_STRINGS[lang === "es" ? "es" : "en"];
   const keep = { path: form.path, kind: form.kind, target: form.target, value: form.value, shown: form.shown };
@@ -6101,7 +7014,7 @@ export function renderChoice({ lang, csrf, form, err }) {
   return `<!doctype html><html lang="${lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(t.tabQuick)}</title><style>body{font-family:system-ui,sans-serif;margin:16px;max-width:40rem}button{min-height:44px;padding:.55rem .9rem;font-size:1rem;margin:.25rem 0;width:100%}</style></head><body>
 <p><strong>${esc(who)}</strong> ${esc(t.openBy)}</p>
 <form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, keep)}<button>${esc(t.tryAgain)}</button></form>
-${err.data?.can_proceed ? `<form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, { ...keep, if_open: "proceed" })}<button>${esc(t.saveAnyway)}</button></form>` : `<p>${esc(err.message)}</p>`}
+${err.data?.can_proceed ? `<form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, { ...keep, if_open: "force_close" })}<button>${esc(t.saveAnyway)}</button></form>` : `<p>${esc(err.message)}</p>`}
 <p><a href="${esc(q({ path: form.path }))}">${esc(t.cancel)}</a></p></body></html>`;
 }
 ```
@@ -6143,6 +7056,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
     try {
       const [{ getConfig }, actions] = await Promise.all([bundleImport("server/config.js"), bundleImport("server/quick/actions.js")]);
       const r = await fn(actions, getConfig(), form);
+      if (r?.queued) { const { renderQueued } = await bundleImport("server/quick/view.js"); return res.status(200).type("html").send(renderQueued({ lang, csrf: req.csrfToken || form._csrf, form, r })); }
       return back(res, form, okNotice, r?.version_id ? { v: r.version_id } : {});
     } catch (err) {
       if (choice && ["open_in_editor", "locked_by_person", "stale_editor_lock"].includes(err?.code)) {
@@ -6158,6 +7072,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   router.post("/api/workspace/quick/save", handle((a, cfg, f) => a.quickSave(cfg, f, clock), "saved", { choice: true }));
   router.post("/api/workspace/quick/undo", handle((a, cfg, f) => a.quickUndo(cfg, f, clock), "undone"));
   router.post("/api/workspace/quick/restore", handle((a, cfg, f) => a.quickRestore(cfg, f, clock), "restored"));
+  router.post("/api/workspace/quick/cancel", handle(async (a, cfg, f) => { const { queueDefs } = await bundleImport("server/tools/queue.js"); await queueDefs[1].run({ change_id: String(f.change_id || "") }); return {}; }, "cancelled"));
   return router;
 }
 ```
@@ -6243,7 +7158,8 @@ Only what the household shared with the **Crow bot** account. If something is mi
 1. **Find before you touch.** `ws_drive_search` or `ws_drive_list_folder`, then `ws_docs_get_structure` / `ws_sheets_get_tabs` / `ws_slides_get_structure`.
 2. **Use the narrowest edit.** `ws_docs_find_replace` (batch with `pairs`) > `ws_docs_rewrite_passages` > `ws_docs_insert_at_heading` > `ws_docs_replace_section`. There is no whole-document replace, on purpose.
 3. **Every write returns `version_id`.** Tell the user what changed and that they can say "undo". On "undo", call `ws_undo_last_change` with the same `path` (or `ref`) and `version_id`. If it answers `changed_since`, explain that someone edited it after you and offer `ws_drive_list_versions` + `ws_drive_restore_version`.
-4. **If a write answers `open_in_editor`:** tell the user who has it open (`data.open_by`) and ask: "Go ahead anyway — their editor reloads and their typing is saved first — or try later?" Only on a clear yes, call the same tool again with `if_open: "proceed"`. On `locked_by_person` or `stale_editor_lock`, relay the message. Never retry in a loop.
+4. **If a write answers `queued: true`** (the file is open): tell the user who has it open and that the change will appear in their editor or when it closes. Ask nothing. Later, `ws_change_status` gives the result (applied with `version_id`, failed with reason). Use `if_open: "force_close"` ONLY when the user explicitly says to apply it now even if it closes the other person's editor; never on your own, never twice. Bot Builder bots should enable only the `ws_*` tools they need.
+4b. **If a write answers `open_in_editor`** (move/rename/trash, which are not queueable): tell the user who has it open (`data.open_by`) and ask: "Go ahead anyway — their editor reloads and their typing is saved first — or try later?" Only on a clear yes, call the same tool again with `if_open: "force_close"`. On `locked_by_person` or `stale_editor_lock`, relay the message. Never retry in a loop.
 5. **Confirm first** before `ws_drive_trash_file`, `ws_sheets_delete_tab`, `ws_slides_delete_slide`, `ws_cal_delete_event`, `ws_contacts_delete`.
 
 ## Sheets
@@ -6264,7 +7180,7 @@ All-day events use `YYYY-MM-DD`; the same day is fine for a one-day event. Timed
 - What Crow can do (tool families, one line each);
 - What Crow can see (only what's shared with Crow bot);
 - Undo and versions;
-- When a file is open (wait → ask → proceed; manual locks; the stale-lock Unlock steps);
+- When a file is open: the change waits and appears live in the open editor (Crow plugin) or on close; status and cancel; the "apply now" override; manual locks; the stale-lock Unlock steps;
 - Quick edit from a phone;
 - Limits (caps, recurring-event instance edits, formula freshness).
 
@@ -6291,7 +7207,7 @@ git show --stat HEAD
 
 ---
 
-### Task 13: PR, CI, merge, deploy on crow
+### Task 15: PR, CI, merge, deploy on crow
 
 **Files:** none new (process task).
 
@@ -6318,6 +7234,8 @@ Expected: `suite`, `static-checks` and `audit` are all `completed`/`success`. An
 
 - [ ] **Step 4: Merge** (standing grant for improvement-plan items; CI must be green), then delete the branch.
 
+- [ ] **Step 4b: Register the documentserver recreate window** in `~/CROW-SCHEDULE.md`. The new bind mount needs `docker compose up -d onlyoffice` (the container is recreated). Run it only when `info` shows no live sessions on the files Crow has pending changes for, and when Kevin and Dayane confirm nothing is open; otherwise wait. Cap the window at 15 min: if the documentserver healthcheck isn't green by then, roll back with `git -C ~/crow revert` of the compose change and `up -d` again, enforced by a detached deadman (`systemd-run --user --on-active=15min …`) per the unattended-window rule. Clear the window when done.
+
 - [ ] **Step 5: Deploy on crow**
 
 1. Read `~/CROW-SCHEDULE.md`.
@@ -6330,13 +7248,20 @@ Expected:
 - `~/.crow/bundles/workspace/node_modules/fflate` exists;
 - `jq .workspace ~/.crow/mcp-addons.json` shows `{command, args, env}` with **no** `WORKSPACE_*_PASSWORD`/`SECRET` keys.
 
-Restart once more: `sudo systemctl restart crow-gateway`. Then `journalctl` shows the workspace addon connected with 74 tools.
+Restart once more: `sudo systemctl restart crow-gateway`.
+Then:
+1. `docker compose -p crow-workspace -f ~/.crow/bundles/workspace/docker-compose.yml up -d onlyoffice` (inside the Step 4b window);
+2. `bash ~/.crow/bundles/workspace/ops/bootstrap.sh` (the cache-flush step logs "live plugin 0.2.0");
+3. add the Serve path (`sudo tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`);
+4. verify that `curl -s https://crow.dachshund-chromatic.ts.net:8457/crow-live/v1/pending?key=x` → 401 from the tailnet;
+5. verify that `tailscale serve status` shows no Funnel on 8457;
+6. `docker exec crow-workspace-onlyoffice-1 ls /var/www/onlyoffice/documentserver/sdkjs-plugins | grep 6F1C2A5E`. Then `journalctl` shows the workspace addon connected with 74 tools.
 
 Confirm `auto_update_last_result` is not "Skipped". Check whether `crow-r4-gateway` shares `~/.crow`: if `systemctl cat crow-r4-gateway | grep CROW_HOME` points elsewhere, nothing to do there.
 
 ---
 
-### Task 14: Live acceptance on crow ([KEVIN] steps marked)
+### Task 16: Live acceptance on crow ([KEVIN] steps marked)
 
 **Files:**
 - Create: `scripts/workspace-w2-acceptance.mjs` (kept for re-runs)
@@ -6397,10 +7322,10 @@ if (process.argv.includes("--lock-test")) {
   console.log(`\n[KEVIN] Open "${F}/acc.docx" in Workspace on the laptop, type the word KEVIN, keep the tab open, then press Enter.`);
   await new Promise((r) => process.stdin.once("data", r));
   const t0 = Date.now();
-  const w = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot." });
+  const w = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot.", if_open: "wait", wait_s: 30 });
   check("open_in_editor names Kevin within ~30 s", w.code === "open_in_editor" && w.data.open_by.length > 0 && Date.now() - t0 < 40000, JSON.stringify(w.data?.open_by));
-  const p = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot.", if_open: "proceed" });
-  check("proceed → write lands", p.success, p.error);
+  const p = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot.", if_open: "force_close" });
+  check("force_close → write lands", p.success, p.error);
   const md = (await call("ws_docs_read", { path: `${F}/acc.docx` })).data.markdown;
   check("Kevin's typing kept and bot line on top", md.includes("KEVIN") && md.includes("Línea del bot."));
   console.log("[KEVIN] Describe what the editor tab showed, then press Enter:"); await new Promise((r) => process.stdin.once("data", r));
@@ -6420,7 +7345,22 @@ process.exit(rows.every((r) => r[0] === "PASS") ? 0 : 1);
 Run: `node scripts/workspace-w2-acceptance.mjs`
 Expected: `11/11 passed`. Before cleanup runs, look at the Menu event on Kevin's phone **[KEVIN]**: DAVx⁵ sync shows "W2: tacos (prueba)" on 2026-10-08. To give Kevin time, run with `--lock-test` or add a pause.
 
-- [ ] **Step 4: [KEVIN] Lock test**
+- [ ] **Step 3b: [KEVIN] K5 live and close-time runs**
+
+1. **Laptop, live:**
+   - Kevin opens `W2 acceptance/acc.docx` and `W2 acceptance/acc.xlsx` on the laptop and keeps typing.
+   - Claude runs `ws_docs_find_replace` (Tortillas → Totopos) and `ws_sheets_write` (B2 → 7). Expected: both return `queued: true` naming Kevin.
+   - Within ~20 s Kevin sees "Crow is editing…", then the changes appear; his own typing is untouched.
+   - `ws_change_status` → `applied_live`. After he closes, the saved file has both, and the version history has his save.
+2. **Undo live:** `ws_undo_last_change` with the `change_id` → the inverse appears live (or at close).
+3. **Phone, close-time:**
+   - Kevin opens `acc.docx` on the phone (view-only). Claude queues `ws_docs_append`.
+   - Expected: no live apply, and a Crow notification "change waiting".
+   - He closes it; within ~1 min it's `applied_close`, and the notification carries the undo id.
+4. **Plugin absent:** with the laptop tab opened **before** Task 15's deploy (if one is still around), or after disabling plugins in the connector admin, the change waits and applies at close.
+5. **Override:** Kevin says "apply now even if it kicks me out" → `if_open: "force_close"` → his editor closes, his typing is saved first, and the change is on top.
+
+- [ ] **Step 4: [KEVIN] Lock test** (`if_open: "wait"` path and the `force_close` override; the default is the queue, covered by Step 3b)
 
 Run: `node scripts/workspace-w2-acceptance.mjs --lock-test` and follow the prompts.
 Expected: three more PASS lines. Kevin's description of the editor (disconnect/reload) is recorded.
@@ -6456,7 +7396,7 @@ git push
 
   | Spec | Task |
   |---|---|
-  | §2.1 proceed | 1, 5 |
+  | §2.1 / K5 queue + live + close-time + override | 1 (S6, S9), 5, 12, 13, 14, 16 |
   | §4.2 Drive | 4, 5, 11 |
   | §4.3 Docs | 6, 7 |
   | §4.4 comments | 11 |

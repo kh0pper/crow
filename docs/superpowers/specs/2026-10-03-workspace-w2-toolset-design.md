@@ -24,32 +24,45 @@ The same engine also drives a phone-friendly **Quick edit** page in Crow's Offic
 
 | # | Question | Decision | Source |
 |---|---|---|---|
-| K1 | What a write does when the file is open in the editor | **Wait up to ~30 s** for the editor lock to clear. If it's still held, return a structured "open by X" result so the bot can **ask the user** whether to go ahead anyway or try later. | Kevin 2026-10-03 |
+| K1 | What a write does when the file is open in the editor | ~~Wait ≤ 30 s, then ask whether to go ahead~~ **Superseded by K5 (§2.1): queue + live plugin apply + close-time apply; closing their session only as an explicit override.** | Kevin 2026-10-03 |
 | K2 | v1 scope | Drive + Docs (.docx), Sheets (.xlsx), **Slides (.pptx)**, Calendar + Contacts (CalDAV/CardDAV) | Kevin 2026-10-03 |
 | K3 | Phone editing | The bot edits by chat, plus a phone-friendly **Quick edit** page in the Office panel for small text and cell changes (no layout editor). Every change is an undoable version. | Kevin 2026-10-03 |
 | K4 | Model routing | None. The bot's normal model drives deterministic tools. | Kevin 2026-10-03 |
 | D6 | How the AI edits | Edits the saved file. Every AI edit makes a Nextcloud version. It never clobbers. | parent spec |
 | D7 | Toolset shape | Mirror the Google Workspace MCP with a `ws_` prefix and the same guardrails | parent spec |
 
-### 2.1 What "go ahead anyway" really does (verified on crow 2026-10-03)
+### 2.1 Writes to a document that is open: smooth by default (Kevin, 2026-10-03, binding)
 
-Kevin pictured going ahead as "the editor shows a reload prompt". The live system works differently, and the design follows the live system.
+This supersedes the earlier default of "wait, then ask whether to close their session". Writes to an open document must be **smooth**: nobody gets kicked out, and the bot never has to make the user choose.
 
-What the probes showed:
-- **The ONLYOFFICE connector holds a hard lock.** `files_lock` is enabled. While a document is open, ONLYOFFICE's connector takes a `files_lock` **app lock** (`nc:lock-owner-type 1`, owner `onlyoffice`, timeout `-60` meaning no expiry): `CallbackController.php:657-663` locks on status 1 and unlocks on save/close.
-- **crow-bot's write is refused.** A WebDAV `PUT` by crow-bot on a file locked that way returns **`423 Locked`**. This was verified on `acceptance-test.docx`, writing back identical bytes.
-- **crow-bot can't break the lock.** `files_lock` lets only the lock's owner, or the file's owner with a *user* lock, unlock it (`LockService::canUnlock`). NC 34 ships no `files_lock` occ command.
-- **ONLYOFFICE can say who is in a document.** The command service (`POST /coauthoring/CommandService.ashx` with the bundle's JWT secret) answers `{"c":"info","key":K}` with **the users in the session**: `{"error":0,"users":["<instanceid>_admin"]}`. It returns `error: 1` when no session exists.
-- **crow-bot can get the document key.** The connector's OCS endpoint `GET /ocs/v2.php/apps/onlyoffice/api/v1/config/{fileId}` returns the key to any user who can open the file. crow-bot got it.
+**K5 — queue, then apply live or on close:**
+1. If the file is locked or open, the write becomes a **pending change** (§5.6):
+   - durable, per file, ordered;
+   - the bot is told who has it open and that the change is queued (`success:true, data.queued:true, change_id`);
+   - Crow notifies (§5.9).
+2. **Live apply (default whenever possible):** the Crow ONLYOFFICE plugin (§5.7) runs inside every open editor session. It applies the change in the live session through the editor's document API, showing a small "Crow is editing…" indicator. The editor's own save persists it, and Crow never writes the file in that case.
+3. **Close-time apply (fallback):** when the session ends and Nextcloud has the saved file, Crow applies the still-pending change to the saved file (§5.8). Both paths re-validate the target first. If it no longer matches, the apply fails safely and the bot and user are notified.
+4. **Override only:** "apply it now even if it kicks them out" (`if_open:"force_close"`, the ONLYOFFICE `drop` path of §5.10). It is used only on the user's explicit words, never by default.
 
-So "go ahead anyway" (`if_open: "proceed"`) means:
-1. Ask ONLYOFFICE to **drop** the editing users (`{"c":"drop","key":K,"users":[…]}`).
-2. ONLYOFFICE ends the session, **saves their edits first** (as their own version) and releases the lock.
-3. The tool waits ≤ 30 s for the release, then makes its change on top.
+**Verified on crow 2026-10-03 (still the facts every path relies on):**
+- **ONLYOFFICE holds a hard lock.** While a document is open, the connector holds a `files_lock` **app lock** (type 1, owner `onlyoffice`, no expiry; `CallbackController.php:657-663`). It unlocks only after the status-2 save succeeds (:530-537), and **never on forcesave** (status 6).
+- **crow-bot cannot write or unlock.** Its `PUT` gets `423 Locked`, and it can't remove the lock (`LockService::canUnlock`).
+- **ONLYOFFICE can say who is editing.** The command service `info` returns the session users (`{"error":0,"users":["<instanceid>_admin"]}`), or `error:1` when no session exists.
+- **crow-bot can get the document key** through the connector's OCS config endpoint.
+- **Plugins work in Community Edition** (11 installed and served on crow; the CE licence has no plugin gate).
+  - A `type:"system"` plugin starts automatically in every session and can't be switched off by the user (sdkjs `common/plugins.js:262-276`, web-apps `Plugins.js:351-352`).
+  - It runs in an un-sandboxed iframe from the document-server origin.
+  - Its `Asc.plugin.info` carries `documentId` (= the document key), `userId`, `isViewMode`, `isMobileMode` and the session `jwt`.
+  - `Asc.plugin.callCommand` runs builder code inside the document as one undoable group action that is co-edited and saved normally (`apiBase.js:3803-3811`).
+- **The connector has no plugin setting** beyond an on/off toggle (`EditorApiController.php:707-710`), and the editor config is JWT-signed on the server. So the plugin is installed **server-side**, not through Nextcloud:
+  - a bind mount into `/var/www/onlyoffice/documentserver/sdkjs-plugins/<guid>` (today that folder is inside the container and is lost when it is recreated);
+  - then `documentserver-flush-cache.sh`, because nginx serves plugin files `immutable` for a year.
 
-The people editing see ONLYOFFICE's disconnect notice and reload. That is the "reload prompt" Kevin asked for, reached without losing anyone's typing. Task 1 (the live spike) confirms the drop → save → unlock timing before any code depends on it. If drop doesn't release the lock within 30 s, the tool returns `could_not_close_editor` and the bot offers "try later". Nothing escalates further.
+**A manual lock is still never overridden.** Changes to a file a person locked in Files are queued and applied after they unlock it. `force_close` refuses with `locked_by_person`.
 
-**A manual lock is never overridden.** A person can lock a file from the Files app (lock type 0 = user, 2 = token). For those, `proceed` returns `locked_by_person` and the bot tells the user who holds the lock.
+| # | Question | Decision | Source |
+|---|---|---|---|
+| K5 | Writing to an open document | Queue → live-apply through the plugin, else close-time apply. `force_close` only as an explicit override. | Kevin 2026-10-03 (later the same day) |
 
 ## 3. Architecture
 
@@ -268,9 +281,9 @@ Calendars:
 | `sheets_*` (11) | `ws_sheets_` + same verb (`batch_update` takes typed ops) |
 | `gslides_*` (15 + export) | `ws_slides_` + same verb; export → `ws_drive_export` |
 | `gcal_list_calendars`, `list_events`, `get_event`, `create_event`, `respond_to_event` | `ws_cal_` + same verb |
-| — | `ws_cal_update_event`, `ws_cal_delete_event`, `ws_contacts_*` (6), `ws_drive_list_versions`, `ws_drive_restore_version`, `ws_undo_last_change` |
+| — | `ws_cal_update_event`, `ws_cal_delete_event`, `ws_contacts_*` (6), `ws_drive_list_versions`, `ws_drive_restore_version`, `ws_undo_last_change`, `ws_change_status`, `ws_cancel_change` |
 
-Total: 17 drive + 16 docs + 11 sheets + 16 slides + 7 calendar + 6 contacts + 1 undo = **74 tools**.
+Total: 17 drive + 16 docs + 11 sheets + 16 slides + 7 calendar + 6 contacts + 1 undo + 2 queue (`ws_change_status`, `ws_cancel_change`) = **76 tools**.
 
 ## 5. The write protocol (`server/write-protocol.js`)
 
@@ -278,13 +291,12 @@ Every file mutation (tools and Quick edit) is `withFileWrite(ref, mutate, opts)`
 
 1. **Resolve and validate** the path (§7.1), then PROPFIND depth 0. A folder, missing file or no `W` permission → error (`not_found` / `read_only`).
 2. **Serialize per file.** An in-process mutex keyed by `file_id` covers the MCP server's own concurrency. Nextcloud's `If-Match` covers everyone else (step 6).
-3. **Lock check** (§5.2). If locked, wait (poll every 2 s, ≤ `wait_s`, default 30). If still locked:
-   - return `{success:false, code:"open_in_editor", data:{open_by:[names], since, lock_type:"editor", can_proceed:true, message}}`;
-   - or `code:"locked_by_person"` (`can_proceed:false`);
-   - or `code:"stale_editor_lock"` (§5.3).
-4. **`if_open:"proceed"`** (only after the user agreed), and only for an editor lock with a live session:
-   - send ONLYOFFICE `drop` for the session's users;
-   - wait ≤ 30 s for the lock to clear;
+3. **Lock check** (§5.2). If locked, poll every 2 s for up to `wait_s` (default **0**: no wait). If still locked:
+   - **`if_open:"queue"` (default):** for any lock type, record a pending change (§5.6) and return `{success:true, data:{queued:true, change_id, open_by, lock_type, apply:"live_or_on_close", message}}`.
+   - **`if_open:"wait"`:** return `open_in_editor` / `locked_by_person` / `stale_editor_lock` as before. Tools that can't be queued (§5.6 table) always behave like this.
+4. **`if_open:"force_close"`** is the explicit override, used only when the user said "apply it now even if it kicks them out". Only for an editor lock with a live session:
+   - send ONLYOFFICE `drop`;
+   - wait ≤ 30 s for the save and unlock;
    - otherwise return `could_not_close_editor`.
 5. **Read** the file (`GET`, ≤ 50 MB) and remember its `etag` and current version id. Then run `mutate(bytes) → {bytes, changed, summary}`. `changed === 0` → return without writing (no version).
 6. **Write:** `PUT` with `If-Match: <etag>`.
@@ -297,12 +309,12 @@ Every file mutation (tools and Quick edit) is `withFileWrite(ref, mutate, opts)`
 - **A label a person already gave a version is never overwritten.**
 8. **Return** `version_id` (§5.4), `version_label`, `changed`, plus the tool's own data.
 
-`wait_s` (0–30) and `if_open` (`"wait"` default \| `"proceed"`) are optional params on every writing tool. With `proceed`, the tool does not wait again before dropping the editor: the user already waited and said yes.
+`wait_s` (0–30, default 0) and `if_open` (`"queue"` default \| `"wait"` \| `"force_close"`) are optional params on every writing tool.
 
 **Cross-process rules** (review C2/C3):
 - **The 1.1 s spacing is enforced against the file's server-side mtime,** not only in-process. pi bots each spawn their own server, and Quick edit runs in the gateway. Nextcloud overwrites the version row when two writes share an mtime second.
 - **The undo token's after-etag is the PUT response's own ETag.**
-- **Undo re-checks the etag after the lock has settled,** immediately before the restore. A proceed-drop that saves someone's typing makes undo refuse with `changed_since`.
+- **Undo re-checks the etag after the lock has settled,** immediately before the restore. A `force_close` drop that saves someone's typing makes undo refuse with `changed_since`.
 
 ### 5.1 Why a version always exists
 
@@ -344,6 +356,136 @@ ONLYOFFICE app locks never expire on their own (timeout `-60`). If the browser d
 - **Pruning:** at server start and every 6 h, entries older than 30 days go, keeping ≤ 500.
 - **Deletes write the journal entry before the DELETE.** CardDAV has no trash, so a journal failure must stop the delete, not lose the undo.
 - File changes need no journal: Nextcloud keeps the versions.
+
+### 5.6 Pending changes (the queue)
+
+**Storage.** Pending changes live in crow.db, table `workspace_pending_changes`, created by the bundle's `server/init-tables.js` (the ramble pattern, no `SCHEMA_GENERATION` bump):
+- `id` (text, `pc_<ulid>`), `file_id`, `path`, `seq` (per-file order), `tool`, `args_json`, `precondition_json`;
+- `state` — `pending | claimed_live | applying_close | applied_live | applied_close | failed | cancelled | expired | unknown_after_claim`;
+- `lease_until`, `lease_owner`, `claim_count`, `result_json`, `version_id`;
+- `inverse_json` (what the live apply replaced, for undo), `created_at`, `updated_at`, `requested_by` (bot/channel label);
+- `open_by_json`.
+
+**Order and serialization.** Changes to one file apply strictly in `seq` order. A change is only offered or applied while every earlier change for that file is in a terminal state (`applied_*`, `failed`, `cancelled`, `expired`). A `failed` earlier change does not block later ones, but every change re-validates on its own.
+
+**Precondition, computed at queue time from the saved file:**
+
+| Tool family | Precondition |
+|---|---|
+| Docs ops | the find text / heading / prefix / quoted text exists (and the heading's section text hash, for `replace_section`) |
+| `ws_sheets_write` | the target cells' current values (FORMULA mode) |
+| `ws_sheets_append` | the header row |
+| `ws_slides_edit_text` | the shape's current text |
+| `find_replace` | the find text |
+| Structural ops | the slide / tab exists |
+
+At apply time (live or close), a precondition mismatch → `failed` with reason `target_changed` → notify.
+
+**Exactly once:**
+- Every transition is a compare-and-set `UPDATE … WHERE id=? AND state=?` in the single crow.db. The plugin and the close-time applier both claim through it, so only one wins.
+- A live claim has a 60 s lease.
+- If the lease expires without an ack, the state goes to `unknown_after_claim`, **not** back to `pending`: the edit may already be in the document. The close-time applier then checks the op's **postcondition** on the saved file:
+  - present → `applied_live` ("detected");
+  - else precondition still true → apply;
+  - else → `failed: ambiguous` + notify.
+- A change is never applied twice.
+
+**Expiry.** A change pending for more than 7 days → `expired` + notify.
+
+**Tools:**
+- `ws_change_status({change_id})` returns the state, `open_by`, and the result or `version_id`.
+- `ws_cancel_change({change_id})` works only while `pending`.
+
+Both are new (76 tools total).
+
+**What can be queued:**
+- Every content op of Docs, comments, Sheets and Slides.
+- Drive `upload_new_version` and `restore_version`, and undo of a file change.
+- **Not** move/rename/trash/share. Those return `open_in_editor` (`if_open` doesn't apply).
+- Calendar and contacts never lock.
+
+### 5.7 The Crow ONLYOFFICE plugin (live apply)
+
+**Package.** `bundles/workspace/onlyoffice-plugin/`:
+- `config.json`: `guid "asc.{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1}"`, one variation, `type:"system"`, `isViewer:true`, `EditorsSupport:["word","cell","slide"]`, `initDataType:"none"`;
+- `index.html` and `crow-live.js`;
+- no external scripts; it loads `pluginBase.js` from the document server, which is ONLYOFFICE's standard pattern.
+
+It is **served from the ONLYOFFICE origin** (bind-mounted read-only into the documentserver container by the bundle compose), so it needs no CDN and no third-party origin.
+
+**Talking to Crow (same origin):**
+- The plugin calls `https://<host>:8457/crow-live/v1/…`.
+- A tailnet-only Tailscale Serve **path** on the ONLYOFFICE port proxies that to the gateway: `tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`. The Office panel's admin block prints it.
+- This avoids CORS entirely. It is never Funnel, and the gateway's Funnel middleware already rejects these paths.
+
+**Auth: no bot password, nothing long-lived in the plugin.**
+1. Every request carries the session's own `Asc.plugin.info.jwt`. That is the editor-config JWT that Nextcloud signed with the shared ONLYOFFICE secret, which Crow already holds.
+2. Crow verifies:
+   - HS256 with `WORKSPACE_ONLYOFFICE_JWT_SECRET`;
+   - `exp` not passed;
+   - `document.key` matches the `key` query.
+   It then resolves the key to a file: the stored key of queued changes, or a fresh crow-bot config lookup for files that have pending changes (cached 30 s).
+3. That proves the caller holds a genuine editor session for that document. It reveals only that document's pending changes.
+4. **Claiming:** a claim returns a **short-lived per-change apply token** — HMAC over (`change_id`, `key`, `lease`, `exp`=+120 s) with a per-boot server secret. It is minted when the change is queued or claimed, and the ack must present it.
+5. Requests in view mode (`isViewMode`) or with `permissions.edit=false` in the JWT are refused for claims.
+
+Task 1 S9 verifies that `info.jwt` exists, its signature and claims, and that `documentId` equals the key. **If it doesn't:** the live path is disabled (the plugin does nothing), and every queued change is applied at close. That is a safe degrade.
+
+**Loop:**
+1. In edit mode, after `onDocumentContentReady`, poll `GET /pending?key=K` every 10 s. Back off to 60 s when empty. Stop after 8 h idle.
+2. For each offered change, in order: `POST /claim` → run the op with `callCommand` (one group action, so Ctrl-Z in the editor also reverts it) → check the postcondition inside the same command → `POST /ack {result, inverse}`.
+3. While working, show the indicator "Crow is editing…" (method chosen in the Task 1 S9 spike; fallback: a temporary content-control-free status in the editor's notification area, or none).
+4. Several editors in one session: all of them poll, only one claim wins, and co-editing syncs the result to the others.
+
+**Live op coverage (v1):**
+
+| Live | Close-time only |
+|---|---|
+| `ws_docs_find_replace`, `ws_docs_append`, `ws_docs_insert_at_heading`, `ws_docs_rewrite_passages`, `ws_docs_format_text` (bold/italic/underline/color; links close-time), `ws_docs_add_comment` | `ws_docs_replace_section`, `ws_docs_insert_image`, reply/resolve/apply_comment_edit |
+| `ws_sheets_write`, `ws_sheets_append`, `ws_sheets_set_number_format`, `ws_sheets_add_tab`, `ws_sheets_rename_tab` | `ws_sheets_delete_tab`, `ws_sheets_batch_update` |
+| `ws_slides_edit_text`, `ws_slides_find_replace` (scope `slides`) | other slide ops, notes, Drive ops, undo |
+
+Each live op's builder implementation mirrors the file-level op's semantics: a heading reset on insert, and the first run's formatting kept on rewrite. A live op that throws or fails its postcondition is acked `failed_live`, and the change returns to `pending` for close-time apply exactly once (`claim_count` ≤ 1).
+
+**Phones.** The phone browser opens documents view-only (CE), so the plugin does nothing there and changes apply at close. Desktop and laptop editors apply live.
+
+**Plugin missing** (an old cached page, an old container, a session that started before install, plugins disabled by the admin): nothing claims, and the change applies at close. The bot's message never promises "live".
+
+### 5.8 Close-time apply
+
+**Where it runs.** A worker in the gateway process (started once by the bundle's panel routes module), every 15 s, for each file with `pending` or `unknown_after_claim` changes:
+1. stat the file;
+2. if it is unlocked **and** ONLYOFFICE `info` on its current key says no session (`error:1`), claim `pending → applying_close` and apply in `seq` order through `withFileWrite` (label `Crow (queued)`), re-validating the precondition;
+3. store `version_id` → `applied_close` → notify, with the undo id.
+
+A user lock or a still-open session → nothing happens. The worker does nothing while the lock is held.
+
+**Undo:**
+- `applied_close` changes undo like any file change (version restore).
+- `applied_live` changes undo by **queueing the inverse op** recorded at apply time (e.g. replace the new text back with the old). It is applied live or at close. If its precondition fails → `changed_since`.
+
+### 5.9 Notifications
+
+| Event | Crow notification (this instance) |
+|---|---|
+| Queued | "Crow has a change waiting for <doc> (open by <names>)" |
+| Applied | "… applied (undo id …)" |
+| Failed | "… could not be applied: <reason>" |
+| Expired | "… expired" |
+
+- Crow notifications use `servers/shared/notifications.js` `createNotification`, type `system`, with `action_url` pointing at Office › Quick edit for the file.
+- People who have the document open see the plugin's in-editor indicator. A household member on another Crow instance (Dayane) is reached that way, or by the bot in her channel. Cross-instance notification is a follow-up.
+- The bot gets the outcome from `ws_change_status`. The skill tells it to check when the user asks.
+
+### 5.10 `force_close` (explicit override only)
+
+The ONLYOFFICE `drop` path of the earlier design is kept, but only as an explicit override:
+1. `drop` the users;
+2. their typing is saved first (status 2, then unlock);
+3. ≤ 30 s, else `could_not_close_editor`;
+4. the bot writes on top.
+
+A second `drop` is never sent without asking again. Task 1 S6 checks whether a dropped user's view-only connection keeps the session alive. If it does, `force_close` always returns `could_not_close_editor`, and that is recorded for Kevin.
 
 ## 6. Auth and configuration
 
@@ -399,7 +541,24 @@ ONLYOFFICE app locks never expire on their own (timeout `-60`). If the browser d
 - Never write outside crow-bot's DAV root.
 - Never log file contents or credentials. Logs carry the tool name, file id, status code and duration.
 
-ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access-checked config call, and only on `if_open:"proceed"`.
+ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access-checked config call, and only on `if_open:"force_close"`.
+
+### 7.4 Plugin and live endpoint
+
+**Live endpoints** (`/api/workspace/live/v1/*`):
+- They accept **only** requests carrying a valid editor-session JWT (§5.7). There is no dashboard session and no cookies; CSRF doesn't apply, because no ambient credential exists.
+- Rate limit: 60 requests/min per key.
+- Responses expose only that document's pending changes: tool, args and change id. They never include paths outside that file, the bot password or the ONLYOFFICE secret.
+
+**Plugin files:**
+- Static and read-only mounted; no `eval` of server data.
+- Ops arrive as data (`{tool, args}`) and run through a fixed table of builder functions in the plugin. The server never sends code. `Asc.scope` carries only data.
+
+**What the plugin can see:**
+- It can read the session JWT; so can any installed plugin. Crow accepts that JWT only for the same document's queue.
+- A malicious co-editor of the same document could fetch the pending change's content. That content is a change to a document they can already edit.
+
+**Network:** the live path is reachable only through the tailnet Serve path, and Funnel paths never include it (`auth-network` test extended).
 
 ## 8. Quick edit (Office panel)
 
@@ -416,7 +575,7 @@ ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access
   - goes through `withFileWrite` with `wait_s: 10` (a phone shouldn't hang for 30 s);
   - is labeled `Quick edit: <what changed>`;
   - lands on a confirmation with an **Undo** button (carrying the `version_id`) and the file's last 20 versions, each with **Restore**.
-  - If the file is open, the page says "Open in the editor by Dayane" and offers **Try again** and **Save anyway (closes their editor; their typing is saved first)**. The second re-posts with `if_open=proceed`.
+  - If the file is open, the save is **queued** (§5.6). The page says "Dayane has this open. Your change is waiting and will appear in her editor or when she closes it", shows the change's status, and offers **Cancel change**. A small "Apply now (closes her editor)" link re-posts with `if_open=force_close`, behind a confirm page.
 - **Auth and plumbing:**
   - Forms POST to panel routes `/api/workspace/quick/{save,undo,restore}`, behind `authMiddleware` + `csrfMiddleware` (the phone-bundle pattern, `bundles/phone/panel/routes.js:96-112`). The hidden `_csrf` field is filled from `req.csrfToken`.
   - Responses are `303` redirects back to the view with a notice code (PRG).
@@ -430,7 +589,12 @@ ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access
 - **Find before you touch:** `ws_drive_search` / `list_folder`, then `ws_docs_get_structure` or `ws_sheets_get_tabs` before editing.
 - **Prefer the narrowest tool:** find_replace > rewrite_passages > replace_section. No full rewrites.
 - **Report every write's `version_id`** in the reply ("say 'undo' to revert"). On "undo", call `ws_undo_last_change` with it.
-- **On `open_in_editor`:** tell the user who has it open and ask "go ahead anyway (their editor will reload; their typing is saved first) or try later?". Call again with `if_open:"proceed"` only on a clear yes. On `locked_by_person` / `stale_editor_lock`, relay the message; never retry in a loop.
+- **When a result says `queued:true`:**
+  - Tell the user who has the file open and that the change will appear in their editor (or when it closes). Do not ask them to choose anything.
+  - Later, `ws_change_status` reports applied (with `version_id` for undo), failed (with reason) or still pending.
+  - Use `if_open:"force_close"` ONLY if the user explicitly says to apply it now even if it closes the other person's editor. Never on your own, never twice.
+  - On `open_in_editor` (non-queueable tools such as move/rename/trash), relay who has it open and try later. Never retry in a loop.
+  - An undo with `force_close` may still end in `changed_since` if the person typed.
 - **Confirm intent** before destructive tools.
 - **Sheets:** after writing formulas, read back with `FORMULA` (cached values are stale until the file is opened).
 - **Calendar:** all-day = `YYYY-MM-DD`. Times need an offset. Ask which calendar if more than one is writable. Kitchen's Menu is `Menu`.
@@ -464,9 +628,12 @@ The parts of `skills/google-workspace.md` that still apply (the daily-briefing /
 - **Protocol tests:**
   - lock wait then success;
   - wait timeout → `open_in_editor` with names;
-  - proceed → drop → unlock → write;
+  - queue when locked; live claim/ack; lease expiry → `unknown_after_claim` → postcondition detection (no double apply); close-time apply only after unlock + `info` error 1; per-file order; precondition failure → `failed: target_changed`; cancel; expiry;
+  - live-endpoint auth (forged, expired or other-document JWT refused; view-mode claim refused; Funnel header refused);
+  - plugin op table: each live op run against a headless ONLYOFFICE-builder stub with recorded calls (hermetic), plus the real editor in Task 1/acceptance;
+  - force_close → drop → unlock → write;
   - drop doesn't release → `could_not_close_editor`;
-  - user lock → `locked_by_person` and `proceed` refused;
+  - user lock → queued (applies after unlock); `force_close` refused with `locked_by_person`;
   - stale lock;
   - `412` retry once, then `changed_concurrently`;
   - zero-change → no PUT;
@@ -480,21 +647,40 @@ The parts of `skills/google-workspace.md` that still apply (the daily-briefing /
   - no secret string in any tool result, error or captured log;
   - mcp-addons secret skip;
   - refresh registers a missing server entry and leaves existing ones alone.
-- **MCP surface test:** the registered tool list equals the §4 catalog exactly (74 names), every description ≤ 1024 chars, every destructive tool's description contains "confirm".
+- **MCP surface test:** the registered tool list equals the §4 catalog exactly (76 names), every description ≤ 1024 chars, every destructive tool's description contains "confirm".
 - **Quick edit tests:**
   - server-rendered pages (en/es parity, no secrets, CSRF field present, escaping);
-  - routes with a fake session + CSRF: save → 303 + version, open-file → choice page, proceed, undo.
+  - routes with a fake session + CSRF: save → 303 + version; open file → queued page; cancel; force_close confirm; undo.
 
 ### 10.2 Live acceptance on crow (Task 14)
 
 Runs as crow-bot against the real Workspace, after merge and deploy. Steps marked **[KEVIN]** need him:
 - **[KEVIN]** shares Menu (edit) and an address book with crow-bot, and creates a `W2 acceptance` folder shared with crow-bot (edit).
 - One scripted call per tool family through the gateway's `crow_tools`.
-- A lock run: **[KEVIN]** keeps a doc open on the laptop and types. The bot write returns `open_in_editor` naming Kevin within ~30 s. On proceed, Kevin's editor shows the disconnect/reload, his typing is in a version, and the bot's change is on top. Then undo.
+- **Live run [KEVIN, laptop]:**
+  - Kevin keeps a .docx and an .xlsx open and types.
+  - The bot's change returns `queued` naming Kevin, then appears in his open editor within ~20 s with the "Crow is editing…" indicator. Kevin's typing is untouched.
+  - After he closes, the saved file holds both, and `ws_change_status` says `applied_live`.
+  - Undo of that change is applied live as well.
+- **Close-time run [KEVIN, phone]:**
+  - Kevin opens the doc on his phone (view-only).
+  - The bot's change is queued and does **not** apply live; a Crow notification shows.
+  - He closes it; within ~1 min the change is applied to the saved file and the "applied" notification carries the undo id.
+- **Override run [KEVIN]:** "apply now even if it kicks me out" closes the laptop editor; his typing is saved first.
 - Quick edit from Kevin's phone **[KEVIN]**.
 - A Menu event created by the bot shows on Kevin's phone **[KEVIN]**. Dayane's phone is checked with the W1 deferred items.
 
 ## 11. Risks
+
+(Added with K5.)
+
+| Risk | Mitigation |
+|---|---|
+| ONLYOFFICE's builder API can't reproduce a file-level op exactly | Live coverage is limited to the §5.7 table; everything else applies at close. The postcondition is checked inside the same `callCommand`. |
+| A plugin crash after applying but before ack | `unknown_after_claim` + postcondition detection at close; never re-applied blindly. |
+| Plugin code cached by browsers for a year | Bootstrap runs `documentserver-flush-cache.sh` after installing or updating the plugin. The plugin reports its version on each poll, and Crow refuses claims from older versions. |
+| Recreating the documentserver container (the W1 compose change) | Registered window in `~/CROW-SCHEDULE.md`. Open sessions are saved first (no forced drop; recreate only when `info` shows no sessions, or wait). |
+
 
 | Risk | Mitigation |
 |---|---|
@@ -502,7 +688,7 @@ Runs as crow-bot against the real Workspace, after merge and deploy. Steps marke
 | ONLYOFFICE rewrites XML in ways the editors don't expect (e.g. `w14`/`w15` extensions, `mc:AlternateContent`) | The `oo-rich.*` fixtures. Unknown elements are preserved, never dropped (DOM edits are local). |
 | Formula cached values are stale after bot writes | `fullCalcOnLoad`, `stale_formulas` flag, skill guidance. A recalc engine (e.g. HyperFormula) is rejected: GPL/commercial license. |
 | Version expiry removes an undo point | Labeled versions (Task 1 verifies exemption). Otherwise R-EXPIRY: undo reports `version_gone` honestly. |
-| 74 tools enlarge AI chat's tool list | Descriptions ≤ 120 useful chars up front (the system prompt truncates there). Follow-up: a per-bot tool allowlist if the prompt budget bites. |
+| 76 tools enlarge AI chat's tool list | Descriptions ≤ 120 useful chars up front (the system prompt truncates there). Follow-up: a per-bot tool allowlist if the prompt budget bites. |
 | `files_lock` app locks never expire | `stale_editor_lock` path + owner-unlock instructions. Follow-up: Kevin may set the files_lock timeout. |
 | crow-bot's view depends on household sharing | The skill + Quick edit say so. Acceptance steps share Menu/contacts. |
 | Calendar recurring-instance edits (v1 updates the master only) | Documented in the tool description. Follow-up W2.1: `RECURRENCE-ID` overrides. |
