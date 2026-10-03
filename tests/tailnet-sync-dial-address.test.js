@@ -424,3 +424,27 @@ test("health: a peer with dial candidates whose every dial fails, with no link, 
     await fleet.cleanup();
   }
 });
+
+test("a peer that refuses us (1008 unknown peer) is recorded with the REAL reason, once, and not hammered", async () => {
+  _resetPeerDialHealth();
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  const B = await gateway(fleet, b);
+  const A = await gateway(fleet, a);
+  quiet();
+  try {
+    await b.db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: [a.id] });
+    await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${B.port}`, b.id] });
+    await A.startClients();
+    assert.ok(await until(() => /1008 unknown peer/.test(getPeerDialHealth()[b.id]?.lastError || ""), 5000), getPeerDialHealth()[b.id]?.lastError);
+    await sleep(500); // many idle ticks: a 30-min refusal idle must not redial
+    const h = getPeerDialHealth()[b.id];
+    assert.match(h.lastError, /closed by peer \(1008 unknown peer\)/, "not overwritten by the generic handshake error");
+    assert.equal(h.failCount, 1, "one refusal, one record, no redial");
+  } finally {
+    loud();
+    await A.close();
+    await B.close();
+    await fleet.cleanup();
+  }
+});

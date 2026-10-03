@@ -764,6 +764,7 @@ export class PeerDialer {
     this.ws = ws;
     let linked = false;
     let closedByUs = false;
+    let peerCloseCode = 0; // set when the PEER closed (refusal codes arrive before any frame)
 
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
@@ -869,6 +870,11 @@ export class PeerDialer {
         recordLinkUp(remoteInstanceId, { direction: "outbound" });
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side${role === "fallback" ? ", fallback dial" : ""})`);
       } catch (err) {
+        frameReader.detach();
+        // A peer refusal (1013 already linked, 1008 unknown peer, …) closes
+        // before any frame; the close handler already classified it — don't
+        // overwrite that with the generic "socket closed during handshake".
+        if (peerCloseCode) return;
         console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
         recordDialFailure(peerId, `${wsUrl}: ${err.message}`);
         frameReader.detach();
@@ -880,6 +886,7 @@ export class PeerDialer {
     ws.on("close", (code, reason) => {
       if (this.ws === ws) this.ws = null;
       const why = reason?.length ? String(reason) : "";
+      if (!closedByUs) peerCloseCode = code || -1;
       if (linked) this.passiveSince = Date.now();
       if (closedByUs && !linked) return this.scheduleRetry(); // our refusal; failure already recorded
       // Peer already linked to us — nothing failed, nothing to retry.
@@ -993,7 +1000,14 @@ export async function startTailnetSyncClients(ctx) {
     }
     // Stop dialers for peers no longer in scope (revoked, etc.)
     for (const [id, dialer] of dialers) {
-      if (!seenIds.has(id)) { dialer.stop(); dialers.delete(id); forgetPeerDialHealth(id); }
+      if (!seenIds.has(id)) {
+        dialer.stop(); dialers.delete(id); forgetPeerDialHealth(id);
+        // Its learned port goes with it (revoked / unpaired).
+        db.execute({
+          sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
+          args: [`${SYNC_PORT_KEY_PREFIX}${id}`, instanceSyncManager.localInstanceId],
+        }).catch(() => {});
+      }
     }
     for (const id of healFailures.keys()) {
       if (!seenIds.has(id)) healFailures.delete(id);
