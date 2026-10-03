@@ -110,7 +110,7 @@ Office panel (gateway) ── Quick edit forms ──▶ panel/routes.js ──�
 | `ws_drive_move_file` | `path`, `new_parent` | MOVE with `Overwrite: F`. Returns `moved:false` if already there. | `gdrive_move_file` |
 | `ws_drive_copy_file` | `path`, `new_name?`, `parent?` | COPY with `Overwrite: F`. A name clash adds ` (2)`, ` (3)`… | `gdrive_copy_file` |
 | `ws_drive_rename` | `path`, `new_name` | MOVE within the same folder. Returns `old_name`/`name`. | `gdrive_rename` |
-| `ws_drive_trash_file` | `path` | DELETE, which goes to Nextcloud's trash bin (recoverable). Refused if the file is open (§5.2). | `gdrive_trash_file` |
+| `ws_drive_trash_file` | `path` | DELETE, which goes to Nextcloud's trash bin (recoverable). Refused if the file is open (§5.2). Refused (`share_root`) for the top folder or file of a share: Nextcloud would only unshare it from Crow bot. | `gdrive_trash_file` |
 | `ws_drive_upload_file` | `folder`, `name`, `text`\|`base64`, `mime?` | Creates a **new** file (`If-None-Match: *`), ≤ 10 MB decoded. Never overwrites. | `gdrive_upload_file` |
 | `ws_drive_upload_new_version` | `path`, `text`\|`base64` | Replaces the content of a non-office file through the write protocol. **Refused for .docx/.xlsx/.pptx**: that is a full-document replace (D7 guardrail). | `gdrive_upload_new_version` |
 | `ws_drive_export` | `path`, `format` (`pdf`,`docx`,`odt`,`xlsx`,`ods`,`csv`,`pptx`,`odp`), `folder?` | Converts through the ONLYOFFICE connector (`GET /apps/onlyoffice/downloadas?fileId=&toExtension=`, verified as crow-bot) and saves the result **into the drive** next to the source (or in `folder`), never overwriting. ≤ 50 MB. | `gdrive_export`, `gdrive_download_file` |
@@ -236,7 +236,7 @@ Calendars:
 | `ws_cal_list_events` | `calendar`, `time_min?` (default now), `time_max?` (default +30 d, ≤ 366 d window), `max_results=20` (≤ 250), `query?`, `single_events=true` | `calendar-query` REPORT with a time-range filter. `single_events` expands RRULEs within the window (ical.js) and orders by start. `query` matches summary/description/location, case-insensitive. | `gcal_list_events` |
 | `ws_cal_get_event` | `calendar`, `uid` | Parsed fields + raw ICS. | `gcal_get_event` |
 | `ws_cal_create_event` | `calendar`, `summary`, `start`, `end`, `description?`, `location?`, `attendees?`, `send_updates="none"` | `YYYY-MM-DD` → all-day (`VALUE=DATE`, end exclusive). Datetimes need an offset or `Z`. `PUT` with `If-None-Match: *`. With `send_updates:"none"` (default), attendees get `SCHEDULE-AGENT=CLIENT`, so Nextcloud sends no invitations. | `gcal_create_event` |
-| `ws_cal_update_event` | `calendar`, `uid`, fields to change | `If-Match` etag. Unspecified fields are kept. Recurring series: master only (v1). Journaled (§5.5). | (new: Kitchen moves meals) |
+| `ws_cal_update_event` | `calendar`, `uid`, fields to change | `If-Match` etag. Unspecified fields are kept. Recurring series: master only (v1). New times keep the event's existing TZID, so a weekly series keeps its local wall time across DST. Journaled (§5.5). | (new: Kitchen moves meals) |
 | `ws_cal_delete_event` | `calendar`, `uid` | `If-Match` DELETE. Nextcloud keeps it in the calendar trash bin. Also journaled. Destructive; confirm first. | (new; the Google MCP omitted it as destructive, but Kitchen needs it and the journal makes it undoable) |
 | `ws_cal_respond_to_event` | `calendar`, `uid`, `response` (`accepted\|declined\|tentative`), `comment?` | Sets crow-bot's own `ATTENDEE` `PARTSTAT`. Error if crow-bot isn't an attendee. | `gcal_respond_to_event` |
 
@@ -293,10 +293,16 @@ Every file mutation (tools and Quick edit) is `withFileWrite(ref, mutate, opts)`
 7. **Label versions** via PROPPATCH `nc:version-label`:
    - the pre-edit version: `Before Crow: <summary>`;
    - the new current version: `Crow: <summary>`. Quick edit uses `Quick edit: <summary>`.
-   - Labels make the history readable in Nextcloud's version sidebar, and labeled versions are exempt from automatic version expiry. Task 1 verifies this; if it's false, the plan's ruling R-EXPIRY applies.
+   - Labels make the history readable in Nextcloud's version sidebar, and labeled versions are exempt from automatic version expiry (verified in the review: `files_versions/lib/Storage.php:602-615`).
+- **A label a person already gave a version is never overwritten.**
 8. **Return** `version_id` (§5.4), `version_label`, `changed`, plus the tool's own data.
 
-`wait_s` (0–30) and `if_open` (`"wait"` default \| `"proceed"`) are optional params on every writing tool.
+`wait_s` (0–30) and `if_open` (`"wait"` default \| `"proceed"`) are optional params on every writing tool. With `proceed`, the tool does not wait again before dropping the editor: the user already waited and said yes.
+
+**Cross-process rules** (review C2/C3):
+- **The 1.1 s spacing is enforced against the file's server-side mtime,** not only in-process. pi bots each spawn their own server, and Quick edit runs in the gateway. Nextcloud overwrites the version row when two writes share an mtime second.
+- **The undo token's after-etag is the PUT response's own ETag.**
+- **Undo re-checks the etag after the lock has settled,** immediately before the restore. A proceed-drop that saves someone's typing makes undo refuse with `changed_since`.
 
 ### 5.1 Why a version always exists
 
@@ -336,6 +342,7 @@ ONLYOFFICE app locks never expire on their own (timeout `-60`). If the browser d
 - **Where:** `<CROW_DATA_DIR or CROW_HOME/data>/workspace-tools/journal/` holds one JSON file per change: `{id, ref, op, before_text|null, after_etag, at}`.
 - **Permissions:** dir 700, files 600. It holds household calendar data.
 - **Pruning:** at server start and every 6 h, entries older than 30 days go, keeping ≤ 500.
+- **Deletes write the journal entry before the DELETE.** CardDAV has no trash, so a journal failure must stop the delete, not lose the undo.
 - File changes need no journal: Nextcloud keeps the versions.
 
 ## 6. Auth and configuration
@@ -350,7 +357,7 @@ ONLYOFFICE app locks never expire on their own (timeout `-60`). If the browser d
 - **Endpoints:** Nextcloud at `http://127.0.0.1:3070` and ONLYOFFICE at `http://127.0.0.1:3071`. No `Host` override: DAV over loopback answers 207 with or without one (verified 2026-10-03), and `MOVE`/`COPY` `Destination` URLs use the same base. Both are loopback ports fixed by the W1 compose. Overridable by `WORKSPACE_NC_INTERNAL_URL` / `WORKSPACE_OO_INTERNAL_URL` in `process.env` for tests.
 - **Secrets never appear in argv, mcp-addons.json, logs, tool results or errors.** The manifest's `server.envKeys` is empty.
 - **Two gateway product fixes are required** (the "fix the product, not the instance" rule):
-  1. **Secrets leak into mcp-addons.json.** `applyEnvToMcpAddons` (`servers/gateway/routes/bundles.js:1129`) copies every Configure-submitted value into the MCP entry, written without mode 600. With a workspace MCP entry, a Configure save would put `WORKSPACE_*` secrets there in plaintext. The fix: skip keys the manifest marks `secret: true` or `generate`, unless they're listed in `server.envKeys`.
+  1. **Secrets leak into mcp-addons.json.** `applyEnvToMcpAddons` (`servers/gateway/routes/bundles.js:1129`) copies every Configure-submitted value into the MCP entry, written without mode 600. With a workspace MCP entry, a Configure save would put `WORKSPACE_*` secrets there in plaintext. The fix is **opt-in**: a manifest `server.configureEnv: "envKeys-only"` (Workspace sets it) makes Configure skip keys marked `secret: true` or `generate`, unless they're listed in `server.envKeys`. Other bundles keep today's behavior, because kodi, media and tax read unlisted secrets from `process.env` (review C1). Workspace also sets `npm_required: true` and ships a lock file, so a failed dependency install leaves 0.1.2 in place and retries on the next boot.
   2. **Existing installs never get the server registered.** `refreshVersionedBundle` (`bundles.js:685`) copies the new `server/` on a version bump but **never writes mcp-addons.json**. So crow's installed Workspace would get the code and never register the server. The fix: after a successful refresh, if the repo manifest declares `server` and mcp-addons.json has no entry for that id, write the same entry install writes (`bundles.js:2189-2219`) and log "needs restart". Existing entries are never rewritten.
 
 ## 7. Security
@@ -401,6 +408,8 @@ ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access
   - Phone-first: one column, ≥ 44 px tap targets, en/es strings with the existing parity test.
 - **Browse:** folders and office files shared with crow-bot (exactly the bot's view).
 - **.docx:** a numbered list of body paragraphs (50 per page; headings bold). Tap **Edit** → a textarea with the paragraph's plain text → **Save**. Under the hood this is `rewrite_passages` on that paragraph index: the paragraph style and first-run formatting are kept.
+  - Every form posts back the text it showed. If the paragraph, cell or shape changed since the page loaded, the save is refused with `stale_view`.
+  - Paragraphs containing links, images, fields or footnote references are refused (`not_plain_text`; edit them in the editor), so Quick edit never drops them.
 - **.xlsx:** pick a tab; a grid of formatted values (first 100 rows × columns A–Z, paged). Tap a cell → one input (a leading `=` makes a formula) → **Save**, through `ws_sheets_write` semantics.
 - **.pptx:** slides with their text shapes. Tap a shape → textarea → **Save**, through `edit_text` semantics.
 - **Every save:**
