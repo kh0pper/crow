@@ -1,3 +1,4 @@
+import { generatePassword, PASSWORD_LENGTH } from "../../shared/password-generator.js";
 /**
  * Extensions Panel — Client-side JavaScript
  *
@@ -19,6 +20,27 @@ export function extensionsClientJS(lang) {
     <script>
       (function() {
         var API = "/dashboard/bundles/api";
+        // --- Crow keychain helpers (password-generator.js is ES5 + backtick-free) ---
+        var crowGeneratePassword = ${generatePassword.toString()};
+        var CROW_PW_LENGTH = ${PASSWORD_LENGTH};
+        var CAN_GENERATE = typeof crypto !== "undefined" && !!crypto.getRandomValues;
+        function crowRandomUint32() { var a = new Uint32Array(1); crypto.getRandomValues(a); return a[0]; }
+        function vaultInstalled() {
+          var c = document.getElementById("ext-keychain-config");
+          return !!c && c.getAttribute("data-vault") === "1";
+        }
+        function vaultSecure() {
+          var c = document.getElementById("ext-keychain-config");
+          return !!c && c.getAttribute("data-vault-secure") === "1";
+        }
+        function copyText(text, btn) {
+          if (typeof navigator === "undefined" || !navigator.clipboard || !text) return;
+          navigator.clipboard.writeText(text).then(function() {
+            var was = btn.textContent;
+            btn.textContent = '${tJs("keychain.copied", lang)}';
+            setTimeout(function() { btn.textContent = was; }, 1500);
+          }).catch(function() {});
+        }
 
         // --- Modal helpers ---
         function showModal() { document.getElementById("modal-overlay").style.display = "flex"; }
@@ -127,6 +149,20 @@ export function extensionsClientJS(lang) {
             // SERVER's: keys compose hard-fails on (a manifest "required" alone does
             // not block — a post-install token is configured later). Install mode
             // only: a configureOnly save may legitimately fill just some keys.
+            function collectKeychain(envData) {
+              var save = [];
+              keychainKeys.forEach(function(k) {
+                var cb = document.querySelector('.ext-keychain-save[data-key="' + k + '"]');
+                if (cb && cb.checked && envData[k]) save.push(k);
+              });
+              if (save.length === 0) return null;
+              var out = { save: save };
+              var vt = document.getElementById("ext-vault-save");
+              var ve = document.getElementById("ext-vault-email");
+              var vp = document.getElementById("ext-vault-password");
+              if (vt && vt.checked && ve && vp && ve.value && vp.value) out.vault = { email: ve.value, password: vp.value };
+              return out;
+            }
             function missingRequired() {
               if (configureOnly) return [];
               return requiredNames.filter(function(n) {
@@ -348,6 +384,7 @@ export function extensionsClientJS(lang) {
             }
 
             var envNames = [];
+            var keychainKeys = [];
             if (envVars.length > 0) {
               var configH = document.createElement("h4");
               configH.style.cssText = "margin:0 0 0.5rem;font-size:0.9rem;color:var(--crow-text-secondary)";
@@ -373,6 +410,60 @@ export function extensionsClientJS(lang) {
                 input.placeholder = ev.description || "";
                 input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
+                if (ev.secret && !ev.generate) {
+                  // Show/Hide/Copy on every typed secret; Generate and "Save to Crow keychain"
+                  // only where the manifest opts in (generatable / keychain — review C1, Kevin Q1).
+                  input.setAttribute("autocomplete", "new-password");
+                  var canKeychain = ev.generatable === true || ev.keychain === true;
+                  if (canKeychain) keychainKeys.push(ev.name);
+                  var tools = document.createElement("div");
+                  tools.className = "ext-secret-tools";
+                  tools.style.cssText = "display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;margin-top:0.3rem";
+                  var genBtn = document.createElement("button");
+                  genBtn.type = "button";
+                  genBtn.className = "btn btn-sm btn-secondary ext-secret-generate";
+                  genBtn.setAttribute("data-key", ev.name);
+                  genBtn.textContent = '${tJs("keychain.generate", lang)}';
+                  var showBtn = document.createElement("button");
+                  showBtn.type = "button";
+                  showBtn.className = "btn btn-sm btn-secondary ext-secret-toggle";
+                  showBtn.textContent = '${tJs("keychain.show", lang)}';
+                  var copyBtn = document.createElement("button");
+                  copyBtn.type = "button";
+                  copyBtn.className = "btn btn-sm btn-secondary ext-secret-copy";
+                  copyBtn.textContent = '${tJs("keychain.copy", lang)}';
+                  if (ev.generatable !== true || !CAN_GENERATE || crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32) === null) genBtn = null;
+                  if (genBtn) genBtn.addEventListener("click", function() {
+                    var pw = crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32);
+                    if (!pw) return;
+                    input.value = pw;
+                    input.type = "text";
+                    showBtn.textContent = '${tJs("keychain.hide", lang)}';
+                    refreshInstallBtnState();
+                  });
+                  showBtn.addEventListener("click", function() {
+                    var hidden = input.type === "password";
+                    input.type = hidden ? "text" : "password";
+                    showBtn.textContent = hidden ? '${tJs("keychain.hide", lang)}' : '${tJs("keychain.show", lang)}';
+                  });
+                  copyBtn.addEventListener("click", function() { copyText(input.value, copyBtn); });
+                  if (genBtn) tools.appendChild(genBtn);
+                  tools.appendChild(showBtn);
+                  tools.appendChild(copyBtn);
+                  if (canKeychain) {
+                    var kcLabel = document.createElement("label");
+                    kcLabel.style.cssText = "display:inline-flex;gap:0.3rem;align-items:center;font-size:0.8rem;color:var(--crow-text-secondary)";
+                    var kcBox = document.createElement("input");
+                    kcBox.type = "checkbox";
+                    kcBox.className = "ext-keychain-save";
+                    kcBox.setAttribute("data-key", ev.name);
+                    kcBox.checked = true;
+                    kcLabel.appendChild(kcBox);
+                    kcLabel.appendChild(document.createTextNode('${tJs("keychain.saveToKeychain", lang)}'));
+                    tools.appendChild(kcLabel);
+                  }
+                  wrap.appendChild(tools);
+                }
 
                 var hint = document.createElement("div");
                 hint.style.cssText = "font-size:0.7rem;color:var(--crow-text-muted);margin-top:0.2rem";
@@ -381,6 +472,48 @@ export function extensionsClientJS(lang) {
 
                 frag.appendChild(wrap);
               });
+              if (keychainKeys.length > 0 && vaultInstalled()) {
+                var vWrap = document.createElement("div");
+                vWrap.className = "ext-vault";
+                vWrap.style.cssText = "margin:0.5rem 0 0.75rem;padding:0.6rem;border:1px solid var(--crow-border);border-radius:6px";
+                var vLabel = document.createElement("label");
+                vLabel.style.cssText = "display:flex;gap:0.4rem;align-items:center;font-size:0.85rem";
+                var vTick = document.createElement("input");
+                vTick.type = "checkbox";
+                vTick.id = "ext-vault-save";
+                vLabel.appendChild(vTick);
+                vLabel.appendChild(document.createTextNode('${tJs("keychain.vaultSave", lang)}'));
+                vWrap.appendChild(vLabel);
+                if (!vaultSecure()) {
+                  vTick.disabled = true;
+                  var vHttps = document.createElement("div");
+                  vHttps.id = "ext-vault-note";
+                  vHttps.style.cssText = "font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.4rem";
+                  vHttps.textContent = '${tJs("keychain.vaultNeedsHttps", lang)}';
+                  vWrap.appendChild(vHttps);
+                } else {
+                var vFields = document.createElement("div");
+                vFields.id = "ext-vault-fields";
+                vFields.style.cssText = "display:none;margin-top:0.5rem";
+                [["ext-vault-email", "email", '${tJs("keychain.vaultEmail", lang)}'], ["ext-vault-password", "password", '${tJs("keychain.vaultPassword", lang)}']].forEach(function(f) {
+                  var inp = document.createElement("input");
+                  inp.id = f[0];
+                  inp.type = f[1];
+                  inp.placeholder = f[2];
+                  inp.setAttribute("aria-label", f[2]);
+                  inp.setAttribute("autocomplete", "off");
+                  inp.style.cssText = "width:100%;padding:0.45rem;margin-bottom:0.4rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);box-sizing:border-box";
+                  vFields.appendChild(inp);
+                });
+                var vNote = document.createElement("div");
+                vNote.style.cssText = "font-size:0.75rem;color:var(--crow-text-muted)";
+                vNote.textContent = '${tJs("keychain.vaultNote", lang)}';
+                vFields.appendChild(vNote);
+                vWrap.appendChild(vFields);
+                vTick.addEventListener("change", function() { vFields.style.display = vTick.checked ? "block" : "none"; });
+                }
+                frag.appendChild(vWrap);
+              }
             }
 
             var statusDiv = document.createElement("div");
@@ -491,7 +624,10 @@ export function extensionsClientJS(lang) {
               statusDiv.style.color = "var(--crow-accent)";
               statusDiv.textContent = '${tJs("extensions.saving", lang)}';
 
-              apiCall("env", { bundle_id: id, env_vars: envData }).then(function(res) {
+              var cfgPayload = { bundle_id: id, env_vars: envData };
+              var cfgKc = collectKeychain(envData);
+              if (cfgKc) cfgPayload.keychain = cfgKc;
+              apiCall("env", cfgPayload).then(function(res) {
                 if (res.ok && res.data && res.data.ok && res.data.needs_bundle_restart) {
                   offerBundleRestart(res.data);
                 } else if (res.ok && res.data && res.data.ok) {
@@ -502,12 +638,15 @@ export function extensionsClientJS(lang) {
                     (res.data.applies_on_next_start
                       ? " " + '${tJs("extensions.configureAppliesOnNextStart", lang)}'
                       : "");
+                  // Keychain / vault outcome (review S4): shown, and given time to be read.
+                  var kcMsgs = (res.data.keychain && res.data.keychain.messages) || [];
+                  if (kcMsgs.length) statusDiv.textContent += " " + kcMsgs.join(" ");
                   setTimeout(function() {
                     // Hand the WHOLE response to onSaved: needs_config is the server's
                     // re-derived truth about what is still missing, and the only thing
                     // allowed to decide whether the "Needs setup" badge may come off.
                     if (typeof onSaved === "function") onSaved(res.data);
-                  }, 1200);
+                  }, kcMsgs.length ? 4000 : 1200);
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
                   statusDiv.textContent = (res.data && res.data.error) || '${tJs("extensions.configureFailed", lang)}';
@@ -541,6 +680,8 @@ export function extensionsClientJS(lang) {
 
               var payload = { bundle_id: id, env_vars: envData };
               if (consentToken) payload.consent_token = consentToken;
+              var kcReq = collectKeychain(envData);
+              if (kcReq) payload.keychain = kcReq;
 
               apiCall("install", payload).then(function(res) {
                 if (res.ok && res.data.job_id) {
@@ -1662,6 +1803,39 @@ export function extensionsClientJS(lang) {
             }
           });
         }
+        // --- Crow keychain first-view banner (server-rendered; survives reload/restart) ---
+        document.querySelectorAll(".ext-firstview").forEach(function(banner) {
+          var showBtn = banner.querySelector(".ext-firstview-show");
+          var code = banner.querySelector(".ext-firstview__secret");
+          var copyBtn = banner.querySelector(".ext-firstview-copy");
+          var note = banner.querySelector(".ext-firstview__note");
+          if (!showBtn) return;
+          showBtn.addEventListener("click", function() {
+            showBtn.disabled = true;
+            fetch("/dashboard/keychain/api/first-view", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: Number(showBtn.getAttribute("data-id")) }),
+            }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); }).then(function(res) {
+              showBtn.hidden = true;
+              if (res.ok && res.d && typeof res.d.secret === "string") {
+                code.textContent = res.d.secret;
+                code.hidden = false;
+                copyBtn.hidden = false;
+                // Plaintext stays on screen 30 s at most, and never into bfcache (review S2).
+                var wipe = function() {
+                  code.textContent = ""; code.hidden = true; copyBtn.hidden = true;
+                  note.textContent = '${tJs("keychain.firstViewSpent", lang)}';
+                };
+                setTimeout(wipe, 30000);
+                window.addEventListener("pagehide", wipe);
+              } else {
+                note.textContent = '${tJs("keychain.firstViewSpent", lang)}';
+              }
+            }).catch(function() { showBtn.disabled = false; });
+          });
+          copyBtn.addEventListener("click", function() { copyText(code.textContent, copyBtn); });
+        });
       })();
     <\/script>`;
 }
