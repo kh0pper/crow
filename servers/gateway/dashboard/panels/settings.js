@@ -43,6 +43,7 @@ import deviceContextSection from "../settings/sections/device-context.js";
 import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
+import passwordsSection from "../settings/sections/passwords.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
 import llmSection from "../settings/sections/llm.js";
 import unifiedDashboardSection from "../settings/sections/unified-dashboard.js";
@@ -85,6 +86,7 @@ registerSettingsSection(deviceContextSection);
 registerSettingsSection(identitySection);
 registerSettingsSection(passwordSection);
 registerSettingsSection(twoFactorSection);
+registerSettingsSection(passwordsSection);
 
 // Load add-on settings (async, non-blocking), then run the advisory
 // sync-allowlist drift check once every section (built-in + add-on) is
