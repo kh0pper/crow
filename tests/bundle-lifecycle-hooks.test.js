@@ -97,12 +97,12 @@ test("runPostInstall: bash <abs script>, cwd, env, timeout; failure carries a st
   assert.equal(calls[0].opts.timeout, 5000);
   assert.ok(logs.some((l) => l.includes("step two")));
   const bad = await L.runPostInstall({
-    manifest: { postInstall: { script: "ops/b.sh" } }, destDir: dest, env: {}, log: () => {},
+    manifest: { postInstall: { script: "ops/b.sh" } }, destDir: dest, env: { CROW_HOME: "/h o'me", CROW_BUNDLE_DIR: dest }, log: () => {},
     runner: async () => { throw Object.assign(new Error("exit 1"), { stdout: "", stderr: "Nextcloud not ready after 600s" }); },
   });
   assert.equal(bad.ok, false);
   assert.match(bad.reason, /post-install setup failed: .*Nextcloud not ready/);
-  assert.equal(bad.rerun, `bash ${join(dest, "ops", "b.sh")}`);
+  assert.equal(bad.rerun, `CROW_HOME='/h o'\\''me' CROW_BUNDLE_DIR='${dest}' bash '${join(dest, "ops", "b.sh")}'`);
 });
 
 test("composeProjectName fallback: COMPOSE_PROJECT_NAME > interpolated name: > dirname", () => {
@@ -175,7 +175,7 @@ test("install: a failing hook keeps the bundle installed, ends not-ok, and logs 
   assert.equal(out.ok, false);
   assert.match(out.reason, /post-install setup failed: .*boom/);
   assert.ok(installedIds().includes("hk-fail"));
-  assert.ok(B._getJobForTest(job.id).log.some((l) => l.includes(`bash ${join(CROW_HOME, "bundles", "hk-fail", "ops", "bootstrap.sh")}`)));
+  assert.ok(B._getJobForTest(job.id).log.some((l) => l.includes(`CROW_HOME='${CROW_HOME}' CROW_BUNDLE_DIR='${join(CROW_HOME, "bundles", "hk-fail")}' bash '${join(CROW_HOME, "bundles", "hk-fail", "ops", "bootstrap.sh")}'`)));
 });
 
 test("install: compose up failure → hook never runs; community bundle → hook refused", async () => {
@@ -217,7 +217,7 @@ test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compo
   // install refused, nothing started, copied files removed
   const { out } = await install(id, m);
   assert.equal(out.ok, false);
-  assert.ok(out.reason.includes(`belong to another Crow install on this host (${otherHome}/bundles/${id})`), out.reason);
+  assert.equal(out.reason, `This extension's containers (compose project "crow-shared") belong to another Crow install on this host (${otherHome}/bundles/${id}): manage them from there.`);
   assert.deepEqual(composeCalls, []);
   assert.ok(dockerCalls.some((a) => a.includes("label=com.docker.compose.project=crow-shared")));
   assert.equal(existsSync(join(CROW_HOME, "bundles", id)), false);
@@ -244,6 +244,30 @@ test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compo
   } finally { server.close(); }
   assert.deepEqual(composeCalls, [], "no up/stop/down ever reached the foreign project");
   assert.equal(existsSync(dir), false, "this instance's own files are still removed");
+});
+
+test("shared-storage apply is guarded: a foreign compose project gets 409 and no recreate", async () => {
+  const id = "hk-ss";
+  const compose = "name: crow-ss\nservices:\n  app:\n    image: busybox:1.36\n";
+  const m = { ...fixture(id, {}, compose), storage: { translator: "env-s3" } };
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(m)); // the route reads the repo manifest for storage.translator
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(m));
+  writeFileSync(join(dir, "docker-compose.yml"), compose);
+  const otherHome = mkdtempSync(join(tmpdir(), "hk-ss-other-"));
+  writeFileSync(join(otherHome, "installed.json"), JSON.stringify([{ id }]));
+  B._setDockerRunnerForTest(async (cmd, args) => { if (args[0] === "compose") throw new Error("x"); return { stdout: `${otherHome}/bundles/${id}\n`, stderr: "" }; });
+  const calls = [];
+  B._setComposeRunnerForTest(async (args) => { calls.push(args[0]); return { stdout: "", stderr: "" }; });
+  const app = express(); app.use(express.json()); app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  try {
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/bundles/api/shared-storage/apply/${id}`, { method: "POST" });
+    assert.equal(r.status, 409);
+    assert.match((await r.json()).error, /another Crow install/);
+  } finally { server.close(); }
+  assert.deepEqual(calls, []);
 });
 
 async function startBundle(id) {

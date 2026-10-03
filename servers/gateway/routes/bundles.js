@@ -1013,7 +1013,7 @@ async function composeOwnership(bundleId, bundleDir, manifest) {
   const { owner, unrelated } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
   return {
     project,
-    refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}) — manage them from there.` : null,
+    refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}): manage them from there.` : null,
     warning: unrelated.length ? `compose project "${project}" also has containers started from ${unrelated.join(", ")} (legacy path) — continuing` : null,
   };
 }
@@ -2900,7 +2900,7 @@ export default function bundlesRouter() {
         if (addonType === "bundle") {
           const composePath = join(bundleDir, "docker-compose.yml");
           if (existsSync(composePath)) {
-            const own = await composeOwnership(bundle_id, bundleDir, manifest);
+            const own = await composeOwnership(bundle_id, bundleDir, getInstalledFirstManifest(bundle_id));
             if (own.warning) appendLog(job, `Note: ${own.warning}`);
             if (own.refusal) {
               appendLog(job, `Containers left running: ${own.refusal}`);
@@ -3396,6 +3396,9 @@ export default function bundlesRouter() {
     }
 
     try {
+      // Same ownership guard as start/stop: never recreate another install's containers.
+      const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
+      if (own.refusal) return res.status(409).json({ error: own.refusal, code: "compose_project_foreign" });
       const injected = await injectSharedStorage({
         destDir: bundleDir,
         bundleId,

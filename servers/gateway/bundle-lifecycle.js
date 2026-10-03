@@ -85,6 +85,7 @@ export function spawnGroup(cmd, args, { cwd, env, timeout, maxBuffer = 4 * 1024 
     child.on("error", (err) => { clearTimeout(timer); clearTimeout(killTimer); reject(Object.assign(err, { stdout, stderr })); });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      // Leader exited: SIGKILL any stray group members now so none outlive the resolved hook.
       if (killTimer) { clearTimeout(killTimer); killGroup("SIGKILL"); }
       if (code === 0 && !timedOut) return resolve({ stdout, stderr });
       const why = timedOut ? `timed out after ${Math.round(timeout / 1000)}s` : `exit ${code ?? signal}`;
@@ -97,6 +98,8 @@ function tailLines(text, n) {
   return String(text || "").split("\n").map((l) => l.trimEnd()).filter(Boolean).slice(-n);
 }
 
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
 /** Never throws. */
 export async function runPostInstall({ manifest, destDir, env, log, runner }) {
   const plan = postInstallPlan(manifest);
@@ -104,7 +107,8 @@ export async function runPostInstall({ manifest, destDir, env, log, runner }) {
   if (plan.refused) return { ok: false, reason: plan.refused };
   const abs = join(destDir, plan.script);
   if (!existsSync(abs)) return { ok: false, reason: `post-install script ${plan.script} is missing from the bundle` };
-  const rerun = `bash ${abs}`;
+  // Exact, copy-pasteable: an operator on a second instance must not re-run against the wrong home.
+  const rerun = `${env?.CROW_HOME !== undefined ? `CROW_HOME=${shq(env.CROW_HOME)} ` : ""}CROW_BUNDLE_DIR=${shq(env?.CROW_BUNDLE_DIR ?? destDir)} bash ${shq(abs)}`;
   log(`Running post-install setup (${plan.script}, up to ${plan.timeoutMs / 1000}s)…`);
   try {
     const { stdout } = await runner("bash", [abs], { cwd: destDir, env, timeout: plan.timeoutMs, maxBuffer: 4 * 1024 * 1024 });
