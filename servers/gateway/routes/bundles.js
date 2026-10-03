@@ -699,8 +699,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // bundles get ONLY manifest.json/settings-section.js/server//panel//skills/
   // + validated manifest-declared roots, NEVER config/scripts/templates/src
   // (existing bundles bind-mount exactly those into live containers).
+  // package.json/package-lock.json are never bind-mounted into containers, so docker
+  // bundles get them too — otherwise a dependency added in a version bump (vaultwarden →
+  // @bitwarden/cli) would be "installed" against the OLD package.json (review C6).
   const topFiles = isDocker
-    ? ["manifest.json", "settings-section.js"]
+    ? ["manifest.json", "settings-section.js", "package.json", "package-lock.json"]
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
   const dirs = isDocker
     ? ["server", "panel", "skills"]
@@ -792,11 +795,23 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // npm step: narrow, added-dep-name-only trigger; warn-only; via the
   // injected runner so tests never shell out to a real npm.
   if (bundleNeedsNpmInstall(appSrc, destDir)) {
+    // npm_required bundles (vaultwarden: the Bitwarden CLI) install exactly as the install
+    // path does — lock file, no lifecycle scripts — and are never blessed half-installed:
+    // on failure the installed manifest (the commit marker) keeps the OLD version, so the
+    // next boot retries (re-review m4). Still warn-only: boot never hard-fails.
+    const required = repoManifest.npm_required === true;
+    const npmArgs = required
+      ? [existsSync(join(destDir, "package-lock.json")) ? "ci" : "install", "--omit=dev", "--ignore-scripts"]
+      : ["install", "--omit=dev"];
     try {
-      await runner("npm", ["install", "--omit=dev"], { cwd: destDir });
-      touched.push("npm install");
+      await runner("npm", npmArgs, { cwd: destDir });
+      touched.push(`npm ${npmArgs[0]}`);
     } catch (err) {
-      console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
+      console.warn(`[bundles] npm ${npmArgs[0]} failed for ${id}: ${err.message}`);
+      if (required) {
+        console.warn(`[bundles] ${id}: left at ${oldVersion} so the next boot retries the dependency install`);
+        return { oldVersion, newVersion: oldVersion, touched: [...touched, "npm failed — will retry"] };
+      }
     }
   }
 

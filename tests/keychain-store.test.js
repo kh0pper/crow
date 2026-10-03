@@ -75,6 +75,18 @@ test("C7 — no backup path can carry the key: it lives outside the data dir and
   }
 });
 
+test("C7 — the whole <CROW_HOME>/secrets dir (keychain key AND vault device id) stays out of every backup path", async () => {
+  const VS = await import("../servers/gateway/keychain/vault-save.js");
+  const h = home();
+  const secretsDir = join(h, "secrets");
+  assert.equal(join(KEY.keychainKeyPath(h), ".."), secretsDir);
+  assert.equal(join(VS.vaultDeviceIdPath(h), ".."), secretsDir, "the vault device id lives beside the key");
+  assert.ok(!secretsDir.startsWith(process.env.CROW_DATA_DIR), "crow.db copies never include the secrets dir");
+  for (const f of ["servers/gateway/routes/admin-backup.js", "servers/sharing/identity.js", "bundles/workspace/ops/backup.sh", "scripts/backup.sh"]) {
+    assert.doesNotMatch(readFileSync(f, "utf8"), /keychain\.key|vault-device-id|\bsecrets\/|["'`]secrets["'`]/, `${f} must never copy anything from <CROW_HOME>/secrets`);
+  }
+});
+
 test("save → list carries metadata only; open returns the plaintext; the column holds ciphertext", async () => {
   const db = freshDb();
   const key = KEY.createKeychainKey({ crowHome: home() });
