@@ -61,6 +61,14 @@ export function designTokensCss() {
 
   /* Sizing scales (theme-independent) */
   :root {
+    /* Dashboard-wide text size multiplier (A11Y-TEXTSIZE). 1 here; the
+       <html data-text-size> rules in shared/text-size.js override it, and the
+       dashboard's rem root is calc(100% * this). */
+    --crow-text-scale: 1;
+    /* The nav sidebar's width, in rem so it grows with the text size (and the
+       browser font-size) instead of clipping the nav labels. 15rem = 240px at
+       the default 16px root. */
+    --crow-sidebar-width: 15rem;
     --crow-space-1: 4px;  --crow-space-2: 8px;  --crow-space-3: 12px;
     --crow-space-4: 16px; --crow-space-5: 24px; --crow-space-6: 32px;
     --crow-space-8: 48px; --crow-space-10: 64px;

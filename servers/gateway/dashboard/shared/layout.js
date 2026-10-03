@@ -12,6 +12,7 @@ import { designTokensCss } from "./design-tokens.js";
 import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
+import { textSizeCss, textSizeHeadScript } from "./text-size.js";
 
 // Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
 // Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
@@ -218,6 +219,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(title)} — Crow's Nest</title>
   <link rel="manifest" href="/manifest.json">
@@ -749,6 +751,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -786,6 +789,7 @@ export function render2faVerify({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -822,6 +826,7 @@ export function render2faRecovery({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -856,6 +861,7 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -894,6 +900,7 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -930,6 +937,7 @@ export function renderResetForm({ error, token, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -980,6 +988,7 @@ function dashboardCss() {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   ${designTokensCss()}
+  ${textSizeCss()}
   ${componentsCss()}
 
   body {
@@ -998,7 +1007,7 @@ function dashboardCss() {
 
   /* Sidebar */
   .sidebar {
-    width: 240px;
+    width: var(--crow-sidebar-width);
     background: var(--crow-bg-surface);
     border-right: 1px solid var(--crow-border);
     display: flex;
@@ -1137,7 +1146,7 @@ function dashboardCss() {
        min-width:0 lets the column shrink and forces descendants to handle
        their own overflow. */
     min-width: 0;
-    margin-left: 240px;
+    margin-left: var(--crow-sidebar-width);
     min-height: 100vh;
     transition: margin-left 0.2s ease-out;
   }
@@ -1481,7 +1490,7 @@ function dashboardCss() {
   /* Desktop sidebar collapse — a persisted-per-viewer preference, entirely
      separate from the ≤768px overlay above (disjoint breakpoints, so the
      two never contend for the same .sidebar/.main-content declarations).
-     Collapsed = sidebar off-canvas, .main-content reclaims its 240px.
+     Collapsed = sidebar off-canvas, .main-content reclaims its width.
 
      "not all and (max-width: 768px)", not "(min-width: 769px)": those are
      NOT the same range. A width of 768.5px — reachable through browser zoom

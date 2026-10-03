@@ -28,9 +28,10 @@ export const PERCH_SPLIT_MIN_WIDTH = 900;
 
 /** TEXT SIZE (2026-10-02). Every px font size in this sheet is emitted as
  *  calc(Npx * var(--pts,1)). --pts is 1 everywhere in the hub except inside
- *  the chat tab, where it follows --perch-text-scale (client.js writes that
- *  onto #perch-hub-root from the Session tab's A− / A / A+, saved per device).
- *  So the chat tab — messages, tool/file/phone cards, the ask card, the
+ *  the chat tab, where it follows --crow-text-scale — the DASHBOARD-WIDE text
+ *  size (shared/text-size.js: one per-device preference, set from Settings ›
+ *  Text size or from the Session tab's A− / A / A+, applied on the html element before
+ *  first paint). So the chat tab — messages, tool/file/phone cards, the ask card, the
  *  banner, the composer — scales as one, and the list, tabs and Session tab
  *  keep their size. Done as one transform rather than hand-editing ~90 rules
  *  so a rule added later is covered without anyone remembering to. Only
@@ -62,11 +63,13 @@ export function perchHubCss() {
    measures both themes. */
 #perch-hub-root,#perch-hub-root *{box-sizing:border-box;margin:0}
 /* Text size: --pts is the multiplier scaleFontSizes() writes into every font
-   size. 1 across the hub; the chat tab follows the operator's step. The
+   size. 1 across the hub; the chat tab follows the dashboard-wide text size
+   (--crow-text-scale, shared/text-size.js) — the rest of the dashboard is
+   rem-based and follows it through the root font size instead. The
    chat tab also gets an explicit base size so the text that inherits (the ask
    card's question, plain notes) scales with the rest. */
 #perch-hub-root{--pts:1}
-#perch-tab-chat{--pts:var(--perch-text-scale,1);font-size:15px}
+#perch-tab-chat{--pts:var(--crow-text-scale,1);font-size:15px}
 /* The control itself (Session tab). */
 #perch-hub-root .text-size{display:flex;align-items:center;gap:6px}
 #perch-hub-root .text-size button{min-width:44px;min-height:44px;padding:8px 10px}
