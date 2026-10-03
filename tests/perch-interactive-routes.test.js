@@ -1603,6 +1603,37 @@ test("GET /interactive/:sid/events carries rendered markdown ALONGSIDE the raw t
   try { await reader.cancel(); } catch { /* already closed */ }
 });
 
+test("GET /interactive/:sid/events renders h5, escapes and math with renderBotMarkdown (history parity)", async () => {
+  const { renderBotMarkdown } = await import("../servers/blog/renderer.js");
+  let push;
+  engineImpl.subscribe = async (sid, fn) => {
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    push = fn;
+    return () => {};
+  };
+  const res = await fetch(base + "/interactive/sess-1/events");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const readUntil = async (n) => {
+    while (sseEvents(buf).length < n) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  await readUntil(1);
+  const md = "##### Verification at the Production Run.\n\nThe last $126$B tokens; a rolling $1000$\\-step window.\n\n$$\nx^2\n$$";
+  push({ type: "text", text: md });
+  await readUntil(2);
+  const frame = sseDataAt(buf, "text", 0);
+  assert.equal(frame.html, renderBotMarkdown(md), "the same function the transcript endpoint uses");
+  assert.match(frame.html, /<h5>Verification at the Production Run\.<\/h5>/);
+  assert.match(frame.html, /<span class="math">126<\/span>B tokens; a rolling <span class="math">1000<\/span>-step/);
+  assert.match(frame.html, /<pre class="math"><code>x\^2<\/code><\/pre>/);
+  try { await reader.cancel(); } catch { /* already closed */ }
+});
+
 test("GET /interactive/:sid/events omits html for an empty or whitespace text frame", async () => {
   let push;
   engineImpl.subscribe = async (sid, fn) => {

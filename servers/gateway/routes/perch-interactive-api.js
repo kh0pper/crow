@@ -55,7 +55,7 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
-import { renderMarkdown } from "../../blog/renderer.js";
+import { renderBotMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -506,9 +506,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // ask_user card, if any) synchronously into this callback before it
     // resolves — the "on connect, replay" contract lives THERE, once, so
     // every subscriber (this route, and any future one) gets it for free.
-    /* Bot output is markdown. It is rendered HERE, on the server, by the same
-       `renderMarkdown` (marked + sanitize-html with an explicit allow-list)
-       the memory panel already uses — the client cannot import a server
+    /* Bot output is markdown. It is rendered HERE, on the server, by
+       `renderBotMarkdown` (renderMarkdown's marked + sanitize-html allow-list,
+       plus TeX math shown once as source) — the same function the transcript
+       endpoint uses, so live and reload match. The client cannot import a server
        module, and must never be handed a markdown parser plus untrusted model
        output. Carried ALONGSIDE the raw text rather than replacing it: a
        frame whose render fails arrives with no `html` and the client falls
@@ -526,7 +527,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       if (!event || (event.type !== "text" && event.type !== "reply")) return event;
       if (typeof event.text !== "string" || !event.text.trim()) return event;
       try {
-        const html = renderMarkdown(event.text);
+        const html = renderBotMarkdown(event.text);
         return html ? { ...event, html } : event;
       } catch {
         return event;                                // the client's textContent path

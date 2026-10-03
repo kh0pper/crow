@@ -491,6 +491,41 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
   assert.equal(blank.html, undefined, "and whitespace renders nothing rather than an empty block");
 });
 
+test("GET transcript: headings/escapes/math render exactly as the live SSE frame does; a toolResult gets no html", async () => {
+  // 2026-10-02 (hank, perchlive-9e2b9bf3): a reload drew a 157k-char
+  // extract_article toolResult as a plain bot row — literal "#####", "\\-".
+  // The server must never hand tool output to the markdown renderer (it is
+  // not model prose; the client draws it as a tool chip), and assistant prose
+  // must go through renderBotMarkdown, the SAME function the SSE route uses.
+  const { renderBotMarkdown } = await import("../servers/blog/renderer.js");
+  const sessions = join(dir, "sessions-mdparity");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-dddddddddddd";
+  const prose = "##### Verification at the Production Run.\n\nThe last $126$B tokens; a rolling $1000$\\-step window, $\\{x\\}$.";
+  const tool = "##### Verification at the Production Run.\n\nthe last 126126B tokens";
+  writeFileSync(join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "a", message: { role: "assistant", content: [{ type: "text", text: prose }] } }) + "\n" +
+    JSON.stringify({ type: "message", id: "t", message: { role: "toolResult", toolCallId: "c1",
+      toolName: "mcp__browser__crow_browser_extract_article", content: [{ type: "text", text: tool }], isError: false } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-mdparity',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+
+  const { status, body } = await getJson("/bots/chatty/sessions/t-mdparity/transcript");
+  assert.equal(status, 200);
+  const [asst, result] = body.events;
+  assert.equal(asst.html, renderBotMarkdown(prose), "history renders with the live path's function");
+  assert.match(asst.html, /<h5>Verification at the Production Run\.<\/h5>/);
+  assert.match(asst.html, /<span class="math">126<\/span>B/);
+  assert.match(asst.html, /<span class="math">1000<\/span>-step/);
+  assert.match(asst.html, /<code>\\\{x\\\}<\/code>/);
+  assert.equal(result.html, undefined, "tool output is never rendered as prose");
+  assert.equal(result.message.role, "toolResult", "and the raw event still rides the payload for the chip");
+});
+
 test("GET transcript SANITIZES: a hostile bot message reaches the client with nothing executable", async () => {
   // Bot output is model-generated and can carry tool results read from files,
   // so this is untrusted input that ends up in the ONE innerHTML sink the

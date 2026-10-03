@@ -38,6 +38,9 @@ let openStreams = [];
  *  fixture accumulates them. A transcript stuck at [] would test the new
  *  resync-on-reconnect against a server that forgets, which no engine does. */
 let historyEvents = [];
+/** Holds the transcript response back, so a test can push frames into the
+ *  subscribe/fetch seam (frames arriving before the history batch lands). */
+let transcriptDelayMs = 0;
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -63,7 +66,10 @@ function serveApi(req, res) {
   }
   // The transcript the resync refetches: whatever this fixture has broadcast
   // as completed messages (see historyEvents).
-  if (url.endsWith("/transcript")) return send(200, { events: historyEvents });
+  if (url.endsWith("/transcript")) {
+    if (transcriptDelayMs) return setTimeout(() => send(200, { events: historyEvents }), transcriptDelayMs);
+    return send(200, { events: historyEvents });
+  }
   if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
   return send(200, {});
 }
@@ -113,7 +119,7 @@ before(async () => {
   port = server.address().port;
 });
 
-beforeEach(() => { openStreams = []; historyEvents = []; });
+beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; });
 after(() => { if (server) server.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -515,5 +521,34 @@ test("W2/W3 live: facts, plan bar, and a tool chip that spins then settles", asy
     assert.equal(done.status, "done");
     assert.equal(done.open, true, "and a tap expands args + result");
     assert.deepEqual(done.pres, ['{"command":"ls"}', "total 8"]);
+  } finally { await s.close(); }
+});
+
+test("seam live: a tool that finishes while history loads is ONE chip, and one still running survives", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  // Review M1 (perch-md): tool frames were drawn on arrival while the history
+  // batch was in flight, and the batch then drew the same finished call again
+  // from its toolResult — two chips for one call.
+  historyEvents = [
+    { type: "message", message: { role: "toolResult", toolCallId: "tc-seam", toolName: "bash",
+      content: [{ type: "text", text: "seam result" }], isError: false } },
+  ];
+  transcriptDelayMs = 1500;
+  const s = await session();
+  try {
+    await s.evalIn(`location.hash='${SID}'; 'go'`);
+    await sleep(600);                                  // stream open, history still pending
+    broadcast("tool", { phase: "start", name: "bash", toolCallId: "tc-seam", argsText: "{}" });
+    broadcast("tool", { phase: "end", name: "bash", toolCallId: "tc-seam", resultText: "seam result", isError: false });
+    broadcast("tool", { phase: "start", name: "grep", toolCallId: "tc-new", argsText: "{}" });
+    await sleep(2000);                                 // the batch has landed and flushed
+    broadcast("tool", { phase: "end", name: "grep", toolCallId: "tc-new", resultText: "found", isError: false });
+    await sleep(300);
+    const seen = await s.json(`JSON.stringify(Array.from(document.querySelectorAll('#perch-transcript .tool-chip')).map(function(c){
+      return { name: c.querySelector('.tn').textContent, spin: !!c.querySelector('.spin'), status: c.lastElementChild.textContent }; }))`);
+    assert.deepEqual(seen.map((c) => c.name), ["bash", "grep"],
+      "one chip per call — the seam must not draw tc-seam twice: " + JSON.stringify(seen));
+    assert.equal(seen[1].spin, false, "the call still running at flush time settles when its end arrives");
+    assert.equal(seen[1].status, "done");
   } finally { await s.close(); }
 });
