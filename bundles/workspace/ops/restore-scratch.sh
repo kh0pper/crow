@@ -2,7 +2,7 @@
 # Prove a backup restores: boot it in a throwaway compose project (crow-ws-restore:
 # no published ports, own subnet, never restarts, own data dir). Shows its users and
 # the admin's files. Never touches crow-workspace.
-#   bash ops/restore-scratch.sh <crow-workspace-*.tar> [passphrase-file]
+#   bash ops/restore-scratch.sh <ONE crow-workspace-....tar> [passphrase-file]   (never a glob)
 #   bash ops/restore-scratch.sh --clean
 set -euo pipefail
 umask 077
@@ -23,7 +23,9 @@ if [ "${1:-}" = "--clean" ]; then
   exit 0
 fi
 
+[ "$#" -le 2 ] || die "expected ONE archive and an optional passphrase file, got $# arguments (did a glob match several archives? name one archive explicitly)"
 ARCHIVE="${1:?usage: restore-scratch.sh <archive.tar> [passphrase-file] | --clean}"
+case "${2:-}" in *.tar) die "second argument looks like an archive ($2); usage: restore-scratch.sh <archive.tar> [passphrase-file]";; esac
 [ ! -e "$SCRATCH" ] || die "$SCRATCH already exists. Run: $0 --clean"
 bash "$BUNDLE_DIR/ops/restore.sh" "$ARCHIVE" "$SCRATCH/unpacked" "${2:-${CROW_HOME:-$HOME/.crow}/workspace/backup-passphrase}"
 ADMIN="$(sed -n 's/^WORKSPACE_ADMIN_USER=//p' "$SCRATCH/unpacked/bundle.env" | tail -n 1)"; ADMIN="${ADMIN:-admin}"

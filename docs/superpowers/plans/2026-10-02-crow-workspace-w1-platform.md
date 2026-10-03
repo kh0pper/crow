@@ -96,7 +96,7 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
     - **Alerts:** `--alert-lib <path>` sources a lab-style `send_alert` (on crow, `~/lab-maintenance/scripts/lib/alerts.sh`). Without it, failures go to the journal.
     - **Not adopted (S8):** `Nice`/`IOSchedulingClass` are dropped, because they do not reach the containerized processes. A `box-reserve` defer is also not adopted: the backup uses no GPU, and the slot sits inside the window-refusal band.
 14. **No secrets in argv anywhere (C4).**
-    - **JWT:** piped over stdin into `php -r … | php occ config:import /dev/stdin` (re-review minor 1: the file-arg path is a blocking read).
+    - **JWT:** piped over stdin; the container writes it to a private temp file for `occ config:import <file>` (NC 34 cannot open `/dev/stdin` under `exec -T`; smoke 2026-10-02).
     - **Passwords for `occ`:** piped over stdin and read inside the container by `sh -c 'IFS= read -r NC_PASS; export NC_PASS; exec php occ "$@"'`. This relies on no `docker compose exec -e` pass-through, which was itself unverified.
     - **Redis:** `requirepass` goes into a 600 config file inside the container, and Redis runs as the `redis` user via `su-exec` with `init: true` (re-review minor 6). The healthcheck uses `REDISCLI_AUTH`.
     - **Dump:** `MYSQL_PWD`.
@@ -2023,13 +2023,14 @@ services:
     mem_limit: 256m
     oom_score_adj: -500
     # requirepass goes into a private config file inside the container (never argv), and
-    # redis-server is exec'd as the redis user (the image entrypoint's su-exec, which a
-    # custom command bypasses); init: true reaps and forwards SIGTERM for a prompt stop.
+    # redis-server is exec'd as the redis user via setpriv (the image entrypoint's own method;
+    # the image ships no gosu-style helper). rm -f first: on a container restart the old conf is owned by
+    # redis in sticky /tmp, and root may not reopen it (fs.protected_regular); init: true reaps and forwards SIGTERM for a prompt stop.
     init: true
     command:
       - sh
       - -c
-      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec su-exec redis redis-server /tmp/redis.conf
+      - umask 077 && rm -f /tmp/redis.conf && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec /bin/setpriv --reuid redis --regid redis --clear-groups redis-server /tmp/redis.conf
     environment:
       REDIS_PASSWORD: ${WORKSPACE_REDIS_PASSWORD:?generated at install}
     healthcheck:
@@ -3106,7 +3107,7 @@ networks:
 # Prove a backup restores: boot it in a throwaway compose project (crow-ws-restore:
 # no published ports, own subnet, never restarts, own data dir). Shows its users and
 # the admin's files. Never touches crow-workspace.
-#   bash ops/restore-scratch.sh <crow-workspace-*.tar> [passphrase-file]
+#   bash ops/restore-scratch.sh <ONE crow-workspace-....tar> [passphrase-file]
 #   bash ops/restore-scratch.sh --clean
 set -euo pipefail
 umask 077
@@ -3727,11 +3728,14 @@ head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 48 > $SMOKE/home
 printf 'send_alert() { printf "%%s|%%s\\n" "$1" "$2" >> %s/alerts.log; }\n' "$SMOKE" > $SMOKE/alerts-fake.sh
 (cd $B && env $BKENV WORKSPACE_DC="$SDC" WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash ops/backup.sh) | tee $SMOKE/backup1.log
 tar -tf $SMOKE/dest/crow-workspace-*.tar                     # db.sql.gpg files.tar.gpg bundle.env.gpg
-# SIGKILL mid-run (setsid → its own process group; kill the GROUP, in this same tool call)
-(cd $B && setsid env $BKENV WORKSPACE_DC="$SDC" bash ops/backup.sh > $SMOKE/backup-killed.log 2>&1 & echo $! > $SMOKE/bk.pid)
-sleep 3; kill -9 -- -"$(cat $SMOKE/bk.pid)"; sleep 1
-occ maintenance:mode                                          # likely "enabled" (the trap never ran)
-(cd $B && env $BKENV WORKSPACE_DC="$SDC" SERVICE_RESULT=signal WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash ops/backup-stoppost.sh)
+# SIGKILL mid-run: a transient user unit that mirrors the product unit (a bare `setsid ... & kill -9 -- -PID` did
+# NOT kill anything in the 2026-10-02 smoke). RuntimeMaxSec + ExecStopPost are the real C3 mechanism.
+systemd-run --user --unit=ws-smoke-backup -p RuntimeMaxSec=600 -p ExecStopPost="$B/ops/backup-stoppost.sh" \
+  --setenv=WORKSPACE_DC="$SDC" $(printf -- '--setenv=%s ' $BKENV) -d bash "$B/ops/backup.sh"
+sleep 3; systemctl --user kill --signal=SIGKILL ws-smoke-backup; sleep 2
+# the unit's ExecStopPost (ops/backup-stoppost.sh) runs by itself after the kill: add
+# --setenv=SERVICE_RESULT is NOT needed (systemd sets it); add --setenv=WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh
+# to the systemd-run line above to capture its alert. Watch `occ maintenance:mode` flip enabled -> disabled.
 occ maintenance:mode                                          # "disabled"
 ls $SMOKE/home/workspace/backups-staging/; cat $SMOKE/alerts.log   # no run-*; one "killed (signal)" alert
 systemctl --user stop ws-smoke-sampler.service
@@ -3739,7 +3743,7 @@ systemctl --user stop ws-smoke-sampler.service
 { sed -n 's/^[A-Z_]*=//p' $B/.env; sed -n 's/^[A-Z_]*=//p' $SMOKE/home/secrets/bundle-env/workspace.env; cat $SMOKE/admin.pw; } | sort -u | grep -v '^$' > $SMOKE/secret-values.txt
 grep -cFf $SMOKE/secret-values.txt $SMOKE/argv.log || echo "0 secrets in argv"   # only the Ruling 14 residual may appear (image first install: throwaway + DB password); anything else = FAIL
 grep -Ff $SMOKE/secret-values.txt $SMOKE/argv.log | sed -E 's/[A-Za-z0-9_-]{20,}/<redacted>/g' | sort -u | head
-(cd $B && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash ops/restore-scratch.sh $SMOKE/dest/crow-workspace-*.tar $SMOKE/home/workspace/backup-passphrase) | tee $SMOKE/restore.log
+(cd $B && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash ops/restore-scratch.sh "$(ls -t $SMOKE/dest/crow-workspace-*.tar | head -n 1)" $SMOKE/home/workspace/backup-passphrase) | tee $SMOKE/restore.log
 (cd $B && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash ops/restore-scratch.sh --clean)
 ```
 
