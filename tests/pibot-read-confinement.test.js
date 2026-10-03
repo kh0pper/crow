@@ -414,4 +414,6 @@ test("federation PATCH validates permission_policy.read_paths like the Bot Build
   for (const bad of [["rel"], ["/x/../y"], "/a", [7]]) {
     assert.throws(() => applyPeerPatch({}, { "permission_policy.read_paths": bad }), /absolute paths/);
   }
+  assert.throws(() => applyPeerPatch({ permission_policy: { read_paths: ["/a"] } }, { "permission_policy.read_paths.1": "rel" }),
+    /absolute paths/, "a deeper key cannot bypass the check");
 });

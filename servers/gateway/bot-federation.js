@@ -92,19 +92,24 @@ function setByPath(obj, path, value) {
  */
 export function applyPeerPatch(currentDef, patch) {
   const out = JSON.parse(JSON.stringify(currentDef || {}));
-  for (let [path, value] of Object.entries(patch || {})) {
+  for (const [path, value] of Object.entries(patch || {})) {
     if (path === "enabled") continue; // routed to the column by the caller
     if (!isPatchable(path)) {
       throw new Error(`field not patchable from a peer: ${path}`);
     }
-    // S6-CROW: read folders get the same validation as the Bot Builder save.
-    if (path === "permission_policy.read_paths") {
-      if (!Array.isArray(value) || !value.every(isValidReadPath)) {
-        throw new Error("permission_policy.read_paths must be an array of absolute paths without '..'");
-      }
-      value = parseReadPathsInput(value.join("\n")).paths;
-    }
     setByPath(out, path, value);
+  }
+  // S6-CROW: read folders get the same validation as the Bot Builder save —
+  // checked on the MERGED result, so a deeper key (permission_policy.read_paths.0)
+  // cannot slip an unvalidated element in.
+  const touchesReadPaths = Object.keys(patch || {}).some((k) =>
+    k === "permission_policy.read_paths" || k.startsWith("permission_policy.read_paths."));
+  if (touchesReadPaths) {
+    const rp = out.permission_policy && out.permission_policy.read_paths;
+    if (!Array.isArray(rp) || !rp.every(isValidReadPath)) {
+      throw new Error("permission_policy.read_paths must be an array of absolute paths without '..' (send [] to clear)");
+    }
+    out.permission_policy.read_paths = parseReadPathsInput(rp.join("\n")).paths;
   }
   return out;
 }
