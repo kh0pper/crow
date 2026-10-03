@@ -53,8 +53,9 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
-import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1956,7 +1957,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
   }
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2054,7 +2055,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // never shown, never sent to the gateway .env. reqEnv is the request env with
     // generated keys stripped, and is the only request env used below.
     const reqEnv = stripGeneratedKeys(manifest, envVars);
-    const generated = resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
+    const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;
     let baseText = null;
@@ -2070,6 +2072,17 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       } catch { /* unreadable base: fall back to provided values only */ }
       if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
     }
+    // Keychain FIRST (review C5, plan P7): a generated token's plaintext must be safely in
+    // the keychain before its hash reaches .env or the retained copy; if that save fails,
+    // abort with nothing persisted so a retry mints a fresh token. Typed fields and the
+    // optional vault copy run here too — before any pull, so the master password lives
+    // for seconds and a later compose failure still leaves the password saved.
+    const kc = await recordKeychainForInstall({ bundleId, manifest, env: installEnv, minted: plan.minted, keychainReq: keychain, log: (m) => appendLog(job, m) });
+    if (!kc.mintedSaved) {
+      rmSync(destDir, { recursive: true, force: true });
+      return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
+    }
+    plan.persist();
     writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
@@ -2763,6 +2776,7 @@ export default function bundlesRouter() {
     }
 
     // Create job for async tracking
+    const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
@@ -2774,6 +2788,7 @@ export default function bundlesRouter() {
         installedSnapshot: v.installed,
         consentVerified: v.consentVerified,
         manifest: v.manifest,
+        keychain: keychainReq,
       });
       if (!out.ok) {
         finishJob(job, "failed");
@@ -3047,6 +3062,8 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+        const keptPasswords = await markBundleKeychainRemoved(bundle_id);
+        if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Passwords)`);
 
         let notifDb;
         try {
@@ -3257,6 +3274,11 @@ export default function bundlesRouter() {
 
       Object.assign(existing, env_vars); // the effective env after this save
       writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
+      const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+      const kcLog = [];
+      const kc = keychainReq.save.length
+        ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })
+        : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
       const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
@@ -3316,6 +3338,7 @@ export default function bundlesRouter() {
         applies_on_next_start: appliesOnNextStart,
         bundle_restart_keys: bundleRestartKeys,
         needs_config: needsConfigKeys(bundle_id),
+        keychain: kc ? { saved: kc.saved, vault: kc.vault, messages: kcLog } : null,
       });
     } catch (err) {
       console.warn(`[bundles] POST /bundles/api/env failed: ${err?.message || err}`);
