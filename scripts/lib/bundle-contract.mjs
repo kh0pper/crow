@@ -168,6 +168,14 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (!fileExists(bundleDir, sk)) errors.push(`skill "${sk}" not found`);
     }
   }
+  if (manifest && manifest.postInstall && !fileExists(bundleDir, manifest.postInstall.script)) {
+    errors.push(`postInstall.script "${manifest.postInstall.script}" not found`);
+  }
+  for (const p of (manifest && manifest.docker && Array.isArray(manifest.docker.precreate)) ? manifest.docker.precreate : []) {
+    if (typeof p !== "string" || p === "" || isAbsolute(p) || p.split(/[\\/]/).includes("..")) {
+      errors.push(`docker.precreate "${p}" must be a relative path inside CROW_HOME`);
+    }
+  }
 
   // 4. Dependency bundles exist (via injected resolver)
   const deps = [

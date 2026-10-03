@@ -21,6 +21,13 @@
     "notes": { "type": "string" },
     "panel": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "object" }] },
     "panelRoutes": { "type": "string", "minLength": 1 },
+    "postInstall": {
+      "type": "object", "required": ["script"], "additionalProperties": false,
+      "properties": {
+        "script": { "type": "string", "minLength": 1, "pattern": "\\.sh$" },
+        "timeout_s": { "type": "integer", "minimum": 1, "maximum": 1800 }
+      }
+    },
     "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "ports": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
@@ -28,7 +35,11 @@
       "type": "object",
       "required": ["composefile"],
       "additionalProperties": true,
-      "properties": { "composefile": { "type": "string", "minLength": 1 } }
+      "properties": {
+        "composefile": { "type": "string", "minLength": 1 },
+        "precreate": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "pull_timeout_s": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
     },
     "server": {
       "type": ["object", "null"],

@@ -53,6 +53,7 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { readEnvFile } from "../env-manager.js";
+import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
@@ -721,6 +722,8 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   if (typeof repoManifest.panel === "string") declare(repoManifest.panel);
   else if (repoManifest.panel && typeof repoManifest.panel === "object") declaredRoots.add("panel");
   if (repoManifest.panelRoutes) declare(repoManifest.panelRoutes);
+  // The post-install hook's directory is code — refreshed on a version bump like panel/.
+  if (repoManifest.postInstall?.script) declare(repoManifest.postInstall.script);
   if (Array.isArray(repoManifest.skills)) {
     for (const s of repoManifest.skills) declare(s);
   }
@@ -923,10 +926,14 @@ function saveInstalled(arr) {
   writeFileSync(INSTALLED_PATH, JSON.stringify(arr, null, 2));
 }
 
+/** run()'s timeout: an explicit `timeout: undefined` (e.g. no pull_timeout_s) must keep the 300 s default. */
+const DEFAULT_RUN_TIMEOUT_MS = 300_000;
+export function _runOptsForTest(opts = {}) { return { ...opts, timeout: opts.timeout ?? DEFAULT_RUN_TIMEOUT_MS }; }
+
 /** Run a shell command safely with execFile */
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: 300_000, ...opts }, (err, stdout, stderr) => {
+    execFile(cmd, args, _runOptsForTest(opts), (err, stdout, stderr) => {
       if (err) {
         reject(Object.assign(err, { stdout, stderr }));
       } else {
@@ -982,6 +989,38 @@ export function composeEnv(base = process.env) {
 // stub `(composeArgs, opts) => Promise`. null restores the real runner.
 let _composeRunnerForTest = null;
 export function _setComposeRunnerForTest(fn) { _composeRunnerForTest = fn || null; }
+
+// Test-only: replace the post-install hook runner / the `docker` CLI runner.
+let _hookRunnerForTest = null;
+export function _setHookRunnerForTest(fn) { _hookRunnerForTest = fn || null; }
+let _dockerRunnerForTest = null;
+export function _setDockerRunnerForTest(fn) { _dockerRunnerForTest = fn || null; }
+
+/**
+ * Ownership of this bundle's compose project. refusal: another Crow install of the SAME
+ * bundle on this host owns it (callers refuse). warning: containers from a legacy path
+ * share the project (callers log and proceed, as before this guard existed).
+ */
+async function composeOwnership(bundleId, bundleDir, manifest) {
+  const rel = manifestComposeFile(manifest) || "docker-compose.yml";
+  let text = "";
+  try { text = readFileSync(join(bundleDir, rel), "utf8"); } catch { return { project: null, refusal: null, warning: null }; }
+  const projectDir = join(bundleDir, dirname(rel));
+  let envVars = {};
+  try { envVars = parseEnvText(readFileSync(join(projectDir, ".env"), "utf8")); } catch { /* no .env */ }
+  const runner = _dockerRunnerForTest || run;
+  const project = await resolveComposeProject({ projectDir, composeText: text, envVars, runner, env: composeEnv() });
+  const { owner, unrelated } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
+  return {
+    project,
+    refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}) — manage them from there.` : null,
+    warning: unrelated.length ? `compose project "${project}" also has containers started from ${unrelated.join(", ")} (legacy path) — continuing` : null,
+  };
+}
+/** Read-only, for operators and the pre-merge smoke: the guard's verdict for an installed bundle. */
+export async function composeOwnershipCheck(bundleId) {
+  return composeOwnership(bundleId, join(BUNDLES_DIR, bundleId), getInstalledFirstManifest(bundleId));
+}
 
 /** Run a docker compose command with the detected compose variant */
 async function runCompose(composeArgs, opts = {}) {
@@ -1898,6 +1937,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
   // panels.json, skills) still run, so a bundle the user fixes via Configure +
   // Start is complete. The job still ends not-ok with this reason.
   let composeFailure = null;
+  let runHook = false;
+  let hookFailure = null;
   try {
     const addonType = manifest?.type || "bundle";
     const sourceDir = join(APP_BUNDLES, bundleId);
@@ -2047,9 +2088,25 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         }
         appendLog(job, "Security check passed");
 
+        const own = await composeOwnership(bundleId, destDir, manifest);
+        if (own.refusal) {
+          appendLog(job, `Install refused: ${own.refusal}`);
+          rmSync(destDir, { recursive: true, force: true });
+          return { ok: false, reason: own.refusal };
+        }
+        if (own.warning) appendLog(job, `Note: ${own.warning}`);
+        try {
+          const made = precreateDirs(manifest, CROW_HOME);
+          if (made.length) appendLog(job, `Prepared data folders: ${made.map((p) => relativePath(CROW_HOME, p)).join(", ")}`);
+        } catch (err) {
+          appendLog(job, `Install refused: ${err.message}`);
+          rmSync(destDir, { recursive: true, force: true });
+          return { ok: false, reason: err.message };
+        }
+
         appendLog(job, "Pulling Docker images...");
         try {
-          await runCompose(["pull"], { cwd: destDir });
+          await runCompose(["pull"], { cwd: destDir, timeout: pullTimeoutMs(manifest) });
           appendLog(job, "Docker images pulled");
         } catch (err) {
           appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
@@ -2061,7 +2118,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
         appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
         try {
-          await runCompose(upArgs, { cwd: destDir });
+          await runCompose(upArgs, { cwd: destDir, timeout: pullTimeoutMs(manifest) });
           appendLog(job, "Containers started");
         } catch (err) {
           const detail = err.stderr || err.message;
@@ -2076,6 +2133,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           composeFailure = `docker compose up failed: ${detail}`;
           appendLog(job, "Continuing with the non-container install steps (panel, MCP server, gateway config, skills) so Configure + Start can finish the job");
         }
+        runHook = !composeFailure && !!manifest?.postInstall;
       }
 
       // Propagate the manifest-DECLARED env vars to the gateway .env so
@@ -2323,6 +2381,22 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     saveInstalled(installedSnapshot);
     appendLog(job, "Installation tracked");
 
+    // Post-install hook — AFTER the install is recorded, so a gateway restart mid-hook
+    // leaves a recorded bundle + a re-runnable script, never orphan containers.
+    if (runHook) {
+      const hook = await runPostInstall({
+        manifest, destDir: join(BUNDLES_DIR, bundleId),
+        env: hookEnv(join(BUNDLES_DIR, bundleId), CROW_HOME),
+        log: (m) => appendLog(job, m),
+        runner: _hookRunnerForTest || spawnGroup,
+      });
+      if (!hook.ok) {
+        hookFailure = hook.reason;
+        appendLog(job, `Post-install setup did not finish: ${hook.reason}`);
+        if (hook.rerun) appendLog(job, `Fix the cause, then re-run it: ${hook.rerun}`);
+      }
+    }
+
     // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
     if (manifest?.ports && Array.isArray(manifest.ports)) {
       const { execFileSync: efs } = await import("node:child_process");
@@ -2404,6 +2478,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Last log line = what the client shows on a failed job: keep the cause in it.
       appendLog(job, `Installed, but the containers did not start (${composeFailure.slice(0, 400)}) — fix the configuration with Configure, then press Start`);
       return { ok: false, reason: composeFailure, needsRestart };
+    }
+    if (hookFailure) {
+      appendLog(job, `Installed and running, but setup is incomplete (${hookFailure.slice(0, 400)})`);
+      return { ok: false, reason: hookFailure, needsRestart };
     }
     return { ok: true, needsRestart };
   } catch (err) {
@@ -2822,14 +2900,20 @@ export default function bundlesRouter() {
         if (addonType === "bundle") {
           const composePath = join(bundleDir, "docker-compose.yml");
           if (existsSync(composePath)) {
-            appendLog(job, "Stopping containers...");
-            const downArgs = ["down", "--remove-orphans"];
-            if (delete_data) downArgs.push("-v");
-            try {
-              await runCompose(downArgs, { cwd: bundleDir });
-              appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
-            } catch (err) {
-              appendLog(job, `Warning: docker compose down: ${err.message}`);
+            const own = await composeOwnership(bundle_id, bundleDir, manifest);
+            if (own.warning) appendLog(job, `Note: ${own.warning}`);
+            if (own.refusal) {
+              appendLog(job, `Containers left running: ${own.refusal}`);
+            } else {
+              appendLog(job, "Stopping containers...");
+              const downArgs = ["down", "--remove-orphans"];
+              if (delete_data) downArgs.push("-v");
+              try {
+                await runCompose(downArgs, { cwd: bundleDir });
+                appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
+              } catch (err) {
+                appendLog(job, `Warning: docker compose down: ${err.message}`);
+              }
             }
           }
         } else if (addonType === "mcp-server") {
@@ -3044,6 +3128,9 @@ export default function bundlesRouter() {
       return res.status(404).json({ error: `Bundle '${bundleId}' has no Docker containers` });
     }
     try {
+      const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
+      if (own.refusal) return res.status(409).json({ error: own.refusal, code: "compose_project_foreign" });
+      if (own.warning) console.warn(`[bundles] ${bundleId} ${action}: ${own.warning}`);
       if (action === "start") {
         const content = readFileSync(composePath, "utf8");
         const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
