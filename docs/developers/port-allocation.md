@@ -12,6 +12,7 @@ This document is the **single source of truth** for every host port consumed by 
 - "Reserved" rows are claimed by upcoming Phase 2 bundles; do not consume them for unrelated work.
 - "MVP" rows are claimed by the bundles in the current MVP plan.
 - This doc alone is not authoritative. A port is only actually free when it's free across all three registries: this table, every `docker-compose.yml` under `crow-addons/` AND `crow/bundles/` (not just the one you're editing), and live listeners on the host. A same-port/different-bind-address pair (e.g. `127.0.0.1:4210` vs. the tailnet IP on `4210`) can pass both `check-port-allocation.js` and a naive "is anything listening?" check, then show up later as a silent double-allocation — check all three before claiming a number.
+- Docker subnets: `crow-workspace` pins 10.89.70.0/24 (scratch: 10.89.71.0/24 smoke, 10.89.72.0/24 restore). Do not reuse.
 
 ## External ports (not Crow's to allocate)
 
@@ -23,7 +24,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 
 | Port | Conflict |
 |---|---|
-| 8080 | LocalAI and Nextcloud both bind 127.0.0.1:8080 — they cannot run simultaneously |
+| — | none. The 8080 LocalAI/Nextcloud collision was resolved 2026-10-02 (the nextcloud bundle no longer deploys; Crow Workspace uses 3070/3071). |
 
 ## Allocation table
 
@@ -54,6 +55,8 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3050 | 127.0.0.1 | forgejo (web) | MVP PR 5 |
 | 3061 | 127.0.0.1 | rookery (OpenScience reviewer) | PR #157 |
 | 3065 | 127.0.0.1 (host network) | phone (crow-phone-runner, assistant calls; binds loopback only) | Phone plan A |
+| 3070 | 127.0.0.1 | workspace (Crow Workspace: Nextcloud web; tailnet via Serve :8456) | W1 2026-10 |
+| 3071 | 127.0.0.1 | workspace (Crow Workspace: ONLYOFFICE Docs; tailnet via Serve :8457) | W1 2026-10 |
 | 3080 | 127.0.0.1 | romm (existing) | existing |
 | 3456 | 127.0.0.1 | vikunja (existing) | existing |
 | 4533 | 127.0.0.1 | navidrome (existing) | existing |
@@ -71,7 +74,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to grackle :8002) | external, freed |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
-| 8080 | 127.0.0.1 | localai (existing) — **also nextcloud, conflict** | existing |
+| 8080 | 127.0.0.1 | localai (existing) | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
 | 8084 | 127.0.0.1 | wallabag (existing) | existing |
@@ -87,6 +90,8 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8096 | 127.0.0.1 | jellyfin (existing) | existing |
 | 8097 | 127.0.0.1 | vaultwarden | MVP PR 5 |
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
+| 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; never Funnel) | W1 2026-10 |
+| 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (Workspace editor; never Funnel) | W1 2026-10 |
 | 8010 | 100.118.41.122 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
 | 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |

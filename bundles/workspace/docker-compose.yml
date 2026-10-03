@@ -1,0 +1,123 @@
+## Crow Workspace (W1 Platform): Nextcloud + MariaDB + Redis + ONLYOFFICE Docs + cron.
+##
+## Installed by Crow. Every internal secret is generated at install
+## (manifest env_vars[].generate) into this bundle's .env (mode 600); the
+## post-install bootstrap (ops/bootstrap.sh) configures the rest through occ,
+## passing secrets on stdin only. The human admin password never reaches a
+## container: the image installs with a generated throwaway, and bootstrap
+## replaces it.
+##
+## Loopback only. The household reaches it through two Tailscale Serve HTTPS
+## ports (see Office in Crow). NEVER Funnel. One Workspace per host: the project
+## name is fixed and Crow refuses to touch it from a second install.
+## Images are pinned; upgrade Nextcloud one major version at a time, never
+## automatically (docs/guide/workspace.md).
+
+name: crow-workspace
+
+x-nextcloud-common-env: &nextcloud-common-env
+  MYSQL_HOST: nextcloud-db
+  MYSQL_DATABASE: nextcloud
+  MYSQL_USER: nextcloud
+  MYSQL_PASSWORD: ${WORKSPACE_DB_PASSWORD:?generated at install}
+  REDIS_HOST: nextcloud-redis
+  REDIS_HOST_PASSWORD: ${WORKSPACE_REDIS_PASSWORD:?generated at install}
+  PHP_UPLOAD_LIMIT: 2G
+  APACHE_DISABLE_REWRITE_IP: "1"
+
+x-nextcloud-volumes: &nextcloud-volumes
+  - ${CROW_HOME:?CROW_HOME is required}/workspace/nextcloud:/var/www/html
+
+services:
+  nextcloud:
+    image: nextcloud:34.0.4-apache
+    restart: unless-stopped
+    mem_limit: 2g
+    ports:
+      - "127.0.0.1:3070:80"
+    environment:
+      <<: *nextcloud-common-env
+      NEXTCLOUD_ADMIN_USER: ${WORKSPACE_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${WORKSPACE_FIRSTRUN_ADMIN_PASSWORD:?generated at install}
+    volumes: *nextcloud-volumes
+    depends_on:
+      nextcloud-db:
+        condition: service_healthy
+      nextcloud-redis:
+        condition: service_healthy
+
+  nextcloud-cron:
+    image: nextcloud:34.0.4-apache
+    restart: unless-stopped
+    mem_limit: 512m
+    entrypoint: /cron.sh
+    environment: *nextcloud-common-env
+    volumes: *nextcloud-volumes
+    depends_on:
+      - nextcloud
+
+  nextcloud-db:
+    image: mariadb:11.8.9
+    restart: unless-stopped
+    mem_limit: 1g
+    oom_score_adj: -500
+    command: ["--transaction-isolation=READ-COMMITTED"]
+    environment:
+      MARIADB_ROOT_PASSWORD: ${WORKSPACE_DB_ROOT_PASSWORD:?generated at install}
+      MARIADB_DATABASE: nextcloud
+      MARIADB_USER: nextcloud
+      MARIADB_PASSWORD: ${WORKSPACE_DB_PASSWORD:?generated at install}
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - ${CROW_HOME:?CROW_HOME is required}/workspace/db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  nextcloud-redis:
+    image: redis:8.2.10-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    oom_score_adj: -500
+    # requirepass goes into a private config file inside the container (never argv), and
+    # redis-server is exec'd as the redis user (the image entrypoint's su-exec, which a
+    # custom command bypasses); init: true reaps and forwards SIGTERM for a prompt stop.
+    init: true
+    command:
+      - sh
+      - -c
+      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec su-exec redis redis-server /tmp/redis.conf
+    environment:
+      REDIS_PASSWORD: ${WORKSPACE_REDIS_PASSWORD:?generated at install}
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  onlyoffice:
+    image: onlyoffice/documentserver:9.4.0.1
+    restart: unless-stopped
+    mem_limit: 3g
+    ports:
+      - "127.0.0.1:3071:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${WORKSPACE_ONLYOFFICE_JWT_SECRET:?generated at install}
+      JWT_HEADER: Authorization
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.89.70.0/24

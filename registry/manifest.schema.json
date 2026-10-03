@@ -28,6 +28,8 @@
         "timeout_s": { "type": "integer", "minimum": 1, "maximum": 1800 }
       }
     },
+    "images": { "type": "array", "items": { "type": "string", "pattern": "^[^\\s]+:[^\\s]+$" } },
+    "deprecated": { "type": "object", "additionalProperties": true, "properties": { "since": { "type": "string" }, "superseded_by": { "type": "string" } } },
     "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "ports": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },

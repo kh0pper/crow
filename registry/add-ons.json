@@ -3948,63 +3948,49 @@
     },
     {
       "id": "nextcloud",
-      "name": "Nextcloud",
-      "version": "1.0.0",
-      "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
-      "type": "bundle",
+      "name": "Nextcloud (connect existing)",
+      "version": "1.1.0",
+      "description": "Deprecated: connect Crow to a Nextcloud you already run, over WebDAV. To host your own files, documents and calendars, install Crow Workspace instead.",
+      "type": "skill",
       "author": "Crow",
       "category": "productivity",
       "tags": [
         "files",
-        "sync",
-        "self-hosted",
         "webdav",
-        "documents"
+        "documents",
+        "deprecated"
       ],
       "icon": "cloud",
-      "docker": {
-        "composefile": "docker-compose.yml"
+      "deprecated": {
+        "since": "2026-10-02",
+        "superseded_by": "workspace"
       },
       "skills": [
         "skills/nextcloud.md"
       ],
       "requires": {
-        "env": [
-          "NEXTCLOUD_URL",
-          "NEXTCLOUD_USER",
-          "NEXTCLOUD_PASSWORD"
-        ],
-        "min_ram_mb": 512,
-        "min_disk_mb": 1024
+        "min_ram_mb": 64,
+        "min_disk_mb": 10
       },
       "env_vars": [
         {
           "name": "NEXTCLOUD_URL",
-          "description": "Nextcloud server URL (e.g., http://localhost:8080)",
+          "description": "Your Nextcloud server URL (e.g., https://cloud.example.com)",
           "required": true
         },
         {
           "name": "NEXTCLOUD_USER",
-          "description": "Nextcloud admin username",
-          "default": "admin",
+          "description": "Your Nextcloud login",
           "required": true
         },
         {
           "name": "NEXTCLOUD_PASSWORD",
-          "description": "Nextcloud admin password",
+          "description": "A Nextcloud app password (Settings → Security)",
           "required": true,
           "secret": true
         }
       ],
-      "ports": [
-        8080
-      ],
-      "webUI": {
-        "port": 8080,
-        "path": "/",
-        "label": "Nextcloud"
-      },
-      "notes": "Disk usage depends on files stored. Includes MariaDB for metadata.",
+      "notes": "Connect-only. This entry no longer deploys a server (its old compose shipped default database passwords and collided with LocalAI on port 8080). For a self-hosted suite use Crow Workspace.",
       "official": true
     },
     {
@@ -6374,6 +6360,131 @@
         "label": "Wallabag"
       },
       "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Create an API client in Wallabag under Developer > Create a new client.",
+      "official": true
+    },
+    {
+      "id": "workspace",
+      "name": "Crow Workspace",
+      "version": "0.1.0",
+      "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "office",
+        "documents",
+        "calendar",
+        "contacts",
+        "files",
+        "forms",
+        "nextcloud",
+        "onlyoffice",
+        "self-hosted"
+      ],
+      "icon": "document",
+      "docker": {
+        "composefile": "docker-compose.yml",
+        "precreate": [
+          "workspace",
+          "workspace/backups-staging"
+        ],
+        "pull_timeout_s": 1800
+      },
+      "images": [
+        "mariadb:11.8.9",
+        "nextcloud:34.0.4-apache",
+        "onlyoffice/documentserver:9.4.0.1",
+        "redis:8.2.10-alpine"
+      ],
+      "requires": {
+        "min_ram_mb": 4096,
+        "recommended_ram_mb": 5120,
+        "min_disk_mb": 10240
+      },
+      "env_vars": [
+        {
+          "name": "WORKSPACE_ADMIN_USER",
+          "description": "Login name for the Workspace administrator account (you).",
+          "default": "admin",
+          "required": false,
+          "propagate": false,
+          "pattern": "^[a-z][a-z0-9._-]{1,31}$",
+          "pattern_hint": "2-32 lowercase letters, digits, dots, dashes or underscores, starting with a letter"
+        },
+        {
+          "name": "WORKSPACE_ADMIN_PASSWORD",
+          "description": "Password for that administrator account. Used once by setup, then removed from this machine's config; change it later inside Workspace (Settings, Security). 12-128 characters: letters, digits and ! % * + , - . / : = ? @ ^ _ ~ (no spaces, quotes, $ or #).",
+          "install_required": true,
+          "secret": true,
+          "propagate": false,
+          "check": "not_breached",
+          "pattern": "^[A-Za-z0-9!%*+,./:=?@^_~-]{12,128}$",
+          "pattern_hint": "12-128 letters, digits or ! % * + , - . / : = ? @ ^ _ ~"
+        },
+        {
+          "name": "WORKSPACE_FIRSTRUN_ADMIN_PASSWORD",
+          "description": "Throwaway password for the image's first install (generated; replaced by setup).",
+          "required": true,
+          "secret": true,
+          "generate": "secret"
+        },
+        {
+          "name": "WORKSPACE_DB_ROOT_PASSWORD",
+          "description": "MariaDB root password (generated).",
+          "required": true,
+          "secret": true,
+          "generate": "secret"
+        },
+        {
+          "name": "WORKSPACE_DB_PASSWORD",
+          "description": "MariaDB password for Nextcloud (generated).",
+          "required": true,
+          "secret": true,
+          "generate": "secret"
+        },
+        {
+          "name": "WORKSPACE_REDIS_PASSWORD",
+          "description": "Redis password (generated).",
+          "required": true,
+          "secret": true,
+          "generate": "secret"
+        },
+        {
+          "name": "WORKSPACE_ONLYOFFICE_JWT_SECRET",
+          "description": "Secret shared by Nextcloud and ONLYOFFICE (generated).",
+          "required": true,
+          "secret": true,
+          "generate": "secret"
+        },
+        {
+          "name": "WORKSPACE_PUBLIC_HOST",
+          "description": "This machine's tailnet name. Leave blank and setup detects it.",
+          "default": "",
+          "required": false,
+          "propagate": false,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$",
+          "pattern_hint": "a hostname (lowercase letters, digits, dots and dashes)"
+        },
+        {
+          "name": "WORKSPACE_NC_SERVE_PORT",
+          "description": "Tailscale Serve HTTPS port for Workspace.",
+          "default": "8456",
+          "required": false,
+          "propagate": false,
+          "pattern": "^[0-9]{2,5}$",
+          "pattern_hint": "a port number"
+        },
+        {
+          "name": "WORKSPACE_OO_SERVE_PORT",
+          "description": "Tailscale Serve HTTPS port for the document editor.",
+          "default": "8457",
+          "required": false,
+          "propagate": false,
+          "pattern": "^[0-9]{2,5}$",
+          "pattern_hint": "a port number"
+        }
+      ],
+      "notes": "One Workspace per machine. Uses about 3-5 GB RAM, no GPU. Every internal password is generated at install; you type only the admin password, which setup uses once and then removes. Setup finishes on its own after the containers start (a few minutes on first install). Then open Office in Crow to publish it on your tailnet and set up phones. Uninstalling keeps your files and database in ~/.crow/workspace, the generated secrets, the backup timer and the tailnet addresses; see the Workspace guide for the cleanup commands. 'Delete data' does not remove those files.",
       "official": true
     },
     {
