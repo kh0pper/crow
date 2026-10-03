@@ -28,6 +28,7 @@ case "$*" in
   *"user:add "*) touch "$S/user-$last" ;;
   *"occ user:auth-tokens:list "*) if [ -f "$S/tokens" ]; then echo '[{"id":7,"name":"crow-workspace-tools"},{"id":8,"name":"phone"}]'; else echo '[]'; fi ;;
   *"user:auth-tokens:add "*) n=$(( $(cat "$S/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/tokens"; printf 'app password:\n%s%s\n' "$(printf 'A%.0s' $(seq 1 71))" "$n" ;;
+  *"occ background:cron"*) [ -f "$S/fail-cron" ] && exit 3 ;;
   *"onlyoffice:documentserver --check"*) echo "Document server is successfully connected" ;;
   *"user:resetpassword --password-from-env admin"*) [ -f "$S/reject-admin" ] && { echo "Password is among the 1,000,000 most common ones" >&2; exit 1; } ;;
   *) : ;;
@@ -97,7 +98,8 @@ test("fresh run configures everything once", () => {
   assert.match(c, /occ config:app:set onlyoffice DocumentServerUrl --value=https:\/\/box\.tailnet-example\.ts\.net:8457\//);
   assert.match(c, /occ config:app:set onlyoffice DocumentServerInternalUrl --value=http:\/\/onlyoffice\//);
   assert.match(c, /occ config:app:set onlyoffice StorageUrl --value=http:\/\/nextcloud\//);
-  assert.match(c, /php occ config:import \/dev\/stdin/);
+  assert.match(c, /php occ config:import "\$d\/c\.json"/);
+  assert.doesNotMatch(c, /config:import \/dev\/stdin/);
   assert.match(c, /occ dav:create-calendar admin Menu/);
   assert.match(c, /occ group:add household/);
   assert.match(c, /occ group:adduser household admin/);
@@ -265,4 +267,37 @@ test("bootstrap.sh GENERATED_KEYS equals exactly the manifest's generate:secret 
   assert.ok(m, "GENERATED_KEYS assignment found in bootstrap.sh");
   assert.deepEqual(m[1].split(/\s+/).filter(Boolean).sort(), want);
   assert.deepEqual(GENERATED.slice().sort(), want);
+});
+
+test("a failing occ step prints a [workspace] ERROR line naming the step and rc (never silent)", () => {
+  const ctx = setup({ state: ["installed", "fail-cron"] });
+  const r = run("bootstrap.sh", ctx);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /\[workspace\] ERROR: enabling apps failed \(rc 3\)/);
+  assert.equal(envOf(ctx).WORKSPACE_BOOTSTRAP_DONE, undefined);
+});
+
+test("reset-password.sh names its step when occ fails", () => {
+  const ctx = setup({ state: ["installed", "reject-admin"] });
+  const r = run("reset-password.sh", ctx, ["admin"], { input: "New-Correct-Horse-7\n" });
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /\[workspace\] ERROR: resetting the password failed \(rc 1\)/);
+});
+
+test("config:import gets the JWT only on stdin, as a JSON file made inside the container", () => {
+  const ctx = setup();
+  assert.equal(run("bootstrap.sh", ctx).status, 0);
+  const stdin = read(ctx, "stdin.log");
+  assert.match(stdin, /config:import "\$d\/c\.json".*\] \{"apps": \{"onlyoffice": \{"jwt_secret": "jwt-SECRET-d+"\}\}\}/s);
+  assert.ok(!read(ctx, "calls.log").includes(SECRETS.WORKSPACE_ONLYOFFICE_JWT_SECRET));
+});
+
+test("restore-scratch.sh refuses a glob that matched several archives", () => {
+  const ctx = setup();
+  const r = run("restore-scratch.sh", ctx, ["a.tar", "b.tar", "pass"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /ONE archive/);
+  const r2 = run("restore-scratch.sh", ctx, ["a.tar", "b.tar"], { env: { WORKSPACE_SCRATCH_DIR: join(ctx.root, "scr") } });
+  assert.notEqual(r2.status, 0);
+  assert.match(r2.out, /looks like an archive/);
 });

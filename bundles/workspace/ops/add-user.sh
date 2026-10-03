@@ -15,6 +15,7 @@ if occ user:info "$LOGIN" >/dev/null 2>&1; then
   echo "Account $LOGIN already exists; nothing changed."
   exit 0
 fi
+step "creating the account"
 PW="$(random_pw 20)"
 printf '%s\n' "$PW" | occ_with_pass user:add --password-from-env --display-name="$NAME" --group household "$LOGIN" >/dev/null
 echo "One-time password for $LOGIN: $PW"

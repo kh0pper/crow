@@ -49,11 +49,13 @@ OO_PORT="$(env_get WORKSPACE_OO_SERVE_PORT)"; OO_PORT="${OO_PORT:-8457}"
 [[ "$NC_PORT" =~ ^[0-9]{2,5}$ && "$OO_PORT" =~ ^[0-9]{2,5}$ ]] || die "Serve ports must be numbers"
 [ -n "$(env_get WORKSPACE_ONLYOFFICE_JWT_SECRET)" ] || die "WORKSPACE_ONLYOFFICE_JWT_SECRET is missing from .env"
 
+step "checking .env"
 # 0a-pre. Never overwrite the only DB-matching copy of the secrets from a damaged .env.
 for k in $GENERATED_KEYS; do
   [ -n "$(env_get "$k")" ] || die "$k is empty or missing in $ENV_FILE. Not touching the retained copy $RETAINED (it may hold the only value that matches the database). Restore the line from $RETAINED into $ENV_FILE (keep it mode 600), then re-run this script"
 done
 
+step "saving the retained secrets copy"
 # 0a. Keep the retained-secrets copy equal to .env (restore / new-box recovery, C2).
 mkdir -p "$RETAINED_DIR"; chmod 700 "$RETAINED_DIR"
 tmp="$(mktemp "$RETAINED_DIR/.workspace.env.XXXXXX")"
@@ -63,9 +65,11 @@ tmp="$(mktemp "$RETAINED_DIR/.workspace.env.XXXXXX")"
 } > "$tmp"
 chmod 600 "$tmp"; mv "$tmp" "$RETAINED"; unset v
 
+step "waiting for Nextcloud install"
 # 1. Nextcloud finished the image's first-run install (with the generated throwaway admin password).
 wait_for "Nextcloud" nc_installed
 
+step "applying the admin password"
 # 1b. Apply the typed admin password via stdin, then scrub it from this machine (Kevin Q2).
 #     Runs before tailnet detection, so a missing tailnet name never delays it.
 ADMIN_PW="$(env_get WORKSPACE_ADMIN_PASSWORD)"
@@ -84,6 +88,7 @@ if [ -n "$ADMIN_PW" ]; then
 fi
 unset ADMIN_PW
 
+step "working out the tailnet name"
 # 0b. Where the household reaches it: this machine's tailnet name.
 HOST="$(env_get WORKSPACE_PUBLIC_HOST)"
 if [ -z "$HOST" ]; then
@@ -97,6 +102,7 @@ NC_URL="https://$HOST:$NC_PORT"
 OO_URL="https://$HOST:$OO_PORT/"
 
 
+step "enabling apps"
 # 2. Apps + background jobs (Redis locking is configured by the image from REDIS_HOST).
 for app in calendar contacts forms onlyoffice; do
   if [ "$(occ config:app:get "$app" enabled 2>/dev/null || true)" = "yes" ]; then
@@ -109,6 +115,7 @@ done
 occ background:cron >/dev/null
 occ config:system:set memcache.local --value='\OC\Memcache\APCu' >/dev/null
 
+step "configuring the reverse proxy"
 # 3. Reverse proxy: Serve → 127.0.0.1:3070 → the (pinned) docker bridge gateway.
 GW="$($DOCKER network inspect "$NET" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)"
 [ -n "$GW" ] || die "cannot read the gateway address of docker network $NET"
@@ -122,20 +129,23 @@ occ config:system:set overwritecondaddr --value="^${GW//./\\.}\$" >/dev/null
 occ config:system:set allow_local_remote_servers --value=true --type=boolean >/dev/null
 log "proxy: $NC_URL (overwrite only for requests via $GW)"
 
-# 4. ONLYOFFICE connector. The JWT goes in on stdin: php builds the JSON from STDIN,
-#    `occ config:import /dev/stdin` reads it with a BLOCKING read (no-arg stdin mode is
-#    non-blocking and can race the pipe) — the secret is in no argv anywhere.
+step "ONLYOFFICE connector"
+# 4. ONLYOFFICE connector. The JWT goes in on stdin: python builds the JSON, which the
+#    container writes to a private temp file for `occ config:import` (see occ_import_stdin;
+#    /dev/stdin is not openable by php there) — the secret is in no argv anywhere.
 occ config:app:set onlyoffice DocumentServerUrl --value="$OO_URL" >/dev/null
 occ config:app:set onlyoffice DocumentServerInternalUrl --value="http://onlyoffice/" >/dev/null
 occ config:app:set onlyoffice StorageUrl --value="http://nextcloud/" >/dev/null
-printf '%s\n' "$(env_get WORKSPACE_ONLYOFFICE_JWT_SECRET)" | dc exec -T -u www-data nextcloud sh -c \
-  'php -r "echo json_encode([\"apps\"=>[\"onlyoffice\"=>[\"jwt_secret\"=>trim(stream_get_contents(STDIN))]]]);" | php occ config:import /dev/stdin' >/dev/null
+printf '%s\n' "$(env_get WORKSPACE_ONLYOFFICE_JWT_SECRET)" \
+  | python3 -c 'import json,sys; print(json.dumps({"apps":{"onlyoffice":{"jwt_secret":sys.stdin.read().strip()}}}))' \
+  | occ_import_stdin >/dev/null
 occ config:app:set onlyoffice jwt_header --value=Authorization >/dev/null
 occ config:system:set onlyoffice allow_local_address --value=true --type=boolean >/dev/null
 occ config:app:set onlyoffice defFormats --value='{"docx":true,"xlsx":true,"pptx":true,"odt":true,"ods":true,"odp":true}' >/dev/null
 occ config:app:set onlyoffice editFormats --value='{"odt":true,"ods":true,"odp":true}' >/dev/null
 wait_for "ONLYOFFICE" oo_connected
 
+step "groups and sharing policy"
 # 5. Groups + sharing policy (Kevin Q5): crow-bot can't make public links and is never
 #    suggested by autocomplete (household users enumerate only their group; typing the
 #    exact login still works).
@@ -146,6 +156,7 @@ occ config:app:set core shareapi_allow_links_exclude_groups --value='["crow-bots
 occ config:app:set core shareapi_restrict_user_enumeration_to_group --value=yes >/dev/null
 occ config:app:set core shareapi_restrict_user_enumeration_full_match --value=yes >/dev/null
 
+step "Menu calendar"
 # 6. The shared "Menu" calendar, owned by the admin (shared with people in the Calendar app).
 if occ dav:list-calendars "$ADMIN_USER" 2>/dev/null | grep -qE '^\| Menu +\|'; then
   log "calendar Menu: exists"
@@ -154,6 +165,7 @@ else
   log "calendar Menu: created"
 fi
 
+step "crow-bot account"
 # 7. crow-bot (group crow-bots, not admin) + exactly one valid app password, in .env (600).
 if occ user:info "$BOT" >/dev/null 2>&1; then BOT_EXISTS=1; else BOT_EXISTS=0; fi
 if [ "$BOT_EXISTS" = 1 ] && [ -n "$(env_get WORKSPACE_BOT_APP_PASSWORD)" ]; then
@@ -180,6 +192,7 @@ print(" ".join(str(t["id"]) for t in d if t.get("name") == "'"$TOKEN_NAME"'"))')
   log "$BOT: account ready; app password stored in .env (mode 600)"
 fi
 
+step "writing the completion marker"
 # Last step: completion marker (non-secret). The Office page shows "ready" only with it.
 env_set WORKSPACE_BOOTSTRAP_DONE 1
 log "done. Workspace: $NC_URL  editor: $OO_URL"

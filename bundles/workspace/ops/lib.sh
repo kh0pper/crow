@@ -19,6 +19,21 @@ occ() { dc exec -T -u www-data nextcloud php occ "$@"; }
 # occ with ONE secret: the caller pipes it on stdin; occ only ever sees it as env NC_PASS.
 occ_with_pass() { dc exec -T -u www-data nextcloud sh -c 'IFS= read -r NC_PASS; export NC_PASS; exec php occ "$@"' sh "$@"; }
 
+# occ config:import from JSON on stdin. NC 34's `config:import /dev/stdin` cannot open /dev/stdin
+# under `exec -T`, so the JSON lands in a private temp file INSIDE the container (never argv),
+# removed even when the import fails.
+occ_import_stdin() {
+  dc exec -T -u www-data nextcloud sh -c 'umask 077; d=$(mktemp -d /dev/shm/ws.XXXXXX 2>/dev/null || mktemp -d); cat > "$d/c.json"; php occ config:import "$d/c.json"; rc=$?; rm -rf "$d"; exit $rc'
+}
+
+# Diagnosability: any failing top-level command under `set -e` names the current step
+# (call `step "..."` before each stage). set -E lets it fire inside functions (set -e exits
+# from inside them); only the top shell prints, so a failure in dc's subshell is one line.
+set -E
+STEP="starting"
+step() { STEP="$*"; }
+trap '_rc=$?; [ "$BASH_SUBSHELL" = 0 ] && printf "[workspace] ERROR: %s failed (rc %s)\n" "$STEP" "$_rc" >&2' ERR
+
 # random_pw N: N alphanumerics. Reads a fixed byte count first and transforms with
 # parameter expansion, so there is no pipeline for SIGPIPE to abort under pipefail.
 random_pw() {

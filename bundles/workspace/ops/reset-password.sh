@@ -9,6 +9,7 @@ LOGIN="${1:-}"
 [[ "$LOGIN" =~ ^[a-z][a-z0-9._-]{1,31}$ ]] || die "usage: reset-password.sh <login>"
 if [ -t 0 ]; then IFS= read -rsp "New password for $LOGIN: " PW; echo; else IFS= read -r PW; fi
 [[ "$PW" =~ ^[A-Za-z0-9!%*+,./:=?@^_~-]{12,128}$ ]] || die "password must be 12-128 letters, digits or ! % * + , - . / : = ? @ ^ _ ~"
+step "resetting the password"
 printf '%s\n' "$PW" | occ_with_pass user:resetpassword --password-from-env "$LOGIN" >/dev/null
 unset PW
 echo "Password for $LOGIN updated."
