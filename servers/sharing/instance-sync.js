@@ -693,6 +693,11 @@ const RAMBLE_EGG_WIRE_COLUMNS = [
   "egg_id", "status", "warmth", "species", "seed",
   "found_cell", "found_week", "from_crow_id", "created_at", "hatched_at",
   "shelf_origin",
+  // Phase 4 (spec 2026-09-08 §5, D11): what a hatched bird is wearing.
+  // Last-writer-wins on the envelope, EXCEPT that a NULL never overwrites —
+  // see rambleEggSetClause. Contacts never receive egg rows, so this
+  // replicates to the user's OWN instances only (D10).
+  "outfit_json",
 ];
 
 /**
@@ -705,6 +710,26 @@ const RAMBLE_EGG_WIRE_COLUMNS = [
 const RAMBLE_EGG_UPDATE_COLUMNS = RAMBLE_EGG_WIRE_COLUMNS.filter(
   (c) => c !== "egg_id" && c !== "created_at",
 );
+
+/**
+ * Guarded, additive `ramble_eggs.outfit_json TEXT` — the bundle's init-tables
+ * adds it, but a core newer than the installed bundle copy can be handed an
+ * outfit row first, and an INSERT naming a missing column would throw the
+ * whole apply. Same shape as ensureLamportOriginColumn. Memoised per db.
+ */
+const _eggOutfitColumnReady = new WeakSet();
+async function ensureRambleEggOutfitColumn(db) {
+  if (_eggOutfitColumnReady.has(db)) return;
+  try {
+    const { rows } = await db.execute(`PRAGMA table_info(ramble_eggs)`);
+    if (rows.length === 0) return;
+    if (!rows.some((r) => r.name === "outfit_json")) {
+      try { await db.execute(`ALTER TABLE ramble_eggs ADD COLUMN outfit_json TEXT`); }
+      catch (err) { if (!/duplicate column/i.test(String(err?.message))) throw err; }
+    }
+    _eggOutfitColumnReady.add(db);
+  } catch { /* the apply below fails loudly on its own if the table is unusable */ }
+}
 
 /**
  * Does the INCOMING row's bird identity win over the local one?
@@ -757,6 +782,13 @@ function rambleEggSetClause(col) {
       return `${col} = CASE WHEN ${RAMBLE_EGG_INCOMING_BIRD_WINS} THEN excluded.${col} ELSE ramble_eggs.${col} END`;
     case "shelf_origin":
       return `shelf_origin = CASE WHEN ramble_eggs.status = 'hatched' THEN ramble_eggs.shelf_origin ELSE excluded.shelf_origin END`;
+    // NULL = "this sender knows nothing about an outfit" (a never-dressed
+    // row, an offline instance still crediting warmth to an egg it thinks is
+    // incubating, a second partitioned hatch). Those full rows arrive at
+    // ever-higher lamports and must not wipe a real outfit. Wearing nothing
+    // is '{}', a real value, so taking everything off still travels.
+    case "outfit_json":
+      return `outfit_json = COALESCE(excluded.outfit_json, ramble_eggs.outfit_json)`;
     // `warmth` included: absolute last-writer-wins, NOT additive across
     // instances — `ramble_credits` (the no-double-count ledger) is local-only,
     // so warmth earned on two instances in the same window does not sum.
@@ -821,6 +853,7 @@ const RAMBLE_EGG_REPROMOTE_SQL = `
  */
 export async function applyRambleEgg(db, op, row, lamportTs, origin = null) {
   if (!row || !row.egg_id) return;
+  await ensureRambleEggOutfitColumn(db);
 
   const local = await readRambleStamp(db, "ramble_eggs", "egg_id", row.egg_id, ", created_at, status, shelf_origin");
   const existing = local ? [local] : [];

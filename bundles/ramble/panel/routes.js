@@ -68,6 +68,7 @@ function loadBirdEngine() {
 const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
 const PERSONA_RE = /^[0-9a-f]{64}$/;
 const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const ITEM_ID_RE = /^[a-z]{1,16}\.[a-z]{1,16}$/;
 const EGG_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const CROW_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const TRADE_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
@@ -194,7 +195,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -214,17 +215,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/cells.js"),
         bundleImport("server/wallet.js"),
         bundleImport("server/hearts.js"),
+        bundleImport("server/wardrobe.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
           !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod ||
-          !cellsMod || !walletMod || !heartsMod) {
+          !cellsMod || !walletMod || !heartsMod || !wardrobeMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -818,7 +820,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const waiting = await mods.eggsMod.nextPromotable(db);
     res.json({
       ...pet,
-      bird,
+      // Phase 4: the outfit rides HERE (the panel + header perch read it), and
+      // deliberately NOT on activeBird(), which mark authoring uses (D10).
+      bird: bird ? { egg_id: bird.egg_id, species: bird.species, seed: Number(bird.seed), outfit: await mods.wardrobeMod.birdOutfit(db, bird.egg_id) } : null,
       // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state now — a read
       // must not crash for it, so an absent egg is reported as `null`, not
       // dereferenced.
@@ -1073,6 +1077,36 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // repaints the profile picture when the bird is the avatar source.
     poke("ramble:bird-activated", { egg_id: req.params.id });
     res.json({ bird: out.bird });
+  }));
+
+  // --- phase 4: the wardrobe (spec 2026-09-08 §5) ---------------------------
+  router.get("/api/ramble/wardrobe", handle(async (req, res) => {
+    res.json(await mods.wardrobeMod.wardrobeState(db));
+  }));
+
+  router.post("/api/ramble/wardrobe/buy", handle(async (req, res) => {
+    const item = (req.body || {}).item;
+    if (typeof item !== "string" || !ITEM_ID_RE.test(item) || !mods.wardrobeMod.itemById(item)) bad("item must be a catalogue id");
+    const out = await mods.wardrobeMod.buyItem(db, item, { now: Date.now(), emit });
+    if (!out.ok) return res.status(409).json({ error: out.reason, seed: out.balance });
+    res.json({ ok: true, item: out.item.id, seed: out.balance });
+  }));
+
+  router.post("/api/ramble/birds/:id/outfit", handle(async (req, res) => {
+    if (!EGG_ID_RE.test(req.params.id)) bad("invalid egg id");
+    const b = req.body || {};
+    if (typeof b.slot !== "string" || !/^[a-z]{1,16}$/.test(b.slot)) bad("slot is required");
+    if (!Object.prototype.hasOwnProperty.call(b, "item")) bad("item is required (an id, or null to take it off)");
+    if (b.item !== null && (typeof b.item !== "string" || !ITEM_ID_RE.test(b.item))) bad("item must be a catalogue id or null");
+    const out = await mods.wardrobeMod.wearItem(db, req.params.id, b.slot, b.item, { emit });
+    if (!out.ok) {
+      const status = out.reason === "not-found" ? 404 : (out.reason === "not-a-bird" || out.reason === "not-owned") ? 409 : 400;
+      return res.status(status).json({ error: out.reason });
+    }
+    // Core coalesces this into at most one profile-picture broadcast per
+    // settled outfit (servers/sharing/profile-avatar.js, spec §5.4).
+    poke("ramble:outfit-changed", { egg_id: req.params.id });
+    res.json({ outfit: out.outfit });
   }));
 
   // --- phase 3: contacts wire -------------------------------------------------

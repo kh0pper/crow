@@ -24,8 +24,8 @@ import { localDay, recordHappyDay } from "./eggs.js";
 import { maxEnergy, ENERGY_MAX_BASE_DEFAULT } from "./hearts.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DECAY_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const DECAY_PER_INTERVAL = 10;
+export const DECAY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const DECAY_PER_INTERVAL = 10;
 
 async function safeEmit(emit, table, op, row) {
   if (!emit) return;
