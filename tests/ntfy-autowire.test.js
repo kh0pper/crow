@@ -188,6 +188,17 @@ test("re-running is idempotent: no new users or tokens, the address setting surv
   assert.equal(state.tokens.get("crow-0867ac2809-pub").length, 1);
 });
 
+test("concurrent provisioning of one instance is single-flight (one token pair)", async () => {
+  const { env } = tmpData();
+  const { state, runner } = fakeNtfy();
+  const [a, b] = await Promise.all([
+    provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep }),
+    provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep }),
+  ]);
+  assert.equal(a, b);
+  assert.equal(state.tokens.get("crow-0867ac2809-pub").length, 1);
+});
+
 test("a token the server no longer knows is re-minted", async () => {
   const { env } = tmpData();
   const { state, runner } = fakeNtfy();

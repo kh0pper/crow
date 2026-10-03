@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
-  ntfyDataDir, readStoredNtfyConfig, writeStoredNtfyConfig,
+  ntfyDataDir, ntfyConfigPath, readStoredNtfyConfig, writeStoredNtfyConfig,
 } from "./ntfy-config.js";
 
 export const NTFY_CONTAINER = "crow-ntfy";
@@ -92,7 +92,18 @@ export function parseTokens(stdout) {
  * @param {Function} [o.log]
  * @returns {Promise<{ok:true, topic:string, created:{users:string[], tokens:string[]}} | {ok:false, reason:string}>}
  */
-export async function provisionNtfy({
+// Single-flight per config file: a double-clicked Set up, or install + boot ensure
+// overlapping, must not mint two token pairs (the loser's would linger on the server).
+const _inflight = new Map();
+export function provisionNtfy(opts = {}) {
+  const k = ntfyConfigPath(opts.env || process.env);
+  if (_inflight.has(k)) return _inflight.get(k);
+  const p = _provisionNtfy(opts).finally(() => _inflight.delete(k));
+  _inflight.set(k, p);
+  return p;
+}
+
+async function _provisionNtfy({
   runner = defaultRunner, env = process.env, instanceId, container = NTFY_CONTAINER,
   port, startWaitMs = 30_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), log = () => {},
 } = {}) {
