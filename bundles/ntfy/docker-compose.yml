@@ -4,8 +4,18 @@ services:
     container_name: crow-ntfy
     restart: unless-stopped
     command: serve --listen-http :80
+    # A user database + deny-all default access: Crow's autowire (Settings ›
+    # Notifications) creates a login and a private topic per Crow instance. Set as
+    # environment so `docker exec crow-ntfy ntfy user|access|token …` reads the
+    # same auth file the server uses. Paths match the layout crow's hand-migrated
+    # server.yml uses (/var/lib/ntfy/{auth,cache}.db).
+    environment:
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_BEHIND_PROXY: "true"
     volumes:
-      - ntfy-cache:/var/cache/ntfy
+      - ntfy-data:/var/lib/ntfy
     ports:
       # Bind only to 127.0.0.1 so Docker's publish doesn't collide with
       # Tailscale's serve rule on the host's tailnet IP (port 2586).
@@ -15,4 +25,4 @@ services:
     mem_limit: 128m
 
 volumes:
-  ntfy-cache:
+  ntfy-data:

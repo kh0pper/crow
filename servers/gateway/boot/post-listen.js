@@ -272,6 +272,18 @@ export async function runPostListenSetup(server, app, deps) {
     });
   });
 
+  // ntfy autowire (spec 2026-10-03): once, 20 s after listen, give this instance its own
+  // login + private push topic when nothing is configured yet and an ntfy server is
+  // here (installed by this instance or shared on the host). Kill switch
+  // CROW_DISABLE_NTFY_AUTOWIRE=1 (forced by run-suite.mjs). Never throws.
+  if (!noAuth && process.env.CROW_DISABLE_NTFY_AUTOWIRE !== "1") {
+    setTimeout(() => {
+      import("../push/ntfy-provision.js").then(({ autowireAtBoot, installedBundleIds }) =>
+        autowireAtBoot({ installedIds: installedBundleIds }),
+      ).catch((err) => console.warn(`[ntfy-autowire] boot check failed: ${err.message}`));
+    }, 20_000).unref();
+  }
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
