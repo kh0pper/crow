@@ -177,6 +177,23 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
     }
   }
 
+  for (const v of (manifest && Array.isArray(manifest.env_vars)) ? manifest.env_vars : []) {
+    if (!v || typeof v !== "object") continue;
+    if (v.store_as !== undefined) {
+      if (v.store_as !== "argon2id") errors.push(`env_vars ${v.name}: store_as must be "argon2id"`);
+      if (v.generate !== "secret") errors.push(`env_vars ${v.name}: store_as needs generate: "secret"`);
+      if (v.keychain !== true) errors.push(`env_vars ${v.name}: store_as needs keychain: true (or the plaintext is lost)`);
+    }
+    if (v.keychain === true && v.secret !== true && v.generate !== "secret") {
+      errors.push(`env_vars ${v.name}: keychain needs secret: true or generate: "secret"`);
+    }
+    if (v.generatable === true) {
+      if (v.secret !== true) errors.push(`env_vars ${v.name}: generatable needs secret: true`);
+      if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);
+      if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
+    }
+  }
+
   // 4. Dependency bundles exist (via injected resolver)
   const deps = [
     ...(manifest && manifest.requires && Array.isArray(manifest.requires.bundles) ? manifest.requires.bundles : []),
