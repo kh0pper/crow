@@ -53,7 +53,7 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { readEnvFile } from "../env-manager.js";
-import { resolveGeneratedEnv, stripGeneratedKeys, writePrivateFile } from "../bundle-env-secrets.js";
+import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1956,12 +1956,26 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
-    // 2. Write env vars (provided values → .env.example fallback → manifest
-    // placeholder; ladder extracted so it is unit-testable). Generated secrets (env_vars[].generate) are minted or reused
-    // here — never taken from the request, never shown, never sent to the gateway .env
-    // (they are not in envVars, which is what propagates).
+    // 2. Write env vars (provided values -> .env.example fallback -> manifest
+    // placeholder; ladder extracted so it is unit-testable). Generated secrets
+    // (env_vars[].generate) are minted or reused here: never taken from the request,
+    // never shown, never sent to the gateway .env. reqEnv is the request env with
+    // generated keys stripped, and is the only request env used below.
+    const reqEnv = stripGeneratedKeys(manifest, envVars);
     const generated = resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
-    const installEnv = { ...(stripGeneratedKeys(manifest, envVars) || {}), ...generated };
+    let installEnv = { ...(reqEnv || {}), ...generated };
+    if (Object.keys(generated).length > 0) {
+      // Writing values bypasses the .env / .env.example rungs, so seed from them:
+      // existing .env entries, else .env.example defaults, then request, then generated.
+      const envP = join(destDir, ".env");
+      const exP = join(destDir, ".env.example");
+      let base = {};
+      try {
+        if (existsSync(envP)) base = parseEnvText(readFileSync(envP, "utf8"));
+        else if (existsSync(exP)) base = parseEnvText(readFileSync(exP, "utf8"));
+      } catch { /* unreadable base: fall back to provided values only */ }
+      installEnv = { ...base, ...installEnv };
+    }
     writeInstallEnv(destDir, installEnv, manifest, (msg) => appendLog(job, msg));
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
@@ -2041,7 +2055,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
       // Propagate the manifest-DECLARED env vars to the gateway .env so
       // dependent services connect. Undeclared request keys never reach it.
-      const gatewayEnv = declaredEnvSubset(manifest, envVars);
+      const gatewayEnv = declaredEnvSubset(manifest, reqEnv);
       if (Object.keys(gatewayEnv).length > 0) {
         propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
@@ -2052,9 +2066,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         const env = {};
-        if (manifest.server.envKeys && envVars) {
+        if (manifest.server.envKeys && reqEnv) {
           for (const key of manifest.server.envKeys) {
-            if (envVars[key]) env[key] = envVars[key];
+            if (reqEnv[key]) env[key] = reqEnv[key];
           }
         }
         if (manifest.env_vars) {
@@ -2113,9 +2127,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         const env = {};
         // Collect user-provided env vars
-        if (manifest.server.envKeys && envVars) {
+        if (manifest.server.envKeys && reqEnv) {
           for (const key of manifest.server.envKeys) {
-            if (envVars[key]) env[key] = envVars[key];
+            if (reqEnv[key]) env[key] = reqEnv[key];
           }
         }
         // Also include default values from manifest.env_vars

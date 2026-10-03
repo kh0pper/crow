@@ -12,7 +12,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 const GENERATE_KINDS = new Set(["secret"]);
 
@@ -62,6 +62,9 @@ export function retainedEnvPath(crowHome, bundleId) {
 export function resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome }) {
   const keys = generatedEnvKeys(manifest);
   if (keys.length === 0) return {};
+  if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) {
+    throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`);
+  }
   const installed = readEnvSafe(join(destDir, ".env"));
   const retainedPath = retainedEnvPath(crowHome, bundleId);
   const retained = readEnvSafe(retainedPath);

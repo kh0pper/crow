@@ -173,3 +173,40 @@ test("boot repair tightens every installed bundle .env to 600", async () => {
   await B.repairInstalledBundleAssets({ appBundles: FIXTURES, run: async () => ({ stdout: "", stderr: "" }) });
   assert.equal(mode(join(dir, ".env")), 0o600);
 });
+
+test("install ignores a request-supplied generated key: not in .env, not in the gateway .env", async () => {
+  const id = "demo-attack";
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  const manifest = { id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: MANIFEST.env_vars };
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+  const job = B._createJobForTest(id, "install");
+  const out = await B.runInstallJob(id, { DEMO_DB_PASSWORD: "attacker", DEMO_ADMIN_PASSWORD: "Correct-Horse-1" }, { job, installedSnapshot: [], consentVerified: false, manifest });
+  assert.equal(out.ok, true, out.reason);
+  const env = S.parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8"));
+  assert.notEqual(env.DEMO_DB_PASSWORD, "attacker");
+  assert.match(env.DEMO_DB_PASSWORD, /^[A-Za-z0-9_-]{43}$/);
+  const gw = existsSync(GATEWAY_ENV) ? readFileSync(GATEWAY_ENV, "utf8") : "";
+  assert.equal(gw.includes("attacker"), false);
+  assert.equal(gw.includes(env.DEMO_DB_PASSWORD), false);
+});
+
+test("a bundle with a generated key keeps its .env.example defaults (mode 600)", async () => {
+  const id = "demo-example";
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  const manifest = { id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: MANIFEST.env_vars };
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+  writeFileSync(join(FIXTURES, id, ".env.example"), "DEMO_REGION=eu-west\n");
+  const job = B._createJobForTest(id, "install");
+  const out = await B.runInstallJob(id, { DEMO_ADMIN_PASSWORD: "Correct-Horse-1" }, { job, installedSnapshot: [], consentVerified: false, manifest });
+  assert.equal(out.ok, true, out.reason);
+  const p = join(CROW_HOME, "bundles", id, ".env");
+  const env = S.parseEnvText(readFileSync(p, "utf8"));
+  assert.equal(env.DEMO_REGION, "eu-west");
+  assert.match(env.DEMO_DB_PASSWORD, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(env.DEMO_ADMIN_PASSWORD, "Correct-Horse-1");
+  assert.equal(mode(p), 0o600);
+});
+
+test("resolveGeneratedEnv rejects an invalid bundle id before touching CROW_HOME", () => {
+  assert.throws(() => S.resolveGeneratedEnv("../evil", MANIFEST, { destDir: scratch("d-"), crowHome: scratch("h-") }), /Invalid bundle ID/);
+});
