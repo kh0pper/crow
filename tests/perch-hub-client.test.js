@@ -616,7 +616,7 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
-                          legacyMediaQuery = false, innerWidth, localStorage } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -670,6 +670,8 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   const doc = Object.assign(docTarget, {
     cookie: "crow_csrf=test-csrf-token",
     body: bodyEl,
+    // <html>: the dashboard-wide text size lands here as data-text-size.
+    documentElement: makeFakeElement("html"),
     getElementById(id) { return els[id] || dynamic[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
     createTextNode(text) { const n = makeFakeElement("#text"); n.textContent = String(text == null ? "" : text); return n; },
@@ -711,6 +713,8 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   } else if (localStorage) {
     win.localStorage = localStorage;
   }
+  // A runtime the layout's head script already made (shared/text-size.js).
+  if (crowTextSize) win.crowTextSize = crowTextSize;
 
   // history is counted, not simulated: assigning location.hash pushes an entry,
   // location.replace('#') does not. Both fire hashchange — verified in a real
@@ -4513,8 +4517,10 @@ test("narrow: a re-run (Turbo) hub script binds ONE resize listener, and it stil
 });
 
 // ---------------------------------------------------------------------------
-// Text size (2026-10-02): A− / A / A+ in the Session tab, five steps, written
-// as --perch-text-scale on the hub root, saved per device in localStorage.
+// Text size: since A11Y-TEXTSIZE (2026-10-03) the Session tab's A− / A / A+ is
+// a CONSUMER of the dashboard-wide text size (shared/text-size.js): four named
+// steps, one per-device localStorage key, applied on <html> as data-text-size.
+// The readout is the step's translated name.
 // ---------------------------------------------------------------------------
 
 function fakeStorage(seed = {}) {
@@ -4522,29 +4528,32 @@ function fakeStorage(seed = {}) {
   return { data, getItem(k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
     setItem(k, v) { data[k] = String(v); }, removeItem(k) { delete data[k]; } };
 }
-const scaleOf = (hub) => hub.els["perch-hub-root"].style["--perch-text-scale"];
+const sizeOf = (hub) => hub.doc.documentElement.getAttribute("data-text-size");
+const NEW_KEY = "crow-text-size";
+const OLD_KEY = "crow.perch.textSize";
 
-test("text size: defaults to 100% with nothing stored; A+ steps up, saves, and updates the readout", async () => {
+test("text size: defaults to Default with nothing stored; A+ steps up, saves the SHARED key, and updates the readout", async () => {
   const store = fakeStorage();
   const hub = await mountHub({ localStorage: store });
-  assert.equal(scaleOf(hub), "1");
-  assert.equal(hub.els["perch-text-size-value"].textContent, "100%");
+  assert.equal(sizeOf(hub), "default");
+  assert.equal(hub.els["perch-text-size-value"].textContent, "Default");
   assert.equal(hub.els["perch-text-reset"].disabled, true, "already at the default");
   hub.els["perch-text-larger"].click();
-  assert.equal(scaleOf(hub), "1.125");
-  assert.equal(store.data["crow.perch.textSize"], "2");
-  assert.equal(hub.els["perch-text-size-value"].textContent, "113%");
-  assert.equal(hub.els["perch-hub-root"].getAttribute("data-text-step"), "2");
+  assert.equal(sizeOf(hub), "large", "<html> carries the dashboard-wide size");
+  assert.equal(store.data[NEW_KEY], "large");
+  assert.equal(store.data[OLD_KEY], undefined, "the old per-chat key is never written");
+  assert.equal(hub.els["perch-text-size-value"].textContent, "Large");
+  assert.equal(hub.els["perch-hub-root"].getAttribute("data-text-size"), "large");
 });
 
-test("text size: the stored step is applied on load (per-device persistence)", async () => {
-  const hub = await mountHub({ localStorage: fakeStorage({ "crow.perch.textSize": "4" }) });
-  assert.equal(scaleOf(hub), "1.4");
+test("text size: the stored dashboard-wide size is applied on load", async () => {
+  const hub = await mountHub({ localStorage: fakeStorage({ [NEW_KEY]: "xlarge" }) });
+  assert.equal(sizeOf(hub), "xlarge");
   assert.equal(hub.els["perch-text-larger"].disabled, true, "A+ is spent at the largest step");
   hub.els["perch-text-larger"].click();
-  assert.equal(scaleOf(hub), "1.4", "never past the last step");
+  assert.equal(sizeOf(hub), "xlarge", "never past the last step");
   hub.els["perch-text-reset"].click();
-  assert.equal(scaleOf(hub), "1");
+  assert.equal(sizeOf(hub), "default");
 });
 
 test("text size: A− stops at the smallest step", async () => {
@@ -4552,26 +4561,66 @@ test("text size: A− stops at the smallest step", async () => {
   const hub = await mountHub({ localStorage: store });
   hub.els["perch-text-smaller"].click();
   hub.els["perch-text-smaller"].click();
-  assert.equal(scaleOf(hub), "0.875");
+  assert.equal(sizeOf(hub), "small");
   assert.equal(hub.els["perch-text-smaller"].disabled, true);
-  assert.equal(store.data["crow.perch.textSize"], "0");
+  assert.equal(store.data[NEW_KEY], "small");
 });
 
-test("text size: a garbage stored value falls back to the default", async () => {
-  for (const bad of ["9", "-1", "2.5", "big", ""]) {
-    const hub = await mountHub({ localStorage: fakeStorage({ "crow.perch.textSize": bad }) });
-    assert.equal(scaleOf(hub), "1", "stored " + JSON.stringify(bad));
+test("text size: #407's per-chat key migrates ONCE to the shared key, then is removed", async () => {
+  const cases = { "0": "small", "1": "default", "2": "large", "3": "large", "4": "xlarge" };
+  for (const [old, want] of Object.entries(cases)) {
+    const store = fakeStorage({ [OLD_KEY]: old });
+    const hub = await mountHub({ localStorage: store });
+    assert.equal(sizeOf(hub), want, "old step " + old);
+    assert.equal(store.data[NEW_KEY], want, "written to the shared key");
+    assert.equal(store.data[OLD_KEY], undefined, "old key removed");
+  }
+  // The shared key wins over a stale old one (Settings already chose).
+  const store = fakeStorage({ [NEW_KEY]: "small", [OLD_KEY]: "4" });
+  const hub = await mountHub({ localStorage: store });
+  assert.equal(sizeOf(hub), "small");
+  assert.equal(store.data[OLD_KEY], undefined);
+});
+
+test("text size: a garbage stored value (new or old key) falls back to Default", async () => {
+  for (const bad of ["9", "-1", "2.5", "big", "", "huge"]) {
+    let hub = await mountHub({ localStorage: fakeStorage({ [NEW_KEY]: bad }) });
+    assert.equal(sizeOf(hub), "default", "new key " + JSON.stringify(bad));
+    const store = fakeStorage({ [OLD_KEY]: bad });
+    hub = await mountHub({ localStorage: store });
+    assert.equal(sizeOf(hub), "default", "old key " + JSON.stringify(bad));
+    assert.equal(store.data[NEW_KEY], undefined, "garbage is not migrated");
   }
 });
 
 test("text size: blocked storage (the accessor throws) never breaks the page", async () => {
   const hub = await mountHub({ localStorage: { throws: true } });
-  assert.equal(scaleOf(hub), "1", "loads at the default");
+  assert.equal(sizeOf(hub), "default", "loads at the default");
   hub.els["perch-text-larger"].click();
-  assert.equal(scaleOf(hub), "1.125", "the control still works for this page view");
+  assert.equal(sizeOf(hub), "large", "the control still works for this page view");
 });
 
 test("text size: no storage at all (old harness default) still runs", async () => {
   const hub = await mountHub();
-  assert.equal(scaleOf(hub), "1");
+  assert.equal(sizeOf(hub), "default");
+});
+
+test("text size: Perch reuses the layout head script's runtime when present (one source of truth)", async () => {
+  const { textSizeRuntimeJs } = await import("../servers/gateway/dashboard/shared/text-size.js");
+  const store = fakeStorage({ [NEW_KEY]: "large" });
+  // Mount once to get a realm, then hand a SECOND mount a pre-made runtime the
+  // way the head script would have: Perch must step THAT object, not its own.
+  const calls = [];
+  const fakeRuntime = {
+    ids: ["small", "default", "large", "xlarge"], cur: "large",
+    get() { return this.cur; }, apply(id) { calls.push(["apply", id]); },
+    set(id) { calls.push(["set", id]); this.cur = id; return true; }, sync() {},
+  };
+  const hub = await mountHub({ localStorage: store, crowTextSize: fakeRuntime });
+  assert.equal(hub.win.crowTextSize, fakeRuntime, "the existing runtime is kept");
+  hub.els["perch-text-larger"].click();
+  assert.deepEqual(calls.filter((c) => c[0] === "set"), [["set", "xlarge"]]);
+  assert.equal(hub.els["perch-text-size-value"].textContent, "Extra large");
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  assert.ok(perchHubJs("en").includes(textSizeRuntimeJs()), "the fallback is the shared runtime source verbatim");
 });

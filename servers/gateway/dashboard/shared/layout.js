@@ -12,6 +12,7 @@ import { designTokensCss } from "./design-tokens.js";
 import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
+import { textSizeCss, textSizeHeadScript } from "./text-size.js";
 
 // Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
 // Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
@@ -218,6 +219,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(title)} — Crow's Nest</title>
   <link rel="manifest" href="/manifest.json">
@@ -749,6 +751,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -786,6 +789,7 @@ export function render2faVerify({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -822,6 +826,7 @@ export function render2faRecovery({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -856,6 +861,7 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -894,6 +900,7 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -930,6 +937,7 @@ export function renderResetForm({ error, token, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
+  ${textSizeHeadScript()}
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   ${FONT_LINKS}
@@ -980,6 +988,7 @@ function dashboardCss() {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   ${designTokensCss()}
+  ${textSizeCss()}
   ${componentsCss()}
 
   body {

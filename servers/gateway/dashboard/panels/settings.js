@@ -25,6 +25,7 @@ import { renderSettingsMenu } from "../settings/menu-renderer.js";
 // Import all built-in sections
 import themeSection from "../settings/sections/theme.js";
 import languageSection from "../settings/sections/language.js";
+import textSizeSection from "../settings/sections/text-size.js";
 import notificationsSection from "../settings/sections/notifications.js";
 import portsSection from "../settings/sections/ports.js";
 import pairedInstancesSection from "../settings/sections/paired-instances.js";
@@ -62,6 +63,7 @@ import botRuntimeSection from "../settings/sections/bot-runtime.js";
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
+registerSettingsSection(textSizeSection);
 registerSettingsSection(llmSection);
 registerSettingsSection(notificationsSection);
 registerSettingsSection(portsSection);

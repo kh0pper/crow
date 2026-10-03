@@ -151,7 +151,7 @@ async function measure(w, h, expression, { css = "", ready = "!!document.querySe
     const value = JSON.parse(await evalIn(expression));
     // Hermetic: the text-size step persists in this origin's localStorage, and
     // every test here shares one origin. Leave nothing behind for the next.
-    await evalIn("(function(){try{localStorage.removeItem('crow.perch.textSize');}catch(e){}return 1;})()");
+    await evalIn("(function(){try{localStorage.removeItem('crow-text-size');localStorage.removeItem('crow.perch.textSize');document.documentElement.removeAttribute('data-text-size');}catch(e){}return 1;})()");
     return value;
   } finally {
     ws.close();
@@ -259,7 +259,8 @@ test("css: every font size is scaled by --pts, which only the chat tab changes",
   assert.doesNotMatch(css, /font-size:\s*\d+(\.\d+)?px/, "an unscaled font-size would ignore the text-size control");
   assert.doesNotMatch(css, /font:(\s*\d{3})?\s*\d+(\.\d+)?px/, "an unscaled font shorthand would ignore it too");
   assert.match(css, /#perch-hub-root\{--pts:1\}/);
-  assert.match(css, /#perch-tab-chat\{--pts:var\(--perch-text-scale,1\)/);
+  assert.match(css, /#perch-tab-chat\{--pts:var\(--crow-text-scale,1\)/, "the chat tab reads the DASHBOARD-WIDE scale");
+  assert.doesNotMatch(css, /--perch-text-scale/, "no Perch-only scale left to diverge");
 });
 
 test("html: the Session tab carries A− / A / A+ with translated aria-labels (en + es)", async () => {
@@ -286,7 +287,7 @@ const TEXT_GEOMETRY = `(function(){
   function hit(e){ var b=e.getBoundingClientRect(); var x=b.left+b.width/2, y=b.top+b.height/2;
     var t=document.elementFromPoint(x,y); return !!t&&(t===e||e.contains(t)); }
   var send=document.getElementById('perch-send');
-  return JSON.stringify({ step:document.getElementById('perch-hub-root').getAttribute('data-text-step'),
+  return JSON.stringify({ step:document.documentElement.getAttribute('data-text-size'),
     entry:fs('#perch-transcript .entry.bot'), input:fs('#perch-input'), sendFs:fs('#perch-send'),
     tabs:fs('#perch-tabs button'), close:fs('#perch-close'),
     sendHit:hit(send), docScrollX:document.documentElement.scrollWidth-innerWidth,
@@ -298,7 +299,7 @@ test("live @412x915: the largest text step scales the chat tab only, and nothing
   if (!available) return t.skip("no CDP endpoint at " + CDP);
   const base = await measure(412, 915, TEXT_GEOMETRY, { ready: MSG_READY });
   const m = await measure(412, 915, "(function(){" + "var x=" + BIGGEST + ";return " + TEXT_GEOMETRY + "})()", { ready: MSG_READY });
-  assert.equal(m.step, "4");
+  assert.equal(m.step, "xlarge");
   assert.ok(Math.abs(m.entry - base.entry * 1.4) < 0.2, "message text x1.4: " + base.entry + " -> " + m.entry);
   assert.ok(Math.abs(m.input - base.input * 1.4) < 0.2, "composer x1.4: " + base.input + " -> " + m.input);
   assert.equal(m.tabs, base.tabs, "the tab bar keeps its size");
