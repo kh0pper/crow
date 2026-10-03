@@ -63,7 +63,7 @@ import { sessionBirdState, foldBirdStates } from "../dashboard/panels/bot-board/
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
-import { renderMarkdown } from "../../blog/renderer.js";
+import { renderBotMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -336,11 +336,12 @@ function readTailBytes(file, maxBytes) {
  * The markdown rendering of an assistant message, or null.
  *
  * Bot output IS markdown — headings, tables, bold, code fences — and rendered
- * as literal text until this. It is rendered on the SERVER, by the same
- * `renderMarkdown` (marked + sanitize-html with an explicit allow-list) the
- * memory panel already uses (dashboard/panels/memory.js:20), because the
- * client cannot import a server module and must never be handed a markdown
- * parser plus untrusted model output.
+ * as literal text until this. It is rendered on the SERVER, by
+ * `renderBotMarkdown` — the memory panel's renderMarkdown pipeline (marked +
+ * the sanitize-html allow-list) plus TeX math shown once as source, and the
+ * SAME function the live SSE frames use, so a reload renders identically —
+ * because the client cannot import a server module and must never be handed
+ * a markdown parser plus untrusted model output.
  *
  * TEXT BLOCKS ONLY, and only for the assistant: a tool-call block renders as
  * the client's own "[tool: name]" line, and the operator's own typing is not
@@ -348,8 +349,14 @@ function readTailBytes(file, maxBytes) {
  * to textContent, which is exactly today's behaviour.
  *
  * Measured cost: 0.075 ms for a typical message, so the 2000-line tail cap
- * above bounds a history load at ~150 ms, and the 2 MB byte cap bounds the
- * pathological case at roughly half a second. Once per session open.
+ * above bounds an ordinary history load at ~150 ms. The pathological case is
+ * bounded per MESSAGE, not by the 2 MB byte cap: renderBotMarkdown refuses
+ * text over BOT_MD_MAX_INPUT (64 KB → no html, textContent), and its math
+ * scans are windowed, so the worst adversarial message measured ~130 ms
+ * (2026-10-02; marked alone ~40 ms on the same input). A 2 MB tail of such
+ * messages (~32) is therefore a few seconds, once per session open — a
+ * bound, not a target; the earlier "half a second" was measured before math
+ * support and against renderMarkdown.
  */
 function assistantHtml(event) {
   const message = event && event.message;
@@ -373,7 +380,7 @@ function assistantHtml(event) {
   // message, which is most of a busy turn.
   if (!text.trim()) return null;
   try {
-    return renderMarkdown(text) || null;
+    return renderBotMarkdown(text) || null;
   } catch {
     // A render failure must not cost the operator the message: the client
     // falls back to textContent whenever `html` is absent.

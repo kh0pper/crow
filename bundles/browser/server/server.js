@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { stateDir, stateRoot, containerName, cdpPort, vncPort } from "./instance.js";
+import { articleTurndown } from "./article-markdown.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -738,7 +739,7 @@ export function createBrowserServer(options = {}) {
         if (format === "markdown" && article.content) {
           try {
             const Turndown = (await import("turndown")).default;
-            body = new Turndown({ headingStyle: "atx", codeBlockStyle: "fenced" }).turndown(article.content);
+            body = articleTurndown(Turndown).turndown(article.content);
           } catch { body = article.textContent; }
         }
 
@@ -1212,7 +1213,7 @@ export function createBrowserServer(options = {}) {
             if ((format || "markdown") === "markdown" && article.content) {
               try {
                 const Turndown = (await import("turndown")).default;
-                body = new Turndown({ headingStyle: "atx", codeBlockStyle: "fenced" }).turndown(article.content);
+                body = articleTurndown(Turndown).turndown(article.content);
               } catch { body = text; }
             }
 
