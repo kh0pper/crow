@@ -188,6 +188,15 @@ export async function initRambleTables(db) {
     sql: "UPDATE ramble_eggs SET shelf_origin = 'sync' WHERE status = 'shelf' AND shelf_origin IS NULL",
     args: [],
   });
+  // Phase 4 (spec 2026-09-08 §5, §6.2): what a hatched bird is wearing, as a
+  // JSON object of slot -> value (bird-svg.cjs OUTFIT_SLOTS), NULL for nothing.
+  // '{}' = wearing nothing; NULL = never dressed / unknown (the sync apply
+  // COALESCEs, so only a non-NULL value can change a stored outfit).
+  // A column on the bird row, which already replicates, so an outfit follows
+  // its bird to the user's other instances (core's applyRambleEgg also adds
+  // this column lazily, for a core newer than this bundle copy). Contacts-only
+  // (D10): it is never put on a mark.
+  await ensureColumn(db, "ramble_eggs", "outfit_json", "TEXT");
 
   await initTable(db, "ramble_credits", `
     CREATE TABLE IF NOT EXISTS ramble_credits (
