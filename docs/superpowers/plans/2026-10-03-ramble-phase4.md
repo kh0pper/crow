@@ -25,7 +25,9 @@
 - `hidden` does nothing on an `<svg>` element (it is an HTMLElement property). Do not rely on hiding an svg.
 - Copy register: plain, warm, slightly hushed (existing lines: "Something's stirring in there", "Getting out is worth more than tapping."). The player IS the bird (pet page uses first person: "How you're doing", "The next you").
 - Accessory prices live in the catalogue (`wardrobe.js`), not in settings (spec §6.4 last line).
-- Commits: always `git commit <paths> -m "..."` with explicit paths (never a bare `git commit` after `git add`); the worktree carries an untracked `node_modules` symlink that must never be committed. No Claude attribution in commit messages.
+- Commits: always `git commit <paths> -m "..."` with explicit paths (never a bare `git commit`). `git commit <path>` REFUSES an untracked file, so a task that CREATES a file first runs `git add <exactly the new files>` and then `git commit <every path> -m ...`. The worktree carries an untracked `node_modules` symlink that must never be added or committed. No Claude attribution in commit messages.
+- **Outfit storage encoding:** `outfit_json` is `'{}'` for "wearing nothing" and `NULL` ONLY for "this row's sender has no knowledge of an outfit" (a never-dressed bird, an incubating egg, a pre-0.13 peer). The sync apply merges with `COALESCE(excluded.outfit_json, local)` so a stale full egg row from another instance (an offline instance still crediting warmth to the egg, or a second partitioned hatch) can never wipe a real outfit.
+- **Tests never open a db file the router/bundle has open with a second SQLite engine** (`@libsql/client` beside core's better-sqlite3 is the 2026-08-04 corruption root cause). Route tests use the bundle's own `createDbClient()` (`bundles/ramble/server/db.js`), closed after each use, as `tests/ramble-panel.test.js` does.
 - Tests: run single files with `npm test -- tests/<file>.test.js` (scratch env; NEVER raw `node --test`, which writes the live crow.db). Full suite: `npm test`.
 
 ## Review Focus
@@ -33,7 +35,7 @@
 1. **Two of the user's instances buy while out of contact.** Expect: each local buy is refused unless the local balance covers it; after sync both instances show the SAME balance and owned set in any arrival order; the balance may legitimately go negative (two instances each spent the same seed) and the shop must show it without breaking and refuse further buys. Same item bought on both: owned once, charged twice — accepted and documented. (Task 2 + Task 4 tests.)
 2. **A bird whose rolled genome already has a hat wears a bought hat, then takes it off.** Expect: the bought hat replaces the rolled one while worn; taking it off restores the ROLLED hat (not bare); public marks and the per-pin bird route still draw the rolled bird throughout. (Task 1 + Task 3 tests.)
 3. **An outfit row arrives at an instance whose `ramble_eggs` table predates the column** (core upgraded, bundle copy older; or a sync apply landing before the bundle's `initRambleTables` ran). Expect: the apply succeeds and the outfit is stored, never a thrown apply. (Task 4 test.)
-4. **Rapid try-ons, and a mood threshold crossed while nobody has the app open.** Expect: four outfit changes inside the settle window produce exactly ONE broadcast carrying the final state; a decay-driven mood change reaches the profile picture on the periodic tick with no user action; an unchanged portrait never re-broadcasts. (Task 6 tests.)
+4. **Rapid try-ons, a mood threshold crossed while nobody has the app open, and two of the user's instances that disagree** (one runs an older engine without `applyOutfit`; their pet energies differ because decay-on-read is local). Expect: four outfit changes inside the settle window produce exactly ONE broadcast carrying the final state; a decay-driven mood change reaches the profile picture on the periodic tick with no user action; the tick NEVER re-broadcasts because the replicated stored picture differs from what this instance would draw — only a change in THIS instance's own render inputs repaints; an engine that cannot draw a worn outfit never overwrites a dressed picture; and a tick never re-sends a stuck "pending" fan-out. (Task 6 tests.)
 5. **A malformed or future `outfit_json`** (hand-edited, truncated JSON, a value from a newer version such as `{"glasses":"monocle"}`, a non-object, `__proto__` keys). Expect: unknown slots/values are dropped, rendering never throws, the API never 500s. (Task 1 + Task 3 + Task 6 tests.)
 
 ---
@@ -461,6 +463,7 @@ Expected: all PASS (wallet/hearts suites prove `seedBalance` still counts pickup
 - [ ] **Step 5: Commit**
 
 ```bash
+git add bundles/ramble/server/wardrobe.js tests/ramble-wardrobe.test.js
 git commit bundles/ramble/server/wardrobe.js bundles/ramble/server/wallet.js tests/ramble-wardrobe.test.js -m "feat(ramble): wardrobe catalogue + per-purchase spend ledger; seed balance subtracts spends"
 ```
 
@@ -479,7 +482,7 @@ git commit bundles/ramble/server/wardrobe.js bundles/ramble/server/wallet.js tes
 - Produces:
   - `parseOutfit(json: string|null|undefined) -> { hat?: string, scarf?: string, glasses?: string }` — always a plain object, only known slot/value pairs, never throws.
   - `birdOutfit(db, eggId) -> Promise<object>` (parsed; `{}` when none / missing column).
-  - `wearItem(db, eggId, slot, itemId|null, { emit }) -> Promise<{ ok: true, outfit } | { ok: false, reason: "not-found"|"not-a-bird"|"bad-slot"|"unknown-item"|"wrong-slot"|"not-owned" }>` — `itemId === null` takes that slot off. Writes `outfit_json` (`NULL` when the outfit becomes empty) and emits the FULL egg row (`SELECT *`) as `("ramble_eggs","update",row)`.
+  - `wearItem(db, eggId, slot, itemId|null, { emit }) -> Promise<{ ok: true, outfit } | { ok: false, reason: "not-found"|"not-a-bird"|"bad-slot"|"unknown-item"|"wrong-slot"|"not-owned" }>` — `itemId === null` takes that slot off. The write is ONE SQL statement (`json_set` / `json_remove` on the stored object, `'{}'` when it becomes empty — never `NULL`, see Global Constraints) so two overlapping requests for different slots cannot lose one another. Emits the FULL egg row (`SELECT *`) as `("ramble_eggs","update",row)`.
   - `wardrobeState(db) -> Promise<{ seed: number, items: Array<{id,slot,value,name,price,owned}>, active: { egg_id, species, seed, outfit } | null }>`.
   - `flockState(...).birds[i].outfit` (parsed object).
 
@@ -538,7 +541,27 @@ test("wearing: owned item on a hatched bird; full row emitted; per-bird; take of
   assert.deepEqual(await birdOutfit(db, "b2"), { hat: "beanie" }, "b2 untouched");
   await wearItem(db, "b1", "scarf", null, { emit });
   const { rows } = await db.execute("SELECT outfit_json FROM ramble_eggs WHERE egg_id = 'b1'");
-  assert.equal(rows[0].outfit_json, null, "an empty outfit is NULL, not '{}'");
+  assert.equal(rows[0].outfit_json, "{}", "wearing nothing is '{}' — NULL is reserved for 'sender knows nothing' (sync COALESCE)");
+});
+
+test("two overlapping wears on different slots both land (one atomic statement each)", async () => {
+  const db = await freshDb(100);
+  await hatched(db, "b1");
+  await buyItem(db, "hat.bow", { now: NOW });
+  await buyItem(db, "glasses.round", { now: NOW });
+  await Promise.all([
+    wearItem(db, "b1", "hat", "hat.bow", {}),
+    wearItem(db, "b1", "glasses", "glasses.round", {}),
+  ]);
+  assert.deepEqual(await birdOutfit(db, "b1"), { hat: "bow", glasses: "round" });
+});
+
+test("wearing over a CORRUPT stored outfit starts from {} instead of failing", async () => {
+  const db = await freshDb(100);
+  await hatched(db, "b1");
+  await buyItem(db, "hat.bow", { now: NOW });
+  await db.execute("UPDATE ramble_eggs SET outfit_json = '{broken' WHERE egg_id = 'b1'");
+  assert.deepEqual(await wearItem(db, "b1", "hat", "hat.bow", {}), { ok: true, outfit: { hat: "bow" } });
 });
 
 test("wearing refusals", async () => {
@@ -602,6 +625,8 @@ Expected: FAIL — `parseOutfit` / `wearItem` not exported; column missing.
 ```js
   // Phase 4 (spec 2026-09-08 §5, §6.2): what a hatched bird is wearing, as a
   // JSON object of slot -> value (bird-svg.cjs OUTFIT_SLOTS), NULL for nothing.
+  // '{}' = wearing nothing; NULL = never dressed / unknown (the sync apply
+  // COALESCEs, so only a non-NULL value can change a stored outfit).
   // A column on the bird row, which already replicates, so an outfit follows
   // its bird to the user's other instances (core's applyRambleEgg also adds
   // this column lazily, for a core newer than this bundle copy). Contacts-only
@@ -644,20 +669,30 @@ export async function wearItem(db, eggId, slot, itemId, { emit } = {}) {
   const egg = await getEgg(db, eggId);
   if (!egg) return { ok: false, reason: "not-found" };
   if (egg.status !== "hatched" || egg.species == null || egg.seed == null) return { ok: false, reason: "not-a-bird" };
-  const outfit = parseOutfit(egg.outfit_json ?? null);
+  // ONE statement per change, applied to whatever is stored NOW — a read,
+  // merge-in-JS, write-back would let two quick taps on different slots lose
+  // one of them. `slot` is whitelisted above, so building the JSON path from
+  // it is safe. A corrupt stored value restarts from '{}'. Never NULL: NULL
+  // means "sender knows nothing" to the sync COALESCE (Global Constraints).
+  const base = "CASE WHEN outfit_json IS NOT NULL AND json_valid(outfit_json) AND json_type(outfit_json) = 'object' THEN outfit_json ELSE '{}' END";
   if (itemId === null) {
-    delete outfit[slot];
+    await db.execute({
+      sql: `UPDATE ramble_eggs SET outfit_json = json_remove(${base}, ?) WHERE egg_id = ? AND status = 'hatched'`,
+      args: ["$." + slot, eggId],
+    });
   } else {
     const item = itemById(itemId);
     if (!item) return { ok: false, reason: "unknown-item" };
     if (item.slot !== slot) return { ok: false, reason: "wrong-slot" };
     if (!(await ownedItems(db)).has(item.id)) return { ok: false, reason: "not-owned" };
-    outfit[slot] = item.value;
+    await db.execute({
+      sql: `UPDATE ramble_eggs SET outfit_json = json_set(${base}, ?, ?) WHERE egg_id = ? AND status = 'hatched'`,
+      args: ["$." + slot, item.value, eggId],
+    });
   }
-  const json = Object.keys(outfit).length ? JSON.stringify(outfit) : null;
-  await db.execute({ sql: "UPDATE ramble_eggs SET outfit_json = ? WHERE egg_id = ?", args: [json, eggId] });
-  await safeEmit(emit, "ramble_eggs", "update", await getEgg(db, eggId));
-  return { ok: true, outfit };
+  const row = await getEgg(db, eggId);
+  await safeEmit(emit, "ramble_eggs", "update", row);
+  return { ok: true, outfit: parseOutfit(row?.outfit_json ?? null) };
 }
 
 /** The shop sheet's one read. `active` is the bird you are, with its outfit. */
@@ -791,7 +826,7 @@ test("an outfit change on A reaches B's copy of the bird", async () => {
   await wearItem(A.db, "b1", "glasses", "glasses.shades", { emit: A.emit });
   await deliver(A.ops, B.db);
   assert.deepEqual(await birdOutfit(B.db, "b1"), { glasses: "shades" });
-  // Taking it off travels too (the row carries outfit_json: null).
+  // Taking it off travels too (the row carries outfit_json: '{}').
   A.ops.length = 0;
   await wearItem(A.db, "b1", "glasses", null, { emit: A.emit });
   await deliver(A.ops, B.db);
@@ -814,6 +849,23 @@ test("an outfit row reaching an instance whose ramble_eggs predates the column a
   assert.equal(rows[0].outfit_json, '{"hat":"leaf"}');
 });
 
+test("a STALE full row at a higher lamport (outfit_json NULL) cannot wipe a worn outfit", async () => {
+  const A = await instance(50), B = await instance(50);
+  await A.db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at) VALUES ('b1', 'hatched', 100, 'crow', 1, 1, 2)");
+  // B never saw the hatch: it still holds b1 as incubating and keeps crediting warmth.
+  await B.db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('b1', 'incubating', 40, 1)");
+  await buyItem(A.db, "hat.leaf", { now: NOW, emit: A.emit });
+  await wearItem(A.db, "b1", "hat", "hat.leaf", { emit: A.emit });
+  const { rows } = await B.db.execute("SELECT * FROM ramble_eggs WHERE egg_id = 'b1'");
+  const staleRow = { ...rows[0], warmth: 45 };
+  delete staleRow.lamport_ts; delete staleRow.lamport_origin;
+  assert.equal(staleRow.outfit_json, null, "the stale sender genuinely knows no outfit");
+  await applyRambleEgg(A.db, "update", staleRow, 1_000_000, "peer-b");
+  assert.deepEqual(await birdOutfit(A.db, "b1"), { hat: "leaf" }, "the outfit survives");
+  const { rows: after } = await A.db.execute("SELECT status FROM ramble_eggs WHERE egg_id = 'b1'");
+  assert.equal(after[0].status, "hatched");
+});
+
 test("a sparse egg row with no outfit_json key leaves a worn outfit alone", async () => {
   const B = await instance(0);
   await B.db.execute(`INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at, outfit_json)
@@ -826,17 +878,27 @@ test("a sparse egg row with no outfit_json key leaves a worn outfit alone", asyn
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npm test -- tests/ramble-wardrobe-sync.test.js`
-Expected: the wallet tests PASS already (spend rows are plain ledger rows — this proves the ledger needed no core change); "an outfit change on A reaches B" FAILS (`outfit_json` not a wire column → `{}`), "predates the column" FAILS.
+Expected: the wallet tests PASS already (spend rows are plain ledger rows — this proves the ledger needed no core change); "an outfit change on A reaches B" FAILS (`outfit_json` not a wire column → `{}`), "predates the column" FAILS. The two "leaves a worn outfit alone" tests PASS now only because the column does not travel yet — prove they guard something: after adding `"outfit_json"` to the wire columns in Step 3 but BEFORE adding the `rambleEggSetClause` case, run the file and record that "a STALE full row ... cannot wipe a worn outfit" FAILS; then add the case.
 
 - [ ] **Step 3: Implement** in `servers/sharing/instance-sync.js`:
 
 Append `"outfit_json"` to `RAMBLE_EGG_WIRE_COLUMNS` (after `"shelf_origin"`), with this comment above the array's closing line:
 ```js
-  // Phase 4 (spec 2026-09-08 §5, D11): what a hatched bird is wearing. Plain
-  // last-writer-wins on the envelope (the default set clause) — an outfit is
-  // the user's latest choice, nothing to merge. Contacts never receive egg
-  // rows, so this replicates to the user's OWN instances only (D10).
+  // Phase 4 (spec 2026-09-08 §5, D11): what a hatched bird is wearing.
+  // Last-writer-wins on the envelope, EXCEPT that a NULL never overwrites —
+  // see rambleEggSetClause. Contacts never receive egg rows, so this
+  // replicates to the user's OWN instances only (D10).
   "outfit_json",
+```
+In `rambleEggSetClause`, add a case before `default`:
+```js
+    // NULL = "this sender knows nothing about an outfit" (a never-dressed
+    // row, an offline instance still crediting warmth to an egg it thinks is
+    // incubating, a second partitioned hatch). Those full rows arrive at
+    // ever-higher lamports and must not wipe a real outfit. Wearing nothing
+    // is '{}', a real value, so taking everything off still travels.
+    case "outfit_json":
+      return `outfit_json = COALESCE(excluded.outfit_json, ramble_eggs.outfit_json)`;
 ```
 
 Above `export async function applyRambleEgg` add:
@@ -871,6 +933,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
+git add tests/ramble-wardrobe-sync.test.js
 git commit servers/sharing/instance-sync.js tests/ramble-wardrobe-sync.test.js -m "feat(sync): outfit_json rides the ramble egg row; lazy guarded column; multi-instance wardrobe tests"
 ```
 
@@ -901,12 +964,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createClient } from "@libsql/client";
 import bus from "../servers/shared/event-bus.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
-let SCRATCH, server, base, db, saved;
+let SCRATCH, server, base, saved, createDbClient;
+// ONE SQLite engine per process: always the bundle's own client (core
+// better-sqlite3), opened and closed per use — never @libsql on this file.
+async function withDb(fn) { const db = createDbClient(); try { return await fn(db); } finally { db.close(); } }
 const emitted = [];
 const H = { "x-test-auth": "1", "content-type": "application/json" };
 const get = (p) => fetch(base + p, { headers: H });
@@ -927,17 +992,16 @@ before(async () => {
   await once(server, "listening");
   base = `http://127.0.0.1:${server.address().port}`;
   assert.equal((await get("/api/ramble/wardrobe")).status, 200, "first request creates + inits the scratch db");
-  // Resolve the db file the router created exactly as ramble-egg-null-read.test.js does
-  // (read bundles/ramble/server/db.js createDbClient's path rule; with CROW_DATA_DIR set
-  // and CROW_DB_PATH unset it is join(SCRATCH, "crow.db")).
-  db = createClient({ url: "file:" + join(SCRATCH, "crow.db") });
-  await db.execute("INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('seed', 'grant', 30, 1)");
-  await db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at) VALUES ('b1', 'hatched', 100, 'crow', 1, 1, 2)");
-  await db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('e1', 'incubating', 3, 3)");
-  await db.execute("INSERT INTO ramble_pet (owner, active_egg_id) VALUES ('self', 'b1') ON CONFLICT(owner) DO UPDATE SET active_egg_id = 'b1'");
+  ({ createDbClient } = await import("../bundles/ramble/server/db.js"));
+  await withDb(async (db) => {
+    await db.execute("INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('seed', 'grant', 30, 1)");
+    await db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at) VALUES ('b1', 'hatched', 100, 'crow', 1, 1, 2)");
+    await db.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('e1', 'incubating', 3, 3)");
+    await db.execute("INSERT INTO ramble_pet (owner, active_egg_id) VALUES ('self', 'b1') ON CONFLICT(owner) DO UPDATE SET active_egg_id = 'b1'");
+  });
 });
 after(async () => {
-  server?.close(); try { db?.close(); } catch {}
+  server?.close();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   rmSync(SCRATCH, { recursive: true, force: true });
 });
@@ -1001,7 +1065,7 @@ test("the per-pin bird route stays PLAIN (D10) whatever the bird is wearing", as
 });
 ```
 
-Note for the implementer: read `bundles/ramble/server/db.js` `createDbClient` and confirm the db file path the router uses under this env; if it is not `join(SCRATCH, "crow.db")`, use the path it actually resolves (do not guess — print it once).
+Note for the implementer: `createDbClient()` resolves `CROW_DATA_DIR/crow.db` (db.js `resolveDbPath`), the same file the router opened. Existing test `tests/ramble-panel.test.js` (~line 1479) deep-equals `pet.bird` as `{ egg_id, species, seed }`; Step 3 adds `outfit`, so update that expectation to include `outfit: {}` (this file is in the commit list).
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1054,12 +1118,13 @@ Expected: FAIL — 404s on `/api/ramble/wardrobe`.
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `npm test -- tests/ramble-wardrobe-routes.test.js tests/ramble-egg-null-read.test.js tests/ramble-panel.test.js`
-Expected: all PASS. If an existing test deep-equals `GET /api/ramble/pet`'s `bird`, update it to the new `{ egg_id, species, seed, outfit }` shape and say so in the commit message.
+Expected: all PASS (with the `pet.bird` expectation in ramble-panel.test.js updated as noted above).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit bundles/ramble/panel/routes.js tests/ramble-wardrobe-routes.test.js -m "feat(ramble): wardrobe routes — shop, buy, wear; outfit on the pet read; poke ramble:outfit-changed"
+git add tests/ramble-wardrobe-routes.test.js
+git commit bundles/ramble/panel/routes.js tests/ramble-wardrobe-routes.test.js tests/ramble-panel.test.js -m "feat(ramble): wardrobe routes — shop, buy, wear; outfit on the pet read; poke ramble:outfit-changed"
 ```
 
 ---
@@ -1072,21 +1137,26 @@ git commit bundles/ramble/panel/routes.js tests/ramble-wardrobe-routes.test.js -
 - Test: `tests/profile-avatar-bird.test.js` (extend + adjust two install calls)
 
 **Interfaces:**
-- Consumes: engine `applyOutfit` IF the loaded engine has it (an older installed engine draws the plain bird — skew-safe); `readActiveBird(db)` (unchanged shape `{egg_id, species, seed}`).
+- Consumes: engine `applyOutfit` IF the loaded engine has it; `readActiveBird(db)` (unchanged shape `{egg_id, species, seed}`); `broadcastProfile`, `readBroadcastPending` (unchanged).
 - Produces:
   - `pet.js`: `export const DECAY_INTERVAL_MS`, `export const DECAY_PER_INTERVAL` (values unchanged: 6 h, 10).
   - `profile-avatar.js`:
     - `portraitMood(energy, lastFedAt, now) -> "happy"|"tired"|"alarmed"` — the same decay `petState` applies on read (no write).
     - `readPortrait(db, { now }) -> Promise<{ egg_id, species, seed, mood, outfit } | null>`; never throws; `outfit` is the raw parsed object or `null` (the engine validates it).
-    - `renderBirdAvatar(bird, engine)` — `bird.mood` (default `"happy"`) and `bird.outfit` (default none) now honoured.
+    - `renderBirdAvatar(bird, engine)` — `bird.mood` (default `"happy"`) and `bird.outfit` (default none) now honoured. Pure; an engine without `applyOutfit` draws the plain bird.
     - `renderActiveBirdAvatar(db, { now })` uses `readPortrait`.
-    - `installBirdAvatarHooks(managers, { emitter, settleMs = AVATAR_SETTLE_MS, tickMs = AVATAR_TICK_MS })`: boot repaint immediate; `ramble:hatched`, `ramble:bird-activated`, `ramble:outfit-changed` and the periodic tick each (re)arm ONE debounce timer of `settleMs`; when it fires, one serialized `refreshBirdAvatar`. `AVATAR_SETTLE_MS = 20_000`, `AVATAR_TICK_MS = 30 * 60_000`, both exported. Timers are `unref()`ed. `__resetBirdAvatarHooksForTest` also clears both timers.
+    - `refreshBirdAvatar(db, managers, { gate = false, resend = true, now = Date.now(), engine = loadBirdEngine() } = {})`:
+      - `resend: false` → never re-sends a stuck pending fan-out (both the picture-source and the bird-source resend branches are skipped).
+      - `gate: true` → if this instance's OWN render inputs (`[species, seed, mood, outfit]`, kept in a per-db in-memory `WeakMap`) are unchanged since it last rendered, return `{ changed: false, reason: "inputs-same" }` without comparing to the stored (replicated) picture. This is what stops the user's instances ping-ponging the replicated `profile_avatar_url` when they legitimately render differently (engine skew, local decay skew).
+      - Bird wearing a non-empty outfit + an engine without `applyOutfit` → `{ changed: false, reason: "engine-too-old" }`: an instance that cannot draw the outfit never overwrites a dressed picture.
+      - Default options keep every existing direct-call behaviour and return shape.
+    - `installBirdAvatarHooks(managers, { emitter, settleMs = AVATAR_SETTLE_MS, tickMs = AVATAR_TICK_MS })`: boot repaint immediate and UNgated (`refreshBirdAvatar(db, m)`); `ramble:hatched`, `ramble:bird-activated`, `ramble:outfit-changed` and the periodic tick each (re)arm ONE debounce timer of `settleMs`; when it fires, one serialized `refreshBirdAvatar(db, m, { gate: true, resend })` where `resend` is true only if at least one bus EVENT (not just the tick) armed this window. `AVATAR_SETTLE_MS = 20_000`, `AVATAR_TICK_MS = 30 * 60_000`, both exported. Timers are `unref()`ed. `__resetBirdAvatarHooksForTest` clears both timers and the inputs memo.
 
-Why a tick: energy decays with time and nothing emits an event for it, and an outfit changed on ANOTHER instance arrives by sync apply, which has no bus. The refresh is idempotent (an unchanged portrait never re-broadcasts), so a tick costs one SVG render.
+Why a tick: energy decays with time and nothing emits an event for it, and an outfit changed on ANOTHER instance arrives by sync apply, which has no bus. With the gate, a tick costs one DB read and a key compare; it repaints only when this instance's own inputs moved.
 
 - [ ] **Step 1: Write the failing tests** — in `tests/profile-avatar-bird.test.js`:
 
-(a) Change the two existing `installBirdAvatarHooks(...)` calls in the tests "a hatch or an activation on the bus refreshes; installs once" and "two triggers landing in the same tick serialize" to pass `{ emitter, settleMs: 0, tickMs: 0 }` (both calls in the first test). Their assertions are unchanged — they now prove the debounce path still delivers every real change.
+(a) Change the existing `installBirdAvatarHooks(...)` calls in the tests "a hatch or an activation on the bus refreshes; installs once" (both calls) and "two triggers landing in the same tick serialize" to pass `{ emitter, settleMs: 0, tickMs: 0 }`. Their assertions are unchanged — they now prove the debounce path still delivers every real change.
 
 (b) Extend the import list with `portraitMood, readPortrait, AVATAR_SETTLE_MS, AVATAR_TICK_MS`, add `import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";`, and append:
 
@@ -1127,8 +1197,67 @@ test("renderBirdAvatar honours mood and outfit; the defaults are byte-identical 
   assert.notEqual(renderBirdAvatar({ species: "crow", seed: 2, mood: "alarmed" }), plain, "D2: a neglected bird looks it");
   assert.notEqual(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "round" } }), plain);
   assert.equal(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "monocle" } }), plain, "unknown value ignored");
-  const oldEngine = { rollGenome: loadBirdEngine().rollGenome, drawBird: loadBirdEngine().drawBird };
+  const full = loadBirdEngine();
+  const oldEngine = { rollGenome: full.rollGenome, drawBird: full.drawBird };
   assert.equal(renderBirdAvatar({ species: "crow", seed: 2, outfit: { glasses: "round" } }, oldEngine), plain, "an engine without applyOutfit draws the plain bird, never throws");
+});
+
+test("gate: an unchanged OWN input set never repaints, even when the replicated stored picture differs (no instance ping-pong)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered", "first gated run has no memo, so it renders");
+    assert.equal(sent.length, 1);
+    // Another of the user's instances (older engine, different local decay)
+    // wrote a different picture and it synced in.
+    await putSetting(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2, mood: "tired" }));
+    assert.deepEqual(await refreshBirdAvatar(db, m, { gate: true }), { changed: false, reason: "inputs-same" });
+    assert.equal(sent.length, 1, "no counter-broadcast");
+    // A real change of THIS instance's inputs does repaint.
+    await db.execute({ sql: "UPDATE ramble_pet SET energy = 61, last_fed_at = ? WHERE owner = 'self'", args: [Date.now() - 4 * DECAY_INTERVAL_MS - 1000] });
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered");
+    assert.equal(sent.length, 2);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("an engine that cannot draw a worn outfit never overwrites the dressed picture", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await db.execute(`UPDATE ramble_eggs SET outfit_json = '{"hat":"beanie"}' WHERE egg_id = 'b1'`);
+    await putSetting(db, "profile_avatar_source", "bird");
+    const dressed = renderBirdAvatar({ species: "crow", seed: 2, outfit: { hat: "beanie" } });
+    await putSetting(db, "profile_avatar_url", dressed);
+    const full = loadBirdEngine();
+    const sent = [];
+    const r = await refreshBirdAvatar(db, mgrsWith(db, sent), { engine: { rollGenome: full.rollGenome, drawBird: full.drawBird } });
+    assert.deepEqual(r, { changed: false, reason: "engine-too-old" });
+    assert.equal(await setting(db, "profile_avatar_url"), dressed);
+    assert.equal(sent.length, 0);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("resend:false never re-sends a stuck pending fan-out (bird and picture sources)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    assert.deepEqual(await refreshBirdAvatar(db, m, { resend: false }), { changed: false, reason: "source-picture" });
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    await putSetting(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    assert.deepEqual(await refreshBirdAvatar(db, m, { resend: false }), { changed: false, reason: "same" });
+    assert.equal(sent.length, 0, "a dead contact's pending flag does not turn the tick into a fan-out");
+    assert.equal(await readBroadcastPending(db), true, "still pending for an event-driven refresh to retry");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 
 test("§5.4 coalescing: four try-ons inside the settle window = ONE broadcast of the final outfit", async () => {
@@ -1140,24 +1269,41 @@ test("§5.4 coalescing: four try-ons inside the settle window = ONE broadcast of
     await putSetting(db, "profile_avatar_source", "bird");
     const sent = [];
     const emitter = new EventEmitter();
-    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 150, tickMs: 0 });
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 400, tickMs: 0 });
     await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
     assert.equal(sent.length, 1, "boot repaint");
+    // No sleeps between try-ons: four writes + four triggers well inside 400 ms.
     for (const hat of ["bow", "leaf", "beanie", "leaf"]) {
       await db.execute({ sql: "UPDATE ramble_eggs SET outfit_json = ? WHERE egg_id = 'b1'", args: [JSON.stringify({ hat })] });
       emitter.emit("ramble:outfit-changed", { egg_id: "b1" });
-      await new Promise((r) => setTimeout(r, 30));
     }
     assert.equal(sent.length, 1, "nothing sent while still trying things on");
     const final = renderBirdAvatar({ species: "crow", seed: 2, outfit: { hat: "leaf" } });
     await settle(db, "profile_avatar_url", final);
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 500));
     assert.equal(sent.length, 2, "exactly one broadcast for the settled outfit");
     assert.equal(JSON.parse(sent[1].content).payload.avatar, final);
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 
-test("the tick: a decay-driven mood change reaches the picture with no event; an unchanged portrait never re-sends", async () => {
+test("the boot repaint and an immediate trigger overlap: the serializing chain keeps it to ONE broadcast", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "raven", seed: 5 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 0 });
+    emitter.emit("ramble:bird-activated", { egg_id: "b1" }); // same tick as the boot run
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "raven", seed: 5 }));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(sent.length, 1);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("the tick: a decay-driven mood change reaches the picture with no event; idle ticks send nothing", async () => {
   __resetBirdAvatarHooksForTest();
   const { db, cleanup } = freshDb();
   try {
@@ -1174,8 +1320,29 @@ test("the tick: a decay-driven mood change reaches the picture with no event; an
     const sad = renderBirdAvatar({ species: "crow", seed: 2, mood: "alarmed" });
     await settle(db, "profile_avatar_url", sad);
     assert.equal(await setting(db, "profile_avatar_url"), sad);
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 250));
     assert.equal(sent.length, 2, "one broadcast for the crossing, then quiet");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("the tick never re-sends a pending fan-out; a bus event does", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 40 });
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    const base = sent.length;
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(sent.length, base, "ticks leave a stuck pending flag alone");
+    emitter.emit("ramble:outfit-changed", { egg_id: "b1" });
+    for (let i = 0; i < 50 && sent.length === base; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sent.length, base + 1, "a real event retries the pending fan-out (existing R2-S3 behaviour)");
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 
@@ -1184,6 +1351,8 @@ test("defaults: a short settle and a half-hourly tick", () => {
   assert.equal(AVATAR_TICK_MS, 30 * 60_000);
 });
 ```
+
+Note: the last hook test relies on an event-armed, gated refresh with unchanged inputs still honouring `resend: true` — see the implementation's `inputs-same` branch.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1194,7 +1363,7 @@ Expected: FAIL — missing exports (`portraitMood`, `readPortrait`, `DECAY_INTER
 
 `pet.js`: change `const DECAY_INTERVAL_MS` / `const DECAY_PER_INTERVAL` to `export const` (values unchanged).
 
-`profile-avatar.js` — update the header comment's "the 'happy' portrait" wording to say the portrait carries the real mood (D2) and the outfit (spec §5.3), and that triggers are coalesced (§5.4). Then:
+`profile-avatar.js` — update the header comment: the portrait carries the real mood (D2) and the outfit (spec §5.3); triggers are coalesced (§5.4); the tick and debounced runs are gated on this instance's own inputs. Then:
 
 ```js
 /* Core's own copy of pet.js's decay-on-read and moodFor — core never imports
@@ -1208,7 +1377,7 @@ export const AVATAR_TICK_MS = 30 * 60_000;
 
 export function portraitMood(energy, lastFedAt, now = Date.now()) {
   let e = Number(energy);
-  if (!Number.isFinite(e)) return "happy";
+  if (energy == null || !Number.isFinite(e)) return "happy";
   const fed = Number(lastFedAt);
   if (lastFedAt != null && Number.isFinite(fed) && now - fed >= DECAY_INTERVAL_MS) {
     e = Math.max(0, e - Math.floor((now - fed) / DECAY_INTERVAL_MS) * DECAY_PER_INTERVAL);
@@ -1238,10 +1407,7 @@ export async function readPortrait(db, { now = Date.now() } = {}) {
   } catch { outfit = null; }
   return { ...bird, mood, outfit };
 }
-```
 
-Replace `renderBirdAvatar`'s body:
-```js
 export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
   if (!bird || !engine) return null;
   try {
@@ -1259,7 +1425,62 @@ export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
 export async function renderActiveBirdAvatar(db, { now = Date.now() } = {}) {
   return renderBirdAvatar(await readPortrait(db, { now }));
 }
+
+/* What THIS instance last rendered, per db handle. In memory on purpose: it
+ * is a per-process anti-ping-pong memo, not state — a restart's boot repaint
+ * is ungated and re-establishes it. */
+let _lastInputs = new WeakMap();
 ```
+
+Rewrite `refreshBirdAvatar` (keep its doc comment, extended with the gate/resend/engine-too-old rules):
+```js
+export async function refreshBirdAvatar(db, managers, { gate = false, resend = true, now = Date.now(), engine = loadBirdEngine() } = {}) {
+  try {
+    const { avatar, source } = await readProfilePictureSettings(db);
+    if (source !== "bird") {
+      if (resend && (await readBroadcastPending(db))) {
+        return { changed: false, reason: "resend", sent: await broadcastProfile(db, managers?.nostrManager) };
+      }
+      return { changed: false, reason: "source-picture" };
+    }
+    const bird = await readPortrait(db, { now });
+    if (!bird || !engine) return { changed: false, reason: "no-bird" };
+    // An engine that cannot dress the bird must not replace a dressed
+    // picture with a plain one (the user's other, newer instance drew it).
+    const dressed = !!bird.outfit && Object.keys(bird.outfit).length > 0;
+    if (dressed && typeof engine.applyOutfit !== "function") return { changed: false, reason: "engine-too-old" };
+    const inputs = JSON.stringify([bird.species, bird.seed, bird.mood, bird.outfit || {}]);
+    if (gate && _lastInputs.get(db) === inputs) {
+      // The stored picture is REPLICATED: another of the user's instances may
+      // have drawn it from slightly different inputs. Only a change in our own
+      // inputs is a reason to repaint — never "stored differs from mine".
+      if (resend && (await readBroadcastPending(db))) {
+        return { changed: false, reason: "resend", sent: await broadcastProfile(db, managers?.nostrManager) };
+      }
+      return { changed: false, reason: "inputs-same" };
+    }
+    const uri = renderBirdAvatar(bird, engine);
+    if (!uri) return { changed: false, reason: "no-bird" };
+    _lastInputs.set(db, inputs);
+    if (uri === avatar) {
+      // R2-S3: the picture is right, but did the last fan-out reach everyone?
+      if (!resend || !(await readBroadcastPending(db))) return { changed: false, reason: "same" };
+      const sent = await broadcastProfile(db, managers?.nostrManager);
+      return { changed: false, reason: "resend", sent };
+    }
+    await upsertSetting(db, "profile_avatar_url", uri);
+    try { await deleteLocalSetting(db, "profile_avatar_url"); } catch (err) {
+      try { console.warn("[sharing] bird avatar: deleteLocalSetting(profile_avatar_url) failed (non-fatal):", err?.message); } catch {}
+    }
+    const sent = await broadcastProfile(db, managers?.nostrManager);
+    return { changed: true, reason: "rendered", sent };
+  } catch (err) {
+    try { console.warn("[sharing] bird avatar refresh failed:", err?.message); } catch {}
+    return { changed: false, reason: "error" };
+  }
+}
+```
+(Keep the existing explanatory comments — Finding 1 CRITICAL, Finding 3 — on the corresponding lines.)
 
 Replace `installBirdAvatarHooks` and the reset:
 ```js
@@ -1268,54 +1489,61 @@ let _settleTimer = null;
 let _tickTimer = null;
 /**
  * Once per process. §5.4: outfits and mood both feed the picture, and every
- * change re-broadcasts to every contact — so triggers are COALESCED. Each
- * trigger (re)arms one settle timer; only when it fires does a refresh run,
- * so trying on four hats sends one picture. The refresh itself stays
- * serialized (the promise chain, fix round 1 Finding 2) and idempotent (an
- * unchanged portrait never re-sends). The tick covers what has no event:
- * energy decay crossing a mood threshold, and an outfit changed on another
- * instance arriving by sync apply.
+ * change re-broadcasts to every contact — so triggers are COALESCED: each
+ * (re)arms one settle timer and only its firing runs a refresh, so trying on
+ * four hats sends one picture. Runs stay serialized (the promise chain, fix
+ * round 1 Finding 2). Debounced runs are GATED on this instance's own inputs
+ * (no ping-pong between the user's instances over the replicated picture).
+ * The tick covers what has no event — decay crossing a mood threshold, an
+ * outfit changed on another instance arriving by sync — and never re-sends a
+ * stuck pending fan-out; only a real bus event retries that.
  */
 export function installBirdAvatarHooks(managers, { emitter = bus, settleMs = AVATAR_SETTLE_MS, tickMs = AVATAR_TICK_MS } = {}) {
   if (_hooksInstalled) return false;
   _hooksInstalled = true;
   let inflight = Promise.resolve();
-  const run = () => { inflight = inflight.then(() => refreshBirdAvatar(managers?.db, managers)).catch(() => {}); };
-  const schedule = () => {
+  const run = (opts) => { inflight = inflight.then(() => refreshBirdAvatar(managers?.db, managers, opts)).catch(() => {}); };
+  let wantResend = false;
+  const schedule = (fromEvent) => {
+    if (fromEvent) wantResend = true;
     if (_settleTimer) clearTimeout(_settleTimer);
-    _settleTimer = setTimeout(() => { _settleTimer = null; run(); }, Math.max(0, Number(settleMs) || 0));
+    _settleTimer = setTimeout(() => {
+      _settleTimer = null;
+      const resend = wantResend;
+      wantResend = false;
+      run({ gate: true, resend });
+    }, Math.max(0, Number(settleMs) || 0));
     _settleTimer.unref?.();
   };
-  emitter.on("ramble:hatched", schedule);
-  emitter.on("ramble:bird-activated", schedule);
-  emitter.on("ramble:outfit-changed", schedule);
+  const onEvent = () => schedule(true);
+  emitter.on("ramble:hatched", onEvent);
+  emitter.on("ramble:bird-activated", onEvent);
+  emitter.on("ramble:outfit-changed", onEvent);
   if (Number(tickMs) > 0) {
-    _tickTimer = setInterval(schedule, Number(tickMs));
+    _tickTimer = setInterval(() => schedule(false), Number(tickMs));
     _tickTimer.unref?.();
   }
   // R1-Q2: the bird may have changed while this gateway was down — one
-  // idempotent repaint at boot, not debounced.
-  run();
+  // idempotent repaint at boot, not debounced and not gated.
+  run({});
   return true;
 }
 export function __resetBirdAvatarHooksForTest() {
-  _hooksInstalled = false; _engine = undefined;
+  _hooksInstalled = false; _engine = undefined; _lastInputs = new WeakMap();
   if (_settleTimer) { clearTimeout(_settleTimer); _settleTimer = null; }
   if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
 }
 ```
 
-`refreshBirdAvatar` calls `renderActiveBirdAvatar(db)` — leave that call as is (it now takes the real mood/outfit).
-
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `npm test -- tests/profile-avatar-bird.test.js tests/ramble-pet.test.js tests/peer-profile.test.js tests/profile-avatar-form.test.js`
-Expected: all PASS.
+Expected: all PASS. Run `tests/profile-avatar-bird.test.js` three times in a row; all three must pass (timer-based tests must not flake).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit servers/sharing/profile-avatar.js bundles/ramble/server/pet.js tests/profile-avatar-bird.test.js -m "feat(profile): the bird portrait carries real mood (D2) + outfit; coalesced triggers + periodic tick (spec §5.4)"
+git commit servers/sharing/profile-avatar.js bundles/ramble/server/pet.js tests/profile-avatar-bird.test.js -m "feat(profile): the bird portrait carries real mood (D2) + outfit; coalesced, input-gated triggers + periodic tick (spec §5.4)"
 ```
 
 ---
@@ -1395,15 +1623,19 @@ test("the wardrobe is a sheet off the pet view (spec §5.5), says who can see it
   assert.ok(!/data-view="wardrobe"|data-for="wardrobe"/.test(html), "not a fifth view");
 });
 
-test("the header perch dresses the bird and adds no backtick inside its template literal", () => {
+test("the header perch dresses the bird and adds no backtick inside its template literal", async () => {
   const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "servers/gateway/dashboard/shared/notifications.js"), "utf8");
   const start = src.indexOf("function _drawRambleBird");
   const end = src.indexOf("// ── end ramble bird integration ──");
   const block = src.slice(start, end);
   assert.ok(block.includes("applyOutfit"), "the header perch wears the outfit");
   assert.ok(!block.includes("`") && !block.includes("${"), "no template syntax inside the template literal");
-  // The module must still parse (a stray backtick would break the whole dashboard).
-  return import("../servers/gateway/dashboard/shared/notifications.js");
+  // The GENERATED client script must compile — importing the module only
+  // proves the template parses, not the JS the browser receives.
+  const { tamagotchiJs } = await import("../servers/gateway/dashboard/shared/notifications.js");
+  const js = tamagotchiJs("en");
+  const inner = js.replace(/^\s*<script[^>]*>/i, "").replace(/<\/script>\s*$/i, "");
+  assert.doesNotThrow(() => new Function(inner), "tamagotchiJs output compiles");
 });
 ```
 
@@ -1435,7 +1667,18 @@ Expected: the five new tests FAIL; all pre-existing tests PASS.
 ```
 Then:
 - `hereArt`: replace `Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), ...)` with `var hg = birdGenome(Bird, lastPet.bird); if (hg) Bird.mountBird(svg, hg, (lastPet && lastPet.mood) || "happy");`.
-- `paintPet`: replace `try { genome = Bird.rollGenome(bird.seed, bird.species); } catch (e) { genome = null; }` with `genome = birdGenome(Bird, bird);`. Keep the traits line reading `genome.hat` (it now shows the worn hat).
+- `paintPet`: replace `try { genome = Bird.rollGenome(bird.seed, bird.species); } catch (e) { genome = null; }` with `genome = birdGenome(Bird, bird);` for the drawing. The traits line describes what the bird HATCHED with, so compute it from the undressed genome: `var rolled = birdGenome(Bird, { species: bird.species, seed: bird.seed });` and `setText($("rb-pet-traits"), [rolled.eye, rolled.mark, rolled.hat].join(" · ") + wornSuffix(bird.outfit));` where `wornSuffix` is a small pure helper defined next to `birdGenome`:
+```js
+  /* " · wearing a beanie, round glasses" — the worn items, in slot order. */
+  function wornSuffix(outfit) {
+    if (!outfit) return "";
+    var parts = [];
+    if (outfit.hat) parts.push(outfit.hat);
+    if (outfit.scarf) parts.push(outfit.scarf + " scarf");
+    if (outfit.glasses) parts.push(outfit.glasses + " glasses");
+    return parts.length ? " · wearing " + parts.join(", ") : "";
+  }
+```
 - `birdTile`: replace `Bird.mountBird(svg, Bird.rollGenome(bird.seed, bird.species), "happy")` with `var tg = birdGenome(Bird, bird); if (tg) Bird.mountBird(svg, tg, "happy");`.
 - `arBirdState`: return `{ species: bird.species, seed: bird.seed, mood: lastPet.mood || "happy", outfit: bird.outfit || null }`.
 
@@ -1501,7 +1744,10 @@ Add the wardrobe block after `refreshPet` and its chore listeners:
   }
 
   function wardrobeAct(action, item, active, btn) {
-    btn.disabled = true;
+    /* Freeze the whole list while a request is in flight: two quick taps on
+     * different rows would otherwise race (the server is atomic per change,
+     * but the list would repaint from whichever answer lands last). */
+    Array.prototype.slice.call(document.querySelectorAll("#rb-wardrobe-list button")).forEach(function (b) { b.disabled = true; });
     var req = action === "buy"
       ? jsonFetch("/api/ramble/wardrobe/buy", { method: "POST", body: { item: item.id } })
       : jsonFetch("/api/ramble/birds/" + encodeURIComponent(active.egg_id) + "/outfit",
@@ -1511,7 +1757,7 @@ Add the wardrobe block after `refreshPet` and its chore listeners:
       return Promise.all([refreshWardrobe(), refreshPet()]);
     }).catch(function (err) {
       setText($("rb-wardrobe-status"), err.message);
-      btn.disabled = false;
+      return refreshWardrobe(); /* repaint re-enables exactly the right buttons */
     });
   }
 
@@ -1623,7 +1869,7 @@ What you wear shows on your bird's page, your flock, your marker on the map, the
 
 Your profile picture also shows how you are doing. A bird left without walks or chores looks tired, then rattled, to your contacts — nothing worse than that ever happens. Changes to the picture are gathered up and sent once things settle (about twenty seconds after your last change), and a quiet stretch is noticed within half an hour, so trying on four hats sends your contacts one picture, not four.
 
-Purchases are recorded the same way seed pickups are, as a ledger on each of your Crows that syncs between them. If two of your Crows buy while out of touch with each other, both purchases stand once they reconnect, and your balance can briefly read below zero; it climbs back as you collect seed, and nothing can be bought until it does.
+Purchases are recorded the same way seed pickups are, as a ledger on each of your Crows that syncs between them. If two of your Crows buy while out of touch with each other, both purchases stand once they reconnect, and your balance can briefly read below zero; it climbs back as you collect seed, and nothing can be bought until it does. A Crow still running a Ramble older than 0.13 does not know about purchases and shows the balance as it was before them until it is updated.
 
 | Item | Price (seed) |
 |---|---|
@@ -1647,7 +1893,7 @@ Lo que llevas se ve en la página de tu pájaro, tu bandada, tu marcador en el m
 
 Tu foto de perfil también muestra cómo estás. Un pájaro sin paseos ni tareas se ve cansado y luego agitado ante tus contactos — nunca pasa nada peor. Los cambios de la foto se agrupan y se envían cuando todo se calma (unos veinte segundos después del último cambio), y un rato de inactividad se nota en menos de media hora, así que probarte cuatro sombreros envía a tus contactos una sola foto, no cuatro.
 
-Las compras se registran igual que el alpiste recogido, como un libro de cuentas en cada uno de tus Crows que se sincroniza entre ellos. Si dos de tus Crows compran mientras están desconectados entre sí, ambas compras cuentan al reconectarse y tu saldo puede quedar por un momento por debajo de cero; vuelve a subir al recoger alpiste, y no se puede comprar nada hasta entonces.
+Las compras se registran igual que el alpiste recogido, como un libro de cuentas en cada uno de tus Crows que se sincroniza entre ellos. Si dos de tus Crows compran mientras están desconectados entre sí, ambas compras cuentan al reconectarse y tu saldo puede quedar por un momento por debajo de cero; vuelve a subir al recoger alpiste, y no se puede comprar nada hasta entonces. Un Crow que todavía tenga un Ramble anterior a 0.13 no conoce las compras y muestra el saldo de antes de ellas hasta que se actualice.
 
 | Artículo | Precio (alpiste) |
 |---|---|
@@ -1695,4 +1941,4 @@ git commit docs/guide/ramble.md docs/es/guide/ramble.md bundles/ramble/manifest.
 1. **Spec coverage** — §5.1/5.2 engine override: Task 1. §5.3 ownership (D11) + visibility (all listed surfaces; D10 plain marks): Tasks 3, 5, 7 (+ D10 tests in Tasks 3 and 5). §5.4 coalescing: Task 6. §5.5 sheet: Task 7. §6.1 spend ledger keyed per purchase: Task 2. §6.2 wardrobe (derived) + worn columns on bird rows: Tasks 2–3. §6.3 guarded column, no schema bump: Tasks 3, 4, 8. §6.4 prices in catalogue: Task 2. §7 bounded inputs: Task 5 validation. §8 multi-instance tests + accessory rendering at every site + coalescing: Tasks 4, 6, 7. D2 sad portrait: Task 6.
 2. **Placeholders** — none; two implementer checks are explicit lookups with a stated fallback (db path in Task 5, `jsonFetch` error contract in Task 7, CSS accent token, ES term for seed).
 3. **Type consistency** — `outfit` is always a plain `{slot: value}` object server-side (`parseOutfit`), `null`-or-object in core `readPortrait` (engine validates); item ids `slot.value`; `buyItem` → `{ok, reason, balance}`, route maps `balance` → `seed`.
-4. **Review Focus** — each line has its test: (1) Task 2 negative-balance + Task 4 offline tests; (2) Task 1 rolled-hat restore + Task 3 D10 + Task 5 plain pin route; (3) Task 4 old-table test; (4) Task 6 coalescing + tick tests; (5) Task 1 junk, Task 3 `parseOutfit`/corrupt, Task 6 corrupt/missing column.
+4. **Review Focus** — each line has its test: (1) Task 2 negative-balance + Task 4 offline tests; (2) Task 1 rolled-hat restore (the Task 3 `activeBird` and Task 5 plain-pin tests are REGRESSION GUARDS on code this plan does not touch — they cannot fail today and are kept so a later change cannot silently leak an outfit to strangers); (3) Task 4 old-table test; (4) Task 6 coalescing, gate (no ping-pong), engine-too-old, resend:false and tick tests; (5) Task 1 junk, Task 3 `parseOutfit`/corrupt, Task 6 corrupt/missing column.
