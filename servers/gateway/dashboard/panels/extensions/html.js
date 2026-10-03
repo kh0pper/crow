@@ -435,7 +435,7 @@ export function buildExtensionsHTML({
       ports: addon.ports || [],
       webUI: addon.webUI || null,
       requires: addon.requires || {},
-      env_vars: (addon.env_vars || []).map((ev) => ({
+      env_vars: (addon.env_vars || []).filter((ev) => !ev.generate).map((ev) => ({
         name: ev.name, description: ev.description,
         default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
       })),

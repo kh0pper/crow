@@ -63,6 +63,11 @@
           "required": { "type": "boolean" },
           "secret": { "type": "boolean" },
           "generate": { "type": "string", "enum": ["secret"] },
+          "propagate": { "type": "boolean" },
+          "install_required": { "type": "boolean" },
+          "check": { "type": "string", "enum": ["not_breached"] },
+          "pattern": { "type": "string", "pattern": "^\\^.*\\$$" },
+          "pattern_hint": { "type": "string" },
           "default": {}
         }
       }

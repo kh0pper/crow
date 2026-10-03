@@ -53,7 +53,7 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { readEnvFile } from "../env-manager.js";
-import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile } from "../bundle-env-secrets.js";
+import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -136,6 +136,9 @@ const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 let APP_ENV_PATH = join(APP_ROOT, ".env");
 /** Test-only: repoint the gateway .env that propagateEnvToGateway writes (normally <repo>/.env). */
 export function _setAppEnvPathForTest(path) { APP_ENV_PATH = path || join(APP_ROOT, ".env"); }
+// Test-only: replace the HIBP range fetch used by env_vars[].check "not_breached".
+let _breachFetchForTest = null;
+export function _setBreachFetchForTest(fn) { _breachFetchForTest = fn || null; }
 
 export { needsConfigKeys, _setAppBundlesForTest };
 export { validateComposeFile as _validateComposeFileForTest };
@@ -1432,7 +1435,8 @@ export function propagateBundleEnvToGateway(bundleId, envVars) {
  * only the declared ones may ever reach the gateway's own .env.
  */
 export function declaredEnvSubset(manifest, envVars) {
-  const declared = new Set((manifest?.env_vars || []).map((v) => v && v.name).filter(Boolean));
+  const excluded = gatewayExcludedKeys(manifest);
+  const declared = new Set((manifest?.env_vars || []).map((v) => v && v.name).filter((n) => n && !excluded.has(n)));
   const subset = {};
   for (const [k, v] of Object.entries(envVars && typeof envVars === "object" ? envVars : {})) {
     if (declared.has(k)) subset[k] = v;
@@ -1607,6 +1611,8 @@ export function composeConsumedKeys(composeText) {
  * user has created it in the app. Those install blank and surface as "Needs
  * setup" → Configure, exactly as before.
  *
+ * install_required: true blocks regardless of compose (a key used only by a post-install hook).
+ *
  * Names only, never values (D5). Served to the install modal through the
  * consent-challenge response so client and server gate on the SAME list.
  */
@@ -1614,11 +1620,11 @@ export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId
   if (!bundleId || !isValidBundleId(bundleId)) return [];
   const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
   let text = "";
-  try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → nothing blocks */ }
-  if (!text) return [];
+  try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → only install_required can block */ }
   const hard = hardFailComposeKeys(text);
   return (manifest?.env_vars || [])
-    .filter((v) => v && v.required && typeof v.name === "string" && !nonBlankEnv(v.default) && hard.has(v.name))
+    .filter((v) => v && typeof v.name === "string" && !v.generate && !nonBlankEnv(v.default)
+      && (v.install_required === true || (v.required && hard.has(v.name))))
     .map((v) => v.name);
 }
 
@@ -1697,6 +1703,25 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
         extra: { code: "missing_required_env", missing_env: missingEnv },
       };
     }
+  }
+
+  // A supplied value that breaks its manifest pattern (e.g. an admin password with `$`
+  // or a space) is refused BEFORE anything is copied — never a half-install.
+  const badPattern = envPatternViolation(manifest, envVars);
+  if (badPattern) {
+    return {
+      ok: false, status: 400, code: "invalid_env",
+      error: `Environment variable '${badPattern.key}' ${badPattern.why}`,
+      extra: { code: "invalid_env", key: badPattern.key },
+    };
+  }
+  const breached = await breachedValueViolation(manifest, envVars, { fetchImpl: _breachFetchForTest || globalThis.fetch });
+  if (breached) {
+    return {
+      ok: false, status: 400, code: "invalid_env",
+      error: `Environment variable '${breached.key}' ${breached.why}`,
+      extra: { code: "invalid_env", key: breached.key },
+    };
   }
 
   // PR 3: advisory Android-app version gate. The gateway can't verify the
@@ -3096,6 +3121,10 @@ export default function bundlesRouter() {
       const badEnv = findInvalidEnv(env_vars);
       if (badEnv) {
         return res.status(400).json({ code: "invalid_env", key: badEnv.key, error: `Environment variable '${badEnv.key}' ${badEnv.why}` });
+      }
+      const badPattern = envPatternViolation(getInstalledFirstManifest(bundle_id), env_vars);
+      if (badPattern) {
+        return res.status(400).json({ code: "invalid_env", key: badPattern.key, error: `Environment variable '${badPattern.key}' ${badPattern.why}` });
       }
 
       // Read existing .env, merge with new values
