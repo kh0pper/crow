@@ -49,7 +49,7 @@
 
 Five inputs the spec implies but no tool table spells out. Each is pinned by a named test in the owning task.
 
-1. **Accented and emoji names** (Dayane writes Spanish), e.g. `Menú semanal/Recetas – 2026 🌮.xlsx`, `find:"Jalapeño"`, an event `"Cena: tacos al pastor"`. Paths round-trip NFC-encoded, and text matching works on composed characters.
+1. **Accented and emoji names** (Dayane writes Spanish), typed or stored DECOMPOSED (NFD, e.g. from a Mac or iPhone), e.g. `Menú semanal/Recetas – 2026 🌮.xlsx`, `find:"jalapeño"`, an event `"Cena: tacos al pastor con piña"`. Paths round-trip NFC-encoded, and text matching treats NFC and NFD as equal. The tests use literal `\u0301`/`\u0303` escapes, so the inputs really are NFD.
    - Pinned in Task 4 (`paths: accented + emoji segments round-trip`), Task 7 (`find_replace matches NFC/NFD-equivalent accents`) and Task 10 (`event summary with accents survives ICS round-trip`).
 2. **Two bot calls hit the same file at once** (e.g. Kitchen appends two recipe rows in parallel). Both changes land, as two versions, ≥ 1.1 s apart, and neither is lost.
    - Pinned in Task 5 (`concurrent writes to one file serialize and both apply`).
@@ -74,6 +74,25 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 - **R-SHAREDF:** a partial overwrite of a shared-formula group is refused (no formula translation in v1).
 - **R-CAL-MASTER:** `ws_cal_update_event` edits the series master only. Instance overrides are a follow-up.
 - **R-REG:** existing installs get the MCP entry through the new refresh-registration fix (Task 2). No manual mcp-addons edit is ever needed or allowed.
+
+## Review round 1 (2026-10-03, adversarial staff review: REVISE). Dispositions
+
+| # | Finding | Disposition | Where |
+|---|---|---|---|
+| C1 | The secret-skip would break kodi, media and tax Configure | Opt-in `server.configureEnv: "envKeys-only"`; kodi regression test | Task 2, Task 12 manifest |
+| C2 | Same-second version overwrite across processes; after-etag taken from a later stat | Spacing measured against the server mtime; after-etag from the PUT's `ETag`/`OC-ETag`; fake models same-second overwrite; tests for two distinct versions and a sneaky later write | Task 5 |
+| C3 | Undo/restore could overwrite typing saved by a proceed-drop | Etag re-checked inside the serialized section after the lock settles (restore and created-file undo); test | Task 5 |
+| C4 | Spike gaps | S2c (etag after labeling current), S3b (restore touches mtime back; the fake now models it), S6b (drop → unlock → bot PUT → distinct versions), S8 (calendar delete → re-create same href), visible folder name, real SPIKE check via fflate, notes master forced in the template | Task 1 |
+| I5 | Review Focus 1 not really NFD | Partly wrong: the plan file already held literal combining marks (U+0301/U+0303, verified with `od`). Converted them to `\u` escapes so no editor can normalize them away, and added an NFD event summary | Tasks 4, 7, 10 |
+| I6 | Quick edit could hit the wrong paragraph or drop links/images | Forms post back `shown`; `stale_view` refusal; `not_plain_text` for paragraphs with links/images/fields | Task 12 |
+| I7 | TZID series drifted after an update | Updates keep the existing TZID; DST update test | Task 10 |
+| I8 | A failed npm install bricks the server | `npm_required: true` + bundle `package-lock.json` | Tasks 3, 12 |
+| I9 | Crow labels overwrote human labels | Label only empty or Crow-written versions; test | Task 5 |
+| I10 | The secret test scanned the wrong thing; redirect `msg` unredacted | The test now scans results and errors, with a forced 500 that echoes secrets; route redacts | Tasks 5, 12 |
+| I11 | pi-spawned server may lack `CROW_APP_ROOT` | `~/crow` fallback + spawn-from-copy test; pi-bot acceptance step | Tasks 3, 14 |
+| I12 | Contact delete journaled after the DELETE | Journal first (calendar too) | Task 10 |
+| I13 | Calendar re-create after delete unverified | Spike S8, with a fallback ruling | Task 1 |
+| minor | Colon names, SEARCH scope encoding, xlsx soffice check, proceed double-wait, share-root trash | All fixed (`share_root` refusal added) | Tasks 4, 5, 8 |
 
 ## File map
 
@@ -271,14 +290,15 @@ for p in list(body.iterchildren()):
         body.remove(p)
 d.save(os.path.join(HERE, "blank.docx"))
 wb = Workbook(); wb.active.title = "Sheet1"; wb.save(os.path.join(HERE, "blank.xlsx"))
-pr = Presentation(); pr.save(os.path.join(HERE, "blank.pptx"))
+pr = Presentation(); _ = pr.notes_master  # python-pptx creates the notes master lazily: force it so edit_notes works on new decks
+pr.save(os.path.join(HERE, "blank.pptx"))
 print("ok")
 ```
 
 - [ ] **Step 3: Generate both sets**
 
 Run: `python3 tests/fixtures/workspace/make-fixtures.py && python3 bundles/workspace/server/templates/make-templates.py`
-Expected: `ok` twice. Six binary files exist. Check `unzip -l bundles/workspace/server/templates/blank.pptx | grep -c slideLayout` ≥ 3 and `unzip -l …/blank.pptx | grep notesMaster` (if the notes master is missing, add `pr.notes_master` access before save; python-pptx creates it lazily).
+Expected: `ok` twice. Six binary files exist. Check `unzip -l bundles/workspace/server/templates/blank.pptx | grep -c slideLayout` ≥ 3 and `unzip -l bundles/workspace/server/templates/blank.pptx | grep -c notesMaster` ≥ 1.
 
 - [ ] **Step 4: Write the spike script**
 
@@ -313,7 +333,7 @@ const versions = async (fid) => { const x = await (await dav("PROPFIND", `versio
 
 const list = await (await dav("PROPFIND", `files/${U}/Shared%20with%20Crow/`, { headers: { Depth: "1" } })).text();
 const parent = decodeURIComponent((list.match(/<d:href>\/remote\.php\/dav\/files\/crow-bot\/(Shared%20with%20Crow\/[^<]+\/)<\/d:href>/) || [])[1] || "Shared%20with%20Crow/");
-const DIR = `${parent}.w2-spike-${Date.now()}`;
+const DIR = `${parent}W2 spike ${Date.now()}`; // visible in the Files UI (dot-folders are hidden)
 fact("scratch_dir", DIR);
 fact("mkcol", (await dav("MKCOL", `files/${U}/${enc(DIR)}`)).status);
 
@@ -335,12 +355,15 @@ fact("S2_label_status", pp.status);
 fact("S2_etag_unchanged_by_label", (await stat(f)).etag === s2.etag);
 const pp2 = await dav("PROPPATCH", `versions/${U}/versions/${s2.fileid}/${s2.mtime}`, { headers: { "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propertyupdate xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns"><d:set><d:prop><nc:version-label>Crow: spike</nc:version-label></d:prop></d:set></d:propertyupdate>` });
 fact("S2b_label_current_version_status", pp2.status);
+fact("S2c_etag_unchanged_by_labeling_current", (await stat(f)).etag === s2.etag); // every undo token depends on this
 
 // S3 restore via MOVE
 const mv = await dav("MOVE", `versions/${U}/versions/${s2.fileid}/${s1.mtime}`, { headers: { Destination: `${NC}/remote.php/dav/versions/${U}/restore/target` } });
 fact("S3_restore_status", mv.status);
 fact("S3_content_after_restore", await (await dav("GET", `files/${U}/${enc(f)}`)).text());
 fact("S3_versions_after_restore", await versions(s2.fileid));
+const s3 = await stat(f);
+fact("S3b_mtime_after_restore_equals_revision", s3.mtime === s1.mtime); // NC touches back to the revision
 
 // S4 two PUTs 1.1 s apart → two versions?
 const g = `${DIR}/fast.txt`;
@@ -373,10 +396,34 @@ if (args.has("--editor-test")) {
   for (let i = 0; i < 30; i++) { await sleep(1000); if ((await stat(e)).lock !== "1") { cleared = (Date.now() - t0) / 1000; break; } }
   fact("S6_seconds_until_unlock", cleared);
   const after = Buffer.from(await (await dav("GET", `files/${U}/${enc(e)}`)).arrayBuffer());
-  fact("S6_typing_saved_contains_SPIKE", after.includes(Buffer.from("SPIKE")) || (await import("node:zlib")) && "check-manually");
-  fact("S6_versions", await versions(st.fileid));
+  const { unzipSync, strFromU8 } = await import("fflate");
+  fact("S6_typing_saved_contains_SPIKE", strFromU8(unzipSync(new Uint8Array(after))["word/document.xml"]).includes("SPIKE"));
+  const vAfterDrop = await versions(st.fileid);
+  fact("S6_versions", vAfterDrop);
+  // S6b: the real proceed sequence: bot PUT right after the unlock, honouring the ≥1.1 s mtime gap
+  const sNow = await stat(e);
+  await sleep(Math.max(0, (sNow.mtime + 1.1) * 1000 - Date.now()));
+  fact("S6b_bot_put_after_unlock_status", (await dav("PUT", `files/${U}/${enc(e)}`, { headers: { "If-Match": sNow.etag }, body: after })).status);
+  const vFinal = await versions(st.fileid);
+  fact("S6b_person_save_and_bot_write_are_distinct_versions", vFinal.length === vAfterDrop.length + 1);
   console.log("[KEVIN] What did the editor tab show after the drop? Type a short description and press Enter:");
   fact("S6_editor_ui", String(await new Promise((r) => process.stdin.once("data", r))).trim());
+}
+
+// S8: calendar delete → re-create at the same href/UID (the undo path) while NC's calendar trash holds it.
+// Needs a calendar crow-bot can write; skipped (fact = "skipped") until Kevin has shared Menu with crow-bot.
+{
+  const home = await (await dav("PROPFIND", `calendars/${U}/`, { headers: { Depth: "1" } })).text();
+  const href = (home.match(/<d:href>(\/remote\.php\/dav\/calendars\/crow-bot\/[^<]*menu[^<]*\/)<\/d:href>/i) || [])[1];
+  if (!href) fact("S8_cal_delete_then_recreate", "skipped (Menu not shared with crow-bot yet)");
+  else {
+    const uid = `w2-spike-${Date.now()}`; const obj = `${href}${uid}.ics`.replace("/remote.php/dav/", "");
+    const ics = `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Crow//spike//EN\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nDTSTAMP:20261003T000000Z\r\nDTSTART;VALUE=DATE:20300101\r\nDTEND;VALUE=DATE:20300102\r\nSUMMARY:W2 spike\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`;
+    await dav("PUT", obj, { headers: { "Content-Type": "text/calendar" }, body: ics });
+    await dav("DELETE", obj);
+    fact("S8_cal_recreate_same_href_after_delete_status", (await dav("PUT", obj, { headers: { "Content-Type": "text/calendar", "If-None-Match": "*" }, body: ics })).status);
+    await dav("DELETE", obj);
+  }
 }
 
 if (args.has("--capture-fixtures")) {
@@ -407,7 +454,10 @@ Expected:
 - `S2_label_status` 207, `S2_etag_unchanged_by_label` true, and `S2b_label_current_version_status` 207 (if the current version can't be labeled, `finishWrite` keeps only the "Before" label and the results file says so);
 - `S3_restore_status` 201 or 204, and the content after restore is `one`;
 - `S4_versions_for_three_puts_1100ms` = 3;
-- `S5_info_no_session.error` = 1.
+- `S5_info_no_session.error` = 1;
+- `S2c_etag_unchanged_by_labeling_current` true (undo tokens depend on it; if false, `finish()` must take the after-etag from a stat AFTER labeling and the spec's §5.4 note changes);
+- `S3b_mtime_after_restore_equals_revision` true (the fake models it; if false, change the fake's MOVE-restore);
+- `S8_cal_recreate_same_href_after_delete_status` 201 (or "skipped"; then Task 14 Step 3 re-runs the spike's S8 after Menu is shared). If it is not 201, calendar undo-of-delete must re-create under a NEW href with the same UID: change `pimUndo`'s delete branch to `putObject(cfg, newObjectHref(coll, uid + "-restored"…)` and record it.
 
 Any other value: stop. Record it in the results file and apply R-COLLIDE / R-EXPIRY.
 
@@ -424,6 +474,7 @@ Expected:
 - `S6_put_while_open_status` = 423;
 - `S6_info.users` contains `<instanceid>_admin`;
 - `S6_drop.error` = 0;
+- `S6b_bot_put_after_unlock_status` 204 and `S6b_person_save_and_bot_write_are_distinct_versions` true;
 - `S6_seconds_until_unlock` ≤ 30;
 - Kevin's `SPIKE` is in the saved file. If the byte check prints `check-manually`, run `unzip -p` on a downloaded copy and grep `word/document.xml` for SPIKE.
 
@@ -459,7 +510,7 @@ git show --stat HEAD
 - Test: `tests/mcp-addons-secret-skip.test.js`, `tests/bundle-refresh-mcp-register.test.js`
 
 **Interfaces:**
-- Produces: `applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null)` skips keys whose manifest entry has `secret: true` or `generate` set, unless the key is in `manifest.server.envKeys`.
+- Produces: `applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null)`. **Only when `manifest.server.configureEnv === "envKeys-only"`** (opt-in; Workspace sets it) does it skip keys whose manifest entry has `secret: true` or `generate` set, unless they are in `server.envKeys`. Every other bundle is unchanged: kodi, media and tax read unlisted secrets from `process.env` (review C1).
 - Produces: `refreshVersionedBundle` writes `{command, args, env?}` for `id` when the repo manifest has `server` and mcp-addons.json has no `id` entry. It adds `"mcp-addons entry"` to `touched` and never rewrites an existing entry.
 - Produces: `export function mcpAddonEntryFor(manifest, reqEnv = null)`, extracted from install (bundles.js:2189-2216) and used by both install and refresh.
 
@@ -483,7 +534,7 @@ before(async () => {
 
 const manifest = {
   id: "workspace",
-  server: { command: "node", args: ["server/index.js"], envKeys: ["PUBLIC_KEY_LISTED"] },
+  server: { command: "node", args: ["server/index.js"], envKeys: ["PUBLIC_KEY_LISTED"], configureEnv: "envKeys-only" },
   env_vars: [
     { name: "WORKSPACE_ADMIN_PASSWORD", secret: true },
     { name: "WORKSPACE_DB_PASSWORD", secret: true, generate: "secret" },
@@ -503,6 +554,15 @@ test("Configure never copies secret or generated keys into mcp-addons.json", () 
   assert.doesNotMatch(text, /hunter2|dbpw/);
   const env = JSON.parse(text).workspace.env;
   assert.deepEqual(env, { PUBLIC_KEY_LISTED: "ok-listed", WORKSPACE_PUBLIC_HOST: "crow.example.ts.net" });
+});
+
+test("bundles that did not opt in (kodi) still receive their secrets on Configure (regression)", async () => {
+  const { readFileSync: rf } = await import("node:fs");
+  const kodi = JSON.parse(rf(join(import.meta.dirname, "..", "bundles", "kodi", "manifest.json"), "utf8"));
+  const p = join(dir, "mcp-addons-kodi.json");
+  writeFileSync(p, JSON.stringify({ kodi: { command: "node", args: ["server/index.js"] } }));
+  B.applyEnvToMcpAddons("kodi", { KODI_PASSWORD: "k-secret" }, p, kodi);
+  assert.equal(JSON.parse(readFileSync(p, "utf8")).kodi.env.KODI_PASSWORD, "k-secret");
 });
 
 test("without a manifest the old behaviour is unchanged (back-compat)", () => {
@@ -588,9 +648,13 @@ export function mcpAddonEntryFor(manifest, reqEnv = null) {
   return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}) };
 }
 
-/** Keys Configure may push into an MCP entry: never a secret/generated one unless the server asks for it. */
+/**
+ * Keys Configure may push into an MCP entry. OPT-IN (review C1): only a manifest whose server declares
+ * `configureEnv: "envKeys-only"` is filtered. kodi/media/tax read secrets from process.env that they do
+ * not list in envKeys, so filtering everyone would silently break their Configure.
+ */
 function mcpForwardableKeys(manifest) {
-  if (!manifest) return null; // legacy callers: no filter
+  if (!manifest || manifest.server?.configureEnv !== "envKeys-only") return null; // unchanged behaviour
   const listed = new Set(manifest.server?.envKeys || []);
   const blocked = new Set((manifest.env_vars || []).filter((v) => v && (v.secret === true || v.generate) && !listed.has(v.name)).map((v) => v.name));
   return (k) => !blocked.has(k);
@@ -772,7 +836,7 @@ Run: `npm install --save-dev fflate@^0.8.3 @xmldom/xmldom@^0.9.12 ical.js@^2.2.1
 
 (Replace the `marked` placeholder with root `package.json`'s exact range before committing; run `node -e "console.log(require('./package.json').dependencies.marked)"`.)
 
-`bundles/workspace/server/app-root.js`: copy `bundles/browser/server/app-root.js` verbatim (same header comment).
+`bundles/workspace/server/app-root.js`: copy `bundles/browser/server/app-root.js`, then (review I11) add one more candidate after the relative guess: `join(homedir(), "crow")`. pi bots spawn this server from the raw mcp-addons block (`scripts/pi-bots/ext_registry.mjs`), and whether `CROW_APP_ROOT` reaches that process is unverified. From an installed copy, the relative guess resolves to `~`, not the repo. The resolver must therefore never leave `APP_ROOT` pointing at a directory without `servers/db.js` when `~/crow` has one. Add a test to `tests/workspace-config.test.js`: spawn `node bundles/workspace/server/index.js` from a COPY of the bundle in a temp dir, with `CROW_APP_ROOT` unset and `HOME` pointing at a temp dir that symlinks `crow` → the repo; it must start and answer `tools/list` (use `StdioClientTransport`).
 
 `bundles/workspace/server/result.js`:
 
@@ -911,8 +975,10 @@ Expected: PASS. If `bundle-server-deps` complains, the manifest `server` block i
 - [ ] **Step 5: Commit**
 
 ```bash
-git add bundles/workspace/package.json bundles/workspace/server/index.js bundles/workspace/server/server.js bundles/workspace/server/app-root.js bundles/workspace/server/result.js bundles/workspace/server/config.js tests/workspace-config.test.js
-git commit package.json package-lock.json bundles/workspace/package.json bundles/workspace/server tests/workspace-config.test.js tests/workspace-bundle.test.js -m "feat(workspace): W2 server scaffold — lazy .env config via codec, result envelope, deps"
+# npm_required (Task 12) uses `npm ci` when a lock file exists: generate and commit one now
+(cd bundles/workspace && npm install --package-lock-only --ignore-scripts)
+git add bundles/workspace/package-lock.json bundles/workspace/package.json bundles/workspace/server/index.js bundles/workspace/server/server.js bundles/workspace/server/app-root.js bundles/workspace/server/result.js bundles/workspace/server/config.js tests/workspace-config.test.js
+git commit package.json package-lock.json bundles/workspace/package.json bundles/workspace/package-lock.json bundles/workspace/server tests/workspace-config.test.js tests/workspace-bundle.test.js -m "feat(workspace): W2 server scaffold — lazy .env config via codec, result envelope, deps"
 git show --stat HEAD
 ```
 
@@ -955,7 +1021,7 @@ git show --stat HEAD
   - `fileRef`, `writeOpts` (zod shapes)
   - `refOf(args) → {path?|file_id?}`
   - `toPublic(entry, cfg) → {path, name, file_id, type, size, modified, mime, locked, web_url}`
-- Produces the helper `startFakeNextcloud({ secret }) → { ncUrl, ooUrl, state, calls, addFile(path, bytes, opts), addFolder(path, opts), close() }` in `tests/helpers/workspace-fake-nextcloud.js`.
+- Produces the helper `startFakeNextcloud({ secret }) → { ncUrl, ooUrl, state, calls, addFile(path, bytes, opts), addFolder(path, opts), close() }` in `tests/helpers/workspace-fake-nextcloud.js`. `state.realisticMtime` (opt-in) models wall-clock mtimes and same-second version overwrite. MOVE-restore models touch-to-revision. Task 1's spike results are the reference for both: if S3b/S6b observed something different, change the fake to match before Task 5.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -973,12 +1039,16 @@ test("traversal, URLs, control chars and backslashes are refused before any requ
   }
 });
 
+test("a colon in a name is fine; only URL schemes are refused", () => {
+  assert.deepEqual(splitPath("Notas: casa/lista.docx"), ["Notas: casa", "lista.docx"]);
+});
+
 test("leading slash means drive root; trailing slash ignored", () => {
   assert.deepEqual(splitPath("/Shared with Crow/Casa Nueva/"), ["Shared with Crow", "Casa Nueva"]);
 });
 
 test("paths: accented + emoji segments round-trip (Review Focus 1)", () => {
-  const p = "Shared with Crow/Menú semanal/Recetas – 2026 🌮.xlsx"; // decomposed é
+  const p = "Shared with Crow/Menu\u0301 semanal/Recetas – 2026 🌮.xlsx"; // decomposed é (U+0301): must come back NFC
   const segs = splitPath(p);
   assert.equal(segs[1], "Menú semanal"); // NFC
   const url = filesUrl(cfg, segs);
@@ -1173,7 +1243,9 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
   };
   const calls = [];
   let lastSearch = "";
-  const touch = (n) => { n.etag = `"e${++etagN}"`; n.mtime = ++clockS; };
+  // Real Nextcloud: mtime = wall-clock seconds; a write in the same second as the current version REPLACES that
+  // version row (files_versions FileEventsListener.php:326-333). Tests opt in via state.realisticMtime = () => seconds.
+  const touch = (n) => { n.etag = `"e${++etagN}"`; n.mtime = state.realisticMtime ? state.realisticMtime() : ++clockS; };
   const mkNode = (path, type, opts = {}) => { const n = { path, type, fileId: ++nextId, owner: opts.owner || "crow-bot", perms: opts.perms || (type === "dir" ? "SRGDNVCK" : "SRGDNVW"), lock: opts.lock || null, bytes: Buffer.alloc(0), versions: [], label: null }; touch(n); nodes.set(path, n); return n; };
   mkNode("", "dir");
   const ensureParents = (path) => { const segs = path.split("/"); for (let i = 1; i < segs.length; i++) { const p = segs.slice(0, i).join("/"); if (!nodes.has(p)) mkNode(p, "dir", { owner: "admin" }); } };
@@ -1211,7 +1283,12 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
   const readBody = (req) => new Promise((r) => { const b = []; req.on("data", (c) => b.push(c)); req.on("end", () => r(Buffer.concat(b))); });
   const pathFromUrl = (u, prefix) => decodeURIComponent(u.slice(prefix.length)).replace(/\/$/, "");
   const lockBlocks = (n) => n.lock && !(n.lock.type === 0 && n.lock.owner === "crow-bot");
-  const writeContent = (n, bytes, author = "crow-bot") => { n.bytes = Buffer.from(bytes); touch(n); n.versions.push({ id: n.mtime, bytes: n.bytes, label: null, author }); };
+  const writeContent = (n, bytes, author = "crow-bot", mtime = null) => {
+    n.bytes = Buffer.from(bytes); touch(n); if (mtime !== null) n.mtime = mtime;
+    const last = n.versions.at(-1);
+    if (last && last.id === n.mtime) Object.assign(last, { bytes: n.bytes, author }); // same-second overwrite, like NC
+    else n.versions.push({ id: n.mtime, bytes: n.bytes, label: null, author });
+  };
 
   const nc = http.createServer(async (req, res) => {
     const auth = Buffer.from((req.headers.authorization || "").replace(/^Basic /, ""), "base64").toString();
@@ -1219,6 +1296,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
     const body = await readBody(req);
     calls.push({ method: req.method, url: req.url, user, headers: req.headers });
     if (user !== "crow-bot" || !pass) { res.writeHead(401); return res.end(); }
+    if (state.failNextWith) { const f = state.failNextWith; state.failNextWith = null; res.writeHead(f.status); return res.end(f.body); }
     const send = (code, text = "", headers = {}) => { res.writeHead(code, { "Content-Type": "application/xml; charset=utf-8", ...headers }); res.end(text); };
     const u = req.url;
     // ---- files ----
@@ -1238,7 +1316,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
         if (req.headers["if-match"] && (!n || req.headers["if-match"] !== n.etag)) return send(412);
         if (!nodes.get(p.split("/").slice(0, -1).join("/"))) return send(409);
         if (!n) { const m = mkNode(p, "file"); m.bytes = body; m.versions.push({ id: m.mtime, bytes: body, label: null, author: "crow-bot" }); return send(201, "", { ETag: m.etag }); }
-        writeContent(n, body); return send(204, "", { ETag: n.etag });
+        writeContent(n, body); const putTag = n.etag; state.afterPutHook?.(n); return send(204, "", { ETag: putTag, "OC-ETag": putTag });
       }
       if (req.method === "MKCOL") { if (n) return send(405); mkNode(p, "dir"); return send(201); }
       if (req.method === "DELETE") { if (!n) return send(404); if (lockBlocks(n)) return send(423); for (const k of [...nodes.keys()]) if (k === p || k.startsWith(`${p}/`)) { state.trash.push(nodes.get(k)); nodes.delete(k); } return send(204); }
@@ -1275,7 +1353,8 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
         n.versions.map((v) => `<d:response><d:href>/remote.php/dav/versions/crow-bot/versions/${n.fileId}/${v.id}</d:href><d:propstat><d:prop><d:getlastmodified>${new Date(v.id * 1000).toUTCString()}</d:getlastmodified><d:getcontentlength>${v.bytes.length}</d:getcontentlength><nc:version-label>${xmlEsc(v.label || "")}</nc:version-label><nc:version-author>${v.author}</nc:version-author></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join("")));
       const v = n.versions.find((x) => String(x.id) === vm[2]); if (!v) return send(404);
       if (req.method === "PROPPATCH") { v.label = (body.toString().match(/<nc:version-label>([\s\S]*?)<\/nc:version-label>/) || [])[1] || null; return send(207, ms("")); }
-      if (req.method === "MOVE") { if (lockBlocks(n)) return send(423); writeContent(n, v.bytes); return send(201); }
+      // Real NC restore touches the file back to the revision's mtime (files_versions Storage.php:408).
+      if (req.method === "MOVE") { if (lockBlocks(n)) return send(423); const cur = n.versions.at(-1); const restored = { ...v }; n.bytes = Buffer.from(v.bytes); n.etag = `"e${++etagN}"`; n.mtime = v.id; n.versions.push({ id: cur.id + 1, bytes: cur.bytes, label: cur.label, author: cur.author }); n.versions = n.versions.filter((x) => x !== cur); n.versions.push({ ...restored, id: v.id }); n.versions = n.versions.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i); return send(201); }
     }
     // ---- principals ----
     const pm = u.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
@@ -1392,7 +1471,7 @@ export function splitPath(p) {
   if (typeof p !== "string") throw new WsError("bad_path", "path must be text");
   const s = p.normalize("NFC");
   if (s.length > 4096) throw new WsError("bad_path", "path is too long");
-  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) throw new WsError("bad_path", "use a path inside Crow's Workspace drive, not a URL");
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^(file|data|javascript|mailto):/i.test(s)) throw new WsError("bad_path", "use a path inside Crow's Workspace drive, not a URL"); // "Notas: casa/x.docx" is a fine name
   const body = s.replace(/^\//, "").replace(/\/$/, "");
   if (!body) throw new WsError("bad_path", "path is empty; use \"\" only where a folder may be the drive root");
   const segs = body.split("/");
@@ -1548,7 +1627,8 @@ export const copy = (cfg, from, to) => moveOrCopy(cfg, "COPY", from, to);
 export async function remove(cfg, segs) { const r = await ncFetch(cfg, "DELETE", filesUrl(cfg, segs)); if (r.status !== 204) throw httpFail(r, "move it to the trash"); }
 
 async function search(cfg, where, scopeSegs, limit, foldersOnly = false) {
-  const scope = `/files/${cfg.user}${scopeSegs.length ? `/${scopeSegs.map(xmlEscape).join("/")}` : ""}`;
+  // Sabre URL-decodes the scope href: encode each segment (a name with "%" or "#" must survive), then XML-escape.
+  const scope = `/files/${encodeURIComponent(cfg.user)}${scopeSegs.length ? `/${scopeSegs.map((x) => xmlEscape(encodeURIComponent(x))).join("/")}` : ""}`;
   const w = foldersOnly ? `<d:and>${where}<d:is-collection/></d:and>` : where;
   const body = `<?xml version="1.0" encoding="UTF-8"?><d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:basicsearch><d:select><d:prop>${PROPS}</d:prop></d:select><d:from><d:scope><d:href>${scope}</d:href><d:depth>infinity</d:depth></d:scope></d:from><d:where>${w}</d:where><d:orderby><d:order><d:prop><d:getlastmodified/></d:prop><d:descending/></d:order></d:orderby><d:limit><d:nresults>${limit}</d:nresults></d:limit></d:basicsearch></d:searchrequest>`;
   const res = await ncFetch(cfg, "SEARCH", `${cfg.ncUrl}/remote.php/dav/`, { headers: { "Content-Type": "text/xml; charset=utf-8" }, body });
@@ -1854,6 +1934,42 @@ test("undo restores the before-version; refuses once the file changed since", as
   await assert.rejects(W.undoFileChange(cfg, { path: "S/u.txt" }, r2.version_id, { clock }), (e) => e.code === "changed_since");
 });
 
+test("undo with proceed: the editor's drop-save changes the file → changed_since, nothing restored (review C3)", async () => {
+  fake.addFile("S/up.docx", Buffer.from("orig"));
+  const r = await W.withFileWrite(cfg, { path: "S/up.docx" }, appendMut("+bot"), { clock });
+  fake.openInEditor("S/up.docx", ["admin"], { releaseAfterMs: 3000, typed: Buffer.from("orig+bot+kevin") });
+  await assert.rejects(W.undoFileChange(cfg, { path: "S/up.docx" }, r.version_id, { clock, ifOpen: "proceed" }), (e) => e.code === "changed_since");
+  assert.equal(text(fake.node("S/up.docx").bytes), "orig+bot+kevin");
+});
+
+test("proceed: the person's save and the bot write become two DISTINCT versions (same-second overwrite modelled, review C2)", async () => {
+  fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
+  fake.addFile("S/two.docx", Buffer.from("base"));
+  fake.openInEditor("S/two.docx", ["admin"], { releaseAfterMs: 500, typed: Buffer.from("base+kevin") });
+  const v0 = fake.versionsOf("S/two.docx").length;
+  await W.withFileWrite(cfg, { path: "S/two.docx" }, appendMut("+bot"), { clock, ifOpen: "proceed" });
+  const vs = fake.versionsOf("S/two.docx");
+  assert.equal(vs.length, v0 + 2, "kevin's save and the bot write are separate rows");
+  assert.equal(vs.at(-2).bytes.toString(), "base+kevin");
+  fake.state.realisticMtime = null;
+});
+
+test("version_id carries the PUT's own etag, not a later write's", async () => {
+  fake.addFile("S/et.txt", Buffer.from("a"));
+  fake.state.afterPutHook = (n) => { if (n.path === "S/et.txt") { n.bytes = Buffer.from("a+bot+sneaky"); n.etag = '"sneaky"'; } };
+  const r = await W.withFileWrite(cfg, { path: "S/et.txt" }, appendMut("+bot"), { clock });
+  fake.state.afterPutHook = null;
+  assert.notEqual(W.decodeVersionId(r.version_id).a, "sneaky");
+  await assert.rejects(W.undoFileChange(cfg, { path: "S/et.txt" }, r.version_id, { clock }), (e) => e.code === "changed_since");
+});
+
+test("a person's own version label is never overwritten (review I9)", async () => {
+  const n = fake.addFile("S/lab.txt", Buffer.from("a"));
+  n.versions[0].label = "Kevin: final draft";
+  await W.withFileWrite(cfg, { path: "S/lab.txt" }, appendMut("b"), { clock });
+  assert.equal(fake.versionsOf("S/lab.txt")[0].label, "Kevin: final draft");
+});
+
 test("undo of a created file moves it to the trash; a forged version_id is refused", async () => {
   fake.addFolder("S/new");
   const c = await W.createFile(cfg, ["S", "new"], "made.txt", Buffer.from("hi"), { label: "Crow", summary: "create" });
@@ -2046,26 +2162,43 @@ async function guard(cfg, ref, opts) {
   return { segs, e0 };
 }
 
-async function finish(cfg, segs, fileId, beforeVersion, out, label, clock) {
+async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, putEtag = "") {
   lastWrite.set(fileId, clock.now());
   const after = await stat(cfg, segs);
+  const afterEtag = putEtag || after.etag;
   const summary = clip(out.summary || "edit", 100);
-  const okB = beforeVersion === "0" ? true : await labelVersion(cfg, fileId, beforeVersion, clip(`Before ${label}: ${summary}`, 120)).then(() => true, () => false);
+  // Review I9: never overwrite a label a person gave a version; only fill empty or Crow-written ones.
+  const existing = beforeVersion === "0" ? null : (await listVersions(cfg, fileId).catch(() => [])).find((v) => v.versionId === beforeVersion);
+  const mayLabel = existing && (!existing.label || /^(Before )?(Crow|Undo|Quick edit)\b/.test(existing.label));
+  const okB = beforeVersion === "0" || !mayLabel ? true : await labelVersion(cfg, fileId, beforeVersion, clip(`Before ${label}: ${summary}`, 120)).then(() => true, () => false);
   const okA = await labelVersion(cfg, fileId, String(after.mtime), clip(`${label}: ${summary}`, 120)).then(() => true, () => false);
   return {
     ...(out.data || {}), path: after.path, file_id: fileId, changed: out.changed,
-    version_id: encodeVersionId({ f: fileId, b: beforeVersion, a: after.etag }), version_label: `${label}: ${summary}`,
+    version_id: encodeVersionId({ f: fileId, b: beforeVersion, a: afterEtag }), version_label: `${label}: ${summary}`,
     ...(okA && okB ? {} : { label_warning: "Saved, but Workspace did not accept the version label." }),
   };
+}
+
+/**
+ * Review C2: Nextcloud keys versions by mtime SECONDS and overwrites the version row when two writes
+ * share an mtime (files_versions FileEventsListener.php:326-333), across ALL processes (pi bots spawn
+ * their own server; Quick edit runs in the gateway). So the spacing rule is enforced against the
+ * SERVER's current mtime, not just this process's last write: never PUT until ≥ 1.1 s after the
+ * file's current mtime. This also separates an editor's drop-save from the bot write on top of it.
+ */
+async function mtimeGap(cur, clock) {
+  const ageMs = clock.now() - cur.mtime * 1000;
+  if (ageMs < WRITE_SPACING_MS) await clock.sleep(WRITE_SPACING_MS - Math.max(0, ageMs));
 }
 
 export async function withFileWrite(cfg, ref, mutate, { waitS = 30, ifOpen = "wait", label = "Crow", clock }) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
     for (let attempt = 0; ; attempt++) {
-      const e = await settleLock(cfg, segs, { waitS, ifOpen, clock });
+      const e = await settleLock(cfg, segs, { waitS: ifOpen === "proceed" ? 0 : waitS, ifOpen, clock });
       await spacing(e.fileId, clock);
-      const cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
+      let cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
+      if (clock.now() - cur.mtime * 1000 < WRITE_SPACING_MS) { await mtimeGap(cur, clock); cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES }); }
       const out = await mutate(cur.bytes, e);
       if (!out || !out.changed) return { ...(out?.data || {}), path: e.path, file_id: e.fileId, changed: 0, version_id: null };
       const res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag });
@@ -2073,17 +2206,26 @@ export async function withFileWrite(cfg, ref, mutate, { waitS = 30, ifOpen = "wa
       if (res.status === 412) throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`);
       if (res.status === 423) { const again = await stat(cfg, segs); if (again.lock) { const c = await classifyLock(cfg, again); throw new WsError(c.code, c.message, c.data); } throw new WsError("locked", "The file is locked; try again."); }
       if (!res.ok) throw httpFail(res, "save the change");
-      return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock);
+      // Review C2: the after-etag is the one THIS PUT produced (ETag / OC-ETag header), never a later
+      // stat that could include someone else's write; finish() falls back to stat only if both are absent.
+      return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, normEtag(res.headers.get("oc-etag") || res.headers.get("etag") || ""));
     }
   });
 }
 
-export async function withFileRestore(cfg, ref, versionId, { waitS = 30, ifOpen = "wait", label = "Crow", summary = "restore", clock }) {
+export async function withFileRestore(cfg, ref, versionId, { waitS = 30, ifOpen = "wait", label = "Crow", summary = "restore", clock, expectEtag = null }) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
     for (let attempt = 0; ; attempt++) {
-      const e = await settleLock(cfg, segs, { waitS, ifOpen, clock });
+      // NOTE (review C4b): a restore touches the file back to the revision's mtime, so after a restore the
+      // "current" version id equals the restored revision's id. finish() then labels that row "Undo: …",
+      // which is the intended reading in the version sidebar ("this content is current again because of undo").
+      const e = await settleLock(cfg, segs, { waitS: ifOpen === "proceed" ? 0 : waitS, ifOpen, clock });
       await spacing(e.fileId, clock);
+      await mtimeGap(e, clock);
+      // Review C3: re-check AFTER the lock settled (a proceed-drop saves the person's typing, which
+      // changes the etag). Undo must never restore over work that landed after the Crow edit.
+      if (expectEtag !== null) { const now = await stat(cfg, segs); if (normEtag(now.etag) !== expectEtag) throw new WsError("changed_since", `"${now.name}" changed after that edit (last modified ${now.modified}); nothing was undone. Use ws_drive_list_versions and ws_drive_restore_version to choose explicitly.`, { modified: now.modified }); }
       const res = await restoreVersion(cfg, e.fileId, versionId);
       if (res.status === 423 && attempt === 0) continue;
       if (![201, 204].includes(res.status)) throw httpFail(res, "restore that version");
@@ -2108,12 +2250,16 @@ export async function undoFileChange(cfg, ref, versionId, opts) {
   if (e.fileId !== v.f) throw new WsError("bad_version_id", "That version_id belongs to a different file.");
   if (normEtag(e.etag) !== v.a) throw new WsError("changed_since", `"${e.name}" changed after that edit (last modified ${e.modified}). Nothing was undone. To go back anyway, use ws_drive_list_versions and ws_drive_restore_version.`, { modified: e.modified });
   if (v.b === "0") {
-    await settleLock(cfg, segs, { waitS: opts.waitS ?? 30, ifOpen: opts.ifOpen ?? "wait", clock: opts.clock });
-    await remove(cfg, segs);
-    return { path: e.path, file_id: e.fileId, undone: "The file Crow created was moved to the Workspace trash." };
+    return serialized(e.fileId, async () => {
+      await settleLock(cfg, segs, { waitS: opts.ifOpen === "proceed" ? 0 : opts.waitS ?? 30, ifOpen: opts.ifOpen ?? "wait", clock: opts.clock });
+      const now = await stat(cfg, segs); // review C3: re-check after the lock settled
+      if (normEtag(now.etag) !== v.a) throw new WsError("changed_since", `"${now.name}" was changed after Crow created it; it was not removed.`, { modified: now.modified });
+      await remove(cfg, segs);
+      return { path: e.path, file_id: e.fileId, undone: "The file Crow created was moved to the Workspace trash." };
+    });
   }
   if (!(await listVersions(cfg, v.f)).some((x) => x.versionId === v.b)) throw new WsError("version_gone", "Workspace no longer keeps the version from before that edit, so it cannot be undone automatically.");
-  return withFileRestore(cfg, segs, v.b, { ...opts, label: "Undo", summary: "undo of a Crow edit" });
+  return withFileRestore(cfg, segs, v.b, { ...opts, label: "Undo", summary: "undo of a Crow edit", expectEtag: v.a });
 }
 ```
 
@@ -2205,8 +2351,14 @@ test("trash refuses an open file and names who has it", async () => {
   assert.equal(r.code, "open_in_editor"); assert.deepEqual(r.data.open_by, ["Dayane"]);
 });
 
-test("no tool result ever contains the app password or JWT secret", () => {
-  for (const c of fake.calls) assert.doesNotMatch(JSON.stringify(c.body || ""), /pw-secret-123/);
+test("no tool RESULT or ERROR ever contains the app password or JWT secret (spec §10.1)", async () => {
+  const outs = [];
+  outs.push(await call("ws_drive_list_folder", { path: "S" }));
+  outs.push(await call("ws_drive_get_metadata", { path: "S/does-not-exist" }));
+  fake.state.failNextWith = { status: 500, body: "boom pw-secret-123 jwt" };
+  outs.push(await call("ws_drive_list_folder", { path: "S" }));
+  for (const o of outs) assert.doesNotMatch(JSON.stringify(o), /pw-secret-123|"jwt"|Bearer|Basic /);
+  for (const c of fake.calls) assert.doesNotMatch(c.url, /pw-secret-123/);
 });
 ```
 
@@ -2276,7 +2428,15 @@ export const driveWriteDefs = [
     run: async ({ path, new_name }, { getConfig }) => { const cfg = getConfig(); const from = splitPath(path); const name = checkName(new_name); await move(cfg, from, [...from.slice(0, -1), name]); return { old_name: from.at(-1), name, path: joinPath([...from.slice(0, -1), name]) }; } },
   { name: "ws_drive_trash_file", description: "Move a file or folder to the Workspace trash (recoverable). Destructive: confirm intent with the user first.",
     schema: { ...fileRef, wait_s: writeOpts.wait_s },
-    run: async (args, { getConfig, clock }) => { const cfg = getConfig(); const segs = await resolveRef(cfg, refOf(args)); const e = await stat(cfg, segs); await refuseIfOpen(cfg, e, args.wait_s ?? 30, clock); await remove(cfg, segs); return { trashed: true, path: e.path }; } },
+    run: async (args, { getConfig, clock }) => {
+      const cfg = getConfig(); const segs = await resolveRef(cfg, refOf(args)); const e = await stat(cfg, segs);
+      // A share's mount point (owned by someone else, top of what was shared) is not trashed by DELETE: Nextcloud
+      // only UNSHARES it from Crow bot. Say so instead of claiming "trashed".
+      const parent = segs.length > 1 ? await stat(cfg, segs.slice(0, -1)) : null;
+      const isShareRoot = e.ownerId && e.ownerId !== cfg.user && (!parent || parent.ownerId !== e.ownerId);
+      if (isShareRoot) throw new WsError("share_root", `"${e.name}" is shared with Crow bot by ${e.ownerName || e.ownerId}; deleting it would only remove Crow's access, not the files. Ask the owner to delete it, or trash items inside it.`);
+      await refuseIfOpen(cfg, e, args.wait_s ?? 30, clock); await remove(cfg, segs); return { trashed: true, path: e.path };
+    } },
   { name: "ws_drive_upload_file", description: "Create a NEW file from text or base64 (max 10 MB). Never overwrites.",
     schema: { folder: z.string().max(4096), name: z.string().min(1).max(255), text: z.string().optional(), base64: z.string().optional() },
     run: async (args, { getConfig, clock }) => { const cfg = getConfig(); return createFile(cfg, splitFolder(args.folder), checkName(args.name), decodeContent(args), { summary: `upload ${args.name}`, clock }); } },
@@ -2973,7 +3133,7 @@ for (const src of ["rich.docx", "oo-rich.docx"]) {
   test(`${src}: find_replace never matches across w:tab; NFC/NFD-equivalent accents match (Review Focus 1)`, async () => {
     put(`tab-${src}`, src);
     assert.equal((await call("ws_docs_find_replace", { path: `S/tab-${src}`, find: "Tabseparated", replace: "x" })).data.total_changes, 0);
-    assert.equal((await call("ws_docs_find_replace", { path: `S/tab-${src}`, find: "jalapeño", replace: "chipotle" })).data.total_changes, 1);
+    assert.equal((await call("ws_docs_find_replace", { path: `S/tab-${src}`, find: "jalapen\u0303o", replace: "chipotle" })).data.total_changes, 1);
   });
 
   test(`${src}: batch pairs are atomic — one PUT, one version`, async () => {
@@ -3556,6 +3716,13 @@ test("oo-rich.xlsx (ONLYOFFICE-saved): cached values are present and formatted",
   assert.equal(r.data.stale_formulas, false);
   const t = await call("ws_sheets_read", { path: "S/o.xlsx", range: "'Menú semanal'!A1:B1" });
   assert.deepEqual(t.data.values[0], ["Jueves", "Tacos"]);
+});
+
+test("an edited workbook still opens in LibreOffice (spec §10.1 smoke check, xlsx)", async () => {
+  put("lo.xlsx", "oo-rich.xlsx");
+  await call("ws_sheets_write", { path: "S/lo.xlsx", range: "Recetas!A30", values: [["=SUM(B2:B4)"]] });
+  const { sofficeOpens } = await import("./helpers/ooxml-assert.js");
+  if (sofficeOpens(bytesOf("S/lo.xlsx"), "xlsx") === null) console.log("# soffice not installed: LibreOffice smoke check skipped");
 });
 
 test("write keeps cell styles, sets fullCalcOnLoad, drops calcChain, touches only the sheet/workbook parts", async () => {
@@ -4691,7 +4858,7 @@ let fake, pim, call, close, home;
 before(async () => {
   fake = await startFakeNextcloud(); pim = installFakePim(fake);
   pim.addCalendar("menu_shared_by_admin", "Menu"); pim.addCalendar("feriados", "Feriados", { writable: false });
-  pim.addEvent("menu_shared_by_admin", "cena.ics", cal("BEGIN:VEVENT", "UID:cena-1", "DTSTAMP:20261001T000000Z", "DTSTART;TZID=America/Chicago:20261022T180000", "DTEND;TZID=America/Chicago:20261022T190000", "RRULE:FREQ=WEEKLY;COUNT=3", "SUMMARY:Cena: tacos al pastor", "END:VEVENT"));
+  pim.addEvent("menu_shared_by_admin", "cena.ics", cal("BEGIN:VEVENT", "UID:cena-1", "DTSTAMP:20261001T000000Z", "DTSTART;TZID=America/Chicago:20261022T180000", "DTEND;TZID=America/Chicago:20261022T190000", "RRULE:FREQ=WEEKLY;COUNT=3", "SUMMARY:Cena: tacos al pastor con pin\u0303a", "END:VEVENT"));
   ({ call, close, home } = await connectWorkspace(fake));
 });
 after(async () => { await close(); fake.close(); });
@@ -4705,7 +4872,7 @@ test("list calendars with writability; ambiguous/unknown names list the options"
 test("weekly recurrence across DST keeps wall time (Review Focus 4); accents survive", async () => {
   const r = await call("ws_cal_list_events", { calendar: "Menu", time_min: "2026-10-20T00:00:00Z", time_max: "2026-11-10T00:00:00Z" });
   assert.deepEqual(r.data.events.map((e) => e.start), ["2026-10-22T18:00:00-05:00", "2026-10-29T18:00:00-05:00", "2026-11-05T18:00:00-06:00"]);
-  assert.equal(r.data.events[0].summary, "Cena: tacos al pastor");
+  assert.equal(r.data.events[0].summary, "Cena: tacos al pastor con piña", "NFD input comes back NFC");
 });
 
 test("all-day on the DST day stays a date (Review Focus 4); single-day end is made exclusive", async () => {
@@ -4740,6 +4907,12 @@ test("update + delete are journaled and undoable; undo refuses after a human edi
   const dir = join(home, "data", "workspace-tools", "journal");
   assert.equal(statSync(dir).mode & 0o777, 0o700);
   for (const f of readdirSync(dir)) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600);
+});
+
+test("moving a TZID weekly series keeps local wall time across DST (review I7)", async () => {
+  await call("ws_cal_update_event", { calendar: "Menu", uid: "cena-1", start: "2026-10-22T19:00:00-05:00", end: "2026-10-22T20:00:00-05:00" });
+  const r = await call("ws_cal_list_events", { calendar: "Menu", time_min: "2026-10-20T00:00:00Z", time_max: "2026-11-10T00:00:00Z", query: "Cena" });
+  assert.deepEqual(r.data.events.map((e) => e.start), ["2026-10-22T19:00:00-05:00", "2026-10-29T19:00:00-05:00", "2026-11-05T19:00:00-06:00"]);
 });
 
 test("read-only calendar refuses writes with a clear code", async () => {
@@ -4944,7 +5117,8 @@ function iso(t) {
 }
 export function parseCal(ics) { const comp = new ICAL.Component(ICAL.parse(ics)); registerZones(comp); return comp; }
 function eventOut(ev, startT, endT, extra = {}) {
-  return { uid: ev.uid, summary: ev.summary || "", description: ev.description || "", location: ev.location || "", start: iso(startT), end: endT ? iso(endT) : null, all_day: startT.isDate, recurring: ev.isRecurring(), attendees: (ev.attendees || []).map((a) => ({ address: String(a.getFirstValue()).replace(/^mailto:/i, ""), status: a.getParameter("partstat") || null })), ...extra };
+  const nfc = (x) => String(x || "").normalize("NFC");
+  return { uid: ev.uid, summary: nfc(ev.summary), description: nfc(ev.description), location: nfc(ev.location), start: iso(startT), end: endT ? iso(endT) : null, all_day: startT.isDate, recurring: ev.isRecurring(), attendees: (ev.attendees || []).map((a) => ({ address: String(a.getFirstValue()).replace(/^mailto:/i, ""), status: a.getParameter("partstat") || null })), ...extra };
 }
 export function expandEvents(ics, start, end, single = true) {
   const comp = parseCal(ics); const vevents = comp.getAllSubcomponents("vevent");
@@ -4965,8 +5139,18 @@ function timeOf(v, field) {
   if (DT.test(v)) return ICAL.Time.fromJSDate(new Date(v), true);
   throw new WsError("bad_time", `${field} must be YYYY-MM-DD (all-day) or a date-time with an offset, e.g. 2026-10-22T18:00:00-05:00`);
 }
-function setTimes(ve, start, end) {
-  const s = timeOf(start, "start"); let e = timeOf(end, "end");
+/**
+ * Review I7: a datetime with an offset is converted to UTC for NEW events, but an update of an event whose
+ * DTSTART carries a TZID keeps that TZID (wall time in the same zone), so a weekly series keeps 18:00 local
+ * across a DST change instead of drifting to 23:00Z.
+ */
+function inZoneOf(t, existing) {
+  if (!existing || t.isDate || !existing.zone || existing.zone === ICAL.Timezone.utcTimezone || existing.zone.tzid === "floating") return t;
+  return t.convertToZone(existing.zone);
+}
+function setTimes(ve, start, end, keepZoneOf = null) {
+  let s = timeOf(start, "start"); let e = timeOf(end, "end");
+  s = inZoneOf(s, keepZoneOf); e = inZoneOf(e, keepZoneOf);
   if (s.isDate !== e.isDate) throw new WsError("bad_time", "start and end must both be dates or both be date-times");
   if (s.isDate && e.compare(s) <= 0) { e = s.clone(); e.day += 1; }
   if (e.compare(s) <= 0) throw new WsError("bad_time", "end must be after start");
@@ -4997,7 +5181,12 @@ const masterOf = (comp) => comp.getAllSubcomponents("vevent").find((v) => !v.has
 export function updateEvent(ics, f) {
   const comp = parseCal(ics); const ve = masterOf(comp);
   setText(ve, "summary", f.summary); setText(ve, "description", f.description); setText(ve, "location", f.location);
-  if (f.start !== undefined || f.end !== undefined) setTimes(ve, f.start ?? iso(ve.getFirstPropertyValue("dtstart")), f.end ?? iso(ve.getFirstPropertyValue("dtend")));
+  if (f.start !== undefined || f.end !== undefined) {
+    const old = ve.getFirstPropertyValue("dtstart");
+    setTimes(ve, f.start ?? iso(old), f.end ?? iso(ve.getFirstPropertyValue("dtend")), old);
+    const tzid = old?.zone?.tzid; // keep the TZID parameter so clients show the same zone
+    if (tzid && tzid !== "UTC" && tzid !== "floating") for (const n of ["dtstart", "dtend"]) ve.getFirstProperty(n)?.setParameter("tzid", tzid);
+  }
   ve.updatePropertyWithValue("sequence", Number(ve.getFirstPropertyValue("sequence") || 0) + 1); stamp(ve);
   return comp.toString();
 }
@@ -5117,7 +5306,12 @@ export const calendarDefs = [
     } },
   { name: "ws_cal_delete_event", description: "Delete an event (Workspace keeps it in the calendar trash; also undoable here). Destructive: confirm intent with the user first.",
     schema: { calendar: z.string().min(1).max(200), uid: z.string().min(1).max(500) },
-    run: async (a, c) => { const cfg = c.getConfig(); const cal = await C.resolveCalendar(cfg, a.calendar); needWritable(cal); const o = await C.findByUid(cfg, cal, a.uid); await C.deleteObject(cfg, o.href, o.etag); return { deleted: true, ref: ref(cal, a.uid), version_id: recordChange({ kind: "cal", ref: ref(cal, a.uid), href: o.href, op: "delete", before_text: o.text, after_etag: null }) }; } },
+    run: async (a, c) => {
+      const cfg = c.getConfig(); const cal = await C.resolveCalendar(cfg, a.calendar); needWritable(cal); const o = await C.findByUid(cfg, cal, a.uid);
+      const version_id = recordChange({ kind: "cal", ref: ref(cal, a.uid), href: o.href, op: "delete", before_text: o.text, after_etag: null }); // journal first
+      await C.deleteObject(cfg, o.href, o.etag);
+      return { deleted: true, ref: ref(cal, a.uid), version_id };
+    } },
   { name: "ws_cal_respond_to_event", description: "Accept, decline or tentatively accept an event Crow bot is invited to.",
     schema: { calendar: z.string().min(1).max(200), uid: z.string().min(1).max(500), response: z.enum(["accepted", "declined", "tentative"]), comment: z.string().max(1000).optional() },
     run: async (a, c) => {
@@ -5165,7 +5359,12 @@ export const contactsDefs = [
       return { uid: a.uid, ref: ref(b, a.uid), version_id: recordChange({ kind: "card", ref: ref(b, a.uid), href: o.href, op: "update", before_text: o.text, after_etag: (await C.getObject(cfg, o.href))?.etag ?? null }) };
     } },
   { name: "ws_contacts_delete", description: "Delete a contact (undoable here; address books have no trash). Destructive: confirm intent with the user first.", schema: { addressbook: z.string().min(1).max(200), uid: z.string().min(1).max(500) },
-    run: async (a, c) => { const cfg = c.getConfig(); const b = await K.resolveBook(cfg, a.addressbook); needW(b); const o = await C.findByUid(cfg, b, a.uid, "card"); await C.deleteObject(cfg, o.href, o.etag); return { deleted: true, ref: ref(b, a.uid), version_id: recordChange({ kind: "card", ref: ref(b, a.uid), href: o.href, op: "delete", before_text: o.text, after_etag: null }) }; } },
+    run: async (a, c) => {
+      const cfg = c.getConfig(); const b = await K.resolveBook(cfg, a.addressbook); needW(b); const o = await C.findByUid(cfg, b, a.uid, "card");
+      const version_id = recordChange({ kind: "card", ref: ref(b, a.uid), href: o.href, op: "delete", before_text: o.text, after_etag: null }); // review I12: journal FIRST (no CardDAV trash)
+      await C.deleteObject(cfg, o.href, o.etag);
+      return { deleted: true, ref: ref(b, a.uid), version_id };
+    } },
 ];
 export const registerContacts = (server, ctx) => defineTools(server, ctx, contactsDefs);
 ```
@@ -5635,7 +5834,8 @@ test("descriptions: ≤1024 chars, destructive tools say confirm, useful first 1
 test("instructions carry the guardrails; the manifest declares the server with NO envKeys", () => {
   const m = JSON.parse(readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "manifest.json"), "utf8"));
   assert.equal(m.version, "0.2.0");
-  assert.deepEqual(m.server, { command: "node", args: ["server/index.js"], envKeys: [] });
+  assert.deepEqual(m.server, { command: "node", args: ["server/index.js"], envKeys: [], configureEnv: "envKeys-only" });
+  assert.equal(m.npm_required, true);
   assert.deepEqual(m.skills, ["skills/workspace.md"]);
   assert.equal(m.panelRoutes, "panel/routes.js");
 });
@@ -5692,7 +5892,7 @@ test("en/es string parity; no secret ever rendered; CSRF field present; values e
 });
 
 test("save a paragraph → 303 back with an undo handle; label is Quick edit", async () => {
-  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", value: "Tacos dorados." });
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "Tacos dorados." });
   assert.equal(r.status, 303);
   const loc = new URL(r.headers.get("location"), base);
   assert.equal(loc.pathname, "/dashboard/workspace"); assert.equal(loc.searchParams.get("notice"), "saved"); assert.match(loc.searchParams.get("v"), /^v1\./);
@@ -5702,19 +5902,26 @@ test("save a paragraph → 303 back with an undo handle; label is Quick edit", a
 });
 
 test("save a cell and a slide shape", async () => {
-  assert.equal((await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.xlsx", kind: "xlsx", target: "Recetas!B2", value: "5" })).status, 303);
+  assert.equal((await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.xlsx", kind: "xlsx", target: "Recetas!B2", shown: "4", value: "5" })).status, 303);
   const { openPptx, readDeck } = await import("../bundles/workspace/server/ooxml/pptx.js");
   const id = readDeck(openPptx(fake.node("Shared with Crow/Casa/r.pptx").bytes), false)[1].shapes[0].object_id;
-  assert.equal((await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.pptx", kind: "pptx", target: id, value: "Viernes" })).status, 303);
+  assert.equal((await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.pptx", kind: "pptx", target: id, shown: "Jueves", value: "Viernes" })).status, 303);
+});
+
+test("stale view and paragraphs with links/images are refused, nothing written (review I6)", async () => {
+  const puts = fake.calls.filter((c) => c.method === "PUT").length;
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "old text", value: "x" });
+  assert.equal(new URL(r.headers.get("location"), base).searchParams.get("notice"), "stale_view");
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
 });
 
 test("file open in the editor → choice page naming who, with Save anyway (proceed)", async () => {
   fake.openInEditor("Shared with Crow/Casa/r.docx", ["dayane"], { releaseAfterMs: 3000, typed: null });
-  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", value: "x" });
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x" });
   assert.equal(r.status, 200);
   const html = await r.text();
   assert.match(html, /Dayane/); assert.match(html, /name="if_open" value="proceed"/); assert.match(html, /data-turbo="false"/);
-  const p = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", value: "x", if_open: "proceed" });
+  const p = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x", if_open: "proceed" });
   assert.equal(p.status, 303);
 });
 
@@ -5739,12 +5946,14 @@ Expected: FAIL. The surface test reports any missing names, the manifest has no 
 import { WsError } from "../result.js";
 import { withFileWrite, withFileRestore, undoFileChange } from "../write-protocol.js";
 import { splitPath } from "../nc/paths.js";
-import { openDocx } from "../ooxml/docx-model.js";
+import { openDocx, paragraphText, runsOf } from "../ooxml/docx-model.js";
 import { setParagraphText } from "../ooxml/docx-edit.js";
+const NON_TEXT = new Set(["drawing", "object", "pict", "fldChar", "instrText", "footnoteReference", "endnoteReference", "sym"]);
+export const hasNonText = (p) => kids(p, NS.w, "hyperlink").length > 0 || kids(p, NS.w, "fldSimple").length > 0 || runsOf(p).some((r) => kids(r, NS.w).some((c) => NON_TEXT.has(c.localName)));
 import { kids } from "../ooxml/xml.js";
 import { NS } from "../ooxml/xml.js";
-import { openXlsx, writeRange } from "../ooxml/xlsx.js";
-import { openPptx, editShapeText } from "../ooxml/pptx.js";
+import { openXlsx, writeRange, readRange } from "../ooxml/xlsx.js";
+import { openPptx, editShapeText, shapeById, shapeText } from "../ooxml/pptx.js";
 
 export const QUICK_MAX_BYTES = 20 * 1024 * 1024;
 const opts = (form, clock, summary) => ({ label: "Quick edit", waitS: 10, ifOpen: form.if_open === "proceed" ? "proceed" : "wait", clock, summary });
@@ -5758,11 +5967,19 @@ export async function quickSave(cfg, form, clock) {
     if (bytes.length > QUICK_MAX_BYTES) throw new WsError("too_large", "Quick edit handles files up to 20 MB; use the editor on a computer");
     if (kind === "docx") {
       const d = openDocx(bytes); const p = kids(d.body, NS.w, "p")[Number(form.target)];
-      if (!p) throw new WsError("bad_args", "That paragraph no longer exists; reload the page");
+      // Review I6: the form carries the text the page showed; if the paragraph at that index changed, refuse.
+      if (!p || paragraphText(p) !== String(form.shown ?? "")) throw new WsError("stale_view", "The document changed since this page loaded; reload and try again.");
+      if (hasNonText(p)) throw new WsError("not_plain_text", "This paragraph contains a link, image, field or footnote; edit it in the editor so nothing is lost.");
       setParagraphText(d, p, value); return { bytes: d.pkg.save(), changed: 1, summary: `paragraph ${Number(form.target) + 1}` };
     }
-    if (kind === "xlsx") { const wb = openXlsx(bytes); const r = writeRange(wb, String(form.target), [[value]], "USER_ENTERED"); return { bytes: wb.pkg.save(), changed: 1, summary: `cell ${r.range}` }; }
-    const deck = openPptx(bytes); editShapeText(deck, String(form.target), value); return { bytes: deck.pkg.save(), changed: 1, summary: "slide text" };
+    if (kind === "xlsx") {
+      const wb = openXlsx(bytes);
+      if (String(readRange(wb, String(form.target), "FORMULA").values[0]?.[0] ?? "") !== String(form.shown ?? "")) throw new WsError("stale_view", "The sheet changed since this page loaded; reload and try again.");
+      const r = writeRange(wb, String(form.target), [[value]], "USER_ENTERED"); return { bytes: wb.pkg.save(), changed: 1, summary: `cell ${r.range}` };
+    }
+    const deck = openPptx(bytes);
+    if (shapeText(shapeById(deck, String(form.target)).sp) !== String(form.shown ?? "")) throw new WsError("stale_view", "The slide changed since this page loaded; reload and try again.");
+    editShapeText(deck, String(form.target), value); return { bytes: deck.pkg.save(), changed: 1, summary: "slide text" };
   }, opts(form, clock));
 }
 export const quickUndo = (cfg, form, clock) => undoFileChange(cfg, { path: String(form.path || "") }, String(form.version_id || ""), { clock, waitS: 10, ifOpen: form.if_open === "proceed" ? "proceed" : "wait" });
@@ -5820,7 +6037,7 @@ export async function renderQuick({ lang, csrf, query }) {
     const kind = (e.name.split(".").pop() || "").toLowerCase();
     if (!["docx", "xlsx", "pptx"].includes(kind)) return `${STYLE}<div class="wq">${notice}<p>${esc(t.notSupported)}</p></div>`;
     const { bytes } = await getFile(cfg, segs, { maxBytes: QUICK_MAX_BYTES });
-    const form = (target, label, value, multiline) => `<form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, { path: e.path, kind, target })}<label>${esc(label)}${multiline ? `<textarea name="value" rows="5">${esc(value)}</textarea>` : `<input type="text" name="value" value="${esc(value)}">`}</label>${kind === "xlsx" ? `<small>${esc(t.formulaHint)}</small>` : ""}<p><button>${esc(t.save)}</button> <a class="btn" href="${esc(q({ path: e.path }))}">${esc(t.cancel)}</a></p></form>`;
+    const form = (target, label, value, multiline) => `<form method="post" action="/api/workspace/quick/save" data-turbo="false">${hidden(csrf, { path: e.path, kind, target, shown: value })}<label>${esc(label)}${multiline ? `<textarea name="value" rows="5">${esc(value)}</textarea>` : `<input type="text" name="value" value="${esc(value)}">`}</label>${kind === "xlsx" ? `<small>${esc(t.formulaHint)}</small>` : ""}<p><button>${esc(t.save)}</button> <a class="btn" href="${esc(q({ path: e.path }))}">${esc(t.cancel)}</a></p></form>`;
     let body = "";
     if (kind === "docx") {
       const d = openDocx(bytes); const ps = kids(d.body, NS.w, "p"); const page = Math.max(0, Number(query.page || 0));
@@ -5847,7 +6064,7 @@ export async function renderQuick({ lang, csrf, query }) {
 
 export function renderChoice({ lang, csrf, form, err }) {
   const t = QUICK_STRINGS[lang === "es" ? "es" : "en"];
-  const keep = { path: form.path, kind: form.kind, target: form.target, value: form.value };
+  const keep = { path: form.path, kind: form.kind, target: form.target, value: form.value, shown: form.shown };
   const who = (err.data?.open_by || []).join(", ") || "Someone";
   return `<!doctype html><html lang="${lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(t.tabQuick)}</title><style>body{font-family:system-ui,sans-serif;margin:16px;max-width:40rem}button{min-height:44px;padding:.55rem .9rem;font-size:1rem;margin:.25rem 0;width:100%}</style></head><body>
 <p><strong>${esc(who)}</strong> ${esc(t.openBy)}</p>
@@ -5900,7 +6117,10 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
         const { renderChoice } = await bundleImport("server/quick/view.js");
         return res.status(200).type("html").send(renderChoice({ lang, csrf: req.csrfToken || form._csrf, form, err }));
       }
-      return back(res, form, err?.code || "error", { msg: String(err?.message || "").slice(0, 300) });
+      // Review I10: redact before the message reaches a URL (browser history / access logs).
+      let msg = String(err?.message || "").slice(0, 300);
+      try { const { redact } = await bundleImport("server/config.js"); msg = redact(msg, null); } catch { msg = ""; }
+      return back(res, form, err?.code || "error", { msg });
     }
   };
   router.post("/api/workspace/quick/save", handle((a, cfg, f) => a.quickSave(cfg, f, clock), "saved", { choice: true }));
@@ -5951,7 +6171,7 @@ Add to `tests/workspace-panel.test.js`: `renderTabs("es", "quick")` contains `Ed
 
 - [ ] **Step 7: Manifest, registry, skill, docs**
 
-`bundles/workspace/manifest.json`: set `"version": "0.2.0"` and add `"server": { "command": "node", "args": ["server/index.js"], "envKeys": [] }`, `"skills": ["skills/workspace.md"]`, `"panelRoutes": "panel/routes.js"`. Add one sentence to `notes`: "Includes Crow's Workspace tools (ws_*): the bot edits only what you share with “Crow bot”, every change is a version you can undo, and Office › Quick edit makes small changes from a phone."
+`bundles/workspace/manifest.json`: set `"version": "0.2.0"`, `"npm_required": true` (review I8: a failed dependency install must leave the old version in place so the next boot retries), and add `"server": { "command": "node", "args": ["server/index.js"], "envKeys": [], "configureEnv": "envKeys-only" }`, `"skills": ["skills/workspace.md"]`, `"panelRoutes": "panel/routes.js"`. Add one sentence to `notes`: "Includes Crow's Workspace tools (ws_*): the bot edits only what you share with “Crow bot”, every change is a version you can undo, and Office › Quick edit makes small changes from a phone."
 
 Run: `npm run build-registry` (rewrites `registry/add-ons.json`), then `npm run build-registry -- --check`.
 Expected: no diff on the second run.
@@ -6172,6 +6392,11 @@ Expected: `11/11 passed`. Before cleanup runs, look at the Menu event on Kevin's
 
 Run: `node scripts/workspace-w2-acceptance.mjs --lock-test` and follow the prompts.
 Expected: three more PASS lines. Kevin's description of the editor (disconnect/reload) is recorded.
+
+- [ ] **Step 4b: pi-bot path** (review I11)
+
+Run one pi bot turn that needs Workspace. For example, `scripts/pi-bots` CLI or Bot Builder "test turn" with a bot whose tool set includes `workspace`, asking "list the W2 acceptance folder".
+Expected: a `ws_drive_list_folder` result. If the server dies at import, the I11 fallback is wrong; fix the product before closing W2.
 
 - [ ] **Step 5: [KEVIN] Gateway path + Quick edit from the phone**
 
