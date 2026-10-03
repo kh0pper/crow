@@ -52,7 +52,7 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
-import { readEnvFile } from "../env-manager.js";
+import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
@@ -572,7 +572,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
   const expandEnv = env || (() => {
     const fileVars = {};
     try {
-      for (const [k, { value }] of readEnvFile(join(destDir, ".env")).vars) fileVars[k] = value;
+      Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
     } catch { /* no .env → process env only */ }
     // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
     // compose run gets (the prod gateway unit may not export it).
@@ -1140,7 +1140,7 @@ function appendManagedBlock(envPath, blockName, kvPairs, version) {
   const end = `# crow-${blockName} END`;
   const lines = [begin];
   if (version) lines.push(`# crow-${blockName}-version: ${version}`);
-  for (const [k, v] of Object.entries(kvPairs)) lines.push(`${k}=${v}`);
+  for (const [k, v] of Object.entries(kvPairs)) lines.push(`${k}=${encodeEnvValue(v)}`);
   lines.push(end, "");
   const block = lines.join("\n");
 
@@ -1684,7 +1684,10 @@ export function findInvalidEnv(envVars) {
   if (!envVars || typeof envVars !== "object") return null;
   for (const [k, v] of Object.entries(envVars)) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
-    if (v !== undefined && v !== null && /[\r\n\0]/.test(String(v))) return { key: k, why: "contains a line break or NUL character" };
+    if (v !== undefined && v !== null) {
+      const problem = envValueProblem(v);
+      if (problem) return { key: k, why: problem };
+    }
   }
   return null;
 }
@@ -1905,17 +1908,25 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
-  const envLines = (envVars && typeof envVars === "object")
-    ? Object.entries(envVars)
-        .filter(([, v]) => v !== undefined && v !== "")
-        .map(([k, v]) => `${k}=${v}`)
-    : [];
-  if (envLines.length > 0) {
-    writePrivateFile(envPath, envLines.join("\n") + "\n");
-    log(`Wrote ${envLines.length} env vars`);
+  const usable = {};
+  if (envVars && typeof envVars === "object") {
+    for (const [k, v] of Object.entries(envVars)) if (v !== undefined && v !== "") usable[k] = v;
+  }
+  const count = Object.keys(usable).length;
+  const pathKeys = pathEnvKeys(manifest);
+  if (typeof baseText === "string") {
+    // Seeded from an existing .env / .env.example: line-preserving (C4) — the base's
+    // own lines (comments, legacy values, ${VAR} references) stay byte-for-byte.
+    writePrivateFile(envPath, updateEnvText(baseText, usable, { pathKeys }));
+    log(`Wrote ${count} env vars`);
+    return;
+  }
+  if (count > 0) {
+    writePrivateFile(envPath, formatEnvLines(usable, { pathKeys }));
+    log(`Wrote ${count} env vars`);
     return;
   }
   if (existsSync(envPath)) { chmodSync(envPath, 0o600); return; }
@@ -2029,20 +2040,22 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // generated keys stripped, and is the only request env used below.
     const reqEnv = stripGeneratedKeys(manifest, envVars);
     const generated = resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
-    let installEnv = { ...(reqEnv || {}), ...generated };
+    const writeEnv = { ...(reqEnv || {}), ...generated };
+    let installEnv = writeEnv;
+    let baseText = null;
     if (Object.keys(generated).length > 0) {
       // Writing values bypasses the .env / .env.example rungs, so seed from them:
-      // existing .env entries, else .env.example defaults, then request, then generated.
+      // existing .env, else .env.example — LINE-PRESERVING (C4): the base's own lines are
+      // kept verbatim and only the request + generated keys are set on top.
       const envP = join(destDir, ".env");
       const exP = join(destDir, ".env.example");
-      let base = {};
       try {
-        if (existsSync(envP)) base = parseEnvText(readFileSync(envP, "utf8"));
-        else if (existsSync(exP)) base = parseEnvText(readFileSync(exP, "utf8"));
+        if (existsSync(envP)) baseText = readFileSync(envP, "utf8");
+        else if (existsSync(exP)) baseText = readFileSync(exP, "utf8");
       } catch { /* unreadable base: fall back to provided values only */ }
-      installEnv = { ...base, ...installEnv };
+      if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
     }
-    writeInstallEnv(destDir, installEnv, manifest, (msg) => appendLog(job, msg));
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }
@@ -3214,15 +3227,11 @@ export default function bundlesRouter() {
         return res.status(400).json({ code: "invalid_env", key: badPattern.key, error: `Environment variable '${badPattern.key}' ${badPattern.why}` });
       }
 
-      // Read existing .env, merge with new values
+      // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
+      // keys change; every other line (legacy values, comments) stays byte-for-byte.
       const envPath = join(bundleDir, ".env");
-      const existing = {};
-      if (existsSync(envPath)) {
-        for (const line of readFileSync(envPath, "utf8").split("\n")) {
-          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-          if (match) existing[match[1]] = match[2];
-        }
-      }
+      const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+      const existing = parseEnvText(oldEnvText);
 
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {
@@ -3231,12 +3240,8 @@ export default function bundlesRouter() {
         return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
       });
 
-      Object.assign(existing, env_vars);
-      const envContent = Object.entries(existing)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${k}=${v}`)
-        .join("\n") + "\n";
-      writePrivateFile(envPath, envContent);
+      Object.assign(existing, env_vars); // the effective env after this save
+      writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
       const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);

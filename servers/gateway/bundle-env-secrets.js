@@ -13,17 +13,11 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { parseEnvText, formatEnvLines } from "./bundle-env-codec.js";
+export { parseEnvText };
 
 const GENERATE_KINDS = new Set(["secret"]);
 
-export function parseEnvText(text) {
-  const out = {};
-  for (const line of String(text || "").split("\n")) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m) out[m[1]] = m[2];
-  }
-  return out;
-}
 
 function readEnvSafe(path) {
   try { return existsSync(path) ? parseEnvText(readFileSync(path, "utf8")) : {}; } catch { return {}; }
@@ -78,7 +72,7 @@ export function resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome }) {
     retainedPath,
     `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
       `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-      Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
+      formatEnvLines(merged),
   );
   return out;
 }

@@ -12,6 +12,7 @@
  * Imports node builtins ONLY — no circular-import risk with routes/bundles.js.
  */
 
+import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -79,14 +80,7 @@ export function getInstalledFirstManifest(bundleId) {
 
 /** Parse a KEY=value .env file into a plain object (same grammar as the installer writes). */
 function parseEnvFile(path) {
-  const env = {};
-  try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-      if (m) env[m[1]] = m[2];
-    }
-  } catch { /* unreadable → treat as empty */ }
-  return env;
+  try { return parseEnvText(readFileSync(path, "utf8")); } catch { return {}; }
 }
 
 /** The bundle's ~/.crow/mcp-addons.json entry, or null if it registers no MCP server. */

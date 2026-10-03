@@ -14,6 +14,7 @@
  *   /proxy/minio/              instead of   http://localhost:9001/
  */
 
+import { parseEnvText } from "../bundle-env-codec.js";
 import { createProxyMiddleware, fixRequestBody } from "http-proxy-middleware";
 import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
@@ -45,20 +46,11 @@ function getManifest(bundleId) {
  * normal, not an error.
  */
 function readBundleEnv(bundleId) {
-  const path = join(BUNDLES_DIR, bundleId, ".env");
-  const values = {};
   try {
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq === -1) continue;
-      values[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-    }
+    return parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8"));
   } catch {
-    // No .env for this bundle — defaults apply.
+    return {}; // No .env for this bundle — defaults apply.
   }
-  return values;
 }
 
 /**
