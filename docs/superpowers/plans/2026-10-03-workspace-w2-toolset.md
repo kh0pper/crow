@@ -142,7 +142,7 @@ bundles/workspace/
   server/quick/actions.js           CREATE  Quick edit save/undo/restore
   server/templates/make-templates.py + blank.docx|xlsx|pptx   CREATE (Task 1)
   panel/workspace.js                MODIFY  tabs Setup | Quick edit
-  panel/routes.js                   CREATE  /api/workspace/quick/*
+  panel/routes.js                   CREATE (Task 13)  live mount + worker + /api/workspace/quick/* (lazy)
   skills/workspace.md               CREATE
   server/init-tables.js, server/db.js                       CREATE (Task 12)
   server/queue/{store,conditions,apply,worker,notify,provider}.js   CREATE (Task 12)
@@ -6304,7 +6304,7 @@ async function verifyAppliedLive(ctx, db, fileId) {
   const { bytes } = await getFile(ctx.getConfig(), splitPath(rows[0].path), { maxBytes: MAX_EDIT_BYTES });
   for (const r of rows) {
     const post = checkPost(r.tool, JSON.parse(r.args_json), bytes, JSON.parse(r.precondition_json || "null"));
-    if (post === false) { await cas(db, r.id, "applied_live", "failed", { result_json: JSON.stringify({ reason: "not_saved" }) }); notifyChange(db, await get(db, r.id), "failed", { reason: "applied in the editor, but the editor closed before saving it" }); }
+    if (post === false) { await cas(db, r.id, "applied_live", "failed", { result_json: JSON.stringify({ reason: "not_saved" }) }); notifyChange(db, await get(db, r.id), "failed", { reason: "it was applied in the editor but is no longer in the saved file (removed, undone, or not saved before closing)" }); }
     else await db.execute({ sql: "UPDATE workspace_pending_changes SET verified=1 WHERE id=?", args: [r.id] });
   }
 }
@@ -6441,7 +6441,7 @@ git show --stat HEAD
   - `GET /api/workspace/live/v1/pending?key=&pv=` → `[{change_id, tool, args, pre}]`, live ops only, in order, the first applicable per file;
   - `POST /api/workspace/live/v1/claim {change_id}` → `{lease_until, apply_token}`;
   - `POST /api/workspace/live/v1/ack {change_id, apply_token, outcome:"applied"|"failed", reason?, inverse?}`.
-- Produces the plugin: `ops.js` exports `LIVE` = `{ [tool]: function (args, pre) /* runs INSIDE callCommand via Asc.scope */ }` and `liveCommand(tool)`, which returns the `callCommand` body. Under Node, `ops.js` is importable for the stub test (UMD: `if (typeof module !== "undefined") module.exports = …`).
+- Produces the plugin: `ops.js` exports `crowCommand` (one self-contained function, op table inline; reads `Asc.scope.crow`, uses global `Api`) for `callCommand`; earlier wording about `LIVE`/`liveCommand` is superseded, which returns the `callCommand` body. Under Node, `ops.js` is importable for the stub test (UMD: `if (typeof module !== "undefined") module.exports = …`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6495,7 +6495,8 @@ test("pending requires a valid editor JWT for THAT key; never the dashboard sess
 });
 
 test("claim: one winner, view-mode JWT refused, apply token required on ack; ack applied → applied_live", async () => {
-  assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key, { editorConfig: { mode: "view", user: { id: "x" } } }), { change_id: changeId })).status, 403);
+  assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key, { editorConfig: { mode: "view", user: { id: "ocinst_admin" } } }), { change_id: changeId })).status, 403);
+  assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key, { editorConfig: { ds_view: true, user: { id: "ocinst_admin" } } }), { change_id: changeId })).status, 403);
   const c1 = await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: changeId });
   const c2 = await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: changeId });
   assert.equal(c1.status, 200); assert.equal(c2.status, 409);
@@ -6551,7 +6552,11 @@ const S9 = readFileSync(join(import.meta.dirname, "..", "docs", "superpowers", "
 
 function wordStub(paras) {
   const calls = []; const mk = (text, style = "Normal") => ({ text, style, GetText: () => text, GetStyle: () => ({ GetName: () => style }), SetStyle: (s) => { calls.push(["SetStyle", s.GetName()]); }, AddText: (t) => { calls.push(["AddText", t]); } });
-  const doc = { paras: paras.map((p) => mk(p.text, p.style)), GetAllParagraphs() { return this.paras; }, SearchAndReplace: (o) => { calls.push(["SearchAndReplace", o]); }, Search: (t) => doc.paras.filter((p) => p.text.includes(t)).map(() => ({ SetBold: (v) => calls.push(["SetBold", v]) })), Push: (p) => calls.push(["Push", p]), GetStyle: (n) => ({ GetName: () => n }) };
+  // The stub really changes text (the command checks its postcondition in-command) and Search returns one hit
+  // per OCCURRENCE (so expect_count logic is exercised).
+  const doc = { paras: paras.map((p) => mk(p.text, p.style)), GetAllParagraphs() { return this.paras; },
+    SearchAndReplace: (o) => { calls.push(["SearchAndReplace", o]); for (const p of doc.paras) { p.text = p.text.split(o.searchString).join(o.replaceString); p.GetText = () => p.text; } },
+    Search: (t) => doc.paras.flatMap((p) => Array.from({ length: t ? p.text.split(t).length - 1 : 0 }, () => ({ SetBold: (v) => calls.push(["SetBold", v]) }))), Push: (p) => calls.push(["Push", p]), GetStyle: (n) => ({ GetName: () => n }) };
   return { Api: { GetDocument: () => doc, CreateParagraph: () => mk("") }, calls };
 }
 test("find_replace: precondition first, then SearchAndReplace per pair, inverse = swapped pairs", () => {
@@ -6884,7 +6889,8 @@ Expected: PASS.
 
 ```bash
 git add bundles/workspace/onlyoffice-plugin bundles/workspace/server/live tests/workspace-live.test.js tests/workspace-plugin-ops.test.js
-git commit bundles/workspace servers/gateway/routes/bundles.js docs/developers/port-allocation.md tests/workspace-live.test.js tests/workspace-plugin-ops.test.js tests/auth-network.test.js tests/bundle-version-refresh.test.js -m "feat(workspace): Crow ONLYOFFICE live-edit plugin + JWT-authenticated live queue endpoints (K5)"
+# also pin the new prefix in tests/rate-limit-middleware.test.js: add "/api/workspace/live/v1/pending" to the skip=true list
+git commit bundles/workspace servers/gateway/routes/bundles.js servers/gateway/middleware/rate-limit.js tests/rate-limit-middleware.test.js docs/developers/port-allocation.md tests/workspace-live.test.js tests/workspace-plugin-ops.test.js tests/auth-network.test.js tests/bundle-version-refresh.test.js -m "feat(workspace): Crow ONLYOFFICE live-edit plugin + JWT-authenticated live queue endpoints (K5)"
 git show --stat HEAD
 ```
 
@@ -6893,7 +6899,7 @@ git show --stat HEAD
 ### Task 14: Quick edit page, skill, manifest/registry, docs, and the MCP surface test
 
 **Files:**
-- Create: `bundles/workspace/server/quick/{view.js,actions.js}`, `bundles/workspace/panel/routes.js`, `bundles/workspace/skills/workspace.md`, `docs/guide/workspace.md`
+- Create: `bundles/workspace/server/quick/{view.js,actions.js}`, `bundles/workspace/skills/workspace.md`, `docs/guide/workspace.md` (`panel/routes.js` already created in Task 13)
 - Modify: `bundles/workspace/panel/workspace.js` (tabs + Quick edit view), `bundles/workspace/manifest.json` (0.2.0, `server`, `skills`, `panelRoutes`), `registry/add-ons.json` (regenerated), `skills/superpowers.md` (nextcloud row → workspace), `bundles/nextcloud/skills/nextcloud.md` (pointer), `docs/.vitepress/config.ts` (sidebar)
 - Test: `tests/workspace-quick-edit.test.js`, `tests/workspace-mcp-surface.test.js`; existing `tests/workspace-panel.test.js`, `tests/workspace-bundle.test.js`, `tests/bundle-server-deps.test.js` must stay green.
 
@@ -6994,7 +7000,7 @@ before(async () => {
   const app = express();
   const auth = (req, res, next) => (req.headers.cookie?.includes("crow_session=ok") ? next() : res.status(401).end());
   let t = 0; const clock = { now: () => t, sleep: async (ms) => { t += ms; fake.advance(ms); } };
-  app.use(router(auth, { clock, csrf: (req, res, next) => (req.body?._csrf === "tok" ? next() : res.status(403).end("csrf")) }));
+  app.use(router(auth, { clock, startWorker: false, csrf: (req, res, next) => (req.body?._csrf === "tok" ? next() : res.status(403).end("csrf")) }));
   server = app.listen(0); base = `http://127.0.0.1:${server.address().port}`;
 });
 after(() => { server.close(); fake.close(); });
