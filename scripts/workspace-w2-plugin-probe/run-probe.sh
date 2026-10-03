@@ -26,6 +26,11 @@ REPO="$(cd "$KIT/../.." && pwd)"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWARN: %s\033[0m\n' "$*" >&2; }
 
+# Canonical (key-sorted) `tailscale serve status --json`, for the before/after comparison. Reading needs no sudo.
+serve_map() { # serve_map <tailscale bin> <node bin>
+  "$1" serve status --json | "$2" -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{const c=(o)=>Array.isArray(o)?o.map(c):o&&typeof o==="object"?Object.fromEntries(Object.keys(o).sort().map((k)=>[k,c(o[k])])):o;process.stdout.write(JSON.stringify(c(JSON.parse(s)),null,1)+"\n");})'
+}
+
 # ---------------------------------------------------------------- cleanup (idempotent; runs as Kevin or as root)
 # State lives in $STATE (mktemp -d, chmod 755, no secrets): owner, node/tailscale paths, scratch dir, listener pid, markers.
 cleanup() {
@@ -33,11 +38,10 @@ cleanup() {
   [ -d "$STATE" ] || return 0
   [ -e "$STATE/cleaned" ] && return 0
   if ! mkdir "$STATE/cleaning.lock" 2>/dev/null; then return 0; fi # the other cleaner is already at it
-  local OWNER NODE TSBIN DIR LPID KPID STAGE SUDO=sudo
+  local OWNER NODE TSBIN DIR LPID KPID STAGE PENDING=no
   OWNER=$(cat "$STATE/owner"); NODE=$(cat "$STATE/node"); TSBIN=$(cat "$STATE/tailscale")
   DIR=$(cat "$STATE/dir" 2>/dev/null || true); LPID=$(cat "$STATE/listener.pid" 2>/dev/null || true)
   KPID=$(cat "$STATE/keepalive.pid" 2>/dev/null || true); STAGE=$(cat "$STATE/stage" 2>/dev/null || true)
-  [ "$AS_ROOT" = yes ] && SUDO=""
   echo "[cleanup $(date +%T)] start (as $(id -un))"
 
   # 1. the probe plugin out of the container, then flush the editor cache
@@ -45,10 +49,14 @@ cleanup() {
   docker exec "$CTR" documentserver-flush-cache.sh >/dev/null && echo "[cleanup] editor cache flushed" || warn "flush-cache failed"
 
   # 2. the temporary Serve path
+  # Never prompt here: as Kevin it is `sudo -n` (a password prompt would block while holding cleaning.lock, e.g. after
+  # an SSH drop or a lapsed ticket). If that fails, the step is left to the root watchdog (PENDING).
   if [ -e "$STATE/serve_added" ]; then
-    if [ -n "$SUDO" ]; then sudo -n true 2>/dev/null || echo "[cleanup] sudo needed to remove the Serve path:"; fi
-    $SUDO "$TSBIN" serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" off && echo "[cleanup] Serve path $SERVE_PATH off" \
-      || warn "could not remove Serve path; run: sudo tailscale serve --https=$SERVE_PORT --set-path=$SERVE_PATH off"
+    if [ "$AS_ROOT" = yes ]; then "$TSBIN" serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" off
+    else sudo -n "$TSBIN" serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" off; fi
+    if [ $? -eq 0 ]; then echo "[cleanup] Serve path $SERVE_PATH off"; rm -f "$STATE/serve_added"
+    elif [ "$AS_ROOT" = yes ]; then warn "could not remove Serve path; run: sudo tailscale serve --https=$SERVE_PORT --set-path=$SERVE_PATH off"
+    else PENDING=yes; warn "sudo -n failed: the root watchdog removes the Serve path within ~10 s of this script exiting (log /tmp/w2-probe-watchdog.log)"; fi
   fi
 
   # 3. the listener (only if that pid is still OUR listener)
@@ -71,6 +79,20 @@ cleanup() {
   # 5. verify
   docker exec "$CTR" test ! -e "$PLUGIN_DIR" && echo "[cleanup] verified: plugin dir gone" || warn "plugin dir still present"
   curl -s "http://127.0.0.1:3071/plugins.json" | grep -q "0C0FFEE0" && warn "plugins.json still lists the probe" || echo "[cleanup] verified: plugins.json does not list the probe"
+  # 6. the Serve map must be exactly the pre-probe baseline (the 8457 root -> 127.0.0.1:3071 handler is the live editor)
+  if [ -s "$STATE/serve-baseline.json" ]; then
+    if serve_map "$TSBIN" "$NODE" >"$STATE/serve-after.json" 2>/dev/null && cmp -s "$STATE/serve-baseline.json" "$STATE/serve-after.json"; then
+      echo "[cleanup] PASS: serve map identical to baseline"
+    else
+      echo "[cleanup] FAIL: serve map differs from baseline$([ "$PENDING" = yes ] && echo " (Serve path removal pending on the root watchdog)")"
+      diff "$STATE/serve-baseline.json" "$STATE/serve-after.json" || true
+    fi
+  fi
+  if [ "$PENDING" = yes ]; then
+    rmdir "$STATE/cleaning.lock" 2>/dev/null # not "cleaned": the root watchdog re-runs cleanup (all steps idempotent)
+    echo "[cleanup $(date +%T)] done except the Serve path (pending on the root watchdog)"
+    return 0
+  fi
   touch "$STATE/cleaned"
   echo "[cleanup $(date +%T)] done"
 }
@@ -158,6 +180,9 @@ done || true
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"kind":"noop"}' "$LISTEN/")" = 204 ] || { echo "listener did not come up" >&2; exit 1; }
 
 say "3/5 Serve path https://$TS_HOST:$SERVE_PORT$SERVE_PATH -> $LISTEN"
+serve_map "$TSBIN" "$NODE" >"$STATE/serve-baseline.json" && [ -s "$STATE/serve-baseline.json" ] \
+  || { echo "could not read the Serve map baseline (tailscale serve status --json); stopping before adding the path" >&2; exit 1; }
+echo "Serve map baseline saved ($(wc -l <"$STATE/serve-baseline.json") lines); cleanup compares against it"
 touch "$STATE/serve_added" # set first: cleanup then always tries to turn it off
 sudo "$TSBIN" serve --bg --https="$SERVE_PORT" --set-path="$SERVE_PATH" "$LISTEN" || exit 1
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"kind":"noop"}' "https://$TS_HOST:$SERVE_PORT$SERVE_PATH")
