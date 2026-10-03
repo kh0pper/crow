@@ -119,11 +119,11 @@ If `NTFY_TOPIC` is set in the gateway's environment, Crow uses the environment e
 | `NTFY_TOPIC` | *(unset)* | Topic to publish to; setting it turns automatic setup off |
 | `NTFY_AUTH_TOKEN` | *(empty)* | Token used to publish (and handed to apps unless `NTFY_SUBSCRIBER_TOKEN` is set) |
 | `NTFY_SUBSCRIBER_TOKEN` | *(empty)* | Read-only token handed to apps instead of `NTFY_AUTH_TOKEN` |
-| `NTFY_EXTRA_TOPICS` | *(empty)* | Extra topics the app subscribes to (comma-separated) |
+| `NTFY_EXTRA_TOPICS` | *(empty)* | Extra topics the app subscribes to (comma-separated; environment mode only) |
 | `NTFY_EXTERNAL_URL` | *(derived)* | Address phones use; overrides the Settings field |
 | `NTFY_HOST` / `NTFY_PORT` | `localhost` / `2586` | Where the gateway publishes |
 
-`CROW_DISABLE_NTFY_AUTOWIRE=1` turns off the boot-time setup.
+`CROW_DISABLE_NTFY_AUTOWIRE=1` turns off the boot-time setup. Uninstalling the extension revokes this Crow's notification tokens.
 
 ### Other ntfy apps
 

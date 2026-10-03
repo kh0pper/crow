@@ -55,8 +55,8 @@ import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../share
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
-import { provisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { readStoredNtfyConfig, removeStoredNtfyConfig } from "../push/ntfy-config.js";
+import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
+import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
@@ -2963,16 +2963,17 @@ export default function bundlesRouter() {
             if (own.refusal) {
               appendLog(job, `Containers left running: ${own.refusal}`);
             } else {
+              if (manifest?.autowire === AUTOWIRE_KIND && readStoredNtfyConfig()) {
+                // Revoke this instance's tokens while the server is still up, then forget them.
+                await deprovisionNtfy({ runner: _dockerRunnerForTest || run });
+                appendLog(job, "Phone notifications turned off (this Crow's notification tokens were revoked)");
+              }
               appendLog(job, "Stopping containers...");
               const downArgs = ["down", "--remove-orphans"];
               if (delete_data) downArgs.push("-v");
               try {
                 await runCompose(downArgs, { cwd: bundleDir });
                 appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
-                if (manifest?.autowire === AUTOWIRE_KIND && readStoredNtfyConfig()) {
-                  removeStoredNtfyConfig();
-                  appendLog(job, "Phone notifications turned off (the notification server was removed)");
-                }
               } catch (err) {
                 appendLog(job, `Warning: docker compose down: ${err.message}`);
               }

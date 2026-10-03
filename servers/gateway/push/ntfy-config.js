@@ -9,8 +9,10 @@
  * Two sources:
  *   env  — NTFY_TOPIC is set: everything behaves exactly as before this module existed.
  *   auto — $CROW_DATA_DIR/ntfy-push.json (0600), written by ntfy-provision.js.
- *          NTFY_HOST / NTFY_PORT / NTFY_EXTERNAL_URL / NTFY_EXTRA_TOPICS still
- *          override field by field.
+ *          NTFY_HOST / NTFY_PORT / NTFY_EXTERNAL_URL still override field by field.
+ *          NTFY_EXTRA_TOPICS is NOT applied: the app's read-only token covers only this
+ *          instance's topic, and ntfy refuses a whole multi-topic stream (403) when any
+ *          one topic is unreadable — one extra would silence every push.
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, renameSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
@@ -86,6 +88,8 @@ export function normalizeExternalUrl(raw) {
   try { u = new URL(s); } catch { return null; }
   if (u.protocol !== "https:" && u.protocol !== "http:") return null;
   if (u.username || u.password || u.search || u.hash) return null;
+  // *.ts.net is HSTS-preloaded: a phone would force https onto a plain-http port and fail.
+  if (u.protocol === "http:" && /\.ts\.net$/i.test(u.hostname)) return null;
   return (u.origin + u.pathname).replace(/\/+$/, "");
 }
 
@@ -143,7 +147,7 @@ export function resolveNtfyConfig(env = process.env) {
   return {
     source: "auto",
     topic: c.topic,
-    topics: [c.topic, ...extraTopics(env, c.topic)],
+    topics: [c.topic],
     publishHost: env.NTFY_HOST || c.host || "localhost",
     publishPort: port,
     publishToken: c.publisherToken || null,

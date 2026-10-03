@@ -10,12 +10,19 @@
  */
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import {
-  ntfyDataDir, ntfyConfigPath, readStoredNtfyConfig, writeStoredNtfyConfig,
+  ntfyDataDir, ntfyConfigPath, readStoredNtfyConfig, writeStoredNtfyConfig, removeStoredNtfyConfig,
 } from "./ntfy-config.js";
+
+function isUnderTmp(dir) {
+  const roots = [tmpdir(), "/tmp", "/var/tmp"].map((r) => { try { return realpathSync(r); } catch { return r; } });
+  let d = dir;
+  try { d = realpathSync(dir); } catch { /* not created yet */ }
+  return roots.some((r) => d === r || d.startsWith(r.endsWith(sep) ? r : r + sep));
+}
 
 export const NTFY_CONTAINER = "crow-ntfy";
 export const AUTOWIRE_KIND = "ntfy-push";
@@ -52,6 +59,14 @@ export function namesFor(key) {
   return { topic: key, publisher: `${key}-pub`, subscriber: `${key}-app` };
 }
 
+/**
+ * Older ntfy (≤ 2.13, incl. the stock bundle's v2.11.0) prints user/token/access results
+ * to STDERR; newer builds print to stdout. Parse both.
+ */
+function out(r) {
+  return `${r?.stdout || ""}\n${r?.stderr || ""}`;
+}
+
 function errText(err) {
   return `${err?.stderr || ""} ${err?.stdout || ""} ${err?.message || ""}`.trim();
 }
@@ -78,6 +93,22 @@ export function parseTokens(stdout) {
   return new Set([...String(stdout).matchAll(/\b(tk_[A-Za-z0-9]+)\b/g)].map((m) => m[1]));
 }
 
+/** Tokens Crow minted (label crow-autowire) in a `token list` output. */
+export function parseAutowireTokens(text) {
+  return [...String(text).matchAll(/^- (tk_[A-Za-z0-9]+) \(crow-autowire\)/gm)].map((m) => m[1]);
+}
+
+/** NTFY_PORT from this instance's installed ntfy bundle .env, or undefined. */
+export function bundleNtfyPort(env = process.env) {
+  try {
+    const home = env.CROW_HOME || join(homedir(), ".crow");
+    const m = /^\s*NTFY_PORT\s*=\s*["']?(\d{1,5})["']?\s*$/m.exec(readFileSync(join(home, "bundles", "ntfy", ".env"), "utf8"));
+    return m ? m[1] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Provision (or repair) this instance's ntfy login + private topic.
  *
@@ -95,10 +126,18 @@ export function parseTokens(stdout) {
 // Single-flight per config file: a double-clicked Set up, or install + boot ensure
 // overlapping, must not mint two token pairs (the loser's would linger on the server).
 const _inflight = new Map();
+const PROVISION_DEADLINE_MS = 120_000;
 export function provisionNtfy(opts = {}) {
   const k = ntfyConfigPath(opts.env || process.env);
   if (_inflight.has(k)) return _inflight.get(k);
-  const p = _provisionNtfy(opts).finally(() => _inflight.delete(k));
+  // Overall cap: a wedged docker daemon must not hold a Settings POST open for minutes.
+  const deadlineMs = opts.deadlineMs ?? PROVISION_DEADLINE_MS;
+  let timer;
+  const capped = Promise.race([
+    _provisionNtfy(opts),
+    new Promise((r) => { timer = setTimeout(() => r({ ok: false, reason: `The notification server did not answer within ${Math.round(deadlineMs / 1000)} s — is Docker running?` }), deadlineMs); timer.unref?.(); }),
+  ]);
+  const p = capped.finally(() => { clearTimeout(timer); _inflight.delete(k); });
   _inflight.set(k, p);
   return p;
 }
@@ -131,11 +170,14 @@ async function _provisionNtfy({
   const deadline = Date.now() + startWaitMs;
   for (;;) {
     try {
-      users = parseUsers((await ntfy(["user", "list"])).stdout);
+      users = parseUsers(out(await ntfy(["user", "list"])));
       break;
     } catch (err) {
       const text = errText(err);
-      if (NOT_STARTED_RE.test(text) && Date.now() < deadline) { await sleep(2000); continue; }
+      if (NOT_STARTED_RE.test(text)) {
+        if (Date.now() < deadline) { await sleep(2000); continue; }
+        return { ok: false, reason: "The notification server is still starting. Wait a moment, then press Set up again." };
+      }
       if (NO_AUTH_RE.test(text)) {
         return { ok: false, reason: "This notification server has no user database (auth-file), so Crow cannot create a private login on it. Reinstall the Push Notifications extension (version 1.1.0 or later) or add auth-file to its server.yml." };
       }
@@ -168,12 +210,14 @@ async function _provisionNtfy({
     const prev = readStoredNtfyConfig(env);
     const samePrev = prev && prev.topic === topic ? prev : null;
     const ensureToken = async (user, stored) => {
-      if (stored) {
-        const listed = parseTokens((await ntfy(["token", "list", user])).stdout);
-        if (listed.has(stored)) return stored;
+      const listing = out(await ntfy(["token", "list", user]));
+      if (stored && parseTokens(listing).has(stored)) return stored;
+      // Re-minting: revoke Crow's own orphans first (a reinstall that kept the volume,
+      // a lost config file) so no stale credential stays valid.
+      for (const old of parseAutowireTokens(listing)) {
+        try { await ntfy(["token", "remove", user, old]); } catch { /* already gone */ }
       }
-      const out = (await ntfy(["token", "add", `--label=${TOKEN_LABEL}`, user])).stdout;
-      const tok = [...parseTokens(out)][0];
+      const tok = [...parseTokens(out(await ntfy(["token", "add", `--label=${TOKEN_LABEL}`, user])))][0];
       if (!tok) throw new Error(`ntfy did not return a token for ${user}`);
       created.tokens.push(user);
       return tok;
@@ -181,7 +225,7 @@ async function _provisionNtfy({
     const publisherToken = await ensureToken(publisher, samePrev?.publisherToken);
     const subscriberToken = await ensureToken(subscriber, samePrev?.subscriberToken);
 
-    const storedPort = Number.parseInt(port ?? prev?.port ?? env.NTFY_PORT ?? 2586, 10) || 2586;
+    const storedPort = Number.parseInt(port ?? env.NTFY_PORT ?? bundleNtfyPort(env) ?? prev?.port ?? 2586, 10) || 2586;
     writeStoredNtfyConfig({
       version: 1,
       topic,
@@ -203,6 +247,21 @@ async function _provisionNtfy({
   return { ok: true, topic, created };
 }
 
+/**
+ * Revoke this instance's stored tokens on the server (best-effort) and forget the config.
+ * Used before the bundle's containers go away. Never throws.
+ */
+export async function deprovisionNtfy({ runner = defaultRunner, env = process.env, container = NTFY_CONTAINER } = {}) {
+  const c = readStoredNtfyConfig(env);
+  if (!c) return { removed: false };
+  for (const [user, tok] of [[c.publisherUser, c.publisherToken], [c.subscriberUser, c.subscriberToken]]) {
+    if (!user || !tok) continue;
+    try { await runner("docker", ["exec", container, "ntfy", "token", "remove", user, tok], { timeout: 20_000 }); } catch { /* server already gone */ }
+  }
+  removeStoredNtfyConfig(env);
+  return { removed: true };
+}
+
 /** Bundle ids in this instance's installed.json (array or object shape). Never throws. */
 export function installedBundleIds(env = process.env) {
   try {
@@ -221,12 +280,15 @@ export function installedBundleIds(env = process.env) {
  * Never throws.
  */
 export async function autowireAtBoot({
-  env = process.env, runner = defaultRunner, installedIds = () => [], log = console.log,
+  env = process.env, runner = defaultRunner, installedIds = () => [], log = console.log, throwaway = isUnderTmp,
 } = {}) {
   try {
     if (env.CROW_DISABLE_NTFY_AUTOWIRE === "1") return { skipped: "disabled" };
     if (env.NTFY_TOPIC) return { skipped: "env" };
     if (readStoredNtfyConfig(env)) return { skipped: "configured" };
+    // Throwaway gateways (a raw single-file test run outside run-suite) live under the
+    // OS temp dir — never let one add users to a host's real notification server.
+    if (throwaway(ntfyDataDir(env))) return { skipped: "temp-data-dir" };
     const installed = (() => { try { return installedIds(); } catch { return []; } })();
     if (!installed.includes("ntfy") && !(await ntfyContainerRunning({ runner }))) return { skipped: "no-server" };
     const r = await provisionNtfy({ env, runner, log: (m) => log(`[ntfy-autowire] ${m}`) });

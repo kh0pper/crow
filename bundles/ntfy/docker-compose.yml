@@ -13,7 +13,6 @@ services:
       NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
       NTFY_AUTH_DEFAULT_ACCESS: deny-all
       NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
-      NTFY_BEHIND_PROXY: "true"
     volumes:
       - ntfy-data:/var/lib/ntfy
     ports:

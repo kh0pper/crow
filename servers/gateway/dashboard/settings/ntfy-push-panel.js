@@ -51,6 +51,7 @@ export function renderNtfyPushPanel({ csrf, lang, env = process.env, flash = "" 
     test_fail: [`${t("ntfyPush.testFailed", lang)}: ${status.lastPushError || ""}`, bad],
     test_off: [t("ntfyPush.notConfigured", lang), bad],
     url_bad: [t("ntfyPush.badAddress", lang), bad],
+    url_ok: [t("ntfyPush.addressSaved", lang), ok],
     env: [t("ntfyPush.envBlocks", lang), bad],
   }[flash];
   const flashHtml = flashMsg

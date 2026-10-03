@@ -13,10 +13,10 @@ import express from "express";
 
 import {
   resolveNtfyConfig, readStoredNtfyConfig, writeStoredNtfyConfig, readNtfyStatus,
-  ntfyConfigPath, normalizeExternalUrl,
+  ntfyConfigPath, normalizeExternalUrl, removeStoredNtfyConfig,
 } from "../servers/gateway/push/ntfy-config.js";
 import {
-  provisionNtfy, autowireAtBoot, instanceKey, parseUsers, parseTokens, installedBundleIds,
+  provisionNtfy, deprovisionNtfy, autowireAtBoot, instanceKey, parseUsers, parseTokens, installedBundleIds,
 } from "../servers/gateway/push/ntfy-provision.js";
 
 const ID_A = "0867ac2809dedd885ba7769b21966f8e";
@@ -33,9 +33,14 @@ function tmpData() {
  * A fake ntfy server CLI behind `docker exec crow-ntfy ntfy …`. Shares state across
  * instances (one server, several Crow homes) like the real co-hosted case.
  */
-function fakeNtfy({ running = true, authFile = true, notStartedFor = 0 } = {}) {
-  const state = { users: new Set(), acl: [], tokens: new Map(), calls: [], notStartedFor, n: 0 };
+function fakeNtfy({ running = true, authFile = true, notStartedFor = 0, stderr = false } = {}) {
+  const state = { users: new Set(), acl: [], tokens: new Map(), calls: [], notStartedFor, n: 0, removed: [] };
+  // ntfy ≤ 2.13 (the stock bundle's v2.11.0) prints CLI results to stderr.
   const runner = async (cmd, args, opts = {}) => {
+    const r = await inner(cmd, args, opts);
+    return stderr && args[0] === "exec" ? { stdout: "", stderr: r.stdout } : r;
+  };
+  const inner = async (cmd, args, opts = {}) => {
     state.calls.push({ cmd, args: [...args], env: opts.env });
     assert.equal(cmd, "docker");
     if (args[0] === "inspect") {
@@ -74,6 +79,11 @@ function fakeNtfy({ running = true, authFile = true, notStartedFor = 0 } = {}) {
       const toks = state.tokens.get(rest[1]) || [];
       if (!toks.length) return { stdout: `user ${rest[1]} has no access tokens\n`, stderr: "" };
       return { stdout: `user ${rest[1]}\n${toks.map((tk) => `- ${tk} (crow-autowire), never expires`).join("\n")}\n`, stderr: "" };
+    }
+    if (sub === "token" && rest[0] === "remove") {
+      state.removed.push(`${rest[1]} ${rest[2]}`);
+      state.tokens.set(rest[1], (state.tokens.get(rest[1]) || []).filter((x) => x !== rest[2]));
+      return { stdout: `token ${rest[2]} for user ${rest[1]} removed\n`, stderr: "" };
     }
     if (sub === "token" && rest[0] === "add") {
       const user = rest[rest.length - 1];
@@ -122,7 +132,9 @@ test("auto mode reads ntfy-push.json; env fields override; nothing configured �
   c = resolveNtfyConfig({ ...env, NTFY_EXTERNAL_URL: "https://override:1", NTFY_PORT: "9999", NTFY_EXTRA_TOPICS: "other" });
   assert.equal(c.externalUrl, "https://override:1");
   assert.equal(c.publishPort, "9999");
-  assert.deepEqual(c.topics, ["crow-0867ac2809", "other"]);
+  // Extras are ignored in auto mode: the read-only token cannot read them, and ntfy
+  // refuses the whole multi-topic stream when one topic is unreadable.
+  assert.deepEqual(c.topics, ["crow-0867ac2809"]);
   // No stored address and no gateway URL → no phone address (route answers disabled).
   writeStoredNtfyConfig({ topic: "crow-0867ac2809", publisherToken: "a", subscriberToken: "b", externalUrl: "" }, env);
   assert.equal(resolveNtfyConfig(env).externalUrl, null);
@@ -139,6 +151,8 @@ test("normalizeExternalUrl accepts http(s) origins/paths only", () => {
   assert.equal(normalizeExternalUrl("https://u:p@h"), null);
   assert.equal(normalizeExternalUrl("https://h/?x=1"), null);
   assert.equal(normalizeExternalUrl("not a url"), null);
+  assert.equal(normalizeExternalUrl("http://crow.tail.ts.net:8445"), null, "HSTS-preloaded ts.net needs https");
+  assert.equal(normalizeExternalUrl("http://10.0.0.5:2586"), "http://10.0.0.5:2586");
 });
 
 // ─── provisioning ───
@@ -150,9 +164,9 @@ test("instance key + parsers", () => {
   assert.deepEqual([...parseTokens("- tk_abc123 (x), never expires\n")], ["tk_abc123"]);
 });
 
-test("first run creates two users, a private topic ACL and two tokens; the config file is 0600", async () => {
+for (const stderr of [false, true]) test(`first run creates two users, a private topic ACL and two tokens; the config file is 0600 (CLI output on ${stderr ? "stderr, ntfy 2.11" : "stdout, ntfy 2.25"})`, async () => {
   const { env } = tmpData();
-  const { state, runner } = fakeNtfy();
+  const { state, runner } = fakeNtfy({ stderr });
   const r = await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.topic, "crow-0867ac2809");
@@ -197,6 +211,53 @@ test("concurrent provisioning of one instance is single-flight (one token pair)"
   ]);
   assert.equal(a, b);
   assert.equal(state.tokens.get("crow-0867ac2809-pub").length, 1);
+});
+
+test("on ntfy 2.11 (stderr output) a re-run reuses the stored tokens", async () => {
+  const { env } = tmpData();
+  const { state, runner } = fakeNtfy({ stderr: true });
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  const r = await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  assert.deepEqual(r.created, { users: [], tokens: [] });
+  assert.equal(state.tokens.get("crow-0867ac2809-pub").length, 1);
+});
+
+test("a lost config re-mints and revokes Crow's orphaned tokens (reinstall that kept the volume)", async () => {
+  const { env } = tmpData();
+  const { state, runner } = fakeNtfy();
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  const oldPub = readStoredNtfyConfig(env).publisherToken;
+  removeStoredNtfyConfig(env);
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  assert.ok(state.removed.includes(`crow-0867ac2809-pub ${oldPub}`));
+  assert.deepEqual(state.tokens.get("crow-0867ac2809-pub"), [readStoredNtfyConfig(env).publisherToken]);
+});
+
+test("deprovision revokes this instance's tokens and forgets the config", async () => {
+  const { env } = tmpData();
+  const { state, runner } = fakeNtfy();
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  assert.deepEqual(await deprovisionNtfy({ runner, env }), { removed: true });
+  assert.equal(state.tokens.get("crow-0867ac2809-pub").length, 0);
+  assert.equal(state.tokens.get("crow-0867ac2809-app").length, 0);
+  assert.equal(readStoredNtfyConfig(env), null);
+  assert.deepEqual(await deprovisionNtfy({ runner, env }), { removed: false });
+});
+
+test("the publish port comes from the installed bundle's .env when no port is passed", async () => {
+  const { env, home } = tmpData();
+  mkdirSync(join(home, "bundles", "ntfy"), { recursive: true });
+  writeFileSync(join(home, "bundles", "ntfy", ".env"), "NTFY_PORT=2599\n");
+  const { runner } = fakeNtfy();
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  assert.equal(readStoredNtfyConfig(env).port, 2599);
+});
+
+test("an unresponsive docker is capped by the overall deadline", async () => {
+  const { env } = tmpData();
+  const r = await provisionNtfy({ runner: () => new Promise(() => {}), env, instanceId: ID_A, deadlineMs: 50 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /did not answer/);
 });
 
 test("a token the server no longer knows is re-minted", async () => {
@@ -252,6 +313,7 @@ test("a just-started server (auth db not created yet) is waited for", async () =
   // …but not forever.
   const r2 = await provisionNtfy({ runner: fakeNtfy({ notStartedFor: 99 }).runner, env: tmpData().env, instanceId: ID_A, startWaitMs: 0, sleep: noSleep });
   assert.equal(r2.ok, false);
+  assert.match(r2.reason, /still starting/);
 });
 
 // ─── boot ensure ───
@@ -261,22 +323,24 @@ test("boot ensure: kill switch, env hosts and configured hosts are left alone", 
   const { state, runner } = fakeNtfy();
   const log = () => {};
   assert.equal((await autowireAtBoot({ env: { ...env, CROW_DISABLE_NTFY_AUTOWIRE: "1" }, runner, log })).skipped, "disabled");
-  assert.equal((await autowireAtBoot({ env: { ...env, NTFY_TOPIC: "x" }, runner, log })).skipped, "env");
-  assert.equal((await autowireAtBoot({ env, runner: fakeNtfy({ running: false }).runner, log })).skipped, "no-server");
+  assert.equal((await autowireAtBoot({ env: { ...env, NTFY_TOPIC: "x" }, runner, log, throwaway: () => false })).skipped, "env");
+  assert.equal((await autowireAtBoot({ env, runner: fakeNtfy({ running: false }).runner, log, throwaway: () => false })).skipped, "no-server");
   assert.equal(state.calls.length, 0);
-  const r = await autowireAtBoot({ env: { ...env }, runner, log, installedIds: () => ["ntfy"] });
+  assert.equal((await autowireAtBoot({ env, runner, log, installedIds: () => ["ntfy"] })).skipped, "temp-data-dir", "a temp-dir gateway never touches a real server");
+  assert.equal(state.calls.length, 0);
+  const r = await autowireAtBoot({ env: { ...env }, runner, log, installedIds: () => ["ntfy"], throwaway: () => false });
   // instance id comes from the data dir; none there and env !== process.env → plain failure, no throw
   assert.equal(r.ok, false);
   writeFileSync(join(env.CROW_DATA_DIR, "instance-id"), ID_A);
-  assert.equal((await autowireAtBoot({ env, runner, log, installedIds: () => ["ntfy"] })).ok, true);
-  assert.equal((await autowireAtBoot({ env, runner, log, installedIds: () => ["ntfy"] })).skipped, "configured");
+  assert.equal((await autowireAtBoot({ env, runner, log, installedIds: () => ["ntfy"], throwaway: () => false })).ok, true);
+  assert.equal((await autowireAtBoot({ env, runner, log, installedIds: () => ["ntfy"], throwaway: () => false })).skipped, "configured");
 });
 
 test("boot ensure provisions a co-hosted instance when another instance's crow-ntfy is running", async () => {
   const { env, data } = tmpData();
   writeFileSync(join(data, "instance-id"), ID_B);
   const { runner } = fakeNtfy();
-  const r = await autowireAtBoot({ env, runner, log: () => {}, installedIds: () => [] });
+  const r = await autowireAtBoot({ env, runner, log: () => {}, installedIds: () => [], throwaway: () => false });
   assert.equal(r.ok, true);
   assert.equal(readStoredNtfyConfig(env).topic, "crow-c22c6af81c");
 });

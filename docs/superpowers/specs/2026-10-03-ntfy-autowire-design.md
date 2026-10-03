@@ -32,7 +32,9 @@ own login on it, picks a private channel, and hands both to the app; co-hosted i
      `ntfy access everyone crow-<key> deny` — the topic is private even on a server whose default access is
      read-write.
    - Tokens: a stored token is reused only if `ntfy token list <user>` still lists it; otherwise
-     `ntfy token add --label=crow-autowire <user>` mints one.
+     Crow's own orphans (label `crow-autowire`) are revoked and `ntfy token add --label=crow-autowire <user>`
+     mints one. CLI output is parsed from stdout AND stderr (ntfy ≤ 2.13, incl. the stock v2.11.0, prints
+     results to stderr). Single-flight per instance, 120 s overall cap.
    - "auth-file does not exist" right after `compose up` (the server has not started yet) is retried for
      ~30 s; a server with no user database at all fails with a plain-language reason.
 2. **Key = the instance id.** `<key>` is the first 10 hex chars of `$CROW_DATA_DIR/instance-id`. A second
@@ -53,8 +55,10 @@ own login on it, picks a private channel, and hands both to the app; co-hosted i
      sibling `ntfy-push-status.json`, best-effort, never blocking a send.
 4. **Env stays an override; existing env hosts are unchanged.** If `NTFY_TOPIC` is set, every path behaves
    exactly as before (topic, host, port, `NTFY_AUTH_TOKEN`, `NTFY_EXTRA_TOPICS`, URL derivation) and
-   autowire never runs at boot. In auto mode, `NTFY_HOST`/`NTFY_PORT`/`NTFY_EXTERNAL_URL`/`NTFY_EXTRA_TOPICS`
-   still override field-by-field. New optional `NTFY_SUBSCRIBER_TOKEN` lets an env host stop handing its
+   autowire never runs at boot. In auto mode, `NTFY_HOST`/`NTFY_PORT`/`NTFY_EXTERNAL_URL` still override
+   field-by-field; `NTFY_EXTRA_TOPICS` is ignored — the read-only token cannot read other topics and ntfy
+   refuses the whole multi-topic stream (403) when any one topic is unreadable. The publish port comes from
+   the installed bundle's `.env` `NTFY_PORT` when present. New optional `NTFY_SUBSCRIBER_TOKEN` lets an env host stop handing its
    publisher token to apps.
 5. **`/api/push/ntfy-config` serves the read-only `-app` token in auto mode — never the publisher token.**
 6. **External URL** = a Settings field (`ntfy-push.json` `externalUrl`) with `NTFY_EXTERNAL_URL` semantics:
@@ -65,9 +69,10 @@ own login on it, picks a private channel, and hands both to the app; co-hosted i
    the install job, non-fatal). (b) Once at boot, 20 s after listen, when no env topic and no config file
    exist and either this instance has the bundle installed or a `crow-ntfy` container is running on the
    host (co-hosted case). Kill switch `CROW_DISABLE_NTFY_AUTOWIRE=1`, forced by `scripts/run-suite.mjs`
-   so a scratch suite gateway can never add users to a host's real ntfy. (c) Settings › Notifications
-   "Set up phone notifications" button (also the repair path). Uninstalling the bundle removes the
-   config file so the sender stops posting to a dead server.
+   so a scratch suite gateway can never add users to a host's real ntfy; a gateway whose data dir is
+   under the OS temp dir (a raw single-file test run) is skipped too. (c) Settings › Notifications
+   "Set up phone notifications" button (also the repair path). Uninstalling the bundle revokes this
+   instance's tokens (while the server is still up) and removes the config file.
 8. **Stock bundle 1.1.0** runs ntfy with a user database and `deny-all` default access
    (`NTFY_AUTH_FILE`/`NTFY_CACHE_FILE` under `/var/lib/ntfy`, same paths crow's override uses, so the exec'd
    CLI and the server agree), and drops the `NTFY_TOPIC`/`NTFY_AUTH_TOKEN` manifest vars (no more topic
@@ -85,7 +90,7 @@ notifications** (provision/repair) and **Send test notification**. Server-render
 
 ## Out of scope
 
-- Cross-instance topic sharing (a phone paired to crow also receiving r4's topic): still `NTFY_EXTRA_TOPICS`,
-  and in auto mode the app's read token covers only its own topic.
+- Cross-instance topic sharing (a phone paired to crow also receiving r4's topic): env-mode
+  `NTFY_EXTRA_TOPICS` only; auto mode serves just the instance's own topic.
 - Migrating r4 off its broken `NTFY_TOPIC=kevin-r4` env: operator removes the env line, then autowire runs.
 - Image bump of the stock bundle.
