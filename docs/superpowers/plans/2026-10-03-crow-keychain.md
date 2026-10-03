@@ -6554,6 +6554,8 @@ Prod is never stopped, and no model container is touched.
 
 Every step starts with `source /tmp/claude-1000/kc-smoke/vars.sh`.
 
+**Deviations recorded by the 2026-10-03 live run:** the Bitwarden CLI (pinned 2026.8.0) refuses plain `http://`, so the CLI/`saveToVault` use the https Serve URL (`vaultwardenStatus` already prefers `VAULTWARDEN_DOMAIN`); only curl/fetch checks use `http://localhost:18097`. Step 6's argv sampler as a systemd user unit captured nothing, so its "never in argv" PASS was vacuous: validate the sampler with a canary login first, or poll inline.
+
 **Sudo** (Serve only): `sudo -S` with the credential from the global CLAUDE.md, never written to a file or this plan; or Kevin runs those lines.
 
 **Findings** go in `$SMOKE/findings.md`. Any FAIL means a fix commit with its unit test, plus a re-run of the affected step in a new registered window, before Task 14.
@@ -6688,6 +6690,7 @@ console.log(e.url === "https://crow.dachshund-chromatic.ts.net:8461/admin" && e.
 const none = (await K.listEntries(db, { keyId: null })).find((x) => x.id === e.id);
 console.log(none.readable === false ? "PASS without the key file the entry reads as unreadable" : "FAIL readable without key");
 db.close();
+process.exit(0);   // the libsql client keeps the loop alive otherwise (smoke 2026-10-03)
 '
 ```
 
