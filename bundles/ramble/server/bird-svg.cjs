@@ -16,6 +16,10 @@
     blackswan:   { name: "Black swan",  base: ["#20222c","#2b2d3a"], crest: 0.0, tail: 0.8, beak: "#d94a4a", size: 1.1, longneck: true }
   };
   var EYES = ["round","sparkle","sleepy","wink"], MARKS = ["none","cheeks","starburst","collar","freckles"], HATS = ["none","none","none","bow","leaf","beanie"];
+  /* What can be WORN (phase 4, spec §5). The hat values are the existing
+   * rolled-hat vocabulary; scarf and glasses are new slots a rolled genome
+   * never has, so a bird with no outfit draws exactly as it always did. */
+  var OUTFIT_SLOTS = { hat: ["bow","leaf","beanie"], scarf: ["knit","stripe"], glasses: ["round","shades"] };
   var ACCENTS = ["#f7c948","#5b7cff","#ff7a9c","#7bd389","#c77dff","#ff8a5b"];
   var PARTS = { /* name -> path data; body/head are ellipses computed from genome, the rest are here */
     beak: "M0 0 l20 5 l-20 6 z", longbeak: "M0 0 l34 -3 l-33 9 z", foot: "M0 0 v16 m-8 0 h16",
@@ -46,6 +50,23 @@
   }
   function n(v) { return (+v).toFixed(2); }
   function at(x, y) { return "translate(" + n(x) + " " + n(y) + ")"; }
+  /* Layer what a bird is wearing over its rolled genome. A NEW object: the
+   * rolled genome is identity, never edited. Only known slot+value pairs are
+   * copied, iterating OUR slot table (never the input's keys), so junk, a
+   * future value from a newer version, or a __proto__ key is simply ignored.
+   * No hat in the outfit = the rolled hat stays. */
+  function applyOutfit(g, outfit) {
+    var out = {}, k;
+    for (k in g) if (Object.prototype.hasOwnProperty.call(g, k)) out[k] = g[k];
+    if (!outfit || typeof outfit !== "object") return out;
+    for (k in OUTFIT_SLOTS) {
+      if (!Object.prototype.hasOwnProperty.call(OUTFIT_SLOTS, k)) continue;
+      if (!Object.prototype.hasOwnProperty.call(outfit, k)) continue;
+      var v = outfit[k];
+      if (typeof v === "string" && OUTFIT_SLOTS[k].indexOf(v) >= 0) out[k] = v;
+    }
+    return out;
+  }
   function drawBird(g, mood) {
     mood = mood === "tired" || mood === "alarmed" ? mood : "happy";
     var sp = SPECIES[g.species]; if (!sp) throw new Error("unknown species: " + g.species);
@@ -63,6 +84,22 @@
     if (g.hat === "bow") hat = '<g transform="' + at(cx - 18, cy - 78) + '"><path d="' + PARTS.bow + '" fill="' + g.accent + '"/><circle r="3.5" fill="#fff"/></g>';
     if (g.hat === "leaf") hat = '<path transform="' + at(cx, cy - 78) + '" d="' + PARTS.leaf + '" fill="#7bd389"/>';
     if (g.hat === "beanie") hat = '<path transform="' + at(cx, cy - 66) + '" d="' + PARTS.beanie + '" fill="' + g.accent + '"/><circle cx="' + n(cx) + '" cy="' + n(cy - 84) + '" r="5" fill="#fff"/>';
+    /* Scarf and glasses: drawn only for a known value, and the value is only
+     * ever COMPARED, never written into the markup. */
+    var scarf = "";
+    if (g.scarf === "knit" || g.scarf === "stripe") {
+      var dash = g.scarf === "stripe" ? ' stroke-dasharray="6 5"' : "";
+      scarf = '<path d="M' + n(cx - 28) + ' ' + n(cy - 26) + ' q 28 13 56 0" stroke="' + g.accent + '" stroke-width="10" fill="none" stroke-linecap="round"/>' +
+        (g.scarf === "stripe" ? '<path d="M' + n(cx - 28) + ' ' + n(cy - 26) + ' q 28 13 56 0" stroke="#fff" stroke-width="10" fill="none"' + dash + ' opacity=".55"/>' : "") +
+        '<path d="M' + n(cx - 16) + ' ' + n(cy - 22) + ' l -7 24 l 10 -2 z" fill="' + g.accent + '"/>';
+    }
+    var glasses = "";
+    if (g.glasses === "round" || g.glasses === "shades") {
+      glasses = '<g stroke="#1a1a1a" stroke-width="2.6" stroke-linecap="round">' +
+        '<circle cx="' + n(ex) + '" cy="' + n(ey) + '" r="10.5" fill="' + (g.glasses === "shades" ? "#1a1a1a" : "none") + '"' + (g.glasses === "shades" ? ' fill-opacity=".88"' : "") + '/>' +
+        '<path d="M' + n(ex - 10.5) + ' ' + n(ey - 1) + ' L' + n(ex - 27) + ' ' + n(ey - 4) + '" fill="none"/></g>' +
+        (g.glasses === "shades" ? '<path d="M' + n(ex - 4) + ' ' + n(ey - 5) + ' l 5 -2" stroke="#fff" stroke-width="2" stroke-linecap="round" opacity=".7"/>' : "");
+    }
     var crest = sp.crest > 0 ? '<path transform="' + at(cx - 4, cy - 76) + ' scale(1 ' + n(sp.crest * 4) + ')" d="' + PARTS.crest + '" fill="' + g.body + '"/>' : "";
     var neck = sp.longneck ? '<rect x="' + n(cx - 8) + '" y="' + n(cy - 60) + '" width="16" height="30" rx="8" fill="' + g.body + '"/>' : "";
     var tail = '<path transform="' + at(cx - bw + 6, cy - 6) + ' scale(' + n(sp.tail) + ' 1)" d="' + PARTS.tail + '" fill="' + g.body + '"/>';
@@ -78,7 +115,7 @@
       '<ellipse cx="' + n(cx - 22) + '" cy="' + n(cy + 2 + wingDrop) + '" rx="18" ry="24" fill="' + hueShift(g.body, 0, .08) + '" opacity=".9" transform="rotate(-12 ' + n(cx - 22) + ' ' + n(cy + 2) + ')"/>' +
       (sp.sheen ? '<ellipse cx="' + n(cx - 10) + '" cy="' + n(cy - 18) + '" rx="16" ry="8" fill="#7ad3ff" opacity=".25"/>' : "") +
       neck + '<circle cx="' + n(cx) + '" cy="' + n(cy - 50) + '" r="' + n(hr) + '" fill="' + g.body + '"/>' +
-      crest + hat + marks + cheeks + eye + beak + alarm + '</g>';
+      crest + hat + marks + scarf + cheeks + eye + glasses + beak + alarm + '</g>';
   }
   function drawEgg(seed) {
     if (!isUint32(seed)) throw new Error("seed must be a uint32");
@@ -122,5 +159,5 @@
   }
   function mountHeart(el) { el.setAttribute("viewBox", "0 0 24 24"); el.innerHTML = drawHeart(); }
   function isValidBird(x) { return !!x && typeof x === "object" && ROSTER.indexOf(x.species) >= 0 && isUint32(x.seed); }
-  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, drawHeart: drawHeart, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, mountHeart: mountHeart, isValidBird: isValidBird };
+  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, OUTFIT_SLOTS: OUTFIT_SLOTS, applyOutfit: applyOutfit, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, drawHeart: drawHeart, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, mountHeart: mountHeart, isValidBird: isValidBird };
 });

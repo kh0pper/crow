@@ -150,6 +150,26 @@ Exactly one egg incubates at a time. From the **Flock** screen you can **incubat
 
 Every hatched bird stays in your flock. The Flock screen (`GET /api/ramble/flock`) lists them with the **active** one tagged — that is the bird on your map, in the Nest header and on your public caws — and tapping another bird activates it (`POST /api/ramble/birds/:id/activate`). The score is species found out of the 8 kinds; a second bird of a kind you already have is still a bird, just not a new kind.
 
+## Wardrobe
+
+Bird seed buys things to wear: hats (bow, leaf, beanie), scarves (knitted, striped) and glasses (round, shades). Open **Wardrobe** from your bird's page. Buy something once and any of your birds can wear it; each bird remembers its own outfit, so switching birds switches clothes. Taking a hat off brings back whatever hat the bird hatched with.
+
+What you wear shows on your bird's page, your flock, your marker on the map, the AR view, the bird in the dashboard header, and your **profile picture** if you use your bird as one — which is how contacts see it. **Strangers never do:** public marks always carry the plain bird you hatched, because a chosen outfit would tie your rotating map identities together.
+
+Your profile picture also shows how you are doing. A bird left without walks or chores looks tired, then rattled, to your contacts — nothing worse than that ever happens. Changes to the picture are gathered up and sent once things settle (about twenty seconds after your last change), and a quiet stretch is noticed within half an hour, so trying on four hats sends your contacts one picture, not four.
+
+Purchases are recorded the same way seed pickups are, as a ledger on each of your Crows that syncs between them. If two of your Crows buy while out of touch with each other, both purchases stand once they reconnect, and your balance can briefly read below zero; it climbs back as you collect seed, and nothing can be bought until it does. A Crow still running a Ramble older than 0.13 does not know about purchases and shows the balance as it was before them until it is updated.
+
+| Item | Price (seed) |
+|---|---|
+| Bow, Leaf | 8 |
+| Beanie | 12 |
+| Knitted scarf | 15 |
+| Striped scarf, Round glasses | 20 |
+| Shades | 25 |
+
+API: `GET /api/ramble/wardrobe`, `POST /api/ramble/wardrobe/buy { item }`, `POST /api/ramble/birds/:id/outfit { slot, item | null }`.
+
 ## Contacts and groups
 
 A mark for **Contacts** goes to every full contact (unblocked, not a bot, not a pending request) as one NIP-44 DM each, signed by this instance's key — the same door every Crow DM uses. A mark for a **Group** goes to the members of that contact group (`group:<group_uid>`, the groups from the Contacts panel; the Ramble panel only shows the Group audience when you have one). The DM's only tag is the recipient; the mark's text, place and bird are ciphertext. Nothing about a contacts or group mark reaches a relay in the clear.

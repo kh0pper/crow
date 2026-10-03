@@ -151,6 +151,26 @@ Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incu
 
 Cada pájaro eclosionado se queda en tu bandada. La pantalla **Bandada** (`GET /api/ramble/flock`) los lista con el **activo** marcado — ese es el pájaro que aparece en tu mapa, en la cabecera del Nest y en tus caws públicos — y tocar otro pájaro lo activa (`POST /api/ramble/birds/:id/activate`). La puntuación es especies encontradas de 8 posibles; un segundo pájaro de una especie que ya tienes sigue siendo un pájaro, solo que no es una especie nueva.
 
+## Vestuario
+
+El alpiste compra cosas para ponerte: sombreros (lazo, hoja, gorro), bufandas (de punto, de rayas) y gafas (redondas, de sol). Abre **Vestuario** desde la página de tu pájaro. Compra algo una vez y cualquiera de tus pájaros puede llevarlo; cada pájaro recuerda su propio atuendo, así que cambiar de pájaro cambia la ropa. Quitarte un sombrero devuelve el sombrero con el que nació el pájaro.
+
+Lo que llevas se ve en la página de tu pájaro, tu bandada, tu marcador en el mapa, la vista AR, el pájaro de la cabecera del panel y tu **foto de perfil** si usas tu pájaro como foto — así es como lo ven tus contactos. **Los desconocidos nunca lo ven:** las marcas públicas siempre llevan el pájaro tal como nació, porque un atuendo elegido uniría tus identidades rotativas del mapa.
+
+Tu foto de perfil también muestra cómo estás. Un pájaro sin paseos ni tareas se ve cansado y luego agitado ante tus contactos — nunca pasa nada peor. Los cambios de la foto se agrupan y se envían cuando todo se calma (unos veinte segundos después del último cambio), y un rato de inactividad se nota en menos de media hora, así que probarte cuatro sombreros envía a tus contactos una sola foto, no cuatro.
+
+Las compras se registran igual que el alpiste recogido, como un libro de cuentas en cada uno de tus Crows que se sincroniza entre ellos. Si dos de tus Crows compran mientras están desconectados entre sí, ambas compras cuentan al reconectarse y tu saldo puede quedar por un momento por debajo de cero; vuelve a subir al recoger alpiste, y no se puede comprar nada hasta entonces. Un Crow que todavía tenga un Ramble anterior a 0.13 no conoce las compras y muestra el saldo de antes de ellas hasta que se actualice.
+
+| Artículo | Precio (alpiste) |
+|---|---|
+| Lazo, Hoja | 8 |
+| Gorro | 12 |
+| Bufanda de punto | 15 |
+| Bufanda de rayas, Gafas redondas | 20 |
+| Gafas de sol | 25 |
+
+API: `GET /api/ramble/wardrobe`, `POST /api/ramble/wardrobe/buy { item }`, `POST /api/ramble/birds/:id/outfit { slot, item | null }`.
+
 ## Contactos y grupos
 
 Una marca para **Contactos** llega a cada contacto completo (no bloqueado, no bot, no una solicitud pendiente) como un DM NIP-44 individual, firmado con la clave de esta instancia — la misma puerta que usa cualquier DM de Crow. Una marca para un **Grupo** llega a los miembros de ese grupo de contactos (`group:<group_uid>`, los grupos del panel Contactos; el panel de Ramble solo muestra la audiencia Grupo cuando tienes alguno). La única etiqueta del DM es el destinatario; el texto, el lugar y el pájaro de la marca van cifrados. Nada de una marca para contactos o grupo llega a un relay en claro.

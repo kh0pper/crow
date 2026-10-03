@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const Bird = require("../bundles/ramble/server/bird-svg.cjs");
@@ -99,4 +100,66 @@ test("mountHeart sets the same 24-unit viewBox the seed pip uses", () => {
   assert.deepEqual(calls[0], ["viewBox", "0 0 24 24"], "same box as mountSeed, so the pips match in size");
   assert.equal(calls[1][0], "innerHTML");
   assert.equal(calls[1][1], Bird.drawHeart());
+});
+
+
+// Golden hash of drawBird over every species x 4 seeds x 3 moods, computed
+// from the engine on origin/main @09ae235f BEFORE this task. An outfit-less
+// bird must draw byte-identically forever: public marks render it.
+const GOLDEN_PLAIN = "548d1335887eb44323fddd71128c77ce2cddcb2ebed5066bbfbf76b735ba09e7";
+test("a bird with no outfit draws byte-identically to the pre-wardrobe engine", () => {
+  let s = "";
+  for (const sp of Bird.ROSTER) for (const seed of [1, 7, 123456, 4294967295]) for (const m of ["happy", "tired", "alarmed"]) {
+    s += Bird.drawBird(Bird.rollGenome(seed, sp), m);
+  }
+  assert.equal(createHash("sha256").update(s).digest("hex"), GOLDEN_PLAIN);
+  // and applyOutfit with nothing to apply is also a no-op on the drawing
+  const g = Bird.rollGenome(7, "magpie");
+  assert.equal(Bird.drawBird(Bird.applyOutfit(g, {})), Bird.drawBird(g));
+  assert.equal(Bird.drawBird(Bird.applyOutfit(g, null)), Bird.drawBird(g));
+});
+
+test("OUTFIT_SLOTS is the catalogue's art vocabulary", () => {
+  assert.deepEqual(Bird.OUTFIT_SLOTS, { hat: ["bow", "leaf", "beanie"], scarf: ["knit", "stripe"], glasses: ["round", "shades"] });
+});
+
+test("applyOutfit layers over the rolled genome without mutating it", () => {
+  const rolled = Bird.rollGenome(1, "crow"); // crow seed 1 rolls a bow
+  assert.equal(rolled.hat, "bow");
+  const before = JSON.stringify(rolled);
+  const worn = Bird.applyOutfit(rolled, { hat: "beanie", scarf: "knit", glasses: "shades" });
+  assert.equal(JSON.stringify(rolled), before, "input untouched");
+  assert.equal(worn.hat, "beanie");
+  assert.equal(worn.scarf, "knit");
+  assert.equal(worn.glasses, "shades");
+  assert.equal(worn.seed, rolled.seed);
+  // Taking the hat off = no hat key in the outfit = the ROLLED hat comes back.
+  assert.equal(Bird.applyOutfit(rolled, { scarf: "knit" }).hat, "bow");
+});
+
+test("applyOutfit drops unknown slots, unknown values and junk — never throws", () => {
+  const g = Bird.rollGenome(2, "crow"); // crow seed 2 rolls no hat
+  for (const junk of [undefined, null, 42, "hat", [], { hat: "monocle" }, { glasses: "monocle" }, { wings: "big" }, { hat: 7 }, JSON.parse('{"__proto__":{"hat":"bow"}}')]) {
+    const out = Bird.applyOutfit(g, junk);
+    assert.equal(out.hat, g.hat, JSON.stringify(junk));
+    assert.equal(out.scarf, undefined);
+    assert.equal(out.glasses, undefined);
+    assert.equal(Bird.drawBird(out), Bird.drawBird(g));
+  }
+  assert.equal(({}).hat, undefined, "no prototype pollution");
+});
+
+test("every scarf and glasses value draws, differently, and the value text never reaches the SVG", () => {
+  const g = Bird.rollGenome(2, "crow");
+  const plain = Bird.drawBird(g);
+  const seen = new Set([plain]);
+  for (const slot of ["scarf", "glasses"]) for (const v of Bird.OUTFIT_SLOTS[slot]) {
+    const svg = Bird.drawBird(Bird.applyOutfit(g, { [slot]: v }));
+    assert.ok(!seen.has(svg), `${slot}=${v} changes the drawing`);
+    seen.add(svg);
+    for (const mood of ["happy", "tired", "alarmed"]) assert.ok(Bird.drawBird(Bird.applyOutfit(g, { [slot]: v }), mood).startsWith("<g"));
+  }
+  for (const v of Bird.OUTFIT_SLOTS.hat) {
+    assert.ok(Bird.drawBird(Bird.applyOutfit(g, { hat: v })) !== plain, `hat=${v} draws`);
+  }
 });

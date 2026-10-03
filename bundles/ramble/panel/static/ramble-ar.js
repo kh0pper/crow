@@ -380,10 +380,15 @@
       // hasEgg term this un-hides a phantom seed-0 egg on every frame.
       if (e.egg) setHidden(e.egg, valid || !hasEgg);
       if (!valid) { birdKey = null; return; }
-      var key = bird.species + ":" + bird.seed + ":" + (bird.mood || "happy");
+      var outfitKey = bird.outfit ? JSON.stringify(bird.outfit) : "";
+      var key = bird.species + ":" + bird.seed + ":" + (bird.mood || "happy") + ":" + outfitKey;
       if (key === birdKey) return;
       birdKey = key;
-      try { engine.mountBird(e.bird, engine.rollGenome(bird.seed, bird.species), bird.mood || "happy"); } catch (err) { /* cosmetic */ }
+      try {
+        var g = engine.rollGenome(bird.seed, bird.species);
+        if (bird.outfit && typeof engine.applyOutfit === "function") g = engine.applyOutfit(g, bird.outfit);
+        engine.mountBird(e.bird, g, bird.mood || "happy");
+      } catch (err) { /* cosmetic */ }
     }
 
     function react() {

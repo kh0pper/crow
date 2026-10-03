@@ -19,6 +19,7 @@ import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
 import { isoWeek, startOfLocalDay, hatchIfReady, readWarmthWeights, promoteFromShelf } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
+import { parseOutfit } from "./wardrobe.js";
 import { isEggLocked, lockedEggIds } from "./egg-locks.js";
 
 const require = createRequire(import.meta.url);
@@ -241,7 +242,7 @@ export async function flockState(db, { now = Date.now() } = {}) {
   const birds = rows
     .filter((r) => r.status === "hatched" && r.species != null && r.seed != null)
     .sort((x, y) => Number(x.hatched_at) - Number(y.hatched_at))
-    .map((r) => ({ egg_id: r.egg_id, species: r.species, seed: r.seed, hatched_at: r.hatched_at, active: r.egg_id === pet.active_egg_id }));
+    .map((r) => ({ egg_id: r.egg_id, species: r.species, seed: r.seed, hatched_at: r.hatched_at, active: r.egg_id === pet.active_egg_id, outfit: parseOutfit(r.outfit_json ?? null) }));
 
   const pct = (w) => Math.max(0, Math.min(100, Math.round((Number(w) / weights.hatch_at) * 100)));
   const eggs = rows
