@@ -94,3 +94,20 @@ test("ownedItems ignores spend rows for items no longer (or not yet) in this cat
   assert.deepEqual([...await ownedItems(db)], [], "unknown to this version: not wearable here");
   assert.equal(await seedBalance(db), -40, "but the seed it cost is still spent");
 });
+
+test("with seed to spare, the owned guard (not the balance) stops a double charge", async () => {
+  const item = itemById("hat.beanie");
+  const db = await freshDb(item.price * 4);
+  const [a, b] = await Promise.all([
+    buyItem(db, item.id, { now: NOW, purchaseId: "c1" }),
+    buyItem(db, item.id, { now: NOW, purchaseId: "c2" }),
+  ]);
+  assert.equal([a, b].filter((r) => r.ok).length, 1, "concurrent double tap: one wins");
+  const again = await buyItem(db, item.id, { now: NOW, purchaseId: "c3" });
+  assert.equal(again.ok, false);
+  assert.equal(again.reason, "owned");
+  assert.equal(again.balance, item.price * 3);
+  const { rows } = await db.execute("SELECT count(*) AS n FROM ramble_wallet WHERE kind = 'spend'");
+  assert.equal(Number(rows[0].n), 1, "exactly one spend row");
+  assert.equal(await seedBalance(db), item.price * 3);
+});
