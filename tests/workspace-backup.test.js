@@ -15,6 +15,7 @@ const SKIP = spawnSync("gpg", ["--version"]).status !== 0 && "gpg not installed"
 const FAKE_DC = String.raw`#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_STATE/calls.log"
 case "$*" in
+  *"maintenance:mode --on"*) if [ -f "$FAKE_STATE/on-fails-after-applying" ]; then echo on-applied >> "$FAKE_STATE/maint.log"; exit 1; fi ;;
   *"mariadb-dump"*)
     if [ -f "$FAKE_STATE/fail-dump" ]; then echo "dump exploded" >&2; exit 2; fi
     if [ -f "$FAKE_STATE/slow-dump" ]; then sleep 5; fi
@@ -208,4 +209,32 @@ test("scratch-restore override never restarts, publishes nothing, uses its own s
   for (const s of ["nextcloud", "nextcloud-cron", "nextcloud-db", "nextcloud-redis", "onlyoffice"]) assert.match(o, new RegExp(`  ${s}:\\n    restart: "no"`), s);
   assert.match(o, /ports: !reset \[\]/);
   assert.match(o, /subnet: 10\.89\.72\.0\/24/);
+});
+
+test("maintenance --on that applies but returns non-zero → --off still runs; --on/--off run under timeout", { skip: SKIP }, () => {
+  const ctx = setup();
+  writeFileSync(join(ctx.st, "on-fails-after-applying"), "");
+  const r = runOps("backup.sh", ctx);
+  assert.notEqual(r.status, 0);
+  assert.match(read(ctx, "maint.log"), /on-applied/);
+  const c = read(ctx, "calls.log");
+  assert.ok(c.lastIndexOf("maintenance:mode --off") > c.indexOf("maintenance:mode --on"));
+  const src = readFileSync(join(OPS, "backup.sh"), "utf8");
+  assert.equal((src.match(/timeout 60 \$DC exec -T -u www-data nextcloud php occ maintenance:mode --(on|off)/g) || []).length, 3, "on, in-band off, trap off");
+  assert.doesNotMatch(src, /^occ maintenance:mode/m);
+  assert.match(src, /--no-symkey-cache/);
+});
+
+test("install-backup-timer.sh refuses when the bundle dir has no .env (run from a checkout) and prints the resolved dir otherwise", () => {
+  const ctx = setup();
+  const env = { PATH: process.env.PATH, HOME: ctx.root, FAKE_STATE: ctx.st, CROW_HOME: join(ctx.root, "crowhome"), CROW_BUNDLE_DIR: ctx.bundle, WORKSPACE_DATA_ROOT: ctx.ws, XDG_CONFIG_HOME: join(ctx.root, "cfg"), WORKSPACE_SYSTEMCTL: "true" };
+  rmSync(join(ctx.bundle, ".env"));
+  const bad = spawnSync("bash", [join(OPS, "install-backup-timer.sh"), "--dest", "/x"], { encoding: "utf8", env });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /~\/\.crow\/bundles\/workspace\/ops\//);
+  assert.ok(!existsSync(join(ctx.root, "cfg", "systemd")), "no units written");
+  writeFileSync(join(ctx.bundle, ".env"), "X=1\n", { mode: 0o600 });
+  const ok = spawnSync("bash", [join(OPS, "install-backup-timer.sh"), "--dest", "/x"], { encoding: "utf8", env });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(ok.stdout.includes(`Using bundle dir: ${ctx.bundle}`));
 });

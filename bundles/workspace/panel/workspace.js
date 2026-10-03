@@ -15,7 +15,7 @@ const T = {
   en: {
     title: "Office",
     subtitle: "Your private office: files, documents, calendars and contacts.",
-    notReady: "Workspace is not set up yet. Finish the install on the Extensions page, then reopen this page.",
+    notReady: "Workspace is not fully set up yet. Finish the setup by running this command in a terminal on the machine that hosts Crow, then reopen this page:",
     addressH: "Your Workspace address",
     addressP: "Open it in a browser on any device that is on your tailnet. Sign in with your Workspace account (not your Crow password).",
     appPwH: "One app password per device",
@@ -40,7 +40,7 @@ const T = {
   es: {
     title: "Office",
     subtitle: "Tu oficina privada: archivos, documentos, calendarios y contactos.",
-    notReady: "Workspace todavía no está configurado. Termina la instalación en la página de Extensiones y vuelve a abrir esta página.",
+    notReady: "Workspace todavía no está completamente configurado. Termina la configuración ejecutando este comando en una terminal de la máquina que aloja Crow y vuelve a abrir esta página:",
     addressH: "La dirección de tu Workspace",
     addressP: "Ábrela en el navegador de cualquier dispositivo conectado a tu tailnet. Entra con tu cuenta de Workspace (no con tu contraseña de Crow).",
     appPwH: "Una contraseña de aplicación por dispositivo",
@@ -65,9 +65,11 @@ const T = {
 };
 export { T as WORKSPACE_STRINGS };
 
-const PUBLIC_KEYS = ["WORKSPACE_PUBLIC_HOST", "WORKSPACE_NC_SERVE_PORT", "WORKSPACE_OO_SERVE_PORT", "WORKSPACE_ADMIN_USER"];
+const PUBLIC_KEYS = ["WORKSPACE_BOOTSTRAP_DONE", "WORKSPACE_PUBLIC_HOST", "WORKSPACE_NC_SERVE_PORT", "WORKSPACE_OO_SERVE_PORT", "WORKSPACE_ADMIN_USER"];
 const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const PORT_RE = /^[0-9]{2,5}$/;
+// Shell-safe rendering of a path: bare when it has only safe characters, else single-quoted.
+const shq = (s) => (/^[A-Za-z0-9_\/.@+:-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`);
 const NC_HOST_PORT = 3070;
 const OO_HOST_PORT = 3071;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -92,7 +94,8 @@ export function workspaceUrls(s) {
   return { host, ncPort, ooPort, nc, dav: `${nc}/remote.php/dav`, office: `https://${host}:${ooPort}/` };
 }
 
-export function renderWorkspacePage(settings, lang) {
+export function renderWorkspacePage(settings, lang, crowHome = join(homedir(), ".crow")) {
+  const opsDir = shq(join(crowHome, "bundles", "workspace", "ops"));
   const t = T[lang === "es" ? "es" : "en"];
   const style = `<style>
     .ws-panel h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
@@ -104,8 +107,8 @@ export function renderWorkspacePage(settings, lang) {
     .ws-note { border-left: 3px solid var(--crow-accent); }
   </style>`;
   const u = workspaceUrls(settings);
-  if (!settings || !u.host) {
-    return `${style}<div class="ws-panel"><h1>${esc(t.title)}</h1><p class="ws-sub">${esc(t.subtitle)}</p><div class="ws-card ws-note"><p>${esc(t.notReady)}</p></div></div>`;
+  if (!settings || !u.host || settings.WORKSPACE_BOOTSTRAP_DONE !== "1") {
+    return `${style}<div class="ws-panel"><h1>${esc(t.title)}</h1><p class="ws-sub">${esc(t.subtitle)}</p><div class="ws-card ws-note"><p>${esc(t.notReady)}</p><pre>bash ${esc(opsDir)}/bootstrap.sh</pre></div></div>`;
   }
   const card = (h, body) => `<div class="ws-card"><h2>${esc(h)}</h2>${body}</div>`;
   return `${style}<div class="ws-panel">
@@ -118,8 +121,8 @@ export function renderWorkspacePage(settings, lang) {
     ${card(t.laptopH, `<p>${esc(t.laptopP)}</p>`)}
     ${card(t.adminH, `<p>${esc(t.serveP)}</p><pre>sudo tailscale serve --bg --https=${u.ncPort} http://127.0.0.1:${NC_HOST_PORT}
 sudo tailscale serve --bg --https=${u.ooPort} http://127.0.0.1:${OO_HOST_PORT}</pre>
-      <p>${esc(t.backupP)}</p><pre>bash ~/.crow/bundles/workspace/ops/install-backup-timer.sh --dest &lt;backup folder&gt; --mount &lt;drive mountpoint&gt;</pre>
-      <p>${esc(t.userP)}</p><pre>bash ~/.crow/bundles/workspace/ops/add-user.sh &lt;login&gt; "&lt;Name&gt;"</pre>
+      <p>${esc(t.backupP)}</p><pre>bash ${esc(opsDir)}/install-backup-timer.sh --dest &lt;backup folder&gt; --mount &lt;drive mountpoint&gt;</pre>
+      <p>${esc(t.userP)}</p><pre>bash ${esc(opsDir)}/add-user.sh &lt;login&gt; "&lt;Name&gt;"</pre>
       <p>${esc(t.uninstallP)}</p><pre>systemctl --user disable --now crow-workspace-backup.timer
 sudo tailscale serve --https=${u.ncPort} off
 sudo tailscale serve --https=${u.ooPort} off</pre>`)}
@@ -136,6 +139,6 @@ export default {
   async handler(req, res, { layout, lang }) {
     const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
     const t = T[lang === "es" ? "es" : "en"];
-    res.send(layout({ title: t.title, content: renderWorkspacePage(readPublicSettings(crowHome), lang) }));
+    res.send(layout({ title: t.title, content: renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome) }));
   },
 };

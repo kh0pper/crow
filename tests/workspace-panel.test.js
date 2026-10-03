@@ -17,7 +17,7 @@ function home(envText) {
 const ENV = [
   "WORKSPACE_ADMIN_USER=admin", "WORKSPACE_DB_PASSWORD=db-SECRET-x", "WORKSPACE_ONLYOFFICE_JWT_SECRET=jwt-SECRET-y",
   "WORKSPACE_FIRSTRUN_ADMIN_PASSWORD=firstrun-SECRET-z", "WORKSPACE_BOT_APP_PASSWORD=TOKEN-zzz",
-  "WORKSPACE_PUBLIC_HOST=box.tailnet-example.ts.net", "WORKSPACE_NC_SERVE_PORT=8456", "WORKSPACE_OO_SERVE_PORT=8457",
+  "WORKSPACE_BOOTSTRAP_DONE=1", "WORKSPACE_PUBLIC_HOST=box.tailnet-example.ts.net", "WORKSPACE_NC_SERVE_PORT=8456", "WORKSPACE_OO_SERVE_PORT=8457",
 ].join("\n") + "\n";
 const keysDeep = (o, p = "") => Object.entries(o).flatMap(([k, v]) => (v && typeof v === "object" ? keysDeep(v, `${p}${k}.`) : [`${p}${k}`])).sort();
 
@@ -26,9 +26,9 @@ test("en and es carry the same keys, all non-empty", () => {
   for (const lang of ["en", "es"]) for (const [k, v] of Object.entries(WORKSPACE_STRINGS[lang])) assert.ok(String(v).trim(), `${lang}.${k}`);
 });
 
-test("readPublicSettings returns only the four public keys", () => {
+test("readPublicSettings returns only the public keys (incl. the completion marker)", () => {
   assert.deepEqual(readPublicSettings(home(ENV)), {
-    WORKSPACE_ADMIN_USER: "admin", WORKSPACE_PUBLIC_HOST: "box.tailnet-example.ts.net", WORKSPACE_NC_SERVE_PORT: "8456", WORKSPACE_OO_SERVE_PORT: "8457",
+    WORKSPACE_ADMIN_USER: "admin", WORKSPACE_BOOTSTRAP_DONE: "1", WORKSPACE_PUBLIC_HOST: "box.tailnet-example.ts.net", WORKSPACE_NC_SERVE_PORT: "8456", WORKSPACE_OO_SERVE_PORT: "8457",
   });
   assert.equal(readPublicSettings(home(null)), null);
 });
@@ -60,7 +60,7 @@ test("not set up / invalid values → friendly notice; values that are not shell
     assert.ok(html.includes(WORKSPACE_STRINGS.en.notReady), JSON.stringify(s));
     assert.doesNotMatch(html, /https:\/\/:|rm -rf|<script>alert/);
   }
-  const badPort = renderWorkspacePage({ WORKSPACE_PUBLIC_HOST: "box.example", WORKSPACE_NC_SERVE_PORT: "8456; reboot" }, "en");
+  const badPort = renderWorkspacePage({ WORKSPACE_BOOTSTRAP_DONE: "1", WORKSPACE_PUBLIC_HOST: "box.example", WORKSPACE_NC_SERVE_PORT: "8456; reboot" }, "en");
   assert.ok(badPort.includes("--https=8456 "), "invalid port falls back to the default");
   assert.doesNotMatch(badPort, /reboot/);
 });
@@ -82,4 +82,26 @@ test("uninstall text names the retained secrets (both languages); CRLF .env stil
   const s = readPublicSettings(home(ENV.replace(/\n/g, "\r\n")));
   assert.equal(s.WORKSPACE_PUBLIC_HOST, "box.tailnet-example.ts.net");
   assert.equal(s.WORKSPACE_OO_SERVE_PORT, "8457");
+});
+
+test("host set but bootstrap marker missing → not ready, with the exact re-run command (real crowHome, shell-safe)", () => {
+  const noMarker = ENV.replace("WORKSPACE_BOOTSTRAP_DONE=1\n", "");
+  const h = home(noMarker);
+  for (const lang of ["en", "es"]) {
+    const html = renderWorkspacePage(readPublicSettings(h), lang, h);
+    assert.ok(html.includes(WORKSPACE_STRINGS[lang].notReady), lang);
+    assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/bootstrap.sh`), lang);
+    assert.ok(!html.includes("sudo tailscale serve"), "no setup cards before bootstrap finished");
+  }
+  const spaced = renderWorkspacePage(readPublicSettings(h), "en", "/home/a b/.crow");
+  assert.ok(spaced.includes("bash &#39;/home/a b/.crow/bundles/workspace/ops&#39;/bootstrap.sh"), "single-quoted (HTML-escaped)");
+  assert.ok(!WORKSPACE_STRINGS.en.notReady.includes("Extensions page"));
+});
+
+test("ready page prints the real crowHome in admin commands, not ~/.crow", () => {
+  const h = home(ENV);
+  const html = renderWorkspacePage(readPublicSettings(h), "en", h);
+  assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/install-backup-timer.sh --dest`));
+  assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/add-user.sh`));
+  assert.ok(!html.includes("bash ~/.crow/bundles"));
 });

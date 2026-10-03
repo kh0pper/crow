@@ -23,6 +23,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$DEST" ] || { echo "usage: install-backup-timer.sh --dest <dir> [--mount <mountpoint>] [--alert-lib <alerts.sh>]" >&2; exit 2; }
+[ -f "$BUNDLE_DIR/.env" ] || { echo "ERROR: no .env in $BUNDLE_DIR: this is not the installed Workspace bundle (the units would point at this checkout). Run it from the installed copy: bash ~/.crow/bundles/workspace/ops/install-backup-timer.sh ..." >&2; exit 1; }
+echo "Using bundle dir: $BUNDLE_DIR"
 mkdir -p "$WS" "$UNIT_DIR"
 
 if [ ! -f "$PASSFILE" ]; then

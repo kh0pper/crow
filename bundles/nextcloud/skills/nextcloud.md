@@ -65,7 +65,7 @@ sudo mount /mnt/nextcloud
 
 ### Deploying a New Instance
 
-Use the Docker Compose file in this bundle to deploy Nextcloud + MariaDB.
+This bundle is a connect-only skill for an existing Nextcloud; it no longer ships a deployment. To run your own private Nextcloud (with document editing, calendars and contacts), install **Crow Workspace** from the Extensions page instead; it supersedes this bundle.
 
 ## Tips
 

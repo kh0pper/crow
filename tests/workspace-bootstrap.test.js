@@ -23,6 +23,7 @@ case "$*" in
   *"occ app:install "*|*"occ app:enable "*) touch "$S/app-$last" ;;
   *"occ dav:list-calendars "*) echo "+------+"; if [ -f "$S/cal-Menu" ]; then echo "| Menu | Menu | principals/users/admin | admin |  ✓  |"; fi ;;
   *"occ dav:create-calendar "*) touch "$S/cal-$last" ;;
+  *"occ user:info admin"*) [ -f "$S/no-admin-user" ] && exit 1 ;;
   *"occ user:info "*) [ -f "$S/user-$last" ] || exit 1 ;;
   *"user:add "*) touch "$S/user-$last" ;;
   *"occ user:auth-tokens:list "*) if [ -f "$S/tokens" ]; then echo '[{"id":7,"name":"crow-workspace-tools"},{"id":8,"name":"phone"}]'; else echo '[]'; fi ;;
@@ -107,6 +108,40 @@ test("fresh run configures everything once", () => {
   assert.equal(envOf(ctx).WORKSPACE_BOT_APP_PASSWORD, TOKEN1);
   assert.equal(envOf(ctx).WORKSPACE_PUBLIC_HOST, "box.tailnet-example.ts.net");
   assert.equal(statSync(join(ctx.bundle, ".env")).mode & 0o777, 0o600);
+  assert.equal(envOf(ctx).WORKSPACE_BOOTSTRAP_DONE, "1", "completion marker written on success");
+});
+
+test("completion marker is absent when a later step dies", () => {
+  const ctx2 = setup({ state: ["installed"] });
+  // docker network inspect yields nothing → step 3 dies after the host was written
+  writeFileSync(join(ctx2.bin, "docker"), "#!/usr/bin/env bash\nexit 1\n");
+  const bad = run("bootstrap.sh", ctx2);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.out, /cannot read the gateway address/);
+  assert.equal(envOf(ctx2).WORKSPACE_PUBLIC_HOST, "box.tailnet-example.ts.net", "host already written");
+  assert.equal(envOf(ctx2).WORKSPACE_BOOTSTRAP_DONE, undefined);
+});
+
+test("a generated key missing from .env aborts before the retained copy is touched", () => {
+  const ctx = setup({ env: { WORKSPACE_DB_PASSWORD: "" } });
+  mkdirSync(join(ctx.home, "secrets", "bundle-env"), { recursive: true });
+  const body = "WORKSPACE_DB_PASSWORD=only-good-copy\n";
+  writeFileSync(retained(ctx), body, { mode: 0o600 });
+  const r = run("bootstrap.sh", ctx);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /WORKSPACE_DB_PASSWORD is empty or missing/);
+  assert.ok(r.out.includes(retained(ctx)));
+  assert.equal(readFileSync(retained(ctx), "utf8"), body);
+});
+
+test("admin reset: a missing admin login is named as such, not blamed on the password policy", () => {
+  const ctx = setup({ state: ["installed", "no-admin-user"], env: { WORKSPACE_ADMIN_USER: "admin" } });
+  const r = run("bootstrap.sh", ctx);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /admin login 'admin'.*does not exist/);
+  assert.doesNotMatch(r.out, /password policy/);
+  assert.ok(!r.out.includes(SECRETS.WORKSPACE_ADMIN_PASSWORD));
+  assert.doesNotMatch(read(ctx, "stdin.log"), /resetpassword --password-from-env admin\] Admin/);
 });
 
 test("REVIEW FOCUS 5b — secrets travel on stdin, never argv or output; admin password scrubbed", () => {
@@ -162,6 +197,7 @@ test("Nextcloud rejecting the typed admin password → clear, recoverable failur
   const r = run("bootstrap.sh", ctx);
   assert.notEqual(r.status, 0);
   assert.match(r.out, /Nextcloud rejected the admin password/);
+  assert.match(r.out, /occ said: Password is among the 1,000,000 most common ones/, "occ's last stderr line is surfaced");
   assert.match(r.out, /ops\/reset-password\.sh admin/);
   assert.match(r.out, /delete the WORKSPACE_ADMIN_PASSWORD line/);
   assert.ok(!r.out.includes(SECRETS.WORKSPACE_ADMIN_PASSWORD));

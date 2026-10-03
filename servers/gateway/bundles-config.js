@@ -182,7 +182,7 @@ export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } =
  */
 export function needsConfigKeys(bundleId, envOverride = null) {
   const man = getInstalledFirstManifest(bundleId);
-  const required = (man?.env_vars || []).filter((v) => v.required).map((v) => v.name);
+  const required = (man?.env_vars || []).filter((v) => v.required && !v.generate).map((v) => v.name);
   if (required.length === 0) return [];
   const { managed, env } = resolveEffectiveEnv(bundleId, man, { envOverride });
   if (!managed) return [];

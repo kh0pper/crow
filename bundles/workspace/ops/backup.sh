@@ -28,7 +28,7 @@ alert() {  # loud by design: a silent backup failure is the same as no backup
   printf '[workspace-backup] ALERT: %s: %s\n' "$1" "$2" >&2
 }
 abort() { alert "Workspace backup ABORTED" "$1"; exit 1; }
-enc() { "$GPG" --batch --yes --pinentry-mode loopback --passphrase-file "$PASSFILE" --symmetric --cipher-algo AES256 --compress-algo none -o "$1"; }
+enc() { "$GPG" --batch --yes --pinentry-mode loopback --passphrase-file "$PASSFILE" --no-symkey-cache --symmetric --cipher-algo AES256 --compress-algo none -o "$1"; }
 
 # Preflight: all before maintenance mode, so a refusal never locks anyone out.
 [ -n "$DEST" ] || abort "WORKSPACE_BACKUP_DEST is not set (re-run ops/install-backup-timer.sh --dest <dir>)"
@@ -60,14 +60,14 @@ trap 'exit 143' INT TERM
 DEADLINE=$(( $(date +%s) + HOLD_S ))
 check_left() { LEFT=$(( DEADLINE - $(date +%s) )); [ "$LEFT" -gt 0 ] || { log "maintenance window exceeded ${HOLD_S}s"; exit 1; }; }
 
-occ maintenance:mode --on >/dev/null
-MAINT=1
+MAINT=1   # before --on: it may apply and still fail; --off is idempotent
+(cd "$BUNDLE_DIR" && timeout 60 $DC exec -T -u www-data nextcloud php occ maintenance:mode --on) >/dev/null
 log "maintenance mode on"
 check_left
 (cd "$BUNDLE_DIR" && timeout --kill-after=10 "$LEFT" $DC exec -T nextcloud-db sh -c 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump --single-transaction --default-character-set=utf8mb4 -uroot nextcloud') | enc "$WORK/db.sql.gpg"
 check_left
 (cd "$BUNDLE_DIR" && timeout --kill-after=10 "$LEFT" $DC exec -T -u root nextcloud tar -C /var/www/html -cf - .) | enc "$WORK/files.tar.gpg"
-occ maintenance:mode --off >/dev/null
+(cd "$BUNDLE_DIR" && timeout 60 $DC exec -T -u www-data nextcloud php occ maintenance:mode --off) >/dev/null
 MAINT=0
 log "maintenance mode off (dump + snapshot encrypted)"
 

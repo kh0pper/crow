@@ -49,6 +49,11 @@ OO_PORT="$(env_get WORKSPACE_OO_SERVE_PORT)"; OO_PORT="${OO_PORT:-8457}"
 [[ "$NC_PORT" =~ ^[0-9]{2,5}$ && "$OO_PORT" =~ ^[0-9]{2,5}$ ]] || die "Serve ports must be numbers"
 [ -n "$(env_get WORKSPACE_ONLYOFFICE_JWT_SECRET)" ] || die "WORKSPACE_ONLYOFFICE_JWT_SECRET is missing from .env"
 
+# 0a-pre. Never overwrite the only DB-matching copy of the secrets from a damaged .env.
+for k in $GENERATED_KEYS; do
+  [ -n "$(env_get "$k")" ] || die "$k is empty or missing in $ENV_FILE. Not touching the retained copy $RETAINED (it may hold the only value that matches the database). Restore the line from $RETAINED into $ENV_FILE (keep it mode 600), then re-run this script"
+done
+
 # 0a. Keep the retained-secrets copy equal to .env (restore / new-box recovery, C2).
 mkdir -p "$RETAINED_DIR"; chmod 700 "$RETAINED_DIR"
 tmp="$(mktemp "$RETAINED_DIR/.workspace.env.XXXXXX")"
@@ -65,9 +70,14 @@ wait_for "Nextcloud" nc_installed
 #     Runs before tailnet detection, so a missing tailnet name never delays it.
 ADMIN_PW="$(env_get WORKSPACE_ADMIN_PASSWORD)"
 if [ -n "$ADMIN_PW" ]; then
-  if ! printf '%s\n' "$ADMIN_PW" | occ_with_pass user:resetpassword --password-from-env "$ADMIN_USER" >/dev/null 2>&1; then
+  if ! occ user:info "$ADMIN_USER" >/dev/null 2>&1; then
     unset ADMIN_PW
-    die "Nextcloud rejected the admin password from the install form (its password policy, e.g. a password found in known data breaches). Fix: bash $BUNDLE_DIR/ops/reset-password.sh $ADMIN_USER with another password, then delete the WORKSPACE_ADMIN_PASSWORD line from $ENV_FILE and re-run this script."
+    die "the admin login '$ADMIN_USER' (WORKSPACE_ADMIN_USER) does not exist in this Nextcloud. This happens when the admin name was changed on a reinstall over existing data. Fix: set WORKSPACE_ADMIN_USER in $ENV_FILE to the login that already exists in Nextcloud (or create it with bash $BUNDLE_DIR/ops/add-user.sh), then re-run this script"
+  fi
+  if ! OCC_ERR="$(printf '%s\n' "$ADMIN_PW" | occ_with_pass user:resetpassword --password-from-env "$ADMIN_USER" 2>&1 >/dev/null)"; then
+    unset ADMIN_PW
+    OCC_ERR="$(printf '%s' "$OCC_ERR" | tail -n 1 | tr -d '\r')"
+    die "Nextcloud rejected the admin password from the install form (its password policy, e.g. a password found in known data breaches; occ said: ${OCC_ERR:-no message}). Fix: bash $BUNDLE_DIR/ops/reset-password.sh $ADMIN_USER with another password, then delete the WORKSPACE_ADMIN_PASSWORD line from $ENV_FILE and re-run this script."
   fi
   env_unset WORKSPACE_ADMIN_PASSWORD
   log "admin password set from the install form; removed from .env"
@@ -170,5 +180,7 @@ print(" ".join(str(t["id"]) for t in d if t.get("name") == "'"$TOKEN_NAME"'"))')
   log "$BOT: account ready; app password stored in .env (mode 600)"
 fi
 
+# Last step: completion marker (non-secret). The Office page shows "ready" only with it.
+env_set WORKSPACE_BOOTSTRAP_DONE 1
 log "done. Workspace: $NC_URL  editor: $OO_URL"
 log "next: publish both on your tailnet (Office in Crow shows the two commands)"
