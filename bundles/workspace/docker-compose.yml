@@ -83,13 +83,14 @@ services:
     mem_limit: 256m
     oom_score_adj: -500
     # requirepass goes into a private config file inside the container (never argv), and
-    # redis-server is exec'd as the redis user (the image entrypoint's su-exec, which a
-    # custom command bypasses); init: true reaps and forwards SIGTERM for a prompt stop.
+    # redis-server is exec'd as the redis user via setpriv (the image entrypoint's own method;
+    # the image ships no gosu-style helper). rm -f first: on a container restart the old conf is owned by
+    # redis in sticky /tmp, and root may not reopen it (fs.protected_regular); init: true reaps and forwards SIGTERM for a prompt stop.
     init: true
     command:
       - sh
       - -c
-      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec su-exec redis redis-server /tmp/redis.conf
+      - umask 077 && rm -f /tmp/redis.conf && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec /bin/setpriv --reuid redis --regid redis --clear-groups redis-server /tmp/redis.conf
     environment:
       REDIS_PASSWORD: ${WORKSPACE_REDIS_PASSWORD:?generated at install}
     healthcheck:

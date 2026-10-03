@@ -98,7 +98,9 @@ test("REVIEW FOCUS 5c — no secret-in-argv patterns in compose or ops scripts",
   const banned = [/-p"\$/, /-a "\$/, /-a \$\$/, /--value="\$\{?[A-Z_]*(PASS|SECRET|JWT|TOKEN|KEY)/, /--requirepass/, /--admin-pass/, /-e [A-Z_]*(PASS|SECRET|JWT|TOKEN)\b/];
   for (const f of files) for (const re of banned) assert.doesNotMatch(readFileSync(f, "utf8"), re, `${f} ${re}`);
   assert.match(compose, /REDISCLI_AUTH=/);
-  assert.match(compose, /exec su-exec redis redis-server \/tmp\/redis\.conf/);
+  assert.match(compose, /exec \/bin\/setpriv --reuid redis --regid redis --clear-groups redis-server \/tmp\/redis\.conf/);
+  assert.doesNotMatch(compose, /exec su-exec|gosu /);
+  assert.match(compose, /rm -f \/tmp\/redis\.conf && printf/);
   assert.match(serviceBlocks().find((s) => s.name === "nextcloud-redis").text, /init: true/);
 });
 
