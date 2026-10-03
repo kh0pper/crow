@@ -22,7 +22,7 @@ import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
@@ -53,6 +53,7 @@ import {
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { readEnvFile } from "../env-manager.js";
+import { resolveGeneratedEnv, stripGeneratedKeys, writePrivateFile } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -847,6 +848,11 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
   for (const entry of installed) {
     const id = typeof entry === "string" ? entry : entry?.id;
     if (!id || !isValidBundleId(id)) continue;
+    // Every installed bundle .env holds secrets: tighten legacy 644/777 files at boot.
+    try {
+      const envP = join(BUNDLES_DIR, id, ".env");
+      if (existsSync(envP)) chmodSync(envP, 0o600);
+    } catch { /* never block boot repair on a chmod */ }
 
     const appSrc = join(appBundles, id);
     if (!existsSync(appSrc)) continue; // not a first-party bundle — skip
@@ -1832,6 +1838,8 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  * @param {object|null} envVars      values from the install modal / CLI
  * @param {object|null} manifest     the bundle manifest (for env_vars)
  * @param {(msg:string)=>void} [log] install-job logger
+ *
+ * Every rung writes mode 600 — bundle .env files hold secrets.
  */
 export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
   const envPath = join(destDir, ".env");
@@ -1842,18 +1850,18 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
         .map(([k, v]) => `${k}=${v}`)
     : [];
   if (envLines.length > 0) {
-    writeFileSync(envPath, envLines.join("\n") + "\n");
+    writePrivateFile(envPath, envLines.join("\n") + "\n");
     log(`Wrote ${envLines.length} env vars`);
     return;
   }
-  if (existsSync(envPath)) return;
+  if (existsSync(envPath)) { chmodSync(envPath, 0o600); return; }
   if (existsSync(examplePath)) {
-    cpSync(examplePath, envPath);
+    writePrivateFile(envPath, readFileSync(examplePath, "utf8"));
     log("Created .env from .env.example");
     return;
   }
   if ((manifest?.env_vars || []).length > 0) {
-    writeFileSync(envPath, "# Managed by Crow — no values provided at install; configure via the dashboard Extensions panel.\n");
+    writePrivateFile(envPath, "# Managed by Crow — no values provided at install; configure via the dashboard Extensions panel.\n");
     log("Wrote placeholder .env (no values provided — configure via Extensions)");
   }
 }
@@ -1949,8 +1957,15 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     }
 
     // 2. Write env vars (provided values → .env.example fallback → manifest
-    // placeholder). Extracted so the fallback ladder is unit-testable.
-    writeInstallEnv(destDir, envVars, manifest, (msg) => appendLog(job, msg));
+    // placeholder; ladder extracted so it is unit-testable). Generated secrets (env_vars[].generate) are minted or reused
+    // here — never taken from the request, never shown, never sent to the gateway .env
+    // (they are not in envVars, which is what propagates).
+    const generated = resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
+    const installEnv = { ...(stripGeneratedKeys(manifest, envVars) || {}), ...generated };
+    writeInstallEnv(destDir, installEnv, manifest, (msg) => appendLog(job, msg));
+    if (Object.keys(generated).length > 0) {
+      appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
+    }
 
     // 2.5 Inject shared-storage vars if bundle declares a translator.
     // Gateway owns the translation in-process (configure-storage.mjs is not
@@ -3044,7 +3059,8 @@ export default function bundlesRouter() {
     // a rejected handler promise is an unhandled rejection, which the crash
     // guard re-throws and the gateway dies. Every throw becomes a 500 instead.
     try {
-      const { bundle_id, env_vars } = req.body;
+      const { bundle_id } = req.body;
+      let { env_vars } = req.body;
 
       if (!bundle_id || !isValidBundleId(bundle_id)) {
         return res.status(400).json({ error: "Invalid bundle ID" });
@@ -3058,6 +3074,9 @@ export default function bundlesRouter() {
       if (!env_vars || typeof env_vars !== "object") {
         return res.status(400).json({ error: "env_vars must be an object" });
       }
+      // Generated secrets are never operator input — a request cannot rotate a DB
+      // password out from under its database.
+      env_vars = stripGeneratedKeys(getInstalledFirstManifest(bundle_id), env_vars);
       // Validate BEFORE writing either file, so the bundle .env and the gateway
       // .env can never hold different copies of the same secret.
       const badEnv = findInvalidEnv(env_vars);
@@ -3087,7 +3106,7 @@ export default function bundlesRouter() {
         .filter(([, v]) => v !== undefined)
         .map(([k, v]) => `${k}=${v}`)
         .join("\n") + "\n";
-      writeFileSync(envPath, envContent);
+      writePrivateFile(envPath, envContent);
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
       const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);

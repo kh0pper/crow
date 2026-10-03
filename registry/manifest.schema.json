@@ -62,6 +62,7 @@
           "description": { "type": "string" },
           "required": { "type": "boolean" },
           "secret": { "type": "boolean" },
+          "generate": { "type": "string", "enum": ["secret"] },
           "default": {}
         }
       }
