@@ -39,6 +39,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
+    static final String EXTRA_OPEN_SETTINGS = "open_settings";
     private static final String WORK_NAME = "crow_notification_poll";
 
     private WebView webView;
@@ -196,11 +197,18 @@ public class MainActivity extends AppCompatActivity {
 
         // Load gateway or open settings
         String gatewayUrl = getGatewayUrl();
-        if (gatewayUrl == null || gatewayUrl.isEmpty()) {
+        if (gatewayUrl == null || gatewayUrl.isEmpty() || wantsSettings(getIntent())) {
             openSettings();
         } else {
             handleIntent(getIntent(), gatewayUrl);
         }
+    }
+
+    /** The launcher's "Server settings" shortcut (res/xml/shortcuts.xml) opens
+     *  Settings directly. The app theme has no action bar, so the options menu
+     *  is unreachable and this shortcut is the way to change servers. */
+    private static boolean wantsSettings(Intent intent) {
+        return intent != null && intent.getBooleanExtra(EXTRA_OPEN_SETTINGS, false);
     }
 
     private void requestNotificationPermission() {
@@ -246,6 +254,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (wantsSettings(intent)) {
+            openSettings();
+            return;
+        }
         String gatewayUrl = getGatewayUrl();
         if (gatewayUrl != null) {
             handleIntent(intent, gatewayUrl);

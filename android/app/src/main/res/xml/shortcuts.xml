@@ -11,4 +11,17 @@
             android:targetPackage="press.maestro.crow"
             android:targetClass="press.maestro.crow.PttShortcutActivity" />
     </shortcut>
+    <shortcut
+        android:shortcutId="server_settings"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_preferences"
+        android:shortcutShortLabel="@string/settings_shortcut_short"
+        android:shortcutLongLabel="@string/settings_shortcut_long">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="press.maestro.crow"
+            android:targetClass="press.maestro.crow.MainActivity">
+            <extra android:name="open_settings" android:value="true" />
+        </intent>
+    </shortcut>
 </shortcuts>
