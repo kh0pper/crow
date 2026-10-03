@@ -656,6 +656,8 @@ async function getEgg(db, eggId) {
   return rows[0] ?? null;
 }
 
+let _wearChain = Promise.resolve();
+
 export async function birdOutfit(db, eggId) {
   try {
     const { rows } = await db.execute({ sql: "SELECT outfit_json FROM ramble_eggs WHERE egg_id = ?", args: [eggId] });
@@ -675,24 +677,32 @@ export async function wearItem(db, eggId, slot, itemId, { emit } = {}) {
   // it is safe. A corrupt stored value restarts from '{}'. Never NULL: NULL
   // means "sender knows nothing" to the sync COALESCE (Global Constraints).
   const base = "CASE WHEN outfit_json IS NOT NULL AND json_valid(outfit_json) AND json_type(outfit_json) = 'object' THEN outfit_json ELSE '{}' END";
+  let sql, args;
   if (itemId === null) {
-    await db.execute({
-      sql: `UPDATE ramble_eggs SET outfit_json = json_remove(${base}, ?) WHERE egg_id = ? AND status = 'hatched'`,
-      args: ["$." + slot, eggId],
-    });
+    sql = `UPDATE ramble_eggs SET outfit_json = json_remove(${base}, ?) WHERE egg_id = ? AND status = 'hatched'`;
+    args = ["$." + slot, eggId];
   } else {
     const item = itemById(itemId);
     if (!item) return { ok: false, reason: "unknown-item" };
     if (item.slot !== slot) return { ok: false, reason: "wrong-slot" };
     if (!(await ownedItems(db)).has(item.id)) return { ok: false, reason: "not-owned" };
-    await db.execute({
-      sql: `UPDATE ramble_eggs SET outfit_json = json_set(${base}, ?, ?) WHERE egg_id = ? AND status = 'hatched'`,
-      args: ["$." + slot, item.value, eggId],
-    });
+    sql = `UPDATE ramble_eggs SET outfit_json = json_set(${base}, ?, ?) WHERE egg_id = ? AND status = 'hatched'`;
+    args = ["$." + slot, item.value, eggId];
   }
-  const row = await getEgg(db, eggId);
-  await safeEmit(emit, "ramble_eggs", "update", row);
-  return { ok: true, outfit: parseOutfit(row?.outfit_json ?? null) };
+  // Update -> read -> emit is SERIALIZED per process: the emit mints its sync
+  // stamp after several awaits, so two overlapping wears could otherwise emit
+  // the older snapshot with the newer stamp and leave the user's other
+  // instances one change behind.
+  const step = _wearChain.then(async () => {
+    const res = await db.execute({ sql, args });
+    if (Number(res.rowsAffected) === 0) return { ok: false, reason: "not-found" }; // deleted by a sync apply mid-flight
+    const row = await getEgg(db, eggId);
+    if (!row) return { ok: false, reason: "not-found" };
+    await safeEmit(emit, "ramble_eggs", "update", row);
+    return { ok: true, outfit: parseOutfit(row.outfit_json ?? null) };
+  });
+  _wearChain = step.catch(() => {});
+  return step;
 }
 
 /** The shop sheet's one read. `active` is the bird you are, with its outfit. */
@@ -1145,6 +1155,7 @@ git commit bundles/ramble/panel/routes.js tests/ramble-wardrobe-routes.test.js t
     - `readPortrait(db, { now }) -> Promise<{ egg_id, species, seed, mood, outfit } | null>`; never throws; `outfit` is the raw parsed object or `null` (the engine validates it).
     - `renderBirdAvatar(bird, engine)` — `bird.mood` (default `"happy"`) and `bird.outfit` (default none) now honoured. Pure; an engine without `applyOutfit` draws the plain bird.
     - `renderActiveBirdAvatar(db, { now })` uses `readPortrait`.
+    - `loadBirdEngine({ candidates, fresh, now })`: on the DEFAULT-candidates path, a cached engine that lacks `applyOutfit` is re-probed (require-cache entries for the candidate paths deleted, then re-required) when at least `ENGINE_REPROBE_MS` (60 s) has passed since the last probe. Explicit-candidates calls are unchanged (never touch the cache).
     - `refreshBirdAvatar(db, managers, { gate = false, resend = true, now = Date.now(), engine = loadBirdEngine() } = {})`:
       - `resend: false` → never re-sends a stuck pending fan-out (both the picture-source and the bird-source resend branches are skipped).
       - `gate: true` → if this instance's OWN render inputs (`[species, seed, mood, outfit]`, kept in a per-db in-memory `WeakMap`) are unchanged since it last rendered, return `{ changed: false, reason: "inputs-same" }` without comparing to the stored (replicated) picture. This is what stops the user's instances ping-ponging the replicated `profile_avatar_url` when they legitimately render differently (engine skew, local decay skew).
@@ -1158,7 +1169,7 @@ Why a tick: energy decays with time and nothing emits an event for it, and an ou
 
 (a) Change the existing `installBirdAvatarHooks(...)` calls in the tests "a hatch or an activation on the bus refreshes; installs once" (both calls) and "two triggers landing in the same tick serialize" to pass `{ emitter, settleMs: 0, tickMs: 0 }`. Their assertions are unchanged — they now prove the debounce path still delivers every real change.
 
-(b) Extend the import list with `portraitMood, readPortrait, AVATAR_SETTLE_MS, AVATAR_TICK_MS`, add `import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";`, and append:
+(b) Extend the import list with `portraitMood, readPortrait, AVATAR_SETTLE_MS, AVATAR_TICK_MS`; extend the `node:fs` import with `mkdirSync, writeFileSync, readFileSync` and the `node:path` import with `dirname`; add `import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";`, and append:
 
 ```js
 test("portraitMood is exactly pet.js's decay-on-read + moodFor (core keeps its own copy for skew; this pins them together)", () => {
@@ -1286,7 +1297,10 @@ test("§5.4 coalescing: four try-ons inside the settle window = ONE broadcast of
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 
-test("the boot repaint and an immediate trigger overlap: the serializing chain keeps it to ONE broadcast", async () => {
+// Regression guard: with the inputs memo, the second run is also deduped by
+// the gate, so this does not ISOLATE the promise chain — it pins the
+// observable contract (one broadcast) for the boot/event overlap.
+test("the boot repaint and an immediate trigger overlap: ONE broadcast", async () => {
   __resetBirdAvatarHooksForTest();
   const { db, cleanup } = freshDb();
   try {
@@ -1336,6 +1350,11 @@ test("the tick never re-sends a pending fan-out; a bus event does", async () => 
     const emitter = new EventEmitter();
     installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 0, tickMs: 40 });
     await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    // The boot run's broadcastProfile still writes pending 1 -> send -> 0 after
+    // the URL lands; wait for it to finish before planting our own flag.
+    for (let i = 0; i < 50 && (sent.length < 1 || await readBroadcastPending(db)); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sent.length, 1);
+    assert.equal(await readBroadcastPending(db), false);
     const base = sent.length;
     await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
     await new Promise((r) => setTimeout(r, 250));
@@ -1344,6 +1363,52 @@ test("the tick never re-sends a pending fan-out; a bus event does", async () => 
     for (let i = 0; i < 50 && sent.length === base; i++) await new Promise((r) => setTimeout(r, 20));
     assert.equal(sent.length, base + 1, "a real event retries the pending fan-out (existing R2-S3 behaviour)");
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("a failed store does not freeze the picture: the next gated run renders again", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    let failOnce = true;
+    const flaky = new Proxy(db, { get(t, k) {
+      if (k === "execute") return async (q) => {
+        const sql = typeof q === "string" ? q : q?.sql;
+        if (failOnce && /dashboard_settings/.test(sql || "") && /^\s*(INSERT|UPDATE)/i.test(sql || "")) { failOnce = false; throw new Error("SQLITE_BUSY"); }
+        return t.execute(q);
+      };
+      const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+    } });
+    const sent = [];
+    assert.equal((await refreshBirdAvatar(flaky, mgrsWith(flaky, sent), { gate: true })).reason, "error");
+    assert.equal((await refreshBirdAvatar(flaky, mgrsWith(flaky, sent), { gate: true })).reason, "rendered", "not inputs-same");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("deploy day: a cached engine without applyOutfit is re-probed (default path), at most once a minute", async () => {
+  __resetBirdAvatarHooksForTest();
+  const dir = mkdtempSync(join(tmpdir(), "bird-engine-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = dir;
+    const target = join(dir, "bundles", "ramble", "server", "bird-svg.cjs");
+    mkdirSync(dirname(target), { recursive: true });
+    // An "0.12" engine: the real one with applyOutfit removed.
+    writeFileSync(target, `const real = require(${JSON.stringify(REPO_ENGINE)}); module.exports = { rollGenome: real.rollGenome, drawBird: real.drawBird };`);
+    const T = 1_760_000_000_000;
+    const old = loadBirdEngine({ now: T });
+    assert.equal(typeof old.applyOutfit, "undefined");
+    writeFileSync(target, readFileSync(REPO_ENGINE, "utf8")); // bundle repair copies 0.13 in
+    assert.equal(loadBirdEngine({ now: T + 1000 }), old, "within the minute: still cached");
+    const fresh = loadBirdEngine({ now: T + 61_000 });
+    assert.equal(typeof fresh.applyOutfit, "function", "re-probed and picked up the new copy");
+    assert.equal(loadBirdEngine({ now: T + 200_000 }), fresh, "a capable engine is never re-probed");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    __resetBirdAvatarHooksForTest();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("defaults: a short settle and a half-hourly tick", () => {
@@ -1426,11 +1491,46 @@ export async function renderActiveBirdAvatar(db, { now = Date.now() } = {}) {
   return renderBirdAvatar(await readPortrait(db, { now }));
 }
 
+/* Deploy day: the gateway can load the bird engine BEFORE bundle repair
+ * copies the new installed bird-svg.cjs in (boot order: sharing boot runs
+ * the hooks' boot repaint before mcp-mounts' repairInstalledBundleAssets),
+ * and require() caches the module — so an engine without applyOutfit is
+ * re-probed, at most once a minute, with its require-cache entries dropped.
+ * Implemented inside loadBirdEngine's DEFAULT-candidates path only. */
+const ENGINE_REPROBE_MS = 60_000;
+
 /* What THIS instance last rendered, per db handle. In memory on purpose: it
  * is a per-process anti-ping-pong memo, not state — a restart's boot repaint
  * is ungated and re-establishes it. */
 let _lastInputs = new WeakMap();
 ```
+
+Change `loadBirdEngine` (keep fix-round-1 Finding 4's explicit-candidates rule intact):
+```js
+let _engine; // undefined = not tried yet; null = unavailable
+let _engineProbedAt = 0;
+export function loadBirdEngine({ candidates, fresh = false, now = Date.now() } = {}) {
+  const usingDefaults = candidates === undefined;
+  if (usingDefaults && _engine !== undefined && !fresh) {
+    const stale = _engine && typeof _engine.applyOutfit !== "function" && now - _engineProbedAt >= ENGINE_REPROBE_MS;
+    if (!stale) return _engine;
+    fresh = true; // fall through to a re-probe
+  }
+  const list = usingDefaults ? birdEngineCandidates() : candidates;
+  let found = null;
+  for (const p of list) {
+    try {
+      if (!existsSync(p)) continue;
+      if (fresh) { try { delete require.cache[require.resolve(p)]; } catch {} }
+      const mod = require(p);
+      if (typeof mod?.rollGenome === "function" && typeof mod?.drawBird === "function") { found = mod; break; }
+    } catch { /* try the next candidate */ }
+  }
+  if (usingDefaults) { _engine = found; _engineProbedAt = now; }
+  return found;
+}
+```
+(Move the `ENGINE_REPROBE_MS` constant above `loadBirdEngine`. Keep the existing Finding-4 comment block.)
 
 Rewrite `refreshBirdAvatar` (keep its doc comment, extended with the gate/resend/engine-too-old rules):
 ```js
@@ -1461,14 +1561,17 @@ export async function refreshBirdAvatar(db, managers, { gate = false, resend = t
     }
     const uri = renderBirdAvatar(bird, engine);
     if (!uri) return { changed: false, reason: "no-bird" };
-    _lastInputs.set(db, inputs);
     if (uri === avatar) {
+      _lastInputs.set(db, inputs);
       // R2-S3: the picture is right, but did the last fan-out reach everyone?
       if (!resend || !(await readBroadcastPending(db))) return { changed: false, reason: "same" };
       const sent = await broadcastProfile(db, managers?.nostrManager);
       return { changed: false, reason: "resend", sent };
     }
     await upsertSetting(db, "profile_avatar_url", uri);
+    // Memo only AFTER the store succeeded: a busy-db throw above must leave
+    // the next gated run free to try again, not freeze a stale picture.
+    _lastInputs.set(db, inputs);
     try { await deleteLocalSetting(db, "profile_avatar_url"); } catch (err) {
       try { console.warn("[sharing] bird avatar: deleteLocalSetting(profile_avatar_url) failed (non-fatal):", err?.message); } catch {}
     }
