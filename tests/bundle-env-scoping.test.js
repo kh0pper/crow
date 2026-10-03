@@ -129,13 +129,15 @@ test("not_breached: a breached value is refused via k-anonymity (5-char prefix o
   assert.equal(await S.breachedValueViolation(m, { P: "Never-Seen-Before-9" }, { fetchImpl: fakeFetch }), null);
   assert.equal(await S.breachedValueViolation(m, { P: "Password1234" }, { fetchImpl: async () => { throw new Error("offline"); } }), null);
   fixture("ws-breach");
-  B._setBreachFetchForTest(fakeFetch);
   const manifestPath = join(FIXTURES, "ws-breach", "manifest.json");
   const man = JSON.parse(readFileSync(manifestPath, "utf8"));
   man.env_vars = man.env_vars.map((e) => (e.name === "WS_ADMIN_PASSWORD" ? { ...e, check: "not_breached" } : e));
   writeFileSync(manifestPath, JSON.stringify(man));
-  const r = await B.validateInstall("ws-breach", { envVars: { WS_ADMIN_PASSWORD: "Password1234" }, requireEnv: true, forceInstall: true });
-  B._setBreachFetchForTest(null);
+  B._setBreachFetchForTest(fakeFetch);
+  let r;
+  try {
+    r = await B.validateInstall("ws-breach", { envVars: { WS_ADMIN_PASSWORD: "Password1234" }, requireEnv: true, forceInstall: true });
+  } finally { B._setBreachFetchForTest(null); }
   assert.equal(r.code, "invalid_env");
   assert.match(r.error, /known data breaches/);
 });
@@ -146,6 +148,13 @@ test("the store never sends a generated key to the browser", () => {
     collections: [], registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
   });
   assert.ok(!addonRegistryScript.includes("WS_DB_PASSWORD"));
+  const { viewsHtml } = buildExtensionsHTML({
+    installed: {}, available: [{ id: "ws-ui", name: "WS", description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: ENV_VARS }],
+    collections: [], registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
+  });
+  assert.match(viewsHtml, /bundle-install/);
+  assert.match(viewsHtml, /data-envvars="[^"]*WS_ADMIN_PASSWORD/);
+  assert.ok(!viewsHtml.includes("WS_DB_PASSWORD"), "install button data-envvars must omit generated keys");
   assert.ok(addonRegistryScript.includes("WS_ADMIN_PASSWORD"));
 });
 
@@ -172,4 +181,10 @@ test("breachedValueViolation clears its timer even when fetch rejects (no linger
   const m = { env_vars: [{ name: "P", check: "not_breached" }] };
   for (let i = 0; i < 5; i++) await S.breachedValueViolation(m, { P: "x" + i }, { fetchImpl: async () => { throw new Error("offline"); }, timeoutMs: 60000 });
   assert.equal(process.getActiveResourcesInfo().filter((x) => x === "Timeout").length, before);
+});
+
+test("an invalid manifest pattern fails closed (names the key, not the value)", () => {
+  const v = S.envPatternViolation({ env_vars: [{ name: "P", pattern: "^(unclosed$" }] }, { P: "secret-value-1" });
+  assert.equal(v.key, "P");
+  assert.ok(!v.why.includes("secret-value-1"));
 });

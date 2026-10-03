@@ -144,7 +144,7 @@ export function envPatternViolation(manifest, envVars) {
     const val = vals[v.name];
     if (val === undefined || val === null || val === "") continue;
     let re;
-    try { re = new RegExp(v.pattern); } catch { continue; }
+    try { re = new RegExp(v.pattern); } catch { return { key: v.name, why: "has an invalid format rule in its manifest" }; }
     if (!re.test(String(val))) {
       return { key: v.name, why: v.pattern_hint ? `must be ${v.pattern_hint}` : "does not match the allowed format" };
     }
