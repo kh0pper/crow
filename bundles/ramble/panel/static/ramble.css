@@ -1046,3 +1046,8 @@
 #ramble #rb-nextegg-empty,
 #ramble #rb-nextegg-lay,
 #ramble #rb-egg-empty { margin-top: 6px; }
+
+#ramble .rb-wardrobe-bird { width: 112px; height: 112px; display: block; margin: 4px auto 0; }
+#ramble .rb-wardrobe-row { display: flex; align-items: center; gap: 10px; }
+#ramble .rb-wardrobe-row .rb-step-txt { flex: 1; min-width: 0; }
+#ramble .rb-wardrobe-row.is-worn strong { color: var(--rb-accent-2); }

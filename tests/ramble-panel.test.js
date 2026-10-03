@@ -22,6 +22,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dir, "..");
@@ -2153,4 +2154,73 @@ test("the hatch beat hooks the rb-meet-bird handler, not clearHatch", () => {
   assert.ok(!clearHatchFn.includes("maybeHatchBeat("),
     "clearHatch fires on ANY view change and has no access to the hatched bird — " +
     "hooking it here would show the beat at random moments with no species name");
+});
+
+const REPO_ROOT_FOR_PANEL = REPO_ROOT;
+
+test("birdGenome: the rolled bird plus its outfit; plain without one; null on junk", () => {
+  const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  const fnSrc = extractFunction(src, "birdGenome");
+  assert.ok(fnSrc, "birdGenome must be defined and extractable");
+  const birdGenome = new Function(fnSrc + "\nreturn birdGenome;")();
+  const Bird = createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.cjs");
+  const rolled = Bird.rollGenome(1, "crow");
+  assert.deepEqual(birdGenome(Bird, { species: "crow", seed: 1 }), rolled);
+  assert.deepEqual(birdGenome(Bird, { species: "crow", seed: 1, outfit: {} }), rolled);
+  assert.equal(birdGenome(Bird, { species: "crow", seed: 1, outfit: { hat: "beanie", glasses: "round" } }).glasses, "round");
+  assert.equal(birdGenome(Bird, { species: "dodo", seed: 1 }), null);
+  assert.equal(birdGenome(null, { species: "crow", seed: 1 }), null);
+  const oldEngine = { rollGenome: Bird.rollGenome };
+  assert.deepEqual(birdGenome(oldEngine, { species: "crow", seed: 1, outfit: { hat: "beanie" } }), rolled, "older engine: plain bird");
+});
+
+test("wardrobeRowState: buy / wear / take off, and when each is disabled", () => {
+  const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  const wardrobeRowState = new Function(extractFunction(src, "wardrobeRowState") + "\nreturn wardrobeRowState;")();
+  const item = { id: "hat.bow", slot: "hat", value: "bow", name: "Bow", price: 8, owned: false };
+  assert.deepEqual(wardrobeRowState(item, false, 8, true), { action: "buy", label: "Buy for 8 seed", disabled: false });
+  assert.deepEqual(wardrobeRowState(item, false, 7, true), { action: "buy", label: "Buy for 8 seed", disabled: true });
+  assert.deepEqual(wardrobeRowState(item, false, -3, true).disabled, true, "a negative balance buys nothing");
+  assert.deepEqual(wardrobeRowState(item, false, 50, false).disabled, false, "you can shop before anything hatches");
+  const owned = { ...item, owned: true };
+  assert.deepEqual(wardrobeRowState(owned, false, 0, true), { action: "wear", label: "Wear", disabled: false });
+  assert.deepEqual(wardrobeRowState(owned, true, 0, true), { action: "off", label: "Take off", disabled: false });
+  assert.equal(wardrobeRowState(owned, false, 0, false).disabled, true, "nothing to dress yet");
+});
+
+test("every OWN-bird render site goes through birdGenome; mark pins and the hatch reveal stay plain", () => {
+  const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  for (const fn of ["paintPet", "birdTile", "hereArt"]) {
+    const body = extractFunction(src, fn);
+    assert.ok(body, fn);
+    assert.ok(body.includes("birdGenome("), `${fn} dresses the bird`);
+    assert.ok(!/Bird\.rollGenome\(/.test(body), `${fn} has no undressed roll left`);
+  }
+  assert.ok(extractFunction(src, "arBirdState").includes("outfit"), "the AR bird carries its outfit");
+  const ar = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble-ar.js"), "utf8");
+  const paint = extractFunction(ar, "paintBird");
+  assert.ok(paint.includes("applyOutfit"), "AR applies the outfit");
+  assert.ok(paint.includes("outfit"), "and keys its redraw cache on it");
+});
+
+test("the wardrobe is a sheet off the pet view (spec 5.5), says who can see it, and adds no backtick to the template", () => {
+  const html = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/ramble.js"), "utf8");
+  assert.ok(html.includes('id="rb-open-wardrobe"'));
+  assert.ok(html.includes('id="rb-wardrobe-sheet"'));
+  assert.ok(/Contacts see what you have on/.test(html));
+  assert.ok(/Strangers on the map never do/.test(html));
+  assert.ok(!/data-view="wardrobe"|data-for="wardrobe"/.test(html), "not a fifth view");
+});
+
+test("the header perch dresses the bird and adds no backtick inside its template literal", async () => {
+  const src = readFileSync(join(REPO_ROOT_FOR_PANEL, "servers/gateway/dashboard/shared/notifications.js"), "utf8");
+  const start = src.indexOf("function _drawRambleBird");
+  const end = src.indexOf("// ── end ramble bird integration ──");
+  const block = src.slice(start, end);
+  assert.ok(block.includes("applyOutfit"), "the header perch wears the outfit");
+  assert.ok(!block.includes("`") && !block.includes("${"), "no template syntax inside the template literal");
+  const { tamagotchiJs } = await import("../servers/gateway/dashboard/shared/notifications.js");
+  const js = tamagotchiJs("en");
+  const inner = js.replace(/^\s*<script[^>]*>/i, "").replace(/<\/script>\s*$/i, "");
+  assert.doesNotThrow(() => new Function(inner), "tamagotchiJs output compiles");
 });

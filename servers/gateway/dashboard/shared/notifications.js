@@ -1126,6 +1126,7 @@ export function tamagotchiJs(lang) {
   var _rambleBirdSpecies = null;
   var _rambleBirdSeed = null;
   var _rambleBirdMood = null;
+  var _rambleBirdOutfit = null;
   var _rambleBirdFailed = false;
 
   function _rambleBirdLoadEngine(cb) {
@@ -1145,7 +1146,7 @@ export function tamagotchiJs(lang) {
     document.head.appendChild(s);
   }
 
-  function _drawRambleBird(species, seed, mood) {
+  function _drawRambleBird(species, seed, mood, outfit) {
     var svg = document.getElementById('crow-tama');
     if (!svg) return;
     var bodyGroup = svg.querySelector('.crow-body-group');
@@ -1173,7 +1174,9 @@ export function tamagotchiJs(lang) {
     }
     if (!inner) return;
     try {
-      inner.innerHTML = RambleBird.drawBird(RambleBird.rollGenome(seed, species), mood);
+      var g = RambleBird.rollGenome(seed, species);
+      if (outfit && typeof RambleBird.applyOutfit === 'function') g = RambleBird.applyOutfit(g, outfit);
+      inner.innerHTML = RambleBird.drawBird(g, mood);
     } catch (e) {
       return;
     }
@@ -1192,15 +1195,18 @@ export function tamagotchiJs(lang) {
       var seed = data.bird.seed;
       var energy = data.energy || 0;
       var mood = energy >= 60 ? 'happy' : (energy >= 30 ? 'tired' : 'alarmed');
+      var outfit = data.bird.outfit || null;
+      var outfitKey = outfit ? JSON.stringify(outfit) : '';
 
-      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood) return;
+      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood && outfitKey === _rambleBirdOutfit) return;
 
       _rambleBirdLoadEngine(function() {
         if (!window.RambleBird) return;
-        _drawRambleBird(species, seed, mood);
+        _drawRambleBird(species, seed, mood, outfit);
         _rambleBirdSpecies = species;
         _rambleBirdSeed = seed;
         _rambleBirdMood = mood;
+        _rambleBirdOutfit = outfitKey;
       });
     } catch (e) {}
   }

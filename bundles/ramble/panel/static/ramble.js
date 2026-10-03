@@ -54,6 +54,31 @@
     if (on) el.setAttribute("hidden", ""); else el.removeAttribute("hidden");
   }
 
+  /* Phase 4: YOUR bird as it looks today — the rolled genome with what it is
+   * wearing layered over it. Every own-bird surface goes through here; mark
+   * pins and the hatch reveal deliberately do not (spec D10: strangers only
+   * ever see the plain rolled bird). An older engine without applyOutfit
+   * draws the plain bird. */
+  function birdGenome(engine, bird) {
+    if (!engine || !bird) return null;
+    var g;
+    try { g = engine.rollGenome(bird.seed, bird.species); } catch (e) { return null; }
+    if (bird.outfit && typeof engine.applyOutfit === "function") {
+      try { g = engine.applyOutfit(g, bird.outfit); } catch (e) { /* plain bird */ }
+    }
+    return g;
+  }
+
+  /* " · wearing a beanie, round glasses" — the worn items, in slot order. */
+  function wornSuffix(outfit) {
+    if (!outfit) return "";
+    var parts = [];
+    if (outfit.hat) parts.push(outfit.hat);
+    if (outfit.scarf) parts.push(outfit.scarf + " scarf");
+    if (outfit.glasses) parts.push(outfit.glasses + " glasses");
+    return parts.length ? " · wearing " + parts.join(", ") : "";
+  }
+
   /* ------------------------------------------------------------------ net */
 
   function jsonFetch(url, options) {
@@ -232,7 +257,8 @@
     try {
       if (perchTarget === "pet" && lastPet && lastPet.bird) {
         svg.setAttribute("class", "rb-here-bird");
-        Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), (lastPet && lastPet.mood) || "happy");
+        var hg = birdGenome(Bird, lastPet.bird);
+        if (hg) Bird.mountBird(svg, hg, (lastPet && lastPet.mood) || "happy");
       } else if (eggSeedId) {
         /* The WALKING egg — legs and all. You are not carrying it, you are it. */
         svg.setAttribute("class", "rb-here-egg");
@@ -1325,12 +1351,14 @@
     var petBird = $("rb-pet-bird");
     if (valid && petBird) {
       var genome = null;
-      try { genome = Bird.rollGenome(bird.seed, bird.species); } catch (e) { genome = null; }
+      genome = birdGenome(Bird, bird);
       if (genome) {
         try { Bird.mountBird(petBird, genome, pet.mood || "happy"); } catch (e) { /* cosmetic */ }
         var species = Bird.SPECIES[bird.species];
         setText($("rb-pet-name"), (species && species.name) || bird.species);
-        setText($("rb-pet-traits"), [genome.eye, genome.mark, genome.hat].join(" · "));
+        /* The traits line is what it HATCHED with; the outfit is appended. */
+        var rolled = birdGenome(Bird, { species: bird.species, seed: bird.seed }) || genome;
+        setText($("rb-pet-traits"), [rolled.eye, rolled.mark, rolled.hat].join(" · ") + wornSuffix(bird.outfit));
       }
     } else {
       setText($("rb-pet-name"), "Still an egg");
@@ -1442,6 +1470,105 @@
         .catch(function (err) { setText($("rb-pet-status"), err.message); })
         .then(function () { btn.disabled = false; });
     });
+  });
+
+  /* ------------------------------------------------------------- wardrobe */
+
+  /* Pure: what an item's row button does right now. Shopping needs no bird;
+   * wearing does. A balance can be negative (two of your Crows spent the same
+   * seed while apart) and then buys nothing. */
+  function wardrobeRowState(item, worn, balance, hasBird) {
+    if (!item.owned) return { action: "buy", label: "Buy for " + item.price + " seed", disabled: !(balance >= item.price) };
+    if (worn) return { action: "off", label: "Take off", disabled: !hasBird };
+    return { action: "wear", label: "Wear", disabled: !hasBird };
+  }
+
+  /* jsonFetch throws Error(body.error), so a refusal code arrives as message. */
+  var WARDROBE_REFUSALS = {
+    "short": "Not enough seed yet.",
+    "owned": "You already have that.",
+    "not-owned": "Buy it first."
+  };
+  function wardrobeError(err) {
+    var m = err && err.message;
+    return Object.prototype.hasOwnProperty.call(WARDROBE_REFUSALS, m) ? WARDROBE_REFUSALS[m] : m;
+  }
+
+  var wardrobeSheet = $("rb-wardrobe-sheet");
+
+  function paintWardrobe(w) {
+    var list = $("rb-wardrobe-list");
+    if (!w || !list) return;
+    setText($("rb-wardrobe-seed"), String(w.seed));
+    var me = $("rb-wardrobe-bird");
+    var active = w.active;
+    if (me) {
+      var g = active ? birdGenome(Bird, active) : null;
+      if (g) { try { Bird.mountBird(me, g, (lastPet && lastPet.mood) || "happy"); } catch (e) { /* cosmetic */ } }
+      else me.textContent = "";
+    }
+    setText($("rb-wardrobe-nobird"), active ? "" : "Nothing has hatched yet. You can shop now and dress up once you do.");
+    list.textContent = "";
+    (w.items || []).forEach(function (item) {
+      var worn = !!(active && active.outfit && active.outfit[item.slot] === item.value);
+      var st = wardrobeRowState(item, worn, w.seed, !!active);
+      var row = document.createElement("div");
+      row.className = "rb-step rb-wardrobe-row" + (worn ? " is-worn" : "");
+      var txt = document.createElement("div");
+      txt.className = "rb-step-txt";
+      var name = document.createElement("strong");
+      name.textContent = item.name;
+      txt.appendChild(name);
+      var sub = document.createElement("span");
+      sub.className = "rb-muted rb-fine";
+      sub.textContent = worn ? "wearing it" : (item.owned ? "yours" : item.price + " seed");
+      txt.appendChild(sub);
+      row.appendChild(txt);
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "rb-btn rb-btn-ghost";
+      btn.textContent = st.label;
+      btn.disabled = st.disabled;
+      btn.addEventListener("click", function () { wardrobeAct(st.action, item, active); });
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+  }
+
+  function refreshWardrobe() {
+    return jsonFetch("/api/ramble/wardrobe").then(paintWardrobe)
+      .catch(function (err) { setText($("rb-wardrobe-status"), wardrobeError(err)); });
+  }
+
+  function wardrobeAct(action, item, active) {
+    /* Freeze the whole list while a request is in flight: two quick taps on
+     * different rows would otherwise race. */
+    Array.prototype.slice.call(document.querySelectorAll("#rb-wardrobe-list button")).forEach(function (b) { b.disabled = true; });
+    var req = action === "buy"
+      ? jsonFetch("/api/ramble/wardrobe/buy", { method: "POST", body: { item: item.id } })
+      : jsonFetch("/api/ramble/birds/" + encodeURIComponent(active.egg_id) + "/outfit",
+          { method: "POST", body: { slot: item.slot, item: action === "off" ? null : item.id } });
+    req.then(function () {
+      setText($("rb-wardrobe-status"), action === "buy" ? "It's yours." : (action === "off" ? "Taken off." : "Looking good."));
+      return Promise.all([refreshWardrobe(), refreshPet()]);
+    }).catch(function (err) {
+      setText($("rb-wardrobe-status"), wardrobeError(err));
+      return refreshWardrobe(); /* repaint re-enables exactly the right buttons */
+    });
+  }
+
+  function openWardrobe(open) {
+    if (!wardrobeSheet) return;
+    setHidden(wardrobeSheet, !open);
+    if (open) { setText($("rb-wardrobe-status"), ""); refreshWardrobe(); }
+  }
+  var openWardrobeBtn = $("rb-open-wardrobe");
+  if (openWardrobeBtn) openWardrobeBtn.addEventListener("click", function () { openWardrobe(true); });
+  var closeWardrobeBtn = $("rb-wardrobe-close");
+  if (closeWardrobeBtn) closeWardrobeBtn.addEventListener("click", function () { openWardrobe(false); });
+  if (wardrobeSheet) wardrobeSheet.addEventListener("click", function (ev) { if (ev.target === wardrobeSheet) openWardrobe(false); });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && wardrobeSheet && !wardrobeSheet.hasAttribute("hidden")) openWardrobe(false);
   });
 
   var backBtn = $("rb-back-world");
@@ -1829,7 +1956,8 @@
     var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 200 200");
     if (Bird && Bird.isValidBird({ species: bird.species, seed: bird.seed })) {
-      try { Bird.mountBird(svg, Bird.rollGenome(bird.seed, bird.species), "happy"); } catch (e) { /* cosmetic */ }
+      var tg = birdGenome(Bird, bird);
+      try { if (tg) Bird.mountBird(svg, tg, "happy"); } catch (e) { /* cosmetic */ }
     }
     btn.appendChild(svg);
     var name = document.createElement("span");
@@ -2273,7 +2401,7 @@
   function arBirdState() {
     var bird = lastPet && lastPet.bird;
     if (!bird) return null;
-    return { species: bird.species, seed: bird.seed, mood: lastPet.mood || "happy" };
+    return { species: bird.species, seed: bird.seed, mood: lastPet.mood || "happy", outfit: bird.outfit || null };
   }
 
   function scheduleArRender() {

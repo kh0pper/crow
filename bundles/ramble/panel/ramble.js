@@ -331,6 +331,7 @@ export default {
             <button class="rb-btn rb-btn-ghost" id="rb-nextegg-warm" type="button" hidden>Warm it</button>
           </section>
 
+          <button class="rb-btn rb-btn-ghost" id="rb-open-wardrobe" type="button">Wardrobe</button>
           <button class="rb-btn" id="rb-my-flock" type="button">${icon("flock")}My flock</button>
           <button class="rb-btn rb-btn-ghost" id="rb-back-world" type="button">${icon("back")}Back to the world</button>
         </section>
@@ -406,6 +407,23 @@ export default {
               <button class="rb-icon-btn" id="rb-pick-cancel" type="button" aria-label="Close">${icon("close")}</button>
             </div>
             <div class="rb-steps" id="rb-pick-list"></div>
+          </div>
+        </div>
+
+        <!-- ─────────────────────────────── the wardrobe (phase 4, spec 5.5) -->
+        <!-- A sheet off the pet view, not a fifth view. -->
+        <div class="rb-sheet" id="rb-wardrobe-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-wardrobe-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-wardrobe-title">Wardrobe</h3>
+              <button class="rb-icon-btn" id="rb-wardrobe-close" type="button" aria-label="Close">${icon("close")}</button>
+            </div>
+            <svg id="rb-wardrobe-bird" class="rb-bird rb-wardrobe-bird" viewBox="0 0 200 200" role="img" aria-label="You, as you look today"></svg>
+            <p class="rb-muted rb-fine" id="rb-wardrobe-nobird"></p>
+            <p class="rb-fine"><strong id="rb-wardrobe-seed">0</strong> bird seed</p>
+            <p class="rb-muted rb-fine">Buy something once and any of your birds can wear it. Contacts see what you have on. Strangers on the map never do.</p>
+            <div class="rb-steps" id="rb-wardrobe-list"></div>
+            <p class="rb-muted rb-fine" id="rb-wardrobe-status"></p>
           </div>
         </div>
 
