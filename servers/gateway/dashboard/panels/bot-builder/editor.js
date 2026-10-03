@@ -836,6 +836,19 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
     const esSel = (v) => (pp.external_send || "draft_only") === v ? " selected" : "";
     const slSel = (v) => (pp.skill_learning || "off") === v ? " selected" : "";
+    // S6-CROW: the project folder the bridge adds to read_paths automatically
+    // (bot-read-paths.mjs) — shown read-only so the operator sees the whole
+    // effective set. Archived projects are not added (loadProjectSpace).
+    let projectReadDir = null;
+    if (def.project_id != null) {
+      try {
+        const ps = (await db.execute({
+          sql: "SELECT workspace_dir, archived_at FROM project_spaces WHERE id=?",
+          args: [def.project_id],
+        })).rows[0];
+        if (ps && ps.workspace_dir && !ps.archived_at) projectReadDir = String(ps.workspace_dir);
+      } catch { projectReadDir = null; }
+    }
     const managedRaw = await readSetting(db, "remote_managed_bots");
     let isManaged = false;
     try { const a = JSON.parse(managedRaw || "[]"); if (Array.isArray(a)) isManaged = a.includes(botId); } catch {}
@@ -847,6 +860,12 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<textarea name="pp_bash_allow" rows="3" class="btb-textarea">${escapeHtml((pp.bash_allow || []).join("\n"))}</textarea></div>` +
       `<div class="btb-group"><label>${t("botbuilder.labelWritePaths", lang)}</label>` +
       `<textarea name="pp_write_paths" rows="3" class="btb-textarea">${escapeHtml((pp.write_paths || []).join("\n"))}</textarea></div>` +
+      `<div class="btb-group"><label>${t("botbuilder.labelReadPaths", lang)}</label>` +
+      `<textarea name="pp_read_paths" rows="3" class="btb-textarea" placeholder="/home/you/notes">${escapeHtml((Array.isArray(pp.read_paths) ? pp.read_paths : []).join("\n"))}</textarea>` +
+      (projectReadDir
+        ? `<p class="btb-hint" data-testid="read-paths-project">${t("botbuilder.readPathsProjectAuto", lang)} <code>${escapeHtml(projectReadDir)}</code></p>`
+        : "") +
+      `<p class="btb-hint">${t("botbuilder.hintReadPaths", lang)}</p></div>` +
       `<div class="btb-group"><label>${t("botbuilder.labelExternalSend", lang)}</label>` +
       `<select name="pp_external_send" class="btb-select"><option${esSel("draft_only")}>draft_only</option><option${esSel("allow")}>allow</option></select></div>` +
       `<div class="btb-group"><label>${t("botbuilder.labelConfirmTools", lang)}</label>` +

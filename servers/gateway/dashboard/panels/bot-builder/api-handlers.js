@@ -16,6 +16,7 @@ import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
+import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-paths.mjs";
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
@@ -394,6 +395,16 @@ export async function handleBotBuilderPost(req, res, { db }) {
       def.permission_policy.bash = b.pp_bash || "deny";
       def.permission_policy.bash_allow = lines(b.pp_bash_allow);
       def.permission_policy.write_paths = lines(b.pp_write_paths);
+      // S6-CROW: "Folders this bot can read". Validated (absolute, no "..");
+      // an invalid entry refuses the whole save rather than silently dropping
+      // a folder the operator meant to grant. The project folder is NOT
+      // stored here — the bridge adds it per spawn (bot-read-paths.mjs).
+      const rp = parseReadPathsInput(b.pp_read_paths);
+      if (rp.invalid.length) {
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions&error=` +
+          encodeURIComponent(fill(t("botbuilder.readPathsInvalid", reqLang(req)), { paths: rp.invalid.join(", ") })));
+      }
+      def.permission_policy.read_paths = rp.paths;
       def.permission_policy.external_send = b.pp_external_send || "draft_only";
       def.permission_policy.confirm = lines(b.pp_confirm);
       // R13 (Phase 3.2): multi-agent opt-in. The pi-lab gate (Phase 3.1)
@@ -477,7 +488,9 @@ export async function handleBotBuilderPost(req, res, { db }) {
     try {
       const r = await regenerateBotMcp(db, botId);
       // Frozen composed message — do NOT translate (spec rule 5, ?mcp= diagnostics)
-      msg = `wrote ${r.path} (servers: ${r.servers.join(", ") || "none"}` +
+      // S6-CROW: fd delivery writes no file (the config is piped to pi per turn).
+      msg = (r.path ? `wrote ${r.path}` : "checked (MCP config is delivered to pi over a pipe each turn; no file on disk)") +
+        ` (servers: ${r.servers.join(", ") || "none"}` +
         (r.minted && r.minted.length ? `; minted: ${r.minted.join(",")}` : "") +
         (r.warnings.length ? `; ⚠ ${r.warnings.join("; ")}` : "") +
         (r.journalGuarded.length ? `; journal-guarded: ${r.journalGuarded.join(",")}` : "") + ")";

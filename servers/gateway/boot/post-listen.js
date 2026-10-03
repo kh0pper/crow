@@ -120,6 +120,15 @@ export async function runPostListenSetup(server, app, deps) {
       }
     })
     .catch((err) => console.warn("[panel-ws] setup skipped:", err.message));
+  // S6-CROW: the pi-lab minimum (MIN_PI_LAB_REV) is checked at boot, once,
+  // on hosts that can run bots at all (a pi CLI resolves) — Perch's
+  // interactive engine spawns pi from this process. Never blocks or throws.
+  Promise.all([import("../../../scripts/pi-bots/pi_resolver.mjs"), import("../../../scripts/pi-bots/pi-lab-compat.mjs")])
+    .then(([{ resolvePiCli }, { warnIfPiLabIncompatible }]) => {
+      if (resolvePiCli()) warnIfPiLabIncompatible((m) => console.warn(m));
+    })
+    .catch((err) => console.warn("[pi-lab] compatibility check skipped:", err.message));
+
   // Graceful shutdown: close listening socket so systemd restart doesn't hit EADDRINUSE
   process.on("crow:shutdown", () => {
     console.log("[gateway] Closing server for restart...");

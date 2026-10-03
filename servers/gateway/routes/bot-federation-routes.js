@@ -94,7 +94,7 @@ export function makeBotFederationHandlers({ db, regenerateBotMcp = defaultRegen,
         }
       }
       await audit(req, "federation.bot.patch", botId, 200, null);
-      return res.json({ ok: true, regenerated: toolsChanged, mcp: mcp && mcp.path ? { path: mcp.path, servers: mcp.servers } : mcp });
+      return res.json({ ok: true, regenerated: toolsChanged, mcp: mcp && !mcp.error ? { path: mcp.path, servers: mcp.servers } : mcp });
     },
 
     async setEnabled(req, res) {

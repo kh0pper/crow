@@ -37,12 +37,15 @@
  *  - impersonation by bots that have neither a file-read tool nor an open
  *    shell, since they cannot see any signature but their own.
  * What it does NOT stop:
- *  - a bot that can READ another bot's world files. The signed headers sit in
- *    that bot's <session_dir>/.mcp.json (and /tmp/pibot-job-*), same uid, and
- *    pi's default `read` tool is not path-confined, so the headers can be
- *    replayed verbatim. Fix queued as S6 (read confinement in pi-lab, or
- *    fd-based delivery of the per-turn MCP config so no signature rests on
- *    disk).
+ *  - a bot that can READ another bot's world files — CLOSED by S6 with
+ *    pi-lab >= c8bbb02 (pi-lab-compat.mjs): read tools are confined to the
+ *    bot's own roots (bot-read-paths.mjs), any `.mcp.json` is structurally
+ *    unreadable, and the per-turn config reaches pi over an inherited fd
+ *    (mcp-delivery.mjs), so no signature rests on disk at all. With an older
+ *    pi-lab (or PIBOT_MCP_CONFIG_DELIVERY=file) the headers sit in
+ *    <session_dir>/.mcp.json / /tmp/pibot-job-* again and can be replayed.
+ *    An allowlisted file-reading bash command (cat, python3, ...) still
+ *    reads anything — keep those out of bash_allow for confined bots.
  *  - a bot with an open shell. The gateway's user is in the docker and sudo
  *    groups. S3 (scripts/pi-bots/pi_sandbox.mjs) is defense in depth that
  *    removes the casual docker/sudo routes (docker socket and user-session
