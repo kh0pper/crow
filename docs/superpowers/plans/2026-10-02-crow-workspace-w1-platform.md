@@ -22,7 +22,7 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
 
 **Spec:** `docs/superpowers/specs/2026-10-02-crow-workspace-design.md` (§4 = W1). It is binding: where this plan and the spec disagree, the spec wins, and any deviation is listed under Rulings.
 
-**Review:** this is revision 2. It addresses `~/crow-weekend-push/reports/workspace-w1-plan-review.md` (critical issues C1–C4, suggestions S1–S16) and Kevin's answers to that review's questions. Anything not adopted is marked with its own ruling.
+**Review:** this is revision 3. Revision 2 addressed `~/crow-weekend-push/reports/workspace-w1-plan-review.md` (C1–C4, S1–S16) and Kevin's answers. Revision 3 fixes `workspace-w1-plan-rereview.md` R1 (the ownership guard: the real compose project name, refusing only another Crow install of the same bundle) and R2 (smoke helpers become named units with `RuntimeMaxSec`), and applies every minor note. Anything not adopted is marked with its own ruling.
 
 ## Rulings (where the spec is silent; each grounded in evidence gathered 2026-10-02)
 
@@ -51,7 +51,9 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
 5. **`propagate: false`** keeps a declared var out of the gateway `.env`. **`pattern`** (an anchored regex) is enforced with a 400 `invalid_env` before anything is written.
    - **`install_required: true`** makes a key install-blocking even when the compose file does not consume it. That is how the admin password stays mandatory after C4 removed it from compose.
    - `installBlockingEnvKeys` feeds both the server gate and the client gate (the consent-challenge `install_required` list).
-6. **The admin password is scrubbed after first use** (Kevin Q2). The human password never enters a container:
+6. **The admin password is checked before install and scrubbed after first use** (Kevin Q2; re-review minor 3).
+   - Before install, a generic `env_vars[].check: "not_breached"` runs the same Have I Been Pwned check that Nextcloud's `password_policy` enforces by default. It uses k-anonymity: only the first 5 hex chars of the SHA-1 leave the machine. If the service is offline, there is no verdict. The pattern's 12-character minimum already exceeds the policy's default 10.
+   - If Nextcloud still refuses the password, bootstrap dies with an exact recovery message and keeps the password line, so nothing is lost. That step runs before tailnet detection. The human password never enters a container:
    - Compose gives the Nextcloud entrypoint a *generated throwaway* first-run password, `WORKSPACE_FIRSTRUN_ADMIN_PASSWORD`, used only for the image's own first install.
    - Bootstrap then pipes the typed `WORKSPACE_ADMIN_PASSWORD` over stdin into `occ user:resetpassword --password-from-env` and removes it from `.env`.
    - It is therefore never in container env (compose does not reference it), never in the retained-secrets copy (it is not generated), never in backups after the first bootstrap, and never in argv. Containers need no recreate.
@@ -65,11 +67,14 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
    - **Not adopted (S2b):** detaching through `systemd-run`. The post-record placement, the idempotent script and the logged re-run command cover the restart case without a second supervisor.
 8. **`docker.precreate`**: paths relative to `CROW_HOME`, created 0700 before `up` (Docker would create a missing bind source as root). Workspace precreates `workspace` and `workspace/backups-staging`.
 9. **The compose-project ownership guard (C1; Kevin Q1: one Workspace per host).**
-   - Generic: before compose `pull`/`up` at install, before `start`/`stop`, and before `down` at uninstall, the gateway resolves the project name (top-level `name:`, else the normalized dirname).
+   - Generic: before compose `pull`/`up` at install, before `start`/`stop`, and before `down` at uninstall, the gateway resolves the project name **the way compose does**: `docker compose config --format json` → `.name` in the project dir, which honors `.env`, `COMPOSE_PROJECT_NAME` and an interpolated `name:` (re-review R1a: the live R4 browser is `name: ${CROW_BROWSER_CONTAINER_NAME:-browser}` + `.env` `COMPOSE_PROJECT_NAME=crow-browser-r4`).
+     - If that call fails (Docker down, an unset `:?` var), it falls back to `COMPOSE_PROJECT_NAME` from `.env`, then `name:` with `${VAR:-default}` resolved against `.env`, then the normalized dirname.
    - It asks `docker ps -a --filter label=com.docker.compose.project=<name>` for each container's `com.docker.compose.project.working_dir`.
-   - If any of them is not this install's dir, it refuses with: "This extension's containers (compose project "<name>") belong to another Crow install on this host (<dir>): manage them from there." Install refusal removes the copied files. Uninstall skips `down` but still removes this instance's own files.
+   - **It refuses only when the owner is another Crow install of the same bundle** (re-review R1b). That means the owner dir is `<H>/bundles/<id>[/<compose subdir>]`, with `<H>` ≠ this `CROW_HOME`, and `<H>/installed.json` lists `<id>`. The refusal says: "This extension's containers (compose project "<name>") belong to another Crow install on this host (<dir>): manage them from there." Install refusal removes the copied files. Start/stop return 409. Uninstall skips `down` but still removes this instance's own files.
+   - **Any other foreign working_dir is a legacy provenance, so the gateway logs a warning and proceeds exactly as today.** Examples are crow's 35b started from `~/crow-addons/…` and grackle's `vllm-cuda-embed` from `~/crow/bundles/…`.
    - If Docker can't be queried, it proceeds and lets compose fail on its own.
-   - It applies to every bundle, which also covers two instances that would share a default dirname project.
+   - Exported read-only `composeOwnershipCheck(bundleId)` for the Task 8 live check.
+   - **Accepted (re-review minor 8):** the guard runs after `.env` is written, because project resolution needs it. A refused install therefore leaves its unused retained-secrets file behind. That is harmless, and a later legitimate install reuses it.
 10. **The compose project name is fixed (`name: crow-workspace`) and the network is pinned to `10.89.70.0/24`** (S3).
     - The fixed name makes the C1 guard's answer deterministic; it is not a collision fix, which the old Ruling 10 claimed.
     - The pinned subnet keeps the bridge gateway at `10.89.70.1`, so `trusted_proxies` and `overwritecondaddr` survive a `down`/`up`.
@@ -91,9 +96,9 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
     - **Alerts:** `--alert-lib <path>` sources a lab-style `send_alert` (on crow, `~/lab-maintenance/scripts/lib/alerts.sh`). Without it, failures go to the journal.
     - **Not adopted (S8):** `Nice`/`IOSchedulingClass` are dropped, because they do not reach the containerized processes. A `box-reserve` defer is also not adopted: the backup uses no GPU, and the slot sits inside the window-refusal band.
 14. **No secrets in argv anywhere (C4).**
-    - **JWT:** piped over stdin into `php -r … | php occ config:import`.
+    - **JWT:** piped over stdin into `php -r … | php occ config:import /dev/stdin` (re-review minor 1: the file-arg path is a blocking read).
     - **Passwords for `occ`:** piped over stdin and read inside the container by `sh -c 'IFS= read -r NC_PASS; export NC_PASS; exec php occ "$@"'`. This relies on no `docker compose exec -e` pass-through, which was itself unverified.
-    - **Redis:** `requirepass` is read from stdin (`redis-server -`), and the healthcheck uses `REDISCLI_AUTH`.
+    - **Redis:** `requirepass` goes into a 600 config file inside the container, and Redis runs as the `redis` user via `su-exec` with `init: true` (re-review minor 6). The healthcheck uses `REDISCLI_AUTH`.
     - **Dump:** `MYSQL_PWD`.
     - **Accepted residual:** the image's own first-boot `occ maintenance:install` puts the generated DB password and the throwaway first-run admin password in `php` argv for a few seconds, once. The throwaway is invalid after bootstrap resets the admin. Avoiding this would mean replacing the image's installer.
     - **Test coverage:** a static test bans `-p"$`, `-a "$`, `--value="$`, `--requirepass`, `--admin-pass` and `-e *PASS*/SECRET/JWT` in the compose file and `ops/*.sh`. The fake `docker compose` records argv and stdin separately, and the tests assert each secret is on stdin, never argv. The smoke window samples real host `ps` during bootstrap and backup.
@@ -122,6 +127,12 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
 23. **`workspace` stays at version `0.1.0`** until merge. The smoke window installs only scratch copies, never from `~/crow`.
 24. **Panel strings are bundle-local en/es** (the `phone` pattern), with a parity test.
 25. **Execution branch:** `feat/workspace-w1-platform`, cut from `docs/crow-workspace-spec` in `~/crow-wt-workspace`. Never `git checkout` in `~/crow`.
+26. **Smoke-window hygiene (re-review R2 + minors 4, 5, 9).**
+    - **Helpers:** the argv sampler and the header echo run as named transient user units (`ws-smoke-sampler`, `ws-smoke-echo`), each with `RuntimeMaxSec`. The sampler logs only matching lines, deduplicated, so the log stays small.
+    - **Teardown:** the deadman stops both units, then removes containers and networks by compose label as well as through compose, which covers an unparsable compose. It cleans only the smoke's own restore dir.
+    - **Kill test:** the SIGKILL test kills a `setsid` process group.
+    - **Sudo:** runs as `sudo -S` with the credential from the global CLAUDE.md, or Kevin runs those lines.
+    - **Not adopted (minor 5b):** foreground `sudo timeout … tailscale serve`. A stale tailnet-only Serve mapping that returns 502 is the documented deadman-path leftover, and the normal path removes it.
 
 ## Global Constraints
 
@@ -159,7 +170,7 @@ Before anything merges, an attended, deadman-guarded smoke window on crow exerci
    - Task 4: `REVIEW FOCUS 5c — no secret-in-argv patterns in compose or ops scripts`;
    - Task 7: `REVIEW FOCUS 5d — the page renders no secret value`;
    - Task 8: the live `ps` sampler.
-6. **A second Crow instance on the same host (R4) installing, starting, stopping or uninstalling Workspace** must never touch the household's containers. *Pinned in Task 3:* `REVIEW FOCUS 6 — a second instance cannot adopt another instance's compose project`.
+6. **A second Crow instance on the same host (R4) installing, starting, stopping or uninstalling Workspace** must never touch the household's containers. And the guard must never block an instance's own per-instance project (R4 browser) or containers that were started from a legacy path. *Pinned in Task 3:* `REVIEW FOCUS 6 — a second instance cannot adopt another instance's compose project`, `regression (R4 browser)`, `regression (legacy provenance)`; *live in Task 8 Step 7*.
 
 ---
 
@@ -450,7 +461,7 @@ Expected: FAIL: `Cannot find module '…/servers/gateway/bundle-env-secrets.js'`
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 const GENERATE_KINDS = new Set(["secret"]);
 
@@ -632,7 +643,8 @@ git show --stat HEAD
 - Produces:
   - `gatewayExcludedKeys(manifest): Set<string>`
   - `envPatternViolation(manifest, envVars): { key, why } | null`
-  - Manifest fields: `env_vars[].propagate: boolean`, `pattern: "^…$"`, `pattern_hint: string`, `install_required: boolean`
+  - `breachedValueViolation(manifest, envVars, { fetchImpl, timeoutMs }): Promise<{ key, why } | null>`; seam `_setBreachFetchForTest(fn)`
+  - Manifest fields: `env_vars[].propagate: boolean`, `pattern: "^…$"`, `pattern_hint: string`, `install_required: boolean`, `check: "not_breached"`
   - Error contract: 400 `code: "invalid_env"`
 
 - [ ] **Step 1: Write the failing test**
@@ -752,6 +764,30 @@ test("Configure refuses a pattern-violating value with 400 invalid_env and leave
   assert.ok(!readFileSync(GATEWAY_ENV, "utf8").includes("WS_ADMIN"));
 });
 
+test("not_breached: a breached value is refused via k-anonymity (5-char prefix only); offline → no verdict", async () => {
+  const { createHash } = await import("node:crypto");
+  const sha = createHash("sha1").update("Password1234").digest("hex").toUpperCase();
+  const urls = [];
+  const fakeFetch = async (url) => { urls.push(url); return { ok: true, text: async () => `0000000000000000000000000000000000A:3\r\n${sha.slice(5)}:41234\r\n` }; };
+  const m = { env_vars: [{ name: "P", check: "not_breached" }] };
+  const v = await S.breachedValueViolation(m, { P: "Password1234" }, { fetchImpl: fakeFetch });
+  assert.equal(v.key, "P");
+  assert.ok(!v.why.includes("Password1234"));
+  assert.deepEqual(urls, [`https://api.pwnedpasswords.com/range/${sha.slice(0, 5)}`]);
+  assert.equal(await S.breachedValueViolation(m, { P: "Never-Seen-Before-9" }, { fetchImpl: fakeFetch }), null);
+  assert.equal(await S.breachedValueViolation(m, { P: "Password1234" }, { fetchImpl: async () => { throw new Error("offline"); } }), null);
+  fixture("ws-breach");
+  B._setBreachFetchForTest(fakeFetch);
+  const manifestPath = join(FIXTURES, "ws-breach", "manifest.json");
+  const man = JSON.parse(readFileSync(manifestPath, "utf8"));
+  man.env_vars = man.env_vars.map((e) => (e.name === "WS_ADMIN_PASSWORD" ? { ...e, check: "not_breached" } : e));
+  writeFileSync(manifestPath, JSON.stringify(man));
+  const r = await B.validateInstall("ws-breach", { envVars: { WS_ADMIN_PASSWORD: "Password1234" }, requireEnv: true, forceInstall: true });
+  B._setBreachFetchForTest(null);
+  assert.equal(r.code, "invalid_env");
+  assert.match(r.error, /known data breaches/);
+});
+
 test("the store never sends a generated key to the browser", () => {
   const { addonRegistryScript } = buildExtensionsHTML({
     installed: {}, available: [{ id: "ws-ui", name: "WS", description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: ENV_VARS }],
@@ -781,6 +817,41 @@ export function gatewayExcludedKeys(manifest) {
   return out;
 }
 
+/**
+ * `env_vars[].check: "not_breached"` — refuse a value found in known data breaches,
+ * the same Have I Been Pwned check Nextcloud's password_policy enforces by default, so
+ * the install is refused up front instead of failing in the post-install hook.
+ * k-anonymity: only the first 5 hex chars of the SHA-1 leave the machine. Network
+ * failure → no verdict (the app's own policy decides; bootstrap explains recovery).
+ */
+export async function breachedValueViolation(manifest, envVars, { fetchImpl = globalThis.fetch, timeoutMs = 5000 } = {}) {
+  const vals = envVars && typeof envVars === "object" ? envVars : {};
+  for (const v of manifest?.env_vars || []) {
+    if (!v || v.check !== "not_breached") continue;
+    const val = vals[v.name];
+    if (val === undefined || val === null || val === "") continue;
+    const sha = createHash("sha1").update(String(val)).digest("hex").toUpperCase();
+    let text;
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), timeoutMs);
+      const r = await fetchImpl(`https://api.pwnedpasswords.com/range/${sha.slice(0, 5)}`, { signal: ctl.signal, headers: { "Add-Padding": "true" } });
+      clearTimeout(timer);
+      if (!r.ok) continue;
+      text = await r.text();
+    } catch {
+      continue;
+    }
+    for (const line of String(text).split("\n")) {
+      const [suffix, count] = line.trim().split(":");
+      if (suffix === sha.slice(5) && Number(count) > 0) {
+        return { key: v.name, why: "appears in known data breaches (haveibeenpwned.com), so the app's password policy would reject it; choose another" };
+      }
+    }
+  }
+  return null;
+}
+
 /** First supplied value breaking its manifest `pattern`, or null. Names the KEY, never the value. */
 export function envPatternViolation(manifest, envVars) {
   const vals = envVars && typeof envVars === "object" ? envVars : {};
@@ -801,7 +872,7 @@ export function envPatternViolation(manifest, envVars) {
 (b) `bundles.js` import line becomes:
 
 ```js
-import { resolveGeneratedEnv, stripGeneratedKeys, writePrivateFile, gatewayExcludedKeys, envPatternViolation } from "../bundle-env-secrets.js";
+import { resolveGeneratedEnv, stripGeneratedKeys, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 ```
 
 (c) `declaredEnvSubset`:
@@ -846,6 +917,22 @@ Extend its doc comment: ` * install_required: true blocks regardless of compose 
       extra: { code: "invalid_env", key: badPattern.key },
     };
   }
+  const breached = await breachedValueViolation(manifest, envVars, { fetchImpl: _breachFetchForTest || globalThis.fetch });
+  if (breached) {
+    return {
+      ok: false, status: 400, code: "invalid_env",
+      error: `Environment variable '${breached.key}' ${breached.why}`,
+      extra: { code: "invalid_env", key: breached.key },
+    };
+  }
+```
+
+Add the test seam next to the other `_set…ForTest` exports:
+
+```js
+// Test-only: replace the HIBP range fetch used by env_vars[].check "not_breached".
+let _breachFetchForTest = null;
+export function _setBreachFetchForTest(fn) { _breachFetchForTest = fn || null; }
 ```
 
 (f) Configure route, directly after the existing `findInvalidEnv` 400 block:
@@ -864,6 +951,7 @@ Extend its doc comment: ` * install_required: true blocks regardless of compose 
 ```json
           "propagate": { "type": "boolean" },
           "install_required": { "type": "boolean" },
+          "check": { "type": "string", "enum": ["not_breached"] },
           "pattern": { "type": "string", "pattern": "^\\^.*\\$$" },
           "pattern_hint": { "type": "string" },
 ```
@@ -906,8 +994,10 @@ git show --stat HEAD
   - `hookEnv(destDir, crowHome, base = process.env): object`
   - `spawnGroup(cmd, args, { cwd, env, timeout, maxBuffer }): Promise<{ stdout, stderr }>`: its own process group, stdin ignored, the group is killed on timeout
   - `runPostInstall({ manifest, destDir, env, log, runner }): Promise<{ ok: true, skipped? } | { ok: false, reason, rerun? }>`
-  - `composeProjectName(composeText, destDir): string`
-  - `foreignProjectOwner({ project, destDir, runner }): Promise<string | null>`
+  - `composeProjectName(composeText, projectDir, envVars = {}): string`: the fallback resolver
+  - `resolveComposeProject({ projectDir, composeText, envVars, runner, env }): Promise<string>`: `docker compose config --format json` first
+  - `classifyProjectOwners({ project, projectDir, bundleId, crowHome, runner }): Promise<{ owner: string | null, unrelated: string[] }>`
+  - bundles.js: `composeOwnershipCheck(bundleId): Promise<{ project, refusal: string | null, warning: string | null }>` (read-only; exported for the Task 8 live check)
   - `pullTimeoutMs(manifest): number | undefined`
   - bundles.js seams: `_setHookRunnerForTest(fn)`, `_setDockerRunnerForTest(fn)`
   - Manifest fields: `docker.precreate`, `docker.pull_timeout_s` (≤3600), `postInstall { script, timeout_s ≤1800 }`
@@ -1025,18 +1115,38 @@ test("runPostInstall: bash <abs script>, cwd, env, timeout; failure carries a st
   assert.equal(bad.rerun, `bash ${join(dest, "ops", "b.sh")}`);
 });
 
-test("composeProjectName: top-level name wins, else normalized dirname", () => {
+test("composeProjectName fallback: COMPOSE_PROJECT_NAME > interpolated name: > dirname", () => {
   assert.equal(L.composeProjectName("name: crow-workspace\nservices: {}\n", "/x/bundles/workspace"), "crow-workspace");
   assert.equal(L.composeProjectName("services: {}\n", "/x/bundles/Work Space"), "workspace");
+  const browser = "name: ${CROW_BROWSER_CONTAINER_NAME:-browser}\nservices: {}\n";
+  assert.equal(L.composeProjectName(browser, "/h/bundles/browser", {}), "browser");
+  assert.equal(L.composeProjectName(browser, "/h/bundles/browser", { CROW_BROWSER_CONTAINER_NAME: "crow-browser-x" }), "crow-browser-x");
+  assert.equal(L.composeProjectName(browser, "/h/bundles/browser", { COMPOSE_PROJECT_NAME: "crow-browser-r4" }), "crow-browser-r4");
 });
 
-test("foreignProjectOwner: other working_dir → returned; own dir or no containers → null; docker error → null", async () => {
-  const dest = mkdtempSync(join(tmpdir(), "own-"));
+test("resolveComposeProject prefers `docker compose config` and falls back when it fails", async () => {
+  const ok = async (cmd, args) => (args[0] === "compose" ? { stdout: JSON.stringify({ name: "crow-browser-r4" }), stderr: "" } : { stdout: "", stderr: "" });
+  assert.equal(await L.resolveComposeProject({ projectDir: "/h/bundles/browser", composeText: "services: {}\n", envVars: {}, runner: ok }), "crow-browser-r4");
+  const down = async () => { throw new Error("no docker"); };
+  assert.equal(await L.resolveComposeProject({ projectDir: "/h/bundles/browser", composeText: "services: {}\n", envVars: { COMPOSE_PROJECT_NAME: "crow-browser-r4" }, runner: down }), "crow-browser-r4");
+});
+
+test("classifyProjectOwners: only another Crow install OF THIS BUNDLE is an owner; legacy paths are unrelated", async () => {
+  const mine = mkdtempSync(join(tmpdir(), "own-mine-"));
+  const otherHome = mkdtempSync(join(tmpdir(), "own-otherhome-"));
+  mkdirSync(join(otherHome, "bundles", "ws"), { recursive: true });
+  writeFileSync(join(otherHome, "installed.json"), JSON.stringify([{ id: "ws", type: "bundle" }]));
+  const notInstalledHome = mkdtempSync(join(tmpdir(), "own-stale-"));
+  mkdirSync(join(notInstalledHome, "bundles", "ws"), { recursive: true });
   const mk = (stdout) => async () => ({ stdout, stderr: "" });
-  assert.equal(await L.foreignProjectOwner({ project: "p", destDir: dest, runner: mk("/home/k/.crow/bundles/workspace\n") }), "/home/k/.crow/bundles/workspace");
-  assert.equal(await L.foreignProjectOwner({ project: "p", destDir: dest, runner: mk(`${dest}\n${dest}\n`) }), null);
-  assert.equal(await L.foreignProjectOwner({ project: "p", destDir: dest, runner: mk("") }), null);
-  assert.equal(await L.foreignProjectOwner({ project: "p", destDir: dest, runner: async () => { throw new Error("no docker"); } }), null);
+  const args = (stdout) => ({ project: "p", projectDir: mine, bundleId: "ws", crowHome: join(mine, ".."), runner: mk(stdout) });
+  assert.deepEqual(await L.classifyProjectOwners(args(`${otherHome}/bundles/ws\n`)), { owner: `${otherHome}/bundles/ws`, unrelated: [] });
+  assert.deepEqual(await L.classifyProjectOwners(args("/home/k/crow-addons/llamacpp-vulkan-qwen36-35b-a3b\n")), { owner: null, unrelated: ["/home/k/crow-addons/llamacpp-vulkan-qwen36-35b-a3b"] });
+  assert.deepEqual(await L.classifyProjectOwners(args("/home/k/crow/bundles/ws\n")), { owner: null, unrelated: ["/home/k/crow/bundles/ws"] }, "a repo checkout path has no installed.json listing → legacy");
+  assert.deepEqual(await L.classifyProjectOwners(args(`${notInstalledHome}/bundles/ws\n`)), { owner: null, unrelated: [`${notInstalledHome}/bundles/ws`] });
+  assert.deepEqual(await L.classifyProjectOwners(args(`${otherHome}/bundles/other-id\n`)), { owner: null, unrelated: [`${otherHome}/bundles/other-id`] });
+  assert.deepEqual(await L.classifyProjectOwners(args(`${mine}\n${mine}\n`)), { owner: null, unrelated: [] });
+  assert.deepEqual(await L.classifyProjectOwners({ ...args(""), runner: async () => { throw new Error("no docker"); } }), { owner: null, unrelated: [] });
 });
 
 test("install: precreate, pull/up with opt-in long timeout, hook AFTER installed.json, minimal env", async () => {
@@ -1104,14 +1214,22 @@ test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compo
   const m = fixture(id, { postInstall: { script: "ops/bootstrap.sh" } }, "name: crow-shared\nservices:\n  app:\n    image: busybox:1.36\n");
   const composeCalls = [];
   B._setComposeRunnerForTest(async (args) => { composeCalls.push(args[0]); return { stdout: "", stderr: "" }; });
+  // The household's install lives in ANOTHER Crow home that really lists this bundle.
+  const otherHome = mkdtempSync(join(tmpdir(), "hk-otherhome-"));
+  mkdirSync(join(otherHome, "bundles", id), { recursive: true });
+  writeFileSync(join(otherHome, "installed.json"), JSON.stringify([{ id, type: "bundle", version: "0.1.0" }]));
   const dockerCalls = [];
-  B._setDockerRunnerForTest(async (cmd, args) => { dockerCalls.push(args); return { stdout: "/home/k/.crow/bundles/hk-owned\n", stderr: "" }; });
+  B._setDockerRunnerForTest(async (cmd, args) => {
+    dockerCalls.push(args);
+    if (args[0] === "compose") throw new Error("config unavailable"); // exercise the fallback resolver
+    return { stdout: `${otherHome}/bundles/${id}\n`, stderr: "" };
+  });
   // install refused, nothing started, copied files removed
   const { out } = await install(id, m);
   assert.equal(out.ok, false);
-  assert.match(out.reason, /belong to another Crow install on this host \(\/home\/k\/\.crow\/bundles\/hk-owned\)/);
+  assert.ok(out.reason.includes(`belong to another Crow install on this host (${otherHome}/bundles/${id})`), out.reason);
   assert.deepEqual(composeCalls, []);
-  assert.ok(dockerCalls[0].includes("label=com.docker.compose.project=crow-shared"));
+  assert.ok(dockerCalls.some((a) => a.includes("label=com.docker.compose.project=crow-shared")));
   assert.equal(existsSync(join(CROW_HOME, "bundles", id)), false);
   // a copy that IS installed here (older install) cannot start/stop/down the foreign project
   const dir = join(CROW_HOME, "bundles", id);
@@ -1136,6 +1254,60 @@ test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compo
   } finally { server.close(); }
   assert.deepEqual(composeCalls, [], "no up/stop/down ever reached the foreign project");
   assert.equal(existsSync(dir), false, "this instance's own files are still removed");
+});
+
+async function startBundle(id) {
+  const app = express(); app.use(express.json()); app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  try {
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/bundles/api/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id }) });
+    return { status: r.status, body: await r.json() };
+  } finally { server.close(); }
+}
+function seedInstalledCompose(id, compose, envText) {
+  const m = fixture(id, {}, compose);
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(m));
+  writeFileSync(join(dir, "docker-compose.yml"), compose);
+  if (envText) writeFileSync(join(dir, ".env"), envText, { mode: 0o600 });
+  return dir;
+}
+
+test("regression (R4 browser): COMPOSE_PROJECT_NAME in .env selects the project; crow's copy of the same bundle is NOT an owner", async () => {
+  const id = "hk-browser";
+  const dir = seedInstalledCompose(id, "name: ${CROW_BROWSER_CONTAINER_NAME:-hk-browser}\nservices:\n  app:\n    image: busybox:1.36\n", "COMPOSE_PROJECT_NAME=crow-hk-browser-r4\n");
+  const crowHome = mkdtempSync(join(tmpdir(), "hk-crowhome-"));
+  mkdirSync(join(crowHome, "bundles", id), { recursive: true });
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify([{ id }]));
+  for (const configWorks of [true, false]) {
+    const filters = [];
+    B._setDockerRunnerForTest(async (cmd, args) => {
+      if (args[0] === "compose") { if (!configWorks) throw new Error("no config"); return { stdout: JSON.stringify({ name: "crow-hk-browser-r4" }), stderr: "" }; }
+      const f = args.find((a) => a.startsWith("label=")); filters.push(f);
+      // crow's own browser project ("hk-browser") belongs to crow's home; R4's project is ours.
+      return { stdout: f.endsWith("=hk-browser") ? `${crowHome}/bundles/${id}\n` : `${dir}\n`, stderr: "" };
+    });
+    const calls = [];
+    B._setComposeRunnerForTest(async (args) => { calls.push(args[0]); return { stdout: "", stderr: "" }; });
+    const r = await startBundle(id);
+    assert.equal(r.status, 200, `configWorks=${configWorks}: ${JSON.stringify(r.body)}`);
+    assert.deepEqual(filters, ["label=com.docker.compose.project=crow-hk-browser-r4"]);
+    assert.deepEqual(calls, ["up"]);
+  }
+});
+
+test("regression (legacy provenance): containers started from ~/crow-addons or a repo checkout stay controllable", async () => {
+  const id = "hk-legacy";
+  seedInstalledCompose(id, "services:\n  app:\n    image: busybox:1.36\n");
+  for (const legacy of ["/home/k/crow-addons/hk-legacy", "/home/k/crow/bundles/hk-legacy"]) {
+    B._setDockerRunnerForTest(async (cmd, args) => (args[0] === "compose" ? { stdout: JSON.stringify({ name: "hk-legacy" }), stderr: "" } : { stdout: `${legacy}\n`, stderr: "" }));
+    const calls = [];
+    B._setComposeRunnerForTest(async (args) => { calls.push(args[0]); return { stdout: "", stderr: "" }; });
+    const r = await startBundle(id);
+    assert.equal(r.status, 200, `${legacy}: ${JSON.stringify(r.body)}`);
+    assert.deepEqual(calls, ["up"]);
+  }
 });
 
 test("version-bump refresh re-copies the hook script's directory for a docker bundle", async () => {
@@ -1185,9 +1357,10 @@ Expected: FAIL: `Cannot find module '…/servers/gateway/bundle-lifecycle.js'`.
  *
  * Ownership: compose identifies a project by NAME only. Two Crow instances on one host
  * (crow + R4 share ~/crow) would otherwise recreate/stop/down each other's containers.
- * foreignProjectOwner() reads the working_dir label of every container in the project.
+ * classifyProjectOwners() reads the working_dir label of every container in the project and
+ * refuses only for another Crow install of the SAME bundle; legacy provenance only warns.
  */
-import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdirSync, existsSync, realpathSync, readFileSync } from "node:fs";
 import { join, isAbsolute, normalize, basename } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -1289,28 +1462,75 @@ export async function runPostInstall({ manifest, destDir, env, log, runner }) {
   }
 }
 
-/** Compose's project name: top-level `name:` (no interpolation), else the normalized dirname. */
-export function composeProjectName(composeText, destDir) {
-  const m = /^name:\s*["']?([A-Za-z0-9][A-Za-z0-9_.-]*)["']?\s*$/m.exec(String(composeText || ""));
-  if (m) return m[1].toLowerCase();
-  return basename(String(destDir)).toLowerCase().replace(/[^a-z0-9_-]/g, "");
+const normProject = (s) => String(s).toLowerCase().replace(/[^a-z0-9_-]/g, "");
+
+/**
+ * Fallback project name when `docker compose config` cannot run: COMPOSE_PROJECT_NAME
+ * from the project .env, then a top-level `name:` with ${VAR}/${VAR:-default} resolved
+ * against that .env, then the normalized dirname — compose's own precedence.
+ */
+export function composeProjectName(composeText, projectDir, envVars = {}) {
+  if (envVars.COMPOSE_PROJECT_NAME) return normProject(envVars.COMPOSE_PROJECT_NAME);
+  const m = /^name:\s*["']?([^"'\n]+?)["']?\s*$/m.exec(String(composeText || ""));
+  if (m) {
+    const v = m[1].replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}/g, (_, k, d) => envVars[k] || d || "");
+    if (normProject(v)) return normProject(v);
+  }
+  return normProject(basename(String(projectDir)));
+}
+
+/** The project compose itself would use (`config --format json` → .name), else the fallback. */
+export async function resolveComposeProject({ projectDir, composeText, envVars = {}, runner, env }) {
+  try {
+    const { stdout } = await runner("docker", ["compose", "config", "--format", "json"], { cwd: projectDir, env, timeout: 15_000 });
+    const name = JSON.parse(String(stdout || "{}")).name;
+    if (name) return name;
+  } catch { /* docker down or an unset :? var — fall back */ }
+  return composeProjectName(composeText, projectDir, envVars);
 }
 
 function realOrSelf(p) { try { return realpathSync(p); } catch { return p; } }
 
-/** First container working_dir in `project` that is not `destDir`; null if none or docker unreachable. */
-export async function foreignProjectOwner({ project, destDir, runner }) {
+function installedListsId(installedPath, id) {
+  try {
+    const d = JSON.parse(readFileSync(installedPath, "utf8"));
+    const arr = Array.isArray(d) ? d : Object.entries(d).map(([k, v]) => ({ id: k, ...v }));
+    return arr.some((e) => (typeof e === "string" ? e : e && e.id) === id);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Who else has containers in `project`?
+ *   owner     — another Crow install OF THIS BUNDLE: <H>/bundles/<id>[/subdir], H ≠ crowHome,
+ *               and <H>/installed.json lists <id>. Callers refuse.
+ *   unrelated — every other foreign working_dir (a legacy ~/crow-addons path, a repo
+ *               checkout, a stale home). Callers warn and proceed, exactly as before.
+ * Docker unreachable → nobody (compose will fail on its own).
+ */
+export async function classifyProjectOwners({ project, projectDir, bundleId, crowHome, runner }) {
   let stdout = "";
   try {
     ({ stdout } = await runner("docker", ["ps", "-a", "--filter", `label=com.docker.compose.project=${project}`, "--format", '{{.Label "com.docker.compose.project.working_dir"}}'], { timeout: 15_000 }));
   } catch {
-    return null; // docker unreachable: compose will fail on its own
+    return { owner: null, unrelated: [] };
   }
-  const mine = realOrSelf(destDir);
-  for (const line of String(stdout).split("\n").map((l) => l.trim()).filter(Boolean)) {
-    if (realOrSelf(line) !== mine) return line;
+  const mine = realOrSelf(projectDir);
+  const myHome = realOrSelf(crowHome);
+  const marker = `/bundles/${bundleId}`;
+  let owner = null;
+  const unrelated = [];
+  for (const d of [...new Set(String(stdout).split("\n").map((l) => l.trim()).filter(Boolean))]) {
+    const r = realOrSelf(d);
+    if (r === mine) continue;
+    const at = r.lastIndexOf(marker);
+    const rest = at >= 0 ? r.slice(at + marker.length) : null;
+    const home = at >= 0 && (rest === "" || rest.startsWith("/")) ? r.slice(0, at) : null;
+    if (!owner && home && home !== myHome && installedListsId(join(home, "installed.json"), bundleId)) owner = d;
+    else unrelated.push(d);
   }
-  return null;
+  return { owner, unrelated };
 }
 ```
 
@@ -1319,7 +1539,8 @@ export async function foreignProjectOwner({ project, destDir, runner }) {
 (a) Imports, next to the Task 1 import:
 
 ```js
-import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, composeProjectName, foreignProjectOwner } from "../bundle-lifecycle.js";
+import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
+import { parseEnvText } from "../bundle-env-secrets.js";
 ```
 
 (b) After the `_setComposeRunnerForTest` export, add the seams and a guard helper:
@@ -1332,18 +1553,29 @@ let _dockerRunnerForTest = null;
 export function _setDockerRunnerForTest(fn) { _dockerRunnerForTest = fn || null; }
 
 /**
- * Refusal text when this bundle's compose project already belongs to ANOTHER install
- * dir on this host (a second Crow instance sharing the repo), else null.
+ * Ownership of this bundle's compose project. refusal: another Crow install of the SAME
+ * bundle on this host owns it (callers refuse). warning: containers from a legacy path
+ * share the project (callers log and proceed, as before this guard existed).
  */
-async function composeOwnershipRefusal(bundleDir, manifest) {
+async function composeOwnership(bundleId, bundleDir, manifest) {
   const rel = manifestComposeFile(manifest) || "docker-compose.yml";
   let text = "";
-  try { text = readFileSync(join(bundleDir, rel), "utf8"); } catch { return null; }
-  const project = composeProjectName(text, join(bundleDir, dirname(rel)));
-  const owner = await foreignProjectOwner({ project, destDir: join(bundleDir, dirname(rel)), runner: _dockerRunnerForTest || run });
-  return owner
-    ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}) — manage them from there.`
-    : null;
+  try { text = readFileSync(join(bundleDir, rel), "utf8"); } catch { return { project: null, refusal: null, warning: null }; }
+  const projectDir = join(bundleDir, dirname(rel));
+  let envVars = {};
+  try { envVars = parseEnvText(readFileSync(join(projectDir, ".env"), "utf8")); } catch { /* no .env */ }
+  const runner = _dockerRunnerForTest || run;
+  const project = await resolveComposeProject({ projectDir, composeText: text, envVars, runner, env: composeEnv() });
+  const { owner, unrelated } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
+  return {
+    project,
+    refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}) — manage them from there.` : null,
+    warning: unrelated.length ? `compose project "${project}" also has containers started from ${unrelated.join(", ")} (legacy path) — continuing` : null,
+  };
+}
+/** Read-only, for operators and the pre-merge smoke: the guard's verdict for an installed bundle. */
+export async function composeOwnershipCheck(bundleId) {
+  return composeOwnership(bundleId, join(BUNDLES_DIR, bundleId), getInstalledFirstManifest(bundleId));
 }
 ```
 
@@ -1352,12 +1584,13 @@ async function composeOwnershipRefusal(bundleDir, manifest) {
 (d) Docker branch: right after `appendLog(job, "Security check passed");`, insert:
 
 ```js
-        const ownerRefusal = await composeOwnershipRefusal(destDir, manifest);
-        if (ownerRefusal) {
-          appendLog(job, `Install refused: ${ownerRefusal}`);
+        const own = await composeOwnership(bundleId, destDir, manifest);
+        if (own.refusal) {
+          appendLog(job, `Install refused: ${own.refusal}`);
           rmSync(destDir, { recursive: true, force: true });
-          return { ok: false, reason: ownerRefusal };
+          return { ok: false, reason: own.refusal };
         }
+        if (own.warning) appendLog(job, `Note: ${own.warning}`);
         try {
           const made = precreateDirs(manifest, CROW_HOME);
           if (made.length) appendLog(job, `Prepared data folders: ${made.map((p) => relativePath(CROW_HOME, p)).join(", ")}`);
@@ -1420,16 +1653,18 @@ Note that `{ timeout: undefined }` spread over `run()`'s `{ timeout: 300_000, ..
 (i) `dispatchBundleAction` local path: right after the `existsSync(composePath)` 404 check, add:
 
 ```js
-    const ownerRefusal = await composeOwnershipRefusal(bundleDir, getInstalledFirstManifest(bundleId));
-    if (ownerRefusal) return res.status(409).json({ error: ownerRefusal, code: "compose_project_foreign" });
+    const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
+    if (own.refusal) return res.status(409).json({ error: own.refusal, code: "compose_project_foreign" });
+    if (own.warning) console.warn(`[bundles] ${bundleId} ${action}: ${own.warning}`);
 ```
 
 (j) Uninstall job: wrap the existing `if (existsSync(composePath)) { … runCompose(downArgs …) … }` so it first runs
 
 ```js
-            const ownerRefusal = await composeOwnershipRefusal(bundleDir, manifest);
-            if (ownerRefusal) {
-              appendLog(job, `Containers left running: ${ownerRefusal}`);
+            const own = await composeOwnership(bundle_id, bundleDir, manifest);
+            if (own.warning) appendLog(job, `Note: ${own.warning}`);
+            if (own.refusal) {
+              appendLog(job, `Containers left running: ${own.refusal}`);
             } else {
               /* existing "Stopping containers..." + runCompose(downArgs) block, unchanged */
             }
@@ -1586,6 +1821,7 @@ test("the human admin password never reaches a container and is install-gated, n
   assert.doesNotMatch(compose, /WORKSPACE_ADMIN_PASSWORD/);
   const v = envVar("WORKSPACE_ADMIN_PASSWORD");
   assert.equal(v.install_required, true);
+  assert.equal(v.check, "not_breached", "pre-install check against Nextcloud's default HIBP password policy");
   assert.notEqual(v.required, true, "required:true would raise 'Needs setup' after bootstrap scrubs it");
   assert.equal(v.secret, true);
   assert.equal(v.propagate, false);
@@ -1610,7 +1846,8 @@ test("REVIEW FOCUS 5c — no secret-in-argv patterns in compose or ops scripts",
   const banned = [/-p"\$/, /-a "\$/, /-a \$\$/, /--value="\$/, /--requirepass/, /--admin-pass/, /-e [A-Z_]*(PASS|SECRET|JWT|TOKEN)\b/];
   for (const f of files) for (const re of banned) assert.doesNotMatch(readFileSync(f, "utf8"), re, `${f} ${re}`);
   assert.match(compose, /REDISCLI_AUTH=/);
-  assert.match(compose, /exec redis-server -/);
+  assert.match(compose, /exec su-exec redis redis-server \/tmp\/redis\.conf/);
+  assert.match(serviceBlocks().find((s) => s.name === "nextcloud-redis").text, /init: true/);
 });
 
 test("ONLYOFFICE has JWT on; manifest has no ports/webUI; RAM/disk declared; Office nav", () => {
@@ -1675,7 +1912,7 @@ Expected: FAIL: `ENOENT … bundles/workspace/manifest.json`.
     {
       "name": "WORKSPACE_ADMIN_PASSWORD",
       "description": "Password for that administrator account. Used once by setup, then removed from this machine's config; change it later inside Workspace (Settings, Security). 12-128 characters: letters, digits and ! % * + , - . / : = ? @ ^ _ ~ (no spaces, quotes, $ or #).",
-      "install_required": true, "secret": true, "propagate": false,
+      "install_required": true, "secret": true, "propagate": false, "check": "not_breached",
       "pattern": "^[A-Za-z0-9!%*+,./:=?@^_~-]{12,128}$",
       "pattern_hint": "12-128 letters, digits or ! % * + , - . / : = ? @ ^ _ ~"
     },
@@ -1785,11 +2022,14 @@ services:
     restart: unless-stopped
     mem_limit: 256m
     oom_score_adj: -500
-    # requirepass is read from stdin (`redis-server -`), never from argv.
+    # requirepass goes into a private config file inside the container (never argv), and
+    # redis-server is exec'd as the redis user (the image entrypoint's su-exec, which a
+    # custom command bypasses); init: true reaps and forwards SIGTERM for a prompt stop.
+    init: true
     command:
       - sh
       - -c
-      - printf 'requirepass %s\n' "$$REDIS_PASSWORD" | exec redis-server -
+      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && chown redis:redis /tmp/redis.conf && exec su-exec redis redis-server /tmp/redis.conf
     environment:
       REDIS_PASSWORD: ${WORKSPACE_REDIS_PASSWORD:?generated at install}
     healthcheck:
@@ -1971,6 +2211,7 @@ case "$*" in
   *"occ user:auth-tokens:list "*) if [ -f "$S/tokens" ]; then echo '[{"id":7,"name":"crow-workspace-tools"},{"id":8,"name":"phone"}]'; else echo '[]'; fi ;;
   *"user:auth-tokens:add "*) n=$(( $(cat "$S/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/tokens"; printf 'app password:\n%s%s\n' "$(printf 'A%.0s' $(seq 1 71))" "$n" ;;
   *"onlyoffice:documentserver --check"*) echo "Document server is successfully connected" ;;
+  *"user:resetpassword --password-from-env admin"*) [ -f "$S/reject-admin" ] && { echo "Password is among the 1,000,000 most common ones" >&2; exit 1; } ;;
   *) : ;;
 esac
 exit 0
@@ -2038,7 +2279,7 @@ test("fresh run configures everything once", () => {
   assert.match(c, /occ config:app:set onlyoffice DocumentServerUrl --value=https:\/\/box\.tailnet-example\.ts\.net:8457\//);
   assert.match(c, /occ config:app:set onlyoffice DocumentServerInternalUrl --value=http:\/\/onlyoffice\//);
   assert.match(c, /occ config:app:set onlyoffice StorageUrl --value=http:\/\/nextcloud\//);
-  assert.match(c, /php occ config:import/);
+  assert.match(c, /php occ config:import \/dev\/stdin/);
   assert.match(c, /occ dav:create-calendar admin Menu/);
   assert.match(c, /occ group:add household/);
   assert.match(c, /occ group:adduser household admin/);
@@ -2097,6 +2338,18 @@ test("REVIEW FOCUS 3 — second run changes nothing; lost token re-minted once, 
   assert.doesNotMatch(c, /auth-tokens:delete crow-bot 8/, "tokens with other names are left alone");
   assert.equal((c.match(/auth-tokens:add/g) || []).length, 1);
   assert.equal(envOf(ctx).WORKSPACE_BOT_APP_PASSWORD, TOKEN2);
+});
+
+test("Nextcloud rejecting the typed admin password → clear, recoverable failure; the password is NOT scrubbed", () => {
+  const ctx = setup({ state: ["installed", "reject-admin"] });
+  const r = run("bootstrap.sh", ctx);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /Nextcloud rejected the admin password/);
+  assert.match(r.out, /ops\/reset-password\.sh admin/);
+  assert.match(r.out, /delete the WORKSPACE_ADMIN_PASSWORD line/);
+  assert.ok(!r.out.includes(SECRETS.WORKSPACE_ADMIN_PASSWORD));
+  assert.equal(envOf(ctx).WORKSPACE_ADMIN_PASSWORD, SECRETS.WORKSPACE_ADMIN_PASSWORD, "kept until it is applied or the operator removes it");
+  assert.doesNotMatch(read(ctx, "calls.log"), /^ts /m, "the admin step runs before tailnet detection");
 });
 
 test("Nextcloud never finishing its install fails within the bounded wait", () => {
@@ -2230,6 +2483,22 @@ tmp="$(mktemp "$RETAINED_DIR/.workspace.env.XXXXXX")"
 } > "$tmp"
 chmod 600 "$tmp"; mv "$tmp" "$RETAINED"; unset v
 
+# 1. Nextcloud finished the image's first-run install (with the generated throwaway admin password).
+wait_for "Nextcloud" nc_installed
+
+# 1b. Apply the typed admin password via stdin, then scrub it from this machine (Kevin Q2).
+#     Runs before tailnet detection, so a missing tailnet name never delays it.
+ADMIN_PW="$(env_get WORKSPACE_ADMIN_PASSWORD)"
+if [ -n "$ADMIN_PW" ]; then
+  if ! printf '%s\n' "$ADMIN_PW" | occ_with_pass user:resetpassword --password-from-env "$ADMIN_USER" >/dev/null 2>&1; then
+    unset ADMIN_PW
+    die "Nextcloud rejected the admin password from the install form (its password policy, e.g. a password found in known data breaches). Fix: bash $BUNDLE_DIR/ops/reset-password.sh $ADMIN_USER with another password, then delete the WORKSPACE_ADMIN_PASSWORD line from $ENV_FILE and re-run this script."
+  fi
+  env_unset WORKSPACE_ADMIN_PASSWORD
+  log "admin password set from the install form; removed from .env"
+fi
+unset ADMIN_PW
+
 # 0b. Where the household reaches it: this machine's tailnet name.
 HOST="$(env_get WORKSPACE_PUBLIC_HOST)"
 if [ -z "$HOST" ]; then
@@ -2242,17 +2511,6 @@ fi
 NC_URL="https://$HOST:$NC_PORT"
 OO_URL="https://$HOST:$OO_PORT/"
 
-# 1. Nextcloud finished the image's first-run install (with the generated throwaway admin password).
-wait_for "Nextcloud" nc_installed
-
-# 1b. Apply the typed admin password via stdin, then scrub it from this machine (Kevin Q2).
-ADMIN_PW="$(env_get WORKSPACE_ADMIN_PASSWORD)"
-if [ -n "$ADMIN_PW" ]; then
-  printf '%s\n' "$ADMIN_PW" | occ_with_pass user:resetpassword --password-from-env "$ADMIN_USER" >/dev/null
-  env_unset WORKSPACE_ADMIN_PASSWORD
-  log "admin password set from the install form; removed from .env"
-fi
-unset ADMIN_PW
 
 # 2. Apps + background jobs (Redis locking is configured by the image from REDIS_HOST).
 for app in calendar contacts forms onlyoffice; do
@@ -2280,12 +2538,13 @@ occ config:system:set allow_local_remote_servers --value=true --type=boolean >/d
 log "proxy: $NC_URL (overwrite only for requests via $GW)"
 
 # 4. ONLYOFFICE connector. The JWT goes in on stdin: php builds the JSON from STDIN,
-#    `occ config:import` reads it from its stdin — the secret is in no argv anywhere.
+#    `occ config:import /dev/stdin` reads it with a BLOCKING read (no-arg stdin mode is
+#    non-blocking and can race the pipe) — the secret is in no argv anywhere.
 occ config:app:set onlyoffice DocumentServerUrl --value="$OO_URL" >/dev/null
 occ config:app:set onlyoffice DocumentServerInternalUrl --value="http://onlyoffice/" >/dev/null
 occ config:app:set onlyoffice StorageUrl --value="http://nextcloud/" >/dev/null
 printf '%s\n' "$(env_get WORKSPACE_ONLYOFFICE_JWT_SECRET)" | dc exec -T -u www-data nextcloud sh -c \
-  'php -r "echo json_encode([\"apps\"=>[\"onlyoffice\"=>[\"jwt_secret\"=>trim(stream_get_contents(STDIN))]]]);" | php occ config:import' >/dev/null
+  'php -r "echo json_encode([\"apps\"=>[\"onlyoffice\"=>[\"jwt_secret\"=>trim(stream_get_contents(STDIN))]]]);" | php occ config:import /dev/stdin' >/dev/null
 occ config:app:set onlyoffice jwt_header --value=Authorization >/dev/null
 occ config:system:set onlyoffice allow_local_address --value=true --type=boolean >/dev/null
 occ config:app:set onlyoffice defFormats --value='{"docx":true,"xlsx":true,"pptx":true,"odt":true,"ods":true,"odp":true}' >/dev/null
@@ -2630,6 +2889,7 @@ test("install-backup-timer.sh: --dest required; units carry dest/mount/alert-lib
   assert.match(svc, new RegExp(`ExecStart=/bin/bash ${ctx.bundle}/ops/backup.sh`));
   assert.match(svc, new RegExp(`ExecStopPost=/bin/bash ${ctx.bundle}/ops/backup-stoppost.sh`));
   assert.match(svc, /TimeoutStartSec=2h/);
+  assert.match(svc, /TimeoutStopSec=5min/, "ExecStopPost runs under TimeoutStopSec: it must exceed stoppost's 120 s bound");
   assert.match(svc, /Environment=WORKSPACE_BACKUP_DEST=\/mnt\/external\/crow-workspace-backups/);
   assert.match(svc, /Environment=WORKSPACE_BACKUP_MOUNT=\/mnt\/external/);
   assert.match(svc, /Environment=WORKSPACE_BACKUP_ALERT_LIB=\/home\/k\/lab-maintenance\/scripts\/lib\/alerts\.sh/);
@@ -2948,6 +3208,7 @@ fi
   echo "ExecStart=/bin/bash $BUNDLE_DIR/ops/backup.sh"
   echo "ExecStopPost=/bin/bash $BUNDLE_DIR/ops/backup-stoppost.sh"
   echo "TimeoutStartSec=2h"
+  echo "TimeoutStopSec=5min"
 } > "$UNIT_DIR/crow-workspace-backup.service"
 
 cat > "$UNIT_DIR/crow-workspace-backup.timer" <<EOF
@@ -3263,50 +3524,93 @@ git show --stat HEAD
 This task was added at Kevin's request (Q3). Nothing has merged yet. It runs **only scratch copies from the branch**:
 - the Workspace stack as compose project `crow-ws-smoke`, on 127.0.0.1:13070/13071, subnet 10.89.71.0/24, with `restart: "no"`;
 - temporary Serve ports 8458/8459, plus 8460 for the header echo;
-- a scratch gateway-code harness against the existing `searxng` bundle in a scratch `CROW_HOME`.
+- a harness that runs the branch's installer code against the existing `searxng` bundle in a scratch `CROW_HOME`;
+- read-only ownership checks against the live R4 browser and crow's 35b.
 
-Prod is not stopped, and no model container is touched. An **out-of-process deadman** (a transient user timer) tears everything down at the cap. Every finding goes into `$SMOKE/findings.md`. Any FAIL means a fix commit on the branch, its unit test, and a re-run of the affected smoke step, all before Task 9.
+Prod is not stopped, and no model container is touched.
 
-**Files:** no repo files. Scratch: `SMOKE=/tmp/claude-1000/ws-smoke` (create fresh).
+**Every long-lived helper is a named transient user unit with its own `RuntimeMaxSec`:**
+- the argv sampler is `ws-smoke-sampler`;
+- the header echo is `ws-smoke-echo`;
+- the deadman, `ws-smoke-deadman`, is a transient timer.
 
-- [ ] **Step 1: Register and arm the deadman**
+The deadman's teardown stops them all and removes the smoke containers by compose label, even if compose can't parse. No helper is ever a backgrounded shell job, because shell state (`$!`, variables) does not survive between Bash tool calls. Every step therefore starts with `source /tmp/claude-1000/ws-smoke/vars.sh`.
 
-Read `~/CROW-SCHEDULE.md`. Add a Reservations row:
+**Sudo:** the operator session runs `sudo` as `sudo -S`, with the credential from the global CLAUDE.md, never written to a file or into this plan. Alternatively, Kevin runs those lines. The deadman cannot sudo, so a stale Serve mapping (tailnet-only, 502) is the only possible deadman-path leftover.
+
+Every finding goes into `$SMOKE/findings.md`. Any FAIL means a fix commit on the branch, its unit test, and a re-run of the affected step in a new registered window, all before Task 9.
+
+**Files:** no repo files. Scratch: `/tmp/claude-1000/ws-smoke`.
+
+- [ ] **Step 1: Register; write the vars, helpers and teardown; arm the deadman**
+
+Read `~/CROW-SCHEDULE.md`, then add a Reservations row:
 
 ```markdown
-| **2026-10-0X HH:MM → +3 h hard cap (attended; deadman `ws-smoke-deadman` tears down at the cap)** | **Crow Workspace W1 PRE-MERGE smoke** (Kevin Q3): scratch compose `crow-ws-smoke` 127.0.0.1:13070/13071 + temp Serve 8458-8460; scratch-gateway harness reinstalls `searxng` in a scratch CROW_HOME (127.0.0.1:8098). No GPU, no model containers, prod untouched. | Claude session (crow) + Kevin | manual | no crow-ws-smoke/crow-ws-restore/searxng containers AND serve 8458-8460 off AND ws-smoke-deadman inactive AND row moved to Done |
+| **2026-10-0X HH:MM → +3 h hard cap (attended; transient units ws-smoke-{deadman,sampler,echo}, each with RuntimeMaxSec; deadman tears down at the cap)** | **Crow Workspace W1 PRE-MERGE smoke** (Kevin Q3): scratch compose `crow-ws-smoke` 127.0.0.1:13070/13071 + temp Serve 8458-8460; branch installer reinstalls `searxng` in a scratch CROW_HOME (127.0.0.1:8098); read-only ownership checks on R4 browser + 35b. No GPU, no model containers, prod untouched. | Claude session (crow) + Kevin | manual | no crow-ws-smoke/crow-ws-restore/searxng/ws-smoke-* containers AND `systemctl --user list-units 'ws-smoke-*'` empty AND serve 8458-8460 off AND row moved to Done |
 ```
 
 Then:
 
 ```bash
 SMOKE=/tmp/claude-1000/ws-smoke; rm -rf $SMOKE; mkdir -p $SMOKE; chmod 700 $SMOKE
+cat > $SMOKE/vars.sh <<'EOF'
+# Sourced at the top of EVERY smoke step (tool calls do not keep shell state).
+SMOKE=/tmp/claude-1000/ws-smoke
+REPO=$HOME/crow-wt-workspace
+B=$SMOKE/bundle
+SDC="docker compose -p crow-ws-smoke -f docker-compose.yml -f ops/smoke.override.yml"
+H=crow.dachshund-chromatic.ts.net
+sdc() { (cd $B && CROW_HOME=$SMOKE/home $SDC "$@"); }
+occ() { sdc exec -T -u www-data nextcloud php occ "$@"; }
+BKENV="CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DATA_ROOT=$SMOKE/home/workspace WORKSPACE_BACKUP_DEST=$SMOKE/dest"
+EOF
+cat > $SMOKE/sampler.sh <<'EOF'
+#!/usr/bin/env bash
+# ws-smoke-sampler: every 0.2 s, record argv of the processes that could carry a secret.
+# Only matching lines, deduplicated, flushed per line: the log stays small and survives a kill.
+while :; do ps -eo args | grep -E 'php|occ|mariadb|redis|gpg|docker|tar ' ; sleep 0.2; done \
+  | awk '!seen[$0]++ { print; fflush() }' > /tmp/claude-1000/ws-smoke/argv.log
+EOF
+cat > $SMOKE/echo.py <<'EOF'
+# ws-smoke-echo: print the request headers Tailscale Serve forwards.
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = "".join(f"{k}: {v}\n" for k, v in self.headers.items()).encode()
+        self.send_response(200); self.send_header("Content-Type", "text/plain"); self.end_headers(); self.wfile.write(body)
+http.server.HTTPServer(("127.0.0.1", 13072), H).serve_forever()
+EOF
 cat > $SMOKE/teardown.sh <<'EOF'
 #!/usr/bin/env bash
-# Out-of-process teardown for the W1 smoke (deadman + normal end). Idempotent.
+# Out-of-process teardown for the W1 smoke (deadman + normal end). Idempotent; label-based
+# fallbacks so it works even if compose cannot parse (no .env yet).
 SMOKE=/tmp/claude-1000/ws-smoke
 B=$SMOKE/bundle
-CROW_HOME=$SMOKE/home docker compose -p crow-ws-smoke -f $B/docker-compose.yml -f $B/ops/smoke.override.yml --env-file $B/.env down -v --remove-orphans 2>/dev/null
-CROW_HOME=$SMOKE/home bash $B/ops/restore-scratch.sh --clean 2>/dev/null
-WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash $B/ops/restore-scratch.sh --clean 2>/dev/null
+systemctl --user stop ws-smoke-sampler.service ws-smoke-echo.service 2>/dev/null
+[ -f $B/.env ] && (cd $B && CROW_HOME=$SMOKE/home docker compose -p crow-ws-smoke -f docker-compose.yml -f ops/smoke.override.yml down -v --remove-orphans) 2>/dev/null
+[ -d $SMOKE/restore ] && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash $B/ops/restore-scratch.sh --clean 2>/dev/null
 [ -f $SMOKE/gw-home/bundles/searxng/docker-compose.yml ] && (cd $SMOKE/gw-home/bundles/searxng && CROW_HOME=$SMOKE/gw-home docker compose down -v --remove-orphans) 2>/dev/null
+for p in crow-ws-smoke crow-ws-restore searxng; do
+  docker ps -aq --filter label=com.docker.compose.project=$p | xargs -r docker rm -f 2>/dev/null
+  docker network rm ${p}_default 2>/dev/null
+done
 docker rm -f ws-smoke-c1 2>/dev/null
-pkill -f "ws-smoke-echo" 2>/dev/null
-[ -d $SMOKE/home ] && docker run --rm -v $SMOKE:/s nextcloud:34.0.4-apache rm -rf /s/home 2>/dev/null
-echo "teardown done $(date +%T). Serve 8458/8459/8460 need: sudo tailscale serve --https=<port> off (deadman cannot sudo; a stale mapping only 502s)" >> $SMOKE/teardown.log
+[ -d $SMOKE/home ] && docker run --rm -v $SMOKE:/s nextcloud:34.0.4-apache rm -rf /s/home /s/restore 2>/dev/null
+echo "teardown done $(date +%T). Serve 8458/8459/8460 need: sudo tailscale serve --https=<port> off (the deadman cannot sudo; a stale mapping only 502s)" >> $SMOKE/teardown.log
 EOF
-chmod +x $SMOKE/teardown.sh
+chmod +x $SMOKE/teardown.sh $SMOKE/sampler.sh
 systemd-run --user --unit=ws-smoke-deadman --on-active=10800 /bin/bash $SMOKE/teardown.sh
 systemctl --user list-timers ws-smoke-deadman.timer
 ```
 
-- [ ] **Step 2: Pre-pull the images; build the scratch Workspace copy**
+- [ ] **Step 2: Pre-pull; build the scratch Workspace copy**
 
 ```bash
+source /tmp/claude-1000/ws-smoke/vars.sh
 for i in nextcloud:34.0.4-apache mariadb:11.8.9 redis:8.2.10-alpine onlyoffice/documentserver:9.4.0.1; do docker pull "$i"; done
-REPO=~/crow-wt-workspace
-cp -r $REPO/bundles/workspace $SMOKE/bundle
-cat > $SMOKE/bundle/ops/smoke.override.yml <<'EOF'
+cp -r $REPO/bundles/workspace $B
+cat > $B/ops/smoke.override.yml <<'EOF'
 services:
   nextcloud:
     restart: "no"
@@ -3328,7 +3632,7 @@ networks:
       config: !override
         - subnet: 10.89.71.0/24
 EOF
-# .env exactly as the installer would write it (Task 1-3 code), plus scratch-only values.
+# .env exactly as the installer would write it (Tasks 1-3 code), plus scratch-only values.
 cd $REPO && SMOKE=$SMOKE node --input-type=module -e '
 import { readFileSync } from "node:fs";
 import { resolveGeneratedEnv, writePrivateFile, newSecretValue } from "./servers/gateway/bundle-env-secrets.js";
@@ -3341,118 +3645,133 @@ const env = { WORKSPACE_ADMIN_USER: "admin", WORKSPACE_ADMIN_PASSWORD: "Smoke-" 
   WORKSPACE_PUBLIC_HOST: "crow.dachshund-chromatic.ts.net", WORKSPACE_NC_SERVE_PORT: "8458", WORKSPACE_OO_SERVE_PORT: "8459", ...gen };
 writePrivateFile(dest + "/.env", Object.entries(env).map(([k, v]) => k + "=" + v).join("\n") + "\n");
 console.log("scratch .env written:", Object.keys(env).join(" "));'
-stat -c '%a %n' $SMOKE/bundle/.env $SMOKE/home/secrets/bundle-env/workspace.env $SMOKE/home/workspace   # 600 600 700
-# Keep the smoke admin password BEFORE bootstrap scrubs it (Kevin signs in with it in Step 5; Step 6 greps argv for it).
-(umask 077; sed -n 's/^WORKSPACE_ADMIN_PASSWORD=//p' $SMOKE/bundle/.env > $SMOKE/admin.pw)
+stat -c '%a %n' $B/.env $SMOKE/home/secrets/bundle-env/workspace.env $SMOKE/home/workspace   # 600 600 700
+# Keep the smoke admin password BEFORE bootstrap scrubs it (Kevin signs in with it; Step 6 greps argv for it).
+(umask 077; sed -n 's/^WORKSPACE_ADMIN_PASSWORD=//p' $B/.env > $SMOKE/admin.pw)
 ```
 
-- [ ] **Step 3: Start the stack and run the bootstrap with a live `ps` sampler (C4 live check)**
+- [ ] **Step 3: Start the sampler unit and the stack; run the bootstrap twice**
 
 ```bash
-B=$SMOKE/bundle
-export SDC="docker compose -p crow-ws-smoke -f docker-compose.yml -f ops/smoke.override.yml"
-( while :; do ps -eo args; sleep 0.2; done ) > $SMOKE/argv.log 2>/dev/null &
-SAMPLER=$!
-(cd $B && CROW_HOME=$SMOKE/home $SDC up -d)
-time CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" WORKSPACE_COMPOSE_PROJECT=crow-ws-smoke bash $B/ops/bootstrap.sh | tee $SMOKE/bootstrap1.log
-CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" WORKSPACE_COMPOSE_PROJECT=crow-ws-smoke bash $B/ops/bootstrap.sh | tee $SMOKE/bootstrap2.log   # idempotency: no "created"/"enabled"/"account ready" lines
+source /tmp/claude-1000/ws-smoke/vars.sh
+systemd-run --user --unit=ws-smoke-sampler -p RuntimeMaxSec=10800 /bin/bash $SMOKE/sampler.sh
+sdc up -d
+time (cd $B && CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" WORKSPACE_COMPOSE_PROJECT=crow-ws-smoke bash ops/bootstrap.sh) | tee $SMOKE/bootstrap1.log
+(cd $B && CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" WORKSPACE_COMPOSE_PROJECT=crow-ws-smoke bash ops/bootstrap.sh) | tee $SMOKE/bootstrap2.log   # no "created"/"enabled"/"account ready" lines
+ls -la $SMOKE/argv.log   # small (deduplicated matching lines only)
 ```
 
-Keep the sampler running through Step 6.
-
-- [ ] **Step 4: Verify every previously-unverified item.** Record PASS/FAIL per line in `$SMOKE/findings.md`.
+- [ ] **Step 4: Verify every previously unverified item.** Record PASS/FAIL per line in `$SMOKE/findings.md`.
 
 ```bash
-cd $B; occ() { CROW_HOME=$SMOKE/home $SDC exec -T -u www-data nextcloud php occ "$@"; }
-# (a) MariaDB/Redis healthchecks (Redis config via stdin + REDISCLI_AUTH) work
-CROW_HOME=$SMOKE/home $SDC ps --format '{{.Service}} {{.State}} {{.Health}}'
+source /tmp/claude-1000/ws-smoke/vars.sh
+# (a) healthchecks; Redis runs as the redis user (not root) and stops promptly
+sdc ps --format '{{.Service}} {{.State}} {{.Health}}'
+docker top crow-ws-smoke-nextcloud-redis-1 -o user,args             # user redis; argv carries no password
 # (b) occ "enabled" output is literally "yes"
 occ config:app:get calendar enabled; occ config:app:get onlyoffice enabled
-# (c) bind-mount root re-owned by the image (www-data 33) — the precreated parent stays kh0pp 700
+# (c) bind roots: the precreated parent stays kh0pp 700; nextcloud/ → www-data (33), db/ → mysql (999)
 stat -c '%u:%g %a %n' $SMOKE/home/workspace $SMOKE/home/workspace/nextcloud $SMOKE/home/workspace/db
-# (d) pinned subnet gateway + proxy settings; no reverse-proxy setup warning
+# (d) pinned subnet + proxy settings; no reverse-proxy setup warning
 docker network inspect crow-ws-smoke_default -f '{{(index .IPAM.Config 0).Gateway}}'   # 10.89.71.1
 occ config:system:get trusted_proxies; occ config:system:get overwritecondaddr
 occ setupchecks | tee $SMOKE/setupchecks.txt
-# (e) admin scrub: gone from .env and from every container's env; the typed password logs in
-grep -c '^WORKSPACE_ADMIN_PASSWORD=' $B/.env || true                                   # 0
-for c in $(docker ps -q --filter label=com.docker.compose.project=crow-ws-smoke); do docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $c; done | grep -c ADMIN_PASSWORD   # only NEXTCLOUD_ADMIN_PASSWORD (the throwaway) on nextcloud
-# (f) bot token valid + 72 chars; bot cannot create a public link; not suggested by autocomplete
-T=$(sed -n 's/^WORKSPACE_BOT_APP_PASSWORD=//p' $B/.env); printf '%s' "$T" | wc -c        # 72
-printf 'machine 127.0.0.1 login crow-bot password %s\n' "$T" > $SMOKE/bot.netrc; chmod 600 $SMOKE/bot.netrc; unset T
+# (e) admin scrub + config:import worked (JWT set) + connector check
+grep -c '^WORKSPACE_ADMIN_PASSWORD=' $B/.env || true                                       # 0
+for c in $(docker ps -q --filter label=com.docker.compose.project=crow-ws-smoke); do docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $c; done | grep -c '^WORKSPACE_ADMIN_PASSWORD' || true   # 0
+occ config:app:get onlyoffice jwt_secret | wc -c                                           # 44 (43 chars + newline): set, never printed here
+occ onlyoffice:documentserver --check
+# (f) bot token valid; bot cannot create a public link; hidden from partial autocomplete
+umask 077
+printf 'machine 127.0.0.1 login crow-bot password %s\n' "$(sed -n 's/^WORKSPACE_BOT_APP_PASSWORD=//p' $B/.env)" > $SMOKE/bot.netrc
 curl -s --netrc-file $SMOKE/bot.netrc -H 'OCS-APIRequest: true' 'http://127.0.0.1:13070/ocs/v2.php/cloud/user?format=json' | python3 -c 'import json,sys; print(json.load(sys.stdin)["ocs"]["meta"]["statuscode"])'   # 200
 curl -s --netrc-file $SMOKE/bot.netrc -X PUT --data-binary 'hello' http://127.0.0.1:13070/remote.php/dav/files/crow-bot/smoke.txt -o /dev/null -w '%{http_code}\n'   # 201
-curl -s --netrc-file $SMOKE/bot.netrc -H 'OCS-APIRequest: true' -X POST -d 'path=/smoke.txt&shareType=3' 'http://127.0.0.1:13070/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json' | python3 -c 'import json,sys; m=json.load(sys.stdin)["ocs"]["meta"]; print(m["statuscode"], m.get("message"))'   # NOT 200 (link sharing refused)
-CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" bash $B/ops/add-user.sh smoketester "Smoke Tester" > $SMOKE/adduser.txt
-SP=$(sed -n 's/^One-time password for smoketester: //p' $SMOKE/adduser.txt); printf 'machine 127.0.0.1 login smoketester password %s\n' "$SP" > $SMOKE/u.netrc; chmod 600 $SMOKE/u.netrc; unset SP
-curl -s --netrc-file $SMOKE/u.netrc -H 'OCS-APIRequest: true' 'http://127.0.0.1:13070/ocs/v2.php/core/autocomplete/get?search=crow&itemType=files&format=json' | grep -c crow-bot     # 0 (partial match hidden)
-curl -s --netrc-file $SMOKE/u.netrc -H 'OCS-APIRequest: true' 'http://127.0.0.1:13070/ocs/v2.php/core/autocomplete/get?search=crow-bot&itemType=files&format=json' | grep -c crow-bot # ≥1 (exact match works)
-# (g) compose without a file: does `-p` alone work from elsewhere? (informational; scripts never rely on it)
+curl -s --netrc-file $SMOKE/bot.netrc -H 'OCS-APIRequest: true' -X POST -d 'path=/smoke.txt&shareType=3' 'http://127.0.0.1:13070/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json' | python3 -c 'import json,sys; m=json.load(sys.stdin)["ocs"]["meta"]; print(m["statuscode"], m.get("message"))'   # NOT 200
+(cd $B && CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" bash ops/add-user.sh smoketester "Smoke Tester") > $SMOKE/adduser.txt
+printf 'machine 127.0.0.1 login smoketester password %s\n' "$(sed -n 's/^One-time password for smoketester: //p' $SMOKE/adduser.txt)" > $SMOKE/u.netrc
+curl -s --netrc-file $SMOKE/u.netrc -H 'OCS-APIRequest: true' 'http://127.0.0.1:13070/ocs/v2.php/core/autocomplete/get?search=crow&itemType=files&format=json' | grep -c crow-bot     # 0
+curl -s --netrc-file $SMOKE/u.netrc -H 'OCS-APIRequest: true' 'http://127.0.0.1:13070/ocs/v2.php/core/autocomplete/get?search=crow-bot&itemType=files&format=json' | grep -c crow-bot # ≥1
+# (g) a known-breached admin password is refused by Nextcloud → bootstrap's recovery message (and the pre-install HIBP gate refuses it too)
+printf 'Password1234\n' | (cd $B && CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC="$SDC" bash ops/reset-password.sh smoketester) ; echo rc=$?   # non-zero: policy rejected it
+cd $REPO && node --input-type=module -e 'import("./servers/gateway/bundle-env-secrets.js").then(async (S) => console.log(await S.breachedValueViolation({ env_vars: [{ name: "P", check: "not_breached" }] }, { P: "Password1234" })))'   # { key: "P", ... }
+# (h) compose without a file (informational; scripts never rely on it)
 (cd /tmp && docker compose -p crow-ws-smoke ps 2>&1 | head -3)
-# (h) gpg loopback symmetric on this host, like the CI runner
-cd ~/crow-wt-workspace && npm test -- tests/workspace-backup.test.js
+# (i) gpg loopback symmetric on this host, like the CI runner
+cd $REPO && npm test -- tests/workspace-backup.test.js
 ```
 
-- [ ] **Step 5: Tailnet: forwarded headers (temporary echo), then mixed content in a real browser**
+- [ ] **Step 5: Tailnet: forwarded headers (echo unit), then mixed content in a real browser**
 
 ```bash
-python3 - <<'EOF' > $SMOKE/echo.log 2>&1 &
-# ws-smoke-echo: print the request headers Tailscale Serve forwards
-import http.server
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = "".join(f"{k}: {v}\n" for k, v in self.headers.items()).encode()
-        self.send_response(200); self.send_header("Content-Type", "text/plain"); self.end_headers(); self.wfile.write(body)
-http.server.HTTPServer(("127.0.0.1", 13072), H).serve_forever()
-EOF
-ECHO=$!
-sudo tailscale serve --bg --https=8460 http://127.0.0.1:13072
-curl -s https://crow.dachshund-chromatic.ts.net:8460/ | tee $SMOKE/forwarded-headers.txt   # expect X-Forwarded-Proto: https, X-Forwarded-Host, X-Forwarded-For
-sudo tailscale serve --https=8460 off; kill $ECHO
-sudo tailscale serve --bg --https=8458 http://127.0.0.1:13070
-sudo tailscale serve --bg --https=8459 http://127.0.0.1:13071
-curl -s https://crow.dachshund-chromatic.ts.net:8458/status.php; curl -s https://crow.dachshund-chromatic.ts.net:8459/healthcheck
+source /tmp/claude-1000/ws-smoke/vars.sh
+systemd-run --user --unit=ws-smoke-echo -p RuntimeMaxSec=3600 /usr/bin/python3 $SMOKE/echo.py
+sudo -S tailscale serve --bg --https=8460 http://127.0.0.1:13072
+curl -s https://$H:8460/ | tee $SMOKE/forwarded-headers.txt   # expect X-Forwarded-Proto: https, X-Forwarded-Host, X-Forwarded-For
+sudo -S tailscale serve --https=8460 off; systemctl --user stop ws-smoke-echo.service
+sudo -S tailscale serve --bg --https=8458 http://127.0.0.1:13070
+sudo -S tailscale serve --bg --https=8459 http://127.0.0.1:13071
+curl -s https://$H:8458/status.php; curl -s https://$H:8459/healthcheck
 ```
 
 **[KEVIN]** In a tailnet browser:
-1. Open `https://crow.dachshund-chromatic.ts.net:8458` and sign in as `admin` with the smoke admin password. It was printed nowhere; Kevin reads it himself from `$SMOKE/admin.pw` (mode 600, saved in Step 2 before the scrub). The sign-in also proves the scrubbed password was really applied.
-2. Upload any .docx and open it.
-3. Report that the editor loads, and that the browser console shows **no mixed-content errors**.
+1. Open `https://crow.dachshund-chromatic.ts.net:8458` and sign in as `admin` with the password in `$SMOKE/admin.pw` (mode 600; Kevin reads it himself). Signing in also proves that the scrubbed password was really applied.
+2. Upload a .docx and open it.
+3. Report that the editor loads and that the console shows **no mixed-content errors**.
 
-Record PASS/FAIL.
-
-- [ ] **Step 6: Backup: real run, a SIGKILL mid-run (C3 live), restore**
+- [ ] **Step 6: Backup: a real run, then a SIGKILL of the whole process group (C3 live), then a restore**
 
 ```bash
-cd $B
-BK="CROW_HOME=$SMOKE/home CROW_BUNDLE_DIR=$B WORKSPACE_DC=\"$SDC\" WORKSPACE_DATA_ROOT=$SMOKE/home/workspace WORKSPACE_BACKUP_DEST=$SMOKE/dest"
-head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 48 > $SMOKE/home/workspace/backup-passphrase; chmod 600 $SMOKE/home/workspace/backup-passphrase
+source /tmp/claude-1000/ws-smoke/vars.sh
+umask 077
+head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 48 > $SMOKE/home/workspace/backup-passphrase
 printf 'send_alert() { printf "%%s|%%s\\n" "$1" "$2" >> %s/alerts.log; }\n' "$SMOKE" > $SMOKE/alerts-fake.sh
-eval "$BK WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash $B/ops/backup.sh" | tee $SMOKE/backup1.log
+(cd $B && env $BKENV WORKSPACE_DC="$SDC" WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash ops/backup.sh) | tee $SMOKE/backup1.log
 tar -tf $SMOKE/dest/crow-workspace-*.tar                     # db.sql.gpg files.tar.gpg bundle.env.gpg
-# SIGKILL mid-run → maintenance stays ON → stoppost recovers it, sweeps, alerts
-eval "$BK bash $B/ops/backup.sh" & BPID=$!; sleep 3; pkill -9 -P $BPID; kill -9 $BPID
-CROW_HOME=$SMOKE/home $SDC exec -T -u www-data nextcloud php occ maintenance:mode   # likely "enabled"
-eval "$BK SERVICE_RESULT=signal WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash $B/ops/backup-stoppost.sh"
-CROW_HOME=$SMOKE/home $SDC exec -T -u www-data nextcloud php occ maintenance:mode   # "disabled"
-ls $SMOKE/home/workspace/backups-staging/; cat $SMOKE/alerts.log                    # no run-*; one "killed (signal)" alert
-kill $SAMPLER
-# C4 live: no secret value ever appeared in any process argv during bootstrap + backup
+# SIGKILL mid-run (setsid → its own process group; kill the GROUP, in this same tool call)
+(cd $B && setsid env $BKENV WORKSPACE_DC="$SDC" bash ops/backup.sh > $SMOKE/backup-killed.log 2>&1 & echo $! > $SMOKE/bk.pid)
+sleep 3; kill -9 -- -"$(cat $SMOKE/bk.pid)"; sleep 1
+occ maintenance:mode                                          # likely "enabled" (the trap never ran)
+(cd $B && env $BKENV WORKSPACE_DC="$SDC" SERVICE_RESULT=signal WORKSPACE_BACKUP_ALERT_LIB=$SMOKE/alerts-fake.sh bash ops/backup-stoppost.sh)
+occ maintenance:mode                                          # "disabled"
+ls $SMOKE/home/workspace/backups-staging/; cat $SMOKE/alerts.log   # no run-*; one "killed (signal)" alert
+systemctl --user stop ws-smoke-sampler.service
+# C4 live: no secret value ever appeared in any sampled argv (patterns via a file, never argv)
 { sed -n 's/^[A-Z_]*=//p' $B/.env; sed -n 's/^[A-Z_]*=//p' $SMOKE/home/secrets/bundle-env/workspace.env; cat $SMOKE/admin.pw; } | sort -u | grep -v '^$' > $SMOKE/secret-values.txt
-grep -cFf $SMOKE/secret-values.txt $SMOKE/argv.log || echo "0 secrets in argv"   # expect the throwaway first-run + DB password ONLY if bootstrap overlapped the image's first install (Ruling 14 residual); anything else = FAIL
-grep -Ff $SMOKE/secret-values.txt $SMOKE/argv.log | sed -E 's/[A-Za-z0-9_-]{20,}/<redacted>/g' | sort -u | head   # which processes, values redacted
-WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash $B/ops/restore-scratch.sh $SMOKE/dest/crow-workspace-*.tar $SMOKE/home/workspace/backup-passphrase | tee $SMOKE/restore.log
-WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash $B/ops/restore-scratch.sh --clean
+grep -cFf $SMOKE/secret-values.txt $SMOKE/argv.log || echo "0 secrets in argv"   # only the Ruling 14 residual may appear (image first install: throwaway + DB password); anything else = FAIL
+grep -Ff $SMOKE/secret-values.txt $SMOKE/argv.log | sed -E 's/[A-Za-z0-9_-]{20,}/<redacted>/g' | sort -u | head
+(cd $B && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash ops/restore-scratch.sh $SMOKE/dest/crow-workspace-*.tar $SMOKE/home/workspace/backup-passphrase) | tee $SMOKE/restore.log
+(cd $B && WORKSPACE_SCRATCH_DIR=$SMOKE/restore bash ops/restore-scratch.sh --clean)
 ```
 
-- [ ] **Step 7: Generic installer against an existing small bundle (searxng) in a scratch `CROW_HOME`, plus C1 live**
+- [ ] **Step 7: The ownership guard, live (R1)**
+
+7a. Read-only checks against real installs. Neither may be refused:
+- R4's per-instance browser, project `crow-browser-r4` via its `.env`;
+- crow's 35b, whose containers were started from `~/crow-addons`.
 
 ```bash
-mkdir -p $SMOKE/gw-home $SMOKE/gw-data $SMOKE/elsewhere
+source /tmp/claude-1000/ws-smoke/vars.sh
+mkdir -p $SMOKE/ro-data
+cd $REPO
+CROW_HOME=$HOME/.crow-r4 CROW_DATA_DIR=$SMOKE/ro-data node --input-type=module -e 'const B = await import("./servers/gateway/routes/bundles.js"); console.log(JSON.stringify(await B.composeOwnershipCheck("browser")))'
+#   expect {"project":"crow-browser-r4","refusal":null,...}
+CROW_HOME=$HOME/.crow CROW_DATA_DIR=$SMOKE/ro-data node --input-type=module -e 'const B = await import("./servers/gateway/routes/bundles.js"); console.log(JSON.stringify(await B.composeOwnershipCheck("llamacpp-vulkan-qwen36-35b-a3b")))'
+#   expect refusal null (a "legacy path" warning naming ~/crow-addons is fine)
+CROW_HOME=$HOME/.crow CROW_DATA_DIR=$SMOKE/ro-data node --input-type=module -e 'const B = await import("./servers/gateway/routes/bundles.js"); console.log(JSON.stringify(await B.composeOwnershipCheck("browser")))'
+#   expect refusal null (crow's own browser)
+```
+
+7b. The generic installer, run for real, against `searxng` in a scratch `CROW_HOME`. A fake *second Crow install that lists searxng* must block the install. Then install, uninstall and reinstall must all work.
+
+```bash
+source /tmp/claude-1000/ws-smoke/vars.sh
+mkdir -p $SMOKE/gw-home $SMOKE/gw-data $SMOKE/otherhome/bundles/searxng
+printf '[{"id":"searxng","type":"bundle"}]\n' > $SMOKE/otherhome/installed.json
 cat > $SMOKE/smokeB.mjs <<'EOF'
 // Drives the branch's real installer code (no stubs) against searxng in a scratch CROW_HOME.
-const REPO = "/home/kh0pp/crow-wt-workspace";
-Object.assign(process.env, { CROW_HOME: process.env.SMOKE + "/gw-home", CROW_DATA_DIR: process.env.SMOKE + "/gw-data",
+const REPO = process.env.HOME + "/crow-wt-workspace";
+const SMOKE = "/tmp/claude-1000/ws-smoke";
+Object.assign(process.env, { CROW_HOME: SMOKE + "/gw-home", CROW_DATA_DIR: SMOKE + "/gw-data",
   CROW_AUTO_UPDATE: "0", CROW_DISABLE_HEALTH_MONITOR: "1", CROW_DISABLE_INSTANCE_SYNC: "1", CROW_DISABLE_NOSTR: "1", CROW_DISABLE_MODEL_ORCHESTRATION: "1" });
 const { execFileSync } = await import("node:child_process");
 const { statSync, existsSync } = await import("node:fs");
@@ -3463,8 +3782,7 @@ async function install() {
   const v = await B.validateInstall("searxng", { envVars: {}, forceInstall: true });
   if (!v.ok) return { ok: false, reason: v.error };
   const job = B._createJobForTest("searxng", "install");
-  const out = await B.runInstallJob("searxng", {}, { job, installedSnapshot: v.installed, consentVerified: v.consentVerified, manifest: v.manifest });
-  return out;
+  return B.runInstallJob("searxng", {}, { job, installedSnapshot: v.installed, consentVerified: v.consentVerified, manifest: v.manifest });
 }
 async function uninstall() {
   const app = express(); app.use(express.json()); app.use(B.default());
@@ -3474,40 +3792,47 @@ async function uninstall() {
   while (existsSync(dir) && Date.now() < t) await new Promise((r) => setTimeout(r, 500));
   srv.close();
 }
-// C1 live: a container claiming project "searxng" from another dir must block the install.
-execFileSync("docker", ["create", "--name", "ws-smoke-c1", "--label", "com.docker.compose.project=searxng", "--label", `com.docker.compose.project.working_dir=${process.env.SMOKE}/elsewhere`, "nextcloud:34.0.4-apache", "true"]);
-let r = await install(); say("C1 install while foreign-owned:", r.ok ? "INSTALLED (FAIL)" : "refused: " + r.reason);
+const label = (wd) => ["create", "--name", "ws-smoke-c1", "--label", "com.docker.compose.project=searxng", "--label", `com.docker.compose.project.working_dir=${wd}`, "nextcloud:34.0.4-apache", "true"];
+// (1) owned by ANOTHER CROW INSTALL of searxng → refused
+execFileSync("docker", label(SMOKE + "/otherhome/bundles/searxng"));
+let r = await install(); say("C1 foreign Crow install:", r.ok ? "INSTALLED (FAIL)" : "refused: " + r.reason);
 execFileSync("docker", ["rm", "-f", "ws-smoke-c1"]);
-r = await install(); say("install #1:", r.ok ? "ok" : "FAIL " + r.reason);
+// (2) a legacy path (no installed.json) → proceeds with a warning
+execFileSync("docker", label(SMOKE + "/legacy-addons/searxng"));
+r = await install(); say("legacy-path owner:", r.ok ? "installed (ok, warned)" : "FAIL " + r.reason);
+execFileSync("docker", ["rm", "-f", "ws-smoke-c1"]);
 say(".env mode:", (statSync(process.env.CROW_HOME + "/bundles/searxng/.env").mode & 0o777).toString(8));
 await uninstall(); say("uninstall #1 done");
 r = await install(); say("install #2 (reinstall):", r.ok ? "ok" : "FAIL " + r.reason);
 await uninstall(); say("uninstall #2 done");
 process.exit(0);
 EOF
-SMOKE=$SMOKE node $SMOKE/smokeB.mjs 2>&1 | tee $SMOKE/smokeB.log
+node $SMOKE/smokeB.mjs 2>&1 | tee $SMOKE/smokeB.log
 docker ps -a --filter label=com.docker.compose.project=searxng --format '{{.Names}}'   # empty
 ```
 
 Expected:
-- `C1 … refused: This extension's containers (compose project "searxng") belong to another Crow install …`;
-- installs #1 and #2 ok;
+- `C1 foreign Crow install: refused: …belong to another Crow install…`;
+- `legacy-path owner: installed (ok, warned)`;
 - `.env mode: 600`;
+- reinstall ok;
 - no searxng containers left.
 
 - [ ] **Step 8: Teardown, disarm, record**
 
 ```bash
+source /tmp/claude-1000/ws-smoke/vars.sh
 bash $SMOKE/teardown.sh
-sudo tailscale serve --https=8458 off; sudo tailscale serve --https=8459 off
-tailscale serve status | grep -cE ':(8458|8459|8460)' || true   # 0
+sudo -S tailscale serve --https=8458 off; sudo -S tailscale serve --https=8459 off
+tailscale serve status | grep -cE ':(8458|8459|8460)' || true                     # 0
 systemctl --user stop ws-smoke-deadman.timer ws-smoke-deadman.service 2>/dev/null
+systemctl --user list-units --all 'ws-smoke-*' --no-legend                        # empty
 docker ps -a --format '{{.Names}}' | grep -E 'crow-ws-(smoke|restore)|searxng|ws-smoke' || echo "clean"
 cp $SMOKE/findings.md ~/crow-weekend-push/reports/workspace-w1-smoke-findings.md
-rm -rf $SMOKE   # holds plaintext secrets
+rm -rf $SMOKE   # held plaintext secrets; nothing still writes into it (sampler unit stopped)
 ```
 
-Move the CROW-SCHEDULE row to Done with the PASS/FAIL summary. For **every FAIL**: write a fix commit on the branch with its unit test, then re-run the affected step under a new registered window. Task 9 starts only when the findings are all PASS, or when Kevin has explicitly accepted an item.
+Move the CROW-SCHEDULE row to Done with the PASS/FAIL summary. For **every FAIL**: write a fix commit with its unit test, then re-run the affected step in a new registered window. Task 9 starts only when the findings are all PASS, or when Kevin has explicitly accepted an item.
 
 ---
 
@@ -3535,6 +3860,7 @@ The Office page has the exact addresses: the Nextcloud app plus DAVx⁵ on Andro
 
 ## Accounts and passwords
 - **Add a person** (run it yourself): `bash ~/.crow/bundles/workspace/ops/add-user.sh <login> "<Name>"`. It prints a one-time password once; they change it at first login (avatar → Settings → Security). New people join the `household` group.
+- **If setup says "Nextcloud rejected the admin password"** (its password policy refuses passwords found in data breaches; the installer already checks this when it can reach haveibeenpwned.com): run `bash ~/.crow/bundles/workspace/ops/reset-password.sh <admin login>` with another password, delete the `WORKSPACE_ADMIN_PASSWORD=` line from `~/.crow/bundles/workspace/.env`, then re-run `bash ~/.crow/bundles/workspace/ops/bootstrap.sh`.
 - **Reset a password:** `bash ~/.crow/bundles/workspace/ops/reset-password.sh <login>`. It asks for the new password without echoing it and passes it to Nextcloud over stdin, never on a command line.
 - **crow-bot** is Crow's own account: not an admin, cannot create public links, never suggested when you type part of a name (type `crow-bot` exactly to share with it). It sees only what you share with it.
 
@@ -3550,9 +3876,10 @@ The Office page has the exact addresses: the Nextcloud app plus DAVx⁵ on Andro
 ## Restore
 - **Test a backup without touching the live one:** `bash ~/.crow/bundles/workspace/ops/restore-scratch.sh <crow-workspace-*.tar>`. It boots a portless copy that never restarts by itself and lists its users and files. Remove it with `--clean`.
 - **Restore for real** (replaces the live data; register a window first):
+  0. `systemctl --user stop crow-workspace-backup.timer`. Re-enable it with `start` at the end: a nightly run mid-restore would toggle maintenance mode under you.
   1. `export CROW_HOME=~/.crow && cd ~/.crow/bundles/workspace && docker compose down`. Every `docker compose` below runs in this shell, because the compose file needs `CROW_HOME`.
   2. `sudo mv ~/.crow/workspace/nextcloud ~/.crow/workspace/nextcloud.old && sudo mv ~/.crow/workspace/db ~/.crow/workspace/db.old`
-  3. `bash ops/restore.sh <archive> ~/ws-restore`, then copy `~/ws-restore/bundle.env` over `.env` (keep mode 600).
+  3. `bash ops/restore.sh <archive> ~/ws-restore`, then copy `~/ws-restore/bundle.env` over `.env` (keep mode 600). **Restoring onto a different machine:** blank the `WORKSPACE_PUBLIC_HOST=` line first, so the bootstrap detects the new tailnet name.
   4. `mkdir -p ~/.crow/workspace/nextcloud && docker run --rm -v ~/.crow/workspace/nextcloud:/dst -v ~/ws-restore:/src:ro nextcloud:34.0.4-apache sh -c 'tar -C /dst -xpf /src/nextcloud-files.tar && chown -R www-data:www-data /dst'`
   5. `docker compose up -d nextcloud-db nextcloud-redis`, wait until healthy, then `docker compose exec -T nextcloud-db sh -c 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot nextcloud' < ~/ws-restore/db.sql`
   6. `docker compose up -d`, then `docker compose exec -u www-data nextcloud php occ maintenance:mode --off`, then `bash ops/bootstrap.sh`. The bootstrap also re-syncs `~/.crow/secrets/bundle-env/workspace.env` to the restored passwords, so a later uninstall/reinstall keeps working.
@@ -3571,7 +3898,7 @@ Uninstall removes the containers and Crow's copy of the extension. It **keeps**:
 3. After a last backup: `sudo rm -rf ~/.crow/workspace && rm ~/.crow/secrets/bundle-env/workspace.env`
 
 ## Upgrades
-Images are pinned. Upgrade Nextcloud **one major version at a time** (34 → 35 → 36), each in a registered window and after a fresh backup:
+Images are pinned. Upgrade Nextcloud **one major version at a time** (34 → 35 → 36), each in a registered window and after a fresh backup, with the backup timer stopped for the window (`systemctl --user stop crow-workspace-backup.timer`, then `start` afterwards):
 1. Bump the `nextcloud` tag in the repo bundle (with a manifest version bump) AND in the installed `~/.crow/bundles/workspace/docker-compose.yml`. A version refresh never re-copies compose files.
 2. `export CROW_HOME=~/.crow && cd ~/.crow/bundles/workspace && docker compose pull && docker compose up -d`
 3. Check `occ status`.
@@ -3808,7 +4135,7 @@ Spec §6 risks are covered in the Task 9 guide plus Ruling 19. Review C1–C4 ma
 **2. Placeholder scan.** No TBD/TODO. Every code step carries full code. Live steps carry exact commands. The only angle-bracket tokens are user-supplied values in rendered help text and the guide (`<login>`, `<folder>`).
 
 **3. Name consistency.**
-- Helper names are identical across tasks: `resolveGeneratedEnv`, `stripGeneratedKeys`, `writePrivateFile`, `gatewayExcludedKeys`, `envPatternViolation`, `precreateDirs`, `pullTimeoutMs`, `postInstallPlan`, `hookEnv`, `spawnGroup`, `runPostInstall`, `composeProjectName`, `foreignProjectOwner`, `_setHookRunnerForTest`, `_setDockerRunnerForTest`.
+- Helper names are identical across tasks: `resolveGeneratedEnv`, `stripGeneratedKeys`, `writePrivateFile`, `gatewayExcludedKeys`, `envPatternViolation`, `precreateDirs`, `pullTimeoutMs`, `postInstallPlan`, `hookEnv`, `spawnGroup`, `runPostInstall`, `composeProjectName`, `resolveComposeProject`, `classifyProjectOwners`, `composeOwnershipCheck`, `_setHookRunnerForTest`, `_setDockerRunnerForTest`.
 - Env keys use the `WORKSPACE_*` names, including `WORKSPACE_FIRSTRUN_ADMIN_PASSWORD`.
 - Projects and subnets: `crow-workspace`/10.89.70, `crow-ws-smoke`/10.89.71, `crow-ws-restore`/10.89.72.
 - The archive is `crow-workspace-*.tar` with members `db.sql.gpg`, `files.tar.gpg` and `bundle.env.gpg`.
@@ -3820,9 +4147,11 @@ Spec §6 risks are covered in the Task 9 guide plus Ruling 19. Review C1–C4 ma
 - whether Tailscale Serve sends forwarded headers, and whether ONLYOFFICE produces mixed content (Step 5);
 - the `occ … enabled` output (4b);
 - bind-mount ownership (4c);
-- the MariaDB/Redis healthchecks and `redis-server -` reading its config from stdin (4a);
-- gpg loopback (4h);
-- compose without a file (4g, informational);
-- `config:import` from stdin (bootstrap success + 4d);
+- the MariaDB/Redis healthchecks, and Redis running as `redis` from its private config file (4a);
+- gpg loopback (4i);
+- compose without a file (4h, informational);
+- `config:import /dev/stdin` (JWT length check, 4e);
+- Nextcloud refusing a breached password, plus the pre-install HIBP gate (4g);
+- the ownership guard against the live R4 browser, crow's 35b and crow's browser, plus a foreign-install refusal and a legacy-path pass on `searxng` (Step 7);
 - link-share exclusion and the autocomplete restriction (4f);
 - the `auth-tokens:add` output having no trailing notice (the 72-char regex in the bootstrap fails loudly otherwise).
