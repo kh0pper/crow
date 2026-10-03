@@ -84,8 +84,10 @@ test("settings section: render is a dry run; the confirmed POST purges and redir
   let to = null;
   const res = { redirectAfterPost: (u) => { to = u; } };
   assert.equal(await section.handleAction({ req: { body: { confirm: "0", expected: "1" } }, res, db, action: "purge_orphan_messages" }), true);
-  assert.match(to, /purge_refused=1/);
+  assert.equal(to, "/dashboard/settings?section=data-hygiene");
   assert.equal((await scanOrphanedMessages(db)).messages, 1, "unconfirmed POST deletes nothing");
+  await section.handleAction({ req: { body: { confirm: "1", expected: "7" } }, res, db, action: "purge_orphan_messages" });
+  assert.match(to, /purge_refused=1/, "a stale count is refused");
   await section.handleAction({ req: { body: { confirm: "1", expected: "1" } }, res, db, action: "purge_orphan_messages" });
   assert.match(to, /purged=1/);
   assert.equal((await scanOrphanedMessages(db)).messages, 0);

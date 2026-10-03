@@ -656,6 +656,7 @@ const TRANSFORMS = {
 export function rebaseBotDefinition(definitionJson, botId, targetCrowHome) {
   const out = { definition: definitionJson, changes: [], foreign: [] };
   if (!definitionJson || !targetCrowHome || !botId) return out;
+  if (!/^[A-Za-z0-9._-]+$/.test(String(botId)) || String(botId).includes("..")) return out;
   let def;
   try { def = JSON.parse(definitionJson); } catch { return out; }
   if (!def || typeof def !== "object" || Array.isArray(def)) return out;
@@ -663,8 +664,12 @@ export function rebaseBotDefinition(definitionJson, botId, targetCrowHome) {
   const tail = `/pi-bots/${botId}`;
   const pol = def.permission_policy && typeof def.permission_policy === "object" ? def.permission_policy : null;
   const policyLists = pol ? ["write_paths", "read_paths"].filter((k) => Array.isArray(pol[k])) : [];
-  let oldRoot = typeof def.session_dir === "string" && def.session_dir.startsWith("/")
-    ? def.session_dir.replace(/\/+$/, "") : null;
+  // session_dir is the world root only when it IS a <home>/pi-bots/<bot>
+  // path; a custom session_dir (an operator directory) is left alone and
+  // reported, never used to drag other paths under the target's pi-bots.
+  const sd = typeof def.session_dir === "string" ? def.session_dir.replace(/\/+$/, "") : null;
+  let oldRoot = sd && sd.startsWith("/") && sd.endsWith(tail) ? sd : null;
+  if (sd && !oldRoot && sd.startsWith("/")) out.foreign.push({ field: "session_dir", path: def.session_dir });
   if (!oldRoot) {
     for (const k of policyLists) {
       const hit = pol[k].find((p) => typeof p === "string" && p.replace(/\/+$/, "").endsWith(tail));

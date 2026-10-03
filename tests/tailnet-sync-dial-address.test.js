@@ -108,11 +108,10 @@ test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tails
   try {
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = 'https://instb.example.ts.net', tailscale_ip = NULL WHERE id = ?", args: [b.id] });
     await b.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${A.port}`, a.id] });
-    A.advertise = { gateway_url: `http://127.0.0.1:${A.port}` };
-    B.advertise = { gateway_url: "https://instb.example.ts.net:8444", tailscale_ip: "127.0.0.1" };
-    // The learned tailscale_ip is dialed on the fallback port ladder; on the
-    // fleet that is the standard backend port, here it is B's listener.
-    A.ctx.gatewayPort = B.port;
+    // A advertises NOTHING — the shape of a peer still on the old code.
+    A.advertise = null;
+    // B advertises its tailnet IP and its own backend port (signed).
+    B.advertise = { gateway_url: "https://instb.example.ts.net:8444", tailscale_ip: "127.0.0.1", sync_port: B.port };
 
     await A.startClients();
     await B.startClients();
@@ -137,6 +136,9 @@ test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tails
 
     // B (not elected) dials as a fallback after the grace; sync resumes.
     assert.ok(await until(() => linked(a, b), 8000), "fallback link comes up");
+    await sleep(300);
+    assert.equal(a.mgr._activeStreams.get(b.id)?.size, 1, "exactly one link (no duplicate from the elected side)");
+    assert.equal(getPeerDialHealth()[a.id]?.lastAttemptRole, "fallback", "the link is B's fallback dial");
     assert.ok(await until(() => hasMemory(b.db, 1101)), "A→B flows after the link");
     assert.ok(await until(() => hasMemory(a.db, 2101)), "B→A flows after the link");
 
@@ -145,14 +147,18 @@ test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tails
     const ra = await row(a.db, b.id);
     assert.equal(ra.tailscale_ip, "127.0.0.1");
     assert.equal(ra.gateway_url, "https://instb.example.ts.net");
+    const portRow = (await a.db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [`tailnet_sync_port:${b.id}`, a.id] })).rows[0];
+    assert.equal(Number(portRow?.value), B.port, "B's backend port learned (local override, never synced)");
     assert.equal(getPeerDialHealth()[b.id].noAddressSince, null, "health condition cleared");
     assert.equal((await dialIssues(a.db)).length, 0, "no warn once linked");
 
     // Prove A can now reach B BY ITSELF with the learned address: B stops
     // dialing entirely, the link drops, and A (elected) re-establishes it.
+    // (A re-dials within one idle tick, so the brief unlinked gap is not
+    // asserted — the direction flip from inbound to outbound proves it.)
+    assert.equal(getPeerDialHealth()[b.id].linkDirection, "inbound");
     B.stopClients();
-    assert.ok(await until(() => unlinked(a, b), 5000), "link dropped");
-    assert.ok(await until(() => linked(a, b), 8000), "A re-dials B on the learned address");
+    assert.ok(await until(() => getPeerDialHealth()[b.id]?.linkDirection === "outbound" && linked(a, b), 8000), "A re-dials B on the learned address");
     const h1 = getPeerDialHealth()[b.id];
     assert.equal(h1.linkDirection, "outbound");
     assert.ok(h1.lastAttemptUrl.includes(`127.0.0.1:${B.port}`), h1.lastAttemptUrl);
@@ -222,9 +228,9 @@ test("MUTUAL: neither side has the other's address — both raise the health not
 
     // Prove B's LEARNED address is usable: A stops dialing; B's fallback
     // dial (after the grace) re-links on the backfilled URL.
+    assert.equal(getPeerDialHealth()[a.id].linkDirection, "inbound", "B's side of A's outbound link");
     A.stopClients();
-    assert.ok(await until(() => unlinked(a, b), 5000), "link dropped");
-    assert.ok(await until(() => linked(a, b), 8000), "B re-links via the learned address");
+    assert.ok(await until(() => getPeerDialHealth()[a.id]?.linkDirection === "outbound" && linked(a, b), 8000), "B re-links via the learned address");
     assert.equal(getPeerDialHealth()[a.id].lastAttemptRole, "fallback");
     await writeAndEmit(a, 1202, "A→B over B's fallback dial");
     await writeAndEmit(b, 2202, "B→A over B's fallback dial");
@@ -249,7 +255,7 @@ async function rawHandshake(port, identity, asId, { addr = null, addrSigOverride
   const nonce = randomBytes(16).toString("hex");
   const hs = { instance_id: asId, nonce_hex: nonce, sig_hex: sign(`${asId}:${nonce}`, identity.ed25519Priv) };
   if (addr) {
-    const canon = JSON.stringify({ gateway_url: addr.gateway_url ?? null, tailscale_ip: addr.tailscale_ip ?? null });
+    const canon = JSON.stringify({ gateway_url: addr.gateway_url ?? null, tailscale_ip: addr.tailscale_ip ?? null, sync_port: addr.sync_port ?? null });
     hs.addr = addr;
     hs.addr_sig = addrSigOverride ?? sign(`addr:${asId}:${nonce}:${canon}`, identity.ed25519Priv);
   }
@@ -266,23 +272,36 @@ test("only SIGNED peer data is learned: a tampered address block is ignored; a c
   quiet();
   try {
     // Tampered: signature over a DIFFERENT address than the one sent.
-    const otherCanon = JSON.stringify({ gateway_url: "http://127.0.0.1:1", tailscale_ip: null });
+    const otherCanon = JSON.stringify({ gateway_url: "https://evil.example.ts.net:8444", tailscale_ip: null, sync_port: null });
     const bad = await rawHandshake(B.port, fleet.identity, a.id, {
-      addr: { gateway_url: "http://10.9.9.9:3001", tailscale_ip: "10.9.9.9" },
+      addr: { gateway_url: "https://a1.example.ts.net:8444", tailscale_ip: "100.64.1.2" },
       addrSigOverride: sign(`addr:${a.id}:deadbeef:${otherCanon}`, fleet.identity.ed25519Priv),
     });
     bad.ws.terminate();
     assert.deepEqual(await row(b.db, a.id), { gateway_url: null, tailscale_ip: null }, "tampered address never written");
 
-    // Positive control on the same rows: a correctly signed block IS learned.
-    const good = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "http://10.9.9.9:3001", tailscale_ip: "100.64.1.2" } });
+    // Correctly signed but NOT tailnet (RFC1918, metadata, public): never written.
+    const offnet = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "http://169.254.169.254:80", tailscale_ip: "10.9.9.9" } });
+    offnet.ws.terminate();
+    const offnet2 = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "https://example.com:8444", tailscale_ip: "8.8.8.8" } });
+    offnet2.ws.terminate();
+    assert.deepEqual(await row(b.db, a.id), { gateway_url: null, tailscale_ip: null }, "non-tailnet addresses never written");
+
+    // Positive control on the same rows: a correctly signed tailnet block IS learned.
+    const good = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "https://a1.example.ts.net:8444", tailscale_ip: "100.64.1.2" } });
     good.ws.terminate();
-    assert.deepEqual(await row(b.db, a.id), { gateway_url: "http://10.9.9.9:3001", tailscale_ip: "100.64.1.2" });
+    assert.deepEqual(await row(b.db, a.id), { gateway_url: "https://a1.example.ts.net:8444", tailscale_ip: "100.64.1.2" });
 
     // Never overwrites: a later signed advertisement of a different address.
-    const later = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "http://10.8.8.8:3001", tailscale_ip: "100.64.9.9" } });
+    const later = await rawHandshake(B.port, fleet.identity, a.id, { addr: { gateway_url: "https://a2.example.ts.net:8444", tailscale_ip: "100.64.9.9" } });
     later.ws.terminate();
-    assert.deepEqual(await row(b.db, a.id), { gateway_url: "http://10.9.9.9:3001", tailscale_ip: "100.64.1.2" });
+    assert.deepEqual(await row(b.db, a.id), { gateway_url: "https://a1.example.ts.net:8444", tailscale_ip: "100.64.1.2" });
+
+    // An UNPAIRED instance with the identity learns nothing: no reply handshake.
+    const stranger = await rawHandshake(B.port, fleet.identity, "instZ");
+    await Promise.race([stranger.closed, sleep(2000)]);
+    assert.equal(stranger.frames.length, 0, "no handshake (and no address) sent to an unknown peer");
+    assert.equal(stranger.closeCode(), 1008);
   } finally {
     loud();
     await B.close();
@@ -319,13 +338,15 @@ test("unit: verifiedAdvertisedAddress rejects a block spliced from another nonce
   try {
     const { identity } = fleet;
     const mk = (nonce, addr, signNonce = nonce) => {
-      const canon = JSON.stringify({ gateway_url: addr.gateway_url ?? null, tailscale_ip: addr.tailscale_ip ?? null });
+      const canon = JSON.stringify({ gateway_url: addr.gateway_url ?? null, tailscale_ip: addr.tailscale_ip ?? null, sync_port: addr.sync_port ?? null });
       return { instance_id: "instA", nonce_hex: nonce, addr, addr_sig: sign(`addr:instA:${signNonce}:${canon}`, identity.ed25519Priv) };
     };
     const addr = { gateway_url: "https://a.example.ts.net:8444", tailscale_ip: "100.64.0.7" };
     assert.deepEqual(verifiedAdvertisedAddress(mk("n1", addr), identity.ed25519Pubkey), addr);
     assert.equal(verifiedAdvertisedAddress(mk("n2", addr, "n1"), identity.ed25519Pubkey), null, "spliced from another connection");
     assert.equal(verifiedAdvertisedAddress({ ...mk("n1", addr), addr_sig: "zz" }, identity.ed25519Pubkey), null, "garbage sig");
+    assert.equal(verifiedAdvertisedAddress(mk("n1", { gateway_url: "http://10.0.0.21:3002", tailscale_ip: "192.168.1.5" }), identity.ed25519Pubkey), null, "LAN addresses are not tailnet");
+    assert.deepEqual(verifiedAdvertisedAddress(mk("n1", { tailscale_ip: "fd7a:115c:a1e0::1", sync_port: 3009 }), identity.ed25519Pubkey), { tailscale_ip: "fd7a:115c:a1e0::1", sync_port: 3009 });
     assert.deepEqual(
       verifiedAdvertisedAddress(mk("n1", { gateway_url: "https://a.example.ts.net", tailscale_ip: "100.64.0.7" }), identity.ed25519Pubkey),
       { tailscale_ip: "100.64.0.7" }, ":443 URL is not a dial address",
@@ -359,4 +380,47 @@ test("Instances page: the Sync link cell shows link / no-address / last attempt 
   assert.doesNotMatch(up, /last error/, "an error older than the live link is not shown");
   assert.match(up, /learned tailscale_ip from its signed handshake/);
   assert.match(renderSyncLinkCell(undefined, "en"), /no dial attempt yet/);
+});
+
+test("the dialer refuses an instance that answers for ANOTHER peer (no silent adoption)", async () => {
+  _resetPeerDialHealth();
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  const B = await gateway(fleet, b);
+  const A = await gateway(fleet, a);
+  quiet();
+  try {
+    // A believes "instC" lives at B's address (a co-hosted mix-up).
+    await a.db.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted, gateway_url) VALUES ('instC', 'instC', ?, 'active', 1, ?)", args: ["crow:fleet-test", `http://127.0.0.1:${B.port}`] });
+    await A.startClients();
+    assert.ok(await until(() => /different instance/.test(getPeerDialHealth().instC?.lastError || ""), 5000), "failure recorded for instC");
+    await sleep(200);
+    assert.equal(a.mgr.hasDedicatedStream("instB"), false, "B was not adopted under instC's dial");
+    assert.equal(a.mgr.hasDedicatedStream("instC"), false);
+  } finally {
+    loud();
+    await A.close();
+    await B.close();
+    await fleet.cleanup();
+  }
+});
+
+test("health: a peer with dial candidates whose every dial fails, with no link, also warns (after the grace and a minimum of attempts)", async () => {
+  _resetPeerDialHealth();
+  const { recordDialFailure, recordLinkUp } = await import("../servers/shared/peer-dial-health.js");
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    for (let i = 0; i < 4; i++) recordDialFailure(b.id, "ws://100.64.0.9:3002: ECONNREFUSED");
+    assert.equal((await dialIssues(a.db, 31 * 60_000)).length, 0, "below the attempt floor");
+    recordDialFailure(b.id, "ws://100.64.0.9:3002: ECONNREFUSED");
+    assert.equal((await dialIssues(a.db, 5 * 60_000)).length, 0, "inside the grace");
+    const issues = await dialIssues(a.db, 31 * 60_000);
+    assert.equal(issues.length, 1);
+    assert.match(issues[0].label, /every dial has failed for 3\d min \(last error: ws:\/\/100\.64\.0\.9:3002: ECONNREFUSED\)/);
+    recordLinkUp(b.id, { direction: "outbound" });
+    assert.equal((await dialIssues(a.db, 31 * 60_000)).length, 0, "a link clears it");
+  } finally {
+    await fleet.cleanup();
+  }
 });

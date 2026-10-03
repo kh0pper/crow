@@ -146,8 +146,10 @@ export default {
         confirm: req.body.confirm === "1",
         expected: req.body.expected != null && req.body.expected !== "" ? Number(req.body.expected) : null,
       });
-      if (r.refused || r.dryRun) {
+      if (r.refused) {
         res.redirectAfterPost(`${BASE}&purge_refused=1`);
+      } else if (r.dryRun) {
+        res.redirectAfterPost(BASE); // unconfirmed: nothing to report
       } else {
         console.log(`[data-hygiene] purged ${r.deleted.messages} orphaned message(s), ${r.deleted.retryQueue} retry-queue row(s)`);
         res.redirectAfterPost(`${BASE}&purged=${r.deleted.messages}&purged_q=${r.deleted.retryQueue}`);

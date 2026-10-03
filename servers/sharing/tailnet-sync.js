@@ -47,6 +47,10 @@ const RETRY_MAX_MS = 60_000;
 // instead of returning for good. Before, a peer that booted with no address
 // was never dialed again until a gateway restart, even after its row was fixed.
 const IDLE_RECHECK_MS = 15_000;
+// A peer that answers "unknown peer"/"not paired" (it revoked us, or never
+// paired) is re-tried at this slow cadence, not every backoff cycle.
+const REFUSED_RECHECK_MS = 30 * 60_000;
+export const SYNC_PORT_KEY_PREFIX = "tailnet_sync_port:";
 // Dialer election picks the lower instance id. If the elected side cannot
 // reach us (it has no address for us — black-swan's shape, 2026-08..10) no
 // link would ever form. After this long with no link at all, the other side
@@ -60,19 +64,40 @@ let _allowLoopbackAddresses = false;
 /** Test seam: the two-instance tests run both gateways on 127.0.0.1. */
 export function _setAllowLoopbackAddressesForTest(v) { _allowLoopbackAddresses = !!v; }
 
-function isLoopbackOrUnspecifiedHost(host) {
-  const h = String(host).replace(/^\[|\]$/g, "").toLowerCase();
-  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127\./.test(h)
-    || h === "0.0.0.0" || h === "::" || h === "";
+/**
+ * True for a Tailscale address: IPv4 100.64.0.0/10 (CGNAT) or IPv6
+ * fd7a:115c:a1e0::/48. A learned address is only ever a TAILNET address — a
+ * public, RFC1918 or metadata (169.254.x) address is never accepted, because
+ * a learned gateway_url also turns on credentialed peer calls (federation
+ * proxy, SSO, probes) for that row.
+ */
+export function isTailnetIp(ip) {
+  const v = String(ip || "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(v) === 4) {
+    const [a, b] = v.split(".").map(Number);
+    return a === 100 && b >= 64 && b <= 127;
+  }
+  if (isIP(v) === 6) return /^fd7a:115c:a1e0:/.test(v);
+  return false;
 }
 
-/** A tailscale_ip a peer may advertise: a literal IP, not loopback/unspecified. */
+function testLoopback(host) {
+  return _allowLoopbackAddresses && /^127\./.test(String(host).replace(/^\[|\]$/g, ""));
+}
+
+/** A tailscale_ip a peer may advertise: a literal tailnet IP. */
 export function sanitizeAdvertisedIp(ip) {
   if (typeof ip !== "string") return null;
   const v = ip.trim();
   if (!v || v.length > 64 || !isIP(v)) return null;
-  if (!_allowLoopbackAddresses && isLoopbackOrUnspecifiedHost(v)) return null;
+  if (!isTailnetIp(v) && !testLoopback(v)) return null;
   return v;
+}
+
+/** A backend port a peer may advertise for its direct ws:// dial. */
+export function sanitizeAdvertisedPort(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
 }
 
 /**
@@ -87,13 +112,17 @@ export function sanitizeAdvertisedGatewayUrl(url) {
   try { u = new URL(v); } catch { return null; }
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
   if (u.username || u.password) return null;
-  if (!_allowLoopbackAddresses && isLoopbackOrUnspecifiedHost(u.hostname)) return null;
+  // Tailnet only: https on a MagicDNS name (*.ts.net — the Serve endpoint
+  // shape), or http(s) on a literal tailnet IP.
+  const host = u.hostname.toLowerCase();
+  const tailnetName = u.protocol === "https:" && host.endsWith(".ts.net") && !isIP(host);
+  if (!tailnetName && !isTailnetIp(host) && !testLoopback(host)) return null;
   const clean = `${u.origin}${u.pathname}`.replace(/\/+$/, "");
   return peerToWsUrlCandidates({ gateway_url: clean }).length > 0 ? clean : null;
 }
 
 function canonicalAddr(addr) {
-  return JSON.stringify({ gateway_url: addr?.gateway_url ?? null, tailscale_ip: addr?.tailscale_ip ?? null });
+  return JSON.stringify({ gateway_url: addr?.gateway_url ?? null, tailscale_ip: addr?.tailscale_ip ?? null, sync_port: addr?.sync_port ?? null });
 }
 
 /**
@@ -115,7 +144,7 @@ function buildHandshakePayload(identity, localInstanceId, addr = null) {
     sig_hex: sign(message, identity.ed25519Priv),
   };
   if (addr && (addr.gateway_url || addr.tailscale_ip)) {
-    const clean = { gateway_url: addr.gateway_url || null, tailscale_ip: addr.tailscale_ip || null };
+    const clean = { gateway_url: addr.gateway_url || null, tailscale_ip: addr.tailscale_ip || null, sync_port: addr.sync_port || null };
     payload.addr = clean;
     payload.addr_sig = sign(addrMessage(localInstanceId, nonce, clean), identity.ed25519Priv);
   }
@@ -134,15 +163,17 @@ function verifyHandshakePayload(payload, expectedPubkeyHex) {
  */
 export function verifiedAdvertisedAddress(payload, expectedPubkeyHex) {
   if (!payload?.addr || typeof payload.addr !== "object" || typeof payload.addr_sig !== "string") return null;
-  const raw = { gateway_url: payload.addr.gateway_url ?? null, tailscale_ip: payload.addr.tailscale_ip ?? null };
+  const raw = { gateway_url: payload.addr.gateway_url ?? null, tailscale_ip: payload.addr.tailscale_ip ?? null, sync_port: payload.addr.sync_port ?? null };
   let ok = false;
   try { ok = verify(addrMessage(payload.instance_id, payload.nonce_hex, raw), payload.addr_sig, expectedPubkeyHex); } catch { ok = false; }
   if (!ok) return null;
   const out = {};
   const gw = sanitizeAdvertisedGatewayUrl(raw.gateway_url);
   const ip = sanitizeAdvertisedIp(raw.tailscale_ip);
+  const port = sanitizeAdvertisedPort(raw.sync_port);
   if (gw) out.gateway_url = gw;
   if (ip) out.tailscale_ip = ip;
+  if (port && (ip || gw)) out.sync_port = port;
   return Object.keys(out).length ? out : null;
 }
 
@@ -156,7 +187,7 @@ async function resolveSelfAddress(ctx) {
   try {
     if (typeof ctx.selfAddress === "function") {
       const a = (await ctx.selfAddress()) || {};
-      return { gateway_url: sanitizeAdvertisedGatewayUrl(a.gateway_url), tailscale_ip: sanitizeAdvertisedIp(a.tailscale_ip) };
+      return { gateway_url: sanitizeAdvertisedGatewayUrl(a.gateway_url), tailscale_ip: sanitizeAdvertisedIp(a.tailscale_ip), sync_port: sanitizeAdvertisedPort(a.sync_port) };
     }
     let row = null;
     try {
@@ -173,7 +204,9 @@ async function resolveSelfAddress(ctx) {
       ip = sanitizeAdvertisedIp(getOwnTailnetIp());
       if (!ip) _ownIpFailedAt = Date.now();
     }
-    return { gateway_url: sanitizeAdvertisedGatewayUrl(row?.gateway_url), tailscale_ip: ip };
+    // sync_port: this gateway's own backend port, so a peer that learns our
+    // tailscale_ip dials ws://<ip>:<port> instead of guessing 3001/3002.
+    return { gateway_url: sanitizeAdvertisedGatewayUrl(row?.gateway_url), tailscale_ip: ip, sync_port: sanitizeAdvertisedPort(ctx.syncPort) };
   } catch {
     return null;
   }
@@ -197,6 +230,23 @@ export async function backfillPeerAddress(ctx, peerId, addr) {
     });
     const row = rows[0];
     if (!row) return written;
+    if (addr.sync_port) {
+      // Not a crow_instances column (no schema change): a LOCAL-scope
+      // override (never synced), keyed per peer. Refreshed on every signed
+      // handshake — it is the peer's own port, not operator data.
+      const key = `${SYNC_PORT_KEY_PREFIX}${peerId}`;
+      const localId = ctx.instanceSyncManager?.localInstanceId;
+      if (localId) {
+        const r = await db.execute({
+          sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(key, instance_id) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+                WHERE dashboard_settings_overrides.value IS NOT excluded.value`,
+          args: [key, localId, String(addr.sync_port)],
+        });
+        if (Number(r.rowsAffected ?? 0) > 0) written.sync_port = addr.sync_port;
+      }
+    }
     for (const col of ["gateway_url", "tailscale_ip"]) {
       if (!addr[col] || (row[col] != null && String(row[col]).trim() !== "")) continue;
       const r = await db.execute({
@@ -284,7 +334,10 @@ export function peerToWsUrlCandidates(peer, fallbackPort = 3002, standardPorts =
   if (peer?.tailscale_ip) {
     const ip = String(peer.tailscale_ip);
     const host = ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
-    for (const port of new Set([fallbackPort, ...standardPorts])) {
+    // The peer's own advertised backend port (learned from its signed
+    // handshake) leads; the guessed ports follow.
+    const learned = sanitizeAdvertisedPort(peer.sync_port);
+    for (const port of new Set([...(learned ? [learned] : []), fallbackPort, ...standardPorts])) {
       const direct = `ws://${host}:${port}${WS_PATH}`;
       if (!candidates.includes(direct)) candidates.push(direct);
     }
@@ -396,10 +449,6 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const { identity, instanceSyncManager, db, log = console } = ctx;
   const remoteInstanceId = peerHandshake.instance_id;
 
-  // Send our own handshake (proves to client we hold the same identity), with
-  // our signed dial address so a peer that lacks it can learn it.
-  ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(ctx))));
-
   // Refuse self-loopback (same instance_id — no value in syncing with self).
   if (remoteInstanceId === instanceSyncManager.localInstanceId) {
     log.warn?.(`[tailnet-sync] rejecting self-loopback from ${remoteInstanceId}`);
@@ -427,12 +476,21 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   }
 
   // A FALLBACK dial (from the side that lost the dialer election — its id
-  // sorts after ours) is refused while a tailnet link already exists: one
-  // dedicated link per pair. The elected direction is always accepted.
-  if (remoteInstanceId > instanceSyncManager.localInstanceId && instanceSyncManager.hasDedicatedStream?.(remoteInstanceId)) {
-    ws.close(1013, "already linked");
-    return;
+  // sorts after ours) is refused while a tailnet link already exists, or
+  // while our own elected dial to it is in flight: one dedicated link per
+  // pair. The elected direction is always accepted.
+  if (remoteInstanceId > instanceSyncManager.localInstanceId) {
+    const ownWs = ctx.dialers?.get?.(remoteInstanceId)?.ws;
+    if (instanceSyncManager.hasDedicatedStream?.(remoteInstanceId) || (ownWs && ownWs.readyState <= WebSocket.OPEN)) {
+      ws.close(1013, "already linked");
+      return;
+    }
   }
+
+  // Our own handshake (proves to the client we hold the same identity), with
+  // our signed dial address — sent only AFTER the peer is known to be a live
+  // paired instance here, so a revoked/unknown instance learns nothing.
+  ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(ctx))));
 
   // Learn the peer's dial address if our row lacks it (signed, verified above).
   await backfillPeerAddress(ctx, remoteInstanceId, verifiedAdvertisedAddress(peerHandshake, identity.ed25519Pubkey));
@@ -705,6 +763,7 @@ export class PeerDialer {
     }
     this.ws = ws;
     let linked = false;
+    let closedByUs = false;
 
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
@@ -716,16 +775,27 @@ export class PeerDialer {
         if (!verifyHandshakePayload(serverHs, identity.ed25519Pubkey)) {
           console.warn(`[tailnet-sync] server handshake sig invalid from ${wsUrl}`);
           recordDialFailure(peerId, `${wsUrl}: server handshake signature invalid`);
+          closedByUs = true;
           ws.close(1008, "bad sig");
           frameReader.detach();
           return;
         }
-        // Server said its instance_id. If matches a different paired record,
-        // adopt that as the canonical remote id so feeds align.
+        // The server must be the instance we dialed. With learned host IPs
+        // and a port ladder, a co-hosted instance sharing the identity could
+        // otherwise answer for another one and be adopted silently.
         const remoteInstanceId = serverHs.instance_id;
+        if (remoteInstanceId !== peerId && remoteInstanceId !== instanceSyncManager.localInstanceId) {
+          console.warn(`[tailnet-sync] ${wsUrl} answered as ${String(remoteInstanceId).slice(0, 12)}…, not the peer we dialed; closing`);
+          recordDialFailure(peerId, `${wsUrl}: answered as a different instance (${String(remoteInstanceId).slice(0, 12)}…)`);
+          closedByUs = true;
+          ws.close(1008, "wrong instance");
+          frameReader.detach();
+          return;
+        }
         if (remoteInstanceId === instanceSyncManager.localInstanceId) {
           console.warn(`[tailnet-sync] server claims our own instance_id; closing`);
           recordDialFailure(peerId, `${wsUrl}: answered with this instance's own id`);
+          closedByUs = true;
           ws.close(1008, "self");
           frameReader.detach();
           return;
@@ -741,6 +811,7 @@ export class PeerDialer {
         if (liveRows.length === 0) {
           console.warn(`[tailnet-sync] server ${String(remoteInstanceId).slice(0, 12)}… is not a live paired peer here; closing`);
           recordDialFailure(peerId, `${wsUrl}: answered as ${String(remoteInstanceId).slice(0, 12)}…, not a live paired peer`);
+          closedByUs = true;
           ws.close(1008, "not paired");
           frameReader.detach();
           return;
@@ -801,18 +872,27 @@ export class PeerDialer {
         console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
         recordDialFailure(peerId, `${wsUrl}: ${err.message}`);
         frameReader.detach();
+        closedByUs = true;
         try { ws.close(); } catch {}
       }
     });
 
     ws.on("close", (code, reason) => {
       if (this.ws === ws) this.ws = null;
-      if (!linked && code && code !== 1000 && code !== 1005 && code !== 1006) {
-        // Refused by the peer (bad sig, unknown peer, already linked, …).
-        recordDialFailure(peerId, `${wsUrl}: closed by peer (${code}${reason?.length ? ` ${reason}` : ""})`);
-      }
+      const why = reason?.length ? String(reason) : "";
       if (linked) this.passiveSince = Date.now();
-      if (code === 1013) return this.scheduleIdle(); // peer already linked to us — nothing to retry
+      if (closedByUs && !linked) return this.scheduleRetry(); // our refusal; failure already recorded
+      // Peer already linked to us — nothing failed, nothing to retry.
+      if (code === 1013) return this.scheduleIdle();
+      if (!linked && code && code !== 1000 && code !== 1005 && code !== 1006) {
+        // Refused by the peer (bad sig, unknown peer, …).
+        recordDialFailure(peerId, `${wsUrl}: closed by peer (${code}${why ? ` ${why}` : ""})`);
+      }
+      if (!linked && code === 1008 && (why === "unknown peer" || why === "not paired")) {
+        // It revoked us (or never paired): stop hammering it.
+        this.idle = true;
+        return this._setTimer(() => this.connect(), this.ctx.refusedRecheckMs ?? REFUSED_RECHECK_MS);
+      }
       this.scheduleRetry();
     });
     ws.on("error", (err) => {
@@ -855,8 +935,18 @@ export async function startTailnetSyncClients(ctx) {
       console.warn(`[tailnet-sync] refresh failed: ${err.message}`);
       return;
     }
+    // Learned backend ports (signed handshakes), kept in local overrides.
+    const ports = new Map();
+    try {
+      const { rows: pr } = await db.execute({
+        sql: "SELECT key, value FROM dashboard_settings_overrides WHERE key LIKE ? AND instance_id = ?",
+        args: [`${SYNC_PORT_KEY_PREFIX}%`, instanceSyncManager.localInstanceId],
+      });
+      for (const r of pr) ports.set(String(r.key).slice(SYNC_PORT_KEY_PREFIX.length), sanitizeAdvertisedPort(r.value));
+    } catch { /* table missing on an old DB — ladder guesses only */ }
     const seenIds = new Set();
-    for (const peer of rows) {
+    for (const raw of rows) {
+      const peer = ports.get(raw.id) ? { ...raw, sync_port: ports.get(raw.id) } : raw;
       seenIds.add(peer.id);
       // 2d C4: converge the in-feed with the persisted sync_url every rescan —
       // heals manual crow_update_instance edits and any missed key exchange

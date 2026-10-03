@@ -28,6 +28,7 @@ function entry(id) {
     lastError: null,
     lastErrorAt: null,
     failCount: 0,
+    failingSince: null,
     linkedAt: null,
     linkDirection: null,
     linkClosedAt: null,
@@ -53,6 +54,7 @@ export function recordDialFailure(id, error, { nowMs = Date.now() } = {}) {
   e.lastError = String(error?.message || error || "unknown error").slice(0, 300);
   e.lastErrorAt = nowMs;
   e.failCount += 1;
+  if (e.failingSince == null) e.failingSince = nowMs;
 }
 
 /** An authenticated link is up. direction: "outbound" | "inbound". */
@@ -63,6 +65,7 @@ export function recordLinkUp(id, { direction, nowMs = Date.now() } = {}) {
   e.linkDirection = direction || null;
   e.linkClosedAt = null;
   e.failCount = 0;
+  e.failingSince = null;
   e.noAddressSince = null;
   e.missing = null;
 }

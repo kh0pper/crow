@@ -764,6 +764,14 @@ describe("pi bot definitions: world roots rebase onto the target", () => {
     assert.deepEqual(JSON.parse(r2.definition).permission_policy.write_paths, ["/x/.crow/pi-bots/other-bot", "/t/pi-bots/b1"]);
   });
 
+  it("unit: a custom session_dir (not <home>/pi-bots/<bot>) is never treated as the world root", () => {
+    const d = JSON.stringify({ session_dir: "/home/kh0pp/projects/foo", permission_policy: { write_paths: ["/home/kh0pp/projects/foo/out"] } });
+    const r = rebaseBotDefinition(d, "b1", "/t");
+    assert.equal(r.definition, d);
+    assert.deepEqual(r.foreign.map((f) => f.field), ["session_dir"]);
+    assert.equal(rebaseBotDefinition(DEF, "../evil", "/t").definition, DEF, "unsafe bot id refused");
+  });
+
   it("unit: empty / non-JSON / pathless definitions pass through byte-identical", () => {
     for (const d of ["{}", "not json", null, JSON.stringify({ engine: "pi" })]) {
       assert.equal(rebaseBotDefinition(d, "b", "/t").definition, d);

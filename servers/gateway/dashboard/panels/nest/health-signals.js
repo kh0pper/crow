@@ -333,6 +333,11 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
 // signal anywhere. One issue per peer (id "peers-dial:<id>", own 24 h push
 // window). The grace keeps a boot that is still learning addresses quiet.
 export const NO_DIAL_ADDRESS_WARN_MS = 10 * 60 * 1000;
+// Same id, second shape: the peer HAS dial candidates but every dial has
+// failed for this long with no link (wrong port, ufw, dead tailnet path) —
+// the /health probe over the Serve URL can stay green meanwhile.
+export const DIAL_FAILING_WARN_MS = 30 * 60 * 1000;
+export const DIAL_FAILING_MIN_ATTEMPTS = 5;
 
 async function syncDialSignal(db, lang = "en", nowFn = () => Date.now()) {
   const dial = getPeerDialHealth();
@@ -346,17 +351,26 @@ async function syncDialSignal(db, lang = "en", nowFn = () => Date.now()) {
     });
     for (const r of rows) {
       const h = dial[r.id];
-      if (!h || h.noAddressSince == null || now - h.noAddressSince < NO_DIAL_ADDRESS_WARN_MS) continue;
+      if (!h) continue;
+      const name = r.name || String(r.id).slice(0, 12);
+      const linkUp = h.linkedAt != null && h.linkClosedAt == null;
+      let issueLabel = null;
+      if (h.noAddressSince != null && now - h.noAddressSince >= NO_DIAL_ADDRESS_WARN_MS) {
+        issueLabel = fill(t("signals.peers.noDialAddress", lang), { name, missing: (h.missing || []).join("; ") || "?" });
+      } else if (!linkUp && h.failingSince != null && h.failCount >= DIAL_FAILING_MIN_ATTEMPTS
+        && now - h.failingSince >= DIAL_FAILING_WARN_MS) {
+        issueLabel = fill(t("signals.peers.dialFailing", lang), {
+          name, minutes: Math.floor((now - h.failingSince) / 60_000), error: h.lastError || "?",
+        });
+      }
+      if (!issueLabel) continue;
       out.push({
         id: `peers-dial:${r.id}`,
         severity: "warn",
         state: "warn",
         issueOnly: true,
         label: t("signals.peers.label", lang),
-        issueLabel: fill(t("signals.peers.noDialAddress", lang), {
-          name: r.name || String(r.id).slice(0, 12),
-          missing: (h.missing || []).join("; ") || "?",
-        }),
+        issueLabel,
         actionLabel: t("signals.peers.action", lang),
         actionHref: "/dashboard/settings?section=paired-instances",
       });

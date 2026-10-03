@@ -3952,13 +3952,6 @@ export class InstanceSyncManager {
     }
   }
 
-  /**
-   * Revoke teardown for one peer: close its feeds (which detaches them from
-   * every stream, including a shared Hyperswarm connection) and destroy any
-   * stream dedicated to that peer (its tailnet-sync WebSocket). Called by
-   * servers/sharing/revoke-peer.js — the one revoke path for the MCP tool and
-   * the dashboard.
-   */
   /** True when ANY replication stream (tailnet or Hyperswarm) to the peer is live. */
   hasActiveStream(remoteInstanceId) {
     return (this._activeStreams.get(remoteInstanceId)?.size ?? 0) > 0;
@@ -3972,6 +3965,13 @@ export class InstanceSyncManager {
     return false;
   }
 
+  /**
+   * Revoke teardown for one peer: close its feeds (which detaches them from
+   * every stream, including a shared Hyperswarm connection) and destroy any
+   * stream dedicated to that peer (its tailnet-sync WebSocket). Called by
+   * servers/sharing/revoke-peer.js — the one revoke path for the MCP tool and
+   * the dashboard.
+   */
   async teardownRevokedPeer(remoteInstanceId) {
     const dedicated = [...(this._activeStreams.get(remoteInstanceId) ?? [])]
       .filter((st) => this._dedicatedStreams.has(st));
