@@ -324,7 +324,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.3.3",
+      "version": "1.3.4",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -797,7 +797,7 @@
     {
       "id": "companion",
       "name": "AI Companion",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
       "type": "bundle",
       "author": "Crow",
@@ -1290,7 +1290,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -2819,7 +2819,7 @@
     {
       "id": "mastodon",
       "name": "Mastodon",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing.",
       "type": "bundle",
       "author": "Crow",
@@ -4295,7 +4295,7 @@
     {
       "id": "peertube",
       "name": "PeerTube",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — S3 storage + aggressive transcoding policy are load-bearing, not optional.",
       "type": "bundle",
       "author": "Crow",
@@ -4522,7 +4522,7 @@
     {
       "id": "pixelfed",
       "name": "Pixelfed",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated photo-sharing server over ActivityPub — Instagram-alternative on the fediverse. Publish photos/stories/collections; remote Mastodon/GoToSocial/Funkwhale followers see your posts in their timelines.",
       "type": "bundle",
       "author": "Crow",
