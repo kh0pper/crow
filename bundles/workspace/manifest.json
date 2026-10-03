@@ -13,6 +13,7 @@
     "precreate": ["workspace", "workspace/backups-staging"],
     "pull_timeout_s": 1800
   },
+  "postInstall": { "script": "ops/bootstrap.sh", "timeout_s": 1500 },
   "images": [
     "mariadb:11.8.9",
     "nextcloud:34.0.4-apache",
