@@ -73,3 +73,13 @@ test("Spanish render; panel metadata (Office, files icon)", () => {
   assert.equal(panel.route, "/dashboard/workspace");
   assert.equal(typeof panel.handler, "function");
 });
+
+test("uninstall text names the retained secrets (both languages); CRLF .env still reads", () => {
+  for (const lang of ["en", "es"]) {
+    assert.ok(WORKSPACE_STRINGS[lang].uninstallP.includes("secrets/bundle-env/workspace.env"), lang);
+    assert.ok(renderWorkspacePage(readPublicSettings(home(ENV)), lang).includes("secrets/bundle-env/workspace.env"), lang);
+  }
+  const s = readPublicSettings(home(ENV.replace(/\n/g, "\r\n")));
+  assert.equal(s.WORKSPACE_PUBLIC_HOST, "box.tailnet-example.ts.net");
+  assert.equal(s.WORKSPACE_OO_SERVE_PORT, "8457");
+});

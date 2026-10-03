@@ -35,7 +35,7 @@ const T = {
     serveP: "Run once on this machine to publish Workspace on your tailnet. Never use “tailscale funnel” for these:",
     backupP: "Turn on nightly encrypted backups (shows the backup passphrase once; keep it offline):",
     userP: "Add a household account yourself (prints a one-time password):",
-    uninstallP: "Before uninstalling: stop the backups and unpublish. Your files and database stay in ~/.crow/workspace until you remove them.",
+    uninstallP: "Uninstalling keeps your files and database in ~/.crow/workspace, the generated secrets (${CROW_HOME}/secrets/bundle-env/workspace.env, kept so a reinstall can reopen your data), the backup timer and the tailnet addresses. \"Delete data\" does not remove those bind-mounted files. Before uninstalling, disable the backup timer first, then remove the Serve mappings:",
   },
   es: {
     title: "Office",
@@ -60,7 +60,7 @@ const T = {
     serveP: "Ejecuta una vez en esta máquina para publicar Workspace en tu tailnet. Nunca uses “tailscale funnel” para esto:",
     backupP: "Activa las copias de seguridad cifradas cada noche (muestra la frase de cifrado una sola vez; guárdala fuera de línea):",
     userP: "Agrega tú mismo una cuenta del hogar (muestra una contraseña de un solo uso):",
-    uninstallP: "Antes de desinstalar: detén las copias y despublica. Tus archivos y la base de datos quedan en ~/.crow/workspace hasta que los borres.",
+    uninstallP: "Desinstalar conserva tus archivos y la base de datos en ~/.crow/workspace, los secretos generados (${CROW_HOME}/secrets/bundle-env/workspace.env, se guardan para que una reinstalación pueda reabrir tus datos), el temporizador de copias y las direcciones de la tailnet. \"Borrar datos\" no elimina esos archivos montados. Antes de desinstalar, desactiva primero el temporizador de copias y luego quita las asignaciones de Serve:",
   },
 };
 export { T as WORKSPACE_STRINGS };
@@ -77,7 +77,7 @@ export function readPublicSettings(crowHome) {
   if (!existsSync(p)) return null;
   const out = {};
   for (const line of readFileSync(p, "utf8").split("\n")) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    const m = line.replace(/\r$/, "").match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
     if (m && PUBLIC_KEYS.includes(m[1])) out[m[1]] = m[2];
   }
   return out;
