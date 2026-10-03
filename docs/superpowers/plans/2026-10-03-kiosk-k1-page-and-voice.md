@@ -128,13 +128,13 @@ These are the conditions the spec implies but does not spell out, ordered by how
 | # | Ruling | Why |
 |---|---|---|
 | R1 | The `companion → kiosk` device migration (§4.1/§11) is **deferred to the K3 retirement PR**. K1 adds the `kiosk` kind only. | Until K3, OLLV and Bot Builder's "AI Companion" tab (`api-handlers.js:281-335`, `editor.js:344-358`) still create and claim `device_kind:"companion"` devices. Migrating on load would silently pull those devices out from under a live OLLV. The test listed in §13.1 moves with the migration. |
-| R2 | Kiosk tokens are hashed **domain-separated**: `sha256("crow-kiosk-v1:" + token)`. Core `verifyToken` refuses a kiosk record unless it is called with `{kind:"kiosk"}`. | The glasses WS (`routes.js:2081-2108`) and `POST /api/meta-glasses/photo` call `verifyToken` with no kind check. The installed glasses copy keeps its own old store until a glasses version bump. With the domain-separated hash, a kiosk token can never verify there, and §10 holds without touching glasses (spec §7.1: glasses untouched). |
+| R2 | A kiosk's real token hash lives in a **separate field**, `kiosk_token_hash = sha256("crow-kiosk-v1:" + token)`. Its `token_hash` holds 32 random bytes that are the hash of nothing anyone holds. Core `verifyToken` checks `kiosk_token_hash` only when called with `{kind:"kiosk"}`, and refuses a kiosk record otherwise. | The glasses WS (`routes.js:2081-2108`) and `POST /api/meta-glasses/photo` call `verifyToken` with no kind check, and an INSTALLED old glasses copy (e.g. grackle's) hashes whatever string the caller sends. A prefix alone would be forgeable (review C2). With a sentinel `token_hash`, every old verifier refuses a kiosk token, prefixed or not, without touching glasses (spec §7.1). |
 | R3 | The kiosk executes `crow_wm` with a **kiosk-native executor** (`bundles/kiosk/server/wm.js`). It keeps the tool name, the single `command` string and the JSON action shape. It does **not** call `servers/wm/server.js`. | That file's other commands have side effects a household display must not trigger: `invite`/`memo`/`react` send to contacts, `relay` hits peers, `search` hits the web, `open pet` spawns an AppImage. Its pet code is deleted in K3. The kiosk refuses those commands without running them. |
 | R4 | K1 window kinds are **timer, recipe and content**. `youtube` (the one iframe), `list` (HA todo) and `camera` come with K3/K4, and `caps` advertises only what the page renders. | The spec's K1 row names timer/recipe/content. Iframe memory is a K2 Pi measurement (R1 of the spec). |
 | R5 | Bird class hooks are **opt-in**: `drawBird(g, mood, {hooks:true})`. With no third argument the output is **byte-identical** to today, pinned by a golden fixture written before the change. Ramble goes 0.13.0 → 0.13.1 (outfits included in the golden). | Every existing caller is unchanged: profile avatar, pins, panel. The spec asks for "byte-compatible apart from the added class attributes"; opt-in gives byte-identical for existing callers, and the hooks output is tested for geometry equivalence. |
 | R6 | `faster-whisper-server` is pinned to `0.5.0-cpu` (the exact running digest, so the image does not change). It also gets `WHISPER__TTL=-1`, `PRELOAD_MODELS=["Systran/faster-distil-whisper-small.en"]` and `mem_limit: 8g`. The kiosk STT profile is created by the kiosk at approval (stable id `kiosk-stt-distil-small-en`), not by a manifest seed. | With the default TTL of 300 s, the first kiosk turn after 5 quiet minutes pays a model reload, and §7.3's warm-up-on-connect cannot fix that. `seedProfile` dedups by provider+baseUrl, so a second `:8004` profile can't be seeded. |
 | R7 | Kokoro is pinned to `v0.9.0` with `mem_limit: 4g`. It is installed through Extensions in the deploy window (Task 14). The pre-merge smoke runs a scratch copy. | §7.3 / Kevin Q2. Pinned per the image-freshness convention (version tags, `scripts/extract-bundle-images.py`). |
-| R8 | **Latency metric:** `e2e = t_play − t_speech_end`. `t_speech_end` is the page's `performance.now()` at the **last voiced frame**, so it includes the 600 ms hangover, as in the spec's breakdown. `t_play` is the scheduled `AudioBufferSourceNode.start` time mapped to `performance.now()` plus `AudioContext.outputLatency` (falling back to `baseLatency`). **Known bias:** mic input latency (tens of ms) is not included. The gate counts only turns that are `route=fast`, not a fast path, not escalated, `vad_reason=silence`, and not aborted. The 20 questions ship as data, and a test pins every one to the fast route. | The spec's §9 metric, with its validity edges made explicit, so the gate cannot pass on turns that never exercised the budgeted path. |
+| R8 | **Latency metric:** `e2e = t_play − t_speech_end`. `t_speech_end` is the page's `performance.now()` at the **last voiced frame**, so it includes the 600 ms hangover, as in the spec's breakdown. `t_play` is the scheduled `AudioBufferSourceNode.start` time mapped to `performance.now()` plus `AudioContext.outputLatency` (falling back to `baseLatency`). **Known biases:** mic input latency (tens of ms) is not included, and some Android builds under-report `outputLatency` (the page falls back to `baseLatency`). Both make the measured number slightly *optimistic*, so treat a median within 100 ms of 2.0 s as marginal in the report. The gate counts only turns that are `route=fast`, not a fast path, not escalated, **not degraded**, `vad_reason=silence`, and not aborted. An eligible turn with no audio counts as a **failure**. The 20 questions ship as data, and a test pins every one to the fast route. | The spec's §9 metric, with its validity edges made explicit, so the gate cannot pass on turns that never exercised the budgeted path. |
 | R9 | The kiosk announce token is minted by the kiosk routes module at gateway boot, through new `local-token.js` helpers of the board-token shape: hash in a local-scope setting, raw value in `$CROW_HOME/kiosk-announce-token` mode 0600. `/api/kiosk/internal/*` requires a **direct loopback socket with no `tailscale-*`, `x-forwarded-for` or `forwarded` header**, plus the bearer. | Serve traffic also arrives from 127.0.0.1. Only the headers tell it apart from the MCP child. |
 | R10 | The admin API (`/api/kiosk/admin/*`) is `dashboardAuth` + `csrfMiddleware`, and the panel client sends `X-Crow-Csrf`. | Panel `/api/*` routes get no CSRF today. Approving a pairing is the security-critical action. |
 | R11 | A kiosk **requires a bound, enabled bot**: approval must pick one. There is no `ai_profile` fallback. A turn with no bot speaks/captions `no_bound_bot`. | D4/D14. This also keeps an owner's default profile off a household screen. |
@@ -143,9 +143,12 @@ These are the conditions the spec implies but does not spell out, ordered by how
 | R14 | Escalated turns start the 35B through `maybeAcquireLocalProvider` **in the background** and probe `GET /models` every 500 ms for up to 8 s. A `ReservedError` or `ServingClassError` falls back at once. | §7.2. `maybeAcquireLocalProvider` blocks until the model is ready, so awaiting it would break the 8 s promise. |
 | R15 | K1 keeps the glasses `pcmStream` behaviour: it buffers each sentence's synthesis, then sends. | It is proven, and a browser plays a whole sentence buffer cleanly. If the gate is missed, levers 1–3 come first (spec order). Unbuffered streaming is recorded as a follow-up, not a K1 lever. |
 | R16 | Stripping the memory category also removes `crow_create_notification` and the schedule tools, because they are in `TOOL_MANIFESTS.memory`. | Spec-faithful (§7.1). Kiosk timers are `crow_wm` timers. Reminders by voice come with `memory_integration:true`, or with a K3 decision. |
+| R21 | Kiosk turns pass `denyTools: ["crow_delegate", "crow_job_status"]`. The tools are not advertised, and a forced call is refused by the turn's gate. | Review C3: `crow_delegate`'s `bot` argument reaches any enabled bot, and `crow_job_status` reads the result back. That would let a room bypass the bound bot's scope and the memory strip. |
+| R22 | The route decision ignores in-process display-tool turns (`crow_wm`). The system message is byte-stable, and live window state rides on the turn's own user message (`turnContext`), stripped from saved history. The degraded-model note joins the leading system message. `maxTokens` is clamped to the model's `contextLen` minus a prompt estimate. "Set/start a timer for …" is a no-LLM fast path. | Review C1/M5/M6/M8: Qwen templates reject a late system message; sticky tool context would push plain questions to a cold 35B; a 4,000-token bump overflows the 4B's 8,192 context; a changing system prompt defeats the prefix cache; "set a timer" matches no tool-intent word. |
+| R23 | Spec items deferred with their window kinds: `pause`/`resume` fast paths (§8.6) come with media windows (K3, R4). Long-press close-all (§8.5) **is** in K1. | Without a media window there is nothing to pause. |
 | R17 | K2 caveat, recorded and not built: if the Pi joins the tailnet as a **tagged** node, Serve sends no `Tailscale-User-Login`, and `isAllowedNetwork` would reject it as bare loopback. K2 must join it as a user node, or add a narrowly scoped rule. | Found while checking `isAllowedNetwork` for the WS path. |
 | R18 | The bird **wears its outfit** on the kiosk: `readPortrait` → `applyOutfit`. The SVG budget becomes ≤ 2,048 B undressed and ≤ 2,560 B fully dressed, both with hooks. | The wardrobe (#416) shipped after the spec. A fully dressed 0.13.0 bird is already 2,128 B, so spec §9's 2 KB figure cannot hold for dressed birds. Node count and CSS-only animation are what cost on a Pi 3. |
-| R19 | The display's bird comes from core `readPortrait(db)` (`servers/sharing/profile-avatar.js`), not a kiosk copy of Ramble's SQL. That gives the decay-on-read mood (the contacts portrait uses the same function) and the outfit, and it never throws. With no hatched bird, the default crow is species `crow`, seed `0`, `happy`. | One mood source. Spec §5's `ramble_pet.mood` column does not exist; mood is derived from energy + `last_fed_at`. |
+| R19 | The display's bird comes from core `readPortrait(db)` (`servers/sharing/profile-avatar.js`), not a kiosk copy of Ramble's SQL. That gives the decay-on-read mood (the contacts portrait uses the same function) and the outfit, and it never throws. With no hatched bird, the default crow is species `crow`, seed `0`, `happy`. | One mood source. `ramble_pet.mood` exists (`init-tables.js:104`), but it is not decayed on read. `readPortrait` derives the mood from energy + `last_fed_at`, exactly as `petState` and the contacts portrait do. |
 | R20 | `kiosk_settings.vad_hangover_ms` (300–1200, default 600) is the switch for latency lever 1. The page reads it from `display_config`. The panel does not expose it; the smoke applies it through the admin API if the gate is missed. | Spec §9 requires the levers to be applicable and reported. A lever that needs a code change mid-window is not one. |
 
 ---
@@ -204,6 +207,7 @@ servers/shared/device-store.js
   verifyToken(db, id, token, {kind?, now?}) → Device|null
   updateDeviceProfiles(db, id, patch) → Device|null      // patch may carry kiosk_settings (merged+validated)
   tokenHash(token, kind) → hex
+  unbindBotFromOtherDevices(db, botId, keepId) → {unbound}        // skips kiosk displays (Bot Builder save)
   normalizeKioskSettings(input, prior?) → KioskSettings
   KIOSK_DEFAULTS, DEVICE_KINDS, LAST_SEEN_WRITE_MS (300000)
 
@@ -220,15 +224,16 @@ servers/gateway/voice/turn.js
   opts = { db, device, audio?:Buffer(WAV), transcript?:string, sink:{event(obj), audio(Buffer)},
            extraTools?: [{definition:{name,description,inputSchema}, execute(args) → Promise<string>}],
            fastPaths?: (transcript) → Promise<{say?:string, events?:object[]}|null>,
-           promptSuffix?: string, signal?: AbortSignal }
+           promptSuffix?: string, turnContext?: string, denyTools?: string[], signal?: AbortSignal }
   TurnResult = { transcript, route:"fast"|"escalate"|null, fastPath, escalated, degraded:null|string, aborted,
                  timings:{stt_ms?, llm_first_token_ms?, tts_first_chunk_ms?, total_ms} }
 
 bundles/kiosk/server/wm.js
   createWmStore({now, setTimer, clearTimer, onTimerDone, maxWindows}) → WmStore
   createWmTool({store, deviceId, caps, emit}) → {definition, execute}
-  matchWmFastPath(transcript, store, deviceId) → {say, events}|null
-  kioskPromptSuffix(store, deviceId) → string
+  matchWmFastPath(transcript, store, deviceId, caps?) → {say, events}|null
+  kioskPromptSuffix() → string            // static
+  kioskTurnContext(store, deviceId) → string   // live, rides on the turn's user message
   normalizeCaps(raw) → {windows:string[], iframe:false, max_windows:int}
 ```
 
@@ -299,9 +304,43 @@ test("kiosk pairing stores a domain-separated hash and a default kiosk_settings"
   assert.equal(device.device_kind, "kiosk");
   assert.deepEqual(device.kiosk_settings, store.KIOSK_DEFAULTS);
   const raw = await store.findDevice(db, "kiosk-a");
-  assert.equal(raw.token_hash, createHash("sha256").update("crow-kiosk-v1:" + token).digest("hex"));
-  assert.notEqual(raw.token_hash, createHash("sha256").update(token).digest("hex"));
+  const sha = (x) => createHash("sha256").update(x).digest("hex");
+  assert.equal(raw.kiosk_token_hash, sha("crow-kiosk-v1:" + token));
+  assert.match(raw.token_hash, /^[0-9a-f]{64}$/, "a sentinel in token_hash, so old readers see a well-formed record");
+  assert.notEqual(raw.token_hash, sha(token));
+  assert.notEqual(raw.token_hash, sha("crow-kiosk-v1:" + token));
   assert.equal(token.length, 64);
+  assert.ok(!("kiosk_token_hash" in device) && !("token_hash" in device), "pair result is redacted");
+  assert.ok((await store.listDevices(db)).every((d) => !("kiosk_token_hash" in d) && !("token_hash" in d)));
+});
+
+/** main's meta-glasses verifyToken, verbatim in substance: sha256(caller string) vs token_hash. */
+async function oldGlassesVerify(db, id, token) {
+  const r = (await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: ["meta_glasses_devices"] })).rows[0];
+  const d = JSON.parse(r?.value || "[]").find((x) => x.id === id);
+  if (!d) return null;
+  const a = Buffer.from(d.token_hash, "hex"), b = Buffer.from(createHash("sha256").update(String(token)).digest("hex"), "hex");
+  return a.length === b.length && a.equals(b) ? d : null;
+}
+
+test("an INSTALLED old glasses store refuses a kiosk token, plain or domain-prefixed (review C2)", async () => {
+  const db = await freshDb();
+  const { token } = await store.pairDevice(db, { id: "kiosk-a", name: "K", device_kind: "kiosk" });
+  assert.equal(await oldGlassesVerify(db, "kiosk-a", token), null);
+  assert.equal(await oldGlassesVerify(db, "kiosk-a", "crow-kiosk-v1:" + token), null);
+  const g = await store.pairDevice(db, { id: "g1", name: "G" });
+  assert.ok(await oldGlassesVerify(db, "g1", g.token), "glasses still verify through the old path");
+});
+
+test("Bot Builder's unbind-others never strands a kiosk display (review M7)", async () => {
+  const db = await freshDb();
+  await store.pairDevice(db, { id: "kiosk-a", name: "K", device_kind: "kiosk" });
+  await store.pairDevice(db, { id: "g1", name: "G" });
+  await store.pairDevice(db, { id: "g2", name: "G2" });
+  for (const id of ["kiosk-a", "g1", "g2"]) await store.updateDeviceProfiles(db, id, { bound_bot_id: "house" });
+  assert.deepEqual(await store.unbindBotFromOtherDevices(db, "house", "g2"), { unbound: 1 });
+  const by = Object.fromEntries((await store.listDevices(db)).map((d) => [d.id, d.bound_bot_id]));
+  assert.deepEqual(by, { "kiosk-a": "house", g1: null, g2: "house" });
 });
 
 test("a kiosk token verifies ONLY when the caller asks for a kiosk", async () => {
@@ -487,10 +526,31 @@ async function writeAll(db, devices) {
   });
 }
 
-/** List paired devices (token_hash redacted). */
+/** A record without either token hash. */
+function redact(record) {
+  const { token_hash, kiosk_token_hash, ...rest } = record;
+  return rest;
+}
+
+/** List paired devices (hashes redacted). */
 export async function listDevices(db) {
   const devices = await readAll(db);
-  return devices.map(({ token_hash, ...rest }) => rest);
+  return devices.map(redact);
+}
+
+/**
+ * Bot Builder's one-device-per-bot rule: unbind every OTHER device bound to
+ * botId — but never a kiosk display (a household display shares the bot by
+ * design; saving a bot's glasses/companion gateway must not strand it).
+ */
+export async function unbindBotFromOtherDevices(db, botId, keepId) {
+  const devices = await readAll(db);
+  let changed = 0;
+  for (const d of devices) {
+    if (d.bound_bot_id === botId && d.id !== keepId && (d.device_kind || "glasses") !== "kiosk") { d.bound_bot_id = null; changed++; }
+  }
+  if (changed) await writeAll(db, devices);
+  return { unbound: changed };
 }
 
 /** Find a device by id. Returns the raw record including token_hash. */
@@ -518,7 +578,11 @@ export async function pairDevice(db, {
   if (!id) throw new Error("device id required");
   const kind = KIND_VALUES.has(device_kind) ? device_kind : "glasses";
   const token = randomBytes(32).toString("hex");
-  const token_hash = tokenHash(token, kind);
+  // Kiosk (ruling R2): the real hash lives in kiosk_token_hash; token_hash gets
+  // 32 random bytes that are the hash of NOTHING anyone holds, so every older
+  // verifier (an installed meta-glasses copy compares sha256(<whatever string
+  // the caller sends>) to token_hash) refuses a kiosk token — prefixed or not.
+  const token_hash = kind === "kiosk" ? randomBytes(32).toString("hex") : tokenHash(token, kind);
   const devices = await readAll(db);
   const now = new Date().toISOString();
   const existing = devices.findIndex((d) => d.id === id);
@@ -547,15 +611,17 @@ export async function pairDevice(db, {
     companion_features: companion_features ?? (prior ? prior.companion_features ?? null : null),
     bound_bot_id: prior ? (prior.bound_bot_id ?? null) : null,
   };
-  if (kind === "kiosk") record.kiosk_settings = normalizeKioskSettings(kiosk_settings, prior?.kiosk_settings);
+  if (kind === "kiosk") {
+    record.kiosk_token_hash = tokenHash(token, "kiosk");
+    record.kiosk_settings = normalizeKioskSettings(kiosk_settings, prior?.kiosk_settings);
+  }
   if (existing >= 0) devices[existing] = record;
   else devices.push(record);
   await writeAll(db, devices);
   try {
     await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [UNPAIR_KEY_PREFIX + id] });
   } catch {}
-  const { token_hash: _h, ...pub } = record;
-  return { device: pub, token };
+  return { device: redact(record), token };
 }
 
 /** Unpair a device by id. */
@@ -594,15 +660,15 @@ export async function verifyToken(db, id, token, opts = {}) {
   const record = devices[idx];
   const kind = record.device_kind || "glasses";
   if (opts.kind ? kind !== opts.kind : kind === "kiosk") return null;
-  if (!constantTimeEqual(record.token_hash, tokenHash(String(token), kind))) return null;
+  const stored = kind === "kiosk" ? record.kiosk_token_hash : record.token_hash;
+  if (!constantTimeEqual(stored, tokenHash(String(token), kind))) return null;
   const last = record.last_seen ? Date.parse(record.last_seen) : NaN;
   if (!Number.isFinite(last) || now - last >= LAST_SEEN_WRITE_MS) {
     record.last_seen = new Date(now).toISOString();
     devices[idx] = record;
     await writeAll(db, devices);
   }
-  const { token_hash, ...rest } = record;
-  return rest;
+  return redact(record);
 }
 
 /** Update overrides on a device. device_kind can never be switched to or from "kiosk" (token hash domain). */
@@ -634,8 +700,7 @@ export async function updateDeviceProfiles(db, id, patch) {
   }
   devices[idx] = cur;
   await writeAll(db, devices);
-  const { token_hash, ...rest } = cur;
-  return rest;
+  return redact(cur);
 }
 ```
 
@@ -669,11 +734,11 @@ const core = await import(pathToFileURL(target).href);
 
 export const {
   listDevices, findDevice, pairDevice, unpairDevice, verifyToken, updateDeviceProfiles,
-  tokenHash, normalizeKioskSettings, KIOSK_DEFAULTS, DEVICE_KINDS, LAST_SEEN_WRITE_MS,
+  tokenHash, normalizeKioskSettings, unbindBotFromOtherDevices, KIOSK_DEFAULTS, DEVICE_KINDS, LAST_SEEN_WRITE_MS,
 } = core;
 ```
 
-No meta-glasses version bump. Crow's installed glasses copy keeps its own full old store, which reads the same JSON. Ruling R2 makes kiosk records unverifiable through it, and its `verifyToken`/`updateDeviceProfiles` spread whole records, so `kiosk_settings` survive its writes.
+No meta-glasses version bump. An instance with meta-glasses installed (grackle today; crow does not have it) keeps its own full old store, which reads the same JSON. Ruling R2 makes kiosk records unverifiable through it: the sentinel `token_hash` is tested against main's old algorithm. Its `verifyToken`/`updateDeviceProfiles` spread whole records, so `kiosk_token_hash`/`kiosk_settings` survive its writes.
 
 - [ ] **Step 5: Repoint the core importers**
 
@@ -681,6 +746,14 @@ In each of these files, replace `"../../../../../bundles/meta-glasses/server/dev
 - `servers/gateway/dashboard/panels/bot-builder/api-handlers.js` (3 sites)
 - `servers/gateway/dashboard/panels/bot-builder/editor.js` (2)
 - `servers/gateway/dashboard/panels/bot-builder/delete-bot.js` (2)
+
+Also, in `api-handlers.js`, replace **both** "unbind any OTHER device currently bound to this bot" loops (the glasses branch and the companion branch: `for (const d of devices) { if (d.bound_bot_id === botId && d.id !== deviceId) await updateDeviceProfiles(db, d.id, { bound_bot_id: "" }); }`, plus the `listDevices` call that feeds it) with:
+
+```js
+            await unbindBotFromOtherDevices(db, botId, deviceId);   // skips kiosk displays (review M7)
+```
+
+Add `unbindBotFromOtherDevices` to that branch's import. `delete-bot.js` keeps unbinding **every** device of a deleted bot, kiosks included: a display whose bot is gone must show `no_bound_bot`.
 
 ```bash
 cd ~/crow-wt-kiosk-k1
@@ -927,10 +1000,13 @@ test("conversation store: 24-message cap, 15-min idle reset, system dropped, nev
   const s = H.createConvoStore({ now: () => t });
   const msgs = [{ role: "system", content: "x" }];
   for (let i = 0; i < 20; i++) msgs.push({ role: "user", content: "u" + i }, { role: "assistant", content: "", tool_calls: "[]" }, { role: "tool", content: "r" });
+  msgs.push({ role: "user", content: "last" }, { role: "assistant", content: "ok" });
+  // 62 non-system messages: the plain last-24 window would START on a tool result (index 38 = tool).
   s.save("d", msgs);
   const kept = s.get("d");
-  assert.ok(kept.length <= 24);
+  assert.equal(kept.length, 23, "the orphan tool result at the window's head is trimmed");
   assert.equal(kept[0].role, "user");
+  assert.equal(kept.at(-1).content, "ok");
   assert.ok(!kept.some((m) => m.role === "system"));
   t = 15 * 60 * 1000 + 1;
   assert.deepEqual(s.get("d"), []);
@@ -948,12 +1024,16 @@ test("pcmStream strips a header, passes the abort signal to synth, and yields no
   const out = [];
   for await (const c of H.pcmStream(adapter, "hi", "v", { synthFormat: undefined, stripHeaderBytes: 44 })) out.push(c);
   assert.equal(Buffer.concat(out).length, 12);
+  const live = new AbortController();
+  for await (const c of H.pcmStream(adapter, "hi", "v", H.negotiatePcm("kokoro"), { signal: live.signal })) out.push(c);
+  assert.equal(seen.at(-1).signal, live.signal, "the abort signal reaches the provider call");
+  assert.equal(seen.at(-1).format, "pcm");
   const ac = new AbortController(); ac.abort();
+  const calls = seen.length;
   const none = [];
   for await (const c of H.pcmStream(adapter, "hi", "v", H.negotiatePcm("kokoro"), { signal: ac.signal })) none.push(c);
   assert.equal(none.length, 0);
-  assert.equal(seen.at(-1).signal, ac.signal);
-  assert.equal(seen.at(-1).format, "pcm");
+  assert.equal(seen.length, calls, "an already-aborted turn never calls the provider");
 });
 
 test("wrapPcmAsWav writes a 44-byte RIFF header for 16 kHz mono s16", () => {
@@ -1218,7 +1298,7 @@ function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { 
 function scriptedChat(rounds, log, state) {
   return {
     async *chatStream(messages, tools, opts) {
-      log.push({ messages: messages.map((m) => ({ ...m })), tools: tools.map((t) => t.name), opts });
+      log.push({ messages: messages.map((m) => ({ ...m })), tools: tools.map((t) => t.name), opts, systemAfterZero: messages.slice(1).some((m) => m.role === "system") });
       const events = rounds[state.i++] || [{ type: "done" }];
       for (const ev of events) { if (opts.signal?.aborted) return; log.pulls = (log.pulls || 0) + 1; yield ev; }
     },
@@ -1228,11 +1308,11 @@ function scriptedChat(rounds, log, state) {
 function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capital. " }, { type: "done" }]], route = "fast",
   bot = { bot_id: "household", display_name: "House", fast_voice_model: "crow-voice/qwen3.5-4b" },
   chatTools = ["crow_memory", "crow_projects", "crow_glasses_capture_photo", "crow_delegate"], probe = () => false, acquire = async () => null,
-  ttsName = "kokoro" } = {}) {
+  ttsName = "kokoro", ctx = null } = {}) {
   const c = clock();
   const log = [];
   const state = { i: 0 };
-  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [] };
+  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [] };
   const deps = {
     now: c.now, sleep: async (ms) => { calls.sleeps++; await c.sleep(ms); },
     loadBotRow: async (db, id) => (bot && id === bot.bot_id ? { bot_id: bot.bot_id, enabled: 1, definition: JSON.stringify(bot) } : null),
@@ -1244,7 +1324,8 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
     resolveKey: async (key) => ({ baseUrl: "http://esc", model: key }),
     acquire: async (p) => { calls.acquired.push(p); return acquire(p); },
     probeReady: async () => probe(),
-    chooseVoiceRoute: () => (route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
+    contextLenFor: async () => ctx,
+    chooseVoiceRoute: (msgs) => (calls.routed.push(msgs.map((m) => m.role)), route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
     fastKey: "crow-voice/qwen3.5-4b",
     getChatTools: () => chatTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
     createToolExecutor: () => ({ executeToolCalls: async (tcs) => { calls.executed.push(...tcs.map((t) => t.name)); return tcs.map((t) => ({ id: t.id, name: t.name, result: "ok" })); }, close: async () => {} }),
@@ -1306,14 +1387,15 @@ test("barge-in: abort stops the LLM stream and TTS at once (no further pulls, no
   const ac = new AbortController();
   const h = harness({ rounds: [[{ type: "content_delta", text: "First. " }, { type: "content_delta", text: "Second. " }, { type: "content_delta", text: "Third. " }, { type: "done" }]] });
   const origAudio = h.sink.audio;
-  h.sink.audio = (b) => { origAudio(b); ac.abort(); };
-  const t0 = h.c.now();
+  let tAbort = 0;
+  h.sink.audio = (b) => { origAudio(b); tAbort = performance.now(); ac.abort(); };
   const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "go", sink: h.sink, signal: ac.signal });
+  const tDone = performance.now();
   assert.equal(r.aborted, true);
   assert.equal(h.audio.length, 1, "only the first sentence's audio left the server");
   assert.ok(h.log.pulls <= 2, `stream stopped after abort (pulls=${h.log.pulls})`);
   assert.equal(h.log[0].opts.signal, ac.signal, "the abort signal reaches the provider fetch");
-  assert.ok(h.c.now() - t0 < 100, "no waiting on a fake clock: abort is observed within 100 ms");
+  assert.ok(tDone - tAbort < 100, `the turn returned ${Math.round(tDone - tAbort)} ms after the abort (real clock; spec: within 100 ms)`);
 });
 
 test("cold escalation target: filler first, then fall back to the fast model after 8 s", async () => {
@@ -1325,7 +1407,8 @@ test("cold escalation target: filler first, then fall back to the fast model aft
   assert.deepEqual(h.calls.acquired, ["crow-chat"]);
   assert.ok(h.c.now() >= 1_000 + ESCALATION_READY_TIMEOUT_MS);
   assert.deepEqual(h.calls.chatKeys, ["crow-voice/qwen3.5-4b"]);
-  assert.match(h.log[0].messages.at(-1).content, /larger model is not available/);
+  assert.match(h.log[0].messages[0].content, /larger model is not available/, "the note joins the leading system message");
+  assert.ok(h.log.every((l) => !l.systemAfterZero), "no system message after index 0 in any request (Qwen templates reject it — review C1)");
 });
 
 test("escalation target ready on the second probe → escalated turn on the 35B", async () => {
@@ -1376,6 +1459,37 @@ test("no bound bot → error no_bound_bot, nothing spoken", async () => {
   await h.runner.runVoiceTurn({ db: {}, device: { ...h.device, bound_bot_id: null }, transcript: "hi", sink: h.sink });
   assert.ok(h.events.some((e) => e.type === "error" && e.code === "no_bound_bot"));
   assert.deepEqual(h.calls.spoken, []);
+});
+
+test("denyTools: crow_delegate/crow_job_status are not advertised and a forced call never runs (review C3)", async () => {
+  const h = harness({ rounds: [[{ type: "tool_call", id: "d1", name: "crow_delegate", arguments: { goal: "search Kevin's memories", bot: "kevin-personal" } }, { type: "done" }], [{ type: "content_delta", text: "I can't do that here." }, { type: "done" }]],
+    chatTools: ["crow_projects", "crow_delegate", "crow_job_status"] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delegate", sink: h.sink, denyTools: ["crow_delegate", "crow_job_status"] });
+  assert.deepEqual(h.log[0].tools, ["crow_projects"]);
+  assert.deepEqual(h.calls.executed, []);
+  assert.match(h.log[1].messages.at(-1).content, /not available on this display/);
+});
+
+test("routing ignores in-process display-tool turns; turnContext rides on the request only (review M5/M6)", async () => {
+  const extra = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async () => '{"ok":true}' };
+  const h = harness({ rounds: [[{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "timer 2 minutes tea" } }, { type: "done" }], [{ type: "content_delta", text: "Set." }, { type: "done" }], [{ type: "content_delta", text: "Lisbon." }, { type: "done" }]] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink, extraTools: [extra], turnContext: "Open windows: none." });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, extraTools: [extra], turnContext: "Open windows: timer 'Tea' 1:59 left." });
+  assert.ok(!h.calls.routed[1].includes("tool"), "the crow_wm round-trip is invisible to the router");
+  assert.match(h.log.at(-1).messages.at(-1).content, /^Open windows: timer 'Tea' 1:59 left\.\n\ncapital of Portugal\?$/);
+  assert.equal(h.log.at(-1).messages[0].content, h.log[0].messages[0].content, "system message byte-stable across turns");
+  const saved = h.runner.convo.get("kiosk-a").filter((m) => m.role === "user").map((m) => m.content);
+  assert.deepEqual(saved, ["set a timer", "capital of Portugal?"], "saved history has plain transcripts");
+});
+
+test("maxTokens is clamped to the model's context minus the prompt estimate (review M6)", async () => {
+  const h = harness({ ctx: 500 });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink });
+  const m = h.log[0].opts.maxTokens;
+  assert.ok(m >= 64 && m < 400, `maxTokens ${m} for a 500-token context`);
+  const big = harness({ ctx: null });
+  await big.runner.runVoiceTurn({ db: {}, device: big.device, transcript: "hi", sink: big.sink });
+  assert.equal(big.log[0].opts.maxTokens, 600, "unknown context → the glasses default");
 });
 
 test("Edge (no PCM path) sends ONE mp3 buffer per sentence", async () => {
@@ -1561,21 +1675,36 @@ export function createVoiceTurnRunner(deps) {
       const memoryOn = device.kiosk_settings?.memory_integration === true;
       const extra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
       const extraByName = new Map(extra.map((x) => [x.definition.name, x]));
+      // denyTools (kiosk: crow_delegate, crow_job_status — review C3): never advertised AND
+      // refused by the gate below even if force-called, so a room cannot hand work to
+      // another bot (crow_delegate's `bot` arg accepts ANY enabled bot) or read it back.
+      const deny = new Set(["crow_glasses_capture_photo", ...(Array.isArray(opts.denyTools) ? opts.denyTools : [])]);
       const tools = deps.getChatTools({ botDef: bot })
-        .filter((t) => t.name !== "crow_glasses_capture_photo" && (memoryOn || t.name !== "crow_memory") && !extraByName.has(t.name))
+        .filter((t) => !deny.has(t.name) && (memoryOn || t.name !== "crow_memory") && !extraByName.has(t.name))
         .concat(extra.map((x) => x.definition));
       executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
       const system = await deps.generateSystemPrompt({ botDef: bot });
+      // The system message stays byte-stable turn to turn (vLLM prefix cache, review M6);
+      // live state (e.g. open windows) rides on THIS turn's user message only and is
+      // dropped from the saved conversation.
+      const userMsg = { role: "user", content: opts.turnContext ? `${opts.turnContext}\n\n${transcript}` : transcript };
       const messages = [
         { role: "system", content: opts.promptSuffix ? `${system}\n\n${opts.promptSuffix}` : system },
         ...convo.get(device.id),
-        { role: "user", content: transcript },
+        userMsg,
       ];
 
-      // 4. Route
-      const decision = deps.chooseVoiceRoute(messages, { hasTools: tools.length > 0 });
+      // 4. Route — on a view WITHOUT in-process display-tool turns (review M5): a
+      // crow_wm timer must not make the next 2-3 plain questions "recent tool context"
+      // and send them to the (possibly cold) 35B.
+      const isExtraCall = (m) => {
+        if (m.role === "tool") return extraByName.has(m.tool_name);
+        if (m.role !== "assistant" || !m.tool_calls) return false;
+        try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name)); } catch { return false; }
+      };
+      const decision = deps.chooseVoiceRoute(messages.filter((m) => !isExtraCall(m)), { hasTools: tools.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -1583,7 +1712,9 @@ export function createVoiceTurnRunner(deps) {
         const ready = await readyEscalation(decision.key, db, signal);
         await filler;
         if (ready.adapter) { chat = ready.adapter; result.route = "escalate"; result.escalated = true; }
-        else { result.degraded = ready.reason; messages.push({ role: "system", content: DEGRADED_NOTE }); }
+        // Qwen chat templates reject a system message anywhere but first (review C1):
+        // the note joins the leading system message.
+        else { result.degraded = ready.reason; messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${DEGRADED_NOTE}` }; }
       }
       if (aborted()) { result.aborted = true; return result; }
 
@@ -1593,6 +1724,7 @@ export function createVoiceTurnRunner(deps) {
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
       const policyGate = (tc) => {
         const eff = deps.effectiveToolName(tc);
+        if (deny.has(eff) || deny.has(tc.name)) return `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`;
         if (!memoryOn && deps.isMemoryTool(eff)) return MEMORY_OFF;
         if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
           return `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`;
@@ -1619,7 +1751,12 @@ export function createVoiceTurnRunner(deps) {
         const calls = [];
         const roundMax = nextMax;
         nextMax = 600;
-        for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMax, chatTemplateKwargs: { enable_thinking: false }, signal })) {
+        // Keep prompt + completion inside the model's context (review M6: the 4B is 8192;
+        // tool schemas alone are ~5k tokens). ~3.2 chars/token is a deliberate over-estimate.
+        const ctx = await deps.contextLenFor(result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey), db);
+        const estPrompt = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.2);
+        const maxTokens = ctx ? Math.max(64, Math.min(roundMax, ctx - estPrompt - 128)) : roundMax;
+        for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal })) {
           if (aborted()) break;
           if (ev.type === "content_delta" && ev.text) {
             mark("llm_first_token_ms");
@@ -1661,6 +1798,8 @@ export function createVoiceTurnRunner(deps) {
       if (!aborted()) await chunker.flush();
       if (aborted()) result.aborted = true;
       say.end();
+      const userIdx = messages.indexOf(userMsg);
+      if (userIdx >= 0) messages[userIdx] = { role: "user", content: transcript };
       convo.save(device.id, messages);
       return result;
     } catch (err) {
@@ -1730,6 +1869,14 @@ export async function defaultVoiceDeps() {
     botVoiceScope: tx.botVoiceScope,
     generateSystemPrompt: sp.generateSystemPrompt,
     isMemoryTool: (n) => n === "crow_memory" || memoryTools.has(n),
+    contextLenFor: async (key, db) => {
+      try {
+        const i = String(key).indexOf("/");
+        const row = (await db.execute({ sql: "SELECT models FROM providers WHERE id = ?", args: [i >= 0 ? key.slice(0, i) : key] })).rows[0];
+        const m = JSON.parse(row?.models || "[]").find((x) => x && (x.id === key.slice(i + 1) || i < 0));
+        return Number.isFinite(m?.contextLen) ? m.contextLen : null;
+      } catch { return null; }
+    },
   };
 }
 ```
@@ -2316,7 +2463,9 @@ export function createPairingStore({ now = Date.now, randomInt = nodeRandomInt, 
   function start({ ip, ua, login, nameHint }) {
     sweep();
     const t = now();
-    const key = String(ip || "?");
+    // Rate-limit key: the Serve-asserted Tailscale identity when present (a direct
+    // LAN/tailnet client could forge X-Forwarded-For and so req.ip — review m3), else the IP.
+    const key = String(login || ip || "?");
     const hits = startHits.get(key) || [];
     if (hits.length >= START_LIMIT_PER_MIN) return { error: "rate_limited", status: 429 };
     hits.push(t);
@@ -2330,7 +2479,7 @@ export function createPairingStore({ now = Date.now, randomInt = nodeRandomInt, 
     const pair_id = randomBytes(16).toString("hex");
     const poll_secret = randomBytes(32).toString("hex");
     pending.set(pair_id, {
-      pair_id, code, pollHash: sha(poll_secret), ip: key,
+      pair_id, code, pollHash: sha(poll_secret), ip: String(ip || "?"),
       ua: String(ua || "").slice(0, 200), login: login ? String(login).slice(0, 128) : null,
       name_hint: String(nameHint || "").slice(0, 64),
       created: t, expires: t + PAIR_TTL_MS, claimed: false, result: null,
@@ -2461,8 +2610,8 @@ git commit bundles/kiosk/server/pairing.js servers/gateway/local-token.js tests/
   - `contentBlocks(title, body) → Block[]`;
   - `createWmStore({now, setTimer, clearTimer, onTimerDone, maxWindows}) → { list(dev), open(dev, win) → {window, evicted[]}, close(dev, id) → win|null, closeKind(dev, kind, name?) → win|null, closeAll(dev) → win[], focus(dev, id), step(dev, delta) → recipe|null, focused(dev), sweepIdle(dev) → win[], describe(dev) → string }`;
   - `createWmTool({store, deviceId, caps, emit}) → {definition, execute(args) → Promise<string>}`;
-  - `matchWmFastPath(transcript, store, deviceId) → {say, events}|null`;
-  - `kioskPromptSuffix(store, deviceId) → string`.
+  - `matchWmFastPath(transcript, store, deviceId, caps?) → {say, events}|null` (controls + timer open);
+  - `kioskPromptSuffix() → string` (static) and `kioskTurnContext(store, deviceId) → string` (live, per turn).
 
   Window shapes:
   - `{id, kind:"timer", title, name, ends_at, done, opened_at, touched_at}`
@@ -2576,6 +2725,17 @@ test("fast paths: only when the target exists; close/close-all/stop timer", asyn
   assert.equal(W.matchWmFastPath("what is a close call", s.store, "k"), null);
 });
 
+test("timer fast path: a spoken 'set a timer' opens it with no LLM; caps respected", () => {
+  const s = setup();
+  const fp = W.matchWmFastPath("Set a timer for 2 minutes called tea.", s.store, "k");
+  assert.equal(fp.say, "Timer set for Tea: 2 minutes.");
+  assert.equal(fp.events.at(-1).action, "open");
+  assert.equal(s.store.list("k")[0].ends_at, 120_000);
+  assert.equal(W.matchWmFastPath("start a timer for an hour", s.store, "k").say, "Timer set: 1 hour.");
+  assert.equal(W.matchWmFastPath("set a timer for 2 minutes", s.store, "k", { windows: ["recipe"] }), null);
+  assert.equal(W.matchWmFastPath("how long is a timer", s.store, "k"), null);
+});
+
 test("at most 4 windows: the oldest non-timer is evicted and a close is emitted", async () => {
   const s = setup();
   await s.run("timer 9 minutes a");
@@ -2592,9 +2752,10 @@ test("idle sweep closes untouched non-timer windows after 10 min; prompt suffix 
   await s.run("display Notes | hi");
   s.ft.advance(W.IDLE_CLOSE_MS);
   assert.deepEqual(s.store.sweepIdle("k").map((w) => w.title), ["Notes"]);
-  const p = W.kioskPromptSuffix(s.store, "k");
-  assert.match(p, /timer 'Pasta' 20:00 left/);
+  assert.match(W.kioskTurnContext(s.store, "k"), /^\[Display\] Open windows: timer 'Pasta' 20:00 left\.$/);
+  const p = W.kioskPromptSuffix();
   assert.ok(p.length <= 1200, `suffix ${p.length} chars`);
+  assert.equal(p, W.kioskPromptSuffix(), "static");
 });
 ```
 
@@ -2673,7 +2834,7 @@ export function parseKioskCommand(command) {
   if (/^(next|next step)$/.test(c)) return { op: "step", delta: 1 };
   if (/^(previous|previous step|back|go back|last step)$/.test(c)) return { op: "step", delta: -1 };
   if (/^(read|repeat) (the )?step$|^what'?s the step$/.test(c)) return { op: "step", delta: 0 };
-  m = raw.match(/^(?:set\s+(?:a\s+|an\s+)?)?timer\s+(?:for\s+)?([\s\S]+)$/i);
+  m = raw.match(/^(?:(?:set|start)\s+(?:a\s+|an\s+)?)?timer\s+(?:for\s+)?([\s\S]+)$/i);
   if (m) {
     const d = parseDuration(m[1]);
     if (!d || d.seconds < 1 || d.seconds > MAX_TIMER_S) return { op: "error", message: "Say how long, from 1 second to 24 hours, e.g. timer 10 minutes pasta." };
@@ -2787,9 +2948,10 @@ const COMMAND_HELP = {
 export function createWmTool({ store, deviceId, caps, emit }) {
   const c = normalizeCaps(caps);
   const lines = c.windows.map((k) => COMMAND_HELP[k]).join("\n");
+  const closes = ["close", ...c.windows.filter((k) => k !== "content").map((k) => `close ${k}`), "close all"].join(" / ");
   const definition = {
     name: "crow_wm",
-    description: `Show things on this display. Call it only when someone asks to see, time or follow something — never for ordinary questions.\nCommands:\n${lines}\n- close / close timer / close recipe / close all`,
+    description: `Show things on this display. Call it only when someone asks to see, time or follow something — never for ordinary questions.\nCommands:\n${lines}\n- ${closes}`,
     inputSchema: { type: "object", properties: { command: { type: "string", description: "One command from the list, e.g. timer 10 minutes pasta" } }, required: ["command"] },
   };
   async function execute(args) {
@@ -2834,19 +2996,41 @@ function normalizeUtterance(t) {
     .trim();
 }
 
-/** No-LLM fast paths (spec §8.6): only controls, and only when the target exists. */
-export function matchWmFastPath(transcript, store, deviceId) {
+function spokenDuration(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const part = (n, u) => (n ? `${n} ${u}${n === 1 ? "" : "s"}` : "");
+  return [part(h, "hour"), part(m, "minute"), part(s, "second")].filter(Boolean).join(" ");
+}
+
+/**
+ * No-LLM fast paths (spec §8.6): controls only when the target exists, plus
+ * "set/start a timer for <duration> [called <name>]" (review M8: "set a timer"
+ * matches no TOOL_INTENT_RE word, so without this the 4B must emit a tool call).
+ */
+export function matchWmFastPath(transcript, store, deviceId, caps) {
   const cmd = parseKioskCommand(normalizeUtterance(transcript));
+  if (cmd.op === "open" && cmd.window.kind === "timer" && normalizeCaps(caps).windows.includes("timer")) {
+    const { window, evicted } = store.open(deviceId, cmd.window);
+    return {
+      say: `Timer set${window.name !== "Timer" ? ` for ${window.name}` : ""}: ${spokenDuration(cmd.window.seconds)}.`,
+      events: [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window }],
+    };
+  }
   if (!["close", "close_all", "step"].includes(cmd.op)) return null;
   return applyControl(cmd, store, deviceId);
 }
 
-export function kioskPromptSuffix(store, deviceId) {
+/** Static (byte-stable, prefix-cacheable) kiosk instructions for the system message. */
+export function kioskPromptSuffix() {
   return [
     "You are speaking through a shared home display to whoever is in the room. Reply in one to three short spoken sentences of plain prose: no markdown, no lists, no emoji.",
     "Use the crow_wm tool only when someone asks to see, time or follow something (a timer, a recipe, something to read); never for ordinary questions.",
-    store.describe(deviceId),
   ].join("\n");
+}
+
+/** Live display state for THIS turn's user message (never the system message — review M6). */
+export function kioskTurnContext(store, deviceId) {
+  return `[Display] ${store.describe(deviceId)}`;
 }
 ```
 
@@ -3035,6 +3219,9 @@ test("unpair closes the live session 4401 unpaired; wm_event dismissed closes se
   ws.text({ type: "wm_event", id: window.id, kind: "dismissed" });
   assert.equal(wm.list("kiosk-a").length, 0);
   assert.ok(ws.msgs().some((m) => m.type === "wm" && m.action === "close" && m.id === window.id));
+  wm.open("kiosk-a", { kind: "content", title: "A", blocks: [] }); wm.open("kiosk-a", { kind: "content", title: "B", blocks: [] });
+  ws.text({ type: "wm_event", kind: "close_all" });
+  assert.equal(wm.list("kiosk-a").length, 0, "long-press close-all");
   h.closeDevice("kiosk-a", 4401, "unpaired");
   assert.deepEqual(ws.closed, { code: 4401, reason: "unpaired" });
   assert.equal(h.isConnected("kiosk-a"), false);
@@ -3055,9 +3242,12 @@ test("metrics: median/p90 count only fast, non-fast-path, non-escalated, silence
   const m = createMetricsStore();
   const add = (id, e2e, r = {}) => { m.serverTurn("d", id, { route: "fast", fastPath: false, escalated: false, aborted: false, timings: {}, ...r }); m.clientTurn("d", { turn_id: id, e2e_ms: e2e, vad_reason: r.vad || "silence" }); };
   [1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 3500].forEach((v, i) => add("t" + i, v));
-  add("x1", 9000, { escalated: true }); add("x2", 9000, { fastPath: true }); add("x3", 9000, { vad: "max" }); add("x4", 9000, { route: "escalate" });
+  add("x1", 9000, { escalated: true }); add("x2", 9000, { fastPath: true }); add("x3", 9000, { vad: "max" }); add("x4", 9000, { route: "escalate" }); add("x5", 900, { degraded: "cold_timeout" });
   const s = m.summary("d");
-  assert.equal(s.n, 10); assert.equal(s.median_ms, 1900); assert.equal(s.p90_ms, 2600);
+  assert.equal(s.n, 10); assert.equal(s.median_ms, 1900); assert.equal(s.p90_ms, 2600); assert.equal(s.no_audio, 0);
+  add("silent", null);
+  const t = m.summary("d", { last: 20 });
+  assert.equal(t.n, 11); assert.equal(t.no_audio, 1); assert.equal(t.p90_ms, 3500, "a turn with no audio counts as a failure, not a gap");
 });
 ```
 
@@ -3071,13 +3261,13 @@ Expected: FAIL — module not found.
 ```js
 /** Per-device latency ring buffer (spec §9; ruling R8 decides which turns count toward the gate). */
 const REASONS = new Set(["silence", "max", "no_speech", "manual"]);
-const clampMs = (v) => (Number.isFinite(v) ? Math.max(0, Math.min(120_000, Math.round(v))) : null);
+const clampMs = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Math.max(0, Math.min(120_000, Math.round(Number(v)))) : null);
 
 export function sanitizeClientMetrics(m) {
   return {
     turn_id: String(m?.turn_id || "").slice(0, 64),
-    e2e_ms: clampMs(Number(m?.e2e_ms)),
-    output_latency_ms: clampMs(Number(m?.output_latency_ms)),
+    e2e_ms: clampMs(m?.e2e_ms),
+    output_latency_ms: clampMs(m?.output_latency_ms),
     vad_reason: REASONS.has(m?.vad_reason) ? m.vad_reason : null,
     source: m?.source === "wake" || m?.source === "tap" || m?.source === "follow_up" ? m.source : null,
   };
@@ -3115,10 +3305,16 @@ export function createMetricsStore({ max = 100 } = {}) {
       return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, vad_reason: c.vad_reason, source: c.source });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
-    summary(dev) {
-      const ok = [...(devs.get(dev)?.values() || [])].filter((r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.aborted && r.vad_reason === "silence" && Number.isFinite(r.e2e_ms));
-      const v = ok.map((r) => r.e2e_ms).sort((a, b) => a - b);
-      return { n: v.length, median_ms: median(v), p90_ms: percentile(v, 90) };
+    /**
+     * The gate view (ruling R8, review M5): the LAST `last` turns that exercised the
+     * budgeted path — fast route, no fast path, not escalated, NOT degraded (a cold
+     * fallback's first audio is the filler), not aborted, silence-ended. Such a turn
+     * with no audio (e2e null) is a FAILURE, counted as Infinity, never dropped.
+     */
+    summary(dev, { last = 20 } = {}) {
+      const ok = [...(devs.get(dev)?.values() || [])].filter((r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && r.vad_reason === "silence").slice(-last);
+      const v = ok.map((r) => (Number.isFinite(r.e2e_ms) ? r.e2e_ms : Infinity)).sort((a, b) => a - b);
+      return { n: v.length, no_audio: v.filter((x) => x === Infinity).length, median_ms: median(v), p90_ms: percentile(v, 90) };
     },
   };
 }
@@ -3258,6 +3454,7 @@ export function createSessionHub(deps) {
           const id = String(msg.id || "");
           if (msg.kind === "dismissed") { const w = deps.wm.close(device.id, id); if (w) sendJson(ws, { type: "wm", action: "close", id: w.id }); }
           else if (msg.kind === "tapped") deps.wm.focus(device.id, id);
+          else if (msg.kind === "close_all") { deps.wm.closeAll(device.id); sendJson(ws, { type: "wm", action: "close_all" }); }   // long-press (spec §8.5)
           return;
         }
         case "turn_metrics": {
@@ -3479,6 +3676,18 @@ test("a kiosk token is useless anywhere but the session: admin, internal, glasse
   assert.equal(await store.verifyToken(db(), "kiosk-z", token), null);
 });
 
+// If dashboardAuth reads a request field this stub lacks, ADD the field; never loosen the assertion.
+test("core dashboardAuth never treats a kiosk token as a credential (spec §13.1, hermetic half)", async () => {
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const { token } = await store.pairDevice(db(), { id: "kiosk-y", name: "Y", device_kind: "kiosk" });
+  let nexted = false;
+  const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, type() { return this; }, send() { return this; }, json() { return this; },
+    redirect() { this.statusCode = 302; return this; }, redirectAfterPost() { this.statusCode = 303; return this; }, setHeader() {}, getHeader() {}, cookie() {} };
+  await dashboardAuth({ headers: { "tailscale-user-login": "a@b", authorization: `Bearer ${token}` }, ip: "100.64.0.9", connection: { remoteAddress: "100.64.0.9" }, socket: { remoteAddress: "100.64.0.9" }, method: "GET", path: "/dashboard", originalUrl: "/dashboard", url: "/dashboard", query: {} }, res, () => { nexted = true; });
+  assert.equal(nexted, false);
+  assert.ok([302, 303, 401, 403].includes(res.statusCode), String(res.statusCode));
+});
+
 test("internal API: loopback + announce token; any forwarding/Tailscale header is refused", async () => {
   assert.equal((await fetch(base + "/api/kiosk/internal/displays")).status, 401);
   assert.equal((await fetch(base + "/api/kiosk/internal/displays", { headers: { Authorization: "Bearer ann-ok" } })).status, 200);
@@ -3598,7 +3807,7 @@ import { randomBytes } from "node:crypto";
 import { createPairingStore } from "./pairing.js";
 import { createSessionHub } from "./session.js";
 import { createMetricsStore } from "./metrics.js";
-import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, contentBlocks } from "./wm.js";
+import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks } from "./wm.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile } from "./profiles.js";
 import { STRINGS } from "./strings.js";
 
@@ -3613,6 +3822,9 @@ export const ASSETS = {
   "wm-view.js": "text/javascript", "bird-view.js": "text/javascript", "metrics.js": "text/javascript",
   "kiosk.css": "text/css",
 };
+
+/** Never on a shared display (review C3): crow_delegate's `bot` arg reaches ANY enabled bot. */
+export const KIOSK_DENY_TOOLS = Object.freeze(["crow_delegate", "crow_job_status"]);
 
 export function kioskThemeCss(T) {
   const vars = (o) => Object.entries(o).map(([k, v]) => `--k-${k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase())}:${v};`).join("");
@@ -3646,8 +3858,10 @@ export function createKioskRuntime(deps) {
     runTurn: ({ device, audio, sink, signal, caps }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal,
       extraTools: [createWmTool({ store: wm, deviceId: device.id, caps, emit: (ev) => sink.event(ev) })],
-      fastPaths: async (t) => matchWmFastPath(t, wm, device.id),
-      promptSuffix: kioskPromptSuffix(wm, device.id),
+      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps),
+      promptSuffix: kioskPromptSuffix(),
+      turnContext: kioskTurnContext(wm, device.id),
+      denyTools: KIOSK_DENY_TOOLS,
     })),
     speak: ({ device, text, sink }) => withDb((db) => deps.voice.speakText({ db, device, text, sink })),
     wm, metrics,
@@ -3693,6 +3907,8 @@ export function createKioskRuntime(deps) {
 
   function router(dashboardAuth) {
     const r = deps.Router();
+    // In the gateway the global 1 MB JSON parser runs first, so this limit only
+    // applies in tests; every handler caps its own fields (slice) regardless.
     const json = deps.json({ limit: "64kb" });
     const gate = (req, res, next) => {
       if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: "funnel_refused" });
@@ -3767,7 +3983,10 @@ export function createKioskRuntime(deps) {
           const id = "kiosk-" + randomBytes(6).toString("hex");
           const { token } = await deps.deviceStore.pairDevice(db, { id, name, device_kind: "kiosk", stt_profile_id: stt.id, tts_profile_id: tts ? tts.id : null });
           await deps.deviceStore.updateDeviceProfiles(db, id, { bound_bot_id: botId });
-          pairing.complete(c.pending.pair_id, { device_id: id, token });
+          if (!pairing.complete(c.pending.pair_id, { device_id: id, token })) {
+            await deps.deviceStore.unpairDevice(db, id);          // expired between claim and complete: no orphan device
+            return res.status(410).json({ error: "pairing_expired" });
+          }
           log(`[kiosk] paired ${id} "${name}" → bot ${botId} (requester ${c.pending.ip})`);
           res.json({ ok: true, device_id: id, tts: tts ? tts.name || tts.id : null });
         } catch (err) { pairing.release(c.pending.pair_id); throw err; }
@@ -4130,7 +4349,7 @@ Latency measurement (ruling R8):
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVad, createPreroll, VAD_DEFAULTS } from "../bundles/kiosk/public/vad.js";
-import { createDecimator } from "../bundles/kiosk/public/resample.js";
+import { createDecimator, createFrameGate } from "../bundles/kiosk/public/resample.js";
 import { e2eMs, playStartPerfTime } from "../bundles/kiosk/public/metrics.js";
 
 const run = (vad, frames) => { let t = 1000; for (const rms of frames) { t += 20; const r = vad.push(rms, t); if (r.end) return { ...r, t }; } return null; };
@@ -4161,6 +4380,19 @@ test("pre-roll keeps the last 1.0 s (50 × 20 ms frames)", () => {
   for (let i = 0; i < 80; i++) p.push(i);
   const d = p.drain();
   assert.equal(d.length, 50); assert.equal(d[0], 30); assert.equal(p.size, 0);
+});
+
+test("frame gate (in the worklet): nothing posted while idle; start(preroll) flushes the last 1.0 s first", () => {
+  const posted = [];
+  const g = createFrameGate((p) => posted.push(p));
+  for (let i = 0; i < 80; i++) g.push(i, 0);
+  assert.equal(posted.length, 0, "idle: no main-thread messages");
+  assert.equal(g.ringSize, 50);
+  g.start(true);
+  assert.deepEqual(posted.slice(0, 2), [30, 31]); assert.equal(posted.length, 50);
+  g.push(99, 0); assert.equal(posted.at(-1), 99);
+  g.stop(); g.push(100, 0); assert.equal(posted.at(-1), 99);
+  g.start(false); assert.equal(posted.at(-1), 99, "a tap sends no pre-roll");
 });
 
 test("decimator: 48 kHz and 44.1 kHz → 320-sample 16 kHz frames with the right RMS", () => {
@@ -4274,6 +4506,14 @@ test("CSS: reduced motion honoured, 56 px touch targets, 20 px body text, phone 
   assert.match(css, /min-height:\s*56px/);
   assert.match(css, /font-size:\s*20px/);
   assert.match(css, /@media \(max-width: 599px\)/);
+});
+
+test("CSS never transforms hook groups that carry an SVG transform attribute; idle animates only the HTML wrapper", () => {
+  const css = read("kiosk.css");
+  assert.doesNotMatch(css, /\.rb-(bird|wing|tail)\b/);
+  assert.doesNotMatch(css, /\.rb-beak(?!-lower)\b/);
+  assert.match(css, /\.is-idle \.k-bird-art\s*\{[^}]*animation/);
+  assert.doesNotMatch(css, /\.is-idle [^{]*\.rb-/, "nothing inside the SVG animates at idle");
 });
 
 test("swipe + countdown helpers", () => {
@@ -4400,6 +4640,31 @@ export function createDecimator(inRate, onFrame, frameSize = 320, outRate = 1600
     }
   };
 }
+
+/**
+ * Runs INSIDE the AudioWorklet (review m7): while idle, frames go into a 1.0 s
+ * ring and NOTHING is posted to the main thread (no 50 Hz messages at idle on a
+ * Pi 3). start(withPreroll) flushes the ring first (wake word, K2) then posts live
+ * frames; stop() goes back to ring-only.
+ */
+export function createFrameGate(post, maxFrames = 50) {
+  const ring = [];
+  let capturing = false;
+  return {
+    push(pcm, rms) {
+      if (capturing) { post(pcm, rms); return; }
+      ring.push([pcm, rms]);
+      if (ring.length > maxFrames) ring.shift();
+    },
+    start(withPreroll) {
+      if (withPreroll) for (const [p, r] of ring) post(p, r);
+      ring.length = 0;
+      capturing = true;
+    },
+    stop() { capturing = false; },
+    get ringSize() { return ring.length; },
+  };
+}
 ```
 
 `bundles/kiosk/public/metrics.js`:
@@ -4418,11 +4683,13 @@ export function e2eMs({ speechEndAt, playAt }) {
 `bundles/kiosk/public/pcm-worklet.js`:
 
 ```js
-import { createDecimator } from "./resample.js";
+import { createDecimator, createFrameGate } from "./resample.js";
 class PcmCapture extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.push = createDecimator(sampleRate, (pcm, rms) => this.port.postMessage({ pcm: pcm.buffer, rms }, [pcm.buffer]));
+    const gate = createFrameGate((pcm, rms) => this.port.postMessage({ pcm: pcm.buffer, rms }, [pcm.buffer]));
+    this.push = createDecimator(sampleRate, (pcm, rms) => gate.push(pcm, rms));
+    this.port.onmessage = (e) => { if (e.data?.cmd === "start") gate.start(!!e.data.preroll); else if (e.data?.cmd === "stop") gate.stop(); };
   }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
@@ -4446,7 +4713,11 @@ export async function openMic(ctx, onFrame) {
   const node = new AudioWorkletNode(ctx, "pcm-capture", { numberOfInputs: 1, numberOfOutputs: 0 });
   node.port.onmessage = (e) => onFrame(e.data.pcm, e.data.rms, performance.now());
   src.connect(node);
-  return { close() { try { src.disconnect(); node.disconnect(); } catch {} stream.getTracks().forEach((t) => t.stop()); } };
+  return {
+    start(preroll) { node.port.postMessage({ cmd: "start", preroll: !!preroll }); },
+    stop() { node.port.postMessage({ cmd: "stop" }); },
+    close() { try { src.disconnect(); node.disconnect(); } catch {} stream.getTracks().forEach((t) => t.stop()); },
+  };
 }
 
 export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
@@ -4551,7 +4822,7 @@ export function formatRemaining(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onTap = () => {}, now = () => Date.now() } = {}) {
+export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onTap = () => {}, onCloseAll = () => {}, now = () => Date.now() } = {}) {
   const doc = root.ownerDocument;
   let wins = [];
   let tick = null;
@@ -4560,9 +4831,16 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
 
   function dismiss(id) { wins = wins.filter((w) => w.id !== id); onDismiss(id); render(); }
   function swipe(node, id) {
-    let x0 = null, y0 = 0, t0 = 0;
-    node.addEventListener("pointerdown", (e) => { x0 = e.clientX; y0 = e.clientY; t0 = e.timeStamp; });
+    let x0 = null, y0 = 0, t0 = 0, hold = null;
+    const cancelHold = () => { clearTimeout(hold); hold = null; };
+    node.addEventListener("pointerdown", (e) => {
+      x0 = e.clientX; y0 = e.clientY; t0 = e.timeStamp;
+      hold = setTimeout(() => { hold = null; x0 = null; wins = []; onCloseAll(); render(); }, 700);   // long-press = close all (spec §8.5)
+    });
+    node.addEventListener("pointermove", (e) => { if (hold && Math.abs(e.clientX - x0) + Math.abs(e.clientY - y0) > 12) cancelHold(); });
+    node.addEventListener("pointercancel", cancelHold);
     node.addEventListener("pointerup", (e) => {
+      cancelHold();
       if (x0 == null) return;
       const s = classifySwipe({ dx: e.clientX - x0, dy: e.clientY - y0, dt: e.timeStamp - t0 });
       x0 = null;
@@ -4705,9 +4983,14 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 .k-ring { position: absolute; inset: 12%; border-radius: 50%; border: 6px solid var(--k-teal); opacity: 0; }
 .k-dots { position: absolute; bottom: 14%; display: flex; gap: 8px; opacity: 0; }
 .k-dots i { width: 12px; height: 12px; border-radius: 50%; background: var(--k-teal); }
-.k-bird-svg .rb-bird, .k-bird-svg .rb-head, .k-bird-svg .rb-eye, .k-bird-svg .rb-beak-lower { transform-box: fill-box; transform-origin: center; }
+/* Idle breathing animates the HTML wrapper (compositor-only). CSS transforms are NEVER put on hook
+   groups that carry an SVG transform attribute (rb-bird, rb-beak, rb-tail, rb-wing): CSS would replace
+   the attribute and move the bird (review M3). SVG-child animation repaints on the main thread, so it
+   runs only while listening/thinking/speaking, never at idle. */
+.k-bird-art { will-change: transform; }
+.is-idle .k-bird-art { animation: k-breath 6s ease-in-out infinite; }
+.k-bird-svg .rb-head, .k-bird-svg .rb-eye, .k-bird-svg .rb-beak-lower { transform-box: fill-box; transform-origin: center; }
 .k-bird-svg .rb-beak-lower { transform-origin: 0% 50%; transform: rotate(calc(var(--beak, 0) * 24deg)); }
-.is-idle .rb-bird { animation: k-breath 6s ease-in-out infinite; }
 .blink .rb-eye { transform: scaleY(0.12); }
 .is-listening .rb-head { transform: rotate(-8deg); transition: transform .25s; }
 .is-listening .k-ring { animation: k-pulse 1.4s ease-out infinite; }
@@ -4756,7 +5039,7 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 /** Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); Pi agent hooks arrive in K2. */
 import { STRINGS } from "./strings.js";
 import { closeDecision, backoffMs, micDecision, isNight, msToNextMinute } from "./state.js";
-import { createVad, createPreroll } from "./vad.js";
+import { createVad } from "./vad.js";
 import { e2eMs } from "./metrics.js";
 import { openMic, createPlayer } from "./audio.js";
 import { mountBird } from "./bird-view.js";
@@ -4774,9 +5057,8 @@ const ls = {
 let lang = (navigator.language || "en").toLowerCase().startsWith("es") ? "es" : "en";
 const t = (k) => STRINGS[lang]?.[k] || STRINGS.en?.[k] || "";
 
-let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null;
+let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null, reconnectTimer = null;
 let ctx = null, mic = null, player = null, birdState = "idle", turn = null, clockTimer = null, serverOffset = 0;
-const preroll = createPreroll(50);
 
 function banner(key) { const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; }
 function setBird(s) {
@@ -4818,23 +5100,29 @@ async function pair() {
   setTimeout(poll, 2000);
 }
 
+function scheduleReconnect(ms) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, ms); }
+/** One socket at a time (review M4): events from any socket that is not the current one are ignored. */
 function connect() {
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   const id = ls.get(LS_DEV), tok = ls.get(LS_TOK);
   if (!id || !tok) { pair(); return; }
   halted = false;
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/kiosk/session`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", device_id: id, token: tok, caps: CAPS }));
-  ws.onmessage = (ev) => { if (typeof ev.data === "string") onText(JSON.parse(ev.data)); else player?.push(ev.data); };
-  ws.onclose = (ev) => {
+  const sock = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/kiosk/session`);
+  ws = sock;
+  sock.binaryType = "arraybuffer";
+  sock.onopen = () => { if (ws === sock) sock.send(JSON.stringify({ type: "hello", device_id: id, token: tok, caps: CAPS })); };
+  sock.onmessage = (ev) => { if (ws !== sock) return; if (typeof ev.data === "string") onText(JSON.parse(ev.data)); else player?.push(ev.data); };
+  sock.onclose = (ev) => {
+    if (ws !== sock) return;
     ws = null;
-    if (turn && !turn.ended) turn.ended = true;
+    if (turn && !turn.ended) { turn.ended = true; mic?.stop(); }
     player?.flush();
     setBird("idle");
     const d = closeDecision(ev.code, ev.reason);
     if (d.action === "forget_token") { ls.del(LS_DEV); ls.del(LS_TOK); pair(); return; }
     if (d.action === "halt") { halted = true; banner(d.banner); return; }
-    setTimeout(connect, backoffMs(attempt++));
+    scheduleReconnect(backoffMs(attempt++));
   };
 }
 const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
@@ -4879,6 +5167,7 @@ function mountUi() {
       t, now: () => Date.now() + serverOffset,
       onDismiss: (id) => send({ type: "wm_event", id, kind: "dismissed" }),
       onTap: (id) => send({ type: "wm_event", id, kind: "tapped" }),
+      onCloseAll: () => send({ type: "wm_event", kind: "close_all" }),
     });
   }
   if (!clockTimer) tickClock();
@@ -4905,7 +5194,7 @@ async function ensureAudio() {
 }
 
 function onFrame(pcm, rms, at) {
-  if (!turn || turn.ended) { preroll.push(pcm); return; }
+  if (!turn || turn.ended) return;               // the worklet only posts during a turn
   if (ws && ws.readyState === 1) ws.send(pcm);
   const r = turn.vad.push(rms, at);
   if (r.end) endTurn(r.reason, r.speechEndAt);
@@ -4918,14 +5207,14 @@ async function startTurn(source) {
   const hangoverMs = Number(config.vad_hangover_ms) || 600;   // latency lever 1 (ruling R20)
   turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, reason: null, ended: false, reported: false };
   send({ type: "turn_start", source: source === "wake" ? "wake" : "tap", turn_id: turn.id });
-  const pre = preroll.drain();
-  if (source === "wake") for (const f of pre) ws.send(f);
+  mic.start(source === "wake");                   // 1.0 s pre-roll only for a wake word (spec §7.3)
   $("cap-user").textContent = "";
   $("cap-bot").textContent = "";
 }
 function endTurn(reason, speechEndAt) {
   if (!turn || turn.ended) return;
   turn.ended = true; turn.reason = reason; turn.speechEndAt = speechEndAt;
+  mic?.stop();
   send({ type: "turn_end", vad_reason: reason });
 }
 function report() {
@@ -4958,7 +5247,7 @@ async function onTap() {
 }
 $("bird").addEventListener("click", onTap);
 $("mic").addEventListener("click", onTap);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !ws && !halted && ls.get(LS_TOK)) connect(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && ls.get(LS_TOK)) connect(); });   // connect() is a no-op while a socket is live
 
 $("mic").textContent = t("mic_talk");
 connect();
@@ -5430,6 +5719,7 @@ unset CROW_DB_PATH
 node scripts/init-db.js >/dev/null
 mkdir -p $H/panels $H/bundles && cp -r bundles/kiosk $H/bundles/kiosk
 cp bundles/kiosk/panel/kiosk.js $H/panels/kiosk.js && cp bundles/kiosk/panel/routes.js $H/panels/kiosk-routes.js && echo '["kiosk"]' > $H/panels.json
+ln -s $PWD/node_modules $H/panels/node_modules          # what the installer does (bundles.js "Ensure panels dir can resolve gateway dependencies"); express/ws resolve from here
 timeout 60 node servers/gateway/index.js > $H/gw.log 2>&1 &
 sleep 10
 TS='Tailscale-User-Login: boot-check@local'   # what Serve adds; bare loopback is refused by isAllowedNetwork
@@ -5522,7 +5812,8 @@ NODE=$HOME/.nvm/versions/node/v24.21.0/bin/node
 unset CROW_DB_PATH CROW_BACKUP_DIR                       # nothing may point at prod
 export CROW_HOME=$SMOKE/home CROW_DATA_DIR=$SMOKE/data CROW_APP_ROOT=$REPO PORT=13001 CROW_GATEWAY_PORT=13001 CROW_GATEWAY_BIND=127.0.0.1 \
   CROW_AUTO_UPDATE=0 CROW_DISABLE_INSTANCE_SYNC=1 CROW_DISABLE_NOSTR=1 CROW_DISABLE_MODEL_ORCHESTRATION=1 CROW_DISABLE_BOT_RUNTIME=1 \
-  CROW_DISABLE_NTFY_AUTOWIRE=1 CROW_DISABLE_HEALTH_MONITOR=1 CROW_DISABLE_PERCH=1
+  CROW_DISABLE_NTFY_AUTOWIRE=1 CROW_DISABLE_HEALTH_MONITOR=1 CROW_DISABLE_PERCH=1 \
+  CROW_EXTERNAL_ENGINE_POLL_MS=0 CROW_BOX_RESERVATION_PATH=$SMOKE/box-reservation.json   # as run-suite.mjs sets them
 TS='Tailscale-User-Login: smoke@local'
 SW="docker compose -p crow-kiosk-smoke-stt -f $REPO/bundles/faster-whisper-server/docker-compose.yml -f $SMOKE/stt.override.yml"
 ST="docker compose -p crow-kiosk-smoke-tts -f $REPO/bundles/kokoro-tts/docker-compose.yml -f $SMOKE/tts.override.yml"
@@ -5594,6 +5885,7 @@ source /tmp/claude-1000/kiosk-smoke/vars.sh
 cd $REPO && $NODE scripts/init-db.js >/dev/null
 mkdir -p $CROW_HOME/panels $CROW_HOME/bundles && cp -r bundles/kiosk $CROW_HOME/bundles/kiosk
 cp bundles/kiosk/panel/kiosk.js $CROW_HOME/panels/kiosk.js && cp bundles/kiosk/panel/routes.js $CROW_HOME/panels/kiosk-routes.js
+ln -s $REPO/node_modules $CROW_HOME/panels/node_modules   # mirrors the installer; without it the copied routes cannot import express/ws (review M2)
 echo '["kiosk"]' > $CROW_HOME/panels.json
 $NODE --input-type=module -e '
 import { writeFileSync } from "node:fs";
@@ -5621,8 +5913,9 @@ The seed carries no Ramble tables, so the bird is the default crow. Step 7 cover
 
 ```bash
 source /tmp/claude-1000/kiosk-smoke/vars.sh
-ENVS=""; for v in CROW_HOME CROW_DATA_DIR CROW_APP_ROOT PORT CROW_GATEWAY_PORT CROW_GATEWAY_BIND CROW_AUTO_UPDATE CROW_DISABLE_INSTANCE_SYNC CROW_DISABLE_NOSTR CROW_DISABLE_MODEL_ORCHESTRATION CROW_DISABLE_BOT_RUNTIME CROW_DISABLE_NTFY_AUTOWIRE CROW_DISABLE_HEALTH_MONITOR CROW_DISABLE_PERCH; do ENVS="$ENVS -E $v=${!v}"; done
-systemd-run --user --unit=kiosk-smoke-gw -p RuntimeMaxSec=7200 --working-directory=$REPO $ENVS $NODE servers/gateway/index.js
+ENVS=""; for v in CROW_HOME CROW_DATA_DIR CROW_APP_ROOT PORT CROW_GATEWAY_PORT CROW_GATEWAY_BIND CROW_AUTO_UPDATE CROW_DISABLE_INSTANCE_SYNC CROW_DISABLE_NOSTR CROW_DISABLE_MODEL_ORCHESTRATION CROW_DISABLE_BOT_RUNTIME CROW_DISABLE_NTFY_AUTOWIRE CROW_DISABLE_HEALTH_MONITOR CROW_DISABLE_PERCH CROW_EXTERNAL_ENGINE_POLL_MS CROW_BOX_RESERVATION_PATH; do ENVS="$ENVS -E $v=${!v}"; done
+# env -u INVOCATION_ID: systemd-run sets it, and the gateway would then believe it is supervised by crow-gateway.service (review m6)
+systemd-run --user --unit=kiosk-smoke-gw -p RuntimeMaxSec=7200 --working-directory=$REPO $ENVS /usr/bin/env -u INVOCATION_ID $NODE servers/gateway/index.js
 sleep 12
 journalctl --user -u kiosk-smoke-gw -o cat | grep -E "kiosk|Crow Gateway listening|ERROR" | head
 curl -s -o /dev/null -w "page %{http_code}\n" -H "$TS" http://127.0.0.1:13001/kiosk
@@ -5669,12 +5962,13 @@ cd $REPO && $NODE --input-type=module -e '
 import { readFileSync } from "node:fs";
 import { median, percentile } from "./bundles/kiosk/server/metrics.js";
 const rows = readFileSync(process.env.SMOKE + "/a2.jsonl", "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
-const ok = (r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.aborted && r.vad_reason === "silence" && Number.isFinite(r.e2e_ms);
+// Same rule as metrics.summary: degraded (cold-fallback) turns are excluded; an eligible turn with NO audio counts as Infinity (a failure).
+const ok = (r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && r.vad_reason === "silence";
 const bad = rows.filter((r) => !ok(r));
 const use = rows.filter(ok).slice(-20);
 const s = (k) => use.map((r) => (k === "e2e_ms" ? r.e2e_ms : r.timings?.[k])).filter(Number.isFinite).sort((a, b) => a - b);
-const e = s("e2e_ms");
-console.log(JSON.stringify({ turns: rows.length, eligible: use.length, excluded: bad.map((r) => ({ id: r.turn_id, route: r.route, fast_path: r.fast_path, escalated: r.escalated, vad: r.vad_reason })),
+const e = use.map((r) => (Number.isFinite(r.e2e_ms) ? r.e2e_ms : Infinity)).sort((a, b) => a - b);
+console.log(JSON.stringify({ turns: rows.length, eligible: use.length, no_audio: e.filter((x) => x === Infinity).length, excluded: bad.map((r) => ({ id: r.turn_id, route: r.route, fast_path: r.fast_path, escalated: r.escalated, degraded: r.degraded, vad: r.vad_reason })),
   e2e: { median: median(e), p90: percentile(e, 90), min: e[0], max: e.at(-1) },
   server_median: { stt_ms: median(s("stt_ms")), llm_first_token_ms: median(s("llm_first_token_ms")), tts_first_chunk_ms: median(s("tts_first_chunk_ms")) },
   output_latency_ms: median(use.map((r) => r.output_latency_ms).filter(Number.isFinite).sort((a, b) => a - b)) }, null, 1));
@@ -5682,8 +5976,9 @@ console.log(use.length === 20 && median(e) < 2000 && percentile(e, 90) < 3000 ? 
 ```
 
 Validity rules (ruling R8):
-- Only eligible turns count: fast route, not a fast path, not escalated, not aborted, `vad_reason=silence`.
-- An excluded question is **re-asked**. Its row is never patched.
+- Only eligible turns count: fast route, not a fast path, not escalated, **not degraded**, not aborted, `vad_reason=silence`.
+- An eligible turn that produced **no audio counts as a failure** (Infinity), never a gap.
+- An excluded question (escalated/degraded/fast-path/VAD cap) is **re-asked**, and the number of re-asks is reported. **More than 3 re-asks** for routing reasons is itself a FAIL: the fast route is not holding for plain questions. Rows are never patched.
 - The breakdown (STT / first token / first audio on the server, plus `output_latency_ms`) goes into `findings.md` next to the spec §9 estimates.
 - If a prod transcription was running (the `docker stats` line), say so in the report.
 - Cross-check: the panel's Diagnostics "Median … p90 …" for the phone must equal this computation.
@@ -5713,7 +6008,7 @@ Write which lever was used, or "none", to `findings.md`. The PR body carries it 
 
 - [ ] **Step 8: [KEVIN] A3 windows, bird states, barge-in; announce/show; dressed bird**
 
-1. [KEVIN] "Set a timer for 2 minutes called tea." Expected: a timer window with "Tea 1:5x" counting down. The log shows the route: `escalate` if the 35B is warm, or `fast (cold_timeout|…)` after "One moment." Either is fine here, because A3 has no latency gate.
+1. [KEVIN] "Set a timer for 2 minutes called tea." Expected: a timer window with "Tea 1:5x" counting down and the spoken "Timer set for Tea: 2 minutes." It runs on the **fast path**: the `[kiosk-metrics]` row has `fast_path:true` and no LLM call is made. If STT words it differently and it falls to the LLM, the route is logged, so record the transcript.
 2. [KEVIN] "Show me a lasagna recipe." Expected: a recipe window (title, ingredients, numbered steps). Then "next step" is a fast path: no LLM in the log, and "Step 2. …" is spoken.
 3. [KEVIN] Swipe the recipe left. It is gone; the log shows `wm_event dismissed`, and the server window list no longer has it.
 4. [KEVIN] "Close the timer." It closes on the fast path: "Timer stopped." with no LLM call in the log.
@@ -5854,6 +6149,12 @@ cd ~/crow/bundles/faster-whisper-server && docker compose up -d          # proje
 for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8004/health >/dev/null 2>&1 && break; sleep 2; done
 docker inspect -f '{{.Config.Image}} {{.HostConfig.Memory}}' faster-whisper-server        # fedirz/faster-whisper-server:0.5.0-cpu 8589934592
 docker exec faster-whisper-server printenv WHISPER__TTL PRELOAD_MODELS
+# Measure the 8g cap instead of assuming it (review m7): a ~5-minute clip through large-v3 while sampling memory.
+for i in $(seq 1 40); do cat /tmp/claude-1000/kiosk-smoke/tts.pcm; done > /tmp/claude-1000/kiosk-deploy/long.pcm
+cd ~/crow && node --input-type=module -e 'import { readFileSync, writeFileSync } from "node:fs"; import { wrapPcmAsWav } from "./servers/gateway/voice/turn-helpers.js"; writeFileSync("/tmp/claude-1000/kiosk-deploy/long.wav", wrapPcmAsWav(readFileSync("/tmp/claude-1000/kiosk-deploy/long.pcm"), 24000));'
+( for i in $(seq 1 120); do docker stats --no-stream --format '{{.MemUsage}}' faster-whisper-server; sleep 1; done ) > /tmp/claude-1000/kiosk-deploy/mem.log &
+curl -s -o /dev/null -w "long clip large-v3: %{time_total}s\n" -F file=@/tmp/claude-1000/kiosk-deploy/long.wav -F model=Systran/faster-whisper-large-v3 http://127.0.0.1:8004/v1/audio/transcriptions
+wait; sort -h /tmp/claude-1000/kiosk-deploy/mem.log | tail -1                 # peak; must be < 6 GiB, else raise mem_limit in a follow-up commit before closing the window
 curl -s -o /dev/null -w "distil warm: %{time_total}s\n" -F file=@/tmp/claude-1000/kiosk-smoke/q.wav -F model=Systran/faster-distil-whisper-small.en -F language=en http://127.0.0.1:8004/v1/audio/transcriptions
 curl -s -w "\nlarge-v3 (glasses/meeting default): %{time_total}s\n" -F file=@/tmp/claude-1000/kiosk-smoke/q.wav -F model=Systran/faster-whisper-large-v3 http://127.0.0.1:8004/v1/audio/transcriptions
 ```
@@ -5891,6 +6192,25 @@ sqlite3 -readonly ~/.crow/data/crow.db "select value from dashboard_settings whe
 
 Then clear the deadman (`systemctl --user stop kiosk-deploy-deadman.timer`), move the schedule row to Done, and delete `/tmp/claude-1000/kiosk-smoke` (scratch password).
 
+- [ ] **Step 9: Register the new standing automation (global rule; ruling R14)**
+
+A kiosk escalation can now start the 35B on demand: `maybeAcquireLocalProvider(…, {requester:"kiosk"})`. Add it to the **Standing Automations** table in `~/CROW-SCHEDULE.md`:
+
+```markdown
+| **crow gateway — kiosk voice turn (bundle `kiosk`)** | an escalated kiosk turn (tool intent / recent non-display tool context) | may START crow-chat (35B) on demand via the orchestrator, requester `kiosk`; the turn falls back to the resident 4B after 8 s and never waits for the start; refused (no start) under a box reservation or serving-class veto |
+```
+
+- [ ] **Step 10: Fleet check after auto-update reaches the other instances (core changes are fleet-wide)**
+
+The device-store move, the `llm-router` refactor and the Bot Builder unbind helper reach every instance on its next auto-update (6 h). After that pull, check the one instance with meta-glasses installed (grackle, while it lives) and a Bot Builder device-binding save:
+
+```bash
+grackle "cd ~/crow && git log -1 --format=%h && journalctl --user -u crow-gateway --since '-30 min' -o cat 2>/dev/null | grep -iE 'meta-glasses|device-store|ERR' | tail -5"
+grackle 'sqlite3 -readonly ~/.crow/data/crow.db "select value from dashboard_settings where key = '"'"'meta_glasses_devices'"'"'" | grep -o "\"bound_bot_id\":[^,]*"'    # bindings unchanged vs before the pull
+```
+
+If glasses pairing or a glasses voice turn is available there, run one glasses voice turn ([KEVIN] if the glasses are at hand); otherwise record that only the static checks ran. If grackle is already retired, record "n/a — no meta-glasses instance".
+
 Follow-ups to record in the PR (not built here):
 - K2 Pi bring-up (ruling R17: tagged-node caveat);
 - K3 HA + Today + sleep + the companion→kiosk migration (R1) + OLLV retirement;
@@ -5923,6 +6243,28 @@ Follow-ups to record in the PR (not built here):
 **Type consistency:** `runVoiceTurn` opts/result, `createWmTool`, `matchWmFastPath`, `kioskPromptSuffix`, `createSessionHub` deps, `createKioskRuntime` deps, and the `turn_metrics` fields (`turn_id`, `e2e_ms`, `vad_reason`, `output_latency_ms`, `source`) were cross-checked between Tasks 4, 8, 9, 10 and 11.
 
 **Review Focus:** five conditions, each with its pinned test in the owning task.
+
+**Dry-run of the plan's own code (2026-10-03, after the review revision):** every complete file in this plan was materialized onto a throwaway detached worktree of `origin/main` @ `24759696` and run with `scripts/run-suite.mjs`:
+- `voice-turn-helpers`, `voice-turn`, `kiosk-pairing`, `kiosk-wm`, `kiosk-session`, `kiosk-vad`, `kiosk-page-state`, `device-store` and `kiosk-panel`: **76/76 pass**;
+- `kiosk-page`, `kiosk-routes` (real `ws` and the real core `readPortrait`), `device-store` and `kiosk-session`: **39/39**;
+- `bundle-server-deps` + `bundle-contract` with the kiosk manifest: **83/83**.
+
+Not dry-run: the partial snippets (`bird-svg.cjs`, `llm-router.js`, `local-token.js`, the Bot Builder edits) and the tests that need them.
+
+**Adversarial review (opus, 2026-10-03): REVISE → revised.**
+- C1 (late system message) → R22.
+- C2 (prefix-forgeable hash) → R2 (separate field + sentinel).
+- C3 (`crow_delegate`) → R21.
+- M1 (two failing tests) → fixed.
+- M2 (`panels/node_modules`) → symlinked in the boot check and smoke.
+- M3 (bird CSS) → wrapper-only idle animation + CSS test.
+- M4 (reconnect race) → single-socket guard.
+- M5 (gate validity) → degraded excluded, no-audio = failure, re-ask cap, routing view.
+- M6 (context/prefix cache) → clamp + `turnContext`.
+- M7 (Bot Builder unbind) → `unbindBotFromOtherDevices`.
+- M8 (standing automation, timer fast path) → Task 14 Step 9 + fast path.
+- Minors: rate key by Tailscale identity, `complete()` check, pre-roll in the worklet, long-press close-all, smoke env flags + `INVOCATION_ID`, measured whisper cap, fleet check, last-20 summary, non-vacuous tests, R19 wording.
+- Not taken: `getOutputTimestamp()`. The bias is stated in R8 instead.
 
 ## Execution handoff
 
