@@ -54,6 +54,7 @@ This supersedes the earlier default of "wait, then ask whether to close their se
   - It runs in an un-sandboxed iframe from the document-server origin.
   - Its `Asc.plugin.info` carries `documentId` (= the document key), `userId`, `isViewMode`, `isMobileMode` and the session `jwt`.
   - `Asc.plugin.callCommand` runs builder code inside the document as one undoable group action that is co-edited and saved normally (`apiBase.js:3803-3811`).
+  - The code runs through `safePluginEval`, so no `Function`, a single `eval` and no generators. The plugin's command is therefore one self-contained function with its op table inline; only data travels in `Asc.scope`.
 - **The connector has no plugin setting** beyond an on/off toggle (`EditorApiController.php:707-710`), and the editor config is JWT-signed on the server. So the plugin is installed **server-side**, not through Nextcloud:
   - a bind mount into `/var/www/onlyoffice/documentserver/sdkjs-plugins/<guid>` (today that folder is inside the container and is lost when it is recreated);
   - then `documentserver-flush-cache.sh`, because nginx serves plugin files `immutable` for a year.
@@ -418,14 +419,13 @@ It is **served from the ONLYOFFICE origin** (bind-mounted read-only into the doc
 - A tailnet-only Tailscale Serve **path** on the ONLYOFFICE port proxies that to the gateway: `tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`. The Office panel's admin block prints it.
 - This avoids CORS entirely. It is never Funnel, and the gateway's Funnel middleware already rejects these paths.
 
-**Auth: no bot password, nothing long-lived in the plugin.**
-1. Every request carries the session's own `Asc.plugin.info.jwt`. That is the editor-config JWT that Nextcloud signed with the shared ONLYOFFICE secret, which Crow already holds.
-2. Crow verifies:
-   - HS256 with `WORKSPACE_ONLYOFFICE_JWT_SECRET`;
-   - `exp` not passed;
-   - `document.key` matches the `key` query.
-   It then resolves the key to a file: the stored key of queued changes, or a fresh crow-bot config lookup for files that have pending changes (cached 30 s).
-3. That proves the caller holds a genuine editor session for that document. It reveals only that document's pending changes.
+**Auth: no bot password, nothing long-lived in the plugin** (corrected by the K5 review, verified in the 9.4 sdkjs):
+1. Every request carries `Asc.plugin.info.jwt`. That is **the document server's session token** (`jwtSession`, 30-day expiry, signed with the ONLYOFFICE secret Crow holds), **not** the 5-minute Nextcloud editor-config JWT.
+2. A valid signature is therefore not enough. Crow also requires:
+   - `document.key` = the file's **current** session key (from ONLYOFFICE `info`/the config lookup, cached 30 s);
+   - the token's user id ∈ that session's live `info.users`.
+3. This binds every call to a live editor session for that document. Old tokens, ended sessions, revoked sharees and tokens crow-bot itself could mint are all refused. It reveals only that document's pending changes.
+4. View mode is detected from the claims S9 records. Writes are also impossible in view mode (`callCommand` requires `asc_canPaste`).
 4. **Claiming:** a claim returns a **short-lived per-change apply token** — HMAC over (`change_id`, `key`, `lease`, `exp`=+120 s) with a per-boot server secret. It is minted when the change is queued or claimed, and the ack must present it.
 5. Requests in view mode (`isViewMode`) or with `permissions.edit=false` in the JWT are refused for claims.
 
@@ -445,7 +445,11 @@ Task 1 S9 verifies that `info.jwt` exists, its signature and claims, and that `d
 | `ws_sheets_write`, `ws_sheets_append`, `ws_sheets_set_number_format`, `ws_sheets_add_tab`, `ws_sheets_rename_tab` | `ws_sheets_delete_tab`, `ws_sheets_batch_update` |
 | `ws_slides_edit_text`, `ws_slides_find_replace` (scope `slides`) | other slide ops, notes, Drive ops, undo |
 
-Each live op's builder implementation mirrors the file-level op's semantics: a heading reset on insert, and the first run's formatting kept on rewrite. A live op that throws or fails its postcondition is acked `failed_live`, and the change returns to `pending` for close-time apply exactly once (`claim_count` ≤ 1).
+Each live op's builder implementation mirrors the file-level op's semantics: a heading reset on insert, and the first run's formatting kept on rewrite. A live op that reports `applied_nothing` (its precondition failed, or it threw before changing anything) returns the change to `pending` for close-time apply, exactly once (`claim_count` ≤ 1). Any other failure → `unknown_after_claim` → postcondition at close.
+
+**After the session ends**, every `applied_live` change is checked against the saved file (postcondition). If it is missing, the editor closed before saving it → `failed: not_saved` + notify.
+
+The live API is exempt from the gateway's general rate limiter and has its own limit of 60 requests/min per document.
 
 **Phones.** The phone browser opens documents view-only (CE), so the plugin does nothing there and changes apply at close. Desktop and laptop editors apply live.
 
@@ -453,16 +457,18 @@ Each live op's builder implementation mirrors the file-level op's semantics: a h
 
 ### 5.8 Close-time apply
 
-**Where it runs.** A worker in the gateway process (started once by the bundle's panel routes module), every 15 s, for each file with `pending` or `unknown_after_claim` changes:
+**Where it runs.** A worker in the gateway process (started lazily by the bundle's panel routes module), every 15 s, for each file with `pending` or `unknown_after_claim` changes:
 1. stat the file;
-2. if it is unlocked **and** ONLYOFFICE `info` on its current key says no session (`error:1`), claim `pending → applying_close` and apply in `seq` order through `withFileWrite` (label `Crow (queued)`), re-validating the precondition;
+2. if it is unlocked **and** ONLYOFFICE `info` on its current key says no session (`error:1`) — checked even when unlocked, because the connector locks only after the editor has fetched the file — claim `pending → applying_close` and apply in `seq` order through `withFileWrite` (label `Crow (queued)`), re-validating the precondition;
 3. store `version_id` → `applied_close` → notify, with the undo id.
 
-A user lock or a still-open session → nothing happens. The worker does nothing while the lock is held.
+- A user lock or a still-open session → nothing happens.
+- A stale editor lock → one notification explaining the owner's Unlock.
+- On start, rows stranded in `applying_close` by a crash become `unknown_after_claim`. The worker does nothing while the lock is held.
 
 **Undo:**
 - `applied_close` changes undo like any file change (version restore).
-- `applied_live` changes undo by **queueing the inverse op** recorded at apply time (e.g. replace the new text back with the old). It is applied live or at close. If its precondition fails → `changed_since`.
+- `applied_live` changes undo by **queueing the inverse op** recorded at apply time, but **only when that inverse is exact** (count-checked find/replace, recorded old values or texts, uniform formatting). Otherwise undo answers `undo_via_versions`: the live edit was saved together with the person's own typing, so Crow offers the version from before the session instead of guessing. Inverses are pinned: one allowed tool per original tool, on the same file. If an inverse's precondition fails → `changed_since`.
 
 ### 5.9 Notifications
 
