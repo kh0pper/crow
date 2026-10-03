@@ -6,6 +6,7 @@ import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
+import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -3087,6 +3088,14 @@ await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertis
 // contacts.advertised_by_instance_id records a fact: the instance_id of the peer
 // whose advertised-bot directory this contact was added from. Set at INSERT only.
 await addColumnIfMissing("contacts", "advertised_by_instance_id", "TEXT"); // NULL=manual/pasted-invite contact, NEVER prunable
+
+// --- Crow keychain (2026-10-03) ---
+// Human-facing passwords, sealed with secret-box under the keychain's OWN key
+// (<CROW_HOME>/secrets/keychain.key — never the identity seed, never in a backup).
+// LOCAL ONLY: listed in instance-sync LOCAL_ONLY_TABLES and never in SYNCED_TABLES.
+// Additive: keychain/store.js also CREATE-IF-NOT-EXISTS this lazily, so existing
+// installs need no SCHEMA_GENERATION bump.
+await initTable("crow_keychain table", KEYCHAIN_DDL);
 
 // Stamp the schema generation so the gateway boot gate can detect when an
 // out-of-band code update introduced migrations that a plain restart missed.

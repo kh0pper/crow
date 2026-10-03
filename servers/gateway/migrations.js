@@ -9,6 +9,7 @@
  * half-state.
  */
 
+import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,12 +32,7 @@ async function readMigrationsState(db) {
 function readCompanionEnv() {
   const envPath = join(homedir(), ".crow", "bundles", "companion", ".env");
   if (!existsSync(envPath)) return {};
-  const env = {};
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m) env[m[1]] = m[2];
-  }
-  return env;
+  return parseEnvText(readFileSync(envPath, "utf8"));
 }
 
 /** Read dashboard_settings by key (string). */

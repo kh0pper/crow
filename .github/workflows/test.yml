@@ -106,6 +106,15 @@ jobs:
             echo "npm audit failed, retry $i/3"; sleep $((i*10))
           done
           exit 1
+      # The vaultwarden bundle carries the Bitwarden CLI, which handles vault credentials
+      # (Crow keychain): its own lock file gets the same blocking critical-tier audit.
+      - name: npm audit (blocking, critical, vaultwarden bundle production deps)
+        run: |
+          for i in 1 2 3; do
+            npm audit --prefix bundles/vaultwarden --omit=dev --audit-level=critical && exit 0
+            echo "npm audit failed, retry $i/3"; sleep $((i*10))
+          done
+          exit 1
       - name: npm audit (informational, full)
         continue-on-error: true
         run: npm audit || true

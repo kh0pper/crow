@@ -1,7 +1,7 @@
 {
   "id": "companion",
   "name": "AI Companion",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
   "type": "bundle",
   "author": "Crow",

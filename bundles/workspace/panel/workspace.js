@@ -8,8 +8,19 @@
  * $CROW_HOME/panels/workspace.js, so it imports nothing from the bundle.
  */
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// The installer quotes .env values (bundle-env-codec.js); decode them the same way. This
+// file runs from $CROW_HOME/panels/, so the app root comes from CROW_APP_ROOT (set by the
+// gateway), falling back to the in-repo location for tests.
+const __wsAppRoot = (() => {
+  const ok = (p) => !!p && existsSync(join(p, "servers", "db.js"));
+  const guess = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  return ok(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT : guess;
+})();
+const { parseEnvText } = await import(pathToFileURL(join(__wsAppRoot, "servers", "gateway", "bundle-env-codec.js")).href);
 
 const T = {
   en: {
@@ -77,11 +88,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 export function readPublicSettings(crowHome) {
   const p = join(crowHome, "bundles", "workspace", ".env");
   if (!existsSync(p)) return null;
+  const all = parseEnvText(readFileSync(p, "utf8"));
   const out = {};
-  for (const line of readFileSync(p, "utf8").split("\n")) {
-    const m = line.replace(/\r$/, "").match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m && PUBLIC_KEYS.includes(m[1])) out[m[1]] = m[2];
-  }
+  for (const k of PUBLIC_KEYS) if (Object.hasOwn(all, k)) out[k] = all[k];
   return out;
 }
 

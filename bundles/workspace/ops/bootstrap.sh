@@ -22,7 +22,6 @@ RETAINED_DIR="$CROW_HOME/secrets/bundle-env"
 RETAINED="$RETAINED_DIR/workspace.env"
 HOST_RE='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
 
-env_get() { [ -f "$ENV_FILE" ] || return 0; sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
 env_rewrite() {  # $1 = key to drop; $2 = optional "KEY=value" line to append. Atomic, 600.
   local tmp
   tmp="$(mktemp "$BUNDLE_DIR/.env.XXXXXX")"

@@ -82,6 +82,7 @@ import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
+import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 
@@ -619,6 +620,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // Crow keychain API (Settings → Passwords + the Extensions first-view banner).
+  // Session-authed + CSRF-protected by the two middlewares above; the router itself
+  // refuses peer-signed requests and serves every response no-store.
+  router.use(keychainApiRouter());
 
   // Perch Hub P1 (C-5): the gateway API the proxied bots lens calls.
   // Mounted HERE — inside the dashboard router, after dashboardAuth AND after

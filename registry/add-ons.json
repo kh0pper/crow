@@ -324,7 +324,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.3.3",
+      "version": "1.3.4",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -797,7 +797,7 @@
     {
       "id": "companion",
       "name": "AI Companion",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
       "type": "bundle",
       "author": "Crow",
@@ -1290,7 +1290,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -2819,7 +2819,7 @@
     {
       "id": "mastodon",
       "name": "Mastodon",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing.",
       "type": "bundle",
       "author": "Crow",
@@ -4295,7 +4295,7 @@
     {
       "id": "peertube",
       "name": "PeerTube",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — S3 storage + aggressive transcoding policy are load-bearing, not optional.",
       "type": "bundle",
       "author": "Crow",
@@ -4522,7 +4522,7 @@
     {
       "id": "pixelfed",
       "name": "Pixelfed",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Federated photo-sharing server over ActivityPub — Instagram-alternative on the fediverse. Publish photos/stories/collections; remote Mastodon/GoToSocial/Funkwhale followers see your posts in their timelines.",
       "type": "bundle",
       "author": "Crow",
@@ -5880,7 +5880,7 @@
     {
       "id": "vaultwarden",
       "name": "Vaultwarden",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "description": "Bitwarden-compatible password manager — self-hosted vault for passwords, notes, and 2FA, used with the Bitwarden browser and mobile apps",
       "type": "bundle",
       "author": "Crow",
@@ -5903,10 +5903,14 @@
           "server/index.js"
         ],
         "envKeys": [
-          "VAULTWARDEN_URL",
-          "VAULTWARDEN_ADMIN_TOKEN"
+          "VAULTWARDEN_URL"
         ]
       },
+      "npm_required": true,
+      "verify_paths": [
+        "node_modules/@bitwarden/cli/build/bw.js",
+        "node_modules/@modelcontextprotocol/sdk/package.json"
+      ],
       "panel": "panel/vaultwarden.js",
       "panelRoutes": "panel/routes.js",
       "skills": [
@@ -5914,13 +5918,10 @@
       ],
       "consent_required": true,
       "install_consent_messages": {
-        "en": "Vaultwarden stores the passwords and secrets for your entire digital life. Before you install: (1) this bundle will hold every credential you import, so back up ~/.crow/vaultwarden/data on a recurring schedule — losing it means losing everything; (2) the admin token sits in your .env file in plaintext — anyone with shell access on this host can administer the vault; (3) signups default to OPEN — without the admin token, anyone who can reach http://localhost:8097 can create the first account and lock you out. Create your account immediately after first start, then set VAULTWARDEN_SIGNUPS_ALLOWED=false and restart the bundle. The Crow MCP tools intentionally do NOT expose vault contents — use the official Bitwarden browser extension or mobile app as your working client.",
-        "es": "Vaultwarden guardará las contraseñas y secretos de toda tu vida digital. Antes de instalar: (1) este bundle contendrá todas tus credenciales, haz copias de seguridad periódicas de ~/.crow/vaultwarden/data — perderlo significa perderlo todo; (2) el token de administrador queda en el archivo .env en texto plano — cualquiera con acceso al shell puede administrar el vault; (3) por defecto se permiten registros — sin proteger el token, cualquiera que pueda alcanzar http://localhost:8097 puede crear la primera cuenta y dejarte fuera. Crea tu cuenta inmediatamente tras el primer arranque, luego pon VAULTWARDEN_SIGNUPS_ALLOWED=false y reinicia. Las herramientas MCP de Crow intencionalmente NO exponen el contenido del vault — usa la extensión oficial de Bitwarden o la app móvil como cliente."
+        "en": "Vaultwarden stores the passwords and secrets for your entire digital life. Before you install: (1) this bundle will hold every credential you import, so back up ~/.crow/vaultwarden/data on a recurring schedule — losing it means losing everything; (2) Crow generates the admin token, keeps only its Argon2id hash in the extension's settings, and saves the token in Settings → Passwords (encrypted, this machine only); (3) signups default to OPEN — without the admin token, anyone who can reach http://localhost:8097 can create the first account and lock you out. Create your account immediately after first start, then set VAULTWARDEN_SIGNUPS_ALLOWED=false and restart the bundle. The Crow MCP tools intentionally do NOT expose vault contents — use the official Bitwarden browser extension or mobile app as your working client.",
+        "es": "Vaultwarden guardará las contraseñas y secretos de toda tu vida digital. Antes de instalar: (1) este bundle contendrá todas tus credenciales, haz copias de seguridad periódicas de ~/.crow/vaultwarden/data — perderlo significa perderlo todo; (2) Crow genera el token de administrador, guarda solo su hash Argon2id en la configuración de la extensión y guarda el token en Ajustes → Contraseñas (cifrado, solo en esta máquina); (3) por defecto se permiten registros — sin proteger el token, cualquiera que pueda alcanzar http://localhost:8097 puede crear la primera cuenta y dejarte fuera. Crea tu cuenta inmediatamente tras el primer arranque, luego pon VAULTWARDEN_SIGNUPS_ALLOWED=false y reinicia. Las herramientas MCP de Crow intencionalmente NO exponen el contenido del vault — usa la extensión oficial de Bitwarden o la app móvil como cliente."
       },
       "requires": {
-        "env": [
-          "VAULTWARDEN_ADMIN_TOKEN"
-        ],
         "min_ram_mb": 256,
         "min_disk_mb": 200
       },
@@ -5933,13 +5934,18 @@
         },
         {
           "name": "VAULTWARDEN_ADMIN_TOKEN",
-          "description": "Argon2id or Bcrypt hash protecting /admin. Generate with: openssl rand -base64 48 (store the output, then run `vaultwarden hash` inside the container to get the hash to paste here). For a simpler MVP you may paste the plain random string — Vaultwarden accepts both.",
+          "description": "Token for the /admin page. Crow generates it at install, keeps only an Argon2id hash in this extension's settings, saves the token itself in Settings → Passwords (encrypted, this machine only) and shows it to you once after install.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "store_as": "argon2id",
+          "keychain_label": "admin page token",
+          "keychain_url": "${VAULTWARDEN_DOMAIN}/admin"
         },
         {
           "name": "VAULTWARDEN_DOMAIN",
-          "description": "Public URL Vaultwarden advertises to clients (set to https://... when put behind Caddy)",
+          "description": "Public URL Vaultwarden advertises to clients. Saving passwords to the vault from Crow needs this to be a secure https URL, e.g. https://<host>.<tailnet>.ts.net:<port> from `sudo tailscale serve --bg --https=<port> http://127.0.0.1:8097` (see the Vaultwarden skill); also set it to https://... when put behind Caddy",
           "default": "http://localhost:8097",
           "required": false
         },
@@ -6365,7 +6371,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",
@@ -6418,13 +6424,17 @@
         },
         {
           "name": "WORKSPACE_ADMIN_PASSWORD",
-          "description": "Password for that administrator account. Used once by setup, then removed from this machine's config; change it later inside Workspace (Settings, Security). 12-128 characters: letters, digits and ! % * + , - . / : = ? @ ^ _ ~ (no spaces, quotes, $ or #).",
+          "description": "Password for that administrator account. Use Generate for a strong one or type your own: 12-128 characters, any letters, digits, spaces or symbols. Keep 'Save to Crow keychain' ticked to find it later in Settings → Passwords. Setup uses it once, then removes it from this machine's config; change it later inside Workspace (Settings, Security).",
           "install_required": true,
           "secret": true,
           "propagate": false,
           "check": "not_breached",
-          "pattern": "^[A-Za-z0-9!%*+,./:=?@^_~-]{12,128}$",
-          "pattern_hint": "12-128 letters, digits or ! % * + , - . / : = ? @ ^ _ ~"
+          "generatable": true,
+          "keychain_configure": false,
+          "pattern": "^[^\\x00-\\x1f\\x7f]{12,128}$",
+          "pattern_hint": "12-128 characters, without tabs or line breaks",
+          "keychain_label": "admin password",
+          "keychain_username": "${WORKSPACE_ADMIN_USER}"
         },
         {
           "name": "WORKSPACE_FIRSTRUN_ADMIN_PASSWORD",

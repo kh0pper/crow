@@ -6,7 +6,7 @@
  */
 
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
 import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
@@ -170,6 +170,8 @@ export function buildExtensionsHTML({
   bundleStatus,
   needsConfig = {},
   dockerOk = true,
+  keychainPending = [],
+  vaultSecure = false,
   lang,
 }) {
   const installedCount = Object.keys(installed).length;
@@ -242,6 +244,19 @@ export function buildExtensionsHTML({
         <p style="margin:0.25rem 0 0">${t("extensions.dockerUnavailableDesc", lang)}</p>
       </div>`;
 
+  // ─── Crow keychain: vault flag + first-view banner (plan P5/P6) ───
+  const keychainConfigHtml = `<div id="ext-keychain-config" data-vault="${installed.vaultwarden ? "1" : "0"}" data-vault-secure="${installed.vaultwarden && vaultSecure ? "1" : "0"}" hidden></div>`;
+  const firstViewHtml = (keychainPending || []).map((e) => `<div class="callout callout-info ext-firstview" data-entry-id="${Number(e.id)}" role="status">
+        <strong>${escapeHtml(fill(t("keychain.firstViewTitle", lang), { label: e.label }))}</strong>
+        <p style="margin:0.25rem 0 0.5rem">${t("keychain.firstViewBody", lang)}</p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+          <button type="button" class="btn btn-sm btn-secondary ext-firstview-show" data-id="${Number(e.id)}">${t("keychain.showOnce", lang)}</button>
+          <code class="ext-firstview__secret" hidden style="font-family:'JetBrains Mono',monospace;word-break:break-all"></code>
+          <button type="button" class="btn btn-sm btn-secondary ext-firstview-copy" hidden>${t("keychain.copy", lang)}</button>
+          <span class="ext-firstview__note" style="font-size:0.8rem"></span>
+          <a href="/dashboard/settings?section=passwords">${t("keychain.openPasswords", lang)}</a>
+        </div>
+      </div>`).join("");
   // ─── Segmented control ───
   const viewTabsHtml = `<div class="ext-viewtabs" id="ext-viewtabs" role="tablist" aria-label="${t("extensions.pageTitle", lang)}">
       <button type="button" class="ext-viewtab ext-viewtab--active" data-view="browse" role="tab" aria-selected="true" aria-controls="ext-view-browse">${t("extensions.viewBrowse", lang)}</button>
@@ -407,7 +422,7 @@ export function buildExtensionsHTML({
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
 
-  const viewsHtml = `${dockerBannerHtml}${viewTabsHtml}
+  const viewsHtml = `${keychainConfigHtml}${firstViewHtml}${dockerBannerHtml}${viewTabsHtml}
     <div class="ext-view" id="ext-view-browse" role="tabpanel">
       ${searchHtml}
       ${collectionsHtml}
@@ -443,6 +458,9 @@ export function buildExtensionsHTML({
       env_vars: visibleEnvVars(addon).map((ev) => ({
         name: ev.name, description: ev.description,
         default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
+        // Configure builds its form from THIS blob: it needs the same opt-ins as Install.
+        generatable: ev.generatable === true, keychain: ev.keychain === true, keychain_configure: ev.keychain_configure === false ? false : undefined,
+        pattern: typeof ev.pattern === "string" ? ev.pattern : undefined,
       })),
       official: !addon._community,
       featured: !!addon.featured,

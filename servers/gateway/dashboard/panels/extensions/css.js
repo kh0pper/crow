@@ -6,6 +6,8 @@
 
 export function extensionStyles() {
   return `<style>
+    /* .btn display:inline-flex beats [hidden]; scoped to the keychain banner (its Show/Copy/secret toggle hidden) */
+    .ext-firstview [hidden] { display: none !important; }
 /* ─── Extensions Store ───
  * Hierarchy (collections > featured > groups) is carried by scale, weight and
  * one accent "spine" — never by new colors. Everything wraps: there is no

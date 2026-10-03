@@ -36,9 +36,24 @@ export default {
     // Docker banner state (Item 4-PR5): cached ~60s with a short probe timeout,
     // so a hung docker daemon can never block the page render.
     const dockerOk = await dockerAvailable();
+    // First-view banner (Crow keychain): ids + labels only, never secrets.
+    let keychainPending = [];
+    try {
+      const { pendingFirstViews } = await import("../../keychain/store.js");
+      const { loadKeychainKey } = await import("../../keychain/key.js");
+      keychainPending = (await pendingFirstViews(db, { keyId: loadKeychainKey()?.id || null })).map((e) => ({ id: e.id, label: e.label }));
+    } catch { /* no banner rather than no page */ }
+    // Vault saving needs Vaultwarden on https (post-spike R-B); any failure = not secure.
+    let vaultSecure = false;
+    if (installed.vaultwarden) {
+      try {
+        const { vaultwardenStatus } = await import("../../keychain/vault-save.js");
+        vaultSecure = vaultwardenStatus().secure === true;
+      } catch { vaultSecure = false; }
+    }
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, dockerOk, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, dockerOk, keychainPending, vaultSecure, lang,
     });
 
     // ─── Modal + client-side JavaScript ───

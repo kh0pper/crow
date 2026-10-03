@@ -52,9 +52,10 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
-import { readEnvFile } from "../env-manager.js";
+import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
-import { resolveGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -572,7 +573,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
   const expandEnv = env || (() => {
     const fileVars = {};
     try {
-      for (const [k, { value }] of readEnvFile(join(destDir, ".env")).vars) fileVars[k] = value;
+      Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
     } catch { /* no .env → process env only */ }
     // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
     // compose run gets (the prod gateway unit may not export it).
@@ -699,8 +700,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // bundles get ONLY manifest.json/settings-section.js/server//panel//skills/
   // + validated manifest-declared roots, NEVER config/scripts/templates/src
   // (existing bundles bind-mount exactly those into live containers).
+  // package.json/package-lock.json are never bind-mounted into containers, so docker
+  // bundles get them too — otherwise a dependency added in a version bump (vaultwarden →
+  // @bitwarden/cli) would be "installed" against the OLD package.json (review C6).
   const topFiles = isDocker
-    ? ["manifest.json", "settings-section.js"]
+    ? ["manifest.json", "settings-section.js", "package.json", "package-lock.json"]
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
   const dirs = isDocker
     ? ["server", "panel", "skills"]
@@ -792,11 +796,23 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // npm step: narrow, added-dep-name-only trigger; warn-only; via the
   // injected runner so tests never shell out to a real npm.
   if (bundleNeedsNpmInstall(appSrc, destDir)) {
+    // npm_required bundles (vaultwarden: the Bitwarden CLI) install exactly as the install
+    // path does — lock file, no lifecycle scripts — and are never blessed half-installed:
+    // on failure the installed manifest (the commit marker) keeps the OLD version, so the
+    // next boot retries (re-review m4). Still warn-only: boot never hard-fails.
+    const required = repoManifest.npm_required === true;
+    const npmArgs = required
+      ? [existsSync(join(destDir, "package-lock.json")) ? "ci" : "install", "--omit=dev", "--ignore-scripts"]
+      : ["install", "--omit=dev"];
     try {
-      await runner("npm", ["install", "--omit=dev"], { cwd: destDir });
-      touched.push("npm install");
+      await runner("npm", npmArgs, { cwd: destDir });
+      touched.push(`npm ${npmArgs[0]}`);
     } catch (err) {
-      console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
+      console.warn(`[bundles] npm ${npmArgs[0]} failed for ${id}: ${err.message}`);
+      if (required) {
+        console.warn(`[bundles] ${id}: left at ${oldVersion} so the next boot retries the dependency install`);
+        return { oldVersion, newVersion: oldVersion, touched: [...touched, "npm failed — will retry"] };
+      }
     }
   }
 
@@ -1140,7 +1156,7 @@ function appendManagedBlock(envPath, blockName, kvPairs, version) {
   const end = `# crow-${blockName} END`;
   const lines = [begin];
   if (version) lines.push(`# crow-${blockName}-version: ${version}`);
-  for (const [k, v] of Object.entries(kvPairs)) lines.push(`${k}=${v}`);
+  for (const [k, v] of Object.entries(kvPairs)) lines.push(`${k}=${encodeEnvValue(v)}`);
   lines.push(end, "");
   const block = lines.join("\n");
 
@@ -1684,7 +1700,10 @@ export function findInvalidEnv(envVars) {
   if (!envVars || typeof envVars !== "object") return null;
   for (const [k, v] of Object.entries(envVars)) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
-    if (v !== undefined && v !== null && /[\r\n\0]/.test(String(v))) return { key: k, why: "contains a line break or NUL character" };
+    if (v !== undefined && v !== null) {
+      const problem = envValueProblem(v);
+      if (problem) return { key: k, why: problem };
+    }
   }
   return null;
 }
@@ -1905,17 +1924,25 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
-  const envLines = (envVars && typeof envVars === "object")
-    ? Object.entries(envVars)
-        .filter(([, v]) => v !== undefined && v !== "")
-        .map(([k, v]) => `${k}=${v}`)
-    : [];
-  if (envLines.length > 0) {
-    writePrivateFile(envPath, envLines.join("\n") + "\n");
-    log(`Wrote ${envLines.length} env vars`);
+  const usable = {};
+  if (envVars && typeof envVars === "object") {
+    for (const [k, v] of Object.entries(envVars)) if (v !== undefined && v !== "") usable[k] = v;
+  }
+  const count = Object.keys(usable).length;
+  const pathKeys = pathEnvKeys(manifest);
+  if (typeof baseText === "string") {
+    // Seeded from an existing .env / .env.example: line-preserving (C4) — the base's
+    // own lines (comments, legacy values, ${VAR} references) stay byte-for-byte.
+    writePrivateFile(envPath, updateEnvText(baseText, usable, { pathKeys }));
+    log(`Wrote ${count} env vars`);
+    return;
+  }
+  if (count > 0) {
+    writePrivateFile(envPath, formatEnvLines(usable, { pathKeys }));
+    log(`Wrote ${count} env vars`);
     return;
   }
   if (existsSync(envPath)) { chmodSync(envPath, 0o600); return; }
@@ -1930,7 +1957,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
   }
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2028,21 +2055,35 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // never shown, never sent to the gateway .env. reqEnv is the request env with
     // generated keys stripped, and is the only request env used below.
     const reqEnv = stripGeneratedKeys(manifest, envVars);
-    const generated = resolveGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
-    let installEnv = { ...(reqEnv || {}), ...generated };
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
+    const generated = plan.env;
+    const writeEnv = { ...(reqEnv || {}), ...generated };
+    let installEnv = writeEnv;
+    let baseText = null;
     if (Object.keys(generated).length > 0) {
       // Writing values bypasses the .env / .env.example rungs, so seed from them:
-      // existing .env entries, else .env.example defaults, then request, then generated.
+      // existing .env, else .env.example — LINE-PRESERVING (C4): the base's own lines are
+      // kept verbatim and only the request + generated keys are set on top.
       const envP = join(destDir, ".env");
       const exP = join(destDir, ".env.example");
-      let base = {};
       try {
-        if (existsSync(envP)) base = parseEnvText(readFileSync(envP, "utf8"));
-        else if (existsSync(exP)) base = parseEnvText(readFileSync(exP, "utf8"));
+        if (existsSync(envP)) baseText = readFileSync(envP, "utf8");
+        else if (existsSync(exP)) baseText = readFileSync(exP, "utf8");
       } catch { /* unreadable base: fall back to provided values only */ }
-      installEnv = { ...base, ...installEnv };
+      if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
     }
-    writeInstallEnv(destDir, installEnv, manifest, (msg) => appendLog(job, msg));
+    // Keychain FIRST (review C5, plan P7): a generated token's plaintext must be safely in
+    // the keychain before its hash reaches .env or the retained copy; if that save fails,
+    // abort with nothing persisted so a retry mints a fresh token. Typed fields and the
+    // optional vault copy run here too — before any pull, so the master password lives
+    // for seconds and a later compose failure still leaves the password saved.
+    const kc = await recordKeychainForInstall({ bundleId, manifest, env: installEnv, minted: plan.minted, keychainReq: keychain, log: (m) => appendLog(job, m) });
+    if (!kc.mintedSaved) {
+      rmSync(destDir, { recursive: true, force: true });
+      return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
+    }
+    plan.persist();
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }
@@ -2735,6 +2776,7 @@ export default function bundlesRouter() {
     }
 
     // Create job for async tracking
+    const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
@@ -2746,6 +2788,7 @@ export default function bundlesRouter() {
         installedSnapshot: v.installed,
         consentVerified: v.consentVerified,
         manifest: v.manifest,
+        keychain: keychainReq,
       });
       if (!out.ok) {
         finishJob(job, "failed");
@@ -3019,6 +3062,8 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+        const keptPasswords = await markBundleKeychainRemoved(bundle_id);
+        if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Passwords)`);
 
         let notifDb;
         try {
@@ -3214,15 +3259,11 @@ export default function bundlesRouter() {
         return res.status(400).json({ code: "invalid_env", key: badPattern.key, error: `Environment variable '${badPattern.key}' ${badPattern.why}` });
       }
 
-      // Read existing .env, merge with new values
+      // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
+      // keys change; every other line (legacy values, comments) stays byte-for-byte.
       const envPath = join(bundleDir, ".env");
-      const existing = {};
-      if (existsSync(envPath)) {
-        for (const line of readFileSync(envPath, "utf8").split("\n")) {
-          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-          if (match) existing[match[1]] = match[2];
-        }
-      }
+      const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+      const existing = parseEnvText(oldEnvText);
 
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {
@@ -3231,12 +3272,17 @@ export default function bundlesRouter() {
         return existing[k] === undefined ? String(next) !== "" : String(existing[k]) !== String(next);
       });
 
-      Object.assign(existing, env_vars);
-      const envContent = Object.entries(existing)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${k}=${v}`)
-        .join("\n") + "\n";
-      writePrivateFile(envPath, envContent);
+      Object.assign(existing, env_vars); // the effective env after this save
+      writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
+      const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+      // keychain_configure:false fields (Workspace admin password): setup applied the stored value
+      // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
+      const noConfigureKc = new Set((getInstalledFirstManifest(bundle_id)?.env_vars || []).filter((v) => v && v.keychain_configure === false).map((v) => v.name));
+      keychainReq.save = keychainReq.save.filter((k) => !noConfigureKc.has(k));
+      const kcLog = [];
+      const kc = keychainReq.save.length
+        ? await recordKeychainForInstall({ bundleId: bundle_id, manifest: getInstalledFirstManifest(bundle_id), env: existing, minted: {}, keychainReq, log: (m) => kcLog.push(m) })
+        : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
       const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
@@ -3296,6 +3342,7 @@ export default function bundlesRouter() {
         applies_on_next_start: appliesOnNextStart,
         bundle_restart_keys: bundleRestartKeys,
         needs_config: needsConfigKeys(bundle_id),
+        keychain: kc ? { saved: kc.saved, vault: kc.vault, messages: kcLog } : null,
       });
     } catch (err) {
       console.warn(`[bundles] POST /bundles/api/env failed: ${err?.message || err}`);

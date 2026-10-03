@@ -107,6 +107,16 @@ export const SYNCED_TABLES = [
   "ramble_wallet",
 ];
 
+// Tables that must NEVER leave this machine (Crow keychain: human passwords). The
+// keychain has its own key file, but its rows are still never replicated. Checked at load.
+export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain"]);
+export function assertLocalOnlyDisjoint(synced, localOnly) {
+  for (const t of localOnly) {
+    if (synced.includes(t)) throw new Error(`instance-sync: table ${t} is local-only and must never be in SYNCED_TABLES`);
+  }
+}
+assertLocalOnlyDisjoint(SYNCED_TABLES, LOCAL_ONLY_TABLES);
+
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
 export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
@@ -269,6 +279,7 @@ export function isLocalOnlyMemorySource(source) {
 }
 
 export function shouldSyncRow(table, row) {
+  if (LOCAL_ONLY_TABLES.includes(table)) return false;
   if (table === "contacts") {
     if (!row) return false;
     // local-bot contacts are hosted on THIS instance (instance-local secp key);

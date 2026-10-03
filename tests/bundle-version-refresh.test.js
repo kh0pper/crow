@@ -474,6 +474,8 @@ describe("npm_required refresh at boot stays warn-only (hard-fail must never lea
     assert.deepEqual(errors, [], "a failing npm step at boot must never surface as an error — warn-only even for npm_required");
     assert.ok(repaired.some((r) => r.includes(id)), "the refresh itself must still be reported as having run");
     assert.ok(existsSync(destBundleDir(id)), "destDir must NOT be removed — boot-time refresh never hard-fails, unlike the install-time path");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "1.0.0",
+      "m4: the commit marker stays at the old version, so the next boot retries the npm step");
   });
 });
 
@@ -719,5 +721,54 @@ describe("B3 — build-context refresh hardening", () => {
     assert.ok(second.repaired.some((r) => r.includes(`${id}: refreshed 0.1.0 -> 0.2.0`)), JSON.stringify(second.repaired));
     assert.ok(runnerRefreshed(id));
     assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C6 (Crow keychain): a docker bundle's package.json/package-lock.json ARE refreshed
+// (they are never bind-mounted into a container), so a dependency added in a version
+// bump (vaultwarden → @bitwarden/cli) is actually installed by the npm step.
+// ---------------------------------------------------------------------------
+describe("C6 — docker bundle refresh ships package.json + lock and installs the added dependency", () => {
+  test("added dep in a docker bundle → package files copied, npm install runs in the installed dir", async () => {
+    const id = "widget-docker-dep";
+    const repoRoot = freshRoot("crowrepo-dockerdep-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "WD", version: "1.1.0", type: "bundle", category: "misc", description: "d",
+      docker: { composefile: "docker-compose.yml" }, server: { command: "node", args: ["server/index.js"] },
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services: {}\n");
+    put(repoRoot, `${id}/server/index.js`, "v2\n");
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "@bitwarden/cli": "2026.8.0", zod: "^3.24.0" } }));
+    put(repoRoot, `${id}/package-lock.json`, JSON.stringify({ name: id, lockfileVersion: 3 }));
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(CROW_HOME, `bundles/${id}/package.json`, JSON.stringify({ name: id, dependencies: { zod: "^3.24.0" } }));
+    put(CROW_HOME, `bundles/${id}/node_modules/zod/package.json`, JSON.stringify({ name: "zod", version: "3.24.0" }));
+    setInstalled([id]);
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(JSON.parse(readAt(destBundleDir(id), "package.json")).dependencies["@bitwarden/cli"], "2026.8.0");
+    assert.ok(existsSync(join(destBundleDir(id), "package-lock.json")));
+    const npm = runner.calls.filter((c) => c.cmd === "npm");
+    assert.equal(npm.length, 1, "npm runs once for the added dependency");
+    assert.equal(npm[0].opts.cwd, destBundleDir(id));
+  });
+
+  test("m4 — an npm_required docker bundle refreshes with the lock file and no lifecycle scripts", async () => {
+    const id = "widget-docker-required";
+    const repoRoot = freshRoot("crowrepo-dockerreq-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "WR", version: "1.1.0", type: "bundle", category: "misc", description: "d", npm_required: true,
+      docker: { composefile: "docker-compose.yml" },
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services: {}\n");
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "@bitwarden/cli": "2026.8.0" } }));
+    put(repoRoot, `${id}/package-lock.json`, JSON.stringify({ name: id, lockfileVersion: 3 }));
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    setInstalled([id]);
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(runner.calls.filter((c) => c.cmd === "npm").map((c) => c.args), [["ci", "--omit=dev", "--ignore-scripts"]]);
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "1.1.0");
   });
 });

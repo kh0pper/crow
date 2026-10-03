@@ -78,8 +78,11 @@ test("the human admin password never reaches a container and is install-gated, n
   assert.equal(v.secret, true);
   assert.equal(v.propagate, false);
   assert.equal(v.default, undefined);
-  assert.ok(new RegExp(v.pattern).test("Correct-Horse-Battery-9"));
-  assert.ok(!new RegExp(v.pattern).test("has $ dollar 123"));
+  const re = new RegExp(v.pattern);
+  for (const ok of ["Correct-Horse-Battery-9", "has $ dollar 123", "it's \"quoted\" #1", "back\\slash and é😀 ok"]) assert.ok(re.test(ok), ok);
+  for (const bad of ["short-1", "tab\there-123456", "line\nbreak-123456", "x".repeat(129)]) assert.ok(!re.test(bad), JSON.stringify(bad));
+  assert.equal(v.keychain_username, "${WORKSPACE_ADMIN_USER}");
+  assert.equal(v.generatable, true, "Generate + keychain box are opt-in (C1)");
   for (const v2 of manifest.env_vars) assert.ok(v2.propagate === false || v2.generate === "secret", `${v2.name} must stay out of the gateway .env`);
   for (const n of ["WORKSPACE_NC_SERVE_PORT", "WORKSPACE_OO_SERVE_PORT", "WORKSPACE_PUBLIC_HOST", "WORKSPACE_ADMIN_USER"]) assert.ok(envVar(n).pattern, `${n} must be pattern-gated (rendered into shell commands)`);
   assert.ok(new RegExp(envVar("WORKSPACE_PUBLIC_HOST").pattern).test("crow.example-tailnet.ts.net"));
