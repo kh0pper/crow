@@ -6,13 +6,23 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHmac } from "node:crypto";
+import { createInterface } from "node:readline";
 import { parseEnvText } from "../servers/gateway/bundle-env-codec.js";
 
 const env = parseEnvText(readFileSync(join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "workspace", ".env"), "utf8"));
 const NC = "http://127.0.0.1:3070", OO = "http://127.0.0.1:3071", U = "crow-bot";
 const AUTH = "Basic " + Buffer.from(`${U}:${env.WORKSPACE_BOT_APP_PASSWORD}`).toString("base64");
 const args = new Set(process.argv.slice(2));
-const ask = () => new Promise((r) => process.stdin.once("data", (d) => { process.stdin.pause(); r(d); })); // [deviation]
+// [deviation] line-based stdin: one readline interface, lines queued, so N prompts read N lines (pipe or tty)
+let rl = null, stdinClosed = false; const lines = [], waiters = [];
+const ask = () => {
+  if (!rl) {
+    rl = createInterface({ input: process.stdin });
+    rl.on("line", (l) => (waiters.length ? waiters.shift()(l) : lines.push(l)));
+    rl.on("close", () => { stdinClosed = true; while (waiters.length) waiters.shift()(""); }); // EOF: never hang
+  }
+  return lines.length ? Promise.resolve(lines.shift()) : stdinClosed ? Promise.resolve("") : new Promise((r) => waiters.push(r));
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const facts = [];
 const fact = (k, v) => { facts.push([k, v]); console.log(`FACT ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`); };
@@ -145,5 +155,5 @@ if (args.has("--capture-fixtures")) {
 } finally {
   fact("cleanup_delete", (await dav("DELETE", `files/${U}/${enc(DIR)}`)).status);
   console.log("\nFACTS JSON\n" + JSON.stringify(Object.fromEntries(facts), null, 2));
-  process.stdin.pause(); // [deviation] a stdin read leaves the stream flowing; pause so the process can exit
+  rl?.close(); // [deviation] release stdin so the process can exit
 }
