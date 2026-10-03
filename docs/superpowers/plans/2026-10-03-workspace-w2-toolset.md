@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship an MCP server inside the `workspace` bundle that gives Crow's bots safe, versioned, lock-aware control of the household's Nextcloud + ONLYOFFICE Workspace. It covers:
-- **Drive, Docs, Sheets, Slides, Calendar, Contacts:** 74 `ws_*` tools mirroring the Google Workspace MCP;
+- **Drive, Docs, Sheets, Slides, Calendar, Contacts:** 76 `ws_*` tools (74 mirroring the Google Workspace MCP, plus `ws_change_status`/`ws_cancel_change` for queued changes);
 - a phone-friendly **Quick edit** page in the Office panel.
 
 **Architecture:**
@@ -96,6 +96,7 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 | I13 | Calendar re-create after delete unverified | Spike S8, with a fallback ruling | Task 1 |
 | r2-rereview | B1: "newest id = current" is wrong after undo/restore. B2: no audit of the bundle lock file. Minors: second drop, undo-after-override wording, 423 on move/rename/folder trash, stale spike line | `current` flag + Quick edit filters the current row; blocking `npm audit --prefix bundles/workspace` CI step; retry runs with `wait`; skill wording; `explain423`; spike text fixed | Tasks 1, 3, 5, 14 |
 | K5 | Kevin's design change (2026-10-03): smooth writes to open docs | Default queue; live apply through a system ONLYOFFICE plugin (bind-mounted, same-origin Serve path, editor-JWT auth, per-change apply tokens, CAS claims); close-time apply; notifications; `force_close` only as an explicit override; spike S9 gates the live path | Tasks 1, 5, 12, 13, 14, 15, 16 |
+| K5-r1 | `new Function` is impossible under safePluginEval; the plugin token is the docservice session token, not the editor JWT; the S9 gate couldn't fail; routes.js was written in Task 14 without live/worker; rate limit; worker skipped `info`; ack ≠ saved; partial failure → double apply; stranded `applying_close`; claims ignored seq; unpinned inverses; unsound undo inverses; Apply-now cancel swallowed; minors | Self-contained `crowCommand` (+ purity test, S9 check); auth binds the token to a LIVE session (current key + user ∈ `info.users`); S9 sends the full token to the loopback listener and records claims/lifetime/view-mode; `panel/routes.js` created in Task 13 with lazy live mount + worker; rate-limit skip prefix + per-document limit; `info` checked when unlocked; `verified` column + not-saved detection; `applied_nothing` gate; `recoverStranded`; `nextApplicable` on claim; `INVERSE_OF` pinning + path override; exact-only inverses else `undo_via_versions`; cancel failure aborts; 76 counts; trash wait 0; stale notify once; callback watchdog; count-based append postcondition | Tasks 1, 12, 13, 14 |
 | r2 | Spike imported fflate before it was installed; the after-version label overwrote human labels on restore; the fake's restore kept pre-restore content under the wrong id; browser CRLF caused stale_view | System `unzip` in the spike; `mayLabel` applied to the after row too; fake keeps `cur` at its id; undo-of-undo + CRLF tests | Tasks 1, 5, 14 |
 | minor | Colon names, SEARCH scope encoding, xlsx soffice check, proceed double-wait, share-root trash | All fixed (`share_root` refusal added) | Tasks 4, 5, 8 |
 
@@ -510,10 +511,16 @@ Purpose: before Task 13, prove the live-plugin assumptions on the real 9.4 CE ed
    - `config.json`: the same shape as Task 13's (`type:"system"`, `isViewer:true`, word/cell/slide), but its own GUID `{0C0FFEE0-5EED-4C8B-9B57-000000000001}`;
    - `index.html`: the same base-script includes as a bundled plugin (copy them from `{9DC93CDB-…}/index.html`);
    - `probe.js`. On init it POSTs to `/crow-live/probe`:
-     - `{documentId, userId, editorType, isViewMode, isMobileMode, has_jwt: !!info.jwt, jwt_header_payload: first two segments only}`;
+     - `{documentId, userId, editorType, isViewMode, isMobileMode, jwt: info.jwt}`: the FULL token (review K5-C3). It travels only over the tailnet Serve path to a loopback listener and is never stored; the listener records claims, not the token;
      - a `typeof` report for every builder method `ops.js` intends to use: `Api.GetDocument, ApiDocument.SearchAndReplace/Search/Push/GetAllParagraphs/GetAllHeadingParagraphs/GetStyle, Api.CreateParagraph, ApiParagraph.AddText/SetStyle/InsertParagraph/GetText/RemoveAllElements, ApiRange.SetBold/SetItalic/SetUnderline/SetColor/AddComment, ApiRun.GetTextPr/SetTextPr` for word; `Api.GetSheet/GetActiveSheet/AddSheet, ApiWorksheet.GetRange/GetUsedRange/SetName, ApiRange.SetValue/GetValue/SetNumberFormat` for cell; `Api.GetPresentation, ApiPresentation.GetSlideByIndex, ApiSlide.GetAllShapes, ApiShape.GetDocContent` for slide. It obtains them inside one `callCommand` that returns `Object.keys`-style presence flags.
    - Then, if not view mode, one `callCommand` that appends a paragraph "CROW-PROBE" (word) or sets `Z99` (cell), and `executeMethod("StartAction", ["Information", "Crow probe…"])` / `EndAction`.
-2. `node scripts/workspace-w2-plugin-probe/listener.mjs` listens on 127.0.0.1:3399. It verifies `has_jwt` and that the JWT signature checks with `WORKSPACE_ONLYOFFICE_JWT_SECRET`, by re-signing header.payload on the server side; the browser never sends the signature. It prints facts and writes them to the results file.
+2. `node scripts/workspace-w2-plugin-probe/listener.mjs` listens on 127.0.0.1:3399. It verifies the token's HS256 signature against `WORKSPACE_ONLYOFFICE_JWT_SECRET`, then records:
+   - the claim **names** (no values except `document.key`, `exp`, `iat`, and the user id/name);
+   - `exp - iat`;
+   - whether it is the 5-minute editor-config JWT or the docservice session token (lifetime ≥ 1 day ⇒ session);
+   - the claim that marks view mode, by comparing the laptop and phone tokens;
+   - whether `user.id` appears in ONLYOFFICE `info.users` for that key.
+   It writes these facts to the results file and never the token. If the docservice uses a *different* secret on another install, the record says so; on crow all four secrets hash the same.
 3. `sudo tailscale serve --bg --https=8457 --set-path=/crow-live/probe http://127.0.0.1:3399` (removed in step 6).
 4. `docker cp scripts/workspace-w2-plugin-probe crow-workspace-onlyoffice-1:/var/www/onlyoffice/documentserver/sdkjs-plugins/{0C0FFEE0-5EED-4C8B-9B57-000000000001}`, then `docker exec crow-workspace-onlyoffice-1 documentserver-flush-cache.sh`.
 5. **[KEVIN]** opens the spike `editor.docx`, an .xlsx and a .pptx on the **laptop** (edit), then the .docx on the **phone** (view). He reports whether "Crow probe…" appeared and whether "CROW-PROBE" showed in the laptop doc and survived close/save.
@@ -527,8 +534,14 @@ Record in the results file:
 - `S9_view_mode_on_phone`, `S9_edit_applied_and_saved`, `S9_indicator_method` (StartAction worked: yes/no);
 - **`API present: <comma list>`** (the exact line `tests/workspace-plugin-ops.test.js` parses).
 
+Also record:
+- `S9_callcommand_structured_result`: a command with a local object literal and an inner function call returned `{ok:true}` through `safePluginEval`;
+- `S9_command_noop_while_user_edits_cell`: Kevin double-clicks a cell; the probe's sheet command reports whether it ran or no-op'd;
+- `S9_phone_locks_file`: `nc:lock` while the phone is only viewing.
+
 **Gate:**
-- `has_jwt` false or the signature invalid → R-LIVE fallback (live disabled, close-time only). Task 13 still ships the plugin code but `LIVE_OPS` is empty, and Kevin is told.
+- No token, an invalid signature, or a token user not found in `info.users` → R-LIVE fallback (live disabled, close-time only).
+- `S9_callcommand_structured_result` false → the same fallback. Task 13 still ships the plugin code but `LIVE_OPS` is empty, and Kevin is told.
 - An individual method missing → that op leaves `LIVE_OPS`.
 
 - [ ] **Step 9: Write the results file**
@@ -2570,7 +2583,7 @@ export const driveWriteDefs = [
       const parent = segs.length > 1 ? await stat(cfg, segs.slice(0, -1)) : null;
       const isShareRoot = e.ownerId && e.ownerId !== cfg.user && (!parent || parent.ownerId !== e.ownerId);
       if (isShareRoot) throw new WsError("share_root", `"${e.name}" is shared with Crow bot by ${e.ownerName || e.ownerId}; deleting it would only remove Crow's access, not the files. Ask the owner to delete it, or trash items inside it.`);
-      await refuseIfOpen(cfg, e, args.wait_s ?? 30, clock); await remove(cfg, segs).catch((err) => explain423(cfg, segs, err)); return { trashed: true, path: e.path };
+      await refuseIfOpen(cfg, e, args.wait_s ?? 0, clock); await remove(cfg, segs).catch((err) => explain423(cfg, segs, err)); return { trashed: true, path: e.path };
     } },
   { name: "ws_drive_upload_file", description: "Create a NEW file from text or base64 (max 10 MB). Never overwrites.",
     schema: { folder: z.string().max(4096), name: z.string().min(1).max(255), text: z.string().optional(), base64: z.string().optional() },
@@ -2623,15 +2636,18 @@ import { z } from "zod";
 import { WsError } from "../result.js";
 import { defineTools } from "./define.js";
 import { undoFileChange } from "../write-protocol.js";
+import { writeOpts, writeOptsOf } from "./common.js";
 
 /** Task 10 adds the "j1." (calendar/contacts journal) branch. */
-export const undoHandlers = { v1: (cfg, args, ctx) => undoFileChange(cfg, { path: args.path }, args.version_id, { clock: ctx.clock, waitS: args.wait_s ?? 30, ifOpen: args.if_open ?? "wait" }) };
+// K5: undo is queueable like any write (default queue, wait 0). A queued FILE undo still re-checks the etag at apply time,
+// so if the person typed meanwhile it ends in changed_since; the skill says so.
+export const undoHandlers = { v1: (cfg, args, ctx) => undoFileChange(cfg, { path: args.path }, args.version_id, { clock: ctx.clock, ...writeOptsOf(args) }) };
 
 export function registerUndo(server, ctx) {
   return defineTools(server, ctx, [{
     name: "ws_undo_last_change",
     description: "Undo one Crow change: pass the path (or the cal:/contacts: ref) and the version_id that change returned. Refuses if someone changed it since.",
-    schema: { path: z.string().max(4096), version_id: z.string().max(2048), wait_s: z.number().int().min(0).max(30).optional(), if_open: z.enum(["wait", "force_close"]).optional() },
+    schema: { path: z.string().max(4096), version_id: z.string().max(2048), ...writeOpts },
     run: async (args, c) => {
       const kind = String(args.version_id).split(".")[0];
       const h = undoHandlers[kind];
@@ -6052,7 +6068,7 @@ CREATE TABLE IF NOT EXISTS workspace_pending_changes (
   id TEXT PRIMARY KEY, file_id INTEGER NOT NULL, path TEXT NOT NULL, seq INTEGER NOT NULL, doc_key TEXT,
   tool TEXT NOT NULL, args_json TEXT NOT NULL, precondition_json TEXT, state TEXT NOT NULL DEFAULT 'pending',
   lease_until INTEGER, lease_owner TEXT, claim_count INTEGER NOT NULL DEFAULT 0, result_json TEXT, version_id TEXT,
-  inverse_json TEXT, open_by_json TEXT, requested_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  inverse_json TEXT, open_by_json TEXT, requested_by TEXT, verified INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_wpc_file_seq ON workspace_pending_changes(file_id, seq);
 CREATE INDEX IF NOT EXISTS ix_wpc_state ON workspace_pending_changes(state);
@@ -6110,7 +6126,7 @@ export async function nextApplicable(db, fileId, states = ["pending", "unknown_a
   for (const r of rows) { if (TERMINAL.has(r.state)) continue; return states.includes(r.state) ? r : null; } // earlier non-terminal blocks
   return null;
 }
-export async function filesWithWork(db) { return (await db.execute({ sql: "SELECT DISTINCT file_id, path FROM workspace_pending_changes WHERE state IN ('pending','unknown_after_claim','claimed_live')", args: [] })).rows; }
+export async function filesWithWork(db) { return (await db.execute({ sql: "SELECT DISTINCT file_id, path FROM workspace_pending_changes WHERE state IN ('pending','unknown_after_claim','claimed_live') OR (state='applied_live' AND verified=0)", args: [] })).rows; }
 export async function expireOld(db, at = now()) {
   const cut = at - 7 * 86400e3;
   const rows = (await db.execute({ sql: "SELECT id FROM workspace_pending_changes WHERE state='pending' AND created_at < ?", args: [cut] })).rows;
@@ -6143,12 +6159,26 @@ export const QUEUEABLE = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_
   "ws_sheets_write", "ws_sheets_append", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_sheets_delete_tab", "ws_sheets_set_number_format", "ws_sheets_batch_update",
   "ws_slides_find_replace", "ws_slides_add_slide", "ws_slides_duplicate_slide", "ws_slides_delete_slide", "ws_slides_reorder_slides", "ws_slides_add_text_box", "ws_slides_add_image", "ws_slides_format_text", "ws_slides_format_paragraph", "ws_slides_edit_text", "ws_slides_edit_notes", "ws_slides_batch_update",
   "ws_drive_upload_new_version", "ws_drive_restore_version", "ws_undo_last_change"]);
+/** K5-I7: the ONLY inverse tool accepted for each live tool (the plugin cannot pick anything else, and never a ws_drive_* tool). */
+export const INVERSE_OF = { ws_docs_find_replace: "ws_docs_find_replace", ws_docs_rewrite_passages: "ws_docs_rewrite_passages", ws_docs_format_text: "ws_docs_format_text",
+  ws_docs_append: "ws__docs_remove_paragraphs_exact", ws_docs_insert_at_heading: "ws__docs_remove_paragraphs_exact", ws_docs_add_comment: "ws__docs_delete_comment",
+  ws_sheets_write: "ws_sheets_write", ws_sheets_append: "ws__sheets_clear_rows_exact", ws_sheets_set_number_format: "ws__sheets_restore_styles",
+  ws_sheets_add_tab: "ws_sheets_delete_tab", ws_sheets_rename_tab: "ws_sheets_rename_tab", ws_slides_edit_text: "ws_slides_edit_text" };
+export function pinInverse(row, inverse) {
+  if (!Array.isArray(inverse) || !inverse.length) return null;
+  const allowed = INVERSE_OF[row.tool];
+  const out = inverse.slice(0, 20).filter((x) => x && x.tool === allowed && x.args && typeof x.args === "object").map((x) => ({ tool: allowed, args: { ...x.args, path: row.path, file_id: undefined } }));
+  return out.length === inverse.length ? out : null; // anything off-list → no inverse (undo_via_versions), never a partial one
+}
 export const LIVE_OPS = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_docs_insert_at_heading", "ws_docs_rewrite_passages", "ws_docs_format_text", "ws_docs_add_comment",
   "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_slides_edit_text"]);
 const docText = (bytes) => allParagraphs(openDocx(bytes)).map(({ p }) => textMap(p).text).join("\n").normalize("NFC");
 const pairsOf = (a) => a.pairs || [{ find: a.find, replace: a.replace }];
 
+const firstLine = (md) => String(md).replace(/[#*_`>|-]/g, "").trim().split("\n")[0].trim();
+const countOf = (hay, needle) => (needle ? hay.split(needle).length - 1 : 0);
 export function snapshot(tool, args, bytes) {
+  if (tool === "ws_docs_append" || tool === "ws_docs_insert_at_heading") return { count: countOf(docText(bytes), firstLine(args.markdown)) }; // review: count-based postcondition
   if (tool === "ws_sheets_write") return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values };
   if (tool === "ws_slides_edit_text") { const deck = openPptx(bytes); return { text: shapeText(shapeById(deck, args.object_id).sp) }; }
   return null;
@@ -6164,10 +6194,10 @@ export function checkPre(tool, args, pre, bytes) {
     default: return { ok: true }; // the tool's own validation (not_found, heading_not_found, slide_not_found…) is the anchor check
   }
 }
-export function checkPost(tool, args, bytes) {
+export function checkPost(tool, args, bytes, pre = null) {
   switch (tool) {
     case "ws_docs_find_replace": { const t = docText(bytes); const p = pairsOf(args).at(-1); return !t.includes(String(pairsOf(args)[0].find)) && t.includes(String(p.replace)); }
-    case "ws_docs_append": return docText(bytes).includes(String(args.markdown).replace(/[#*_`>|-]/g, "").trim().split("\n")[0].trim());
+    case "ws_docs_append": case "ws_docs_insert_at_heading": return pre && Number.isInteger(pre.count) ? countOf(docText(bytes), firstLine(args.markdown)) > pre.count : null;
     case "ws_docs_rewrite_passages": { const t = docText(bytes); return args.passages.every((p) => t.includes(String(p.new_text).split("\n")[0])); }
     case "ws_sheets_write": { const want = (Array.isArray(args.values[0]) ? args.values : [args.values]).map((r) => r.map((v) => String(v ?? ""))); const got = readRange(openXlsx(bytes), args.range, "FORMULA").values.map((r) => r.map((v) => String(v ?? ""))); return JSON.stringify(got) === JSON.stringify(want); }
     case "ws_slides_edit_text": { try { return shapeText(shapeById(openPptx(bytes), args.object_id).sp) === args.new_text; } catch { return null; } }
@@ -6192,7 +6222,7 @@ export async function applyQueued(ctx, db, row) {
   const cfg = ctx.getConfig(); const args = JSON.parse(row.args_json); const segs = splitPath(row.path);
   const { bytes } = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
   if (row.state === "unknown_after_claim") {
-    const post = checkPost(row.tool, args, bytes);
+    const post = checkPost(row.tool, args, bytes, JSON.parse(row.precondition_json || "null"));
     if (post === true) { await cas(db, row.id, "unknown_after_claim", "applied_live", { result_json: JSON.stringify({ detected: true }) }); return { state: "applied_live", detected: true }; }
     if (post === null) { await cas(db, row.id, "unknown_after_claim", "failed", { result_json: JSON.stringify({ reason: "ambiguous" }) }); return { state: "failed", reason: "ambiguous" }; }
     if (!(await cas(db, row.id, "unknown_after_claim", "applying_close"))) return { state: "skipped" };
@@ -6238,7 +6268,7 @@ export async function notifyChange(db, r, event, extra = {}) {
 import { stat } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
 import { docSession } from "../nc/onlyoffice.js";
-import { filesWithWork, nextApplicable, releaseExpiredLeases, expireOld, get } from "./store.js";
+import { filesWithWork, nextApplicable, releaseExpiredLeases, expireOld, get, cas } from "./store.js";
 import { applyQueued } from "./apply.js";
 import { notifyChange } from "./notify.js";
 
@@ -6250,11 +6280,14 @@ export function makeTick({ db, getConfig, clock }) {
     for (const f of await filesWithWork(db)) {
       let e; try { e = await stat(cfg, splitPath(f.path)); } catch { continue; }
       if (e.lock) {
-        if (e.lockType !== 1) continue;                       // person's lock: wait for unlock
-        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true }));
-        if (s.live) continue;                                 // session alive: the plugin may still apply live
-        continue;                                             // stale editor lock: Nextcloud refuses writes anyway
+        if (e.lockType === 1) { const s = await docSession(cfg, e.fileId).catch(() => ({ live: true })); if (!s.live) await notifyStaleOnce(db, f.file_id); }
+        continue;                                             // any lock: wait (person's lock, live session, or stale)
       }
+      // review K5-I2: the connector locks only on the status-1 callback, AFTER the document server fetched the file.
+      // An unlocked file can therefore still have an opening session → check ONLYOFFICE info even when unlocked.
+      const s = await docSession(cfg, e.fileId).catch(() => ({ live: true }));
+      if (s.live) continue;
+      await verifyAppliedLive(ctx, db, f.file_id);           // review K5-I3: an "applied" ack is not proof of a save
       for (let row = await nextApplicable(db, f.file_id); row; row = await nextApplicable(db, f.file_id)) {
         const r = await applyQueued(ctx, db, row);
         if (r.state === "skipped" || r.state === "pending") break;
@@ -6263,6 +6296,29 @@ export function makeTick({ db, getConfig, clock }) {
     }
   };
 }
+/** K5-I3: once the session is over, check applied_live rows against the SAVED file (postcondition). */
+async function verifyAppliedLive(ctx, db, fileId) {
+  const rows = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? AND state='applied_live' AND COALESCE(verified,0)=0", args: [fileId] })).rows;
+  if (!rows.length) return;
+  const { getFile } = await import("../nc/dav.js"); const { MAX_EDIT_BYTES } = await import("../write-protocol.js"); const { checkPost } = await import("./conditions.js");
+  const { bytes } = await getFile(ctx.getConfig(), splitPath(rows[0].path), { maxBytes: MAX_EDIT_BYTES });
+  for (const r of rows) {
+    const post = checkPost(r.tool, JSON.parse(r.args_json), bytes, JSON.parse(r.precondition_json || "null"));
+    if (post === false) { await cas(db, r.id, "applied_live", "failed", { result_json: JSON.stringify({ reason: "not_saved" }) }); notifyChange(db, await get(db, r.id), "failed", { reason: "applied in the editor, but the editor closed before saving it" }); }
+    else await db.execute({ sql: "UPDATE workspace_pending_changes SET verified=1 WHERE id=?", args: [r.id] });
+  }
+}
+const staleNotified = new Set();
+async function notifyStaleOnce(db, fileId) {
+  if (staleNotified.has(fileId)) return; staleNotified.add(fileId);
+  const r = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? AND state='pending' ORDER BY seq LIMIT 1", args: [fileId] })).rows[0];
+  if (r) notifyChange(db, r, "failed", { reason: "the file is still marked open in the editor but nobody is editing it; its owner can Unlock it in Workspace (⋯ → Unlock), then the change applies" });
+}
+/** K5-I5: a crash between PUT and CAS strands applying_close and blocks the file → treat as unknown_after_claim. */
+export async function recoverStranded(db) {
+  await db.execute({ sql: "UPDATE workspace_pending_changes SET state='unknown_after_claim', updated_at=? WHERE state='applying_close'", args: [Date.now()] });
+}
+
 let running = null;
 export function startQueueWorker({ db, getConfig, clock, intervalMs = 15000 }) {
   if (running) return running;
@@ -6314,7 +6370,17 @@ export const queueDefs = [
 export const registerQueue = (server, ctx) => defineTools(server, ctx, queueDefs);
 ```
 
-**Undo of live-applied changes.** The plugin's ack stores `inverse_json`: a `{tool, args}` list that reverts it, built from what it actually replaced or inserted. `ws_undo_last_change` accepts `version_id` = `change_id` (`pc_…`):
+**Undo of live-applied changes** (review K5-I8). The plugin's ack stores `inverse_json` **only when the inverse is exact**; otherwise it stores `null`, and undo answers `undo_via_versions`. That answer explains that the live edit was saved together with the person's own typing, offers `ws_drive_list_versions` and names the version from before the session. Exact inverses:
+- `find_replace`: only if the replacement text occurred 0 times before (count-checked: `expect_count`);
+- `rewrite_passages`: paragraph text and first-run formatting (other inline formatting is reported as lost);
+- `format_text`: only if the range had uniform formatting;
+- `sheets_write`: the old values;
+- `slides_edit_text`: the old text;
+- `append` / `insert_at_heading`: exact paragraph removal, with the texts occurring once;
+- `add_comment`: delete it;
+- tab ops: guarded by preconditions.
+
+"Detected" rows (`unknown_after_claim` resolved by postcondition) have no inverse → `undo_via_versions`. `ws_undo_last_change` accepts `version_id` = `change_id` (`pc_…`):
 - `applied_close` → its stored `version_id` → the normal file undo;
 - `applied_live` → **enqueue the inverse** (`requested_by: "undo"`), which applies live or at close like any change;
 - otherwise `not_applied`.
@@ -6361,15 +6427,17 @@ git show --stat HEAD
 
 **Files:**
 - Create: `bundles/workspace/onlyoffice-plugin/{config.json,index.html,crow-live.js,ops.js,icon.png}`, `bundles/workspace/server/live/{jwt.js,routes-live.js}`
-- Modify: `bundles/workspace/docker-compose.yml` (read-only bind mount), `bundles/workspace/ops/bootstrap.sh` (step "Crow live plugin": flush the cache), `bundles/workspace/panel/routes.js` (mount the live routes + start the worker), `bundles/workspace/panel/workspace.js` (admin block: Serve path command), `docs/developers/port-allocation.md` (note: the new Serve path, no new port), `tests/auth-network.test.js` (Funnel never reaches `/api/workspace/live`)
+- Create: `bundles/workspace/panel/routes.js` (Step 3b: the live mount, the worker start, and the Quick edit handlers, all lazy)
+- Modify: `servers/gateway/middleware/rate-limit.js` (add `/api/workspace/live/` to `GENERAL_LIMITER_SKIP_PREFIXES`; the per-document limit in `liveRouter` replaces it; review K5-I1), `bundles/workspace/docker-compose.yml` (read-only bind mount), `bundles/workspace/ops/bootstrap.sh` (step "Crow live plugin": flush the cache), `bundles/workspace/panel/workspace.js` (admin block: Serve path command), `docs/developers/port-allocation.md` (note: the new Serve path, no new port), `tests/auth-network.test.js` (Funnel never reaches `/api/workspace/live`)
 - Test: `tests/workspace-live.test.js`, `tests/workspace-plugin-ops.test.js`
 
 **Interfaces:**
 - Consumes: queue store/conditions (Task 12), `WORKSPACE_ONLYOFFICE_JWT_SECRET` via `getConfig().jwtSecret`, `docSession`.
+- Note: the apply-token secret is per boot. A gateway restart during a live apply makes the ack fail → lease expiry → `unknown_after_claim` → postcondition. That is safe, just slower.
 - Produces `live/jwt.js`:
   - `verifyEditorJwt(token, secret, nowMs) → payload | throws`. Accepts HS256 only; `exp` checked; returns `{key, userId, userName, canEdit}`.
   - `mintApplyToken(changeId, key, leaseUntil, secret) → string`, `checkApplyToken(...)`. The secret is per-boot random, from `crypto.randomBytes`.
-- Produces `live/routes-live.js`: `mountLive(router, {db, getConfig, clock})` with:
+- Produces `live/routes-live.js`: `liveRouter({db, getConfig, clock}) → express.Router`, mounted lazily at `/api/workspace/live/v1` by `panel/routes.js`, with:
   - `GET /api/workspace/live/v1/pending?key=&pv=` → `[{change_id, tool, args, pre}]`, live ops only, in order, the first applicable per file;
   - `POST /api/workspace/live/v1/claim {change_id}` → `{lease_until, apply_token}`;
   - `POST /api/workspace/live/v1/ack {change_id, apply_token, outcome:"applied"|"failed", reason?, inverse?}`.
@@ -6392,6 +6460,7 @@ import { connectWorkspace } from "./helpers/workspace-client.js";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const sign = (payload, secret = "jwt") => { const h = `${b64({ alg: "HS256", typ: "JWT" })}.${b64(payload)}`; return `${h}.${createHmac("sha256", secret).update(h).digest("base64url")}`; };
 const editorJwt = (key, extra = {}) => sign({ document: { key, permissions: { edit: true } }, editorConfig: { user: { id: "ocinst_admin", name: "Kevin" }, mode: "edit" }, exp: Math.floor(Date.now() / 1000) + 3600, ...extra });
+// the fake's session for S/l.docx has users ["ocinst_admin"] (openInEditor) → tokens for other users are refused
 let fake, call, close, base, server, key, changeId;
 before(async () => {
   fake = await startFakeNextcloud(); fake.addFolder("S", { owner: "admin" });
@@ -6406,6 +6475,12 @@ before(async () => {
 after(async () => { server.close(); await close(); fake.close(); });
 const get = (path, jwt) => fetch(`${base}${path}`, { headers: jwt ? { Authorization: `Bearer ${jwt}` } : {} });
 const post = (path, jwt, body, headers = {}) => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}), ...headers }, body: JSON.stringify(body) });
+
+test("a validly signed token for a user NOT in the live session, or for an ended session, is refused (K5-C2)", async () => {
+  const intruder = sign({ document: { key }, editorConfig: { user: { id: "ocinst_mallory" }, mode: "edit" }, exp: 9e9 });
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`, intruder)).status, 401);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=old-session-key`, editorJwt("old-session-key"))).status, 401);
+});
 
 test("pending requires a valid editor JWT for THAT key; never the dashboard session", async () => {
   assert.equal((await get(`/api/workspace/live/v1/pending?key=${key}`)).status, 401);
@@ -6431,10 +6506,22 @@ test("claim: one winner, view-mode JWT refused, apply token required on ack; ack
   assert.equal((await call("ws_change_status", { change_id: changeId })).data.state, "applied_live");
 });
 
-test("a failed live apply returns the change to pending ONCE (claim_count ≤ 1), then close-time only", async () => {
+test("inverse ops are pinned: a ws_drive_* or foreign-path inverse is dropped (→ undo via versions) (K5-I7)", async () => {
+  const { pinInverse } = await import("../bundles/workspace/server/queue/conditions.js");
+  const row = { tool: "ws_docs_find_replace", path: "S/l.docx" };
+  assert.equal(pinInverse(row, [{ tool: "ws_drive_restore_version", args: { path: "S/other.docx", version_id: "1" } }]), null);
+  assert.deepEqual(pinInverse(row, [{ tool: "ws_docs_find_replace", args: { path: "S/evil.docx", pairs: [{ find: "a", replace: "b" }] } }])[0].args.path, "S/l.docx");
+});
+
+test("rate limiting: the live prefix is exempt from the gateway's general limiter (its own per-document limit applies)", async () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "middleware", "rate-limit.js"), "utf8");
+  assert.match(src, /GENERAL_LIMITER_SKIP_PREFIXES[\s\S]*"\/api\/workspace\/live\/"/);
+});
+
+test("a failed live apply that changed nothing returns to pending ONCE (claim_count ≤ 1); otherwise unknown_after_claim", async () => {
   const id = (await call("ws_docs_append", { path: "S/l.docx", markdown: "Línea" })).data.change_id;
   const { apply_token } = await (await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: id })).json();
-  await post("/api/workspace/live/v1/ack", editorJwt(key), { change_id: id, apply_token, outcome: "failed", reason: "api_error" });
+  await post("/api/workspace/live/v1/ack", editorJwt(key), { change_id: id, apply_token, outcome: "failed", applied_nothing: true, reason: "api_error" });
   assert.equal((await call("ws_change_status", { change_id: id })).data.state, "pending");
   assert.equal((await post("/api/workspace/live/v1/claim", editorJwt(key), { change_id: id })).status, 409, "no second live attempt");
 });
@@ -6457,7 +6544,9 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 const require = createRequire(import.meta.url);
-const { LIVE } = require("../bundles/workspace/onlyoffice-plugin/ops.js");
+const { crowCommand } = require("../bundles/workspace/onlyoffice-plugin/ops.js");
+// Run the self-contained command exactly as callCommand would: data in Asc.scope, Api as a global.
+const LIVE = new Proxy({}, { get: (_, tool) => (Api, args, pre) => { globalThis.Api = Api; globalThis.Asc = { scope: { crow: { tool, args, pre } } }; return crowCommand(); } });
 const S9 = readFileSync(join(import.meta.dirname, "..", "docs", "superpowers", "specs", "2026-10-03-workspace-w2-spike-results.md"), "utf8");
 
 function wordStub(paras) {
@@ -6469,14 +6558,22 @@ test("find_replace: precondition first, then SearchAndReplace per pair, inverse 
   const { Api, calls } = wordStub([{ text: "Tortillas" }]);
   const r = LIVE.ws_docs_find_replace(Api, { pairs: [{ find: "Tortillas", replace: "Totopos" }] }, null);
   assert.equal(r.ok, true); assert.deepEqual(calls[0], ["SearchAndReplace", { searchString: "Tortillas", replaceString: "Totopos", matchCase: true }]);
-  assert.deepEqual(r.inverse, [{ tool: "ws_docs_find_replace", args: { pairs: [{ find: "Totopos", replace: "Tortillas" }] } }]);
-  assert.equal(LIVE.ws_docs_find_replace(wordStub([{ text: "nada" }]).Api, { find: "Tortillas", replace: "x" }, null).reason, "target_changed");
+  // exact inverse only because "Totopos" did not exist before (count-checked); otherwise inverse = null → undo via versions
+  assert.deepEqual(r.inverse, [{ tool: "ws_docs_find_replace", args: { pairs: [{ find: "Totopos", replace: "Tortillas" }], expect_count: 1 } }]);
+  assert.equal(LIVE.ws_docs_find_replace(wordStub([{ text: "Tortillas y Totopos" }]).Api, { find: "Tortillas", replace: "Totopos" }, null).inverse, null);
+  const miss = LIVE.ws_docs_find_replace(wordStub([{ text: "nada" }]).Api, { find: "Tortillas", replace: "x" }, null);
+  assert.equal(miss.reason, "target_changed"); assert.equal(miss.applied_nothing, true);
 });
 test("append: every new paragraph gets the Normal style explicitly (heading reset)", () => {
   const { Api, calls } = wordStub([]);
   LIVE.ws_docs_append(Api, { markdown: "Uno\n\nDos" }, null);
   assert.deepEqual(calls.filter((c) => c[0] === "SetStyle").map((c) => c[1]), ["Normal", "Normal"]);
 });
+test("crowCommand is self-contained: no new Function/eval/async/generators, no free identifiers besides Api and Asc", () => {
+  const src = crowCommand.toString();
+  assert.doesNotMatch(src, /new Function|\beval\(|\basync\b|function\s*\*|=>\s*\{?\s*await/);
+});
+
 test("ops.js only calls builder methods the S9 probe found", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "onlyoffice-plugin", "ops.js"), "utf8");
   const present = new Set((S9.match(/API present: (.*)/) || [, ""])[1].split(/,\s*/).filter(Boolean));
@@ -6505,7 +6602,10 @@ export function verifyEditorJwt(token, secret, nowMs = Date.now()) {
   const p = JSON.parse(Buffer.from(parts[1], "base64url").toString());
   if (!p.exp || p.exp * 1000 < nowMs) throw new WsError("unauthorized", "editor session token expired");
   const key = p.document?.key; if (!key) throw new WsError("unauthorized", "token has no document");
-  return { key: String(key), userId: String(p.editorConfig?.user?.id || ""), userName: String(p.editorConfig?.user?.name || ""), canEdit: p.editorConfig?.mode !== "view" && p.document?.permissions?.edit !== false };
+  // View-mode detection follows the claims S9 recorded for the docservice session token (upstream suggests
+  // editorConfig.ds_view); the write itself is also impossible in view mode (callCommand needs asc_canPaste).
+  const ec = p.editorConfig || {};
+  return { key: String(key), userId: String(ec.user?.id || p.user?.id || ""), userName: String(ec.user?.name || ""), canEdit: !(ec.ds_view || ec.mode === "view" || p.document?.permissions?.edit === false) };
 }
 export function mintApplyToken(changeId, key, leaseUntil) { const d = `${changeId}.${key}.${leaseUntil}`; return `${leaseUntil}.${sig(BOOT_SECRET, d)}`; }
 export function checkApplyToken(token, changeId, key, nowMs = Date.now()) { const [lease, s] = String(token || "").split("."); return Number(lease) >= nowMs - 120000 && eq(s, sig(BOOT_SECRET, `${changeId}.${key}.${lease}`)); }
@@ -6515,66 +6615,165 @@ export function checkApplyToken(token, changeId, key, nowMs = Date.now()) { cons
 // live/routes-live.js
 import express from "express";
 import { verifyEditorJwt, mintApplyToken, checkApplyToken } from "./jwt.js";
-import { cas, get } from "../queue/store.js";
-import { LIVE_OPS } from "../queue/conditions.js";
+import { cas, get, nextApplicable } from "../queue/store.js";
+import { LIVE_OPS, pinInverse } from "../queue/conditions.js";
 import { docSession } from "../nc/onlyoffice.js";
 import { notifyChange } from "../queue/notify.js";
 export const MIN_PLUGIN_VERSION = "0.2.0";
 const LEASE_MS = 60000;
 const newer = (a, b) => a.split(".").map(Number).reduce((r, x, i) => r || Math.sign(x - (b.split(".").map(Number)[i] || 0)), 0) >= 0;
 
-export function mountLive(router, { db, getConfig, clock }) {
+export function liveRouter({ db, getConfig, clock }) {
+  const router = express.Router();
   const hits = new Map(); // key → [timestamps] (60/min)
-  const auth = (req, res, next) => {
+  // key → {fileId, users} for files with queued work; refreshed every 30 s from ONLYOFFICE info (the source of truth).
+  const sessCache = new Map();
+  const liveSession = async (key) => {
+    const hit = sessCache.get(key); if (hit && hit.at > clock.now() - 30000) return hit.v;
+    let v = null;
+    for (const f of (await db.execute({ sql: "SELECT DISTINCT file_id FROM workspace_pending_changes WHERE state IN ('pending','claimed_live')", args: [] })).rows) {
+      const s = await docSession(getConfig(), f.file_id).catch(() => null);
+      if (s?.live && s.key === key) { v = { fileId: f.file_id, users: s.users }; break; }
+    }
+    sessCache.set(key, { at: clock.now(), v }); return v;
+  };
+  const auth = async (req, res, next) => {
     if (req.headers["tailscale-funnel-request"]) return res.status(403).end();
     try {
       const key = String(req.query.key || req.body?.key || "");
       const t = verifyEditorJwt((req.headers.authorization || "").replace(/^Bearer /, ""), getConfig().jwtSecret, clock.now());
       if (key && t.key !== key) return res.status(401).json({ error: "token is for another document" });
+      // review K5-C2: the token plugins see is the DOCSERVICE session token (30-day expiry), not the 5-min editor
+      // config JWT, and crow-bot's own OCS config call can mint key-bound JWTs. So a valid signature is not enough:
+      // the key must be a file's CURRENT session key, and the token's user must be in that live session (info.users).
+      const live = await liveSession(t.key);
+      if (!live || !live.users.includes(t.userId)) return res.status(401).json({ error: "not a live editor session" });
+      req.fileId = live.fileId;
       const h = (hits.get(t.key) || []).filter((x) => x > clock.now() - 60000); h.push(clock.now()); hits.set(t.key, h);
       if (h.length > 60) return res.status(429).end();
       if (req.query.pv && !newer(String(req.query.pv), MIN_PLUGIN_VERSION)) return res.status(426).json({ error: "plugin outdated" });
       req.editor = t; next();
-    } catch { res.status(401).json({ error: "unauthorized" }); }
+    } catch (e) { if (!res.headersSent) res.status(401).json({ error: "unauthorized" }); }
   };
-  const mapKey = async (key) => {
-    const byKey = (await db.execute({ sql: "SELECT DISTINCT file_id FROM workspace_pending_changes WHERE doc_key=? AND state='pending'", args: [key] })).rows;
-    if (byKey.length) return byKey[0].file_id;
-    for (const f of (await db.execute({ sql: "SELECT DISTINCT file_id FROM workspace_pending_changes WHERE state='pending'", args: [] })).rows) {
-      const s = await docSession(getConfig(), f.file_id).catch(() => null);
-      if (s?.key === key) { await db.execute({ sql: "UPDATE workspace_pending_changes SET doc_key=? WHERE file_id=? AND state='pending'", args: [key, f.file_id] }); return f.file_id; }
-    }
-    return null;
-  };
-  router.use("/api/workspace/live/v1", express.json({ limit: "32kb" }), auth);
-  router.get("/api/workspace/live/v1/pending", async (req, res) => {
-    const fileId = await mapKey(req.editor.key); if (!fileId) return res.json([]);
+  router.use(express.json({ limit: "32kb" }), auth);
+  router.get("/pending", async (req, res) => {
+    const fileId = req.fileId;
     const rows = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? ORDER BY seq", args: [fileId] })).rows;
     const out = [];
     for (const r of rows) { if (["applied_live", "applied_close", "failed", "cancelled", "expired"].includes(r.state)) continue; if (r.state === "pending" && LIVE_OPS.has(r.tool) && Number(r.claim_count) < 1) out.push({ change_id: r.id, tool: r.tool, args: JSON.parse(r.args_json), pre: JSON.parse(r.precondition_json || "null") }); break; }
     res.json(out);
   });
-  router.post("/api/workspace/live/v1/claim", async (req, res) => {
+  router.post("/claim", async (req, res) => {
     if (!req.editor.canEdit) return res.status(403).json({ error: "view-only session" });
-    const r = await get(db, String(req.body?.change_id || "")); const fileId = await mapKey(req.editor.key);
-    if (!r || r.file_id !== fileId || !LIVE_OPS.has(r.tool) || Number(r.claim_count) >= 1) return res.status(409).end();
+    const r = await get(db, String(req.body?.change_id || "")); const fileId = req.fileId;
+    const next1 = await nextApplicable(db, fileId, ["pending"]); // review K5-I6: only the next change in seq order
+    if (!r || r.file_id !== fileId || !next1 || next1.id !== r.id || !LIVE_OPS.has(r.tool) || Number(r.claim_count) >= 1) return res.status(409).end();
     const lease = clock.now() + LEASE_MS;
     if (!(await cas(db, r.id, "pending", "claimed_live", { lease_until: lease, lease_owner: req.editor.userId, claim_count: Number(r.claim_count) + 1 }))) return res.status(409).end();
     res.json({ lease_until: lease, apply_token: mintApplyToken(r.id, req.editor.key, lease) });
   });
-  router.post("/api/workspace/live/v1/ack", async (req, res) => {
+  router.post("/ack", async (req, res) => {
     const b = req.body || {}; const r = await get(db, String(b.change_id || ""));
     if (!r || !checkApplyToken(b.apply_token, r.id, req.editor.key, clock.now())) return res.status(403).end();
     if (b.outcome === "applied") {
-      if (!(await cas(db, r.id, "claimed_live", "applied_live", { inverse_json: JSON.stringify(Array.isArray(b.inverse) ? b.inverse.slice(0, 50) : []), result_json: JSON.stringify({ by: req.editor.userName }) }))) return res.status(409).end();
+      if (!(await cas(db, r.id, "claimed_live", "applied_live", { inverse_json: JSON.stringify(pinInverse(r, b.inverse)), result_json: JSON.stringify({ by: req.editor.userName }) }))) return res.status(409).end();
       notifyChange(db, await get(db, r.id), "applied_live");
-    } else if (!(await cas(db, r.id, "claimed_live", "pending", { result_json: JSON.stringify({ live_failed: String(b.reason || "error").slice(0, 60) }) }))) return res.status(409).end();
+    } else {
+      // review K5-I4: only an op that provably changed NOTHING may return to pending; anything else is ambiguous.
+      const to = b.applied_nothing === true ? "pending" : "unknown_after_claim";
+      if (!(await cas(db, r.id, "claimed_live", to, { result_json: JSON.stringify({ live_failed: String(b.reason || "error").slice(0, 60) }) }))) return res.status(409).end();
+    }
     res.json({ ok: true });
   });
+  return router;
 }
 ```
 
-(The panel router calls `mountLive(router, …)` **before** its dashboard-auth middleware, which is path-scoped to `/api/workspace/quick` anyway. With `seams.startWorker !== false` it also calls `startQueueWorker`. `inverse` entries are validated on use: only `{tool, args}` with `tool` in `QUEUEABLE` ∪ the internal inverse ops, and args re-validated by that tool's zod schema at apply time.)
+(`liveRouter` is mounted lazily by `panel/routes.js` (Step 3b). Inverse entries are **pinned** (review K5-I7): each original tool has exactly one allowed inverse tool (`INVERSE_OF` in `conditions.js`), the inverse's `path` is overwritten with the row's own path (the plugin can't choose a file), and args are re-validated by that tool's zod schema. `ws_drive_*` tools are never accepted as inverses.)
+
+- [ ] **Step 3b: Create `panel/routes.js`** (review K5-C4: it must exist from this task on, and Task 14 only adds modules)
+
+```js
+/**
+ * Workspace panel routes: K5 live-edit endpoints (/api/workspace/live/v1/*, editor-JWT auth, NO dashboard session)
+ * and Quick edit (/api/workspace/quick/*, dashboard session + CSRF). The gateway calls this factory SYNCHRONOUSLY
+ * (servers/gateway/index.js:650), so every bundle module and the DB are resolved lazily on first request.
+ * Quick edit routes. Copied ALONE to $CROW_HOME/panels/workspace-routes.js,
+ * so bundle modules are imported by absolute URL from BUNDLE_DIR (ramble pattern). Every middleware is
+ * path-scoped (STRICT_PANEL_MOUNT). Dashboard session + CSRF (phone-bundle pattern). Writes as crow-bot.
+ */
+import { Router } from "express";
+import express from "express";
+import { join, resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CANDIDATES = [join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "workspace"), process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "workspace") : null, resolve(__dirname, "..")].filter(Boolean);
+const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.json")) && existsSync(join(p, "server", "config.js"))) || CANDIDATES.at(-1);
+const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
+const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+
+export default function workspaceRouter(authMiddleware, seams = {}) {
+  const router = Router();
+  const clock = seams.clock || realClock;
+  let csrf = seams.csrf || null;
+  const csrfMw = async (req, res, next) => {
+    if (!csrf) { const root = process.env.CROW_APP_ROOT || resolve(BUNDLE_DIR, "..", ".."); csrf = (await import(pathToFileURL(join(root, "servers", "gateway", "dashboard", "shared", "csrf.js")).href)).csrfMiddleware; }
+    return csrf(req, res, next);
+  };
+  // ---- K5 live endpoints (Task 13). Registered synchronously, built on first request. ----
+  let live = null;
+  router.use("/api/workspace/live/v1", (req, res, next) => {
+    live ??= (async () => {
+      const [{ openWorkspaceDb }, { getConfig }, { liveRouter }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/live/routes-live.js")]);
+      return liveRouter({ db: await openWorkspaceDb(), getConfig, clock });
+    })();
+    live.then((r) => r(req, res, next), (e) => { live = null; next(e); });
+  });
+  // ---- K5 close-time worker: one per gateway process; waits until Workspace is set up. ----
+  if (seams.startWorker !== false) {
+    const tryStart = async () => {
+      try {
+        const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker, recoverStranded }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/queue/worker.js")]);
+        getConfig(); const db = await openWorkspaceDb();
+        await recoverStranded(db);
+        startQueueWorker({ db, getConfig, clock });
+      } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
+    };
+    setTimeout(tryStart, 5000).unref();
+  }
+
+  // ---- Quick edit (Task 14; handlers import their modules on first use) ----
+  router.use("/api/workspace/quick", express.urlencoded({ extended: false, limit: "64kb" }), authMiddleware, csrfMw);
+  const back = (res, form, notice, extra = {}) => res.redirect(303, `/dashboard/workspace?${new URLSearchParams({ view: "quick", path: String(form.path || ""), notice, ...extra }).toString()}`);
+  const handle = (fn, okNotice, { choice = false } = {}) => async (req, res) => {
+    const form = req.body || {};
+    const lang = (req.headers["accept-language"] || "").startsWith("es") ? "es" : "en";
+    try {
+      const [{ getConfig }, actions] = await Promise.all([bundleImport("server/config.js"), bundleImport("server/quick/actions.js")]);
+      const r = await fn(actions, getConfig(), form);
+      if (r?.queued) { const { renderQueued } = await bundleImport("server/quick/view.js"); return res.status(200).type("html").send(renderQueued({ lang, csrf: req.csrfToken || form._csrf, form, r })); }
+      return back(res, form, okNotice, r?.version_id ? { v: r.version_id } : {});
+    } catch (err) {
+      if (choice && ["open_in_editor", "locked_by_person", "stale_editor_lock"].includes(err?.code)) {
+        const { renderChoice } = await bundleImport("server/quick/view.js");
+        return res.status(200).type("html").send(renderChoice({ lang, csrf: req.csrfToken || form._csrf, form, err }));
+      }
+      // Review I10: redact before the message reaches a URL (browser history / access logs).
+      let msg = String(err?.message || "").slice(0, 300);
+      try { const { redact } = await bundleImport("server/config.js"); msg = redact(msg, null); } catch { msg = ""; }
+      return back(res, form, err?.code || "error", { msg });
+    }
+  };
+  router.post("/api/workspace/quick/save", handle((a, cfg, f) => a.quickSave(cfg, f, clock), "saved", { choice: true }));
+  router.post("/api/workspace/quick/undo", handle((a, cfg, f) => a.quickUndo(cfg, f, clock), "undone"));
+  router.post("/api/workspace/quick/restore", handle((a, cfg, f) => a.quickRestore(cfg, f, clock), "restored"));
+  router.post("/api/workspace/quick/cancel", handle(async (a, cfg, f) => { const { queueDefs } = await bundleImport("server/tools/queue.js"); await queueDefs[1].run({ change_id: String(f.change_id || "") }); return {}; }, "cancelled"));
+  return router;
+}
+```
 
 - [ ] **Step 4: The plugin**
 
@@ -6616,9 +6815,11 @@ export function mountLive(router, { db, getConfig, clock }) {
       return api("/claim", { method: "POST", body: JSON.stringify({ change_id: ch.change_id }) }).then(function (cl) {
         indicator(true);
         window.Asc.scope.crow = { tool: ch.tool, args: ch.args, pre: ch.pre };
-        window.Asc.plugin.callCommand(window.CrowLive.command, false, true, function (res) {
+        var done = false, watchdog = setTimeout(function () { if (!done) { done = true; indicator(false); busy = false; schedule(60000); } }, 30000); // review: callback may never fire
+        window.Asc.plugin.callCommand(window.crowCommand, false, true, function (res) {
+          if (done) return; done = true; clearTimeout(watchdog);
           indicator(false); res = res || { ok: false, reason: "no_result" };
-          api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", reason: res.reason, inverse: res.inverse }) })
+          api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", applied_nothing: res.applied_nothing === true, reason: res.reason, inverse: res.inverse }) })
             .catch(function () {}).then(function () { busy = false; schedule(1000); });
         });
       });
@@ -6630,7 +6831,16 @@ export function mountLive(router, { db, getConfig, clock }) {
 })(window);
 ```
 
-`ops.js` defines `LIVE` as plain functions taking `(Api, args, pre)`. `CrowLive.command` is the `callCommand` body: it reads `Asc.scope.crow`, dispatches to `LIVE[tool](Api, args, pre)` and returns `{ok, reason?, inverse?}`. `callCommand` serialises the function, so `ops.js` ships the op table **inside** the command as `Asc.scope.crowOps` (the stringified `LIVE` source from `ops.js`), which the command revives with `new Function`. That source is static plugin code from the same file, never server data. The op table follows §5.7's live list. Each op:
+`ops.js` defines **one self-contained function** `crowCommand()` (review K5-C1).
+
+ONLYOFFICE 9.4 runs `callCommand` bodies through `AscCommon.safePluginEval`, which replaces `Function` with `{}`, allows one `eval`, and stubs generators. So `new Function`, closures, `async` and generators are all impossible there. The function is serialised by `callCommand`, so **everything it needs is written inside its own body**:
+- the `LIVE` op table as a local object literal;
+- the helpers;
+- the dispatch on `Asc.scope.crow.tool`.
+
+It reads only data from `Asc.scope.crow` (`{tool, args, pre}`) and returns `{ok, applied_nothing?, reason?, inverse?}`. `crow-live.js` passes it as `window.Asc.plugin.callCommand(crowCommand, false, true, cb)`.
+
+In Node, `ops.js` exports `crowCommand` (UMD tail), and the stub test runs it by setting `globalThis.Api` and `globalThis.Asc = { scope: { crow } }`. The S9 probe (Task 1) adds one check that `callCommand` returned a structured result from a command containing a local object literal and a function call; the gate fails if not. The op table follows §5.7's live list. Each op:
 1. checks its precondition on the live document (anchor exists; snapshot equals);
 2. applies the change with the S9-verified builder methods;
 3. returns its inverse.
@@ -6887,7 +7097,7 @@ const opts = (form, clock, summary, value) => { const op = asToolOp(form, value 
 export async function quickSave(cfg, formIn, clock) {
   let form = formIn;
   // "Yes, apply now" from the queued page: cancel the queued twin first so it can never apply a second time.
-  if (form.if_open === "force_close" && /^pc_[0-9a-z]+$/.test(String(form.cancel_first || ""))) { const { queueDefs } = await import("../tools/queue.js"); await queueDefs[1].run({ change_id: form.cancel_first }).catch(() => {}); }
+  if (form.if_open === "force_close" && /^pc_[0-9a-z]+$/.test(String(form.cancel_first || ""))) { const { queueDefs } = await import("../tools/queue.js"); await queueDefs[1].run({ change_id: form.cancel_first }); } // review K5-I9: if the twin can't be cancelled (already claimed/applied), STOP: not_pending is shown
   const segs = splitPath(String(form.path || ""));
   // Browsers submit textarea/hidden values with CRLF: normalize both, or every multi-line target is "stale".
   const nl = (x) => String(x ?? "").replace(/\r\n?/g, "\n");
@@ -7019,63 +7229,9 @@ ${err.data?.can_proceed ? `<form method="post" action="/api/workspace/quick/save
 }
 ```
 
-- [ ] **Step 5: Write `panel/routes.js`**
+- [ ] **Step 5: Quick edit routes**
 
-```js
-/**
- * Workspace Quick edit routes (/api/workspace/quick/*). Copied ALONE to $CROW_HOME/panels/workspace-routes.js,
- * so bundle modules are imported by absolute URL from BUNDLE_DIR (ramble pattern). Every middleware is
- * path-scoped (STRICT_PANEL_MOUNT). Dashboard session + CSRF (phone-bundle pattern). Writes as crow-bot.
- */
-import { Router } from "express";
-import express from "express";
-import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { existsSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CANDIDATES = [join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "workspace"), process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "workspace") : null, resolve(__dirname, "..")].filter(Boolean);
-const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.json")) && existsSync(join(p, "server", "quick", "actions.js"))) || CANDIDATES.at(-1);
-const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
-const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
-
-export default function workspaceRouter(authMiddleware, seams = {}) {
-  const router = Router();
-  const clock = seams.clock || realClock;
-  let csrf = seams.csrf || null;
-  const csrfMw = async (req, res, next) => {
-    if (!csrf) { const root = process.env.CROW_APP_ROOT || resolve(BUNDLE_DIR, "..", ".."); csrf = (await import(pathToFileURL(join(root, "servers", "gateway", "dashboard", "shared", "csrf.js")).href)).csrfMiddleware; }
-    return csrf(req, res, next);
-  };
-  router.use("/api/workspace/quick", express.urlencoded({ extended: false, limit: "64kb" }), authMiddleware, csrfMw);
-  const back = (res, form, notice, extra = {}) => res.redirect(303, `/dashboard/workspace?${new URLSearchParams({ view: "quick", path: String(form.path || ""), notice, ...extra }).toString()}`);
-  const handle = (fn, okNotice, { choice = false } = {}) => async (req, res) => {
-    const form = req.body || {};
-    const lang = (req.headers["accept-language"] || "").startsWith("es") ? "es" : "en";
-    try {
-      const [{ getConfig }, actions] = await Promise.all([bundleImport("server/config.js"), bundleImport("server/quick/actions.js")]);
-      const r = await fn(actions, getConfig(), form);
-      if (r?.queued) { const { renderQueued } = await bundleImport("server/quick/view.js"); return res.status(200).type("html").send(renderQueued({ lang, csrf: req.csrfToken || form._csrf, form, r })); }
-      return back(res, form, okNotice, r?.version_id ? { v: r.version_id } : {});
-    } catch (err) {
-      if (choice && ["open_in_editor", "locked_by_person", "stale_editor_lock"].includes(err?.code)) {
-        const { renderChoice } = await bundleImport("server/quick/view.js");
-        return res.status(200).type("html").send(renderChoice({ lang, csrf: req.csrfToken || form._csrf, form, err }));
-      }
-      // Review I10: redact before the message reaches a URL (browser history / access logs).
-      let msg = String(err?.message || "").slice(0, 300);
-      try { const { redact } = await bundleImport("server/config.js"); msg = redact(msg, null); } catch { msg = ""; }
-      return back(res, form, err?.code || "error", { msg });
-    }
-  };
-  router.post("/api/workspace/quick/save", handle((a, cfg, f) => a.quickSave(cfg, f, clock), "saved", { choice: true }));
-  router.post("/api/workspace/quick/undo", handle((a, cfg, f) => a.quickUndo(cfg, f, clock), "undone"));
-  router.post("/api/workspace/quick/restore", handle((a, cfg, f) => a.quickRestore(cfg, f, clock), "restored"));
-  router.post("/api/workspace/quick/cancel", handle(async (a, cfg, f) => { const { queueDefs } = await bundleImport("server/tools/queue.js"); await queueDefs[1].run({ change_id: String(f.change_id || "") }); return {}; }, "cancelled"));
-  return router;
-}
-```
+`panel/routes.js` was created in Task 13 (Step 3b) and already contains the `/api/workspace/quick/*` handlers. They import `server/quick/actions.js` and `server/quick/view.js` lazily, so they become live as soon as this task adds those modules. Nothing to write here. Re-read the file, check the handler names match `quickSave`/`quickUndo`/`quickRestore`/`renderQueued`/`renderChoice`, and run the Quick edit tests.
 
 - [ ] **Step 6: Wire Quick edit into the Office panel**
 
@@ -7218,7 +7374,7 @@ Expected: suite green after the rebase.
 
 - [ ] **Step 2: Open the PR with the GitHub MCP** (`gh` is not installed on crow)
 
-Title: "feat(workspace): W2 Crow toolset — 74 ws_* tools, versioned lock-aware edits, Quick edit". The body lists:
+Title: "feat(workspace): W2 Crow toolset — 76 ws_* tools, versioned lock-aware edits, Quick edit". The body lists:
 - the spec and plan paths;
 - the two gateway fixes (secret-skip, refresh registration);
 - the new deps;
@@ -7255,7 +7411,7 @@ Then:
 3. add the Serve path (`sudo tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`);
 4. verify that `curl -s https://crow.dachshund-chromatic.ts.net:8457/crow-live/v1/pending?key=x` → 401 from the tailnet;
 5. verify that `tailscale serve status` shows no Funnel on 8457;
-6. `docker exec crow-workspace-onlyoffice-1 ls /var/www/onlyoffice/documentserver/sdkjs-plugins | grep 6F1C2A5E`. Then `journalctl` shows the workspace addon connected with 74 tools.
+6. `docker exec crow-workspace-onlyoffice-1 ls /var/www/onlyoffice/documentserver/sdkjs-plugins | grep 6F1C2A5E`. Then `journalctl` shows the workspace addon connected with 76 tools.
 
 Confirm `auto_update_last_result` is not "Skipped". Check whether `crow-r4-gateway` shares `~/.crow`: if `systemctl cat crow-r4-gateway | grep CROW_HOME` points elsewhere, nothing to do there.
 
@@ -7297,7 +7453,7 @@ const rows = []; const check = (name, ok, info = "") => { rows.push([ok ? "PASS"
 const F = "Shared with Crow/W2 acceptance";
 const FIX = join(homedir(), "crow", "tests", "fixtures", "workspace");
 
-check("74 tools", (await client.listTools()).tools.length === 74);
+check("76 tools", (await client.listTools()).tools.length === 76);
 const up = await call("ws_drive_upload_file", { folder: F, name: "acc.docx", base64: readFileSync(join(FIX, "oo-rich.docx")).toString("base64") });
 check("upload", up.success, up.error);
 const fr = await call("ws_docs_find_replace", { path: `${F}/acc.docx`, find: "Tortillas", replace: "Totopos" });
@@ -7343,7 +7499,7 @@ process.exit(rows.every((r) => r[0] === "PASS") ? 0 : 1);
 - [ ] **Step 3: Run the scripted acceptance**
 
 Run: `node scripts/workspace-w2-acceptance.mjs`
-Expected: `11/11 passed`. Before cleanup runs, look at the Menu event on Kevin's phone **[KEVIN]**: DAVx⁵ sync shows "W2: tacos (prueba)" on 2026-10-08. To give Kevin time, run with `--lock-test` or add a pause.
+Expected: all checks pass. Before cleanup runs, look at the Menu event on Kevin's phone **[KEVIN]**: DAVx⁵ sync shows "W2: tacos (prueba)" on 2026-10-08. To give Kevin time, run with `--lock-test` or add a pause.
 
 - [ ] **Step 3b: [KEVIN] K5 live and close-time runs**
 
