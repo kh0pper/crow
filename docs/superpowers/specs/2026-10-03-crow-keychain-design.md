@@ -1,7 +1,8 @@
 # Crow Keychain: Generated Passwords, Wider Charset and a Local Password Store (Design)
 
 **Date:** 2026-10-03.
-**Revision 2** follows the adversarial review `~/crow-weekend-push/reports/keychain-plan-review.md` (C1–C8, S1–S10) and Kevin's answers to its questions Q1–Q6.
+- **Revision 2** follows the adversarial review `~/crow-weekend-push/reports/keychain-plan-review.md` (C1–C8, S1–S10) and Kevin's answers to its questions Q1–Q6.
+- **Revision 3** follows the re-review `keychain-plan-rereview.md` (B1–B3, m1–m7).
 
 **Status:** Approved in chat by Kevin, 2026-10-03.
 - Decisions 1–7 below are his and are binding, as amended by his review answers.
@@ -119,7 +120,12 @@ The **gateway's own** `.env` is loaded literally by `servers/gateway/index.js`. 
   - the onboarding identity export: the seed;
   - `~/r4-tehcy/scripts/r4-backup.sh`: crow.db + `identity.json` + `~/.crow-r4/env`, uploaded to Google Drive;
   - `pi-lab/scripts/crow-db-backup.sh`: crow.db only, to `/mnt/external`.
-- **None of them copies `<CROW_HOME>/secrets/`.** That is where the keychain key lives (§5.3).
+- **None of those copies `<CROW_HOME>/secrets/`.** That is where the keychain key lives (§5.3).
+- **One host backup does (re-review B3):** dayane's container instance.
+  - `crow-dayane-backup.timer` (daily 03:40 on crow) runs `~/crow-dayane/backup.sh`.
+  - That script does `docker cp crow-dayane:/crow - | gzip` into `/mnt/external/crow-db-backups/crow-dayane/`, the `[crow-external]` Samba share.
+  - dayane's image sets `CROW_HOME=/crow`, so once dayane is rebuilt onto this code, that whole-volume tar would include `secrets/keychain.key`.
+  - The kit lives in `~/crow-dayane` (Gitea), not in this repo. The fix is an operator step (§9.7), required before dayane's next rebuild.
 
 ### Vaultwarden
 
@@ -204,6 +210,22 @@ All bundle-`.env` readers in §3 switch to the codec:
 
 Each touched bundle gets a version bump: browser 1.3.4, companion 1.0.1, peertube, pixelfed, funkwhale and mastodon 1.0.1, workspace 0.1.2.
 
+**What a bump actually refreshes on an existing install** (re-review B1):
+- A docker bundle's version refresh copies `manifest.json`, `settings-section.js`, `package.json` + lock, `server/`, `panel/`, `skills/`, and the manifest-declared roots: the server entry, panel files, the `postInstall` directory, and skills.
+- It **never** copies `scripts/`, `config/`, `docker-compose.yml` or `.env*`, because those may be bind-mounted into live containers.
+- So:
+  - browser (`server/`), companion (`settings-section.js`) and workspace (`panel/`, `ops/` as the postInstall root) refresh in place;
+  - the four storage bundles' `scripts/configure-storage.mjs` changes reach **fresh installs only**.
+
+**Installed storage scripts never crash for lack of the app** (re-review B1):
+- They resolve the codec from `CROW_APP_ROOT`, then the in-repo path, inside try/catch.
+- Otherwise they fall back to `scripts/env-codec-fallback.mjs` shipped beside them, a codec subset that a test keeps equivalent to the codec.
+- Another test runs each script from outside the repo.
+
+**Line preservation and Configure** (re-review m6): the Configure form pre-fills defaults and resubmits them, so those keys are rewritten on every save, as before this change. Byte-for-byte preservation covers every key the save does not submit.
+
+**Decoding is literal** (m5): `decodeEnvValue` reproduces compose's quoting and escapes, but not compose's own `${VAR}` interpolation of unquoted or double-quoted legacy values. Crow never writes such a value unescaped, and the old readers did not interpolate either.
+
 ### 5.2 Manifest capability
 
 `env_vars[]` gains:
@@ -232,8 +254,16 @@ Each touched bundle gets a version bump: browser 1.3.4, companion 1.0.1, peertub
 **Key file** (`keychain/key.js`):
 - `<CROW_HOME>/secrets/keychain.key`, file 600 in a 700 dir;
 - JSON `{v:1, id, key}`: 32 random bytes and a 16-hex fingerprint id;
-- created only on the first save;
-- **never overwritten**: a corrupt file is left alone and saves report "key missing".
+- created only on the first save, add or import.
+
+**Creation is crash-atomic** (re-review m1): a 600 temp file is written and fsync'd, hard-linked to the final name (link never overwrites; EEXIST means another writer won), the temp is unlinked and the dir is fsync'd. A crash can leave a stray temp, never an empty key.
+
+**States** are `ok` / `missing` / `invalid` (empty, short or corrupt):
+- an **invalid** key is replaced (moved aside to `keychain.key.invalid-<ts>`, never deleted) **only while the keychain table is empty**;
+- otherwise every save refuses with `KEYCHAIN_KEY_INVALID`, naming the file path, so the user can restore it;
+- reads treat it as missing.
+
+**A key created while entries already exist** (the old key was lost) is audited (`keychain_key_created`) and raises one notification: "N entries need Import" (m2).
 
 Entries are sealed with the existing `secret-box` (AES-256-GCM, HKDF), using this key as its seed.
 
@@ -264,6 +294,11 @@ UNIQUE (bundle_id, env_key) WHERE kind = 'extension'
   - An extension entry is skipped when its bundle+key has a readable row. It **replaces** an unreadable row (that is the new-machine recovery path).
   - A manual entry is skipped when an identical label+username+URL exists.
 - Both are re-auth gated and audited, with counts only.
+- **Import trusts nothing in the file** (re-review B2):
+  - only the exact v1 KDF constants (m=65536, t=3, p=4) are accepted;
+  - salt 16, nonce 12 and tag 16 bytes are checked, and the ciphertext is capped at 4 MiB, all before any derivation;
+  - GCM runs with `authTagLength: 16`.
+- Argon2 for export and import uses async `crypto.argon2` (libuv threadpool), so it never blocks the gateway's event loop.
 
 ### 5.4 Re-auth gate and the keychain API
 
@@ -338,6 +373,8 @@ All strings are en+es.
 - One overall 90 s deadline (review S4).
 - Errors are fixed sentences: wrong credentials / two-step login / unreachable / timeout / create failed / CLI missing.
 
+**Outdated server** (m4): an install from before vaultwarden 1.1.0 keeps its old compose file (1.32.7) until reinstalled, because a docker refresh never touches `docker-compose.yml`. `vaultwardenStatus` reads the installed image tag and reports "Reinstall the Vaultwarden extension to update its server…" instead of letting the save fail with "create failed". The vault data in `~/.crow/vaultwarden/data` survives a reinstall.
+
 **Devices:** each save logs in with fresh appdata, so Vaultwarden may register a new device each time. The spike (plan Task 6) measures this; pinning a per-instance device id is a §9 follow-up if it does.
 
 **Where it runs:** during install, right after the keychain save and before images are pulled (the credentials are then dropped). On the Passwords page it is a per-entry action.
@@ -350,6 +387,7 @@ All strings are en+es.
 - Uninstall marks the bundle's entries "extension removed".
 - Job logs carry counts and fixed sentences, never values.
 - The docker-bundle refresh now copies `package.json` + `package-lock.json`, which are never container-mounted (review C6).
+- For `npm_required` bundles the refresh runs `npm ci --omit=dev --ignore-scripts` (with a lock), as install does. On failure it keeps the installed manifest at the old version, so the next boot retries; it stays warn-only (m4).
 
 ### 5.8 Adopters
 
@@ -360,6 +398,11 @@ All strings are en+es.
 - `server.envKeys` drops the token, and `requires.env` drops it too;
 - `vaultwarden_user_count` explains instead of calling;
 - the CLI dependency is added with `npm_required` + `verify_paths`.
+
+**Existing Vaultwarden installs** (m4):
+- They keep their **old image until reinstalled** (§5.6).
+- A legacy typed `VAULTWARDEN_ADMIN_TOKEN` in an existing `.env` is reused as-is: plaintext, with no keychain row.
+- The skill says both.
 
 **Workspace** `0.1.1 → 0.1.2`:
 - `WORKSPACE_ADMIN_PASSWORD` becomes `generatable`, with pattern `^[^\x00-\x1f\x7f]{12,128}$` and `keychain_username:"${WORKSPACE_ADMIN_USER}"`;
@@ -384,6 +427,8 @@ All strings are en+es.
 - Any dashboard session, including an agent driving the crow-browser, can consume a pending first view; that is why it is short and single-use (review S7).
 
 **Argv:** the vault master password goes through `--passwordenv`, item JSON through stdin and the session through env. The vault email IS in `bw login` argv (R11).
+
+**Container deployments** (re-review m3): the key lives under `CROW_HOME`. The repo's `Dockerfile` / cloud compose profile persists only `/app/data`, while `CROW_HOME` defaults to the container's ephemeral `/root/.crow`. So a container deployment must mount `CROW_HOME` (or at least `CROW_HOME/secrets`) on a volume, or every recreate orphans the keychain — the same requirement the retained bundle secrets (`secrets/bundle-env`) already have. Such a volume must then be backed up **without** `secrets/keychain.key`; see §9.7 for the one host where that applies today.
 
 **Not protected against:** code running as the same OS user (including a pi-bot with a shell) can read the key file and crow.db and decrypt everything. The keychain protects against off-host copies, not against the local account (review S7).
 
@@ -410,6 +455,11 @@ All strings are en+es.
 - **R19** *(C4)* Configure and install seeding are line-preserving.
 - **R20** *(C6)* Docker-bundle refresh copies `package.json` + lock.
 - **R21** *(S5)* Not adopted as written: one `package.json` instead of a separate `cli/` package. Adopted instead: `npm_required` + `verify_paths` (lock-file `npm ci`, 300 s, hard-fail) and a blocking critical-tier `npm audit` of `bundles/vaultwarden` in CI.
+- **R22** *(B1)* Installed storage scripts fall back to a shipped codec copy. `scripts/` bumps reach fresh installs only, as stated.
+- **R23** *(B2)* Import accepts only the v1 KDF constants and exact lengths; Argon2 runs async.
+- **R24** *(B3)* dayane's backup excludes the key, as an operator step in `~/crow-dayane` (§9.7).
+- **R25** *(m1/m2)* Crash-atomic key creation; an invalid key is replaced only while the table is empty; re-keying is reported.
+- **R26** *(m4/m7)* `npm_required` refresh mirrors install and retries. An outdated Vaultwarden server is reported. If no CLI passes the spike, ship without the vault option.
 
 ## 8. Testing
 
@@ -427,7 +477,7 @@ All strings are en+es.
 - the adopters;
 - i18n parity.
 
-The plan's code was dry-run in full: 6050/6050 on a staged copy.
+The plan's code was dry-run in full: 6059/6059 on a staged copy (revision 3).
 
 **Live:**
 - the spike (Vaultwarden 1.37.3 + CLI 2026.9.1) before the vault-save task;
@@ -443,5 +493,18 @@ The plan's code was dry-run in full: 6050/6050 on a staged copy.
 5. A stable per-instance Bitwarden device id for vault saves, if the spike shows a new device per save.
 6. Mark more extension-created passwords `generatable`: `CROW_BROWSER_VNC_PASSWORD`, `MINIO_ROOT_PASSWORD`, `MINIFLUX_ADMIN_PASSWORD`, `MLA_ADMIN_PASSWORD`. Move `*_DB_PASSWORD` fields to `generate:"secret"`.
 7. **Operator (not product):**
-   - If `~/r4-tehcy/scripts/r4-backup.sh` or `pi-lab/scripts/crow-db-backup.sh` ever start copying `<CROW_HOME>/secrets/`, they would carry the keychain key. Today neither does. The owners keep it that way, or exclude `secrets/keychain.key` explicitly.
-   - The dayane container instance is pinned (deliberate rebuild only): it picks this up on its next rebuild.
+   - **dayane backup (required before dayane's next rebuild; re-review B3).** In `~/crow-dayane/backup.sh` (Gitea `kh0pp/crow-dayane`), replace
+
+     ```bash
+     docker cp crow-dayane:/crow - | gzip > "$DEST/volume-$TS.tar.gz.part"
+     ```
+
+     with
+
+     ```bash
+     docker exec crow-dayane tar -C / --exclude=crow/secrets/keychain.key -cf - crow | gzip > "$DEST/volume-$TS.tar.gz.part"
+     ```
+
+     The archive layout is unchanged, and the container has `/usr/bin/tar`. Verify with `tar -tzf <newest volume-*.tar.gz> | grep -c keychain.key` → `0`.
+   - If `~/r4-tehcy/scripts/r4-backup.sh` or `pi-lab/scripts/crow-db-backup.sh` ever start copying `<CROW_HOME>/secrets/`, they would carry the key. Today neither does; their owners keep it that way, or exclude `secrets/keychain.key` explicitly.
+   - **Existing Vaultwarden installs:** reinstall to move off 1.32.7. Today none exist on the fleet.

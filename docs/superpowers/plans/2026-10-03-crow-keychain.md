@@ -21,11 +21,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-03-crow-keychain-design.md` (revision 2). It is binding: where this plan and the spec disagree, the spec wins. Spec §7 R1–R21 apply; this plan adds P1–P12.
 
-**Review:** this is revision 2. It answers `~/crow-weekend-push/reports/keychain-plan-review.md` (C1–C8, S1–S10) and Kevin's answers to Q1–Q6. The ruling table maps every item.
+**Review:** this is revision 3.
+- Revision 2 answered `~/crow-weekend-push/reports/keychain-plan-review.md` (C1–C8, S1–S10) and Kevin's answers to Q1–Q6.
+- Revision 3 answers `~/crow-weekend-push/reports/keychain-plan-rereview.md`: blocking B1–B3 and minor m1–m7.
+
+The ruling table maps every item.
 
 **How the code in this plan was produced:**
 - Every code block was first applied, task by task and in this order, to a git-tracked scratch copy of the branch.
-- Each task's tests were run after its step, and the full suite ran at the end: **6050 / 6050 passed**, `build-registry --check` OK, `check-port-allocation` OK.
+- Each task's tests were run after its step, and the full suite ran at the end: **6059 / 6059 passed**, `build-registry --check` OK, `check-port-allocation` OK.
 - New files are given in full. Changes to existing files are given as `git apply` patches cut from that scratch history.
 - So the patches apply in order to this branch (base `ec197558` plus the docs commits).
 
@@ -50,11 +54,36 @@ If a patch fails to apply because `main` moved, re-run `git pull --rebase` and a
   - grackle: `crow-gateway.service`;
   - raven's paired instance (raven:3009): unit confirmed with `systemctl list-units '*crow*'` at deploy;
   - **black-swan:** auto-update, verified after merge, no manual step;
-  - **dayane's container instance:** pinned, deliberate rebuild only, **no action** (Kevin Q5).
+  - **dayane's container instance:** pinned, deliberate rebuild only, so no deploy step (Kevin Q5). **But one operator step comes first** (re-review B3):
+    - Its nightly `crow-dayane-backup.timer` (03:40) runs `~/crow-dayane/backup.sh`, which does `docker cp crow-dayane:/crow - | gzip` to the `[crow-external]` share.
+    - dayane's `CROW_HOME=/crow`, so after its next rebuild that tar would carry `secrets/keychain.key`.
+    - The kit lives in `~/crow-dayane` (Gitea `kh0pp/crow-dayane`), not in this repo, so the change is listed as an operator follow-up.
+    - The exact change is in Task 14 Step 6 and spec §9.7. It must land before dayane is rebuilt onto this code.
 - **P9 — Found while dry-running the plan:** the Extensions `#addon-registry` blob (Configure's form source) dropped `pattern` and would have dropped `generatable`/`keychain`. Task 9 adds them.
 - **P10 — The keychain key is never created on read.** `GET /entries` and `/reveal` use `create:false`; only a save, an add or an import creates it. A corrupt key file is never overwritten.
 - **P11 — The vault spike runs before the vault-save code (Task 6), with the fallback pre-decided** (spec R18).
-- **P12 — Bundle version bumps in this PR:**
+- **P12 — Bundle version bumps in this PR,** and exactly what each bump refreshes on an existing install (re-review B1). A docker bundle's refresh copies only:
+  - `manifest.json`, `settings-section.js`, and now `package.json` / `package-lock.json`;
+  - `server/`, `panel/`, `skills/`;
+  - manifest-declared roots: the `server` entry, the `panel` / `panelRoutes` files, the `postInstall` script directory, and the skills.
+
+  It never copies `scripts/`, `config/`, `docker-compose.yml` or `.env*`.
+  - **browser 1.3.3→1.3.4:** refreshes `server/instance.js` + the new `server/app-root.js`.
+  - **companion 1.0.0→1.0.1:** refreshes `settings-section.js`.
+  - **peertube / pixelfed / funkwhale / mastodon 1.0.0→1.0.1:** the changed files are in `scripts/`, so these bumps refresh nothing on existing installs; only fresh installs get the new `configure-storage.mjs` + `env-codec-fallback.mjs`. That is acceptable: the old script still works on installs whose S3 values are bare (every value Crow wrote before this PR), and the scripts are run by hand.
+  - **workspace 0.1.1→0.1.2:** refreshes `panel/` and `ops/` (the postInstall root: `bootstrap.sh`, `lib.sh`, `reset-password.sh`, `restore-scratch.sh`, `envfile.py`).
+  - **vaultwarden 1.0.0→1.1.0:** refreshes `manifest.json`, `package.json` + lock (then `npm ci`), `server/`, `panel/`, `skills/`. **It does not refresh `docker-compose.yml`**, so an existing install keeps its old image (1.32.7) until it is reinstalled. `vaultwardenStatus` reports that, and the vault option says "reinstall" (m4).
+- **P13 — B1:** each storage script resolves the codec from `CROW_APP_ROOT`, then the in-repo path, inside try/catch, and otherwise imports `./env-codec-fallback.mjs` shipped beside it. A test runs each script from a tmpdir outside the repo with no `CROW_APP_ROOT`. Another test keeps the four fallback copies equivalent to the codec.
+- **P14 — B2:** import accepts only the exact v1 KDF constants (m=65536, t=3, p=4), checks salt 16 / nonce 12 / tag 16 bytes and a 4 MiB ciphertext cap before any derivation, passes `authTagLength: 16`, and runs Argon2 with async `crypto.argon2` (libuv threadpool, off the event loop) for both export and import.
+- **P15 — m1/m2:**
+  - Key creation is crash-atomic: write a 600 temp file, fsync, `linkSync` to the final name (never overwrites; EEXIST takes theirs), unlink the temp, fsync the dir.
+  - An empty or damaged key is replaced (moved aside, never deleted) only while `crow_keychain` is empty. Otherwise saves refuse with `KEYCHAIN_KEY_INVALID`, naming the file path.
+  - A key created while rows exist is audited (`keychain_key_created`) and raises one notification: "N entries need Import".
+- **P16 — m4 refresh:** for `npm_required` bundles, the boot refresh runs `npm ci --omit=dev --ignore-scripts` when a lock exists, the same as the install path. On failure it leaves the installed manifest at the old version, so the next boot retries. It stays warn-only. Other bundles are unchanged (`npm install --omit=dev`).
+- **P17 — m3/m5/m6 (documentation):**
+  - container deployments must keep `CROW_HOME` on a volume (spec §6);
+  - the codec's decode comment no longer claims `${VAR}` interpolation;
+  - Configure resubmits default-prefilled fields, so those keys are rewritten every save. That is pre-existing; only untouched blank fields' lines are preserved byte-for-byte (spec §5.1).
   - browser 1.3.3→1.3.4
   - companion 1.0.0→1.0.1
   - peertube / pixelfed / funkwhale / mastodon 1.0.0→1.0.1
@@ -84,6 +113,16 @@ If a patch fails to apply because `main` moved, re-run `git pull --rebase` and a
 | S9 smoke hygiene | `unset CROW_DB_PATH` and other `CROW_*`; sampler only matches `bw.js`; bw installed with the installer's own `npm ci` flags; `http://localhost` URL. Serve 8461 kept for the [KEVIN] registration (it is the verified path; an `ssh -L` alternative is noted) | Task 13 |
 | S10 reset-password length, ambiguous grep | UTF-16 length via python on stdin; unambiguous PASS/FAIL checks | Tasks 11, 13 |
 | Q5 dayane / black-swan | P8 | Task 14 |
+| B1 storage scripts crash when installed | P13 + P12 precision | Task 2; spec §5.1 |
+| B2 crafted import wedges the event loop | P14 | Task 4 |
+| B3 dayane backup carries the key | P8 operator step, exact `backup.sh` change | Task 14; spec §3, §9.7 |
+| m1 non-atomic key creation | P15 | Task 4 |
+| m2 silent re-keying | P15 (`onNewKey` audit + notification) | Tasks 4, 5, 8 |
+| m3 Docker deployment loses the key | documented: `CROW_HOME` on a volume | spec §6 |
+| m4 refresh npm / old VW image / legacy token | P16; `serverOutdated`; skill note | Tasks 7, 11 |
+| m5 decoder comment overclaims | reworded | Task 1 |
+| m6 Configure resubmits defaults | documented (pre-existing) | spec §5.1 |
+| m7 spike edge cases | if no CLI passes → ship without the vault option (decided below); `tailscale set --operator` noted as Kevin's option | Task 6 |
 | Q6 no password and no TOTP | `method()==="none"` → 403 `reauth_unavailable`; the page disables and explains | Tasks 5, 10 |
 
 ## Global Constraints
@@ -91,7 +130,11 @@ If a patch fails to apply because `main` moved, re-run `git pull --rebase` and a
 - **Codec refusals:** only CR/LF/NUL and a backtick with `'` or a trailing `\`. Bare-safe values are byte-identical to before. Every update of an existing `.env` is line-preserving.
 - **Generated passwords** use only `a-z A-Z 2-9 ! % * + , - . / : = ? @ ^ _`.
 - **Keychain table:** `crow_keychain`, additive, **no `SCHEMA_GENERATION` bump**, in `LOCAL_ONLY_TABLES`, never in `SYNCED_TABLES`.
-- **Keychain key:** `<CROW_HOME>/secrets/keychain.key` (600, dir 700), created only on save/add/import, never overwritten, referenced by no backup / export / sync code.
+- **Keychain key:** `<CROW_HOME>/secrets/keychain.key` (600, dir 700).
+  - Created crash-atomically (temp, fsync, link) and only on save/add/import.
+  - Never overwritten; a damaged one is replaced only while the table is empty.
+  - Referenced by no backup / export / sync code in this repo.
+- **Export import accepts only the v1 KDF constants;** Argon2 runs async.
 - **Re-auth:**
   - TOTP when `is2faEnabled()`; else the dashboard password; else `none`, which disables everything that needs it.
   - The grant lasts 5 minutes, per session.
@@ -461,7 +504,12 @@ export function encodeEnvValue(value, { path = false } = {}) {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
 }
 
-/** The value compose would see for the text after `KEY=`. */
+/**
+ * The literal value for the text after `KEY=`, decoded the way compose's dotenv parser
+ * decodes quoting and escapes. It does NOT perform compose's own `${VAR}` interpolation of
+ * unquoted or double-quoted LEGACY values (no Crow writer emits such a value unescaped, and
+ * the old raw readers did not interpolate either) — re-review m5.
+ */
 export function decodeEnvValue(raw) {
   const s = String(raw).trimStart();
   if (s.startsWith("'")) {
@@ -842,7 +890,9 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: Task 1 `parseEnvText`, `updateEnvText`, `encodeEnvValue`.
-- Produces: `bundles/workspace/ops/envfile.py get <file> <KEY>`. It prints the decoded value without a trailing newline; exit 0 when the key is absent, 2 on bad usage.
+- Produces:
+  - `bundles/workspace/ops/envfile.py get <file> <KEY>`. It prints the decoded value without a trailing newline; exit 0 when the key is absent, 2 on bad usage.
+  - `bundles/<storage>/scripts/env-codec-fallback.mjs`, exporting `encodeEnvValue`, `decodeEnvValue`, `parseEnvText` (a codec subset with no path logic).
 
 - [ ] **Step 1: Write the failing test** — create `tests/bundle-env-readers.test.js`:
 
@@ -853,7 +903,8 @@ git show --stat HEAD
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "node:fs";
+import { randomInt } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -905,12 +956,51 @@ test("static guard: the remaining raw readers import the codec and dropped their
     assert.doesNotMatch(s, /`\$\{k\}=\$\{v\}`/, `${f} still writes raw KEY=value lines`);
   }
 });
+
+const STORAGE_BUNDLES = ["peertube", "pixelfed", "funkwhale", "mastodon"];
+
+test("B1 — each shipped fallback codec is equivalent to the real codec (encode + parse)", async () => {
+  const C = await import("../servers/gateway/bundle-env-codec.js");
+  const pool = []; for (let c = 0x20; c < 0x7f; c++) pool.push(String.fromCharCode(c)); pool.push("é", "😀", "\t");
+  const vals = ["", "plain", "p a$s'w\"d #1", "~/x", "it's $HOME", "x\\"];
+  for (let i = 0; i < 400; i++) { let v = ""; const n = randomInt(1, 25); for (let j = 0; j < n; j++) v += pool[randomInt(pool.length)]; vals.push(v); }
+  const ok = vals.filter((v) => !C.envValueProblem(v));
+  for (const b of STORAGE_BUNDLES) {
+    const F = await import(`../bundles/${b}/scripts/env-codec-fallback.mjs`);
+    for (const v of ok) assert.equal(F.encodeEnvValue(v), C.encodeEnvValue(v), `${b} encode ${JSON.stringify(v)}`);
+    const text = C.formatEnvLines(Object.fromEntries(ok.map((v, i) => [`K${i}`, v])));
+    assert.deepEqual(F.parseEnvText(text), C.parseEnvText(text), `${b} parse`);
+  }
+});
+
+test("B1 — an INSTALLED copy (outside the repo, no CROW_APP_ROOT) still runs and writes an encoded block", () => {
+  for (const b of STORAGE_BUNDLES) {
+    const root = mkdtempSync(join(tmpdir(), `crow-storage-${b}-`));
+    mkdirSync(join(root, "scripts"));
+    for (const f of ["configure-storage.mjs", "env-codec-fallback.mjs"]) copyFileSync(join(ROOT, "bundles", b, "scripts", f), join(root, "scripts", f));
+    const prefix = b.toUpperCase();
+    writeFileSync(join(root, ".env"), [
+      `${prefix}_S3_ENDPOINT='http://minio.example:9000'`,
+      `${prefix}_S3_BUCKET=media`,
+      `${prefix}_S3_ACCESS_KEY='access key'`,
+      `${prefix}_S3_SECRET_KEY='s3cr3t with space $x'`,
+      "",
+    ].join("\n"));
+    const env = { ...process.env };
+    delete env.CROW_APP_ROOT;
+    const r = spawnSync(process.execPath, [join(root, "scripts", "configure-storage.mjs")], { cwd: root, env, encoding: "utf8" });
+    assert.equal(r.status, 0, `${b}: ${r.stderr}`);
+    const out = readFileSync(join(root, ".env"), "utf8");
+    assert.match(out, /BEGIN/, `${b}: managed block written`);
+    assert.ok(out.includes("'s3cr3t with space $x'"), `${b}: the secret is decoded, then re-encoded (not double-quoted text)`);
+  }
+});
 ````
 
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `npm test -- tests/bundle-env-readers.test.js`
-Expected: FAIL. The browser test reads `'crow-browser-r4'` with its quotes, and `envfile.py` is missing.
+Expected: FAIL. The browser test reads `'crow-browser-r4'` with its quotes, `envfile.py` and the fallback codecs are missing, and the out-of-repo storage run dies with `ERR_MODULE_NOT_FOUND` (the B1 regression this task must not ship).
 
 - [ ] **Step 3: Create the two new files**
 
@@ -1006,6 +1096,70 @@ if __name__ == "__main__":
         sys.exit(2)
     sys.stdout.write(get(sys.argv[2], sys.argv[3]))
 ````
+
+`bundles/peertube/scripts/env-codec-fallback.mjs` (B1). Then copy it unchanged into the other three storage bundles; the test keeps all four equivalent to the codec:
+
+````js
+/**
+ * Fallback copy of the Crow .env codec's decode/encode (servers/gateway/bundle-env-codec.js),
+ * used by ./configure-storage.mjs only when the Crow app cannot be found (an installed copy
+ * run without CROW_APP_ROOT). tests/bundle-env-readers.test.js keeps it byte-for-byte
+ * equivalent to the real codec on a fuzzed value set. Do not edit one without the other.
+ */
+const BARE_SAFE = /^[A-Za-z0-9_./:@%+,=^!?*-]*$/;
+const LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+const DQ_ESCAPES = { "\\": "\\", '"': '"', $: "$", n: "\n", t: "\t", r: "\r" };
+
+export function encodeEnvValue(value) {
+  const s = String(value);
+  if (/[\r\n\0]/.test(s)) throw new Error("env value contains a line break or NUL character");
+  if (BARE_SAFE.test(s)) return s;
+  if (!s.includes("'") && !s.endsWith("\\")) return `'${s}'`;
+  if (s.includes("`")) throw new Error("env value cannot contain a backtick together with a single quote or a trailing backslash");
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`;
+}
+
+export function decodeEnvValue(raw) {
+  const s = String(raw).trimStart();
+  if (s.startsWith("'")) {
+    let out = "";
+    for (let i = 1; i < s.length; i++) {
+      if (s[i] === "\\" && s[i + 1] === "'") { out += "'"; i++; continue; }
+      if (s[i] === "'") return out;
+      out += s[i];
+    }
+    return s;
+  }
+  if (s.startsWith('"')) {
+    let out = "";
+    for (let i = 1; i < s.length; i++) {
+      if (s[i] === "\\" && i + 1 < s.length) {
+        const n = s[i + 1];
+        if (Object.hasOwn(DQ_ESCAPES, n)) { out += DQ_ESCAPES[n]; i++; continue; }
+        out += "\\";
+        continue;
+      }
+      if (s[i] === '"') return out;
+      out += s[i];
+    }
+    return s;
+  }
+  return s.split(/\s+#/, 1)[0].trim();
+}
+
+export function parseEnvText(text) {
+  const out = {};
+  for (const line of String(text || "").split("\n")) {
+    const m = line.replace(/\r$/, "").match(LINE);
+    if (m) out[m[1]] = decodeEnvValue(m[2]);
+  }
+  return out;
+}
+````
+
+```bash
+for b in pixelfed funkwhale mastodon; do cp bundles/peertube/scripts/env-codec-fallback.mjs bundles/$b/scripts/env-codec-fallback.mjs; done
+```
 
 - [ ] **Step 4: Switch the readers and bump the versions**
 
@@ -1143,27 +1297,46 @@ index 977dba6..d4e9c6c 100644
    "type": "bundle",
    "author": "Crow",
 diff --git a/bundles/funkwhale/scripts/configure-storage.mjs b/bundles/funkwhale/scripts/configure-storage.mjs
-index fc15c3c..2b7ee03 100755
+index fc15c3c..bd6b4f3 100755
 --- a/bundles/funkwhale/scripts/configure-storage.mjs
 +++ b/bundles/funkwhale/scripts/configure-storage.mjs
-@@ -20,13 +20,10 @@ import { fileURLToPath } from "node:url";
+@@ -15,18 +15,28 @@
+ 
+ import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
+ import { join, dirname, resolve } from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ 
  const __dirname = dirname(fileURLToPath(import.meta.url));
  const ENV_PATH = resolve(__dirname, "..", ".env");
  
-+// Compose-exact decoding: the installer quotes values with spaces, quotes, $ or # (bundle-env-codec.js).
-+const codec = await import(resolve(__dirname, "..", "..", "..", "servers", "gateway", "bundle-env-codec.js"));
- function parseEnv(text) {
+-function parseEnv(text) {
 -  const out = {};
 -  for (const line of text.split("\n")) {
 -    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
 -    if (m) out[m[1]] = m[2].replace(/^"|"$/g, "");
--  }
++// Compose-exact .env codec (servers/gateway/bundle-env-codec.js): the installer quotes values
++// with spaces, quotes, $ or #. An INSTALLED copy runs from ~/.crow/bundles/<id>/scripts/, where
++// the repo-relative path does not exist — so resolve the app from CROW_APP_ROOT, then the
++// in-repo location, and otherwise use the copy shipped beside this script. A failed import
++// must never leave S3 storage silently unconfigured.
++async function loadCodec() {
++  for (const root of [process.env.CROW_APP_ROOT, resolve(__dirname, "..", "..", "..")]) {
++    if (!root) continue;
++    const p = resolve(root, "servers", "gateway", "bundle-env-codec.js");
++    if (!existsSync(p)) continue;
++    try { return await import(pathToFileURL(p).href); } catch { /* try the next location */ }
+   }
 -  return out;
++  return import(new URL("./env-codec-fallback.mjs", import.meta.url).href);
++}
++const codec = await loadCodec();
++function parseEnv(text) {
 +  return codec.parseEnvText(text);
  }
  
  function loadEnv() {
-@@ -73,7 +70,7 @@ async function main() {
+@@ -73,7 +83,7 @@ async function main() {
  
    const BEGIN = "# crow-funkwhale-storage BEGIN (managed by scripts/configure-storage.mjs — do not edit)";
    const END = "# crow-funkwhale-storage END";
@@ -1186,27 +1359,46 @@ index 944311b..9056eb4 100644
    "type": "bundle",
    "author": "Crow",
 diff --git a/bundles/mastodon/scripts/configure-storage.mjs b/bundles/mastodon/scripts/configure-storage.mjs
-index 919dd3e..4032322 100755
+index 919dd3e..6e9649e 100755
 --- a/bundles/mastodon/scripts/configure-storage.mjs
 +++ b/bundles/mastodon/scripts/configure-storage.mjs
-@@ -17,13 +17,10 @@ import { fileURLToPath } from "node:url";
+@@ -12,18 +12,28 @@
+ 
+ import { readFileSync, writeFileSync, existsSync } from "node:fs";
+ import { dirname, resolve } from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ 
  const __dirname = dirname(fileURLToPath(import.meta.url));
  const ENV_PATH = resolve(__dirname, "..", ".env");
  
-+// Compose-exact decoding: the installer quotes values with spaces, quotes, $ or # (bundle-env-codec.js).
-+const codec = await import(resolve(__dirname, "..", "..", "..", "servers", "gateway", "bundle-env-codec.js"));
- function parseEnv(text) {
+-function parseEnv(text) {
 -  const out = {};
 -  for (const line of text.split("\n")) {
 -    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
 -    if (m) out[m[1]] = m[2].replace(/^"|"$/g, "");
--  }
++// Compose-exact .env codec (servers/gateway/bundle-env-codec.js): the installer quotes values
++// with spaces, quotes, $ or #. An INSTALLED copy runs from ~/.crow/bundles/<id>/scripts/, where
++// the repo-relative path does not exist — so resolve the app from CROW_APP_ROOT, then the
++// in-repo location, and otherwise use the copy shipped beside this script. A failed import
++// must never leave S3 storage silently unconfigured.
++async function loadCodec() {
++  for (const root of [process.env.CROW_APP_ROOT, resolve(__dirname, "..", "..", "..")]) {
++    if (!root) continue;
++    const p = resolve(root, "servers", "gateway", "bundle-env-codec.js");
++    if (!existsSync(p)) continue;
++    try { return await import(pathToFileURL(p).href); } catch { /* try the next location */ }
+   }
 -  return out;
++  return import(new URL("./env-codec-fallback.mjs", import.meta.url).href);
++}
++const codec = await loadCodec();
++function parseEnv(text) {
 +  return codec.parseEnvText(text);
  }
  
  function loadEnv() {
-@@ -78,7 +75,7 @@ async function main() {
+@@ -78,7 +88,7 @@ async function main() {
  
    const BEGIN = "# crow-mastodon-storage BEGIN (managed by scripts/configure-storage.mjs — do not edit)";
    const END = "# crow-mastodon-storage END";
@@ -1229,27 +1421,46 @@ index c23023b..93ae060 100644
    "type": "bundle",
    "author": "Crow",
 diff --git a/bundles/peertube/scripts/configure-storage.mjs b/bundles/peertube/scripts/configure-storage.mjs
-index 0672270..2f4d7ba 100755
+index 0672270..4b4b6e4 100755
 --- a/bundles/peertube/scripts/configure-storage.mjs
 +++ b/bundles/peertube/scripts/configure-storage.mjs
-@@ -18,13 +18,10 @@ import { fileURLToPath } from "node:url";
+@@ -13,18 +13,28 @@
+ 
+ import { readFileSync, writeFileSync, existsSync } from "node:fs";
+ import { dirname, resolve } from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ 
  const __dirname = dirname(fileURLToPath(import.meta.url));
  const ENV_PATH = resolve(__dirname, "..", ".env");
  
-+// Compose-exact decoding: the installer quotes values with spaces, quotes, $ or # (bundle-env-codec.js).
-+const codec = await import(resolve(__dirname, "..", "..", "..", "servers", "gateway", "bundle-env-codec.js"));
- function parseEnv(text) {
+-function parseEnv(text) {
 -  const out = {};
 -  for (const line of text.split("\n")) {
 -    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
 -    if (m) out[m[1]] = m[2].replace(/^"|"$/g, "");
--  }
++// Compose-exact .env codec (servers/gateway/bundle-env-codec.js): the installer quotes values
++// with spaces, quotes, $ or #. An INSTALLED copy runs from ~/.crow/bundles/<id>/scripts/, where
++// the repo-relative path does not exist — so resolve the app from CROW_APP_ROOT, then the
++// in-repo location, and otherwise use the copy shipped beside this script. A failed import
++// must never leave S3 storage silently unconfigured.
++async function loadCodec() {
++  for (const root of [process.env.CROW_APP_ROOT, resolve(__dirname, "..", "..", "..")]) {
++    if (!root) continue;
++    const p = resolve(root, "servers", "gateway", "bundle-env-codec.js");
++    if (!existsSync(p)) continue;
++    try { return await import(pathToFileURL(p).href); } catch { /* try the next location */ }
+   }
 -  return out;
++  return import(new URL("./env-codec-fallback.mjs", import.meta.url).href);
++}
++const codec = await loadCodec();
++function parseEnv(text) {
 +  return codec.parseEnvText(text);
  }
  
  function loadEnv() {
-@@ -75,7 +72,7 @@ async function main() {
+@@ -75,7 +85,7 @@ async function main() {
  
    const BEGIN = "# crow-peertube-storage BEGIN (managed by scripts/configure-storage.mjs — do not edit)";
    const END = "# crow-peertube-storage END";
@@ -1272,27 +1483,46 @@ index c9e6cdd..0617dc7 100644
    "type": "bundle",
    "author": "Crow",
 diff --git a/bundles/pixelfed/scripts/configure-storage.mjs b/bundles/pixelfed/scripts/configure-storage.mjs
-index a60b772..1b88ace 100755
+index a60b772..f783c6d 100755
 --- a/bundles/pixelfed/scripts/configure-storage.mjs
 +++ b/bundles/pixelfed/scripts/configure-storage.mjs
-@@ -20,13 +20,10 @@ import { fileURLToPath } from "node:url";
+@@ -15,18 +15,28 @@
+ 
+ import { readFileSync, writeFileSync, existsSync } from "node:fs";
+ import { dirname, resolve } from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ 
  const __dirname = dirname(fileURLToPath(import.meta.url));
  const ENV_PATH = resolve(__dirname, "..", ".env");
  
-+// Compose-exact decoding: the installer quotes values with spaces, quotes, $ or # (bundle-env-codec.js).
-+const codec = await import(resolve(__dirname, "..", "..", "..", "servers", "gateway", "bundle-env-codec.js"));
- function parseEnv(text) {
+-function parseEnv(text) {
 -  const out = {};
 -  for (const line of text.split("\n")) {
 -    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
 -    if (m) out[m[1]] = m[2].replace(/^"|"$/g, "");
--  }
++// Compose-exact .env codec (servers/gateway/bundle-env-codec.js): the installer quotes values
++// with spaces, quotes, $ or #. An INSTALLED copy runs from ~/.crow/bundles/<id>/scripts/, where
++// the repo-relative path does not exist — so resolve the app from CROW_APP_ROOT, then the
++// in-repo location, and otherwise use the copy shipped beside this script. A failed import
++// must never leave S3 storage silently unconfigured.
++async function loadCodec() {
++  for (const root of [process.env.CROW_APP_ROOT, resolve(__dirname, "..", "..", "..")]) {
++    if (!root) continue;
++    const p = resolve(root, "servers", "gateway", "bundle-env-codec.js");
++    if (!existsSync(p)) continue;
++    try { return await import(pathToFileURL(p).href); } catch { /* try the next location */ }
+   }
 -  return out;
++  return import(new URL("./env-codec-fallback.mjs", import.meta.url).href);
++}
++const codec = await loadCodec();
++function parseEnv(text) {
 +  return codec.parseEnvText(text);
  }
  
  function loadEnv() {
-@@ -74,7 +71,7 @@ async function main() {
+@@ -74,7 +84,7 @@ async function main() {
  
    const BEGIN = "# crow-pixelfed-storage BEGIN (managed by scripts/configure-storage.mjs — do not edit)";
    const END = "# crow-pixelfed-storage END";
@@ -1405,7 +1635,7 @@ Expected: all PASS; "companion loads true".
 - [ ] **Step 6: Commit**
 
 ```bash
-git add bundles/browser/server/app-root.js bundles/workspace/ops/envfile.py tests/bundle-env-readers.test.js
+git add bundles/browser/server/app-root.js bundles/workspace/ops/envfile.py tests/bundle-env-readers.test.js bundles/peertube/scripts/env-codec-fallback.mjs bundles/pixelfed/scripts/env-codec-fallback.mjs bundles/funkwhale/scripts/env-codec-fallback.mjs bundles/mastodon/scripts/env-codec-fallback.mjs
 git commit bundles/browser/server/app-root.js bundles/browser/server/instance.js bundles/browser/manifest.json bundles/companion/settings-section.js bundles/companion/manifest.json servers/gateway/migrations.js bundles/workspace/panel/workspace.js bundles/workspace/ops/envfile.py bundles/workspace/ops/restore-scratch.sh bundles/peertube bundles/pixelfed bundles/funkwhale bundles/mastodon registry/add-ons.json tests/bundle-env-readers.test.js -m "fix(bundles): every bundle .env reader decodes with the codec (browser, companion, workspace, storage scripts, migrations)"
 git show --stat HEAD
 ```
@@ -1817,9 +2047,13 @@ git show --stat HEAD
 - Produces:
   - `key.js`:
     - `keychainKeyPath(crowHome?): string`
-    - `loadKeychainKey({ crowHome?, create? }): { id: string, seed: Buffer } | null`
+    - `keychainKeyState({ crowHome? }) → { state: "ok"|"missing"|"invalid", path, key }`
+    - `loadKeychainKey({ crowHome? }): { id, seed } | null` (read-only, never creates)
+    - `createKeychainKey({ crowHome?, replaceInvalid? }) → key` (crash-atomic; throws `KeychainKeyInvalidError` (`code: "KEYCHAIN_KEY_INVALID"`, `.path`) for a damaged file unless `replaceInvalid`)
   - `store.js` (all `async`):
     - `ensureKeychainTable(db)`
+    - `countEntries(db) → number`
+    - `ensureWriteKey(db, { crowHome?, onNewKey?({ orphaned }) }) → key`: missing → create; invalid → replace only when the table is empty, else throw `KeychainKeyInvalidError`; calls `onNewKey` when created while rows exist
     - `saveExtensionSecret(db, key, { bundleId, envKey, label, username?, url?, secret, origin: "typed"|"generated", firstView?, now? }) → { id, created }`
     - `addManualSecret(db, key, { label, username?, url?, secret }) → { id }`
     - `listEntries(db, { now?, keyId? }) → Entry[]`, where `Entry = { id, kind, label, bundle_id, env_key, username, url, origin, status, created_at, updated_at, readable, first_view_pending }`
@@ -1832,9 +2066,9 @@ git show --stat HEAD
     - `importEntries(db, key, entries) → { imported, skipped }`
     - `FIRST_VIEW_MS`, `KeychainKeyMissingError`
   - `export.js`:
-    - `sealExport(entries, passphrase) → file`
-    - `openExport(file, passphrase) → entries | null`
-    - `MIN_PASSPHRASE = 12`, `EXPORT_FORMAT`
+    - `async sealExport(entries, passphrase) → file`
+    - `async openExport(file, passphrase) → entries | null` (only v1 KDF constants; salt/nonce/tag lengths checked; 4 MiB cap)
+    - `MIN_PASSPHRASE = 12`, `EXPORT_FORMAT`, `KDF_V1`
   - `instance-sync.js`: `LOCAL_ONLY_TABLES`, `assertLocalOnlyDisjoint(synced, localOnly)`.
   - `grackle-d3-import.mjs`: `SKIP_REASONS.crow_keychain`.
 
@@ -1865,20 +2099,49 @@ const home = () => mkdtempSync(join(tmpdir(), "crow-kc-home-"));
 const freshDb = () => createDbClient(join(mkdtempSync(join(tmpdir(), "crow-kc-db-")), "crow.db"));
 const mode = (p) => statSync(p).mode & 0o777;
 
-test("C7 — the keychain key is its own random file: 600 in a 700 dir, created only on demand, never overwritten", () => {
+test("C7 — the keychain key is its own random file: 600 in a 700 dir, created only on demand", () => {
   const h = home();
   assert.equal(KEY.loadKeychainKey({ crowHome: h }), null, "no key until something is saved");
-  const k = KEY.loadKeychainKey({ crowHome: h, create: true });
+  assert.equal(KEY.keychainKeyState({ crowHome: h }).state, "missing");
+  const k = KEY.createKeychainKey({ crowHome: h });
   assert.equal(k.seed.length, 32);
   assert.match(k.id, /^[0-9a-f]{16}$/);
   const p = KEY.keychainKeyPath(h);
   assert.equal(p, join(h, "secrets", "keychain.key"));
   assert.equal(mode(p), 0o600);
   assert.equal(mode(join(h, "secrets")), 0o700);
-  assert.deepEqual(KEY.loadKeychainKey({ crowHome: h, create: true }), k, "a second create reuses the file");
-  writeFileSync(p, "garbage");
-  assert.equal(KEY.loadKeychainKey({ crowHome: h, create: true }), null, "a corrupt key is never replaced");
-  assert.equal(readFileSync(p, "utf8"), "garbage");
+  assert.deepEqual(KEY.createKeychainKey({ crowHome: h }), k, "a second create reuses the file");
+  assert.deepEqual(readdirSync(join(h, "secrets")), ["keychain.key"], "m1: no temp file left behind");
+});
+
+test("m1 — an empty/damaged key is replaced only while the table is empty; otherwise a clear refusal", async () => {
+  const h = home();
+  const db = freshDb();
+  const k = KEY.createKeychainKey({ crowHome: h });
+  await K.addManualSecret(db, k, { label: "Phone", secret: "app-pass" });
+  writeFileSync(KEY.keychainKeyPath(h), "");
+  assert.equal(KEY.keychainKeyState({ crowHome: h }).state, "invalid");
+  assert.throws(() => KEY.createKeychainKey({ crowHome: h }), (e) => e.code === "KEYCHAIN_KEY_INVALID" && e.message.includes(KEY.keychainKeyPath(h)));
+  await assert.rejects(K.ensureWriteKey(db, { crowHome: h }), (e) => e.code === "KEYCHAIN_KEY_INVALID", "rows exist → refuse, never silently re-key");
+  assert.equal(readFileSync(KEY.keychainKeyPath(h), "utf8"), "", "the damaged file is left for the user to restore");
+
+  const h2 = home();
+  const db2 = freshDb();
+  KEY.createKeychainKey({ crowHome: h2 });
+  writeFileSync(KEY.keychainKeyPath(h2), "{\"v\":1,\"id\":\"short\"}");
+  const fresh = await K.ensureWriteKey(db2, { crowHome: h2 });
+  assert.equal(fresh.seed.length, 32, "empty table → replaced");
+  assert.ok(readdirSync(join(h2, "secrets")).some((n) => n.startsWith("keychain.key.invalid-")), "the damaged file is moved aside, never deleted");
+});
+
+test("m2 — a new key created while rows exist (old key lost) is reported through onNewKey", async () => {
+  const db = freshDb();
+  const lost = KEY.createKeychainKey({ crowHome: home() });
+  await K.addManualSecret(db, lost, { label: "Old", secret: "x" });
+  const seen = [];
+  const k = await K.ensureWriteKey(db, { crowHome: home(), onNewKey: (info) => seen.push(info) });
+  assert.ok(k);
+  assert.deepEqual(seen, [{ orphaned: 1 }]);
 });
 
 test("C7 — no backup path can carry the key: it lives outside the data dir and no backup code names it", () => {
@@ -1891,7 +2154,7 @@ test("C7 — no backup path can carry the key: it lives outside the data dir and
 
 test("save → list carries metadata only; open returns the plaintext; the column holds ciphertext", async () => {
   const db = freshDb();
-  const key = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key = KEY.createKeychainKey({ crowHome: home() });
   const { id, created } = await K.saveExtensionSecret(db, key, { bundleId: "workspace", envKey: "WORKSPACE_ADMIN_PASSWORD", label: "Crow Workspace — admin password", username: "admin", url: null, secret: "p a$s'w\"d", origin: "typed", firstView: false });
   assert.equal(created, true);
   const [e] = await K.listEntries(db, { keyId: key.id });
@@ -1906,9 +2169,9 @@ test("save → list carries metadata only; open returns the plaintext; the colum
 
 test("C7 — restored without the key: entries list as unreadable, open/first-view throw KEYCHAIN_KEY_MISSING, never crash", async () => {
   const db = freshDb();
-  const oldKey = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const oldKey = KEY.createKeychainKey({ crowHome: home() });
   const { id } = await K.saveExtensionSecret(db, oldKey, { bundleId: "vaultwarden", envKey: "VAULTWARDEN_ADMIN_TOKEN", label: "L", secret: "tok", origin: "generated", firstView: true });
-  const newKey = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const newKey = KEY.createKeychainKey({ crowHome: home() });
   const [e] = await K.listEntries(db, { keyId: newKey.id });
   assert.equal(e.readable, false);
   assert.equal((await K.listEntries(db, { keyId: null }))[0].readable, false, "no key at all → unreadable too");
@@ -1921,7 +2184,7 @@ test("C7 — restored without the key: entries list as unreadable, open/first-vi
 
 test("a second save for the same bundle+key updates in place (no duplicates)", async () => {
   const db = freshDb();
-  const key = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key = KEY.createKeychainKey({ crowHome: home() });
   const a = await K.saveExtensionSecret(db, key, { bundleId: "b", envKey: "K", label: "L", secret: "one", origin: "typed" });
   const b = await K.saveExtensionSecret(db, key, { bundleId: "b", envKey: "K", label: "L2", secret: "two", origin: "typed" });
   assert.equal(b.id, a.id);
@@ -1933,7 +2196,7 @@ test("a second save for the same bundle+key updates in place (no duplicates)", a
 
 test("manual entries; delete; uninstall marks extension entries and a later save reactivates them", async () => {
   const db = freshDb();
-  const key = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key = KEY.createKeychainKey({ crowHome: home() });
   const m = await K.addManualSecret(db, key, { label: "Phone app password", username: "kevin", url: "https://ws.example:8456", secret: "abcd-efgh" });
   const x = await K.saveExtensionSecret(db, key, { bundleId: "vaultwarden", envKey: "VAULTWARDEN_ADMIN_TOKEN", label: "Vaultwarden — admin token", secret: "t", origin: "generated" });
   assert.equal(await K.markBundleRemoved(db, "vaultwarden"), 1);
@@ -1948,7 +2211,7 @@ test("manual entries; delete; uninstall marks extension entries and a later save
 
 test("REVIEW FOCUS 2 — first view is single-use and expires", async () => {
   const db = freshDb();
-  const key = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key = KEY.createKeychainKey({ crowHome: home() });
   const t0 = new Date("2026-10-03T12:00:00Z");
   const { id } = await K.saveExtensionSecret(db, key, { bundleId: "vaultwarden", envKey: "VAULTWARDEN_ADMIN_TOKEN", label: "L", secret: "tok", origin: "generated", firstView: true, now: t0 });
   assert.equal((await K.pendingFirstViews(db, { now: t0, keyId: key.id })).length, 1);
@@ -1960,28 +2223,28 @@ test("REVIEW FOCUS 2 — first view is single-use and expires", async () => {
 
 test("Export → Import round-trips through a passphrase file; wrong passphrase opens nothing; readable entries are never overwritten", async () => {
   const db = freshDb();
-  const key = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key = KEY.createKeychainKey({ crowHome: home() });
   await K.saveExtensionSecret(db, key, { bundleId: "workspace", envKey: "WORKSPACE_ADMIN_PASSWORD", label: "WS admin", username: "admin", secret: "ws-pass 1", origin: "typed" });
   await K.addManualSecret(db, key, { label: "Phone", username: "kevin", secret: "app-pass" });
   const entries = await K.exportableEntries(db, key);
   assert.equal(entries.length, 2);
-  const file = X.sealExport(entries, "correct horse battery");
+  const file = await X.sealExport(entries, "correct horse battery");
   assert.equal(file.format, "crow-keychain-export");
   assert.ok(!JSON.stringify(file).includes("ws-pass") && !JSON.stringify(file).includes("WS admin"), "nothing readable in the file");
-  assert.equal(X.openExport(file, "wrong passphrase!!"), null);
-  assert.throws(() => X.sealExport(entries, "short"), /at least 12/);
+  assert.equal(await X.openExport(file, "wrong passphrase!!"), null);
+  await assert.rejects(X.sealExport(entries, "short"), /at least 12/);
 
   // New machine: fresh DB + new key, the old crow.db rows restored (unreadable there).
   const db2 = freshDb();
-  const key2 = KEY.loadKeychainKey({ crowHome: home(), create: true });
+  const key2 = KEY.createKeychainKey({ crowHome: home() });
   await K.saveExtensionSecret(db2, key, { bundleId: "workspace", envKey: "WORKSPACE_ADMIN_PASSWORD", label: "WS admin", secret: "stale", origin: "typed" });
-  const out = await K.importEntries(db2, key2, X.openExport(file, "correct horse battery"));
+  const out = await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery"));
   assert.deepEqual(out, { imported: 2, skipped: 0 }, "the unreadable restored row is replaced");
   const list = await K.listEntries(db2, { keyId: key2.id });
   assert.ok(list.every((e) => e.readable));
   const ws = list.find((e) => e.env_key === "WORKSPACE_ADMIN_PASSWORD");
   assert.equal(await K.openEntrySecret(db2, key2, ws.id), "ws-pass 1");
-  assert.deepEqual(await K.importEntries(db2, key2, X.openExport(file, "correct horse battery")), { imported: 0, skipped: 2 }, "re-import overwrites nothing");
+  assert.deepEqual(await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery")), { imported: 0, skipped: 2 }, "re-import overwrites nothing");
 });
 
 test("init-db creates crow_keychain with the same columns as the store's lazy ensure (no CHECK constraints)", async () => {
@@ -2019,6 +2282,27 @@ test("REVIEW FOCUS 3 — crow_keychain can never replicate (and the grackle D3 i
   walk("servers");
   assert.deepEqual(offenders, []);
 });
+
+test("B2 — a crafted export is refused fast: only the v1 KDF constants and exact salt/nonce/tag lengths", async () => {
+  const db = freshDb();
+  const key = KEY.createKeychainKey({ crowHome: home() });
+  await K.addManualSecret(db, key, { label: "Phone", secret: "app-pass" });
+  const good = await X.sealExport(await K.exportableEntries(db, key), "correct horse battery");
+  const variants = [
+    { ...good, kdf: { ...good.kdf, memory: 2097152 } },
+    { ...good, kdf: { ...good.kdf, passes: 2097152 } },
+    { ...good, kdf: { ...good.kdf, parallelism: 64 } },
+    { ...good, kdf: { ...good.kdf, salt: Buffer.alloc(8).toString("base64") } },
+    { ...good, nonce: Buffer.alloc(16).toString("base64") },
+    { ...good, tag: Buffer.alloc(4).toString("base64") },
+    { ...good, version: 2 },
+    { ...good, ciphertext: "x".repeat(5 * 1024 * 1024) },
+  ];
+  const t0 = Date.now();
+  for (const v of variants) assert.equal(await X.openExport(v, "correct horse battery"), null);
+  assert.ok(Date.now() - t0 < 1000, "refused before any key derivation");
+  assert.equal((await X.openExport(good, "correct horse battery")).length, 1, "the genuine file still opens");
+});
 ````
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -2035,50 +2319,89 @@ Expected: FAIL with `Cannot find module '…/keychain/store.js'`.
  * The Crow keychain's OWN key (Kevin, 2026-10-03, review C7): 32 random bytes in
  * <CROW_HOME>/secrets/keychain.key (dir 700, file 600). It is NOT the identity seed, so
  * nothing that copies identity.json or crow.db (product /api/admin/backup + Nest "Run
- * backup now", onboarding identity export, r4-backup.sh, crow-db-backup.sh, instance
- * sync) can ever make keychain ciphertext readable elsewhere. The only way entries leave
- * the machine is the user's own passphrase-encrypted Export (keychain/export.js).
+ * backup now", onboarding identity export, r4-backup.sh, crow-db-backup.sh, instance sync)
+ * can make keychain ciphertext readable elsewhere. The only way entries leave the machine is
+ * the user's own passphrase-encrypted Export (keychain/export.js). Container deployments
+ * must keep CROW_HOME on a volume, or every recreate loses the key (spec §6).
  *
- * Never overwritten: a missing key is created only on a SAVE (create:true); an existing
- * but unreadable file is left alone and reads/saves report "key missing". Entries sealed
- * with another key (a restored crow.db on a new machine) show as unreadable, never crash.
+ * States (keychainKeyState): "ok" | "missing" | "invalid" (present but empty/short/corrupt).
+ * Creation is crash-atomic (re-review m1): a 600 temp file is written and fsync'd, then
+ * hard-linked to the final name (link never overwrites; EEXIST = another writer won, use
+ * theirs), then the temp is removed — a crash can leave only a stray temp, never an empty
+ * keychain.key. An INVALID file is replaced only when the keychain table is empty (the
+ * caller decides, store.ensureWriteKey) and is then moved aside, never deleted.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, chmodSync, openSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
+
+export class KeychainKeyInvalidError extends Error {
+  constructor(path) {
+    super(`The keychain key file ${path} is unreadable (empty or damaged) and saved passwords depend on it. Restore it from where you keep it, or delete the saved passwords first, then try again.`);
+    this.code = "KEYCHAIN_KEY_INVALID";
+    this.path = path;
+  }
+}
 
 export function keychainKeyPath(crowHome = process.env.CROW_HOME || join(homedir(), ".crow")) {
   return join(crowHome, "secrets", "keychain.key");
 }
 
-/** `{ id, seed }`, or null when the key file is missing or unreadable (and create is false). */
-export function loadKeychainKey({ crowHome, create = false } = {}) {
-  const p = keychainKeyPath(crowHome);
-  if (existsSync(p)) {
-    try {
-      const j = JSON.parse(readFileSync(p, "utf8"));
-      const seed = Buffer.from(String(j.key || ""), "base64");
-      if (j.v !== 1 || typeof j.id !== "string" || seed.length !== 32) return null;
-      return { id: j.id, seed };
-    } catch {
-      return null;
-    }
+export function keychainKeyState({ crowHome } = {}) {
+  const path = keychainKeyPath(crowHome);
+  if (!existsSync(path)) return { state: "missing", path, key: null };
+  try {
+    const j = JSON.parse(readFileSync(path, "utf8"));
+    const seed = Buffer.from(String(j.key || ""), "base64");
+    if (j.v !== 1 || typeof j.id !== "string" || !/^[0-9a-f]{16}$/.test(j.id) || seed.length !== 32) return { state: "invalid", path, key: null };
+    return { state: "ok", path, key: { id: j.id, seed } };
+  } catch {
+    return { state: "invalid", path, key: null };
   }
-  if (!create) return null;
-  const dir = dirname(p);
+}
+
+/** Read-only: `{ id, seed }`, or null when the key file is missing or invalid. Never creates. */
+export function loadKeychainKey({ crowHome } = {}) {
+  return keychainKeyState({ crowHome }).key;
+}
+
+/**
+ * Create the key if it is missing (or, with replaceInvalid, if it is invalid). Returns the
+ * key that is on disk afterwards. Throws KeychainKeyInvalidError for an invalid file unless
+ * replaceInvalid is set.
+ */
+export function createKeychainKey({ crowHome, replaceInvalid = false } = {}) {
+  const st = keychainKeyState({ crowHome });
+  if (st.state === "ok") return st.key;
+  if (st.state === "invalid") {
+    if (!replaceInvalid) throw new KeychainKeyInvalidError(st.path);
+    renameSync(st.path, `${st.path}.invalid-${Date.now()}`);
+  }
+  const dir = dirname(st.path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const seed = randomBytes(32);
   const id = createHash("sha256").update(seed).digest("hex").slice(0, 16);
+  const tmp = `${st.path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const fd = openSync(tmp, "wx", 0o600);
   try {
-    writeFileSync(p, JSON.stringify({ v: 1, id, key: seed.toString("base64") }) + "\n", { mode: 0o600, flag: "wx" });
-  } catch (err) {
-    if (err.code === "EEXIST") return loadKeychainKey({ crowHome, create: false }); // lost a race: use theirs
-    throw err;
+    writeSync(fd, JSON.stringify({ v: 1, id, key: seed.toString("base64") }) + "\n");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
-  chmodSync(p, 0o600);
-  return { id, seed };
+  try {
+    linkSync(tmp, st.path);
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+  } finally {
+    try { unlinkSync(tmp); } catch {}
+  }
+  try { const dfd = openSync(dir, "r"); fsyncSync(dfd); closeSync(dfd); } catch { /* best effort */ }
+  const after = keychainKeyState({ crowHome });
+  if (after.state !== "ok") throw new KeychainKeyInvalidError(after.path);
+  return after.key;
 }
 ````
 
@@ -2127,6 +2450,7 @@ export const KEYCHAIN_DDL = `
  */
 import { sealSecret, openSecret } from "../../sharing/secret-box.js";
 import { KEYCHAIN_DDL } from "./schema.js";
+import { keychainKeyState, createKeychainKey, KeychainKeyInvalidError } from "./key.js";
 
 export const KEYCHAIN_TABLE = "crow_keychain";
 export const FIRST_VIEW_MS = 30 * 60 * 1000;
@@ -2160,6 +2484,30 @@ function toEntry(r, { now, keyId } = {}) {
   if (!r) return null;
   const { first_view_until: fvu, key_id: kid, ...rest } = r;
   return { ...rest, id: Number(r.id), readable: !!keyId && kid === keyId, first_view_pending: !!fvu && fvu > iso(now) };
+}
+
+export async function countEntries(db) {
+  await ensureKeychainTable(db);
+  return Number((await db.execute("SELECT COUNT(*) AS n FROM crow_keychain")).rows[0].n);
+}
+
+/**
+ * The key to SAVE with (re-review m1/m2). Missing → created. Invalid (empty/damaged file) →
+ * replaced only while the table is empty; otherwise KeychainKeyInvalidError, because those
+ * rows may still be recoverable by restoring the file. When a key is created while rows
+ * already exist (the old key was lost), onNewKey({ orphaned }) lets the caller audit it and
+ * tell the user those entries need an Import.
+ */
+export async function ensureWriteKey(db, { crowHome, onNewKey } = {}) {
+  const st = keychainKeyState({ crowHome });
+  if (st.state === "ok") return st.key;
+  const n = await countEntries(db);
+  if (st.state === "invalid" && n > 0) throw new KeychainKeyInvalidError(st.path);
+  const key = createKeychainKey({ crowHome, replaceInvalid: st.state === "invalid" });
+  if (n > 0 && typeof onNewKey === "function") {
+    try { await onNewKey({ orphaned: n }); } catch { /* reporting must never block a save */ }
+  }
+  return key;
 }
 
 export async function saveExtensionSecret(db, key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
@@ -2312,52 +2660,75 @@ export async function importEntries(db, key, entries) {
 /**
  * Passphrase-encrypted keychain Export / Import (Kevin, 2026-10-03): the ONLY way keychain
  * entries leave the machine, and only on the user's explicit, re-authenticated request.
- * KDF: Argon2id (Node 24 crypto.argon2Sync, m=65536 KiB, t=3, p=4) over the passphrase
- * with a random 16-byte salt → 32-byte key. Cipher: AES-256-GCM, random 12-byte nonce.
- * The file carries no plaintext metadata beyond a count and a timestamp.
+ * KDF: Argon2id (Node 24 crypto.argon2, ASYNC — off the event loop) over the passphrase
+ * with a random 16-byte salt → 32-byte key. Cipher: AES-256-GCM, 12-byte nonce, 16-byte tag.
+ *
+ * Import trusts NOTHING in the file (re-review B2): only the exact v1 KDF constants are
+ * accepted (a crafted file cannot ask for gigabytes of memory or hours of passes), and the
+ * salt / nonce / tag lengths are checked before any work is done.
  */
-import { argon2Sync, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { argon2, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { promisify } from "node:util";
+
+const argon2Async = promisify(argon2);
 
 export const EXPORT_FORMAT = "crow-keychain-export";
-const KDF = Object.freeze({ alg: "argon2id", memory: 65536, passes: 3, parallelism: 4 });
+export const KDF_V1 = Object.freeze({ alg: "argon2id", memory: 65536, passes: 3, parallelism: 4 });
 export const MIN_PASSPHRASE = 12;
+const SALT_LEN = 16;
+const NONCE_LEN = 12;
+const TAG_LEN = 16;
+const MAX_CIPHERTEXT_B64 = 4 * 1024 * 1024;
 
-function deriveKey(passphrase, salt, kdf) {
-  return argon2Sync("argon2id", {
+function deriveKey(passphrase, salt) {
+  return argon2Async("argon2id", {
     message: Buffer.from(String(passphrase), "utf8"),
     nonce: salt,
-    memory: kdf.memory,
-    passes: kdf.passes,
-    parallelism: kdf.parallelism,
+    memory: KDF_V1.memory,
+    passes: KDF_V1.passes,
+    parallelism: KDF_V1.parallelism,
     tagLength: 32,
   });
 }
 
-export function sealExport(entries, passphrase, { now = new Date() } = {}) {
+export async function sealExport(entries, passphrase, { now = new Date() } = {}) {
   if (typeof passphrase !== "string" || passphrase.length < MIN_PASSPHRASE) throw new Error(`passphrase must be at least ${MIN_PASSPHRASE} characters`);
-  const salt = randomBytes(16);
-  const nonce = randomBytes(12);
-  const key = deriveKey(passphrase, salt, KDF);
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const salt = randomBytes(SALT_LEN);
+  const nonce = randomBytes(NONCE_LEN);
+  const key = await deriveKey(passphrase, salt);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: TAG_LEN });
   const ct = Buffer.concat([cipher.update(JSON.stringify({ entries }), "utf8"), cipher.final()]);
   return {
     format: EXPORT_FORMAT, version: 1, created_at: now.toISOString(), count: entries.length,
-    kdf: { ...KDF, salt: salt.toString("base64") },
+    kdf: { ...KDF_V1, salt: salt.toString("base64") },
     cipher: "aes-256-gcm", nonce: nonce.toString("base64"),
     ciphertext: ct.toString("base64"), tag: cipher.getAuthTag().toString("base64"),
   };
 }
 
-/** The entries array, or null when the passphrase is wrong or the file is not an export. */
-export function openExport(file, passphrase) {
+const b64 = (v, len) => {
+  if (typeof v !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) return null;
+  const buf = Buffer.from(v, "base64");
+  return len === undefined || buf.length === len ? buf : null;
+};
+
+/** The entries array, or null when the passphrase is wrong or the file is not a v1 export. */
+export async function openExport(file, passphrase) {
   try {
-    if (!file || file.format !== EXPORT_FORMAT || file.version !== 1 || file.cipher !== "aes-256-gcm") return null;
+    if (!file || typeof file !== "object" || file.format !== EXPORT_FORMAT || file.version !== 1 || file.cipher !== "aes-256-gcm") return null;
     const k = file.kdf || {};
-    if (k.alg !== "argon2id" || ![k.memory, k.passes, k.parallelism].every((n) => Number.isInteger(n) && n > 0 && n <= 1 << 21)) return null;
-    const key = deriveKey(passphrase, Buffer.from(k.salt, "base64"), k);
-    const d = createDecipheriv("aes-256-gcm", key, Buffer.from(file.nonce, "base64"));
-    d.setAuthTag(Buffer.from(file.tag, "base64"));
-    const pt = Buffer.concat([d.update(Buffer.from(file.ciphertext, "base64")), d.final()]).toString("utf8");
+    if (k.alg !== KDF_V1.alg || k.memory !== KDF_V1.memory || k.passes !== KDF_V1.passes || k.parallelism !== KDF_V1.parallelism) return null;
+    const salt = b64(k.salt, SALT_LEN);
+    const nonce = b64(file.nonce, NONCE_LEN);
+    const tag = b64(file.tag, TAG_LEN);
+    if (!salt || !nonce || !tag || typeof file.ciphertext !== "string" || file.ciphertext.length > MAX_CIPHERTEXT_B64) return null;
+    const ct = b64(file.ciphertext);
+    if (!ct) return null;
+    if (typeof passphrase !== "string" || passphrase === "") return null;
+    const key = await deriveKey(passphrase, salt);
+    const d = createDecipheriv("aes-256-gcm", key, nonce, { authTagLength: TAG_LEN });
+    d.setAuthTag(tag);
+    const pt = Buffer.concat([d.update(ct), d.final()]).toString("utf8");
     const parsed = JSON.parse(pt);
     return Array.isArray(parsed.entries) ? parsed.entries : null;
   } catch {
@@ -2494,7 +2865,10 @@ git show --stat HEAD
     - `verify(token, { password?, totp_code? })`, resolving to `{ ok:true, method, expires_at }` or `{ ok:false, locked?, unavailable?, global_lock_started?, locked_until?, error }`
     - `isGranted(token)`, `expiresAt(token)`, `revoke(token)`
   - `defaultReauthGate()`
-  - `keychainApiRouter({ openDb?, keychainKey?, gate?, vault?, audit?, notify? }): Router` (routes in spec §5.4)
+  - `keychainApiRouter({ openDb?, crowHome?, gate?, vault?, audit?, notify? }): Router` (routes in spec §5.4)
+    - reads use `loadKeychainKey`; add/import use `ensureWriteKey`;
+    - a damaged key with entries answers 409 `key_invalid` with the file path;
+    - a lost key re-created while rows exist is audited and notified once (m2).
   - placeholder `vaultwardenStatus()` / `saveToVault()` (same signatures as Task 7)
 
 - [ ] **Step 1: Write the failing test** — create `tests/keychain-api.test.js`:
@@ -2514,7 +2888,8 @@ process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 const { createDbClient } = await import("../servers/db.js");
 const { createReauthGate } = await import("../servers/gateway/keychain/reauth.js");
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
-const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
+const { createKeychainKey, keychainKeyPath } = await import("../servers/gateway/keychain/key.js");
+import { writeFileSync } from "node:fs";
 const K = await import("../servers/gateway/keychain/store.js");
 
 const AUDIT_DDL = "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, actor TEXT, ip_address TEXT, details TEXT, created_at TEXT DEFAULT (datetime('now')))";
@@ -2538,7 +2913,7 @@ async function setup({ twoFa = false, hasPassword = true, clock = { t: Date.pars
   app.use((req, _res, next) => { req.dashboardSession = req.headers["x-test-session"] || null; next(); });
   app.use(keychainApiRouter({
     openDb: () => createDbClient(dbPath),
-    keychainKey: ({ create = false } = {}) => loadKeychainKey({ crowHome, create }),
+    crowHome,
     gate,
     notify: async (_db, n) => { notes.push(n); },
     vault: vault || { status: () => ({ installed: true, cliPath: "/x/bw.js", serverUrl: "http://localhost:18097" }), save: async (o) => { vaultCalls.push(o); return { ok: true }; } },
@@ -2550,7 +2925,7 @@ async function setup({ twoFa = false, hasPassword = true, clock = { t: Date.pars
     fetch(base + path, { method, headers: { "content-type": "application/json", ...(session ? { "x-test-session": session } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined })
       .then(async (r) => ({ status: r.status, body: await r.json(), cache: r.headers.get("cache-control"), disposition: r.headers.get("content-disposition") }));
   const audits = async () => (await seedDb.execute("SELECT event_type, details FROM audit_log ORDER BY id")).rows;
-  const key = () => loadKeychainKey({ crowHome, create: true });
+  const key = () => createKeychainKey({ crowHome });
   return { db: seedDb, crowHome, key, call, audits, clock, vaultCalls, notes, close: () => server.close() };
 }
 
@@ -2654,7 +3029,7 @@ test("REVIEW FOCUS 2 (API) — first-view works once without re-auth, then 410",
 test("C7 — entries sealed under a missing key list as unreadable and reveal answers 409 key_missing", async () => {
   const s = await setup();
   try {
-    const other = loadKeychainKey({ crowHome: mkdtempSync(join(tmpdir(), "crow-kcapi-other-")), create: true });
+    const other = createKeychainKey({ crowHome: mkdtempSync(join(tmpdir(), "crow-kcapi-other-")) });
     const { id } = await K.addManualSecret(s.db, other, { label: "From the old machine", secret: "old" });
     const list = await s.call("/entries");
     assert.equal(list.body.entries[0].readable, false);
@@ -2740,6 +3115,26 @@ test("peer-signed and session-less requests are refused", async () => {
   try {
     assert.equal((await s.call("/entries", { headers: { "x-crow-signature": "abc" } })).status, 403);
     assert.equal((await s.call("/entries", { session: null })).status, 401);
+  } finally { s.close(); }
+});
+
+test("m1/m2 — a damaged key with entries refuses saves (409 key_invalid); a lost key is re-created once and reported", async () => {
+  const s = await setup();
+  try {
+    await K.addManualSecret(s.db, s.key(), { label: "Phone", secret: "app-pass" });
+    writeFileSync(keychainKeyPath(s.crowHome), "");
+    const r = await s.call("/add", { body: { label: "New", secret: "x-1" } });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.code, "key_invalid");
+    assert.match(r.body.error, /keychain\.key/);
+
+    const { rmSync } = await import("node:fs");
+    rmSync(keychainKeyPath(s.crowHome));
+    const ok = await s.call("/add", { body: { label: "New", secret: "x-1" } });
+    assert.equal(ok.status, 200, "a MISSING key is simply created");
+    assert.equal(s.notes.length, 1, "the user is told the older entries need an Import");
+    assert.match(s.notes[0].body, /1 saved password/);
+    assert.ok((await s.audits()).some((e) => e.event_type === "keychain_key_created"));
   } finally { s.close(); }
 });
 ````
@@ -2867,7 +3262,7 @@ import { loadKeychainKey } from "./key.js";
 import { sealExport, openExport, MIN_PASSPHRASE } from "./export.js";
 import {
   listEntries, getEntry, openEntrySecret, consumeFirstView, addManualSecret, deleteEntry,
-  exportableEntries, importEntries,
+  exportableEntries, importEntries, ensureWriteKey,
 } from "./store.js";
 import { vaultwardenStatus, saveToVault } from "./vault-save.js";
 
@@ -2902,7 +3297,7 @@ const KEY_MISSING = { code: "key_missing", error: "This password was saved under
 
 export function keychainApiRouter({
   openDb = () => createDbClient(),
-  keychainKey = ({ create = false } = {}) => loadKeychainKey({ create }),
+  crowHome = undefined, // the keychain key lives in <crowHome>/secrets (default: CROW_HOME)
   gate = defaultReauthGate(),
   vault = { status: vaultwardenStatus, save: saveToVault },
   audit = auditLog,
@@ -2917,12 +3312,24 @@ export function keychainApiRouter({
     next();
   });
 
+  const readKey = () => loadKeychainKey({ crowHome });
+  // Saving creates the key on first use; a key created while entries already exist means
+  // the old key was lost — audit it and tell the user once (re-review m2).
+  const writeKey = (db, ip) => ensureWriteKey(db, {
+    crowHome,
+    onNewKey: async ({ orphaned }) => {
+      await audit(db, "keychain_key_created", { ip, details: { orphaned } });
+      try { await notify(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Passwords to recover them.`, type: "system", source: "keychain" }); } catch {}
+    },
+  });
+
   const withDb = (handler) => async (req, res) => {
     const db = openDb();
     try {
       await handler(req, res, db);
     } catch (err) {
       if (err?.code === "KEYCHAIN_KEY_MISSING") { if (!res.headersSent) res.status(409).json(KEY_MISSING); return; }
+      if (err?.code === "KEYCHAIN_KEY_INVALID") { if (!res.headersSent) res.status(409).json({ code: "key_invalid", error: err.message }); return; }
       console.error("[keychain] request failed:", err?.code || err?.name || "error");
       if (!res.headersSent) res.status(500).json({ error: "Keychain error. Nothing was revealed." });
     } finally {
@@ -2942,13 +3349,13 @@ export function keychainApiRouter({
 
   router.get(`${BASE}/entries`, withDb(async (req, res, db) => {
     const st = vault.status();
-    const key = keychainKey();
+    const key = readKey();
     res.json({
       entries: await listEntries(db, { keyId: key?.id || null }),
       key_present: !!key,
       reauth_method: await gate.method(),
       granted_until: gate.expiresAt(req.dashboardSession),
-      vault_available: !!(st && st.installed && st.cliPath),
+      vault_available: !!(st && st.installed && st.cliPath && !st.serverOutdated),
     });
   }));
 
@@ -2973,7 +3380,7 @@ export function keychainApiRouter({
     const purpose = req.body?.purpose === "copy" ? "copy" : "reveal";
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
-    const secret = await openEntrySecret(db, keychainKey(), entry.id);
+    const secret = await openEntrySecret(db, readKey(), entry.id);
     await audit(db, purpose === "copy" ? "keychain_copy" : "keychain_reveal", { ip: req.ip, details: auditDetails(entry) });
     res.json({ secret });
   }));
@@ -2981,7 +3388,7 @@ export function keychainApiRouter({
   router.post(`${BASE}/first-view`, withDb(async (req, res, db) => {
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
-    const secret = await consumeFirstView(db, keychainKey(), entry.id);
+    const secret = await consumeFirstView(db, readKey(), entry.id);
     if (secret === null) return res.status(410).json({ code: "first_view_spent", error: "Already shown. Open Settings → Passwords to see it again." });
     await audit(db, "keychain_first_view", { ip: req.ip, details: auditDetails(entry) });
     res.json({ secret });
@@ -2993,7 +3400,7 @@ export function keychainApiRouter({
     if (!label || !secret || /[\0]/.test(secret)) return res.status(400).json({ error: "A label and a password are required." });
     const username = str(req.body?.username, 256);
     const url = str(req.body?.url, 2048);
-    const { id } = await addManualSecret(db, keychainKey({ create: true }), { label, username, url, secret });
+    const { id } = await addManualSecret(db, await writeKey(db, req.ip), { label, username, url, secret });
     await audit(db, "keychain_add", { ip: req.ip, details: { entry_id: id, label } });
     res.json({ ok: true, id });
   }));
@@ -3015,10 +3422,10 @@ export function keychainApiRouter({
     if (!(await requireGrant(req, res))) return;
     const passphrase = typeof req.body?.passphrase === "string" ? req.body.passphrase : "";
     if (passphrase.length < MIN_PASSPHRASE) return res.status(400).json({ error: `Choose a passphrase of at least ${MIN_PASSPHRASE} characters.` });
-    const key = keychainKey();
+    const key = readKey();
     if (!key) return res.status(409).json(KEY_MISSING);
     const entries = await exportableEntries(db, key);
-    const file = sealExport(entries, passphrase);
+    const file = await sealExport(entries, passphrase);
     await audit(db, "keychain_export", { ip: req.ip, details: { count: entries.length } });
     res.set("Content-Disposition", `attachment; filename="crow-keychain-${new Date().toISOString().slice(0, 10)}.json"`);
     res.json(file);
@@ -3026,9 +3433,9 @@ export function keychainApiRouter({
 
   router.post(`${BASE}/import`, withDb(async (req, res, db) => {
     if (!(await requireGrant(req, res))) return;
-    const entries = openExport(req.body?.file, typeof req.body?.passphrase === "string" ? req.body.passphrase : "");
+    const entries = await openExport(req.body?.file, typeof req.body?.passphrase === "string" ? req.body.passphrase : "");
     if (!entries) return res.status(400).json({ error: "That passphrase does not open this file, or it is not a Crow keychain export." });
-    const out = await importEntries(db, keychainKey({ create: true }), entries);
+    const out = await importEntries(db, await writeKey(db, req.ip), entries);
     await audit(db, "keychain_import", { ip: req.ip, details: out });
     res.json({ ok: true, ...out });
   }));
@@ -3037,12 +3444,13 @@ export function keychainApiRouter({
     if (!(await requireGrant(req, res))) return;
     const st = vault.status();
     if (!st || !st.installed || !st.cliPath) return res.status(409).json({ ok: false, reason: "Install or update the Vaultwarden extension first." });
+    if (st.serverOutdated) return res.status(409).json({ ok: false, reason: st.serverOutdated });
     const email = str(req.body?.vault_email?.trim?.(), 320);
     const masterPassword = str(req.body?.vault_password, 1024);
     if (!email || !masterPassword) return res.status(400).json({ ok: false, reason: "Enter your vault email and master password." });
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ ok: false, reason: "No such password." });
-    const secret = await openEntrySecret(db, keychainKey(), entry.id);
+    const secret = await openEntrySecret(db, readKey(), entry.id);
     const out = await vault.save({
       cliPath: st.cliPath, serverUrl: st.serverUrl, email, masterPassword,
       item: { name: entry.label, username: entry.username, password: secret, url: entry.url, notes: entry.bundle_id ? `Saved by Crow (${entry.bundle_id} / ${entry.env_key})` : "Saved by Crow" },
@@ -3127,6 +3535,14 @@ git show --stat HEAD
 - This spike proves the pair live before Tasks 7–11 build on it.
 
 **Pre-decided fallback (spec R18):** if any PASS line below fails on 1.37.3, repeat Steps 3–4 with the newest `@bitwarden/cli` release that passes (`npm view @bitwarden/cli versions`, newest first). Pin that version in Tasks 7 and 11 instead of `2026.9.1`, and record the finding.
+
+**If no CLI release passes (re-review m7, decided now):** ship the keychain without the vault option.
+- Keep Task 5's placeholder `vault-save.js` (its `vaultwardenStatus()` reports not installed, so no vault UI ever shows).
+- In Task 7, do only the refresh fix (Step 4 and its test).
+- In Task 11, drop the `@bitwarden/cli` dependency, `npm_required` and `verify_paths`.
+- Record it in the findings, and add "vault save" back as a §9 follow-up.
+
+**Serve teardown without sudo (optional, Kevin's call):** a one-time `sudo tailscale set --operator=kh0pp` lets the deadman's teardown run `tailscale serve --https=8461 off` itself. This plan does not make that host change on its own.
 
 **Touches:**
 - a throwaway `vaultwarden/server:1.37.3` (compose project `crow-kc-spike`, container `crow-kc-spike-vw`, `127.0.0.1:18097`, `restart: "no"`, data under the scratch dir);
@@ -3266,7 +3682,8 @@ Move the schedule row to Done, then `rm -rf $SP`.
 **Interfaces:**
 - Consumes: `BUNDLES_DIR` and `CROW_HOME` (`servers/gateway/bundles-config.js`), `parseEnvText` (Task 1).
 - Produces:
-  - `vaultwardenStatus({ bundlesDir? }) → { installed, cliPath, serverUrl }`
+  - `vaultwardenStatus({ bundlesDir? }) → { installed, cliPath, serverUrl, serverOutdated: string|null }` (`serverOutdated` is the "reinstall" sentence when the installed compose pins Vaultwarden < 1.37)
+  - refresh (P16): `npm_required` bundles use `npm ci --omit=dev --ignore-scripts` with a lock; on npm failure the manifest marker is left at the old version
   - `saveToVault({ cliPath, serverUrl, email, masterPassword, item:{ name, username?, password, url?, notes? }, deadlineMs?=90000, tmpRoot?=<CROW_HOME>/tmp, nodePath? }) → { ok:true } | { ok:false, reason }` (never throws)
   - `sweepStaleVaultDirs(tmpRoot, { now? }) → number`
   - `classifyLogin(stderr) → reason`
@@ -3375,7 +3792,7 @@ test("missing CLI or bad input → a reason, never a throw", async () => {
 
 test("vaultwardenStatus: installed + CLI present + decoded VAULTWARDEN_URL", () => {
   const bundles = mkdtempSync(join(tmpdir(), "crow-vwstatus-"));
-  assert.deepEqual(V.vaultwardenStatus({ bundlesDir: bundles }), { installed: false, cliPath: null, serverUrl: null });
+  assert.deepEqual(V.vaultwardenStatus({ bundlesDir: bundles }), { installed: false, cliPath: null, serverUrl: null, serverOutdated: null });
   const vw = join(bundles, "vaultwarden");
   mkdirSync(join(vw, "node_modules", "@bitwarden", "cli", "build"), { recursive: true });
   writeFileSync(join(vw, ".env"), "VAULTWARDEN_URL='http://127.0.0.1:18097/'\n");
@@ -3402,6 +3819,16 @@ test("the default temp root is <CROW_HOME>/tmp, not /tmp", () => {
   assert.match(src, /tmpRoot = join\(CROW_HOME, "tmp"\)/);
   assert.match(src, /--core=0/, "core dumps off when prlimit exists");
 });
+
+test("m4 — an install still on an old Vaultwarden image is reported as needing a reinstall", () => {
+  const bundles = mkdtempSync(join(tmpdir(), "crow-vwold-"));
+  const vw = join(bundles, "vaultwarden");
+  mkdirSync(vw, { recursive: true });
+  writeFileSync(join(vw, "docker-compose.yml"), "services:\n  vaultwarden:\n    image: vaultwarden/server:1.32.7\n");
+  assert.match(V.vaultwardenStatus({ bundlesDir: bundles }).serverOutdated, /Reinstall the Vaultwarden extension.*1\.32\.7/);
+  writeFileSync(join(vw, "docker-compose.yml"), "services:\n  vaultwarden:\n    image: vaultwarden/server:1.37.3\n");
+  assert.equal(V.vaultwardenStatus({ bundlesDir: bundles }).serverOutdated, null);
+});
 ````
 
 Append to `tests/bundle-version-refresh.test.js`:
@@ -3409,10 +3836,19 @@ Append to `tests/bundle-version-refresh.test.js`:
 ````bash
 cd ~/crow-wt-keychain && git apply <<'PATCH'
 diff --git a/tests/bundle-version-refresh.test.js b/tests/bundle-version-refresh.test.js
-index ec1b99e..a8f202f 100644
+index ec1b99e..498b0bd 100644
 --- a/tests/bundle-version-refresh.test.js
 +++ b/tests/bundle-version-refresh.test.js
-@@ -721,3 +721,34 @@ describe("B3 — build-context refresh hardening", () => {
+@@ -474,6 +474,8 @@ describe("npm_required refresh at boot stays warn-only (hard-fail must never lea
+     assert.deepEqual(errors, [], "a failing npm step at boot must never surface as an error — warn-only even for npm_required");
+     assert.ok(repaired.some((r) => r.includes(id)), "the refresh itself must still be reported as having run");
+     assert.ok(existsSync(destBundleDir(id)), "destDir must NOT be removed — boot-time refresh never hard-fails, unlike the install-time path");
++    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "1.0.0",
++      "m4: the commit marker stays at the old version, so the next boot retries the npm step");
+   });
+ });
+ 
+@@ -721,3 +723,52 @@ describe("B3 — build-context refresh hardening", () => {
      assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "0.2.0");
    });
  });
@@ -3445,6 +3881,24 @@ index ec1b99e..a8f202f 100644
 +    const npm = runner.calls.filter((c) => c.cmd === "npm");
 +    assert.equal(npm.length, 1, "npm runs once for the added dependency");
 +    assert.equal(npm[0].opts.cwd, destBundleDir(id));
++  });
++
++  test("m4 — an npm_required docker bundle refreshes with the lock file and no lifecycle scripts", async () => {
++    const id = "widget-docker-required";
++    const repoRoot = freshRoot("crowrepo-dockerreq-");
++    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
++      id, name: "WR", version: "1.1.0", type: "bundle", category: "misc", description: "d", npm_required: true,
++      docker: { composefile: "docker-compose.yml" },
++    }));
++    put(repoRoot, `${id}/docker-compose.yml`, "services: {}\n");
++    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "@bitwarden/cli": "2026.9.1" } }));
++    put(repoRoot, `${id}/package-lock.json`, JSON.stringify({ name: id, lockfileVersion: 3 }));
++    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
++    setInstalled([id]);
++    const runner = fakeRunner();
++    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
++    assert.deepEqual(runner.calls.filter((c) => c.cmd === "npm").map((c) => c.args), [["ci", "--omit=dev", "--ignore-scripts"]]);
++    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "1.1.0");
 +  });
 +});
 PATCH
@@ -3497,13 +3951,25 @@ export const VAULT_REASONS = Object.freeze({
 const STALE_MS = 10 * 60 * 1000;
 const PRLIMIT = ["/usr/bin/prlimit", "/bin/prlimit"].find((p) => existsSync(p)) || null;
 
+/**
+ * serverOutdated: an install that predates vaultwarden 1.1.0 keeps its OLD compose file (a
+ * docker refresh never touches docker-compose.yml), and Vaultwarden < 1.37 does not support
+ * Bitwarden clients 2026.7.0+ (re-review m4) — say so instead of failing with "create failed".
+ */
 export function vaultwardenStatus({ bundlesDir = BUNDLES_DIR } = {}) {
   const dir = join(bundlesDir, "vaultwarden");
-  if (!existsSync(dir)) return { installed: false, cliPath: null, serverUrl: null };
+  if (!existsSync(dir)) return { installed: false, cliPath: null, serverUrl: null, serverOutdated: null };
   const cli = join(dir, "node_modules", "@bitwarden", "cli", "build", "bw.js");
   let url = "http://localhost:8097";
   try { url = parseEnvText(readFileSync(join(dir, ".env"), "utf8")).VAULTWARDEN_URL || url; } catch { /* default */ }
-  return { installed: true, cliPath: existsSync(cli) ? cli : null, serverUrl: url.replace(/\/+$/, "") };
+  let serverOutdated = null;
+  try {
+    const m = readFileSync(join(dir, "docker-compose.yml"), "utf8").match(/vaultwarden\/server:(\d+)\.(\d+)\.(\d+)/);
+    if (m && (Number(m[1]) < 1 || (Number(m[1]) === 1 && Number(m[2]) < 37))) {
+      serverOutdated = `Reinstall the Vaultwarden extension to update its server: saving to the vault needs Vaultwarden 1.37 or newer, and this install runs ${m[1]}.${m[2]}.${m[3]}. Your vault data is kept.`;
+    }
+  } catch { /* no compose file: nothing to judge */ }
+  return { installed: true, cliPath: existsSync(cli) ? cli : null, serverUrl: url.replace(/\/+$/, ""), serverOutdated };
 }
 
 /** Remove crow-bw-* dirs older than 10 minutes (a crashed save's data.json holds tokens). */
@@ -3594,12 +4060,12 @@ export async function saveToVault({
 }
 ````
 
-- [ ] **Step 4: Refresh copies `package.json` + lock for docker bundles** (review C6; no compose file in the repo mounts a `package.json`, checked with `grep -l package.json bundles/*/docker-compose.yml`)
+- [ ] **Step 4: Refresh copies `package.json` + lock for docker bundles (review C6), and `npm_required` refreshes like the install path (P16).** No compose file in the repo mounts a `package.json`; check with `grep -l package.json bundles/*/docker-compose.yml`.
 
 ````bash
 cd ~/crow-wt-keychain && git apply <<'PATCH'
 diff --git a/servers/gateway/routes/bundles.js b/servers/gateway/routes/bundles.js
-index 96cfb4d..574e65b 100644
+index 96cfb4d..2a4c356 100644
 --- a/servers/gateway/routes/bundles.js
 +++ b/servers/gateway/routes/bundles.js
 @@ -699,8 +699,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
@@ -3615,6 +4081,33 @@ index 96cfb4d..574e65b 100644
      : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
    const dirs = isDocker
      ? ["server", "panel", "skills"]
+@@ -792,11 +795,23 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
+   // npm step: narrow, added-dep-name-only trigger; warn-only; via the
+   // injected runner so tests never shell out to a real npm.
+   if (bundleNeedsNpmInstall(appSrc, destDir)) {
++    // npm_required bundles (vaultwarden: the Bitwarden CLI) install exactly as the install
++    // path does — lock file, no lifecycle scripts — and are never blessed half-installed:
++    // on failure the installed manifest (the commit marker) keeps the OLD version, so the
++    // next boot retries (re-review m4). Still warn-only: boot never hard-fails.
++    const required = repoManifest.npm_required === true;
++    const npmArgs = required
++      ? [existsSync(join(destDir, "package-lock.json")) ? "ci" : "install", "--omit=dev", "--ignore-scripts"]
++      : ["install", "--omit=dev"];
+     try {
+-      await runner("npm", ["install", "--omit=dev"], { cwd: destDir });
+-      touched.push("npm install");
++      await runner("npm", npmArgs, { cwd: destDir });
++      touched.push(`npm ${npmArgs[0]}`);
+     } catch (err) {
+-      console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
++      console.warn(`[bundles] npm ${npmArgs[0]} failed for ${id}: ${err.message}`);
++      if (required) {
++        console.warn(`[bundles] ${id}: left at ${oldVersion} so the next boot retries the dependency install`);
++        return { oldVersion, newVersion: oldVersion, touched: [...touched, "npm failed — will retry"] };
++      }
+     }
+   }
+ 
 PATCH
 git diff --stat
 ````
@@ -3633,7 +4126,7 @@ Expected: all PASS.
 
 ```bash
 git add tests/keychain-vault-save.test.js
-git commit servers/gateway/keychain/vault-save.js tests/keychain-vault-save.test.js servers/gateway/routes/bundles.js tests/bundle-version-refresh.test.js -m "feat(keychain): Vaultwarden save via the Bitwarden CLI (env/stdin only, CROW_HOME/tmp, swept, no cores, 90 s); docker refresh ships package files"
+git commit servers/gateway/keychain/vault-save.js tests/keychain-vault-save.test.js servers/gateway/routes/bundles.js tests/bundle-version-refresh.test.js -m "feat(keychain): Vaultwarden save via the Bitwarden CLI (env/stdin only, CROW_HOME/tmp, swept, no cores, 90 s, outdated-server notice); docker refresh ships package files, npm_required refresh retries"
 git show --stat HEAD
 ```
 
@@ -3656,7 +4149,10 @@ git show --stat HEAD
   - `sanitizeKeychainRequest(raw, { localSession }) → { save, vault }`
   - `recordKeychainForInstall({ bundleId, manifest, env, minted, keychainReq, log }) → { saved, firstView, vault, mintedSaved }` (never throws)
   - `markBundleKeychainRemoved(bundleId) → number`
-  - `_setKeychainDepsForTest({ openDb?, keychainKey?, vault?, audit? } | null)`
+  - `_setKeychainDepsForTest({ openDb?, writeKey?(db), vault?, audit? } | null)`
+    - the default `writeKey` is `ensureWriteKey`, with an audit + notification on a re-created key;
+    - a damaged key makes a `keychain:true` install fail with "keychain key file unreadable at <path>" and nothing written;
+    - typed fields are then skipped, and the install continues.
   - `runInstallJob(…, { …, keychain = null })`, which returns `{ ok:false, reason:"could not save the generated password to Crow keychain; nothing was written — retry the install" }` when a generated token cannot be saved
   - the Configure response gains `keychain: { saved, vault, messages } | null`
 
@@ -3831,7 +4327,7 @@ test("Configure: a local session saves a checked human field; a peer-signed requ
 
 test("C5 — if the generated token cannot be saved, the install fails with NOTHING persisted; a retry mints a new token", async () => {
   const id = "demo-kc-e"; const manifest = fixture(id);
-  H._setKeychainDepsForTest({ keychainKey: () => null, vault: { status: () => ({ installed: false }), save: async () => ({ ok: true }) } });
+  H._setKeychainDepsForTest({ writeKey: async () => null, vault: { status: () => ({ installed: false }), save: async () => ({ ok: true }) } });
   try {
     const job = B._createJobForTest(id, "install");
     const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
@@ -3850,6 +4346,22 @@ test("C5 — if the generated token cannot be saved, the install fails with NOTH
     const e = (await K.listEntries(d, { keyId: ID().id })).find((x) => x.bundle_id === id);
     assert.equal(P.verifyArgon2idPhc(await K.openEntrySecret(d, ID(), e.id), env.DEMO_ADMIN_TOKEN), true, "the saved token matches the persisted hash");
   } finally { d.close(); }
+});
+
+test("m1 — a damaged key file with entries: a keychain:true install fails with the file path in the log, nothing written", async () => {
+  const { keychainKeyPath } = await import("../servers/gateway/keychain/key.js");
+  const id = "demo-kc-f"; const manifest = fixture(id);
+  const p = keychainKeyPath(CROW_HOME);
+  const { readFileSync: rf, writeFileSync: wf } = await import("node:fs");
+  const saved = rf(p, "utf8");
+  wf(p, "");
+  try {
+    const job = B._createJobForTest(id, "install");
+    const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    assert.equal(out.ok, false);
+    assert.ok(job.log.some((l) => l.includes(`unreadable at ${p}`)), job.log.join("\n"));
+    assert.equal(existsSync(S.retainedEnvPath(CROW_HOME, id)), false);
+  } finally { wf(p, saved); }
 });
 ````
 
@@ -3874,8 +4386,8 @@ Expected: FAIL with `Cannot find module '…/keychain/install-hooks.js'`.
  */
 import { createDbClient, auditLog } from "../../db.js";
 import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate } from "../bundle-env-secrets.js";
-import { loadKeychainKey } from "./key.js";
-import { saveExtensionSecret, reactivateBundleEntries, markBundleRemoved } from "./store.js";
+import { createNotification } from "../../shared/notifications.js";
+import { saveExtensionSecret, reactivateBundleEntries, markBundleRemoved, ensureWriteKey } from "./store.js";
 import { vaultwardenStatus, saveToVault, VAULT_REASONS } from "./vault-save.js";
 
 let _override = null;
@@ -3883,7 +4395,13 @@ export function _setKeychainDepsForTest(deps) { _override = deps || null; }
 function deps() {
   return {
     openDb: () => createDbClient(),
-    keychainKey: ({ create = false } = {}) => loadKeychainKey({ create }),
+    // The key to save with (created on first use; refuses a damaged key while entries exist).
+    writeKey: (db) => ensureWriteKey(db, {
+      onNewKey: async ({ orphaned }) => {
+        await auditLog(db, "keychain_key_created", { details: { orphaned } });
+        try { await createNotification(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Passwords to recover them.`, type: "system", source: "keychain" }); } catch {}
+      },
+    }),
     vault: { status: vaultwardenStatus, save: saveToVault },
     audit: auditLog,
     ...(_override || {}),
@@ -3943,15 +4461,23 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
   try {
     db = d.openDb();
     if (reused.length) await reactivateBundleEntries(db, bundleId, reused);
-    const key = (mintedList.length || typedList.length) ? d.keychainKey({ create: true }) : null;
+    let key = null;
     try {
+      if (mintedList.length || typedList.length) key = await d.writeKey(db);
       for (const s of mintedList) await saveOne(key, s);
     } catch (err) {
-      out.mintedSaved = false;
-      log(`Could not save the generated password(s) to Crow keychain (${err?.code || err?.name || "error"}); nothing was written, so retrying the install mints a new one`);
-      return out;
+      if (mintedList.length) {
+        out.mintedSaved = false;
+        log(err?.code === "KEYCHAIN_KEY_INVALID"
+          ? `Crow keychain key file unreadable at ${err.path}: restore it (or delete the saved passwords in Settings → Passwords), then install again. Nothing was written.`
+          : `Could not save the generated password(s) to Crow keychain (${err?.code || err?.name || "error"}); nothing was written, so retrying the install mints a new one`);
+        return out;
+      }
+      log(err?.code === "KEYCHAIN_KEY_INVALID"
+        ? `Passwords were not saved to Crow keychain: its key file is unreadable at ${err.path}. The install continues.`
+        : `Passwords were not saved to Crow keychain (${err?.code || err?.name || "error"}). The install continues.`);
     }
-    for (const s of typedList) {
+    for (const s of key ? typedList : []) {
       try { await saveOne(key, s); } catch (err) { log(`Could not save ${s.k} to Crow keychain (${err?.code || err?.name || "error"}); the install continues`); }
     }
     if (out.saved) log(`Saved ${out.saved} password(s) to Crow keychain (Settings → Passwords)`);
@@ -3960,6 +4486,8 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
       const st = d.vault.status();
       if (!st || !st.installed || !st.cliPath) {
         out.vault = { ok: false, reason: VAULT_REASONS.missingCli };
+      } else if (st.serverOutdated) {
+        out.vault = { ok: false, reason: st.serverOutdated };
       } else {
         out.vault = { ok: true };
         for (const e of saved) {
@@ -4002,7 +4530,7 @@ export async function markBundleKeychainRemoved(bundleId) {
 ````bash
 cd ~/crow-wt-keychain && git apply <<'PATCH'
 diff --git a/servers/gateway/routes/bundles.js b/servers/gateway/routes/bundles.js
-index 574e65b..6168ac7 100644
+index 2a4c356..6ebbeab 100644
 --- a/servers/gateway/routes/bundles.js
 +++ b/servers/gateway/routes/bundles.js
 @@ -53,8 +53,9 @@ import {
@@ -4016,7 +4544,7 @@ index 574e65b..6168ac7 100644
  
  /**
   * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
-@@ -1944,7 +1945,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
+@@ -1956,7 +1957,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
    }
  }
  
@@ -4025,7 +4553,7 @@ index 574e65b..6168ac7 100644
    let needsRestart = false;
    // Set when `docker compose up` fails. The install does NOT stop there: the
    // non-container steps (gateway env, MCP registration, panel + routes,
-@@ -2042,7 +2043,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
+@@ -2054,7 +2055,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
      // never shown, never sent to the gateway .env. reqEnv is the request env with
      // generated keys stripped, and is the only request env used below.
      const reqEnv = stripGeneratedKeys(manifest, envVars);
@@ -4035,7 +4563,7 @@ index 574e65b..6168ac7 100644
      const writeEnv = { ...(reqEnv || {}), ...generated };
      let installEnv = writeEnv;
      let baseText = null;
-@@ -2058,6 +2060,17 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
+@@ -2070,6 +2072,17 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
        } catch { /* unreadable base: fall back to provided values only */ }
        if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
      }
@@ -4053,7 +4581,7 @@ index 574e65b..6168ac7 100644
      writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
      if (Object.keys(generated).length > 0) {
        appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
-@@ -2751,6 +2764,7 @@ export default function bundlesRouter() {
+@@ -2763,6 +2776,7 @@ export default function bundlesRouter() {
      }
  
      // Create job for async tracking
@@ -4061,7 +4589,7 @@ index 574e65b..6168ac7 100644
      const job = createJob(bundle_id, "install");
      res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
  
-@@ -2762,6 +2776,7 @@ export default function bundlesRouter() {
+@@ -2774,6 +2788,7 @@ export default function bundlesRouter() {
          installedSnapshot: v.installed,
          consentVerified: v.consentVerified,
          manifest: v.manifest,
@@ -4069,7 +4597,7 @@ index 574e65b..6168ac7 100644
        });
        if (!out.ok) {
          finishJob(job, "failed");
-@@ -3035,6 +3050,8 @@ export default function bundlesRouter() {
+@@ -3047,6 +3062,8 @@ export default function bundlesRouter() {
          const installed = getInstalled().filter((i) => i.id !== bundle_id);
          saveInstalled(installed);
          appendLog(job, "Installation record removed");
@@ -4078,7 +4606,7 @@ index 574e65b..6168ac7 100644
  
          let notifDb;
          try {
-@@ -3245,6 +3262,11 @@ export default function bundlesRouter() {
+@@ -3257,6 +3274,11 @@ export default function bundlesRouter() {
  
        Object.assign(existing, env_vars); // the effective env after this save
        writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
@@ -4090,7 +4618,7 @@ index 574e65b..6168ac7 100644
  
        // Also configure the MCP child, which reads mcp-addons.json — not this .env.
        const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
-@@ -3304,6 +3326,7 @@ export default function bundlesRouter() {
+@@ -3316,6 +3338,7 @@ export default function bundlesRouter() {
          applies_on_next_start: appliesOnNextStart,
          bundle_restart_keys: bundleRestartKeys,
          needs_config: needsConfigKeys(bundle_id),
@@ -5795,10 +6323,10 @@ index 7e5282e..2df1680 100644
  
    server.tool(
 diff --git a/bundles/vaultwarden/skills/vaultwarden.md b/bundles/vaultwarden/skills/vaultwarden.md
-index fa38615..75e6420 100644
+index fa38615..d9b10de 100644
 --- a/bundles/vaultwarden/skills/vaultwarden.md
 +++ b/bundles/vaultwarden/skills/vaultwarden.md
-@@ -23,13 +23,12 @@ connect to it over HTTP(S).
+@@ -23,13 +23,19 @@ connect to it over HTTP(S).
  
  ## One-time setup (do this in order)
  
@@ -5815,6 +6343,13 @@ index fa38615..75e6420 100644
 +   only). The Extensions page shows it to you once right after install; later,
 +   reveal it from Settings → Passwords (Crow asks you to confirm it's you).
 +   Use it to sign in at `/admin`.
++
++   **Installed before Crow generated tokens?** Your typed token keeps working: Crow
++   reuses it as it is (plaintext in the extension's settings, not in the keychain) — add
++   it to Settings → Passwords yourself if you want it there. Such an install also keeps
++   its older Vaultwarden server image until you reinstall the extension (your vault data
++   in `~/.crow/vaultwarden/data` is kept); saving passwords to the vault from Crow needs
++   Vaultwarden 1.37 or newer, and Crow tells you when a reinstall is needed.
  
  2. **Start the bundle** from the Extensions panel.
  
@@ -6278,6 +6813,7 @@ git push origin feat/crow-keychain
   - the review→ruling table;
   - the spike and smoke findings inline, plus their report paths;
   - flagged for Kevin: R11 (vault email in `bw login` argv);
+  - **Operator follow-ups:** the dayane `backup.sh` change (Task 14 Step 6); existing Vaultwarden installs keep the old image until reinstalled;
   - the P12 version bumps.
 - No AI attribution.
 
@@ -6319,7 +6855,29 @@ ssh kh0pp@100.67.188.54 "systemctl list-units --type=service --no-legend '*crow*
 
 - **raven:** pull its checkout (it must be on `main`; otherwise stop and tell Kevin), restart the unit the last command shows, and check `/health` on 3009.
 - **black-swan:** `ssh black-swan "git -C ~/crow log --oneline -1"` within the auto-update interval. It must show the merge sha; if it still shows the old sha after one interval, report it.
-- **dayane:** its container instance is pinned (deliberate rebuild only). No action; note it in the PR.
+- **dayane (operator follow-up, re-review B3):** its container instance is pinned (deliberate rebuild only), so there is no deploy step here. Before dayane is next rebuilt onto this code, its backup must stop carrying the key.
+  - The kit lives in `~/crow-dayane` (Gitea `kh0pp/crow-dayane`), not in this repo.
+  - The exact change, for Kevin or a session in that repo: in `~/crow-dayane/backup.sh`, replace
+
+    ```bash
+    docker cp crow-dayane:/crow - | gzip > "$DEST/volume-$TS.tar.gz.part"
+    ```
+
+    with
+
+    ```bash
+    # Never back up the Crow keychain key (Crow keychain spec §3/§9.7): entries stay readable only on this host.
+    docker exec crow-dayane tar -C / --exclude=crow/secrets/keychain.key -cf - crow | gzip > "$DEST/volume-$TS.tar.gz.part"
+    ```
+
+    The archive layout (`crow/...`) is unchanged, and the image's `/usr/bin/tar` was verified present.
+  - Then verify:
+
+    ```bash
+    bash ~/crow-dayane/backup.sh && tar -tzf "$(ls -t /mnt/external/crow-db-backups/crow-dayane/volume-*.tar.gz | head -1)" | grep -c keychain.key   # 0
+    ```
+
+  - Put this in the PR body under "Operator follow-ups".
 
 - [ ] **Step 7: [KEVIN] Post-deploy acceptance on crow** (prod, harmless)
 1. **Settings → Passwords** appears under Account, showing "No saved passwords yet."
@@ -6365,7 +6923,10 @@ Record the results as a PR comment (`mcp__github__add_issue_comment`).
 
 **Review Focus:** all five lines are pinned in their owning tasks.
 
-**Dry run:** the patches and files above were applied in order to a git-tracked scratch copy. Each task's tests passed at its step. Final full suite 6050/6050; `build-registry --check` and `check-port-allocation` OK.
+**Dry run (revision 3):**
+- The patches and files above were replayed in order on a git-tracked scratch copy, and each task's tests passed at its commit.
+- Final full suite **6059 / 6059**; `build-registry --check` and `check-port-allocation` OK.
+- The B1 regression was reproduced first (`ERR_MODULE_NOT_FOUND` from an installed copy) and is now pinned by a test.
 
 **Unverified until live:**
 - CLI 2026.9.1 ⇄ Vaultwarden 1.37.3 (Task 6, before any vault code);
