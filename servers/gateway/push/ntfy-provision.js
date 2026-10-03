@@ -133,11 +133,15 @@ export function provisionNtfy(opts = {}) {
   // Overall cap: a wedged docker daemon must not hold a Settings POST open for minutes.
   const deadlineMs = opts.deadlineMs ?? PROVISION_DEADLINE_MS;
   let timer;
+  const inner = _provisionNtfy(opts);
   const capped = Promise.race([
-    _provisionNtfy(opts),
+    inner,
     new Promise((r) => { timer = setTimeout(() => r({ ok: false, reason: `The notification server did not answer within ${Math.round(deadlineMs / 1000)} s — is Docker running?` }), deadlineMs); timer.unref?.(); }),
   ]);
-  const p = capped.finally(() => { clearTimeout(timer); _inflight.delete(k); });
+  // The in-flight slot is held until the INNER run settles, so a retry after the cap
+  // fires cannot race a late run (its orphan sweep would revoke the token being stored).
+  inner.finally(() => { if (_inflight.get(k) === p) _inflight.delete(k); }).catch(() => {});
+  const p = capped.finally(() => clearTimeout(timer));
   _inflight.set(k, p);
   return p;
 }
@@ -211,12 +215,14 @@ async function _provisionNtfy({
     const samePrev = prev && prev.topic === topic ? prev : null;
     const ensureToken = async (user, stored) => {
       const listing = out(await ntfy(["token", "list", user]));
-      if (stored && parseTokens(listing).has(stored)) return stored;
-      // Re-minting: revoke Crow's own orphans first (a reinstall that kept the volume,
-      // a lost config file) so no stale credential stays valid.
+      const keep = stored && parseTokens(listing).has(stored) ? stored : null;
+      // Revoke Crow's own orphans (a reinstall that kept the volume, a lost config file,
+      // an earlier interrupted run) so no stale credential stays valid.
       for (const old of parseAutowireTokens(listing)) {
+        if (old === keep) continue;
         try { await ntfy(["token", "remove", user, old]); } catch { /* already gone */ }
       }
+      if (keep) return keep;
       const tok = [...parseTokens(out(await ntfy(["token", "add", `--label=${TOKEN_LABEL}`, user])))][0];
       if (!tok) throw new Error(`ntfy did not return a token for ${user}`);
       created.tokens.push(user);

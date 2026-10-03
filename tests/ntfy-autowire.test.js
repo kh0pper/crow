@@ -260,6 +260,33 @@ test("an unresponsive docker is capped by the overall deadline", async () => {
   assert.match(r.reason, /did not answer/);
 });
 
+test("after the cap fires, a retry joins the still-running attempt instead of racing it", async () => {
+  const { env } = tmpData();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { runner: real } = fakeNtfy();
+  let calls = 0;
+  const runner = async (...a) => { calls++; await gate; return real(...a); };
+  const first = await provisionNtfy({ runner, env, instanceId: ID_A, deadlineMs: 20, sleep: noSleep });
+  assert.equal(first.ok, false);
+  const second = provisionNtfy({ runner, env, instanceId: ID_A, deadlineMs: 20, sleep: noSleep });
+  assert.equal(calls, 1, "no second docker run while the first is alive");
+  release();
+  await second;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(readStoredNtfyConfig(env), "the late run still completes");
+});
+
+test("a valid stored token is kept and Crow's duplicate tokens are swept", async () => {
+  const { env } = tmpData();
+  const { state, runner } = fakeNtfy();
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  const keep = readStoredNtfyConfig(env).publisherToken;
+  state.tokens.set("crow-0867ac2809-pub", [keep, "tk_dupe1"]);
+  await provisionNtfy({ runner, env, instanceId: ID_A, sleep: noSleep });
+  assert.deepEqual(state.tokens.get("crow-0867ac2809-pub"), [keep]);
+});
+
 test("a token the server no longer knows is re-minted", async () => {
   const { env } = tmpData();
   const { state, runner } = fakeNtfy();
