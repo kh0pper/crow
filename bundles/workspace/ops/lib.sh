@@ -23,7 +23,7 @@ occ_with_pass() { dc exec -T -u www-data nextcloud sh -c 'IFS= read -r NC_PASS; 
 # under `exec -T`, so the JSON lands in a private temp file INSIDE the container (never argv),
 # removed even when the import fails.
 occ_import_stdin() {
-  dc exec -T -u www-data nextcloud sh -c 'umask 077; d=$(mktemp -d /dev/shm/ws.XXXXXX 2>/dev/null || mktemp -d); cat > "$d/c.json"; php occ config:import "$d/c.json"; rc=$?; rm -rf "$d"; exit $rc'
+  dc exec -T -u www-data nextcloud sh -c 'umask 077; d=$(mktemp -d /dev/shm/ws.XXXXXX 2>/dev/null || mktemp -d) || exit 1; [ -n "$d" ] || exit 1; trap '"'"'rm -rf "$d"'"'"' EXIT; trap '"'"'exit 1'"'"' HUP INT TERM; cat > "$d/c.json"; php occ config:import "$d/c.json"'
 }
 
 # Diagnosability: any failing top-level command under `set -e` names the current step

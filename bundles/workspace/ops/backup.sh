@@ -9,6 +9,7 @@ set -euo pipefail
 umask 077
 
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+step "backup"
 WS="${WORKSPACE_DATA_ROOT:-$CROW_HOME/workspace}"
 STAGING="$WS/backups-staging"
 DEST="${WORKSPACE_BACKUP_DEST:-}"
