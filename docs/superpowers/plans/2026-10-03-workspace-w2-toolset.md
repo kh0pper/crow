@@ -92,6 +92,7 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 | I11 | pi-spawned server may lack `CROW_APP_ROOT` | `~/crow` fallback + spawn-from-copy test; pi-bot acceptance step | Tasks 3, 14 |
 | I12 | Contact delete journaled after the DELETE | Journal first (calendar too) | Task 10 |
 | I13 | Calendar re-create after delete unverified | Spike S8, with a fallback ruling | Task 1 |
+| r2 | Spike imported fflate before it was installed; the after-version label overwrote human labels on restore; the fake's restore kept pre-restore content under the wrong id; browser CRLF caused stale_view | System `unzip` in the spike; `mayLabel` applied to the after row too; fake keeps `cur` at its id; undo-of-undo + CRLF tests | Tasks 1, 5, 12 |
 | minor | Colon names, SEARCH scope encoding, xlsx soffice check, proceed double-wait, share-root trash | All fixed (`share_root` refusal added) | Tasks 4, 5, 8 |
 
 ## File map
@@ -396,8 +397,10 @@ if (args.has("--editor-test")) {
   for (let i = 0; i < 30; i++) { await sleep(1000); if ((await stat(e)).lock !== "1") { cleared = (Date.now() - t0) / 1000; break; } }
   fact("S6_seconds_until_unlock", cleared);
   const after = Buffer.from(await (await dav("GET", `files/${U}/${enc(e)}`)).arrayBuffer());
-  const { unzipSync, strFromU8 } = await import("fflate");
-  fact("S6_typing_saved_contains_SPIKE", strFromU8(unzipSync(new Uint8Array(after))["word/document.xml"]).includes("SPIKE"));
+  // fflate is only installed in Task 3: use the system unzip here (Info-ZIP is on crow)
+  const { writeFileSync: wf } = await import("node:fs"); const { execFileSync } = await import("node:child_process");
+  const tmp = `/tmp/w2-spike-${Date.now()}.docx`; wf(tmp, after);
+  fact("S6_typing_saved_contains_SPIKE", execFileSync("unzip", ["-p", tmp, "word/document.xml"]).toString().includes("SPIKE"));
   const vAfterDrop = await versions(st.fileid);
   fact("S6_versions", vAfterDrop);
   // S6b: the real proceed sequence: bot PUT right after the unlock, honouring the ≥1.1 s mtime gap
@@ -1354,7 +1357,9 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
       const v = n.versions.find((x) => String(x.id) === vm[2]); if (!v) return send(404);
       if (req.method === "PROPPATCH") { v.label = (body.toString().match(/<nc:version-label>([\s\S]*?)<\/nc:version-label>/) || [])[1] || null; return send(207, ms("")); }
       // Real NC restore touches the file back to the revision's mtime (files_versions Storage.php:408).
-      if (req.method === "MOVE") { if (lockBlocks(n)) return send(423); const cur = n.versions.at(-1); const restored = { ...v }; n.bytes = Buffer.from(v.bytes); n.etag = `"e${++etagN}"`; n.mtime = v.id; n.versions.push({ id: cur.id + 1, bytes: cur.bytes, label: cur.label, author: cur.author }); n.versions = n.versions.filter((x) => x !== cur); n.versions.push({ ...restored, id: v.id }); n.versions = n.versions.filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i); return send(201); }
+      // The pre-restore content stays as version <current mtime> (Storage.php:383-386); the restored revision's row
+      // becomes current again (mtime touched back to it). Order rows by id so "current" = max id stays meaningful.
+      if (req.method === "MOVE") { if (lockBlocks(n)) return send(423); n.bytes = Buffer.from(v.bytes); n.etag = `"e${++etagN}"`; n.mtime = v.id; n.versions.sort((a, b) => a.id - b.id); return send(201); }
     }
     // ---- principals ----
     const pm = u.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
@@ -1963,6 +1968,17 @@ test("version_id carries the PUT's own etag, not a later write's", async () => {
   await assert.rejects(W.undoFileChange(cfg, { path: "S/et.txt" }, r.version_id, { clock }), (e) => e.code === "changed_since");
 });
 
+test("undo of an undo works, and restoring onto a human-labeled version keeps that label (review r2)", async () => {
+  const n = fake.addFile("S/uu.txt", Buffer.from("v1"));
+  n.versions[0].label = "Kevin: approved";
+  const r = await W.withFileWrite(cfg, { path: "S/uu.txt" }, appendMut("+bot"), { clock });
+  const u = await W.undoFileChange(cfg, { path: "S/uu.txt" }, r.version_id, { clock });
+  assert.equal(text(fake.node("S/uu.txt").bytes), "v1");
+  assert.equal(fake.versionsOf("S/uu.txt").find((x) => x.bytes.toString() === "v1").label, "Kevin: approved");
+  await W.undoFileChange(cfg, { path: "S/uu.txt" }, u.version_id, { clock });
+  assert.equal(text(fake.node("S/uu.txt").bytes), "v1+bot");
+});
+
 test("a person's own version label is never overwritten (review I9)", async () => {
   const n = fake.addFile("S/lab.txt", Buffer.from("a"));
   n.versions[0].label = "Kevin: final draft";
@@ -2171,7 +2187,10 @@ async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, putEt
   const existing = beforeVersion === "0" ? null : (await listVersions(cfg, fileId).catch(() => [])).find((v) => v.versionId === beforeVersion);
   const mayLabel = existing && (!existing.label || /^(Before )?(Crow|Undo|Quick edit)\b/.test(existing.label));
   const okB = beforeVersion === "0" || !mayLabel ? true : await labelVersion(cfg, fileId, beforeVersion, clip(`Before ${label}: ${summary}`, 120)).then(() => true, () => false);
-  const okA = await labelVersion(cfg, fileId, String(after.mtime), clip(`${label}: ${summary}`, 120)).then(() => true, () => false);
+  // Review r2: after a restore, after.mtime IS the restored revision's existing row; apply the same rule.
+  const afterRow = (await listVersions(cfg, fileId).catch(() => [])).find((v) => v.versionId === String(after.mtime));
+  const mayLabelA = !afterRow || !afterRow.label || /^(Before )?(Crow|Undo|Quick edit)\b/.test(afterRow.label);
+  const okA = !mayLabelA ? true : await labelVersion(cfg, fileId, String(after.mtime), clip(`${label}: ${summary}`, 120)).then(() => true, () => false);
   return {
     ...(out.data || {}), path: after.path, file_id: fileId, changed: out.changed,
     version_id: encodeVersionId({ f: fileId, b: beforeVersion, a: afterEtag }), version_label: `${label}: ${summary}`,
@@ -5908,6 +5927,15 @@ test("save a cell and a slide shape", async () => {
   assert.equal((await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.pptx", kind: "pptx", target: id, shown: "Jueves", value: "Viernes" })).status, 303);
 });
 
+test("CRLF from the browser is normalized: a two-line shape saves, no stray \\r (review r2)", async () => {
+  const { openPptx, readDeck } = await import("../bundles/workspace/server/ooxml/pptx.js");
+  const sh = readDeck(openPptx(fake.node("Shared with Crow/Casa/r.pptx").bytes), false)[1].shapes.find((x) => x.text.includes("\n"));
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.pptx", kind: "pptx", target: sh.object_id, shown: sh.text.replace(/\n/g, "\r\n"), value: "Uno\r\nDos" });
+  assert.equal(new URL(r.headers.get("location"), base).searchParams.get("notice"), "saved");
+  const after = readDeck(openPptx(fake.node("Shared with Crow/Casa/r.pptx").bytes), false)[1].shapes.find((x) => x.object_id === sh.object_id);
+  assert.equal(after.text, "Uno\nDos");
+});
+
 test("stale view and paragraphs with links/images are refused, nothing written (review I6)", async () => {
   const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "old text", value: "x" });
@@ -5957,9 +5985,13 @@ import { openPptx, editShapeText, shapeById, shapeText } from "../ooxml/pptx.js"
 
 export const QUICK_MAX_BYTES = 20 * 1024 * 1024;
 const opts = (form, clock, summary) => ({ label: "Quick edit", waitS: 10, ifOpen: form.if_open === "proceed" ? "proceed" : "wait", clock, summary });
-export async function quickSave(cfg, form, clock) {
+export async function quickSave(cfg, formIn, clock) {
+  let form = formIn;
   const segs = splitPath(String(form.path || ""));
-  const value = String(form.value ?? "").slice(0, 20000);
+  // Browsers submit textarea/hidden values with CRLF: normalize both, or every multi-line target is "stale".
+  const nl = (x) => String(x ?? "").replace(/\r\n?/g, "\n");
+  form = { ...form, shown: nl(form.shown) };
+  const value = nl(form.value).slice(0, 20000);
   const kind = String(form.kind || "");
   const ext = segs.at(-1).toLowerCase().split(".").pop();
   if (!["docx", "xlsx", "pptx"].includes(kind) || ext !== kind) throw new WsError("wrong_type", "Quick edit works on .docx, .xlsx and .pptx files");
