@@ -347,6 +347,7 @@ export const SKIP_REASONS = {
   mcp_sessions: "per-host session state",
   sync_conflicts: "grackle-local sync bookkeeping",
   audit_log: "grackle-local audit trail",
+  crow_keychain: "machine-local passwords sealed with that machine's own keychain key (move them with Settings → Passwords → Export / Import)",
   cross_host_calls: "grackle-local bookkeeping",
   providers: "already synced (grackle's provider rows are being retired)",
   data_backends: "keep crow's rows (map: grackle's point at ~/spring-2026)",
@@ -359,6 +360,7 @@ export const SKIP_REASONS = {
 /** Never written to the extract: credentials / sync internals (the archived full backup keeps them). */
 const NO_EXTRACT = new Set([
   "oauth_clients", "oauth_tokens", "mcp_sessions", "dashboard_pending_2fa", "push_subscriptions",
+  "crow_keychain",
   "crow_instances", "sync_state", "sync_outbox", "rate_limit_buckets", "sqlite_sequence",
   "dashboard_settings", "dashboard_settings_overrides",
 ]);
