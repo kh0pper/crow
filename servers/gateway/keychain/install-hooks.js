@@ -12,7 +12,7 @@
 import { createDbClient, auditLog } from "../../db.js";
 import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate } from "../bundle-env-secrets.js";
 import { createNotification } from "../../shared/notifications.js";
-import { saveExtensionSecret, reactivateBundleEntries, markBundleRemoved, ensureWriteKey } from "./store.js";
+import { saveExtensionSecret, reactivateBundleEntries, hasExtensionEntry, markBundleRemoved, ensureWriteKey } from "./store.js";
 import { vaultwardenStatus, saveToVault, VAULT_REASONS } from "./vault-save.js";
 
 let _override = null;
@@ -57,7 +57,7 @@ function templateEnv(manifest, env) {
  * Never throws. `mintedSaved` is false only when a GENERATED token could not be saved —
  * the caller must then abort the install without persisting anything.
  */
-export async function recordKeychainForInstall({ bundleId, manifest, env, minted, keychainReq, log = () => {} }) {
+export async function recordKeychainForInstall({ bundleId, manifest, env, minted, reusedPlain = {}, keychainReq, log = () => {} }) {
   const d = deps();
   const out = { saved: 0, firstView: [], vault: null, mintedSaved: true };
   const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
@@ -68,6 +68,12 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
     .filter((k) => eligible.has(k) && typeof env?.[k] === "string" && env[k] !== "")
     .map((k) => ({ k, plain: env[k], origin: "typed", firstView: false }));
   const reused = keychainGeneratedKeys(manifest).filter((k) => !Object.hasOwn(minted || {}, k));
+  // A keychain:true value KEPT from an earlier install (typed before the field was generated,
+  // or a retained copy) whose keychain entry does not exist: the form no longer shows the
+  // field, so the keychain is the only place the user can read it. Saved best-effort.
+  const keptCandidates = Object.entries(reusedPlain || {})
+    .filter(([k, r]) => reused.includes(k) && r && typeof r.plain === "string" && r.plain !== "")
+    .map(([k, r]) => ({ k, plain: r.plain, origin: r.origin === "typed" ? "typed" : "generated", firstView: true }));
   if (mintedList.length === 0 && typedList.length === 0 && reused.length === 0) return out;
 
   let db;
@@ -86,9 +92,13 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
   try {
     db = d.openDb();
     if (reused.length) await reactivateBundleEntries(db, bundleId, reused);
+    const keptList = [];
+    for (const c of keptCandidates) {
+      try { if (!(await hasExtensionEntry(db, bundleId, c.k))) keptList.push(c); } catch { /* best-effort */ }
+    }
     let key = null;
     try {
-      if (mintedList.length || typedList.length) key = await d.writeKey(db);
+      if (mintedList.length || typedList.length || keptList.length) key = await d.writeKey(db);
       for (const s of mintedList) await saveOne(key, s);
     } catch (err) {
       if (mintedList.length) {
@@ -101,6 +111,9 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
       log(err?.code === "KEYCHAIN_KEY_INVALID"
         ? `Passwords were not saved to Crow keychain: its key file is unreadable at ${err.path}. The install continues.`
         : `Passwords were not saved to Crow keychain (${err?.code || err?.name || "error"}). The install continues.`);
+    }
+    for (const s of key ? keptList : []) {
+      try { await saveOne(key, s); } catch (err) { log(`Could not save the kept ${s.k} to Crow keychain (${err?.code || err?.name || "error"}); the install continues`); }
     }
     for (const s of key ? typedList : []) {
       try { await saveOne(key, s); } catch (err) { log(`Could not save ${s.k} to Crow keychain (${err?.code || err?.name || "error"}); the install continues`); }

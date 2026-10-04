@@ -39,23 +39,13 @@ Gated by F.0's hardware check. Refused below **3 GB effective RAM after committe
 
 `MASTODON_LOCAL_DOMAIN` appears in user handles (`@user@example.com`) and in every ActivityPub actor/object URL. **Once the instance federates with anyone, changing LOCAL_DOMAIN abandons every federated identity.** Pick the domain you intend to keep forever before first boot. If you need domain-delegation (federation on the apex, web UI on a subdomain), set `MASTODON_WEB_DOMAIN` and use Caddy's `matrix-server`-style `.well-known/webfinger` delegation (the F.0 caddy helper supports it).
 
-## Generate the crypto secrets
+## Crypto secrets
 
-Mastodon needs three secrets in `.env` before first boot. Generate them with the image itself:
-
-```bash
-# SECRET_KEY_BASE + OTP_SECRET (128 hex chars each):
-docker run --rm ghcr.io/mastodon/mastodon:v4.3.0 bundle exec rake secret
-docker run --rm ghcr.io/mastodon/mastodon:v4.3.0 bundle exec rake secret
-
-# VAPID keypair (for Web Push):
-docker run --rm ghcr.io/mastodon/mastodon:v4.3.0 bundle exec rake mastodon:webpush:generate_vapid_key
-# → paste the two lines into MASTODON_VAPID_PRIVATE_KEY + MASTODON_VAPID_PUBLIC_KEY
-```
+Crow generates every internal secret at install and never shows them: the Postgres password, `SECRET_KEY_BASE`, `OTP_SECRET`, the VAPID Web Push keypair, and the three Active Record encryption keys Mastodon 4.3+ refuses to boot without. They are kept across uninstall/reinstall (`~/.crow/secrets/bundle-env/mastodon.env`), because the kept database still expects them.
 
 ## First-run bootstrap
 
-1. Populate `.env` with all six required secrets + `MASTODON_LOCAL_DOMAIN` + `MASTODON_DB_PASSWORD`. Optionally add `MASTODON_SMTP_*` for registration email.
+1. In the install form, set `MASTODON_LOCAL_DOMAIN` (the secrets are generated). Optionally add `MASTODON_SMTP_*` for registration email.
 2. Install. The entrypoint runs `db:migrate` + `assets:precompile` on first boot (2-3 minutes).
 3. Expose via Caddy:
    ```
@@ -77,18 +67,11 @@ docker run --rm ghcr.io/mastodon/mastodon:v4.3.0 bundle exec rake mastodon:webpu
    crow bundle restart mastodon
    ```
 
-## Storage: on-disk or S3
+## Storage: local disk
 
-On-disk by default (`~/.crow/mastodon/system/`). To route to MinIO / external S3, set these in `.env` before install:
+Media lives on local disk (`~/.crow/mastodon/system/`). Crow does not set up object storage for this bundle: Mastodon hands media URLs to browsers and remote servers, so the bucket must be publicly reachable (and usually fronted by `S3_ALIAS_HOST`). A host-local MinIO is not reachable that way, so the install form no longer offers S3 fields.
 
-```
-MASTODON_S3_ENDPOINT=https://minio.example.com
-MASTODON_S3_BUCKET=mastodon-media
-MASTODON_S3_ACCESS_KEY=...
-MASTODON_S3_SECRET_KEY=...
-```
-
-`scripts/post-install.sh` detects these and runs `scripts/configure-storage.mjs`, which uses F.0's `storage-translators.mastodon()` to emit the `S3_*` envelope Mastodon actually reads. This is load-bearing on any active instance — without S3, local disk consumption scales with follow count.
+To move to a public S3 bucket by hand: add `MASTODON_S3_ENDPOINT`, `MASTODON_S3_BUCKET`, `MASTODON_S3_ACCESS_KEY` and `MASTODON_S3_SECRET_KEY` to the installed bundle's `.env` (`~/.crow/bundles/mastodon/.env`), run `node ~/.crow/bundles/mastodon/scripts/configure-storage.mjs` (it writes the `storage-translators.mastodon()` envelope into the same `.env`), then recreate the containers from Extensions (Restart).
 
 ## Common workflows
 
@@ -151,4 +134,4 @@ mastodon_search { "query": "@bob@example.com", "resolve": true }
 - **"413 Payload Too Large" on media upload** — Mastodon's default is 10 MB images / 40 MB video. Override via nginx / Caddy `request_body_max`. The bundled compose doesn't override it.
 - **Sidekiq queue growing** — `docker logs crow-mastodon-sidekiq`. DB performance is the usual bottleneck; check postgres memory / disk.
 - **Federation delivery retrying forever** — classic fediverse failure mode. `bin/tootctl accounts cull` prunes dead remote accounts; scheduled sidekiq job also handles this.
-- **Disk filling fast** — remote media cache. Run `mastodon_media_prune`, lower `MASTODON_MEDIA_RETENTION_DAYS` (default 14), or enable S3 storage.
+- **Disk filling fast** — remote media cache. Run `mastodon_media_prune`, lower `MASTODON_MEDIA_RETENTION_DAYS` (default 14), or move media to a public S3 bucket by hand (see Storage).

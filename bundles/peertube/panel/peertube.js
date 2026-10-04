@@ -31,7 +31,7 @@ export default {
           <h3>Notes</h3>
           <ul>
             <li>Video transcoding is RAM-hot (3-5 GB per concurrent upload). Keep <code>PEERTUBE_TRANSCODING_CONCURRENCY</code> low unless this host has headroom.</li>
-            <li>Storage is unbounded without S3 — enable it via <code>PEERTUBE_S3_*</code> before publishing anything meaningful.</li>
+            <li>Video is stored on local disk — watch free space and keep transcoding/retention tight before publishing anything meaningful.</li>
             <li>Hosting copyrighted video is a legal fast-track to defederation and takedown notices.</li>
           </ul>
         </div>

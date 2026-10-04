@@ -385,11 +385,35 @@ export function extensionsClientJS(lang) {
 
             var envNames = [];
             var keychainKeys = [];
+            var openAdvancedFor = function() {};
             if (envVars.length > 0) {
               var configH = document.createElement("h4");
               configH.style.cssText = "margin:0 0 0.5rem;font-size:0.9rem;color:var(--crow-text-secondary)";
               configH.textContent = '${tJs("extensions.configuration", lang)}';
               frag.appendChild(configH);
+
+              // Optional fields that already have a sensible default (or that the manifest
+              // marks advanced) fold under a collapsed "Advanced" section, so a typical
+              // install shows only what needs a human. The inputs stay in the form: every
+              // value, folded or not, is submitted exactly as before.
+              var advCount = envVars.filter(function(ev) { return ev.advanced === true; }).length;
+              var advDetails = null;
+              var advBody = null;
+              if (advCount > 0) {
+                advDetails = document.createElement("details");
+                advDetails.className = "ext-install__advanced";
+                advDetails.style.cssText = "margin:0.25rem 0 0.75rem;border:1px solid var(--crow-border);border-radius:6px;padding:0.4rem 0.6rem";
+                var advSummary = document.createElement("summary");
+                advSummary.style.cssText = "cursor:pointer;font-size:0.85rem;color:var(--crow-text-secondary)";
+                advSummary.textContent = '${tJs("extensions.advancedSettings", lang)}' + " (" + advCount + ")";
+                advDetails.appendChild(advSummary);
+                var advHint = document.createElement("div");
+                advHint.style.cssText = "font-size:0.75rem;color:var(--crow-text-muted);margin:0.4rem 0 0.6rem";
+                advHint.textContent = '${tJs("extensions.advancedSettingsHint", lang)}';
+                advDetails.appendChild(advHint);
+                advBody = document.createElement("div");
+                advDetails.appendChild(advBody);
+              }
 
               envVars.forEach(function(ev) {
                 envNames.push(ev.name);
@@ -489,8 +513,18 @@ export function extensionsClientJS(lang) {
                 hint.textContent = ev.description || "";
                 wrap.appendChild(hint);
 
-                frag.appendChild(wrap);
+                if (ev.advanced === true && advBody) advBody.appendChild(wrap);
+                else frag.appendChild(wrap);
               });
+              if (advDetails) frag.appendChild(advDetails);
+              // A server rejection names its key: unfold Advanced when that field is folded.
+              openAdvancedFor = function(key) {
+                if (!advDetails || !key) return;
+                var inputs = advDetails.querySelectorAll("input");
+                for (var i = 0; i < inputs.length; i++) {
+                  if (inputs[i].id === "env_" + key) { advDetails.setAttribute("open", ""); return; }
+                }
+              };
               if (keychainKeys.length > 0 && vaultInstalled()) {
                 var vWrap = document.createElement("div");
                 vWrap.className = "ext-vault";
@@ -669,6 +703,7 @@ export function extensionsClientJS(lang) {
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
                   statusDiv.textContent = (res.data && res.data.error) || '${tJs("extensions.configureFailed", lang)}';
+                  openAdvancedFor(res.data && res.data.key);
                   installBtn.disabled = false;
                   installBtn.textContent = '${tJs("extensions.retry", lang)}';
                 }
@@ -726,6 +761,7 @@ export function extensionsClientJS(lang) {
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
                   statusDiv.textContent = res.data.error || '${tJs("extensions.installFailed", lang)}';
+                  openAdvancedFor(res.data && res.data.key);
                   installBtn.disabled = false;
                   installBtn.textContent = '${tJs("extensions.retry", lang)}';
                 }

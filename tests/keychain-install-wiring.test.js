@@ -248,3 +248,37 @@ test("F1 — Configure never saves a keychain_configure:false field over the sto
     } finally { d.close(); }
   } finally { server.close(); }
 });
+
+test("config-friction: a keychain:true value KEPT from an earlier install is saved when the keychain lacks it (once, never overwriting)", async () => {
+  const id = "demo-kc-kept";
+  const manifest = { id, name: "Demo VNC", description: "d", type: "bundle", category: "automation", version: "0.2.0",
+    env_vars: [{ name: "DEMO_VNC_PASSWORD", secret: true, generate: "secret", keychain: true, keychain_label: "VNC viewer password" }] };
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+  // A prior install where a human typed the password (before the field was generated).
+  mkdirSync(join(CROW_HOME, "bundles", id), { recursive: true });
+  writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_VNC_PASSWORD=typed-by-kevin\n");
+  let job = B._createJobForTest(id, "install");
+  let out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).DEMO_VNC_PASSWORD, "typed-by-kevin", "never regenerated");
+  const d = db();
+  try {
+    const mine = (await K.listEntries(d, { keyId: ID().id })).filter((e) => e.bundle_id === id);
+    assert.equal(mine.length, 1, "the hidden field's value is readable in Settings → Passwords");
+    assert.equal(mine[0].origin, "typed");
+    assert.equal(mine[0].label, "Demo VNC — VNC viewer password");
+    assert.equal(await K.openEntrySecret(d, ID(), mine[0].id), "typed-by-kevin");
+  } finally { d.close(); }
+  // Reinstall with a different kept value: the existing entry is NOT overwritten.
+  writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_VNC_PASSWORD=edited-later\n");
+  job = B._createJobForTest(id, "install");
+  out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+  assert.equal(out.ok, true, out.reason);
+  const d2 = db();
+  try {
+    const mine = (await K.listEntries(d2, { keyId: ID().id })).filter((e) => e.bundle_id === id);
+    assert.equal(mine.length, 1);
+    assert.equal(await K.openEntrySecret(d2, ID(), mine[0].id), "typed-by-kevin");
+  } finally { d2.close(); }
+});
