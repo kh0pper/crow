@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A paired browser (Kevin's phone in K1, the Pi 3 in K2) opens `https://crow.dachshund-chromatic.ts.net:8444/kiosk`, shows the user's Ramble bird, and holds a tap-to-talk voice conversation with its bound Crow bot. Crow runs STT, the bot turn and TTS server-side. The bot can open and close `crow_wm` windows (timer, recipe, content). End of speech to first audio is measured on the device.
+**Goal:** A paired browser (Kevin's phone in K1, the Pi 3 in K2) opens `https://crow.dachshund-chromatic.ts.net:8444/display`, shows the user's Ramble bird, and holds a tap-to-talk voice conversation with its bound Crow bot. Crow runs STT, the bot turn and TTS server-side. The bot can open and close `crow_wm` windows (timer, recipe, content). End of speech to first audio is measured on the device.
 
 **Architecture:**
 - Two pieces move into core:
@@ -73,7 +73,8 @@ Copied from the spec. Every task's requirements implicitly include these.
   - Gate: **median < 2.0 s, p90 < 3.0 s over 20 scripted questions**, measured by the page as `t_play − t_speech_end` and reported as `turn_metrics`.
   - Levers in order if the gate is missed: (1) VAD hangover 450 ms, (2) `tiny.en` or STT on the GPU, (3) a pre-synthesized acknowledgement. The plan must report which lever was used.
 - **Network:**
-  - Tailnet + loopback only. **Never Funnel.** `/kiosk` and `/api/kiosk` are not in `PUBLIC_FUNNEL_PREFIXES`.
+  - The page path is `/display` (ruling F1 — maker-lab owns `/kiosk/*`); every page URL in Tasks 13–14 uses it.
+  - Tailnet + loopback only. **Never Funnel.** `/display` and `/api/kiosk` are not in `PUBLIC_FUNNEL_PREFIXES`.
   - `isAllowedNetwork()` is applied **before** any token check, on HTTP **and** on the WS upgrade.
   - **No new host port.** Everything rides the gateway behind Serve `:8444`.
 - **Device token:** 32 random bytes, stored only as sha256. It is accepted **only** by `/api/kiosk/session` (in `hello`). It is never accepted by `dashboardAuth`, MCP mounts, `/llm/v1`, the board, or any other route. **The token in a URL is ignored.**
@@ -5747,6 +5748,8 @@ git commit bundles/kiosk/panel/kiosk.js bundles/kiosk/server/strings.js docs/arc
 ---
 ### Task 13: Full local gates + PRE-MERGE attended smoke on crow (registered window, deadman) — LIVE
 
+> **Path note (controller ruling F1, 2026-10-03):** the kiosk **page**, its static assets (`/display/assets/*`) and the pairing UI live at **`/display`**, not `/kiosk`: the installed maker-lab bundle owns `/kiosk/*` (Express 5 non-strict routing makes its `/kiosk/` answer `/kiosk` too), so `/kiosk` was unreachable on prod. `/api/kiosk/*`, the WS `/api/kiosk/session`, the bundle id `kiosk` and the file names are unchanged. Earlier task bodies that say `/kiosk` for the page were implemented at `/display`.
+
 **What it proves before anything merges (spec §12 K1 exit gate, §13.2 A1–A3):**
 1. A phone pairs with a 6-digit code and the bird appears (A1).
 2. 20 scripted questions give a fast-route **median < 2.0 s and p90 < 3.0 s** end of speech → first audio, measured on the phone (A2). If not, the plan's levers are applied in order and reported.
@@ -5919,11 +5922,11 @@ ENVS=""; for v in CROW_HOME CROW_DATA_DIR CROW_APP_ROOT PORT CROW_GATEWAY_PORT C
 systemd-run --user --unit=kiosk-smoke-gw -p RuntimeMaxSec=7200 --working-directory=$REPO $ENVS /usr/bin/env -u INVOCATION_ID $NODE servers/gateway/index.js
 sleep 12
 journalctl --user -u kiosk-smoke-gw -o cat | grep -E "kiosk|Crow Gateway listening|ERROR" | head
-curl -s -o /dev/null -w "page %{http_code}\n" -H "$TS" http://127.0.0.1:13001/kiosk
+curl -s -o /dev/null -w "page %{http_code}\n" -H "$TS" http://127.0.0.1:13001/display
 ls -l $CROW_HOME/kiosk-announce-token
 sudo tailscale serve --bg --https=8462 http://127.0.0.1:13001
 tailscale serve status | grep -A2 ':8462'                     # "(tailnet only)" — never Funnel
-grackle "curl -s -o /dev/null -w '%{http_code}\n' https://crow.dachshund-chromatic.ts.net:8462/kiosk"          # from a REAL remote node: 200
+grackle "curl -s -o /dev/null -w '%{http_code}\n' https://crow.dachshund-chromatic.ts.net:8462/display"          # from a REAL remote node: 200
 grackle "curl -s -o /dev/null -w '%{http_code}\n' https://crow.dachshund-chromatic.ts.net:8462/api/kiosk/internal/displays -H 'Authorization: Bearer x'"   # 403 loopback_only (Serve adds X-Forwarded-For)
 ```
 
@@ -5937,7 +5940,7 @@ If grackle is unreachable (it is mid-decommission), use any other tailnet node, 
 
 - [ ] **Step 6: [KEVIN] A1 — pair the phone**
 
-1. [KEVIN] On the phone (on the tailnet), open `https://crow.dachshund-chromatic.ts.net:8462/kiosk`. A 6-digit code appears.
+1. [KEVIN] On the phone (on the tailnet), open `https://crow.dachshund-chromatic.ts.net:8462/display`. A 6-digit code appears.
 2. [KEVIN] On a laptop, open `https://crow.dachshund-chromatic.ts.net:8462/dashboard/kiosk`. Claude gives the scratch dashboard password from `$SMOKE/dash-pass`, in the terminal only. Check that "Waiting to pair" shows the phone's tailnet IP, login and user agent. Type the code and a name ("Kevin's phone"), pick **House**, then **Pair**.
 3. [KEVIN] The phone shows the bird (the default crow) and "Tap the bird to talk". **Tap the bird once.** This creates the AudioContext and grants the microphone (allow it).
 
@@ -6018,7 +6021,7 @@ Write which lever was used, or "none", to `findings.md`. The PR body carries it 
 3. [KEVIN] Swipe the recipe left. It is gone; the log shows `wm_event dismissed`, and the server window list no longer has it.
 4. [KEVIN] "Close the timer." It closes on the fast path: "Timer stopped." with no LLM call in the log.
 5. [KEVIN] Watch the bird through one question: breathing at idle, head tilt plus ring while listening, bob plus dots while thinking, beak moving while speaking. Screenshot each state if possible (`$SMOKE/a3-*.png`).
-6. [KEVIN] Barge-in: ask "Tell me a long story about a crow." and tap during the answer. Audio stops at once, and the next `[kiosk-metrics]` row has `"aborted":true`.
+6. [KEVIN] Barge-in: ask "Tell me a long story about a crow." and tap during the answer. Audio stops at once, and the next `[kiosk-metrics]` row has `"aborted":true` **or** `"barged":true` — either passes; record in `findings.md` which one occurred. `aborted` (server-side abort of the LLM/TTS) happens only if the tap lands before the server sent `turn_done`; a tap after `turn_done`, while the phone is still playing buffered audio, is a page-side barge (ruling F3) and shows `barged:true` with `aborted:false`.
 7. Timer done: [KEVIN] "Set a timer for 10 seconds called test." After ~10 s the full-screen "Time's up" card, the chime and the spoken "Test timer is done." appear.
 8. Announce + show through the internal API and through the MCP tool (Claude):
 
@@ -6080,6 +6083,8 @@ Move the schedule row to Done, with the outcome. Copy `findings.md` plus the A2 
 
 ### Task 14: PR, CI, merge, deploy window (prod whisper recreate + Kokoro + kiosk install), post-deploy acceptance
 
+> **Path note:** the page is at `/display` (ruling F1; see the note at the top of Task 13). `/api/kiosk/*` is unchanged.
+
 **Preconditions:** Task 13 A1–A3 PASS, with the A2 lever recorded. If lever 2 was what passed, Kevin has decided the production STT model.
 
 - [ ] **Step 1: Rebase, full suite, push**
@@ -6124,7 +6129,7 @@ docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' faster-whisper-server
 Register this row in `~/CROW-SCHEDULE.md`:
 
 ```markdown
-| **2026-10-0X HH:MM → +45 min hard cap (attended; deadman kiosk-deploy-deadman restores the previous whisper compose if prod STT is unhealthy)** | **Crow kiosk K1 deploy**: pull ~/crow main; recreate prod faster-whisper from the pinned compose (same image digest; adds TTL -1, distil-small preload, 8g cap) — glasses/meeting-recorder STT down ≤ 2 min; restart crow-gateway; [KEVIN] install Kokoro TTS + Kiosk display from Extensions. No GPU, no model containers. | Claude session (crow) + Kevin | manual | prod whisper healthy on 0.5.0-cpu with both models loaded AND kokoro-tts healthy AND /kiosk 200 via :8444 AND auto_update_last_result not "Skipped" AND row moved to Done |
+| **2026-10-0X HH:MM → +45 min hard cap (attended; deadman kiosk-deploy-deadman restores the previous whisper compose if prod STT is unhealthy)** | **Crow kiosk K1 deploy**: pull ~/crow main; recreate prod faster-whisper from the pinned compose (same image digest; adds TTL -1, distil-small preload, 8g cap) — glasses/meeting-recorder STT down ≤ 2 min; restart crow-gateway; [KEVIN] install Kokoro TTS + Kiosk display from Extensions. No GPU, no model containers. | Claude session (crow) + Kevin | manual | prod whisper healthy on 0.5.0-cpu with both models loaded AND kokoro-tts healthy AND /display 200 via :8444 AND auto_update_last_result not "Skipped" AND row moved to Done |
 ```
 
 Then:
@@ -6183,15 +6188,15 @@ cat ~/.crow/bundles/ramble/manifest.json | grep version                    # 0.1
 
 ```bash
 docker inspect -f '{{.Config.Image}} {{.HostConfig.Memory}}' kokoro-tts                     # ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0 4294967296
-curl -s -o /dev/null -w "kiosk page via Serve: %{http_code}\n" https://crow.dachshund-chromatic.ts.net:8444/kiosk
-grackle "curl -s -o /dev/null -w '%{http_code}\n' https://crow.dachshund-chromatic.ts.net:8444/kiosk"     # 200 from a remote node
+curl -s -o /dev/null -w "kiosk page via Serve: %{http_code}\n" https://crow.dachshund-chromatic.ts.net:8444/display
+grackle "curl -s -o /dev/null -w '%{http_code}\n' https://crow.dachshund-chromatic.ts.net:8444/display"     # 200 from a remote node
 tailscale funnel status 2>/dev/null | grep -i kiosk; echo "(no kiosk path on Funnel expected)"
 sqlite3 -readonly ~/.crow/data/crow.db "select value from dashboard_settings where key='auto_update_last_result'"   # must NOT be "Skipped: not on main"
 ```
 
 - [ ] **Step 8: [KEVIN] Post-deploy acceptance on prod (short)**
 
-1. [KEVIN] Open `https://crow.dachshund-chromatic.ts.net:8444/kiosk` on the phone. Pair in **Kiosk** (prod dashboard) and bind a household assistant. Kevin picks or creates one; a bot with a narrow tool selection is recommended (panel copy).
+1. [KEVIN] Open `https://crow.dachshund-chromatic.ts.net:8444/display` on the phone. Pair in **Kiosk** (prod dashboard) and bind a household assistant. Kevin picks or creates one; a bot with a narrow tool selection is recommended (panel copy).
 2. [KEVIN] Ask three of the scripted questions. Diagnostics shows them at a median in line with the smoke.
 3. [KEVIN] "Set a timer for 1 minute called check". It opens and rings.
 
