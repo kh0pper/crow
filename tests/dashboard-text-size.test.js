@@ -11,6 +11,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import vm from "node:vm";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 const TS = await import("../servers/gateway/dashboard/shared/text-size.js");
 const layout = await import("../servers/gateway/dashboard/shared/layout.js");
@@ -160,9 +161,10 @@ test("runtime: set() saves, applies and announces; another tab's change is follo
 
 // ─── live: in force before the body is parsed ──────────────────────────────
 
-const CDP = process.env.CROW_CDP_URL ||
-  ("http://127.0.0.1:" + (process.env.CROW_BROWSER_CDP_PORT || "9223"));
-const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
+// A PRIVATE headless Chrome per file (tests/fixtures/headless-chrome.mjs) —
+// never the live crow-browser on :9223. Set in before().
+let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
+let HOST_FROM_CONTAINER = "127.0.0.1";
 let available = false, server = null, port = 0;
 
 // The first thing in <body> records what the page looks like at that moment —
@@ -175,11 +177,10 @@ const NAV = ["messages", "contacts", "extensions", "models", "skills", "settings
   ({ id, name: id, icon: id, route: "/dashboard/" + id, navOrder: i }));
 
 before(async () => {
-  try {
-    const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
-    available = r.ok;
-  } catch { available = false; }
+  chrome = await startHeadlessChrome();
+  available = !!chrome;
   if (!available) return;
+  CDP = chrome.cdp; HOST_FROM_CONTAINER = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: section } = await import("../servers/gateway/dashboard/settings/sections/text-size.js");
   const content = await section.render({ lang: "en" });
   server = http.createServer((req, res) => {
@@ -188,10 +189,10 @@ before(async () => {
     res.writeHead(200, { "content-type": "text/html" });
     res.end(html);
   });
-  await new Promise((r) => server.listen(0, "0.0.0.0", r));
+  await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
 });
-after(() => { if (server) server.close(); });
+after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 async function withTab(fn, { width = 1280, height = 900 } = {}) {
   const tab = await (await fetch(CDP + "/json/new?about:blank", { method: "PUT" })).json();

@@ -111,12 +111,18 @@ test("M7: math inside image alt text is plain source, not markup", () => {
 
 const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
 
+// CPU time of THIS process, not wall-clock: the render is synchronous and
+// single-threaded, so a quadratic regression (2.1 s at 60 KB) still shows in
+// full, while the parallel suite's load on other cores no longer does (611 ms
+// wall vs the 600 ms bound on a clean full run of main, 2026-10-04).
+function cpuMs() { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }
+
 test("I1: 200 KB of unclosed \\[ and \\( renders in under 200 ms", () => {
   for (const u of ["\\[ x\n", "\\( a ", "\\[ x\n\\( a $$ y\n\n$b "]) {
     const src = rep(u, 200 * 1024);
-    const t0 = performance.now();
+    const t0 = cpuMs();
     const html = renderBotMarkdown(src);
-    const ms = performance.now() - t0;
+    const ms = cpuMs() - t0;
     assert.ok(ms < 200, `${JSON.stringify(u)} x200KB took ${ms.toFixed(0)} ms`);
     assert.equal(html, "", "over BOT_MD_MAX_INPUT the caller's plain-text path takes it");
   }
@@ -126,9 +132,9 @@ test("I1: just under the cap, adversarial delimiter runs stay bounded (was 2.1 s
   const n = BOT_MD_MAX_INPUT - 1;
   for (const u of ["\\[ x\n", "\\[ x\n\n", "\\( a ", "$$ x\n\n", "x\n\\[ y \\]\n", "\\[ x\n> y\n\n", "$x$ ", "\\(\\("]) {
     const src = rep(u, n);
-    const t0 = performance.now();
+    const t0 = cpuMs();
     const html = renderBotMarkdown(src);
-    const ms = performance.now() - t0;
+    const ms = cpuMs() - t0;
     assert.ok(html.length > 0, "still rendered");
     assert.ok(ms < 600, `${JSON.stringify(u)} x${n} took ${ms.toFixed(0)} ms`);
   }

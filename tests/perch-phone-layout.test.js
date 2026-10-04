@@ -5,7 +5,7 @@
 //
 // Two layers:
 //   • static assertions on the emitted CSS / client script (always run);
-//   • a live layout check in the shared CDP Chrome (skips without one).
+//   • a live layout check in a private headless Chrome (skips without one).
 //
 // The live part is hermetic on purpose (see the F1b note in
 // tests/perch-hub-render.test.js): its own http server on an ephemeral port,
@@ -15,10 +15,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
-const CDP = process.env.CROW_CDP_URL ||
-  ("http://127.0.0.1:" + (process.env.CROW_BROWSER_CDP_PORT || "9223"));
-const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
+// A PRIVATE headless Chrome per file (tests/fixtures/headless-chrome.mjs) —
+// never the live crow-browser on :9223. Set in before().
+let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
+let HOST_FROM_CONTAINER = "127.0.0.1";
 const SID = "perchlive-9e2b9bf3";
 
 // The exact card in Kevin's screenshot: one question, four options + Other.
@@ -86,11 +88,10 @@ function serveApi(req, res) {
 }
 
 before(async () => {
-  try {
-    const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
-    available = r.ok;
-  } catch { available = false; }
+  chrome = await startHeadlessChrome();
+  available = !!chrome;
   if (!available) return;
+  CDP = chrome.cdp; HOST_FROM_CONTAINER = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { renderMarkdown } = await import("../servers/blog/renderer.js");
   TRANSCRIPT = [
     { type: "message", message: { role: "user", content: "What can Crow do? Give me the overview, with a table." } },
@@ -104,11 +105,11 @@ before(async () => {
     const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
-  await new Promise((r) => server.listen(0, "0.0.0.0", r));
+  await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
 });
 
-after(() => { if (server) server.close(); });
+after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 /** Open a tab at w x h on the session deep link, wait (by polling) until
  *  `ready` is true in the page, run `expression`, close the tab. `css` is

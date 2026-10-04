@@ -1,12 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Same isolation rule as bundles-install-job.test.js: bundles.js resolves its
 // paths from CROW_HOME at module load — point it at a scratch dir BEFORE import.
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+// resolveDataDir() (servers/db.js) ignores CROW_HOME — without this the
+// router's DB client opens the run's shared data dir (absent in a single-file
+// `npm test` run → "Cannot open database because the directory does not
+// exist") or, under a raw node --test, the LIVE ~/.crow/data/crow.db.
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const { writeInstallEnv } = await import("../servers/gateway/routes/bundles.js");
 
 const scratchDest = () => mkdtempSync(join(tmpdir(), "crow-env-dest-"));

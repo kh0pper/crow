@@ -21,10 +21,12 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { readFileSync } from "node:fs";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
-const CDP = process.env.CROW_CDP_URL ||
-  ("http://127.0.0.1:" + (process.env.CROW_BROWSER_CDP_PORT || "9223"));
-const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
+// A PRIVATE headless Chrome per file (tests/fixtures/headless-chrome.mjs) —
+// never the live crow-browser on :9223. Set in before().
+let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
+let HOST_FROM_CONTAINER = "127.0.0.1";
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const SID = "perchlive-aaaaaaaa";
@@ -85,11 +87,10 @@ function broadcast(type, data) {
 }
 
 before(async () => {
-  try {
-    const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
-    available = r.ok;
-  } catch { available = false; }
+  chrome = await startHeadlessChrome();
+  available = !!chrome;
   if (!available) return;
+  CDP = chrome.cdp; HOST_FROM_CONTAINER = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   const turbo = readFileSync(REPO + "/servers/gateway/public/vendor/turbo-8.0.5.umd.js");
@@ -115,12 +116,12 @@ before(async () => {
     const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
-  await new Promise((r) => server.listen(0, "0.0.0.0", r));
+  await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
 });
 
 beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; });
-after(() => { if (server) server.close(); });
+after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
