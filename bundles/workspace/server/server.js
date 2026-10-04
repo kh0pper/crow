@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getConfig } from "./config.js";
 import { registerDrive } from "./tools/drive.js";
+import { registerDocs } from "./tools/docs.js";
 import { registerUndo } from "./tools/undo.js";
 import { systemClock } from "./write-protocol.js";
 
@@ -19,6 +20,7 @@ export function createWorkspaceServer({ clock = realClock } = {}) {
   const ctx = Object.freeze({ getConfig, clock });
   const names = [];
   names.push(...registerDrive(server, ctx)); // further tool families register here (Tasks 6-11)
+  names.push(...registerDocs(server, ctx, [])); // docsWriteDefs arrive in Task 7
   names.push(...registerUndo(server, ctx));
   server.__wsToolNames = names;
   return server;
