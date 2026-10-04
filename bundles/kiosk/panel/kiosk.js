@@ -1,9 +1,155 @@
 /**
- * Crow's Nest panel — Kiosk displays. PLACEHOLDER (Task 10): the manifest
- * declares this file (bundle-contract file-checks it, and the gateway only
- * loads kiosk-routes.js next to a kiosk.js panel). Task 12 replaces it with
- * the pairing/admin panel.
+ * Crow's Nest panel — Kiosk displays: pair (code approval), bind an assistant,
+ * per-display voice + settings, unpair, latency diagnostics.
+ * All user data is rendered with textContent. CLIENT_SCRIPT has NO backticks
+ * and NO "${" (it sits inside a template literal; tests/kiosk-panel.test.js).
  */
+import { existsSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const BUNDLE_DIR = [
+  join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "kiosk"),
+  process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "kiosk") : null,
+  resolve(here, ".."),
+].filter(Boolean).find((p) => existsSync(join(p, "server", "strings.js")));
+const { STRINGS } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "strings.js")).href);
+
+export const CLIENT_SCRIPT = `
+(function () {
+  if (window.__kkRefresh) { clearInterval(window.__kkRefresh); window.__kkRefresh = null; }
+  var S = JSON.parse(document.getElementById('kk-strings').textContent);
+  var root = document.getElementById('kk-root');
+  if (!root) return;
+  function fill(s, o) { return String(s).replace(/\\{(\\w+)\\}/g, function (m, k) { return o && o[k] != null ? String(o[k]) : m; }); }
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  function opt(sel, value, label, selected) { var o = el('option', null, label); o.value = value; if (selected) o.selected = true; sel.appendChild(o); }
+  function api(method, path, body) {
+    return fetch(path, { method: method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.__status = r.status; return j; }); });
+  }
+  var state = null;
+
+  function renderPair(data) {
+    var box = document.getElementById('kk-pair'); clear(box);
+    box.appendChild(el('h2', null, S.pair_title));
+    box.appendChild(el('p', 'kk-dim', S.pair_steps));
+    var pend = el('div', 'kk-pending');
+    pend.appendChild(el('h3', null, S.pending_requests));
+    if (!data.pending.length) pend.appendChild(el('p', 'kk-dim', S.no_pending));
+    data.pending.forEach(function (p) {
+      var row = el('p', 'kk-req');
+      row.appendChild(el('strong', null, p.name_hint || '?'));
+      row.appendChild(document.createTextNode(' — ' + fill(S.requester, { ip: p.ip }) + (p.login ? ' (' + p.login + ')' : '') + ' — ' + (p.ua || '').slice(0, 80)));
+      pend.appendChild(row);
+    });
+    box.appendChild(pend);
+    var form = el('form', 'kk-form');
+    var code = el('input'); code.name = 'code'; code.inputMode = 'numeric'; code.autocomplete = 'off'; code.placeholder = '123 456'; code.required = true;
+    var name = el('input'); name.name = 'name'; name.placeholder = S.name; name.maxLength = 64;
+    var bot = el('select'); bot.name = 'bot_id'; opt(bot, '', '— ' + S.bot + ' —', true);
+    data.bots.forEach(function (b) { opt(bot, b.bot_id, b.display_name || b.bot_id, false); });
+    var go = el('button', 'btn btn-primary', S.approve); go.type = 'submit';
+    var msg = el('p', 'kk-msg');
+    [[S.code, code], [S.name, name], [S.bot, bot]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); form.appendChild(l); });
+    form.appendChild(go); form.appendChild(msg);
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      if (!bot.value) { msg.textContent = S.bot_required; return; }
+      api('POST', '/api/kiosk/admin/approve', { code: code.value.replace(/\\s+/g, ''), name: name.value, bot_id: bot.value }).then(function (j) {
+        if (j.ok) { code.value = ''; name.value = ''; msg.textContent = S.saved; load(); return; }
+        msg.textContent = j.error === 'locked' ? fill(S.locked, { s: j.retry_after_s }) : (S[j.error] || j.error || '');
+      });
+    });
+    box.appendChild(form);
+    box.appendChild(el('p', 'kk-hint', S.household_hint));
+    if (!data.tts_profiles.some(function (p) { return p.provider === 'kokoro'; })) box.appendChild(el('p', 'kk-warn', S.tts_missing));
+  }
+
+  function renderDevice(d, data) {
+    var card = el('section', 'kk-card');
+    var head = el('h3', null, d.name);
+    head.appendChild(el('span', d.connected ? 'kk-on' : 'kk-off', d.connected ? S.connected : S.offline));
+    card.appendChild(head);
+    card.appendChild(el('p', 'kk-dim', d.last_seen ? fill(S.last_seen, { when: new Date(d.last_seen).toLocaleString() }) : S.never_seen));
+    var lat = d.latency || {};
+    card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms == null ? '>' + 3000 : lat.median_ms, p90: lat.p90_ms == null ? '>' + 3000 : lat.p90_ms, n: lat.n }) + (lat.no_audio ? ' · ' + lat.no_audio + ' ✗' : '') : S.no_latency));   // Infinity serializes as null
+    var bot = el('select'); data.bots.forEach(function (b) { opt(bot, b.bot_id, b.display_name || b.bot_id, b.bot_id === d.bound_bot_id); });
+    var stt = el('select'); data.stt_profiles.forEach(function (p) { opt(stt, p.id, p.name, p.id === d.stt_profile_id); });
+    var tts = el('select'); data.tts_profiles.forEach(function (p) { opt(tts, p.id, p.name, p.id === d.tts_profile_id); });
+    var ks = d.kiosk_settings || {};
+    var fu = el('input'); fu.type = 'checkbox'; fu.checked = !!ks.follow_up;
+    var mem = el('input'); mem.type = 'checkbox'; mem.checked = !!ks.memory_integration;
+    [[S.bot, bot], [S.stt, stt], [S.tts, tts], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
+    card.appendChild(el('p', 'kk-dim', S.memory_warn));
+    var msg = el('span', 'kk-msg');
+    var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
+    save.addEventListener('click', function () {
+      api('POST', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id), { bound_bot_id: bot.value, stt_profile_id: stt.value, tts_profile_id: tts.value, kiosk_settings: { follow_up: fu.checked, memory_integration: mem.checked } })
+        .then(function (j) { msg.textContent = j.ok ? S.saved : (S[j.error] || j.error || ''); });
+    });
+    var unpair = el('button', 'btn btn-secondary btn-sm', S.unpair); unpair.type = 'button';
+    unpair.addEventListener('click', function () {
+      if (!window.confirm(fill(S.unpair_confirm, { name: d.name }))) return;
+      api('DELETE', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id)).then(load);
+    });
+    var diagBtn = el('button', 'btn btn-secondary btn-sm', S.diagnostics); diagBtn.type = 'button';
+    var diag = el('div', 'kk-diag');
+    diagBtn.addEventListener('click', function () {
+      api('GET', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id) + '/metrics').then(function (j) {
+        clear(diag);
+        diag.appendChild(el('p', 'kk-dim', S.diag_cols));
+        (j.turns || []).slice(0, 20).forEach(function (t) {
+          var tm = t.timings || {};
+          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms, tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '')].join(' · ')));
+        });
+      });
+    });
+    var bar = el('div', 'kk-bar'); [save, diagBtn, unpair, msg].forEach(function (n) { bar.appendChild(n); });
+    card.appendChild(bar); card.appendChild(diag);
+    return card;
+  }
+
+  function render(data) {
+    state = data;
+    renderPair(data);
+    var list = document.getElementById('kk-devices'); clear(list);
+    list.appendChild(el('h2', null, S.displays));
+    if (!data.devices.length) list.appendChild(el('p', 'kk-dim', S.no_displays));
+    data.devices.forEach(function (d) { list.appendChild(renderDevice(d, data)); });
+  }
+  function load() { return api('GET', '/api/kiosk/admin/displays').then(function (j) { if (j.devices) render(j); }); }
+  function refreshPending() {
+    if (!document.getElementById('kk-root') || document.hidden) return;
+    api('GET', '/api/kiosk/admin/displays').then(function (j) {
+      if (!j.devices || !state) return;
+      var changed = JSON.stringify(j.pending) !== JSON.stringify(state.pending) || j.devices.length !== state.devices.length;
+      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section')) render(j);
+      else state = j;
+    });
+  }
+  load();
+  window.__kkRefresh = setInterval(refreshPending, 5000);
+})();
+`;
+
+const STYLES = `
+  .kk-wrap { max-width: 880px; }
+  .kk-dim, .kk-hint { color: var(--crow-text-secondary); }
+  .kk-warn { color: var(--crow-warning); }
+  .kk-card { border: 1px solid var(--crow-border); border-radius: 14px; padding: 12px 16px; margin: 12px 0; background: var(--crow-bg-surface); }
+  .kk-card h3 { display: flex; gap: 12px; align-items: baseline; margin: 0 0 4px; }
+  .kk-on { color: var(--crow-success); font-size: .85rem; } .kk-off { color: var(--crow-text-muted); font-size: .85rem; }
+  .kk-card label, .kk-form label { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .kk-bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .kk-form { display: grid; gap: 4px; max-width: 420px; }
+  .kk-form input[name=code] { font-size: 1.4rem; letter-spacing: .15em; width: 9ch; }
+  .kk-row { font-family: ui-monospace, monospace; font-size: .8rem; margin: 2px 0; }
+`;
+
 export default {
   id: "kiosk",
   name: "Kiosk",
@@ -11,7 +157,21 @@ export default {
   route: "/dashboard/kiosk",
   navOrder: 56,
   category: "hardware",
-  async handler(req, res, { layout }) {
-    res.send(layout({ title: "Kiosk", content: "<p>Kiosk displays: open /display on the display to pair it.</p>" }));
+  async handler(req, res, { layout, lang }) {
+    const L = STRINGS[lang] ? lang : "en";
+    const S = STRINGS[L];
+    const json = JSON.stringify(S).replace(/</g, "\\u003c");
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+    const content = `
+      <style>${STYLES}</style>
+      <div id="kk-root" class="kk-wrap">
+        <h1>${esc(S.panel_title)}</h1>
+        <p class="kk-dim">${esc(S.panel_intro)}</p>
+        <div id="kk-pair" class="kk-card"></div>
+        <div id="kk-devices"></div>
+      </div>
+      <script type="application/json" id="kk-strings">${json}</script>
+      <script>${CLIENT_SCRIPT}<\/script>`;
+    res.send(layout({ title: S.panel_title, content }));
   },
 };
