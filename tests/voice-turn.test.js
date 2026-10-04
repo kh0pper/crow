@@ -217,5 +217,49 @@ test("denyTools (ruling F4): schedule tools are hidden and refused when passed; 
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "schedule", sink: h.sink, denyTools: deny });
   assert.deepEqual(h.log[0].tools, ["crow_projects"]);
   assert.deepEqual(h.calls.executed, []);
-  assert.ok(h.calls.spoken.every((s) => s === s.trim() && s.length > 0), JSON.stringify(h.calls.spoken));
+  assert.deepEqual(h.calls.spoken, ["Hi.", "Ok."]);
+});
+
+test("review fix: a filler TTS rejection during the real-timer wait is not an unhandled rejection", async () => {
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  const origWarn = console.warn; const warned = [];
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    const h = harness({ route: "escalate", probe: () => false });
+    h.deps.sleep = (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20)));   // real timers; fake clock advances via now()
+    let t = 0; h.deps.now = () => (t += 400);
+    h.deps.createTtsAdapter = async () => ({ name: "kokoro", async *synthesize() { throw new Error("tts down"); } });
+    const runner = createVoiceTurnRunner(h.deps);
+    const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink });
+    await new Promise((res) => setTimeout(res, 30));
+    assert.deepEqual(unhandled, []);
+    assert.equal(r.degraded, "cold_timeout");
+    assert.ok(warned.some((w) => /filler TTS failed: tts down/.test(w)), "the filler error is logged, not hidden");
+  } finally { process.off("unhandledRejection", onUnhandled); console.warn = origWarn; }
+});
+
+test("review fix: acquire resolving false falls back at once", async () => {
+  const h = harness({ route: "escalate", acquire: async () => false });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink });
+  assert.equal(r.degraded, "acquire_failed");
+  assert.ok(h.calls.sleeps <= 1);
+});
+
+test("review fix: bare tool names hit the memory strip, denyTools and the destructive gate (REAL effectiveToolName/isMemoryTool)", async () => {
+  const real = await (await import("../servers/gateway/voice/turn.js")).defaultVoiceDeps();
+  const bare = async (name, args, extra = {}) => {
+    const h = harness({ rounds: [[{ type: "tool_call", id: "b1", name, arguments: args }, { type: "done" }], [{ type: "content_delta", text: "Ok." }, { type: "done" }]], chatTools: ["crow_projects"] });
+    h.deps.effectiveToolName = real.effectiveToolName; h.deps.isMemoryTool = real.isMemoryTool;
+    const runner = createVoiceTurnRunner(h.deps);
+    await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "go", sink: h.sink, ...extra });
+    return h;
+  };
+  const m = await bare("search_memories", { query: "x" });
+  assert.deepEqual(m.calls.executed, []); assert.match(m.log[1].messages.at(-1).content, /Memory is turned off/);
+  const d = await bare("delegate", { goal: "x" }, { denyTools: ["crow_delegate"] });
+  assert.deepEqual(d.calls.executed, []); assert.match(d.log[1].messages.at(-1).content, /not available on this display/);
+  const x = await bare("delete_post", { id: 7 });
+  assert.deepEqual(x.calls.executed, []); assert.match(x.log[1].messages.at(-1).content, /Confirmation required/);
 });
