@@ -6,7 +6,7 @@ import { unzipSync, zipSync, strFromU8, strToU8 } from "fflate";
 import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
 import { connectWorkspace } from "./helpers/workspace-client.js";
 import { openDocx } from "../bundles/workspace/server/ooxml/docx-model.js";
-import { setParagraphText, isPlainTextParagraph } from "../bundles/workspace/server/ooxml/docx-edit.js";
+import { setParagraphText, isPlainTextParagraph, appendMarkdown, formatText } from "../bundles/workspace/server/ooxml/docx-edit.js";
 import { imageSize } from "../bundles/workspace/server/ooxml/image-size.js";
 import { assertOnlyPartsChanged, partText, bodyBlocks, assertBlocksUnchangedOutside, sofficeOpens } from "./helpers/ooxml-assert.js";
 
@@ -341,4 +341,37 @@ test("insert_at_heading: a markdown heading gets its heading style, the paragrap
   assert.match(after[i + 1], /<w:pStyle w:val="[^"]+"\/>/); assert.match(after[i + 1], />Sub</);
   assert.doesNotMatch(after[i + 2], /w:pStyle|w:numPr/); assert.match(after[i + 2], />Texto normal</);
   assert.match((await call("ws_docs_read", { path: "S/hp.docx" })).data.markdown, /### Sub\n\nTexto normal/);
+});
+
+// ---- review fix round 2 ------------------------------------------------------------------------------
+const FOREIGN_PARAS = '<w:p><w:r><w:t xml:space="preserve">Con forma </w:t></w:r><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="wps"><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="12700" cy="12700"/><wp:docPr id="77" name="Forma"/></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent></w:r></w:p>'
+  + '<w:p><w:r><w:t xml:space="preserve">Con fórmula </w:t></w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x=1</m:t></m:r></m:oMath></w:p>'
+  + '<w:p><w:r><w:t xml:space="preserve">Con w14 </w:t><w14:checkbox xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"/></w:r></w:p>';
+
+for (const src of ["rich.docx", "oo-rich.docx"]) {
+  test(`${src}: rewrite_passages refuses runs/paragraphs with foreign-namespace content (mc:AlternateContent shape, m:oMath, w14:*) and leaves them byte-identical`, async () => {
+    putBytes(`fo-${src}`, variant(src, (x) => x.replace(/<w:sectPr/, `${FOREIGN_PARAS}<w:sectPr`)));
+    const before = await bodyBlocks(bytesOf(`S/fo-${src}`));
+    const putsBefore = puts();
+    const r = await call("ws_docs_rewrite_passages", { path: `S/fo-${src}`, passages: ["Con forma", "Con fórmula", "Con w14"].map((match_prefix) => ({ match_prefix, new_text: "x" })) });
+    assert.deepEqual(r.data.results.map((x) => [x.matched, x.reason]), Array(3).fill([false, "not_plain_text"]));
+    assert.equal(puts() - putsBefore, 0);
+    assert.deepEqual(await bodyBlocks(bytesOf(`S/fo-${src}`)), before);
+    // and setParagraphText itself refuses them
+    const d = openDocx(bytesOf(`S/fo-${src}`));
+    for (const t of ["Con forma", "Con fórmula", "Con w14"]) {
+      const p = Array.from(d.body.getElementsByTagNameNS(W_NS, "p")).find((x) => x.textContent.startsWith(t));
+      assert.throws(() => setParagraphText(d, p, "x"), (e) => e.code === "not_plain_text", t);
+    }
+  });
+}
+
+test("format_text re-pointing a whole link drops its w:anchor (Word would append #anchor to the new URL)", () => {
+  const d = openDocx(readFileSync(join(FIX, "rich.docx")));
+  appendMarkdown(d, "Ver [la receta](https://a.example/x) hoy.");
+  const h = Array.from(d.body.getElementsByTagNameNS(W_NS, "hyperlink")).at(-1);
+  h.setAttributeNS(W_NS, "w:anchor", "tacos");
+  assert.equal(formatText(d, "la receta", 0, { link_url: "https://b.example/y" }), 1);
+  assert.equal(h.hasAttributeNS(W_NS, "anchor"), false);
+  assert.ok(h.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id"));
 });

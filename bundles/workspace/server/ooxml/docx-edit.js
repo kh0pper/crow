@@ -15,13 +15,16 @@ const KEEP_ON_REWRITE = new Set(["pPr", "bookmarkStart", "bookmarkEnd", "comment
 const RANGE_END = new Set(["bookmarkEnd", "commentRangeEnd"]);
 // what a plain-text run may hold; anything else (drawing, field chars, footnote refs, objects…) is not plain text
 const PLAIN_RUN = new Set(["rPr", "t", "tab", "br", "cr", "lastRenderedPageBreak", "softHyphen", "noBreakHyphen"]);
-const isCommentRef = (c) => c.localName === "r" && kids(c, W, "commentReference").length > 0 && kids(c, W).every((k) => k.localName === "rPr" || k.localName === "commentReference");
+// every element child (any namespace) is checked: a foreign one (mc:AlternateContent shapes, m:oMath, w14:*) is never plain
+const isW = (c, names) => c.namespaceURI === W && names.has(c.localName);
+const COMMENT_RUN = new Set(["rPr", "commentReference"]);
+const isCommentRef = (c) => c.namespaceURI === W && c.localName === "r" && kids(c, W, "commentReference").length > 0 && kids(c).every((k) => isW(k, COMMENT_RUN));
 /**
  * A paragraph whose whole text may be replaced: only plain runs, comment markers and range anchors. Links,
  * fields (fldSimple/fldChar), tracked changes, content controls, images and note references would be lost or
  * left unbalanced, so those paragraphs are refused (spec §8 remedy: edit them with find_replace).
  */
-export const isPlainTextParagraph = (p) => kids(p, W).every((c) => KEEP_ON_REWRITE.has(c.localName) || isCommentRef(c) || (c.localName === "r" && kids(c, W).every((k) => PLAIN_RUN.has(k.localName))));
+export const isPlainTextParagraph = (p) => kids(p).every((c) => isW(c, KEEP_ON_REWRITE) || isCommentRef(c) || (c.namespaceURI === W && c.localName === "r" && kids(c).every((k) => isW(k, PLAIN_RUN))));
 
 // ---- text search -------------------------------------------------------------------------------------
 // A paragraph's text is its w:t segments joined, with "\u0000" for every tab/break/drawing/field (SEP), so a
@@ -98,7 +101,7 @@ export function setParagraphText(d, p, text) {
   const lines = String(text).normalize("NFC").split("\n");
   const pPr = kid(p, W, "pPr");
   const firstRun = runsOf(p).find((r) => !isCommentRef(r)); const rPr = firstRun ? kid(firstRun, W, "rPr") : null; const rPrCopy = rPr ? rPr.cloneNode(true) : null;
-  for (const c of kids(p, W)) if (!KEEP_ON_REWRITE.has(c.localName) && !isCommentRef(c)) removeNode(c);
+  for (const c of kids(p)) if (!isW(c, KEEP_ON_REWRITE) && !isCommentRef(c)) removeNode(c);
   // the new text goes before the first range end (inside bookmarks and comment ranges) and before the comment marker
   const anchor = kids(p, W).find((c) => RANGE_END.has(c.localName) || isCommentRef(c)) || null;
   p.insertBefore(makeRun(d.doc, lines[0], rPrCopy), anchor);
@@ -179,6 +182,7 @@ export function formatText(d, find, occurrence, style) {
         const old = parent.getAttributeNS(NS.r, "id");
         const relId = addRel(d.pkg, part, REL.hyperlink, url, true);
         parent.setAttributeNS(NS.r, "r:id", relId);
+        parent.removeAttributeNS(W, "anchor"); // else Word appends #anchor to the new URL
         if (old && !relUsed(p.ownerDocument, old)) removeRel(d.pkg, part, old);
       } else {
         const relId = addRel(d.pkg, part, REL.hyperlink, url, true);
