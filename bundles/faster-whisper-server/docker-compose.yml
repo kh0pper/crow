@@ -10,6 +10,12 @@ services:
       WHISPER__MODEL: Systran/faster-whisper-large-v3
       WHISPER__INFERENCE_DEVICE: cpu
       WHISPER__COMPUTE_TYPE: int8
+      # CTranslate2 intra-op threads (smoke 2026-10-04 lever C). The image maps
+      # WHISPER__CPU_THREADS → whisper.cpu_threads → WhisperModel(cpu_threads=…)
+      # (pydantic env_nested_delimiter "__"); 0 means faster-whisper's default of 4.
+      # 12 suits crow (16 cores / 32 threads); set WHISPER_CPU_THREADS in this
+      # bundle's .env (Extensions → Configure) to at most the physical cores elsewhere.
+      WHISPER__CPU_THREADS: "${WHISPER_CPU_THREADS:-12}"
       # Never unload a loaded model. The default (300 s) unloaded after five idle
       # minutes, so the first kiosk turn after a quiet spell paid a model load.
       WHISPER__TTL: "-1"

@@ -56,3 +56,13 @@ test("smoke 2026-10-04 lever 2: kioskSttModel maps tiny.en for faster-whisper on
   const y = read("bundles/faster-whisper-server/docker-compose.yml");
   for (const id of Object.values(KIOSK_STT_MODEL_IDS)) assert.ok(y.includes(id), `${id} is preloaded`);
 });
+
+test("lever C: whisper CPU threads come from WHISPER__CPU_THREADS (bundle env WHISPER_CPU_THREADS, default 12); the 8g cap stays", () => {
+  const y = read("bundles/faster-whisper-server/docker-compose.yml");
+  assert.match(y, /^\s*WHISPER__CPU_THREADS: "\$\{WHISPER_CPU_THREADS:-12\}"\s*$/m, "the image reads whisper.cpu_threads from WHISPER__CPU_THREADS (env_nested_delimiter __)");
+  assert.match(y, /^\s*mem_limit: 8g\s*$/m);
+  const m = JSON.parse(read("bundles/faster-whisper-server/manifest.json"));
+  const v = m.env_vars.find((e) => e.name === "WHISPER_CPU_THREADS");
+  assert.equal(v.default, "12");
+  assert.equal(v.required, false);
+});
