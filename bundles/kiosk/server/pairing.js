@@ -14,6 +14,7 @@ export const START_LIMIT_PER_MIN = 5;
 export const LOCK_AFTER = 5;
 export const LOCK_WINDOW_MS = 10 * 60 * 1000;
 export const LOCK_MS = 10 * 60 * 1000;
+export const MAX_START_KEYS = 1000;
 
 const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
 function sameHex(a, b) {
@@ -36,9 +37,12 @@ export function createPairingStore({ now = Date.now, randomInt = nodeRandomInt, 
   function start({ ip, ua, login, nameHint }) {
     sweep();
     const t = now();
-    // Rate-limit key: the Serve-asserted Tailscale identity when present (a direct
-    // LAN/tailnet client could forge X-Forwarded-For and so req.ip — review m3), else the IP.
+    // Rate-limit key: the caller's Tailscale login when given, else the IP. This store
+    // cannot tell a real identity from a forged one: the caller must only pass a login it
+    // trusts (Serve-asserted, i.e. arrived over the loopback socket) and otherwise null.
+    // Because keys can still be attacker-chosen, startHits is hard-capped (MAX_START_KEYS).
     const key = String(login || ip || "?");
+    if (!startHits.has(key) && startHits.size >= MAX_START_KEYS) return { error: "rate_limited", status: 429 };
     const hits = startHits.get(key) || [];
     if (hits.length >= START_LIMIT_PER_MIN) return { error: "rate_limited", status: 429 };
     hits.push(t);
@@ -84,7 +88,7 @@ export function createPairingStore({ now = Date.now, randomInt = nodeRandomInt, 
 
   function complete(pair_id, { device_id, token }) {
     const p = pending.get(pair_id);
-    if (!p) return false;
+    if (!p || !p.claimed || p.result) return false;
     p.result = { device_id, token };
     p.expires = Math.max(p.expires, now() + PICKUP_GRACE_MS);
     return true;
