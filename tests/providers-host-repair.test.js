@@ -9,7 +9,7 @@ import { repairProviderHosts, syncProvidersFromModelsJson, setProviderSyncManage
 import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
 
 const PEER = "49cf71ca878643ba7717f344329266fd";
-const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237", "100.64.20.1"]);
+const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.201", "100.64.20.1"]);
 
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "providers-host-repair-"));
@@ -51,14 +51,14 @@ async function get(db, id) {
 test("repairs exactly this instance's in-scope bad writes, nothing else; idempotent", async () => {
   const t = fresh();
   try {
-    await insert(t.db, "raven-halogen-smoke", "local", "http://10.0.0.126:8731/v1", t.own);
-    await insert(t.db, "raven-flash-next", "raven", "http://10.0.0.126:8030/v1", t.own);
-    await insert(t.db, "peer-wrote-local", "local", "http://10.0.0.126:9999/v1", PEER);
+    await insert(t.db, "raven-halogen-smoke", "local", "http://10.0.0.203:8731/v1", t.own);
+    await insert(t.db, "raven-flash-next", "raven", "http://10.0.0.203:8030/v1", t.own);
+    await insert(t.db, "peer-wrote-local", "local", "http://10.0.0.203:9999/v1", PEER);
     await insert(t.db, "own-addr-local", "local", "http://100.64.20.1:8003/v1", t.own);
     await insert(t.db, "dns-local", "local", "https://api.z.ai/v4", t.own);
     await insert(t.db, "cloud-ok", "cloud", "https://api.together.xyz/v1", t.own);
-    await insert(t.db, "bundle-foreign", "local", "http://10.0.0.126:7000/v1", t.own, { bundleId: "b" });
-    await insert(t.db, "disabled-foreign", "local", "http://10.0.0.126:7001/v1", t.own, { disabled: 1 });
+    await insert(t.db, "bundle-foreign", "local", "http://10.0.0.203:7000/v1", t.own, { bundleId: "b" });
+    await insert(t.db, "disabled-foreign", "local", "http://10.0.0.203:7001/v1", t.own, { disabled: 1 });
     await insert(t.db, "hf-token", "external", "https://huggingface.co", t.own, { disabled: 1, gpuPolicy: { local_only: true } });
 
     const res = await repairProviderHosts(t.db, { ownInstanceId: t.own, ownAddrs: CROW });
@@ -83,7 +83,7 @@ test("G1 boot race: no CGNAT own address → 100.x rows untouched; loopback-only
   try {
     await insert(t.db, "tail-local", "local", "http://100.99.0.1:8003/v1", t.own);
     await insert(t.db, "tail-invalid", "raven", "http://100.99.0.2:8003/v1", t.own);
-    const noTs = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]);
+    const noTs = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.201"]);
     assert.equal((await repairProviderHosts(t.db, { ownInstanceId: t.own, ownAddrs: noTs })).repaired, 0);
     const loop = new Set(["localhost", "127.0.0.1", "::1"]);
     assert.equal((await repairProviderHosts(t.db, { ownInstanceId: t.own, ownAddrs: loop })).repaired, 0);
@@ -95,7 +95,7 @@ test("G1 boot race: no CGNAT own address → 100.x rows untouched; loopback-only
 test("syncProvidersFromModelsJson runs the repair even with no models.json, and reports it", async () => {
   const t = fresh();
   try {
-    await insert(t.db, "raven-flash-next", "raven", "http://10.0.0.126:8030/v1", t.own);
+    await insert(t.db, "raven-flash-next", "raven", "http://10.0.0.203:8030/v1", t.own);
     const res = await syncProvidersFromModelsJson(t.db, { ownAddrs: CROW });
     assert.equal(res.repaired, 1);
     assert.equal((await get(t.db, "raven-flash-next")).host, "cloud");

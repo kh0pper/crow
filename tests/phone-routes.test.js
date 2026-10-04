@@ -23,7 +23,7 @@ before(async () => {
   process.env.CROW_APP_ROOT = join(import.meta.dirname, "..");
   s.db = createDbClient(join(s.home, "crow.db"));
   await s.db.executeMultiple(`CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
-    INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'), ('phone_owner_name','Kevin');
+    INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'), ('phone_owner_name','Casey');
     CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT, host TEXT, disabled INTEGER DEFAULT 0);
     INSERT INTO providers (id, base_url, host) VALUES ('loc','http://127.0.0.1:1/v1','local'), ('cld','https://x.example/v1','cloud');`);
   await initPhoneTables(s.db);
@@ -163,7 +163,7 @@ test("panel renders in EN and ES with the approval controls and no backticks in 
 });
 
 async function sharePlan() {
-  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", shareable: { name: "Kevin", date_of_birth: "1980-01-01" } });
+  const p = validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", shareable: { name: "Casey", date_of_birth: "1980-01-01" } });
   return (await store.createPlan(s.db, p, { kind: "bot", id: "bobby-" + (++planN) }, null)).call_id;
 }
 
@@ -185,7 +185,7 @@ test("approve requires a non-empty owner name (409 owner_name_required)", async 
     assert.equal((await r.json()).error, "owner_name_required");
     assert.equal((await store.getCall(s.db, id)).status, "awaiting_approval");
   } finally {
-    await s.db.execute({ sql: "UPDATE dashboard_settings SET value='Kevin' WHERE key='phone_owner_name'", args: [] });
+    await s.db.execute({ sql: "UPDATE dashboard_settings SET value='Casey' WHERE key='phone_owner_name'", args: [] });
   }
 });
 

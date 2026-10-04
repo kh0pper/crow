@@ -36,9 +36,9 @@ test("restore-scratch.sh reads the admin user through envfile.py (no sed)", () =
   assert.doesNotMatch(sh, /sed -n 's\/\^WORKSPACE_ADMIN_USER=/);
   assert.match(sh, /envfile\.py" get "\$SCRATCH\/unpacked\/bundle\.env" WORKSPACE_ADMIN_USER/);
   const dir = mkdtempSync(join(tmpdir(), "crow-readers-py-"));
-  writeFileSync(join(dir, ".env"), "WORKSPACE_ADMIN_USER='kevin'\n");
+  writeFileSync(join(dir, ".env"), "WORKSPACE_ADMIN_USER='casey'\n");
   const r = spawnSync("python3", [join(ROOT, "bundles/workspace/ops/envfile.py"), "get", join(dir, ".env"), "WORKSPACE_ADMIN_USER"], { encoding: "utf8" });
-  assert.equal(r.stdout, "kevin");
+  assert.equal(r.stdout, "casey");
 });
 
 test("static guard: the remaining raw readers import the codec and dropped their ad-hoc parsers", () => {

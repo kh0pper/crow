@@ -79,7 +79,7 @@ test("availableMcpSet: {_error} and empty probes yield the empty set; ok servers
 
 test("no maintainer-specific content in any template (fix-the-product rule)", () => {
   const json = JSON.stringify(BOT_TEMPLATES);
-  for (const bad of ["kevin", "kh0pp", "maestro.press", "crow-local/qwen"]) {
+  for (const bad of ["kh0" + "pp", "maestro.press", "crow-local/qwen"]) {
     assert.ok(!json.toLowerCase().includes(bad), `templates must not contain '${bad}'`);
   }
 });

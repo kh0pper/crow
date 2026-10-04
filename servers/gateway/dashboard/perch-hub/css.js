@@ -281,7 +281,7 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .ask-foot{display:flex;gap:8px;align-items:center}
 #perch-hub-root .ask-send{flex:1}
 #perch-hub-root .ask-send:disabled{opacity:.45;cursor:default}
-/* THE ASK PANE FITS ITS SPACE (2026-10-02, Kevin's Pixel 9a report). #perch-ask
+/* THE ASK PANE FITS ITS SPACE (2026-10-02, Casey's Pixel 9a report). #perch-ask
    is a flex child of the #perch-tab-chat column, between the transcript and
    the composer. Before this it had no rule at all, so it kept the flex default
    min-height:auto (= its full content height): a five-option card at 412px
@@ -335,7 +335,7 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-tab-chat > #perch-transcript{min-height:min(56px,10vh)}
 /* A scrolled transcript shows a sliver of the row above in its 12px top
    padding, flush against the banner — which read as the banner covering the
-   chat (Kevin's screenshot). Fade exactly that padding band: at scrollTop 0 it
+   chat (Casey's screenshot). Fade exactly that padding band: at scrollTop 0 it
    is empty, so nothing at rest changes. */
 #perch-transcript{-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 12px);mask-image:linear-gradient(to bottom,transparent 0,#000 12px)}
 /* Send must be reachable at ANY scroll position, not only at the bottom of a

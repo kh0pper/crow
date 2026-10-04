@@ -8,7 +8,7 @@ E-reader subsystem (reading_progress, ereader_pins, ereader_material_tags, TTS, 
 1. Construct `~/.crow/env/capstone-tracker.env` via the heredoc in plan § 4.0.4.
 2. `docker compose build && docker compose up -d` from this directory.
 3. Append entry to `~/.crow/installed.json` and restart `crow-gateway`.
-4. Run sync scripts from `~/crow/scripts/research/` to populate `/data/capstone.db`.
+4. Run the operator's sync scripts (kept in the private engineering notes) to populate `/data/capstone.db`.
 
 ## Endpoints
 - `/health` — healthcheck

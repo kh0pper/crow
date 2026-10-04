@@ -20,7 +20,7 @@ import { resolveDataDir } from "../../servers/db.js";
  * better-sqlite3 has NO URI support — it passes the string to SQLite as a bare
  * filename, so `new Database("file:/x/tasks.db")` fails with SQLITE_CANTOPEN
  * rather than opening `/x/tasks.db`. Production stores exactly that form in
- * `project_spaces.tasks_db_uri` (r4: `file:/home/kh0pp/.crow-r4/data/tasks.db`),
+ * `project_spaces.tasks_db_uri` (r4: `file:/home/alex/.crow-r4/data/tasks.db`),
  * so every reader of that column must come through here.
  *
  * This normalizes the OPEN, deliberately not the resolution: `cardsDbForBot`

@@ -176,8 +176,8 @@ function applyJournalGuard(env) {
  * so a verbatim copy of an optIn block silently never loads. Selecting the
  * server IS the opt-in.
  *
- * The /.crow anchor is deliberate. `/home/kh0pp/crow/bundles/browser` and
- * `/home/kh0pp/crow` do not match, so the repo is left alone — it is
+ * The /.crow anchor is deliberate. `/home/alex/crow/bundles/browser` and
+ * `/home/alex/crow` do not match, so the repo is left alone — it is
  * instance-neutral, correctly.
  */
 export function rebindBlock(name, block, binding, crowHome) {

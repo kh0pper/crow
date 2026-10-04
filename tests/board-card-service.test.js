@@ -24,7 +24,7 @@ import {
 
 const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
-const HUMAN = { kind: "human", id: "kevin", jobId: null };
+const HUMAN = { kind: "human", id: "casey", jobId: null };
 const BOT = { kind: "bot", id: "bot-1", jobId: "job-abc" };
 
 function markPriorDone(c) {
@@ -125,7 +125,7 @@ test("createCard validates status against the resolved def and records a create 
     assert.equal(muts.length, 1);
     assert.equal(muts[0].verb, "create");
     assert.equal(muts[0].actor_kind, "human");
-    assert.equal(muts[0].actor_id, "kevin");
+    assert.equal(muts[0].actor_id, "casey");
   });
 });
 
@@ -158,16 +158,16 @@ test("createCard parent_id must exist and child inherits project", async () => {
 test("updateCard records a field diff and refuses archived cards", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const { id } = await createCard(tdb, { title: "orig", status: "pending", project_id: 1 }, HUMAN);
-    await updateCard(tdb, id, { title: "changed", owner: "kevin" }, HUMAN);
+    await updateCard(tdb, id, { title: "changed", owner: "casey" }, HUMAN);
     const row = await getCard(tdb, id);
     assert.equal(row.title, "changed");
-    assert.equal(row.owner, "kevin");
+    assert.equal(row.owner, "casey");
     const muts = await allMutations(tdb, id);
     const upd = muts.find((m) => m.verb === "update");
     assert.ok(upd);
     const detail = JSON.parse(upd.detail_json);
     assert.deepEqual(detail.title, ["orig", "changed"]);
-    assert.deepEqual(detail.owner, [null, "kevin"]);
+    assert.deepEqual(detail.owner, [null, "casey"]);
     assert.ok(!("status" in detail));
 
     await archiveCard(tdb, cdb, id, HUMAN);

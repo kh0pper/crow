@@ -345,7 +345,7 @@ describe("apply: what lands where", () => {
     assert.deepEqual(report.source_only_columns.research_sources.columns.sort(), ["file_path", "s3_key"]);
     assert.equal(report.source_only_columns.research_sources.rows_with_values, 1);
     const ex = query(s.applyOpts.extract, "SELECT column_name, value FROM _source_only_columns WHERE table_name='research_sources' ORDER BY column_name");
-    assert.deepEqual(ex.map((r) => [r.column_name, r.value]), [["file_path", "/home/kh0pp/pdfs/r1.pdf"], ["s3_key", "capstone/r1.pdf"]]);
+    assert.deepEqual(ex.map((r) => [r.column_name, r.value]), [["file_path", "/home/alex/pdfs/r1.pdf"], ["s3_key", "capstone/r1.pdf"]]);
   });
 
   it("memories: content matches skipped, fresh ids above every peer, embeddings follow, FTS consistent", () => {
@@ -550,7 +550,7 @@ describe("fix round 2", () => {
     assert.deepEqual(report.go_no_go.tombstoned_contacts, [{ crow_id: "crow:deleted" }]);
   });
 
-  it("N2: schedules import disabled with next_run cleared, and are listed for Kevin", () => {
+  it("N2: schedules import disabled with next_run cleared, and are listed for Casey", () => {
     const rows = query(s.target, "SELECT task, enabled, next_run FROM schedules ORDER BY task");
     assert.deepEqual(rows, [
       { task: "blog-digest", enabled: 0, next_run: null },
@@ -739,7 +739,7 @@ describe("idempotency and emit-only", () => {
 /* ------------------------------------------- bot world roots (IMPORTER-BOT-PATHS) */
 
 describe("pi bot definitions: world roots rebase onto the target", () => {
-  const GRACKLE_ROOT = "/home/kh0pp/.crow-mpa/pi-bots/home-search";
+  const GRACKLE_ROOT = "/home/alex/.crow-mpa/pi-bots/home-search";
   const DEF = JSON.stringify({
     engine: "pi",
     session_dir: GRACKLE_ROOT,
@@ -751,13 +751,13 @@ describe("pi bot definitions: world roots rebase onto the target", () => {
   });
 
   it("unit: session_dir and every path under it move; foreign paths are kept and reported", () => {
-    const r = rebaseBotDefinition(DEF, "home-search", "/home/kh0pp/.crow");
+    const r = rebaseBotDefinition(DEF, "home-search", "/home/alex/.crow");
     const def = JSON.parse(r.definition);
-    assert.equal(def.session_dir, "/home/kh0pp/.crow/pi-bots/home-search");
+    assert.equal(def.session_dir, "/home/alex/.crow/pi-bots/home-search");
     assert.deepEqual(def.permission_policy.write_paths, [
-      "/home/kh0pp/.crow/pi-bots/home-search", "/home/kh0pp/.crow/pi-bots/home-search/outputs", "/srv/shared-projects/alpha",
+      "/home/alex/.crow/pi-bots/home-search", "/home/alex/.crow/pi-bots/home-search/outputs", "/srv/shared-projects/alpha",
     ]);
-    assert.deepEqual(def.permission_policy.read_paths, ["/home/kh0pp/.crow/pi-bots/home-search/notes"]);
+    assert.deepEqual(def.permission_policy.read_paths, ["/home/alex/.crow/pi-bots/home-search/notes"]);
     assert.equal(def.permission_policy.bash, "deny", "other fields untouched");
     assert.equal(r.changes.length, 4);
     assert.deepEqual(r.foreign, [{ field: "permission_policy.write_paths", path: "/srv/shared-projects/alpha" }]);
@@ -774,7 +774,7 @@ describe("pi bot definitions: world roots rebase onto the target", () => {
   });
 
   it("unit: a custom session_dir (not <home>/pi-bots/<bot>) is never treated as the world root", () => {
-    const d = JSON.stringify({ session_dir: "/home/kh0pp/projects/foo", permission_policy: { write_paths: ["/home/kh0pp/projects/foo/out"] } });
+    const d = JSON.stringify({ session_dir: "/home/alex/projects/foo", permission_policy: { write_paths: ["/home/alex/projects/foo/out"] } });
     const r = rebaseBotDefinition(d, "b1", "/t");
     assert.equal(r.definition, d);
     assert.deepEqual(r.foreign.map((f) => f.field), ["session_dir"]);

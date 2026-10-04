@@ -18,7 +18,7 @@
  *
  * Data dir: resolveDataDir() — the gateway's own helper (CROW_DATA_DIR, else
  * ~/.crow/data, else the repo's ./data). For r4:
- *   CROW_DATA_DIR=/home/kh0pp/.crow-r4/data node scripts/models-runtime-override.mjs …
+ *   CROW_DATA_DIR=/home/alex/.crow-r4/data node scripts/models-runtime-override.mjs …
  * `set`/`clear` print the data dir they wrote. The gateway reads state.json
  * on every native start, so no restart is needed; a model that is already
  * running keeps its binary until it is stopped and started again.

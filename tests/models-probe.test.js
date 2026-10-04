@@ -446,7 +446,7 @@ test("disk free reported via fs.statfsSync when modelsDir given", async () => {
     readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP },
     statfs: { bavail: 1000000, bsize: 4096 },
   });
-  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic", modelsDir: "/home/kh0pp/.crow/models" });
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic", modelsDir: "/home/alex/.crow/models" });
 
   assert.equal(probe.diskFreeMb, Math.round((1000000 * 4096) / (1024 * 1024)));
   assert.ok(!probe.unknown.includes("disk"));

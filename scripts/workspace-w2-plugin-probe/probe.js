@@ -103,7 +103,7 @@
       try { window.Asc.plugin.executeMethod("EndAction", ["Information", "Crow probe…"]); res.end = "called"; }
       catch (e) { res.end = "threw: " + (e && e.message || e); }
       done(res);
-    }, 6000); // long enough for Kevin to see it
+    }, 6000); // long enough for Casey to see it
   }
 
   function start() {
@@ -125,7 +125,7 @@
         if (editor === "word") {
           run("edit", wordEditCommand, true, function (r3) { post("edit", { editorType: editor, outcome: r3 }); });
         } else if (editor === "cell") {
-          // Tick every 15 s for 10 min so Kevin can double-click a cell (cell edit mode) during some ticks.
+          // Tick every 15 s for 10 min so Casey can double-click a cell (cell edit mode) during some ticks.
           var n = 0;
           var tick = function () {
             n += 1; window.Asc.scope.probeTick = n;

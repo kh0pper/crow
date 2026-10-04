@@ -22,18 +22,18 @@
 #   exempts ESTABLISHED sockets to those ports on the model's host IP, i.e.
 #   the MCP bridge; without it check 6 false-fails once the app connects),
 #   UI_URL (default http://127.0.0.1:3061/),
-#   PROBE_INTERNET (default 1.1.1.1:443), PROBE_TAILNET (default
-#   100.121.254.89:3002), PROBE_PUBLISHED (default 100.118.41.122:8003)
+#   PROBE_INTERNET (default 1.1.1.1:443), PROBE_TAILNET (required,
+#   e.g. 100.64.20.12:3002), PROBE_PUBLISHED (required, e.g. 100.64.20.11:8003)
 
 set -uo pipefail
 
 ROOKERY_NETWORK=${ROOKERY_NETWORK:-rookery_default}
-MODEL_PUBLISH=${MODEL_PUBLISH:-100.118.41.122:8010}
+MODEL_PUBLISH=${MODEL_PUBLISH:?MODEL_PUBLISH is required: host ip:port of the model endpoint}
 CONTAINER=${CONTAINER:-crow-rookery}
 UI_URL=${UI_URL:-http://127.0.0.1:3061/}
 PROBE_INTERNET=${PROBE_INTERNET:-1.1.1.1:443}
-PROBE_TAILNET=${PROBE_TAILNET:-100.121.254.89:3002}
-PROBE_PUBLISHED=${PROBE_PUBLISHED:-100.118.41.122:8003}
+PROBE_TAILNET=${PROBE_TAILNET:?PROBE_TAILNET is required: a tailnet ip:port the container must NOT reach}
+PROBE_PUBLISHED=${PROBE_PUBLISHED:?PROBE_PUBLISHED is required: another published ip:port the container must NOT reach}
 
 FAILURES=0
 pass() { echo "PASS  $*"; }

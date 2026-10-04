@@ -454,7 +454,7 @@ test("registerModel: refuses to register over an external-engine row BEFORE allo
             VALUES (?, ?, NULL, ?, ?, NULL, ?, 0, 5, ?, 'openai-compat', ?)`,
       args: [
         "chat-test-model",
-        "http://10.0.0.126:9000/v1",
+        "http://10.0.0.203:9000/v1",
         "cloud",
         "llamacpp-vulkan-qwen36-35b-a3b",
         JSON.stringify([{ id: "chat-test-model", task: "chat" }]),

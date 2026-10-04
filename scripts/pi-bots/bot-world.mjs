@@ -129,7 +129,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // The file ALWAYS lives in the world root, never in the operator's chosen
   // cwd: writeBotMcp replaces the whole file (closed-world), so writing it
   // into a project directory destroyed that project's own .mcp.json on every
-  // turn (r4-tehcy and crow itself, 2026-09-12/13). pi finds it through the
+  // turn (r4-acme and crow itself, 2026-09-12/13). pi finds it through the
   // engine-reserved PI_BOT_MCP_CONFIG env var the bridge sets at spawn
   // (pi-lab mcp-client: global file + that file only, no cwd-ancestor walk),
   // so a chosen directory is read-only to the MCP layer and its own

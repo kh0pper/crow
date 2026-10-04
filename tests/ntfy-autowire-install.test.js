@@ -88,7 +88,7 @@ test("an env-configured gateway keeps its NTFY_* setup on install", async () => 
   const { runner, calls } = dockerFake();
   B._setDockerRunnerForTest(runner);
   B._setComposeRunnerForTest(async () => ({ stdout: "", stderr: "" }));
-  process.env.NTFY_TOPIC = "kevin";
+  process.env.NTFY_TOPIC = "casey";
   try {
     const job = B._createJobForTest("aw-ntfy2", "install");
     const out = await B.runInstallJob("aw-ntfy2", {}, { job, installedSnapshot: [], consentVerified: false, manifest: m });

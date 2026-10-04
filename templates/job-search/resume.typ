@@ -1,5 +1,5 @@
-// Job-search resume template — matches the visual style of the user's existing
-// application PDFs in ~/ed-jobs-scraper/notes/<employer>-application/.
+// Job-search resume template — plain, single-column resume layout.
+//
 //
 // Usage:
 //   typst compile --input name=<name> --input contact=<contact-line> \
@@ -11,7 +11,7 @@
 
 #import "@preview/cmarker:0.1.6": render as md-render
 
-#let name = sys.inputs.at("name", default: "Kevin Hopper")
+#let name = sys.inputs.at("name", default: "Your Name")
 #let contact = sys.inputs.at("contact", default: "")
 #let body-path = sys.inputs.at("body-path", default: "")
 #let body-text = if body-path != "" { read(body-path) } else { "" }

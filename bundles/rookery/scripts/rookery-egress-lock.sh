@@ -9,7 +9,7 @@
 # rebuilds; does NOT survive reboot (see --print-systemd-unit).
 #
 # Verified rule shape (Task 2 recon, 2026-07-14): the model endpoint
-# (MODEL_PUBLISH, default 100.118.41.122:8010) is a docker-PUBLISHED port of
+# (MODEL_PUBLISH, required, e.g. 100.64.20.11:8010) is a docker-PUBLISHED port of
 # the copilot container, so container→model traffic is DNAT'd in
 # nat/PREROUTING to <copilot-ip>:<container-port> and traverses
 # FORWARD → DOCKER-USER — NOT host INPUT (corrects Task 1a; confirmed by
@@ -63,7 +63,7 @@
 #   ROOKERY_NETWORK            docker network name (default rookery_default)
 #   MODEL_PUBLISH              host ip:port of the model endpoint the bundle
 #                              is configured against (default
-#                              100.118.41.122:8010)
+#                              100.64.20.11:8010)
 #   ALLOW_HOST_TCP_PORTS       extra host-INPUT tcp ports reachable from the
 #                              container, space/comma-separated (Task 4 adds
 #                              the crow API port here)
@@ -86,7 +86,7 @@ for v in MODEL_PUBLISH ALLOW_PUBLISHED_TCP_PORTS ALLOW_HOST_TCP_PORTS ROOKERY_NE
 done
 
 ROOKERY_NETWORK=${ROOKERY_NETWORK:-rookery_default}
-MODEL_PUBLISH=${MODEL_PUBLISH:-100.118.41.122:8010}
+MODEL_PUBLISH=${MODEL_PUBLISH:-}
 ALLOW_HOST_TCP_PORTS=${ALLOW_HOST_TCP_PORTS:-}
 ALLOW_PUBLISHED_TCP_PORTS=${ALLOW_PUBLISHED_TCP_PORTS:-}
 
@@ -106,6 +106,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ -z $MODEL_PUBLISH && ( $MODE == install || $MODE == unit ) ]]; then
+  echo "MODEL_PUBLISH is required: host ip:port of the model endpoint (e.g. 100.64.20.11:8010)" >&2
+  exit 2
+fi
 
 CHAINS=(ROOKERY-EGRESS ROOKERY-INGRESS ROOKERY-HOSTIN)
 CMT=(-m comment --comment rookery-lock)

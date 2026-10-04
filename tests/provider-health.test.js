@@ -164,7 +164,7 @@ test("_resetProviderHealth restores the initial shape", () => {
 
 // --- external engines (spec 2026-09-23 external-engine-provider §2.3) -------
 
-const RAVEN = "http://10.0.0.126:8030/v1";
+const RAVEN = "http://10.0.0.203:8030/v1";
 const ext = (ready, nowMs, extra = {}) =>
   recordExternal("raven-flash-next", { ready, nowMs, baseUrl: RAVEN, engineHost: "raven", label: "halogen", ...extra });
 

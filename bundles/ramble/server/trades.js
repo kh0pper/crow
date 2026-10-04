@@ -26,11 +26,11 @@
  * An egg named by an open trade is LOCKED: it cannot be incubated, gifted or
  * offered again until the trade closes (flock.js asks isEggLocked).
  *
- * Spec §4.2 (promote-on-gift-receipt, Kevin 2026-09-22): every path here that
+ * Spec §4.2 (promote-on-gift-receipt, Casey 2026-09-22): every path here that
  * makes an egg AVAILABLE — a gift landing, a swap hand-over, a decline that
  * unlocks an egg — ends with `refillSlot`, so an empty incubating slot takes
  * the oldest promotable egg at once. `expireTrades` deliberately does NOT
- * (Kevin, 2026-09-22): an expired row can still receive a late `completed`.
+ * (Casey, 2026-09-22): an expired row can still receive a late `completed`.
  * The freed egg is promotable by every OTHER path, though, so the hand-over
  * (`HANDOVER_SQL`) takes the promised egg from the slot too — the user never
  * keeps both. See eggs.js `promoteFromShelf` for the full inventory.
@@ -351,7 +351,7 @@ export async function receiveTrade(db, parsed, { fromCrowId, now = Date.now(), e
  * Local sweep: open rows past expires_at become 'expired' (emitted). Returns how many.
  *
  * ⚠ Does NOT refill the slot, unlike every other path that frees an egg
- * (Kevin, 2026-09-22). 'expired' is not terminal for the hand-over: a
+ * (Casey, 2026-09-22). 'expired' is not terminal for the hand-over: a
  * `completed` can still land on an expired acceptor row. The freed egg waits
  * and the pet card's Warm it offers it; if anything drafts it first, the late
  * hand-over takes it from the slot (`HANDOVER_SQL`).

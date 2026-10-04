@@ -1091,7 +1091,7 @@ test("GET /bots/:id/models marks a provider pi cannot resolve as unrunnable, and
   piProvidersImpl = { custom: new Set(["local"]), builtin: new Set(["zai"]), keyed: new Set(["zai"]) };
   catalogueImpl = [
     { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
-    { provider: "raven-flash-next", id: "flash-next", name: "Flash", baseUrl: "http://10.0.0.126:8030/v1" },
+    { provider: "raven-flash-next", id: "flash-next", name: "Flash", baseUrl: "http://10.0.0.203:8030/v1" },
     { provider: "ZAI", id: "glm-5", baseUrl: "https://api.z.ai/api/coding/paas/v4" },
   ];
   const { body } = await getJson("/bots/chatty/models");
@@ -1326,7 +1326,7 @@ test("ATTACK symlink pre-plant: uploading over a pre-planted symlink must NOT wr
   const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
   const secretDir = mkdtempSync(join(tmpdir(), "perch-uploads-secret-"));
   const secretFile = join(secretDir, "authorized_keys");
-  const originalSecret = "ssh-ed25519 AAAA...original-legit-key kevin@crow\n";
+  const originalSecret = "ssh-ed25519 AAAA...original-legit-key casey@crow\n";
   writeFileSync(secretFile, originalSecret);
   // The pre-plant: a symlink sitting at the exact name the operator's next
   // upload will use, pointing at the secret file OUTSIDE uploadsDir.

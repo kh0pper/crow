@@ -15,7 +15,7 @@ public class OriginCheckTest {
     @Test
     public void canonicalFillsDefaultPortsAndLowercases() {
         assertEquals("https://crow.example.ts.net:443", OriginCheck.canonical("HTTPS://Crow.Example.ts.net/dashboard"));
-        assertEquals("http://10.0.0.237:80", OriginCheck.canonical("http://10.0.0.237"));
+        assertEquals("http://10.0.0.201:80", OriginCheck.canonical("http://10.0.0.201"));
         assertEquals("https://crow.example.ts.net:8444", OriginCheck.canonical("https://crow.example.ts.net:8444/x?y=1#z"));
         assertEquals("http://[::1]:3001", OriginCheck.canonical("http://[::1]:3001/"));
     }
@@ -60,8 +60,8 @@ public class OriginCheckTest {
 
     @Test
     public void changedGatewayMovesTheTrust() {
-        String next = "http://10.0.0.237:3001";
-        assertTrue(OriginCheck.sameOrigin("http://10.0.0.237:3001", next));
+        String next = "http://10.0.0.201:3001";
+        assertTrue(OriginCheck.sameOrigin("http://10.0.0.201:3001", next));
         assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net:8444", next));
     }
 
@@ -69,8 +69,8 @@ public class OriginCheckTest {
     public void allowedOriginRuleOmitsOnlyDefaultPorts() {
         assertEquals("https://crow.example.ts.net:8444", OriginCheck.allowedOriginRule(PAIRED));
         assertEquals("https://crow.example.ts.net", OriginCheck.allowedOriginRule("https://Crow.Example.ts.net:443/x"));
-        assertEquals("http://10.0.0.237", OriginCheck.allowedOriginRule("http://10.0.0.237/"));
-        assertEquals("http://10.0.0.237:3001", OriginCheck.allowedOriginRule("http://10.0.0.237:3001"));
+        assertEquals("http://10.0.0.201", OriginCheck.allowedOriginRule("http://10.0.0.201/"));
+        assertEquals("http://10.0.0.201:3001", OriginCheck.allowedOriginRule("http://10.0.0.201:3001"));
         assertNull(OriginCheck.allowedOriginRule(""));
         assertNull(OriginCheck.allowedOriginRule("ftp://x"));
     }
