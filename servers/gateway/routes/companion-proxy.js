@@ -15,6 +15,8 @@
 
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { validateRoomToken } from "../../sharing/server.js";
+import { join } from "node:path";
+import { resolveDataDir } from "../../db.js";
 
 const COMPANION_PORT = process.env.COMPANION_PORT || "12393";
 const COMPANION_TARGET = `http://127.0.0.1:${COMPANION_PORT}`;
@@ -56,7 +58,7 @@ export default function setupCompanionProxy(app, server) {
     if (!deviceId) return res.status(400).json({ error: "device query param required" });
     try {
       const { default: Database } = await import("better-sqlite3");
-      const dbPath = process.env.CROW_DB_PATH || `${process.env.HOME}/.crow/data/crow.db`;
+      const dbPath = process.env.CROW_DB_PATH || join(resolveDataDir(), "crow.db");
       const db = new Database(dbPath, { readonly: true });
       let devices = [];
       try {

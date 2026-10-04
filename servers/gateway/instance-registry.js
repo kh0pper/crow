@@ -10,10 +10,10 @@
  */
 
 import { randomBytes, createHash } from "crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
-import { homedir } from "os";
-import { hostname as osHostname } from "os";
+import { hostname as osHostname, tmpdir } from "os";
+import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull } from "../shared/crow-home.js";
 import bus from "../shared/event-bus.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { createDbClient } from "../db.js";
@@ -22,9 +22,13 @@ import { isPeerUsableUrl, deriveSelfDialAddress } from "../shared/self-dial-addr
 // CROW_INSTANCES_JSON_PATH is a test seam (scripts/run-suite.mjs sets it to the
 // scratch dir): every suite gateway used to register itself in the host's REAL
 // ~/.crow/instances.json — 1,647 stale worktree entries on crow by 2026-10-04.
-// Unset in production, so the default path is unchanged.
-const INSTANCES_JSON_PATH = process.env.CROW_INSTANCES_JSON_PATH
-  || resolve(homedir(), ".crow", "instances.json");
+// Otherwise the file lives under THIS instance's CROW_HOME: a co-hosted gateway
+// (CROW_HOME=~/.crow-r4) used to read-modify-write the primary's file. Resolved
+// at call time (the gateway's .env loader runs after static imports).
+export function instancesJsonPath() {
+  return process.env.CROW_INSTANCES_JSON_PATH
+    || resolve(resolveCrowHome(), "instances.json");
+}
 
 /**
  * Generate a new instance UUID (used as primary key in crow_instances).
@@ -277,8 +281,9 @@ export async function rotateAuthToken(db, id) {
  */
 export function readLocalInstances() {
   try {
-    if (existsSync(INSTANCES_JSON_PATH)) {
-      return JSON.parse(readFileSync(INSTANCES_JSON_PATH, "utf-8"));
+    const p = instancesJsonPath();
+    if (existsSync(p)) {
+      return JSON.parse(readFileSync(p, "utf-8"));
     }
   } catch (err) {
     console.warn("[instance-registry] Failed to read instances.json:", err.message);
@@ -311,11 +316,106 @@ function removeFromLocalInstancesJson(id) {
  */
 function writeLocalInstancesJson(instances) {
   try {
-    mkdirSync(dirname(INSTANCES_JSON_PATH), { recursive: true });
-    writeFileSync(INSTANCES_JSON_PATH, JSON.stringify(instances, null, 2));
+    const p = instancesJsonPath();
+    mkdirSync(dirname(p), { recursive: true });
+    // write-then-rename: a reader (or a crash mid-write) never sees a torn file.
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(instances, null, 2));
+    renameSync(tmp, p);
+    return true;
   } catch (err) {
     console.warn("[instance-registry] Failed to write instances.json:", err.message);
+    return false;
   }
+}
+
+// --- instances.json hygiene (Settings › Data hygiene) ---
+//
+// Before CROW_INSTANCES_JSON_PATH (PR #419), every gateway the test suite
+// spawned auto-registered itself in the host's real instances.json: 1,700+
+// entries on crow, each a fresh random id under a throwaway data dir. The
+// repair below removes ONLY entries that carry the suite's scratch signature:
+//
+//   1. the id is NOT in this instance's crow_instances (any status) — a real
+//      registration always writes the DB row first, with the same id;
+//   2. the id is not this instance's own id;
+//   3. the name is the auto-registration form "<host>:<directory>" (an
+//      operator-named registration — "Main", "Finance" — is never touched);
+//   4. and the entry is throwaway: its directory no longer exists, sits under
+//      the OS temp dir, or is shared by 2+ ids (one install registers ONE id
+//      per data dir; a burst of ids for one checkout is suite gateways).
+//
+// Dry-run by default; the delete is operator-confirmed, count-checked, and
+// writes a timestamped backup of the file first.
+
+function isAutoName(entry) {
+  const name = String(entry?.name || "");
+  const dir = String(entry?.directory || "");
+  if (!dir) return false;
+  const i = name.indexOf(":");
+  return i > 0 && name.slice(i + 1) === dir;
+}
+
+/**
+ * Pure classifier (exported for tests).
+ * @param {Record<string, object>} local  parsed instances.json
+ * @param {Set<string>} knownIds          ids present in crow_instances
+ * @param {{localId?:string|null, exists?:(p:string)=>boolean, tmpRoots?:string[]}} [o]
+ * @returns {{id:string, name:string, directory:string, updatedAt:string|null, reason:string}[]}
+ */
+export function classifyStaleLocalInstances(local, knownIds, { localId = null, exists = existsSync, tmpRoots = [tmpdir(), "/tmp"] } = {}) {
+  const dirCounts = new Map();
+  for (const e of Object.values(local || {})) {
+    const d = e?.directory || "";
+    dirCounts.set(d, (dirCounts.get(d) || 0) + 1);
+  }
+  const roots = tmpRoots.map((r) => resolve(r).replace(/\/+$/, "") + "/");
+  const out = [];
+  for (const [id, e] of Object.entries(local || {})) {
+    if (!id || knownIds.has(id) || (localId && id === localId)) continue;
+    if (!isAutoName(e)) continue;
+    const dir = String(e.directory);
+    let reason = null;
+    if (roots.some((r) => resolve(dir).startsWith(r))) reason = "temp-dir";
+    else if (!exists(dir)) reason = "dir-missing";
+    else if ((dirCounts.get(dir) || 0) >= 2) reason = "burst";
+    if (reason) out.push({ id, name: e.name, directory: dir, updatedAt: e.updatedAt || null, reason });
+  }
+  return out;
+}
+
+/** Scan this instance's instances.json for suite-scratch entries (read-only). */
+export async function scanStaleLocalInstances(db, { localId = readLocalInstanceIdOrNull() } = {}) {
+  const local = readLocalInstances();
+  const { rows } = await db.execute({ sql: "SELECT id FROM crow_instances", args: [] });
+  const known = new Set(rows.map((r) => r.id));
+  const candidates = classifyStaleLocalInstances(local, known, { localId });
+  return { path: instancesJsonPath(), total: Object.keys(local).length, candidates };
+}
+
+/**
+ * Remove the scratch entries found by scanStaleLocalInstances. Without
+ * confirm → dry run. With `expected` set and the live count different →
+ * refused (the file changed since the operator looked).
+ */
+export async function removeStaleLocalInstances(db, { confirm = false, expected = null, localId } = {}) {
+  const scan = await scanStaleLocalInstances(db, localId === undefined ? {} : { localId });
+  if (!confirm) return { dryRun: true, removed: 0, scan };
+  if (expected != null && Number(expected) !== scan.candidates.length) return { refused: true, removed: 0, scan };
+  if (scan.candidates.length === 0) return { removed: 0, scan };
+  const p = instancesJsonPath();
+  const current = readLocalInstances();
+  try {
+    writeFileSync(`${p}.bak-hygiene-${new Date().toISOString().replace(/[:.]/g, "-")}`, JSON.stringify(current, null, 2));
+  } catch (err) {
+    return { error: `could not back up ${p}: ${err.message}`, removed: 0, scan };
+  }
+  let removed = 0;
+  for (const c of scan.candidates) {
+    if (current[c.id]) { delete current[c.id]; removed++; }
+  }
+  if (!writeLocalInstancesJson(current)) return { error: `could not write ${p}`, removed: 0, scan };
+  return { removed, scan, backup: true };
 }
 
 /**
@@ -340,9 +440,7 @@ export async function discoverLocalInstances(db) {
  * Get the current instance's ID. Reads from ~/.crow/data/instance-id or generates one.
  */
 export function getOrCreateLocalInstanceId() {
-  const dataDir = process.env.CROW_DATA_DIR
-    ? resolve(process.env.CROW_DATA_DIR)
-    : resolve(homedir(), ".crow", "data");
+  const dataDir = resolveInstanceDataDir();
   const idPath = resolve(dataDir, "instance-id");
 
   try {

@@ -11,7 +11,7 @@
 
 import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { resolveCrowHome } from "../shared/crow-home.js";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -30,7 +30,7 @@ async function readMigrationsState(db) {
 
 /** Read companion .env as a plain object (missing file → {}). */
 function readCompanionEnv() {
-  const envPath = join(homedir(), ".crow", "bundles", "companion", ".env");
+  const envPath = join(resolveCrowHome(), "bundles", "companion", ".env");
   if (!existsSync(envPath)) return {};
   return parseEnvText(readFileSync(envPath, "utf8"));
 }

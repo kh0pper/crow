@@ -11,6 +11,10 @@ import {
   collectHealthSignals,
   invalidateHealthCache,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
+import { backupLabel, instanceBackupTag, backupFileName } from "../servers/shared/backup-naming.js";
+
+// The signal only counts THIS instance's backup files (per-instance naming).
+const OWN_BACKUP = backupFileName(backupLabel(), instanceBackupTag(), "2026-01-01");
 
 // ─── Stub DB factory ──────────────────────────────────────────────────────────
 
@@ -78,7 +82,7 @@ test("backup: file older than 7 days → state warn", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "crow-backup-test-"));
   process.env.CROW_BACKUP_DIR = tmpDir;
 
-  writeFileSync(join(tmpDir, "test.db"), "");
+  writeFileSync(join(tmpDir, OWN_BACKUP), "");
 
   // now = real now + 8 days (file appears 8 days old)
   const futureNow = () => Date.now() + 8 * 24 * 60 * 60 * 1000;
@@ -108,7 +112,7 @@ test("backup: fresh backup, verified ok → ok", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "crow-backup-fresh-"));
   process.env.CROW_BACKUP_DIR = tmpDir;
 
-  const dbFile = join(tmpDir, "test.db");
+  const dbFile = join(tmpDir, OWN_BACKUP);
   writeFileSync(dbFile, "x");
 
   // Supply a matching verification record so the signal reports verified-ok.
@@ -142,7 +146,7 @@ test("backup: fresh backup, no verification record → info (gentle nudge, not w
   const original = process.env.CROW_BACKUP_DIR;
   const tmpDir = mkdtempSync(join(tmpdir(), "crow-backup-unv-"));
   process.env.CROW_BACKUP_DIR = tmpDir;
-  writeFileSync(join(tmpDir, "test.db"), "x");
+  writeFileSync(join(tmpDir, OWN_BACKUP), "x");
 
   const result = await collectHealthSignals(makeDb()); // no verification record
 

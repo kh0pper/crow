@@ -7,8 +7,8 @@
  * docs/superpowers/specs/2026-06-10-f6c2-connect-token-design.md.
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import { resolveCrowHome } from "../shared/crow-home.js";
 import { writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   readSetting, writeSetting, deleteLocalSetting,
@@ -41,12 +41,11 @@ function phoneTokenPath() {
   return join(crowHome(), "phone-token");
 }
 
-// Deliberately self-contained (not importing resolveCrowHome from ./proxy.js)
-// — proxy.js pulls in the McpServer/Client/StdioClientTransport machinery for
-// the external-integrations proxy, which this file has no other reason to
-// load. Identical resolution order to proxy.js's resolveCrowHome().
+// Not importing resolveCrowHome from ./proxy.js — proxy.js pulls in the
+// McpServer/Client/StdioClientTransport machinery. The shared resolver is
+// dependency-free.
 function crowHome() {
-  return process.env.CROW_HOME || join(homedir(), ".crow");
+  return resolveCrowHome();
 }
 
 function boardTokenPath() {

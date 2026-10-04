@@ -16,7 +16,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, renameSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
-import { homedir } from "node:os";
+import { resolveInstanceDataDir } from "../../shared/crow-home.js";
 import { randomBytes } from "node:crypto";
 
 /**
@@ -40,7 +40,7 @@ export const STATUS_FILE = "ntfy-push-status.json";
 
 /** Same resolution as the instance-id file (instance-registry.js) — one dir per instance. */
 export function ntfyDataDir(env = process.env) {
-  return env.CROW_DATA_DIR ? resolve(env.CROW_DATA_DIR) : resolve(homedir(), ".crow", "data");
+  return resolveInstanceDataDir(env);
 }
 
 export function ntfyConfigPath(env = process.env) {

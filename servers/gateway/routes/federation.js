@@ -49,7 +49,7 @@ import { getVisiblePanels } from "../dashboard/panel-registry.js";
 import { getLocalCatalog } from "../capability-registry.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 import { botFederationRouter } from "./bot-federation-routes.js";
 import { buildAdvertisementPayload } from "../dashboard/panels/bot-builder/crow-messages-admin.js";
 
@@ -59,7 +59,7 @@ import { buildAdvertisementPayload } from "../dashboard/panels/bot-builder/crow-
  * cross-dependency between federation and the nest panel.
  */
 function loadInstalledBundles() {
-  const installedPath = join(homedir(), ".crow", "installed.json");
+  const installedPath = join(resolveCrowHome(), "installed.json");
   if (!existsSync(installedPath)) return [];
 
   let installed;
@@ -79,7 +79,7 @@ function loadInstalledBundles() {
     let icon = null;
     let category = null;
     const manifestPaths = [
-      join(homedir(), ".crow", "bundles", id, "manifest.json"),
+      join(resolveCrowHome(), "bundles", id, "manifest.json"),
       join(import.meta.dirname, "../../../bundles", id, "manifest.json"),
     ];
     for (const mp of manifestPaths) {

@@ -1,13 +1,13 @@
 import { readFileSync, writeFileSync, existsSync, copyFileSync, statSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { homedir } from "os";
+import { resolveCrowHome } from "../shared/crow-home.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const APP_ROOT = resolve(__dirname, "../..");
 
 export function resolveEnvPath() {
-  const crowEnv = join(homedir(), ".crow", ".env");
+  const crowEnv = join(resolveCrowHome(), ".env");
   if (existsSync(crowEnv)) return crowEnv;
   return join(APP_ROOT, ".env");
 }

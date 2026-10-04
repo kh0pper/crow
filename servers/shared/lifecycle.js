@@ -19,12 +19,18 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
-import { homedir } from "os";
+import { resolveInstanceDataDir } from "./crow-home.js";
 import { loadProviders } from "./providers.js";
 import { isExternalEngine } from "./provider-engine.js";
 
+// Per-instance: refcounts are this PROCESS's warm/release state. A co-hosted
+// gateway (r4, CROW_DATA_DIR=~/.crow-r4/data) used to share the primary's file,
+// so each overwrote the other's counts and the next boot loaded the wrong ones.
 const REFCOUNT_PATH = process.env.CROW_REFCOUNT_PATH
-  || resolve(homedir(), ".crow", "data", "orchestrator-refcounts.json");
+  || resolve(resolveInstanceDataDir(), "orchestrator-refcounts.json");
+
+/** Where this process persists its refcounts (exported for tests). */
+export function refcountPath() { return REFCOUNT_PATH; }
 
 const IDLE_GRACE_MS = 5 * 60 * 1000; // 5 min
 
@@ -85,7 +91,7 @@ function persistRefcounts() {
     }
     const dir = dirname(REFCOUNT_PATH);
     mkdirSync(dir, { recursive: true });
-    const tmp = REFCOUNT_PATH + ".tmp";
+    const tmp = `${REFCOUNT_PATH}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(out, null, 2));
     renameSync(tmp, REFCOUNT_PATH);
   } catch {}

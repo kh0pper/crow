@@ -13,6 +13,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mountMcpServer } from "../routes/mcp.js";
 import { createDbClient } from "../../db.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 
 // Re-anchored gateway dir for repo-fallback bundle paths (C3)
 const __gatewayDir = dirname(fileURLToPath(import.meta.url));
@@ -105,8 +106,7 @@ export async function mountFeatureRoutes(app, deps) {
     const { existsSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
-    const { homedir } = await import("node:os");
-    const installed = join(homedir(), ".crow", "bundles", "media", "panel", "routes.js");
+    const installed = join(resolveCrowHome(), "bundles", "media", "panel", "routes.js");
     // C3: re-anchored — boot/ is one level deeper, need ../../bundles
     const repo = join(__featureGatewayDir, "../../bundles/media/panel/routes.js");
     const routesPath = existsSync(installed) ? installed : repo;
@@ -126,9 +126,8 @@ export async function mountFeatureRoutes(app, deps) {
     const { existsSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
-    const { homedir } = await import("node:os");
     // Honor CROW_HOME so alternate instances mount their own installed copy
-    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const crowHome = resolveCrowHome();
     const installed = join(crowHome, "bundles", "knowledge-base", "routes", "kb-public.js");
     // C3: re-anchored — boot/ is one level deeper, need ../../bundles
     const repo = join(__featureGatewayDir, "../../bundles/knowledge-base/routes/kb-public.js");
@@ -194,8 +193,7 @@ export async function mountFeatureRoutes(app, deps) {
     const { existsSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
-    const { homedir } = await import("node:os");
-    const installed = join(homedir(), ".crow", "bundles", "tea-maps", "routes", "tea-maps-public.js");
+    const installed = join(resolveCrowHome(), "bundles", "tea-maps", "routes", "tea-maps-public.js");
     // C3: re-anchored — boot/ is one level deeper, need ../../bundles
     const repo = join(__featureGatewayDir, "../../bundles/tea-maps/routes/tea-maps-public.js");
     const routesPath = existsSync(installed) ? installed : repo;
@@ -223,8 +221,7 @@ export async function mountFeatureRoutes(app, deps) {
   try {
     const { join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
-    const { homedir } = await import("node:os");
-    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const crowHome = resolveCrowHome();
     // C3: re-anchored — boot/ is one level deeper, need ../../bundles
     const repoServerDir = join(__featureGatewayDir, "../../bundles/ramble/server");
     const { getManagersOrNull, getInstanceSyncManager } = await import("../../sharing/managers.js");

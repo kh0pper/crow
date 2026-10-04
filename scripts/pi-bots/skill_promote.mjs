@@ -36,10 +36,15 @@ import { normalizeSkillName } from "./skill_proposals.mjs";
 import { resolveSkill } from "./skill_resolver.mjs";
 import { botAuthoredSkill, recordSkillEvent } from "./skill_provenance.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 
 const HOME = homedir();
 const CROW_DB = botsDbPath();
-const CROW_USER_SKILLS = join(HOME, ".crow", "skills");   // sole write target (matches approve handler)
+// Sole write target: THIS instance's skills dir (CROW_HOME/skills), the same dir
+// the gateway approve handler and Skills panel use. Was hardcoded ~/.crow/skills,
+// so a co-hosted instance (CROW_HOME=~/.crow-r4) promoted into the primary's.
+const CROW_USER_SKILLS = join(resolveCrowHome(), "skills");
+function userSkillsDir(crowHome) { return crowHome ? join(crowHome, "skills") : join(resolveCrowHome(), "skills"); }
 const REPO_SKILLS = join(HOME, "crow", "skills");         // protected (shipped) — never written
 
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
@@ -82,13 +87,14 @@ export function promoteSkill(opts) {
   if (!text.trim()) return { ok: false, code: "empty", message: "content (non-empty) required" };
   const mode = opts.mode === "operator" ? "operator" : "auto";
 
-  mkdirSync(CROW_USER_SKILLS, { recursive: true });
+  const skillsDir = userSkillsDir(opts.crowHome);
+  mkdirSync(skillsDir, { recursive: true });
   // containment: the resolved skills root must be a prefix of the target.
-  const realRoot = realpathSync(CROW_USER_SKILLS);
+  const realRoot = realpathSync(skillsDir);
   if (!join(realRoot, name + ".md").startsWith(realRoot + "/")) {
     return { ok: false, code: "escape", message: "target escapes the skills dir" };
   }
-  const target = join(CROW_USER_SKILLS, name + ".md");
+  const target = join(skillsDir, name + ".md");
   const targetExists = existsSync(target);
   if (targetExists && lstatSync(target).isSymbolicLink()) {
     return { ok: false, code: "symlink", message: "target is a symlink — refusing" };

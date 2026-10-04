@@ -15,7 +15,7 @@
 import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
+import { resolveCrowHome } from "../shared/crow-home.js";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +23,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Respect the instance's CROW_HOME (matches proxy.js resolveCrowHome). Without
 // this, an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance) reads and
 // writes the MAIN ~/.crow, re-coupling the instances (commit 1b28d38a).
-export const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
+export const CROW_HOME = resolveCrowHome();
 export const BUNDLES_DIR = join(CROW_HOME, "bundles");
 export const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 

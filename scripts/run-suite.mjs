@@ -90,10 +90,11 @@ env.CROW_DATA_DIR = join(scratch, "data");
 // having created it first ("Cannot open database because the directory does
 // not exist" in bundle-npm-required / bundles-auth-bypass, 2026-10-04).
 mkdirSync(env.CROW_DATA_DIR, { recursive: true });
-// Host-global files that live outside CROW_HOME by design (they are keyed on
-// os.homedir()), redirected so no suite process ever reads or writes the
-// host's real copies: the same-machine instance registry (every suite gateway
-// registered itself there) and the orchestrator refcount file.
+// Belt and braces: these now resolve per instance (CROW_HOME / CROW_DATA_DIR,
+// servers/shared/crow-home.js), but a suite gateway must never touch a real
+// copy even if a resolver regresses — the same-machine instance registry
+// (every suite gateway used to register itself in the host's) and the
+// orchestrator refcount file.
 env.CROW_INSTANCES_JSON_PATH = join(scratch, "instances.json");
 env.CROW_REFCOUNT_PATH = join(env.CROW_DATA_DIR, "orchestrator-refcounts.json");
 // The nightly API backup dir (routes/admin-backup.js writes there, the Nest
