@@ -346,3 +346,21 @@ test("funnel: env unset leaves the static allowlist behavior unchanged", () => {
   assert.equal(runFunnelMw("/s/family").statusCode, 403);
   assert.equal(runFunnelMw("/blog").nexted, true);
 });
+
+test("kiosk paths are never public-funnel paths (spec §10; page at /display per ruling F1)", async () => {
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const p of ["/display", "/display/", "/kiosk", "/kiosk/", "/api/kiosk", "/api/kiosk/"]) assert.ok(!PUBLIC_FUNNEL_PREFIXES.includes(p), p);
+  const app = express();
+  app.use(rejectFunneledMiddleware());
+  app.get("/display", (req, res) => res.send("ok"));
+  app.get("/display/assets/:file", (req, res) => res.send("ok"));
+  app.post("/api/kiosk/pair/start", (req, res) => res.send("ok"));
+  const srv = http.createServer(app);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    assert.equal((await fetch(base + "/display", { headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
+    assert.equal((await fetch(base + "/display/assets/kiosk.js", { headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
+    assert.equal((await fetch(base + "/api/kiosk/pair/start", { method: "POST", headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
+  } finally { srv.close(); }
+});
