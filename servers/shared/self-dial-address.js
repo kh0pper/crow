@@ -231,9 +231,12 @@ export async function tailscaleStatusAsync({ timeoutMs = PROBE_TIMEOUT_MS } = {}
 }
 
 /**
- * A (re-)pairing ceremony resets what tailnet-sync learned about the peer's
- * protocol: its challenge-response flag (the downgrade guard) is cleared, so
- * a peer re-paired onto older code can link again. Never throws.
+ * The OPERATOR's local re-pair (`crow instance pair`, run in a shell on this
+ * host) resets what tailnet-sync learned about the peer's protocol: its
+ * challenge-response pin (the downgrade guard) is cleared, so a peer
+ * re-paired onto older code can link again. NEVER call this from an inbound
+ * network request (e.g. /instance/enroll-request): that would let any caller
+ * downgrade a pinned peer to the replayable legacy handshake. Never throws.
  */
 export async function forgetPeerHandshakeState(db, localInstanceId, peerId) {
   if (!db || !localInstanceId || !peerId) return;

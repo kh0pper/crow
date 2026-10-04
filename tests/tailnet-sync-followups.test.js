@@ -197,10 +197,12 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
         const port = (await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_port:peerB' AND instance_id = 'self'")).rows[0];
         assert.equal(port?.value, "3001", "the source's backend port is remembered");
 
-        // Re-pairing clears the peer's challenge-response flag (downgrade guard).
+        // An inbound enroll request for a PINNED peer must leave the
+        // challenge-response pin intact — otherwise anyone who can reach the
+        // endpoint while enrollment is on could downgrade the peer.
         await db.execute("INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES ('tailnet_sync_cr:peerB', 'self', '1', datetime('now'))");
-        assert.equal((await post({ ...base, source_gateway_url: "http://100.90.185.114:3001" })).status, 200);
-        assert.equal((await db.execute("SELECT COUNT(*) AS n FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_cr:peerB'")).rows[0].n, 0, "CR flag cleared by the re-pair");
+        assert.equal((await post({ ...base, source_gateway_url: "http://100.90.185.114:3001" })).status, 200, "the enroll itself succeeds (pairing semantics unchanged)");
+        assert.equal((await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_cr:peerB' AND instance_id = 'self'")).rows[0]?.value, "1", "CR pin intact after an inbound enroll");
 
         // An OLD peer re-pairing with its :443 CROW_GATEWAY_URL never replaces a dialable row.
         const r2 = await post({ ...base, source_gateway_url: "https://black-swan.example.ts.net", source_tailscale_ip: "8.8.8.8" });
@@ -710,4 +712,68 @@ test("Hyperswarm handshake is no signing oracle: it signs only a 32-byte hex cha
   } finally {
     await fleet.cleanup();
   }
+});
+
+test("DOWNGRADE, garbled CR fields: a PINNED peer whose hello carries a malformed `cr` (string, 0, float, null) is refused on the accept side, and a pinned server whose reply carries a malformed `cr_sig` is refused on the dial side; an UNPINNED peer sending the same malformed `cr` is still served as legacy", async () => {
+  _resetPeerDialHealth();
+  const fleet = await makeFleet();
+  const { a, b, identity } = fleet;
+  const B = await startGateway(fleet, b);
+  quiet();
+  const bad = ["1", 0, 1.5, null, true, { v: 1 }];
+  try {
+    // Unpinned control: malformed cr → treated as legacy, gets hello + feed key.
+    for (const cr of bad) {
+      const c = await openRaw(B.port);
+      c.ws.send(JSON.stringify({ ...hello(identity, a.id, { cr: false }), cr }));
+      assert.equal((await c.nextFrame(1))?.instance_id, b.id, `unpinned, cr=${JSON.stringify(cr)}: hello`);
+      assert.ok("feed_key_hex" in ((await c.nextFrame(2)) || {}), `unpinned, cr=${JSON.stringify(cr)}: legacy feed key`);
+      c.close();
+    }
+    // Pin A on B.
+    await b.db.execute({ sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES (?, ?, '1', datetime('now'))", args: [`tailnet_sync_cr:${a.id}`, b.id] });
+    for (const cr of bad) {
+      const c = await openRaw(B.port);
+      c.ws.send(JSON.stringify({ ...hello(identity, a.id, { cr: false }), cr }));
+      await Promise.race([c.closed, sleep(3000)]);
+      assert.equal(c.code(), 1008, `pinned, cr=${JSON.stringify(cr)}: refused`);
+      assert.equal(c.reason(), "challenge required");
+      assert.equal(c.frames.length, 0, `pinned, cr=${JSON.stringify(cr)}: nothing sent`);
+    }
+  } finally {
+    loud();
+    await B.close();
+  }
+
+  // Dial side: A pinned for B; an endpoint answering as B with a garbled cr_sig.
+  for (const crSig of [null, "", "zz", 42]) {
+    _resetPeerDialHealth();
+    const http = createServer();
+    const wss = new WebSocketServer({ server: http, path: WS_PATH });
+    const got = [];
+    wss.on("connection", (ws) => ws.on("message", (d, bin) => {
+      if (bin) return;
+      const m = JSON.parse(d.toString()); got.push(m);
+      if (m.instance_id) { ws.send(JSON.stringify({ ...hello(identity, b.id, { cr: false }), cr_sig: crSig })); ws.send(JSON.stringify({ feed_key_hex: null })); }
+    }));
+    await new Promise((r) => http.listen(0, "127.0.0.1", r));
+    await a.db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES (?, ?, '1', datetime('now'))", args: [`tailnet_sync_cr:${b.id}`, a.id] });
+    await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${http.address().port}`, b.id] });
+    const A = await startGateway(fleet, a);
+    quiet();
+    try {
+      await A.startClients();
+      assert.ok(await until(() => /challenge response invalid|downgrade refused/.test(getPeerDialHealth()[b.id]?.lastError || ""), 5000), `cr_sig=${JSON.stringify(crSig)}: ${getPeerDialHealth()[b.id]?.lastError}`);
+      await sleep(150);
+      assert.ok(got.some((m) => m.instance_id === a.id), "reached the endpoint");
+      assert.ok(!got.some((m) => "feed_key_hex" in m || "cr_proof" in m), `cr_sig=${JSON.stringify(crSig)}: nothing leaked`);
+      assert.equal(a.mgr.hasDedicatedStream(b.id), false);
+    } finally {
+      loud();
+      await A.close();
+      for (const c of wss.clients) c.terminate();
+      await new Promise((r) => http.close(r));
+    }
+  }
+  await fleet.cleanup();
 });

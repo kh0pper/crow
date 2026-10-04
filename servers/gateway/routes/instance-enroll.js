@@ -35,7 +35,7 @@ import {
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../instance-registry.js";
-import { isDialableGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState } from "../../shared/self-dial-address.js";
+import { isDialableGatewayUrl, isTailnetAddress, rememberPeerSyncPort } from "../../shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
@@ -118,7 +118,13 @@ export function instanceEnrollRouter(db, { execFileSyncImpl } = {}) {
 
       const localId = getOrCreateLocalInstanceId();
       await rememberPeerSyncPort(db, localId, source_instance_id, source_sync_port);
-      await forgetPeerHandshakeState(db, localId, source_instance_id);
+      // NOTE: the tailnet-sync challenge-response pin (tailnet_sync_cr:<id>)
+      // is deliberately NOT touched here. This endpoint is reachable by any
+      // host while enrollment is enabled (the OTC is optional), so clearing
+      // the pin on an inbound request would let anyone downgrade a pinned
+      // peer to the replayable legacy handshake. Only the operator's local
+      // `crow instance pair` (scripts/cli/instance-pair.js) or a revoke
+      // clears it.
       // Our TAILNET dial address — never CROW_GATEWAY_URL (the public
       // Funnel URL on crow; instance sync never dials :443).
       const self = await selfPairingAddress(db, execFileSyncImpl ? { execFileSyncImpl } : {});
