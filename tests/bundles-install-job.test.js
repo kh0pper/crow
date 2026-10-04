@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,12 @@ import { join } from "node:path";
 // in the operator's real ~/.crow (it has — see bundles-auth-bypass.test.js's header
 // comment for the live incident this caused).
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+// resolveDataDir() (servers/db.js) ignores CROW_HOME — without this the
+// router's DB client opens the run's shared data dir (absent in a single-file
+// `npm test` run → "Cannot open database because the directory does not
+// exist") or, under a raw node --test, the LIVE ~/.crow/data/crow.db.
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const { runInstallJob, _createJobForTest, _getJobForTest, _finishJobForTest } =
   await import("../servers/gateway/routes/bundles.js");
 

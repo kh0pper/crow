@@ -12,13 +12,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
-// The repo's convention is CROW_BROWSER_CDP_PORT (tests/pibot-crow-server-catalog.test.js:38).
-const CDP = process.env.CROW_CDP_URL ||
-  ("http://127.0.0.1:" + (process.env.CROW_BROWSER_CDP_PORT || "9223"));
-// The CDP browser runs in Docker: it cannot reach 127.0.0.1 on the host, and
-// file:// is unreachable entirely. Bind 0.0.0.0 and navigate to the bridge.
-const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
+// A PRIVATE headless Chrome per file (tests/fixtures/headless-chrome.mjs) —
+// never the live crow-browser on :9223. Set in before().
+let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
+let HOST_FROM_CONTAINER = "127.0.0.1";
 
 let available = false, server = null, port = 0;
 
@@ -158,11 +157,10 @@ function serveApi(req, res) {
 }
 
 before(async () => {
-  try {
-    const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
-    available = r.ok;
-  } catch { available = false; }
+  chrome = await startHeadlessChrome();
+  available = !!chrome;
   if (!available) return;
+  CDP = chrome.cdp; HOST_FROM_CONTAINER = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   server = http.createServer(async (req, res) => {
@@ -174,11 +172,11 @@ before(async () => {
     const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
-  await new Promise((r) => server.listen(0, "0.0.0.0", r));
+  await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
 });
 
-after(() => { if (server) server.close(); });
+after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 /** Open a tab, run one expression, return its value, close the tab. */
 async function evaluate(width, height, expression) {
@@ -377,6 +375,15 @@ async function session(width, height) {
   return {
     evalIn,
     json: async (expression) => JSON.parse(await evalIn(expression)),
+    /** Let the page use the async clipboard API the way a focused tab with a
+     *  user gesture could (headless tabs are neither focused nor granted). */
+    grantClipboard: async () => {
+      await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+      await send("Browser.grantPermissions", {
+        origin: `http://${HOST_FROM_CONTAINER}:${port}`,
+        permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+      });
+    },
     /** Resize the emulated viewport mid-session, so a test can cross the
      *  split breakpoint the way an operator dragging a window does. */
     metrics: async (w, h) => send("Emulation.setDeviceMetricsOverride",
@@ -708,9 +715,18 @@ test("F1b live @1280x900: with a chat open the VISIBLE list keeps polling", asyn
 
     // The world moves on: one session ends elsewhere.
     liveSids = liveSids.slice(0, 2);
-    await new Promise((r) => setTimeout(r, 11000));   // one 10s poll interval
-
-    const after = await s.json(ROW_COUNT);
+    // One 10s poll interval, then poll the DOM rather than trusting a fixed
+    // 11s budget (1s of slack flaked under full-suite load). Bounded at 25s:
+    // the sibling @412x730 test proves nothing BUT the list poll changes the
+    // row count, so a change inside this window is still the poll.
+    let after = null;
+    const deadline = Date.now() + 25000;
+    await new Promise((r) => setTimeout(r, 9500));
+    do {
+      after = await s.json(ROW_COUNT);
+      if (after.rows === 2) break;
+      await new Promise((r) => setTimeout(r, 250));
+    } while (Date.now() < deadline);
     assert.equal(after.rows, 2,
       "a visible list that stopped polling is what showed an idle row beside an awake session");
   } finally { await s.close(); }
@@ -1350,7 +1366,13 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
     try {
       await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
       await new Promise((r) => setTimeout(r, 900));
-      const seen = await s.json(`(function(){
+      // A private headless Chrome serves the page from 127.0.0.1 — a SECURE
+      // context, so the client takes the async navigator.clipboard path (the
+      // old Docker browser on 172.17.0.1 was insecure and only ever exercised
+      // the sync execCommand fallback). Grant the permission the real user
+      // gesture would, then wait for the flash instead of reading it sync.
+      await s.grantClipboard();
+      const seen = await s.json(`(async function(){
         var pre=document.querySelector('#perch-transcript .what.md pre');
         var wrap=pre&&pre.parentElement;
         var btn=wrap&&wrap.querySelector('.copy-pre');
@@ -1358,7 +1380,11 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         var out={pre:!!pre, wrapped:wrap&&wrap.className==='prewrap', btn:!!btn,
                  btnOutsidePre:btn?!pre.contains(btn):null,
                  msgBtn:!!msgBtn};
-        if(btn){ btn.click(); out.flashed=btn.classList.contains('copied'); }
+        if(btn){ btn.click();
+          for(var i=0;i<40&&!btn.classList.contains('copied');i++) await new Promise(function(r){setTimeout(r,50);});
+          out.flashed=btn.classList.contains('copied');
+          out.clip=window.isSecureContext&&navigator.clipboard
+            ? await navigator.clipboard.readText().catch(function(e){return 'ERR '+e;}) : '(insecure: execCommand path)'; }
         // The composer: ten lines must grow it, but never past 120px.
         var ta=document.getElementById('perch-input');
         ta.value='1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10';
@@ -1376,6 +1402,12 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.btnOutsidePre, true,
         "the button is a SIBLING of the pre — inside it, the glyph would pollute the copy source");
       assert.equal(seen.flashed, true, "a tap flashes ✓ (clipboard API or the execCommand fallback)");
+      // On the private browser (page on 127.0.0.1, always a secure context)
+      // the clipboard check is mandatory; only the CROW_CDP_URL opt-in
+      // (Docker browser, insecure 172.17.0.1 page) may take the execCommand path.
+      if (HOST_FROM_CONTAINER === "127.0.0.1" || seen.clip !== "(insecure: execCommand path)") {
+        assert.equal(seen.clip, "ls -la\n", "the clipboard holds the fence's text, without the button glyph");
+      }
       assert.equal(seen.msgBtn, true, "bot rows carry the per-message copy too");
       assert.ok(seen.grew > 72 && seen.grew <= 121,
         `ten lines grew the composer to ${seen.grew}px — above the floor, at/under the 120px ceiling`);

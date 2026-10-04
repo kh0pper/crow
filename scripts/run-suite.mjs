@@ -23,7 +23,7 @@
  * CI=true (devcontainers etc.) does NOT reduce the suite — we warn instead.
  * Every entry must name an existing test file (rot guard, hard error).
  */
-import { readdirSync, readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -86,6 +86,19 @@ const scratch = mkdtempSync(join(tmpdir(), "crow-test-"));
 const env = { ...process.env };
 env.CROW_HOME = scratch;
 env.CROW_DATA_DIR = join(scratch, "data");
+// Created up front: a single-file run used to depend on SOME other test file
+// having created it first ("Cannot open database because the directory does
+// not exist" in bundle-npm-required / bundles-auth-bypass, 2026-10-04).
+mkdirSync(env.CROW_DATA_DIR, { recursive: true });
+// Host-global files that live outside CROW_HOME by design (they are keyed on
+// os.homedir()), redirected so no suite process ever reads or writes the
+// host's real copies: the same-machine instance registry (every suite gateway
+// registered itself there) and the orchestrator refcount file.
+env.CROW_INSTANCES_JSON_PATH = join(scratch, "instances.json");
+env.CROW_REFCOUNT_PATH = join(env.CROW_DATA_DIR, "orchestrator-refcounts.json");
+// The nightly API backup dir (routes/admin-backup.js writes there, the Nest
+// backup signal stats it): never the host's real ~/backups/crow.
+env.CROW_BACKUP_DIR = join(scratch, "backups");
 // Box reservation (docs/architecture/box-reservation.md): the orchestrator
 // reads /run/user/<uid>/crow-box-reservation.json unless this is set. A live
 // benchmark window on the host would otherwise turn every model-start test
