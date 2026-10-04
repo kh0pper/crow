@@ -198,6 +198,47 @@ export async function ensurePhoneToken(db) {
 
 export const PHONE_TOKEN_KEYS = { PHONE_HASH_KEY, PHONE_CREATED_KEY };
 
+// Kiosk announce token (kiosk spec §4.1): lets the kiosk bundle's stdio MCP
+// server reach the gateway's live display sessions through loopback-only
+// /api/kiosk/internal/*. Same shape as the board/phone tokens (hash in a
+// local-scope setting, raw value in <crowHome>/kiosk-announce-token 0600) but
+// accepted NOWHERE else — validateLocalToken never consults it.
+const KIOSK_ANNOUNCE_HASH_KEY = "kiosk_announce_token_hash";
+const KIOSK_ANNOUNCE_CREATED_KEY = "kiosk_announce_token_created";
+function kioskAnnounceTokenPath() {
+  return join(crowHome(), "kiosk-announce-token");
+}
+
+export async function generateKioskAnnounceToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, KIOSK_ANNOUNCE_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, KIOSK_ANNOUNCE_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = kioskAnnounceTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validateKioskAnnounceToken(db, token) {
+  if (!token) return false;
+  const stored = await readSetting(db, KIOSK_ANNOUNCE_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensureKioskAnnounceToken(db) {
+  const hash = await readSetting(db, KIOSK_ANNOUNCE_HASH_KEY);
+  if (hash && existsSync(kioskAnnounceTokenPath())) return { minted: false };
+  await generateKioskAnnounceToken(db);
+  return { minted: true };
+}
+
+export const KIOSK_ANNOUNCE_TOKEN_KEYS = { HASH: KIOSK_ANNOUNCE_HASH_KEY, CREATED: KIOSK_ANNOUNCE_CREATED_KEY };
+
 // Models token (models arc plan 2, Task 6): path-scoped to the lifecycle API
 // under /llm/models. pi-lab reads it from <crowHome>/models-token. It cannot
 // reach any MCP mount: the MCP middleware never consults it.
