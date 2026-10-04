@@ -28,3 +28,6 @@ export function createPreroll(maxFrames = 50) {
     get size() { return buf.length; },
   };
 }
+
+/** Wall-clock backstop: if the worklet stops posting (phone locked, track ended) the VAD never sees the cap. */
+export const TURN_GUARD_MS = VAD_DEFAULTS.maxMs + 1000;

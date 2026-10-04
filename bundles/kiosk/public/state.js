@@ -74,3 +74,20 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
     barged: !!turn.barged, output_latency_ms: outputLatencyMs,
   };
 }
+
+/** A dead token or a halt leaves the display idle for a long time: release the mic so the phone's indicator goes off. */
+export const releasesMic = (decision) => decision.action === "forget_token" || decision.action === "halt";
+/**
+ * tts_start: `own` = it belongs to the active turn (may book playAt); `play` = false keeps the player
+ * muted — a barged turn's tts_start/frames still in flight before the server saw barge_in.
+ */
+export function ttsStartDecision(turn) {
+  if (turn && turn.barged && !turn.done) return { play: false, own: false };
+  return { play: true, own: !!(turn && turn.ended && !turn.done && !turn.barged) };
+}
+export function pairStartDecision(status, body, attempt) {
+  if (status === 200 && body && /^\d{6}$/.test(String(body.code)) && body.pair_id && body.poll_secret) return { action: "show" };
+  return status === 429 ? { action: "retry", hint: "pair_busy", ms: 15_000 } : { action: "retry", hint: "pair_error", ms: backoffMs(attempt) };
+}
+const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);
+export const bannerAfterReady = (cur) => (MIC_BANNERS.has(cur) ? cur : null);

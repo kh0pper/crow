@@ -3,8 +3,9 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
+  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady,
 } from "./state.js";
-import { createVad } from "./vad.js";
+import { createVad, TURN_GUARD_MS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
 import { mountBird } from "./bird-view.js";
 import { createWindowView } from "./wm-view.js";
@@ -23,9 +24,17 @@ const t = (k) => STRINGS[lang]?.[k] || STRINGS.en?.[k] || "";
 
 let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null, reconnectTimer = null;
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
-let ttsSeq = 0;
+let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
 
-function banner(key) { const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; }
+function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; }
+/** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
+function releaseAudio() {
+  if (turn && !turn.ended) endTurn("manual", null);
+  try { mic?.close(); } catch {}
+  mic = null;
+  player?.flush();
+  try { ctx?.suspend(); } catch {}
+}
 function setBird(s) {
   birdState = s;
   bird?.setState(s);
@@ -47,12 +56,16 @@ async function pair() {
   $("pair-label").textContent = t("pair_label");
   $("pair-hint").textContent = t("pair_hint");
   $("pair-code").textContent = "";
-  let res;
+  let status = 0, body = null;
   try {
-    res = await fetch("/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name_hint: /Mobile|Android|iPhone/.test(navigator.userAgent) ? "Phone" : "Display" }) });
-  } catch { setTimeout(pair, 5000); return; }
-  if (!res.ok) { $("pair-hint").textContent = t(res.status === 429 ? "pair_busy" : "pair_error"); setTimeout(pair, 15_000); return; }
-  const { pair_id, code, poll_secret } = await res.json();
+    const res = await fetch("/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name_hint: /Mobile|Android|iPhone/.test(navigator.userAgent) ? "Phone" : "Display" }) });
+    status = res.status;
+    body = await res.json().catch(() => null);
+  } catch { /* network error: status 0 */ }
+  const d = pairStartDecision(status, body, pairAttempt);
+  if (d.action !== "show") { pairAttempt++; $("pair-hint").textContent = t(d.hint); setTimeout(pair, d.ms); return; }
+  pairAttempt = 0;
+  const { pair_id, code, poll_secret } = body;
   $("pair-code").textContent = `${code.slice(0, 3)} ${code.slice(3)}`;
   const deadline = Date.now() + 10 * 60 * 1000;
   const poll = async () => {
@@ -94,6 +107,7 @@ function connect() {
     serverBird = "idle";
     renderBird();
     const d = closeDecision(ev.code, ev.reason);
+    if (releasesMic(d)) releaseAudio();
     if (d.action === "forget_token") { ls.del(LS_DEV); ls.del(LS_TOK); pair(); return; }
     if (d.action === "halt") { halted = true; banner(d.banner); return; }
     scheduleReconnect(backoffMs(attempt++));   // incl. 1011 server_error: the token is kept
@@ -104,7 +118,7 @@ const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
 function onText(m) {
   switch (m.type) {
     case "ready":
-      attempt = 0; banner(null);
+      attempt = 0; banner(bannerAfterReady(bannerKey));   // a mic prompt survives a reconnect
       config = m.display_config || {};
       if (config.lang === "en" || config.lang === "es") lang = config.lang;
       serverOffset = (m.server_now || Date.now()) - Date.now();
@@ -116,11 +130,14 @@ function onText(m) {
       break;
     case "transcript_final": $("cap-user").textContent = m.text || ""; $("cap-bot").textContent = ""; break;
     case "caption_delta": $("cap-bot").textContent += m.text || ""; break;
-    case "tts_start":
+    case "tts_start": {
+      const d = ttsStartDecision(turn);
+      if (!d.play) break;                            // a barged turn's in-flight start: the player stays muted
       ttsSeq++;
-      if (turn && turn.ended && !turn.done) { turn.tts = true; turn.ttsSeq = ttsSeq; }   // this turn's own audio
+      if (d.own) { turn.tts = true; turn.ttsSeq = ttsSeq; }   // this turn's own audio
       player?.begin(m.codec, m.sample_rate, ttsSeq);
       break;
+    }
     case "wm": wmView?.apply(m); if (m.action === "timer_done") chime(); break;
     case "announce": $("cap-user").textContent = ""; $("cap-bot").textContent = m.text || ""; break;
     case "turn_done":
@@ -139,6 +156,7 @@ function mountUi() {
   const b = config.bird || { species: "crow", seed: 0, mood: "happy" };
   const anim = config.animation !== false && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   document.documentElement.classList.toggle("no-anim", !anim);
+  bird?.dispose();                                // every ready remounts: never leave the old blink chain running
   bird = mountBird($("bird-art"), b, { animate: anim });
   $("bird").setAttribute("aria-label", t("mic_talk"));
   renderBird();
@@ -161,7 +179,7 @@ async function ensureAudio() {
     player = createPlayer(ctx, {
       onLevel: (v) => bird?.setLevel(v),
       onFirstPlay: (at, seq) => {
-        if (turn && turn.ttsSeq === seq && turn.playAt == null) turn.playAt = at;
+        if (turn && !turn.barged && turn.ttsSeq === seq && turn.playAt == null) turn.playAt = at;
         renderBird();
       },
       onDrained: () => { renderBird(); if (turn) settle(turn); },
@@ -189,7 +207,9 @@ async function startTurn(source) {
   if (turn) report(turn, true);                  // a pending no-audio wait is cut short: still reported (F9)
   const noSpeechMs = source === "follow_up" ? (config.follow_up_s || 6) * 1000 : 8000;
   const hangoverMs = Number(config.vad_hangover_ms) || 600;   // latency lever 1 (ruling R20)
-  turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null };
+  turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null };
+  const tn = turn;
+  tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
   send({ type: "turn_start", source: source === "wake" ? "wake" : "tap", turn_id: turn.id });
   mic.start(source === "wake");                   // 1.0 s pre-roll only for a wake word (spec §7.3)
   $("cap-user").textContent = "";
@@ -198,6 +218,7 @@ async function startTurn(source) {
 function endTurn(reason, speechEndAt) {
   if (!turn || turn.ended) return;
   turn.ended = true; turn.reason = reason; turn.speechEndAt = speechEndAt;
+  clearTimeout(turn.guard); turn.guard = null;
   mic?.stop();
   send({ type: "turn_end", vad_reason: reason });
 }
@@ -241,6 +262,7 @@ async function onTap() {
 }
 $("bird").addEventListener("click", onTap);
 $("mic").addEventListener("click", onTap);
+window.addEventListener("pagehide", releaseAudio);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && ls.get(LS_TOK)) connect(); });   // connect() is a no-op while a socket is live
 
 $("mic").textContent = t("mic_talk");

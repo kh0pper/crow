@@ -11,12 +11,12 @@ export function mountBird(container, bird, { animate = true } = {}) {
   const draw = () => { svg.innerHTML = RB.drawBird(genome, mood, { hooks: true }); };
   draw();
   container.replaceChildren(svg);
-  let blink = null;
+  let blink = null, unblink = null, disposed = false;
   const scheduleBlink = () => {
-    if (!animate) return;
+    if (!animate || disposed) return;
     blink = setTimeout(() => {
       container.classList.add("blink");
-      setTimeout(() => container.classList.remove("blink"), 160);
+      unblink = setTimeout(() => { unblink = null; container.classList.remove("blink"); }, 160);
       scheduleBlink();
     }, 4000 + Math.random() * 5000);
   };
@@ -27,5 +27,7 @@ export function mountBird(container, bird, { animate = true } = {}) {
     setLevel(v) { host.style.setProperty("--beak", String(Math.round(v * 100) / 100)); },
     setMood(m) { if (m !== mood) { mood = m; draw(); } },
     pause(p) { if (p) { clearTimeout(blink); blink = null; } else if (!blink) scheduleBlink(); },
+    /** Stop every timer (a remount on reconnect must not leave a second blink chain running). */
+    dispose() { disposed = true; clearTimeout(blink); clearTimeout(unblink); blink = unblink = null; container.classList.remove("blink"); },
   };
 }

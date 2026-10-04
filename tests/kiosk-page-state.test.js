@@ -133,10 +133,11 @@ function fakeCtx() {
 }
 const tick = () => new Promise((r) => setImmediate(r));
 
-test("player: playing covers queued audio; drain fires once when the last source ends; flush never fires drain", async () => {
+test("player: playing covers queued audio; drain fires once when the last source ends; flush never fires drain", async (t) => {
   const { ctx, started } = fakeCtx();
   const ev = { first: [], drained: 0 };
   const p = createPlayer(ctx, { onLevel() {}, onFirstPlay: (at, tag) => ev.first.push(tag), onDrained: () => ev.drained++ });
+  t.after(() => p.flush());                      // a failed assertion must not leave the beak sampler interval running
   p.begin("pcm", 24000, 7);
   p.push(new ArrayBuffer(4800)); p.push(new ArrayBuffer(4800));
   assert.equal(p.playing, true, "queued but not yet scheduled still counts as playing (server idle can beat the decode)");
@@ -155,4 +156,91 @@ test("player: playing covers queued audio; drain fires once when the last source
   const n = started.length;
   p.push(new ArrayBuffer(4800)); p.flush(); await tick();
   assert.equal(started.length, n, "audio queued before a flush never starts after it");
+});
+
+// ---- Fix round 1 ----
+import { mock } from "node:test";
+import { parseHTML } from "linkedom";
+import { releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady } from "../bundles/kiosk/public/state.js";
+import { TURN_GUARD_MS, VAD_DEFAULTS as VD } from "../bundles/kiosk/public/vad.js";
+import { mountBird } from "../bundles/kiosk/public/bird-view.js";
+
+test("fix 1: a remount disposes the old bird — no blink timer chain survives dispose()", (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(Math, "random", () => 0);       // blink every 4 s exactly
+  t.after(() => { mock.timers.reset(); delete globalThis.window; delete globalThis.document; });
+  const { document, window } = parseHTML("<button class=k-bird><span id=a></span></button>");
+  globalThis.document = document;
+  globalThis.window = Object.assign(window, { RambleBird: { rollGenome: () => ({}), drawBird: () => "<g></g>" } });
+  const art = document.getElementById("a");
+  const blinkedWithin = (ms) => { let seen = false; for (let i = 0; i < ms; i += 20) { mock.timers.tick(20); seen ||= art.classList.contains("blink"); } return seen; };
+  const b1 = mountBird(art, { species: "crow", seed: 0, mood: "happy" });
+  assert.equal(blinkedWithin(4100), true, "blinks every 4–9 s");
+  mock.timers.tick(3990);                        // just before the next blink
+  b1.dispose();
+  assert.equal(blinkedWithin(30_000), false, "a disposed bird never blinks again");
+  b1.pause(false);
+  assert.equal(blinkedWithin(30_000), false, "unpause after dispose does not revive it");
+  const b2 = mountBird(art, { species: "crow", seed: 0, mood: "happy" });
+  mock.timers.tick(4000); assert.equal(art.classList.contains("blink"), true);
+  b2.dispose();
+  assert.equal(art.classList.contains("blink"), false, "dispose mid-blink clears the class and the 160 ms un-blink");
+});
+
+test("fix 2: halt (4000) and forget_token (4401) release the mic; a reconnect (1006/1011/hello_timeout) keeps it", () => {
+  assert.equal(releasesMic(closeDecision(4000, "superseded")), true);
+  assert.equal(releasesMic(closeDecision(4401, "unpaired")), true);
+  assert.equal(releasesMic(closeDecision(4401, "unauthorized")), true);
+  for (const [c, r] of [[1006, ""], [1011, "server_error"], [4401, "hello_timeout"]]) assert.equal(releasesMic(closeDecision(c, r)), false, `${c} ${r}`);
+});
+
+test("fix 3: tts_start for a barged turn stays muted and never books playAt; a later announcement unmutes", () => {
+  const live = { ended: true, done: null, barged: false };
+  assert.deepEqual(ttsStartDecision(live), { play: true, own: true });
+  assert.deepEqual(ttsStartDecision({ ...live, barged: true }), { play: false, own: false }, "in-flight tts_start after a barge");
+  assert.deepEqual(ttsStartDecision({ ended: true, done: {}, barged: true }), { play: true, own: false }, "speech queued after the barged turn finished");
+  assert.deepEqual(ttsStartDecision(null), { play: true, own: false }, "announcement with no turn");
+  assert.deepEqual(ttsStartDecision({ ended: false, done: null, barged: false }), { play: true, own: false });
+});
+
+test("fix 3: after a barge flush the player drops in-flight PCM until the next begin(); fix 4: the beak sampler restarts after a gap", async (t) => {
+  const { ctx, started } = fakeCtx();
+  const first = [];
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay: (at, tag) => first.push(tag), onDrained() {} });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(4800)); await tick();
+  assert.equal(p.sampling, true);
+  started[0].onended();
+  assert.equal(p.sampling, false, "a drained gap stops the sampler");
+  p.push(new ArrayBuffer(4800)); await tick();
+  assert.equal(p.sampling, true, "the next sentence of the same turn restarts it");
+  p.flush();
+  const n = started.length;
+  p.push(new ArrayBuffer(4800)); p.push(new ArrayBuffer(4800)); await tick();
+  assert.equal(started.length, n, "frames the server sent before it saw barge_in never play");
+  assert.equal(p.playing, false);
+  assert.deepEqual(first, [1], "and never book a first play");
+  p.begin("pcm", 24000, 2);
+  p.push(new ArrayBuffer(4800)); await tick();
+  assert.equal(started.length, n + 1); assert.deepEqual(first, [1, 2]);
+  p.flush();
+});
+
+test("fix 5: the wall-clock guard ends a turn whose frames stop arriving, just past the VAD cap", () => {
+  assert.equal(TURN_GUARD_MS, VD.maxMs + 1000);
+});
+
+test("fix 6: pair/start needs a well-formed JSON body; anything else retries with backoff", () => {
+  const ok = { pair_id: "p1", code: "123456", poll_secret: "s" };
+  assert.deepEqual(pairStartDecision(200, ok, 0), { action: "show" });
+  assert.deepEqual(pairStartDecision(200, null, 0), { action: "retry", hint: "pair_error", ms: 1000 }, "non-JSON 200");
+  assert.deepEqual(pairStartDecision(200, { code: "12" }, 2), { action: "retry", hint: "pair_error", ms: 4000 });
+  assert.deepEqual(pairStartDecision(429, null, 0), { action: "retry", hint: "pair_busy", ms: 15_000 });
+  assert.deepEqual(pairStartDecision(0, null, 9), { action: "retry", hint: "pair_error", ms: 30_000 }, "network error");
+});
+
+test("fix 7: ready clears only connection banners; a mic prompt survives a reconnect", () => {
+  for (const k of ["mic_blocked", "needs_gesture", "no_mic", "mic_error"]) assert.equal(bannerAfterReady(k), k);
+  for (const k of ["opened_elsewhere", "error_generic", "no_bot", null]) assert.equal(bannerAfterReady(k), null);
 });
