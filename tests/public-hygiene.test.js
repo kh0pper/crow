@@ -37,7 +37,7 @@ test("process documents are refused by path", () => {
   }
 });
 
-test("a literal piped into sudo -S, and sshpass -p, are refused; env-var pipes are allowed", () => {
+test("a literal piped into sudo -S, and inline sshpass passwords, are refused; env-var pipes are allowed", () => {
   const bad = [
     J("echo 'hunter2' | sud", "o -S systemctl restart x"),
     J('echo "hunter2" | sud', "o -S true"),

@@ -10,7 +10,7 @@
  *      any path with a handoffs/ directory, any *handoff*.md file, or anything
  *      under .claude/;
  *   2. a tracked text file pipes a literal into `sudo -S` (echo/printf of a
- *      value that is not a $variable), or uses `sshpass -p`;
+ *      value that is not a $variable), or passes an inline password to sshpass;
  *   3. a tracked text file names a real-looking tailnet host
  *      (<host>.<tailnet>.ts.net) whose tailnet label is not an allowlisted
  *      placeholder (scripts/public-hygiene-allowlist.txt, `tailnet:` lines);
@@ -98,7 +98,7 @@ export function checkContent(path, text, { allow = { tailnets: new Set(), secret
     const line = lines[i];
     const n = i + 1;
     if (SUDO_LITERAL.test(line)) out.push({ path, line: n, rule: "literal piped into sudo -S" });
-    if (SSHPASS.test(line)) out.push({ path, line: n, rule: "sshpass -p" });
+    if (SSHPASS.test(line)) out.push({ path, line: n, rule: "sshpass with an inline password" });
     for (const m of line.matchAll(TAILNET_HOST)) {
       if (!allow.tailnets.has(m[1].toLowerCase())) out.push({ path, line: n, rule: `tailnet hostname (tailnet label not allowlisted)` });
     }
