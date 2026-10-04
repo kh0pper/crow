@@ -149,6 +149,12 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
     if (u.startsWith("/ocs/v2.php/apps/files_sharing/api/v1/shares")) {
       res.writeHead(200, { "Content-Type": "application/json" });
       if (req.method === "POST") { const f = new URLSearchParams(body.toString()); const s = { id: String(state.shares.length + 1), path: f.get("path"), share_with: f.get("shareWith"), share_type: Number(f.get("shareType")), permissions: Number(f.get("permissions")) }; state.shares.push(s); return res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: s } })); }
+      // T13 fix B (verified live as crow-bot, NC 34): shares/inherited?path=<file> → user shares on ANCESTOR folders;
+      // shares?path=<p>&reshares=true → shares on exactly <p>. Any other GET keeps listing everything (older tests).
+      const q = new URL(u, "http://x").searchParams; const qp = q.get("path");
+      if (state.shareApiDown) { res.statusCode = 500; return res.end("{}"); }
+      if (u.startsWith("/ocs/v2.php/apps/files_sharing/api/v1/shares/inherited")) return res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: state.shares.filter((x) => qp.startsWith(`${x.path}/`)) } }));
+      if (q.get("reshares") === "true") return res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: state.shares.filter((x) => x.path === qp) } }));
       return res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: state.shares } }));
     }
     const dl = u.match(/^\/apps\/onlyoffice\/downloadas\?fileId=(\d+)&toExtension=([a-z]+)/);

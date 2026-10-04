@@ -13,7 +13,7 @@ const ROOT = join(import.meta.dirname, "..");
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const sign = (payload, secret = "jwt", head = { alg: "HS256", typ: "JWT" }) => { const h = `${b64(head)}.${b64(payload)}`; return `${h}.${createHmac("sha256", secret).update(h).digest("base64url")}`; };
 // The docservice SESSION token shape S9 recorded (claims identical for edit and view sessions; 30-day exp).
-const editorJwt = (k, extra = {}) => sign({ document: { key: k, permissions: { edit: true } }, editorConfig: { user: { id: "ocinst_admin", name: "Kevin" } }, exp: Math.floor(Date.now() / 1000) + 2592000, ...extra });
+const editorJwt = (k, extra = {}, uid = "admin") => sign({ document: { key: k, permissions: { edit: true } }, editorConfig: { user: { id: `ocinst_${uid}`, name: uid } }, exp: Math.floor(Date.now() / 1000) + 2592000, ...extra });
 const PV = "pv=0.2.0";
 // the fake's session for S/l.docx has users ["ocinst_admin"] (openInEditor) → tokens for other users are refused
 let fake, call, close, base, server, key, key2, changeId, db;
@@ -87,11 +87,17 @@ test("claim: one winner, view-mode JWT refused, apply token required on ack; ack
   assert.equal((await ack({ change_id: changeId, apply_token: `${lease_until}.AAAA`, outcome: "applied" })).status, 403);
   // the apply token is bound to the document key: another live document's editor cannot ack it
   assert.notEqual((await ack({ change_id: changeId, apply_token, outcome: "applied" }, editorJwt(key2))).status, 200);
-  const a = await ack({ change_id: changeId, apply_token, outcome: "applied", inverse: [{ tool: "ws_docs_find_replace", args: { path: "S/evil.docx", find: "Totopos", replace: "Tortillas" } }] });
+  // fix A: a crafted inverse in the ack is NEVER stored (or executed): the undo is derived from Crow's own record
+  const a = await ack({ change_id: changeId, apply_token, outcome: "applied", inverse: [{ tool: "ws_docs_find_replace", args: { path: "S/evil.docx", find: "Totopos", replace: "EVIL-CONTENT" } }] });
   assert.equal(a.status, 200);
   const st = (await call("ws_change_status", { change_id: changeId })).data;
   assert.equal(st.state, "applied_live"); assert.equal(st.verified, false, "an ack is never proof (R-LIVE)");
-  assert.deepEqual(JSON.parse((await row(changeId)).inverse_json), [{ tool: "ws_docs_find_replace", args: { find: "Totopos", replace: "Tortillas", path: "S/l.docx" } }]);
+  const stored = (await row(changeId)).inverse_json;
+  assert.doesNotMatch(stored, /EVIL|evil/);
+  assert.deepEqual(JSON.parse(stored), [{ tool: "ws_docs_find_replace", args: { pairs: [{ find: "Totopos", replace: "Tortillas" }], expect_count: 1, path: "S/l.docx" } }]);
+  // M1: the notification never states the live edit as fact
+  const n = (await db.execute("SELECT title FROM notifications ORDER BY id DESC LIMIT 1")).rows[0];
+  assert.match(n.title, /was applied in the open editor \(confirmed when the file is saved\)/);
   assert.equal((await ack({ change_id: changeId, apply_token, outcome: "applied" })).status, 409, "a second ack changes nothing");
 });
 
@@ -122,10 +128,9 @@ test("only the next change in seq order, only live-eligible ones; another docume
   assert.equal((await claim(next, editorJwt(key))).status, 409, "a token for another live document cannot claim this file's change");
   const list = await (await get(`/api/workspace/live/v1/pending?key=${key2}&${PV}`, j2)).json();
   assert.deepEqual(list.map((x) => x.change_id), [next]);
-  // an ack whose inverse fails the inverse tool's own schema stores NO inverse (→ undo via versions)
   const { apply_token } = await (await claim(next, j2)).json();
-  assert.equal((await ack({ change_id: next, apply_token, outcome: "applied", inverse: [{ tool: "ws_docs_find_replace", args: { pairs: "nope" } }] }, j2)).status, 200);
-  assert.equal((await row(next)).inverse_json, null);
+  assert.equal((await ack({ change_id: next, apply_token, outcome: "applied", inverse: [{ tool: "ws_drive_trash_file", args: {} }] }, j2)).status, 200);
+  assert.match((await row(next)).inverse_json, /"replace":"Tortillas"/, "derived from the row, the ack's inverse ignored");
 });
 
 test("a failed live apply that may have changed something → unknown_after_claim (postcondition decides at close)", async () => {
@@ -164,4 +169,127 @@ test("one plugin version everywhere: config.json, crow-live.js and the server's 
   const html = readFileSync(join(dir, "index.html"), "utf8");
   assert.deepEqual([...html.matchAll(/<script[^>]*src="([^"]+)"/g)].map((m) => m[1]), ["./../v1/plugins.js", "./../v1/plugins-ui.js", "ops.js", "crow-live.js"], "no external scripts");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")), { type: "commonjs" });
+});
+
+// ---- T13 fix round 1 ----------------------------------------------------------------------------------------
+const req = (path, jwt, { method = "GET", body, headers = {} } = {}) => fetch(`${base}${path}`, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}`, ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
+
+test("fix B: write permission is checked server-side on /pending, /claim and /ack (owner ok, read-only sharee 403, unverifiable 403)", async () => {
+  doc("r.docx");
+  fake.state.shares.push({ id: "s1", path: "/S", share_with: "dayane", share_type: 0, permissions: 1 }, // read-only on the folder
+    { id: "s2", path: "/S/r.docx", share_with: "eve", share_type: 0, permissions: 3 }, // can edit this file
+    { id: "s3", path: "/S", share_with: "family", share_type: 1, permissions: 31 }); // a GROUP share: crow-bot cannot list members
+  const k = fake.openInEditor("S/r.docx", ["admin", "dayane", "eve", "gina"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/r.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  const pend = (uid) => req(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k, {}, uid));
+  assert.equal((await pend("dayane")).status, 403, "a viewer sees no change content");
+  assert.equal((await pend("gina")).status, 403, "group-only rights are unverifiable → view-only");
+  assert.deepEqual((await (await pend("eve")).json()).map((x) => x.change_id), [id]);
+  assert.deepEqual((await (await pend("admin")).json()).map((x) => x.change_id), [id], "the owner");
+  assert.equal((await claim(id, editorJwt(k, {}, "dayane"))).status, 403);
+  // B3: a viewer cannot disturb a legitimate claim — its failed/applied_nothing ack is refused and changes nothing
+  const { apply_token } = await (await claim(id, editorJwt(k, {}, "eve"))).json();
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "failed", applied_nothing: true }, editorJwt(k, {}, "dayane"))).status, 403);
+  assert.equal((await row(id)).state, "claimed_live");
+  // Nextcloud's share API unreachable → unverifiable → fail closed (acks and claims check fresh)
+  fake.state.shareApiDown = true;
+  try { assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k, {}, "eve"))).status, 403); }
+  finally { fake.state.shareApiDown = false; }
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k, {}, "eve"))).status, 200);
+  assert.equal((await row(id)).state, "applied_live");
+});
+
+test("fix B3: a false 'applied' ack only delays — at close the saved file decides, and a missing change fails visibly", async () => {
+  doc("p.docx");
+  const k = fake.openInEditor("S/p.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_append", { path: "S/p.docx", markdown: "Nunca escrito" })).data.change_id;
+  const { apply_token } = await (await claim(id, editorJwt(k))).json();
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k))).status, 200); // nothing was written
+  fake.node("S/p.docx").lock = null; fake.state.sessions.delete(k); // the editor closes
+  const W = await import("../bundles/workspace/server/queue/worker.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  await W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+  const r = await row(id);
+  assert.equal(r.state, "failed"); assert.equal(JSON.parse(r.result_json).reason, "not_saved");
+  assert.ok((await db.execute("SELECT title FROM notifications")).rows.some((n) => /p\.docx could not be applied/.test(n.title)));
+});
+
+test("fix I1: a write into a merged non-anchor cell is refused at queue time; a rewrite of a linked paragraph is never offered live", async () => {
+  fake.addFile("S/g.xlsx", readFileSync(join(ROOT, "tests", "fixtures", "workspace", "oo-rich.xlsx")), { owner: "admin" });
+  fake.openInEditor("S/g.xlsx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const w = await call("ws_sheets_write", { path: "S/g.xlsx", range: "Recetas!B6", values: [["x"]] });
+  assert.equal(w.success, false); assert.equal(w.code, "merged_cell");
+  doc("h.docx");
+  assert.equal((await call("ws_docs_append", { path: "S/h.docx", markdown: "[Receta](https://example.com) del día" })).success, true); // closed: written now
+  const k = fake.openInEditor("S/h.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_rewrite_passages", { path: "S/h.docx", passages: [{ match_prefix: "Receta del", new_text: "Otra receta" }] })).data.change_id;
+  assert.equal(JSON.parse((await row(id)).precondition_json).plain, false);
+  assert.deepEqual(await (await get(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k))).json(), []);
+  assert.equal((await claim(id, editorJwt(k))).status, 409);
+});
+
+test("fix A: derived inverses come from the row's args + pre only (exact or null)", async () => {
+  const { deriveInverse } = await import("../bundles/workspace/server/live/derive-inverse.js");
+  const r = (tool, args, pre) => ({ tool, path: "S/x", args_json: JSON.stringify({ path: "S/x", ...args }), precondition_json: JSON.stringify(pre) });
+  const inv = (...a) => deriveInverse(r(...a));
+  assert.deepEqual(inv("ws_docs_append", { markdown: "# Cena\n\nTacos al pastor\ncon piña" }, { text: "Cena", count: 0 }),
+    [{ tool: "ws__docs_remove_paragraphs_exact", args: { texts: ["Cena", "Tacos al pastor con piña"], at_end: true, path: "S/x" } }]);
+  assert.deepEqual(inv("ws_docs_insert_at_heading", { heading: "Menú", markdown: "Lunes" }, { text: "Lunes", count: 0 })[0].args, { texts: ["Lunes"], after_heading: "Menú", path: "S/x" });
+  assert.equal(inv("ws_docs_append", { markdown: "| a |\n|---|\n| b |" }, {}), null, "a table is not paragraph-exact");
+  assert.equal(inv("ws_docs_find_replace", { find: "a", replace: "b", match_case: true }, { fcount: 2, rcount: 1 }), null, "the replacement existed before");
+  assert.equal(inv("ws_docs_find_replace", { find: "a", replace: "b", match_case: false }, { fcount: 2, rcount: 0 }), null);
+  assert.deepEqual(inv("ws_docs_find_replace", { find: "a", replace: "b", match_case: true }, { fcount: 2, rcount: 0 })[0].args.expect_count, 2);
+  assert.deepEqual(inv("ws_sheets_write", { range: "'Mi tab'!b2:c2", values: [["x", 1]] }, { cells: [["old", 3]] }),
+    [{ tool: "ws_sheets_write", args: { range: "'Mi tab'!B2", values: [["old", 3]], value_input_option: "RAW", path: "S/x" } }]);
+  assert.equal(inv("ws_sheets_write", { range: "T!A1", values: [["x"]] }, { cells: [["=A2"]] }), null);
+  assert.deepEqual(inv("ws_sheets_append", { sheet_name: "Menu", values: [{ Plato: "Sopa" }] }, { header: ["Día", "Plato"], last_row: 4 })[0].args, { sheet: "Menu", from_row: 5, values: [["", "Sopa"]], path: "S/x" });
+  assert.deepEqual(inv("ws_sheets_set_number_format", { range: "T!A1:A2", format_type: "DATE" }, { s_attrs: [["0"], [null]] })[0].args, { range: "T!A1:A2", s_attrs: [["0"], [null]], pattern: "yyyy-mm-dd", path: "S/x" });
+  assert.deepEqual(inv("ws_sheets_rename_tab", { title: "A", new_title: "B" }, {})[0].args, { title: "B", new_title: "A", path: "S/x" });
+  assert.equal(inv("ws_docs_rewrite_passages", { passages: [{ match_prefix: "a", new_text: "b" }] }, { new_counts: {}, plain: true }), null, "the replaced text is not on Crow's record");
+  assert.equal(inv("ws_sheets_add_tab", { title: "X" }, {}), null);
+});
+
+test("fix C: pre-auth limits (per IP + global) run before any token check or ONLYOFFICE call; post-auth per (document, user) and per document", async () => {
+  const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  const app2 = express();
+  app2.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { perIp: 3, global: 5, perUser: 2, perDocument: 3 } }));
+  const s2 = app2.listen(0); const b2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const hit = (ip, jwt = "bad.token.x", path = "/claim") => fetch(`${b2}${path}`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}`, "X-Forwarded-For": ip }, body: JSON.stringify({ change_id: "pc_x", pv: "0.2.0" }) }).then((r) => r.status);
+    assert.deepEqual([await hit("100.64.0.1"), await hit("100.64.0.1"), await hit("100.64.0.1")], [401, 401, 401]);
+    const oo = fake.calls.filter((c) => c.method === "OO").length;
+    assert.equal(await hit("100.64.0.1", editorJwt(key)), 429, "per IP, before the (valid) token is even checked");
+    assert.equal(fake.calls.filter((c) => c.method === "OO").length, oo, "no command-service call for a limited request");
+    assert.deepEqual([await hit("100.64.0.2"), await hit("100.64.0.3"), await hit("100.64.0.4")], [401, 401, 429], "the global cap");
+  } finally { s2.close(); }
+  const app3 = express();
+  app3.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { perIp: 100, global: 100, perUser: 2, perDocument: 3 } }));
+  const s3 = app3.listen(0); const b3 = `http://127.0.0.1:${s3.address().port}`;
+  try {
+    const k = fake.state.keys.get(fake.node("S/r.docx").fileId);
+    const pend = (uid) => fetch(`${b3}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k, {}, uid)}` } }).then((r) => r.status);
+    assert.deepEqual([await pend("admin"), await pend("admin"), await pend("admin")], [200, 200, 429], "per (document, user)");
+    assert.deepEqual([await pend("eve"), await pend("eve")], [200, 429], "the per-document ceiling");
+  } finally { s3.close(); }
+});
+
+test("fix C3: the limiter's key set is bounded (least recently used evicted), counters of live keys survive", async () => {
+  const { windowLimiter } = await import("../bundles/workspace/server/live/limits.js");
+  let t = 0; const l = windowLimiter({ max: 2, windowMs: 1000, maxKeys: 2, now: () => t });
+  assert.equal(l.hit("a"), true); assert.equal(l.hit("b"), true); assert.equal(l.hit("a"), true);
+  assert.equal(l.hit("c"), true);
+  assert.equal(l.size(), 2); assert.equal(l.has("b"), false, "b was least recently used"); assert.equal(l.hit("a"), false, "a kept its count");
+  t = 1000; assert.equal(l.hit("a"), true, "a new window");
+});
+
+test("fix I2: delete_tab as an undo step refuses a tab that is not empty (changed_since)", async () => {
+  const { checkPre } = await import("../bundles/workspace/server/queue/conditions.js");
+  const X = await import("../bundles/workspace/server/ooxml/xlsx.js");
+  const wb = X.openXlsx(readFileSync(join(ROOT, "tests", "fixtures", "workspace", "oo-rich.xlsx")));
+  X.addTab(wb, "Vacía"); X.addTab(wb, "Llena"); X.writeRange(wb, "Llena!A1", [["dato"]]);
+  const bytes = Buffer.from(wb.pkg.save());
+  const pre = { undo_of: "pc_x", orig: null };
+  assert.deepEqual(checkPre("ws_sheets_delete_tab", { title: "Vacía" }, { undo_of: "pc_x" }, bytes), { ok: true });
+  assert.deepEqual(checkPre("ws_sheets_delete_tab", { title: "Llena" }, pre, bytes), { ok: false, reason: "changed_since" });
 });

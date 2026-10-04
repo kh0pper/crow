@@ -488,8 +488,10 @@ function composeBindSources(text, projectDir, env, { rwOnly = false } = {}) {
     const item = /^\s*-\s+(.+)$/.exec(line);
     if (!item) continue;
     const vol = clean(item[1]); const src = shortVolumeSource(vol);
-    // rwOnly: skip a short-syntax mount whose mode list has "ro" (long syntax is always counted: conservative)
-    if (rwOnly && /(^|,)ro(,|$)/.test(vol.slice(src.length + 1).split(":")[1] || "")) continue;
+    // rwOnly: skip a short-syntax mount whose mode (the LAST ":" segment of "src:dst:mode") lists "ro";
+    // long syntax is always counted (conservative)
+    const rest = vol.slice(src.length + 1).split(":");
+    if (rwOnly && rest.length >= 2 && /(^|,)ro(,|$)/.test(rest.at(-1))) continue;
     consider(src);
   }
   return out;

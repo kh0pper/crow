@@ -6,6 +6,8 @@ const names = (r) => { try { return JSON.parse(r.open_by_json || "[]").join(", "
 const TITLES = {
   queued: (r) => `Crow has a change waiting for ${base(r)}${names(r) ? ` (open by ${names(r)})` : ""}`,
   applied_live: (r) => `Crow's change to ${base(r)} was applied`,
+  // T13 M1: a live ack is not proof (R-LIVE) — never stated as fact until the saved file confirms it
+  live_ack: (r) => `Crow's change to ${base(r)} was applied in the open editor (confirmed when the file is saved)`,
   applied_close: (r) => `Crow's change to ${base(r)} was applied`,
   failed: (r) => `Crow's change to ${base(r)} could not be applied`,
   expired: (r) => `Crow's change to ${base(r)} expired`,
@@ -21,6 +23,7 @@ export async function notifyChange(db, r, event, extra = {}) {
     if (!r || !TITLES[event]) return;
     const { createNotification } = await appImport("servers/shared/notifications.js");
     const body = event === "queued" ? `Open by ${names(r) || "someone"}. It will appear in their editor, or when they close it.`
+      : event === "live_ack" ? `If it is not in the saved file when the editor closes, Crow will tell you. Undo id: ${r.id}`
       : event.startsWith("applied") ? `${extra.detected ? "Found already applied in the editor. " : ""}Undo id: ${extra.version_id || r.version_id || r.id}`
       : event === "expired" ? "It waited 7 days without the file being closed, so it was dropped."
       : `Reason: ${extra.message_for_user || REASONS[extra.reason] || extra.reason || "unknown"}.`;

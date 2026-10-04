@@ -841,6 +841,20 @@ describe("manifest.refreshFiles — docker opt-in refresh of named code paths", 
     assert.equal(readAt(destBundleDir(id), "plugin/config.json"), "plugin v1\n");
   });
 
+  test("M5: the mount mode is the LAST \":\" segment (\"z,ro\" is read-only, \"rw,z\" is not)", async () => {
+    const id = "rf-mode";
+    const repoRoot = freshRoot("crowrepo-rf-mode-");
+    const c = "services:\n  app:\n    volumes:\n      - ./ro2:/srv/ro2:z,ro\n      - ./rw2:/srv/rw2:rw,z\n";
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "W", version: "2.0.0", type: "bundle", category: "misc", description: "d", docker: { composefile: "docker-compose.yml" }, refreshFiles: ["ro2", "rw2"] }));
+    put(repoRoot, `${id}/docker-compose.yml`, c); put(repoRoot, `${id}/ro2/a`, "v2\n"); put(repoRoot, `${id}/rw2/a`, "v2\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, c); put(CROW_HOME, `bundles/${id}/ro2/a`, "v1\n"); put(CROW_HOME, `bundles/${id}/rw2/a`, "v1\n");
+    setInstalled([id]);
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.equal(readAt(destBundleDir(id), "ro2/a"), "v2\n");
+    assert.equal(readAt(destBundleDir(id), "rw2/a"), "v1\n");
+  });
+
   test("the workspace bundle declares its compose file and the live plugin, mounted read-only", () => {
     const m = JSON.parse(readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "manifest.json"), "utf8"));
     assert.deepEqual(m.refreshFiles, ["docker-compose.yml", "onlyoffice-plugin"]);

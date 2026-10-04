@@ -13,7 +13,8 @@ import { NS, all } from "../ooxml/xml.js";
 import { openDocx, allParagraphs, textMap, paragraphText, topBlocks } from "../ooxml/docx-model.js";
 import { sectionRange } from "../ooxml/docx-read.js";
 import { markdownToBlocks } from "../ooxml/md-to-wml.js";
-import { openXlsx, readRange, sheetByName, headerRow, lastDataRow, rowsFormula, styleAttrs, numFmtCodes, cellKey, sameRows, patternFor } from "../ooxml/xlsx.js";
+import { rewritePassages } from "../ooxml/docx-edit.js";
+import { openXlsx, readRange, writeRange, sheetByName, headerRow, lastDataRow, rowsFormula, styleAttrs, numFmtCodes, cellKey, sameRows, patternFor } from "../ooxml/xlsx.js";
 import { dateToSerial } from "../ooxml/xlsx-format.js";
 import { openPptx, shapeById, shapeText, slideById, paraText } from "../ooxml/pptx.js";
 
@@ -28,10 +29,12 @@ export const QUEUEABLE = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_
  * Ops the plugin may apply live (spec §5.7 table, minus R-LIVE: the 9.4 builder API lacks AddComment/SetBold/SetItalic/
  * SetUnderline/SetColor, so ws_docs_add_comment and ws_docs_format_text are close-time only). Task 13: the slide ops
  * are close-time only too — S9 verified no text method on a shape's ApiDocumentContent, so the plugin cannot read
- * or check a shape's text (onlyoffice-plugin/ops.js implements exactly this set; its test pins it).
+ * or check a shape's text. ws_sheets_add_tab is close-time only (T13 fix I2): Api.AddSheet makes the new tab the
+ * ACTIVE sheet and no verified method switches back, so the person's typing would land in Crow's tab.
+ * onlyoffice-plugin/ops.js implements exactly this set; its test pins it.
  */
 export const LIVE_OPS = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_docs_insert_at_heading", "ws_docs_rewrite_passages",
-  "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_add_tab", "ws_sheets_rename_tab"]);
+  "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_rename_tab"]);
 export const isLiveOp = (tool) => LIVE_OPS.has(tool);
 /**
  * R-LIVE: a live ack is verified against the saved file, so a change is offered for live apply only when its
@@ -44,7 +47,10 @@ export function liveEligible(tool, args = {}, pre = null) {
     case "ws_docs_find_replace": return pairsOf(args).length === 1 && Number.isInteger(pre?.rcount);
     case "ws_docs_append": case "ws_docs_insert_at_heading": return Number.isInteger(pre?.count) && !!pre?.text;
     case "ws_sheets_append": return Number.isInteger(pre?.last_row);
-    case "ws_docs_rewrite_passages": return !!pre?.new_counts;
+    // T13 fix I1: the file op's own guardrails ran on the saved file at queue time (snapshot dry run); the editor
+    // cannot check them. Residual: a link/field added in the editor after the last save is not seen.
+    case "ws_docs_rewrite_passages": return !!pre?.new_counts && pre?.plain === true;
+    case "ws_sheets_write": return pre?.guarded === true;
     default: return true;
   }
 }
@@ -55,7 +61,7 @@ export const INTERNAL_OPS = Object.freeze(["ws__docs_remove_paragraphs_exact", "
 export const INVERSE_OF = Object.freeze({ ws_docs_find_replace: "ws_docs_find_replace", ws_docs_rewrite_passages: "ws_docs_rewrite_passages", ws_docs_format_text: "ws_docs_format_text",
   ws_docs_append: "ws__docs_remove_paragraphs_exact", ws_docs_insert_at_heading: "ws__docs_remove_paragraphs_exact", ws_docs_add_comment: "ws__docs_delete_comment",
   ws_sheets_write: "ws_sheets_write", ws_sheets_append: "ws__sheets_clear_rows_exact", ws_sheets_set_number_format: "ws__sheets_restore_styles",
-  ws_sheets_add_tab: "ws_sheets_delete_tab", ws_sheets_rename_tab: "ws_sheets_rename_tab", ws_slides_edit_text: "ws_slides_edit_text", ws_slides_find_replace: "ws_slides_find_replace" });
+  ws_sheets_rename_tab: "ws_sheets_rename_tab", ws_slides_edit_text: "ws_slides_edit_text", ws_slides_find_replace: "ws_slides_find_replace" });
 /** Pin a reported inverse to the allowed tool and THIS file; anything off-list → null (undo_via_versions), never a partial inverse. */
 export function pinInverse(row, inverse) {
   if (!Array.isArray(inverse) || !inverse.length || inverse.length > 20) return null;
@@ -109,8 +115,20 @@ export function snapshot(tool, args, bytes) {
     case "ws_docs_find_replace": { const d = openDocx(bytes); const ps = pairsOf(args); if (ps.length !== 1) return null; const t = docText(d); const mc = caseOf(args, ps[0]); return { fcount: countOf(fold(t, mc), fold(ps[0].find, mc)), rcount: countOf(fold(t, mc), fold(ps[0].replace, mc)) }; }
     case "ws_docs_append": case "ws_docs_insert_at_heading": { const d = openDocx(bytes); if (tool === "ws_docs_insert_at_heading") sectionRange(d, args.heading); const text = firstInsertedText(d, args.markdown); return text ? { text, count: paraCount(d, text) } : null; }
     case "ws_docs_replace_section": return { section_hash: sectionHash(openDocx(bytes), args.heading) };
-    case "ws_docs_rewrite_passages": { const ts = rewriteTexts(args); if (!ts.length || ts.some((t) => /[\n\t]/.test(t))) return null; const d = openDocx(bytes); return { new_counts: Object.fromEntries([...new Set(ts)].map((t) => [t, paraCount(d, t)])) }; }
-    case "ws_sheets_write": return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values };
+    case "ws_docs_rewrite_passages": {
+      const ts = rewriteTexts(args); if (!ts.length || ts.some((t) => /[\n\t]/.test(t))) return null;
+      const d = openDocx(bytes);
+      // T13 fix I1: dry run of the file op on a throwaway copy — every passage must match a PLAIN paragraph (no link,
+      // field, image, tracked change…), or the change is never offered live (the editor cannot tell).
+      const plain = rewritePassages(openDocx(bytes), args.passages).results.every((r) => r.matched);
+      return { new_counts: Object.fromEntries([...new Set(ts)].map((t) => [t, paraCount(d, t)])), plain };
+    }
+    case "ws_sheets_write": {
+      // T13 fix I1: the file op's guardrails (merged non-anchor cell, partial shared formula) run NOW, on a throwaway
+      // copy of the saved file: such a write is refused at queue time instead of being offered live.
+      writeRange(openXlsx(bytes), args.range, args.values, args.value_input_option || "USER_ENTERED");
+      return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values, guarded: true };
+    }
     case "ws_sheets_append": { const wb = openXlsx(bytes); return { header: headerRow(wb, args.sheet_name), last_row: lastDataRow(wb, args.sheet_name) }; }
     case "ws_sheets_set_number_format": return { s_attrs: styleAttrs(openXlsx(bytes), args.range) };
     case "ws_slides_edit_text": return { text: shapeText(shapeById(openPptx(bytes), args.object_id).sp) };

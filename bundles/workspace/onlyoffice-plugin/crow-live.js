@@ -34,7 +34,7 @@
           if (done) return;
           done = true; clearTimeout(watchdog); indicator(false);
           res = res || { ok: false, reason: "no_result" };
-          api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", applied_nothing: res.applied_nothing === true, reason: res.reason, inverse: res.inverse || null }) })
+          api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", applied_nothing: res.applied_nothing === true, reason: res.reason }) })
             .catch(function () { /* the lease expires → unknown_after_claim → postcondition at close */ })
             .then(function () { busy = false; schedule(1000); });
         });

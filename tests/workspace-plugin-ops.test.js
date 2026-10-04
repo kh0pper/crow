@@ -9,12 +9,10 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod";
 import * as acorn from "acorn";
 import * as walk from "acorn-walk";
-import { LIVE_OPS, INVERSE_OF, pinInverse } from "../bundles/workspace/server/queue/conditions.js";
+import { LIVE_OPS } from "../bundles/workspace/server/queue/conditions.js";
 import { FORMAT_TYPE_PATTERNS } from "../bundles/workspace/server/ooxml/xlsx.js";
-import { ALL_DEFS } from "../bundles/workspace/server/tools/all.js";
 
 const require = createRequire(import.meta.url);
 const ROOT = join(import.meta.dirname, "..");
@@ -121,29 +119,22 @@ function run(stub, tool, args, pre = null) {
   globalThis.Api = stub.Api; globalThis.Asc = { scope: { crow: JSON.parse(JSON.stringify({ tool, args, pre })) } };
   try { return crowCommand(); } finally { delete globalThis.Api; delete globalThis.Asc; }
 }
-/** Every reported inverse must be accepted by the server: the pinned tool, valid for that tool's own zod schema. */
-function inverseOk(tool, r) {
-  if (r.inverse == null) return;
-  const pinned = pinInverse({ tool, path: "S/f.x" }, r.inverse);
-  assert.ok(pinned, `${tool}: inverse is the allowed tool ${INVERSE_OF[tool]}`);
-  for (const x of pinned) { const def = ALL_DEFS.get(x.tool); assert.ok(z.object(def.schema).safeParse(x.args).success, `${tool}: inverse args valid for ${x.tool}`); }
-}
+/** T13 fix A: the plugin reports NO inverse (Crow derives the undo server-side from its own record). */
+const noInverse = (r) => assert.ok(!("inverse" in r), "the plugin never reports an inverse");
 const clean = (stub) => assert.deepEqual(stub.violations, [], "only S9-verified builder methods, per class");
 const NOTHING = { ok: false, applied_nothing: true };
 
 // ---- docs -----------------------------------------------------------------------------------------------------
-test("find_replace: precondition first, then SearchAndReplace, inverse = swapped pair count-checked; else null", () => {
+test("find_replace: precondition first, then SearchAndReplace, no inverse reported", () => {
   const s = wordStub([{ text: "Tortillas" }]);
   const r = run(s, "ws_docs_find_replace", { pairs: [{ find: "Tortillas", replace: "Totopos" }] });
   assert.equal(r.ok, true); assert.deepEqual(s.calls[0], ["SearchAndReplace", { searchString: "Tortillas", replaceString: "Totopos", matchCase: true }]);
   assert.deepEqual(s.texts(), ["Totopos"]);
-  // exact inverse only because "Totopos" did not exist before (count-checked); otherwise inverse = null → undo via versions
-  assert.deepEqual(r.inverse, [{ tool: "ws_docs_find_replace", args: { pairs: [{ find: "Totopos", replace: "Tortillas" }], expect_count: 1 } }]);
-  inverseOk("ws_docs_find_replace", r); clean(s);
-  assert.equal(run(wordStub([{ text: "Tortillas y Totopos" }]), "ws_docs_find_replace", { find: "Tortillas", replace: "Totopos" }).inverse, null);
+  noInverse(r);
+   clean(s);
   const ci = wordStub([{ text: "tortillas" }]);
   const r2 = run(ci, "ws_docs_find_replace", { find: "Tortillas", replace: "Tacos", match_case: false });
-  assert.equal(r2.ok, true); assert.equal(r2.inverse, null, "case-insensitive: the original case is lost"); assert.equal(ci.calls[0][1].matchCase, false);
+  assert.equal(r2.ok, true); assert.equal(ci.calls[0][1].matchCase, false);
   const miss = wordStub([{ text: "nada" }]);
   assert.deepEqual(run(miss, "ws_docs_find_replace", { find: "Tortillas", replace: "x" }), { ...NOTHING, reason: "target_changed" });
   assert.deepEqual(miss.calls, [], "nothing changed");
@@ -152,20 +143,27 @@ test("find_replace: precondition first, then SearchAndReplace, inverse = swapped
   assert.deepEqual(two.calls, []);
 });
 
+test("find_replace: find/replace typed decomposed (NFD) are searched NFC, like the file engine (M2)", () => {
+  const s = wordStub([{ text: "jalape\u00f1o" }]);
+  const r = run(s, "ws_docs_find_replace", { find: "jalapen\u0303o", replace: "pin\u0303a" });
+  assert.equal(r.ok, true); assert.deepEqual(s.calls[0][1], { searchString: "jalape\u00f1o", replaceString: "pi\u00f1a", matchCase: true });
+  assert.deepEqual(s.texts(), ["pi\u00f1a"]);
+});
+
 test("find_replace: a replacement that contains the find text is not a failed postcondition", () => {
   const s = wordStub([{ text: "un taco" }]);
   const r = run(s, "ws_docs_find_replace", { find: "taco", replace: "tacos" });
-  assert.equal(r.ok, true); assert.deepEqual(s.texts(), ["un tacos"]); assert.equal(r.inverse, null);
+  assert.equal(r.ok, true); assert.deepEqual(s.texts(), ["un tacos"]);
 });
 
-test("append: every new paragraph gets its style explicitly (Normal; Heading N for #), soft wraps fold; inverse removes exactly those", () => {
+test("append: every new paragraph gets its style explicitly (Normal; Heading N for #), soft wraps fold", () => {
   const s = wordStub([{ text: "Recetas", style: "Heading 1" }]);
   const r = run(s, "ws_docs_append", { markdown: "Uno\n\nDos" });
   assert.equal(r.ok, true);
   assert.deepEqual(s.calls.filter((c) => c[0] === "SetStyle").map((c) => c[1]), ["Normal", "Normal"]);
   assert.deepEqual(s.texts(), ["Recetas", "Uno", "Dos"]); assert.deepEqual(s.styles(), ["Heading 1", "Normal", "Normal"]);
-  assert.deepEqual(r.inverse, [{ tool: "ws__docs_remove_paragraphs_exact", args: { texts: ["Uno", "Dos"], at_end: true } }]);
-  inverseOk("ws_docs_append", r); clean(s);
+  noInverse(r);
+   clean(s);
   const h = wordStub([]);
   assert.equal(run(h, "ws_docs_append", { markdown: "## Cena  \nlarga\n\nTacos al pastor\ncon piña" }).applied_nothing, true, "a hard break (two trailing spaces) is close-time only");
   const h2 = wordStub([]);
@@ -187,8 +185,8 @@ test("insert_at_heading: after the (case-insensitive) heading, in order, Normal 
   const r = run(s, "ws_docs_insert_at_heading", { heading: " menú ", markdown: "Lunes\n\nMartes" });
   assert.equal(r.ok, true);
   assert.deepEqual(s.texts(), ["Menú", "Lunes", "Martes", "viejo", "Otro"]); assert.deepEqual(s.styles(), ["Heading 1", "Normal", "Normal", "Normal", "Heading 1"]);
-  assert.deepEqual(r.inverse, [{ tool: "ws__docs_remove_paragraphs_exact", args: { texts: ["Lunes", "Martes"], after_heading: " menú " } }]);
-  inverseOk("ws_docs_insert_at_heading", r); clean(s);
+  noInverse(r);
+   clean(s);
   assert.deepEqual(run(wordStub([{ text: "Otro", style: "Heading 1" }]), "ws_docs_insert_at_heading", { heading: "Menú", markdown: "x" }), { ...NOTHING, reason: "target_changed" });
   const dup = wordStub([{ text: "Menú", style: "Heading 1" }, { text: "Menú", style: "Heading 2" }]);
   assert.equal(run(dup, "ws_docs_insert_at_heading", { heading: "Menú", markdown: "x" }).applied_nothing, true); assert.deepEqual(dup.calls, []);
@@ -200,8 +198,8 @@ test("rewrite_passages: the whole paragraph is replaced in place (SearchAndRepla
   assert.equal(r.ok, true);
   assert.deepEqual(s.calls, [["SearchAndReplace", { searchString: "Lunes: tacos", replaceString: "Lunes: enchiladas", matchCase: true }]], "no RemoveAllElements/AddText: the run keeps its formatting");
   assert.deepEqual(s.texts(), ["Lunes: enchiladas", "Martes: sopa"]); assert.deepEqual(s.styles(), ["Quote", "Normal"]);
-  assert.deepEqual(r.inverse, [{ tool: "ws_docs_rewrite_passages", args: { passages: [{ match_prefix: "Lunes: enchiladas", new_text: "Lunes: tacos" }] } }]);
-  inverseOk("ws_docs_rewrite_passages", r); clean(s);
+  noInverse(r);
+   clean(s);
   // two paragraphs start with the prefix, or the paragraph text also occurs inside another one → close-time
   const amb = wordStub([{ text: "Lunes: tacos" }, { text: "Lunes: sopa" }]);
   assert.equal(run(amb, "ws_docs_rewrite_passages", { passages: [{ match_prefix: "Lunes", new_text: "x" }] }).applied_nothing, true);
@@ -222,13 +220,13 @@ test("an exception before any change → applied_nothing; after a change → not
 });
 
 // ---- sheets ---------------------------------------------------------------------------------------------------
-test("sheets_write: precondition = the cells' queued values; integers/text/formulas as the editor would enter them; inverse = old values RAW", () => {
+test("sheets_write: precondition = the cells' queued values; integers/text/formulas as the editor would enter them", () => {
   const s = cellStub({ Menu: { B2: "tacos", C2: 3 } });
   const r = run(s, "ws_sheets_write", { range: "Menu!B2:C2", values: [["enchiladas", "12"]], value_input_option: "USER_ENTERED" }, { cells: [["tacos", 3]] });
   assert.equal(r.ok, true);
   assert.deepEqual(s.calls, [["SetValue", "Menu", "B2", "enchiladas"], ["SetValue", "Menu", "C2", "12"]]);
-  assert.deepEqual(r.inverse, [{ tool: "ws_sheets_write", args: { range: "Menu!B2", values: [["tacos", 3]], value_input_option: "RAW" } }]);
-  inverseOk("ws_sheets_write", r); clean(s);
+  noInverse(r);
+   clean(s);
   const flat = cellStub({ "Mi tab": {} });
   assert.equal(run(flat, "ws_sheets_write", { range: "'Mi tab'!A1", values: ["=SUM(B1:B2)", 5] }, { cells: [] }).ok, true);
   assert.deepEqual(flat.calls.map((c) => c.slice(2)), [["A1", "=SUM(B1:B2)"], ["B1", 5]]);
@@ -244,14 +242,14 @@ test("sheets_write: precondition = the cells' queued values; integers/text/formu
   assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_write", { range: "Menu!A1", values: [[7]], value_input_option: "RAW" }, { cells: [] }).ok, true, "RAW numbers are fine");
 });
 
-test("sheets_append: header precondition, rows after the queued last row (which must still be the last), dicts keyed by header; inverse clears exactly", () => {
+test("sheets_append: header precondition, rows after the queued last row (which must still be the last), dicts keyed by header", () => {
   const s = cellStub({ Menu: { A1: "Día", B1: "Plato", A2: "Lunes", B2: "Tacos" } });
   const pre = { header: ["Día", "Plato"], last_row: 2 };
   const r = run(s, "ws_sheets_append", { sheet_name: "Menu", values: [{ Plato: "Sopa", "Día": "Martes" }] }, pre);
   assert.equal(r.ok, true);
   assert.deepEqual(s.calls, [["SetValue", "Menu", "A3", "Martes"], ["SetValue", "Menu", "B3", "Sopa"]]);
-  assert.deepEqual(r.inverse, [{ tool: "ws__sheets_clear_rows_exact", args: { sheet: "Menu", from_row: 3, values: [["Martes", "Sopa"]] } }]);
-  inverseOk("ws_sheets_append", r); clean(s);
+  noInverse(r);
+   clean(s);
   const rows = cellStub({ Menu: { A1: "Día", B1: "Plato", A2: "Lunes" } });
   assert.equal(run(rows, "ws_sheets_append", { sheet_name: "Menu", values: [["Mar", ""], ["Mié", 4]] }, pre).ok, true);
   assert.deepEqual(rows.calls.map((c) => c.slice(2)), [["A3", "Mar"], ["A4", "Mié"], ["B4", 4]], "empty cells are left empty");
@@ -267,34 +265,29 @@ test("sheets_append: header precondition, rows after the queued last row (which 
   assert.deepEqual(run(mid, "ws_sheets_append", { sheet_name: "Menu", values: [["a", "b"]] }, pre), { ok: false, applied_nothing: false, reason: "api_error" });
 });
 
-test("sheets_set_number_format: the format_type patterns match the file engine; inverse restores the queued style ids", () => {
+test("sheets_set_number_format: the format_type patterns match the file engine", () => {
   for (const [type, pattern] of Object.entries(FORMAT_TYPE_PATTERNS)) {
     const s = cellStub({ Menu: {} });
     const r = run(s, "ws_sheets_set_number_format", { range: "Menu!A2:B3", format_type: type }, { s_attrs: [["0", null], ["3", "3"]] });
     assert.equal(r.ok, true, type);
     assert.deepEqual(s.calls, [["SetNumberFormat", "Menu", "A2:B3", pattern]], type);
-    assert.deepEqual(r.inverse, [{ tool: "ws__sheets_restore_styles", args: { range: "Menu!A2:B3", s_attrs: [["0", null], ["3", "3"]], pattern } }]);
-    inverseOk("ws_sheets_set_number_format", r); clean(s);
+    noInverse(r);
+     clean(s);
   }
   const p = cellStub({ Menu: {} });
-  assert.equal(run(p, "ws_sheets_set_number_format", { range: "Menu!C1", pattern: "0.0" }, null).inverse, null, "no queued styles → undo via versions");
+  assert.equal(run(p, "ws_sheets_set_number_format", { range: "Menu!C1", pattern: "0.0" }, null).ok, true);
   assert.deepEqual(p.calls, [["SetNumberFormat", "Menu", "C1", "0.0"]]);
   assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_set_number_format", { range: "Menu!A:A" }, null).applied_nothing, true);
   assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_set_number_format", { range: "Menu!A1", format_type: "BOGUS" }, null).applied_nothing, true);
 });
 
-test("sheets_add_tab / rename_tab: tab-existence preconditions, postcondition, exact inverses", () => {
-  const s = cellStub({ Menu: {} });
-  const r = run(s, "ws_sheets_add_tab", { title: "Compras" });
-  assert.equal(r.ok, true); assert.ok(s.tab("Compras"));
-  assert.deepEqual(r.inverse, [{ tool: "ws_sheets_delete_tab", args: { title: "Compras" } }]); inverseOk("ws_sheets_add_tab", r); clean(s);
-  assert.equal(run(cellStub({ Compras: {} }), "ws_sheets_add_tab", { title: "compras" }).reason, "target_changed");
-  assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_add_tab", { title: "X", index: 0 }).applied_nothing, true, "a position needs the file engine");
-  assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_add_tab", { title: "a/b" }).applied_nothing, true);
+test("sheets_rename_tab: tab-existence preconditions, postcondition; add_tab is close-time only (it would switch the person's tab)", () => {
+  assert.equal(LIVE_OPS.has("ws_sheets_add_tab"), false);
+  assert.deepEqual(run(cellStub({ Menu: {} }), "ws_sheets_add_tab", { title: "Compras" }), { ...NOTHING, reason: "unsupported" });
   const rn = cellStub({ Menu: {} });
   const r2 = run(rn, "ws_sheets_rename_tab", { title: "Menu", new_title: "Menú" });
   assert.equal(r2.ok, true); assert.ok(rn.tab("Menú"));
-  assert.deepEqual(r2.inverse, [{ tool: "ws_sheets_rename_tab", args: { title: "Menú", new_title: "Menu" } }]); inverseOk("ws_sheets_rename_tab", r2); clean(rn);
+  noInverse(r2);  clean(rn);
   assert.equal(run(cellStub({ Otra: {} }), "ws_sheets_rename_tab", { title: "Menu", new_title: "X" }).reason, "target_changed");
   assert.equal(run(cellStub({ Menu: {}, X: {} }), "ws_sheets_rename_tab", { title: "Menu", new_title: "x" }).reason, "target_changed");
   assert.equal(run(cellStub({ Menu: {} }), "ws_sheets_rename_tab", { title: "Menu", new_title: "MENU" }).ok, true, "a case-only rename");

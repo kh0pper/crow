@@ -10,7 +10,6 @@
  * BUNDLE_DIR (the ramble pattern) — never by a relative ../server import. STRICT_PANEL_MOUNT: every middleware is
  * path-scoped (this router is mounted at the app root).
  */
-import { Router } from "express";
 import express from "express";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -28,7 +27,7 @@ const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
 export default function workspaceRouter(authMiddleware, seams = {}) {
-  const router = Router();
+  const router = express.Router();
   const clock = seams.clock || realClock;
   let csrf = seams.csrf || null;
   const csrfMw = async (req, res, next) => {
@@ -41,7 +40,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   router.use("/api/workspace/live/v1", (req, res, next) => {
     live ??= (async () => {
       const [{ openWorkspaceDb }, { getConfig }, { liveRouter }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/live/routes-live.js")]);
-      return liveRouter({ Router, json: express.json, db: await openWorkspaceDb(), getConfig, clock });
+      return liveRouter({ Router: express.Router, json: express.json, db: await openWorkspaceDb(), getConfig, clock });
     })();
     live.then((r) => r(req, res, next), (e) => { live = null; console.warn(`[workspace] live endpoints unavailable: ${e.message}`); if (!res.headersSent) res.status(503).json({ error: "unavailable" }); });
   });
