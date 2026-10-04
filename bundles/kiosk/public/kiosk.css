@@ -1,4 +1,6 @@
 /* Crow kiosk — 800×480 landscape first, single column under 600 px. Colors from PERCH_TOKENS via theme.css (--k-*). */
+/* The hidden attribute must win over any class display (.k-pairing/.k-windows are display:grid): smoke A1 2026-10-04. */
+[hidden] { display: none !important; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--k-sky); color: var(--k-ink); font-family: system-ui, sans-serif; font-size: 20px; line-height: 1.35; overflow: hidden; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; border: 0; background: none; cursor: pointer; touch-action: manipulation; }

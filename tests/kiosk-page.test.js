@@ -144,3 +144,20 @@ test("ending a turn (no_speech included) stops the frame upload: onFrame gates o
   assert.ok(iEnded > 0 && iStop > iEnded && iSend > iStop, "ended + mic stop happen before turn_end is sent");
   assert.match(src.slice(src.indexOf("function startTurn"), src.indexOf("function endTurn")), /noSpeechMs/, "the no-speech timeout ends the turn through the VAD → endTurn");
 });
+
+test("smoke A1 (2026-10-04): [hidden] beats class display — the pairing overlay and #windows really hide", () => {
+  const css = read("kiosk.css");
+  assert.match(css, /(^|\n)\s*\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/, "kiosk.css needs [hidden]{display:none !important}");
+  // Every element the HTML ships hidden (or the JS toggles) whose class sets a display value is covered by that rule.
+  const { document } = parseHTML(read("kiosk.html"));
+  const hiddenEls = [...document.querySelectorAll("[hidden]")];
+  for (const id of ["pairing", "windows"]) assert.ok(hiddenEls.some((el) => el.id === id), `#${id} ships hidden`);
+  for (const el of hiddenEls) {
+    for (const cls of el.classList) {
+      const rule = css.match(new RegExp(`\\.${cls}\\s*\\{([^}]*)\\}`));
+      if (rule && /display\s*:/.test(rule[1])) assert.doesNotMatch(rule[1], /!important/, `.${cls} display must not out-rank [hidden]`);
+    }
+  }
+  // After approval the page hides the overlay via the attribute (which the CSS rule now honours).
+  assert.match(read("kiosk.js"), /j\.state === "approved"[^\n]*\$\("pairing"\)\.hidden = true/);
+});
