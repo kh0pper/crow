@@ -35,14 +35,27 @@ export async function listCollections(cfg, kind) {
   return out;
 }
 export const listCalendars = (cfg) => listCollections(cfg, "cal");
+/**
+ * A collection by name or id, in this order: exact display name (case-insensitive), collection id, then — for a
+ * collection someone SHARED with crow-bot, which Nextcloud shows as "Menu (admin)" with id "Menu_shared_by_admin" —
+ * the base name without the trailing " (owner)" when exactly one collection matches. Ambiguous → the choices.
+ */
 export async function resolveCollection(cfg, kind, nameOrId) {
   const all = await listCollections(cfg, kind);
-  const want = String(nameOrId).normalize("NFC");
-  const byId = all.find((c) => c.id === want); if (byId) return byId;
-  const byName = all.filter((c) => c.name.normalize("NFC").toLowerCase() === want.toLowerCase());
-  if (byName.length === 1) return byName[0];
+  const norm = (x) => String(x).normalize("NFC").toLowerCase();
+  const want = norm(nameOrId);
   const what = kind === "card" ? "address book" : "calendar";
-  throw new WsError(byName.length ? "ambiguous" : `${kind === "card" ? "addressbook" : "calendar"}_not_found`, `${byName.length ? `More than one ${what} is named` : `No ${what} named`} "${nameOrId}" is shared with Crow bot. Available: ${all.map((c) => `${c.name} (${c.id})`).join(", ") || "none — ask the household to share one with Crow bot"}`);
+  const listing = () => all.map((c) => `${c.name} (${c.id})`).join(", ") || "none — ask the household to share one with Crow bot";
+  const ambiguous = () => new WsError("ambiguous", `More than one ${what} is named "${nameOrId}" for Crow bot. Available: ${listing()}`);
+  const byName = all.filter((c) => norm(c.name) === want);
+  if (byName.length === 1) return byName[0];
+  const byId = all.find((c) => c.id === String(nameOrId).normalize("NFC")); if (byId) return byId;
+  if (byName.length > 1) throw ambiguous();
+  const baseOf = (c) => (c.owner_uid && c.owner_uid !== cfg.user ? c.name.replace(/\s+\([^()]*\)$/, "") : c.name);
+  const byBase = all.filter((c) => norm(baseOf(c)) === want);
+  if (byBase.length === 1) return byBase[0];
+  if (byBase.length > 1) throw ambiguous();
+  throw new WsError(`${kind === "card" ? "addressbook" : "calendar"}_not_found`, `No ${what} named "${nameOrId}" is shared with Crow bot. Available: ${listing()}`);
 }
 export const resolveCalendar = (cfg, n) => resolveCollection(cfg, "cal", n);
 

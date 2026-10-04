@@ -1,7 +1,8 @@
 /**
  * The close-time applier (spec §5.8): every 15 s, for each file with pending / unknown_after_claim changes (or live
- * changes not yet checked against the saved file): stat it; if it is unlocked AND ONLYOFFICE `info` says no session
- * (checked even when unlocked — the connector locks only after the editor fetched the file), verify live-applied
+ * changes not yet checked against the saved file): stat it; if it is unlocked AND ONLYOFFICE `info` lists nobody in
+ * the session (checked even when unlocked — the connector locks only after the editor fetched the file; a key it
+ * still caches with `users: []` after the last viewer left is NOT a session), verify live-applied
  * changes, then apply the waiting ones in seq order. Any lock (a person's, a live session, or a phone viewing it)
  * → nothing happens; a stale editor lock → one notification. Runs in the gateway only (one applier per host). A
  * second applier on the same crow.db (an orphan or overlapping gateway) is still safe: every transition is a CAS,
@@ -63,11 +64,14 @@ export function makeTick({ db, getConfig, clock }) {
       try {
         const e = await statFile(cfg, db, f);
         if (e.lock) {
-          if (e.lockType === 1) { const s = await docSession(cfg, e.fileId).catch(() => ({ live: true })); if (!s.live) await notifyStaleOnce(db, f.file_id); }
+          // stale = the document server forgot the key (`known`); a cached key with no users is the post-close save
+          if (e.lockType === 1) { const s = await docSession(cfg, e.fileId).catch(() => ({ known: true })); if (!s.known) await notifyStaleOnce(db, f.file_id); }
           continue; // any lock: wait (a person's lock, a live session — also a phone viewing it — or a stale one)
         }
         staleNotified.delete(f.file_id);
-        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true })); // unknown → treat as open
+        // unknown → treat as open. `live` needs a user in the session: a key ONLYOFFICE keeps cached after a
+        // view-only session closed (error 0, users []) on an UNLOCKED file is over, and the change applies.
+        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true }));
         if (s.live) continue;
         await processFile(ctx, db, { file_id: f.file_id, path: e.path });
       } catch (err) { console.warn(`[workspace] queue: file ${f.file_id}: ${err.code || ""} ${err.message}`); }

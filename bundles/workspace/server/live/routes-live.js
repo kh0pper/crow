@@ -27,8 +27,11 @@
  *  7. plugin version (pv) on poll and claim (426) — after authorization, so it leaks nothing to a viewer.
  * Every authentication/authorization failure gets the SAME answer, 401 {"error":"unauthorized"} (fix2 N5): a viewer
  * cannot tell whether a document has queued work.
- * Caching: ONLYOFFICE sessions and write decisions are cached 30 s for polls (GET); claims and acks always check
- * fresh. So a document opened (or a share changed) right after a poll can wait up to 30 s (+ the plugin's back-off).
+ * Caching: for polls (GET), an ONLYOFFICE session that can authorize (live) and write decisions are cached 30 s;
+ * a NEGATIVE answer (no live session, an unreadable one, a key that matched no queued file) only NEGATIVE_TTL_MS
+ * (5 s), so a document opened — or a change queued for it — right after a poll is seen within ~5 s (+ the plugin's
+ * poll interval: 5 s while the editor has focus). Claims and acks always check fresh. Every lookup is still behind
+ * the per-(document, user) and per-document limits above.
  * A claim returns a per-change apply token (per-boot secret) that the ack must present. An ack is never proof of
  * application (R-LIVE): applied_live rows stay unverified until the close-time worker checks the saved file, and the
  * undo of a live change is derived server-side (live/derive-inverse.js) — the ack carries no inverse (fix A).
@@ -46,6 +49,7 @@ export const MIN_PLUGIN_VERSION = "0.2.0";
 export const LEASE_MS = 60000;
 export const LIMITS = Object.freeze({ perIp: 300, global: 1200, perUser: 60, perDocument: 180, perDocumentRaw: 720 });
 const SESSION_TTL_MS = 30000;
+export const NEGATIVE_TTL_MS = 5000;
 const CACHE_MAX = 2000;
 const MAX_CANDIDATES = 20;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
@@ -69,35 +73,44 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const lim = (max, maxKeys = 1000) => windowLimiter({ max, windowMs: 60000, maxKeys, now });
   const perIp = lim(limits.perIp), global = lim(limits.global, 1), perUser = lim(limits.perUser), perDoc = lim(limits.perDocument);
   const rawDoc = lim(limits.perDocumentRaw ?? limits.perDocument * 4); // every valid token on the document, before authorization
-  // bounded 30 s caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission
+  // bounded caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission. Each entry keeps
+  // its own lifetime: 30 s, or NEGATIVE_TTL_MS for an answer that cannot authorize anyone.
   const cache = () => {
     const m = new Map();
     return {
-      get: (k, force) => { const c = m.get(k); return !force && c && c.at > now() - SESSION_TTL_MS ? c : null; },
-      set: (k, v) => { m.delete(k); m.set(k, { at: now(), v }); while (m.size > CACHE_MAX) m.delete(m.keys().next().value); return v; },
+      get: (k, force, maxAge = Infinity) => { const c = m.get(k); return !force && c && c.at > now() - Math.min(c.ttl, maxAge) ? c : null; },
+      set: (k, v, ttl = SESSION_TTL_MS) => { m.delete(k); m.set(k, { at: now(), ttl, v }); while (m.size > CACHE_MAX) m.delete(m.keys().next().value); return v; },
     };
   };
   const sessions = cache(), writes = cache();
-  const sessionOf = async (fileId, force) => sessions.get(fileId, force)?.v ?? sessions.set(fileId, await docSession(getConfig(), fileId).catch(() => null));
+  const sessionOf = async (fileId, force) => {
+    const c = sessions.get(fileId, force); if (c) return c.v;
+    const s = await docSession(getConfig(), fileId).catch(() => null);
+    return sessions.set(fileId, s, s?.live ? SESSION_TTL_MS : NEGATIVE_TTL_MS);
+  };
   const canWrite = async (fileId, uid, path, force) => {
     const k = `${fileId}\u0000${uid}`; const c = writes.get(k, force);
-    return c ? c.v : writes.set(k, await userCanWrite(getConfig(), fileId, uid, path));
+    if (c) return c.v;
+    const ok = await userCanWrite(getConfig(), fileId, uid, path);
+    return writes.set(k, ok, ok ? SESSION_TTL_MS : NEGATIVE_TTL_MS);
   };
   /**
    * The file whose CURRENT live session has this key → {fileId, path, users, uids} | null. Candidates: files with
    * queued work or a live change not yet verified (bounded; the key the change was queued under is tried first).
    */
-  const misses = cache(); // key → candidate-set signature it matched none of (N6)
-  async function liveSession(key, force) {
+  const misses = cache(); // key → candidate-set signature it matched none of (N6), for NEGATIVE_TTL_MS
+  async function liveSession(key, force, userId) {
     const rows = (await db.execute({ sql: `SELECT file_id, MIN(path) AS path, MAX(CASE WHEN doc_key=? THEN 1 ELSE 0 END) AS hinted FROM workspace_pending_changes
       WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
     const sig = rows.map((r) => r.file_id).join(",");
-    if (misses.get(key)?.v === sig) return null; // asked these same files < 30 s ago: none had this key
+    if (misses.get(key)?.v === sig) return null; // asked these same files < 5 s ago: none had this key
     for (const r of rows) {
-      const s = await sessionOf(Number(r.file_id), force);
+      let s = await sessionOf(Number(r.file_id), force);
+      // a user who joined after this session was cached: re-ask once the entry is older than the negative window
+      if (!force && userId && s?.live && String(s.key) === key && !s.users.map(String).includes(userId) && !sessions.get(Number(r.file_id), false, NEGATIVE_TTL_MS)) s = await sessionOf(Number(r.file_id), true);
       if (s?.live && String(s.key) === key) return { fileId: Number(r.file_id), path: r.path, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
     }
-    misses.set(key, sig);
+    misses.set(key, sig, NEGATIVE_TTL_MS);
     return null;
   }
   /** Rightmost X-Forwarded-For entry when the peer is the loopback Serve proxy, else the TCP peer (fix2 X1). */
@@ -130,7 +143,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     if (req.query.key !== undefined && String(req.query.key) !== t.key) return deny(res);
     const force = req.method !== "GET";
     let live;
-    try { live = await liveSession(t.key, force); } catch { return res.status(503).json({ error: "editor unavailable" }); }
+    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : ""); } catch { return res.status(503).json({ error: "editor unavailable" }); }
     const at = live && t.userId ? live.users.indexOf(t.userId) : -1;
     if (at < 0) return deny(res);
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)

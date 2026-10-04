@@ -17,7 +17,16 @@ export async function ooCommand(cfg, payload) {
   try { return await r.json(); } catch { throw new WsError("editor_unreachable", "The document editor gave an unreadable answer"); }
 }
 
-/** The editor session for a file: key, whether it is live, raw users ("<instanceid>_<uid>", spike S6) and bare uids. */
+/**
+ * The editor session for a file: key, raw users ("<instanceid>_<uid>", spike S6), bare uids, and two flags:
+ *  - `known`: the document server still has this key (info error 0). After the last person leaves — notably a
+ *    view-only session (a phone) — ONLYOFFICE keeps the key cached for minutes with `users: []`, so `known` alone
+ *    does NOT mean anyone is in the document (live acceptance 2026-10-04: a queued change waited forever).
+ *  - `live`: known AND at least one user present. A session that is starting (the editor has joined but the
+ *    connector has not locked the file yet) already lists its user, so it counts as live.
+ * Callers that only reach this with the file LOCKED (stale-lock checks) key on `known`: a locked file whose key
+ * is still cached with no users is the editor's post-close save window, not a stale lock.
+ */
 export async function docSession(cfg, fileId) {
   const c = await ocsGet(cfg, `/ocs/v2.php/apps/onlyoffice/api/v1/config/${Number(fileId)}`);
   const key = c?.document?.key;
@@ -28,7 +37,8 @@ export async function docSession(cfg, fileId) {
   const prefix = own.endsWith(suffix) ? own.slice(0, -suffix.length) : "";
   const info = await ooCommand(cfg, { c: "info", key });
   const users = Array.isArray(info.users) ? info.users.map(String) : [];
-  return { key, live: info.error === 0, users, uids: users.map((u) => (prefix && u.startsWith(`${prefix}_`) ? u.slice(prefix.length + 1) : u)) };
+  const known = info.error === 0;
+  return { key, known, live: known && users.length > 0, users, uids: users.map((u) => (prefix && u.startsWith(`${prefix}_`) ? u.slice(prefix.length + 1) : u)) };
 }
 
 export async function dropUsers(cfg, key, users) {
