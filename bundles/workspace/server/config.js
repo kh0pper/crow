@@ -45,11 +45,34 @@ export function getConfig() {
   });
 }
 
+/**
+ * Every form a secret can take on the wire: plain, URL-encoded, and inside an HTTP Basic header
+ * (base64 / base64url of "<user>:<secret>"). Longest first so a form never leaves a partial match behind.
+ */
+function secretForms(c) {
+  const out = new Set();
+  for (const v of c?.secrets || []) {
+    if (!v) continue;
+    out.add(v); out.add(encodeURIComponent(v));
+    const basic = Buffer.from(`${c.user || BOT_USER}:${v}`);
+    out.add(basic.toString("base64")); out.add(basic.toString("base64url"));
+  }
+  return [...out].filter(Boolean).sort((a, b) => b.length - a.length);
+}
+
 /** Replace every secret occurrence; a null cfg tries the live config and tolerates not_ready. */
 export function redact(text, cfg) {
   let s = String(text);
   let c = cfg;
   if (!c) { try { c = getConfig(); } catch { c = null; } }
-  for (const v of c?.secrets || []) if (v) s = s.split(v).join("[redacted]");
+  for (const v of secretForms(c)) s = s.split(v).join("[redacted]");
   return s;
+}
+
+/** redact() applied to every string inside a JSON-able value (keys included). */
+export function redactDeep(value, cfg) {
+  if (typeof value === "string") return redact(value, cfg);
+  if (Array.isArray(value)) return value.map((x) => redactDeep(x, cfg));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [redact(k, cfg), redactDeep(v, cfg)]));
+  return value;
 }

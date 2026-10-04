@@ -2,8 +2,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getConfig } from "./config.js";
 import { registerDrive } from "./tools/drive.js";
+import { registerUndo } from "./tools/undo.js";
+import { systemClock } from "./write-protocol.js";
 
-export const realClock = Object.freeze({ now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
+export const realClock = systemClock;
 
 export const WORKSPACE_INSTRUCTIONS = [
   "Crow Workspace tools (ws_*): files, .docx/.xlsx/.pptx, calendars and contacts in the household's private Nextcloud, as the 'Crow bot' account.",
@@ -16,7 +18,8 @@ export function createWorkspaceServer({ clock = realClock } = {}) {
   const server = new McpServer({ name: "crow-workspace", version: "0.2.0" }, { instructions: WORKSPACE_INSTRUCTIONS });
   const ctx = Object.freeze({ getConfig, clock });
   const names = [];
-  names.push(...registerDrive(server, ctx)); // further tool families register here (Tasks 5-11)
+  names.push(...registerDrive(server, ctx)); // further tool families register here (Tasks 6-11)
+  names.push(...registerUndo(server, ctx));
   server.__wsToolNames = names;
   return server;
 }
