@@ -6332,6 +6332,10 @@
         "timeout_s": 1500
       },
       "panel": "panel/workspace.js",
+      "refreshFiles": [
+        "docker-compose.yml",
+        "onlyoffice-plugin"
+      ],
       "images": [
         "mariadb:11.8.9",
         "nextcloud:34.0.4-apache",

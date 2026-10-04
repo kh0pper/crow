@@ -114,10 +114,11 @@ import { generalLimiterSkip, GENERAL_LIMITER_SKIP_PREFIXES } from "../servers/ga
 test("generalLimiterSkip: dashboard, glasses, llm AND every Ramble surface are exempt; other API paths are not", () => {
   const skip = (path, extra = []) => generalLimiterSkip({ path }, extra);
   for (const p of ["/dashboard", "/dashboard/ramble", "/api/meta-glasses/x", "/llm/v1/chat",
-    "/ramble/tiles/15/7000/13000.png", "/ramble/static/ramble-ar.js", "/api/ramble/egg/checkin", "/api/ramble/around"]) {
+    "/ramble/tiles/15/7000/13000.png", "/ramble/static/ramble-ar.js", "/api/ramble/egg/checkin", "/api/ramble/around",
+    "/api/workspace/live/v1/pending"]) {
     assert.equal(skip(p), true, p);
   }
-  for (const p of ["/api/chat", "/api/ramblex", "/rambler", "/mcp", "/"]) assert.equal(skip(p), false, p);
+  for (const p of ["/api/chat", "/api/ramblex", "/rambler", "/mcp", "/", "/api/workspace/quick/save", "/api/workspace/livex"]) assert.equal(skip(p), false, p);
   assert.equal(skip("/api/other", ["/api/other"]), true, "an operator prefix is honoured");
   assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/ramble/") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/ramble/"));
 });

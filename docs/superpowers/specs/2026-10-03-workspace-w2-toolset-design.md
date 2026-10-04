@@ -441,9 +441,11 @@ Task 1 S9 verifies that `info.jwt` exists, its signature and claims, and that `d
 
 | Live | Close-time only |
 |---|---|
-| `ws_docs_find_replace`, `ws_docs_append`, `ws_docs_insert_at_heading`, `ws_docs_rewrite_passages`, `ws_docs_format_text` (bold/italic/underline/color; links close-time), `ws_docs_add_comment` | `ws_docs_replace_section`, `ws_docs_insert_image`, reply/resolve/apply_comment_edit |
+| `ws_docs_find_replace` (one pair), `ws_docs_append`, `ws_docs_insert_at_heading`, `ws_docs_rewrite_passages` | `ws_docs_format_text`, `ws_docs_add_comment` (R-LIVE: the 9.4 builder lacks SetBold/SetItalic/SetUnderline/SetColor/AddComment), `ws_docs_replace_section`, `ws_docs_insert_image`, reply/resolve/apply_comment_edit |
 | `ws_sheets_write`, `ws_sheets_append`, `ws_sheets_set_number_format`, `ws_sheets_add_tab`, `ws_sheets_rename_tab` | `ws_sheets_delete_tab`, `ws_sheets_batch_update` |
-| `ws_slides_edit_text`, `ws_slides_find_replace` (scope `slides`) | other slide ops, notes, Drive ops, undo |
+| — | every slide op incl. `ws_slides_edit_text` and `ws_slides_find_replace` (Task 13: S9 verified no text method on a shape's `ApiDocumentContent`), notes, Drive ops, undo |
+
+The plugin uses only builder methods S9 verified, per class. A live op whose input the editor cannot reproduce exactly as the file engine would (markdown beyond plain paragraphs and `#` headings, locale-dependent numbers, dates, booleans, RAW text, a formula target cell, an ambiguous heading or passage) reports `applied_nothing` before touching the document, so it applies at close.
 
 Each live op's builder implementation mirrors the file-level op's semantics: a heading reset on insert, and the first run's formatting kept on rewrite. A live op that reports `applied_nothing` (its precondition failed, or it threw before changing anything) returns the change to `pending` for close-time apply, exactly once (`claim_count` ≤ 1). Any other failure → `unknown_after_claim` → postcondition at close.
 

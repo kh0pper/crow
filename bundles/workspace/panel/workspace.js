@@ -44,6 +44,7 @@ const T = {
     officeP: "Document editor address (Workspace opens it for you):",
     adminH: "For the admin",
     serveP: "Run once on this machine to publish Workspace on your tailnet. Never use “tailscale funnel” for these:",
+    liveP: "Lets Crow's live-edit plugin reach Crow, so Crow's changes appear in documents that are open. Tailnet only; never use funnel:",
     backupP: "Turn on nightly encrypted backups (shows the backup passphrase once; keep it offline):",
     userP: "Add a household account yourself (prints a one-time password):",
     uninstallP: "Uninstalling keeps your files and database in ~/.crow/workspace, the generated secrets (${CROW_HOME}/secrets/bundle-env/workspace.env, kept so a reinstall can reopen your data), the backup timer and the tailnet addresses. \"Delete data\" does not remove those bind-mounted files. Before uninstalling, disable the backup timer first, then remove the Serve mappings:",
@@ -69,6 +70,7 @@ const T = {
     officeP: "Dirección del editor de documentos (Workspace la abre por ti):",
     adminH: "Para el administrador",
     serveP: "Ejecuta una vez en esta máquina para publicar Workspace en tu tailnet. Nunca uses “tailscale funnel” para esto:",
+    liveP: "Permite que el complemento de edición en vivo de Crow llegue a Crow, para que sus cambios aparezcan en los documentos abiertos. Solo tailnet; nunca uses funnel:",
     backupP: "Activa las copias de seguridad cifradas cada noche (muestra la frase de cifrado una sola vez; guárdala fuera de línea):",
     userP: "Agrega tú mismo una cuenta del hogar (muestra una contraseña de un solo uso):",
     uninstallP: "Desinstalar conserva tus archivos y la base de datos en ~/.crow/workspace, los secretos generados (${CROW_HOME}/secrets/bundle-env/workspace.env, se guardan para que una reinstalación pueda reabrir tus datos), el temporizador de copias y las direcciones de la tailnet. \"Borrar datos\" no elimina esos archivos montados. Antes de desinstalar, desactiva primero el temporizador de copias y luego quita las asignaciones de Serve:",
@@ -83,6 +85,11 @@ const PORT_RE = /^[0-9]{2,5}$/;
 const shq = (s) => (/^[A-Za-z0-9_\/.@+:-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`);
 const NC_HOST_PORT = 3070;
 const OO_HOST_PORT = 3071;
+/** This gateway's own port (servers/gateway/index.js: PORT, then CROW_GATEWAY_PORT, else 3001): the live plugin's Serve path target. */
+function gatewayPort() {
+  const p = Number.parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
+  return Number.isInteger(p) && p > 0 && p < 65536 ? p : 3001;
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export function readPublicSettings(crowHome) {
@@ -130,9 +137,11 @@ export function renderWorkspacePage(settings, lang, crowHome = join(homedir(), "
     ${card(t.laptopH, `<p>${esc(t.laptopP)}</p>`)}
     ${card(t.adminH, `<p>${esc(t.serveP)}</p><pre>sudo tailscale serve --bg --https=${u.ncPort} http://127.0.0.1:${NC_HOST_PORT}
 sudo tailscale serve --bg --https=${u.ooPort} http://127.0.0.1:${OO_HOST_PORT}</pre>
+      <p>${esc(t.liveP)}</p><pre>sudo tailscale serve --bg --https=${u.ooPort} --set-path=/crow-live http://127.0.0.1:${gatewayPort()}/api/workspace/live</pre>
       <p>${esc(t.backupP)}</p><pre>bash ${esc(opsDir)}/install-backup-timer.sh --dest &lt;backup folder&gt; --mount &lt;drive mountpoint&gt;</pre>
       <p>${esc(t.userP)}</p><pre>bash ${esc(opsDir)}/add-user.sh &lt;login&gt; "&lt;Name&gt;"</pre>
       <p>${esc(t.uninstallP)}</p><pre>systemctl --user disable --now crow-workspace-backup.timer
+sudo tailscale serve --https=${u.ooPort} --set-path=/crow-live off
 sudo tailscale serve --https=${u.ncPort} off
 sudo tailscale serve --https=${u.ooPort} off</pre>`)}
   </div>`;

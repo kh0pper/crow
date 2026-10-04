@@ -41,10 +41,13 @@ test("URLs: Workspace, DAV base, editor", () => {
 });
 
 test("page: address, DAVx⁵, iPhone CalDAV, tailnet note, Serve commands, backup/add-user/uninstall cleanup", () => {
-  const html = renderWorkspacePage(readPublicSettings(home(ENV)), "en");
+  const saved = [process.env.PORT, process.env.CROW_GATEWAY_PORT]; delete process.env.PORT; delete process.env.CROW_GATEWAY_PORT;
+  let html; try { html = renderWorkspacePage(readPublicSettings(home(ENV)), "en"); } finally { if (saved[0] !== undefined) process.env.PORT = saved[0]; if (saved[1] !== undefined) process.env.CROW_GATEWAY_PORT = saved[1]; }
   for (const s of ["https://box.tailnet-example.ts.net:8456", "https://box.tailnet-example.ts.net:8456/remote.php/dav", "DAVx",
     WORKSPACE_STRINGS.en.tailnetNote, "sudo tailscale serve --bg --https=8456 http://127.0.0.1:3070",
     "sudo tailscale serve --bg --https=8457 http://127.0.0.1:3071", "ops/install-backup-timer.sh --dest", "ops/add-user.sh",
+    "sudo tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live", "live-edit plugin reach Crow", "Tailnet only; never use funnel",
+    "sudo tailscale serve --https=8457 --set-path=/crow-live off",
     "sudo tailscale serve --https=8456 off", "systemctl --user disable --now crow-workspace-backup.timer"]) assert.ok(html.includes(s), s);
   assert.doesNotMatch(html, /tailscale funnel --/);
 });

@@ -472,7 +472,7 @@ function shortVolumeSource(item) {
  * the INSTALLED bundle's compose dir), `~` against HOME. Anything that is not
  * a path after expansion (a named volume, a port, an env entry) is skipped.
  */
-function composeBindSources(text, projectDir, env) {
+function composeBindSources(text, projectDir, env, { rwOnly = false } = {}) {
   const out = [];
   const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
   const consider = (rawSrc) => {
@@ -486,7 +486,11 @@ function composeBindSources(text, projectDir, env) {
     const longForm = /^\s*(?:-\s+)?source:\s*(.+)$/.exec(line);
     if (longForm) { consider(longForm[1]); continue; }
     const item = /^\s*-\s+(.+)$/.exec(line);
-    if (item) consider(shortVolumeSource(clean(item[1])));
+    if (!item) continue;
+    const vol = clean(item[1]); const src = shortVolumeSource(vol);
+    // rwOnly: skip a short-syntax mount whose mode list has "ro" (long syntax is always counted: conservative)
+    if (rwOnly && /(^|,)ro(,|$)/.test(vol.slice(src.length + 1).split(":")[1] || "")) continue;
+    consider(src);
   }
   return out;
 }
@@ -521,6 +525,17 @@ function pathsOverlap(a, b) {
   const ba = relativePath(b, a);
   const inside = (rel) => rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   return inside(ab) || inside(ba);
+}
+
+/** The env compose expands ${VAR} with for the INSTALLED bundle: its .env, then the shell env (shell wins). */
+function composeExpandEnv(destDir) {
+  const fileVars = {};
+  try {
+    Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
+  } catch { /* no .env → process env only */ }
+  // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
+  // compose run gets (the prod gateway unit may not export it).
+  return composeEnv({ ...fileVars, ...process.env });
 }
 
 /**
@@ -572,15 +587,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
   let rootReal;
   try { rootReal = realpathSync(appSrc); } catch { return []; }
 
-  const expandEnv = env || (() => {
-    const fileVars = {};
-    try {
-      Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
-    } catch { /* no .env → process env only */ }
-    // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
-    // compose run gets (the prod gateway unit may not export it).
-    return composeEnv({ ...fileVars, ...process.env });
-  })();
+  const expandEnv = env || composeExpandEnv(destDir);
   const destReal = realOrSelf(destDir);
   // The LIVE mounts come from the INSTALLED compose (never refreshed, may be
   // operator-edited) plus any override compose merges in from that dir — not
@@ -607,6 +614,50 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
     const installedCtx = realOrSelf(join(destReal, rel));
     if (binds.some((b) => pathsOverlap(b, installedCtx))) continue;
+    out.add(rel);
+  }
+  return [...out];
+}
+
+/** Never refreshed through manifest.refreshFiles, at any depth: instance-local secrets and state. */
+const REFRESH_FILES_NEVER = /^(\.env.*|data|node_modules|\.git)$/i;
+
+/**
+ * manifest.refreshFiles (Crow Workspace W2, F4): an OPT-IN list of bundle-relative paths a docker bundle wants
+ * re-copied on a version change — e.g. ["docker-compose.yml", "onlyoffice-plugin"]: the compose that adds a
+ * read-only plugin mount, and the plugin directory it mounts. The running containers are NOT recreated (they keep
+ * the old compose until the bundle is restarted). An entry is copied only when it is a plain relative path inside
+ * the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
+ * no .env*, data, node_modules or .git at any depth, exists in the repo copy (realpath inside the bundle), and does
+ * not overlap a READ-WRITE bind mount of the installed compose or its overrides (that is data). Returns the
+ * bundle-relative paths to copy.
+ */
+function manifestRefreshFiles(manifest, appSrc, destDir) {
+  const list = manifest?.refreshFiles;
+  if (!Array.isArray(list) || !list.length) return [];
+  let rootReal;
+  try { rootReal = realpathSync(appSrc); } catch { return []; }
+  const composeRel = manifestComposeFile(manifest);
+  const destReal = realOrSelf(destDir);
+  const env = composeExpandEnv(destDir);
+  const texts = [];
+  for (const f of composeRel ? [join(appSrc, composeRel), ...installedComposeFiles(composeRel).map((r) => join(destDir, r))] : []) {
+    try { if (existsSync(f)) texts.push(readFileSync(f, "utf8")); } catch { /* unreadable → skip */ }
+  }
+  const projectDir = join(destReal, composeRel ? dirname(composeRel) : ".");
+  const rwBinds = texts.flatMap((t) => composeBindSources(t, projectDir, env, { rwOnly: true })).map(realOrSelf);
+  const out = new Set();
+  for (const p of list.slice(0, 50)) {
+    if (typeof p !== "string" || !p || isAbsolute(p) || p.includes("\\") || p.includes("$")) continue;
+    const rel = relativePath(".", p);
+    if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
+    let real;
+    try { real = realpathSync(join(appSrc, rel)); } catch { continue; }
+    const realRel = relativePath(rootReal, real);
+    if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
+    const installed = realOrSelf(join(destReal, rel));
+    if (rwBinds.some((b) => pathsOverlap(b, installed))) continue;
     out.add(rel);
   }
   return [...out];
@@ -672,7 +723,9 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *   1. Copies the explicit-include set of code artifacts from appSrc → destDir
  *      (type-aware: docker-surface bundles get a narrower set, since existing
  *      docker bundles bind-mount config/scripts/etc into LIVE containers and a
- *      refresh must never mutate a running container's mounts).
+ *      refresh must never mutate a running container's mounts). A docker bundle
+ *      may opt specific code paths in with manifest.refreshFiles (see
+ *      manifestRefreshFiles: never .env*, data, or a read-write mount).
  *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
@@ -712,7 +765,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     ? ["server", "panel", "skills"]
     : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
-  // .env*, node_modules/, data/ — simply absent from both lists above.
+  // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
+  // exception is a docker bundle's explicit opt-in, manifest.refreshFiles
+  // (manifestRefreshFiles): named code paths such as its compose file or a
+  // read-only-mounted plugin dir — still never .env*, data, node_modules, .git
+  // or anything a read-write bind mount reaches.
 
   // Manifest-declared roots: the bundle contract is manifest-declaration-
   // driven, so any path a manifest names is code by definition. Each is
@@ -758,6 +815,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     }
     if (contexts.length) {
       console.log(`[bundles] ${id}: build source refreshed (${contexts.join(", ")}) — Restart/Start it in Extensions to rebuild the image`);
+    }
+    const opted = manifestRefreshFiles(repoManifest, appSrc, destDir).filter((rel) => copyBundleRefreshItem(appSrc, destDir, rel));
+    for (const rel of opted) touched.push(`refresh:${rel}`);
+    if (opted.length) {
+      console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")}) — running containers keep the old files/compose until the bundle is restarted`);
     }
   }
 

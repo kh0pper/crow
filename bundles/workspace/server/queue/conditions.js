@@ -26,21 +26,22 @@ export const QUEUEABLE = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_
 
 /**
  * Ops the plugin may apply live (spec §5.7 table, minus R-LIVE: the 9.4 builder API lacks AddComment/SetBold/SetItalic/
- * SetUnderline/SetColor, so ws_docs_add_comment and ws_docs_format_text are close-time only). ws_slides_find_replace is
- * live only with scope "slides" — use isLiveOp(tool, args).
+ * SetUnderline/SetColor, so ws_docs_add_comment and ws_docs_format_text are close-time only). Task 13: the slide ops
+ * are close-time only too — S9 verified no text method on a shape's ApiDocumentContent, so the plugin cannot read
+ * or check a shape's text (onlyoffice-plugin/ops.js implements exactly this set; its test pins it).
  */
 export const LIVE_OPS = new Set(["ws_docs_find_replace", "ws_docs_append", "ws_docs_insert_at_heading", "ws_docs_rewrite_passages",
-  "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_slides_edit_text", "ws_slides_find_replace"]);
-export const isLiveOp = (tool, args = {}) => LIVE_OPS.has(tool) && (tool !== "ws_slides_find_replace" || (args.scope ?? "slides") === "slides");
+  "ws_sheets_write", "ws_sheets_append", "ws_sheets_set_number_format", "ws_sheets_add_tab", "ws_sheets_rename_tab"]);
+export const isLiveOp = (tool) => LIVE_OPS.has(tool);
 /**
  * R-LIVE: a live ack is verified against the saved file, so a change is offered for live apply only when its
  * postcondition can be decided (single-pair find/replace with counts, an append with a known first paragraph…).
  * Everything else waits for close-time apply.
  */
 export function liveEligible(tool, args = {}, pre = null) {
-  if (!isLiveOp(tool, args)) return false;
+  if (!isLiveOp(tool)) return false;
   switch (tool) {
-    case "ws_docs_find_replace": case "ws_slides_find_replace": return pairsOf(args).length === 1 && Number.isInteger(pre?.rcount);
+    case "ws_docs_find_replace": return pairsOf(args).length === 1 && Number.isInteger(pre?.rcount);
     case "ws_docs_append": case "ws_docs_insert_at_heading": return Number.isInteger(pre?.count) && !!pre?.text;
     case "ws_sheets_append": return Number.isInteger(pre?.last_row);
     default: return true;

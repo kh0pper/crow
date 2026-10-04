@@ -772,3 +772,79 @@ describe("C6 — docker bundle refresh ships package.json + lock and installs th
     assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "1.1.0");
   });
 });
+
+// ---------------------------------------------------------------------------
+// manifest.refreshFiles (Crow Workspace W2, F4): a docker bundle opts specific
+// code paths in (its compose file, a read-only-mounted plugin dir). Never .env*,
+// data, node_modules, .git, manifest.json, a path outside the bundle, or anything
+// a read-write bind mount reaches; nothing at all without a version change.
+// ---------------------------------------------------------------------------
+describe("manifest.refreshFiles — docker opt-in refresh of named code paths", () => {
+  const compose = "services:\n  app:\n    image: x\n    volumes:\n      - ./plugin:/srv/plugin:ro\n      - ./state:/srv/state\n      - ./conf:/srv/conf:rw\n";
+  function setup(id, refreshFiles, { version = "2.0.0" } = {}) {
+    const repoRoot = freshRoot(`crowrepo-rf-${id}-`);
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "W", version, type: "bundle", category: "misc", description: "d", docker: { composefile: "docker-compose.yml" }, refreshFiles }));
+    put(repoRoot, `${id}/docker-compose.yml`, compose + "# v2\n");
+    put(repoRoot, `${id}/plugin/config.json`, "plugin v2\n");
+    put(repoRoot, `${id}/plugin/sub/ops.js`, "ops v2\n");
+    put(repoRoot, `${id}/state/db.json`, "repo state\n");
+    put(repoRoot, `${id}/conf/a.yml`, "repo conf\n");
+    put(repoRoot, `${id}/data/x`, "repo data\n");
+    put(repoRoot, `${id}/.env`, "SECRET=repo\n");
+    put(repoRoot, `${id}/notes.txt`, "repo notes\n");
+    put(repoRoot, "outside.txt", "outside\n");
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, compose + "# v1\n");
+    put(CROW_HOME, `bundles/${id}/plugin/config.json`, "plugin v1\n");
+    put(CROW_HOME, `bundles/${id}/state/db.json`, "live state\n");
+    put(CROW_HOME, `bundles/${id}/conf/a.yml`, "live conf\n");
+    put(CROW_HOME, `bundles/${id}/data/x`, "live data\n");
+    put(CROW_HOME, `bundles/${id}/.env`, "SECRET=live\n");
+    setInstalled([id]);
+    return repoRoot;
+  }
+
+  test("version bump: the compose file and the read-only-mounted plugin dir are copied; nothing else", async () => {
+    const id = "rf-ok";
+    const repoRoot = setup(id, ["docker-compose.yml", "plugin", "./plugin/sub"]);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.match(readAt(destBundleDir(id), "docker-compose.yml"), /# v2/);
+    assert.equal(readAt(destBundleDir(id), "plugin/config.json"), "plugin v2\n");
+    assert.equal(readAt(destBundleDir(id), "plugin/sub/ops.js"), "ops v2\n");
+    assert.equal(readAt(destBundleDir(id), ".env"), "SECRET=live\n");
+    assert.equal(readAt(destBundleDir(id), "state/db.json"), "live state\n");
+    assert.equal(readAt(destBundleDir(id), "data/x"), "live data\n");
+    assert.ok(!existsSync(join(destBundleDir(id), "notes.txt")), "an undeclared file is not copied");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "2.0.0");
+  });
+
+  test("hostile or data entries are refused: .env, data, read-write mounts, traversal, absolute, manifest.json", async () => {
+    const id = "rf-bad";
+    const repoRoot = setup(id, [".env", "data", "data/x", "state", "state/db.json", "conf", "../outside.txt", "/etc/hostname", "plugin/../.env", "node_modules", "manifest.json", "$HOME", 7, null]);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), ".env"), "SECRET=live\n");
+    assert.equal(readAt(destBundleDir(id), "data/x"), "live data\n");
+    assert.equal(readAt(destBundleDir(id), "state/db.json"), "live state\n", "a read-write bind mount is data");
+    assert.equal(readAt(destBundleDir(id), "conf/a.yml"), "live conf\n", "an explicit :rw mount is data");
+    assert.ok(!existsSync(join(destBundleDir(id), "..", "outside.txt")));
+    assert.match(readAt(destBundleDir(id), "docker-compose.yml"), /# v1/, "not declared → not copied");
+  });
+
+  test("no version change → nothing is copied, even when declared", async () => {
+    const id = "rf-same";
+    const repoRoot = setup(id, ["docker-compose.yml", "plugin"]);
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "2.0.0", type: "bundle" }));
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.match(readAt(destBundleDir(id), "docker-compose.yml"), /# v1/);
+    assert.equal(readAt(destBundleDir(id), "plugin/config.json"), "plugin v1\n");
+  });
+
+  test("the workspace bundle declares its compose file and the live plugin, mounted read-only", () => {
+    const m = JSON.parse(readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "manifest.json"), "utf8"));
+    assert.deepEqual(m.refreshFiles, ["docker-compose.yml", "onlyoffice-plugin"]);
+    const c = readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "docker-compose.yml"), "utf8");
+    assert.match(c, /- \.\/onlyoffice-plugin:\/var\/www\/onlyoffice\/documentserver\/sdkjs-plugins\/\{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1\}:ro/);
+  });
+});
