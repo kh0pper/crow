@@ -100,3 +100,21 @@ test("rate limit with no login falls back to per-IP; different IPs are independe
   assert.deepEqual(go("100.64.0.1"), { error: "rate_limited", status: 429 });
   assert.ok(go("100.64.0.2").code, "a different IP has its own budget");
 });
+
+test("startHits is hard-capped: a flood of fresh keys gets rate_limited, existing keys keep working", () => {
+  const { s, adv } = mk();
+  for (let i = 0; i < P.MAX_START_KEYS; i++) s.start({ ip: "10.0.0.1", ua: "x", login: "u" + i });
+  assert.deepEqual(s.start({ ip: "10.0.0.1", ua: "x", login: "fresh" }), { error: "rate_limited", status: 429 });
+  adv(61 * 1000);
+  assert.ok(s.start({ ip: "10.0.0.1", ua: "x", login: "fresh" }).error !== "rate_limited", "stale keys swept after a minute");
+});
+
+test("complete() needs a claimed entry and cannot overwrite an existing result", () => {
+  const { s } = mk();
+  const r = start(s);
+  assert.equal(s.complete(r.pair_id, { device_id: "k", token: "a" }), false, "unclaimed");
+  s.claim(r.code);
+  assert.equal(s.complete(r.pair_id, { device_id: "k", token: "a" }), true);
+  assert.equal(s.complete(r.pair_id, { device_id: "k2", token: "b" }), false, "second complete refused");
+  assert.equal(s.status(r.pair_id, r.poll_secret).body.token, "a");
+});
