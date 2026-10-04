@@ -188,9 +188,12 @@ export function createVoiceTurnRunner(deps) {
       result.failed = why;
       timings.failed = why;
       log(`[voice-turn] ${device?.id} turn failed (${why})${timings.tools ? `; tools by round: ${timings.tools.join(" → ")}` : ""}`);
-      if (aborted() || !say) return;
+      if (aborted()) { result.aborted = true; result.failed = null; delete timings.failed; return; }
+      if (!say) return;
       sink.event({ type: "caption_delta", text: spokenBefore ? ` ${fallbackText}` : fallbackText });
       await say.force(fallbackText);
+      // A barge-in over the apology: the turn was interrupted, not failed (the gate excludes it anyway).
+      if (aborted()) { result.aborted = true; result.failed = null; delete timings.failed; return; }
       say.end();
       if (history) convo.save(device.id, [...history, { role: "user", content: result.transcript }, { role: "assistant", content: fallbackText }]);
     };
@@ -297,13 +300,14 @@ export function createVoiceTurnRunner(deps) {
         const filler = say.filler().catch((err) => { fillerErr = err; });
         const ready = await readyEscalation(decision.key, db, llmSignal);
         await filler;
-        if (fillerErr && !aborted()) {
+        if (fillerErr && !aborted() && !mute.signal.aborted) {
           console.warn(`[voice-turn] filler TTS failed: ${fillerErr.message}`);
           timings.filler_error = String(fillerErr.message || fillerErr);
         }
         if (ready.adapter) { chat = ready.adapter; result.route = "escalate"; result.escalated = true; }
         // Qwen chat templates reject a system message anywhere but first (review C1):
         // the note joins the leading system message.
+        else if (budgetHit) result.degraded = "budget";   // cut by the first-audio budget, not a barge-in
         else { result.degraded = ready.reason; messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${DEGRADED_NOTE}` }; }
       }
       if (aborted()) { result.aborted = true; return result; }
@@ -349,6 +353,9 @@ export function createVoiceTurnRunner(deps) {
       let nextMax = 600;
       let spokenChars = 0;
       let displayProgress = false;
+      // Speech that reads as an ANSWER, not a preamble: any words after the first tool round, or a
+      // long first round. A silent forced final round after a real answer is not a failure.
+      let answeredChars = 0;
       let cut = null;
       let finalRound = false;
       let finalSpoken = 0;
@@ -444,6 +451,7 @@ export function createVoiceTurnRunner(deps) {
         const remoteResults = remote.length ? await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]) : [];
         if (budgetHit || remoteResults == null) break;
         if (roundDisplay) displayProgress = true;
+        if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
         if (assistantMsg && !content.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
         // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
@@ -478,7 +486,9 @@ export function createVoiceTurnRunner(deps) {
       } else {
         await chunker.flush();
         if (aborted()) result.aborted = true;
-        else if (cut && finalSpoken === 0) { await speakFallback(cut, spokenChars > 0); return result; }
+        // The budget can fire while the last chunk is still synthesizing (the stream already ended).
+        else if (budgetHit && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
+        else if (cut && finalSpoken === 0 && answeredChars === 0 && !displayProgress) { await speakFallback(cut, spokenChars > 0); return result; }
         else if (spokenChars === 0 && !displayProgress) { await speakFallback("no_text", false); return result; }
       }
       say.end();
@@ -488,7 +498,7 @@ export function createVoiceTurnRunner(deps) {
       return result;
     } catch (err) {
       if (aborted()) { result.aborted = true; return result; }
-      if (budgetHit) { await speakFallback("budget", false).catch(() => {}); return result; }
+      if (budgetHit) { await speakFallback("budget", true).catch(() => {}); return result; }
       result.failed = "error";
       timings.failed = "error";
       fail("turn_failed", true, err.message);

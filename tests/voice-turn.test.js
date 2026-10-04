@@ -483,3 +483,59 @@ test("stall fix: the budget also bounds a slow remote tool; it never fires once 
   assert.equal(r3.failed, null);
   assert.deepEqual(b.calls.spoken, []);
 });
+
+// --- review fixes (adversarial review of the stall fix) ---
+
+test("review 1: the budget firing during the final flush (TTS ends cleanly on abort) still speaks the fallback", async () => {
+  const h = harness({ rounds: [[{ type: "content_delta", text: "No sentence end here" }, { type: "done" }]] });
+  h.deps.createTtsAdapter = async () => ({ name: "kokoro", async *synthesize(text, voice, o) {
+    if (text === FALLBACK_TEXT) { h.calls.spoken.push(text); yield Buffer.from(text); return; }
+    await new Promise((res) => (o.signal?.aborted ? res() : o.signal?.addEventListener("abort", res, { once: true })));   // slow, ends cleanly
+  } });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hm", sink: h.sink, firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.deepEqual(h.calls.spoken, [FALLBACK_TEXT]);
+  assert.ok(h.events.some((e) => e.type === "caption_delta" && e.text === ` ${FALLBACK_TEXT}`), "joins the shown caption with a space");
+});
+
+test("review 2/5: a silent forced final round after a real spoken answer, or after display changes, is not a failure", async () => {
+  const h = harness({ chatTools: ["crow_projects", "crow_blog", "crow_sharing"],
+    rounds: [call("a", "crow_projects"), [{ type: "content_delta", text: "It's 72 and sunny. " }, ...call("b", "crow_blog")], call("c", "crow_sharing"), [{ type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "weather?", sink: h.sink, maxToolRounds: 3 });
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.spoken, ["It's 72 and sunny."]);
+  // A short preamble then a loop still gets the fallback.
+  const p = harness({ rounds: [[{ type: "content_delta", text: "Let me check. " }, ...call("a", "crow_projects")], call("b", "crow_projects"), call("c", "crow_projects"), [{ type: "done" }]] });
+  const rp = await p.runner.runVoiceTurn({ db: {}, device: p.device, transcript: "x", sink: p.sink, maxToolRounds: 3 });
+  assert.ok(rp.failed, "preamble-only turn still fails");
+  assert.equal(p.calls.spoken.at(-1), FALLBACK_TEXT);
+  // Three display changes then a silent final round: the screen changed, no apology.
+  const extra = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async () => '{"ok":true,"action":"open"}' };
+  const d = harness({ rounds: [call("w1", "crow_wm"), call("w2", "crow_wm"), call("w3", "crow_wm"), [{ type: "done" }]] });
+  const rd = await d.runner.runVoiceTurn({ db: {}, device: d.device, transcript: "three timers", sink: d.sink, extraTools: [extra], maxToolRounds: 3 });
+  assert.equal(rd.failed, null);
+  assert.deepEqual(d.calls.spoken, []);
+});
+
+test("review 3: a budget cut during the escalation wait is degraded='budget' (not 'aborted') with no filler warning", async () => {
+  const h = harness({ route: "escalate", probe: () => false });
+  h.deps.sleep = (ms) => new Promise((res) => setTimeout(res, 5));   // real-time probe loop so the budget lands inside it
+  h.deps.now = (() => { const t0 = Date.now(); return () => 1_000 + (Date.now() - t0); })();
+  const runner = createVoiceTurnRunner(h.deps);   // the runner reads now/sleep at creation
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink, firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.equal(r.degraded, "budget");
+  assert.equal(r.timings.filler_error, undefined);
+  assert.equal(h.calls.spoken.at(-1), FALLBACK_TEXT);
+});
+
+test("review 4: a barge-in over the fallback line marks the turn aborted, not failed", async () => {
+  const ac = new AbortController();
+  const h = harness({ rounds: [[{ type: "done" }]] });
+  const orig = h.sink.audio;
+  h.sink.audio = (b) => { orig(b); ac.abort(); };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "x", sink: h.sink, signal: ac.signal });
+  assert.equal(r.aborted, true);
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.failed, undefined);
+});
