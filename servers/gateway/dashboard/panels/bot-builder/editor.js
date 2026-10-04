@@ -278,8 +278,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // onto the gateway record.
       let devices = [];
       try {
-        const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
-        devices = await listDevices(db).catch(() => []);
+        const { listDevices } = await import("../../../../shared/device-store.js");
+        devices = (await listDevices(db).catch(() => [])).filter((d) => d.device_kind !== "kiosk");   // kiosk displays bind elsewhere
       } catch { devices = []; }
       const selDev = devices.find((d) => String(d.id) === String(gw.device_id || "")) || null;
       const devOpts = `<option value="">&mdash; select a paired device &mdash;</option>` +
@@ -347,10 +347,10 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // it's NOT configured per device here — see the AI tab / docs/architecture/companion.md.
       let devices = [];
       try {
-        const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+        const { listDevices } = await import("../../../../shared/device-store.js");
         // Any paired device can be bound as a companion kiosk; binding tags it
         // device_kind:"companion". Show all so a fresh device can be claimed.
-        devices = await listDevices(db).catch(() => []);
+        devices = (await listDevices(db).catch(() => [])).filter((d) => d.device_kind !== "kiosk");   // kiosk displays bind elsewhere
       } catch { devices = []; }
       const devOpts = `<option value="">&mdash; select a paired device &mdash;</option>` +
         devices.map((d) => {

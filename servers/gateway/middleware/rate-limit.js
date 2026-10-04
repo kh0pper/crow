@@ -133,6 +133,8 @@ export function fixedWindowLimit({
  */
 export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
   "/dashboard", "/api/meta-glasses/", "/llm", "/ramble/", "/api/ramble/", "/api/workspace/live/",
+  // Kiosk display page + its API (2 s pair polling); each has its own gate.
+  "/display", "/api/kiosk/",
 ]);
 
 /** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */

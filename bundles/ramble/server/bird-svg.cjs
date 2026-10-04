@@ -24,7 +24,9 @@
   var PARTS = { /* name -> path data; body/head are ellipses computed from genome, the rest are here */
     beak: "M0 0 l20 5 l-20 6 z", longbeak: "M0 0 l34 -3 l-33 9 z", foot: "M0 0 v16 m-8 0 h16",
     tail: "M0 0 l-26 -14 l4 22 z", crest: "M0 0 q6 -18 14 -6 q-6 4 -8 10 z",
-    bow: "M0 0 l-12 -7 v14 z M0 0 l12 -7 v14 z", leaf: "M0 0 q14 -16 26 -8 q-12 4 -20 14 z", beanie: "M-26 0 q26 -34 52 0 z"
+    bow: "M0 0 l-12 -7 v14 z M0 0 l12 -7 v14 z", leaf: "M0 0 q14 -16 26 -8 q-12 4 -20 14 z", beanie: "M-26 0 q26 -34 52 0 z",
+    beakUpper: "M0 0 l20 5 l-20 0.5 z", beakLower: "M0 5.5 l20 -0.5 l-20 6 z",
+    longbeakUpper: "M0 0 l34 -3 l-33.5 6 z", longbeakLower: "M0.5 3 l33.5 -6 l-33 9 z"
   };
   function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; var t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   function pick(r, arr) { return arr[Math.floor(r() * arr.length)]; }
@@ -67,8 +69,10 @@
     }
     return out;
   }
-  function drawBird(g, mood) {
+  function drawBird(g, mood, opts) {
     mood = mood === "tired" || mood === "alarmed" ? mood : "happy";
+    var hk = !!(opts && opts.hooks);
+    function cl(name) { return hk ? ' class="' + name + '"' : ""; }
     var sp = SPECIES[g.species]; if (!sp) throw new Error("unknown species: " + g.species);
     var cx = 100, cy = 118, bw = 46 * g.plump, bh = 42, hr = 30, ex = cx + 10, ey = cy - 50, feet = sp.feet || "#c98a3a";
     var eye;
@@ -102,20 +106,23 @@
     }
     var crest = sp.crest > 0 ? '<path transform="' + at(cx - 4, cy - 76) + ' scale(1 ' + n(sp.crest * 4) + ')" d="' + PARTS.crest + '" fill="' + g.body + '"/>' : "";
     var neck = sp.longneck ? '<rect x="' + n(cx - 8) + '" y="' + n(cy - 60) + '" width="16" height="30" rx="8" fill="' + g.body + '"/>' : "";
-    var tail = '<path transform="' + at(cx - bw + 6, cy - 6) + ' scale(' + n(sp.tail) + ' 1)" d="' + PARTS.tail + '" fill="' + g.body + '"/>';
+    var tail = '<path' + cl("rb-tail") + ' transform="' + at(cx - bw + 6, cy - 6) + ' scale(' + n(sp.tail) + ' 1)" d="' + PARTS.tail + '" fill="' + g.body + '"/>';
     var beakD = sp.longbeak ? PARTS.longbeak : PARTS.beak;
-    var beak = '<path transform="' + at(cx + 22, cy - 46) + '" d="' + beakD + '" fill="' + sp.beak + '"/>';
+    var beak = hk
+      ? '<g class="rb-beak" transform="' + at(cx + 22, cy - 46) + '"><path class="rb-beak-upper" d="' + (sp.longbeak ? PARTS.longbeakUpper : PARTS.beakUpper) + '" fill="' + sp.beak + '"/><path class="rb-beak-lower" d="' + (sp.longbeak ? PARTS.longbeakLower : PARTS.beakLower) + '" fill="' + sp.beak + '"/></g>'
+      : '<path transform="' + at(cx + 22, cy - 46) + '" d="' + beakD + '" fill="' + sp.beak + '"/>';
     var wingDrop = mood === "alarmed" ? -6 : 0;
-    var feetSvg = '<g stroke="' + feet + '" stroke-width="4" stroke-linecap="round" fill="none"><path transform="' + at(cx - 12, cy + 34) + '" d="' + PARTS.foot + '"/><path transform="' + at(cx + 12, cy + 34) + '" d="' + PARTS.foot + '"/></g>';
+    var feetSvg = '<g' + cl("rb-feet") + ' stroke="' + feet + '" stroke-width="4" stroke-linecap="round" fill="none"><path transform="' + at(cx - 12, cy + 34) + '" d="' + PARTS.foot + '"/><path transform="' + at(cx + 12, cy + 34) + '" d="' + PARTS.foot + '"/></g>';
     var alarm = mood === "alarmed" ? '<text x="' + n(cx + 34) + '" y="' + n(cy - 70) + '" font-size="26" font-weight="800" fill="#ef4444" font-family="Baloo 2, sans-serif">!</text>' : "";
-    return '<g transform="' + at(cx, cy) + ' rotate(' + n(g.tilt) + ') scale(' + n(g.size) + ') ' + at(-cx, -cy) + '">' +
+    var eyeOut = hk ? '<g class="rb-eye">' + eye + '</g>' : eye;
+    return '<g' + cl("rb-bird") + ' transform="' + at(cx, cy) + ' rotate(' + n(g.tilt) + ') scale(' + n(g.size) + ') ' + at(-cx, -cy) + '">' +
       feetSvg + tail +
-      '<ellipse cx="' + n(cx) + '" cy="' + n(cy) + '" rx="' + n(bw) + '" ry="' + n(bh) + '" fill="' + g.body + '"/>' +
+      '<ellipse' + cl("rb-body") + ' cx="' + n(cx) + '" cy="' + n(cy) + '" rx="' + n(bw) + '" ry="' + n(bh) + '" fill="' + g.body + '"/>' +
       '<ellipse cx="' + n(cx + 4) + '" cy="' + n(cy + 8) + '" rx="' + n(bw * .62) + '" ry="' + n(bh * .62) + '" fill="' + g.belly + '" opacity=".95"/>' +
-      '<ellipse cx="' + n(cx - 22) + '" cy="' + n(cy + 2 + wingDrop) + '" rx="18" ry="24" fill="' + hueShift(g.body, 0, .08) + '" opacity=".9" transform="rotate(-12 ' + n(cx - 22) + ' ' + n(cy + 2) + ')"/>' +
+      '<ellipse' + cl("rb-wing") + ' cx="' + n(cx - 22) + '" cy="' + n(cy + 2 + wingDrop) + '" rx="18" ry="24" fill="' + hueShift(g.body, 0, .08) + '" opacity=".9" transform="rotate(-12 ' + n(cx - 22) + ' ' + n(cy + 2) + ')"/>' +
       (sp.sheen ? '<ellipse cx="' + n(cx - 10) + '" cy="' + n(cy - 18) + '" rx="16" ry="8" fill="#7ad3ff" opacity=".25"/>' : "") +
-      neck + '<circle cx="' + n(cx) + '" cy="' + n(cy - 50) + '" r="' + n(hr) + '" fill="' + g.body + '"/>' +
-      crest + hat + marks + scarf + cheeks + eye + glasses + beak + alarm + '</g>';
+      neck + (hk ? '<g class="rb-head">' : "") + '<circle cx="' + n(cx) + '" cy="' + n(cy - 50) + '" r="' + n(hr) + '" fill="' + g.body + '"/>' +
+      crest + hat + marks + scarf + cheeks + eyeOut + glasses + beak + alarm + (hk ? "</g>" : "") + '</g>';
   }
   function drawEgg(seed) {
     if (!isUint32(seed)) throw new Error("seed must be a uint32");

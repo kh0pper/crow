@@ -3,12 +3,14 @@
   "type": "bundle",
   "name": "Faster-Whisper Server (local)",
   "category": "ai",
-  "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
+  "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses, the Kiosk display and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
   "host": "local",
   "requires": {
     "platform": "linux-x86_64"
   },
-  "env_vars": [],
+  "env_vars": [
+    { "name": "WHISPER_CPU_THREADS", "description": "CPU threads per transcription (CTranslate2). More threads = faster speech-to-text for the kiosk and glasses; keep it at or below the machine's physical cores. Default 12 (sized for a 16-core box).", "default": "12", "required": false, "propagate": false }
+  ],
   "port": 8004,
   "no_auto_provider": "Not an LLM chat endpoint -- speech-to-text is wired via sttProfileSeed below, which seeds a dedicated STT profile (provider: fasterwhisper) pointing at this container's OpenAI-compatible /v1/audio/transcriptions endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
   "sttProfileSeed": {

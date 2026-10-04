@@ -127,6 +127,7 @@ export default defineConfig({
               { text: 'Sincronización Multi-Instancia', link: '/es/architecture/instances' },
               { text: 'Bot Builder', link: '/es/architecture/bot-builder' },
               { text: 'Compañero de IA', link: '/es/architecture/companion' },
+              { text: 'Pantalla kiosk', link: '/es/architecture/kiosk' },
               { text: 'Panel de Datos', link: '/es/architecture/data-dashboard' },
             ],
           },
@@ -316,6 +317,7 @@ export default defineConfig({
           { text: 'Multi-Instance Sync', link: '/architecture/instances' },
           { text: 'Bot Builder', link: '/architecture/bot-builder' },
           { text: 'AI Companion', link: '/architecture/companion' },
+          { text: 'Kiosk display', link: '/architecture/kiosk' },
 
           { text: 'Data Dashboard', link: '/architecture/data-dashboard' },
         ],

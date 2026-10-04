@@ -3,7 +3,7 @@
   "type": "bundle",
   "name": "Kokoro TTS (local)",
   "category": "ai",
-  "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
+  "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the Kiosk display, AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
   "host": "local",
   "requires": {
     "platform": "linux-x86_64"

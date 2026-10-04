@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Crow Kiosk</title>
+<link rel="stylesheet" href="/display/assets/theme.css">
+<link rel="stylesheet" href="/display/assets/kiosk.css">
+<script src="/display/assets/bird-svg.js"></script>
+<script type="module" src="/display/assets/kiosk.js"></script>
+</head>
+<body>
+<main id="app" class="k-app">
+  <header class="k-top"><time id="clock" class="k-clock"></time><span id="date" class="k-date"></span></header>
+  <section class="k-stage">
+    <button id="bird" class="k-bird is-idle" type="button">
+      <span class="k-ring" aria-hidden="true"></span>
+      <span id="bird-art" class="k-bird-art"></span>
+      <span class="k-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    </button>
+    <div id="windows" class="k-windows" aria-live="polite" hidden></div>
+  </section>
+  <section id="pairing" class="k-pairing" hidden>
+    <p id="pair-label" class="k-pair-label"></p>
+    <p id="pair-code" class="k-pair-code"></p>
+    <p id="pair-hint" class="k-pair-hint"></p>
+  </section>
+  <footer id="captions" class="k-captions" aria-live="polite">
+    <p id="cap-user" class="k-cap-user"></p>
+    <p id="cap-bot" class="k-cap-bot"></p>
+  </footer>
+  <button id="mic" class="k-mic" type="button"></button>
+  <div id="banner" class="k-banner" role="status" hidden></div>
+  <div id="debug" class="k-debug" hidden></div>
+</main>
+</body>
+</html>

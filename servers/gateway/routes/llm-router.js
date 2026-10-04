@@ -297,6 +297,24 @@ function stripEscalate(body) {
   }
 }
 
+/** The fast/escalate keys the router and the kiosk voice turn share. */
+export const VOICE_ROUTE_KEYS = Object.freeze({ fast: FAST_KEY, escalate: ESC_KEY });
+
+/**
+ * THE voice routing policy (kiosk spec §7.2): the same decision /llm/v1 makes,
+ * callable in-process so the kiosk needs no HTTP hop. `messages` is the full
+ * OpenAI-style list; `hasTools` says whether the turn advertises any tools.
+ */
+export function chooseVoiceRoute(messages, { hasTools = false } = {}) {
+  const body = { messages: Array.isArray(messages) ? messages : [], tools: hasTools ? [{}] : [] };
+  if (wantsEscalation(body)) return { route: "escalate", reason: "manual", key: ESC_KEY };
+  if (wantsToolEscalation(body)) return { route: "escalate", reason: "tool-intent", key: ESC_KEY };
+  return { route: "fast", reason: null, key: FAST_KEY };
+}
+
+export const resolveVoiceKey = (key) => resolveKey(key);
+export const probeVoiceReady = (baseUrl) => defaultProbeReady(baseUrl);
+
 /** Is the fast model answering right now? A 2 s GET on its models list —
  *  same shape as the orchestrator's readiness probe, kept local so the
  *  router's degrade decision has no orchestrator dependency. */
@@ -315,11 +333,10 @@ async function handleChat(req, res, deps) {
   if (door.kind !== "companion") return handleDoor(req, res, "chat/completions", deps, door);
   // door.kind === "companion": fall through to the fast/escalate heuristics, unchanged.
 
-  const manualEsc = wantsEscalation(body);
-  if (manualEsc) stripEscalate(body); // only the typed token is stripped
-  const toolEsc = !manualEsc && wantsToolEscalation(body);
-  const escalate = manualEsc || toolEsc;
-  const escReason = manualEsc ? "manual" : toolEsc ? "tool-intent" : null;
+  const decision = chooseVoiceRoute(body.messages, { hasTools: Array.isArray(body.tools) && body.tools.length > 0 });
+  if (decision.reason === "manual") stripEscalate(body); // only the typed token is stripped
+  const escalate = decision.route === "escalate";
+  const escReason = decision.reason;
   let key = escalate ? ESC_KEY : FAST_KEY;
   let routeLabel = escalate ? `escalate(${escReason})` : "fast";
 

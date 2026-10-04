@@ -250,16 +250,11 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // Keep def.fast_voice_model (read by the voice turn) in sync.
         if (fvm) def.fast_voice_model = fvm;
         try {
-          const { listDevices, updateDeviceProfiles } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+          const { updateDeviceProfiles, unbindBotFromOtherDevices } = await import("../../../../shared/device-store.js");
           if (deviceId) {
             // Unbind any OTHER device currently bound to this bot, and the
             // prior device if the binding moved ("" -> null via the store).
-            const devices = await listDevices(db).catch(() => []);
-            for (const d of devices) {
-              if (d.bound_bot_id === botId && d.id !== deviceId) {
-                await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
-              }
-            }
+            await unbindBotFromOtherDevices(db, botId, deviceId);   // skips kiosk displays (review M7)
             if (priorDeviceId && priorDeviceId !== deviceId) {
               await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
             }
@@ -291,7 +286,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         const newKioskName = (b.gw_new_kiosk_name || "").trim();
         if (!deviceId && newKioskName) {
           try {
-            const { listDevices, pairDevice } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+            const { listDevices, pairDevice } = await import("../../../../shared/device-store.js");
             const baseId = ("kiosk-" + newKioskName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40)).replace(/-$/, "") || "kiosk";
             const taken = new Set((await listDevices(db).catch(() => [])).map((d) => String(d.id)));
             let newId = baseId;
@@ -320,14 +315,9 @@ export async function handleBotBuilderPost(req, res, { db }) {
         def.gateways = [{ type: "companion", ...(deviceId ? { device_id: deviceId } : {}) }];
         def.companion_features = features;
         try {
-          const { listDevices, updateDeviceProfiles } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+          const { updateDeviceProfiles, unbindBotFromOtherDevices } = await import("../../../../shared/device-store.js");
           if (deviceId) {
-            const devices = await listDevices(db).catch(() => []);
-            for (const d of devices) {
-              if (d.bound_bot_id === botId && d.id !== deviceId) {
-                await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
-              }
-            }
+            await unbindBotFromOtherDevices(db, botId, deviceId);   // skips kiosk displays (review M7)
             if (priorDeviceId && priorDeviceId !== deviceId) {
               await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
             }
