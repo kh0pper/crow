@@ -37,6 +37,16 @@ after(() => { server.close(); fake.close(); });
 const post = (path, form, cookie = "crow_session=ok") => fetch(`${base}${path}`, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie }, body: new URLSearchParams(form).toString() });
 const loc = (r) => new URL(r.headers.get("location"), base);
 const puts = () => fake.calls.filter((c) => c.method === "PUT").length;
+const { openDocx } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+const { setParagraphText } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+const { kids, NS } = await import("../bundles/workspace/server/ooxml/xml.js");
+/** oo-rich.docx with some paragraphs (by index) set to other text. */
+function docxWith(texts) {
+  const d = openDocx(readFileSync(join(FIX, "oo-rich.docx"))); const ps = kids(d.body, NS.w, "p");
+  for (const [i, text] of Object.entries(texts)) setParagraphText(d, ps[Number(i)], text);
+  return d.pkg.save();
+}
+const pendingCount = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM workspace_pending_changes")).rows[0].n);
 const rowOf = async (id) => (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE id=?", args: [id] })).rows[0];
 
 test("en/es string parity; no secret ever rendered; CSRF field present; values escaped", async () => {
@@ -52,6 +62,34 @@ test("en/es string parity; no secret ever rendered; CSRF field present; values e
   assert.doesNotMatch(html, /<script/i, "server-rendered, no client script");
   const evil = await V.renderQuick({ lang: "en", csrf: "tok", query: { view: "quick", path: "Shared with Crow/<img src=x>" } });
   assert.doesNotMatch(evil, /<img src=x>/);
+});
+
+test("XSS: a hostile file name and a <script> paragraph are escaped; an accented/emoji name round-trips through the link", async () => {
+  const name = "<img src=x onerror=1> Menú 🌮.docx"; const path = `Shared with Crow/Casa/${name}`;
+  fake.addFile(path, docxWith({ 1: "<script>alert(1)</script>" }), { owner: "admin" });
+  const folder = await V.renderQuick({ lang: "en", csrf: "tok", query: { path: "Shared with Crow/Casa" } });
+  assert.doesNotMatch(folder, /<img src=x/); assert.doesNotMatch(folder, /<script/i);
+  assert.ok(folder.includes("&lt;img src=x onerror=1&gt; Menú 🌮.docx"));
+  const hrefs = [...folder.matchAll(/href="([^"]+)"/g)].map((m) => new URL(m[1].replace(/&amp;/g, "&"), base));
+  assert.ok(hrefs.some((u) => u.searchParams.get("path") === path), "the Open link carries the exact (NFC, emoji) path");
+  const file = await V.renderQuick({ lang: "en", csrf: "tok", query: { path } });
+  assert.doesNotMatch(file, /<script/i); assert.ok(file.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
+  const edit = await V.renderQuick({ lang: "en", csrf: "tok", query: { path, target: "1" } });
+  assert.doesNotMatch(edit, /<script/i); assert.match(edit, /name="shown" value="&lt;script&gt;alert\(1\)&lt;\/script&gt;"/);
+  assert.match(edit, /name="path" value="&lt;img src=x onerror=1&gt; Menú 🌮\.docx"|name="path" value="Shared with Crow\/Casa\/&lt;img src=x onerror=1&gt; Menú 🌮\.docx"/);
+});
+
+test("unknown notice codes show a generic text, never a message from the URL; the choice page is localized per lock kind", async () => {
+  const page = await V.renderQuick({ lang: "es", csrf: "tok", query: { path: "Shared with Crow/Casa", notice: "weird_code", msg: "EVIL injected text" } });
+  assert.doesNotMatch(page, /EVIL injected text/); assert.ok(page.includes(V.QUICK_STRINGS.es.err_generic));
+  const form = { path: DOCX, kind: "docx", target: "1", value: "x", shown: P1 };
+  const stale = V.renderChoice({ lang: "es", csrf: "tok", form, err: { code: "stale_editor_lock", message: "RAW lock text", data: { can_proceed: false } } });
+  assert.ok(stale.includes(V.QUICK_STRINGS.es.err_stale_editor_lock)); assert.doesNotMatch(stale, /RAW lock text/);
+  assert.ok(!stale.includes(V.QUICK_STRINGS.es.openBy), "a stale lock is not 'someone is editing'"); assert.doesNotMatch(stale, /force_close/);
+  const person = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "locked_by_person", message: "RAW", data: { open_by: ["Dayane"], can_proceed: false } } });
+  assert.ok(person.includes(V.QUICK_STRINGS.en.err_locked_by_person)); assert.doesNotMatch(person, /RAW|force_close/);
+  const open = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "open_in_editor", message: "RAW", data: { open_by: ["Dayane"], can_proceed: true } } });
+  assert.match(open, /Dayane/); assert.ok(open.includes(V.QUICK_STRINGS.en.openBy)); assert.match(open, /value="force_close"/); assert.doesNotMatch(open, /RAW|<script/i);
 });
 
 test("browse: folders and office files only, phone-sized buttons; a cell and a paragraph render an edit form that posts back what it showed", async () => {
@@ -141,6 +179,48 @@ test("restore of an open file queues ws_drive_restore_version {path, version_id}
   assert.equal(loc(c).searchParams.get("notice"), "cancelled");
   assert.equal((await rowOf(id)).state, "cancelled");
   assert.equal(loc(await post("/api/workspace/quick/restore", { _csrf: "tok", path: XLSX, version_id: "not-a-version" })).searchParams.get("notice"), "bad_version_id");
+});
+
+test("I1: an open file + a paragraph whose prefix also starts an EARLIER paragraph (or an empty one) is not queued — try-again page, nothing queued or written", async () => {
+  const DUP = "Shared with Crow/Casa/dup.docx";
+  fake.addFile(DUP, docxWith({ 4: "Tortillas", 5: "" }), { owner: "admin" }); // p3 "Tortillas" == p4 "Tortillas"; p5 empty
+  fake.openInEditor(DUP, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const n = puts(); const q0 = await pendingCount();
+  for (const [target, shown] of [["4", "Tortillas"], ["5", ""]]) {
+    const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: DUP, kind: "docx", target, shown, value: "Totopos" });
+    assert.equal(r.status, 200, `target ${target}`);
+    const html = await r.text();
+    assert.ok(html.includes(V.QUICK_STRINGS.en.notQueueable.replace(/'/g, "&#39;")), `target ${target}: explains why it can't wait`);
+    assert.match(html, /Dayane/); assert.match(html, /action="\/api\/workspace\/quick\/save"/);
+    assert.doesNotMatch(html, /quick\/cancel/, "nothing was queued, so nothing to cancel");
+  }
+  assert.equal(await pendingCount(), q0, "no pending change was created");
+  assert.equal(puts(), n, "nothing written");
+  // the first "Tortillas" (p3) is still queueable: its prefix picks itself
+  const ok = await post("/api/workspace/quick/save", { _csrf: "tok", path: DUP, kind: "docx", target: "3", shown: "Tortillas", value: "Totopos" });
+  assert.match(await ok.text(), /quick\/cancel/);
+  assert.equal(await pendingCount(), q0 + 1);
+});
+
+test("I2: Apply now whose forced save fails puts the cancelled change back in the queue and says it is still waiting; a malformed cancel_first is refused", async () => {
+  const W = "Shared with Crow/Casa/w.docx";
+  fake.addFile(W, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
+  fake.openInEditor(W, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
+  const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
+  const n = puts();
+  fake.state.failNextWith = { status: 503, body: "busy" }; // the forced save's first request fails
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados.", if_open: "force_close", cancel_first: id });
+  assert.equal(r.status, 303);
+  assert.equal(loc(r).searchParams.get("notice"), "still_waiting");
+  assert.equal((await rowOf(id)).state, "pending", "the change is waiting again, not lost");
+  assert.equal(puts(), n);
+  const page = await V.renderQuick({ lang: "en", csrf: "tok", query: Object.fromEntries(loc(r).searchParams) });
+  assert.ok(page.includes(V.QUICK_STRINGS.en.err_still_waiting));
+  const bad = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "x", if_open: "force_close", cancel_first: "nope'" });
+  assert.equal(loc(bad).searchParams.get("notice"), "bad_args");
+  assert.equal(puts(), n, "refused before anything was written");
+  assert.equal((await rowOf(id)).state, "pending");
 });
 
 test("no session → 401; bad CSRF → 403; traversal path → error notice, no request", async () => {

@@ -74,10 +74,10 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
         const { renderChoice } = await bundleImport("server/quick/view.js");
         return res.status(200).type("html").send(renderChoice({ lang, csrf: req.csrfToken || form._csrf, form, err }));
       }
-      // Review I10: redact before the message reaches a URL (browser history / access logs).
-      let msg = String(err?.message || "").slice(0, 300);
-      try { const { redact } = await bundleImport("server/config.js"); msg = redact(msg, null); } catch { msg = ""; }
-      return back(res, form, err?.code || "error", { msg });
+      // Review I10 / T14 minor: only the error CODE travels in the URL (browser history, access logs); the page shows
+      // a localized text for it and never reflects a message from the query string.
+      const code = /^[a-z_]{1,40}$/.test(String(err?.code || "")) ? err.code : "error";
+      return back(res, form, code);
     }
   };
   router.post("/api/workspace/quick/save", handle((a, cfg, f) => a.quickSave(cfg, f, clock), "saved", { choice: true }));

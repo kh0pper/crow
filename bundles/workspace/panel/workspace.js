@@ -29,6 +29,7 @@ const T = {
     title: "Office",
     tabSetup: "Setup",
     tabQuick: "Quick edit",
+    quickUnavailable: "Quick edit is not available yet: Workspace is not set up, or its files are still being installed (see Setup).",
     subtitle: "Your private office: files, documents, calendars and contacts.",
     notReady: "Workspace is not fully set up yet. Finish the setup by running this command in a terminal on the machine that hosts Crow, then reopen this page:",
     addressH: "Your Workspace address",
@@ -57,6 +58,7 @@ const T = {
     title: "Office",
     tabSetup: "Configuración",
     tabQuick: "Edición rápida",
+    quickUnavailable: "La edición rápida aún no está disponible: Workspace no está configurado o sus archivos se están instalando (ver Configuración).",
     subtitle: "Tu oficina privada: archivos, documentos, calendarios y contactos.",
     notReady: "Workspace todavía no está completamente configurado. Termina la configuración ejecutando este comando en una terminal de la máquina que aloja Crow y vuelve a abrir esta página:",
     addressH: "La dirección de tu Workspace",
@@ -160,7 +162,20 @@ sudo tailscale serve --https=${u.ooPort} off</pre>`)}
 async function bundleDir() {
   const here = dirname(fileURLToPath(import.meta.url));
   const sibling = ["workspace-routes.js", "routes.js"].map((f) => join(here, f)).find((p) => existsSync(p));
-  return (await import(pathToFileURL(sibling).href)).BUNDLE_DIR;
+  return sibling ? (await import(pathToFileURL(sibling).href)).BUNDLE_DIR : null;
+}
+/** Quick edit from the bundle; if the routes file or the bundle's view is missing, a note instead of a 500. */
+async function renderQuickView(t, lang, req) {
+  try {
+    const dir = await bundleDir();
+    const view = dir && join(dir, "server", "quick", "view.js");
+    if (!view || !existsSync(view)) return `<p class="ws-note">${esc(t.quickUnavailable)}</p>`;
+    const { renderQuick } = await import(pathToFileURL(view).href);
+    return await renderQuick({ lang, csrf: req.csrfToken, query: req.query || {} });
+  } catch (e) {
+    console.warn(`[workspace] Quick edit unavailable: ${e.message}`);
+    return `<p class="ws-note">${esc(t.quickUnavailable)}</p>`;
+  }
 }
 
 export function renderTabs(lang, view) {
@@ -182,8 +197,7 @@ export default {
     const view = req.query?.view === "quick" ? "quick" : "setup";
     let content;
     if (view === "quick") {
-      const { renderQuick } = await import(pathToFileURL(join(await bundleDir(), "server", "quick", "view.js")).href);
-      content = renderTabs(lang, view) + (await renderQuick({ lang, csrf: req.csrfToken, query: req.query || {} }));
+      content = renderTabs(lang, view) + (await renderQuickView(t, lang, req));
     } else {
       content = renderTabs(lang, view) + renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome);
     }

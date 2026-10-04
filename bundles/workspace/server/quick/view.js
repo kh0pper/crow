@@ -33,6 +33,11 @@ export const QUICK_STRINGS = {
     err_version_gone: "Workspace no longer keeps that version, so it cannot be undone automatically.",
     err_read_only: "Crow bot can see this file but was not given edit rights. Ask the owner to share it with edit permission.",
     err_busy: "The file is being saved right now. Try again in a few seconds.",
+    err_stale_editor_lock: "This file is still marked as open in the editor, but nobody is editing it. Ask the file's owner to open its ⋯ menu in Workspace and choose Unlock, then try again.",
+    err_still_waiting: "It could not be applied right now, so your change is still waiting. It will be applied when the editor closes.",
+    err_bad_args: "That request was not valid. Go back and try again.",
+    err_generic: "Something went wrong. Nothing was changed; try again.",
+    notQueueable: "This paragraph can't wait in the queue (its first words also start an earlier paragraph, or it is empty). Try again after the editor closes.",
   },
   es: {
     tabSetup: "Configuración", tabQuick: "Edición rápida",
@@ -56,6 +61,11 @@ export const QUICK_STRINGS = {
     err_version_gone: "Workspace ya no guarda esa versión, así que no se puede deshacer automáticamente.",
     err_read_only: "Crow bot puede ver este archivo pero no tiene permiso de edición. Pide al dueño que lo comparta con permiso de edición.",
     err_busy: "El archivo se está guardando en este momento. Inténtalo de nuevo en unos segundos.",
+    err_stale_editor_lock: "Este archivo sigue marcado como abierto en el editor, pero nadie lo está editando. Pide al dueño del archivo que abra su menú ⋯ en Workspace y elija Desbloquear; luego inténtalo de nuevo.",
+    err_still_waiting: "No se pudo aplicar ahora, así que tu cambio sigue esperando. Se aplicará cuando se cierre el editor.",
+    err_bad_args: "Esa solicitud no era válida. Vuelve e inténtalo de nuevo.",
+    err_generic: "Algo salió mal. No se cambió nada; inténtalo de nuevo.",
+    notQueueable: "Este párrafo no puede esperar en la cola (sus primeras palabras también empiezan un párrafo anterior, o está vacío). Inténtalo de nuevo cuando se cierre el editor.",
   },
 };
 const strings = (lang) => QUICK_STRINGS[lang === "es" ? "es" : "en"];
@@ -73,7 +83,9 @@ const keepOf = (form) => ({ path: form.path, kind: form.kind, target: form.targe
 function noticeText(t, query) {
   const n = String(query.notice || "");
   if (["saved", "undone", "restored", "cancelled"].includes(n)) return t[n];
-  return `${t.errorPrefix} ${Object.hasOwn(t, `err_${n}`) ? t[`err_${n}`] : query.msg || n}`;
+  if (n === "still_waiting") return t.err_still_waiting;
+  // never reflect a message from the URL: a known code gets its localized text, anything else a generic one
+  return `${t.errorPrefix} ${Object.hasOwn(t, `err_${n}`) ? t[`err_${n}`] : t.err_generic}`;
 }
 
 async function versionsBlock(cfg, t, csrf, e) {
@@ -143,8 +155,10 @@ ${postForm("save", csrf, { ...keepOf(form), if_open: "force_close", cancel_first
 export function renderChoice({ lang, csrf, form, err }) {
   const t = strings(lang);
   const who = (err.data?.open_by || []).join(", ") || t.someone;
-  return standalone(lang, t.tabQuick, `<p><strong>${esc(who)}</strong> ${esc(t.openBy)}</p>
+  // only a live editor session is "someone editing"; a person's lock or a stale lock gets its own localized text
+  const head = err.code === "open_in_editor" ? `<p><strong>${esc(who)}</strong> ${esc(t.openBy)}</p>` : `<p>${esc(Object.hasOwn(t, `err_${err.code}`) ? t[`err_${err.code}`] : t.err_generic)}</p>`;
+  return standalone(lang, t.tabQuick, `${head}${err.data?.not_queueable ? `<p>${esc(t.notQueueable)}</p>` : ""}
 ${postForm("save", csrf, keepOf(form), t.tryAgain)}
-${err.data?.can_proceed ? postForm("save", csrf, { ...keepOf(form), if_open: "force_close" }, t.saveAnyway) : `<p>${esc(err.message)}</p>`}
+${err.data?.can_proceed ? postForm("save", csrf, { ...keepOf(form), if_open: "force_close" }, t.saveAnyway) : ""}
 <p><a href="${esc(q({ path: form.path }))}">${esc(t.cancel)}</a></p>`);
 }

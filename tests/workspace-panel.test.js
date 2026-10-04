@@ -134,3 +134,18 @@ test("handler: ?view=quick renders the tabs + the bundle's Quick edit view; defa
     for (const html of [quick, setup]) assert.doesNotMatch(html, /<script/i);
   } finally { if (saved === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = saved; }
 });
+
+test("installed alone without its routes file: ?view=quick shows a note, never a 500", async () => {
+  const { copyFileSync } = await import("node:fs");
+  const { pathToFileURL } = await import("node:url");
+  const dir = mkdtempSync(join(tmpdir(), "ws-panel-alone-"));
+  copyFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "panel", "workspace.js"), join(dir, "workspace.js"));
+  const saved = process.env.CROW_APP_ROOT; process.env.CROW_APP_ROOT = join(import.meta.dirname, "..");
+  try {
+    const { default: alone, WORKSPACE_STRINGS: S } = await import(pathToFileURL(join(dir, "workspace.js")).href);
+    let out = null;
+    await alone.handler({ query: { view: "quick" }, csrfToken: "tok" }, { send: (x) => { out = x; } }, { layout: ({ content }) => content, lang: "en" });
+    assert.ok(out.includes(S.en.quickUnavailable)); assert.ok(out.includes("Quick edit"));
+    assert.doesNotMatch(out, /<script/i);
+  } finally { if (saved === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = saved; }
+});

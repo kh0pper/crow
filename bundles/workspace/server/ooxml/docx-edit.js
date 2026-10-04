@@ -89,12 +89,16 @@ export function setParagraphText(d, p, text) {
   d.pkg.markDirty(d.part);
 }
 
+/** How rewrite_passages reads a match_prefix, and which body paragraph it picks (the first unused one that starts with it). */
+export const passagePrefix = (s) => String(s ?? "").normalize("NFC").trim().slice(0, 100);
+export const findPassage = (paras, prefix, used = new Set()) => paras.find((x) => !used.has(x) && paragraphText(x).normalize("NFC").replace(/^\s+/, "").startsWith(prefix));
+
 export function rewritePassages(d, passages) {
   const used = new Set(); const paras = kids(d.body, W, "p");
   const results = passages.map((ps) => {
-    const prefix = String(ps.match_prefix ?? "").normalize("NFC").trim().slice(0, 100);
+    const prefix = passagePrefix(ps.match_prefix);
     if (!prefix) return { match_prefix: ps.match_prefix, matched: false, reason: "Empty match_prefix" };
-    const p = paras.find((x) => !used.has(x) && paragraphText(x).normalize("NFC").replace(/^\s+/, "").startsWith(prefix));
+    const p = findPassage(paras, prefix, used);
     if (!p) return { match_prefix: ps.match_prefix, matched: false, reason: "No paragraph starts with this prefix" };
     if (!isPlainTextParagraph(p)) return { match_prefix: ps.match_prefix, matched: false, reason: "not_plain_text" };
     used.add(p); const original_length = paragraphText(p).length;

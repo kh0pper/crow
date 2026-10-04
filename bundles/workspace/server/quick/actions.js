@@ -6,18 +6,20 @@
 import { WsError } from "../result.js";
 import { withFileWrite, withFileRestore, undoFileChange } from "../write-protocol.js";
 import { splitPath } from "../nc/paths.js";
+import { getFile } from "../nc/dav.js";
 import { kids, NS } from "../ooxml/xml.js";
 import { openDocx, paragraphText } from "../ooxml/docx-model.js";
-import { setParagraphText, isPlainTextParagraph } from "../ooxml/docx-edit.js";
+import { setParagraphText, isPlainTextParagraph, passagePrefix, findPassage } from "../ooxml/docx-edit.js";
 import { openXlsx, writeRange, readRange } from "../ooxml/xlsx.js";
 import { openPptx, editShapeText, shapeById, shapeText } from "../ooxml/pptx.js";
 import { queueDescriptor } from "../queue/provider.js";
 import { queueDefs } from "../tools/queue.js";
+import { cas, CHANGE_ID_RE } from "../queue/store.js";
+import { workspaceDb, openWorkspaceDb } from "../db.js";
 
 export const QUICK_MAX_BYTES = 20 * 1024 * 1024;
 const WAIT_S = 10; // spec §8 / F16: a phone shouldn't hang for 30 s
 const KINDS = ["docx", "xlsx", "pptx"];
-const CHANGE_ID = /^pc_[0-9a-z]+$/;
 const [, cancelChange] = queueDefs; // ws_cancel_change
 /** Browsers submit textarea/hidden values with CRLF: normalize both sides, or every multi-line target is "stale". */
 const nl = (x) => String(x ?? "").replace(/\r\n?/g, "\n");
@@ -31,16 +33,60 @@ function asToolOp(form, value) {
   return ["ws_slides_edit_text", { path, object_id: String(form.target), new_text: value }];
 }
 /** force_close = the user's explicit "apply now" (never queued); otherwise queue after the 10 s wait. */
-const writeOpts = (form, clock, [tool, args]) => ({
-  label: "Quick edit", waitS: WAIT_S, clock,
-  ifOpen: forced(form) ? "force_close" : "queue",
-  queue: forced(form) ? null : queueDescriptor(tool, args, { requestedBy: "quick_edit" }),
-});
+const writeOpts = (form, clock, [tool, args], queueGuard = null) => {
+  const queue = forced(form) ? null : queueDescriptor(tool, args, { requestedBy: "quick_edit" });
+  return { label: "Quick edit", waitS: WAIT_S, clock, ifOpen: forced(form) ? "force_close" : "queue", queue: queue && queueGuard ? guardedQueue(queue, queueGuard) : queue };
+};
+
+/** The paragraph the page showed, or a refusal: stale (moved/changed) or not plain text (links, images, fields…). */
+function docxTarget(d, target, shown) {
+  const p = /^\d{1,6}$/.test(target) ? kids(d.body, NS.w, "p")[Number(target)] : null;
+  // Review I6: the form carries the text the page showed; if the paragraph at that index changed, refuse.
+  if (!p || paragraphText(p) !== shown) throw new WsError("stale_view", "The document changed since this page loaded; reload and try again.");
+  if (!isPlainTextParagraph(p)) throw new WsError("not_plain_text", "This paragraph contains a link, image, field or footnote; edit it in the editor so nothing is lost.");
+  return p;
+}
+
+/**
+ * T14-I1: the queued docx twin is rewrite_passages by prefix, which rewrites the FIRST paragraph starting with it.
+ * Queue only when that paragraph IS the one the page showed (and the text is not empty); otherwise answer the lock's
+ * own refusal (open_in_editor: "try again when the editor closes") so a duplicated prefix never edits another paragraph.
+ */
+const docxQueueGuard = (cfg, target, shown) => async ({ entry, lock }) => {
+  const { bytes } = await getFile(cfg, splitPath(entry.path), { maxBytes: QUICK_MAX_BYTES });
+  const d = openDocx(bytes);
+  const p = docxTarget(d, target, shown);
+  const prefix = passagePrefix(shown);
+  if (!prefix || findPassage(kids(d.body, NS.w, "p"), prefix) !== p) {
+    throw new WsError(lock.code || "open_in_editor", `${lock.message || "The file is open."} This paragraph cannot wait in the queue; try again after the editor closes.`, { ...(lock.data || {}), not_queueable: true });
+  }
+};
+const guardedQueue = (queue, check) => ({ enqueue: async (sig) => { await check(sig); return queue.enqueue(sig); } });
+
+/** T14-I2: put a twin cancelled by "Apply now" back in the queue, so a failed forced save never loses the change. */
+async function repend(changeId) {
+  const db = workspaceDb() || await openWorkspaceDb();
+  return cas(db, changeId, "cancelled", "pending");
+}
 
 export async function quickSave(cfg, formIn, clock) {
+  const cancelFirst = String(formIn.cancel_first ?? "");
+  if (!cancelFirst || !forced(formIn)) return save(cfg, formIn, clock);
+  if (!CHANGE_ID_RE.test(cancelFirst)) throw new WsError("bad_args", "cancel_first is not a change id");
   // "Yes, apply now" from the queued page: cancel the queued twin first so it can never apply a second time.
   // If it can't be cancelled (already claimed/applied), this throws not_pending and NOTHING is written (review K5-I9).
-  if (forced(formIn) && CHANGE_ID.test(String(formIn.cancel_first || ""))) await cancelChange.run({ change_id: String(formIn.cancel_first) });
+  await cancelChange.run({ change_id: cancelFirst });
+  try { return await save(cfg, formIn, clock); }
+  catch (err) {
+    // T14-I2: the forced save failed (busy, a person's lock, too large, …): the waiting change goes back in the queue.
+    let back = false;
+    try { back = await repend(cancelFirst); } catch { back = false; }
+    if (!back) throw err;
+    throw new WsError("still_waiting", `Could not apply it now (${err?.code || "error"}); your change is still waiting and will be applied when the editor closes.`, { change_id: cancelFirst, cause: err?.code || null });
+  }
+}
+
+async function save(cfg, formIn, clock) {
   const segs = splitPath(String(formIn.path ?? ""));
   const form = { ...formIn, shown: nl(formIn.shown) };
   const value = nl(form.value).slice(0, 20000);
@@ -52,11 +98,7 @@ export async function quickSave(cfg, formIn, clock) {
     if (bytes.length > QUICK_MAX_BYTES) throw new WsError("too_large", "Quick edit handles files up to 20 MB; use the editor on a computer");
     if (kind === "docx") {
       const d = openDocx(bytes);
-      const p = /^\d{1,6}$/.test(target) ? kids(d.body, NS.w, "p")[Number(target)] : null;
-      // Review I6: the form carries the text the page showed; if the paragraph at that index changed, refuse.
-      if (!p || paragraphText(p) !== form.shown) throw new WsError("stale_view", "The document changed since this page loaded; reload and try again.");
-      if (!isPlainTextParagraph(p)) throw new WsError("not_plain_text", "This paragraph contains a link, image, field or footnote; edit it in the editor so nothing is lost.");
-      setParagraphText(d, p, value);
+      setParagraphText(d, docxTarget(d, target, form.shown), value);
       return { bytes: d.pkg.save(), changed: 1, summary: `paragraph ${Number(target) + 1}` };
     }
     if (kind === "xlsx") {
@@ -69,7 +111,7 @@ export async function quickSave(cfg, formIn, clock) {
     if (shapeText(shapeById(deck, target).sp) !== form.shown) throw new WsError("stale_view", "The slide changed since this page loaded; reload and try again.");
     editShapeText(deck, target, value);
     return { bytes: deck.pkg.save(), changed: 1, summary: "slide text" };
-  }, writeOpts(form, clock, asToolOp({ ...form, kind }, value)));
+  }, writeOpts(form, clock, asToolOp({ ...form, kind }, value), kind === "docx" ? docxQueueGuard(cfg, target, form.shown) : null));
 }
 
 /** Undo of a Quick edit: waits 10 s for an open file, then answers open_in_editor (undo is close-time only, spec §5.7). */
