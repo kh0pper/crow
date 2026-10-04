@@ -256,6 +256,24 @@ test("final I1: a queued xlsx Quick edit whose page is stale (the saved cell dif
   assert.equal(await pendingCount(), q0 + 1);
 });
 
+test("final review TOCTOU: a save landing right after Quick edit's guard read is never taken as the queued twin's expected value", async () => {
+  const X = "Shared with Crow/Casa/toctou.xlsx";
+  const wb = openXlsx(readFileSync(join(FIX, "oo-rich.xlsx"))); writeRange(wb, "Recetas!B2", [[4]], "RAW");
+  fake.addFile(X, Buffer.from(wb.pkg.save()), { owner: "admin" });
+  fake.openInEditor(X, ["ana"], { releaseAfterMs: 10 ** 9 });
+  // the person's save (B2 = 9) lands right after the first GET of the file (the guard's read)
+  const theirs = openXlsx(readFileSync(join(FIX, "oo-rich.xlsx"))); writeRange(theirs, "Recetas!B2", [[9]], "RAW");
+  const theirBytes = Buffer.from(theirs.pkg.save());
+  fake.state.afterGetHook = (n) => { if (n.path === X) { fake.state.afterGetHook = null; n.bytes = theirBytes; n.etag = `"theirs"`; n.mtime += 5; } };
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: X, kind: "xlsx", target: "Recetas!B2", shown: "4", value: "5" });
+  assert.match(await r.text(), /quick\/cancel/, "queued");
+  const row = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE path=? ORDER BY seq DESC LIMIT 1", args: [X] })).rows[0];
+  const pre = JSON.parse(row.precondition_json);
+  assert.equal(String(pre.cells[0][0]), "4", "the snapshot is the value the guard checked (what the page showed), not the person's later save");
+  const { checkPre } = await import("../bundles/workspace/server/queue/conditions.js");
+  assert.equal(checkPre(row.tool, JSON.parse(row.args_json), pre, fake.node(X).bytes).ok, false, "so at close the person's 9 is never overwritten");
+});
+
 test("final I1: a queued pptx Quick edit whose page is stale is refused stale_view — nothing queued or written", async () => {
   const P = "Shared with Crow/Casa/stale.pptx";
   const deck = openPptx(readFileSync(join(FIX, "oo-rich.pptx")));
@@ -313,6 +331,10 @@ test("final M1: Apply now whose PUT landed but a later step failed is NOT re-que
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados.", if_open: "force_close", cancel_first: id });
   assert.equal(r.status, 303);
   assert.notEqual(loc(r).searchParams.get("notice"), "still_waiting", "never told it is still waiting after the save landed");
+  assert.equal(loc(r).searchParams.get("notice"), "apply_now_unconfirmed", "the page says the twin was cancelled and the save is unconfirmed");
+  const page = await V.renderQuick({ lang: "en", csrf: "tok", query: Object.fromEntries(loc(r).searchParams) });
+  assert.ok(page.includes(V.QUICK_STRINGS.en.err_apply_now_unconfirmed.split(":")[0]), "localized text shown");
+  assert.doesNotMatch(page, /Nothing was changed/);
   assert.equal(puts(), n + 1, "the forced save was written");
   assert.equal((await rowOf(id)).state, "cancelled", "the twin is not put back (it would apply a second time)");
   assert.equal(paragraphText(kids(openDocx(fake.node(W).bytes).body, NS.w, "p")[1]), "Tacos dorados.");

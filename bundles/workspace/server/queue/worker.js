@@ -1,7 +1,9 @@
 /**
  * The close-time applier (spec §5.8): every 15 s, for each file with pending / unknown_after_claim changes (or live
- * changes not yet checked against the saved file): stat it; if it is unlocked AND ONLYOFFICE `info` says no session
- * (checked even when unlocked — the connector locks only after the editor fetched the file), verify live-applied
+ * changes not yet checked against the saved file): stat it; if it is unlocked AND ONLYOFFICE `info` lists nobody in
+ * the session (checked even when unlocked — the connector locks only after the editor fetched the file; a key it
+ * still caches with `users: []` after the last viewer left is NOT a session once seen twice ≥ EMPTY_CONFIRM_MS apart
+ * with the same key and etag), verify live-applied
  * changes, then apply the waiting ones in seq order. Any lock (a person's, a live session, or a phone viewing it)
  * → nothing happens; a stale editor lock → one notification. Runs in the gateway only (one applier per host). A
  * second applier on the same crow.db (an orphan or overlapping gateway) is still safe: every transition is a CAS,
@@ -30,6 +32,9 @@ async function statFile(cfg, db, f) {
 }
 
 const staleNotified = new Set();
+/** fileId → {sig: key+etag, at}: the first tick that saw a known key with no users on an unlocked file. */
+const emptySeen = new Map();
+export const EMPTY_CONFIRM_MS = 10000;
 async function notifyStaleOnce(db, fileId) {
   if (staleNotified.has(fileId)) return; staleNotified.add(fileId);
   const r = (await db.execute({ sql: "SELECT * FROM workspace_pending_changes WHERE file_id=? AND state='pending' ORDER BY seq LIMIT 1", args: [fileId] })).rows[0];
@@ -59,16 +64,30 @@ export function makeTick({ db, getConfig, clock }) {
     await releaseExpiredLeases(db, clock.now());
     await recoverStranded(db, clock.now()); // an applier that died mid-apply: lease run out → unknown_after_claim
     for (const id of await expireOld(db, clock.now())) await notifyChange(db, await get(db, id), "expired");
-    for (const f of await filesWithWork(db)) {
+    const work = await filesWithWork(db);
+    for (const id of emptySeen.keys()) if (!work.some((f) => String(f.file_id) === String(id))) emptySeen.delete(id);
+    for (const f of work) {
       try {
         const e = await statFile(cfg, db, f);
         if (e.lock) {
-          if (e.lockType === 1) { const s = await docSession(cfg, e.fileId).catch(() => ({ live: true })); if (!s.live) await notifyStaleOnce(db, f.file_id); }
+          // stale = the document server forgot the key (`known`); a cached key with no users is the post-close save
+          if (e.lockType === 1) { const s = await docSession(cfg, e.fileId).catch(() => ({ known: true })); if (!s.known) await notifyStaleOnce(db, f.file_id); }
           continue; // any lock: wait (a person's lock, a live session — also a phone viewing it — or a stale one)
         }
         staleNotified.delete(f.file_id);
-        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true })); // unknown → treat as open
-        if (s.live) continue;
+        // unknown → treat as open. `live` needs a user in the session: a key ONLYOFFICE keeps cached after a
+        // view-only session closed (error 0, users []) on an UNLOCKED file is over, and the change applies —
+        // but only once that same picture (same key, same etag, still no users) was seen on an earlier tick at least
+        // EMPTY_CONFIRM_MS ago. An editor whose connection blipped (users [] for a moment, edits not yet saved) is
+        // back in `users` or has saved (new etag) by then; the connector's lock is not the only safeguard.
+        const s = await docSession(cfg, e.fileId).catch(() => ({ live: true }));
+        if (s.live) { emptySeen.delete(f.file_id); continue; }
+        if (s.known) {
+          const seen = emptySeen.get(f.file_id), sig = `${s.key}\u0000${e.etag}`;
+          if (!seen || seen.sig !== sig) { emptySeen.set(f.file_id, { sig, at: clock.now() }); continue; }
+          if (clock.now() - seen.at < EMPTY_CONFIRM_MS) continue;
+        }
+        emptySeen.delete(f.file_id);
         await processFile(ctx, db, { file_id: f.file_id, path: e.path });
       } catch (err) { console.warn(`[workspace] queue: file ${f.file_id}: ${err.code || ""} ${err.message}`); }
     }
