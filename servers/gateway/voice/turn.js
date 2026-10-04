@@ -102,11 +102,11 @@ export function createVoiceTurnRunner(deps) {
     // maybeAcquireLocalProvider blocks until the model is ready, so it runs in
     // the background and we PROBE instead (ruling R14). A cold start keeps
     // going after we give up (the gateway's on-demand start, CROW-SCHEDULE.md).
-    Promise.resolve().then(() => deps.acquire(providerId)).catch((err) => { refused = err || new Error("acquire failed"); });
+    Promise.resolve().then(() => deps.acquire(providerId)).then((ok) => { if (ok === false) refused = Object.assign(new Error("acquire returned false"), { code: "acquire_failed" }); }).catch((err) => { refused = err || new Error("acquire failed"); });
     const deadline = now() + ESCALATION_READY_TIMEOUT_MS;
     while (now() < deadline) {
       if (signal?.aborted) return { reason: "aborted" };
-      await Promise.resolve();
+      await new Promise((r) => setImmediate(r));   // lets a background acquire rejection/false land before the first probe
       if (refused) {
         const code = refused.code;
         return { reason: code === "box_reserved" ? "box_reserved" : code === "serving_class_refused" ? "serving_class" : "acquire_failed" };
@@ -198,9 +198,17 @@ export function createVoiceTurnRunner(deps) {
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
-        const filler = say.filler();
+        // The filler runs alongside the (real-timer) readiness wait. A handler is attached NOW
+        // so a rejection during that wait is never an unhandledRejection (which would exit the
+        // gateway); the error is kept, logged below, and the turn carries on without the filler.
+        let fillerErr = null;
+        const filler = say.filler().catch((err) => { fillerErr = err; });
         const ready = await readyEscalation(decision.key, db, signal);
         await filler;
+        if (fillerErr && !aborted()) {
+          console.warn(`[voice-turn] filler TTS failed: ${fillerErr.message}`);
+          timings.filler_error = String(fillerErr.message || fillerErr);
+        }
         if (ready.adapter) { chat = ready.adapter; result.route = "escalate"; result.escalated = true; }
         // Qwen chat templates reject a system message anywhere but first (review C1):
         // the note joins the leading system message.
@@ -214,21 +222,24 @@ export function createVoiceTurnRunner(deps) {
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
       const policyGate = (tc) => {
         const eff = deps.effectiveToolName(tc);
-        if (deny.has(eff) || deny.has(tc.name)) return `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`;
-        if (!memoryOn && deps.isMemoryTool(eff)) return MEMORY_OFF;
+        // The executor resolves a bare name (`search_memories`) to `crow_<name>`
+        // (tool-executor resolveToolCategory), so every check sees both spellings.
+        const names = eff && !String(eff).startsWith("crow_") ? [eff, `crow_${eff}`] : [eff];
+        if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`;
+        if (!memoryOn && names.some((n) => deps.isMemoryTool(n))) return MEMORY_OFF;
         if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
           return `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`;
         }
         if (policy.external_send === "draft_only" && deps.isExternalSendTool(eff)) {
           return `This assistant is draft-only by voice and cannot send "${shortName(eff)}" externally. Tell the user it was not sent. Then end your turn — do not call another tool.`;
         }
-        if (Array.isArray(policy.deny) && policy.deny.includes(eff)) {
+        if (Array.isArray(policy.deny) && names.some((n) => policy.deny.includes(n))) {
           return `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`;
         }
-        const needsConfirm = isDestructiveTool(eff) || (Array.isArray(policy.confirm) && policy.confirm.includes(eff));
-        if (!needsConfirm) return null;
-        if (confirm.check({ deviceId: device.id, eff, args: tc.arguments, transcript }) === "allow") return null;
-        return `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: eff, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`;
+        const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n)));
+        if (!confirmName) return null;
+        if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
+        return `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`;
       };
 
       const chunker = createSentenceChunker((s) => say(s));
