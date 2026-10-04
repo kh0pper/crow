@@ -123,8 +123,7 @@ export function instanceEnrollRouter(db, { execFileSyncImpl } = {}) {
       // host while enrollment is enabled (the OTC is optional), so clearing
       // the pin on an inbound request would let anyone downgrade a pinned
       // peer to the replayable legacy handshake. Only the operator's local
-      // `crow instance pair` (scripts/cli/instance-pair.js) or a revoke
-      // clears it.
+      // `crow instance pair` (scripts/cli/instance-pair.js) clears it.
       // Our TAILNET dial address — never CROW_GATEWAY_URL (the public
       // Funnel URL on crow; instance sync never dials :443).
       const self = await selfPairingAddress(db, execFileSyncImpl ? { execFileSyncImpl } : {});

@@ -189,9 +189,11 @@ async function peerCrRequired(ctx, peerId) {
       sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
       args: [`${SYNC_CR_KEY_PREFIX}${peerId}`, localId],
     });
-    return rows[0]?.value === String(CR_VERSION);
-  } catch {
-    return false;
+    return Number(rows[0]?.value) >= 1;
+  } catch (err) {
+    // Fail CLOSED on a transient DB error (a pinned peer must not slip
+    // through as legacy); only a missing table (an old DB) means "no pin".
+    return !/no such table/i.test(String(err?.message || err));
   }
 }
 
@@ -685,6 +687,9 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   // expects a NoiseSecretStream; wrap the WS Duplex first. Server side =
   // isInitiator: false (the dialer is the initiator). handoffToStream
   // replays any Noise frames that raced our handshake DB writes.
+  // The socket may have closed while we awaited the DB writes above; a
+  // stream built on a closed socket never emits close (phantom link).
+  if (ws.readyState !== WebSocket.OPEN) { frameReader.detach(); return; }
   const wsStream = handoffToStream(ws, frameReader);
   const noiseStream = new NoiseSecretStream(false, wsStream);
   // A socket that closes before the Noise handshake completes leaves the
@@ -1044,6 +1049,7 @@ export class PeerDialer {
         // handoffToStream replays any binary frames that raced the
         // handshake (defensive — the responder shouldn't write first,
         // but symmetric handling costs nothing).
+        if (ws.readyState !== WebSocket.OPEN) { frameReader.detach(); return; } // closed mid-handshake: close handler retries
         const wsStream = handoffToStream(ws, frameReader);
         const noiseStream = new NoiseSecretStream(true, wsStream);
         // A socket that closes before the Noise handshake completes leaves the
@@ -1253,10 +1259,13 @@ export async function startTailnetSyncClients(ctx) {
     for (const [id, dialer] of dialers) {
       if (!seenIds.has(id)) {
         dialer.stop(); dialers.delete(id); forgetPeerDialHealth(id);
-        // Its learned port and CR flag go with it (revoked / unpaired).
+        // Its learned port goes with it (revoked / paused / unpaired). The CR
+        // pin deliberately STAYS: a pause → un-pause must not open a legacy
+        // replay window. Only the operator's local `crow instance pair`
+        // clears it.
         db.execute({
-          sql: "DELETE FROM dashboard_settings_overrides WHERE key IN (?, ?) AND instance_id = ?",
-          args: [`${SYNC_PORT_KEY_PREFIX}${id}`, `${SYNC_CR_KEY_PREFIX}${id}`, instanceSyncManager.localInstanceId],
+          sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
+          args: [`${SYNC_PORT_KEY_PREFIX}${id}`, instanceSyncManager.localInstanceId],
         }).catch(() => {});
       }
     }
