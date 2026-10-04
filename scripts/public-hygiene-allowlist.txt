@@ -14,5 +14,13 @@ tailnet: tu-tailnet
 tailnet: tn
 tailnet: tail
 tailnet: tail12345
+# bare placeholder domains (<label>.ts.net with no host label)
+tailnet: your-instance
+tailnet: your-machine
+tailnet: your-server
+tailnet: tu-servidor
+tailnet: peer-a
+tailnet: node-b
 
 secret: sk-real-secret-do-not-touch
+secret: xoxb-1234567890-345-67-8901-SECRETTAILXYZ

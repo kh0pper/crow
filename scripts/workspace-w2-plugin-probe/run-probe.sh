@@ -17,7 +17,7 @@ PLUGIN_DIR="/var/www/onlyoffice/documentserver/sdkjs-plugins/$GUID"
 SERVE_PORT=8457
 SERVE_PATH=/crow-live/probe
 LISTEN=http://127.0.0.1:3399
-TS_HOST=${TS_HOST:-crow.dachshund-chromatic.ts.net}
+TS_HOST=${TS_HOST:-crow.example.ts.net}
 CAP_SECONDS=${CAP_SECONDS:-2700}
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

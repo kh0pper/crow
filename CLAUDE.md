@@ -15,8 +15,8 @@ Index for working on this repo. Load-bearing rules inline; deep reference is in 
 
 This repository is **public**. Process documents (design specs, implementation plans, session handoffs, ledgers, incident write-ups) live in the private engineering repo (`~/crow-engineering`, a clone of Gitea `kh0pp/crow-engineering`: `specs/`, `plans/`, `handoffs/`, `runbooks/`), never here. Code comments refer to them as "the private engineering notes", without paths.
 
-- Never write personal names, real hostnames or tailnet names, real IP addresses, or credentials into tracked files, commit messages, or PR text. Use placeholders: `crow.example.ts.net` / `<tailnet-host>`, `100.64.0.x`, neutral names ("alex", "second user").
-- The guard is `scripts/check-public-hygiene.mjs` (CI `static-checks` + `tests/public-hygiene.test.js`). It refuses process-doc paths (`docs/superpowers/`, `handoffs/`, `*handoff*.md`, `.claude/`), literals piped into `sudo -S`, sshpass with an inline password, real-looking `*.ts.net` hosts, and common secret patterns. Placeholders and known-fake test values go in `scripts/public-hygiene-allowlist.txt`.
+- Never write personal names, real hostnames or tailnet names, real IP addresses, or credentials into tracked files, commit messages, or PR text. Use placeholders: `crow.example.ts.net` / `<tailnet-host>`, `100.64.20.x`, neutral names ("alex", "second user").
+- The guard is `scripts/check-public-hygiene.mjs` (CI `static-checks` + `tests/public-hygiene.test.js`). It refuses process-doc paths (`docs/superpowers/`, `.superpowers/`, `handoffs/`, `*handoff*` docs, `.claude/`), literals piped into `sudo -S`, sshpass with an inline password, real-looking `*.ts.net` hosts, and common secret patterns. Placeholders and known-fake test values go in `scripts/public-hygiene-allowlist.txt`.
 - Locally it also applies an untracked personal-token denylist, `~/.crow-public-denylist` (one token per line, mode 600; CI skips it). Enable the sample pre-push hook per clone with `git config core.hooksPath scripts/hooks`.
 
 ## Network exposure invariant

@@ -176,20 +176,20 @@ const req = (path, jwt, { method = "GET", body, headers = {} } = {}) => fetch(`$
 
 test("fix B: write permission is checked server-side on /pending, /claim and /ack (owner ok; read-only sharee and unverifiable rights get the same 401 as no session)", async () => {
   doc("r.docx");
-  fake.state.shares.push({ id: "s1", path: "/S", share_with: "dayane", share_type: 0, permissions: 1 }, // read-only on the folder
+  fake.state.shares.push({ id: "s1", path: "/S", share_with: "alex", share_type: 0, permissions: 1 }, // read-only on the folder
     { id: "s2", path: "/S/r.docx", share_with: "eve", share_type: 0, permissions: 3 }, // can edit this file
     { id: "s3", path: "/S", share_with: "family", share_type: 1, permissions: 31 }); // a GROUP share: crow-bot cannot list members
-  const k = fake.openInEditor("S/r.docx", ["admin", "dayane", "eve", "gina"], { releaseAfterMs: 10 ** 9 });
+  const k = fake.openInEditor("S/r.docx", ["admin", "alex", "eve", "gina"], { releaseAfterMs: 10 ** 9 });
   const id = (await call("ws_docs_find_replace", { path: "S/r.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
   const pend = (uid) => req(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k, {}, uid));
-  assert.equal((await pend("dayane")).status, 401, "a viewer sees no change content");
+  assert.equal((await pend("alex")).status, 401, "a viewer sees no change content");
   assert.equal((await pend("gina")).status, 401, "group-only rights are unverifiable → view-only");
   assert.deepEqual((await (await pend("eve")).json()).map((x) => x.change_id), [id]);
   assert.deepEqual((await (await pend("admin")).json()).map((x) => x.change_id), [id], "the owner");
-  assert.equal((await claim(id, editorJwt(k, {}, "dayane"))).status, 401);
+  assert.equal((await claim(id, editorJwt(k, {}, "alex"))).status, 401);
   // B3: a viewer cannot disturb a legitimate claim — its failed/applied_nothing ack is refused and changes nothing
   const { apply_token } = await (await claim(id, editorJwt(k, {}, "eve"))).json();
-  assert.equal((await ack({ change_id: id, apply_token, outcome: "failed", applied_nothing: true }, editorJwt(k, {}, "dayane"))).status, 401);
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "failed", applied_nothing: true }, editorJwt(k, {}, "alex"))).status, 401);
   assert.equal((await row(id)).state, "claimed_live");
   // Nextcloud's share API unreachable → unverifiable → fail closed (acks and claims check fresh)
   fake.state.shareApiDown = true;
@@ -270,7 +270,7 @@ test("fix C + fix2 X1: pre-auth buckets count only token FAILURES, keyed by the 
     const k = fake.state.keys.get(fake.node("S/r.docx").fileId);
     const pend = (uid) => fetch(`${b3}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k, {}, uid)}` } }).then((r) => r.status);
     // N3: viewers polling never spend the per-document budget
-    for (let i = 0; i < 2; i++) assert.equal(await pend("dayane"), 401);
+    for (let i = 0; i < 2; i++) assert.equal(await pend("alex"), 401);
     assert.deepEqual([await pend("admin"), await pend("admin"), await pend("admin")], [200, 200, 429], "per (document, user)");
     assert.deepEqual([await pend("eve"), await pend("eve")], [200, 429], "the per-document ceiling (authorized editors only)");
   } finally { s3.close(); }
@@ -332,9 +332,9 @@ test("fix3 R1: a valid token is limited per (document, user) BEFORE any session 
   try {
     const k = fake.state.keys.get(fake.node("S/r.docx").fileId);
     const claimAs = (uid) => fetch(`${b5}/claim`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${editorJwt(k, {}, uid)}` }, body: JSON.stringify({ change_id: "pc_none", pv: "0.2.0" }) }).then((r) => r.status);
-    assert.deepEqual([await claimAs("dayane"), await claimAs("dayane")], [401, 401], "a viewer: forced lookups, refused");
+    assert.deepEqual([await claimAs("alex"), await claimAs("alex")], [401, 401], "a viewer: forced lookups, refused");
     const n = fake.calls.length;
-    assert.equal(await claimAs("dayane"), 429);
+    assert.equal(await claimAs("alex"), 429);
     assert.equal(fake.calls.length, n, "over the limit: no Nextcloud or ONLYOFFICE call at all");
     assert.deepEqual([await claimAs("admin"), await claimAs("admin"), await claimAs("admin")], [409, 409, 429], "the editor has its own bucket");
   } finally { s5.close(); }

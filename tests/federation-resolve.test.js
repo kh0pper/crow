@@ -64,7 +64,7 @@ test("resolve: case-insensitive name match", async () => {
 
 test("resolve: ambiguous duplicate names → 400 with matches list", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
-    { id: "aaa1", name: "Crow", hostname: "grackle-a.ts.net", gateway_url: "https://a" },
+    { id: "aaa1", name: "Crow", hostname: "peer-a.ts.net", gateway_url: "https://a" },
     { id: "bbb2", name: "Crow", hostname: "node-b.ts.net", gateway_url: "https://b" },
   ]);
   try {

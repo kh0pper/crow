@@ -149,5 +149,5 @@ Drafts are indexed (Phase 6.3, 2026-05-12) in crow's knowledge-base-mcp `project
 - Data dashboard / SQL queries / case study editing: `data-dashboard` skill.
 - Adding new sources via the dedicated panel UI: `data-dashboard` skill, "Case Studies" section.
 - KB tool usage details (chunking, idempotent re-index, dim gotcha): see `[[reference-kb-mcp-register-draft]]` and `[[reference-crow-embedding-endpoint]]` in auto-memory.
-- The rosy-blossom plan: `~/.claude/plans/ok-i-think-we-rosy-blossom.md` (Phase 6 sub-phases).
+- The capstone research plan in the private engineering notes (Phase 6 sub-phases).
 - Spring-2026 move history: `[[project-spring2026-moved-to-crow]]` in auto-memory.

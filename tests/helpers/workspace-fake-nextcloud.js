@@ -142,7 +142,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
     }
     // ---- principals ----
     const pm = u.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
-    if (pm && req.method === "PROPFIND") { const names = { admin: "Kevin", dayane: "Dayane", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname><cal:calendar-user-address-set><d:href>mailto:${pm[1]}@crow.test</d:href></cal:calendar-user-address-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
+    if (pm && req.method === "PROPFIND") { const names = { admin: "Kevin", alex: "Alex", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname><cal:calendar-user-address-set><d:href>mailto:${pm[1]}@crow.test</d:href></cal:calendar-user-address-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
     // ---- OCS ----
     const cfgm = u.match(/^\/ocs\/v2\.php\/apps\/onlyoffice\/api\/v1\/config\/(\d+)/);
     if (cfgm) { const id = Number(cfgm[1]); if (!state.keys.has(id)) state.keys.set(id, `k${id}`); res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ document: { key: state.keys.get(id) }, editorConfig: { user: { id: `${instance}_crow-bot` } } })); }

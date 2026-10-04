@@ -17,4 +17,4 @@ E-reader subsystem (reading_progress, ereader_pins, ereader_material_tags, TTS, 
 - `/pir`, `/notes`, `/advocacy` — HTML routes (mounted under `/proxy/capstone-tracker/` via gateway)
 - `/api/notes/*`, `/api/pir/*` — JSON routes
 
-See parent plan `~/.claude/plans/ok-i-think-we-rosy-blossom.md` § 4 for full context.
+See the parent plan in the private engineering notes (§ 4) for full context.

@@ -51,9 +51,9 @@ test("export converts via the connector into the drive, never overwriting", asyn
 });
 
 test("share: user shares only, permissions by role", async () => {
-  const r = await call("ws_drive_share", { path: "S/r.docx", user: "dayane", role: "writer" });
+  const r = await call("ws_drive_share", { path: "S/r.docx", user: "alex", role: "writer" });
   assert.equal(r.success, true);
-  assert.deepEqual(fake.state.shares.at(-1), { id: "1", path: "/S/r.docx", share_with: "dayane", share_type: 0, permissions: 3 });
+  assert.deepEqual(fake.state.shares.at(-1), { id: "1", path: "/S/r.docx", share_with: "alex", share_type: 0, permissions: 3 });
   assert.equal((await call("ws_drive_share", { path: "S/r.docx", user: "bad user/../", role: "reader" })).code, "bad_user");
 });
 
@@ -80,18 +80,18 @@ test("after an undo, list_versions flags the restored row as current and still l
 });
 
 test("move/rename/trash of an open file (or a folder with an open child) explain who has it open (re-review minor)", async () => {
-  fake.addFile("S/mv.docx", Buffer.from("PK")); fake.openInEditor("S/mv.docx", ["dayane"]);
+  fake.addFile("S/mv.docx", Buffer.from("PK")); fake.openInEditor("S/mv.docx", ["alex"]);
   assert.equal((await call("ws_drive_rename", { path: "S/mv.docx", new_name: "x.docx" })).code, "open_in_editor");
-  fake.addFolder("S/dir"); fake.addFile("S/dir/in.docx", Buffer.from("PK")); fake.openInEditor("S/dir/in.docx", ["dayane"]);
+  fake.addFolder("S/dir"); fake.addFile("S/dir/in.docx", Buffer.from("PK")); fake.openInEditor("S/dir/in.docx", ["alex"]);
   const t = await call("ws_drive_trash_file", { path: "S/dir", wait_s: 0 });
   assert.equal(t.code, "locked_inside"); assert.match(t.error, /open/);
 });
 
 test("trash refuses an open file and names who has it", async () => {
   fake.addFile("S/open.docx", Buffer.from("PK"));
-  fake.openInEditor("S/open.docx", ["dayane"]);
+  fake.openInEditor("S/open.docx", ["alex"]);
   const r = await call("ws_drive_trash_file", { path: "S/open.docx", wait_s: 0 });
-  assert.equal(r.code, "open_in_editor"); assert.deepEqual(r.data.open_by, ["Dayane"]);
+  assert.equal(r.code, "open_in_editor"); assert.deepEqual(r.data.open_by, ["Alex"]);
 });
 
 test("no tool RESULT or ERROR ever contains the app password or JWT secret (spec §10.1)", async () => {
@@ -117,11 +117,11 @@ test("move/rename/trash results carry file_id (spec §4.1)", async () => {
 });
 
 test("trash refuses the top of a share (share_root) and deletes nothing", async () => {
-  fake.addFolder("Shared/Dayane docs", { owner: "dayane" });
-  fake.addFile("Shared/Dayane docs/in.txt", Buffer.from("x"), { owner: "dayane" });
-  const r = await call("ws_drive_trash_file", { path: "Shared/Dayane docs" });
+  fake.addFolder("Shared/Alex docs", { owner: "alex" });
+  fake.addFile("Shared/Alex docs/in.txt", Buffer.from("x"), { owner: "alex" });
+  const r = await call("ws_drive_trash_file", { path: "Shared/Alex docs" });
   assert.equal(r.code, "share_root"); assert.match(r.error, /only remove Crow's access/);
-  assert.ok(fake.node("Shared/Dayane docs")); assert.ok(fake.node("Shared/Dayane docs/in.txt"));
+  assert.ok(fake.node("Shared/Alex docs")); assert.ok(fake.node("Shared/Alex docs/in.txt"));
 });
 
 test("an upstream 500 echoing the secrets (plain, Basic base64, URL-encoded) never reaches a result", async () => {

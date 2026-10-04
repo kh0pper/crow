@@ -19,6 +19,7 @@ tests/claude-ai/screenshots/
 docs/superpowers/
 **/handoffs/
 .claude/plans/
+.superpowers/
 
 # Brainstorm runtime state (.superpowers)
 .superpowers/brainstorm/*/.server.pid

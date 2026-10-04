@@ -43,11 +43,11 @@ const liveAck = async (id, inverse = null) => {
 };
 
 test("open file → queued (success, who, change_id), nothing written, notification created", async () => {
-  put("q1.docx"); fake.openInEditor("S/q1.docx", ["dayane"]);
+  put("q1.docx"); fake.openInEditor("S/q1.docx", ["alex"]);
   const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await call("ws_docs_find_replace", { path: "S/q1.docx", find: "Tortillas", replace: "Totopos" });
   assert.equal(r.success, true); assert.equal(r.data.queued, true); assert.match(r.data.change_id, /^pc_/);
-  assert.deepEqual(r.data.open_by, ["Dayane"]); assert.equal(r.data.apply, "live_or_on_close");
+  assert.deepEqual(r.data.open_by, ["Alex"]); assert.equal(r.data.apply, "live_or_on_close");
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
   assert.ok((await notifs()).some((n) => /change waiting for q1\.docx/.test(n.title)));
   assert.equal((await status(r.data.change_id)).state, "pending");
@@ -143,7 +143,7 @@ test("R-LIVE: a live ack is not proof — an ack missing from the saved file →
 });
 
 test("a person's manual lock: queued, applied only after unlock; force_close refused", async () => {
-  fake.addFile("S/q5.docx", readFileSync(join(FIX, "oo-rich.docx")), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
+  fake.addFile("S/q5.docx", readFileSync(join(FIX, "oo-rich.docx")), { lock: { type: 0, owner: "alex", displayName: "Alex" } });
   const r = await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota." });
   assert.equal(r.data.queued, true); assert.equal(r.data.apply, "on_close"); assert.equal(r.data.lock_type, "person");
   assert.equal((await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota.", if_open: "force_close" })).code, "locked_by_person");
@@ -156,9 +156,9 @@ test("a person's manual lock: queued, applied only after unlock; force_close ref
 });
 
 test("a phone viewing the file (spike S9: nc:lock 1, owner type 1, owner NULL) is an EDITOR lock, not a person's lock: queued, applied at close", async () => {
-  put("q19.docx"); const key = fake.openInEditor("S/q19.docx", ["dayane"], { releaseAfterMs: 10 ** 9 }); // what the phone's view-only session looks like
+  put("q19.docx"); const key = fake.openInEditor("S/q19.docx", ["alex"], { releaseAfterMs: 10 ** 9 }); // what the phone's view-only session looks like
   const r = await call("ws_docs_append", { path: "S/q19.docx", markdown: "Desde Crow." });
-  assert.equal(r.data.queued, true); assert.equal(r.data.lock_type, "editor"); assert.deepEqual(r.data.open_by, ["Dayane"]);
+  assert.equal(r.data.queued, true); assert.equal(r.data.lock_type, "editor"); assert.deepEqual(r.data.open_by, ["Alex"]);
   assert.doesNotMatch(r.data.message, /locked/, "never described as a person's manual lock");
   await tick();
   assert.equal((await status(r.data.change_id)).state, "pending", "the phone session is still open");
@@ -553,7 +553,7 @@ test("ws__docs_delete_comment: add_comment reversed exactly (body, comments, thr
   const c1 = K.addComment(d, nfd, undefined).comment_id;
   K.deleteComment(d, c1, { content: nfd });
   assert.deepEqual(await Promise.all(parts.map((p) => xmlOf(d, p))), want);
-  const c2 = K.addComment(d, "Pregunta", "Cilantro").comment_id; K.replyComment(d, c2, "Respuesta de Dayane");
+  const c2 = K.addComment(d, "Pregunta", "Cilantro").comment_id; K.replyComment(d, c2, "Respuesta de Alex");
   assert.throws(() => K.deleteComment(d, c2), { code: "target_changed" });
 });
 
