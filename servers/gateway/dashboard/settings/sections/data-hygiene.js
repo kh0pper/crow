@@ -12,6 +12,9 @@
  *                            pattern, each through deleteContactLocal (the
  *                            #155 user-delete path: tombstone + broadcast, so
  *                            paired instances converge).
+ *   remove_stale_instances — drop suite-scratch entries from this instance's
+ *                            instances.json (never an id in crow_instances;
+ *                            see instance-registry.js classifyStaleLocalInstances).
  *
  * Logic lives in servers/sharing/data-hygiene.js.
  */
@@ -22,6 +25,9 @@ import {
   scanOrphanedMessages, purgeOrphanedMessages, previewContactsByName, bulkDeleteContactsByName,
 } from "../../../../sharing/data-hygiene.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
+import { scanStaleLocalInstances, removeStaleLocalInstances } from "../../../instance-registry.js";
+
+const INSTANCE_ROWS_SHOWN = 50;
 
 const BASE = "/dashboard/settings?section=data-hygiene";
 
@@ -35,6 +41,11 @@ function flash(req, lang) {
     const skipped = Number(q.contacts_skipped) || 0;
     return `<div class="alert alert-success">${escapeHtml(fill(t("hygiene.contactsDeleted", lang), { n: Number(q.contacts_deleted) || 0, skipped }))}</div>`;
   }
+  if (q.instances_removed != null) {
+    return `<div class="alert alert-success">${escapeHtml(fill(t("hygiene.instancesRemoved", lang), { n: Number(q.instances_removed) || 0 }))}</div>`;
+  }
+  if (q.instances_refused) return `<div class="alert alert-error">${escapeHtml(t("hygiene.instancesChanged", lang))}</div>`;
+  if (q.instances_error) return `<div class="alert alert-error">${escapeHtml(t("hygiene.instancesError", lang))}</div>`;
   if (q.contacts_error) return `<div class="alert alert-error">${escapeHtml(t("hygiene.badPattern", lang))}</div>`;
   return "";
 }
@@ -119,6 +130,37 @@ export default {
       }
     }
 
+    // ── leftover test entries in instances.json ──
+    let instancesHtml;
+    let stale = { path: "instances.json", total: 0, candidates: [] };
+    try { stale = await scanStaleLocalInstances(db); } catch {}
+    const nStale = stale.candidates.length;
+    if (nStale === 0) {
+      instancesHtml = `<p style="color:var(--crow-text-muted);font-size:0.88rem">${escapeHtml(fill(t("hygiene.instancesNone", lang), { total: stale.total }))}</p>`;
+    } else {
+      const shown = stale.candidates.slice(0, INSTANCE_ROWS_SHOWN);
+      const rows = shown.map((c) => `<tr>
+          <td style="padding:6px;font-family:'JetBrains Mono',monospace;font-size:0.75rem">${escapeHtml(c.id.slice(0, 12))}</td>
+          <td style="padding:6px;font-size:0.78rem">${escapeHtml(c.directory)}</td>
+          <td style="padding:6px;font-size:0.78rem">${escapeHtml(t(`hygiene.reason.${c.reason}`, lang))}</td>
+          <td style="padding:6px;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(c.updatedAt || "-")}</td>
+        </tr>`).join("");
+      const confirmMsg = JSON.stringify(fill(t("hygiene.instancesConfirm", lang), { n: nStale }));
+      instancesHtml = `
+        <p style="font-size:0.88rem">${escapeHtml(fill(t("hygiene.instancesFound", lang), { n: nStale, total: stale.total }))}${nStale > shown.length ? " " + escapeHtml(fill(t("hygiene.instancesShowing", lang), { shown: shown.length })) : ""}</p>
+        <div class="table-scroll"><table class="pi-table">
+          <thead><tr><th>id</th><th>${escapeHtml(t("hygiene.colFolder", lang))}</th><th>${escapeHtml(t("hygiene.colReason", lang))}</th><th>${escapeHtml(t("hygiene.colLastSeen", lang))}</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+        <form method="POST" action="/dashboard/settings" style="margin-top:0.75rem" onsubmit="return confirm(${escapeHtml(confirmMsg)})">
+          <input type="hidden" name="_csrf" value="${csrf}" />
+          <input type="hidden" name="action" value="remove_stale_instances" />
+          <input type="hidden" name="expected" value="${nStale}" />
+          <input type="hidden" name="confirm" value="1" />
+          <button type="submit" class="btn btn-secondary">${escapeHtml(fill(t("hygiene.instancesButton", lang), { n: nStale }))}</button>
+        </form>`;
+    }
+
     return `${flash(req, lang)}<style>
       .pi-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
       .pi-table th { text-align:left; padding:6px; background:var(--crow-bg-deep); color:var(--crow-text-muted); font-weight:500; font-size:0.75rem; }
@@ -137,6 +179,10 @@ export default {
       <button type="submit" class="btn btn-primary">${escapeHtml(t("hygiene.preview", lang))}</button>
     </form>
     ${previewHtml}
+
+    <h3 style="font-size:1rem;margin:1.5rem 0 0.5rem">${escapeHtml(t("hygiene.instancesTitle", lang))}</h3>
+    <p style="font-size:0.82rem;color:var(--crow-text-muted)">${escapeHtml(fill(t("hygiene.instancesHelp", lang), { path: stale.path }))}</p>
+    ${instancesHtml}
     `;
   },
 
@@ -168,6 +214,22 @@ export default {
       } else {
         console.log(`[data-hygiene] bulk contact delete: ${r.deleted} deleted, ${r.skipped.length} skipped`);
         res.redirectAfterPost(`${BASE}&contacts_deleted=${r.deleted}&contacts_skipped=${r.skipped.length}`);
+      }
+      return true;
+    }
+    if (action === "remove_stale_instances") {
+      const r = await removeStaleLocalInstances(db, {
+        confirm: req.body.confirm === "1",
+        expected: req.body.expected != null && req.body.expected !== "" ? Number(req.body.expected) : null,
+      });
+      if (r.refused) res.redirectAfterPost(`${BASE}&instances_refused=1`);
+      else if (r.error) {
+        console.warn(`[data-hygiene] instances.json repair failed: ${r.error}`);
+        res.redirectAfterPost(`${BASE}&instances_error=1`);
+      } else if (r.dryRun) res.redirectAfterPost(BASE);
+      else {
+        console.log(`[data-hygiene] removed ${r.removed} stale instances.json entr(ies) from ${r.scan.path}`);
+        res.redirectAfterPost(`${BASE}&instances_removed=${r.removed}`);
       }
       return true;
     }

@@ -17,10 +17,11 @@ import { resolve as resolvePath } from "node:path";
 import express from "express";
 import { validateRoomToken } from "../../sharing/server.js";
 import { getRoomInfo } from "./calls-signaling.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 
 // Resolve calls bundle scripts directory
 const BUNDLES_DIR = process.env.CROW_BUNDLES_DIR ||
-  resolvePath(process.env.HOME || "", ".crow/bundles");
+  resolvePath(resolveCrowHome(), "bundles");
 const CALLS_SCRIPTS_DIR = resolvePath(BUNDLES_DIR, "calls/scripts");
 
 // Also check the repo bundles/ dir as fallback (development mode)

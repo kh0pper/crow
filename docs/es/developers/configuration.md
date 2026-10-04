@@ -88,8 +88,8 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 
 | Variable | Predeterminado | Propósito |
 |---|---|---|
-| `CROW_BACKUP_DIR` | `~/.crow/backups` | Salida de `POST /api/admin/backup` (endpoint solo de localhost). |
-| `CROW_BACKUP_KEEP_DAYS` | `7` | Retención. |
+| `CROW_BACKUP_DIR` | `~/backups/crow` | Salida de `POST /api/admin/backup` (endpoint solo de localhost) y de "Hacer copia ahora" en el Nest. Los archivos son `<etiqueta>-<fecha>.db`; una instancia con su propio `CROW_HOME` (varias en una máquina) escribe `<etiqueta>-<home>-<hash>-<fecha>.db`, así dos gateways que comparten el directorio nunca se sobrescriben. Cada archivo tiene un `.owner.json` que nombra la instancia que lo escribió. La restauración no cambia: detén el gateway, copia el `.db` sobre `crow.db`, borra `crow.db-wal`/`-shm` antiguos y arranca; ignora el `.owner.json`. |
+| `CROW_BACKUP_KEEP_DAYS` | `7` | Retención, por instancia: cada ejecución solo poda sus propios archivos. |
 | `CROW_BACKUP_TOKEN` | *(sin definir)* | Requisito adicional de bearer para el endpoint de respaldo. |
 | `CROW_AUTO_UPDATE` | habilitado | Auto-actualización basada en pull (`0` la desactiva). |
 | `CROW_SSE_MAX` | `200` | Tope de streams SSE abiertos simultáneamente entre todos los endpoints de streaming; por encima del tope, las solicitudes reciben `503` + `Retry-After: 5`. |

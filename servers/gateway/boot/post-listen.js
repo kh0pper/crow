@@ -296,6 +296,10 @@ export async function runPostListenSetup(server, app, deps) {
     }, 20_000).unref();
   }
 
+  // Backup ownership self-check (co-hosted gateways share ~/backups/crow).
+  import("../routes/admin-backup.js").then(({ backupSelfCheck }) => backupSelfCheck())
+    .catch((err) => console.warn(`[backup] self-check failed: ${err.message}`));
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);

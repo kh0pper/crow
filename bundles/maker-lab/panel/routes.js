@@ -55,8 +55,9 @@ try {
 // that's a feature, not a bug (admin can rotate to force all kiosks to re-bind).
 function resolveCookieSecret() {
   if (process.env.MAKER_LAB_COOKIE_SECRET) return process.env.MAKER_LAB_COOKIE_SECRET;
-  const home = process.env.HOME || ".";
-  const path = resolve(home, ".crow", "maker-lab.cookie.secret");
+  // Per-instance (CROW_HOME): co-hosted instances must not share a signing secret.
+  const crowHome = process.env.CROW_HOME || resolve(process.env.HOME || ".", ".crow");
+  const path = resolve(crowHome, "maker-lab.cookie.secret");
   try {
     if (existsSync(path)) return readFileSync(path, "utf8").trim();
   } catch {}
@@ -492,7 +493,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
       resolve(__dirname, `../curriculum/age-5-9/${id}.json`),
       resolve(__dirname, `../curriculum/age-10-13/${id}.json`),
       resolve(__dirname, `../curriculum/age-14+/${id}.json`),
-      resolve(process.env.HOME || ".", `.crow/bundles/maker-lab/curriculum/custom/${id}.json`),
+      resolve(process.env.CROW_HOME || resolve(process.env.HOME || ".", ".crow"), `bundles/maker-lab/curriculum/custom/${id}.json`),
     ];
     for (const p of candidates) {
       if (existsSync(p)) {
