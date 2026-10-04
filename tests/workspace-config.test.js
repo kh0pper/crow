@@ -64,8 +64,6 @@ test("installed copy (no CROW_APP_ROOT) finds the repo via ~/crow and answers to
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "crow-workspace"); // initialize answered => app root resolved, imports loaded
-    // McpServer registers tools/list only once the first tool exists (Task 4); until then -32601 is the correct answer.
-    try { assert.ok(Array.isArray((await client.listTools()).tools)); }
-    catch (e) { assert.equal(e.code, -32601); }
+    assert.ok(Array.isArray((await client.listTools()).tools));
   } finally { await client.close(); }
 });

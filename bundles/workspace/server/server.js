@@ -1,6 +1,7 @@
 /** Crow Workspace MCP server (W2): ws_* tools over Nextcloud + ONLYOFFICE as crow-bot. */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getConfig } from "./config.js";
+import { registerDrive } from "./tools/drive.js";
 
 export const realClock = Object.freeze({ now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
 
@@ -14,6 +15,8 @@ export const WORKSPACE_INSTRUCTIONS = [
 export function createWorkspaceServer({ clock = realClock } = {}) {
   const server = new McpServer({ name: "crow-workspace", version: "0.2.0" }, { instructions: WORKSPACE_INSTRUCTIONS });
   const ctx = Object.freeze({ getConfig, clock });
-  void ctx; // tool families register here (Tasks 4-11)
+  const names = [];
+  names.push(...registerDrive(server, ctx)); // further tool families register here (Tasks 5-11)
+  server.__wsToolNames = names;
   return server;
 }
