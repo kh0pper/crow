@@ -37,10 +37,10 @@
 
 import { readFileSync, existsSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
+import { resolveCrowHome } from "./crow-home.js";
 import { join } from "node:path";
 
-const DEFAULT_CONFIG_PATH = join(homedir(), ".crow", "rate-limits.json");
+const DEFAULT_CONFIG_PATH = join(resolveCrowHome(), "rate-limits.json");
 
 /**
  * Default budgets keyed by tool-name pattern.

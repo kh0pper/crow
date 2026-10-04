@@ -13,7 +13,8 @@
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
  *               else trusted peers unseen >24h (info)
  *   updates   — auto_update_* version comparison (info if update available)
- *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
+ *   backup    — newest of THIS instance's files in CROW_BACKUP_DIR (none → info;
+ *               >7d → warn; owned by another instance → warn)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
  *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
  *               info at most — never warn, never a push; no card when none
@@ -45,6 +46,7 @@ import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
 import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 import { readReservation } from "../../../box-reservation.js";
+import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
@@ -535,29 +537,17 @@ async function outboxSignal(db) {
   };
 }
 
-// The default MUST match admin-backup.js's DEFAULT_DIR (~/backups/crow) — the
-// signal previously read ~/.crow/backups (stale pre-upgrade snapshots) while
-// real daily backups land in ~/backups/crow, so it under-reported (W2-4 fix).
-function backupDir() {
-  return process.env.CROW_BACKUP_DIR || join(homedir(), "backups", "crow");
-}
-
+// Directory, file naming and ownership come from the same module admin-backup
+// writes with (servers/shared/backup-naming.js), so the signal only ever looks
+// at THIS instance's backups — a co-hosted instance's newer file in the same
+// directory must not read as ours (2026-10-04: r4's backup masked the
+// primary's missing one).
 async function backupSignal(db, nowFn, lang) {
   const nowMs = nowFn();
-  const dir = backupDir();
-  let newestMtimeMs = null;
-  let newestPath = null;
-
-  try {
-    const files = readdirSync(dir).filter(f => f.endsWith(".db"));
-    for (const f of files) {
-      try {
-        const full = join(dir, f);
-        const m = statSync(full).mtimeMs;
-        if (newestMtimeMs === null || m > newestMtimeMs) { newestMtimeMs = m; newestPath = full; }
-      } catch {}
-    }
-  } catch {}
+  const { dir, label, tag, me } = localBackupContext(process.env);
+  const own = newestBackupOwnership(dir, label, tag, me);
+  const newestMtimeMs = own.newest ? own.newest.mtimeMs : null;
+  const newestPath = own.newest ? own.newest.path : null;
 
   const runAction = { actionLabel: t("health.runBackupNow", lang), actionHref: "/dashboard/nest?action=backup" };
 
@@ -565,6 +555,15 @@ async function backupSignal(db, nowFn, lang) {
     return {
       id: "backup", severity: "info", state: "info", label: t("signals.backup.label", lang),
       value: "never", issueLabel: t("signals.backup.neverIssue", lang), ...runAction,
+    };
+  }
+
+  if (own.status === "foreign") {
+    return {
+      id: "backup", severity: "warn", state: "warn", label: t("signals.backup.label", lang),
+      value: t("signals.backup.foreign", lang),
+      issueLabel: t("signals.backup.foreignIssue", lang).replace("{owner}", String(own.owner.crow_home || own.owner.instance_id || "?")),
+      ...runAction,
     };
   }
 
@@ -588,7 +587,10 @@ async function backupSignal(db, nowFn, lang) {
   let readable = false, sizeOk = false;
   try { const st = statSync(newestPath); readable = true; sizeOk = st.size > 0; } catch {}
 
-  const verifiedFailedForNewest = verified && verified.path === newestPath && verified.ok === false;
+  // A failed run keeps the previous good file (write-then-rename), so a failure
+  // newer than our newest file also counts.
+  const verifiedFailedForNewest = verified && verified.ok === false
+    && (verified.path === newestPath || Date.parse(verified.checked_at || "") >= newestMtimeMs);
   if (!readable || !sizeOk || verifiedFailedForNewest) {
     return {
       id: "backup", severity: "warn", state: "warn", label: t("signals.backup.label", lang),

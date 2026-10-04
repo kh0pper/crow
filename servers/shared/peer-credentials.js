@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
-import { homedir } from "os";
+import { resolveCrowHome } from "./crow-home.js";
 import { randomBytes } from "crypto";
 
 // peer-tokens.json is an INSTANCE-scoped resource: it must honor CROW_HOME
@@ -48,7 +48,7 @@ import { randomBytes } from "crypto";
 // recreating the very wrong-instance failure this resolution exists to stop.
 function peerTokensFile() {
   return process.env.CROW_PEER_TOKENS_PATH
-    || resolve(process.env.CROW_HOME || resolve(homedir(), ".crow"), "peer-tokens.json");
+    || resolve(resolveCrowHome(), "peer-tokens.json");
 }
 
 function ensureDir() {

@@ -7,10 +7,10 @@
  */
 
 import { spawn } from "node:child_process";
+import { resolveCrowHome as resolveSharedCrowHome } from "../shared/crow-home.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -65,7 +65,7 @@ bus.on("crow_instances:row_updated", (evt) => {
  * skills/panels stay per-instance instead of bleeding into primary's state.
  */
 export function resolveCrowHome() {
-  return process.env.CROW_HOME || join(homedir(), ".crow");
+  return resolveSharedCrowHome();
 }
 
 /**

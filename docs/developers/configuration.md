@@ -116,8 +116,8 @@ link here — there is no built-in fallback model list.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CROW_BACKUP_DIR` | `~/.crow/backups` | Output of `POST /api/admin/backup` (localhost-only endpoint). |
-| `CROW_BACKUP_KEEP_DAYS` | `7` | Retention. |
+| `CROW_BACKUP_DIR` | `~/backups/crow` | Output of `POST /api/admin/backup` (localhost-only endpoint) and Nest "Run backup now". Files are `<label>-<date>.db`; an instance with its own `CROW_HOME` (co-hosted on one machine) writes `<label>-<home>-<hash>-<date>.db`, so two gateways sharing the directory never overwrite each other. Each file has an `.owner.json` sidecar naming the instance that wrote it. Restore is unchanged: stop the gateway, copy the `.db` over `crow.db`, delete stale `crow.db-wal`/`-shm`, start; ignore the sidecar. |
+| `CROW_BACKUP_KEEP_DAYS` | `7` | Retention, per instance: a run only prunes its own files. |
 | `CROW_BACKUP_TOKEN` | *(unset)* | Extra bearer requirement for the backup endpoint. |
 | `CROW_AUTO_UPDATE` | enabled | Pull-based auto-update (`0` disables). |
 | `CROW_SSE_MAX` | `200` | Cap on concurrent open SSE streams across all stream endpoints; over the cap, requests get `503` + `Retry-After: 5`. |

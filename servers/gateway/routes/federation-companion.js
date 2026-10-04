@@ -42,7 +42,7 @@
 import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { resolveCrowHome } from "../../shared/crow-home.js";
 import { getTrustedInstances } from "../dashboard/panels/nest/data-queries.js";
 import { getPeerOverview } from "../dashboard/overview-cache.js";
 
@@ -57,7 +57,7 @@ const STATIC_LOCAL_APPS = [
 ];
 
 function loadInstalled() {
-  const p = join(homedir(), ".crow", "installed.json");
+  const p = join(resolveCrowHome(), "installed.json");
   if (!existsSync(p)) return {};
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8"));
@@ -85,7 +85,7 @@ function loadLocalBundleTiles() {
   for (const [id, meta] of Object.entries(installed)) {
     if (meta.type !== "bundle") continue;
     const manifestPaths = [
-      join(homedir(), ".crow", "bundles", id, "manifest.json"),
+      join(resolveCrowHome(), "bundles", id, "manifest.json"),
       join(import.meta.dirname, "../../../bundles", id, "manifest.json"),
     ];
     let manifest = null;

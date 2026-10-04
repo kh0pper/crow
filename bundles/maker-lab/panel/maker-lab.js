@@ -24,6 +24,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
 
+// This instance's custom-lesson dir. Honors CROW_HOME so a co-hosted instance
+// never writes lessons into the primary's ~/.crow/bundles copy.
+function customCurriculumDir() {
+  const crowHome = process.env.CROW_HOME || resolve(process.env.HOME || ".", ".crow");
+  return resolve(crowHome, "bundles/maker-lab/curriculum/custom");
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Inlined app-root resolver (BH-4 phase 2): this panel is copied ALONE into
@@ -359,10 +366,9 @@ export default {
             content: renderLessonImportResult({ errors, raw, escapeHtml }),
           });
         }
-        // Write to ~/.crow/bundles/maker-lab/curriculum/custom/<id>.json
+        // Write to <CROW_HOME>/bundles/maker-lab/curriculum/custom/<id>.json
         const { mkdirSync, writeFileSync } = await import("node:fs");
-        const home = process.env.HOME || ".";
-        const dir = resolve(home, ".crow/bundles/maker-lab/curriculum/custom");
+        const dir = customCurriculumDir();
         try {
           mkdirSync(dir, { recursive: true });
           writeFileSync(resolve(dir, `${parsed.id}.json`), JSON.stringify(parsed, null, 2) + "\n");
@@ -379,8 +385,7 @@ export default {
         const id = String(req.body.lesson_id || "").replace(/[^\w-]/g, "");
         if (!id) return res.redirectAfterPost("/dashboard/maker-lab?lessons=1");
         const { unlinkSync, existsSync: existsFn } = await import("node:fs");
-        const home = process.env.HOME || ".";
-        const path = resolve(home, ".crow/bundles/maker-lab/curriculum/custom", `${id}.json`);
+        const path = resolve(customCurriculumDir(), `${id}.json`);
         try {
           if (existsFn(path)) unlinkSync(path);
         } catch {}
@@ -443,8 +448,7 @@ export default {
     // Lessons view
     if (req.query.lessons) {
       const { readdirSync, readFileSync, existsSync: existsFn } = await import("node:fs");
-      const home = process.env.HOME || ".";
-      const customDir = resolve(home, ".crow/bundles/maker-lab/curriculum/custom");
+      const customDir = customCurriculumDir();
       const bundledDirs = [
         { band: "5-9", dir: resolve(__dirname, "../curriculum/age-5-9") },
         { band: "10-13", dir: resolve(__dirname, "../curriculum/age-10-13") },
