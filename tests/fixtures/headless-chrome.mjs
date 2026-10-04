@@ -28,7 +28,7 @@
  * endpoint (e.g. a Dockerised browser); nothing defaults to 9223 any more.
  */
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
@@ -85,7 +85,13 @@ export function reapStaleChromes() {
   try { dirs = readdirSync(tmpdir()).filter((d) => d.startsWith("crow-test-chrome-")).map((d) => join(tmpdir(), d)); } catch {}
   for (const dir of dirs) {
     let owner = 0;
-    try { owner = Number(readFileSync(join(dir, "owner.pid"), "utf8")); } catch { continue; } // still being created
+    try { owner = Number(readFileSync(join(dir, "owner.pid"), "utf8")); } catch {
+      // No owner.pid: still being created — or its creator died before writing
+      // it. Only the latter is old; leave anything younger than 10 minutes.
+      try { if (Date.now() - statSync(dir).mtimeMs > 600000) { rmSync(dir, { recursive: true, force: true }); reaped++; } } catch {}
+      continue;
+    }
+    if (!Number.isInteger(owner) || owner <= 0) continue;   // partial write: not ours to judge
     let alive = false;
     try { process.kill(owner, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; }
     if (alive) continue;
