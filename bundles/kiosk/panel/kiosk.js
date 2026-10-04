@@ -138,7 +138,7 @@ export const CLIENT_SCRIPT = `
         diag.appendChild(el('p', 'kk-dim', S.diag_cols));
         (j.turns || []).slice(0, 20).forEach(function (t) {
           var tm = t.timings || {};
-          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms, tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '')].join(' · ')));
+          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms + (tm.stt_early === 'used' ? ' (early ' + tm.stt_early_ms + ')' : ''), tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '')].join(' · ')));
         });
       });
     });

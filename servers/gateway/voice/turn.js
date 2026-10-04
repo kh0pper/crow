@@ -150,7 +150,7 @@ export function createVoiceTurnRunner(deps) {
       let transcript = opts.transcript;
       if (opts.sttEarly) {
         timings.stt_early = opts.sttEarly.used ? "used" : "none";
-        if (opts.sttEarly.discards) timings.stt_early_discards = opts.sttEarly.discards;
+        if (opts.sttEarly.discards) { timings.stt_early_discards = opts.sttEarly.discards; timings.stt_early_discard_ms = opts.sttEarly.discard_ms || 0; }
         if (opts.sttEarly.used && Number.isFinite(opts.sttEarly.ms)) timings.stt_early_ms = opts.sttEarly.ms;
       }
       if (transcript != null && opts.sttEarly?.used) mark("stt_ms");   // = how long the turn waited for the early transcript

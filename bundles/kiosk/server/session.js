@@ -8,6 +8,8 @@ import { normalizeCaps } from "./wm.js";
 export const HELLO_TIMEOUT_MS = 5000;
 export const MAX_TURN_BYTES = 1024 * 1024;
 export const MIN_TURN_BYTES = 6400;
+/** How long a turn waits for its early transcript before transcribing the audio itself. */
+export const EARLY_STT_WAIT_MS = 3000;
 
 export function createSessionHub(deps) {
   const sessions = new Map();
@@ -33,21 +35,24 @@ export function createSessionHub(deps) {
     // whisper (num_workers 1) cannot cancel a request, so a newer pause while one runs only
     // records `want` and starts when it settles.
     let early = null;
-    let earlyWant = false;
+    let earlyWant = null;          // {bytes, n}: the newest pause's snapshot, queued behind a running early STT
     let earlyDiscards = 0;
+    let earlyDiscardMs = 0;
     const nowMs = () => (deps.now || Date.now)();
-    function dropEarly() { if (early && !early.done) early.ctrl.abort(); early = null; earlyWant = false; }
-    function startEarly() {
-      if (!inTurn || !deps.transcribe || bytes < MIN_TURN_BYTES) return;
-      if (early && !early.done) { earlyWant = true; return; }
-      if (early && early.bytes === bytes) return;               // nothing new since the last one
-      if (early) earlyDiscards++;                                // superseded by more speech
-      earlyWant = false;
-      const e = { bytes, ctrl: new AbortController(), startedAt: nowMs(), done: false };
+    function dropEarly() { if (early && !early.done) early.ctrl.abort(); early = null; earlyWant = null; }
+    /** snap = {bytes, n}: the audio as of the pause (n frames) — a queued restart transcribes THAT slice, never later mid-word audio. */
+    function startEarly(snap = { bytes, n: frames.length }) {
+      if (!inTurn || !deps.transcribe || snap.bytes < MIN_TURN_BYTES) return;
+      if (early && !early.done) { earlyWant = snap; return; }
+      if (early && early.bytes >= snap.bytes) return;           // nothing new since the last one
+      if (early) { earlyDiscards++; earlyDiscardMs += early.ms || 0; }   // superseded by more speech
+      earlyWant = null;
+      const e = { bytes: snap.bytes, ctrl: new AbortController(), startedAt: nowMs(), done: false, ms: 0 };
+      const audio = deps.wrapPcmAsWav(Buffer.concat(frames.slice(0, snap.n)), 16000);
       e.promise = Promise.resolve()
-        .then(() => deps.transcribe({ device, audio: deps.wrapPcmAsWav(Buffer.concat(frames), 16000), signal: e.ctrl.signal }))
-        .then((r) => ({ text: String(r?.text || "").trim(), ms: nowMs() - e.startedAt }), (err) => ({ error: err }))
-        .then((r) => { e.done = true; if (early === e && earlyWant && inTurn) startEarly(); return r; });
+        .then(() => deps.transcribe({ device, audio, signal: e.ctrl.signal }))
+        .then((r) => ({ text: String(r?.text || "").trim(), ms: nowMs() - e.startedAt }), (err) => ({ error: err, ms: nowMs() - e.startedAt }))
+        .then((r) => { e.done = true; e.ms = r.ms; if (early === e && earlyWant && inTurn) startEarly(earlyWant); return r; });
       early = e;
     }
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
@@ -106,16 +111,16 @@ export function createSessionHub(deps) {
       // (the page reports how many bytes it had sent at its last voiced frame).
       const voiced = Number(msg?.voiced_bytes);
       const usable = early && msg?.vad_reason === "silence" && Number.isFinite(voiced) && early.bytes >= voiced ? early : null;
-      if (early && !usable) earlyDiscards++;
+      if (early && !usable) { earlyDiscards++; earlyDiscardMs += early.ms || 0; }
       if (!usable) dropEarly();
-      const discards = earlyDiscards;
-      early = null; earlyWant = false; earlyDiscards = 0;
+      const discards = earlyDiscards, discardMs = earlyDiscardMs;
+      early = null; earlyWant = null; earlyDiscards = 0; earlyDiscardMs = 0;
       inTurn = false;
       const pcm = Buffer.concat(frames);
       frames = []; bytes = 0;
       // Nothing said (the page's no-speech timeout): never send room noise to STT —
       // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
-      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { usable?.ctrl.abort(); deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
+      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
       abort = new AbortController();
       const my = abort;
@@ -133,15 +138,30 @@ export function createSessionHub(deps) {
       try {
         let transcript = null, sttEarly = null;
         if (usable) {
-          const er = await usable.promise;
-          if (!er.error && !my.signal.aborted) { transcript = er.text; sttEarly = { used: true, ms: er.ms, discards }; }
-          else if (er.error) deps.log?.(`[kiosk] early STT failed, transcribing again: ${er.error.message}`);
+          // A barge-in / close cancels the early request with the turn; a wedged whisper is capped.
+          my.signal.addEventListener("abort", () => usable.ctrl.abort(), { once: true });
+          const setT2 = deps.setTimeout || setTimeout, clearT2 = deps.clearTimeout || clearTimeout;
+          let cap = null;
+          const er = await Promise.race([
+            usable.promise,
+            new Promise((res) => { if (my.signal.aborted) res({ error: new Error("aborted") }); else my.signal.addEventListener("abort", () => res({ error: new Error("aborted") }), { once: true }); }),
+            new Promise((res) => { cap = setT2(() => res({ error: new Error("early STT wait cap"), capped: true }), deps.earlyWaitMs ?? EARLY_STT_WAIT_MS); }),
+          ]);
+          clearT2(cap);
+          if (er.capped) usable.ctrl.abort();
+          // An empty early transcript is not trusted (a mid-word snapshot): the full audio is transcribed.
+          if (!er.error && er.text && !my.signal.aborted) sttEarly = { used: true, ms: er.ms, discards, discard_ms: discardMs };
+          if (sttEarly) transcript = er.text;
+          else if (er.error && !my.signal.aborted) deps.log?.(`[kiosk] early STT unusable, transcribing again: ${er.error.message}`);
         }
-        if (!sttEarly) sttEarly = { used: false, discards };
+        if (!sttEarly) sttEarly = { used: false, discards, discard_ms: discardMs };
+        if (my.signal.aborted) throw Object.assign(new Error("aborted"), { aborted: true });
         r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps, transcript, startedAt: turnStartedAt, sttEarly });
       } catch (err) {
-        deps.log?.(`[kiosk] turn failed: ${err.message}`);
-        sendJson(ws, { type: "error", code: "turn_failed", recoverable: true });
+        if (!err?.aborted) {
+          deps.log?.(`[kiosk] turn failed: ${err.message}`);
+          sendJson(ws, { type: "error", code: "turn_failed", recoverable: true });
+        }
       } finally {
         busy = false;
         abort = null;

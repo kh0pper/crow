@@ -87,7 +87,7 @@ test("lever D: pause fires ONCE, pauseMs into a silence after real speech; resum
   assert.equal(end.reason, "silence");
   assert.equal(VAD_DEFAULTS.pauseMs, 120);
   assert.ok(VAD_DEFAULTS.pauseMs < VAD_DEFAULTS.hangoverMs);
-  const off = createVad({ hangoverMs: 100 });      // pause >= hangover: no pause, just the end
+  const off = createVad({ hangoverMs: 130, pauseMs: 140 });   // pause >= hangover: no pause, just the end
   t = 1000; out.length = 0;
   const v2 = off; for (let i = 0; i < 15; i++) { t += 20; v2.push(0.05, t); }
   let r2; for (let i = 0; i < 20 && !(r2 = v2.push(0.001, (t += 20))).end;) { assert.ok(!r2.pause); i++; }

@@ -13,8 +13,9 @@ services:
       # CTranslate2 intra-op threads (smoke 2026-10-04 lever C). The image maps
       # WHISPER__CPU_THREADS → whisper.cpu_threads → WhisperModel(cpu_threads=…)
       # (pydantic env_nested_delimiter "__"); 0 means faster-whisper's default of 4.
-      # 12 suits crow (16 cores / 32 threads); set WHISPER_CPU_THREADS in this
-      # bundle's .env (Extensions → Configure) to at most the physical cores elsewhere.
+      # 12 suits crow (16 cores / 32 threads). Override with WHISPER_CPU_THREADS in
+      # this compose directory's .env (an Extensions install: Configure), at most the
+      # physical cores. Shared by every model here, glasses/meeting large-v3 included.
       WHISPER__CPU_THREADS: "${WHISPER_CPU_THREADS:-12}"
       # Never unload a loaded model. The default (300 s) unloaded after five idle
       # minutes, so the first kiosk turn after a quiet spell paid a model load.

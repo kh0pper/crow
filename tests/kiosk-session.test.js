@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createSessionHub, HELLO_TIMEOUT_MS, MAX_TURN_BYTES } from "../bundles/kiosk/server/session.js";
+import { createSessionHub, HELLO_TIMEOUT_MS, MAX_TURN_BYTES, EARLY_STT_WAIT_MS } from "../bundles/kiosk/server/session.js";
 import { createMetricsStore } from "../bundles/kiosk/server/metrics.js";
 import { createWmStore } from "../bundles/kiosk/server/wm.js";
 import { wrapPcmAsWav } from "../servers/gateway/voice/turn-helpers.js";
@@ -353,7 +353,7 @@ test("lever D: speech_pause starts STT on the audio so far; a turn_end with no l
   await tick(); await tick();
   assert.equal(turns.length, 1);
   assert.equal(turns[0].transcript, "What is the capital of Portugal?");
-  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 0 });
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 0, discard_ms: 0 });
   assert.equal(typeof turns[0].startedAt, "number");
   assert.equal(stt[0].signal.aborted, false);
 });
@@ -371,10 +371,10 @@ test("lever D: speech resumed after the pause → the early transcript is discar
   assert.equal(turns.length, 1);
   assert.equal(turns[0].transcript, null, "the turn transcribes the whole utterance itself");
   assert.equal(turns[0].audio.length, 44 + 45 * 640);
-  assert.deepEqual(turns[0].sttEarly, { used: false, discards: 1 });
+  assert.deepEqual(turns[0].sttEarly, { used: false, discards: 1, discard_ms: 0 });
 });
 
-test("lever D: one early STT at a time — a newer pause while one runs waits, then transcribes the longer audio; the newest wins", async () => {
+test("lever D: one early STT at a time — a newer pause while one runs waits, then transcribes the newest pause's audio; the newest wins", async () => {
   const { h, turns, stt } = earlyHub(); const ws = await hello(h);
   ws.text({ type: "turn_start", turn_id: "e3" });
   for (let i = 0; i < 20; i++) ws.bin(F);
@@ -392,7 +392,7 @@ test("lever D: one early STT at a time — a newer pause while one runs waits, t
   stt[1].d.resolve({ text: "What is the time?" });
   await tick(); await tick(); await tick();
   assert.equal(turns[0].transcript, "What is the time?");
-  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 1 });
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 1, discard_ms: 0 });
 });
 
 test("lever D: a failed early STT falls back to transcribing; no_speech and close abort it; without speech_pause nothing changes", async () => {
@@ -405,7 +405,7 @@ test("lever D: a failed early STT falls back to transcribing; no_speech and clos
   await tick(); await tick(); await tick();
   assert.equal(a.turns[0].transcript, null);
   assert.equal(a.turns[0].sttEarly.used, false);
-  assert.ok(a.logs.some((l) => /early STT failed/.test(l)));
+  assert.ok(a.logs.some((l) => /early STT unusable/.test(l)));
 
   const b = earlyHub(); const wb = await hello(b.h);
   wb.text({ type: "turn_start", turn_id: "f2" });
@@ -423,5 +423,71 @@ test("lever D: a failed early STT falls back to transcribing; no_speech and clos
   wc.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 23 * 640 });
   await tick(); await tick();
   assert.equal(c.turns[0].transcript, null);
-  assert.deepEqual(c.turns[0].sttEarly, { used: false, discards: 0 });
+  assert.deepEqual(c.turns[0].sttEarly, { used: false, discards: 0, discard_ms: 0 });
+});
+
+test("review I1: a barge-in while the turn waits for its early transcript ends the turn at once — no LLM turn, no turn_failed, not busy", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "b1" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" }); await tick();
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 20 * 640 });
+  await tick();
+  ws.text({ type: "barge_in" });
+  await tick(); await tick();
+  assert.equal(stt[0].signal.aborted, true, "the whisper request is cancelled with the turn");
+  assert.equal(turns.length, 0);
+  const m = ws.msgs();
+  assert.ok(!m.some((x) => x.type === "error" && x.code === "turn_failed"));
+  assert.equal(m.filter((x) => x.type === "turn_done").at(-1).aborted, true);
+  ws.text({ type: "turn_start", turn_id: "b2" });
+  assert.ok(!ws.msgs().some((x) => x.code === "turn_busy"), "the next tap is not refused");
+});
+
+test("review I1: a wedged early STT is capped — after EARLY_STT_WAIT_MS the turn transcribes the audio itself", async () => {
+  const { h, turns, stt, timers } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "c1" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" }); await tick();
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 20 * 640 });
+  await tick();
+  const cap = timers.find((t) => t.ms === EARLY_STT_WAIT_MS);
+  assert.ok(cap, "a cap timer is armed");
+  cap.fn();
+  await tick(); await tick();
+  assert.equal(stt[0].signal.aborted, true);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].transcript, null);
+  assert.equal(turns[0].sttEarly.used, false);
+});
+
+test("review minor: an EMPTY early transcript is not trusted — the full audio is transcribed", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "m1" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" }); await tick();
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 20 * 640 });
+  stt[0].d.resolve({ text: "  " });
+  await tick(); await tick(); await tick();
+  assert.equal(turns[0].transcript, null);
+  assert.equal(turns[0].sttEarly.used, false);
+});
+
+test("review I2: a queued early STT transcribes the audio AS OF its pause, not the later mid-word audio", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "q1" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" }); await tick();
+  for (let i = 0; i < 10; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" }); await tick();                 // snapshot = 30 frames
+  for (let i = 0; i < 8; i++) ws.bin(F);                            // more speech while the first STT runs
+  stt[0].d.resolve({ text: "What" });
+  await tick(); await tick();
+  assert.equal(stt.length, 2);
+  assert.equal(stt[1].audio.length, 44 + 30 * 640, "exactly the second pause's slice");
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 38 * 640 });
+  await tick(); await tick();
+  assert.equal(stt[1].signal.aborted, true, "speech after that pause → discarded");
+  assert.equal(turns[0].transcript, null);
+  assert.equal(turns[0].sttEarly.discards, 2);
 });

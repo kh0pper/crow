@@ -6048,10 +6048,16 @@ If **Run A passes**, small.en stays the default and tiny.en remains an option. I
   - Verified in the image source (speaches v0.5.0): `Config` uses `env_nested_delimiter="__"`, so `WHISPER__CPU_THREADS` sets `whisper.cpu_threads`. `model_manager.py` passes that to `WhisperModel(cpu_threads=…)`, and faster-whisper 1.0.3 passes it on as CTranslate2 `intra_threads`. 0 means faster-whisper's default of 4 threads, and a non-zero value overrides `OMP_NUM_THREADS`.
   - The bundle owns the value: compose `WHISPER__CPU_THREADS: "${WHISPER_CPU_THREADS:-12}"`, plus manifest env var `WHISPER_CPU_THREADS` (default 12, editable in Extensions → Configure). The 8g cap is kept.
   - The setting applies to every model in that container, so prod glasses and meeting-recorder STT (large-v3) get faster too. Task 14's whisper recreate applies it.
+  - The env var is `propagate: false`, so it never lands in the gateway's own `.env`, where it would override the bundle's on later restarts.
+  - **Reach:** crow's prod whisper runs from `~/crow/bundles/faster-whisper-server`, not from an Extensions install. On crow the compose default (12) applies, and a different value goes in that directory's `.env`. Elsewhere, `refreshVersionedBundle` never copies a docker bundle's compose, and this manifest has no `version`. Existing installs therefore get neither lever C nor the tiny.en preload until a reinstall.
+  - **CPU:** `num_workers: 1` serializes requests per model only. A kiosk turn and a meeting-recorder large-v3 job can run at the same time, at 12 threads each, on 16 physical cores.
 - **Lever D (early STT) — BUILT (2nd fix round).** How it works:
   - The page's VAD reports `pause` once, 120 ms into a silence after real speech (`VAD_DEFAULTS.pauseMs`). The page sends `speech_pause`. Audio frames are already streaming during the turn.
   - The server transcribes the audio it holds so far, while the 450 ms wait runs. `turn_end` carries `voiced_bytes`, the bytes the page had sent at its last voiced frame. The early transcript is used only if its snapshot covers that point. Otherwise the user spoke again: the early STT is aborted and the whole utterance is transcribed.
-  - Only one early STT runs at a time. A newer pause during one is queued until it settles. A failed early STT falls back to a normal STT.
+  - Only one early STT runs at a time. A newer pause during one is queued until it settles, and it then transcribes the audio as of that pause, never later mid-word audio.
+  - A failed or empty early transcript falls back to a normal STT. So does one still running after 3 s (`EARLY_STT_WAIT_MS`). A barge-in or socket close during the wait cancels the early request with the turn.
+  - Design limit: speech after the pause that stays under the VAD energy threshold is not "voiced", for example a soft last syllable. The early transcript then wins and can drop it. At most about 330 ms of audio is affected. Note any such cut-offs in `findings.md`.
+  - `stt_early_discard_ms` records the whisper time spent on discarded early STTs.
   - The turn's timings start at `turn_end` (`startedAt`), so `stt_ms` is the WAIT for the early transcript, usually far below the STT time.
   - Risk: pauses of 120 ms or more mid-sentence start STTs that get discarded, and each holds whisper's single worker until done. Watch `stt_early_discards`. If discards hurt p90, raise `pauseMs` (for example to 200 ms; it saves less).
 
@@ -6242,7 +6248,7 @@ curl -s -w "\nlarge-v3 (glasses/meeting default): %{time_total}s\n" -F file=@/tm
 
 Expected:
 - the image is unchanged and the cap is 8 GiB;
-- the env is set, including `WHISPER__CPU_THREADS=12`. This is lever C, and prod large-v3 for glasses and the meeting recorder gets it too. Compare the `large-v3 (glasses/meeting default)` time with the pre-deploy number. If the meeting-recorder long clip makes crow's CPU contention a problem, lower `WHISPER_CPU_THREADS` in `~/crow/bundles/faster-whisper-server/.env`;
+- the env is set, including `WHISPER__CPU_THREADS=12`. A kiosk turn running alongside a meeting-recorder large-v3 job means 2 × 12 threads on 16 cores; check that the kiosk `stt_ms` holds up during one. This is lever C, and prod large-v3 for glasses and the meeting recorder gets it too. Compare the `large-v3 (glasses/meeting default)` time with the pre-deploy number. If the meeting-recorder long clip makes crow's CPU contention a problem, lower `WHISPER_CPU_THREADS` in `~/crow/bundles/faster-whisper-server/.env`;
 - all three models (large-v3, distil-small.en, tiny.en — 2026-10-04 fix round) transcribe the test clip correctly. The first large-v3 call pays its one load, and later ones stay warm (TTL -1). After the gateway restart, the journal shows `[kiosk] STT warm (…)` once a display is paired. **Installed copies elsewhere:** `refreshVersionedBundle` never copies a docker bundle's compose, so a faster-whisper install from an older copy has no tiny.en preload. There, choosing "Fastest" pays a ~75 MB download on its first warm-up, retried until it succeeds.
 
 If `q.wav` was deleted with the smoke dir, regenerate it as in Task 13 Step 3.
