@@ -550,7 +550,7 @@ describe("fix round 2", () => {
     assert.deepEqual(report.go_no_go.tombstoned_contacts, [{ crow_id: "crow:deleted" }]);
   });
 
-  it("N2: schedules import disabled with next_run cleared, and are listed for Kevin", () => {
+  it("N2: schedules import disabled with next_run cleared, and are listed for Casey", () => {
     const rows = query(s.target, "SELECT task, enabled, next_run FROM schedules ORDER BY task");
     assert.deepEqual(rows, [
       { task: "blog-digest", enabled: 0, next_run: null },

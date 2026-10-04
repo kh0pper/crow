@@ -132,7 +132,7 @@ test("a second save for the same bundle+key updates in place (no duplicates)", a
 test("manual entries; delete; uninstall marks extension entries and a later save reactivates them", async () => {
   const db = freshDb();
   const key = KEY.createKeychainKey({ crowHome: home() });
-  const m = await K.addManualSecret(db, key, { label: "Phone app password", username: "kevin", url: "https://ws.example:8456", secret: "abcd-efgh" });
+  const m = await K.addManualSecret(db, key, { label: "Phone app password", username: "casey", url: "https://ws.example:8456", secret: "abcd-efgh" });
   const x = await K.saveExtensionSecret(db, key, { bundleId: "vaultwarden", envKey: "VAULTWARDEN_ADMIN_TOKEN", label: "Vaultwarden — admin token", secret: "t", origin: "generated" });
   assert.equal(await K.markBundleRemoved(db, "vaultwarden"), 1);
   assert.equal((await K.getEntry(db, x.id)).status, "extension_removed");
@@ -160,7 +160,7 @@ test("Export → Import round-trips through a passphrase file; wrong passphrase 
   const db = freshDb();
   const key = KEY.createKeychainKey({ crowHome: home() });
   await K.saveExtensionSecret(db, key, { bundleId: "workspace", envKey: "WORKSPACE_ADMIN_PASSWORD", label: "WS admin", username: "admin", secret: "ws-pass 1", origin: "typed" });
-  await K.addManualSecret(db, key, { label: "Phone", username: "kevin", secret: "app-pass" });
+  await K.addManualSecret(db, key, { label: "Phone", username: "casey", secret: "app-pass" });
   const entries = await K.exportableEntries(db, key);
   assert.equal(entries.length, 2);
   const file = await X.sealExport(entries, "correct horse battery");

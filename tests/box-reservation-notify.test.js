@@ -12,7 +12,7 @@ import {
 } from "../servers/gateway/box-reservation-notify.js";
 
 const R1 = { owner: "win", reason: "bench", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z", allow: ["crow-embed"], corrupt: false, key: "win@2026-09-04T20:00:00.000Z" };
-const R2 = { ...R1, owner: "kevin", started_at: "2026-09-04T23:30:00.000Z", key: "kevin@2026-09-04T23:30:00.000Z" };
+const R2 = { ...R1, owner: "casey", started_at: "2026-09-04T23:30:00.000Z", key: "casey@2026-09-04T23:30:00.000Z" };
 
 test("first sight of a reservation emits 'start' once; later sights emit nothing", () => {
   const st = createNoticeState();

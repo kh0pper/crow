@@ -25,9 +25,9 @@
 import { readFileSync, statSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** Kevin decision 2 (2026-09-04): a hold longer than this needs `force`. */
+/** Casey decision 2 (2026-09-04): a hold longer than this needs `force`. */
 export const DEFAULT_MAX_HOLD_MS = 8 * 60 * 60 * 1000;
-/** Kevin decision 3: providers that may start even while reserved. The embed
+/** Casey decision 3: providers that may start even while reserved. The embed
  *  model is small, never evicted, and search/memory depend on it. */
 export const DEFAULT_ALLOW = Object.freeze(["crow-embed"]);
 const DEFAULT_MINUTES = 480;

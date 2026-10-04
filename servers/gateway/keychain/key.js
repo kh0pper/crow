@@ -1,5 +1,5 @@
 /**
- * The Crow keychain's OWN key (Kevin, 2026-10-03, review C7): 32 random bytes in
+ * The Crow keychain's OWN key (Casey, 2026-10-03, review C7): 32 random bytes in
  * <CROW_HOME>/secrets/keychain.key (dir 700, file 600). It is NOT the identity seed, so
  * nothing that copies identity.json or crow.db (product /api/admin/backup + Nest "Run
  * backup now", onboarding identity export, r4-backup.sh, crow-db-backup.sh, instance sync)

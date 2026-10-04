@@ -27,7 +27,7 @@
  *
  * Also exports probeServerTools(): a dependency-free MCP stdio `tools/list`
  * (initialize -> notifications/initialized -> tools/list) reusing the
- * s0_mcp_probe wire plumbing — this is the authoritative GUI tool-picker data
+ * same stdio wire plumbing — this is the authoritative GUI tool-picker data
  * source (plan §5: pi's effective mcp.json + a LIVE per-server tools/list, NOT
  * getProxyStatus()). Each tool is flagged `hasPattern` if its inputSchema
  * contains a `pattern`/regex anywhere (drives the Phase-2.3 SOFT-WARN; S4

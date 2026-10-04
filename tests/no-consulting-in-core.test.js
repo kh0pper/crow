@@ -1,6 +1,6 @@
 /**
  * The Maestro Press consulting-pipeline CRM must NOT ship in core Crow
- * (strategic-review Q4, Kevin 2026-07-18: moved to a private MPA-only bundle).
+ * (strategic-review Q4, Casey 2026-07-18: moved to a private MPA-only bundle).
  * Every public install used to advertise crow_consulting_* tools in its AI
  * tool manifest — this pins the removal.
  */

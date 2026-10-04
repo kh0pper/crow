@@ -38,7 +38,7 @@ test("start.sh minimum and root Dockerfile base match the engines major", () => 
 });
 
 test("live code never spawns a hardcoded nvm node", () => {
-  for (const f of ["servers/gateway/routes/bot-board-api.js", "scripts/bots/router_dispatch.mjs"]) {
+  for (const f of ["servers/gateway/routes/bot-board-api.js"]) {
     assert.ok(!/\.nvm\/versions\/node\/v\d/.test(read(f)), `${f} hardcodes an nvm node path; use process.execPath`);
   }
 });

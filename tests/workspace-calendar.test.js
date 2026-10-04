@@ -21,7 +21,7 @@ after(async () => { await close(); fake.close(); });
 test("list calendars with writability; ambiguous/unknown names list the options", async () => {
   const r = await call("ws_cal_list_calendars", {});
   assert.deepEqual(r.data.calendars.map((c) => [c.name, c.writable]), [["Menu", true], ["Feriados", false]]);
-  assert.equal(r.data.calendars[0].owner, "Kevin");
+  assert.equal(r.data.calendars[0].owner, "Casey");
   const nope = await call("ws_cal_list_events", { calendar: "Nope" });
   assert.equal(nope.code, "calendar_not_found"); assert.match(nope.error, /Menu.*Feriados/);
 });
@@ -125,7 +125,7 @@ test("read-only calendar refuses writes with a clear code", async () => {
 });
 
 test("respond_to_event finds crow-bot via calendar-user-address-set and sets its own PARTSTAT; not an attendee → error", async () => {
-  pim.addEvent("menu_shared_by_admin", "inv.ics", cal("BEGIN:VEVENT", "UID:inv-1", "DTSTAMP:20261001T000000Z", "DTSTART:20261015T230000Z", "DTEND:20261016T000000Z", "SUMMARY:Junta", "ORGANIZER:mailto:kevin@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alex@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:MAILTO:Crow-Bot@crow.test", "END:VEVENT"));
+  pim.addEvent("menu_shared_by_admin", "inv.ics", cal("BEGIN:VEVENT", "UID:inv-1", "DTSTAMP:20261001T000000Z", "DTSTART:20261015T230000Z", "DTEND:20261016T000000Z", "SUMMARY:Junta", "ORGANIZER:mailto:casey@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alex@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:MAILTO:Crow-Bot@crow.test", "END:VEVENT"));
   const r = await call("ws_cal_respond_to_event", { calendar: "Menu", uid: "inv-1", response: "accepted" });
   assert.equal(r.success, true); assert.ok(r.data.version_id.startsWith("j1."));
   const t = unfold(pim.calendars.get("menu_shared_by_admin").objects.get("inv.ics").text);

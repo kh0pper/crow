@@ -1,7 +1,7 @@
 /**
  * admin-backup getInstanceLabel generalization (Item 4-PR4, B9).
  *
- * The label used to be derived via a personal /^kevin-(.+)$/ regex on
+ * The label used to be derived via a personal /^casey-(.+)$/ regex on
  * NTFY_TOPIC. Now: an optional CROW_NTFY_LABEL_PREFIX is stripped when it
  * matches; otherwise the topic is used verbatim; the CROW_DB_PATH heuristics
  * remain the fallback when no topic is set.
@@ -18,20 +18,20 @@ function withEnv(vars, fn) {
   }
 }
 
-test("no prefix configured -> topic verbatim (no kevin special-case)", () => {
-  withEnv({ NTFY_TOPIC: "kevin-mpa", CROW_NTFY_LABEL_PREFIX: null }, () => {
-    assert.equal(getInstanceLabel(), "kevin-mpa");
+test("no prefix configured -> topic verbatim (no casey special-case)", () => {
+  withEnv({ NTFY_TOPIC: "casey-mpa", CROW_NTFY_LABEL_PREFIX: null }, () => {
+    assert.equal(getInstanceLabel(), "casey-mpa");
   });
 });
 
 test("configured prefix is stripped when it matches", () => {
-  withEnv({ NTFY_TOPIC: "kevin-mpa", CROW_NTFY_LABEL_PREFIX: "kevin" }, () => {
+  withEnv({ NTFY_TOPIC: "casey-mpa", CROW_NTFY_LABEL_PREFIX: "casey" }, () => {
     assert.equal(getInstanceLabel(), "mpa");
   });
 });
 
 test("configured prefix that does not match -> topic verbatim", () => {
-  withEnv({ NTFY_TOPIC: "alerts-prod", CROW_NTFY_LABEL_PREFIX: "kevin" }, () => {
+  withEnv({ NTFY_TOPIC: "alerts-prod", CROW_NTFY_LABEL_PREFIX: "casey" }, () => {
     assert.equal(getInstanceLabel(), "alerts-prod");
   });
 });

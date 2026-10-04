@@ -45,7 +45,7 @@ before(async () => {
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "unauthorized" } });
   const sm = new SessionManager();
-  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ verifyActor: verifyActorSig, db: s.db, ownerNumber: "+15129372366", McpServer, z, notify: async (db, n) => { s.notes.push(n); } }), sm, noAuth);
+  mountMcpServer(app, "/phone", () => createPhoneMcpServer({ verifyActor: verifyActorSig, db: s.db, ownerNumber: "+15125550100", McpServer, z, notify: async (db, n) => { s.notes.push(n); } }), sm, noAuth);
   mountMcpServer(app, "/memory", () => new McpServer({ name: "stub", version: "0" }), sm, noAuth);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
@@ -66,7 +66,7 @@ async function client(path, token, headers = {}) {
 const payload = (r) => JSON.parse(r.content[0].text);
 const botHeaders = signed({ "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "bobby", "X-Crow-Actor-Thread": "discord:42", "X-Crow-Actor-Gateway": "discord" });
 const args = { business_name: "Smile Dental", number: "512-555-0101", goal: "Book a cleaning", language: "en",
-  limits: { days_of_week: ["tue"] }, shareable: { name: "Kevin" } };
+  limits: { days_of_week: ["tue"] }, shareable: { name: "Casey" } };
 
 test("phone token works on /phone/mcp only; board token does not", async () => {
   const c = await client("/phone/mcp", s.phoneToken, botHeaders);
@@ -90,7 +90,7 @@ test("phone_plan_call records the bot actor and deliver_to, never dials", async 
 
 test("phone_plan_call rejects blocked numbers with a clear error", async () => {
   const c = await client("/phone/mcp", s.phoneToken, botHeaders);
-  for (const number of ["911", "+19005551234", "512-937-2366"]) {
+  for (const number of ["911", "+19005550123", "512-555-0100"]) {
     const r = await c.callTool({ name: "phone_plan_call", arguments: { ...args, number } });
     assert.equal(r.isError, true, number);
   }
@@ -136,7 +136,7 @@ test("catalog: phone token only -> phone present and board reason preserved", ()
 });
 
 test("ownerNumber may be a function evaluated per call", async () => {
-  let owner = "+15125550000";
+  let owner = "+15125550198";
   const app = express(); app.use(express.json());
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({});

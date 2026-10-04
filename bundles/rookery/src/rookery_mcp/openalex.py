@@ -1,6 +1,6 @@
 """OpenAlex search for the lit-review workflow (Phase 2 Task 5).
 
-Kevin's scope decision 2026-07-14: OpenAlex only (UNT library access lapsed —
+Scope decision 2026-07-14: OpenAlex only (university library access lapsed —
 removed from the plan). Results are returned as crow_add_source-READY dicts
 (title, authors, publication_date, publisher, doi, url, abstract,
 source_type, relevance_score) so the workspace model can pass kept items

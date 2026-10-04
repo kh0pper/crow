@@ -85,7 +85,7 @@ pt_list_channels {}
 
 pt_upload_video {
   "channel_id": 1,
-  "file_path": "/home/kev/videos/presentation.mp4",
+  "file_path": "/home/alex/videos/presentation.mp4",
   "name": "Crow platform overview",
   "description": "Walkthrough of the memory and sharing layers",
   "privacy": "public",

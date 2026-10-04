@@ -1,6 +1,6 @@
 // tests/llm-router-companion-source.test.js
 //
-// Kevin decision 2026-10-02: every device that uses the voice companion is on
+// Casey decision 2026-10-02: every device that uses the voice companion is on
 // Tailscale, and r4 reaches the gateway over loopback, so the companion's
 // /llm/v1 path gets the same source check as the door and /llm/acquire:
 // loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) pass, a LAN

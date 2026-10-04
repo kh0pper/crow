@@ -5,7 +5,7 @@
  *    aborts before any hash reaches .env or the retained copy (review C5), so a retry
  *    simply mints a new token instead of leaving an unusable hash behind;
  *  - typed fields are saved only when the manifest opts them in (generatable / keychain,
- *    Kevin Q1) AND the request is a LOCAL dashboard session that ticked "Save to Crow
+ *    Casey Q1) AND the request is a LOCAL dashboard session that ticked "Save to Crow
  *    keychain" (sanitizeKeychainRequest); a failure there is a job-log line, not a failure;
  *  - the optional vault copy uses the typed vault credentials once, then drops them.
  */

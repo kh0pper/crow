@@ -9,7 +9,7 @@
  *
  * Writes/reads $CROW_BOX_RESERVATION_PATH (default
  * /run/user/<uid>/crow-box-reservation.json). A hold longer than 8 h needs
- * --force (Kevin decision 2, 2026-09-04). While the file exists, escalations
+ * --force (Casey decision 2, 2026-09-04). While the file exists, escalations
  * degrade to the fast resident model and non-allowed model starts are
  * refused with `box_reserved` — see docs/architecture/box-reservation.md.
  *

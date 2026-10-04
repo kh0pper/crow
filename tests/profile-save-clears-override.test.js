@@ -38,20 +38,20 @@ test("save_profile writes global, clears the stranded override, and getMyProfile
       args: [localId],
     });
 
-    const req = { body: { action: "save_profile", display_name: "Kevin", bio: "Hello" } };
+    const req = { body: { action: "save_profile", display_name: "Casey", bio: "Hello" } };
     const out = await handleContactAction(req, db, {});
     assert.ok(out && out.redirect, "save redirects");
 
     const g = await db.execute("SELECT key, value FROM dashboard_settings WHERE key IN ('profile_display_name','profile_bio')");
     const byKey = Object.fromEntries(g.rows.map((r) => [r.key, r.value]));
-    assert.equal(byKey.profile_display_name, "Kevin", "global name row written");
+    assert.equal(byKey.profile_display_name, "Casey", "global name row written");
     assert.equal(byKey.profile_bio, "Hello", "global bio row written");
 
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key LIKE 'profile_%'");
     assert.equal(Number(o.rows[0].c), 0, "stranded override cleared (D2)");
 
     const profile = await getMyProfile(db);
-    assert.equal(profile.display_name, "Kevin", "the profile page reader sees the save immediately");
+    assert.equal(profile.display_name, "Casey", "the profile page reader sees the save immediately");
     assert.equal(profile.bio, "Hello");
   } finally {
     setSettingsSyncManager(null);

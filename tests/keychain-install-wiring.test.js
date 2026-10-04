@@ -66,7 +66,7 @@ test("install: generated token → keychain (first view) + PHC hash in .env; che
   const id = "demo-kc-a"; const manifest = fixture(id);
   const job = B._createJobForTest(id, "install");
   const keychain = { save: ["DEMO_PASSWORD", "DEMO_API_KEY"], vault: null };
-  const out = await B.runInstallJob(id, { DEMO_DOMAIN: "http://localhost:18097", DEMO_USER: "kevin", DEMO_PASSWORD: "p a$s'w\"d #1", DEMO_API_KEY: "api-123" }, { job, installedSnapshot: [], consentVerified: false, manifest, keychain });
+  const out = await B.runInstallJob(id, { DEMO_DOMAIN: "http://localhost:18097", DEMO_USER: "casey", DEMO_PASSWORD: "p a$s'w\"d #1", DEMO_API_KEY: "api-123" }, { job, installedSnapshot: [], consentVerified: false, manifest, keychain });
   assert.equal(out.ok, true, out.reason);
   const env = parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8"));
   assert.match(env.DEMO_ADMIN_TOKEN, /^\$argon2id\$v=19\$m=65540,t=3,p=4\$/);
@@ -79,7 +79,7 @@ test("install: generated token → keychain (first view) + PHC hash in .env; che
     assert.equal(byKey.DEMO_ADMIN_TOKEN.label, "Demo Vault — admin token");
     assert.equal(byKey.DEMO_ADMIN_TOKEN.url, "http://localhost:18097/admin");
     assert.equal(byKey.DEMO_ADMIN_TOKEN.first_view_pending, true);
-    assert.equal(byKey.DEMO_PASSWORD.username, "kevin");
+    assert.equal(byKey.DEMO_PASSWORD.username, "casey");
     assert.equal(byKey.DEMO_PASSWORD.first_view_pending, false);
     const token = await K.openEntrySecret(d, ID(), byKey.DEMO_ADMIN_TOKEN.id);
     assert.equal(P.verifyArgon2idPhc(token, env.DEMO_ADMIN_TOKEN), true, "the keychain plaintext matches the .env hash");
@@ -257,18 +257,18 @@ test("config-friction: a keychain:true value KEPT from an earlier install is sav
   writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
   // A prior install where a human typed the password (before the field was generated).
   mkdirSync(join(CROW_HOME, "bundles", id), { recursive: true });
-  writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_VNC_PASSWORD=typed-by-kevin\n");
+  writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_VNC_PASSWORD=typed-by-casey\n");
   let job = B._createJobForTest(id, "install");
   let out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
   assert.equal(out.ok, true, out.reason);
-  assert.equal(parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).DEMO_VNC_PASSWORD, "typed-by-kevin", "never regenerated");
+  assert.equal(parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).DEMO_VNC_PASSWORD, "typed-by-casey", "never regenerated");
   const d = db();
   try {
     const mine = (await K.listEntries(d, { keyId: ID().id })).filter((e) => e.bundle_id === id);
     assert.equal(mine.length, 1, "the hidden field's value is readable in Settings → Passwords");
     assert.equal(mine[0].origin, "typed");
     assert.equal(mine[0].label, "Demo VNC — VNC viewer password");
-    assert.equal(await K.openEntrySecret(d, ID(), mine[0].id), "typed-by-kevin");
+    assert.equal(await K.openEntrySecret(d, ID(), mine[0].id), "typed-by-casey");
   } finally { d.close(); }
   // Reinstall with a different kept value: the existing entry is NOT overwritten.
   writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_VNC_PASSWORD=edited-later\n");
@@ -279,6 +279,6 @@ test("config-friction: a keychain:true value KEPT from an earlier install is sav
   try {
     const mine = (await K.listEntries(d2, { keyId: ID().id })).filter((e) => e.bundle_id === id);
     assert.equal(mine.length, 1);
-    assert.equal(await K.openEntrySecret(d2, ID(), mine[0].id), "typed-by-kevin");
+    assert.equal(await K.openEntrySecret(d2, ID(), mine[0].id), "typed-by-casey");
   } finally { d2.close(); }
 });

@@ -87,7 +87,7 @@ function fixture() {
     CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE dashboard_settings_overrides (key TEXT NOT NULL, instance_id TEXT NOT NULL, value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')), lamport_ts INTEGER DEFAULT 0, PRIMARY KEY (key, instance_id));
-    INSERT INTO project_spaces (id, name, slug, archived_at) VALUES (1, 'R4 TEHCY', 'r4-tehcy', NULL);`);
+    INSERT INTO project_spaces (id, name, slug, archived_at) VALUES (1, 'R4 ACME', 'r4-acme', NULL);`);
   c.close();
 
   const t = new Database(tasksDbPath);
@@ -133,7 +133,7 @@ before(async () => {
 
   // Project cards board: pending/in_progress/done, 'done' terminal.
   await tdb.execute({
-    sql: "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (1,'R4 TEHCY',?,?,'[]')",
+    sql: "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (1,'R4 ACME',?,?,'[]')",
     args: ['["pending","in_progress","done"]', '["done"]'],
   });
   // Slug tracker board: intake, 'shipped' terminal.
@@ -324,12 +324,12 @@ test("board_update_item: plain fields, and parent_id re-parents + re-inherits pr
   const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "orig", project_id: 1 } }));
   const updated = payload(await client.callTool({
     name: "board_update_item",
-    arguments: { id: created.id, title: "changed", owner: "kevin" },
+    arguments: { id: created.id, title: "changed", owner: "casey" },
   }));
   assert.equal(updated.changed, true);
   const got = payload(await client.callTool({ name: "board_get_item", arguments: { id: created.id } }));
   assert.equal(got.item.title, "changed");
-  assert.equal(got.item.owner, "kevin");
+  assert.equal(got.item.owner, "casey");
 
   // action_needed / next_followup_date persist on CARDS too (regression:
   // they were in the tool schema but missing from CARD_UPDATE_FIELDS, so a

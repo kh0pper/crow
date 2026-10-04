@@ -1,5 +1,5 @@
 /**
- * Passphrase-encrypted keychain Export / Import (Kevin, 2026-10-03): the ONLY way keychain
+ * Passphrase-encrypted keychain Export / Import (Casey, 2026-10-03): the ONLY way keychain
  * entries leave the machine, and only on the user's explicit, re-authenticated request.
  * KDF: Argon2id (Node 24 crypto.argon2, ASYNC — off the event loop) over the passphrase
  * with a random 16-byte salt → 32-byte key. Cipher: AES-256-GCM, 12-byte nonce, 16-byte tag.

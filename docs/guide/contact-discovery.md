@@ -17,7 +17,7 @@ Think of it like a digital business card posted on your door: it shows your name
 Open the Crow's Nest and go to **Settings**. Under the **Contact Discovery** section:
 
 1. Set the dropdown to **Enabled**
-2. Optionally enter a **display name** (e.g., "Alice", "Kevin's Research Crow")
+2. Optionally enter a **display name** (e.g., "Alice", "Casey's Research Crow")
 3. Click **Save**
 
 Or ask your AI:

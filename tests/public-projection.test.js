@@ -8,7 +8,7 @@ test("toPublicBot exposes only whitelisted fields, never the raw definition", ()
     definition: JSON.stringify({
       models: { default: "crow-local/qwen3.6-35b-a3b" },
       tools: { crow_mcp: ["crow-tasks/tasks_list", "crow-memory/crow_store_memory"], pi_builtin: ["read"] },
-      gateways: [{ type: "gmail", address: "kevin.example+scout@maestro.press", allowlist: ["secret@x"] }],
+      gateways: [{ type: "gmail", address: "bot+scout@example.com", allowlist: ["secret@x"] }],
       permission_policy: { bash: "deny", write_paths: ["/home/alex/.crow-mpa/pi-bots/scout"] },
       system_prompt: "SECRET PROMPT do not leak",
       spawn_env: { PI_PROVIDER: "crow-local", SECRET_KEY: "abc123" },

@@ -1,5 +1,5 @@
 // Perch on a phone: the pending ask_user card must fit between the banner and
-// the composer (Kevin's Pixel 9a report, 2026-10-02 — the bottom tab bar and the
+// the composer (Casey's Pixel 9a report, 2026-10-02 — the bottom tab bar and the
 // composer were painted over Send answer / Cancel, and the transcript was
 // squeezed to a 24px sliver under the banner).
 //
@@ -23,7 +23,7 @@ let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
 let HOST_FROM_CONTAINER = "127.0.0.1";
 const SID = "perchlive-9e2b9bf3";
 
-// The exact card in Kevin's screenshot: one question, four options + Other.
+// The exact card in Casey's screenshot: one question, four options + Other.
 const CARD = {
   requestId: "req-1", method: "questions",
   questions: [{

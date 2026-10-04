@@ -158,14 +158,14 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
     const outcome = await migrateStore(tdb, tasksDbPath, log);
     log(`  instance-global tasks_items: ${outcome}`);
 
-    // 14 kevin-gated tagged cards are noted here — the tag stays as a visual
+    // Operator-gated tagged cards (tag ends in -gated) are noted here — the tag stays as a visual
     // marker, the autonomy column is the machine truth; no data rewrite.
     const cols = tdb.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
     if (cols.includes("tags")) {
       const gatedTagCount = tdb.prepare(
-        "SELECT COUNT(*) AS n FROM tasks_items WHERE tags LIKE '%kevin-gated%'"
+        "SELECT COUNT(*) AS n FROM tasks_items WHERE tags LIKE '%-gated%'"
       ).get().n;
-      log(`  kevin-gated tag count: ${gatedTagCount} (autonomy stays default 'gated' for all — no data rewrite)`);
+      log(`  *-gated tag count: ${gatedTagCount} (autonomy stays default 'gated' for all — no data rewrite)`);
     }
 
     // ---- Per-project stores: columns + guarded drop only, own backup,

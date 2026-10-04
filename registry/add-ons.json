@@ -1031,8 +1031,7 @@
       },
       "skills": [
         "skills/data-dashboard.md",
-        "skills/data-scraping.md",
-        "skills/capstone-research-workflow.md"
+        "skills/data-scraping.md"
       ],
       "server": {
         "command": "node",

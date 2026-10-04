@@ -436,7 +436,7 @@ export function extensionsClientJS(lang) {
                 wrap.appendChild(input);
                 if (ev.secret && !ev.generate) {
                   // Show/Hide/Copy on every typed secret; Generate and "Save to Crow keychain"
-                  // only where the manifest opts in (generatable / keychain — review C1, Kevin Q1).
+                  // only where the manifest opts in (generatable / keychain — review C1, Casey Q1).
                   input.setAttribute("autocomplete", "new-password");
                   // keychain_configure:false (setup applies it once; Configure cannot re-apply it): no
                   // Generate and no keychain tick when configuring an installed bundle.

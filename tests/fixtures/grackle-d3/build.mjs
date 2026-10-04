@@ -106,7 +106,7 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
     INSERT INTO ramble_pet (owner, mood) VALUES ('self', 'crow-mood');
     -- crow's own incubating egg (one per user; N3)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-c1', 'incubating', 'wren', 90);
-    -- a contact Kevin deleted on crow; the delete never reached grackle (N1)
+    -- a contact Casey deleted on crow; the delete never reached grackle (N1)
     INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at) VALUES ('crow:deleted', 7, 1700000000);
     -- blog: crow already has a post at slug post-nine (same post) and a DIFFERENT post at post-eight (minor d)
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (20, 'post-nine', 'Nine', 'body nine', 'draft');

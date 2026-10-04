@@ -6,8 +6,7 @@
  * Sends self-guarded mail (gmail_send_to_self / gmail_send_threaded_to_self —
  * recipients restricted server-side to the authenticated account plus any
  * addresses in GMAIL_SEND_TO_SELF_ALLOWLIST) and reads threads
- * (gmail_search_threads / gmail_get_thread). Used by the bridge for outbound,
- * and by bridge_gmail_e2e.mjs to drive the user side.
+ * (gmail_search_threads / gmail_get_thread). Used by the bridge for outbound.
  *
  * Configuration (env; HOME-derived defaults):
  *   PIBOT_GWS_MCP_DIR   — google-workspace-mcp checkout (default

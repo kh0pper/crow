@@ -85,10 +85,10 @@ fact("S5_config_has_key", !!cfg?.document?.key);
 fact("S5_info_no_session", await cmd({ c: "info", key: cfg.document.key }));
 
 if (args.has("--editor-test")) {
-  // S6 [KEVIN]: open <DIR>/editor.docx in Workspace, type a word, leave the tab open, press Enter here.
+  // S6 [CASEY]: open <DIR>/editor.docx in Workspace, type a word, leave the tab open, press Enter here.
   const e = `${DIR}/editor.docx`;
   await dav("PUT", `files/${U}/${enc(e)}`, { body: readFileSync(join(import.meta.dirname, "..", "tests", "fixtures", "workspace", "rich.docx")) });
-  console.log(`\n[KEVIN] Open "${e}" in Workspace (ONLYOFFICE), type the word SPIKE anywhere, keep the tab open, then press Enter here.`);
+  console.log(`\n[CASEY] Open "${e}" in Workspace (ONLYOFFICE), type the word SPIKE anywhere, keep the tab open, then press Enter here.`);
   await ask();
   const st = await stat(e);
   fact("S6_lock_while_open", { lock: st.lock, type: st.lockType, owner: st.lockOwner });
@@ -116,12 +116,12 @@ if (args.has("--editor-test")) {
   fact("S6b_bot_put_after_unlock_status", (await dav("PUT", `files/${U}/${enc(e)}`, { headers: { "If-Match": sNow.etag }, body: after })).status);
   const vFinal = await versions(st.fileid);
   fact("S6b_person_save_and_bot_write_are_distinct_versions", vFinal.length === vAfterDrop.length + 1);
-  console.log("[KEVIN] What did the editor tab show after the drop? Type a short description and press Enter:");
+  console.log("[CASEY] What did the editor tab show after the drop? Type a short description and press Enter:");
   fact("S6_editor_ui", String(await ask()).trim());
 }
 
 // S8: calendar delete → re-create at the same href/UID (the undo path) while NC's calendar trash holds it.
-// Needs a calendar crow-bot can write; skipped (fact = "skipped") until Kevin has shared Menu with crow-bot.
+// Needs a calendar crow-bot can write; skipped (fact = "skipped") until Casey has shared Menu with crow-bot.
 {
   const home = await (await dav("PROPFIND", `calendars/${U}/`, { headers: { Depth: "1" } })).text();
   const href = (home.match(/<d:href>(\/remote\.php\/dav\/calendars\/crow-bot\/[^<]*menu[^<]*\/)<\/d:href>/i) || [])[1];
@@ -137,9 +137,9 @@ if (args.has("--editor-test")) {
 }
 
 if (args.has("--capture-fixtures")) {
-  // S7 [KEVIN]: open each rich.* in ONLYOFFICE, type one character and delete it, close the tab; press Enter here.
+  // S7 [CASEY]: open each rich.* in ONLYOFFICE, type one character and delete it, close the tab; press Enter here.
   for (const ext of ["docx", "xlsx", "pptx"]) await dav("PUT", `files/${U}/${enc(`${DIR}/rich.${ext}`)}`, { body: readFileSync(join(import.meta.dirname, "..", "tests", "fixtures", "workspace", `rich.${ext}`)) });
-  console.log(`\n[KEVIN] In "${DIR}": open rich.docx, rich.xlsx, rich.pptx one at a time, make a tiny edit (type and delete a character), close each tab. Wait 20 s after the last close, then press Enter.`);
+  console.log(`\n[CASEY] In "${DIR}": open rich.docx, rich.xlsx, rich.pptx one at a time, make a tiny edit (type and delete a character), close each tab. Wait 20 s after the last close, then press Enter.`);
   await ask();
   const { writeFileSync } = await import("node:fs");
   for (const ext of ["docx", "xlsx", "pptx"]) {

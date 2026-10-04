@@ -26,7 +26,7 @@ const PNG = "data:image/png;base64," + "A".repeat(64);
 const REPO = join(import.meta.dirname, "..");
 
 test("renderMyProfile: file input + hidden data field capped by data-max; the bird radios only with a bird; remove-picture only with a picture; a legacy URL never renders", () => {
-  const base = renderMyProfile({ display_name: "Kevin", avatar_url: "", bio: "", avatar_source: "picture" }, "en");
+  const base = renderMyProfile({ display_name: "Casey", avatar_url: "", bio: "", avatar_source: "picture" }, "en");
   assert.match(base, /<input type="file" id="profilePictureInput"[^>]*data-max="32768"/);
   assert.equal(AVATAR_MAX_BYTES, 32768);
   assert.ok(base.includes('<input type="hidden" name="avatar" id="profileAvatarData" value="">'));
@@ -36,7 +36,7 @@ test("renderMyProfile: file input + hidden data field capped by data-max; the bi
   assert.ok(base.includes('data-too-big="' + t("contacts.pictureTooBig", "en") + '"'));
   assert.ok(base.includes('onchange="readProfilePicture(this)"'));
 
-  const withPic = renderMyProfile({ display_name: "Kevin", avatar_url: PNG, bio: "", avatar_source: "picture" }, "en", { birdAvailable: true });
+  const withPic = renderMyProfile({ display_name: "Casey", avatar_url: PNG, bio: "", avatar_source: "picture" }, "en", { birdAvailable: true });
   assert.ok(withPic.includes('<img src="' + PNG + '" alt="">'), "the preview renders the inline picture");
   assert.ok(withPic.includes('name="avatar_clear" value="1"'));
   assert.match(withPic, /name="avatar_source" value="picture" checked/);
@@ -45,9 +45,9 @@ test("renderMyProfile: file input + hidden data field capped by data-max; the bi
   assert.match(bird, /name="avatar_source" value="bird" checked/);
   assert.ok(bird.includes(t("contacts.sourceBird", "es")));
 
-  const legacy = renderMyProfile({ display_name: "Kevin", avatar_url: "https://example.com/me.png", bio: "" }, "en");
+  const legacy = renderMyProfile({ display_name: "Casey", avatar_url: "https://example.com/me.png", bio: "" }, "en");
   assert.ok(!legacy.includes("https://example.com/me.png"), "a URL is not rendered anywhere");
-  assert.ok(legacy.includes(">KE<"), "initials instead");
+  assert.ok(legacy.includes(">CA<"), "initials instead");
 });
 
 test("contacts client script: the picture reader has no backticks, no interpolation, no markup sinks; the css carries the new rules", () => {
@@ -96,15 +96,15 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     const sent = [];
     const managers = spyMgrs(db, sent);
 
-    let out = await save(db, { display_name: "Kevin", avatar: PNG, bio: "hi" }, managers);
+    let out = await save(db, { display_name: "Casey", avatar: PNG, bio: "hi" }, managers);
     assert.equal(out.redirect, "/dashboard/contacts?view=profile");
     let p = await getMyProfile(db);
     assert.equal(p.avatar_url, PNG);
     assert.equal(p.avatar_source, "picture");
     assert.equal(sent.length, 1, "one broadcast");
-    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Kevin", avatar: PNG });
+    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey", avatar: PNG });
 
-    out = await save(db, { display_name: "Kevin", avatar: "", bio: "hi" }, managers);
+    out = await save(db, { display_name: "Casey", avatar: "", bio: "hi" }, managers);
     assert.equal(sent.length, 1, "nothing changed (an empty avatar field means untouched) -> no broadcast");
     assert.equal((await getMyProfile(db)).avatar_url, PNG);
 
@@ -118,15 +118,15 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     assert.equal(out.status, 400);
     assert.equal(sent.length, 1);
 
-    out = await save(db, { display_name: "Kevin", avatar_clear: "1" }, managers);
+    out = await save(db, { display_name: "Casey", avatar_clear: "1" }, managers);
     p = await getMyProfile(db);
     assert.equal(p.avatar_url, "", "cleared");
     assert.equal(sent.length, 2);
-    assert.deepEqual(sent[1].payload, { v: 1, display_name: "Kevin", avatar: null }, "a removed picture propagates as null");
+    assert.deepEqual(sent[1].payload, { v: 1, display_name: "Casey", avatar: null }, "a removed picture propagates as null");
 
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key LIKE 'profile_%'");
     assert.equal(Number(o.rows[0].c), 0, "no stranded overrides (D2)");
-    assert.equal((await save(db, { display_name: "Kevin" }, null)).redirect, "/dashboard/contacts?view=profile", "no managers: saves, no broadcast, no throw");
+    assert.equal((await save(db, { display_name: "Casey" }, null)).redirect, "/dashboard/contacts?view=profile", "no managers: saves, no broadcast, no throw");
   } finally { cleanup(); }
 });
 
@@ -138,7 +138,7 @@ test("save_profile: a mixed POST (a valid display_name and avatar alongside an i
     const managers = spyMgrs(db, sent);
     // Establish a known-good baseline first, so the mixed-invalid POST below
     // has something to leave untouched.
-    await save(db, { display_name: "Kevin", avatar: PNG }, managers);
+    await save(db, { display_name: "Casey", avatar: PNG }, managers);
     assert.equal(sent.length, 1);
     const before = await getMyProfile(db);
 
@@ -160,20 +160,20 @@ test("save_profile: the response does not wait for the fan-out, and a fan-out th
     let release;
     const gate = new Promise((r) => { release = r; });
     const slow = { db, nostrManager: { sendControl: async () => { await gate; return { eventId: "e", relays: ["r"] }; } } };
-    const out = await handleContactAction({ body: { action: "save_profile", display_name: "Kevin", avatar: PNG } }, db, { managers: slow });
+    const out = await handleContactAction({ body: { action: "save_profile", display_name: "Casey", avatar: PNG } }, db, { managers: slow });
     assert.equal(out.redirect, "/dashboard/contacts?view=profile", "redirect returned while the relay is still hanging");
     assert.ok(out.broadcast instanceof Promise);
     release();
     assert.deepEqual(await out.broadcast, { sent: 1, failed: 0, skipped: 0 });
 
     const down = { db, nostrManager: { sendControl: async () => { throw new Error("relay down"); } } };
-    assert.deepEqual(await (await handleContactAction({ body: { action: "save_profile", display_name: "Kevin2" } }, db, { managers: down })).broadcast, { sent: 0, failed: 1, skipped: 0 });
+    assert.deepEqual(await (await handleContactAction({ body: { action: "save_profile", display_name: "Casey2" } }, db, { managers: down })).broadcast, { sent: 0, failed: 1, skipped: 0 });
     const sent = [];
     const up = spyMgrs(db, sent);
-    await save(db, { display_name: "Kevin2" }, up); // unchanged profile
+    await save(db, { display_name: "Casey2" }, up); // unchanged profile
     assert.equal(sent.length, 1, "re-sent because the last fan-out was pending");
-    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Kevin2", avatar: PNG });
-    await save(db, { display_name: "Kevin2" }, up);
+    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey2", avatar: PNG });
+    await save(db, { display_name: "Casey2" }, up);
     assert.equal(sent.length, 1, "delivered once, quiet afterwards");
   } finally { cleanup(); }
 });

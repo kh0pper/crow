@@ -14,7 +14,7 @@ import {
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 
 const ENGINE = { managed: "external", host: "raven", label: "halogen" };
-const RAVEN = "http://192.168.1.202:8030/v1";
+const RAVEN = "http://10.0.0.203:8030/v1";
 const extRow = (extra = {}) => ({
   baseUrl: RAVEN, host: "cloud", bundleId: null, apiKey: null,
   models: [{ id: "flash-next" }], gpuPolicy: { engine: ENGINE }, ...extra,
@@ -73,7 +73,7 @@ test("2xx → ready (lastReadyAt stamped); non-2xx → not-ready with lastError;
   assert.equal(ext()["raven-flash-next"].lastError, "http 503");
   assert.equal(ext()["raven-flash-next"].lastReadyAt, 1000, "outage clock origin kept");
 
-  await pollExternalEngines({ cfg: cfgOne(), fetchImpl: async () => { throw new Error("connect ECONNREFUSED 192.168.1.202:8030"); }, now: () => 3000 });
+  await pollExternalEngines({ cfg: cfgOne(), fetchImpl: async () => { throw new Error("connect ECONNREFUSED 10.0.0.203:8030"); }, now: () => 3000 });
   assert.match(ext()["raven-flash-next"].lastError, /ECONNREFUSED/);
   assert.equal(ext()["raven-flash-next"].firstSeenAt, 1000);
 });
@@ -100,7 +100,7 @@ test("the timeout is honoured even when fetch ignores the abort signal; the sign
 test("disabled and removed rows are pruned from the external map", async () => {
   const two = { _source: DB, providers: {
     "raven-flash-next": extRow(),
-    "raven-halogen-smoke": extRow({ baseUrl: "http://192.168.1.202:8031/v1" }),
+    "raven-halogen-smoke": extRow({ baseUrl: "http://10.0.0.203:8031/v1" }),
     "cloud-openai": { baseUrl: "https://api.openai.com/v1", host: "cloud" },
   } };
   await pollExternalEngines({ cfg: two, fetchImpl: recorder(ok200), now: () => 1 });

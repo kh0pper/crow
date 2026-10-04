@@ -67,7 +67,7 @@ To move to a public S3 bucket by hand: add `PIXELFED_S3_ENDPOINT`, `PIXELFED_S3_
 
 ```
 pf_post_photo {
-  "file_path": "/home/kev/photos/2026/sunset.jpg",
+  "file_path": "/home/alex/photos/2026/sunset.jpg",
   "caption": "Dusk over the ridge",
   "alt_text": "Orange and purple sky over a forested ridge at sunset",
   "visibility": "public"

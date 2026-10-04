@@ -6,7 +6,7 @@
  * every other core server. Auth is token-only (local token OR the board
  * token, both validated in local-token.js) — there is no cookie leg.
  *
- * ONE implementation serves three callers (Kevin's sessions, the dashboard's
+ * ONE implementation serves three callers (Casey's sessions, the dashboard's
  * shared service layer, and bots) — this file itself only needs to serve the
  * MCP wire protocol; the dashboard talks to the SAME services via its own
  * HTTP routes (bot-board-api.js), never through this mount.

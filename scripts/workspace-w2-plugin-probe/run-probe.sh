@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# W2 spike S9: ONLYOFFICE live-plugin probe. Kevin runs this on crow over SSH (interactive; needs sudo for
+# W2 spike S9: ONLYOFFICE live-plugin probe. Casey runs this on crow over SSH (interactive; needs sudo for
 # `tailscale serve`). Read ~/CROW-SCHEDULE.md first. Nothing here degrades prod:
 #   - the probe plugin is docker-cp'd into the RUNNING onlyoffice container only (not persistent) and removed again;
 #   - a temporary Serve path https://<host>:8457/crow-live/probe -> 127.0.0.1:3399 is added and removed again;
@@ -31,7 +31,7 @@ serve_map() { # serve_map <tailscale bin> <node bin>
   "$1" serve status --json | "$2" -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{const c=(o)=>Array.isArray(o)?o.map(c):o&&typeof o==="object"?Object.fromEntries(Object.keys(o).sort().map((k)=>[k,c(o[k])])):o;process.stdout.write(JSON.stringify(c(JSON.parse(s)),null,1)+"\n");})'
 }
 
-# ---------------------------------------------------------------- cleanup (idempotent; runs as Kevin or as root)
+# ---------------------------------------------------------------- cleanup (idempotent; runs as Casey or as root)
 # State lives in $STATE (mktemp -d, chmod 755, no secrets): owner, node/tailscale paths, scratch dir, listener pid, markers.
 cleanup() {
   local STATE="$1" AS_ROOT="${2:-no}"
@@ -49,7 +49,7 @@ cleanup() {
   docker exec "$CTR" documentserver-flush-cache.sh >/dev/null && echo "[cleanup] editor cache flushed" || warn "flush-cache failed"
 
   # 2. the temporary Serve path
-  # Never prompt here: as Kevin it is `sudo -n` (a password prompt would block while holding cleaning.lock, e.g. after
+  # Never prompt here: as Casey it is `sudo -n` (a password prompt would block while holding cleaning.lock, e.g. after
   # an SSH drop or a lapsed ticket). If that fails, the step is left to the root watchdog (PENDING).
   if [ -e "$STATE/serve_added" ]; then
     if [ "$AS_ROOT" = yes ]; then "$TSBIN" serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" off
@@ -69,7 +69,7 @@ cleanup() {
   # the sudo keep-alive loop is a subshell of run-probe.sh (same cmdline)
   if [ -n "$KPID" ] && grep -qa "run-probe.sh" "/proc/$KPID/cmdline" 2>/dev/null; then kill "$KPID" 2>/dev/null; fi
 
-  # 4. the scratch folder (as Kevin's user: the listener reads his .env)
+  # 4. the scratch folder (as Casey's user: the listener reads his .env)
   if [ -n "$DIR" ]; then
     if [ "$AS_ROOT" = yes ]; then sudo -u "$OWNER" -H "$NODE" "$KIT/listener.mjs" --cleanup "$DIR"
     else "$NODE" "$KIT/listener.mjs" --cleanup "$DIR"; fi || warn "scratch folder '$DIR' may remain (delete it in the Files UI)"
@@ -113,7 +113,7 @@ if [ "${1:-}" = "--watchdog" ]; then
   done
   echo "[watchdog $(date +%T)] $reason"
   if kill -0 "$MAIN" 2>/dev/null; then
-    kill -TERM "$MAIN" 2>/dev/null # its trap cleans up with Kevin's sudo; give it 30 s
+    kill -TERM "$MAIN" 2>/dev/null # its trap cleans up with Casey's sudo; give it 30 s
     for _ in $(seq 1 30); do [ -e "$STATE/cleaned" ] && { rm -rf "$STATE"; exit 0; }; sleep 1; done
   fi
   rmdir "$STATE/cleaning.lock" 2>/dev/null # a cleaner that died half-way must not block the backstop
@@ -129,7 +129,7 @@ ask() { # ask "<question>" -> answer in $A; at the hard cap the script exits (an
   if ! read -r -t "$(remaining)" -p "$1 " A; then echo; warn "hard cap reached while waiting"; exit 3; fi
 }
 mark() { curl -s -o /dev/null -X POST -H 'Content-Type: application/json' --data "$(printf '{"kind":"mark","label":%s}' "$("$NODE" -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1")")" "$LISTEN/" || warn "mark failed: $1"; }
-answer() { mark "kevin: $1 = $2"; }
+answer() { mark "casey: $1 = $2"; }
 
 NODE=$(command -v node) || { echo "node not found" >&2; exit 1; }
 TSBIN=$(command -v tailscale) || { echo "tailscale not found" >&2; exit 1; }

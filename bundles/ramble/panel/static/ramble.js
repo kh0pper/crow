@@ -430,7 +430,7 @@
   /* The opening frame is a WALK, not a survey. At 15 the map showed about
    * 1.5 km across a phone, which put most of the visible seed beyond any
    * reasonable walk and out along roads with no footpath; 16 is about 730 m,
-   * which is the range Kevin marked as somewhere he would actually go. */
+   * which is the range Casey marked as somewhere he would actually go. */
   var WALK_ZOOM = 16;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
@@ -854,7 +854,7 @@
 
   /* The one label rule (spec 2026-09-08 §3.1), mirrored from server/labels.js:
    * yours, then a contact's saved name, then a stranger's world name with a
-   * key tail (unverified, so the tail keeps two Kevins apart), then the key. */
+   * key tail (unverified, so the tail keeps two Caseys apart), then the key. */
   function markLabel(mark) {
     var noun = mark.kind === "caw" ? "caw" : "mark";
     if (mark.origin === "local" || mark.origin === "sync") return "your " + noun;

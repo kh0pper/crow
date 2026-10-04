@@ -35,7 +35,7 @@ def docx():
     p.add_run("pastor").italic = True
     p.add_run(" con piña y jalapeño.")
     add_bookmark(p, "tacos", 1)
-    d.add_comment(p.runs[2], text="¿Con salsa verde?", author="Alex", initials="D")  # python-docx >= 1.2
+    d.add_comment(p.runs[2], text="¿Con salsa verde?", author="Alex", initials="A")  # python-docx >= 1.2
     d.add_heading("Ingredientes", level=2)
     for item in ["Tortillas", "Cebolla", "Cilantro"]:
         d.add_paragraph(item, style="List Bullet")

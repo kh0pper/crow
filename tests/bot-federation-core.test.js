@@ -12,7 +12,7 @@ function sampleDef() {
     gateways: [
       { type: "discord", token: "SECRET-DISCORD", channel_ids: ["123"], allowlist: ["u#1"] },
       { type: "slack", bot_token: "xoxb-SECRET", app_token: "xapp-SECRET", channel_ids: ["C1"] },
-      { type: "gmail", address: "kevin.example+scout@maestro.press", allowlist: ["a@b.com"] },
+      { type: "gmail", address: "bot+scout@example.com", allowlist: ["a@b.com"] },
     ],
     permission_policy: { bash: "deny", external_send: "draft_only", confirm: [] },
     triggers: { gateway: true, cron: "" },
@@ -44,7 +44,7 @@ test("redactDefForPeer: non-secret fields preserved verbatim", () => {
   assert.deepEqual(red.tools.crow_mcp, ["crow-tasks/tasks_list"]);
   assert.equal(red.gateways[0].type, "discord");
   assert.deepEqual(red.gateways[0].channel_ids, ["123"]);
-  assert.equal(red.gateways[2].address, "kevin.example+scout@maestro.press");
+  assert.equal(red.gateways[2].address, "bot+scout@example.com");
   assert.equal(red.spawn_env.PI_PROVIDER, "crow-local");
 });
 

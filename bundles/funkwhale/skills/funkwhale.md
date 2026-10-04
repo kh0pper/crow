@@ -70,7 +70,7 @@ fw_list_library {}
 
 fw_upload_track {
   "library_uuid": "3b2a…",
-  "file_path": "/home/kev/music/my-song.flac",
+  "file_path": "/home/alex/music/my-song.flac",
   "import_reference": "my-own"
 }
 ```

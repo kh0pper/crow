@@ -401,7 +401,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
   });
 
   // --- Browse Hugging Face download (Task 13 fix round 1, finding 1 —
-  // Kevin decided to build this in this PR rather than leave the tab
+  // Casey decided to build this in this PR rather than leave the tab
   // search-only) ---------------------------------------------------------
   //
   // Shares the download-job map + GET /downloads polling surface with the

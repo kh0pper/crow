@@ -217,7 +217,7 @@ export const IMPORT_SPECS = [
     fks: { setlist_id: fk("songbook_setlists", "skip"), post_id: fk("blog_posts", "skip") },
   },
   {
-    // imported INACTIVE and listed: Kevin confirms the target integration exists on crow (minor e)
+    // imported INACTIVE and listed: Casey confirms the target integration exists on crow (minor e)
     table: "crosspost_rules", group: "core", pk: "id", idPolicy: "keep-if-free",
     dedupe: [{ cols: ["source_app", "source_trigger", "target_app"] }],
     transform: (row) => ({ row: { ...row, active: 0 } }),
@@ -370,7 +370,7 @@ const NO_EXTRACT = new Set([
 ]);
 
 /**
- * Explicitly archive-only (spec §4.2, Kevin §9, fix-round rulings): extract
+ * Explicitly archive-only (spec §4.2, Casey §9, fix-round rulings): extract
  * only, NEVER created in the target, and not part of --ack-unclassified.
  */
 export const ARCHIVE_ONLY = [
@@ -385,7 +385,7 @@ export const ARCHIVE_ONLY = [
   [/^data_dashboard_items$/, "points at grackle's data_backends (not imported)"],
 ];
 
-/** Settings: blog settings move to crow (Kevin, 09-22) — grackle wins. */
+/** Settings: blog settings move to crow (Casey, 09-22) — grackle wins. */
 const SETTINGS_UPSERT = /^blog_/;
 const SETTINGS_INSERT_IF_ABSENT = new Set(["tts_voice", "meta_glasses_devices"]);
 const OVERRIDE_KEYS = { meta_glasses_default_project_id: "project_spaces" };
@@ -593,7 +593,7 @@ const TRANSFORMS = {
     }
     return { row: { ...row, definition: r.definition, enabled: 0 } };
   },
-  /** A contact Kevin deleted on crow stays deleted (N1); its children follow it to the extract. */
+  /** A contact Casey deleted on crow stays deleted (N1); its children follow it to the extract. */
   contactTombstone(row, ctx) {
     if (tableExists(ctx.tgt, "contact_tombstones") &&
         ctx.tgt.prepare("SELECT 1 FROM contact_tombstones WHERE crow_id = ?").get(row.crow_id)) {
@@ -1182,7 +1182,7 @@ function writerChecks(opts, probes) {
 function identityChecks(opts, probes, target, sourceId) {
   const fails = [];
   const uid = probes.uid();
-  if (uid === 0) fails.push("running as root: the gateway (kh0pp) could not open root-owned -wal/-shm afterwards. Run as the target's owner");
+  if (uid === 0) fails.push("running as root: the gateway user could not open root-owned -wal/-shm afterwards. Run as the target's owner");
   try {
     const owner = statSync(opts.target).uid;
     if (uid != null && owner !== uid) fails.push(`target is owned by uid ${owner} but this process runs as uid ${uid}`);

@@ -27,7 +27,7 @@
  * password/network auth here would 403 every legitimate turn. The gateway
  * listens on ALL interfaces (LAN + tailnet + loopback), so binding is not a
  * boundary. Every /llm/v1 and /llm/p request — the companion path included
- * (Kevin decision 2026-10-02: every companion device is on Tailscale) — door
+ * (Casey decision 2026-10-02: every companion device is on Tailscale) — door
  * addressing (provider path /llm/p/<provider>/v1, the X-Crow-Provider header,
  * a qualified "<provider>/<model>" id, or a bare id that resolves to a
  * forwardable row) and /llm/acquire are limited to loopback and the tailnet
@@ -513,7 +513,7 @@ export default function llmRouterRouter(opts = {}) {
     if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: { code: "FUNNEL_REFUSED", message: "/llm is never reachable through Funnel" } });
     next();
   });
-  // Kevin decision 2026-10-02: every device that uses the voice companion is
+  // Casey decision 2026-10-02: every device that uses the voice companion is
   // on Tailscale, and r4 reaches the gateway over loopback, so the WHOLE
   // model surface (/llm/v1 — the companion path included — and the
   // provider-scoped door /llm/p) gets the door's source check: loopback or

@@ -441,8 +441,8 @@ test("select, input and editor answer with value", async () => {
   const payloadFor = await extract("answerPayloadFor");
   assert.deepEqual(payloadFor({ requestId: "r1", method: "select" }, { value: "yes" }),
     { requestId: "r1", value: "yes" });
-  assert.deepEqual(payloadFor({ requestId: "r2", method: "input" }, { value: "Kevin" }),
-    { requestId: "r2", value: "Kevin" });
+  assert.deepEqual(payloadFor({ requestId: "r2", method: "input" }, { value: "Casey" }),
+    { requestId: "r2", value: "Casey" });
   assert.deepEqual(payloadFor({ requestId: "r3", method: "editor" }, { value: "line\nline" }),
     { requestId: "r3", value: "line\nline" });
 });
@@ -1289,7 +1289,7 @@ test("I2: applyVV is bound to BOTH visualViewport events, not two different hand
 // ---------------------------------------------------------------------------
 // Task C — Perch owns its own session lifecycle.
 //
-// Kevin, verbatim: "there is no way to launch a new session, rather you can
+// Casey, verbatim: "there is no way to launch a new session, rather you can
 // only interact with already existing sessions" and "it looks like there are 8
 // sessions running, most of which were started by mistake, and I cannot close
 // them".
@@ -1303,7 +1303,7 @@ test("I2: applyVV is bound to BOTH visualViewport events, not two different hand
 // to nothing).
 // ---------------------------------------------------------------------------
 
-/** Kevin's instance, reduced: ONE perch-attached bot, and it is busy. There is
+/** Casey's instance, reduced: ONE perch-attached bot, and it is busy. There is
  *  no idle row here, because listRows() drops a bot's idle row the moment it
  *  has a live session — so a launcher derived from rows would be absent. A
  *  fixture with an empty roost, or with one idle bot, would NOT reproduce the
@@ -2309,7 +2309,7 @@ test("with no attached bot there is no model picker either", async () => {
 });
 
 test("the drawer's model picker is ENABLED on a hibernating session's fallback list", async () => {
-  // Kevin's actual bug: he switched a session's model, a deploy restarted the
+  // Casey's actual bug: he switched a session's model, a deploy restarted the
   // gateway, and the picker "stopped working". The switch itself was always
   // honoured (control() stores it, startChild reads it before warmModel); only
   // the list was missing, and an empty dropdown reads as a broken page.
@@ -2372,7 +2372,7 @@ test("crossing the breakpoint with a chat open starts and stops the poll, with n
 });
 
 test("in split view the poll renders the newly opened session as a live row with a Close", async () => {
-  // Kevin's screenshot: an awake session open on the right, and on the left a
+  // Casey's screenshot: an awake session open on the right, and on the left a
   // single "R4 Assistant / idle" row with a Talk button. Close lives on live
   // rows only, so that surface offered no way to end anything.
   let roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "idle", sessions: [] }] };
@@ -3262,9 +3262,9 @@ test("D2: the state frame refreshes the Session tab's cwd readout — engine rec
   const hub = await mountHub({ fetchImpl: stdFetch() });
   await openChatSession(hub);
   const es = FakeEventSource.instances[0];
-  es._serverFrame("state", { state: "awake", turnInFlight: false, cwd: "/home/kevin/projects" });
+  es._serverFrame("state", { state: "awake", turnInFlight: false, cwd: "/home/casey/projects" });
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(hub.els["perch-session-cwd"].textContent, "/home/kevin/projects");
+  assert.equal(hub.els["perch-session-cwd"].textContent, "/home/casey/projects");
   // null = the bot's default directory, stated in words, never blank and
   // never a stale path from the previous session.
   es._serverFrame("state", { state: "awake", turnInFlight: false, cwd: null });
@@ -4126,7 +4126,7 @@ test("W3: a hibernating session's menu says asleep instead of faking an empty re
 
 const PH_SID = "perchlive-aaaaaaaa";
 const phCall = (over = {}) => ({ id: "call_1", status: "awaiting_approval", plan_hash: "h1", business_name: "Smile Dental",
-  number_e164: "+15125550101", goal: "Book a cleaning", language: "en", limits: {}, shareable: { name: "Kevin" }, transcript: [],
+  number_e164: "+15125550101", goal: "Book a cleaning", language: "en", limits: {}, shareable: { name: "Casey" }, transcript: [],
   event_seq: 0, run_after: null, deliver_to: { kind: "perch", session_id: PH_SID }, created_by: { kind: "bot", id: "r4" }, ...over });
 function phWalk(node, out = []) { out.push(node); for (const c of node.children || []) phWalk(c, out); return out; }
 const phCards = (hub) => hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("phonecard"));
@@ -4167,7 +4167,7 @@ test("phone card (a): Approve and call now POSTs the shown plan_hash, run_after 
   const body = JSON.parse(post.opts.body);
   assert.equal(body.plan_hash, "h1");
   assert.ok("run_after" in body); assert.equal(body.run_after, null, "Approve now means now");
-  assert.deepEqual(body.edits, { shareable: { name: "Kevin" } });
+  assert.deepEqual(body.edits, { shareable: { name: "Casey" } });
   assert.equal(post.opts.headers["X-Crow-Csrf"], "test-csrf-token");
 });
 
@@ -4263,7 +4263,7 @@ test("phone card polish: checkboxes are rows (box left, label right) and the clo
   assert.deepEqual(labels.slice(0, 3), ["Goal", "Limits", "May share"]);
   const share = phFind(hub, (n) => n.tagName === "DETAILS" && String(n.className).includes("ph-sharebox"));
   assert.equal(share.open, true);
-  assert.ok(phWalk(share).some((n) => n.tagName === "TEXTAREA" && n.value === "Kevin"), "editable when expanded");
+  assert.ok(phWalk(share).some((n) => n.tagName === "TEXTAREA" && n.value === "Casey"), "editable when expanded");
   // the head: business name + a "Needs approval" pill
   assert.equal(phFind(hub, (n) => n.className === "ph-title").textContent, "Smile Dental");
   assert.equal(phFind(hub, (n) => String(n.className).startsWith("ph-pill ")).className, "ph-pill ph-pill-wait");

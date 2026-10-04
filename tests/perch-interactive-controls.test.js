@@ -722,7 +722,7 @@ test("options(): awake session returns the live models + thinking levels from th
   assert.deepEqual(r.thinkingLevels, ["off", "low", "high"]);
 });
 
-// The defect Kevin hit: he switched a session to another model, a deploy
+// The defect Casey hit: he switched a session to another model, a deploy
 // restarted the gateway, and the picker "stopped working". The engine
 // hibernates idle sessions by design and adoptRow brings a restart-orphaned
 // row back hibernating too, so `models: null` was the answer for the
@@ -958,7 +958,7 @@ test("rename(): a session with no row is refused, not answered 200 with nothing 
 // catalogue, and selected option 0 — the exact defect Q1 exists for, in the
 // one case the !s.pi branch of options() was added to serve.
 //
-// This is Kevin's sequence: switch the model, the gateway restarts, open the
+// This is Casey's sequence: switch the model, the gateway restarts, open the
 // session again.
 // ---------------------------------------------------------------------------
 

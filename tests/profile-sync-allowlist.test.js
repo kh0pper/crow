@@ -41,9 +41,9 @@ test("upsertSetting on a profile key writes the GLOBAL row (no override) and emi
   const emitted = [];
   setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push({ t, op, row }); } });
   try {
-    await upsertSetting(db, "profile_display_name", "Kevin");
+    await upsertSetting(db, "profile_display_name", "Casey");
     const g = await db.execute("SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'");
-    assert.equal(g.rows[0]?.value, "Kevin", "global row written");
+    assert.equal(g.rows[0]?.value, "Casey", "global row written");
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key = 'profile_display_name'");
     assert.equal(Number(o.rows[0].c), 0, "no local-override downgrade");
     assert.ok(

@@ -62,7 +62,7 @@ before(() => {
     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
   );
   // project 7: phases in play (r4-shaped journal cards)
-  ins.run("Parse HB2 file", "Box file id 123, two named traps, standing rule.", "pending", 2, "2026-09-01", "Drafting", "kevin", "kevin-gated", 7, null, null, null, null, null);
+  ins.run("Parse HB2 file", "Box file id 123, two named traps, standing rule.", "pending", 2, "2026-09-01", "Drafting", "casey", "casey-gated", 7, null, null, null, null, null);
   ins.run("Toolkit ES copy", "long body ".repeat(80), "in_progress", 3, null, "Internal review", null, null, 7, null, null, null, null, null);
   ins.run("Ship November toolkit", null, "done", 1, null, "Final", null, null, 7, null, null, null, null, "2026-08-01 10:00:00");
   ins.run("Cancelled acceptance card", "carried the only stage value", "cancelled", 3, null, null, null, null, 7, null, "executing", "r4-assistant", null, "2026-08-07 21:00:00");
@@ -87,7 +87,7 @@ before(() => {
 
   const c = new Database(CROW);
   c.exec("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT, tasks_db_uri TEXT)");
-  c.prepare("INSERT INTO project_spaces (id, name, slug, tasks_db_uri) VALUES (7, 'TEHCY R4', 'tehcy', ?)").run("file:" + PROJ);
+  c.prepare("INSERT INTO project_spaces (id, name, slug, tasks_db_uri) VALUES (7, 'ACME R4', 'acme', ?)").run("file:" + PROJ);
   c.close();
 });
 
@@ -135,7 +135,7 @@ test("board_defs seeded per project: four statuses, phase field only where phase
     assert.equal(defs.length, 2, "one def per project with cards; none for NULL project");
     const [p7, p9] = defs;
     assert.equal(p7.project_id, 7);
-    assert.equal(p7.display_name, "TEHCY R4", "name from crow.db project_spaces");
+    assert.equal(p7.display_name, "ACME R4", "name from crow.db project_spaces");
     assert.deepEqual(JSON.parse(p7.status_values), ["pending", "in_progress", "done", "cancelled"]);
     assert.deepEqual(JSON.parse(p7.terminal_values), ["done", "cancelled"]);
     const f7 = JSON.parse(p7.fields_json);

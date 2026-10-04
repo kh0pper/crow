@@ -528,10 +528,10 @@ test("phase 3 apply door: trade insert, LWW by envelope lamport, update, delete 
 });
 
 test("author_name rides the apply door (wire column) and is updatable by LWW", async () => {
-  const row = { mark_id: "named-9", author: "c".repeat(64), author_level: "pseudonym", kind: "mark", anchor_kind: "geo", geohash: "9v6m21h", lat: 30.46, lon: -98.08, visibility: "public", reveal: "open", content_text: "n", content_kind: "none", created_at: 1, expires_at: null, nostr_event_id: "ev-n9", author_name: "Kevin" };
+  const row = { mark_id: "named-9", author: "c".repeat(64), author_level: "pseudonym", kind: "mark", anchor_kind: "geo", geohash: "9v6m21h", lat: 30.46, lon: -98.08, visibility: "public", reveal: "open", content_text: "n", content_kind: "none", created_at: 1, expires_at: null, nostr_event_id: "ev-n9", author_name: "Casey" };
   await applyRemoteOp(b, "ramble_marks", "insert", row, 11);
   let got = (await b.execute({ sql: "SELECT author_name, origin FROM ramble_marks WHERE mark_id = 'named-9'", args: [] })).rows[0];
-  assert.deepEqual([got.author_name, got.origin], ["Kevin", "sync"]);
+  assert.deepEqual([got.author_name, got.origin], ["Casey", "sync"]);
   await applyRemoteOp(b, "ramble_marks", "update", { ...row, author_name: "Kev" }, 12);
   got = (await b.execute({ sql: "SELECT author_name FROM ramble_marks WHERE mark_id = 'named-9'", args: [] })).rows[0];
   assert.equal(got.author_name, "Kev");

@@ -1053,7 +1053,7 @@ export async function downloadModel({
 
 // ---------------------------------------------------------------------------
 // Browse Hugging Face — un-vetted-repo downloads (Task 13 fix round 1,
-// finding 1: Kevin decided to build this in-PR).
+// finding 1: Casey decided to build this in-PR).
 //
 // The curated path above trusts a PR-reviewed, sha256-pinned catalog entry.
 // This path has no such review — the operator is choosing an arbitrary

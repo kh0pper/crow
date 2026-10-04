@@ -24,3 +24,19 @@ tailnet: node-b
 
 secret: sk-real-secret-do-not-touch
 secret: xoxb-1234567890-345-67-8901-SECRETTAILXYZ
+
+# email: <address>  — a placeholder address at a personal mail domain (docs examples)
+email: your-email@gmail.com
+email: you+assistant@gmail.com
+email: tu+asistente@gmail.com
+
+# phone: <digits>   — a test number for dial-blocking rules (premium 900/976
+# exchanges, malformed country codes); digits only
+phone: 15129760101
+phone: 15129000101
+phone: 15129765555
+phone: 15129005555
+phone: 445125550101
+
+# a sequential placeholder contact number in the workspace vCard tests
+phone: 525512345678

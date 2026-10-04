@@ -13,7 +13,7 @@
 #
 # See memory: crow-autoupdate-pull-only.
 set -euo pipefail
-REPO="${CROW_REPO:-/home/alex/crow}"
+REPO="${CROW_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cd "$REPO" || exit 0
 ts() { date -Is; }
 

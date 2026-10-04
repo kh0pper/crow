@@ -87,7 +87,7 @@ From **Crow's Nest** > **Contacts** > **My Profile**, you can update:
 
 Or ask your AI:
 
-> "Crow, update my display name to 'Kevin H.'"
+> "Crow, update my display name to 'Casey H.'"
 
 ## Import and export
 

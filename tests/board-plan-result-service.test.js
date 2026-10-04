@@ -23,7 +23,7 @@ import { reportResult, decideResult, listResults } from "../servers/gateway/boar
 
 const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
-const HUMAN = { kind: "human", id: "kevin", jobId: null };
+const HUMAN = { kind: "human", id: "casey", jobId: null };
 const BOT = { kind: "bot", id: "bot-1", jobId: "job-abc" };
 
 function markPriorDone(c) {

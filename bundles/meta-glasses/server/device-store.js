@@ -6,7 +6,7 @@
  *
  *   {
  *     id: string,              // caller-supplied handle (e.g. BT MAC hash)
- *     name: string,             // user-facing label ("Kevin's Ray-Bans")
+ *     name: string,             // user-facing label ("Casey's Ray-Bans")
  *     paired_at: iso,           // when it was paired
  *     last_seen: iso | null,    // last successful /session connect
  *     token_hash: string,       // sha256(bearer_token) — never store plaintext

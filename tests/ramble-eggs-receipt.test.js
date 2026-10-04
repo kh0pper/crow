@@ -1,6 +1,6 @@
 /**
  * Spec 2026-09-08 §4.2 — "the user is therefore only ever eggless when they
- * genuinely have none." Promote-on-gift-receipt (Kevin, 2026-09-22: the
+ * genuinely have none." Promote-on-gift-receipt (Casey, 2026-09-22: the
  * branch's "wait on the shelf" deviation was rejected).
  *
  * ⚠ THE HARNESS MODELS LAMPORT LWW FOR REAL (fix round 1, I-3). An earlier
@@ -32,7 +32,7 @@
  *      our own withdrawal, or the
  *      "cannot honour" reply)         -> promoted: a declined row can never
  *                                        complete, so nothing is stranded
- *   4. a swap LAPSES (expireTrades)   -> NOT promoted by the sweep (Kevin:
+ *   4. a swap LAPSES (expireTrades)   -> NOT promoted by the sweep (Casey:
  *                                        leave it). The freed egg IS
  *                                        promotable by every other path, so
  *                                        the late-`completed` hand-over takes
@@ -427,7 +427,7 @@ async function lapsedAcceptor() {
 
 test("LAPSED: expireTrades does not promote; the egg waits and the Warm it card offers it", async () => {
   const { me } = await lapsedAcceptor();
-  assert.deepEqual(await incubating(me), [], "expireTrades is left alone (Kevin, 2026-09-22)");
+  assert.deepEqual(await incubating(me), [], "expireTrades is left alone (Casey, 2026-09-22)");
   assert.equal((await nextPromotable(me)).egg_id, "mine", "the pet card's Warm it offers exactly this egg");
 });
 

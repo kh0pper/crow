@@ -14,7 +14,7 @@ async function fresh() {
   await initPhoneTables(db);
   return db;
 }
-const plan = () => validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", shareable: { name: "Kevin" } });
+const plan = () => validatePlan({ business_name: "Smile", number: "512-555-0101", goal: "Book", language: "en", shareable: { name: "Casey" } });
 const audits = async (db, id) => (await db.execute({ sql: "SELECT event, detail_json FROM phone_audit WHERE call_id=? AND event='card_target_mismatch'", args: [id] })).rows;
 
 test("I2: the frame is a pointer — exactly type, call_id, status, event_seq", async () => {

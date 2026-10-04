@@ -22,7 +22,7 @@ async function setup({ runner, settings } = {}) {
   const { token } = await approveFresh(db, call_id, { session: "s", allowCloud: false });
   const delivered = [];
   const d = createDispatcher({ db, runner, deps: { notify: async () => {}, deliver: async (_db, c) => { delivered.push(c.id); return { via: "notify_only" }; } },
-    settings: settings || (() => ({ ownerName: "Kevin", ownerNumber: "+15129372366", dailyCap: 10, line: "fake", model: () => ({ base_url: "http://m", api_key: "k", model: "x", label: "local" }) })) });
+    settings: settings || (() => ({ ownerName: "Casey", ownerNumber: "+15125550100", dailyCap: 10, line: "fake", model: () => ({ base_url: "http://m", api_key: "k", model: "x", label: "local" }) })) });
   return { db, call_id, token, d, delivered };
 }
 

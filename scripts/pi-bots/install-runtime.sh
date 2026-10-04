@@ -41,8 +41,11 @@ PATH=$NODE_BIN:/usr/local/bin:/usr/bin:/bin
 EOF
 sudo chmod 0644 "$ENV_FILE"
 
+# The templates carry placeholder User=/checkout values; render them for this
+# host (the installing user and this checkout) on the way in.
+RUN_USER="${CROW_RUN_USER:-$(id -un)}"
 for u in pibot-gateways@.service pibot-discord@.service pibot-bridge@.service pibot-bridge@.timer; do
-  sudo cp "$UNIT_SRC/$u" "/etc/systemd/system/$u"
+  sed -e "s|^User=.*|User=$RUN_USER|" -e "s|/home/crow/crow|$REPO|g" "$UNIT_SRC/$u" | sudo tee "/etc/systemd/system/$u" >/dev/null
 done
 sudo systemctl daemon-reload
 sudo systemctl enable --now "pibot-gateways@$NAME.service" "pibot-discord@$NAME.service" "pibot-bridge@$NAME.timer"

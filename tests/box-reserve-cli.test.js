@@ -40,11 +40,11 @@ test("status with no reservation prints 'none', exit 0", () => {
 
 test("hold writes the file (default 480 min), status prints it as JSON", () => {
   const before = Date.now();
-  const r = run("hold", "--owner", "kevin", "--reason", "serving dsv4 tonight", "--allow", "crow-embed,my-heavy");
+  const r = run("hold", "--owner", "casey", "--reason", "serving dsv4 tonight", "--allow", "crow-embed,my-heavy");
   assert.equal(r.code, 0, r.err);
   assert.ok(existsSync(path));
   const rec = JSON.parse(readFileSync(path, "utf8"));
-  assert.equal(rec.owner, "kevin");
+  assert.equal(rec.owner, "casey");
   assert.equal(rec.reason, "serving dsv4 tonight");
   assert.deepEqual(rec.allow, ["crow-embed", "my-heavy"]);
   const held = Date.parse(rec.expires_at) - Date.parse(rec.started_at);
@@ -52,19 +52,19 @@ test("hold writes the file (default 480 min), status prints it as JSON", () => {
   assert.ok(Date.parse(rec.started_at) >= before - 1000);
   const s = run("status");
   assert.equal(s.code, 0);
-  assert.equal(JSON.parse(s.out).owner, "kevin");
+  assert.equal(JSON.parse(s.out).owner, "casey");
 });
 
 test("hold beyond 8h without --force fails (exit 1) and leaves the existing file untouched", () => {
   const prev = readFileSync(path, "utf8");
-  const r = run("hold", "--owner", "kevin", "--reason", "long", "--minutes", "600");
+  const r = run("hold", "--owner", "casey", "--reason", "long", "--minutes", "600");
   assert.equal(r.code, 1);
   assert.match(r.err, /8h/);
   assert.equal(readFileSync(path, "utf8"), prev);
 });
 
 test("hold beyond 8h WITH --force succeeds", () => {
-  const r = run("hold", "--owner", "kevin", "--reason", "long", "--minutes", "600", "--force");
+  const r = run("hold", "--owner", "casey", "--reason", "long", "--minutes", "600", "--force");
   assert.equal(r.code, 0, r.err);
   const rec = JSON.parse(readFileSync(path, "utf8"));
   assert.equal(Date.parse(rec.expires_at) - Date.parse(rec.started_at), 600 * 60_000);

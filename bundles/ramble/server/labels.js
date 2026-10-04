@@ -5,7 +5,7 @@
  *   1. yours (origin local or sync — sync rows are your own other instances);
  *   2. a contact's saved name (verified by the handshake key; no tail);
  *   3. a stranger's chosen world name plus a key tail (unverified, so the
- *      tail keeps two "Kevin"s apart and matches the key the map showed);
+ *      tail keeps two "Casey"s apart and matches the key the map showed);
  *   4. the short key alone.
  */
 export function keyTail(author, n) {

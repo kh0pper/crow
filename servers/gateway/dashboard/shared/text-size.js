@@ -1,6 +1,6 @@
 /**
  * Dashboard text size — ONE per-device preference for the whole dashboard
- * (A11Y-TEXTSIZE, 2026-10-03). Kevin, 2026-10-02: "Text size should apply to
+ * (A11Y-TEXTSIZE, 2026-10-03). Casey, 2026-10-02: "Text size should apply to
  * chat, though maybe we should consider a system wide text size adjuster for
  * accessibility." #407 had shipped a Perch-only A−/A/A+; this module is now
  * the single source of truth and Perch's control is a consumer of it.

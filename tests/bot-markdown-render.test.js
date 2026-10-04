@@ -1,5 +1,5 @@
 // Perch bot markdown: headings, backslash escapes and TeX math, rendered once
-// and sanitized. Kevin's screenshot (2026-10-02, hank session
+// and sanitized. Casey's screenshot (2026-10-02, hank session
 // perchlive-9e2b9bf3) showed literal "#####", "126126B" and "10001000\-step".
 //
 // ROOT CAUSE, measured from the session file: that bubble was NOT bot prose.

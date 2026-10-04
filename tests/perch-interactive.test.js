@@ -2073,7 +2073,7 @@ async function phoneRouterNoSeam() {
   const { createDbClient } = await import("../servers/db.js");
   const { default: phoneRouter } = await import("../bundles/phone/panel/routes.js");
   const db = createDbClient(DB_FILE);
-  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'),('phone_owner_name','Kevin') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
+  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('phone_tcpa_ack','true'),('phone_owner_name','Casey') ON CONFLICT(key) DO UPDATE SET value=excluded.value", args: [] });
   const router = phoneRouter((req, res, next) => { req.dashboardSession = "local"; next(); }, {
     db, startDispatcher: false, csrf: (req, res, next) => next(),
     runner: { stop: async () => ({}), events: async () => ({ events: [], done: false, active: true }), farend: async () => ({}) },
