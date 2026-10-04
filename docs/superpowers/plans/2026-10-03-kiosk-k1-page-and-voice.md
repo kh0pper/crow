@@ -6017,7 +6017,9 @@ Validity rules (ruling R8):
 
 **Re-run after the 2026-10-04 fix round (smoke run 1 FAILED: median 2714 ms, p90 3836 ms).** Levers 1 and 3 are now built into the branch, and lever 2 is a per-display setting. Run the 20 questions **twice** in the new registered window, and record both runs:
 
-- **Run A (branch defaults):** 450 ms end-of-speech wait, first-clause TTS, `crow_discover` denied, Speech model **Standard (small.en)**.
+- **Run A (branch defaults):** 450 ms end-of-speech wait, first-clause TTS, `crow_discover` denied, early STT (lever D), whisper at 12 CPU threads (lever C), Speech model **Standard (small.en)**.
+  - The scratch whisper picks up 12 threads from the branch compose (`WHISPER__CPU_THREADS: "${WHISPER_CPU_THREADS:-12}"`). Check with `docker exec crow-kiosk-smoke-stt printenv WHISPER__CPU_THREADS`, which should print `12`.
+  - Each `[kiosk-metrics]` row now carries `timings.stt_early` (`used` or `none`), `stt_early_ms` and `stt_early_discards`. Report the used/none ratio and the total discards: a discarded early STT still occupies whisper's single worker, because 0.5.0 cannot cancel a request.
 - **Run B (lever 2):** the same display with Speech model **Fastest (tiny.en)**. Set it in the scratch panel (Kiosk → the display → Speech model → Save), or over the API:
 
   ```bash
@@ -6042,21 +6044,32 @@ If **Run A passes**, small.en stays the default and tiny.en remains an option. I
 - **Lever 1 (end-of-speech wait).** Now the default: 450 ms per display, adjustable from 300 to 900 ms in the panel (End-of-speech wait). 300 ms is the floor. It saves another 150 ms but cuts off slow speakers, so it is a Kevin call.
 - **Lever 2 (tiny.en).** See Run B.
 - **Lever 3 (first-clause TTS).** Now built in, replacing the unbuilt pre-synthesized acknowledgement. The first spoken chunk ends at the first `, ; : —` after 3 or more words, or at 8 complete words. Later chunks are whole sentences.
-- **Next lever, C (whisper CPU threads; scratch only, needs a whisper recreate in the window).** In faster-whisper-server 0.5.0, `cpu_threads: 0` means the CTranslate2 default of 4 threads, on a 32-thread box. To try more threads, add `environment: { WHISPER__CPU_THREADS: "8" }` to `$SMOKE/stt.override.yml`, then run `$SW up -d --force-recreate` and re-warm with one Step 3 STT call. Then re-run the worse of A and B. Estimate: −25 to −40 % STT. It also changes prod large-v3 (meeting recorder) if adopted, so it is a [KEVIN] decision for Task 14.
-- **Next lever, D (speculative end-of-speech; not built, about a day of work).** The page would send a tentative `turn_end` after about 200 ms of silence, and the server would start STT, and the LLM only after the full wait confirms. If speech resumes, the server aborts and keeps buffering. Estimated saving: (wait − 200 ms) ≈ 250 ms at 450 ms. This is the next build lever if A and B both miss.
+- **Lever C (whisper CPU threads) — BUILT (2nd fix round 2026-10-04).**
+  - Verified in the image source (speaches v0.5.0): `Config` uses `env_nested_delimiter="__"`, so `WHISPER__CPU_THREADS` sets `whisper.cpu_threads`. `model_manager.py` passes that to `WhisperModel(cpu_threads=…)`, and faster-whisper 1.0.3 passes it on as CTranslate2 `intra_threads`. 0 means faster-whisper's default of 4 threads, and a non-zero value overrides `OMP_NUM_THREADS`.
+  - The bundle owns the value: compose `WHISPER__CPU_THREADS: "${WHISPER_CPU_THREADS:-12}"`, plus manifest env var `WHISPER_CPU_THREADS` (default 12, editable in Extensions → Configure). The 8g cap is kept.
+  - The setting applies to every model in that container, so prod glasses and meeting-recorder STT (large-v3) get faster too. Task 14's whisper recreate applies it.
+- **Lever D (early STT) — BUILT (2nd fix round).** How it works:
+  - The page's VAD reports `pause` once, 120 ms into a silence after real speech (`VAD_DEFAULTS.pauseMs`). The page sends `speech_pause`. Audio frames are already streaming during the turn.
+  - The server transcribes the audio it holds so far, while the 450 ms wait runs. `turn_end` carries `voiced_bytes`, the bytes the page had sent at its last voiced frame. The early transcript is used only if its snapshot covers that point. Otherwise the user spoke again: the early STT is aborted and the whole utterance is transcribed.
+  - Only one early STT runs at a time. A newer pause during one is queued until it settles. A failed early STT falls back to a normal STT.
+  - The turn's timings start at `turn_end` (`startedAt`), so `stt_ms` is the WAIT for the early transcript, usually far below the STT time.
+  - Risk: pauses of 120 ms or more mid-sentence start STTs that get discarded, and each holds whisper's single worker until done. Watch `stt_early_discards`. If discards hurt p90, raise `pauseMs` (for example to 200 ms; it saves less).
 
 Write the levers used and both runs' numbers to `findings.md`. The PR body carries them (spec §9).
 
 **Latency budget (where each ms went, smoke run 1, medians of the last 20 eligible turns; e2e median 2714 ms):**
 
-| segment | run 1 measured | after this round, Run A (est.) | Run B, tiny.en (est.) | source |
-|---|---|---|---|---|
-| end-of-speech silence wait (page VAD, ends on the first 20 ms frame past it) | 600 | 450 | 450 | `vad_hangover_ms` |
-| STT (turn start → transcript) | 830 | 830 | 250–400 | `stt_ms` (distil-small.en int8, CPU, 4 threads) |
-| transcript → first LLM token (bot load, prompt build, 4B TTFT) | 421 | ~420 (p90 better: no crow_discover loops) | ~420 | `llm_first_token_ms − stt_ms` |
-| first token → first TTS chunk sent (sentence wait ≈ 500 + Kokoro first synth ≈ 200) | 715 | ~400 (first clause) | ~400 | `tts_first_chunk_ms − llm_first_token_ms` |
-| server first chunk → sound on the phone (WS + Serve, PCM schedule +20 ms, output latency ≈ 25) | ~150 | ~150 | ~150 | `e2e − wait − tts_first_chunk_ms` |
-| **e2e median** | **2714** | **≈ 2250–2550 (likely FAIL)** | **≈ 1700–2000 (borderline)** | |
+| segment | run 1 measured | 1st fix round only, small.en (est.) | **Run A: + C + D, small.en (est.)** | **Run B: + C + D, tiny.en (est.)** | source |
+|---|---|---|---|---|---|
+| end-of-speech silence wait (page VAD, ends on the first 20 ms frame past it) | 600 | 460 | 460 | 460 | `vad_hangover_ms` |
+| STT run time (whisper) | 830 (4 threads) | 830 | 450–650 (12 threads) | 150–250 | `stt_early_ms` (or `stt_ms` when not early) |
+| wait for the transcript after turn_end (STT starts 120 ms into the silence: max(0, 120 + STT − 460)) | 830 | 830 | 110–310 | ~0 | `stt_ms` |
+| transcript → first LLM token (bot load, prompt build, 4B TTFT) | 421 | ~420 (p90 better: no crow_discover loops) | ~420 | ~420 | `llm_first_token_ms − stt_ms` |
+| first token → first TTS chunk sent (sentence/clause wait + Kokoro first synth ≈ 200) | 715 | 400–715 (first clause) | 400–715 | 400–715 | `tts_first_chunk_ms − llm_first_token_ms` |
+| server first chunk → sound on the phone (WS + Serve, PCM schedule +20 ms, output latency ≈ 25) | ~150 | ~150 | ~150 | ~150 | `e2e − wait − tts_first_chunk_ms` |
+| **e2e median** | **2714** | **≈ 2250–2550 (FAIL)** | **≈ 1550–2050 (borderline → likely PASS, median ~1.8 s)** | **≈ 1430–1750 (likely PASS)** | |
+
+These estimates are not measured. Lever C's speed-up from 4 to 12 threads is assumed to be 1.3–1.8× on the encoder. Lever D assumes few mid-sentence discards. p90 is driven by long first sentences (no comma within 8 words) and by discards queued on whisper. The re-run is the measurement.
 
 *Review caveat on lever 3:* many scripted answers open with a first sentence of 8 words or fewer and no comma (e.g. "Twelve times fourteen is 168."). There the first chunk is the whole sentence, as before, so lever 3 saves 0–300 ms depending on the answer; the ~400 above is the best case. The 450 ms wait really ends at 460 ms, because the VAD works in 20 ms frames.
 
@@ -6066,7 +6079,7 @@ Write the levers used and both runs' numbers to `findings.md`. The PR body carri
 - **Two halves fail the same way.** Sending the first half while the user is still speaking runs into the same padding: the second half still pays a full encoder pass, and words split at the cut lose accuracy. Estimated saving: about 0.
 - **Beam size cannot be changed.** The 0.5.0 POST route passes no `beam_size`, so faster-whisper's default beam 5 applies. Greedy decoding would need a newer server or a patched image.
 
-So the STT levers that do work are a smaller model (Run B), more CPU threads (lever C), overlapping STT with the silence wait (lever D), or STT on the GPU (a separate GPU-window plan).
+So the STT levers that do work are a smaller model (Run B), more CPU threads (lever C, now built), overlapping STT with the silence wait (lever D, now built), or STT on the GPU (a separate GPU-window plan).
 
 - [ ] **Step 8: [KEVIN] A3 windows, bird states, barge-in; announce/show; dressed bird**
 
@@ -6216,7 +6229,7 @@ systemd-run --user --unit=kiosk-deploy-deadman --on-active=2700 /bin/bash $D/res
 cd ~/crow/bundles/faster-whisper-server && docker compose up -d          # project name = dir name = faster-whisper-server (matches the existing container's labels)
 for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8004/health >/dev/null 2>&1 && break; sleep 2; done
 docker inspect -f '{{.Config.Image}} {{.HostConfig.Memory}}' faster-whisper-server        # fedirz/faster-whisper-server:0.5.0-cpu 8589934592
-docker exec faster-whisper-server printenv WHISPER__TTL PRELOAD_MODELS
+docker exec faster-whisper-server printenv WHISPER__TTL PRELOAD_MODELS WHISPER__CPU_THREADS   # -1, the three models, 12 (lever C — glasses + meeting recorder large-v3 benefit too)
 # Measure the 8g cap instead of assuming it (review m7): a ~5-minute clip through large-v3 while sampling memory.
 for i in $(seq 1 40); do cat /tmp/claude-1000/kiosk-smoke/tts.pcm; done > /tmp/claude-1000/kiosk-deploy/long.pcm
 cd ~/crow && node --input-type=module -e 'import { readFileSync, writeFileSync } from "node:fs"; import { wrapPcmAsWav } from "./servers/gateway/voice/turn-helpers.js"; writeFileSync("/tmp/claude-1000/kiosk-deploy/long.wav", wrapPcmAsWav(readFileSync("/tmp/claude-1000/kiosk-deploy/long.pcm"), 24000));'
@@ -6229,7 +6242,7 @@ curl -s -w "\nlarge-v3 (glasses/meeting default): %{time_total}s\n" -F file=@/tm
 
 Expected:
 - the image is unchanged and the cap is 8 GiB;
-- the env is set;
+- the env is set, including `WHISPER__CPU_THREADS=12`. This is lever C, and prod large-v3 for glasses and the meeting recorder gets it too. Compare the `large-v3 (glasses/meeting default)` time with the pre-deploy number. If the meeting-recorder long clip makes crow's CPU contention a problem, lower `WHISPER_CPU_THREADS` in `~/crow/bundles/faster-whisper-server/.env`;
 - all three models (large-v3, distil-small.en, tiny.en — 2026-10-04 fix round) transcribe the test clip correctly. The first large-v3 call pays its one load, and later ones stay warm (TTL -1). After the gateway restart, the journal shows `[kiosk] STT warm (…)` once a display is paired. **Installed copies elsewhere:** `refreshVersionedBundle` never copies a docker bundle's compose, so a faster-whisper install from an older copy has no tiny.en preload. There, choosing "Fastest" pays a ~75 MB download on its first warm-up, retried until it succeeds.
 
 If `q.wav` was deleted with the smoke dir, regenerate it as in Task 13 Step 3.
