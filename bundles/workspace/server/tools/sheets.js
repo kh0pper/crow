@@ -9,7 +9,7 @@ import { loadOoxml, ooxmlWrite } from "./ooxml-file.js";
 import { stat } from "../nc/dav.js";
 import { splitFolder } from "../nc/paths.js";
 import { createFile } from "../write-protocol.js";
-import { openXlsx, readRange, writeRange, appendRows, addTab, renameTab, deleteTab, setNumberFormat, tabsInfo } from "../ooxml/xlsx.js";
+import { openXlsx, readRange, writeRange, appendRows, addTab, renameTab, deleteTab, setNumberFormat, tabsInfo, patternFor, FORMAT_TYPE_PATTERNS } from "../ooxml/xlsx.js";
 
 const XLSX = Object.freeze({ ext: "xlsx", noun: "an .xlsx spreadsheet", open: openXlsx });
 const TEMPLATE = new URL("../templates/blank.xlsx", import.meta.url);
@@ -33,7 +33,7 @@ function applyOp(wb, op) {
     case "add_tab": addTab(wb, op.title, op.index); return `add tab ${op.title}`;
     case "rename_tab": renameTab(wb, op.title, op.new_title); return `rename tab ${op.title} → ${op.new_title}`;
     case "delete_tab": deleteTab(wb, op.title); return `delete tab ${op.title}`;
-    case "set_number_format": setNumberFormat(wb, op.range, op.pattern ?? "@"); return `format ${op.range}`;
+    case "set_number_format": setNumberFormat(wb, op.range, patternFor(op.pattern, op.format_type)); return `format ${op.range}`;
     default: throw new WsError("bad_args", `unknown op "${op.op}"`);
   }
 }
@@ -73,9 +73,9 @@ export const sheetsDefs = [
     run: (a, c) => xlsxWrite(c, a, (wb) => ({ changed: 1, summary: `rename tab ${a.title}`, data: renameTab(wb, a.title, a.new_title) })) },
   { name: "ws_sheets_delete_tab", description: "Delete a tab. Destructive: confirm intent with the user first. The last visible tab cannot be deleted.", schema: { ...fileRef, title: z.string().min(1).max(64), ...writeOpts },
     run: (a, c) => xlsxWrite(c, a, (wb) => ({ changed: 1, summary: `delete tab ${a.title}`, data: deleteTab(wb, a.title) })) },
-  { name: "ws_sheets_set_number_format", description: "Set a number format on a range (default '@' = plain text, keeps leading zeros). Other cell formatting is kept.",
-    schema: { ...fileRef, range: z.string().min(1).max(300), pattern: z.string().min(1).max(255).optional().default("@"), format_type: z.string().max(20).optional().default("TEXT"), ...writeOpts },
-    run: (a, c) => xlsxWrite(c, a, (wb) => { const n = setNumberFormat(wb, a.range, a.pattern); return { changed: n, summary: `format ${a.range}`, data: { formatted_cells: n } }; }) },
+  { name: "ws_sheets_set_number_format", description: "Set a number format on a range: pattern, or format_type's default pattern (default TEXT '@' = plain text, keeps leading zeros). Other cell formatting is kept.",
+    schema: { ...fileRef, range: z.string().min(1).max(300), pattern: z.string().min(1).max(255).optional().describe("Excel number format code; overrides format_type"), format_type: z.enum(Object.keys(FORMAT_TYPE_PATTERNS)).optional().default("TEXT").describe("Used when no pattern is given: TEXT '@', NUMBER '#,##0.00', PERCENT '0.00%', CURRENCY '\"$\"#,##0.00', DATE 'yyyy-mm-dd', TIME 'h:mm:ss', DATE_TIME 'yyyy-mm-dd h:mm:ss', SCIENTIFIC '0.00E+00'"), ...writeOpts },
+    run: (a, c) => xlsxWrite(c, a, (wb) => { const pattern = patternFor(a.pattern, a.format_type); const n = setNumberFormat(wb, a.range, pattern); return { changed: n, summary: `format ${a.range}`, data: { formatted_cells: n, pattern } }; }) },
   { name: "ws_sheets_batch_update", description: "Apply typed ops in order as ONE version: write, append, add_tab, rename_tab, delete_tab, set_number_format (same params as the single tools). Any failing op aborts the whole batch.",
     schema: { ...fileRef, ops: z.array(z.object({ op: z.enum(["write", "append", "add_tab", "rename_tab", "delete_tab", "set_number_format"]) }).passthrough()).min(1).max(200), ...writeOpts },
     run: (a, c) => xlsxWrite(c, a, (wb) => { const done = a.ops.map((op) => applyOp(wb, op)); return { changed: done.length, summary: `${done.length} sheet op(s)`, data: { applied: done } }; }) },

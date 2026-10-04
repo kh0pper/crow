@@ -202,3 +202,92 @@ test("append: schema accepts an empty list so the handler answers bad_args in th
     assert.equal(r.success, false); assert.equal(r.code, "bad_args", JSON.stringify(values));
   }
 });
+
+// ---- fix round 1 ----
+const MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const RNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+async function withEdits(src, edits) {
+  const { strToU8 } = await import("fflate");
+  const pkg = OoxmlPackage.open(readFileSync(join(FIX, src)));
+  for (const [part, fn] of Object.entries(edits)) pkg.setBytes(part, strToU8(fn(pkg.has(part) ? pkg.text(part) : "")));
+  return Buffer.from(pkg.save());
+}
+const chartsheetEdits = {
+  "xl/workbook.xml": (x) => x.replace("</sheets>", `<sheet xmlns:r="${RNS}" name="Gráfico" sheetId="9" r:id="rIdCS"/></sheets>`),
+  "xl/_rels/workbook.xml.rels": (x) => x.replace("</Relationships>", `<Relationship Id="rIdCS" Type="${RNS}/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>`),
+  "xl/chartsheets/sheet1.xml": () => `<?xml version="1.0" encoding="UTF-8"?><chartsheet xmlns="${MAIN}"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>`,
+};
+
+test("a chart sheet tab: get_tabs reports kind chart, rename_tab still works and rewrites chart refs (I1)", async () => {
+  fake.addFile("S/cs.xlsx", await withEdits("rich.xlsx", chartsheetEdits), { owner: "admin" });
+  const tabs = await call("ws_sheets_get_tabs", { path: "S/cs.xlsx" });
+  assert.equal(tabs.success, true);
+  assert.deepEqual(tabs.data.tabs.map((t) => [t.title, t.kind]), [["Recetas", "sheet"], ["Menú semanal", "sheet"], ["Gráfico", "chart"]]);
+  assert.deepEqual({ ...tabs.data.tabs[2], sheet_id: 0, index: 0 }, { sheet_id: 0, index: 0, title: "Gráfico", kind: "chart", rows: 0, cols: 0, frozen_rows: 0, frozen_cols: 0, hidden: false });
+  assert.equal((await call("ws_sheets_rename_tab", { path: "S/cs.xlsx", title: "Recetas", new_title: "Recetas 2026" })).success, true);
+  const b = bytesOf("S/cs.xlsx");
+  assert.match(partText(b, "xl/charts/chart1.xml"), /'Recetas 2026'!\$C\$2:\$C\$4/);
+  assert.match(partText(b, "xl/worksheets/sheet2.xml"), /'Recetas 2026'!A2/);
+  assert.equal((await call("ws_sheets_rename_tab", { path: "S/cs.xlsx", title: "Gráfico", new_title: "Gráfico 2" })).success, true);
+  assert.equal((await call("ws_sheets_read", { path: "S/cs.xlsx", range: "'Gráfico 2'!A1" })).code, "unsupported");
+});
+
+test("rename_tab rewrites data validations, conditional formats, x14 xm:f and hyperlink locations (I2)", async () => {
+  const XMNS = "http://schemas.microsoft.com/office/excel/2006/main";
+  const bytes = await withEdits("rich.xlsx", {
+    "xl/worksheets/sheet1.xml": (x) => x.replace("</mergeCells>", `</mergeCells>`
+      + `<conditionalFormatting sqref="B2:B4"><cfRule type="expression" priority="1"><formula>B2&gt;'Menú semanal'!$C$1</formula></cfRule></conditionalFormatting>`
+      + `<dataValidations count="1"><dataValidation type="list" allowBlank="1" sqref="A2:A4"><formula1>'Menú semanal'!$A$1:$A$3</formula1><formula2>"'Menú semanal'!kept"</formula2></dataValidation></dataValidations>`
+      + `<hyperlinks><hyperlink ref="A1" location="'Menú semanal'!A1" display="Menú"/></hyperlinks>`)
+      .replace("</worksheet>", `<extLst><ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:dataValidations xmlns:xm="${XMNS}" count="1"><x14:dataValidation type="list"><x14:formula1><xm:f>'Menú semanal'!$B$1:$B$2</xm:f></x14:formula1><xm:sqref>C2:C4</xm:sqref></x14:dataValidation></x14:dataValidations></ext></extLst></worksheet>`),
+  });
+  fake.addFile("S/dv.xlsx", bytes, { owner: "admin" });
+  assert.equal((await call("ws_sheets_rename_tab", { path: "S/dv.xlsx", title: "Menú semanal", new_title: "Menú 2026" })).success, true);
+  const x = partText(bytesOf("S/dv.xlsx"), "xl/worksheets/sheet1.xml");
+  assert.match(x, /<formula1>'Menú 2026'!\$A\$1:\$A\$3<\/formula1>/);
+  assert.match(x, /<formula2>"'Menú semanal'!kept"<\/formula2>/); // string literal untouched
+  assert.match(x, /<formula>B2&gt;'Menú 2026'!\$C\$1<\/formula>/);
+  assert.match(x, /<xm:f>'Menú 2026'!\$B\$1:\$B\$2<\/xm:f>/);
+  assert.match(x, /location="'Menú 2026'!A1"/);
+  assert.doesNotMatch(x, /'Menú semanal'!\$/);
+});
+
+test("new cells inherit the row style (customFormat) else the column style; overwriting drops cm/vm (controller ruling)", async () => {
+  const bytes = await withEdits("oo-rich.xlsx", {
+    "xl/worksheets/sheet1.xml": (x) => x
+      .replace("<sheetData>", `<cols><col min="4" max="5" width="12" style="3" customWidth="1"/></cols><sheetData>`)
+      .replace(`<row r="6">`, `<row r="5" s="2" customFormat="1"></row><row r="6">`)
+      .replace(`<c r="B3"><v>6</v></c>`, `<c r="B3" cm="1" vm="2"><v>6</v></c>`),
+  });
+  fake.addFile("S/st.xlsx", bytes, { owner: "admin" });
+  const w = await call("ws_sheets_write", { path: "S/st.xlsx", range: "Recetas!A5:E5", values: [["Mole", 8, 3, 4, 5]] });
+  assert.equal(w.success, true);
+  await call("ws_sheets_write", { path: "S/st.xlsx", range: "Recetas!D9", values: [[1234.5]] });
+  await call("ws_sheets_write", { path: "S/st.xlsx", range: "Recetas!B3", values: [[7]] });
+  await call("ws_sheets_append", { path: "S/st.xlsx", sheet_name: "Recetas", values: [["Sopa", 2, 1, 99]] });
+  const x = partText(bytesOf("S/st.xlsx"), "xl/worksheets/sheet1.xml");
+  for (const ref of ["A5", "B5", "D5", "E5"]) assert.match(x, new RegExp(`<c r="${ref}" s="2"`), `${ref} takes the row style`);
+  assert.match(x, /<c r="D9" s="3"/); // column style (numFmt 4 "#,##0.00")
+  assert.match(x, /<c r="D10" s="3"/); // appended row, column style
+  assert.match(x, /<c r="A10"(?! s=)/); // no column/row style → no s
+  assert.match(x, /<c r="B3"><v>7<\/v><\/c>/); // cm/vm dropped
+  assert.equal((await call("ws_sheets_read", { path: "S/st.xlsx", range: "Recetas!D9" })).data.values[0][0], "1,234.50");
+});
+
+test("set_number_format: format_type picks a default pattern; an explicit pattern wins (G1)", async () => {
+  put("nf.xlsx", "rich.xlsx");
+  const p = await call("ws_sheets_set_number_format", { path: "S/nf.xlsx", range: "Recetas!C3", format_type: "PERCENT" });
+  assert.equal(p.data.pattern, "0.00%");
+  assert.equal((await call("ws_sheets_read", { path: "S/nf.xlsx", range: "Recetas!C3" })).data.values[0][0], "2000.00%");
+  assert.match(partText(bytesOf("S/nf.xlsx"), "xl/styles.xml"), /<numFmt numFmtId="164" formatCode="0.00%"\/>/);
+  const q = await call("ws_sheets_set_number_format", { path: "S/nf.xlsx", range: "Recetas!C4", format_type: "PERCENT", pattern: "0.0" });
+  assert.equal(q.data.pattern, "0.0");
+  assert.equal((await call("ws_sheets_read", { path: "S/nf.xlsx", range: "Recetas!C4" })).data.values[0][0], "15.3");
+  const expect = { TEXT: "@", NUMBER: "#,##0.00", CURRENCY: '"$"#,##0.00', DATE: "yyyy-mm-dd", TIME: "h:mm:ss", DATE_TIME: "yyyy-mm-dd h:mm:ss", SCIENTIFIC: "0.00E+00" };
+  for (const [format_type, pattern] of Object.entries(expect)) assert.equal((await call("ws_sheets_set_number_format", { path: "S/nf.xlsx", range: "Recetas!B4", format_type })).data.pattern, pattern);
+  assert.equal((await call("ws_sheets_read", { path: "S/nf.xlsx", range: "Recetas!B4" })).data.values[0][0], "4.00E+00");
+  const b = await call("ws_sheets_batch_update", { path: "S/nf.xlsx", ops: [{ op: "set_number_format", range: "Recetas!B2", format_type: "CURRENCY" }, { op: "set_number_format", range: "Recetas!B3", format_type: "BOGUS" }] });
+  assert.equal(b.code, "bad_args"); assert.match(b.error, /CURRENCY/);
+  assert.equal((await call("ws_sheets_batch_update", { path: "S/nf.xlsx", ops: [{ op: "set_number_format", range: "Recetas!B2", format_type: "CURRENCY" }] })).success, true);
+  assert.equal((await call("ws_sheets_read", { path: "S/nf.xlsx", range: "Recetas!B2" })).data.values[0][0], "$4.00");
+});

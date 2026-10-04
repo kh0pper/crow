@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { WsError } from "../result.js";
-import { fileRef, writeOpts, refOf, writeOptsOf } from "./common.js";
+import { fileRef, writeOpts, refOf } from "./common.js";
+import { loadOoxml, ooxmlWrite } from "./ooxml-file.js";
 import { defineTools } from "./define.js";
 import { uniqueName } from "./drive.js";
-import { stat, getFile, resolveRef } from "../nc/dav.js";
+import { stat, getFile } from "../nc/dav.js";
 import { splitFolder, splitPath } from "../nc/paths.js";
-import { withFileWrite, createFile, MAX_EDIT_BYTES } from "../write-protocol.js";
+import { createFile } from "../write-protocol.js";
 import { openDocx, topBlocks } from "../ooxml/docx-model.js";
 import { toMarkdown, structure, sectionRange } from "../ooxml/docx-read.js";
 import { findReplace, rewritePassages, formatText, appendMarkdown, insertAtHeading, replaceSection, insertImage } from "../ooxml/docx-edit.js";
@@ -16,24 +17,11 @@ const TEMPLATE = (ext) => readFileSync(new URL(`../templates/blank.${ext}`, impo
 const MAX_IMAGE = 5 * 1024 * 1024;
 const pairsSchema = z.array(z.object({ find: z.string().min(1).max(2000), replace: z.string().max(20000), match_case: z.boolean().optional() })).min(1).max(200);
 
-export async function loadDocx(cfg, ref) {
-  const segs = await resolveRef(cfg, ref);
-  const entry = await stat(cfg, segs);
-  if (!/\.docx$/i.test(entry.name)) throw new WsError("wrong_type", `"${entry.name}" is not a .docx document`);
-  const { bytes, etag } = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
-  return { entry: { ...entry, etag }, d: openDocx(bytes) };
-}
+const DOCX = Object.freeze({ ext: "docx", noun: "a .docx document", open: openDocx });
+export async function loadDocx(cfg, ref) { const { entry, model } = await loadOoxml(cfg, ref, DOCX); return { entry, d: model }; }
 
 /** Run fn(d) on the live file inside the write protocol; one save → one version. */
-export function docxWrite(ctx, args, fn, label = "Crow") {
-  return withFileWrite(ctx.getConfig(), refOf(args), async (bytes, entry) => {
-    if (!/\.docx$/i.test(entry.name)) throw new WsError("wrong_type", `"${entry.name}" is not a .docx document`);
-    const d = openDocx(bytes);
-    const r = fn(d);
-    if (!r.changed) return { changed: 0, data: r.data };
-    return { bytes: d.pkg.save(), changed: r.changed, summary: r.summary, data: r.data };
-  }, { ...writeOptsOf(args), clock: ctx.clock, label });
-}
+export const docxWrite = (ctx, args, fn, label = "Crow") => ooxmlWrite(ctx, args, DOCX, fn, label);
 
 export const docsReadDefs = [
   { name: "ws_docs_read", description: "Read a .docx as markdown (headings, lists, bold/italic, links, tables). Always reads the live file.",

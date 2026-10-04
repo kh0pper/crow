@@ -6,6 +6,7 @@ import { mainPart, readRels, resolveTarget, addRel, removeRel, partsOfType, setO
 import { formatValue, codeFor, isDateCode, dateToSerial } from "./xlsx-format.js";
 
 const S = NS.s;
+const XM = "http://schemas.microsoft.com/office/excel/2006/main";
 export const MAX_CELLS = 50000;
 export const colName = (n) => { let s = ""; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
 const colNum = (s) => [...s.toUpperCase()].reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0);
@@ -56,6 +57,12 @@ export function sheetByName(wb, name) {
   if (!s) throw new WsError("tab_not_found", `No tab "${name}". Tabs: ${wb.sheets.map((x) => x.name).join(", ")}`);
   return s;
 }
+/** "sheet" for a worksheet, "chart" for a chartsheet, else the root element name (dialogsheet, …). */
+function tabKind(wb, s) {
+  if (!s.part || !wb.pkg.has(s.part)) return "missing";
+  const n = wb.pkg.xml(s.part).documentElement.localName;
+  return n === "worksheet" ? "sheet" : n === "chartsheet" ? "chart" : n;
+}
 function sheetDoc(wb, s) {
   if (!s.part || !wb.pkg.has(s.part)) throw new WsError("malformed_document", `tab "${s.name}" has no worksheet part`);
   const doc = wb.pkg.xml(s.part);
@@ -92,6 +99,8 @@ const cellCount = (R) => (R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1);
 /** row number → {row, cells: Map(col → <c>)}; built once per operation. */
 function grid(wb, s) {
   const m = new Map();
+  // <col min max style> ranges, for new cells in rows without their own format
+  m.colStyles = kids(kid(sheetDoc(wb, s).documentElement, S, "cols"), S, "col").filter((c) => c.getAttribute("style")).map((c) => ({ min: Number(c.getAttribute("min")), max: Number(c.getAttribute("max")), style: c.getAttribute("style") }));
   for (const row of kids(sheetData(wb, s), S, "row")) {
     const cells = new Map(); for (const c of kids(row, S, "c")) cells.set(posOf(c).c, c);
     m.set(Number(row.getAttribute("r")), { row, cells });
@@ -113,7 +122,10 @@ function ensureCell(wb, s, g, r, c) {
   entry.row.removeAttribute("spans"); // optional hint; stale after a write
   let cell = entry.cells.get(c);
   if (!cell) {
-    cell = el(doc, S, "c", { r: a1(r, c) });
+    // a new cell inherits the row's style (customFormat="1"), else the covering column's style, as editors do
+    const rowStyle = entry.row.getAttribute("customFormat") === "1" || entry.row.getAttribute("customFormat") === "true" ? entry.row.getAttribute("s") : null;
+    const style = rowStyle || g.colStyles?.find((x) => c >= x.min && c <= x.max)?.style || null;
+    cell = el(doc, S, "c", { r: a1(r, c), s: style && style !== "0" ? style : undefined });
     const after = [...entry.cells.keys()].filter((k) => k > c).sort((p, q) => p - q)[0];
     entry.row.insertBefore(cell, after === undefined ? null : entry.cells.get(after));
     entry.cells.set(c, cell);
@@ -205,6 +217,7 @@ function setCell(wb, s, cell, value, input) {
   const doc = sheetDoc(wb, s);
   for (const ch of Array.from(cell.childNodes)) cell.removeChild(ch);
   cell.removeAttribute("t");
+  cell.removeAttribute("cm"); cell.removeAttribute("vm"); // cell/value metadata (dynamic arrays, rich values) belongs to the old value
   const v = scalar(value);
   const put = (t, child) => { if (t) cell.setAttribute("t", t); if (child) cell.appendChild(child); };
   if (v === "") return;
@@ -302,10 +315,12 @@ export function appendRows(wb, sheetName, values, input = "USER_ENTERED") {
 
 export function tabsInfo(wb) {
   return wb.sheets.map((s) => {
+    const kind = tabKind(wb, s);
+    if (kind !== "sheet") return { sheet_id: s.sheetId, index: s.index, title: s.name, kind, rows: 0, cols: 0, frozen_rows: 0, frozen_cols: 0, hidden: s.state !== "visible" };
     const doc = sheetDoc(wb, s); const pane = kid(kid(kid(doc.documentElement, S, "sheetViews"), S, "sheetView"), S, "pane");
     const frozen = pane && /frozen/.test(pane.getAttribute("state") || "");
     const u = usedRange(wb, s);
-    return { sheet_id: s.sheetId, index: s.index, title: s.name, rows: u.r2, cols: u.c2, frozen_rows: frozen ? Number(pane.getAttribute("ySplit") || 0) : 0, frozen_cols: frozen ? Number(pane.getAttribute("xSplit") || 0) : 0, hidden: s.state !== "visible" };
+    return { sheet_id: s.sheetId, index: s.index, title: s.name, kind, rows: u.r2, cols: u.c2, frozen_rows: frozen ? Number(pane.getAttribute("ySplit") || 0) : 0, frozen_cols: frozen ? Number(pane.getAttribute("xSplit") || 0) : 0, hidden: s.state !== "visible" };
   });
 }
 
@@ -358,9 +373,15 @@ export function renameTab(wb, title, newTitle) {
   }
   const old = s.name;
   for (const t of wb.sheets) {
-    if (!t.part || !wb.pkg.has(t.part)) continue;
+    if (tabKind(wb, t) !== "sheet") continue; // chart sheets hold no formulas; their charts are rewritten below
     const doc = sheetDoc(wb, t); let dirty = false;
-    for (const f of Array.from(doc.getElementsByTagNameNS(S, "f"))) { const n = rewriteRefs(f.textContent, old, name); if (n !== f.textContent) { f.textContent = n; dirty = true; } }
+    const fix = (node) => { const n = rewriteRefs(node.textContent, old, name); if (n !== node.textContent) { node.textContent = n; dirty = true; } };
+    // cell formulas, data-validation formula1/2, conditional-format <formula>, and x14 extension xm:f (x14:dataValidation / x14:conditionalFormatting)
+    for (const [ns, local] of [[S, "f"], [S, "formula1"], [S, "formula2"], [S, "formula"], [XM, "f"]]) for (const node of Array.from(doc.getElementsByTagNameNS(ns, local))) fix(node);
+    for (const h of Array.from(doc.getElementsByTagNameNS(S, "hyperlink"))) {
+      const loc = h.getAttribute("location"); if (!loc) continue;
+      const n = rewriteRefs(loc, old, name); if (n !== loc) { h.setAttribute("location", n); dirty = true; }
+    }
     if (dirty) wb.pkg.markDirty(t.part);
   }
   for (const dn of kids(kid(wb.doc.documentElement, S, "definedNames"), S, "definedName")) { const n = rewriteRefs(dn.textContent, old, name); if (n !== dn.textContent) dn.textContent = n; }
@@ -385,6 +406,15 @@ export function deleteTab(wb, title) {
   wb.sheets = wb.sheets.filter((x) => x !== s).map((x, i) => ({ ...x, index: i }));
   wb.pkg.markDirty(wb.part); markRecalc(wb);
   return { deleted: s.name };
+}
+
+/** Default pattern per format_type (Google Sheets NumberFormat types); an explicit pattern always wins. */
+export const FORMAT_TYPE_PATTERNS = Object.freeze({ TEXT: "@", NUMBER: "#,##0.00", PERCENT: "0.00%", CURRENCY: '"$"#,##0.00', DATE: "yyyy-mm-dd", TIME: "h:mm:ss", DATE_TIME: "yyyy-mm-dd h:mm:ss", SCIENTIFIC: "0.00E+00" });
+export function patternFor(pattern, formatType = "TEXT") {
+  if (pattern !== undefined && pattern !== null && pattern !== "") return String(pattern);
+  const p = FORMAT_TYPE_PATTERNS[String(formatType).toUpperCase()];
+  if (!p) throw new WsError("bad_args", `format_type must be one of ${Object.keys(FORMAT_TYPE_PATTERNS).join(", ")}`);
+  return p;
 }
 
 export function setNumberFormat(wb, range, pattern = "@") {
