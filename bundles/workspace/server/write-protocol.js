@@ -87,19 +87,27 @@ async function spacing(fileId, clock) {
  * their own server; Quick edit runs in the gateway). So the spacing rule is enforced against the
  * SERVER's current mtime, not just this process's last write: never write until ≥ 1.1 s after the
  * file's current mtime. A write that lands DURING the sleep resets the gap, so the check loops until the
- * file is unchanged across a sleep (bounded; If-Match still guards the PUT). Returns the latest read.
+ * file is unchanged across a sleep. Returns the latest read.
+ *
+ * Review N1: the loop is bounded, and the LAST round never returns a fresh read (that read could be a foreign
+ * save from this very second). With `ifMatchGuarded` (a PUT with If-Match follows) the last round sleeps out the
+ * gap on the read it already has and returns it un-re-read: a save during that sleep changes the etag, so the
+ * PUT takes the 412 path instead of sharing the save's second. Without it (a restore MOVE has no If-Match)
+ * the last round throws a retryable `busy`.
  */
-async function settleMtime(cur, reread, clock) {
-  for (let i = 0; i < 5; i++) {
+const MTIME_ROUNDS = 5;
+async function settleMtime(cur, reread, clock, { ifMatchGuarded }) {
+  for (let i = 0; ; i++) {
     const ageMs = clock.now() - cur.mtime * 1000;
     if (ageMs >= WRITE_SPACING_MS) return cur;
+    if (i === MTIME_ROUNDS - 1 && !ifMatchGuarded) throw new WsError("busy", "The file is being saved repeatedly right now (someone is editing it). Nothing was changed; try again in a few seconds.");
     await clock.sleep(WRITE_SPACING_MS - Math.max(0, ageMs));
+    if (i === MTIME_ROUNDS - 1) return cur;
     const next = await reread();
     const same = next.mtime === cur.mtime && normEtag(next.etag) === normEtag(cur.etag);
     cur = next;
     if (same) return cur;
   }
-  return cur;
 }
 
 async function guard(cfg, ref) {
@@ -140,8 +148,11 @@ async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, { put
   lastWriteOf(clock).set(fileId, clock.now());
   const after = await stat(cfg, segs);
   const ours = afterIsOurs ? afterIsOurs(after) : true;
-  // Review C2: the after-etag is the one THIS write produced; "" (never a real etag) makes undo refuse.
-  const afterEtag = putEtag || (ours ? after.etag : "");
+  // Review C2: the after-etag is the one THIS write produced (the PUT's own ETag). A restore has none: if someone
+  // else already saved on top, a token would carry THEIR etag, so none is issued (version_id null). A PUT keeps its
+  // honest token (undo then refuses with changed_since). Either way the result says why.
+  const afterEtag = putEtag || after.etag;
+  const issueToken = ours || !!putEtag;
   const summary = clip(out.summary || "edit", 100);
   const rows = await listVersions(cfg, fileId).catch(() => null);
   let okB = true, okA = true;
@@ -157,8 +168,9 @@ async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, { put
   }
   return {
     ...(out.data || {}), path: after.path, file_id: fileId, changed: out.changed,
-    version_id: encodeVersionId({ f: fileId, b: beforeVersion, a: afterEtag }), version_label: `${label}: ${summary}`,
-    ...(okA && okB ? {} : { label_warning: "Saved, but Workspace did not accept the version label." }),
+    version_id: issueToken ? encodeVersionId({ f: fileId, b: beforeVersion, a: afterEtag }) : null, version_label: `${label}: ${summary}`,
+    ...(!ours ? { label_warning: "Saved, but someone else saved the file right after, so this change cannot be undone automatically. Use ws_drive_list_versions and ws_drive_restore_version if needed." }
+      : okA && okB ? {} : { label_warning: "Saved, but Workspace did not accept the version label." }),
   };
 }
 
@@ -166,19 +178,17 @@ const putEtagOf = (res) => normEtag(res.headers.get("oc-etag") || res.headers.ge
 const queueOrThrow = (sig, queue) => { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; };
 
 /**
- * Spec §5 step 6: a second 423 (the lock re-appeared after the one retry) goes back through the lock check once
- * more — no wait, no second drop — so if_open "queue" still queues instead of failing.
+ * Spec §5 step 6: a 423 goes back to the lock check. The first retry uses the caller's wait; a second 423 (the lock
+ * re-appeared after that retry) goes back once more with no wait — "queue" still queues, and if the lock has
+ * already cleared the write simply proceeds. Never a second drop (allowDrop). A third 423 gives up.
  */
-async function lockedAgain(cfg, segs, { ifOpen, clock, queue }) {
-  try { await settleLock(cfg, segs, { waitS: 0, ifOpen, clock, queue, allowDrop: false }); }
-  catch (sig) { return queueOrThrow(sig, queue); }
-  throw new WsError("locked", "The file is locked; try again.");
-}
+const MAX_423_RETRIES = 2;
+const lockedOut = () => new WsError("locked", "The file keeps getting locked; nothing was changed. Try again shortly.");
 
-export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen = "queue", label = "Crow", clock = systemClock, queue = null } = {}) {
+export async function withFileWrite(cfg, ref, mutate, { waitS: waitS0 = 0, ifOpen = "queue", label = "Crow", clock = systemClock, queue = null } = {}) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
-    let dropped = false, retried412 = false, retried423 = false;
+    let dropped = false, retried412 = false, n423 = 0, waitS = waitS0;
     for (;;) {
       let e;
       // Spec §5 step 6: a 423 retry goes back to the lock check with the caller's if_open unchanged
@@ -187,12 +197,12 @@ export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen = "que
       catch (sig) { return queueOrThrow(sig, queue); }
       await spacing(e.fileId, clock);
       const read = () => getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
-      const cur = await settleMtime(await read(), read, clock);
+      const cur = await settleMtime(await read(), read, clock, { ifMatchGuarded: true });
       const out = await mutate(cur.bytes, e);
       if (!out || !out.changed) return { ...(out?.data || {}), path: e.path, file_id: e.fileId, changed: 0, version_id: null };
       const res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag });
       if (res.status === 412) { if (!retried412) { retried412 = true; continue; } throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`); }
-      if (res.status === 423) { if (!retried423) { retried423 = true; continue; } return lockedAgain(cfg, segs, { ifOpen, clock, queue }); }
+      if (res.status === 423) { if (++n423 > MAX_423_RETRIES) throw lockedOut(); if (n423 === 2) waitS = 0; continue; }
       if (!res.ok) throw httpFail(res, "save the change");
       const putEtag = putEtagOf(res);
       return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, { putEtag, afterIsOurs: (a) => !putEtag || normEtag(a.etag) === putEtag });
@@ -200,10 +210,10 @@ export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen = "que
   });
 }
 
-export async function withFileRestore(cfg, ref, versionId, { waitS = 0, ifOpen = "queue", label = "Crow", summary = "restore", clock = systemClock, expectEtag = null, queue = null } = {}) {
+export async function withFileRestore(cfg, ref, versionId, { waitS: waitS0 = 0, ifOpen = "queue", label = "Crow", summary = "restore", clock = systemClock, expectEtag = null, queue = null } = {}) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
-    let dropped = false, retried423 = false;
+    let dropped = false, n423 = 0, waitS = waitS0;
     for (;;) {
       // NOTE (review C4b): a restore touches the file back to the revision's mtime, so after a restore the
       // "current" version id equals the restored revision's id. finish() then labels that row "Undo: …"
@@ -215,12 +225,12 @@ export async function withFileRestore(cfg, ref, versionId, { waitS = 0, ifOpen =
       // Review I4: the entry used for the undo token's "before" and for the etag re-check is the one read
       // AFTER the gap, never one from before the sleep.
       const read = () => stat(cfg, segs);
-      const now = await settleMtime(await read(), read, clock);
+      const now = await settleMtime(await read(), read, clock, { ifMatchGuarded: false });
       // Review C3: re-check AFTER the lock settled (a force_close drop saves the person's typing, which
       // changes the etag). Undo must never restore over work that landed after the Crow edit.
       if (expectEtag !== null && normEtag(now.etag) !== expectEtag) throw await changedSince(cfg, now, `"${now.name}" changed after that edit (last modified ${now.modified}); nothing was undone. Use ws_drive_list_versions and ws_drive_restore_version to choose explicitly.`);
       const res = await restoreVersion(cfg, now.fileId, versionId);
-      if (res.status === 423) { if (!retried423) { retried423 = true; continue; } return lockedAgain(cfg, segs, { ifOpen, clock, queue }); }
+      if (res.status === 423) { if (++n423 > MAX_423_RETRIES) throw lockedOut(); if (n423 === 2) waitS = 0; continue; }
       if (![201, 204].includes(res.status)) throw httpFail(res, "restore that version");
       // A restore touches the file back to the revision's mtime; any other mtime means someone wrote after it.
       return finish(cfg, segs, now.fileId, String(now.mtime), { changed: 1, summary }, label, clock, { afterIsOurs: (a) => String(a.mtime) === String(versionId) });

@@ -279,7 +279,7 @@ test("I3: a write that lands right after our PUT is not labelled as Crow's", asy
   fake.state.afterPutHook = null;
   const vs = fake.versionsOf("S/aft.txt");
   assert.equal(vs.at(-1).bytes.toString(), "a+b+kevin"); assert.equal(vs.at(-1).label, null, "kevin's row unlabelled");
-  assert.ok(r.label_warning);
+  assert.match(r.label_warning, /someone else saved the file right after/); await assert.rejects(W.undoFileChange(cfg, { path: "S/aft.txt" }, r.version_id, { clock }), (e) => e.code === "changed_since");
 });
 
 test("I4: a plain restore's undo token uses the file as read AFTER the spacing gap", async () => {
@@ -294,6 +294,20 @@ test("I4: a plain restore's undo token uses the file as read AFTER the spacing g
   assert.equal(W.decodeVersionId(r.version_id).b, String(cMtime));
   await W.undoFileChange(cfg, { path: "S/rg.txt" }, r.version_id, { clock });
   assert.equal(text(fake.node("S/rg.txt").bytes), "C", "undo brings back the content that was current, not an older one");
+});
+
+test("a restore overtaken by someone's save issues no undo token and says why", async () => {
+  const n = fake.addFile("S/ov.txt", Buffer.from("A")); const vA = String(n.versions[0].id);
+  await W.withFileWrite(cfg, { path: "S/ov.txt" }, async () => ({ bytes: Buffer.from("B"), changed: 1, summary: "B" }), { clock });
+  // the first stat after the restore MOVE (content back to "A") sees Kevin's save land on top
+  let hit = false;
+  fake.extraRoutes = async (req) => {
+    if (!hit && req.method === "PROPFIND" && req.url.includes("/files/crow-bot/S/ov.txt") && fake.node("S/ov.txt").bytes.toString() === "A") { hit = true; inject("S/ov.txt", "A+kevin"); }
+    return false;
+  };
+  const r = await W.withFileRestore(cfg, { path: "S/ov.txt" }, vA, { clock });
+  fake.extraRoutes = null;
+  assert.ok(hit); assert.equal(r.version_id, null); assert.match(r.label_warning, /cannot be undone automatically/);
 });
 
 test("I5: a save landing during the mtime-gap sleep resets the gap (no shared second, both versions kept)", async () => {
@@ -364,4 +378,51 @@ test("I8: a non-JSON 200 from the editor is editor_unreachable, never a SyntaxEr
     await assert.rejects(ooCommand({ ...cfg, ooUrl: `http://127.0.0.1:${srv.address().port}` }, { c: "info", key: "k" }),
       (e) => e.code === "editor_unreachable" && !/pw-leak/.test(e.message));
   } finally { srv.close(); }
+});
+
+// ---- fix round 2 ----
+test("N1: against a writer saving every 0.9 s, Crow never PUTs in the same server second as an earlier foreign save", async () => {
+  fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
+  const p = "S/busy.txt";
+  fake.addFile(p, Buffer.from("base"));
+  const foreign = new Set(); let stop = false, saves = 0;
+  const arm = (at) => fake.state.pendingReleases.push({ at, fn: () => { if (stop) return; foreign.add(inject(p, `foreign${++saves}`).mtime); arm(at + 900); } });
+  arm(fake.state.now + 50);
+  const clashes = []; let crowPuts = 0;
+  fake.state.afterPutHook = (n) => { if (n.path === p) { crowPuts++; if (foreign.has(n.mtime)) clashes.push(n.mtime); } };
+  const outcomes = [];
+  for (let i = 0; i < 6; i++) {
+    try { await W.withFileWrite(cfg, { path: p }, appendMut(`+bot${i}`), { clock }); outcomes.push("ok"); }
+    catch (e) { outcomes.push(e.code); }
+  }
+  stop = true; fake.state.afterPutHook = null; fake.state.realisticMtime = null;
+  assert.ok(saves >= 5, `the writer kept saving (${saves})`);
+  assert.deepEqual(clashes, [], `Crow PUT shared a second with a foreign save (${outcomes.join(",")}, puts ${crowPuts})`);
+  for (const o of outcomes) assert.ok(["ok", "changed_concurrently", "busy"].includes(o), o);
+});
+
+test("second 423 with the lock already gone: the write proceeds instead of 'try again'", async () => {
+  const p = "S/gone423.txt";
+  fake.addFile(p, Buffer.from("d"));
+  let forced = 0;
+  fake.extraRoutes = (req, res, body, { send }) => { if (req.method === "PUT" && req.url.endsWith("/S/gone423.txt") && forced < 2) { forced++; send(423); return true; } return false; };
+  let n = 0;
+  const r = await W.withFileWrite(cfg, { path: p }, async (bytes) => { n++; return { bytes: Buffer.from(text(bytes) + "!"), changed: 1, summary: "x" }; }, { clock });
+  fake.extraRoutes = null;
+  assert.equal(forced, 2); assert.equal(n, 3); assert.equal(r.changed, 1); assert.ok(r.version_id);
+  assert.equal(text(fake.node(p).bytes), "d!");
+});
+
+test("restore against a file saved every 0.9 s ends in a retryable busy, never a same-second MOVE", async () => {
+  fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
+  const p = "S/busyr.txt";
+  const n = fake.addFile(p, Buffer.from("A")); const vA = String(n.versions[0].id);
+  let stop = false;
+  const arm = (at) => fake.state.pendingReleases.push({ at, fn: () => { if (stop) return; inject(p, "x"); arm(at + 900); } });
+  arm(fake.state.now + 50);
+  const moves = () => fake.calls.filter((c) => c.method === "MOVE" && c.url.includes("/dav/versions/")).length;
+  const m0 = moves();
+  await assert.rejects(W.withFileRestore(cfg, { path: p }, vA, { clock }), (e) => e.code === "busy");
+  stop = true; fake.state.realisticMtime = null;
+  assert.equal(moves(), m0, "no restore sent");
 });
