@@ -10,6 +10,7 @@ export const NS = Object.freeze({
   ct: "http://schemas.openxmlformats.org/package/2006/content-types", wp: "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
   pic: "http://schemas.openxmlformats.org/drawingml/2006/picture", c: "http://schemas.openxmlformats.org/drawingml/2006/chart",
   w14: "http://schemas.microsoft.com/office/word/2010/wordml", w15: "http://schemas.microsoft.com/office/word/2012/wordml",
+  w16cid: "http://schemas.microsoft.com/office/word/2016/wordml/cid", w16cex: "http://schemas.microsoft.com/office/word/2018/wordml/cex",
   xml: "http://www.w3.org/XML/1998/namespace",
 });
 

@@ -224,15 +224,16 @@ test("no full-document replace tool exists (D7 guardrail)", async () => {
   try {
     const tools = (await conn.client.listTools()).tools;
     const docs = tools.filter((t) => t.name.startsWith("ws_docs_")).map((t) => t.name).sort();
-    // exactly the §4.3 Docs tools so far (comment tools arrive in a later task) — nothing else can replace a whole document
-    assert.deepEqual(docs, ["ws_docs_append", "ws_docs_create", "ws_docs_find_replace", "ws_docs_format_text", "ws_docs_get_structure", "ws_docs_insert_at_heading", "ws_docs_insert_image", "ws_docs_read", "ws_docs_read_section", "ws_docs_replace_section", "ws_docs_rewrite_passages"]);
+    // exactly the §4.3 Docs tools + the §4.4 comment tools — nothing else can replace a whole document
+    assert.deepEqual(docs, ["ws_docs_add_comment", "ws_docs_append", "ws_docs_apply_comment_edit", "ws_docs_create", "ws_docs_find_replace", "ws_docs_format_text", "ws_docs_get_structure", "ws_docs_insert_at_heading", "ws_docs_insert_image", "ws_docs_list_comments", "ws_docs_read", "ws_docs_read_section", "ws_docs_replace_section", "ws_docs_reply_comment", "ws_docs_resolve_comment", "ws_docs_rewrite_passages"]);
     for (const t of tools) {
       assert.doesNotMatch(t.name, /^ws_docs_(replace|write|overwrite|set|update)(_all|_document|_content)?$/, t.name);
       assert.doesNotMatch(t.description, /(replace|overwrite)s? (the )?(whole|entire|full) (document|file|contents?)/i, `${t.name} describes a whole-document replace`);
     }
     // the only docs tool taking a whole-document body is create, which never touches an existing file
-    const bodyParams = tools.filter((t) => t.name.startsWith("ws_docs_") && Object.keys(t.inputSchema.properties || {}).some((k) => ["content", "text", "base64", "bytes"].includes(k))).map((t) => t.name);
-    assert.deepEqual(bodyParams, ["ws_docs_create"]);
+    // (add_comment / reply_comment's `content` is the comment's own text, written to word/comments.xml)
+    const bodyParams = tools.filter((t) => t.name.startsWith("ws_docs_") && Object.keys(t.inputSchema.properties || {}).some((k) => ["content", "text", "base64", "bytes"].includes(k))).map((t) => t.name).sort();
+    assert.deepEqual(bodyParams, ["ws_docs_add_comment", "ws_docs_create", "ws_docs_reply_comment"]);
     // and office files cannot be replaced through the generic drive upload either
     const up = tools.find((t) => t.name === "ws_drive_upload_new_version");
     if (up) assert.match(up.description, /docx|office/i);
@@ -374,4 +375,16 @@ test("format_text re-pointing a whole link drops its w:anchor (Word would append
   assert.equal(formatText(d, "la receta", 0, { link_url: "https://b.example/y" }), 1);
   assert.equal(h.hasAttributeNS(W_NS, "anchor"), false);
   assert.ok(h.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id"));
+});
+
+test("format_text styles only the match when it sits after a tab (or before a break) in the same run", async () => {
+  put("ft-tab.docx", "rich.docx");
+  await call("ws_docs_format_text", { path: "S/ft-tab.docx", find: "separated", bold: true });
+  await call("ws_docs_format_text", { path: "S/ft-tab.docx", find: "Tab", italic: true });
+  const p = await blockWith(bytesOf("S/ft-tab.docx"), "separated");
+  const runs = [...p.matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)].map((m) => m[1]);
+  const runOf = (txt) => runs.find((r) => r.includes(`>${txt}<`));
+  assert.match(runOf("separated"), /<w:b\/>/); assert.doesNotMatch(runOf("separated"), /<w:tab\/>|Tab</);
+  assert.match(runOf("Tab"), /<w:i\/>/); assert.doesNotMatch(runOf("Tab"), /<w:tab\/>|separated/);
+  assert.match((await call("ws_docs_read", { path: "S/ft-tab.docx" })).data.markdown, /\*Tab\*\t\*\*separated\*\* text and a line/);
 });

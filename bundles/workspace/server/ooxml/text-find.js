@@ -5,7 +5,7 @@
  *
  * Matching is done on the NFC form of the text (NFC and NFD spellings are equal) WITHOUT touching the paragraph;
  * only a paragraph that is actually hit gets its text nodes rewritten (normalizeSegs, then spliceSegs).
- * (Same algorithm as docx-edit.js's scan/prepareHit/spliceText; docx-edit.js can move onto this module.)
+ * Used by docx-edit.js (Word) and pptx.js (PowerPoint).
  */
 export const SEP = "\u0000";
 

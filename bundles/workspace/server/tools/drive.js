@@ -2,13 +2,14 @@ import { z } from "zod";
 import { WsError } from "../result.js";
 import { fileRef, refOf, toPublic, writeOpts, writeOptsOf } from "./common.js";
 import { defineTools } from "./define.js";
-import { stat, list, resolveRef, searchNames, mkcol, move, copy, remove } from "../nc/dav.js";
+import { stat, list, resolveRef, searchNames, mkcol, move, copy, remove, getFile } from "../nc/dav.js";
 import { splitPath, splitFolder, joinPath } from "../nc/paths.js";
 import { myShares, createUserShare } from "../nc/ocs.js";
 import { lockInfo, classifyLock } from "../nc/locks.js";
 import { exportAs } from "../nc/onlyoffice.js";
 import { listVersions } from "../nc/versions.js";
 import { withFileWrite, withFileRestore, createFile, refuseShareRoot, MAX_EDIT_BYTES } from "../write-protocol.js";
+import { extractText } from "../ooxml/text-extract.js";
 
 const PERMS = { R: "can_share", W: "can_write", D: "can_delete", C: "can_create", K: "can_create", N: "can_rename", V: "can_move" };
 
@@ -32,6 +33,16 @@ export const driveReadDefs = [
       try { shares = (await myShares(cfg, splitPath(e.path))).map((s) => ({ with: s.share_with, permissions: s.permissions })); }
       catch { note += " Crow bot's own shares could not be read right now."; }
       return { path: e.path, owner: { id: e.ownerId, name: e.ownerName }, crow_bot, shares_by_crow_bot: shares, note };
+    } },
+  { name: "ws_drive_read_file", description: "Read a file as text: .docx → markdown, .xlsx → each tab as CSV-like text, .pptx → slide text + notes; text files (text/*, .md, .csv, .json, .ics, .vcf…) as UTF-8. Other files are refused (not_text) with their metadata. truncated:true when cut at max_chars.",
+    schema: { ...fileRef, max_chars: z.number().int().min(1).max(1000000).optional().default(200000) },
+    run: async (args, { getConfig }) => {
+      const cfg = getConfig(); const segs = await resolveRef(cfg, refOf(args)); const e = await stat(cfg, segs);
+      if (e.isFolder) throw new WsError("not_a_file", `"${e.path}" is a folder; list it with ws_drive_list_folder`);
+      const { bytes } = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
+      const text = extractText(e.name, bytes, e.mime);
+      if (text === null) throw new WsError("not_text", `"${e.name}" is not a document or text file Crow can read`, { path: e.path, file_id: e.fileId, size: e.size, mime: e.mime });
+      return { path: e.path, file_id: e.fileId, text: text.slice(0, args.max_chars), truncated: text.length > args.max_chars };
     } },
   { name: "ws_drive_search", description: "Search file and folder names in Crow's Workspace drive (newest first).",
     schema: { query: z.string().min(1).max(200), max_results: z.number().int().min(1).max(100).optional().default(20) },

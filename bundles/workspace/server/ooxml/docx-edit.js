@@ -9,6 +9,7 @@ import { sectionRange } from "./docx-read.js";
 import { markdownToBlocks, safeUrl } from "./md-to-wml.js";
 import { addRel, removeRel, REL, ensureDefault } from "./opc.js";
 import { imageSize } from "./image-size.js";
+import { scanMap, normalizeSegs, spliceSegs } from "./text-find.js";
 
 const W = NS.w;
 const KEEP_ON_REWRITE = new Set(["pPr", "bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "proofErr"]);
@@ -27,34 +28,15 @@ const isCommentRef = (c) => c.namespaceURI === W && c.localName === "r" && kids(
 export const isPlainTextParagraph = (p) => kids(p).every((c) => isW(c, KEEP_ON_REWRITE) || isCommentRef(c) || (c.namespaceURI === W && c.localName === "r" && kids(c).every((k) => isW(k, PLAIN_RUN))));
 
 // ---- text search -------------------------------------------------------------------------------------
-// A paragraph's text is its w:t segments joined, with "\u0000" for every tab/break/drawing/field (SEP), so a
-// match can span runs (and the bookmarks/comment anchors between them) but never a tab or a line break.
+// A paragraph's text is its w:t segments joined, with SEP for every tab/break/drawing/field (docx-model textMap),
+// so a match can span runs (and the bookmarks/comment anchors between them) but never a tab or a line break.
+// The matching itself is the shared, pure core in text-find.js (NFC and NFD spellings are equal).
 
-/** Case fold that keeps every UTF-16 offset (a character whose lower case has another length, e.g. "İ", is kept). */
-const fold = (s, matchCase) => (matchCase ? s : Array.from(s, (c) => { const l = c.toLowerCase(); return l.length === c.length ? l : c; }).join(""));
-
-/** The paragraph text as it would read after NFC-normalizing each w:t (separators kept in place). */
-function nfcText({ text, segs }) {
-  let out = "", at = 0;
-  for (const g of segs) { out += text.slice(at, g.start) + text.slice(g.start, g.end).normalize("NFC"); at = g.end; }
-  return out + text.slice(at);
-}
-
-function indexAll(text, find, matchCase) {
-  const H = fold(text, matchCase), N = fold(find, matchCase);
-  const hits = []; let i = 0;
-  while (N && (i = H.indexOf(N, i)) !== -1) { if (!text.slice(i, i + N.length).includes("\u0000")) hits.push(i); i += N.length; }
-  return hits;
-}
-
-/** Pure: match offsets in the NFC form of p (NFC and NFD spellings are equal). Never touches p. */
-function scan(p, find, matchCase) {
-  const map = textMap(p); const norm = nfcText(map);
-  return { hits: indexAll(norm, find, matchCase), normalized: norm === map.text };
-}
+/** Pure: match offsets in the NFC form of p. Never touches p. */
+const scan = (p, find, matchCase) => scanMap(textMap(p), find, matchCase);
 /** Only for a paragraph that IS hit: store its w:t text NFC so the scan offsets apply; returns the fresh map. */
 function prepareHit(p, normalized) {
-  if (!normalized) for (const g of textMap(p).segs) { const n = g.t.textContent.normalize("NFC"); if (n !== g.t.textContent) g.t.textContent = n; }
+  if (!normalized) normalizeSegs(textMap(p).segs);
   return textMap(p);
 }
 
@@ -65,16 +47,8 @@ function dropIfEmpty(g) {
   if (!kids(g.run, W).some((c) => c.localName !== "rPr")) removeNode(g.run);
 }
 
-/** Replace [start,end) by repl in the run where the match starts; the other runs are trimmed. */
-function spliceText(segs, start, end, repl) {
-  const hit = segs.filter((g) => g.end > start && g.start < end);
-  if (!hit.length) return;
-  const first = hit[0];
-  const tail = end <= first.end ? first.t.textContent.slice(end - first.start) : "";
-  first.t.textContent = first.t.textContent.slice(0, start - first.start) + repl + tail; preserve(first.t);
-  for (const g of hit.slice(1)) { g.t.textContent = g.t.textContent.slice(Math.min(end, g.end) - g.start); preserve(g.t); dropIfEmpty(g); }
-  dropIfEmpty(first);
-}
+/** Replace [start,end) of a docx text map by repl in the run where the match starts; the other runs are trimmed. */
+export const spliceText = (segs, start, end, repl) => spliceSegs(segs, start, end, repl, { touch: preserve, drop: dropIfEmpty });
 
 export function findReplace(d, pairs, matchCase = true) {
   const results = []; let total = 0;
@@ -142,9 +116,27 @@ function splitRun(run, tNode, offset) {
   tNode.textContent = text.slice(0, offset); preserve(tNode);
   insertAfter(nr, run);
 }
-/** Split runs at the match edges; returns the runs that hold exactly [start,end). */
-function isolate(p, start, end) {
-  for (const pos of [end, start]) { const g = textMap(p).segs.find((s) => s.start < pos && pos < s.end); if (g) splitRun(g.run, g.t, pos - g.start); }
+/** Move `node` and every later sibling into a new run (same w:rPr) right after `run`. */
+function splitBefore(run, node) {
+  const nr = el(run.ownerDocument, W, "w:r"); const rPr = kid(run, W, "rPr"); if (rPr) nr.appendChild(rPr.cloneNode(true));
+  for (let n = node; n;) { const next = n.nextSibling; nr.appendChild(n); n = next; }
+  insertAfter(nr, run);
+}
+const elementSibling = (n, dir) => { for (let x = n[dir]; x; x = x[dir]) if (x.nodeType === 1) return x; return null; };
+const contentBefore = (t) => { const x = elementSibling(t, "previousSibling"); return x && !(x.namespaceURI === W && x.localName === "rPr") ? x : null; };
+/**
+ * Split runs at the match edges; returns the runs that hold exactly [start,end). An edge inside a w:t splits it;
+ * an edge between two children of one run (text right after a tab or before a break) splits the run there, so
+ * the returned runs never carry text or tabs from outside the range.
+ */
+export function isolate(p, start, end) {
+  for (const pos of [end, start]) {
+    const segs = textMap(p).segs.filter((s) => s.end > s.start);
+    const g = segs.find((s) => s.start < pos && pos < s.end);
+    if (g) { splitRun(g.run, g.t, pos - g.start); continue; }
+    if (pos === end) { const a = segs.find((s) => s.end === pos && elementSibling(s.t, "nextSibling")); if (a) splitBefore(a.run, elementSibling(a.t, "nextSibling")); }
+    if (pos === start) { const b = segs.find((s) => s.start === pos && contentBefore(s.t)); if (b) splitBefore(b.run, b.t); }
+  }
   return [...new Set(textMap(p).segs.filter((s) => s.start >= start && s.end <= end && s.end > s.start).map((s) => s.run))];
 }
 

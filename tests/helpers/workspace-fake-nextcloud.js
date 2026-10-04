@@ -24,7 +24,7 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
   // Real Nextcloud: mtime = wall-clock seconds; a write in the same second as the current version REPLACES that
   // version row (files_versions FileEventsListener.php:326-333). Tests opt in via state.realisticMtime = () => seconds.
   const touch = (n) => { n.etag = `"e${++etagN}"`; n.mtime = state.realisticMtime ? state.realisticMtime() : ++clockS; };
-  const mkNode = (path, type, opts = {}) => { const n = { path, type, fileId: ++nextId, owner: opts.owner || "crow-bot", perms: opts.perms || (type === "dir" ? "SRGDNVCK" : "SRGDNVW"), lock: opts.lock || null, bytes: Buffer.alloc(0), versions: [], label: null }; touch(n); nodes.set(path, n); return n; };
+  const mkNode = (path, type, opts = {}) => { const n = { path, type, fileId: ++nextId, mime: opts.mime || null, owner: opts.owner || "crow-bot", perms: opts.perms || (type === "dir" ? "SRGDNVCK" : "SRGDNVW"), lock: opts.lock || null, bytes: Buffer.alloc(0), versions: [], label: null }; touch(n); nodes.set(path, n); return n; };
   mkNode("", "dir");
   const ensureParents = (path) => { const segs = path.split("/"); for (let i = 1; i < segs.length; i++) { const p = segs.slice(0, i).join("/"); if (!nodes.has(p)) mkNode(p, "dir", { owner: "admin" }); } };
   const api = {
@@ -50,7 +50,7 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
     const lock = n.lock;
     return `<d:propstat><d:prop>
 <d:getetag>${xmlEsc(n.etag)}</d:getetag><d:getlastmodified>${new Date(n.mtime * 1000).toUTCString()}</d:getlastmodified>
-${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/><d:getcontentlength>${n.bytes.length}</d:getcontentlength><d:getcontenttype>application/octet-stream</d:getcontenttype>`}
+${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/><d:getcontentlength>${n.bytes.length}</d:getcontentlength><d:getcontenttype>${n.mime || "application/octet-stream"}</d:getcontenttype>`}
 <oc:fileid>${n.fileId}</oc:fileid><oc:permissions>${n.perms}</oc:permissions><oc:owner-id>${n.owner}</oc:owner-id><oc:owner-display-name>${n.owner === "admin" ? "Kevin" : n.owner}</oc:owner-display-name>
 <nc:lock>${lock ? 1 : ""}</nc:lock>${lock ? `<nc:lock-owner-type>${lock.type}</nc:lock-owner-type>${lock.owner == null ? "" : `<nc:lock-owner>${xmlEsc(lock.owner)}</nc:lock-owner>`}${(lock.displayName ?? lock.owner) == null ? "" : `<nc:lock-owner-displayname>${xmlEsc(lock.displayName ?? lock.owner)}</nc:lock-owner-displayname>`}<nc:lock-time>${lock.time || clockS}</nc:lock-time>` : ""}
 </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>`;

@@ -5,6 +5,7 @@ const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 export const REL = Object.freeze({
   officeDocument: `${R}/officeDocument`, styles: `${R}/styles`, numbering: `${R}/numbering`, hyperlink: `${R}/hyperlink`, image: `${R}/image`,
   comments: `${R}/comments`, commentsExtended: "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
+  commentsIds: "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds", commentsExtensible: "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible",
   header: `${R}/header`, footer: `${R}/footer`, worksheet: `${R}/worksheet`, sharedStrings: `${R}/sharedStrings`, calcChain: `${R}/calcChain`,
   slide: `${R}/slide`, slideLayout: `${R}/slideLayout`, notesSlide: `${R}/notesSlide`, notesMaster: `${R}/notesMaster`, chart: `${R}/chart`,
   pivotCacheDefinition: `${R}/pivotCacheDefinition`, drawing: `${R}/drawing`,
