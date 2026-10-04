@@ -133,7 +133,12 @@ export function isForeignOwner(owner, me) {
   // CROW_HOME is what the file NAME encodes, so it is the primary key: same
   // home = own file even if the instance-id file was regenerated or the DB
   // moved. Only when either side lacks it do the weaker keys decide.
-  if (owner.crow_home && me.crow_home) return resolve(owner.crow_home) !== resolve(me.crow_home);
+  if (owner.crow_home && me.crow_home) {
+    if (resolve(owner.crow_home) !== resolve(me.crow_home)) return true;
+    // Same home but two different DBs (two gateways sharing ~/.crow under one
+    // label): still another instance's data.
+    return !!(owner.db_path && me.db_path && resolve(owner.db_path) !== resolve(me.db_path));
+  }
   if (owner.db_path && me.db_path) return resolve(owner.db_path) !== resolve(me.db_path);
   if (owner.instance_id && me.instance_id) return owner.instance_id !== me.instance_id;
   return false;

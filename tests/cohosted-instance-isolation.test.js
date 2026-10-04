@@ -71,6 +71,7 @@ test("isForeignOwner: differing instance id, db path or CROW_HOME is foreign; mi
   assert.equal(isForeignOwner({ crow_home: "/h/.crow-r4" }, { crow_home: "/h/.crow" }), true);
   // Same CROW_HOME = own, even after the instance-id file was regenerated.
   assert.equal(isForeignOwner({ crow_home: "/h/.crow", instance_id: "old" }, { crow_home: "/h/.crow", instance_id: "new" }), false);
+  assert.equal(isForeignOwner({ crow_home: "/h/.crow", db_path: "/d/a.db" }, { crow_home: "/h/.crow", db_path: "/d/b.db" }), true);
 });
 
 test("coHostedDataDirWarning flags CROW_HOME without CROW_DATA_DIR only", () => {
