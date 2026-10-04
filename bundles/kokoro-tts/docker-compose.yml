@@ -1,7 +1,9 @@
 services:
   kokoro-tts:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    # Pinned (kiosk K1, 2026-10-03): v0.9.0 == the floating latest tag on that date (sha256:ee3111d6…).
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
     container_name: kokoro-tts
+    mem_limit: 4g
     environment:
       USE_GPU: "false"
       DEVICE: cpu

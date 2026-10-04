@@ -1,19 +1,30 @@
 services:
   faster-whisper-server:
-    image: fedirz/faster-whisper-server:latest-cpu
+    # Pinned (kiosk K1, 2026-10-03): 0.5.0-cpu IS the image crow already runs
+    # (digest sha256:760e5e43…, formerly the floating latest-cpu tag) — pinning changes nothing
+    # on a recreate.
+    image: fedirz/faster-whisper-server:0.5.0-cpu
     container_name: faster-whisper-server
     environment:
       # Preload + default model. OpenAI-compatible /v1/audio/transcriptions.
       WHISPER__MODEL: Systran/faster-whisper-large-v3
       WHISPER__INFERENCE_DEVICE: cpu
       WHISPER__COMPUTE_TYPE: int8
+      # Never unload a loaded model. The default (300 s) unloaded after five idle
+      # minutes, so the first kiosk turn after a quiet spell paid a model load.
+      WHISPER__TTL: "-1"
+      # The kiosk's small English model (spec §7.3) is loaded at start.
+      PRELOAD_MODELS: '["Systran/faster-distil-whisper-small.en"]'
       ENABLE_UI: "false"
+    # large-v3 int8 + distil-small resident, plus decode buffers for a 90-min
+    # meeting recording (R4 meeting recorder) — measured headroom, not a target.
+    mem_limit: 8g
     volumes:
       # Persist the downloaded CTranslate2 weights across recreates (~3 GB).
       - faster-whisper-cache:/root/.cache/huggingface
     # Loopback only. The OpenAI-compatible Whisper endpoint is consumed by the
-    # gateway STT adapter (glasses + AI-chat); the companion keeps faster-whisper
-    # in-container. :8002 is taken by edjobs_backend on crow → use :8004.
+    # gateway STT adapter (glasses, kiosk, AI chat, meeting recorder).
+    # :8002 is taken by edjobs_backend on crow → use :8004.
     ports:
       - "127.0.0.1:8004:8000"
     restart: unless-stopped
