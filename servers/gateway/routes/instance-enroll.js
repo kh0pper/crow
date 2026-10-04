@@ -33,15 +33,16 @@ import {
   getInstance,
   updateInstance,
   getOrCreateLocalInstanceId,
-  configuredSelfGatewayUrl,
+  selfPairingAddress,
 } from "../instance-registry.js";
+import { isDialableGatewayUrl, isTailnetAddress, rememberPeerSyncPort } from "../../shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
 } from "../../shared/peer-credentials.js";
 import { hostname as osHostname } from "os";
 
-export function instanceEnrollRouter(db) {
+export function instanceEnrollRouter(db, { execFileSyncImpl } = {}) {
   const router = express.Router();
 
   router.post("/instance/enroll-request", express.json({ limit: "8kb" }), async (req, res) => {
@@ -53,6 +54,8 @@ export function instanceEnrollRouter(db) {
       source_instance_id,
       source_name,
       source_gateway_url,
+      source_tailscale_ip,
+      source_sync_port,
       source_outbound_bearer,
       shared_signing_key,
       otc,
@@ -77,10 +80,18 @@ export function instanceEnrollRouter(db) {
       // and promote to trusted=1.
       const sourceHash = createHash("sha256").update(source_outbound_bearer).digest("hex");
       const existing = await getInstance(db, source_instance_id);
+      // A dialable advertised URL wins; an undialable one (an old peer's
+      // CROW_GATEWAY_URL — the :443 door) never replaces a dialable row.
+      const srcUrl = typeof source_gateway_url === "string" && source_gateway_url.trim() ? source_gateway_url.trim() : null;
+      const gatewayUrl = srcUrl && (isDialableGatewayUrl(srcUrl) || !isDialableGatewayUrl(existing?.gateway_url))
+        ? srcUrl : (existing?.gateway_url || srcUrl || null);
+      const tailscaleIp = typeof source_tailscale_ip === "string" && isTailnetAddress(source_tailscale_ip.trim())
+        ? source_tailscale_ip.trim() : null;
       if (existing) {
         await updateInstance(db, source_instance_id, {
           name: source_name || existing.name,
-          gateway_url: source_gateway_url || existing.gateway_url,
+          gateway_url: gatewayUrl,
+          ...(tailscaleIp ? { tailscale_ip: tailscaleIp } : {}),
           auth_token_hash: sourceHash,
           trusted: 1,
         });
@@ -89,7 +100,8 @@ export function instanceEnrollRouter(db) {
           id: source_instance_id,
           name: source_name || source_instance_id,
           crowId: source_instance_id,
-          gatewayUrl: source_gateway_url || null,
+          gatewayUrl,
+          tailscaleIp,
           authTokenHash: sourceHash,
         });
         await updateInstance(db, source_instance_id, { trusted: 1 });
@@ -105,11 +117,23 @@ export function instanceEnrollRouter(db) {
       });
 
       const localId = getOrCreateLocalInstanceId();
+      await rememberPeerSyncPort(db, localId, source_instance_id, source_sync_port);
+      // NOTE: the tailnet-sync challenge-response pin (tailnet_sync_cr:<id>)
+      // is deliberately NOT touched here. This endpoint is reachable by any
+      // host while enrollment is enabled (the OTC is optional), so clearing
+      // the pin on an inbound request would let anyone downgrade a pinned
+      // peer to the replayable legacy handshake. Only the operator's local
+      // `crow instance pair` (scripts/cli/instance-pair.js) clears it.
+      // Our TAILNET dial address — never CROW_GATEWAY_URL (the public
+      // Funnel URL on crow; instance sync never dials :443).
+      const self = await selfPairingAddress(db, execFileSyncImpl ? { execFileSyncImpl } : {});
       return res.json({
         peer_instance_id: localId,
         peer_crow_id: localId,
         peer_name: osHostname(),
-        peer_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
+        peer_gateway_url: self.gateway_url,
+        peer_tailscale_ip: self.tailscale_ip,
+        peer_sync_port: self.sync_port,
         peer_outbound_bearer: peerOutboundBearer,
       });
     } catch (err) {
