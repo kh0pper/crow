@@ -29,6 +29,8 @@ The deferral's other argument — that new places measure exploration and cannot
 | S3 | Fallback | Players without the Android counter (phone browser, iPhone, a phone without the sensor, permission refused) get a **one-tap "I walked today"** daily check-in. It counts for **mood only** — no seed bonus without a real count. |
 | S4 | Nudge | **One gentle nudge** from the bird in the early evening (~18:00 local) if well below goal, **at most one per day**, via Crow push. A setting turns it off; an option skips weekends. |
 
+**Further rulings (Kevin, 2026-10-04, after plan review):** the daily goal's floor is **2,000 steps** (range 2,000–30,000, §4.3); and **open-to-count** — steps are read only when the Ramble panel is opened, with no background reader — is accepted for v1 (background sampling stays in §12).
+
 ## 2. Rulings made in this design (not Kevin decisions; each is reversible by a setting or a small change)
 
 | # | Ruling | Why |
@@ -38,7 +40,7 @@ The deferral's other argument — that new places measure exploration and cannot
 | R3 | The phone's counter baseline lives in a **local, non-replicated** table `ramble_step_devices` on the instance the phone talks to. | A baseline is one instance's view of one sensor; replicating it would let two instances both diff against it and double-credit. |
 | R4 | Steps since the last reading are credited to **the day of the reading**. | The counter carries no timestamps. Steps walked after last night's reading but before midnight land on today. Generous, never punishing (S1), and bounded by the daily cap. Exact attribution would need background sampling — out of scope (§12). |
 | R5 | Step energy does **not reset the decay clock** (`last_fed_at`). | Every other feed resets it. Step readings arrive often and in small amounts; if each reset the clock, a bird whose owner opens the app every few hours would never decay at all. Steps add energy; decay keeps its own cadence. |
-| R6 | "Walked today" (the badge) = the manual check-in, **or** today's steps reached `min(goal, 2,000)`. | A badge only for meeting a 6,000 goal would show a 5,000-step day as "didn't walk", which reads as a judgement. 2,000 is a real walk. Tunable (`steps.badge.min`). |
+| R6 | "Walked today" (the badge) = the manual check-in, **or** today's steps reached `min(goal, 2,000)`. | A badge only for meeting a 6,000 goal would show a 5,000-step day as "didn't walk", which reads as a judgement. 2,000 is a real walk. Tunable (`steps.badge.min`). With the 2,000 goal floor the `min` only matters when `steps.badge.min` is raised above the goal. |
 | R7 | The seed bonus is a `kind='seed'` row keyed `steps:<day>`. | It then counts in `seedBalance` and in `buyItem`'s affordability check with **no change** to either query (`wardrobe.js` hard-codes `kind IN ('seed', ?)`). The key cannot collide with a pickup key (`<cell>:<window>`, window an integer) — a test pins that `harvestableCells` ignores it. |
 | R8 | The nudge is sent only by an instance that is the player's **"steps home"** — one where the player opened the pet page, sent a reading, or checked in within the last 3 days (a `local.`-prefixed setting, which instance sync never replicates). A replicated `kind='nudge'` row per day is written **before** sending, so a second home instance that has synced it stays quiet. | Ramble may be installed on more than one of the user's instances; each runs the same timer. The home rule keeps an idle instance from nudging; the day row dedupes the rest. A same-minute race between two active homes can still send two — accepted, bounded at one extra per day. |
 | R9 | The nudge only reaches players who **have used walking** (a steps or check-in row in the last 7 days) and is **on by default** for them. | A player who never touched the feature should never get pushed about it. |
@@ -104,7 +106,7 @@ Absent from `SYNCED_TABLES` (an allowlist), so it is local by construction. Addi
 
 ### 4.3 Settings (replicated `ramble_settings`, LWW with the existing `lamport_origin` tie-break)
 
-User-facing: `steps.goal` (default 6000, range 1,000–30,000), `steps.nudge` (`1`/`0`, default on), `steps.nudge.weekends` (`1`/`0`, default on — "nudge me on weekends too").
+User-facing: `steps.goal` (default 6000, range 2,000–30,000), `steps.nudge` (`1`/`0`, default on), `steps.nudge.weekends` (`1`/`0`, default on — "nudge me on weekends too").
 
 Tunables (live, defaults in code, following the `nest.rate`/`seed.rate` pattern):
 
@@ -256,7 +258,7 @@ The project rule stands: anything that replicates gets an executable **multi-ins
 
 **Android:** there is no unit-test harness in the app and CI does not build the APK. `./gradlew assembleDebug --offline` must compile on crow; behaviour is proven by the documented on-device test (Kevin, §12 acceptance).
 
-**Live acceptance (last) — [KEVIN] on his Pixel**, APK 1.6.0, against crow: the permission prompt; a first reading; walk ~200 steps and see the count rise by about that; energy rise; lower the goal to just below today's count and see the bonus once; the badge on his portrait as a contact sees it; a nudge on a test evening (by moving `steps.nudge.hour` to the current hour), and none after a check-in; "weekends off" holding on a weekend.
+**Live acceptance (last) — [KEVIN] on his Pixel**, APK 1.6.0, against crow: the permission prompt; a first reading; walk ~200 steps and see the count rise by about that; energy rise; lower the goal to just below today's count (needs 2,000+ steps that day — the goal floor) and see the bonus once; the badge on his portrait as a contact sees it; a nudge on a test evening (by moving `steps.nudge.hour` to the current hour), and none after a check-in; "weekends off" holding on a weekend.
 
 ## 12. Not in this design
 

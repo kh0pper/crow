@@ -27,7 +27,7 @@
 - Run single files with `npm test -- tests/<file>.test.js` (scratch env). **Never raw `node --test`** — it writes the live crow.db. Full suite: `npm test`.
 - Commits: `git commit <paths> -m "..."` with explicit paths, never bare. `git commit <path>` refuses an untracked file, so a task that CREATES a file runs `git add <exactly the new files>` first. Never add the worktree's untracked `node_modules` symlink. No Claude attribution in commit messages. Verify each commit with `git show --stat HEAD`.
 - Android: CI does not build the APK. `versionCode 19 → 20`, `versionName "1.5.2" → "1.6.0"`. The release APK is built on crow with the keystore env file and installed by Kevin (Task 11).
-- Constants (spec §4.3 defaults): goal 6000 (1,000–30,000); `steps.max.day` 40000; `steps.max.per.min` 250; `steps.devices.per.day` 4; `steps.energy.full` 30; `steps.energy.chunk` 5; `steps.checkin.energy` 15; `steps.goal.seed` 3; `steps.badge.min` 2000; `steps.nudge.hour` 18; `steps.nudge.until` 21; `steps.nudge.below` 50 (percent).
+- Constants (spec §4.3 defaults): goal 6000 (2,000–30,000); `steps.max.day` 40000; `steps.max.per.min` 250; `steps.devices.per.day` 4; `steps.energy.full` 30; `steps.energy.chunk` 5; `steps.checkin.energy` 15; `steps.goal.seed` 3; `steps.badge.min` 2000; `steps.nudge.hour` 18; `steps.nudge.until` 21; `steps.nudge.below` 50 (percent).
 
 ## Review Focus
 
@@ -35,7 +35,7 @@
 2. **The panel fires two readings at once** (load + visibility change, a double tap) **or a phone moves between two of the user's instances mid-day — and back.** Expect: no double credit on one instance (compare-and-swap), a first reading on the second instance does not re-add what the first already synced, a return to the first instance re-baselines instead of re-counting the second's range (foreign-credit guard), totals stay monotone and capped after merge, and the seed bonus pays once. (Task 1 concurrent test; Task 3 multi-instance tests.)
 3. **A player who cannot count steps** — browser, iPhone, the 1.5.x app, a phone without the sensor, permission refused twice. Expect: the card explains why in one line, offers "I walked today", never throws, and never shows a "Count my steps" button that cannot work. (Task 7 `walkCardState` + `nativeStepsMode` tests.)
 4. **Nudge edges:** the gateway restarts inside the evening window, weekends-off on a Saturday, a check-in after the nudge was sent, a second instance with Ramble installed, a player who never used walking, reminders turned off in notification preferences. Expect: at most one nudge per day, none when off/weekend/not-engaged/on-track/not-home, and the core timer never throws. (Task 6 tests; the type-preference gate is `createNotification`'s own and is exercised by sending type `reminder`.)
-5. **Junk from the client or a hand-edited setting** — a fractional/negative/huge counter, a non-string device id, `elapsed_ms` as a string, `steps.goal = "abc"`, a goal of 999 via the API. Expect: 400 from the API, defaults from the settings reader, never a 500 or a NaN in the ledger. (Task 1 parse tests; Task 2 settings tests; Task 4 route 400s.)
+5. **Junk from the client or a hand-edited setting** — a fractional/negative/huge counter, a non-string device id, `elapsed_ms` as a string, `steps.goal = "abc"`, a goal of 1,999 via the API. Expect: 400 from the API, defaults from the settings reader, never a 500 or a NaN in the ledger. (Task 1 parse tests; Task 2 settings tests; Task 4 route 400s.)
 
 ---
 
@@ -81,7 +81,7 @@ npm test 2>&1 | tail -6  # record the BASELINE pass count for the PR body
 
 **Interfaces:**
 - Consumes: `localDay(ms)`, `startOfLocalDay(ms)` from `eggs.js`.
-- Produces (exported from `steps.js`): kind constants `STEPS_KIND="steps"`, `STEP_ENERGY_KIND="stepenergy"`, `WALKED_KIND="walked"`, `WALK_CHECKIN_KIND="walkcheck"`, `NUDGE_KIND="nudge"`, `STEP_SEED_PREFIX="steps:"`, `HOME_KEY="local.steps.seen_at"`; `STEPS_DEFAULTS` (frozen object: `goal, maxDay, maxPerMin, devicesPerDay, energyFull, energyChunk, checkinEnergy, goalSeed, badgeMin, nudge, nudgeWeekends, nudgeHour, nudgeUntil, nudgeBelow`); `GOAL_MIN=1000`, `GOAL_MAX=30000`; `class StepsInputError extends Error` (`name === "StepsInputError"`); `parseReading(obj) → {device_id, counter, elapsed_ms, boot_count|null}` (throws `StepsInputError`); `readStepSettings(db) → settings object shaped like STEPS_DEFAULTS`; `stepsToday(db, now, settings?) → number` (capped); `recordStepReading(db, reading, {now, emit}) → {credited, reason, clamped, day}` where `reason ∈ "baseline"|"booted-today"|"foreign"|"reboot"|"delta"|"raced"|"device-limit"`; internal helpers `safeEmit`, `rowDelta`, `insertOnce`, `casDelta` (used by Tasks 2 and 6).
+- Produces (exported from `steps.js`): kind constants `STEPS_KIND="steps"`, `STEP_ENERGY_KIND="stepenergy"`, `WALKED_KIND="walked"`, `WALK_CHECKIN_KIND="walkcheck"`, `NUDGE_KIND="nudge"`, `STEP_SEED_PREFIX="steps:"`, `HOME_KEY="local.steps.seen_at"`; `STEPS_DEFAULTS` (frozen object: `goal, maxDay, maxPerMin, devicesPerDay, energyFull, energyChunk, checkinEnergy, goalSeed, badgeMin, nudge, nudgeWeekends, nudgeHour, nudgeUntil, nudgeBelow`); `GOAL_MIN=2000`, `GOAL_MAX=30000`; `class StepsInputError extends Error` (`name === "StepsInputError"`); `parseReading(obj) → {device_id, counter, elapsed_ms, boot_count|null}` (throws `StepsInputError`); `readStepSettings(db) → settings object shaped like STEPS_DEFAULTS`; `stepsToday(db, now, settings?) → number` (capped); `recordStepReading(db, reading, {now, emit}) → {credited, reason, clamped, day}` where `reason ∈ "baseline"|"booted-today"|"foreign"|"reboot"|"delta"|"raced"|"device-limit"`; internal helpers `safeEmit`, `rowDelta`, `insertOnce`, `casDelta` (used by Tasks 2 and 6).
 
 - [ ] **Step 1: Write the failing tests** — create `tests/ramble-steps.test.js`:
 
@@ -273,7 +273,7 @@ test("readStepSettings: defaults, valid overrides, junk falls back", async () =>
   assert.equal(s.badgeMin, STEPS_DEFAULTS.badgeMin, "0 is below the floor");
   assert.equal(s.nudge, false);
   assert.equal(s.nudgeWeekends, true);
-  await setSetting(db, "steps.goal", "999");
+  await setSetting(db, "steps.goal", "1999");
   assert.equal((await readStepSettings(db)).goal, 6000, "below GOAL_MIN");
 });
 ```
@@ -337,7 +337,7 @@ export const NUDGE_KIND = "nudge";               // key `<day>`, delta 1 — the
 export const STEP_SEED_PREFIX = "steps:";        // kind 'seed', key `steps:<day>` — the goal bonus (R7)
 export const HOME_KEY = "local.steps.seen_at";   // R8; `local.` keys never replicate
 
-export const GOAL_MIN = 1000;
+export const GOAL_MIN = 2000;
 export const GOAL_MAX = 30000;
 export const STEPS_DEFAULTS = Object.freeze({
   goal: 6000,
@@ -751,10 +751,15 @@ test("the badge: min(goal, badge.min) counted steps, or a check-in; the new-fact
   assert.deepEqual([out.walked, out.walkedNew], [true, false]);
   assert.equal(await walkedToday(db, { now: AT(11) }), true);
   assert.equal(await walkedToday(db, { now: AT(11) + 24 * H }), false, "tomorrow starts unwalked");
+  // The goal floor is 2,000 (= the default badge.min), so a goal can only be
+  // the lower line when badge.min has been raised above it.
   const db2 = await freshDb();
-  await writeStepSettings(db2, { goal: 1_500 }, { now: AT(10) });
-  await plantSteps(db2, AT(10), 1_500);
-  assert.equal((await settleDay(db2, { now: AT(10) })).walked, true, "a goal under 2,000 is its own badge line");
+  await setSetting(db2, "steps.badge.min", 5_000);
+  await writeStepSettings(db2, { goal: 4_000 }, { now: AT(10) });
+  await plantSteps(db2, AT(10), 3_999);
+  assert.equal((await settleDay(db2, { now: AT(10) })).walked, false);
+  await plantSteps(db2, AT(10, 5), 4_000);
+  assert.equal((await settleDay(db2, { now: AT(10, 5) })).walked, true, "a goal under badge.min is its own badge line");
 });
 
 test("step energy is clamped by the heart-derived ceiling", async () => {
@@ -781,7 +786,7 @@ test("writeStepSettings validates, persists, and emits each setting", async () =
   const db = await freshDb();
   const ops = [];
   const emit = async (table, op, row) => ops.push({ table, op, row });
-  for (const bad of [{}, { goal: 999 }, { goal: 30_001 }, { goal: 6000.5 }, { goal: "6000" }, { nudge: "yes" }, { nudge_weekends: 1 }, null]) {
+  for (const bad of [{}, { goal: 1_999 }, { goal: 30_001 }, { goal: 6000.5 }, { goal: "6000" }, { nudge: "yes" }, { nudge_weekends: 1 }, null]) {
     await assert.rejects(() => writeStepSettings(db, bad, { now: AT(10), emit }), (e) => e.name === "StepsInputError", JSON.stringify(bad));
   }
   const st = await writeStepSettings(db, { goal: 7_500, nudge: false, nudge_weekends: false }, { now: AT(10), emit });
@@ -1284,18 +1289,18 @@ test("POST /api/ramble/steps/walked: idempotent, mood not seed, pokes the badge 
 });
 
 test("PUT /api/ramble/steps/settings: validates, persists, emits; lowering the goal under today's steps completes it", async () => {
-  for (const body of [{}, { goal: 999 }, { goal: 6000.5 }, { goal: "6000" }, { nudge: "yes" }]) {
+  for (const body of [{}, { goal: 1999 }, { goal: 6000.5 }, { goal: "6000" }, { nudge: "yes" }]) {
     assert.equal((await send("PUT", "/api/ramble/steps/settings", body)).status, 400, JSON.stringify(body));
   }
   await withDb((db) => db.execute({
-    sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('steps', ?, 1500, ?)",
+    sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('steps', ?, 2500, ?)",
     args: [`${localDay(Date.now())}:dddddddd-0000-0000-0000-000000000000`, Date.now()],
   }));
-  const r = await send("PUT", "/api/ramble/steps/settings", { goal: 1000, nudge: false });
+  const r = await send("PUT", "/api/ramble/steps/settings", { goal: 2000, nudge: false });
   assert.equal(r.status, 200);
   const st = await r.json();
-  assert.deepEqual([st.goal, st.goal_met, st.seed_today, st.settings.nudge], [1000, true, 3, false]);
-  assert.ok(emitted.some((e) => e.table === "ramble_settings" && e.row.key === "steps.goal" && e.row.value === "1000"));
+  assert.deepEqual([st.goal, st.goal_met, st.seed_today, st.settings.nudge], [2000, true, 3, false]);
+  assert.ok(emitted.some((e) => e.table === "ramble_settings" && e.row.key === "steps.goal" && e.row.value === "2000"));
 });
 ```
 
@@ -2312,7 +2317,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
 
   function nudgeGoal(by) {
     var goal = (walkState && Number(walkState.goal)) || 6000;
-    var next = Math.max(1000, Math.min(30000, goal + by));
+    var next = Math.max(2000, Math.min(30000, goal + by));
     if (next !== goal) saveWalkSettings({ goal: next });
   }
 
@@ -2660,12 +2665,12 @@ git show --stat HEAD
 ```markdown
 ## Walking
 
-Set a daily step goal on the pet page (6,000 to start; anywhere from 1,000 to 30,000). Walking toward it tops up your bird's energy as you go — up to +30 a day at the goal — and reaching it pays 3 bird seed. A day you miss costs nothing.
+Set a daily step goal on the pet page (6,000 to start; anywhere from 2,000 to 30,000). Walking toward it tops up your bird's energy as you go — up to +30 a day at the goal — and reaching it pays 3 bird seed. A day you miss costs nothing.
 
 - **In the Crow Android app (1.6.0 or later)** tap **Count my steps** once and allow *Physical activity*. The app reads the phone's own step counter whenever you open Ramble; nothing runs in the background. The first day may start at zero ("counting from now") unless the phone was restarted today.
 - **Anywhere else** (a phone browser, an iPhone, a phone without a step counter) tap **I walked today**. It cheers your bird up (+15) but pays no seed, since there is no count behind it.
 
-**Who sees what.** Your step count stays on your own Crows. Contacts see only a small "walked today" mark on your bird's profile picture — never a number. The mark appears when you check in or pass 2,000 steps (or your goal, if it is lower), and clears after midnight. Because it appears when you walk, it does say roughly *when* you walked.
+**Who sees what.** Your step count stays on your own Crows. Contacts see only a small "walked today" mark on your bird's profile picture — never a number. The mark appears when you check in or pass 2,000 steps, and clears after midnight. Because it appears when you walk, it does say roughly *when* you walked.
 
 **The evening nudge.** If you have been walking with Ramble this week and by 6 pm you are under half your goal, your bird sends one gentle reminder through Crow notifications. Never more than one a day. Turn it off, or keep weekends quiet, under **Goal and reminders** on the walking card.
 
@@ -2679,12 +2684,12 @@ Add to the `## Configuration` section's settings table (match its existing colum
 ```markdown
 ## Caminar
 
-En la página de tu pájaro puedes fijar una meta diaria de pasos (6.000 para empezar; entre 1.000 y 30.000). Caminar hacia ella le va dando energía a tu pájaro — hasta +30 al día al llegar a la meta — y alcanzarla da 3 de alpiste. Un día sin caminar no cuesta nada.
+En la página de tu pájaro puedes fijar una meta diaria de pasos (6.000 para empezar; entre 2.000 y 30.000). Caminar hacia ella le va dando energía a tu pájaro — hasta +30 al día al llegar a la meta — y alcanzarla da 3 de alpiste. Un día sin caminar no cuesta nada.
 
 - **En la app de Crow para Android (1.6.0 o posterior)** toca **Contar mis pasos** una vez y permite *Actividad física*. La app lee el contador de pasos del propio teléfono cada vez que abres Ramble; nada funciona en segundo plano. El primer día puede empezar en cero ("contando desde ahora") salvo que el teléfono se haya reiniciado ese día.
 - **En cualquier otro lugar** (el navegador del teléfono, un iPhone, un teléfono sin contador de pasos) toca **Caminé hoy**. Alegra a tu pájaro (+15) pero no da alpiste, porque no hay un conteo detrás.
 
-**Quién ve qué.** Tu número de pasos se queda en tus propios Crows. Tus contactos solo ven una pequeña marca de "caminó hoy" en la foto de perfil de tu pájaro — nunca un número. La marca aparece cuando marcas que caminaste o pasas de 2.000 pasos (o de tu meta, si es menor), y se borra después de medianoche. Como aparece cuando caminas, sí indica más o menos *cuándo* caminaste.
+**Quién ve qué.** Tu número de pasos se queda en tus propios Crows. Tus contactos solo ven una pequeña marca de "caminó hoy" en la foto de perfil de tu pájaro — nunca un número. La marca aparece cuando marcas que caminaste o pasas de 2.000 pasos, y se borra después de medianoche. Como aparece cuando caminas, sí indica más o menos *cuándo* caminaste.
 
 **El aviso de la tarde.** Si esta semana has caminado con Ramble y a las 6 de la tarde vas por debajo de la mitad de tu meta, tu pájaro envía un recordatorio amable por las notificaciones de Crow. Nunca más de uno al día. Puedes desactivarlo, o dejar los fines de semana tranquilos, en **Meta y recordatorios** de la tarjeta de caminar.
 
@@ -2798,7 +2803,7 @@ Each line is pass/fail; record results as a PR comment. The operator can watch `
 - [ ] **A1 Permission.** Open Ramble → My bird. The walking card says "Let Crow count your steps…" with **Count my steps** and **I walked today**. Tap **Count my steps** → Android's *Physical activity* prompt → Allow. The card switches to the step meter; the manual button disappears.
 - [ ] **A2 First reading.** The meter shows a number: either today's steps (if the phone was restarted today) or 0 with "Counting from now." A `steps` row does or does not appear accordingly; a `ramble_step_devices` row exists.
 - [ ] **A3 Walk.** Note the count, walk about 200 steps (count them roughly), reopen Ramble (or switch away and back to the pet view after a minute). The count rises by roughly that amount (±20%). Energy rises in chunks of 5 once progress crosses each 1/6 of the goal.
-- [ ] **A4 Goal + bonus + badge.** Open **Goal and reminders**, lower the goal (−) until it is just under today's count. The line reads "Goal reached… (+3 seed)", the seed balance rises by 3 once (repeat − : no second bonus), and the badge appears on the pet portrait. Within ~30 s the profile picture as a contact sees it shows the footprint mark (check from another Crow that has Kevin as a contact, e.g. the Dayane instance's contact list, or ask a contact). Raise the goal back to 6,000.
+- [ ] **A4 Goal + bonus + badge.** Open **Goal and reminders**, lower the goal (−) until it is just under today's count (needs at least 2,000 steps today — the goal floor; on a shorter day, walk more first). The line reads "Goal reached… (+3 seed)", the seed balance rises by 3 once (repeat − : no second bonus), and the badge appears on the pet portrait. Within ~30 s the profile picture as a contact sees it shows the footprint mark (check from another Crow that has Kevin as a contact, e.g. the Dayane instance's contact list, or ask a contact). Raise the goal back to 6,000.
 - [ ] **A5 Nudge.** Preferred: a real weekday evening. If by 18:00 Kevin is under half his goal and has not checked in, within 10 minutes exactly one notification arrives (ntfy) — "Your bird is by the door" if the panel was opened in the last 3 hours, otherwise "Your bird wants to hear about your day". No second one that evening. Only if a same-day check is needed: register the step in `~/CROW-SCHEDULE.md`, then ONE statement against the live db (`sqlite3 ~/.crow/data/crow.db "INSERT INTO ramble_settings (key, value) VALUES ('steps.nudge.hour', strftime('%H','now','localtime')+0) ON CONFLICT(key) DO UPDATE SET value = excluded.value;"`), observe, and remove it the same way (`... "DELETE FROM ramble_settings WHERE key = 'steps.nudge.hour';"`) — deleting restores the default only because this write was never emitted to the other instances.
 - [ ] **A6 Off switches.** With "An evening nudge if I haven't walked" unticked, no nudge the next evening. With "…on weekends too" unticked, none on Saturday.
 - [ ] **A7 Fallback.** Open Ramble in the phone's browser (not the app): the card offers only **I walked today** with the "Steps are counted in the Crow Android app" line; tapping it marks the day and cheers the bird; no seed changes.
