@@ -1,0 +1,120 @@
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
+import { connectWorkspace } from "./helpers/workspace-client.js";
+import { partText, assertOnlyPartsChanged, sofficeOpens } from "./helpers/ooxml-assert.js";
+
+const FIX = join(import.meta.dirname, "fixtures", "workspace");
+let fake, call, close;
+const put = (name, src) => fake.addFile(`S/${name}`, readFileSync(join(FIX, src)), { owner: "admin" });
+before(async () => { fake = await startFakeNextcloud(); fake.addFolder("S", { owner: "admin" }); ({ call, close } = await connectWorkspace(fake)); });
+after(async () => { await close(); fake.close(); });
+
+for (const src of ["rich.docx", "oo-rich.docx"]) {
+  test(`${src}: lists every comment with its anchored text`, async () => {
+    put(`l-${src}`, src);
+    const r = await call("ws_docs_list_comments", { path: `S/l-${src}` });
+    const c = r.data.comments.find((x) => x.content === "¿Con salsa verde?");
+    assert.equal(c.author, "Dayane"); assert.match(c.quoted_text, /con piña y jalapeño/);
+  });
+
+  test(`${src}: add (real anchor) → reply → resolve; resolved hidden unless asked`, async () => {
+    put(`a-${src}`, src);
+    const a = await call("ws_docs_add_comment", { path: `S/a-${src}`, content: "Revisar porciones", quoted_text: "Marinar la carne" });
+    const xml = partText(fake.node(`S/a-${src}`).bytes, "word/document.xml");
+    assert.match(xml, new RegExp(`<w:commentRangeStart w:id="${a.data.comment_id}"/>`));
+    const rep = await call("ws_docs_reply_comment", { path: `S/a-${src}`, comment_id: a.data.comment_id, content: "Hecho" });
+    assert.ok(rep.data.comment_id);
+    let l = await call("ws_docs_list_comments", { path: `S/a-${src}` });
+    const mine = l.data.comments.find((x) => x.id === a.data.comment_id);
+    assert.equal(mine.quoted_text, "Marinar la carne"); assert.equal(mine.replies[0].content, "Hecho");
+    await call("ws_docs_resolve_comment", { path: `S/a-${src}`, comment_id: a.data.comment_id });
+    l = await call("ws_docs_list_comments", { path: `S/a-${src}` });
+    assert.ok(!l.data.comments.some((x) => x.id === a.data.comment_id));
+    l = await call("ws_docs_list_comments", { path: `S/a-${src}`, include_resolved: true });
+    assert.equal(l.data.comments.find((x) => x.id === a.data.comment_id).resolved, true);
+  });
+
+  test(`${src}: apply_comment_edit replaces ONLY the anchored range, replies, resolves — one version`, async () => {
+    put(`e-${src}`, src);
+    const a = await call("ws_docs_add_comment", { path: `S/e-${src}`, content: "¿Mejor 'Servir caliente'?", quoted_text: "Servir" });
+    await call("ws_docs_append", { path: `S/e-${src}`, markdown: "Servir con limón." });
+    const v0 = fake.versionsOf(`S/e-${src}`).length;
+    const r = await call("ws_docs_apply_comment_edit", { path: `S/e-${src}`, comment_id: a.data.comment_id, replace_text: "Servir caliente", summary: "Aplicado" });
+    assert.equal(r.data.applied, true); assert.equal(fake.versionsOf(`S/e-${src}`).length, v0 + 1);
+    const md = (await call("ws_docs_read", { path: `S/e-${src}` })).data.markdown;
+    assert.match(md, /Servir caliente/); assert.match(md, /Servir con limón\./, "the other occurrence is untouched");
+    assert.equal((await call("ws_docs_apply_comment_edit", { path: `S/e-${src}`, comment_id: a.data.comment_id, replace_text: "x", summary: "x" })).code, "already_resolved");
+  });
+
+  test(`${src}: reply/resolve keep the threading parts consistent (commentsExtended, commentsIds when present)`, async () => {
+    put(`t-${src}`, src);
+    const before = fake.node(`S/t-${src}`).bytes;
+    const rep = await call("ws_docs_reply_comment", { path: `S/t-${src}`, comment_id: "0", content: "Sí, verde" });
+    const after_ = fake.node(`S/t-${src}`).bytes;
+    assertOnlyPartsChanged(before, after_, ["word/document.xml", "word/comments.xml", "word/commentsExtended.xml", "word/commentsIds.xml", "word/_rels/document.xml.rels", "[Content_Types].xml"]);
+    const comments = partText(after_, "word/comments.xml"); const ext = partText(after_, "word/commentsExtended.xml");
+    const pidOf = (id) => new RegExp(`<w:comment [^>]*w:id="${id}"[^>]*>[\\s\\S]*?w14:paraId="([0-9A-F]{8})"`).exec(comments)[1];
+    const rootPid = pidOf("0"), replyPid = pidOf(rep.data.comment_id);
+    assert.match(ext, new RegExp(`w15:paraId="${replyPid}"[^>]*w15:paraIdParent="${rootPid}"|w15:paraIdParent="${rootPid}"[^>]*w15:paraId="${replyPid}"`));
+    assert.match(partText(after_, "word/_rels/document.xml.rels"), /commentsExtended/);
+    assert.match(partText(after_, "[Content_Types].xml"), /\/word\/commentsExtended\.xml/);
+    if (src === "oo-rich.docx") {
+      const ids = partText(after_, "word/commentsIds.xml");
+      assert.match(ids, new RegExp(`w16cid:paraId="${replyPid}" w16cid:durableId="[0-9A-F]{8}"`), "a new comment gets its commentsIds row");
+      assert.match(ids, /w16cid:paraId="00000001"/, "existing rows kept");
+    }
+    // the reply is anchored with the root and carries its own reference mark
+    const doc = partText(after_, "word/document.xml");
+    assert.match(doc, new RegExp(`<w:commentRangeStart w:id="${rep.data.comment_id}"/>`));
+    assert.match(doc, new RegExp(`<w:commentReference w:id="${rep.data.comment_id}"/>`));
+    await call("ws_docs_resolve_comment", { path: `S/t-${src}`, comment_id: "0" });
+    assert.match(partText(fake.node(`S/t-${src}`).bytes, "word/commentsExtended.xml"), new RegExp(`w15:paraId="${rootPid}"[^>]*w15:done="1"|w15:done="1"[^>]*w15:paraId="${rootPid}"`));
+    const l = await call("ws_docs_list_comments", { path: `S/t-${src}`, include_resolved: true });
+    const root = l.data.comments.find((x) => x.id === "0");
+    assert.equal(root.resolved, true); assert.equal(root.replies.length, 1); assert.equal(root.replies[0].content, "Sí, verde"); assert.equal(root.replies[0].author, "Crow bot");
+    if (sofficeOpens(fake.node(`S/t-${src}`).bytes, "docx") === null) console.log("# soffice not installed: LibreOffice smoke check skipped");
+  });
+}
+
+test("apply_comment_edit with no usable anchor replies and leaves the thread unresolved", async () => {
+  put("n.docx", "rich.docx");
+  const a = await call("ws_docs_add_comment", { path: "S/n.docx", content: "general" });
+  await call("ws_docs_find_replace", { path: "S/n.docx", find: "Recetas de la semana", replace: "" });
+  const r = await call("ws_docs_apply_comment_edit", { path: "S/n.docx", comment_id: a.data.comment_id, replace_text: "x", summary: "s" });
+  assert.equal(r.data.applied, false); assert.equal(r.data.left_unresolved, true); assert.equal(r.data.reason, "no_anchor");
+  const l = await call("ws_docs_list_comments", { path: "S/n.docx" });
+  const c = l.data.comments.find((x) => x.id === a.data.comment_id);
+  assert.equal(c.resolved, false); assert.equal(c.replies.length, 1, "an explanatory reply was posted");
+});
+
+test("apply_comment_edit on a paragraph that is not plain text is refused (not_plain_text), nothing written", async () => {
+  put("np.docx", "rich.docx");
+  await call("ws_docs_format_text", { path: "S/np.docx", find: "Asar", link_url: "https://example.com/asar" });
+  const a = await call("ws_docs_add_comment", { path: "S/np.docx", content: "?", quoted_text: "Asar" });
+  const v0 = fake.versionsOf("S/np.docx").length; const bytes0 = fake.node("S/np.docx").bytes;
+  const r = await call("ws_docs_apply_comment_edit", { path: "S/np.docx", comment_id: a.data.comment_id, replace_text: "Asar a la parrilla", summary: "ok" });
+  assert.equal(r.code, "not_plain_text");
+  assert.equal(fake.versionsOf("S/np.docx").length, v0); assert.ok(Buffer.compare(bytes0, fake.node("S/np.docx").bytes) === 0);
+  assert.match((await call("ws_docs_read", { path: "S/np.docx" })).data.markdown, /\[Asar\]\(https:\/\/example\.com\/asar\)/);
+});
+
+test("add_comment anchors exactly the quoted text, even after a tab in the same run, and matches NFD input", async () => {
+  put("q.docx", "rich.docx");
+  const a = await call("ws_docs_add_comment", { path: "S/q.docx", content: "tab", quoted_text: "separated" });
+  const b = await call("ws_docs_add_comment", { path: "S/q.docx", content: "nfd", quoted_text: "piña y jalapeño" });
+  const l = await call("ws_docs_list_comments", { path: "S/q.docx" });
+  assert.equal(l.data.comments.find((x) => x.id === a.data.comment_id).quoted_text, "separated");
+  assert.equal(l.data.comments.find((x) => x.id === b.data.comment_id).quoted_text, "piña y jalapeño");
+  const md = (await call("ws_docs_read", { path: "S/q.docx" })).data.markdown;
+  assert.match(md, /Tab\tseparated text and a line/, "the run split kept the text in order");
+  assert.equal((await call("ws_docs_add_comment", { path: "S/q.docx", content: "x", quoted_text: "no existe" })).code, "not_found");
+});
+
+test("unknown comment ids are comment_not_found", async () => {
+  put("u.docx", "rich.docx");
+  assert.equal((await call("ws_docs_reply_comment", { path: "S/u.docx", comment_id: "99", content: "x" })).code, "comment_not_found");
+  assert.equal((await call("ws_docs_resolve_comment", { path: "S/u.docx", comment_id: "99" })).code, "comment_not_found");
+});

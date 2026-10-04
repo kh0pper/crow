@@ -472,7 +472,7 @@ function shortVolumeSource(item) {
  * the INSTALLED bundle's compose dir), `~` against HOME. Anything that is not
  * a path after expansion (a named volume, a port, an env entry) is skipped.
  */
-function composeBindSources(text, projectDir, env) {
+function composeBindSources(text, projectDir, env, { rwOnly = false } = {}) {
   const out = [];
   const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
   const consider = (rawSrc) => {
@@ -486,7 +486,13 @@ function composeBindSources(text, projectDir, env) {
     const longForm = /^\s*(?:-\s+)?source:\s*(.+)$/.exec(line);
     if (longForm) { consider(longForm[1]); continue; }
     const item = /^\s*-\s+(.+)$/.exec(line);
-    if (item) consider(shortVolumeSource(clean(item[1])));
+    if (!item) continue;
+    const vol = clean(item[1]); const src = shortVolumeSource(vol);
+    // rwOnly: skip a short-syntax mount whose mode (the LAST ":" segment of "src:dst:mode") lists "ro";
+    // long syntax is always counted (conservative)
+    const rest = vol.slice(src.length + 1).split(":");
+    if (rwOnly && rest.length >= 2 && /(^|,)ro(,|$)/.test(rest.at(-1))) continue;
+    consider(src);
   }
   return out;
 }
@@ -521,6 +527,17 @@ function pathsOverlap(a, b) {
   const ba = relativePath(b, a);
   const inside = (rel) => rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   return inside(ab) || inside(ba);
+}
+
+/** The env compose expands ${VAR} with for the INSTALLED bundle: its .env, then the shell env (shell wins). */
+function composeExpandEnv(destDir) {
+  const fileVars = {};
+  try {
+    Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
+  } catch { /* no .env → process env only */ }
+  // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
+  // compose run gets (the prod gateway unit may not export it).
+  return composeEnv({ ...fileVars, ...process.env });
 }
 
 /**
@@ -572,15 +589,7 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
   let rootReal;
   try { rootReal = realpathSync(appSrc); } catch { return []; }
 
-  const expandEnv = env || (() => {
-    const fileVars = {};
-    try {
-      Object.assign(fileVars, parseEnvText(readFileSync(join(destDir, ".env"), "utf8")));
-    } catch { /* no .env → process env only */ }
-    // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
-    // compose run gets (the prod gateway unit may not export it).
-    return composeEnv({ ...fileVars, ...process.env });
-  })();
+  const expandEnv = env || composeExpandEnv(destDir);
   const destReal = realOrSelf(destDir);
   // The LIVE mounts come from the INSTALLED compose (never refreshed, may be
   // operator-edited) plus any override compose merges in from that dir — not
@@ -607,6 +616,50 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
     if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
     const installedCtx = realOrSelf(join(destReal, rel));
     if (binds.some((b) => pathsOverlap(b, installedCtx))) continue;
+    out.add(rel);
+  }
+  return [...out];
+}
+
+/** Never refreshed through manifest.refreshFiles, at any depth: instance-local secrets and state. */
+const REFRESH_FILES_NEVER = /^(\.env.*|data|node_modules|\.git)$/i;
+
+/**
+ * manifest.refreshFiles (Crow Workspace W2, F4): an OPT-IN list of bundle-relative paths a docker bundle wants
+ * re-copied on a version change — e.g. ["docker-compose.yml", "onlyoffice-plugin"]: the compose that adds a
+ * read-only plugin mount, and the plugin directory it mounts. The running containers are NOT recreated (they keep
+ * the old compose until the bundle is restarted). An entry is copied only when it is a plain relative path inside
+ * the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
+ * no .env*, data, node_modules or .git at any depth, exists in the repo copy (realpath inside the bundle), and does
+ * not overlap a READ-WRITE bind mount of the installed compose or its overrides (that is data). Returns the
+ * bundle-relative paths to copy.
+ */
+function manifestRefreshFiles(manifest, appSrc, destDir) {
+  const list = manifest?.refreshFiles;
+  if (!Array.isArray(list) || !list.length) return [];
+  let rootReal;
+  try { rootReal = realpathSync(appSrc); } catch { return []; }
+  const composeRel = manifestComposeFile(manifest);
+  const destReal = realOrSelf(destDir);
+  const env = composeExpandEnv(destDir);
+  const texts = [];
+  for (const f of composeRel ? [join(appSrc, composeRel), ...installedComposeFiles(composeRel).map((r) => join(destDir, r))] : []) {
+    try { if (existsSync(f)) texts.push(readFileSync(f, "utf8")); } catch { /* unreadable → skip */ }
+  }
+  const projectDir = join(destReal, composeRel ? dirname(composeRel) : ".");
+  const rwBinds = texts.flatMap((t) => composeBindSources(t, projectDir, env, { rwOnly: true })).map(realOrSelf);
+  const out = new Set();
+  for (const p of list.slice(0, 50)) {
+    if (typeof p !== "string" || !p || isAbsolute(p) || p.includes("\\") || p.includes("$")) continue;
+    const rel = relativePath(".", p);
+    if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
+    let real;
+    try { real = realpathSync(join(appSrc, rel)); } catch { continue; }
+    const realRel = relativePath(rootReal, real);
+    if (!realRel || realRel.startsWith("..") || isAbsolute(realRel)) continue;
+    const installed = realOrSelf(join(destReal, rel));
+    if (rwBinds.some((b) => pathsOverlap(b, installed))) continue;
     out.add(rel);
   }
   return [...out];
@@ -672,7 +725,9 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *   1. Copies the explicit-include set of code artifacts from appSrc → destDir
  *      (type-aware: docker-surface bundles get a narrower set, since existing
  *      docker bundles bind-mount config/scripts/etc into LIVE containers and a
- *      refresh must never mutate a running container's mounts).
+ *      refresh must never mutate a running container's mounts). A docker bundle
+ *      may opt specific code paths in with manifest.refreshFiles (see
+ *      manifestRefreshFiles: never .env*, data, or a read-write mount).
  *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
@@ -712,7 +767,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     ? ["server", "panel", "skills"]
     : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
-  // .env*, node_modules/, data/ — simply absent from both lists above.
+  // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
+  // exception is a docker bundle's explicit opt-in, manifest.refreshFiles
+  // (manifestRefreshFiles): named code paths such as its compose file or a
+  // read-only-mounted plugin dir — still never .env*, data, node_modules, .git
+  // or anything a read-write bind mount reaches.
 
   // Manifest-declared roots: the bundle contract is manifest-declaration-
   // driven, so any path a manifest names is code by definition. Each is
@@ -758,6 +817,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     }
     if (contexts.length) {
       console.log(`[bundles] ${id}: build source refreshed (${contexts.join(", ")}) — Restart/Start it in Extensions to rebuild the image`);
+    }
+    const opted = manifestRefreshFiles(repoManifest, appSrc, destDir).filter((rel) => copyBundleRefreshItem(appSrc, destDir, rel));
+    for (const rel of opted) touched.push(`refresh:${rel}`);
+    if (opted.length) {
+      console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")}) — running containers keep the old files/compose until the bundle is restarted`);
     }
   }
 
@@ -815,6 +879,23 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
         console.warn(`[bundles] ${id}: left at ${oldVersion} so the next boot retries the dependency install`);
         return { oldVersion, newVersion: oldVersion, touched: [...touched, "npm failed — will retry"] };
       }
+    }
+  }
+
+  // A version that ADDS an MCP server must register it for existing installs (W2: the
+  // workspace bundle gained a server; refresh used to copy server/ and never register it).
+  if (repoManifest.server && !repoManifest.server.url) {
+    // A file that exists but does not parse is left alone: rewriting it from {} would wipe every other add-on.
+    // Like a failed npm_required install, the manifest (commit marker) stays old so the next boot retries.
+    const addons = readJsonSafe(MCP_ADDONS_PATH, null) ?? (existsSync(MCP_ADDONS_PATH) ? null : {});
+    if (!addons) {
+      console.warn(`[bundles] ${id}: ${MCP_ADDONS_PATH} exists but could not be parsed; MCP server not registered, left at ${oldVersion} so the next boot retries`);
+      return { oldVersion, newVersion: oldVersion, touched: [...touched, "mcp-addons.json unreadable — will retry"] };
+    }
+    if (!addons[id]) {
+      addons[id] = mcpAddonEntryFor(repoManifest, null);
+      writeJsonSafe(MCP_ADDONS_PATH, addons);
+      touched.push("mcp-addons entry (restart to load)");
     }
   }
 
@@ -1118,6 +1199,30 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
 }
 
 /**
+ * The mcp-addons.json entry for a manifest that declares `server` — the single shape both
+ * install (either branch) and the version refresh write. envKeys values come only from an
+ * install request; every truthy env_vars default rides along (unchanged install behaviour).
+ */
+export function mcpAddonEntryFor(manifest, reqEnv = null) {
+  const env = {};
+  for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
+  for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}) };
+}
+
+/**
+ * Keys Configure may push into an MCP entry. OPT-IN (review C1): only a manifest whose server declares
+ * `configureEnv: "envKeys-only"` is filtered. kodi/media/tax read secrets from process.env that they do
+ * not list in envKeys, so filtering everyone would silently break their Configure.
+ */
+function mcpForwardableKeys(manifest) {
+  if (!manifest || manifest.server?.configureEnv !== "envKeys-only") return null; // unchanged behaviour
+  const listed = new Set(manifest.server?.envKeys || []);
+  const blocked = new Set((manifest.env_vars || []).filter((v) => v && (v.secret === true || v.generate) && !listed.has(v.name)).map((v) => v.name));
+  return (k) => !blocked.has(k);
+}
+
+/**
  * Push env values into the add-on's mcp-addons.json entry.
  *
  * MCP children are spawned with { ...process.env, ...(config.env||{}) } from
@@ -1128,17 +1233,18 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  *
  * @returns {boolean} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH) {
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
+  const allowed = mcpForwardableKeys(manifest);
   const merged = { ...(entry.env || {}) };
   // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
   // so a blank here would SHADOW a working ambient value rather than clear it. The two
   // install-time writers of this file (see the mcp_server registration paths) guard the
   // same way. Clearing a value stays the .env file's job.
   for (const [k, v] of Object.entries(envVars || {})) {
-    if (v) merged[k] = v;
+    if (v && (!allowed || allowed(k))) merged[k] = v;
   }
   entry.env = merged;
   mcpAddons[bundleId] = entry;
@@ -2199,17 +2305,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Bundle types can also have MCP servers — register if manifest has server config
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        const env = {};
-        if (manifest.server.envKeys && reqEnv) {
-          for (const key of manifest.server.envKeys) {
-            if (reqEnv[key]) env[key] = reqEnv[key];
-          }
-        }
-        if (manifest.env_vars) {
-          for (const v of manifest.env_vars) {
-            if (v.default && !env[v.name]) env[v.name] = v.default;
-          }
-        }
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
         // shared by more than one gateway on a host (e.g. grackle runs a
         // main gateway + a separate-DB instance off the same ~/.crow), so a
@@ -2218,11 +2313,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = {
-          command: manifest.server.command,
-          args: manifest.server.args || [],
-          ...(Object.keys(env).length > 0 ? { env } : {}),
-        };
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2259,24 +2350,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        const env = {};
-        // Collect user-provided env vars
-        if (manifest.server.envKeys && reqEnv) {
-          for (const key of manifest.server.envKeys) {
-            if (reqEnv[key]) env[key] = reqEnv[key];
-          }
-        }
-        // Also include default values from manifest.env_vars
-        if (manifest.env_vars) {
-          for (const v of manifest.env_vars) {
-            if (v.default && !env[v.name]) env[v.name] = v.default;
-          }
-        }
-        mcpAddons[bundleId] = {
-          command: manifest.server.command,
-          args: manifest.server.args || [],
-          ...(Object.keys(env).length > 0 ? { env } : {}),
-        };
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -3321,7 +3395,7 @@ export default function bundlesRouter() {
         : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id));
 
       // And the gateway's own env, exactly as install does for docker bundles:
       // gateway-side panel routes read their config from process.env (the phone

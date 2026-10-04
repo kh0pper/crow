@@ -10,7 +10,11 @@ const DIR = join(ROOT, "bundles", "workspace");
 const manifest = JSON.parse(readFileSync(join(DIR, "manifest.json"), "utf8"));
 const compose = readFileSync(join(DIR, "docker-compose.yml"), "utf8");
 const envVar = (n) => manifest.env_vars.find((v) => v.name === n);
-const walk = (dir) => readdirSync(dir).flatMap((n) => { const p = join(dir, n); return statSync(p).isDirectory() ? walk(p) : [p]; });
+const walk = (dir) => readdirSync(dir).flatMap((n) => {
+  if (n === "node_modules") return [];
+  const p = join(dir, n);
+  return statSync(p).isDirectory() ? walk(p) : (/\.(docx|xlsx|pptx|png)$/i.test(n) ? [] : [p]);
+});
 function serviceBlocks() {
   const body = compose.split(/^services:\s*$/m)[1].split(/^networks:\s*$/m)[0];
   const names = [...body.matchAll(/^  ([a-z][a-z0-9-]*):\s*$/gm)].map((m) => m[1]);
