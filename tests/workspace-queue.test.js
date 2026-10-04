@@ -302,6 +302,140 @@ test("undo with a pc_ id: the text changed since → the inverse fails changed_s
   assert.match(await md("S/q8.docx"), /Tostadas/);
 });
 
+test("M5: an undo whose inverse failed does not leave the change 'already undone' forever → undo_via_versions", async () => {
+  put("q26.docx"); const key = fake.openInEditor("S/q26.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/q26.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  await liveAck(id, [{ tool: "ws_docs_find_replace", args: { find: "Totopos", replace: "Tortillas", expect_count: 1 } }]);
+  const { findReplace, appendMarkdown } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+  await editorSave("S/q26.docx", (d) => { findReplace(d, [{ find: "Tortillas", replace: "Totopos" }]); appendMarkdown(d, "Totopos caseros."); }); // the person typed another Totopos
+  const u = await call("ws_undo_last_change", { path: "S/q26.docx", version_id: id });
+  closeSession("S/q26.docx", key);
+  await tick();
+  assert.equal((await status(id)).state, "applied_live", "the live change is still in the file");
+  assert.equal((await status(u.data.change_id)).reason, "changed_since", "the inverse is no longer exact");
+  const again = await call("ws_undo_last_change", { path: "S/q26.docx", version_id: id });
+  assert.equal(again.code, "undo_via_versions", JSON.stringify(again));
+  assert.equal((await status(id)).undone_by, undefined, "the failed undo's marker is released");
+  assert.equal((await call("ws_undo_last_change", { path: "S/q26.docx", version_id: id })).code, "undo_via_versions", "the inexact inverse is not queued again");
+});
+
+test("M5: a cancelled undo can be asked for again (re-queued, not already_undone)", async () => {
+  put("q24.docx"); const key = fake.openInEditor("S/q24.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/q24.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  await liveAck(id, [{ tool: "ws_docs_find_replace", args: { find: "Totopos", replace: "Tortillas", expect_count: 1 } }]);
+  const u1 = await call("ws_undo_last_change", { path: "S/q24.docx", version_id: id });
+  assert.equal((await call("ws_cancel_change", { change_id: u1.data.change_id })).data.state, "cancelled");
+  const u2 = await call("ws_undo_last_change", { path: "S/q24.docx", version_id: id });
+  assert.equal(u2.data?.queued, true, JSON.stringify(u2)); assert.notEqual(u2.data.change_id, u1.data.change_id);
+  await Q.cas(db, u2.data.change_id, "pending", "cancelled");
+  closeSession("S/q24.docx", key);
+});
+
+// ---- fix round 1 ------------------------------------------------------------------------------------
+
+const ownRow = async (id, owner, leaseUntil) => db.execute({ sql: "UPDATE workspace_pending_changes SET state='applying_close', lease_owner=?, lease_until=? WHERE id=?", args: [owner, leaseUntil, id] });
+
+test("I1: recoverStranded takes only applying_close rows whose applier lease ran out (another live applier keeps its row)", async () => {
+  const mk = () => Q.enqueue(db, { fileId: 990003, path: "S/none3.docx", tool: "ws_docs_append", args: {}, precondition: null });
+  const a = await mk(), b = await mk(), c = await mk();
+  const t = Date.now();
+  await ownRow(a.id, "applier-B", t + 60000); // B is mid-apply
+  await ownRow(b.id, "applier-B", t - 1);      // B died
+  await ownRow(c.id, null, null);               // stranded by a build without leases
+  assert.deepEqual((await W.recoverStranded(db, t)).sort(), [b.id, c.id].sort());
+  assert.equal((await Q.get(db, a.id)).state, "applying_close", "a live applier's row is never taken");
+  for (const r of [a, b, c]) await db.execute({ sql: "UPDATE workspace_pending_changes SET state='failed' WHERE id=?", args: [r.id] });
+});
+
+test("I1: two appliers — a tick never touches the other applier's leased row; after its lease runs out the postcondition decides", async () => {
+  put("q20.docx"); const key = fake.openInEditor("S/q20.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/q20.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  await ownRow(id, "applier-B", Date.now() + 60000);
+  // applier B's PUT landed (B is still about to CAS it):
+  const { findReplace } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+  await editorSave("S/q20.docx", (d) => findReplace(d, [{ find: "Tortillas", replace: "Totopos" }]));
+  closeSession("S/q20.docx", key);
+  const puts = fake.calls.filter((c) => c.method === "PUT").length;
+  await tick();
+  assert.equal((await Q.get(db, id)).state, "applying_close", "B's leased row is left alone");
+  await db.execute({ sql: "UPDATE workspace_pending_changes SET lease_until=? WHERE id=?", args: [Date.now() - 1, id] }); // B died
+  await tick();
+  const s = await status(id);
+  assert.equal(s.state, "applied_live"); assert.equal(s.detected, true);
+  assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts, "never applied a second time");
+  assert.equal(((await md("S/q20.docx")).match(/Totopos/g) || []).length, 1);
+});
+
+test("I1: an applier whose final CAS loses (its row was taken over) reports skipped — no 'applied' notification", async () => {
+  put("q21.docx"); const key = fake.openInEditor("S/q21.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/q21.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  closeSession("S/q21.docx", key);
+  fake.extraRoutes = async (req) => { // while this applier PUTs, another applier takes the row over
+    if (req.method === "PUT" && decodeURIComponent(req.url).includes("q21.docx")) await db.execute({ sql: "UPDATE workspace_pending_changes SET lease_owner='applier-B' WHERE id=?", args: [id] });
+    return false;
+  };
+  const n0 = (await notifs()).length;
+  try { await tick(); } finally { fake.extraRoutes = null; }
+  const row = await Q.get(db, id);
+  assert.equal(row.state, "applying_close"); assert.equal(row.lease_owner, "applier-B", "the winner's row is not overwritten");
+  assert.equal((await notifs()).slice(n0).filter((n) => /q21\.docx was applied/.test(n.title)).length, 0);
+  await db.execute({ sql: "UPDATE workspace_pending_changes SET state='failed' WHERE id=?", args: [id] });
+});
+
+test("I2: undo rows are close-time only — never live-eligible (spec §5.7)", () => {
+  const args = { find: "Totopos", replace: "Tortillas", expect_count: 1 };
+  assert.equal(C.liveEligible("ws_docs_find_replace", args, { fcount: 1, rcount: 0 }), true);
+  assert.equal(C.liveEligible("ws_docs_find_replace", args, { fcount: 1, rcount: 0, undo_of: "pc_abcdef123" }), false);
+  assert.equal(C.liveEligible("ws_docs_find_replace", args, { undo_of: "pc_abcdef123", step: 1 }), false);
+});
+
+test("M3: rewrite_passages postcondition is count-based — a pre-existing copy of new_text is not 'detected'", async () => {
+  const { openDocx } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+  const { rewritePassages } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+  const bytes = readFileSync(join(FIX, "oo-rich.docx"));
+  const args = { passages: [{ match_prefix: "Marinar", new_text: "Asar" }] }; // "Asar" is already a paragraph
+  const pre = C.snapshot("ws_docs_rewrite_passages", args, bytes);
+  assert.equal(C.checkPost("ws_docs_rewrite_passages", args, bytes, pre), false, "not applied yet");
+  const d = openDocx(bytes); rewritePassages(d, args.passages); const after = Buffer.from(d.pkg.save());
+  assert.equal(C.checkPost("ws_docs_rewrite_passages", args, after, pre), true);
+  assert.equal(C.liveEligible("ws_docs_rewrite_passages", args, pre), true);
+  assert.equal(C.checkPost("ws_docs_rewrite_passages", args, after, null), null, "no snapshot → cannot tell");
+  const multi = { passages: [{ match_prefix: "Asar", new_text: "Asar\nlento" }] };
+  const pm = C.snapshot("ws_docs_rewrite_passages", multi, bytes);
+  assert.equal(C.liveEligible("ws_docs_rewrite_passages", multi, pm), false, "undecidable → close-time only");
+  assert.equal(C.checkPost("ws_docs_rewrite_passages", multi, bytes, pm), null);
+});
+
+test("M4: an unexpected (non-WsError) throw after the claim → failed: error + notification, never stranded in applying_close", async () => {
+  put("q22.docx");
+  const n = fake.node("S/q22.docx");
+  const row = await Q.enqueue(db, { fileId: n.fileId, path: "S/q22.docx", tool: "ws_docs_rewrite_passages", args: { path: "S/q22.docx", passages: null }, precondition: null });
+  await tick();
+  const s = await status(row.id);
+  assert.equal(s.state, "failed"); assert.equal(s.reason, "error");
+  assert.ok((await notifs()).some((x) => /q22\.docx could not be applied/.test(x.title)));
+});
+
+test("M7: a queued upload_new_version / restore_version refuses (changed_since) when the file moved past its base version", async () => {
+  fake.addFile("S/q23.txt", Buffer.from("uno"), { owner: "admin" });
+  const key = fake.openInEditor("S/q23.txt", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const up = (await call("ws_drive_upload_new_version", { path: "S/q23.txt", text: "de Crow" })).data.change_id;
+  const n = fake.node("S/q23.txt"); n.bytes = Buffer.from("dos (la persona)"); n.etag = '"person"'; n.mtime += 5; // the person saved meanwhile
+  closeSession("S/q23.txt", key);
+  await tick();
+  const s = await status(up);
+  assert.equal(s.state, "failed"); assert.equal(s.reason, "changed_since");
+  assert.equal(String(fake.node("S/q23.txt").bytes), "dos (la persona)", "the person's save is not overwritten");
+  // unchanged since queued → applies
+  fake.addFile("S/q25.txt", Buffer.from("uno"), { owner: "admin" });
+  const k2 = fake.openInEditor("S/q25.txt", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const ok = (await call("ws_drive_upload_new_version", { path: "S/q25.txt", text: "de Crow" })).data.change_id;
+  closeSession("S/q25.txt", k2);
+  await tick();
+  assert.equal((await status(ok)).state, "applied_close");
+  assert.equal(String(fake.node("S/q25.txt").bytes), "de Crow");
+});
+
 test("undo with a pc_ id: no exact inverse (off-list tool, or detected) → undo_via_versions; not applied → not_applied", async () => {
   put("q16.docx"); const key = fake.openInEditor("S/q16.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
   const id = (await call("ws_docs_find_replace", { path: "S/q16.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;

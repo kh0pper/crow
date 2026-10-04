@@ -7,7 +7,7 @@ import { getFile } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
 import { MAX_EDIT_BYTES } from "../write-protocol.js";
 import { checkPre, checkPost } from "./conditions.js";
-import { cas, argsOf, preOf, resultOf, markVerified } from "./store.js";
+import { cas, argsOf, preOf, resultOf, markVerified, APPLIER_ID, APPLY_LEASE_MS } from "./store.js";
 import { ALL_DEFS } from "../tools/all.js";
 
 /** Version labels of close-time applies: "Crow (queued): …"; Quick edit keeps "Quick edit: …" (both match CROW_LABEL_RE). */
@@ -16,15 +16,25 @@ export const labelFor = (row) => (row.requested_by === "quick_edit" ? "Quick edi
 const TRANSIENT = new Set(["open_in_editor", "locked_by_person", "stale_editor_lock", "locked", "busy", "changed_concurrently", "editor_unreachable", "could_not_close_editor"]);
 /** The tool's own anchor errors: the target is gone → target_changed. */
 const ANCHOR = new Set(["not_found", "heading_not_found", "tab_not_found", "slide_not_found", "shape_not_found", "comment_not_found", "target_changed", "already_resolved"]);
+/** Whole-file replacements: they re-validate against the version the change was queued on (precondition base_version). */
+const BASE_VERSIONED = new Set(["ws_drive_upload_new_version", "ws_drive_restore_version"]);
 const res = (row, extra) => JSON.stringify({ ...resultOf(row), ...extra });
-const readSaved = async (ctx, row) => (await getFile(ctx.getConfig(), splitPath(row.path), { maxBytes: MAX_EDIT_BYTES })).bytes;
+const readSaved = async (ctx, row) => getFile(ctx.getConfig(), splitPath(row.path), { maxBytes: MAX_EDIT_BYTES });
+const nowOf = (ctx) => (ctx.clock?.now ? ctx.clock.now() : Date.now());
+const SKIPPED = Object.freeze({ state: "skipped" });
+
+/** The close-time claim: from `from` to applying_close, owned by this applier with a lease. */
+const claim = (ctx, db, row, from) => cas(db, row.id, from, "applying_close", { lease_owner: APPLIER_ID, lease_until: nowOf(ctx) + APPLY_LEASE_MS });
+/** Leave applying_close — only while this applier still owns the row; a lost CAS means another applier took it over. */
+const release = (db, row, to, patch = {}) => cas(db, row.id, "applying_close", to, { lease_owner: null, lease_until: null, ...patch }, { owner: APPLIER_ID });
 
 async function fail(db, row, from, reason, extra = {}) {
-  await cas(db, row.id, from, "failed", { result_json: res(row, { reason, ...extra }) });
-  return { state: "failed", reason, ...extra };
+  const patch = { result_json: res(row, { reason, ...extra }) };
+  const ok = from === "applying_close" ? await release(db, row, "failed", patch) : await cas(db, row.id, from, "failed", patch);
+  return ok ? { state: "failed", reason, ...extra } : SKIPPED;
 }
 
-/** Run the claimed change (state applying_close). `pre` already passed. */
+/** Run the claimed change (state applying_close, owned by this applier). `pre` already passed. */
 async function runClaimed(ctx, db, row) {
   const args = argsOf(row); const def = ALL_DEFS.get(row.tool);
   if (!def) return fail(db, row, "applying_close", "unsupported");
@@ -32,18 +42,32 @@ async function runClaimed(ctx, db, row) {
   let out;
   try { out = await def.run(callArgs, ctx); }
   catch (e) {
-    if (TRANSIENT.has(e.code)) { await cas(db, row.id, "applying_close", "pending"); return { state: "pending", reason: e.code }; } // re-opened meanwhile: nothing written
+    if (TRANSIENT.has(e.code)) return (await release(db, row, "pending")) ? { state: "pending", reason: e.code } : SKIPPED; // re-opened meanwhile: nothing written
     if (e.code === "changed_since") return fail(db, row, "applying_close", "changed_since");
     // spec §5.8: an undo whose target moved on answers changed_since; any other change target_changed
     if (ANCHOR.has(e.code)) return fail(db, row, "applying_close", row.requested_by === "undo" ? "changed_since" : "target_changed", { detail: e.code });
     // Unexpected error: it may have come AFTER the save (labels, stat). The postcondition decides — never a re-apply.
-    let post = null; try { post = checkPost(row.tool, args, await readSaved(ctx, row), preOf(row)); } catch { post = null; }
-    if (post === true) { await cas(db, row.id, "applying_close", "applied_close", { result_json: res(row, { detected: true, warning: String(e.message).slice(0, 200) }) }); return { state: "applied_close", detected: true }; }
+    let post = null; try { post = checkPost(row.tool, args, (await readSaved(ctx, row)).bytes, preOf(row)); } catch { post = null; }
+    if (post === true) return (await release(db, row, "applied_close", { result_json: res(row, { detected: true, warning: String(e.message).slice(0, 200) }) })) ? { state: "applied_close", detected: true } : SKIPPED;
     return fail(db, row, "applying_close", e.code || "error", { message: String(e.message).slice(0, 300) });
   }
   if (!out || out.changed === 0 || out.changed === false) return fail(db, row, "applying_close", row.requested_by === "undo" ? "changed_since" : "target_changed", { detail: "nothing_to_change" });
-  await cas(db, row.id, "applying_close", "applied_close", { version_id: out.version_id ?? null, result_json: res(row, { changed: out.changed ?? 1, version_label: out.version_label ?? null, ...(out.label_warning ? { label_warning: out.label_warning } : {}) }) });
-  return { state: "applied_close", version_id: out.version_id ?? null };
+  const ok = await release(db, row, "applied_close", { version_id: out.version_id ?? null, result_json: res(row, { changed: out.changed ?? 1, version_label: out.version_label ?? null, ...(out.label_warning ? { label_warning: out.label_warning } : {}) }) });
+  return ok ? { state: "applied_close", version_id: out.version_id ?? null } : SKIPPED; // lost: the winner reports it, never a second notification
+}
+
+/** After a claim: re-validate on the saved file, then run. Any unexpected throw → failed: error (never stranded). */
+async function validateAndRun(ctx, db, row, saved, preFailReason) {
+  try {
+    const args = argsOf(row); const pre = preOf(row);
+    if (BASE_VERSIONED.has(row.tool) && pre?.base_version && String(saved.mtime) !== String(pre.base_version))
+      return fail(db, row, "applying_close", "changed_since", { message_for_user: "the file was saved again after this change was queued, so Crow did not overwrite it" });
+    const p = checkPre(row.tool, args, pre, saved.bytes);
+    if (!p.ok) return fail(db, row, "applying_close", preFailReason ?? p.reason);
+    return await runClaimed(ctx, db, row);
+  } catch (e) {
+    return fail(db, row, "applying_close", "error", { message: String(e?.message || e).slice(0, 300) });
+  }
 }
 
 /**
@@ -52,23 +76,18 @@ async function runClaimed(ctx, db, row) {
  * apply; else failed: ambiguous. Never applied twice.
  */
 export async function applyQueued(ctx, db, row) {
-  const args = argsOf(row); const pre = preOf(row);
   if (row.state === "unknown_after_claim") {
-    const bytes = await readSaved(ctx, row);
-    const post = checkPost(row.tool, args, bytes, pre);
-    if (post === true) return (await cas(db, row.id, "unknown_after_claim", "applied_live", { verified: 1, result_json: res(row, { detected: true }) })) ? { state: "applied_live", detected: true } : { state: "skipped" };
+    const saved = await readSaved(ctx, row);
+    let post; try { post = checkPost(row.tool, argsOf(row), saved.bytes, preOf(row)); } catch { post = null; } // cannot tell
+    if (post === true) return (await cas(db, row.id, "unknown_after_claim", "applied_live", { verified: 1, result_json: res(row, { detected: true }) })) ? { state: "applied_live", detected: true } : SKIPPED;
     if (post === null) return fail(db, row, "unknown_after_claim", "ambiguous");
-    if (!(await cas(db, row.id, "unknown_after_claim", "applying_close"))) return { state: "skipped" };
-    const p = checkPre(row.tool, args, pre, bytes);
-    if (!p.ok) return fail(db, row, "applying_close", "ambiguous");
-    return runClaimed(ctx, db, row);
+    if (!(await claim(ctx, db, row, "unknown_after_claim"))) return SKIPPED;
+    return validateAndRun(ctx, db, row, saved, "ambiguous");
   }
-  if (row.state !== "pending" || !(await cas(db, row.id, "pending", "applying_close"))) return { state: "skipped" };
-  let bytes;
-  try { bytes = await readSaved(ctx, row); } catch (e) { await cas(db, row.id, "applying_close", "pending"); return { state: "pending", reason: e.code || "read_failed" }; }
-  const p = checkPre(row.tool, args, pre, bytes);
-  if (!p.ok) return fail(db, row, "applying_close", p.reason);
-  return runClaimed(ctx, db, row);
+  if (row.state !== "pending" || !(await claim(ctx, db, row, "pending"))) return SKIPPED;
+  let saved;
+  try { saved = await readSaved(ctx, row); } catch (e) { return (await release(db, row, "pending")) ? { state: "pending", reason: e.code || "read_failed" } : SKIPPED; }
+  return validateAndRun(ctx, db, row, saved);
 }
 
 /**

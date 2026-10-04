@@ -12,6 +12,13 @@ export const EXPIRY_MS = 7 * 86400e3;
 const now = () => Date.now();
 /** A change_id: pc_<base36 time><12 hex>. */
 export const CHANGE_ID_RE = /^pc_[0-9a-z]{6,40}$/;
+/**
+ * This process's identity as a close-time applier (per boot). A close-time claim (→ applying_close) records it with
+ * a lease; every later transition of that row is owner-checked, and recoverStranded only takes rows whose lease ran
+ * out — so a second applier (an orphan or overlapping gateway on the same crow.db) never re-applies an in-flight row.
+ */
+export const APPLIER_ID = `close:${process.pid}:${randomBytes(6).toString("hex")}`;
+export const APPLY_LEASE_MS = 10 * 60e3;
 const newId = () => `pc_${Date.now().toString(36)}${randomBytes(6).toString("hex")}`;
 const PATCHABLE = new Set(["lease_until", "lease_owner", "claim_count", "result_json", "version_id", "inverse_json", "verified", "doc_key"]);
 
@@ -30,13 +37,17 @@ export async function enqueue(db, r) {
   }
 }
 
-/** Compare-and-set: moves `id` from `from` to `to` (plus patch columns) only if it is still in `from`. */
-export async function cas(db, id, from, to, patch = {}) {
+/**
+ * Compare-and-set: moves `id` from `from` to `to` (plus patch columns) only if it is still in `from` — and, with
+ * `owner`, only if its lease_owner is still `owner` (the applier that claimed it).
+ */
+export async function cas(db, id, from, to, patch = {}, { owner } = {}) {
   if (!STATES.includes(to)) throw new Error(`unknown state ${to}`);
   const cols = Object.keys(patch);
   for (const c of cols) if (!PATCHABLE.has(c)) throw new Error(`not a patchable column: ${c}`);
   const sets = ["state=?", "updated_at=?", ...cols.map((c) => `${c}=?`)];
-  const res = await db.execute({ sql: `UPDATE workspace_pending_changes SET ${sets.join(",")} WHERE id=? AND state=?`, args: [to, now(), ...cols.map((c) => patch[c] ?? null), String(id), from] });
+  const own = owner === undefined ? "" : " AND lease_owner IS ?";
+  const res = await db.execute({ sql: `UPDATE workspace_pending_changes SET ${sets.join(",")} WHERE id=? AND state=?${own}`, args: [to, now(), ...cols.map((c) => patch[c] ?? null), String(id), from, ...(owner === undefined ? [] : [owner])] });
   return res.rowsAffected === 1;
 }
 
@@ -65,11 +76,20 @@ export async function releaseExpiredLeases(db, at = now()) {
   const rows = (await db.execute({ sql: "SELECT id FROM workspace_pending_changes WHERE state='claimed_live' AND lease_until < ?", args: [at] })).rows;
   for (const r of rows) await cas(db, r.id, "claimed_live", "unknown_after_claim");
 }
-/** K5-I5: a crash between the PUT and the final CAS strands applying_close; on start those become unknown_after_claim. */
-export async function recoverStranded(db) {
-  const rows = (await db.execute({ sql: "SELECT id FROM workspace_pending_changes WHERE state='applying_close'", args: [] })).rows;
-  for (const r of rows) await cas(db, r.id, "applying_close", "unknown_after_claim");
-  return rows.map((r) => r.id);
+/**
+ * K5-I5: a crash between the PUT and the final CAS strands applying_close. Rows whose applier lease ran out (or that
+ * carry none) become unknown_after_claim, so the postcondition decides; a row another applier still holds is never
+ * taken. Runs at worker start and on every tick. Returns the ids it took.
+ */
+export async function recoverStranded(db, at = now()) {
+  const expired = "state='applying_close' AND (lease_until IS NULL OR lease_until < ?)";
+  const rows = (await db.execute({ sql: `SELECT id FROM workspace_pending_changes WHERE ${expired}`, args: [at] })).rows;
+  const out = [];
+  for (const r of rows) {
+    const res = await db.execute({ sql: `UPDATE workspace_pending_changes SET state='unknown_after_claim', lease_owner=NULL, lease_until=NULL, updated_at=? WHERE id=? AND ${expired}`, args: [now(), String(r.id), at] });
+    if (res.rowsAffected === 1) out.push(r.id);
+  }
+  return out;
 }
 /** Paths are kept in step when a file is found again by id after a rename. */
 export async function setPath(db, fileId, path) { await db.execute({ sql: "UPDATE workspace_pending_changes SET path=? WHERE file_id=?", args: [path, fileId] }); }

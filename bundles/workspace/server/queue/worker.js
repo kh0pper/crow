@@ -3,8 +3,10 @@
  * changes not yet checked against the saved file): stat it; if it is unlocked AND ONLYOFFICE `info` says no session
  * (checked even when unlocked — the connector locks only after the editor fetched the file), verify live-applied
  * changes, then apply the waiting ones in seq order. Any lock (a person's, a live session, or a phone viewing it)
- * → nothing happens; a stale editor lock → one notification. Runs in the gateway only (one applier per host);
- * every transition is a CAS, so a second applier would still be safe.
+ * → nothing happens; a stale editor lock → one notification. Runs in the gateway only (one applier per host). A
+ * second applier on the same crow.db (an orphan or overlapping gateway) is still safe: every transition is a CAS,
+ * a close-time claim carries this process's APPLIER_ID and a lease, every later transition is owner-checked (a lost
+ * final CAS reports `skipped`, never a second notification), and recoverStranded only takes rows whose lease ran out.
  */
 import { stat, getFile, resolveRef } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
@@ -55,6 +57,7 @@ export function makeTick({ db, getConfig, clock }) {
   return async function tick() {
     const cfg = getConfig(); const ctx = Object.freeze({ getConfig, clock });
     await releaseExpiredLeases(db, clock.now());
+    await recoverStranded(db, clock.now()); // an applier that died mid-apply: lease run out → unknown_after_claim
     for (const id of await expireOld(db, clock.now())) await notifyChange(db, await get(db, id), "expired");
     for (const f of await filesWithWork(db)) {
       try {
@@ -73,11 +76,11 @@ export function makeTick({ db, getConfig, clock }) {
 }
 
 let running = null;
-/** Idempotent per process: a second call returns the running worker's stop(). Recovers stranded rows once at start. */
+/** Idempotent per process: a second call returns the running worker's stop(). Recovers stranded rows (expired leases) at start and on every tick. */
 export function startQueueWorker({ db, getConfig, clock, intervalMs = 15000 }) {
   if (running) return running;
   const tick = makeTick({ db, getConfig, clock }); let busy = false;
-  const recovered = recoverStranded(db).catch((e) => console.warn(`[workspace] queue recover: ${e.message}`));
+  const recovered = recoverStranded(db, clock.now()).catch((e) => console.warn(`[workspace] queue recover: ${e.message}`));
   const t = setInterval(() => {
     if (busy) return; busy = true;
     recovered.then(() => tick()).catch((e) => console.warn(`[workspace] queue tick: ${e.message}`)).finally(() => { busy = false; });

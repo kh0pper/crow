@@ -39,11 +39,12 @@ export const isLiveOp = (tool) => LIVE_OPS.has(tool);
  * Everything else waits for close-time apply.
  */
 export function liveEligible(tool, args = {}, pre = null) {
-  if (!isLiveOp(tool)) return false;
+  if (!isLiveOp(tool) || pre?.undo_of) return false; // spec §5.7: undo (every step of a queued inverse) is close-time only
   switch (tool) {
     case "ws_docs_find_replace": return pairsOf(args).length === 1 && Number.isInteger(pre?.rcount);
     case "ws_docs_append": case "ws_docs_insert_at_heading": return Number.isInteger(pre?.count) && !!pre?.text;
     case "ws_sheets_append": return Number.isInteger(pre?.last_row);
+    case "ws_docs_rewrite_passages": return !!pre?.new_counts;
     default: return true;
   }
 }
@@ -79,6 +80,12 @@ function firstInsertedText(d, md) {
   for (const n of markdownToBlocks(d, md)) for (const p of n.localName === "p" ? [n] : all(n, NS.w, "p")) { const t = paragraphText(p).normalize("NFC").trim(); if (t) return t; }
   return "";
 }
+/**
+ * rewrite_passages: how many paragraphs read exactly each new_text (trimmed, NFC) — counted at queue time, so the
+ * postcondition is "at least that many more", never mere presence. A new_text with a line break or tab cannot be
+ * compared paragraph-for-paragraph → no snapshot (undecidable: never live, never "detected").
+ */
+const rewriteTexts = (args) => (args.passages || []).map((p) => nfc(p.new_text).trim());
 const paraCount = (d, text) => allParagraphs(d).filter(({ p }) => paragraphText(p).normalize("NFC").trim() === text).length;
 const sectionHash = (d, heading) => { const r = sectionRange(d, heading); return sha(topBlocks(d).slice(r.start + 1, r.end).map((b) => all(b, NS.w, "p").concat(b.localName === "p" ? [b] : []).map(paragraphText).join("\n")).join("\n\u0001")); };
 const slideTexts = (deck, slideIds) => deck.slides.filter((s) => !slideIds || slideIds.map(String).includes(String(s.id))).map((s) => all(deck.pkg.xml(s.part), NS.a, "p").map(paraText).join("\n")).join("\n").normalize("NFC");
@@ -102,6 +109,7 @@ export function snapshot(tool, args, bytes) {
     case "ws_docs_find_replace": { const d = openDocx(bytes); const ps = pairsOf(args); if (ps.length !== 1) return null; const t = docText(d); const mc = caseOf(args, ps[0]); return { fcount: countOf(fold(t, mc), fold(ps[0].find, mc)), rcount: countOf(fold(t, mc), fold(ps[0].replace, mc)) }; }
     case "ws_docs_append": case "ws_docs_insert_at_heading": { const d = openDocx(bytes); if (tool === "ws_docs_insert_at_heading") sectionRange(d, args.heading); const text = firstInsertedText(d, args.markdown); return text ? { text, count: paraCount(d, text) } : null; }
     case "ws_docs_replace_section": return { section_hash: sectionHash(openDocx(bytes), args.heading) };
+    case "ws_docs_rewrite_passages": { const ts = rewriteTexts(args); if (!ts.length || ts.some((t) => /[\n\t]/.test(t))) return null; const d = openDocx(bytes); return { new_counts: Object.fromEntries([...new Set(ts)].map((t) => [t, paraCount(d, t)])) }; }
     case "ws_sheets_write": return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values };
     case "ws_sheets_append": { const wb = openXlsx(bytes); return { header: headerRow(wb, args.sheet_name), last_row: lastDataRow(wb, args.sheet_name) }; }
     case "ws_sheets_set_number_format": return { s_attrs: styleAttrs(openXlsx(bytes), args.range) };
@@ -162,7 +170,11 @@ export function checkPost(tool, args, bytes, pre = null) {
         return remainingFinds(h, f, r) === 0 && countOf(h, r) > pre.rcount;
       }
       case "ws_docs_append": case "ws_docs_insert_at_heading": return pre && Number.isInteger(pre.count) && pre.text ? paraCount(openDocx(bytes), pre.text) > pre.count : null;
-      case "ws_docs_rewrite_passages": { const t = docText(openDocx(bytes)); return args.passages.every((p) => t.includes(nfc(p.new_text).split("\n")[0])); }
+      case "ws_docs_rewrite_passages": {
+        if (!pre?.new_counts) return null;
+        const d = openDocx(bytes); const need = {}; for (const t of rewriteTexts(args)) need[t] = (need[t] || 0) + 1;
+        return Object.entries(need).every(([t, n]) => Number.isInteger(pre.new_counts[t]) && paraCount(d, t) >= pre.new_counts[t] + n);
+      }
       case "ws_sheets_write": { const want = (Array.isArray(args.values[0]) ? args.values : [args.values]); return sameWritten(want, readRange(openXlsx(bytes), args.range, "FORMULA").values); }
       case "ws_sheets_append": {
         if (!pre || !Number.isInteger(pre.last_row)) return null;
