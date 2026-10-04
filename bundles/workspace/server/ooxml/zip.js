@@ -39,7 +39,7 @@ export class OoxmlPackage {
   remove(n) { this.removed.add(n); this.dirty.delete(n); }
   changed() { return new Set([...this.dirty, ...this.removed]); }
   save() {
-    const out = {};
+    const out = Object.create(null);
     // [Content_Types].xml goes first (OPC convention; some writers, e.g. openpyxl, put it last); every other part keeps its order.
     const names = this.names();
     for (const n of ["[Content_Types].xml", ...names.filter((x) => x !== "[Content_Types].xml")]) out[n] = [this.bytes(n), { level: this.levels.get(n) === 0 ? 0 : 6 }];

@@ -7,11 +7,21 @@ import { NS, kids, kid, el, insertAfter, removeNode, parseXml } from "./xml.js";
 import { textMap, runsOf, paragraphText, topBlocks, allParagraphs, makeRun, preserve, setOrdered, RPR_ORDER } from "./docx-model.js";
 import { sectionRange } from "./docx-read.js";
 import { markdownToBlocks, safeUrl } from "./md-to-wml.js";
-import { addRel, REL, ensureDefault } from "./opc.js";
+import { addRel, removeRel, REL, ensureDefault } from "./opc.js";
 import { imageSize } from "./image-size.js";
 
 const W = NS.w;
 const KEEP_ON_REWRITE = new Set(["pPr", "bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "proofErr"]);
+const RANGE_END = new Set(["bookmarkEnd", "commentRangeEnd"]);
+// what a plain-text run may hold; anything else (drawing, field chars, footnote refs, objects…) is not plain text
+const PLAIN_RUN = new Set(["rPr", "t", "tab", "br", "cr", "lastRenderedPageBreak", "softHyphen", "noBreakHyphen"]);
+const isCommentRef = (c) => c.localName === "r" && kids(c, W, "commentReference").length > 0 && kids(c, W).every((k) => k.localName === "rPr" || k.localName === "commentReference");
+/**
+ * A paragraph whose whole text may be replaced: only plain runs, comment markers and range anchors. Links,
+ * fields (fldSimple/fldChar), tracked changes, content controls, images and note references would be lost or
+ * left unbalanced, so those paragraphs are refused (spec §8 remedy: edit them with find_replace).
+ */
+export const isPlainTextParagraph = (p) => kids(p, W).every((c) => KEEP_ON_REWRITE.has(c.localName) || isCommentRef(c) || (c.localName === "r" && kids(c, W).every((k) => PLAIN_RUN.has(k.localName))));
 
 // ---- text search -------------------------------------------------------------------------------------
 // A paragraph's text is its w:t segments joined, with "\u0000" for every tab/break/drawing/field (SEP), so a
@@ -84,13 +94,13 @@ export function findReplace(d, pairs, matchCase = true) {
 // ---- whole-paragraph rewrite -------------------------------------------------------------------------
 
 export function setParagraphText(d, p, text) {
+  if (!isPlainTextParagraph(p)) throw new WsError("not_plain_text", "that paragraph holds a link, field, image, tracked change or note reference; edit it with ws_docs_find_replace instead");
   const lines = String(text).normalize("NFC").split("\n");
   const pPr = kid(p, W, "pPr");
-  const firstRun = runsOf(p)[0]; const rPr = firstRun ? kid(firstRun, W, "rPr") : null; const rPrCopy = rPr ? rPr.cloneNode(true) : null;
-  const isCommentRef = (c) => c.localName === "r" && kids(c, W, "commentReference").length > 0;
+  const firstRun = runsOf(p).find((r) => !isCommentRef(r)); const rPr = firstRun ? kid(firstRun, W, "rPr") : null; const rPrCopy = rPr ? rPr.cloneNode(true) : null;
   for (const c of kids(p, W)) if (!KEEP_ON_REWRITE.has(c.localName) && !isCommentRef(c)) removeNode(c);
-  // the new text goes inside the comment range when there is one, and always before the comment marker
-  const anchor = kids(p, W, "commentRangeEnd")[0] || kids(p, W).find(isCommentRef) || null;
+  // the new text goes before the first range end (inside bookmarks and comment ranges) and before the comment marker
+  const anchor = kids(p, W).find((c) => RANGE_END.has(c.localName) || isCommentRef(c)) || null;
   p.insertBefore(makeRun(d.doc, lines[0], rPrCopy), anchor);
   let prev = p;
   for (const line of lines.slice(1)) {
@@ -109,6 +119,7 @@ export function rewritePassages(d, passages) {
     if (!prefix) return { match_prefix: ps.match_prefix, matched: false, reason: "Empty match_prefix" };
     const p = paras.find((x) => !used.has(x) && paragraphText(x).normalize("NFC").replace(/^\s+/, "").startsWith(prefix));
     if (!p) return { match_prefix: ps.match_prefix, matched: false, reason: "No paragraph starts with this prefix" };
+    if (!isPlainTextParagraph(p)) return { match_prefix: ps.match_prefix, matched: false, reason: "not_plain_text" };
     used.add(p); const original_length = paragraphText(p).length;
     setParagraphText(d, p, ps.new_text);
     return { match_prefix: ps.match_prefix, matched: true, original_length, new_length: String(ps.new_text).length };
@@ -160,10 +171,17 @@ export function formatText(d, find, occurrence, style) {
     if (url) {
       const parents = new Set(runs.map((r) => r.parentNode));
       const parent = [...parents][0];
-      if (parents.size > 1) throw new WsError("bad_args", "that text crosses a link, field or tracked change; format a smaller piece");
-      const relId = addRel(d.pkg, part, REL.hyperlink, url, true);
-      if (parent.localName === "hyperlink") parent.setAttributeNS(NS.r, "r:id", relId);
-      else {
+      const inLink = [...parents].some((x) => x.localName === "hyperlink");
+      if (inLink && (parents.size > 1 || runsOf(parent).some((r) => !runs.includes(r) && kids(r, W, "t").some((t) => t.textContent)))) throw new WsError("bad_args", "part of that text is already a link; give the whole link text to change where it points");
+      if (parents.size > 1) throw new WsError("bad_args", "that text crosses a field or tracked change; format a smaller piece");
+      if (inLink) {
+        // the match is the whole link: re-point it, and drop the old relationship when nothing else uses it
+        const old = parent.getAttributeNS(NS.r, "id");
+        const relId = addRel(d.pkg, part, REL.hyperlink, url, true);
+        parent.setAttributeNS(NS.r, "r:id", relId);
+        if (old && !relUsed(p.ownerDocument, old)) removeRel(d.pkg, part, old);
+      } else {
+        const relId = addRel(d.pkg, part, REL.hyperlink, url, true);
         // wrap the runs and anything between them (bookmarks, comment anchors) in one w:hyperlink
         const h = el(doc, W, "w:hyperlink", { "r:id": relId }); const last = runs.at(-1);
         parent.insertBefore(h, runs[0]);
@@ -173,6 +191,12 @@ export function formatText(d, find, occurrence, style) {
     d.pkg.markDirty(part);
   }
   return chosen.length;
+}
+
+/** Whether any element of the part still references relationship `id` (r:id, r:embed, r:link, …). */
+function relUsed(doc, id) {
+  for (const e of Array.from(doc.getElementsByTagName("*"))) for (const a of Array.from(e.attributes)) if (a.namespaceURI === NS.r && a.value === id) return true;
+  return false;
 }
 
 // ---- block insertion ---------------------------------------------------------------------------------

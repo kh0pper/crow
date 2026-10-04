@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { unzipSync, zipSync, strFromU8, strToU8 } from "fflate";
 import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
 import { connectWorkspace } from "./helpers/workspace-client.js";
+import { openDocx } from "../bundles/workspace/server/ooxml/docx-model.js";
+import { setParagraphText, isPlainTextParagraph } from "../bundles/workspace/server/ooxml/docx-edit.js";
+import { imageSize } from "../bundles/workspace/server/ooxml/image-size.js";
 import { assertOnlyPartsChanged, partText, bodyBlocks, assertBlocksUnchangedOutside, sofficeOpens } from "./helpers/ooxml-assert.js";
 
 const FIX = join(import.meta.dirname, "fixtures", "workspace");
@@ -187,7 +190,10 @@ test("insert_image embeds a drive image sized from its header", async () => {
   const changed = assertOnlyPartsChanged(before, bytesOf("S/img.docx"), ["word/document.xml", "word/_rels/document.xml.rels", "word/media/image2.png"]);
   assert.ok(changed.includes("word/media/image2.png"));
   assert.match(partText(bytesOf("S/img.docx"), "word/_rels/document.xml.rels"), /Target="media\/image2\.png"/);
-  assert.equal((await call("ws_docs_insert_image", { path: "S/img.docx", image_path: "S/fr-rich.docx" })).code, "bad_image");
+  fake.addFile("S/not-an-image.png", Buffer.from("PK\u0003\u0004 this is a zip, not a png"));
+  const putsBefore = puts();
+  assert.equal((await call("ws_docs_insert_image", { path: "S/img.docx", image_path: "S/not-an-image.png" })).code, "bad_image");
+  assert.equal(puts() - putsBefore, 0, "a non-image never reaches the write path");
 });
 
 test("insert_image replaces anchor_text inside one run and keeps the rest of the run's text", async () => {
@@ -231,4 +237,108 @@ test("no full-document replace tool exists (D7 guardrail)", async () => {
     const up = tools.find((t) => t.name === "ws_drive_upload_new_version");
     if (up) assert.match(up.description, /docx|office/i);
   } finally { await conn.close(); }
+});
+
+
+// ---- review fix round 1 ------------------------------------------------------------------------------
+const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const PNG_200x100 = Buffer.from("89504e470d0a1a0a0000000d49484452000000c8000000640806000000", "hex").subarray(0, 24);
+const pngOf = (w, h) => { const b = Buffer.from(PNG_200x100); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); return b; };
+const FIELD_PARAS = '<w:p><w:r><w:t xml:space="preserve">Campo simple </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>'
+  + '<w:p><w:r><w:t xml:space="preserve">Campo complejo </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>hoy</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+  + '<w:p><w:r><w:t xml:space="preserve">Con nota</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+  + '<w:p><w:r><w:t xml:space="preserve">Con enlace </w:t></w:r><w:hyperlink w:anchor="tacos"><w:r><w:t>aquí</w:t></w:r></w:hyperlink></w:p>'
+  + '<w:p><w:bookmarkStart w:id="9" w:name="marca"/><w:r><w:t>Marcado uno</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>';
+const withFields = (src) => variant(src, (x) => x.replace(/<w:sectPr/, `${FIELD_PARAS}<w:sectPr`));
+
+for (const src of ["rich.docx", "oo-rich.docx"]) {
+  test(`${src}: rewrite_passages refuses paragraphs that are not plain text (image, fields, note, link) and keeps them intact`, async () => {
+    putBytes(`np-${src}`, withFields(src));
+    fake.addFile(`S/np-${src}.png`, PNG_200x100);
+    assert.equal((await call("ws_docs_insert_image", { path: `S/np-${src}`, image_path: `S/np-${src}.png`, anchor_text: "antes del final" })).success, true);
+    const before = bytesOf(`S/np-${src}`);
+    const drawings = (partText(before, "word/document.xml").match(/<w:drawing>/g) || []).length;
+    const putsBefore = puts();
+    const r = await call("ws_docs_rewrite_passages", { path: `S/np-${src}`, passages: ["Última línea", "Campo simple", "Campo complejo", "Con nota", "Con enlace"].map((match_prefix) => ({ match_prefix, new_text: "x" })) });
+    assert.deepEqual(r.data.results.map((x) => [x.matched, x.reason]), Array(5).fill([false, "not_plain_text"]));
+    assert.equal(r.data.changed, 0); assert.equal(puts() - putsBefore, 0, "nothing matched → no version");
+    assert.equal((partText(bytesOf(`S/np-${src}`), "word/document.xml").match(/<w:drawing>/g) || []).length, drawings);
+    // a plain paragraph in the same call still applies; the others stay byte-identical
+    const blocksBefore = await bodyBlocks(before);
+    const r2 = await call("ws_docs_rewrite_passages", { path: `S/np-${src}`, passages: [{ match_prefix: "Campo complejo", new_text: "x" }, { match_prefix: "Marcado", new_text: "Marcado dos" }] });
+    assert.deepEqual(r2.data.results.map((x) => x.matched), [false, true]);
+    const blocksAfter = await bodyBlocks(bytesOf(`S/np-${src}`));
+    const i = blocksBefore.findIndex((b) => b.includes("Marcado uno"));
+    assertBlocksUnchangedOutside(blocksBefore, blocksAfter, i, 1, 1);
+    // the new text sits inside the bookmark (before its bookmarkEnd), not after it
+    assert.match(blocksAfter[i], /<w:bookmarkStart[^>]*w:name="marca"\/><w:r><w:t[^>]*>Marcado dos<\/w:t><\/w:r><w:bookmarkEnd w:id="9"\/>/);
+  });
+}
+
+test("setParagraphText guards every caller: a field or image paragraph is refused with not_plain_text", () => {
+  const d = openDocx(withFields("rich.docx"));
+  const paras = Array.from(d.body.getElementsByTagNameNS(W_NS, "p"));
+  const byText = (t) => paras.find((p) => p.textContent.startsWith(t));
+  for (const t of ["Campo simple", "Campo complejo", "Con nota", "Con enlace"]) {
+    assert.equal(isPlainTextParagraph(byText(t)), false, t);
+    assert.throws(() => setParagraphText(d, byText(t), "x"), (e) => e.code === "not_plain_text", t);
+  }
+  const img = paras.find((p) => p.getElementsByTagNameNS(W_NS, "drawing").length);
+  assert.throws(() => setParagraphText(d, img, "x"), (e) => e.code === "not_plain_text");
+  assert.equal(isPlainTextParagraph(byText("Tacos al")), true, "bookmarks, comment anchors and the comment marker are fine");
+});
+
+test("imageSize: truncated PNG, JPEG without SOF, zero/oversize sides are bad_image; real JPEG and GIF are sized", () => {
+  const bad = (b) => assert.throws(() => imageSize(b), (e) => e.code === "bad_image");
+  bad(PNG_200x100.subarray(0, 23));
+  bad(Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex")); // APP0 then EOI, no frame header
+  bad(Buffer.from("ffd8ffe000104a46494600010100000100010000ffda000c03010002110311003f00ffd9", "hex")); // scan before any SOF
+  bad(pngOf(1, 0xffffffff)); bad(pngOf(65536, 10)); bad(pngOf(0, 10));
+  assert.deepEqual(imageSize(pngOf(65535, 1)), { type: "png", width: 65535, height: 1 });
+  const thumb = unzipSync(new Uint8Array(readFileSync(join(FIX, "rich.docx"))))["docProps/thumbnail.jpeg"];
+  assert.deepEqual(imageSize(thumb), { type: "jpeg", width: 395, height: 512 }); // PIL agrees: 395×512
+  assert.deepEqual(imageSize(Buffer.from("ffd8ffe000104a46494600010100000100010000ffc0001108006400c803012200021101031101ffd9", "hex")), { type: "jpeg", width: 200, height: 100 });
+  assert.deepEqual(imageSize(Buffer.concat([Buffer.from("GIF87a"), Buffer.from([3, 0, 4, 0]), Buffer.alloc(4)])), { type: "gif", width: 3, height: 4 });
+});
+
+test("insert_image: a JPEG is embedded as imageN.jpeg; an oversize or > 5 MB image is refused before any write", async () => {
+  put("jpg.docx", "rich.docx");
+  fake.addFile("S/thumb.jpg", unzipSync(new Uint8Array(readFileSync(join(FIX, "rich.docx"))))["docProps/thumbnail.jpeg"]);
+  const r = await call("ws_docs_insert_image", { path: "S/jpg.docx", image_path: "S/thumb.jpg", max_width_pt: 1000 });
+  assert.equal(r.data.image_part, "word/media/image2.jpeg");
+  assert.match(partText(bytesOf("S/jpg.docx"), "word/document.xml"), /<wp:extent cx="3762375" cy="4876800"\/>/); // 395×512 px at 9525 EMU/px
+  assert.match(partText(bytesOf("S/jpg.docx"), "[Content_Types].xml"), /Extension="jpeg" ContentType="image\/jpeg"/);
+  fake.addFile("S/huge.png", pngOf(1, 0xffffffff));
+  fake.addFile("S/big.png", Buffer.concat([PNG_200x100, Buffer.alloc(5 * 1024 * 1024 + 1 - PNG_200x100.length)]));
+  const putsBefore = puts();
+  assert.equal((await call("ws_docs_insert_image", { path: "S/jpg.docx", image_path: "S/huge.png" })).code, "bad_image");
+  assert.equal((await call("ws_docs_insert_image", { path: "S/jpg.docx", image_path: "S/big.png" })).code, "too_large");
+  assert.equal(puts() - putsBefore, 0);
+});
+
+test("format_text link_url: a whole existing link is re-pointed (old relationship removed); part of a link is refused", async () => {
+  put("lnk.docx", "rich.docx");
+  await call("ws_docs_append", { path: "S/lnk.docx", markdown: "Ver [nuestra receta](https://a.example/x) hoy." });
+  const part = await call("ws_docs_format_text", { path: "S/lnk.docx", find: "receta", link_url: "https://b.example/y" });
+  assert.equal(part.code, "bad_args"); assert.match(part.error, /part of that text is already a link/);
+  const whole = await call("ws_docs_format_text", { path: "S/lnk.docx", find: "nuestra receta", link_url: "https://b.example/y" });
+  assert.equal(whole.data.formatted, 1);
+  assert.match((await call("ws_docs_read", { path: "S/lnk.docx" })).data.markdown, /Ver \[nuestra receta\]\(https:\/\/b\.example\/y\) hoy\./);
+  const rels = partText(bytesOf("S/lnk.docx"), "word/_rels/document.xml.rels");
+  assert.doesNotMatch(rels, /a\.example/, "the old relationship is not orphaned");
+  assert.equal((rels.match(/b\.example/g) || []).length, 1);
+  // text spanning plain text and a link is refused too
+  assert.equal((await call("ws_docs_format_text", { path: "S/lnk.docx", find: "Ver nuestra", link_url: "https://c.example/" })).code, "bad_args");
+});
+
+test("insert_at_heading: a markdown heading gets its heading style, the paragraph after it gets none", async () => {
+  put("hp.docx", "oo-rich.docx");
+  const before = await bodyBlocks(bytesOf("S/hp.docx"));
+  await call("ws_docs_insert_at_heading", { path: "S/hp.docx", heading: "Notas", markdown: "### Sub\n\nTexto normal" });
+  const after = await bodyBlocks(bytesOf("S/hp.docx"));
+  const i = before.findIndex((b) => b.includes(">Notas<"));
+  assertBlocksUnchangedOutside(before, after, i + 1, 0, 2);
+  assert.match(after[i + 1], /<w:pStyle w:val="[^"]+"\/>/); assert.match(after[i + 1], />Sub</);
+  assert.doesNotMatch(after[i + 2], /w:pStyle|w:numPr/); assert.match(after[i + 2], />Texto normal</);
+  assert.match((await call("ws_docs_read", { path: "S/hp.docx" })).data.markdown, /### Sub\n\nTexto normal/);
 });
