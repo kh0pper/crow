@@ -500,7 +500,12 @@ export async function stepsToday(db, now, settings) {
  * the row has since grown, another of the user's instances credited the same
  * phone in between (the phone switched gateways and came back): diffing
  * against our stale baseline would count that range twice. Re-baseline and
- * credit nothing — this can only under-count.
+ * credit nothing — this can only under-count. Known benign false positive:
+ * two concurrent requests for the SAME device on THIS instance (two tabs) can
+ * see the other's write between its claim and its last_total update and drop
+ * a delta; the panel's single in-flight read makes that rare, and it too only
+ * under-counts. The "unseen" nudge wording (Task 6) likewise looks at this
+ * instance's freshest device only.
  */
 export async function recordStepReading(db, reading, { now = Date.now(), emit } = {}) {
   const r = parseReading(reading);
