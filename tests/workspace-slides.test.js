@@ -216,7 +216,8 @@ test("add_image refuses a non-image and an image over 65535 px before any write"
   const b = await call("ws_slides_add_image", { path: "S/i.pptx", slide_id: "256", image_path: "S/big.png" });
   assert.equal(b.code, "bad_image"); assert.match(b.error, /65535/);
   assert.equal(puts(), p0);
-  assert.equal((await call("ws_slides_read", { path: "S/i.xlsx" })).success, false);
+  const r = await call("ws_slides_read", { path: "S/i.pptx" });
+  assert.ok(!r.data.slides[0].shapes.some((s) => s.kind === "picture"), "a refused image is not added");
 });
 
 test("wrong file type is refused", async () => {
@@ -293,5 +294,53 @@ test("unit: a new slide gets sldIdLst in schema order on a deck with no slides; 
   const top = Array.from(d.doc.documentElement.childNodes).filter((n) => n.nodeType === 1).map((n) => n.localName);
   assert.deepEqual(top.slice(0, 4), ["sldMasterIdLst", "notesMasterIdLst", "sldIdLst", "sldSz"]);
   assert.equal(X.notesText(d, X.slideById(d, slide_id)), "hola");
+  assertPackageConsistent(d.pkg.save());
+});
+
+test("review I1: duplicate slide_ids in find_replace are refused (no double replace, no version)", async () => {
+  put("dd.pptx", "rich.pptx");
+  const p0 = puts(); const before = bytesOf("S/dd.pptx");
+  const r = await call("ws_slides_find_replace", { path: "S/dd.pptx", find: "Jueves", replace: "Jueves y viernes", slide_ids: ["257", "257"] });
+  assert.equal(r.code, "bad_args"); assert.match(r.error, /duplicates/);
+  assert.equal(puts(), p0); assert.equal(Buffer.compare(before, bytesOf("S/dd.pptx")), 0);
+  const ok = await call("ws_slides_find_replace", { path: "S/dd.pptx", find: "Jueves", replace: "Jueves y viernes", slide_ids: ["257"] });
+  assert.equal(ok.data.total_changes, 1);
+  assert.equal((await call("ws_slides_read", { path: "S/dd.pptx" })).data.slides[1].title, "Jueves y viernes");
+});
+
+test("a reorder that changes nothing makes no version (single tool and batch)", async () => {
+  put("ro.pptx", "rich.pptx");
+  const p0 = puts(); const before = bytesOf("S/ro.pptx");
+  const r = await call("ws_slides_reorder_slides", { path: "S/ro.pptx", slide_ids: ["256"], insertion_index: 0 });
+  assert.equal(r.success, true); assert.deepEqual(r.data.order, ["256", "257"]);
+  const b = await call("ws_slides_batch_update", { path: "S/ro.pptx", ops: [{ op: "reorder_slides", slide_ids: ["257"], insertion_index: 2 }] });
+  assert.equal(b.success, true);
+  assert.equal(puts(), p0); assert.equal(Buffer.compare(before, bytesOf("S/ro.pptx")), 0);
+  await call("ws_slides_reorder_slides", { path: "S/ro.pptx", slide_ids: ["257"], insertion_index: 0 });
+  assert.equal(puts() - p0, 1);
+});
+
+test("unit: a txBody created for a shape without one goes before p:extLst", () => {
+  const d0 = deckOf();
+  setPart(d0, X.slideById(d0, "256").part, (x) => x.replace('<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Casa Nueva</a:t></a:r></a:p></p:txBody>', '<p:spPr/><p:extLst><p:ext uri="{X}"/></p:extLst>'));
+  const d = X.openPptx(d0.pkg.save());
+  X.editShapeText(d, "256:3", "Hola");
+  const sp = Array.from(d.pkg.xml(X.slideById(d, "256").part).getElementsByTagNameNS(P_NS, "sp"))[1];
+  assert.deepEqual(Array.from(sp.childNodes).filter((n) => n.nodeType === 1).map((n) => n.localName), ["nvSpPr", "spPr", "txBody", "extLst"]);
+  assert.equal(X.readDeck(d, false)[0].shapes[1].text, "Hola");
+});
+
+test("unit: add_slide drops layout placeholder parts that reference the layout's own relationships", () => {
+  const d0 = deckOf();
+  const layout = "ppt/slideLayouts/slideLayout2.xml";
+  const rid = addRel(d0.pkg, layout, REL.hyperlink, "https://example.com/", true);
+  setPart(d0, layout, (x) => x.replace(/(<p:cNvPr id="2" name="Title 1")\/>/, `$1><a:hlinkClick xmlns:r="${R_NS}" r:id="${rid}"/></p:cNvPr>`)
+    .replace(/(<p:ph type="title"\/>)/, `$1<p:custDataLst><p:custData xmlns:r="${R_NS}" r:id="${rid}"/></p:custDataLst>`));
+  assert.match(serializeXml(d0.pkg.xml(layout)), /hlinkClick[\s\S]*custData /, "fixture edit applied");
+  const d = X.openPptx(d0.pkg.save());
+  const { slide_id } = X.addSlide(d, "Title and Content");
+  const xml = serializeXml(d.pkg.xml(X.slideById(d, slide_id).part));
+  assert.doesNotMatch(xml, /r:id=|hlinkClick|custData/);
+  assert.match(xml, /<p:ph type="title"\/>/);
   assertPackageConsistent(d.pkg.save());
 });

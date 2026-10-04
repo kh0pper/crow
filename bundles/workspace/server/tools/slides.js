@@ -51,7 +51,7 @@ function opRun(deck, op) {
     case "find_replace": return fr(deck, op).total;
     case "add_slide": X.addSlide(deck, op.layout ?? "Blank", op.index); return 1;
     case "delete_slide": X.deleteSlide(deck, op.slide_id); return 1;
-    case "reorder_slides": X.reorderSlides(deck, op.slide_ids, op.insertion_index); return 1;
+    case "reorder_slides": return X.reorderSlides(deck, op.slide_ids, op.insertion_index).changed ? 1 : 0;
     case "edit_notes": X.editNotes(deck, op.slide_id, op.text, op.mode ?? "replace"); return 1;
     case "format_text": return X.formatShapeText(deck, op.object_id, op);
     default: throw new WsError("bad_args", `unknown op "${op.op}"`);
@@ -88,7 +88,7 @@ export const slidesDefs = [
   { name: "ws_slides_delete_slide", description: "Delete a slide with its notes and relationships. Destructive: confirm intent with the user first.", schema: { ...fileRef, slide_id: slideId, ...writeOpts },
     run: (a, c) => deckWrite(c, a, (deck) => ({ changed: 1, summary: `delete slide ${a.slide_id}`, data: X.deleteSlide(deck, a.slide_id) })) },
   { name: "ws_slides_reorder_slides", description: "Move slides (kept in the given order) to insertion_index, a position in the slide order before the move (Google semantics).", schema: { ...fileRef, slide_ids: z.array(slideId).min(1).max(500), insertion_index: z.number().int().min(0), ...writeOpts },
-    run: (a, c) => deckWrite(c, a, (deck) => ({ changed: 1, summary: "reorder slides", data: X.reorderSlides(deck, a.slide_ids, a.insertion_index) })) },
+    run: (a, c) => deckWrite(c, a, (deck) => { const r = X.reorderSlides(deck, a.slide_ids, a.insertion_index); return { changed: r.changed ? 1 : 0, summary: "reorder slides", data: { order: r.order } }; }) },
   { name: "ws_slides_add_text_box", description: "Add a text box to a slide (position and size in inches; \\n makes new paragraphs).", schema: { ...fileRef, slide_id: slideId, text: z.string().max(20000), ...inches, font_size: z.number().min(1).max(400).optional(), ...writeOpts },
     run: (a, c) => deckWrite(c, a, (deck) => ({ changed: 1, summary: "add text box", data: X.addTextBox(deck, a.slide_id, a.text, a) })) },
   { name: "ws_slides_add_image", description: "Add a PNG/JPEG/GIF from the drive (≤5 MB, sides ≤65535 px) to a slide (position and size in inches).", schema: { ...fileRef, slide_id: slideId, image_path: z.string().min(1).max(4096), ...inches, ...writeOpts },

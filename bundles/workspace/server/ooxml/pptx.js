@@ -112,6 +112,7 @@ const dropRun = (g) => removeNode(g.run); // an emptied a:r goes (a:r without te
 
 export function findReplaceDeck(deck, pairs, matchCase = true, scope = "slides", slideIds = null) {
   if (!["slides", "notes", "all"].includes(scope)) throw new WsError("bad_args", "scope must be slides, notes or all");
+  if (slideIds && new Set(slideIds.map(String)).size !== slideIds.length) throw new WsError("bad_args", "slide_ids has duplicates");
   const chosen = slideIds ? slideIds.map((id) => slideById(deck, id)) : deck.slides;
   // scope "slides" never even resolves a notes part: notes are separate parts and only notes/all loads them
   const parts = [];
@@ -204,6 +205,7 @@ export function addSlide(deck, layoutName = "Blank", index) {
   for (const sp of shapesOf(deck.pkg.xml(L.part))) {
     const t = phType(sp); if (!t || ["dt", "ftr", "sldNum"].includes(t)) continue;
     const nv = doc.importNode(kid(sp, P, "nvSpPr"), true);
+    stripRelRefs(nv); // the layout's hyperlinks / custData rels are not the new slide's: they would dangle
     tree.appendChild(el(doc, P, "p:sp", {}, [nv, el(doc, P, "p:spPr"), el(doc, P, "p:txBody", {}, [el(doc, A, "a:bodyPr"), el(doc, A, "a:lstStyle"), el(doc, A, "a:p")])]));
   }
   deck.pkg.setXml(part, doc);
@@ -213,6 +215,15 @@ export function addSlide(deck, layoutName = "Blank", index) {
   return { slide_id: insertSldId(deck, rid, index), layout: L.name };
 }
 
+/** Remove every descendant of `node` that references a relationship (r:* attribute); empty containers go too. */
+function stripRelRefs(node) {
+  const hits = Array.from(node.getElementsByTagName("*")).filter((e) => Array.from(e.attributes).some((a) => a.namespaceURI === NS.r));
+  for (const e of hits) {
+    if (!e.parentNode) continue; // already gone with an ancestor
+    const parent = e.parentNode; dropRef(e);
+    if (parent.parentNode && parent.namespaceURI === P && parent.localName === "custDataLst" && !kids(parent).length) removeNode(parent);
+  }
+}
 /** Elements of `doc` that reference relationship `id` through any r:* attribute. */
 function refsTo(doc, id) {
   const out = [];
@@ -321,6 +332,8 @@ export function reorderSlides(deck, slideIds, insertionIndex) {
   const rest = deck.slides.filter((s) => !moving.includes(s));
   const at = deck.slides.slice(0, Math.max(0, insertionIndex)).filter((s) => !moving.includes(s)).length;
   const order = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
+  const was = deck.slides.map((s) => s.id).join(",");
+  if (order.map((s) => s.id).join(",") === was) return { order: deck.slides.map((s) => s.id), changed: false };
   const lst = kid(deck.doc.documentElement, P, "sldIdLst");
   for (const s of order) lst.appendChild(s.el);
   // sections must list the slides in sldIdLst order: a moved slide joins the section of the slide before it
@@ -335,7 +348,7 @@ export function reorderSlides(deck, slideIds, insertionIndex) {
     else { const lst = all(deck.doc.documentElement, P14, "sldIdLst")[0]; for (const e of fresh) lst.appendChild(e); }
   }
   deck.pkg.markDirty(deck.part); loadSlides(deck);
-  return { order: deck.slides.map((s) => s.id) };
+  return { order: deck.slides.map((s) => s.id), changed: true };
 }
 
 // ---- shapes ------------------------------------------------------------------------------------------
@@ -424,7 +437,8 @@ function makeParas(doc, text, { pPr, rPr, endRPr }) {
 }
 function bodyOf(sp) {
   let tb = kid(sp, P, "txBody");
-  if (!tb) { const doc = sp.ownerDocument; tb = el(doc, P, "p:txBody", {}, [el(doc, A, "a:bodyPr"), el(doc, A, "a:lstStyle")]); sp.appendChild(tb); }
+  // CT_Shape: nvSpPr, spPr, style?, txBody?, extLst? — a new txBody goes before an extension list
+  if (!tb) { const doc = sp.ownerDocument; tb = el(doc, P, "p:txBody", {}, [el(doc, A, "a:bodyPr"), el(doc, A, "a:lstStyle")]); sp.insertBefore(tb, kid(sp, P, "extLst")); }
   return tb;
 }
 /** Replace the shape's text: the first a:pPr and the first run's a:rPr are reapplied to every new paragraph. */
