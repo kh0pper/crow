@@ -10,7 +10,7 @@ Both open items from the May 22 follow-up are now resolved. Item 3 (financial mo
 
 ## Proposed Reply
 
-See: [correspondence_reply.txt](http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt)
+See: [correspondence_reply.txt](http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt)
 
 ## Open Items
 

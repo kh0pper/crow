@@ -82,6 +82,11 @@ jobs:
       - name: Vendored payload digest check
         run: node scripts/check-vendored-payloads.mjs
       - run: npm run validate-model-catalog
+      # This repo is public: no process documents (specs/plans/handoffs),
+      # credentials, or real tailnet hostnames in tracked files. The local
+      # personal-token denylist part is skipped here (CI is set).
+      - name: Public hygiene check
+        run: node scripts/check-public-hygiene.mjs
 
   audit:
     runs-on: ubuntu-latest

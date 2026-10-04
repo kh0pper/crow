@@ -1357,7 +1357,7 @@ test("owner gate: a native row owned by another instance is never orchestrated h
 
 test("owner gate: a native row owned by THIS instance orchestrates even though its base_url is the tailnet door", async () => {
   const startCalls = [];
-  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.64.20.1:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
   const cfg = { providers: { "native-target": p } };
   const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
   opts.ownInstanceIdFn = () => "this-instance";
@@ -1386,7 +1386,7 @@ test("liveness marker is written under the registry key, not the provider name",
 // ---------------------------------------------------------------------------
 
 test("NativePortConflictError names the loopback probe URL, not the tailnet door, for an owned row", async () => {
-  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.64.20.1:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
   const cfg = { providers: { "native-target": p } };
   const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["conflict"]) });
   opts.ownInstanceIdFn = () => "this-instance";
@@ -1514,7 +1514,7 @@ test("C3: ensureResident never starts a foreign-owned native row — acquireOrSt
   // A peer instance's door row. On a co-hosted box its tailnet address IS
   // one of ours, so the hostname-only rule would happily start it.
   const p = nativeProv(18100, "native-target", {
-    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    baseUrl: "http://100.64.20.1:3001/llm/v1",
     gpuPolicy: { owner: "r4-instance", port: 18100, alwaysResident: true },
   });
   const cfg = { providers: { "native-target": p } };
@@ -1550,7 +1550,7 @@ test("C3: ensureResident never starts a foreign-owned native row — acquireOrSt
 test("C3: the same row, owned by THIS instance, still starts through ensureResident (the gate is ownership, not the door URL)", async () => {
   const startCalls = [];
   const p = nativeProv(18100, "native-target", {
-    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    baseUrl: "http://100.64.20.1:3001/llm/v1",
     gpuPolicy: { owner: "this-instance", port: 18100, alwaysResident: true },
   });
   const cfg = { providers: { "native-target": p } };
@@ -1569,7 +1569,7 @@ test("C3: the same row, owned by THIS instance, still starts through ensureResid
 test("I1: a door-shaped baseUrl with no gpu_policy.port has NO port — it never falls back to the gateway's", async () => {
   const startCalls = [];
   const p = nativeProv(18100, "native-target", {
-    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    baseUrl: "http://100.64.20.1:3001/llm/v1",
     gpuPolicy: { owner: "this-instance" },
   });
   delete p.gpuPolicy.port;

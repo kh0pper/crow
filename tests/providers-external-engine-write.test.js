@@ -1,6 +1,6 @@
 /**
  * upsertProvider external-engine validation is TRANSITION-ONLY (spec
- * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.2,
+ * the private engineering notes §2.2,
  * revised after review round 1): a write is refused only when it CHANGES
  * engine / bundleId / runtime and the result is invalid. Replication writes
  * rows directly, so contradictory or malformed rows are seeded here with raw

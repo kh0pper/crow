@@ -190,7 +190,7 @@ for (const t of ["research_sources", "data_backends"]) {
 // / learner_profile / bot scope / Kanban container) into a first-class shareable
 // space with members, capabilities, workspace dir, audit log.
 //
-// Design constraints (see ~/.claude/plans/yeah-let-s-do-some-shimmering-key.md):
+// Design constraints (see the private engineering notes):
 //   - `research_projects` stays a real, writable table. `project_spaces` sits
 //     alongside it. Triggers mirror rp → ps so legacy callers (12+ INSERT sites)
 //     keep working with zero coordination during the transition window.

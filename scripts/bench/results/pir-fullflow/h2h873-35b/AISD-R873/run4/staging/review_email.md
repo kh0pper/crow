@@ -26,6 +26,6 @@ kevin.hopper1@gmail.com
 
 **Open items:** #4c (statutory basis — unanswered), #9b (within-district transfers — refused on FERPA, but I dispute the FERPA basis)
 
-**Preview of reply:** http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
+**Preview of reply:** http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
 
 Reply APPROVE to send this reply, REVISE <feedback> to adjust, REJECT to cancel.

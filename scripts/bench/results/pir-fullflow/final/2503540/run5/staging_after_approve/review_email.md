@@ -29,6 +29,6 @@ kevin.hopper1@gmail.com
 
 ---
 
-**Preview:** http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt
+**Preview:** http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt
 
 Reply APPROVE to send this reply, REVISE with feedback to adjust, REJECT to cancel.

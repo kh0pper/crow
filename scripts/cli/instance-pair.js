@@ -13,7 +13,7 @@
  *   - Store { auth_token, signing_key } in ~/.crow/peer-tokens.json.
  *
  * Usage:
- *   node scripts/cli/instance-pair.js --peer-url https://grackle.dachshund-chromatic.ts.net
+ *   node scripts/cli/instance-pair.js --peer-url https://grackle.example.ts.net
  *   node scripts/cli/instance-pair.js --manual-paste
  *
  * With --peer-url, the peer's gateway must expose the /instance/enroll

@@ -42,21 +42,21 @@ test("editor lock clears inside 30 s → waits, then writes", async () => {
 });
 
 test("default with no queue provider = no wait, open_in_editor at once; queue provider → enqueue is called, nothing written", async () => {
-  fake.addFile("S/q.docx", Buffer.from("d")); fake.openInEditor("S/q.docx", ["dayane"]);
+  fake.addFile("S/q.docx", Buffer.from("d")); fake.openInEditor("S/q.docx", ["alex"]);
   const t0 = clock.now();
   await assert.rejects(W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock }), (e) => e.code === "open_in_editor");
   assert.equal(clock.now(), t0, "default wait_s is 0");
   let got = null; const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_x" }; } } });
-  assert.deepEqual(r, { queued: true, change_id: "pc_x" }); assert.equal(got.lock.data.open_by[0], "Dayane");
+  assert.deepEqual(r, { queued: true, change_id: "pc_x" }); assert.equal(got.lock.data.open_by[0], "Alex");
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
 });
 
 test("still open after 30 s (if_open wait) → open_in_editor naming the person, can_proceed", async () => {
   fake.addFile("S/o.docx", Buffer.from("d"));
-  fake.openInEditor("S/o.docx", ["dayane"]);
+  fake.openInEditor("S/o.docx", ["alex"]);
   await assert.rejects(W.withFileWrite(cfg, { path: "S/o.docx" }, appendMut("!"), { clock, ifOpen: "wait", waitS: 30 }),
-    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Dayane" && e.data.can_proceed === true && /open in the editor/.test(e.message));
+    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Alex" && e.data.can_proceed === true && /open in the editor/.test(e.message));
 });
 
 test("proceed → drop → editor saves its typing first → bot change on top", async () => {
@@ -75,7 +75,7 @@ test("drop that never releases → could_not_close_editor", async () => {
 });
 
 test("a person's manual lock is never overridden, even with proceed", async () => {
-  fake.addFile("S/m.docx", Buffer.from("d"), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
+  fake.addFile("S/m.docx", Buffer.from("d"), { lock: { type: 0, owner: "alex", displayName: "Alex" } });
   await assert.rejects(W.withFileWrite(cfg, { path: "S/m.docx" }, appendMut("!"), { clock, ifOpen: "force_close", waitS: 0 }),
     (e) => e.code === "locked_by_person" && e.data.can_proceed === false);
   assert.ok(!fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.key === "k" + fake.node("S/m.docx").fileId));
@@ -182,7 +182,7 @@ test("423 between lock check and PUT: the retry keeps the caller's if_open (queu
   let got = null;
   const queue = { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_423" }; } };
   const r = await W.withFileWrite(cfg, { path: "S/r423.docx" }, async (bytes) => {
-    if (!fake.node("S/r423.docx").lock) fake.openInEditor("S/r423.docx", ["dayane"]); // the editor opens it mid-write
+    if (!fake.node("S/r423.docx").lock) fake.openInEditor("S/r423.docx", ["alex"]); // the editor opens it mid-write
     return { bytes: Buffer.concat([Buffer.from(bytes), Buffer.from("!")]), changed: 1, summary: "x" };
   }, { clock, queue });
   assert.deepEqual(r, { queued: true, change_id: "pc_423" });
@@ -204,11 +204,11 @@ test("force_close: a 423 on the retry never sends a second drop", async () => {
 test("undo of a created file that is open: queued like any write (F12), nothing removed", async () => {
   fake.addFolder("S/q2");
   const c = await W.createFile(cfg, ["S", "q2"], "made.docx", Buffer.from("hi"), { clock });
-  fake.openInEditor("S/q2/made.docx", ["dayane"]);
+  fake.openInEditor("S/q2/made.docx", ["alex"]);
   let got = null;
   const r = await W.undoFileChange(cfg, { path: "S/q2/made.docx" }, c.version_id, { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_u" }; } } });
   assert.deepEqual(r, { queued: true, change_id: "pc_u" });
-  assert.deepEqual(got.lock.data.open_by, ["Dayane"]);
+  assert.deepEqual(got.lock.data.open_by, ["Alex"]);
   assert.ok(fake.node("S/q2/made.docx"));
   // without a queue provider the default (queue, wait 0) surfaces open_in_editor at once
   const t0 = clock.now();
@@ -230,10 +230,10 @@ test("createFile and withFileWrite share the injected clock for the 1.1 s spacin
 test("classifyLock keys on lock-owner-type only: a NULL owner (spike S6) is still an editor lock", async () => {
   const { classifyLock } = await import("../bundles/workspace/server/nc/locks.js");
   const { stat } = await import("../bundles/workspace/server/nc/dav.js");
-  fake.addFile("S/cls.docx", Buffer.from("d")); fake.openInEditor("S/cls.docx", ["admin", "dayane"]);
+  fake.addFile("S/cls.docx", Buffer.from("d")); fake.openInEditor("S/cls.docx", ["admin", "alex"]);
   const c = await classifyLock(cfg, await stat(cfg, ["S", "cls.docx"]));
-  assert.equal(c.code, "open_in_editor"); assert.deepEqual(c.data.open_by, ["Kevin", "Dayane"]);
-  assert.deepEqual(c.users, ["ocinst_admin", "ocinst_dayane"]); assert.match(c.message, /Kevin and Dayane have/);
+  assert.equal(c.code, "open_in_editor"); assert.deepEqual(c.data.open_by, ["Kevin", "Alex"]);
+  assert.deepEqual(c.users, ["ocinst_admin", "ocinst_alex"]); assert.match(c.message, /Kevin and Alex have/);
   fake.addFile("S/tok.docx", Buffer.from("d"), { lock: { type: 2, owner: null, displayName: null } });
   const t = await classifyLock(cfg, await stat(cfg, ["S", "tok.docx"]));
   assert.equal(t.code, "locked_by_person"); assert.match(t.message, /^Someone locked/);
@@ -329,7 +329,7 @@ test("I6: 412 then 423 each get their own retry; the 423 retry queues", async ()
   const r = await W.withFileWrite(cfg, { path: "S/mix.docx" }, async (bytes) => {
     n++;
     if (n === 1) fake.node("S/mix.docx").etag = '"bumped-mix"';
-    if (n === 2) fake.openInEditor("S/mix.docx", ["dayane"]);
+    if (n === 2) fake.openInEditor("S/mix.docx", ["alex"]);
     return { bytes: Buffer.from(bytes), changed: 1, summary: "x" };
   }, { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_mix" }; } } });
   assert.deepEqual(r, { queued: true, change_id: "pc_mix" }); assert.equal(got.lock.code, "open_in_editor"); assert.equal(n, 2);
@@ -341,7 +341,7 @@ test("I6: a second 423 (lock re-appears after the retry) goes back through the l
   let n = 0;
   const r = await W.withFileWrite(cfg, { path: p }, async (bytes) => {
     n++;
-    fake.openInEditor(p, ["dayane"]);
+    fake.openInEditor(p, ["alex"]);
     if (n === 1) fake.state.pendingReleases.push({ at: fake.state.now + 2000, fn: () => { fake.node(p).lock = null; } });
     return { bytes: Buffer.from(bytes), changed: 1, summary: "x" };
   }, { clock, waitS: 10, queue: { enqueue: async () => ({ queued: true, change_id: "pc_again" }) } });
@@ -355,7 +355,7 @@ test("I7: a forged created-file token never deletes a folder or a share root", a
   const t1 = W.encodeVersionId({ f: dir.fileId, b: "0", a: normEtag(dir.etag) });
   await assert.rejects(W.undoFileChange(cfg, { path: "S/forged-dir" }, t1, { clock }), (e) => e.code === "not_a_file");
   assert.ok(fake.node("S/forged-dir"));
-  const top = fake.addFile("SR2/top.txt", Buffer.from("x"), { owner: "dayane" });
+  const top = fake.addFile("SR2/top.txt", Buffer.from("x"), { owner: "alex" });
   const t2 = W.encodeVersionId({ f: top.fileId, b: "0", a: normEtag(top.etag) });
   await assert.rejects(W.undoFileChange(cfg, { path: "SR2/top.txt" }, t2, { clock }), (e) => e.code === "share_root");
   assert.ok(fake.node("SR2/top.txt"));

@@ -1,6 +1,6 @@
 /**
  * Host-neutral provider defaults (spec
- * docs/superpowers/specs/2026-09-24-host-neutral-model-defaults-design.md).
+ * the private engineering notes).
  *
  * A default must never name a machine. A task's default provider resolves:
  * env override → dashboard_settings key → the lowest-id ENABLED provider that

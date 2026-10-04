@@ -11,7 +11,7 @@ Austin ISD replied to your May 22 portal follow-up (sent May 28). Key points:
 
 ## Proposed Reply (inline)
 
-[Preview: http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt](http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt)
+[Preview: http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt](http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt)
 
 ## Open Items
 

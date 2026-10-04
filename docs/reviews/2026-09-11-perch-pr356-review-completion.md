@@ -108,7 +108,7 @@ R1 and R2 share a root: the engine grants the row's `model` column more trust th
 ## Status footer (resolved 2026-09-12)
 
 All three findings are **closed**, shipped as Phase A of the operator-approved
-open-anywhere plan (`docs/superpowers/plans/2026-09-11-perch-hub-open-anywhere.md`):
+open-anywhere plan (the private engineering notes):
 
 | Finding | Closed by | Where |
 |---|---|---|

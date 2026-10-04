@@ -6,7 +6,7 @@
  * Verified limit (READ-ONLY probes as crow-bot against NC 34.0.4 on crow, 2026-10-04):
  * - PROPFIND oc:owner-id on the file → the owner's uid (e.g. "admin"). The owner can write.
  * - OCS GET files_sharing/api/v1/shares/inherited?path=<file> → USER shares on the file's ANCESTOR folders made by
- *   others (e.g. {share_type 0, share_with "dayane", permissions 31} on "Casa Nueva"), with their permission bits.
+ *   others (e.g. {share_type 0, share_with "alex", permissions 31} on "Casa Nueva"), with their permission bits.
  * - OCS GET files_sharing/api/v1/shares?path=<file>&reshares=true → user shares on the file itself.
  * - crow-bot cannot list group members (no admin rights), so a person who can edit only through a GROUP share
  *   (share_type 1), a link or a federated share is unverifiable → treated as view-only.

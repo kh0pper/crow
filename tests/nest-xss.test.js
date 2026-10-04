@@ -122,7 +122,7 @@ test("nest-xss: peer tile href prefers gateway_url over bare hostname", () => {
       id: "peer-g",
       name: "crow",
       hostname: "crow",                                // bare, unresolvable
-      gateway_url: "http://100.118.41.122:3001",        // canonical
+      gateway_url: "http://100.64.20.1:3001",        // canonical
     }],
     peerOverviews: [{
       status: "ok",
@@ -133,7 +133,7 @@ test("nest-xss: peer tile href prefers gateway_url over bare hostname", () => {
     }],
   }), "en");
   assert.ok(
-    html.includes('href="http://100.118.41.122:3001/dashboard/memory"'),
+    html.includes('href="http://100.64.20.1:3001/dashboard/memory"'),
     "tile href should be derived from gateway_url, not bare hostname. Hrefs found: " + (html.match(/href="[^"]+"/g) || []).join(", ")
   );
   assert.ok(

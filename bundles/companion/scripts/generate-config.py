@@ -441,7 +441,7 @@ def resolve_ai_profile(profiles, env_vars):
     # Auto mode: prefer local profiles (faster inference for voice chat).
     # "Local" includes loopback, RFC1918 LAN, the Docker bridge, AND Tailscale
     # CGNAT (100.64.0.0/10) — Crow's own endpoints are commonly addressed by
-    # their Tailscale IP (e.g. http://100.118.41.122:8003/v1), which the old
+    # their Tailscale IP (e.g. http://100.64.20.1:8003/v1), which the old
     # substring check missed, causing a silent fall-through to a cloud profile.
     for p in profiles:
         if is_local_base(p.get("baseUrl", "")):

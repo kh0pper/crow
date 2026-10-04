@@ -148,11 +148,11 @@ test("nothing listening is not up — a refused connection is the real negative"
 test("the probe uses the baseUrl on the model entry, not a provider-config lookup", async () => {
   const seen = [];
   await annotateAvailability(
-    [{ id: "a", provider: "crow-local-122b", baseUrl: "http://100.118.41.122:8004/v1" }],
+    [{ id: "a", provider: "crow-local-122b", baseUrl: "http://100.64.20.1:8004/v1" }],
     { fetchStatus: async (url) => { seen.push(url); return 200; }, resolveWarmable: () => null }
   );
   assert.equal(seen.length, 1);
-  assert.ok(seen[0].startsWith("http://100.118.41.122:8004/v1"),
+  assert.ok(seen[0].startsWith("http://100.64.20.1:8004/v1"),
     "the entry's own baseUrl, so a row missing from the orchestrator config still probes");
 });
 

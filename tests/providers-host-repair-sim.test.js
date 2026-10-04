@@ -1,6 +1,6 @@
 /**
  * providers-host-repair-sim — two-instance simulation of the host repair
- * (spec: docs/superpowers/specs/2026-09-22-provider-host-identity-design.md §3.4, §4.1).
+ * (spec in the private engineering notes §3.4, §4.1).
  *
  * Proves the repair can never start a sync war: each instance runs its full
  * hourly reconcile (`syncProvidersFromModelsJson`, which asserts owned
@@ -91,8 +91,8 @@ after(() => {
   rmSync(dirB, { recursive: true, force: true });
 });
 
-const ADDRS_A = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.237", "100.118.41.122"]);
-const ADDRS_B = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.21", "100.121.254.89"]);
+const ADDRS_A = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.237", "100.64.20.1"]);
+const ADDRS_B = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.21", "100.64.20.2"]);
 
 const EMPTY = { providers: {} };
 
@@ -180,13 +180,13 @@ test("scenario B: the owner asserts local and the non-owner never fights it", as
   await reset();
   writeFixtures("B", EMPTY, {
     providers: {
-      "grackle-embed": { baseUrl: "http://100.121.254.89:9100/v1", host: "local", models: [{ id: "e" }] },
+      "grackle-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "local", models: [{ id: "e" }] },
     },
   });
   for (const db of [dbA, dbB]) {
     await db.execute({
       sql: `INSERT INTO providers (id, base_url, host, models, bundle_id, gpu_policy, lamport_ts, instance_id)
-            VALUES ('grackle-embed', 'http://100.121.254.89:9100/v1', 'local', '[{"id":"e"}]', NULL, NULL, 50, ?)`,
+            VALUES ('grackle-embed', 'http://100.64.20.2:9100/v1', 'local', '[{"id":"e"}]', NULL, NULL, 50, ?)`,
       args: [B_ID],
     });
   }
@@ -217,7 +217,7 @@ test("scenario C: a bundle row B re-stamped (crow-chat case) is never repaired b
   for (const db of [dbA, dbB]) {
     await db.execute({
       sql: `INSERT INTO providers (id, base_url, host, lamport_ts, instance_id, bundle_id)
-            VALUES ('crow-swap-agentic', 'http://100.118.41.122:8003/v1', 'local', 50, ?, 'llamacpp-vulkan-qwen36-35b-a3b')`,
+            VALUES ('crow-swap-agentic', 'http://100.64.20.1:8003/v1', 'local', 50, ?, 'llamacpp-vulkan-qwen36-35b-a3b')`,
       args: [B_ID],
     });
   }

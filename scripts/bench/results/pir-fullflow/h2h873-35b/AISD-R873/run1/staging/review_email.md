@@ -24,7 +24,7 @@ Austin ISD sent a brief follow-up to our 5/22 narrowed portal reply:
 
 ## Proposed Reply
 
-See: [correspondence_reply.txt](http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt)
+See: [correspondence_reply.txt](http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt)
 
 Key arguments:
 1. **#9b FERPA rebuttal** — aggregated campus-level counts are not SSI; TEA publishes the same data type publicly in PEIMS. Ask for written confirmation if data truly does not exist, or accept the cost estimate.

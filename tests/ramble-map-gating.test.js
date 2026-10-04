@@ -78,12 +78,12 @@ test("the user's own and a contact's marks are NEVER gated, in any zone", () => 
   // Constraints: a publicly published mark is public terrain whoever sent it,
   // and `contact_name` cannot be the test because it excludes pending,
   // blocked and deleted contacts.
-  const contact = gate([mark(FAR, { visibility: "contacts", contact_name: "Dayane" })]);
+  const contact = gate([mark(FAR, { visibility: "contacts", contact_name: "Alex" })]);
   assert.equal(contact.length, 1, "a contacts-channel mark survives fog");
   assert.equal(contact[0].content_text, "secret words");
   assert.ok(!contact[0].beacon);
 
-  const publicFromAContact = gate([mark(FAR, { contact_name: "Dayane" })]);   // visibility stays "public"
+  const publicFromAContact = gate([mark(FAR, { contact_name: "Alex" })]);   // visibility stays "public"
   assert.deepEqual(publicFromAContact, [], "a contact's PUBLIC mark is public terrain and fogs like any other");
 });
 

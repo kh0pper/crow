@@ -43,7 +43,7 @@ En Android, este ajuste es por aplicación. Solo necesitas permitirlo para el na
 
 ### Paso 4: Conectar a tu gateway
 
-1. Introduce la URL de tu gateway (ej., `http://100.121.254.89:3001` o `https://tu-servidor.ts.net`)
+1. Introduce la URL de tu gateway (ej., `http://100.64.20.2:3001` o `https://tu-servidor.ts.net`)
 2. Toca **Probar conexión** para verificar
 3. Inicia sesión con tu contraseña del Crow's Nest
 
@@ -52,7 +52,7 @@ En Android, este ajuste es por aplicación. Solo necesitas permitirlo para el na
 Si prefieres no instalar un APK, puedes agregar el Crow's Nest como app de pantalla de inicio directamente desde Chrome:
 
 1. Abre Chrome en tu dispositivo Android
-2. Navega a la URL de tu Crow's Nest (ej., `http://100.121.254.89:3001`)
+2. Navega a la URL de tu Crow's Nest (ej., `http://100.64.20.2:3001`)
 3. Inicia sesión en el Crow's Nest
 4. Toca el **menú de tres puntos** (arriba a la derecha)
 5. Toca **Agregar a pantalla de inicio**
@@ -67,7 +67,7 @@ Si tu gateway de Crow se ejecuta en un servidor casero o red local, instala Tail
 1. Instala [Tailscale desde Play Store](https://play.google.com/store/apps/details?id=com.tailscale.ipn)
 2. Abre Tailscale e inicia sesión con la misma cuenta que usas en tu servidor
 3. Activa Tailscale
-4. Usa la IP de Tailscale de tu servidor como URL del gateway (ej., `http://100.121.254.89:3001`)
+4. Usa la IP de Tailscale de tu servidor como URL del gateway (ej., `http://100.64.20.2:3001`)
 
 ::: tip
 Tailscale se ejecuta en segundo plano con un impacto mínimo en la batería. Tu conexión a Crow permanece disponible mientras Tailscale esté activo.

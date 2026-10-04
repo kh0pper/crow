@@ -82,7 +82,7 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${RAVEN_ID}', 'unknown', 'crow:kdq7zskhat', 'active');
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${MPA_ID}', 'MPA', 'crow:kdq7zskhat', 'active');
 
-    INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (3, 'crow:dayane', 'Dayane', 'ed', 'secp');
+    INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (3, 'crow:alex', 'Alex', 'ed', 'secp');
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'crow-uuid-6', 'tea-data', 'TEA data', '/home/kh0pp/.crow/data/projects/6');
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (2, 'crow-uuid-2', 'clash', 'Crow clash', '/home/kh0pp/.crow/data/projects/2');
     -- real shape: a local-owner row (contact_id NULL) per project
@@ -159,7 +159,7 @@ export async function buildSource(dir) {
   `);
   db.exec(`
     INSERT INTO crow_instances (id, name, crow_id, is_home) VALUES ('${GRACKLE_ID}', 'Grackle', 'crow:kdq7zskhat', 1);
-    INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (9, 'crow:dayane', 'Dayane', 'ed', 'secp');
+    INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (9, 'crow:alex', 'Alex', 'ed', 'secp');
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, verified) VALUES (10, 'crow:nobody', 'Nobody', 'ed2', 'secp2', 1);
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, origin) VALUES (11, 'crow:gbot', 'Grackle bot', 'ed3', 'secp3', 'local-bot');
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (12, 'crow:deleted', 'Deleted on crow', 'ed4', 'secp4');
@@ -215,10 +215,10 @@ export async function buildSource(dir) {
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (8, 'post-eight', 'Eight', 'body eight', 'draft');
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (9, 'post-nine', 'Nine', 'body nine', 'draft');
     INSERT INTO blog_post_embeddings (post_id, model, dim, vec) VALUES (8, 'qwen3-embedding-0.6b', 4, x'08080808');
-    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 9, 'Dayane', 'nice', 'approved', '2026-05-05 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 9, 'Alex', 'nice', 'approved', '2026-05-05 00:00:00');
     INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 11, 'A bot', 'beep', 'approved', '2026-05-06 00:00:00');
     INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (9, 12, 'Deleted', 'gone', 'approved', '2026-05-07 00:00:00');
-    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (8, 9, 'Dayane', 'on grackle post eight', 'approved', '2026-05-08 00:00:00');
+    INSERT INTO blog_comments (post_id, contact_id, author_name, content, status, created_at) VALUES (8, 9, 'Alex', 'on grackle post eight', 'approved', '2026-05-08 00:00:00');
     INSERT INTO songbook_setlists (id, name, created_at) VALUES (1, 'Sunday', '2026-05-01 00:00:00');
     INSERT INTO songbook_setlist_items (setlist_id, post_id, position) VALUES (1, 9, 1);
     INSERT INTO crosspost_rules (source_app, source_trigger, target_app, created_at, updated_at) VALUES ('blog', 'publish', 'mastodon', 1, 1);

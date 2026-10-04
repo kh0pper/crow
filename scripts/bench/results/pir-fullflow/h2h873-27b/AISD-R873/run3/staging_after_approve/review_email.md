@@ -19,7 +19,7 @@ The reply pushes back on both points:
 - **Closure:** Declines to close the request until both items are resolved.
 
 Preview the reply text:
-http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
+http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
 
 ## Open Items
 

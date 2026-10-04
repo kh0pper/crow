@@ -86,10 +86,10 @@ test("unknown notice codes show a generic text, never a message from the URL; th
   const stale = V.renderChoice({ lang: "es", csrf: "tok", form, err: { code: "stale_editor_lock", message: "RAW lock text", data: { can_proceed: false } } });
   assert.ok(stale.includes(V.QUICK_STRINGS.es.err_stale_editor_lock)); assert.doesNotMatch(stale, /RAW lock text/);
   assert.ok(!stale.includes(V.QUICK_STRINGS.es.openBy), "a stale lock is not 'someone is editing'"); assert.doesNotMatch(stale, /force_close/);
-  const person = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "locked_by_person", message: "RAW", data: { open_by: ["Dayane"], can_proceed: false } } });
+  const person = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "locked_by_person", message: "RAW", data: { open_by: ["Alex"], can_proceed: false } } });
   assert.ok(person.includes(V.QUICK_STRINGS.en.err_locked_by_person)); assert.doesNotMatch(person, /RAW|force_close/);
-  const open = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "open_in_editor", message: "RAW", data: { open_by: ["Dayane"], can_proceed: true } } });
-  assert.match(open, /Dayane/); assert.ok(open.includes(V.QUICK_STRINGS.en.openBy)); assert.match(open, /value="force_close"/); assert.doesNotMatch(open, /RAW|<script/i);
+  const open = V.renderChoice({ lang: "en", csrf: "tok", form, err: { code: "open_in_editor", message: "RAW", data: { open_by: ["Alex"], can_proceed: true } } });
+  assert.match(open, /Alex/); assert.ok(open.includes(V.QUICK_STRINGS.en.openBy)); assert.match(open, /value="force_close"/); assert.doesNotMatch(open, /RAW|<script/i);
 });
 
 test("browse: folders and office files only, phone-sized buttons; a cell and a paragraph render an edit form that posts back what it showed", async () => {
@@ -146,13 +146,13 @@ test("stale view and paragraphs with links/images are refused with a friendly no
 });
 
 test("file open in the editor → queued page naming who, with Cancel and a confirm-gated Apply now (K5)", async () => {
-  fake.openInEditor(DOCX, ["dayane"], { releaseAfterMs: 3000, typed: null });
+  fake.openInEditor(DOCX, ["alex"], { releaseAfterMs: 3000, typed: null });
   const n = puts(); const t0 = t;
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: DOCX, kind: "docx", target: "1", shown: P1, value: "x" });
   assert.equal(r.status, 200);
   assert.ok(t - t0 >= 10_000, "a phone waits 10 s for the editor to close before queueing (F16)");
   const html = await r.text();
-  assert.match(html, /Dayane/); assert.match(html, /waiting/i); assert.match(html, /action="\/api\/workspace\/quick\/cancel"/);
+  assert.match(html, /Alex/); assert.match(html, /waiting/i); assert.match(html, /action="\/api\/workspace\/quick\/cancel"/);
   assert.match(html, /name="if_open" value="force_close"/); assert.match(html, /data-turbo="false"/);
   assert.doesNotMatch(html, /<script/i);
   assert.equal(puts(), n, "queued, not written");
@@ -168,7 +168,7 @@ test("file open in the editor → queued page naming who, with Cancel and a conf
 
 test("restore of an open file queues ws_drive_restore_version {path, version_id} (F13); Cancel change cancels it", async () => {
   const vid = String(fake.versionsOf(XLSX)[0].id);
-  fake.openInEditor(XLSX, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(XLSX, ["alex"], { releaseAfterMs: 10 ** 9 });
   const r = await post("/api/workspace/quick/restore", { _csrf: "tok", path: XLSX, version_id: vid });
   assert.equal(r.status, 200);
   const id = (await r.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
@@ -184,14 +184,14 @@ test("restore of an open file queues ws_drive_restore_version {path, version_id}
 test("I1: an open file + a paragraph whose prefix also starts an EARLIER paragraph (or an empty one) is not queued — try-again page, nothing queued or written", async () => {
   const DUP = "Shared with Crow/Casa/dup.docx";
   fake.addFile(DUP, docxWith({ 4: "Tortillas", 5: "" }), { owner: "admin" }); // p3 "Tortillas" == p4 "Tortillas"; p5 empty
-  fake.openInEditor(DUP, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(DUP, ["alex"], { releaseAfterMs: 10 ** 9 });
   const n = puts(); const q0 = await pendingCount();
   for (const [target, shown] of [["4", "Tortillas"], ["5", ""]]) {
     const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: DUP, kind: "docx", target, shown, value: "Totopos" });
     assert.equal(r.status, 200, `target ${target}`);
     const html = await r.text();
     assert.ok(html.includes(V.QUICK_STRINGS.en.notQueueable.replace(/'/g, "&#39;")), `target ${target}: explains why it can't wait`);
-    assert.match(html, /Dayane/); assert.match(html, /action="\/api\/workspace\/quick\/save"/);
+    assert.match(html, /Alex/); assert.match(html, /action="\/api\/workspace\/quick\/save"/);
     assert.doesNotMatch(html, /quick\/cancel/, "nothing was queued, so nothing to cancel");
   }
   assert.equal(await pendingCount(), q0, "no pending change was created");
@@ -205,7 +205,7 @@ test("I1: an open file + a paragraph whose prefix also starts an EARLIER paragra
 test("I2: Apply now whose forced save fails puts the cancelled change back in the queue and says it is still waiting; a malformed cancel_first is refused", async () => {
   const W = "Shared with Crow/Casa/w.docx";
   fake.addFile(W, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
-  fake.openInEditor(W, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(W, ["alex"], { releaseAfterMs: 10 ** 9 });
   const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
   const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
   const n = puts();
@@ -243,7 +243,7 @@ test("final I1: a queued xlsx Quick edit whose page is stale (the saved cell dif
   const X = "Shared with Crow/Casa/stale.xlsx";
   const wb = openXlsx(readFileSync(join(FIX, "oo-rich.xlsx"))); writeRange(wb, "Recetas!B2", [[7]], "RAW");
   fake.addFile(X, Buffer.from(wb.pkg.save()), { owner: "admin" }); // the person already saved 7; the phone page showed 4
-  fake.openInEditor(X, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(X, ["alex"], { releaseAfterMs: 10 ** 9 });
   const n = puts(); const q0 = await pendingCount();
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: X, kind: "xlsx", target: "Recetas!B2", shown: "4", value: "5" });
   assert.equal(r.status, 303);
@@ -261,7 +261,7 @@ test("final I1: a queued pptx Quick edit whose page is stale is refused stale_vi
   const deck = openPptx(readFileSync(join(FIX, "oo-rich.pptx")));
   const id = readDeck(deck, false)[1].shapes[0].object_id; // "Jueves" in the fixture
   editShapeText(deck, id, "Sábado"); fake.addFile(P, Buffer.from(deck.pkg.save()), { owner: "admin" });
-  fake.openInEditor(P, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(P, ["alex"], { releaseAfterMs: 10 ** 9 });
   const n = puts(); const q0 = await pendingCount();
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: P, kind: "pptx", target: id, shown: "Jueves", value: "Viernes" });
   assert.equal(loc(r).searchParams.get("notice"), "stale_view");
@@ -271,7 +271,7 @@ test("final I1: a queued pptx Quick edit whose page is stale is refused stale_vi
 test("final I1: the queued docx twin carries expect_text = shown — a paragraph edited after queueing (prefix kept) is refused at close and live", async () => {
   const D = "Shared with Crow/Casa/twin.docx";
   fake.addFile(D, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
-  fake.openInEditor(D, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(D, ["alex"], { releaseAfterMs: 10 ** 9 });
   const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: D, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
   const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
   const row = await rowOf(id);
@@ -290,7 +290,7 @@ test("final I2: the queued docx twin's match_prefix is passagePrefix(shown) — 
   const D = "Shared with Crow/Casa/spaces.docx";
   const text = `${" ".repeat(120)}Pozole rojo los sábados.`;
   fake.addFile(D, docxWith({ 1: text }), { owner: "admin" });
-  fake.openInEditor(D, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  fake.openInEditor(D, ["alex"], { releaseAfterMs: 10 ** 9 });
   const shown = paragraphText(kids(openDocx(fake.node(D).bytes).body, NS.w, "p")[1]);
   assert.equal(shown, text, "fixture keeps the leading spaces");
   const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: D, kind: "docx", target: "1", shown, value: "Menudo." });
@@ -305,7 +305,7 @@ test("final I2: the queued docx twin's match_prefix is passagePrefix(shown) — 
 test("final M1: Apply now whose PUT landed but a later step failed is NOT re-queued (the change is saved; the twin stays cancelled)", async () => {
   const W = "Shared with Crow/Casa/m1.docx";
   fake.addFile(W, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
-  fake.openInEditor(W, ["dayane"], { releaseAfterMs: 3000 }); // Apply now closes the editor, then saves
+  fake.openInEditor(W, ["alex"], { releaseAfterMs: 3000 }); // Apply now closes the editor, then saves
   const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
   const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
   const n = puts();

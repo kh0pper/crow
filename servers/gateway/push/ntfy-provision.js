@@ -1,7 +1,7 @@
 /**
  * ntfy autowire — Crow creates its own login on the local ntfy server, a private
  * per-instance topic, and stores the tokens in ntfy-push.json (ntfy-config.js).
- * Design note: docs/superpowers/specs/2026-10-03-ntfy-autowire-design.md.
+ * Design note: the private engineering notes
  *
  * Every step is idempotent and runs through `docker exec <container> ntfy …` with
  * an injectable runner (execFile semantics, no shell). The key is derived from the

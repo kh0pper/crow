@@ -10,7 +10,7 @@ import org.junit.Test;
 /** The steps bridge's origin gate (security fix 2026-10-04, spec §10 "Exposure"). */
 public class OriginCheckTest {
 
-    private static final String PAIRED = "https://crow.dachshund-chromatic.ts.net:8444/";
+    private static final String PAIRED = "https://crow.example.ts.net:8444/";
 
     @Test
     public void canonicalFillsDefaultPortsAndLowercases() {
@@ -34,24 +34,24 @@ public class OriginCheckTest {
 
     @Test
     public void pairedPageIsTrusted() {
-        assertTrue(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net:8444", PAIRED));
-        assertTrue(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net:8444/dashboard/ramble", PAIRED));
-        assertTrue(OriginCheck.sameOrigin("https://CROW.dachshund-chromatic.ts.net:8444", PAIRED));
+        assertTrue(OriginCheck.sameOrigin("https://crow.example.ts.net:8444", PAIRED));
+        assertTrue(OriginCheck.sameOrigin("https://crow.example.ts.net:8444/dashboard/ramble", PAIRED));
+        assertTrue(OriginCheck.sameOrigin("https://CROW.example.ts.net:8444", PAIRED));
         assertTrue(OriginCheck.sameOrigin("https://crow.example.ts.net:443", "https://crow.example.ts.net/"));
     }
 
     @Test
     public void sameHostOtherPortIsRefused() {
-        assertFalse(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net:8456", PAIRED)); // Nextcloud
-        assertFalse(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net:8457", PAIRED)); // ONLYOFFICE
-        assertFalse(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net", PAIRED));
+        assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net:8456", PAIRED)); // Nextcloud
+        assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net:8457", PAIRED)); // ONLYOFFICE
+        assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net", PAIRED));
     }
 
     @Test
     public void otherHostsAndSchemesAreRefused() {
-        assertFalse(OriginCheck.sameOrigin("https://grackle.dachshund-chromatic.ts.net:8444", PAIRED));
-        assertFalse(OriginCheck.sameOrigin("http://crow.dachshund-chromatic.ts.net:8444", PAIRED));
-        assertFalse(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net.evil.com:8444", PAIRED));
+        assertFalse(OriginCheck.sameOrigin("https://grackle.example.ts.net:8444", PAIRED));
+        assertFalse(OriginCheck.sameOrigin("http://crow.example.ts.net:8444", PAIRED));
+        assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net.evil.com:8444", PAIRED));
         assertFalse(OriginCheck.sameOrigin("null", PAIRED));
         assertFalse(OriginCheck.sameOrigin(PAIRED, null));
         assertFalse(OriginCheck.sameOrigin(PAIRED, ""));
@@ -62,12 +62,12 @@ public class OriginCheckTest {
     public void changedGatewayMovesTheTrust() {
         String next = "http://10.0.0.237:3001";
         assertTrue(OriginCheck.sameOrigin("http://10.0.0.237:3001", next));
-        assertFalse(OriginCheck.sameOrigin("https://crow.dachshund-chromatic.ts.net:8444", next));
+        assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net:8444", next));
     }
 
     @Test
     public void allowedOriginRuleOmitsOnlyDefaultPorts() {
-        assertEquals("https://crow.dachshund-chromatic.ts.net:8444", OriginCheck.allowedOriginRule(PAIRED));
+        assertEquals("https://crow.example.ts.net:8444", OriginCheck.allowedOriginRule(PAIRED));
         assertEquals("https://crow.example.ts.net", OriginCheck.allowedOriginRule("https://Crow.Example.ts.net:443/x"));
         assertEquals("http://10.0.0.237", OriginCheck.allowedOriginRule("http://10.0.0.237/"));
         assertEquals("http://10.0.0.237:3001", OriginCheck.allowedOriginRule("http://10.0.0.237:3001"));

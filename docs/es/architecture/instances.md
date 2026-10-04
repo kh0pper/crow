@@ -20,7 +20,7 @@ CREATE TABLE crow_instances (
   id TEXT PRIMARY KEY,            -- UUID
   name TEXT NOT NULL,             -- Etiqueta legible ("grackle", "black-swan")
   role TEXT NOT NULL,             -- "home" o "satellite"
-  gateway_url TEXT,               -- Endpoint HTTP (p. ej., "http://100.121.254.89:3001")
+  gateway_url TEXT,               -- Endpoint HTTP (p. ej., "http://100.64.20.2:3001")
   public_key TEXT NOT NULL,       -- Clave pública Ed25519 (debe coincidir con la identidad compartida)
   last_seen INTEGER,              -- Marca de tiempo Unix del último contacto exitoso
   status TEXT DEFAULT 'unknown',  -- "online", "syncing", "offline", "unknown"

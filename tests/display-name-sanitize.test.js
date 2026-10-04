@@ -75,7 +75,7 @@ test("empty, whitespace-only, and non-strings return null", () => {
 });
 
 test("legitimate names round-trip unchanged", () => {
-  assert.equal(sanitizeDisplayName("Dayane"), "Dayane");
+  assert.equal(sanitizeDisplayName("Alex"), "Alex");
   assert.equal(sanitizeDisplayName("José M."), "José M.");
   assert.equal(sanitizeDisplayName("山田太郎"), "山田太郎");
   assert.equal(sanitizeDisplayName("\u{1F985} Crow"), "\u{1F985} Crow");

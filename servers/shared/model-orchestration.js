@@ -1,6 +1,6 @@
 /**
  * Host-level "no model orchestration" switch
- * (spec docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md).
+ * (spec in the private engineering notes).
  *
  * A host whose models are owned by something else (raven: halogen under
  * systemd and pi-lab's windows) sets CROW_DISABLE_MODEL_ORCHESTRATION=1, and

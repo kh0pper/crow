@@ -15,7 +15,7 @@ TEA has responded to our follow-up inquiry on Item 4 (TEC §12.1101 ISD impact n
 
 ### Preview of Draft Reply
 
-[http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt](http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt)
+[http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt](http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt)
 
 ---
 

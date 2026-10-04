@@ -19,7 +19,7 @@ Both open items from the May 22 follow-up are now resolved. The only remaining i
 
 The draft reply acknowledges receipt, notes both items are resolved, and awaits the AG ruling on Item 3.
 
-Preview: http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt
+Preview: http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt
 
 ---
 

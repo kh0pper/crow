@@ -43,7 +43,7 @@ function catalogFor(files) {
   }] };
 }
 const OPTS = (h) => ({ db: h.db, dir: h.dir, allocatePortFn: async (s, id) => { s.reservations[id] = { port: 18170, owner: {} }; return 18170; },
-  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001 });
+  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.64.20.1", gatewayPortFn: () => 3001 });
 
 test("hashFileSha256 streams a file", async () => {
   const dir = mkdtempSync(join(tmpdir(), "adopt-"));

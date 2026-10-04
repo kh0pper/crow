@@ -27,7 +27,7 @@ import { resolveProviderConfig } from "../servers/gateway/ai/resolve-profile.js"
 import { loadProviderFromDb } from "../servers/memory/embeddings.js";
 import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
 
-const DOOR = "http://100.118.41.122:3001/llm/v1";
+const DOOR = "http://100.64.20.1:3001/llm/v1";
 
 function freshLibsql() {
   const dir = mkdtempSync(join(tmpdir(), "providers-localize-"));

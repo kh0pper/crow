@@ -1,6 +1,6 @@
 /**
  * serving.class orchestrator enforcement (Task 3, spec
- * docs/superpowers/specs/2026-09-23-serving-class-design.md §3.3).
+ * the private engineering notes §3.3).
  *
  * The gateway's single native-model spawn funnel (`acquireOrStartNative`)
  * must refuse a cold `windowed`/`wedge-risk` model unless the caller's

@@ -49,7 +49,7 @@ test("backfillProvidersForNewPeers: fresh peer → syncable (tailnet) row append
   const m = freshMgr("fresh", "local-1");
   const feed = captureFeed();
   m.outFeeds.set("peer-1", feed);
-  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-tailnet', 'http://100.118.41.122:8003/v1', '[\"m1\"]')" });
+  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-tailnet', 'http://100.64.20.1:8003/v1', '[\"m1\"]')" });
   await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-loop', 'http://127.0.0.1:9999/v1', '[\"m2\"]')" });
 
   const n = await m.backfillProvidersForNewPeers();
@@ -71,7 +71,7 @@ test("backfillProvidersForNewPeers: fresh peer → syncable (tailnet) row append
 
 test("backfillProvidersForNewPeers: no armed peers → returns 0, NO flag written (retryable); backfills once feeds arm", async () => {
   const m = freshMgr("nopeers", "local-2");
-  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.118.41.122:8003/v1', '[]')" });
+  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.64.20.1:8003/v1', '[]')" });
   assert.equal(await m.backfillProvidersForNewPeers(), 0);
   const { rows } = await m.db.execute({ sql: "SELECT key FROM dashboard_settings WHERE key LIKE '__providers_backfill_v1:%'" });
   assert.equal(rows.length, 0, "peerless run writes NO flags — boot can race feed-init (contacts lesson)");
@@ -87,7 +87,7 @@ test("backfillProvidersForNewPeers: flag semantics — only 'done:*' is terminal
   const m = freshMgr("staleflag", "local-3");
   const feed = captureFeed();
   m.outFeeds.set("peer-1", feed);
-  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.118.41.122:8003/v1', '[]')" });
+  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.64.20.1:8003/v1', '[]')" });
   // A stale non-done flag (pre-fix code class of bug) must NOT be terminal.
   await m.db.execute({
     sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now'))",
@@ -105,7 +105,7 @@ test("backfillProvidersForNewPeers: two peers, one already done → runs for the
   const newFeed = captureFeed();
   m.outFeeds.set("peer-old", oldFeed);
   m.outFeeds.set("peer-new", newFeed);
-  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.118.41.122:8003/v1', '[]')" });
+  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models) VALUES ('prov-a', 'http://100.64.20.1:8003/v1', '[]')" });
   await m.db.execute({
     sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'done:5', datetime('now'))",
     args: [FLAG("peer-old")],
@@ -126,7 +126,7 @@ test("backfillProvidersForNewPeers: disabled provider rows ARE emitted — disab
   const m = freshMgr("disabled", "local-5");
   const feed = captureFeed();
   m.outFeeds.set("peer-1", feed);
-  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES ('prov-off', 'http://100.121.254.89:8004/v1', '[]', 1)" });
+  await m.db.execute({ sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES ('prov-off', 'http://100.64.20.2:8004/v1', '[]', 1)" });
   assert.equal(await m.backfillProvidersForNewPeers(), 1, "disabled row still emitted — the peer must learn the disabled state");
   assert.equal(feed.entries.length, 1);
   assert.equal(feed.entries[0].row.id, "prov-off");
@@ -139,7 +139,7 @@ test("backfillProvidersForNewPeers: END-TO-END DELIVERY — a fresh peer that ap
   const feed = captureFeed();
   origin.outFeeds.set("peer-fresh", feed);
   await origin.db.execute({
-    sql: "INSERT INTO providers (id, base_url, models, lamport_ts) VALUES ('prov-e2e', 'http://100.118.41.122:8003/v1', ?, 7)",
+    sql: "INSERT INTO providers (id, base_url, models, lamport_ts) VALUES ('prov-e2e', 'http://100.64.20.1:8003/v1', ?, 7)",
     args: [JSON.stringify([{ id: "m", contextWindow: 262144 }])],
   });
 

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Sample pre-push hook: run the public-hygiene check on exactly what is being
+# pushed (the committed tree of each pushed ref, plus the new commit
+# messages) before anything leaves this machine. This repo is public — see
+# "Public repository hygiene" in CLAUDE.md.
+#
+# Enable for THIS clone only (nothing is installed globally):
+#   git config core.hooksPath scripts/hooks
+# or copy it:
+#   cp scripts/hooks/pre-push "$(git rev-parse --git-common-dir)/hooks/pre-push"
+#
+# Locally the check also applies your untracked personal-token denylist
+# (~/.crow-public-denylist, one token per line, mode 600; override with
+# CROW_PUBLIC_DENYLIST). Bypass once, deliberately: git push --no-verify
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+status=0
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  [ "$local_sha" = "$zero" ] && continue          # branch deletion: nothing published
+  if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha" 2>/dev/null; then
+    range="$remote_sha..$local_sha"
+  elif git rev-parse -q --verify origin/main >/dev/null; then
+    range="origin/main..$local_sha"
+  else
+    range=""
+  fi
+  if [ -n "$range" ]; then
+    node "$root/scripts/check-public-hygiene.mjs" --rev "$local_sha" --messages "$range" || status=1
+  else
+    node "$root/scripts/check-public-hygiene.mjs" --rev "$local_sha" || status=1
+  fi
+done
+exit $status

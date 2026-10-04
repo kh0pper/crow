@@ -11,7 +11,7 @@ SCRIPT = BUNDLE / "config-gen.mjs"
 
 BASE_ENV = {
     "PATH": os.environ["PATH"],
-    "MODEL_BASE_URL": "http://100.118.41.122:8010/v1",
+    "MODEL_BASE_URL": "http://100.64.20.1:8010/v1",
     "MODEL_ID": "qwen3.6-27b",
 }
 
@@ -38,7 +38,7 @@ def test_baseline_matches_previous_heredoc_shape():
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Crow Local",
                 "options": {
-                    "baseURL": "http://100.118.41.122:8010/v1",
+                    "baseURL": "http://100.64.20.1:8010/v1",
                     "apiKey": "local",
                 },
                 "models": {"qwen3.6-27b": {"name": "qwen3.6-27b"}},
@@ -66,14 +66,14 @@ def test_missing_model_base_url_dies():
 def test_crow_bridge_registers_per_verified_schema():
     cfg, _ = gen(
         {
-            "MCP_CROW_URL": "http://100.118.41.122:3006/router/mcp",
+            "MCP_CROW_URL": "http://100.64.20.1:3006/router/mcp",
             "MCP_CROW_TOKEN": "tok123",
         }
     )
     assert cfg["mcp"] == {
         "crow": {
             "type": "remote",
-            "url": "http://100.118.41.122:3006/router/mcp",
+            "url": "http://100.64.20.1:3006/router/mcp",
             "enabled": True,
             "headers": {"Authorization": "Bearer tok123"},
         }
@@ -81,7 +81,7 @@ def test_crow_bridge_registers_per_verified_schema():
 
 
 def test_url_without_token_skips_loudly():
-    cfg, stderr = gen({"MCP_CROW_URL": "http://100.118.41.122:3006/router/mcp"})
+    cfg, stderr = gen({"MCP_CROW_URL": "http://100.64.20.1:3006/router/mcp"})
     assert "mcp" not in cfg
     assert "MCP_CROW_TOKEN missing" in stderr
 
@@ -108,8 +108,8 @@ def test_json_injection_safe_token():
 def test_research_slot_registers_alongside_crow():
     cfg, _ = gen(
         {
-            "MCP_CROW_URL": "http://100.118.41.122:3006/projects/mcp",
-            "MCP_RESEARCH_URL": "http://100.118.41.122:3006/tools-rookery/mcp",
+            "MCP_CROW_URL": "http://100.64.20.1:3006/projects/mcp",
+            "MCP_RESEARCH_URL": "http://100.64.20.1:3006/tools-rookery/mcp",
             "MCP_CROW_TOKEN": "tok123",
         }
     )

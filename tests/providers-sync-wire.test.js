@@ -82,7 +82,7 @@ function providerRow(overrides = {}) {
   return {
     id: "crow-local",
     name: "crow llama.cpp",
-    base_url: "http://100.118.41.122:8003/v1",
+    base_url: "http://100.64.20.1:8003/v1",
     models: '[{"id":"m1"}]',
     ...overrides,
   };
@@ -95,7 +95,7 @@ test("D9: loopback base_urls never sync; tailnet/LAN/cloud do; malformed/missing
     ["http://localhost:3001/llm/v1", false],
     ["http://127.0.0.1:8011/v1", false],
     ["http://[::1]:8080/v1", false],
-    ["http://100.118.41.122:8003/v1", true],
+    ["http://100.64.20.1:8003/v1", true],
     ["http://10.0.0.21:9005/v1", true],
     ["https://api.example.com/v1", true],
   ];
@@ -282,7 +282,7 @@ test("D3+D4 integration: bookkeeping columns and null gpu_policy all stripped; c
       `${key} must not ride the wire`,
     );
   }
-  assert.equal(wireRow.base_url, "http://100.118.41.122:8003/v1");
+  assert.equal(wireRow.base_url, "http://100.64.20.1:8003/v1");
   assert.equal(wireRow.models, '[{"id":"m1"}]');
   assert.equal(wireRow.id, "crow-local");
 });

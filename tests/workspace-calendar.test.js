@@ -70,9 +70,9 @@ test("all-day on DST day stays a date (Review Focus 4); single-day end is made e
 
 test("datetimes need an offset; attendees get SCHEDULE-AGENT=CLIENT by default", async () => {
   assert.equal((await call("ws_cal_create_event", { calendar: "Menu", summary: "x", start: "2026-10-10T18:00", end: "2026-10-10T19:00" })).code, "bad_time");
-  await call("ws_cal_create_event", { calendar: "Menu", summary: "Con invitados", start: "2026-10-10T18:00:00-05:00", end: "2026-10-10T19:00:00-05:00", attendees: ["dayane@example.org"] });
+  await call("ws_cal_create_event", { calendar: "Menu", summary: "Con invitados", start: "2026-10-10T18:00:00-05:00", end: "2026-10-10T19:00:00-05:00", attendees: ["alex@example.org"] });
   const obj = unfold([...pim.calendars.get("menu_shared_by_admin").objects.values()].find((o) => o.text.includes("Con invitados")).text);
-  assert.match(obj, /ATTENDEE;[^:]*SCHEDULE-AGENT=CLIENT[^:]*:mailto:dayane@example\.org/);
+  assert.match(obj, /ATTENDEE;[^:]*SCHEDULE-AGENT=CLIENT[^:]*:mailto:alex@example\.org/);
   assert.match(obj, /ORGANIZER[^:]*:mailto:crow-bot@crow\.test/i);
 });
 
@@ -93,7 +93,7 @@ test("update + delete are journaled and undoable; undo refuses after a human edi
   assert.equal((await call("ws_undo_last_change", { path: "cal:menu_shared_by_admin/other", version_id: d.data.version_id })).code, "bad_version_id");
   const u2 = await call("ws_cal_update_event", { calendar: "Menu", uid: c.data.uid, location: "Casa" });
   const file = [...pim.calendars.get("menu_shared_by_admin").objects.entries()].find(([, o]) => o.text.includes(c.data.uid))[0];
-  pim.addEvent("menu_shared_by_admin", file, pim.calendars.get("menu_shared_by_admin").objects.get(file).text.replace("Casa", "Casa de Dayane"));
+  pim.addEvent("menu_shared_by_admin", file, pim.calendars.get("menu_shared_by_admin").objects.get(file).text.replace("Casa", "Casa de Alex"));
   assert.equal((await call("ws_undo_last_change", { path: u2.data.ref, version_id: u2.data.version_id })).code, "changed_since");
   // undo of a create removes it
   const c2 = await call("ws_cal_create_event", { calendar: "Menu", summary: "Temporal", start: "2026-10-14", end: "2026-10-14" });
@@ -125,12 +125,12 @@ test("read-only calendar refuses writes with a clear code", async () => {
 });
 
 test("respond_to_event finds crow-bot via calendar-user-address-set and sets its own PARTSTAT; not an attendee → error", async () => {
-  pim.addEvent("menu_shared_by_admin", "inv.ics", cal("BEGIN:VEVENT", "UID:inv-1", "DTSTAMP:20261001T000000Z", "DTSTART:20261015T230000Z", "DTEND:20261016T000000Z", "SUMMARY:Junta", "ORGANIZER:mailto:kevin@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:dayane@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:MAILTO:Crow-Bot@crow.test", "END:VEVENT"));
+  pim.addEvent("menu_shared_by_admin", "inv.ics", cal("BEGIN:VEVENT", "UID:inv-1", "DTSTAMP:20261001T000000Z", "DTSTART:20261015T230000Z", "DTEND:20261016T000000Z", "SUMMARY:Junta", "ORGANIZER:mailto:kevin@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alex@example.org", "ATTENDEE;PARTSTAT=NEEDS-ACTION:MAILTO:Crow-Bot@crow.test", "END:VEVENT"));
   const r = await call("ws_cal_respond_to_event", { calendar: "Menu", uid: "inv-1", response: "accepted" });
   assert.equal(r.success, true); assert.ok(r.data.version_id.startsWith("j1."));
   const t = unfold(pim.calendars.get("menu_shared_by_admin").objects.get("inv.ics").text);
   assert.match(t, /ATTENDEE;PARTSTAT=ACCEPTED:MAILTO:Crow-Bot@crow\.test/);
-  assert.match(t, /ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:dayane@example\.org/);
+  assert.match(t, /ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alex@example\.org/);
   assert.equal((await call("ws_cal_respond_to_event", { calendar: "Menu", uid: "cena-1", response: "accepted" })).code, "not_attendee");
 });
 
@@ -192,13 +192,13 @@ test("T10-I2: a rule too dense to expand is flagged truncated with a warning nam
 test("T10-I3: after_etag comes from the PUT's ETag, so a person's edit right after the bot's write is never undone", async () => {
   const c = await call("ws_cal_create_event", { calendar: "Menu", summary: "Jueves: enchiladas", start: "2026-10-15", end: "2026-10-15" });
   const before = fake.calls.length;
-  pim.afterPut = (col, file) => col.objects.set(file, { text: col.objects.get(file).text.replace("enchiladas", "enchiladas verdes (Dayane)"), etag: pim.nextEtag() });
+  pim.afterPut = (col, file) => col.objects.set(file, { text: col.objects.get(file).text.replace("enchiladas", "enchiladas verdes (Alex)"), etag: pim.nextEtag() });
   const u = await call("ws_cal_update_event", { calendar: "Menu", uid: c.data.uid, summary: "Jueves: enchiladas rojas" });
   const e = journalEntry(u.data.version_id);
   assert.ok(e.after_etag); assert.equal(e.after_etag_posthoc, undefined);
   assert.ok(!fake.calls.slice(before).some((x) => x.method === "GET"), "no GET needed when the PUT answers with an ETag");
   assert.equal((await call("ws_undo_last_change", { path: u.data.ref, version_id: u.data.version_id })).code, "changed_since");
-  assert.match(pim.calendars.get("menu_shared_by_admin").objects.get(`${c.data.uid}.ics`).text, /verdes \(Dayane\)/, "the person's edit survives");
+  assert.match(pim.calendars.get("menu_shared_by_admin").objects.get(`${c.data.uid}.ics`).text, /verdes \(Alex\)/, "the person's edit survives");
   // no ETag on the PUT → GET fallback, marked post-hoc
   pim.omitPutEtag = true;
   try {

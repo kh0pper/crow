@@ -62,7 +62,7 @@ On the home instance, register the satellite:
 "Register my black-swan server as a satellite instance"
 ```
 
-The AI uses `crow_register_instance` to add the satellite to the instance registry. You need the satellite's gateway URL (e.g., `http://100.121.254.89:3001` via Tailscale).
+The AI uses `crow_register_instance` to add the satellite to the instance registry. You need the satellite's gateway URL (e.g., `http://100.64.20.2:3001` via Tailscale).
 
 On the satellite, register the home instance the same way. Both sides need to know about each other.
 

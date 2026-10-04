@@ -93,12 +93,12 @@ test("unit: the derived self dial address is never the :443 door (crow / black-s
   assert.equal(serveUrlForPort(FUNNEL_ON_8444, 3001), null, "a Funnel-enabled host:port is never advertised");
 
   const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
-  const crow = deriveSelfDialAddress({ port: 3001, env, execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.118.41.122" }) });
-  assert.deepEqual(crow, { gateway_url: "https://crow.example.ts.net:8444", tailscale_ip: "100.118.41.122", sync_port: 3001, source: "serve" });
-  const bs = deriveSelfDialAddress({ port: 3001, env: { CROW_GATEWAY_URL: "https://black-swan.example.ts.net" }, execFileSyncImpl: fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.90.185.114" }) });
-  assert.deepEqual(bs, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114", sync_port: 3001, source: "serve" });
-  const bare = deriveSelfDialAddress({ port: 3009, env: {}, execFileSyncImpl: fakeTailscale({ serve: null, ip: "100.67.188.54" }) });
-  assert.deepEqual(bare, { gateway_url: "http://100.67.188.54:3009", tailscale_ip: "100.67.188.54", sync_port: 3009, source: "tailnet-ip" }, "no Serve → the direct backend");
+  const crow = deriveSelfDialAddress({ port: 3001, env, execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.64.20.1" }) });
+  assert.deepEqual(crow, { gateway_url: "https://crow.example.ts.net:8444", tailscale_ip: "100.64.20.1", sync_port: 3001, source: "serve" });
+  const bs = deriveSelfDialAddress({ port: 3001, env: { CROW_GATEWAY_URL: "https://black-swan.example.ts.net" }, execFileSyncImpl: fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.64.20.3" }) });
+  assert.deepEqual(bs, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001, source: "serve" });
+  const bare = deriveSelfDialAddress({ port: 3009, env: {}, execFileSyncImpl: fakeTailscale({ serve: null, ip: "100.64.20.4" }) });
+  assert.deepEqual(bare, { gateway_url: "http://100.64.20.4:3009", tailscale_ip: "100.64.20.4", sync_port: 3009, source: "tailnet-ip" }, "no Serve → the direct backend");
   const pinned = deriveSelfDialAddress({ port: 3001, env, configuredUrl: "https://pin.example.ts.net:9000", execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE }) });
   assert.equal(pinned.gateway_url, "https://pin.example.ts.net:9000", "CROW_PEER_GATEWAY_URL stays the explicit override");
   assert.equal(deriveSelfDialAddress({ port: 3001, env: {}, execFileSyncImpl: fakeTailscale({ ip: null }) }).gateway_url, null, "no tailnet → nothing advertised");
@@ -107,16 +107,16 @@ test("unit: the derived self dial address is never the :443 door (crow / black-s
   assert.equal(isDialableGatewayUrl("https://crow.example.ts.net:443"), false);
   assert.equal(isDialableGatewayUrl("http://localhost:3001"), false);
   assert.equal(isDialableGatewayUrl("https://crow.example.ts.net:8444"), true);
-  assert.equal(isDialableGatewayUrl("http://100.90.185.114:3001"), true);
+  assert.equal(isDialableGatewayUrl("http://100.64.20.3:3001"), true);
   assert.equal(pickPeerGatewayUrl("https://b.example.ts.net", "https://b.example.ts.net:8444/"), "https://b.example.ts.net:8444");
   assert.equal(pickPeerGatewayUrl("http://100.64.0.9:3001", "https://b.example.ts.net:8444"), "http://100.64.0.9:3001");
 
   const status = {
-    Self: { DNSName: "crow.example.ts.net.", TailscaleIPs: ["100.118.41.122", "fd7a:115c:a1e0::1"] },
-    Peer: { k: { DNSName: "black-swan.example.ts.net.", TailscaleIPs: ["fd7a:115c:a1e0::2", "100.90.185.114"] } },
+    Self: { DNSName: "crow.example.ts.net.", TailscaleIPs: ["100.64.20.1", "fd7a:115c:a1e0::1"] },
+    Peer: { k: { DNSName: "black-swan.example.ts.net.", TailscaleIPs: ["fd7a:115c:a1e0::2", "100.64.20.3"] } },
   };
-  assert.equal(lookupTailnetIpForHost("black-swan.example.ts.net", { status }), "100.90.185.114");
-  assert.equal(lookupTailnetIpForHost("BLACK-SWAN.example.ts.net", { status }), "100.90.185.114");
+  assert.equal(lookupTailnetIpForHost("black-swan.example.ts.net", { status }), "100.64.20.3");
+  assert.equal(lookupTailnetIpForHost("BLACK-SWAN.example.ts.net", { status }), "100.64.20.3");
   assert.equal(lookupTailnetIpForHost("nope.example.ts.net", { status }), null);
   assert.equal(lookupTailnetIpForHost("example.com", { status }), null, "only MagicDNS names are looked up");
 });
@@ -141,12 +141,12 @@ async function withScratchSelf(selfUrl, fn, { tailscaleIp = null } = {}) {
 
 test("self row: a self row with NO usable address (empty / localhost) is repaired at boot with the derived one; a usable row — even a private :443 Serve URL — is never overwritten", async () => {
   await withScratchSelf("http://localhost:3001", async (db) => {
-    await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.67.188.54:3009", tailscaleIp: "100.67.188.54" });
-    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "http://100.67.188.54:3009", tailscale_ip: "100.67.188.54" });
+    await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.20.4:3009", tailscaleIp: "100.64.20.4" });
+    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "http://100.64.20.4:3009", tailscale_ip: "100.64.20.4" });
   });
   await withScratchSelf("https://black-swan.example.ts.net", async (db) => {
-    await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.90.185.114:3001", tailscaleIp: "100.90.185.114" });
-    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114" }, "browser URL kept; tailscale_ip filled");
+    await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.20.3:3001", tailscaleIp: "100.64.20.3" });
+    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3" }, "browser URL kept; tailscale_ip filled");
   });
   await withScratchSelf("https://r4.example.ts.net:8448", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.0.5:3008" });
@@ -169,14 +169,14 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
   try {
     await withScratchSelf(undefined, async (db) => {
       // Black-swan's host shape: only a :443 Serve, no self row yet.
-      const exec = fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.90.185.114" });
+      const exec = fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.64.20.3" });
       const before = await selfPairingAddress(db, { execFileSyncImpl: exec });
-      assert.deepEqual(before, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114", sync_port: 3001 },
+      assert.deepEqual(before, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001 },
         "its private Serve for HTTP + the tailnet IP and port sync will dial");
 
       // Crow's host shape through the REAL route, over real HTTP.
       const app = express();
-      app.use(instanceEnrollRouter(db, { execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.118.41.122" }) }));
+      app.use(instanceEnrollRouter(db, { execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.64.20.1" }) }));
       const srv = createServer(app);
       await new Promise((r) => srv.listen(0, "127.0.0.1", r));
       try {
@@ -187,13 +187,13 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
           return { status: res.status, body: await res.json() };
         };
         const base = { source_instance_id: "peerB", source_name: "B", source_outbound_bearer: "x".repeat(40), shared_signing_key: "k".repeat(40) };
-        const r1 = await post({ ...base, source_gateway_url: "http://100.90.185.114:3001", source_tailscale_ip: "100.90.185.114", source_sync_port: 3001 });
+        const r1 = await post({ ...base, source_gateway_url: "http://100.64.20.3:3001", source_tailscale_ip: "100.64.20.3", source_sync_port: 3001 });
         assert.equal(r1.status, 200);
         assert.equal(r1.body.peer_gateway_url, "https://crow.example.ts.net:8444", "the private Serve endpoint, not the Funnel URL");
         assert.notEqual(r1.body.peer_gateway_url, process.env.CROW_GATEWAY_URL);
-        assert.equal(r1.body.peer_tailscale_ip, "100.118.41.122");
+        assert.equal(r1.body.peer_tailscale_ip, "100.64.20.1");
         assert.equal(r1.body.peer_sync_port, 3001);
-        assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.90.185.114:3001", tailscale_ip: "100.90.185.114" });
+        assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.64.20.3:3001", tailscale_ip: "100.64.20.3" });
         const port = (await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_port:peerB' AND instance_id = 'self'")).rows[0];
         assert.equal(port?.value, "3001", "the source's backend port is remembered");
 
@@ -201,13 +201,13 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
         // challenge-response pin intact — otherwise anyone who can reach the
         // endpoint while enrollment is on could downgrade the peer.
         await db.execute("INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES ('tailnet_sync_cr:peerB', 'self', '1', datetime('now'))");
-        assert.equal((await post({ ...base, source_gateway_url: "http://100.90.185.114:3001" })).status, 200, "the enroll itself succeeds (pairing semantics unchanged)");
+        assert.equal((await post({ ...base, source_gateway_url: "http://100.64.20.3:3001" })).status, 200, "the enroll itself succeeds (pairing semantics unchanged)");
         assert.equal((await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_cr:peerB' AND instance_id = 'self'")).rows[0]?.value, "1", "CR pin intact after an inbound enroll");
 
         // An OLD peer re-pairing with its :443 CROW_GATEWAY_URL never replaces a dialable row.
         const r2 = await post({ ...base, source_gateway_url: "https://black-swan.example.ts.net", source_tailscale_ip: "8.8.8.8" });
         assert.equal(r2.status, 200);
-        assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.90.185.114:3001", tailscale_ip: "100.90.185.114" }, "dialable row kept; non-tailnet IP ignored");
+        assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.64.20.3:3001", tailscale_ip: "100.64.20.3" }, "dialable row kept; non-tailnet IP ignored");
       } finally {
         await new Promise((r) => srv.close(r));
       }

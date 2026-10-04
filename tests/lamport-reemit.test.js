@@ -2,7 +2,7 @@
 //
 // Item 2c — Lamport-preserving re-emit + boot-window emit loss: the EXECUTABLE
 // two-instance acceptance gate (design §5, spec
-// docs/superpowers/specs/2026-07-14-lamport-preserving-reemit-design.md).
+// the private engineering notes).
 //
 // This file (Task 4) carries the SHARED harness that Tasks 5–7 extend, plus the
 // C3 gate cases G3/G3b/G3c: the per-peer ordered append chain (_appendLocks),

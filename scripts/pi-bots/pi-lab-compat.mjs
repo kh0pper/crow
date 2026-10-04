@@ -19,7 +19,7 @@
  *   1. git: MIN_PI_LAB_REV is an ancestor of the checkout's HEAD (pi runs the
  *      working tree, so HEAD is what runs);
  *   2. feature markers in the source, for exports and containers with no git
- *      history (Dayane's container pins a pi-lab export).
+ *      history (a second-user container pins a pi-lab export).
  *
  * Never throws. An unknown pi-lab (none found, unreadable) is reported as not
  * compatible: the MCP-config fd needs pi-lab to read it, and a pi that ignores

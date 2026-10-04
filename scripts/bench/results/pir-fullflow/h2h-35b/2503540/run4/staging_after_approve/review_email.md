@@ -26,7 +26,7 @@ Both open items from your follow-up are now resolved.
 
 ### Preview Link
 
-[View reply file](http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt)
+[View reply file](http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt)
 
 ### Open Items
 

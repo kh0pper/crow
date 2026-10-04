@@ -10,14 +10,14 @@ import {
 
 // Real fleet shapes (models.json fallback on a fresh install):
 const CFG = { providers: {
-  "crow-voice":    { baseUrl: "http://100.118.41.122:8011/v1", host: "local", bundleId: "vllm-rocm-qwen35-4b", gpuPolicy: { alwaysResident: true } },
-  "grackle-embed": { baseUrl: "http://100.121.254.89:9100/v1", host: "grackle-5fc01ac74463b6f4", bundleId: "vllm-cuda-embed", gpuPolicy: { alwaysResident: true } },
+  "crow-voice":    { baseUrl: "http://100.64.20.1:8011/v1", host: "local", bundleId: "vllm-rocm-qwen35-4b", gpuPolicy: { alwaysResident: true } },
+  "grackle-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "grackle-5fc01ac74463b6f4", bundleId: "vllm-cuda-embed", gpuPolicy: { alwaysResident: true } },
   "crow-llm":      { baseUrl: "http://localhost:3001/llm/v1", host: "local", bundleId: null },
   "cloud-alias":   { baseUrl: "https://api.together.xyz/v1", host: "cloud" },
   "loop-bundle":   { baseUrl: "http://127.0.0.1:8004/v1", bundleId: "llamacpp-cpu-qwen3-embed", gpuPolicy: { alwaysResident: true } },
 } };
-const CROW = new Set(["localhost", "127.0.0.1", "::1", "100.118.41.122"]);
-const GRACKLE = new Set(["localhost", "127.0.0.1", "::1", "100.121.254.89"]);
+const CROW = new Set(["localhost", "127.0.0.1", "::1", "100.64.20.1"]);
+const GRACKLE = new Set(["localhost", "127.0.0.1", "::1", "100.64.20.2"]);
 const FRESH = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.5"]);
 
 test("isLocallyOrchestratable is physical: own-IP or loopback, never the host string", () => {
@@ -96,7 +96,7 @@ test("R2-C1: a peer's resident parks forever without ensure calls or errors", as
 
 const PEER_NATIVE = { providers: {
   "peer-native": {
-    baseUrl: "http://100.118.41.122:3001/llm/v1", // the SHARED box address
+    baseUrl: "http://100.64.20.1:3001/llm/v1", // the SHARED box address
     host: "local", bundleId: null,
     models: [{ id: "peer-model", task: "chat" }],
     gpuPolicy: { runtime: "native", owner: "r4-instance", port: 18170, alwaysResident: true },
@@ -151,10 +151,10 @@ test("D9 resolveWarmableProviderName: own-id / cloud alias resolves to its local
   _setOwnInstanceIdForTest(SELF);
   try {
     const cfg = { providers: {
-      "bundle":       { baseUrl: "http://100.118.41.122:8003/v1", host: "local", bundleId: "b1" },
-      "alias-self":   { baseUrl: "http://100.118.41.122:8003/v1", host: SELF,    bundleId: null },
-      "alias-cloud":  { baseUrl: "http://100.118.41.122:8003/v1", host: "cloud", bundleId: null },
-      "alias-other":  { baseUrl: "http://100.118.41.122:8003/v1", host: OTHER,   bundleId: null },
+      "bundle":       { baseUrl: "http://100.64.20.1:8003/v1", host: "local", bundleId: "b1" },
+      "alias-self":   { baseUrl: "http://100.64.20.1:8003/v1", host: SELF,    bundleId: null },
+      "alias-cloud":  { baseUrl: "http://100.64.20.1:8003/v1", host: "cloud", bundleId: null },
+      "alias-other":  { baseUrl: "http://100.64.20.1:8003/v1", host: OTHER,   bundleId: null },
       "public-cloud": { baseUrl: "https://api.together.xyz/v1",   host: "cloud", bundleId: null },
     } };
     assert.equal(resolveWarmableProviderName(cfg, "alias-self", CROW), "bundle");

@@ -1,6 +1,6 @@
 /**
  * serving.class — a curated safety CEILING on a model catalog entry
- * (spec docs/superpowers/specs/2026-09-23-serving-class-design.md).
+ * (spec in the private engineering notes).
  *
  * resident   — single box, no RPC, safe behind a cap: starts as today.
  * windowed   — operator present, two-box and/or evicts production.

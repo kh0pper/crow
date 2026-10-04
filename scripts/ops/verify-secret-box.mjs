@@ -20,7 +20,7 @@ const identityB = { seed: fixtureSeedB };
 
 const PLAINTEXTS = [
   "crowadmin",
-  "8r00kly^",
+  "s4mple^Passw0rd!",
   "",
   "a".repeat(4096),
   "unicode-ok: 🪶 ✓",

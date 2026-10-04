@@ -16,7 +16,7 @@ TEA also provided two attachments:
 
 The draft reply acknowledges receipt, accepts the TCPA explanation, and registers the ILTexas confirmation. It does not re-open any items.
 
-**Preview:** http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt
+**Preview:** http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt
 
 ### Open items
 

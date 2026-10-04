@@ -1076,7 +1076,7 @@ test("GET /bots/:id/models collapses aliases of one endpoint+model into the row 
   // qwen3.6-35b-a3b on :8003. The bot names crow-local, so crow-local is the
   // ONE entry — even though crow-chat is the bundle-managed row.
   catalogueImpl = [
-    { provider: "crow-chat", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", managed: true },
+    { provider: "crow-chat", id: "q35", baseUrl: "http://100.64.20.1:8003/v1", managed: true },
     { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
     { provider: "crow-swap-agentic", id: "qwen", baseUrl: "http://x:8003/v1/", managed: true },
   ];
@@ -1111,8 +1111,8 @@ test("fix round 1 I1: bot A on crow-chat/qwen3.6-35b-a3b does not take crow-loca
   seedBot("bot-b", { gateways: [{ type: "perch" }], tools: {}, models: { default: "zai-coding/glm-5.1" } });
   piProvidersImpl = { custom: new Set(["crow-local", "zai-coding"]), builtin: new Set(), keyed: new Set() };
   catalogueImpl = [
-    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", managed: true },
-    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1" },
+    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.64.20.1:8003/v1", managed: true },
+    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.64.20.1:8003/v1" },
     { provider: "zai-coding", id: "glm-5.1", baseUrl: "https://api.z.ai/api/coding/paas/v4" },
   ];
   try {

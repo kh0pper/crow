@@ -807,18 +807,18 @@ test("unregisterModel: removes the primary, every shard and every companion; a m
 // ---------------------------------------------------------------------------
 
 const REG_OPTS = (h) => ({ db: h.db, dir: h.dir, allocatePortFn: async (state, id) => { state.reservations[id] = { port: 18150, owner: {} }; return 18150; },
-  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001 });
+  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.64.20.1", gatewayPortFn: () => 3001 });
 
 test("registerModel: row carries the door base_url, owner, port, catalogId/quant; registry key is <id>@<quant>", async () => {
   const h = freshLibsql();
   try {
     const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h) });
-    assert.equal(r.baseUrl, "http://100.118.41.122:3001/llm/p/chat-test-model/v1");
+    assert.equal(r.baseUrl, "http://100.64.20.1:3001/llm/p/chat-test-model/v1");
     assert.equal(r.port, 18150);
     assert.equal(r.registryKey, "chat-test-model@Q4_K_M");
     const row = await dbRow(h.db, "chat-test-model");
     const gp = JSON.parse(row.gpu_policy);
-    assert.equal(row.base_url, "http://100.118.41.122:3001/llm/p/chat-test-model/v1");
+    assert.equal(row.base_url, "http://100.64.20.1:3001/llm/p/chat-test-model/v1");
     assert.deepEqual({ runtime: gp.runtime, catalogId: gp.catalogId, quant: gp.quant, port: gp.port, owner: gp.owner, alwaysResident: gp.alwaysResident, defaultMember: gp.defaultMember },
       { runtime: "native", catalogId: "chat-test-model", quant: "Q4_K_M", port: 18150, owner: "inst-A", alwaysResident: false, defaultMember: false });
     assert.ok(loadState(h.dir).registry["chat-test-model@Q4_K_M"]);
@@ -879,7 +879,7 @@ test("registerModel: launch override is validated against the catalog context_le
 test("registerModel: converts an existing BUNDLE row of the same id, snapshotting it to state.conversions", async () => {
   const h = freshLibsql();
   try {
-    await upsertProvider(h.db, { id: "crow-chat", baseUrl: "http://100.118.41.122:8003/v1", host: "local", bundleId: "llamacpp-vulkan-qwen36-35b-a3b",
+    await upsertProvider(h.db, { id: "crow-chat", baseUrl: "http://100.64.20.1:8003/v1", host: "local", bundleId: "llamacpp-vulkan-qwen36-35b-a3b",
       models: [{ id: "qwen3.6-35b-a3b", task: "chat" }], gpuPolicy: { mutexGroup: "crow-strix-vram", alwaysResident: false, defaultMember: true } });
     const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "crow-chat", defaultMember: true, ...REG_OPTS(h) });
     assert.equal(r.converted, true);
@@ -888,7 +888,7 @@ test("registerModel: converts an existing BUNDLE row of the same id, snapshottin
     assert.equal(JSON.parse(row.gpu_policy).mutexGroup, "crow-strix-vram", "auto mutex joins the group the converted row already had");
     const snap = loadState(h.dir).conversions["crow-chat"];
     assert.equal(snap.row.bundle_id, "llamacpp-vulkan-qwen36-35b-a3b");
-    assert.equal(snap.row.base_url, "http://100.118.41.122:8003/v1");
+    assert.equal(snap.row.base_url, "http://100.64.20.1:8003/v1");
     assert.equal(snap.row.disabled, false);
     assert.match(snap.at, /^\d{4}-/);
   } finally { h.cleanup(); }
