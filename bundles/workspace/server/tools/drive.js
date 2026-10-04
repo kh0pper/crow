@@ -28,8 +28,10 @@ export const driveReadDefs = [
       const cfg = getConfig(); const e = await stat(cfg, refOf(args));
       const crow_bot = Object.fromEntries(Object.values(PERMS).map((k) => [k, false]));
       for (const ch of e.permissions) if (PERMS[ch]) crow_bot[PERMS[ch]] = true;
-      const shares = (await myShares(cfg, await resolveRef(cfg, refOf(args))).catch(() => [])).map((s) => ({ with: s.share_with, permissions: s.permissions }));
-      return { path: e.path, owner: { id: e.ownerId, name: e.ownerName }, crow_bot, shares_by_crow_bot: shares, note: "Crow bot cannot see other people's shares of this item." };
+      let shares = null, note = "Crow bot cannot see other people's shares of this item.";
+      try { shares = (await myShares(cfg, splitPath(e.path))).map((s) => ({ with: s.share_with, permissions: s.permissions })); }
+      catch { note += " Crow bot's own shares could not be read right now."; }
+      return { path: e.path, owner: { id: e.ownerId, name: e.ownerName }, crow_bot, shares_by_crow_bot: shares, note };
     } },
   { name: "ws_drive_search", description: "Search file and folder names in Crow's Workspace drive (newest first).",
     schema: { query: z.string().min(1).max(200), max_results: z.number().int().min(1).max(100).optional().default(20) },

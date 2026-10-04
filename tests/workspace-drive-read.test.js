@@ -67,3 +67,21 @@ test("fake: extraRoutes run before the built-in branches; principal carries cale
   assert.equal(await (await fetch(url, { method: "PROPFIND", headers: hdr })).text(), "override");
   fake.extraRoutes = null;
 });
+
+test("listing the drive root requests exactly .../files/crow-bot/ (no double slash)", async () => {
+  const n = fake.calls.length;
+  const r = await call("ws_drive_list_folder", {});
+  assert.equal(r.success, true);
+  const pf = fake.calls.slice(n).find((c) => c.method === "PROPFIND");
+  assert.equal(pf.url, "/remote.php/dav/files/crow-bot/");
+});
+
+test("get_permissions: an OCS failure yields shares_by_crow_bot null plus a note, not a silent empty list", async () => {
+  fake.extraRoutes = async (req, res) => { if (req.url.startsWith("/ocs/v2.php/apps/files_sharing")) { res.writeHead(500); res.end("x"); return true; } return false; };
+  try {
+    const p = await call("ws_drive_get_permissions", { path: "Shared with Crow/Casa Nueva/notes.md" });
+    assert.equal(p.success, true);
+    assert.equal(p.data.shares_by_crow_bot, null);
+    assert.match(p.data.note, /could not be read/);
+  } finally { fake.extraRoutes = null; }
+});

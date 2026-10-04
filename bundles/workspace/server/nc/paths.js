@@ -10,23 +10,35 @@ export function splitPath(p) {
   const body = s.replace(/^\//, "").replace(/\/$/, "");
   if (!body) throw new WsError("bad_path", "path is empty; use \"\" only where a folder may be the drive root");
   const segs = body.split("/");
+  assertSegs(segs);
+  return segs;
+}
+
+/** The one segment rule: used by splitPath, hrefToSegs and filesUrl, so no URL can ever hop to a parent. */
+function assertSegs(segs) {
   for (const seg of segs) {
-    if (seg === "" || seg === "." || seg === "..") throw new WsError("bad_path", "path segments cannot be empty, '.' or '..'");
-    if (BAD.test(seg)) throw new WsError("bad_path", "path contains a control character or backslash");
+    if (typeof seg !== "string" || seg === "" || seg === "." || seg === "..") throw new WsError("bad_path", "path segments cannot be empty, '.' or '..'");
+    if (seg.includes("/") || BAD.test(seg)) throw new WsError("bad_path", "path contains a slash, control character or backslash inside a name");
     if (Buffer.byteLength(seg) > 255) throw new WsError("bad_path", "a name in the path is longer than 255 bytes");
   }
-  return segs;
 }
 
 /** Folder params may be "" (drive root). */
 export const splitFolder = (p) => (p === undefined || p === null || p === "" || p === "/" ? [] : splitPath(p));
 export const joinPath = (segs) => segs.join("/");
 export const filesRoot = (cfg) => `${cfg.ncUrl}/remote.php/dav/files/${encodeURIComponent(cfg.user)}`;
-export const filesUrl = (cfg, segs) => `${filesRoot(cfg)}/${segs.map((s) => encodeURIComponent(s)).join("/")}`;
+export function filesUrl(cfg, segs) {
+  assertSegs(segs);
+  return segs.length ? `${filesRoot(cfg)}/${segs.map((s) => encodeURIComponent(s)).join("/")}` : filesRoot(cfg);
+}
 
 export function hrefToSegs(cfg, href) {
   const prefix = `/remote.php/dav/files/${encodeURIComponent(cfg.user)}`;
   const path = href.startsWith("http") ? new URL(href).pathname : href;
   if (path !== prefix && !path.startsWith(`${prefix}/`)) throw new WsError("bad_path", "the server answered with a path outside Crow's drive");
-  return path.slice(prefix.length).split("/").filter(Boolean).map((s) => decodeURIComponent(s).normalize("NFC"));
+  let segs;
+  try { segs = path.slice(prefix.length).split("/").filter(Boolean).map((s) => decodeURIComponent(s).normalize("NFC")); }
+  catch { throw new WsError("bad_path", "the server answered with a malformed path"); }
+  assertSegs(segs);
+  return segs;
 }

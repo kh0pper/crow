@@ -36,3 +36,15 @@ test("a literal %2e%2e segment is a name, re-encoded, never a parent hop", () =>
 test("hrefToSegs refuses hrefs outside crow-bot's root", () => {
   assert.throws(() => hrefToSegs(cfg, "/remote.php/dav/files/admin/secret.docx"), (e) => e.code === "bad_path");
 });
+
+test("hrefToSegs validates every decoded segment (encoded .., %2F, malformed %)", () => {
+  for (const h of ["/remote.php/dav/files/crow-bot/%2e%2e/admin/secret.docx", "/remote.php/dav/files/crow-bot/a%2Fb", "/remote.php/dav/files/crow-bot/a%zz", "/remote.php/dav/files/crow-bot/a%5Cb"]) {
+    assert.throws(() => hrefToSegs(cfg, h), (e) => e.code === "bad_path", h);
+  }
+});
+
+test("filesUrl refuses a parent hop or slash segment; the root URL has no trailing slash", () => {
+  assert.throws(() => filesUrl(cfg, ["a", "..", "b"]), (e) => e.code === "bad_path");
+  assert.throws(() => filesUrl(cfg, ["a/b"]), (e) => e.code === "bad_path");
+  assert.equal(filesUrl(cfg, []), "http://127.0.0.1:1/remote.php/dav/files/crow-bot");
+});
