@@ -40,6 +40,20 @@ export const KIOSK_DENY_TOOLS = Object.freeze([
   "crow_discover",
 ]);
 
+/**
+ * Voice-turn guards (smoke 2026-10-04 #19: the 4B called a tool for 10 rounds, 24.5 s, and said
+ * nothing). Three tool rounds cover every K1 flow (a timer is one crow_wm call, then its spoken
+ * confirmation); the budget is from end of speech to the first ANSWER audio — past it the display
+ * says the fallback line instead of going silent.
+ */
+export const KIOSK_MAX_TOOL_ROUNDS = 3;
+export const KIOSK_FIRST_AUDIO_BUDGET_MS = 12_000;
+
+/** The fallback line in the display's language. */
+export function kioskFallbackText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].fallback_stuck;
+}
+
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 /**
@@ -139,6 +153,9 @@ export function createKioskRuntime(deps) {
       turnContext: kioskTurnContext(wm, device.id),
       denyTools: KIOSK_DENY_TOOLS,
       sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
+      maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
+      firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
+      fallbackText: kioskFallbackText(device.kiosk_settings?.lang),
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe

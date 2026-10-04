@@ -8,7 +8,8 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
-import { createKioskRuntime, KIOSK_DENY_TOOLS, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { STRINGS } from "../bundles/kiosk/server/strings.js";
 import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { readPortrait, portraitMood } from "../servers/sharing/profile-avatar.js";
@@ -266,6 +267,33 @@ test("ruling C: KIOSK_DENY_TOOLS denies cross-bot escapes, and every voice turn 
   assert.equal(call.sttModel({ provider: "fasterwhisper" }), "Systran/faster-whisper-tiny.en");
   assert.equal(call.sttModel({ provider: "openai" }), null, "never forced onto another provider");
   ws.close();
+});
+
+test("stall fix (wired): every kiosk voice turn carries the 3-round cap, the 12 s first-audio budget and the fallback in the display's language", async () => {
+  assert.equal(KIOSK_MAX_TOOL_ROUNDS, 3);
+  assert.equal(KIOSK_FIRST_AUDIO_BUDGET_MS, 12_000);
+  assert.equal(kioskFallbackText("en"), STRINGS.en.fallback_stuck);
+  assert.equal(kioskFallbackText("es"), STRINGS.es.fallback_stuck);
+  assert.equal(kioskFallbackText(undefined), STRINGS.en.fallback_stuck);
+  const { token } = await store.pairDevice(db(), { id: "kiosk-stall-es2", name: "es2", device_kind: "kiosk", kiosk_settings: { lang: "es" } });
+  await store.updateDeviceProfiles(db(), "kiosk-stall-es2", { bound_bot_id: "household" });
+  const w = new WebSocket(wsUrl(base));
+  const msgs = [];
+  await new Promise((r) => w.on("open", r));
+  w.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  w.send(JSON.stringify({ type: "hello", device_id: "kiosk-stall-es2", token, caps: {} }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+  const before = turnCalls.length;
+  w.send(JSON.stringify({ type: "turn_start", turn_id: "s1" }));
+  w.send(Buffer.alloc(8000));
+  w.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+  const call = turnCalls.at(-1);
+  assert.equal(call.device.id, "kiosk-stall-es2");
+  assert.equal(call.maxToolRounds, KIOSK_MAX_TOOL_ROUNDS);
+  assert.equal(call.firstAudioBudgetMs, KIOSK_FIRST_AUDIO_BUDGET_MS);
+  assert.equal(call.fallbackText, STRINGS.es.fallback_stuck);
+  w.close();
 });
 
 // Ruling D (Task 7 carry): the login is trusted only when Serve delivered it (loopback socket).

@@ -17,6 +17,10 @@ export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
 export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
+/** Spoken + captioned when a turn ends with no answer (tool loop, empty reply, budget); callers pass a localized one. */
+export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again.";
+/** Rides on the last tool result before the forced final round (kept off the saved conversation). */
+export const STOP_TOOLS_NOTE = "Tool limit reached for this question. Answer the user now from what you already have, in one or two short sentences. Do not call another tool.";
 const DEGRADED_NOTE = "The larger model is not available right now. Answer with what you have, and call a tool directly if one is needed.";
 // A denied discovery call keeps the turn going: the schemas are already in the tool list.
 const SOFT_DENY = { crow_discover: "Tool discovery is not needed here: every tool you can use is already listed with its parameters. Call the right tool directly, or answer from what you know." };
@@ -59,46 +63,61 @@ export function createVoiceTurnRunner(deps) {
     return { profile, adapter, neg: negotiatePcm(adapter.name), voice: profile.defaultVoice };
   }
 
-  /** A speaker bound to one turn: emits tts_start once, then audio; non-PCM = one buffer per sentence. */
-  function makeSpeaker(tts, sink, signal, onChunk) {
+  /**
+   * A speaker bound to one turn: emits tts_start once, then audio; non-PCM = one buffer per sentence.
+   * `mute` (optional AbortSignal) silences the ANSWER (say/filler) when the turn's first-audio budget
+   * runs out; say.force() ignores it, so the fallback line still plays. `signal` (barge-in/close) stops both.
+   */
+  function makeSpeaker(tts, sink, signal, onChunk, mute = null) {
     let started = false;
+    let answered = false;
+    const both = mute ? (signal ? AbortSignal.any([signal, mute]) : mute) : signal;
+    const off = (hard) => signal?.aborted === true || (!hard && mute?.aborted === true);
     const begin = () => {
       if (started) return;
       started = true;
       sink.event({ type: "tts_start", codec: tts.neg ? "pcm" : "mp3", sample_rate: tts.neg ? tts.neg.sampleRate : 24000 });
     };
-    const emit = (buf) => { if (signal?.aborted || !buf.length) return; onChunk(); sink.audio(buf); };
-    async function collect(text) {
+    const emit = (buf, hard, answer) => { if (off(hard) || !buf.length) return; onChunk(); if (answer) answered = true; sink.audio(buf); };
+    async function collect(text, hard) {
       const parts = [];
-      const stream = tts.neg ? pcmStream(tts.adapter, text, tts.voice, tts.neg, { signal }) : tts.adapter.synthesize(text, tts.voice, { signal });
+      const sig = hard ? signal : both;
+      const stream = tts.neg ? pcmStream(tts.adapter, text, tts.voice, tts.neg, { signal: sig }) : tts.adapter.synthesize(text, tts.voice, { signal: sig });
       for await (const c of stream) {
-        if (signal?.aborted) return null;
-        if (tts.neg) { begin(); emit(Buffer.isBuffer(c) ? c : Buffer.from(c)); } else parts.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+        if (off(hard)) return null;
+        if (tts.neg) { begin(); emit(Buffer.isBuffer(c) ? c : Buffer.from(c), hard, true); } else parts.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
       }
       return tts.neg ? null : Buffer.concat(parts);
     }
-    const say = async (text) => {
+    const speak = async (text, hard) => {
       const t = String(text || "").trim();
-      if (!t || signal?.aborted) return;
-      const mp3 = await collect(t);
-      if (mp3 && !signal?.aborted) { begin(); emit(mp3); }
+      if (!t || off(hard)) return;
+      const mp3 = await collect(t, hard);
+      if (mp3 && !off(hard)) { begin(); emit(mp3, hard, true); }
     };
+    const say = (text) => speak(text, false);
+    /** Speaks even after the answer was muted (the fallback line); a barge-in still stops it. */
+    say.force = (text) => speak(text, true);
+    /** Whether any answer audio (not the filler) has left the server this turn. */
+    say.answered = () => answered;
     say.filler = async () => {
-      if (signal?.aborted) return;
+      if (off(false)) return;
       const key = `${tts.profile.id}|${tts.voice}|${tts.adapter.name}`;
       let buf = fillerCache.get(key);
       if (!buf) {
         const parts = [];
-        const stream = tts.neg ? pcmStream(tts.adapter, FILLER_TEXT, tts.voice, tts.neg, { signal }) : tts.adapter.synthesize(FILLER_TEXT, tts.voice, { signal });
+        const stream = tts.neg ? pcmStream(tts.adapter, FILLER_TEXT, tts.voice, tts.neg, { signal: both }) : tts.adapter.synthesize(FILLER_TEXT, tts.voice, { signal: both });
         for await (const c of stream) parts.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-        if (signal?.aborted) return;
+        if (off(false)) return;
         buf = Buffer.concat(parts);
         fillerCache.set(key, buf);
       }
+      if (off(false)) return;
       begin();
-      emit(buf);
+      emit(buf, false, false);
     };
-    say.end = () => { if (started) sink.event({ type: "tts_end" }); };
+    let ended = false;
+    say.end = () => { if (started && !ended) { ended = true; sink.event({ type: "tts_end" }); } };
     return say;
   }
 
@@ -135,16 +154,46 @@ export function createVoiceTurnRunner(deps) {
     return { text: String(r?.text || "").trim() };
   }
 
+  /**
+   * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
+   * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
+   * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
+   * fallback spoken (default: none); fallbackText — the localized fallback line.
+   * result.failed: null | "tool_rounds" | "tool_repeat" | "no_text" | "budget" | "error".
+   */
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
     // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = {};
-    const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, timings };
+    const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, failed: null, timings };
     const mark = (k) => { if (timings[k] == null) timings[k] = now() - t0; };
     const aborted = () => signal?.aborted === true;
     const fail = (code, recoverable = true, message) => sink.event({ type: "error", code, recoverable, ...(message ? { message } : {}) });
+    const log = deps.log || ((m) => console.log(m));
+    const fallbackText = String(opts.fallbackText || FALLBACK_TEXT);
+    // The first-audio budget cuts the answer (LLM stream, tool wait, answer TTS) through `mute`;
+    // the session `signal` (barge-in/close) is never touched by it.
+    const mute = new AbortController();
+    const llmSignal = signal ? AbortSignal.any([signal, mute.signal]) : mute.signal;
+    let budgetHit = false;
+    let budgetTimer = null;
+    let budgetFired = null;
+    const budgetP = new Promise((res) => { budgetFired = res; });
+    let say = null;
+    let history = null;
     let executor = null;
+    /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
+    const speakFallback = async (why, spokenBefore) => {
+      result.failed = why;
+      timings.failed = why;
+      log(`[voice-turn] ${device?.id} turn failed (${why})${timings.tools ? `; tools by round: ${timings.tools.join(" → ")}` : ""}`);
+      if (aborted() || !say) return;
+      sink.event({ type: "caption_delta", text: spokenBefore ? ` ${fallbackText}` : fallbackText });
+      await say.force(fallbackText);
+      say.end();
+      if (history) convo.save(device.id, [...history, { role: "user", content: result.transcript }, { role: "assistant", content: fallbackText }]);
+    };
     try {
       // 1. STT (the WAV is only ever passed to the adapter; never written anywhere)
       let transcript = opts.transcript;
@@ -171,7 +220,7 @@ export function createVoiceTurnRunner(deps) {
 
       const tts = await openTts(db, device);
       if (!tts) { fail("no_tts_profile", false); return result; }
-      const say = makeSpeaker(tts, sink, signal, () => mark("tts_first_chunk_ms"));
+      say = makeSpeaker(tts, sink, signal, () => mark("tts_first_chunk_ms"), mute.signal);
 
       // 2. Fast paths (no LLM)
       if (typeof opts.fastPaths === "function") {
@@ -189,6 +238,18 @@ export function createVoiceTurnRunner(deps) {
       // 3. The bound bot drives the turn (ruling R11: no profile fallback)
       const bot = await loadBot(db, device.bound_bot_id);
       if (!bot) { fail("no_bound_bot", false); return result; }
+      history = convo.get(device.id);
+      // First-audio budget (smoke 2026-10-04 #19: a 24.5 s silent tool loop). Counted from the turn
+      // start; only answer audio stops it, so an escalation's "One moment." is followed by the fallback.
+      if (Number.isFinite(opts.firstAudioBudgetMs) && opts.firstAudioBudgetMs > 0) {
+        const left = Math.max(0, opts.firstAudioBudgetMs - (now() - t0));
+        budgetTimer = (deps.setTimeout || setTimeout)(() => {
+          if (say.answered() || aborted()) return;
+          budgetHit = true;
+          mute.abort();
+          budgetFired();
+        }, left);
+      }
       const memoryOn = device.kiosk_settings?.memory_integration === true;
       const extra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
       const extraByName = new Map(extra.map((x) => [x.definition.name, x]));
@@ -209,7 +270,7 @@ export function createVoiceTurnRunner(deps) {
       const userMsg = { role: "user", content: opts.turnContext ? `${opts.turnContext}\n\n${transcript}` : transcript };
       const messages = [
         { role: "system", content: opts.promptSuffix ? `${system}\n\n${opts.promptSuffix}` : system },
-        ...convo.get(device.id),
+        ...history,
         userMsg,
       ];
 
@@ -234,7 +295,7 @@ export function createVoiceTurnRunner(deps) {
         // gateway); the error is kept, logged below, and the turn carries on without the filler.
         let fillerErr = null;
         const filler = say.filler().catch((err) => { fillerErr = err; });
-        const ready = await readyEscalation(decision.key, db, signal);
+        const ready = await readyEscalation(decision.key, db, llmSignal);
         await filler;
         if (fillerErr && !aborted()) {
           console.warn(`[voice-turn] filler TTS failed: ${fillerErr.message}`);
@@ -246,6 +307,7 @@ export function createVoiceTurnRunner(deps) {
         else { result.degraded = ready.reason; messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${DEGRADED_NOTE}` }; }
       }
       if (aborted()) { result.aborted = true; return result; }
+      if (budgetHit) { await speakFallback("budget", false); return result; }
 
       // 5. Streamed tool loop
       const scope = deps.botVoiceScope(bot);
@@ -277,12 +339,27 @@ export function createVoiceTurnRunner(deps) {
 
       // First chunk = first clause (latency lever 3); later chunks are whole sentences.
       const chunker = createSentenceChunker((s) => say(s), { firstClause: opts.firstClause !== false });
+      // Tool rounds are capped (kiosk: 3). When the cap is hit — or the model calls the same tool(s)
+      // twice in a row with nothing user-visible in between (no speech, no display change) — one
+      // final round runs with the SAME tool list (the prefix cache stays warm) and a stop note on
+      // the last tool result; any call it makes is ignored. No text from it → the fallback.
+      const maxRounds = Number.isInteger(opts.maxToolRounds) && opts.maxToolRounds > 0 ? opts.maxToolRounds : (deps.maxToolRounds || 10);
       let rounds = 0;
+      let toolRounds = 0;
       let nextMax = 600;
-      while (rounds < (deps.maxToolRounds || 10)) {
+      let spokenChars = 0;
+      let displayProgress = false;
+      let cut = null;
+      let finalRound = false;
+      let finalSpoken = 0;
+      let lastStuckSig = null;
+      let nudged = null;
+      const toolLog = [];
+      while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
         let content = "";
+        let roundSpoken = 0;
         const calls = [];
         const roundMax = nextMax;
         nextMax = 600;
@@ -292,19 +369,36 @@ export function createVoiceTurnRunner(deps) {
         const estPrompt = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.2);
         const maxTokens = ctx ? Math.max(64, Math.min(roundMax, ctx - estPrompt - 128)) : roundMax;
         timings.est_prompt_tokens = estPrompt; timings.max_tokens = maxTokens;   // in [kiosk-metrics]; the smoke records both
-        for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal })) {
-          if (aborted()) break;
-          if (ev.type === "content_delta" && ev.text) {
-            mark("llm_first_token_ms");
-            content += ev.text;
-            const spoken = think.feed(ev.text);
-            if (spoken) { sink.event({ type: "caption_delta", text: spoken }); await chunker.push(spoken); }
-          } else if (ev.type === "tool_call") {
-            mark("llm_first_token_ms");
-            calls.push({ id: ev.id, name: ev.name, arguments: ev.arguments });
-          } else if (ev.type === "done") break;
+        try {
+          for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal })) {
+            if (aborted() || budgetHit) break;
+            if (ev.type === "content_delta" && ev.text) {
+              mark("llm_first_token_ms");
+              content += ev.text;
+              const spoken = think.feed(ev.text);
+              if (spoken) {
+                if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
+                sink.event({ type: "caption_delta", text: spoken });
+                await chunker.push(spoken);
+              }
+            } else if (ev.type === "tool_call") {
+              mark("llm_first_token_ms");
+              calls.push({ id: ev.id, name: ev.name, arguments: ev.arguments });
+            } else if (ev.type === "done") break;
+          }
+        } catch (err) {
+          if (!budgetHit) throw err;   // the budget's own abort surfacing from the provider fetch
         }
         if (aborted()) { result.aborted = true; break; }
+        if (budgetHit) break;
+        if (finalRound) {
+          // The forced answer: its text is kept, any call it still makes is ignored (never executed,
+          // never saved — an unanswered tool call would break the next turn's template).
+          finalSpoken = roundSpoken;
+          if (calls.length) log(`[voice-turn] ${device.id} final round ignored tool call(s): ${calls.map((c) => c.name).join(", ")}`);
+          if (content) messages.push({ role: "assistant", content });
+          break;
+        }
         let assistantMsg = null;
         if (content || calls.length) {
           assistantMsg = { role: "assistant", content };
@@ -312,8 +406,16 @@ export function createVoiceTurnRunner(deps) {
           messages.push(assistantMsg);
         }
         if (!calls.length) break;
+        toolRounds++;
+        // Tool NAMES only (never arguments) — the smoke could not tell which tool looped.
+        const roundSig = [...new Set(calls.map((c) => String(c.name)))].sort().join("+");
+        toolLog.push(roundSig);
+        timings.tools = toolLog.slice();
+        timings.tool_rounds = toolRounds;
+        log(`[voice-turn] ${device.id} round ${rounds}: ${calls.map((c) => c.name).join(", ")}`);
         const local = [];
         const remote = [];
+        let roundDisplay = false;
         // Route-neutral = in-process display tools + calls refused because the tool is not on this
         // display (deny list / memory off). Confirm and policy refusals still count as tool context:
         // the "yes" that follows a confirmation must keep its escalation (review I3).
@@ -331,24 +433,54 @@ export function createVoiceTurnRunner(deps) {
             neutralCalls++;
             let out;
             try { out = await x.execute(tc.arguments || {}); } catch (err) { out = JSON.stringify({ action: "error", message: err.message }); }
+            // A display tool that changed the screen is user-visible progress.
+            try { if (JSON.parse(out)?.ok === true) roundDisplay = true; } catch {}
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
           remote.push(tc);
         }
-        const remoteResults = remote.length ? await executor.executeToolCalls(remote) : [];
+        // The budget also bounds a slow remote tool: the race stops waiting (the call itself runs on).
+        const remoteResults = remote.length ? await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]) : [];
+        if (budgetHit || remoteResults == null) break;
+        if (roundDisplay) displayProgress = true;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
         if (assistantMsg && !content.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
         // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
+        let lastToolMsg = null;
         for (const r of [...local, ...remoteResults]) {
           const toolMsg = { role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name };
           if (r.neutral === true && local.includes(r)) routeNeutral.add(toolMsg);
           messages.push(toolMsg);
+          lastToolMsg = toolMsg;
           if (typeof r.result === "string" && r.result.length > 500) nextMax = 4000;
         }
+        // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
+        const progress = roundSpoken > 0 || roundDisplay;
+        if (!progress && roundSig === lastStuckSig) cut = "tool_repeat";
+        lastStuckSig = progress ? null : roundSig;
+        if (!cut && toolRounds >= maxRounds) cut = "tool_rounds";
+        if (cut) {
+          log(`[voice-turn] ${device.id} stopping tools (${cut}) after ${toolRounds} round(s); forcing an answer`);
+          finalRound = true;
+          if (lastToolMsg) {
+            nudged = { msg: lastToolMsg, content: lastToolMsg.content };
+            lastToolMsg.content = `${typeof lastToolMsg.content === "string" ? lastToolMsg.content : JSON.stringify(lastToolMsg.content)}\n\n${STOP_TOOLS_NOTE}`;
+          }
+        }
       }
-      if (!aborted()) await chunker.flush();
-      if (aborted()) result.aborted = true;
+      if (nudged) nudged.msg.content = nudged.content;
+      if (aborted()) {
+        result.aborted = true;
+      } else if (budgetHit) {
+        await speakFallback("budget", spokenChars > 0);
+        return result;
+      } else {
+        await chunker.flush();
+        if (aborted()) result.aborted = true;
+        else if (cut && finalSpoken === 0) { await speakFallback(cut, spokenChars > 0); return result; }
+        else if (spokenChars === 0 && !displayProgress) { await speakFallback("no_text", false); return result; }
+      }
       say.end();
       const userIdx = messages.indexOf(userMsg);
       if (userIdx >= 0) messages[userIdx] = { role: "user", content: transcript };
@@ -356,9 +488,13 @@ export function createVoiceTurnRunner(deps) {
       return result;
     } catch (err) {
       if (aborted()) { result.aborted = true; return result; }
+      if (budgetHit) { await speakFallback("budget", false).catch(() => {}); return result; }
+      result.failed = "error";
+      timings.failed = "error";
       fail("turn_failed", true, err.message);
       return result;
     } finally {
+      if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
       timings.total_ms = now() - t0;
       if (executor) { try { await executor.close(); } catch {} }
     }

@@ -165,9 +165,9 @@ export function createSessionHub(deps) {
       } finally {
         busy = false;
         abort = null;
-        const res = { route: r?.route ?? null, fastPath: !!r?.fastPath, escalated: !!r?.escalated, degraded: r?.degraded ?? null, aborted: my.signal.aborted || !!r?.aborted, timings: r?.timings || {} };
+        const res = { route: r?.route ?? null, fastPath: !!r?.fastPath, escalated: !!r?.escalated, degraded: r?.degraded ?? null, aborted: my.signal.aborted || !!r?.aborted, failed: r ? (r.failed ?? null) : (my.signal.aborted ? null : "error"), timings: r?.timings || {} };
         deps.metrics.serverTurn(device.id, id, res);
-        sendJson(ws, { type: "turn_done", turn_id: id, route: res.route, fast_path: res.fastPath, escalated: res.escalated, degraded: res.degraded, aborted: res.aborted, timings: res.timings });
+        sendJson(ws, { type: "turn_done", turn_id: id, route: res.route, fast_path: res.fastPath, escalated: res.escalated, degraded: res.degraded, aborted: res.aborted, failed: res.failed, timings: res.timings });
         state("idle");
         drainSpeech();
       }

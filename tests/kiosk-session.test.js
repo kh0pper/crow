@@ -175,6 +175,39 @@ test("metrics: median/p90 count only fast, non-fast-path, non-escalated, silence
   assert.equal(t.n, 11); assert.equal(t.no_audio, 1); assert.equal(t.p90_ms, 3500, "a turn with no audio counts as a failure, not a gap");
 });
 
+test("stall fix: a fallback turn reports failed on turn_done and in the [kiosk-metrics] line (tool names ride in timings)", async () => {
+  const { h, metrics, logs } = hub({ runTurn: async (o) => ({ route: "fast", fastPath: false, escalated: false, aborted: false, degraded: null, failed: "tool_repeat", timings: { total_ms: 9, failed: "tool_repeat", tools: ["crow_projects", "crow_projects"] } }) });
+  const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "f1" });
+  for (let i = 0; i < 20; i++) ws.bin(Buffer.alloc(640, 7));
+  ws.text({ type: "turn_end", vad_reason: "silence" });
+  await tick(); await tick();
+  assert.equal(ws.msgs().find((x) => x.type === "turn_done").failed, "tool_repeat");
+  assert.equal(metrics.list("kiosk-a")[0].failed, "tool_repeat");
+  ws.text({ type: "turn_metrics", turn_id: "f1", e2e_ms: 2100, vad_reason: "silence" });
+  const line = logs.find((l) => l.startsWith("[kiosk-metrics] "));
+  assert.ok(line.includes('"failed":"tool_repeat"') && line.includes('"tools":["crow_projects","crow_projects"]'), line);
+  // A normal turn reports failed: null.
+  const ok = hub();
+  const w2 = await hello(ok.h);
+  w2.text({ type: "turn_start", turn_id: "o1" });
+  for (let i = 0; i < 20; i++) w2.bin(Buffer.alloc(640, 7));
+  w2.text({ type: "turn_end", vad_reason: "silence" });
+  await tick(); await tick();
+  assert.equal(w2.msgs().find((x) => x.type === "turn_done").failed, null);
+});
+
+test("stall fix: a turn that ended on the fallback line is a gate FAILURE even though it played audio", () => {
+  const m = createMetricsStore();
+  const add = (id, e2e, failed = null) => { m.serverTurn("d", id, { route: "fast", fastPath: false, escalated: false, aborted: false, failed, timings: failed ? { failed } : {} }); m.clientTurn("d", { turn_id: id, e2e_ms: e2e, vad_reason: "silence" }); };
+  add("a", 1000); add("b", 1200); add("c", 12500, "budget"); add("d", 1400, "tool_repeat");
+  const s = m.summary("d");
+  assert.equal(s.n, 4);
+  assert.equal(s.no_audio, 2, "both fallback turns count as failures");
+  assert.equal(s.p90_ms, Infinity, "a failure, not a fast fallback");
+  assert.equal(m.list("d").find((r) => r.turn_id === "d").failed, "tool_repeat");
+});
+
 test("metrics: a barged client turn is not gate-eligible; barged is recorded; null e2e stays a failure", () => {
   const m = createMetricsStore();
   const add = (id, e2e, extra = {}) => { m.serverTurn("d", id, { route: "fast", fastPath: false, escalated: false, aborted: false, timings: {} }); return m.clientTurn("d", { turn_id: id, e2e_ms: e2e, vad_reason: "silence", ...extra }); };

@@ -36,7 +36,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     serverTurn(dev, turnId, r) {
       Object.assign(rec(dev, String(turnId)), {
         route: r?.route ?? null, fast_path: !!r?.fastPath, escalated: !!r?.escalated, aborted: !!r?.aborted,
-        degraded: r?.degraded ?? null, timings: r?.timings || {},
+        degraded: r?.degraded ?? null, failed: r?.failed ?? null, timings: r?.timings || {},
       });
     },
     clientTurn(dev, m) {
@@ -49,11 +49,12 @@ export function createMetricsStore({ max = 100 } = {}) {
      * The gate view (ruling R8, review M5): the LAST `last` turns that exercised the
      * budgeted path — fast route, no fast path, not escalated, NOT degraded (a cold
      * fallback's first audio is the filler), not aborted, silence-ended. Such a turn
-     * with no audio (e2e null) is a FAILURE, counted as Infinity, never dropped.
+     * with no audio (e2e null) is a FAILURE, counted as Infinity, never dropped. So is a turn
+     * that ended on the fallback line (r.failed): its audio is the apology, not an answer.
      */
     summary(dev, { last = 20 } = {}) {
       const ok = [...(devs.get(dev)?.values() || [])].filter((r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && !r.barged && r.vad_reason === "silence").slice(-last);
-      const v = ok.map((r) => (Number.isFinite(r.e2e_ms) ? r.e2e_ms : Infinity)).sort((a, b) => a - b);
+      const v = ok.map((r) => (Number.isFinite(r.e2e_ms) && !r.failed ? r.e2e_ms : Infinity)).sort((a, b) => a - b);
       return { n: v.length, no_audio: v.filter((x) => x === Infinity).length, median_ms: median(v), p90_ms: percentile(v, 90) };
     },
   };

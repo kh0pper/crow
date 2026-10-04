@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT } from "../servers/gateway/voice/turn.js";
+import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
 function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { t += ms; }, advance: (ms) => { t += ms; } }; }
@@ -11,7 +11,15 @@ function scriptedChat(rounds, log, state) {
     async *chatStream(messages, tools, opts) {
       log.push({ messages: messages.map((m) => ({ ...m })), tools: tools.map((t) => t.name), opts, systemAfterZero: messages.slice(1).some((m) => m.role === "system") });
       const events = rounds[state.i++] || [{ type: "done" }];
-      for (const ev of events) { if (opts.signal?.aborted) return; log.pulls = (log.pulls || 0) + 1; yield ev; }
+      for (const ev of events) {
+        if (opts.signal?.aborted) return;
+        log.pulls = (log.pulls || 0) + 1;
+        if (ev.type === "hang") {   // a model that never answers: waits for the abort, then throws like fetch does
+          await new Promise((res) => (opts.signal?.aborted ? res() : opts.signal?.addEventListener("abort", res, { once: true })));
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        yield ev;
+      }
     },
   };
 }
@@ -23,8 +31,9 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
   const c = clock();
   const log = [];
   const state = { i: 0 };
-  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [] };
+  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [], logs: [] };
   const deps = {
+    log: (m) => calls.logs.push(m),
     now: c.now, sleep: async (ms) => { calls.sleeps++; await c.sleep(ms); },
     loadBotRow: async (db, id) => (bot && id === bot.bot_id ? { bot_id: bot.bot_id, enabled: 1, definition: JSON.stringify(bot) } : null),
     getSttProfile: async () => ({ id: "kiosk-stt", language: "en" }),
@@ -105,7 +114,7 @@ test("barge-in: abort stops the LLM stream and TTS at once (no further pulls, no
   assert.equal(r.aborted, true);
   assert.equal(h.audio.length, 1, "only the first sentence's audio left the server");
   assert.ok(h.log.pulls <= 2, `stream stopped after abort (pulls=${h.log.pulls})`);
-  assert.equal(h.log[0].opts.signal, ac.signal, "the abort signal reaches the provider fetch");
+  assert.equal(h.log[0].opts.signal.aborted, true, "the abort signal reaches the provider fetch (composed with the first-audio budget)");
   assert.ok(tDone - tAbort < 100, `the turn returned ${Math.round(tDone - tAbort)} ms after the abort (real clock; spec: within 100 ms)`);
 });
 
@@ -358,4 +367,119 @@ test("lever D: an early transcript skips STT; timings count from the real turn s
   h.deps.createSttAdapter = async () => ({ transcribe: async (a, o) => { seen.push(o.model ?? null); return { text: "  hi  " }; } });
   assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi" });
   assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en"]);
+});
+
+// --- Tool-loop stall fix (smoke 2026-10-04 Run B #19: 10 silent 4B tool rounds, 24.5 s, no audio, no message) ---
+
+const call = (id, name, args = { q: "secret-arg" }) => [{ type: "tool_call", id, name, arguments: args }, { type: "done" }];
+
+test("stall fix: a model looping the SAME tool is stopped after 2 rounds; the final round's call is ignored; the fallback is spoken + captioned; logs name the tool, never its args", async () => {
+  const h = harness({ rounds: Array.from({ length: 10 }, (_, i) => call("c" + i, "crow_projects")) });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "how do you separate an egg yolk", sink: h.sink, maxToolRounds: 3 });
+  assert.equal(r.failed, "tool_repeat");
+  assert.equal(r.timings.failed, "tool_repeat");
+  assert.deepEqual(h.calls.executed, ["crow_projects", "crow_projects"], "two calls ran, the forced final round's call did not");
+  assert.equal(h.log.length, 3, "two tool rounds + one forced final round");
+  assert.equal(h.log[2].tools.length, h.log[0].tools.length, "the final round keeps the same tool list (prefix cache)");
+  assert.match(h.log[2].messages.at(-1).content, new RegExp(STOP_TOOLS_NOTE.slice(0, 30)));
+  assert.deepEqual(h.calls.spoken, [FALLBACK_TEXT]);
+  assert.ok(h.events.some((e) => e.type === "caption_delta" && e.text === FALLBACK_TEXT));
+  assert.deepEqual(h.events.filter((e) => /^tts_/.test(e.type)).map((e) => e.type), ["tts_start", "tts_end"]);
+  assert.ok(h.calls.logs.some((l) => /round 1: crow_projects/.test(l)) && h.calls.logs.some((l) => /round 2: crow_projects/.test(l)));
+  assert.ok(h.calls.logs.some((l) => /turn failed \(tool_repeat\).*crow_projects → crow_projects/.test(l)));
+  assert.ok(!h.calls.logs.some((l) => /secret-arg/.test(l)), "no tool arguments in the logs");
+  assert.deepEqual(r.timings.tools, ["crow_projects", "crow_projects"]);
+  // The saved conversation is a clean exchange: no looping tool chatter, no stop note.
+  const saved = h.runner.convo.get(h.device.id);
+  assert.deepEqual(saved.map((m) => m.role), ["user", "assistant"]);
+  assert.equal(saved[1].content, FALLBACK_TEXT);
+});
+
+test("stall fix: varied tools hit the round cap (3); the forced final answer is spoken and the turn does not fail", async () => {
+  const h = harness({ chatTools: ["crow_projects", "crow_blog", "crow_sharing"],
+    rounds: [call("a", "crow_projects"), call("b", "crow_blog"), call("c", "crow_sharing"), [{ type: "content_delta", text: "Crack it over a bowl." }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "egg yolk?", sink: h.sink, maxToolRounds: 3 });
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.executed, ["crow_projects", "crow_blog", "crow_sharing"]);
+  assert.match(h.log[3].messages.at(-1).content, /Tool limit reached/);
+  assert.deepEqual(h.calls.spoken, ["Crack it over a bowl."]);
+  assert.ok(!h.runner.convo.get(h.device.id).some((m) => typeof m.content === "string" && m.content.includes("Tool limit reached")), "the stop note never reaches the saved conversation");
+});
+
+test("stall fix: round cap with an empty final answer → fallback (tool_rounds), in the display's language", async () => {
+  const h = harness({ chatTools: ["crow_projects", "crow_blog", "crow_sharing"],
+    rounds: [call("a", "crow_projects"), call("b", "crow_blog"), call("c", "crow_sharing"), [{ type: "done" }]] });
+  const es = "Lo siento, me atasqué con esa. Intenta preguntarme otra vez.";
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "¿yema?", sink: h.sink, maxToolRounds: 3, fallbackText: es });
+  assert.equal(r.failed, "tool_rounds");
+  assert.deepEqual(h.calls.spoken, [es]);
+  assert.ok(h.events.some((e) => e.type === "caption_delta" && e.text === es));
+});
+
+test("stall fix: an empty reply (no text, no tool call) speaks the fallback and is recorded as failed", async () => {
+  const h = harness({ rounds: [[{ type: "content_delta", text: "<think>hmm</think>" }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "what rhymes with orange", sink: h.sink });
+  assert.equal(r.failed, "no_text");
+  assert.deepEqual(h.calls.spoken, [FALLBACK_TEXT]);
+  assert.ok(h.events.some((e) => e.type === "caption_delta" && e.text === FALLBACK_TEXT));
+});
+
+test("stall fix: the cap keeps legitimate tool use — timer set + spoken confirm, and two display calls in a row (progress), never cut", async () => {
+  const wmCalls = [];
+  const extra = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async (a) => { wmCalls.push(a); return '{"ok":true,"action":"open"}'; } };
+  const h = harness({ rounds: [call("w1", "crow_wm", { command: "timer 5 minutes pasta" }), [{ type: "content_delta", text: "Pasta timer set." }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a pasta timer for five minutes", sink: h.sink, extraTools: [extra], maxToolRounds: 3 });
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.spoken, ["Pasta timer set."]);
+  const two = harness({ rounds: [call("w1", "crow_wm", { command: "timer 5 minutes pasta" }), call("w2", "crow_wm", { command: "timer 9 minutes sauce" }), [{ type: "content_delta", text: "Both timers are running." }, { type: "done" }]] });
+  const r2 = await two.runner.runVoiceTurn({ db: {}, device: two.device, transcript: "pasta five, sauce nine", sink: two.sink, extraTools: [extra], maxToolRounds: 3 });
+  assert.equal(r2.failed, null, "a display call that changed the screen is progress, so the same tool twice is not a loop");
+  assert.equal(two.log.length, 3);
+  assert.ok(!two.log[2].messages.at(-1).content.includes("Tool limit reached"));
+  assert.deepEqual(two.calls.spoken, ["Both timers are running."]);
+  // A silent display action (timer set, no words) is not a failure either.
+  const quiet = harness({ rounds: [call("w1", "crow_wm", { command: "timer 1 minute" }), [{ type: "done" }]] });
+  const r3 = await quiet.runner.runVoiceTurn({ db: {}, device: quiet.device, transcript: "one minute timer", sink: quiet.sink, extraTools: [extra], maxToolRounds: 3 });
+  assert.equal(r3.failed, null);
+  assert.deepEqual(quiet.calls.spoken, []);
+});
+
+test("stall fix: first-audio budget — a model that never answers is cut and the fallback is spoken (no silence)", async () => {
+  const h = harness({ rounds: [[{ type: "hang" }]] });
+  const t = performance.now();
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hello?", sink: h.sink, firstAudioBudgetMs: 40 });
+  assert.ok(performance.now() - t < 1000);
+  assert.equal(r.failed, "budget");
+  assert.equal(r.aborted, false);
+  assert.deepEqual(h.calls.spoken, [FALLBACK_TEXT]);
+  assert.ok(!h.events.some((e) => e.type === "error"), "the budget's provider abort is not a turn_failed error");
+});
+
+test("stall fix: first-audio budget on an escalated turn — 'One moment.' is followed by the fallback", async () => {
+  const h = harness({ route: "escalate", probe: () => false, rounds: [[{ type: "hang" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink, firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.deepEqual(h.calls.spoken, [FILLER_TEXT, FALLBACK_TEXT]);
+});
+
+test("stall fix: the budget also bounds a slow remote tool; it never fires once answer audio has started; a barge-in is not a failure", async () => {
+  const h = harness({ rounds: [call("a", "crow_projects")] });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: () => new Promise(() => {}), close: async () => {} });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "find it", sink: h.sink, firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.deepEqual(h.calls.spoken, [FALLBACK_TEXT]);
+
+  const ok = harness({ rounds: [[{ type: "content_delta", text: "Here we go. " }, { type: "done" }]] });
+  const r2 = await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "go", sink: ok.sink, firstAudioBudgetMs: 40 });
+  await new Promise((res) => setTimeout(res, 60));
+  assert.equal(r2.failed, null);
+  assert.deepEqual(ok.calls.spoken, ["Here we go."]);
+
+  const ac = new AbortController();
+  const b = harness({ rounds: [[{ type: "hang" }]] });
+  setTimeout(() => ac.abort(), 10);
+  const r3 = await b.runner.runVoiceTurn({ db: {}, device: b.device, transcript: "go", sink: b.sink, signal: ac.signal, firstAudioBudgetMs: 200 });
+  assert.equal(r3.aborted, true);
+  assert.equal(r3.failed, null);
+  assert.deepEqual(b.calls.spoken, []);
 });
