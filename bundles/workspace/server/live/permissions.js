@@ -11,6 +11,10 @@
  * - crow-bot cannot list group members (no admin rights), so a person who can edit only through a GROUP share
  *   (share_type 1), a link or a federated share is unverifiable → treated as view-only.
  * Write = permission bit 2 (update) on a user share with share_with == uid (any matching share suffices).
+ * Share acceptance (fix2 N2): the probe showed OCS `status` on these shares is the sharee's PRESENCE object
+ * ({"status":"offline",…}), not an acceptance state; a NUMERIC status (Nextcloud's IShare pending 0 / accepted 1 /
+ * rejected 2) is honoured when present — only 1 counts. Pending shares are otherwise not visible to crow-bot
+ * (shares/pending lists only its own), so a not-yet-accepted share without a numeric status cannot be told apart.
  */
 import { stat, resolveRef } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
@@ -35,6 +39,7 @@ export async function userCanWrite(cfg, fileId, uid, path = null) {
     if (e.ownerId && String(e.ownerId) === uid) return true;
     const p = encodeURIComponent(`/${e.path}`);
     const [direct, inherited] = await Promise.all([ocsGet(cfg, `${SHARES}?path=${p}&reshares=true`), ocsGet(cfg, `${SHARES}/inherited?path=${p}`)]);
-    return [...list(direct), ...list(inherited)].some((s) => Number(s?.share_type) === 0 && String(s?.share_with) === uid && (Number(s?.permissions) & UPDATE) === UPDATE);
+    const accepted = (s) => typeof s?.status !== "number" || s.status === 1;
+    return [...list(direct), ...list(inherited)].some((s) => Number(s?.share_type) === 0 && String(s?.share_with) === uid && accepted(s) && (Number(s?.permissions) & UPDATE) === UPDATE);
   } catch { return false; }
 }

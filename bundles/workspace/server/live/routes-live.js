@@ -4,18 +4,28 @@
  *
  * Every request (no dashboard session, no cookies, so CSRF does not apply), in this order:
  *  1. never over Funnel (403);
- *  2. PRE-AUTH rate limit, before any token check or Nextcloud/ONLYOFFICE call: per client IP (the first
- *     X-Forwarded-For hop when the peer is the loopback Serve proxy) and a small global cap (429). This router's
- *     prefix is in the gateway's GENERAL_LIMITER_SKIP_PREFIXES because every editor arrives through the same
- *     loopback Serve proxy (one shared IP bucket there); these limits replace it;
- *  3. Bearer = the docservice SESSION token (HS256, shared secret; S9: 30-day lifetime) — signature and exp;
- *  4. its document.key must be the CURRENT live session key of a file with queued (or unverified live) work, and
- *     its user must be in that session's ONLYOFFICE info.users (command service);
- *  5. post-auth limits: 60/min per (document, user) and 180/min per document (bounded LRU key sets);
- *  6. plugin version (pv) required on poll and claim (426);
- *  7. WRITE permission (fix B), checked server-side on /pending, /claim and /ack alike: the user must own the file or
- *     hold a user share with update rights that crow-bot can see (live/permissions.js documents the verified limit;
- *     unverifiable → view-only → 403, and the change applies at close). Token "view" markers are honoured too.
+ *  2. Bearer = the docservice SESSION token (HS256, shared secret; S9: 30-day lifetime) — signature and exp, from the
+ *     header alone (cheap, before the body is parsed and before any Nextcloud/ONLYOFFICE call). Only FAILURES are
+ *     counted against the pre-auth buckets — per client address and a global cap (fix2 X1): an unauthenticated flood
+ *     gets 429 itself but can never make a valid editor wait. The client address is the TCP peer, or — when the peer
+ *     is the loopback Serve proxy — the RIGHTMOST X-Forwarded-For entry. Verified read-only on crow 2026-10-04:
+ *     through Tailscale Serve (:8444) a request carrying `X-Forwarded-For: 1.2.3.4` still passes the /llm source
+ *     gate (which refuses any non-tailnet forwarded address: the same request sent directly to 127.0.0.1:3001 is
+ *     403), so Serve REPLACES an inbound XFF with the real tailnet source (W1 smoke: Serve sets `X-Forwarded-For:
+ *     <tailnet ip>`). The rightmost entry is used anyway, in case a proxy that appends ever sits in front.
+ *     Tailscale-User-Login is NOT used as a key (stripping of inbound copies by Serve not verified here).
+ *     This prefix is in the gateway's GENERAL_LIMITER_SKIP_PREFIXES because every editor arrives through the same
+ *     loopback proxy (one shared bucket there); these limits replace it;
+ *  3. its document.key must be the CURRENT live session key of a file with queued (or unverified live) work, and its
+ *     user must be in that session's ONLYOFFICE info.users (command service). A key that matched no file is
+ *     remembered for 30 s against the same set of candidate files (fix2 N6), and at most 20 candidate files are asked;
+ *  4. 60/min per (document, user) — before the write check, so a viewer cannot drive Nextcloud calls;
+ *  5. WRITE permission (fix B), server-side on /pending, /claim and /ack alike: the user owns the file or holds a user
+ *     share with update rights that crow-bot can see (live/permissions.js documents the verified limit);
+ *  6. 180/min per document, counted only for authorized editors (fix2 N3: viewers cannot starve the editor);
+ *  7. plugin version (pv) on poll and claim (426) — after authorization, so it leaks nothing to a viewer.
+ * Every authentication/authorization failure gets the SAME answer, 401 {"error":"unauthorized"} (fix2 N5): a viewer
+ * cannot tell whether a document has queued work.
  * Caching: ONLYOFFICE sessions and write decisions are cached 30 s for polls (GET); claims and acks always check
  * fresh. So a document opened (or a share changed) right after a poll can wait up to 30 s (+ the plugin's back-off).
  * A claim returns a per-change apply token (per-boot secret) that the ack must present. An ack is never proof of
@@ -36,6 +46,7 @@ export const LEASE_MS = 60000;
 export const LIMITS = Object.freeze({ perIp: 300, global: 1200, perUser: 60, perDocument: 180 });
 const SESSION_TTL_MS = 30000;
 const CACHE_MAX = 2000;
+const MAX_CANDIDATES = 20;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
 const REASON_RE = /^[a-z_]{1,40}$/;
 
@@ -74,45 +85,59 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
    * The file whose CURRENT live session has this key → {fileId, path, users, uids} | null. Candidates: files with
    * queued work or a live change not yet verified (bounded; the key the change was queued under is tried first).
    */
+  const misses = cache(); // key → candidate-set signature it matched none of (N6)
   async function liveSession(key, force) {
     const rows = (await db.execute({ sql: `SELECT file_id, MIN(path) AS path, MAX(CASE WHEN doc_key=? THEN 1 ELSE 0 END) AS hinted FROM workspace_pending_changes
-      WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id`, args: [key] })).rows;
+      WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
+    const sig = rows.map((r) => r.file_id).join(",");
+    if (misses.get(key)?.v === sig) return null; // asked these same files < 30 s ago: none had this key
     for (const r of rows) {
       const s = await sessionOf(Number(r.file_id), force);
       if (s?.live && String(s.key) === key) return { fileId: Number(r.file_id), path: r.path, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
     }
+    misses.set(key, sig);
     return null;
   }
+  /** Rightmost X-Forwarded-For entry when the peer is the loopback Serve proxy, else the TCP peer (fix2 X1). */
   const clientIp = (req) => {
     const peer = String(req.socket?.remoteAddress || "");
-    const xff = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-    return /^(127\.|::1$|::ffff:127\.)/.test(peer) && xff ? xff : peer || "unknown";
+    const hops = String(req.headers["x-forwarded-for"] || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return /^(127\.|::1$|::ffff:127\.)/.test(peer) && hops.length ? hops.at(-1) : peer || "unknown";
   };
+  const deny = (res) => res.status(401).json({ error: "unauthorized" }); // N5: one answer for every auth failure
 
-  const auth = async (req, res, next) => {
+  /** Funnel + token signature, from the header only; failures feed the pre-auth buckets. */
+  const preAuth = (req, res, next) => {
     if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: "not available over Funnel" });
-    if (!perIp.hit(clientIp(req)) || !global.hit("*")) return res.status(429).json({ error: "too many requests" });
     let cfg;
     try { cfg = getConfig(); } catch { return res.status(503).json({ error: "Workspace is not set up" }); }
-    let t;
-    try { t = verifyEditorJwt(String(req.headers.authorization || "").replace(/^Bearer\s+/i, ""), cfg.jwtSecret, now()); }
-    catch { return res.status(401).json({ error: "unauthorized" }); }
-    if (req.query.key !== undefined && String(req.query.key) !== t.key) return res.status(401).json({ error: "token is for another document" });
+    try { req.liveToken = verifyEditorJwt(String(req.headers.authorization || "").replace(/^Bearer\s+/i, ""), cfg.jwtSecret, now()); }
+    catch {
+      if (!perIp.hit(clientIp(req)) || !global.hit("*")) return res.status(429).json({ error: "too many requests" });
+      return deny(res);
+    }
+    next();
+  };
+  const auth = async (req, res, next) => {
+    const t = req.liveToken;
+    if (req.query.key !== undefined && String(req.query.key) !== t.key) return deny(res);
     const force = req.method !== "GET";
     let live;
     try { live = await liveSession(t.key, force); } catch { return res.status(503).json({ error: "editor unavailable" }); }
     const at = live && t.userId ? live.users.indexOf(t.userId) : -1;
-    if (at < 0) return res.status(401).json({ error: "not a live editor session" });
-    if (!perUser.hit(`${t.key}\u0000${t.userId}`) || !perDoc.hit(t.key)) return res.status(429).json({ error: "too many requests" });
-    if (req.path !== "/ack" && !versionAtLeast(req.query.pv ?? req.body?.pv)) return res.status(426).json({ error: "the Crow plugin in this editor is outdated; reload the document" });
+    if (at < 0) return deny(res);
+    if (!perUser.hit(`${t.key}\u0000${t.userId}`)) return res.status(429).json({ error: "too many requests" });
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)
-    if (!t.canEdit || !(await canWrite(live.fileId, live.uids[at], live.path, force))) return res.status(403).json({ error: "view-only session" });
+    if (!t.canEdit || !(await canWrite(live.fileId, live.uids[at], live.path, force))) return deny(res);
+    if (!perDoc.hit(t.key)) return res.status(429).json({ error: "too many requests" });
+    if (req.path !== "/ack" && !versionAtLeast(req.query.pv ?? req.body?.pv)) return res.status(426).json({ error: "the Crow plugin in this editor is outdated; reload the document" });
     req.live = { editor: t, fileId: live.fileId };
     next();
   };
   const wrap = (fn) => (req, res) => fn(req, res).catch((e) => { console.warn(`[workspace] live: ${e.code || ""} ${String(e.message).slice(0, 200)}`); if (!res.headersSent) res.status(500).json({ error: "internal" }); });
 
-  router.use(json({ limit: "256kb" }), auth);
+  // N4: the body is parsed only after the token passed (the gateway's own JSON parser may already have run)
+  router.use(preAuth, json({ limit: "256kb" }), auth);
 
   router.get("/pending", wrap(async (req, res) => {
     const r = await nextApplicable(db, req.live.fileId, ["pending"]); // spec §5.6 order: only the next change, if it is pending

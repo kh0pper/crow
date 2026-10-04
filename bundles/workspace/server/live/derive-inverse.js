@@ -14,7 +14,6 @@ import { argsOf, preOf } from "../queue/store.js";
 import { ALL_DEFS } from "../tools/all.js";
 import { openDocx, paragraphText } from "../ooxml/docx-model.js";
 import { markdownToBlocks } from "../ooxml/md-to-wml.js";
-import { patternFor } from "../ooxml/xlsx.js";
 
 const BLANK_DOCX = new URL("../templates/blank.docx", import.meta.url);
 const nfc = (s) => String(s ?? "").normalize("NFC");
@@ -68,9 +67,9 @@ function inverseOf(tool, a, pre) {
       if (!rows || !Number.isInteger(pre?.last_row) || rows.some((row) => row.some(isFormula))) return null;
       return [{ tool: "ws__sheets_clear_rows_exact", args: { sheet: String(a.sheet_name), from_row: pre.last_row + 1, values: rows } }];
     }
-    case "ws_sheets_set_number_format":
-      if (!Array.isArray(pre?.s_attrs)) return null;
-      return [{ tool: "ws__sheets_restore_styles", args: { range: String(a.range), s_attrs: pre.s_attrs, pattern: patternFor(a.pattern, a.format_type ?? "TEXT") } }];
+    // fix2 N1: no inverse. Crow's record holds the queue-time cell STYLE indices, but the editor re-saves styles.xml
+    // with its own index table, so restoring those indices would also change fonts/fills/borders → versions.
+    case "ws_sheets_set_number_format": return null;
     case "ws_sheets_rename_tab": return [{ tool, args: { title: String(a.new_title), new_title: String(a.title) } }];
     default: return null; // rewrite_passages: the replaced text in the editor is not on Crow's record → versions
   }

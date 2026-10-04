@@ -76,9 +76,9 @@ test("plugin version (spec §11): pending and claim refuse a missing or old pv w
 });
 
 test("claim: one winner, view-mode JWT refused, apply token required on ack; ack applied → applied_live (unverified), inverse pinned", async () => {
-  assert.equal((await claim(changeId, editorJwt(key, { editorConfig: { mode: "view", user: { id: "ocinst_admin" } } }))).status, 403);
-  assert.equal((await claim(changeId, editorJwt(key, { editorConfig: { ds_view: true, user: { id: "ocinst_admin" } } }))).status, 403);
-  assert.equal((await claim(changeId, editorJwt(key, { document: { key, permissions: { edit: false } } }))).status, 403);
+  assert.equal((await claim(changeId, editorJwt(key, { editorConfig: { mode: "view", user: { id: "ocinst_admin" } } }))).status, 401);
+  assert.equal((await claim(changeId, editorJwt(key, { editorConfig: { ds_view: true, user: { id: "ocinst_admin" } } }))).status, 401);
+  assert.equal((await claim(changeId, editorJwt(key, { document: { key, permissions: { edit: false } } }))).status, 401);
   const c1 = await claim(changeId); const c2 = await claim(changeId);
   assert.equal(c1.status, 200); assert.equal(c2.status, 409);
   const { apply_token, lease_until } = await c1.json();
@@ -174,7 +174,7 @@ test("one plugin version everywhere: config.json, crow-live.js and the server's 
 // ---- T13 fix round 1 ----------------------------------------------------------------------------------------
 const req = (path, jwt, { method = "GET", body, headers = {} } = {}) => fetch(`${base}${path}`, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}`, ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
 
-test("fix B: write permission is checked server-side on /pending, /claim and /ack (owner ok, read-only sharee 403, unverifiable 403)", async () => {
+test("fix B: write permission is checked server-side on /pending, /claim and /ack (owner ok; read-only sharee and unverifiable rights get the same 401 as no session)", async () => {
   doc("r.docx");
   fake.state.shares.push({ id: "s1", path: "/S", share_with: "dayane", share_type: 0, permissions: 1 }, // read-only on the folder
     { id: "s2", path: "/S/r.docx", share_with: "eve", share_type: 0, permissions: 3 }, // can edit this file
@@ -182,18 +182,18 @@ test("fix B: write permission is checked server-side on /pending, /claim and /ac
   const k = fake.openInEditor("S/r.docx", ["admin", "dayane", "eve", "gina"], { releaseAfterMs: 10 ** 9 });
   const id = (await call("ws_docs_find_replace", { path: "S/r.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
   const pend = (uid) => req(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k, {}, uid));
-  assert.equal((await pend("dayane")).status, 403, "a viewer sees no change content");
-  assert.equal((await pend("gina")).status, 403, "group-only rights are unverifiable → view-only");
+  assert.equal((await pend("dayane")).status, 401, "a viewer sees no change content");
+  assert.equal((await pend("gina")).status, 401, "group-only rights are unverifiable → view-only");
   assert.deepEqual((await (await pend("eve")).json()).map((x) => x.change_id), [id]);
   assert.deepEqual((await (await pend("admin")).json()).map((x) => x.change_id), [id], "the owner");
-  assert.equal((await claim(id, editorJwt(k, {}, "dayane"))).status, 403);
+  assert.equal((await claim(id, editorJwt(k, {}, "dayane"))).status, 401);
   // B3: a viewer cannot disturb a legitimate claim — its failed/applied_nothing ack is refused and changes nothing
   const { apply_token } = await (await claim(id, editorJwt(k, {}, "eve"))).json();
-  assert.equal((await ack({ change_id: id, apply_token, outcome: "failed", applied_nothing: true }, editorJwt(k, {}, "dayane"))).status, 403);
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "failed", applied_nothing: true }, editorJwt(k, {}, "dayane"))).status, 401);
   assert.equal((await row(id)).state, "claimed_live");
   // Nextcloud's share API unreachable → unverifiable → fail closed (acks and claims check fresh)
   fake.state.shareApiDown = true;
-  try { assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k, {}, "eve"))).status, 403); }
+  try { assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k, {}, "eve"))).status, 401); }
   finally { fake.state.shareApiDown = false; }
   assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k, {}, "eve"))).status, 200);
   assert.equal((await row(id)).state, "applied_live");
@@ -243,35 +243,63 @@ test("fix A: derived inverses come from the row's args + pre only (exact or null
     [{ tool: "ws_sheets_write", args: { range: "'Mi tab'!B2", values: [["old", 3]], value_input_option: "RAW", path: "S/x" } }]);
   assert.equal(inv("ws_sheets_write", { range: "T!A1", values: [["x"]] }, { cells: [["=A2"]] }), null);
   assert.deepEqual(inv("ws_sheets_append", { sheet_name: "Menu", values: [{ Plato: "Sopa" }] }, { header: ["Día", "Plato"], last_row: 4 })[0].args, { sheet: "Menu", from_row: 5, values: [["", "Sopa"]], path: "S/x" });
-  assert.deepEqual(inv("ws_sheets_set_number_format", { range: "T!A1:A2", format_type: "DATE" }, { s_attrs: [["0"], [null]] })[0].args, { range: "T!A1:A2", s_attrs: [["0"], [null]], pattern: "yyyy-mm-dd", path: "S/x" });
+  assert.equal(inv("ws_sheets_set_number_format", { range: "T!A1:A2", format_type: "DATE" }, { s_attrs: [["0"], [null]] }), null, "N1: queue-time style indices are not exact after the editor re-saves styles → versions");
   assert.deepEqual(inv("ws_sheets_rename_tab", { title: "A", new_title: "B" }, {})[0].args, { title: "B", new_title: "A", path: "S/x" });
   assert.equal(inv("ws_docs_rewrite_passages", { passages: [{ match_prefix: "a", new_text: "b" }] }, { new_counts: {}, plain: true }), null, "the replaced text is not on Crow's record");
   assert.equal(inv("ws_sheets_add_tab", { title: "X" }, {}), null);
 });
 
-test("fix C: pre-auth limits (per IP + global) run before any token check or ONLYOFFICE call; post-auth per (document, user) and per document", async () => {
+test("fix C + fix2 X1: pre-auth buckets count only token FAILURES, keyed by the rightmost XFF hop; post-auth per (document, user) and per document", async () => {
   const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
   const { getConfig } = await import("../bundles/workspace/server/config.js");
-  const app2 = express();
-  app2.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { perIp: 3, global: 5, perUser: 2, perDocument: 3 } }));
-  const s2 = app2.listen(0); const b2 = `http://127.0.0.1:${s2.address().port}`;
+  const mk = (limits) => { const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits })); const s = a.listen(0); return { s, b: `http://127.0.0.1:${s.address().port}` }; };
+  const { s: s2, b: b2 } = mk({ perIp: 3, global: 5, perUser: 100, perDocument: 100 });
   try {
-    const hit = (ip, jwt = "bad.token.x", path = "/claim") => fetch(`${b2}${path}`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}`, "X-Forwarded-For": ip }, body: JSON.stringify({ change_id: "pc_x", pv: "0.2.0" }) }).then((r) => r.status);
-    assert.deepEqual([await hit("100.64.0.1"), await hit("100.64.0.1"), await hit("100.64.0.1")], [401, 401, 401]);
+    const hit = (xff, jwt = "bad.token.x") => fetch(`${b2}/pending?key=${key}&${PV}`, { headers: { Authorization: `Bearer ${jwt}`, "X-Forwarded-For": xff } }).then((r) => r.status);
     const oo = fake.calls.filter((c) => c.method === "OO").length;
-    assert.equal(await hit("100.64.0.1", editorJwt(key)), 429, "per IP, before the (valid) token is even checked");
-    assert.equal(fake.calls.filter((c) => c.method === "OO").length, oo, "no command-service call for a limited request");
-    assert.deepEqual([await hit("100.64.0.2"), await hit("100.64.0.3"), await hit("100.64.0.4")], [401, 401, 429], "the global cap");
+    // a client rotating a spoofed FIRST hop stays in one bucket: the rightmost hop is the one the proxy added
+    assert.deepEqual([await hit("1.1.1.1, 100.64.0.1"), await hit("2.2.2.2, 100.64.0.1"), await hit("3.3.3.3, 100.64.0.1"), await hit("4.4.4.4, 100.64.0.1")], [401, 401, 401, 429]);
+    assert.equal(fake.calls.filter((c) => c.method === "OO").length, oo, "bad tokens never reach ONLYOFFICE");
+    assert.deepEqual([await hit("100.64.0.2"), await hit("100.64.0.3"), await hit("100.64.0.4")], [401, 401, 429], "the global cap on failures (3 + 2 counted, the 6th refused)");
+    // an unauthenticated flood filled both buckets: a valid editor (same address, too) is not affected
+    assert.equal(await hit("100.64.0.1", editorJwt(key)), 200);
+    assert.equal(await hit("100.64.0.9", editorJwt(key)), 200);
   } finally { s2.close(); }
-  const app3 = express();
-  app3.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { perIp: 100, global: 100, perUser: 2, perDocument: 3 } }));
-  const s3 = app3.listen(0); const b3 = `http://127.0.0.1:${s3.address().port}`;
+  const { s: s3, b: b3 } = mk({ perIp: 100, global: 100, perUser: 2, perDocument: 3 });
   try {
     const k = fake.state.keys.get(fake.node("S/r.docx").fileId);
     const pend = (uid) => fetch(`${b3}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k, {}, uid)}` } }).then((r) => r.status);
+    // N3: viewers polling never spend the per-document budget
+    for (let i = 0; i < 2; i++) assert.equal(await pend("dayane"), 401);
     assert.deepEqual([await pend("admin"), await pend("admin"), await pend("admin")], [200, 200, 429], "per (document, user)");
-    assert.deepEqual([await pend("eve"), await pend("eve")], [200, 429], "the per-document ceiling");
+    assert.deepEqual([await pend("eve"), await pend("eve")], [200, 429], "the per-document ceiling (authorized editors only)");
   } finally { s3.close(); }
+});
+
+test("fix2 N6: a valid token whose key matches no queued file is not re-asked of ONLYOFFICE within 30 s (same candidate files)", async () => {
+  const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() } }));
+  const s4 = a.listen(0); const b4 = `http://127.0.0.1:${s4.address().port}`;
+  try {
+    const go = () => fetch(`${b4}/claim`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${editorJwt("no-such-key")}` }, body: JSON.stringify({ change_id: "pc_x", pv: "0.2.0" }) }).then((r) => r.status);
+    assert.equal(await go(), 401);
+    const oo = fake.calls.filter((c) => c.method === "OO").length;
+    assert.equal(await go(), 401);
+    assert.equal(fake.calls.filter((c) => c.method === "OO").length, oo);
+  } finally { s4.close(); }
+});
+
+test("fix2 N2: a share whose numeric status is not 'accepted' grants no write; a presence-status object is ignored", async () => {
+  const { userCanWrite } = await import("../bundles/workspace/server/live/permissions.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  doc("st.docx"); const n = fake.node("S/st.docx");
+  fake.state.shares.push({ id: "p0", path: "/S/st.docx", share_with: "pat", share_type: 0, permissions: 3, status: 0 },
+    { id: "r2", path: "/S/st.docx", share_with: "rex", share_type: 0, permissions: 3, status: 2 },
+    { id: "a1", path: "/S/st.docx", share_with: "ana", share_type: 0, permissions: 3, status: 1 },
+    { id: "pr", path: "/S/st.docx", share_with: "pres", share_type: 0, permissions: 3, status: { status: "offline", message: null } });
+  const can = (uid) => userCanWrite(getConfig(), n.fileId, uid, "S/st.docx");
+  assert.deepEqual([await can("pat"), await can("rex"), await can("ana"), await can("pres"), await can("admin")], [false, false, true, true, true]);
 });
 
 test("fix C3: the limiter's key set is bounded (least recently used evicted), counters of live keys survive", async () => {
