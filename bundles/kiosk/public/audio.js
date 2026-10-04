@@ -19,7 +19,8 @@ export async function openMic(ctx, onFrame) {
  * Sequential playback of the server's sentence buffers. `playing` covers buffers still
  * being decoded (the server's idle can arrive before an mp3 decode finishes, ruling F3).
  * onDrained fires once when the last source ends naturally; flush() (a barge) never fires it,
- * and buffers queued before a flush never start after it. onFirstPlay(at, tag) carries the
+ * and buffers queued before a flush never start after it. After a flush the player is muted:
+ * frames still in flight are dropped until the next begin() (tts_start). onFirstPlay(at, tag) carries the
  * tag given to begin() so the page attributes the play time to the right turn.
  */
 export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
@@ -28,7 +29,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
   analyser.connect(ctx.destination);
   const data = new Uint8Array(analyser.fftSize);
   const sources = new Set();
-  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0;
+  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0, muted = false;
   const startLevel = () => {
     if (level) return;
     level = setInterval(() => {                     // ~15 Hz beak level, only while audio plays
@@ -59,16 +60,17 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
     nextAt = when + ab.duration;
     sources.add(src);
     src.onended = () => { sources.delete(src); maybeDrained(); };
+    startLevel();                                   // every start: a drained inter-sentence gap stopped it
     if (first) {
       first = false;
       onFirstPlay(playStartPerfTime({ nowPerf: performance.now(), ctxCurrentTime: ctx.currentTime, startWhen: when, outputLatency: ctx.outputLatency || ctx.baseLatency || 0 }), tag);
-      startLevel();
     }
   }
   return {
     // nextAt is NOT reset: an announcement that follows a turn queues after it instead of overlapping.
-    begin(c, sr, t = null) { codec = c === "mp3" ? "mp3" : "pcm"; rate = sr || 24000; first = true; tag = t; },
+    begin(c, sr, t = null) { codec = c === "mp3" ? "mp3" : "pcm"; rate = sr || 24000; first = true; tag = t; muted = false; },
     push(buf) {
+      if (muted) return;                            // in-flight audio from before a barge (until the next tts_start)
       const g = gen;
       pending++;
       chain = chain.then(() => (g === gen ? play(buf, g) : null)).catch(() => {}).then(() => {
@@ -79,10 +81,12 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
     },
     flush() {
       gen++;
+      muted = true;
       pending = 0;
       for (const s of sources) { s.onended = null; try { s.stop(); } catch {} }
       sources.clear(); nextAt = 0; chain = Promise.resolve(); stopLevel();
     },
     get playing() { return sources.size > 0 || pending > 0; },
+    get sampling() { return level != null; },
   };
 }
