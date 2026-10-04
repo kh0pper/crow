@@ -19,7 +19,8 @@
  *  3. its document.key must be the CURRENT live session key of a file with queued (or unverified live) work, and its
  *     user must be in that session's ONLYOFFICE info.users (command service). A key that matched no file is
  *     remembered for 30 s against the same set of candidate files (fix2 N6), and at most 20 candidate files are asked;
- *  4. 60/min per (document, user) — before the write check, so a viewer cannot drive Nextcloud calls;
+ *  4. 60/min per (document, user) and a raw 720/min per document, for every VALID token, right after the signature
+ *     check and before the session lookup or body parse (fix3 R1) — a viewer cannot drive Nextcloud/ONLYOFFICE calls;
  *  5. WRITE permission (fix B), server-side on /pending, /claim and /ack alike: the user owns the file or holds a user
  *     share with update rights that crow-bot can see (live/permissions.js documents the verified limit);
  *  6. 180/min per document, counted only for authorized editors (fix2 N3: viewers cannot starve the editor);
@@ -43,7 +44,7 @@ import { notifyChange } from "../queue/notify.js";
 
 export const MIN_PLUGIN_VERSION = "0.2.0";
 export const LEASE_MS = 60000;
-export const LIMITS = Object.freeze({ perIp: 300, global: 1200, perUser: 60, perDocument: 180 });
+export const LIMITS = Object.freeze({ perIp: 300, global: 1200, perUser: 60, perDocument: 180, perDocumentRaw: 720 });
 const SESSION_TTL_MS = 30000;
 const CACHE_MAX = 2000;
 const MAX_CANDIDATES = 20;
@@ -67,6 +68,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const now = () => clock.now();
   const lim = (max, maxKeys = 1000) => windowLimiter({ max, windowMs: 60000, maxKeys, now });
   const perIp = lim(limits.perIp), global = lim(limits.global, 1), perUser = lim(limits.perUser), perDoc = lim(limits.perDocument);
+  const rawDoc = lim(limits.perDocumentRaw ?? limits.perDocument * 4); // every valid token on the document, before authorization
   // bounded 30 s caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission
   const cache = () => {
     const m = new Map();
@@ -116,6 +118,11 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       if (!perIp.hit(clientIp(req)) || !global.hit("*")) return res.status(429).json({ error: "too many requests" });
       return deny(res);
     }
+    // fix3 R1: a valid token is limited BEFORE any session lookup (Nextcloud/ONLYOFFICE calls) or body parse — per
+    // (document, user) and a raw per-document ceiling — so even a 30-day token holder cannot drive command-service
+    // calls at will, and the answer is the same whether or not the document has queued work.
+    const t = req.liveToken;
+    if (!perUser.hit(`${t.key}\u0000${t.userId}`) || !rawDoc.hit(t.key)) return res.status(429).json({ error: "too many requests" });
     next();
   };
   const auth = async (req, res, next) => {
@@ -126,7 +133,6 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     try { live = await liveSession(t.key, force); } catch { return res.status(503).json({ error: "editor unavailable" }); }
     const at = live && t.userId ? live.users.indexOf(t.userId) : -1;
     if (at < 0) return deny(res);
-    if (!perUser.hit(`${t.key}\u0000${t.userId}`)) return res.status(429).json({ error: "too many requests" });
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)
     if (!t.canEdit || !(await canWrite(live.fileId, live.uids[at], live.path, force))) return deny(res);
     if (!perDoc.hit(t.key)) return res.status(429).json({ error: "too many requests" });

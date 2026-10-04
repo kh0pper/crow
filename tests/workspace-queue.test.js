@@ -505,12 +505,6 @@ test("internal ws__ defs (as the close-time applier runs them): each reverses it
   const from = Number(/A(\d+)/.exec(ap.range)[1]);
   await inv("ws__sheets_clear_rows_exact", { path: "S/i3.xlsx", sheet: "Recetas", from_row: from, values: [["Tamales", 3, 9]], dimension: dim });
   assert.equal(await sheetXml("S/i3.xlsx"), s0);
-  // set_number_format → ws__sheets_restore_styles
-  fake.addFile("S/i4.xlsx", readFileSync(join(FIX, "oo-rich.xlsx")), { owner: "admin" }); const f0 = await sheetXml("S/i4.xlsx");
-  const w4 = X.openXlsx(fake.node("S/i4.xlsx").bytes); const sAttrs = X.styleAttrs(w4, "Recetas!B2:C3"); const dim4 = X.dimensionOf(w4, "Recetas");
-  await call("ws_sheets_set_number_format", { path: "S/i4.xlsx", range: "Recetas!B2:C3", pattern: "0.0" });
-  await inv("ws__sheets_restore_styles", { path: "S/i4.xlsx", range: "Recetas!B2:C3", s_attrs: sAttrs, pattern: "0.0", dimension: dim4 });
-  assert.equal(await sheetXml("S/i4.xlsx"), f0);
 });
 
 test("undo with a pc_ id: a live append is reversed by ws__docs_remove_paragraphs_exact at close", async () => {
@@ -578,16 +572,3 @@ test("ws__sheets_clear_rows_exact: append reversed exactly; other values or rows
   assert.throws(() => X.clearRowsExact(wb, "Recetas", from, [["A", 1]]), { code: "target_changed" }, "rows below → refused");
 });
 
-test("ws__sheets_restore_styles: set_number_format reversed exactly; a format changed since → target_changed", async () => {
-  const X = await import("../bundles/workspace/server/ooxml/xlsx.js");
-  const bytes = readFileSync(join(FIX, "oo-rich.xlsx"));
-  const w0 = X.openXlsx(bytes); const part = w0.sheets[0].part; const want = await xmlOf(w0, part);
-  const wb = X.openXlsx(bytes);
-  const range = "Recetas!B2:C5"; // includes the empty row 5
-  const before = X.styleAttrs(wb, range);
-  X.setNumberFormat(wb, range, "0.0");
-  assert.throws(() => X.restoreStyles(wb, range, before, { pattern: "0.000" }), { code: "target_changed" });
-  X.restoreStyles(wb, range, before, { pattern: "0.0", dimension: X.dimensionOf(w0, "Recetas") });
-  assert.equal(await xmlOf(wb, part), want);
-  assert.throws(() => X.restoreStyles(wb, range, [["1"]]), { code: "bad_args" });
-});

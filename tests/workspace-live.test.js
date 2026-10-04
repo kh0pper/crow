@@ -297,9 +297,11 @@ test("fix2 N2: a share whose numeric status is not 'accepted' grants no write; a
   fake.state.shares.push({ id: "p0", path: "/S/st.docx", share_with: "pat", share_type: 0, permissions: 3, status: 0 },
     { id: "r2", path: "/S/st.docx", share_with: "rex", share_type: 0, permissions: 3, status: 2 },
     { id: "a1", path: "/S/st.docx", share_with: "ana", share_type: 0, permissions: 3, status: 1 },
-    { id: "pr", path: "/S/st.docx", share_with: "pres", share_type: 0, permissions: 3, status: { status: "offline", message: null } });
+    { id: "pr", path: "/S/st.docx", share_with: "pres", share_type: 0, permissions: 3, status: { status: "offline", message: null } },
+    { id: "s0", path: "/S/st.docx", share_with: "sam", share_type: 0, permissions: 3, status: "0" }, // fix3 R3: numeric string
+    { id: "s1", path: "/S/st.docx", share_with: "sue", share_type: 0, permissions: 3, status: "1" });
   const can = (uid) => userCanWrite(getConfig(), n.fileId, uid, "S/st.docx");
-  assert.deepEqual([await can("pat"), await can("rex"), await can("ana"), await can("pres"), await can("admin")], [false, false, true, true, true]);
+  assert.deepEqual([await can("pat"), await can("rex"), await can("ana"), await can("pres"), await can("admin"), await can("sam"), await can("sue")], [false, false, true, true, true, false, true]);
 });
 
 test("fix C3: the limiter's key set is bounded (least recently used evicted), counters of live keys survive", async () => {
@@ -320,4 +322,37 @@ test("fix I2: delete_tab as an undo step refuses a tab that is not empty (change
   const pre = { undo_of: "pc_x", orig: null };
   assert.deepEqual(checkPre("ws_sheets_delete_tab", { title: "Vacía" }, { undo_of: "pc_x" }, bytes), { ok: true });
   assert.deepEqual(checkPre("ws_sheets_delete_tab", { title: "Llena" }, pre, bytes), { ok: false, reason: "changed_since" });
+});
+
+test("fix3 R1: a valid token is limited per (document, user) BEFORE any session lookup — no Nextcloud/ONLYOFFICE call once over; a viewer spends only its own bucket", async () => {
+  const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { perIp: 100, global: 100, perUser: 2, perDocument: 100 } }));
+  const s5 = a.listen(0); const b5 = `http://127.0.0.1:${s5.address().port}`;
+  try {
+    const k = fake.state.keys.get(fake.node("S/r.docx").fileId);
+    const claimAs = (uid) => fetch(`${b5}/claim`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${editorJwt(k, {}, uid)}` }, body: JSON.stringify({ change_id: "pc_none", pv: "0.2.0" }) }).then((r) => r.status);
+    assert.deepEqual([await claimAs("dayane"), await claimAs("dayane")], [401, 401], "a viewer: forced lookups, refused");
+    const n = fake.calls.length;
+    assert.equal(await claimAs("dayane"), 429);
+    assert.equal(fake.calls.length, n, "over the limit: no Nextcloud or ONLYOFFICE call at all");
+    assert.deepEqual([await claimAs("admin"), await claimAs("admin"), await claimAs("admin")], [409, 409, 429], "the editor has its own bucket");
+  } finally { s5.close(); }
+});
+
+test("fix3 R2: the gateway's global 1 MB JSON parser skips the live prefix (only the bundle's 256 KB parser runs, after the token check)", () => {
+  const src = readFileSync(join(ROOT, "servers", "gateway", "index.js"), "utf8");
+  const m = /const _hasOwnParser = \(p\) => ([^\n]*\n[^\n]*);/.exec(src);
+  assert.ok(m, "the predicate is where it was");
+  const pred = m[1];
+  assert.ok(pred.includes('p.startsWith("/api/workspace/live/v1/")'));
+  assert.match(readFileSync(join(ROOT, "bundles", "workspace", "server", "live", "routes-live.js"), "utf8"), /router\.use\(preAuth, json\(\{ limit: "256kb" \}\), auth\)/);
+});
+
+test("fix3 R4: no set_number_format inverse exists any more (ws__sheets_restore_styles removed)", async () => {
+  const C = await import("../bundles/workspace/server/queue/conditions.js");
+  const { ALL_DEFS } = await import("../bundles/workspace/server/tools/all.js");
+  assert.ok(!C.INTERNAL_OPS.includes("ws__sheets_restore_styles")); assert.ok(!ALL_DEFS.has("ws__sheets_restore_styles"));
+  assert.equal(C.INVERSE_OF.ws_sheets_set_number_format, undefined);
+  assert.equal(C.pinInverse({ tool: "ws_sheets_set_number_format", path: "S/a.xlsx" }, [{ tool: "ws__sheets_restore_styles", args: {} }]), null);
 });

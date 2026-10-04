@@ -467,14 +467,6 @@ export function rowsFormula(wb, sheetName, r1, r2, width) {
   if (r2 < r1) return [];
   return readRange(wb, qualified(s, `A${r1}:${colName(Math.max(1, width))}${r2}`), "FORMULA").values;
 }
-/** The raw `s` attribute (or null) of every cell in a range, row-major (for an exact set_number_format inverse). */
-export function styleAttrs(wb, range) {
-  const R = parseRange(wb, range);
-  if (cellCount(R) > MAX_CELLS) throw new WsError("too_large", `at most ${MAX_CELLS} cells`);
-  const g = grid(wb, R.sheet); const out = [];
-  for (let r = R.r1; r <= R.r2; r++) { const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(g.get(r)?.cells.get(c)?.getAttribute("s") ?? null); out.push(row); }
-  return out;
-}
 /** The number-format code of every cell in a range ("General" for a missing cell). */
 export function numFmtCodes(wb, range) {
   const R = parseRange(wb, range);
@@ -551,26 +543,3 @@ export function clearRowsExact(wb, sheetName, fromRow, values, { dimension } = {
   return n;
 }
 
-/**
- * Inverse of set_number_format (ws__sheets_restore_styles): put each cell's previous `s` attribute back (null = none;
- * an empty cell with no style left is removed, as it did not exist before). `pattern` (optional): every cell must
- * still carry that number format, else target_changed.
- */
-export function restoreStyles(wb, range, sAttrs, { pattern, dimension } = {}) {
-  const R = parseRange(wb, range);
-  const h = R.r2 - R.r1 + 1, w = R.c2 - R.c1 + 1;
-  if (!Array.isArray(sAttrs) || sAttrs.length !== h || !sAttrs.every((row) => Array.isArray(row) && row.length === w)) throw new WsError("bad_args", `s_attrs must be ${h} row(s) of ${w} value(s)`);
-  for (const row of sAttrs) for (const v of row) if (v !== null && !/^\d{1,6}$/.test(String(v)) || (v !== null && Number(v) >= wb.styles.xfs.length)) throw new WsError("bad_args", "s_attrs holds an unknown cell format");
-  if (pattern !== undefined && pattern !== null && numFmtCodes(wb, range).some((row) => row.some((c) => c !== pattern))) throw changed(`the number format of ${range} changed since`);
-  const g = grid(wb, R.sheet); const sd = sheetData(wb, R.sheet); let n = 0;
-  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
-    const want = sAttrs[r - R.r1][c - R.c1];
-    const entry = g.get(r); const cell = entry?.cells.get(c);
-    if (!cell) { if (want === null) continue; const nc = ensureCell(wb, R.sheet, g, r, c); nc.setAttribute("s", String(want)); n++; continue; }
-    if (want === null) cell.removeAttribute("s"); else cell.setAttribute("s", String(want));
-    n++; if (want === null) dropBare(entry, g, c, sd);
-  }
-  setDimension(wb, R.sheet, dimension);
-  wb.pkg.markDirty(R.sheet.part);
-  return n;
-}

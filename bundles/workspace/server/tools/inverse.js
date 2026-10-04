@@ -13,7 +13,7 @@ import { XLSX } from "./sheets.js";
 import { ooxmlWrite } from "./ooxml-file.js";
 import { removeParagraphsExact } from "../ooxml/docx-edit.js";
 import { deleteComment } from "../ooxml/docx-comments.js";
-import { clearRowsExact, restoreStyles } from "../ooxml/xlsx.js";
+import { clearRowsExact } from "../ooxml/xlsx.js";
 
 const cell = z.union([z.string().max(32767), z.number(), z.boolean(), z.null()]);
 const dimension = z.string().max(40).optional().describe("the tab's <dimension> ref before the change (\"\" = none)");
@@ -33,6 +33,4 @@ export const inverseDefs = [
     (a, c) => docxWrite(c, a, (d) => ({ changed: 1, summary: "remove Crow's comment", data: deleteComment(d, a.comment_id, { content: a.content }) }))),
   internal("ws__sheets_clear_rows_exact", { ...fileRef, sheet: z.string().min(1).max(31), from_row: z.number().int().min(1).max(1048576), values: z.array(z.array(cell).max(16384)).min(1).max(10000), dimension, ...writeOpts },
     (a, c) => ooxmlWrite(c, a, XLSX, (wb) => { const n = clearRowsExact(wb, a.sheet, a.from_row, a.values, { dimension: a.dimension }); return { changed: n || 1, summary: `remove ${a.values.length} appended row(s)`, data: { cleared_cells: n } }; })),
-  internal("ws__sheets_restore_styles", { ...fileRef, range: z.string().min(1).max(300), s_attrs: z.array(z.array(z.string().regex(/^\d{1,6}$/).nullable())).min(1).max(50000), pattern: z.string().min(1).max(255).optional(), dimension, ...writeOpts },
-    (a, c) => ooxmlWrite(c, a, XLSX, (wb) => ({ changed: restoreStyles(wb, a.range, a.s_attrs, { pattern: a.pattern, dimension: a.dimension }) || 1, summary: `restore the number format of ${a.range}`, data: {} }))),
 ];

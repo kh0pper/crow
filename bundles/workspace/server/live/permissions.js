@@ -39,7 +39,8 @@ export async function userCanWrite(cfg, fileId, uid, path = null) {
     if (e.ownerId && String(e.ownerId) === uid) return true;
     const p = encodeURIComponent(`/${e.path}`);
     const [direct, inherited] = await Promise.all([ocsGet(cfg, `${SHARES}?path=${p}&reshares=true`), ocsGet(cfg, `${SHARES}/inherited?path=${p}`)]);
-    const accepted = (s) => typeof s?.status !== "number" || s.status === 1;
+    // fix3 R3: a numeric STRING ("0") is a numeric status too
+    const accepted = (s) => { const st = typeof s?.status === "string" && /^\d+$/.test(s.status) ? Number(s.status) : s?.status; return typeof st !== "number" || st === 1; };
     return [...list(direct), ...list(inherited)].some((s) => Number(s?.share_type) === 0 && String(s?.share_with) === uid && accepted(s) && (Number(s?.permissions) & UPDATE) === UPDATE);
   } catch { return false; }
 }

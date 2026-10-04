@@ -14,7 +14,7 @@ import { openDocx, allParagraphs, textMap, paragraphText, topBlocks } from "../o
 import { sectionRange } from "../ooxml/docx-read.js";
 import { markdownToBlocks } from "../ooxml/md-to-wml.js";
 import { rewritePassages } from "../ooxml/docx-edit.js";
-import { openXlsx, readRange, writeRange, sheetByName, headerRow, lastDataRow, rowsFormula, styleAttrs, numFmtCodes, cellKey, sameRows, patternFor } from "../ooxml/xlsx.js";
+import { openXlsx, readRange, writeRange, sheetByName, headerRow, lastDataRow, rowsFormula, numFmtCodes, cellKey, sameRows, patternFor } from "../ooxml/xlsx.js";
 import { dateToSerial } from "../ooxml/xlsx-format.js";
 import { openPptx, shapeById, shapeText, slideById, paraText } from "../ooxml/pptx.js";
 
@@ -56,11 +56,11 @@ export function liveEligible(tool, args = {}, pre = null) {
 }
 
 /** The internal exact-inverse ops (registered in ALL_DEFS only, never as MCP tools). */
-export const INTERNAL_OPS = Object.freeze(["ws__docs_remove_paragraphs_exact", "ws__docs_delete_comment", "ws__sheets_clear_rows_exact", "ws__sheets_restore_styles"]);
+export const INTERNAL_OPS = Object.freeze(["ws__docs_remove_paragraphs_exact", "ws__docs_delete_comment", "ws__sheets_clear_rows_exact"]);
 /** K5-I7: the ONLY inverse tool accepted for each live tool (never anything else, never a ws_drive_* tool). */
 export const INVERSE_OF = Object.freeze({ ws_docs_find_replace: "ws_docs_find_replace", ws_docs_rewrite_passages: "ws_docs_rewrite_passages", ws_docs_format_text: "ws_docs_format_text",
   ws_docs_append: "ws__docs_remove_paragraphs_exact", ws_docs_insert_at_heading: "ws__docs_remove_paragraphs_exact", ws_docs_add_comment: "ws__docs_delete_comment",
-  ws_sheets_write: "ws_sheets_write", ws_sheets_append: "ws__sheets_clear_rows_exact", ws_sheets_set_number_format: "ws__sheets_restore_styles",
+  ws_sheets_write: "ws_sheets_write", ws_sheets_append: "ws__sheets_clear_rows_exact",
   ws_sheets_rename_tab: "ws_sheets_rename_tab", ws_slides_edit_text: "ws_slides_edit_text", ws_slides_find_replace: "ws_slides_find_replace" });
 /** Pin a reported inverse to the allowed tool and THIS file; anything off-list → null (undo_via_versions), never a partial inverse. */
 export function pinInverse(row, inverse) {
@@ -130,7 +130,6 @@ export function snapshot(tool, args, bytes) {
       return { cells: readRange(openXlsx(bytes), args.range, "FORMULA").values, guarded: true };
     }
     case "ws_sheets_append": { const wb = openXlsx(bytes); return { header: headerRow(wb, args.sheet_name), last_row: lastDataRow(wb, args.sheet_name) }; }
-    case "ws_sheets_set_number_format": return { s_attrs: styleAttrs(openXlsx(bytes), args.range) };
     case "ws_slides_edit_text": return { text: shapeText(shapeById(openPptx(bytes), args.object_id).sp) };
     case "ws_slides_find_replace": { const ps = pairsOf(args); if (ps.length !== 1) return null; const t = slideTexts(openPptx(bytes), args.slide_ids); const mc = caseOf(args, ps[0]); return { fcount: countOf(fold(t, mc), fold(ps[0].find, mc)), rcount: countOf(fold(t, mc), fold(ps[0].replace, mc)) }; }
     default: return null;

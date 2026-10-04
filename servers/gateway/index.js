@@ -454,9 +454,10 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 // /dashboard/perch-api/interactive/:sid/{files,message} (10mb parsers in
 // perch-interactive-api.js — Track 3 Task 9: a 5MB post-decode base64 file
 // upload is ~6.7MB of JSON text, and 3 × 2MB post-decode message images are
-// ~8.4MB).
+// ~8.4MB). /api/workspace/live/v1/ (Crow Workspace K5 plugin endpoints): the bundle's
+// router parses its own body (256kb) only AFTER the editor token was verified.
 const _jsonParser = express.json({ limit: "1mb" });
-const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p) ||
+const _hasOwnParser = (p) => p.startsWith("/llm") || p.startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
   /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
