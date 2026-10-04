@@ -189,6 +189,9 @@ function crowCommand() {
         if (m > 1) return no("needs_close_apply");
         full = str(all[at].GetText());
         if (!full || /[\t\r\n]/.test(full) || hits(d, full, true) !== 1) return no("needs_close_apply");
+        // final review I1: with expect_text the WHOLE paragraph must still read what was queued (a person may have
+        // edited it, keeping its first words); the close-time applier then decides on the saved file.
+        if (typeof ps[i].expect_text === "string" && nfc(full) !== nfc(ps[i].expect_text)) return no("needs_close_apply");
         used[at] = true; plan.push({ full: full, nt: nt });
       }
       touched = true;

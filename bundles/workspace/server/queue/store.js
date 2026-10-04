@@ -18,7 +18,9 @@ export const CHANGE_ID_RE = /^pc_[0-9a-z]{6,40}$/;
  * out — so a second applier (an orphan or overlapping gateway on the same crow.db) never re-applies an in-flight row.
  */
 export const APPLIER_ID = `close:${process.pid}:${randomBytes(6).toString("hex")}`;
-export const APPLY_LEASE_MS = 10 * 60e3;
+// Final review L1: 30 min — a close-time apply whose PUT is slow must not lose its lease (another applier would then
+// decide by postcondition while the late PUT may still land). A lease heartbeat is the follow-up.
+export const APPLY_LEASE_MS = 30 * 60e3;
 const newId = () => `pc_${Date.now().toString(36)}${randomBytes(6).toString("hex")}`;
 const PATCHABLE = new Set(["lease_until", "lease_owner", "claim_count", "result_json", "version_id", "inverse_json", "verified", "doc_key"]);
 

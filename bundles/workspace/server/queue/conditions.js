@@ -9,11 +9,11 @@
  */
 import { createHash } from "node:crypto";
 import { WsError } from "../result.js";
-import { NS, all } from "../ooxml/xml.js";
+import { NS, all, kids } from "../ooxml/xml.js";
 import { openDocx, allParagraphs, textMap, paragraphText, topBlocks } from "../ooxml/docx-model.js";
 import { sectionRange } from "../ooxml/docx-read.js";
 import { markdownToBlocks } from "../ooxml/md-to-wml.js";
-import { rewritePassages } from "../ooxml/docx-edit.js";
+import { rewritePassages, passagePrefix, findPassage, expectsOk } from "../ooxml/docx-edit.js";
 import { openXlsx, readRange, writeRange, sheetByName, headerRow, lastDataRow, rowsFormula, numFmtCodes, cellKey, sameRows, patternFor } from "../ooxml/xlsx.js";
 import { dateToSerial } from "../ooxml/xlsx-format.js";
 import { openPptx, shapeById, shapeText, slideById, paraText } from "../ooxml/pptx.js";
@@ -148,7 +148,17 @@ function toolPre(tool, args, pre, bytes) {
     }
     case "ws_docs_insert_at_heading": try { sectionRange(openDocx(bytes), args.heading); return OK; } catch { return no(); }
     case "ws_docs_replace_section": try { return !pre?.section_hash || sectionHash(openDocx(bytes), args.heading) === pre.section_hash ? OK : no(); } catch { return no(); }
-    case "ws_docs_rewrite_passages": { const lines = docText(openDocx(bytes)).split("\n"); return args.passages.some((p) => lines.some((line) => line.normalize("NFC").startsWith(nfc(p.match_prefix)))) ? OK : no(); }
+    case "ws_docs_rewrite_passages": {
+      // Final review M6/I1: EVERY passage must still pick a body paragraph exactly as the file op does (same prefix
+      // rule, first unused match) and, with expect_text, that paragraph must still read exactly what was shown —
+      // otherwise the whole change fails target_changed (never a partial apply, never over a person's edit).
+      const d = openDocx(bytes); const paras = kids(d.body, NS.w, "p"); const used = new Set();
+      return args.passages.length > 0 && args.passages.every((ps) => {
+        const prefix = passagePrefix(ps.match_prefix); const p = prefix ? findPassage(paras, prefix, used) : null;
+        if (!p || !expectsOk(p, ps.expect_text)) return false;
+        used.add(p); return true;
+      }) ? OK : no();
+    }
     case "ws_docs_format_text": case "ws_docs_add_comment": { const needle = args.find ?? args.quoted_text; return !needle || docText(openDocx(bytes)).includes(nfc(needle)) ? OK : no(); }
     case "ws_sheets_write": try { const cur = readRange(openXlsx(bytes), args.range, "FORMULA").values; return pre?.cells === undefined || sameRows(cur, pre.cells) ? OK : no(); } catch { return no(); }
     case "ws_sheets_append": try { const h = headerRow(openXlsx(bytes), args.sheet_name); return !pre?.header || JSON.stringify(h) === JSON.stringify(pre.header) ? OK : no(); } catch { return no(); }

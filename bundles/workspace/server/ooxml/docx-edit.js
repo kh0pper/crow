@@ -92,6 +92,8 @@ export function setParagraphText(d, p, text) {
 /** How rewrite_passages reads a match_prefix, and which body paragraph it picks (the first unused one that starts with it). */
 export const passagePrefix = (s) => String(s ?? "").normalize("NFC").trim().slice(0, 100);
 export const findPassage = (paras, prefix, used = new Set()) => paras.find((x) => !used.has(x) && paragraphText(x).normalize("NFC").replace(/^\s+/, "").startsWith(prefix));
+/** Final review I1: an optional expect_text pins the passage's WHOLE current text (NFC), so a prefix match alone never rewrites a paragraph someone edited since. */
+export const expectsOk = (p, expectText) => expectText === undefined || expectText === null || paragraphText(p).normalize("NFC") === String(expectText).normalize("NFC");
 
 export function rewritePassages(d, passages) {
   const used = new Set(); const paras = kids(d.body, W, "p");
@@ -100,6 +102,7 @@ export function rewritePassages(d, passages) {
     if (!prefix) return { match_prefix: ps.match_prefix, matched: false, reason: "Empty match_prefix" };
     const p = findPassage(paras, prefix, used);
     if (!p) return { match_prefix: ps.match_prefix, matched: false, reason: "No paragraph starts with this prefix" };
+    if (!expectsOk(p, ps.expect_text)) return { match_prefix: ps.match_prefix, matched: false, reason: "text_changed" };
     if (!isPlainTextParagraph(p)) return { match_prefix: ps.match_prefix, matched: false, reason: "not_plain_text" };
     used.add(p); const original_length = paragraphText(p).length;
     setParagraphText(d, p, ps.new_text);

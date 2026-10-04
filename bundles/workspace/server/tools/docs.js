@@ -57,8 +57,8 @@ export const docsWriteDefs = [
       // an empty section replaced by empty markdown changes nothing → no version (spec §4.1)
       return { changed: r.removed + r.inserted, summary: `replace section "${args.heading}"`, data: { removed_blocks: r.removed, inserted_blocks: r.inserted, heading_inheritance_fix_applied: true } };
     }) },
-  { name: "ws_docs_rewrite_passages", description: "Rewrite whole paragraphs found by the start of their text (match_prefix, ≤100 chars, case-sensitive). Keeps paragraph style and the first run's formatting. Atomic.",
-    schema: { ...fileRef, passages: z.array(z.object({ match_prefix: z.string().max(1000), new_text: z.string().max(20000) })).min(1).max(100), ...writeOpts },
+  { name: "ws_docs_rewrite_passages", description: "Rewrite whole paragraphs found by the start of their text (match_prefix, ≤100 chars, case-sensitive). Keeps paragraph style and the first run's formatting. Atomic. Optional expect_text: the paragraph's full current text; if it differs, that passage is not rewritten (text_changed).",
+    schema: { ...fileRef, passages: z.array(z.object({ match_prefix: z.string().max(1000), new_text: z.string().max(20000), expect_text: z.string().max(20000).optional() })).min(1).max(100), ...writeOpts },
     run: (args, ctx) => docxWrite(ctx, args, (d) => { const r = rewritePassages(d, args.passages); const n = r.results.filter((x) => x.matched).length; return { changed: n, summary: `rewrite ${n} paragraph(s)`, data: { total_passages: args.passages.length, matched: n, results: r.results } }; }) },
   { name: "ws_docs_format_text", description: "Style matching text: bold, italic, underline, color_hex, or link_url (http/https/mailto). occurrence 0 = first, -1 = all.",
     schema: { ...fileRef, find: z.string().min(1).max(2000), occurrence: z.number().int().min(-1).optional().default(0), bold: z.boolean().optional(), italic: z.boolean().optional(), underline: z.boolean().optional(), link_url: z.string().max(2000).optional(), color_hex: z.string().max(7).optional(), ...writeOpts },

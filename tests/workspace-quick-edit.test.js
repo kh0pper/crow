@@ -231,3 +231,89 @@ test("no session → 401; bad CSRF → 403; traversal path → error notice, no 
   assert.equal(loc(r).searchParams.get("notice"), "bad_path");
   assert.equal(fake.calls.length, n);
 });
+
+// ---- final whole-branch review fix wave ----------------------------------------------------------------
+const { openXlsx, writeRange } = await import("../bundles/workspace/server/ooxml/xlsx.js");
+const { openPptx, readDeck, editShapeText } = await import("../bundles/workspace/server/ooxml/pptx.js");
+const C = await import("../bundles/workspace/server/queue/conditions.js");
+const { passagePrefix, rewritePassages } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+const { paragraphText } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+
+test("final I1: a queued xlsx Quick edit whose page is stale (the saved cell differs from what was shown) is refused stale_view — nothing queued or written", async () => {
+  const X = "Shared with Crow/Casa/stale.xlsx";
+  const wb = openXlsx(readFileSync(join(FIX, "oo-rich.xlsx"))); writeRange(wb, "Recetas!B2", [[7]], "RAW");
+  fake.addFile(X, Buffer.from(wb.pkg.save()), { owner: "admin" }); // the person already saved 7; the phone page showed 4
+  fake.openInEditor(X, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const n = puts(); const q0 = await pendingCount();
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: X, kind: "xlsx", target: "Recetas!B2", shown: "4", value: "5" });
+  assert.equal(r.status, 303);
+  assert.equal(loc(r).searchParams.get("notice"), "stale_view");
+  assert.equal(await pendingCount(), q0, "never queued over the person's newer value");
+  assert.equal(puts(), n);
+  // the fresh view (shown = the saved value) still queues
+  const ok = await post("/api/workspace/quick/save", { _csrf: "tok", path: X, kind: "xlsx", target: "Recetas!B2", shown: "7", value: "5" });
+  assert.match(await ok.text(), /quick\/cancel/);
+  assert.equal(await pendingCount(), q0 + 1);
+});
+
+test("final I1: a queued pptx Quick edit whose page is stale is refused stale_view — nothing queued or written", async () => {
+  const P = "Shared with Crow/Casa/stale.pptx";
+  const deck = openPptx(readFileSync(join(FIX, "oo-rich.pptx")));
+  const id = readDeck(deck, false)[1].shapes[0].object_id; // "Jueves" in the fixture
+  editShapeText(deck, id, "Sábado"); fake.addFile(P, Buffer.from(deck.pkg.save()), { owner: "admin" });
+  fake.openInEditor(P, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const n = puts(); const q0 = await pendingCount();
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: P, kind: "pptx", target: id, shown: "Jueves", value: "Viernes" });
+  assert.equal(loc(r).searchParams.get("notice"), "stale_view");
+  assert.equal(await pendingCount(), q0); assert.equal(puts(), n);
+});
+
+test("final I1: the queued docx twin carries expect_text = shown — a paragraph edited after queueing (prefix kept) is refused at close and live", async () => {
+  const D = "Shared with Crow/Casa/twin.docx";
+  fake.addFile(D, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
+  fake.openInEditor(D, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: D, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
+  const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
+  const row = await rowOf(id);
+  const args = JSON.parse(row.args_json);
+  assert.equal(args.passages[0].expect_text, P1);
+  // the person edits the same paragraph in the editor, keeping its first words
+  const later = docxWith({ 1: `${P1} Y cebolla.` });
+  assert.equal(C.checkPre(row.tool, args, JSON.parse(row.precondition_json || "null"), later).ok, false, "close-time: target_changed, never overwrites the person's edit");
+  assert.equal(C.checkPre(row.tool, args, JSON.parse(row.precondition_json || "null"), fake.node(D).bytes).ok, true, "unchanged paragraph: still applies");
+  const d = openDocx(later); const r = rewritePassages(d, args.passages);
+  assert.equal(r.results[0].matched, false, "the file op itself refuses too");
+  assert.equal(paragraphText(kids(d.body, NS.w, "p")[1]), `${P1} Y cebolla.`);
+});
+
+test("final I2: the queued docx twin's match_prefix is passagePrefix(shown) — a paragraph with >100 leading spaces still picks itself", async () => {
+  const D = "Shared with Crow/Casa/spaces.docx";
+  const text = `${" ".repeat(120)}Pozole rojo los sábados.`;
+  fake.addFile(D, docxWith({ 1: text }), { owner: "admin" });
+  fake.openInEditor(D, ["dayane"], { releaseAfterMs: 10 ** 9 });
+  const shown = paragraphText(kids(openDocx(fake.node(D).bytes).body, NS.w, "p")[1]);
+  assert.equal(shown, text, "fixture keeps the leading spaces");
+  const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: D, kind: "docx", target: "1", shown, value: "Menudo." });
+  const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
+  const args = JSON.parse((await rowOf(id)).args_json);
+  assert.equal(args.passages[0].match_prefix, passagePrefix(shown));
+  const d = openDocx(fake.node(D).bytes); const r = rewritePassages(d, args.passages);
+  assert.equal(r.results[0].matched, true);
+  assert.equal(paragraphText(kids(d.body, NS.w, "p")[1]), "Menudo.");
+});
+
+test("final M1: Apply now whose PUT landed but a later step failed is NOT re-queued (the change is saved; the twin stays cancelled)", async () => {
+  const W = "Shared with Crow/Casa/m1.docx";
+  fake.addFile(W, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
+  fake.openInEditor(W, ["dayane"], { releaseAfterMs: 3000 }); // Apply now closes the editor, then saves
+  const q = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados." });
+  const id = (await q.text()).match(/name="change_id" value="(pc_[0-9a-z]+)"/)[1];
+  const n = puts();
+  fake.state.afterPutHook = () => { fake.state.afterPutHook = null; fake.state.failNextWith = { status: 503, body: "busy" }; }; // the stat after the PUT fails
+  const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: W, kind: "docx", target: "1", shown: P1, value: "Tacos dorados.", if_open: "force_close", cancel_first: id });
+  assert.equal(r.status, 303);
+  assert.notEqual(loc(r).searchParams.get("notice"), "still_waiting", "never told it is still waiting after the save landed");
+  assert.equal(puts(), n + 1, "the forced save was written");
+  assert.equal((await rowOf(id)).state, "cancelled", "the twin is not put back (it would apply a second time)");
+  assert.equal(paragraphText(kids(openDocx(fake.node(W).bytes).body, NS.w, "p")[1]), "Tacos dorados.");
+});

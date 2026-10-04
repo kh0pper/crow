@@ -388,3 +388,15 @@ test("format_text styles only the match when it sits after a tab (or before a br
   assert.match(runOf("Tab"), /<w:i\/>/); assert.doesNotMatch(runOf("Tab"), /<w:tab\/>|separated/);
   assert.match((await call("ws_docs_read", { path: "S/ft-tab.docx" })).data.markdown, /\*Tab\*\t\*\*separated\*\* text and a line/);
 });
+
+test("final I1: rewrite_passages expect_text — a paragraph whose full text differs from expect_text is not rewritten (prefix alone is not enough)", async () => {
+  put("et.docx", "oo-rich.docx");
+  const n = puts();
+  const miss = await call("ws_docs_rewrite_passages", { path: "S/et.docx", passages: [{ match_prefix: "Tacos al", new_text: "x", expect_text: "Tacos al pastor (old view)" }] });
+  assert.equal(miss.data.results[0].matched, false);
+  assert.equal(miss.data.results[0].reason, "text_changed");
+  assert.equal(puts(), n, "nothing written");
+  const hit = await call("ws_docs_rewrite_passages", { path: "S/et.docx", passages: [{ match_prefix: "Tacos al", new_text: "Tacos dorados.", expect_text: "Tacos al pastor con piña y jalapeño." }] });
+  assert.equal(hit.data.results[0].matched, true);
+  assert.match((await call("ws_docs_read", { path: "S/et.docx" })).data.markdown, /Tacos dorados\./);
+});

@@ -4,7 +4,7 @@
  * open file (F16); after that the change is queued (K5) as the equivalent tool op and applied live or at close.
  */
 import { WsError } from "../result.js";
-import { withFileWrite, withFileRestore, undoFileChange } from "../write-protocol.js";
+import { withFileWrite, withFileRestore, undoFileChange, wasPutSent } from "../write-protocol.js";
 import { splitPath } from "../nc/paths.js";
 import { getFile } from "../nc/dav.js";
 import { kids, NS } from "../ooxml/xml.js";
@@ -28,7 +28,9 @@ const forced = (form) => form.if_open === "force_close";
 /** K5: an open file → the edit is queued as the equivalent tool op (applies live through the plugin, or at close). */
 function asToolOp(form, value) {
   const path = String(form.path);
-  if (form.kind === "docx") return ["ws_docs_rewrite_passages", { path, passages: [{ match_prefix: form.shown.slice(0, 100), new_text: value }] }];
+  // Final review I2/I1: the prefix is read exactly as rewrite_passages reads it, and expect_text pins the whole
+  // paragraph to what the page showed (a person's later edit that keeps the first words is never overwritten).
+  if (form.kind === "docx") return ["ws_docs_rewrite_passages", { path, passages: [{ match_prefix: passagePrefix(form.shown), new_text: value, expect_text: form.shown }] }];
   if (form.kind === "xlsx") return ["ws_sheets_write", { path, range: String(form.target), values: [[value]] }];
   return ["ws_slides_edit_text", { path, object_id: String(form.target), new_text: value }];
 }
@@ -37,6 +39,9 @@ const writeOpts = (form, clock, [tool, args], queueGuard = null) => {
   const queue = forced(form) ? null : queueDescriptor(tool, args, { requestedBy: "quick_edit" });
   return { label: "Quick edit", waitS: WAIT_S, clock, ifOpen: forced(form) ? "force_close" : "queue", queue: queue && queueGuard ? guardedQueue(queue, queueGuard) : queue };
 };
+
+const xlsxStale = (wb, target, shown) => { if (String(readRange(wb, target, "FORMULA").values[0]?.[0] ?? "") !== shown) throw new WsError("stale_view", "The sheet changed since this page loaded; reload and try again."); };
+const pptxStale = (deck, target, shown) => { if (shapeText(shapeById(deck, target).sp) !== shown) throw new WsError("stale_view", "The slide changed since this page loaded; reload and try again."); };
 
 /** The paragraph the page showed, or a refusal: stale (moved/changed) or not plain text (links, images, fields…). */
 function docxTarget(d, target, shown) {
@@ -48,12 +53,17 @@ function docxTarget(d, target, shown) {
 }
 
 /**
+ * Final review I1: every Quick edit queue path first checks the SAVED file: the target must still read what the page
+ * showed (else stale_view, nothing queued) — the queued twin's own snapshot/precondition then protects it from any
+ * later edit (xlsx/pptx: the queued cell/shape value; docx: expect_text).
  * T14-I1: the queued docx twin is rewrite_passages by prefix, which rewrites the FIRST paragraph starting with it.
  * Queue only when that paragraph IS the one the page showed (and the text is not empty); otherwise answer the lock's
  * own refusal (open_in_editor: "try again when the editor closes") so a duplicated prefix never edits another paragraph.
  */
-const docxQueueGuard = (cfg, target, shown) => async ({ entry, lock }) => {
+const quickQueueGuard = (cfg, kind, target, shown) => async ({ entry, lock }) => {
   const { bytes } = await getFile(cfg, splitPath(entry.path), { maxBytes: QUICK_MAX_BYTES });
+  if (kind === "xlsx") return xlsxStale(openXlsx(bytes), target, shown);
+  if (kind === "pptx") return pptxStale(openPptx(bytes), target, shown);
   const d = openDocx(bytes);
   const p = docxTarget(d, target, shown);
   const prefix = passagePrefix(shown);
@@ -78,7 +88,10 @@ export async function quickSave(cfg, formIn, clock) {
   await cancelChange.run({ change_id: cancelFirst });
   try { return await save(cfg, formIn, clock); }
   catch (err) {
-    // T14-I2: the forced save failed (busy, a person's lock, too large, …): the waiting change goes back in the queue.
+    // Final review M1: once the PUT was sent the change may already be in the file — never put the twin back (it
+    // would apply a second time); the error is shown as is.
+    if (wasPutSent(err)) throw err;
+    // T14-I2: the forced save failed BEFORE writing (busy, a person's lock, too large, …): the change goes back in the queue.
     let back = false;
     try { back = await repend(cancelFirst); } catch { back = false; }
     if (!back) throw err;
@@ -103,15 +116,15 @@ async function save(cfg, formIn, clock) {
     }
     if (kind === "xlsx") {
       const wb = openXlsx(bytes);
-      if (String(readRange(wb, target, "FORMULA").values[0]?.[0] ?? "") !== form.shown) throw new WsError("stale_view", "The sheet changed since this page loaded; reload and try again.");
+      xlsxStale(wb, target, form.shown);
       const r = writeRange(wb, target, [[value]], "USER_ENTERED");
       return { bytes: wb.pkg.save(), changed: 1, summary: `cell ${r.range}` };
     }
     const deck = openPptx(bytes);
-    if (shapeText(shapeById(deck, target).sp) !== form.shown) throw new WsError("stale_view", "The slide changed since this page loaded; reload and try again.");
+    pptxStale(deck, target, form.shown);
     editShapeText(deck, target, value);
     return { bytes: deck.pkg.save(), changed: 1, summary: "slide text" };
-  }, writeOpts(form, clock, asToolOp({ ...form, kind }, value), kind === "docx" ? docxQueueGuard(cfg, target, form.shown) : null));
+  }, writeOpts(form, clock, asToolOp({ ...form, kind }, value), quickQueueGuard(cfg, kind, target, form.shown)));
 }
 
 /** Undo of a Quick edit: waits 10 s for an open file, then answers open_in_editor (undo is close-time only, spec §5.7). */

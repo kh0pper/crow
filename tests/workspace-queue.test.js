@@ -572,3 +572,31 @@ test("ws__sheets_clear_rows_exact: append reversed exactly; other values or rows
   assert.throws(() => X.clearRowsExact(wb, "Recetas", from, [["A", 1]]), { code: "target_changed" }, "rows below → refused");
 });
 
+
+test("final M6: a multi-passage rewrite_passages precondition needs EVERY passage (no partial apply at close); final I1: expect_text is checked", () => {
+  const bytes = readFileSync(join(FIX, "oo-rich.docx"));
+  const both = { passages: [{ match_prefix: "Marinar", new_text: "a" }, { match_prefix: "No existe", new_text: "b" }] };
+  assert.equal(C.checkPre("ws_docs_rewrite_passages", both, null, bytes).ok, false, "one missing passage → target_changed");
+  assert.equal(C.checkPre("ws_docs_rewrite_passages", { passages: [{ match_prefix: "Marinar", new_text: "a" }, { match_prefix: "Tacos al", new_text: "b" }] }, null, bytes).ok, true);
+  assert.equal(C.checkPre("ws_docs_rewrite_passages", { passages: [{ match_prefix: "Tacos al", new_text: "b", expect_text: "Tacos al pastor con piña y jalapeño." }] }, null, bytes).ok, true);
+  assert.equal(C.checkPre("ws_docs_rewrite_passages", { passages: [{ match_prefix: "Tacos al", new_text: "b", expect_text: "Tacos al pastor" }] }, null, bytes).ok, false, "full paragraph text differs → target_changed");
+});
+
+test("final I1: a queued rewrite_passages with expect_text is refused at close when the person edited the paragraph (prefix kept)", async () => {
+  put("q-et.docx"); const key = fake.openInEditor("S/q-et.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const P1 = "Tacos al pastor con piña y jalapeño.";
+  const c = await call("ws_docs_rewrite_passages", { path: "S/q-et.docx", passages: [{ match_prefix: "Tacos al", new_text: "Tacos dorados.", expect_text: P1 }] });
+  const { setParagraphText, findPassage } = await import("../bundles/workspace/server/ooxml/docx-edit.js");
+  const { kids, NS } = await import("../bundles/workspace/server/ooxml/xml.js");
+  await editorSave("S/q-et.docx", (d) => setParagraphText(d, findPassage(kids(d.body, NS.w, "p"), "Tacos al"), `${P1} Con cebolla.`));
+  const before = fake.node("S/q-et.docx").bytes;
+  closeSession("S/q-et.docx", key);
+  await tick();
+  const s = await status(c.data.change_id);
+  assert.equal(s.state, "failed"); assert.equal(s.reason, "target_changed");
+  assert.equal(fake.node("S/q-et.docx").bytes, before, "the person's edit stands");
+});
+
+test("final L1: the close-time applier lease is 30 minutes", () => {
+  assert.equal(Q.APPLY_LEASE_MS, 30 * 60e3);
+});

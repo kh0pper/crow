@@ -174,6 +174,13 @@ async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, { put
   };
 }
 
+/**
+ * Final review M1: an error thrown once the PUT was sent (the PUT itself failing in flight or with an unexpected
+ * status, or anything after it) is tagged put_sent — the change may already be in the file, so a caller must never
+ * re-queue it. A 412/423 answer is a refusal (nothing written) and is not tagged.
+ */
+const putSent = (err) => { if (err && typeof err === "object") err.put_sent = true; return err; };
+export const wasPutSent = (err) => !!(err && err.put_sent);
 const putEtagOf = (res) => normEtag(res.headers.get("oc-etag") || res.headers.get("etag") || "");
 const queueOrThrow = (sig, queue) => { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; };
 
@@ -200,12 +207,14 @@ export async function withFileWrite(cfg, ref, mutate, { waitS: waitS0 = 0, ifOpe
       const cur = await settleMtime(await read(), read, clock, { ifMatchGuarded: true });
       const out = await mutate(cur.bytes, e);
       if (!out || !out.changed) return { ...(out?.data || {}), path: e.path, file_id: e.fileId, changed: 0, version_id: null };
-      const res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag });
+      let res;
+      try { res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag }); } catch (err) { throw putSent(err); }
       if (res.status === 412) { if (!retried412) { retried412 = true; continue; } throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`); }
       if (res.status === 423) { if (++n423 > MAX_423_RETRIES) throw lockedOut(); if (n423 === 2) waitS = 0; continue; }
-      if (!res.ok) throw httpFail(res, "save the change");
+      if (!res.ok) throw putSent(httpFail(res, "save the change"));
       const putEtag = putEtagOf(res);
-      return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, { putEtag, afterIsOurs: (a) => !putEtag || normEtag(a.etag) === putEtag });
+      try { return await finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, { putEtag, afterIsOurs: (a) => !putEtag || normEtag(a.etag) === putEtag }); }
+      catch (err) { throw putSent(err); }
     }
   });
 }

@@ -328,3 +328,13 @@ test("ops.js only calls builder methods the S9 probe found", () => {
   assert.ok(used.size > 5);
   for (const m of used) assert.ok(presentBare.has(m), `ops.js uses ${m}, which S9 did not verify`);
 });
+
+test("final I1: rewrite_passages expect_text — the full paragraph text must equal it, else close-time (needs_close_apply), nothing touched", () => {
+  const s = wordStub([{ text: "Lunes: tacos y sopa" }, { text: "Martes: sopa" }]);
+  const r = run(s, "ws_docs_rewrite_passages", { passages: [{ match_prefix: "Lunes", new_text: "Lunes: enchiladas", expect_text: "Lunes: tacos" }] });
+  assert.equal(r.ok, false); assert.equal(r.applied_nothing, true); assert.equal(r.reason, "needs_close_apply");
+  assert.deepEqual(s.calls, []);
+  const ok = wordStub([{ text: "Lunes: tacos" }]);
+  assert.equal(run(ok, "ws_docs_rewrite_passages", { passages: [{ match_prefix: "Lunes", new_text: "Lunes: enchiladas", expect_text: "Lunes: tacos" }] }).ok, true);
+  assert.deepEqual(ok.texts(), ["Lunes: enchiladas"]);
+});
