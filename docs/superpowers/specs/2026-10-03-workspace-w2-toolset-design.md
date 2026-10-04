@@ -1,6 +1,6 @@
 # Crow Workspace W2: the Crow toolset (design)
 
-**Status:** spec written 2026-10-03, from Kevin's W2 decisions of the same day and live probes of the W1 install on crow. It covers sub-project W2 of `docs/superpowers/specs/2026-10-02-crow-workspace-design.md`. Plan: `docs/superpowers/plans/2026-10-03-workspace-w2-toolset.md`.
+**Status:** spec written 2026-10-03, from the operator's W2 decisions of the same day and live probes of the W1 install on crow. It covers sub-project W2 of `docs/superpowers/specs/2026-10-02-crow-workspace-design.md`. Plan: `docs/superpowers/plans/2026-10-03-workspace-w2-toolset.md`.
 **Binding inputs:** the parent spec's D6 (versioned edits with a lock check), D7 (mirror the Google Workspace MCP with a `ws_` prefix and the same guardrails), §5 (W2 preview) and Appendix A (Kitchen needs a Menu calendar and a recipe-index spreadsheet). W1 is live on crow: Nextcloud 34.0.4, ONLYOFFICE Docs 9.4.0, bundle `bundles/workspace` v0.1.2, bot account `crow-bot`.
 
 ## 1. Purpose
@@ -17,21 +17,21 @@ The same engine also drives a phone-friendly **Quick edit** page in Crow's Offic
 **Success looks like:**
 - A bot asked "add tacos to Thursday's menu" puts the event on the Menu calendar, and both phones show it.
 - A bot asked "fix the typo in the second paragraph" changes one run of text. Everything else in the file stays byte-identical, and a labeled version exists to roll back to.
-- If Dayane has the file open, the bot waits up to 30 s. Then it says "Dayane has it open" and asks whether to go ahead.
-- On a phone, Kevin can change one spreadsheet cell from Crow's Office panel and undo it.
+- If Alex has the file open, the bot waits up to 30 s. Then it says "Alex has it open" and asks whether to go ahead.
+- On a phone, the operator can change one spreadsheet cell from Crow's Office panel and undo it.
 
 ## 2. Decisions
 
 | # | Question | Decision | Source |
 |---|---|---|---|
-| K1 | What a write does when the file is open in the editor | ~~Wait ≤ 30 s, then ask whether to go ahead~~ **Superseded by K5 (§2.1): queue + live plugin apply + close-time apply; closing their session only as an explicit override.** | Kevin 2026-10-03 |
-| K2 | v1 scope | Drive + Docs (.docx), Sheets (.xlsx), **Slides (.pptx)**, Calendar + Contacts (CalDAV/CardDAV) | Kevin 2026-10-03 |
-| K3 | Phone editing | The bot edits by chat, plus a phone-friendly **Quick edit** page in the Office panel for small text and cell changes (no layout editor). Every change is an undoable version. | Kevin 2026-10-03 |
-| K4 | Model routing | None. The bot's normal model drives deterministic tools. | Kevin 2026-10-03 |
+| K1 | What a write does when the file is open in the editor | ~~Wait ≤ 30 s, then ask whether to go ahead~~ **Superseded by K5 (§2.1): queue + live plugin apply + close-time apply; closing their session only as an explicit override.** | the operator 2026-10-03 |
+| K2 | v1 scope | Drive + Docs (.docx), Sheets (.xlsx), **Slides (.pptx)**, Calendar + Contacts (CalDAV/CardDAV) | the operator 2026-10-03 |
+| K3 | Phone editing | The bot edits by chat, plus a phone-friendly **Quick edit** page in the Office panel for small text and cell changes (no layout editor). Every change is an undoable version. | the operator 2026-10-03 |
+| K4 | Model routing | None. The bot's normal model drives deterministic tools. | the operator 2026-10-03 |
 | D6 | How the AI edits | Edits the saved file. Every AI edit makes a Nextcloud version. It never clobbers. | parent spec |
 | D7 | Toolset shape | Mirror the Google Workspace MCP with a `ws_` prefix and the same guardrails | parent spec |
 
-### 2.1 Writes to a document that is open: smooth by default (Kevin, 2026-10-03, binding)
+### 2.1 Writes to a document that is open: smooth by default (the operator, 2026-10-03, binding)
 
 This supersedes the earlier default of "wait, then ask whether to close their session". Writes to an open document must be **smooth**: nobody gets kicked out, and the bot never has to make the user choose.
 
@@ -63,7 +63,7 @@ This supersedes the earlier default of "wait, then ask whether to close their se
 
 | # | Question | Decision | Source |
 |---|---|---|---|
-| K5 | Writing to an open document | Queue → live-apply through the plugin, else close-time apply. `force_close` only as an explicit override. | Kevin 2026-10-03 (later the same day) |
+| K5 | Writing to an open document | Queue → live-apply through the plugin, else close-time apply. `force_close` only as an explicit override. | the operator 2026-10-03 (later the same day) |
 
 ## 3. Architecture
 
@@ -91,7 +91,7 @@ Office panel (gateway) ── Quick edit forms ──▶ panel/routes.js ──�
   | `docxtemplater` | Placeholder templating, not general editing |
 
   Markdown parsing reuses **`marked`**, already a root dependency (its `lexer`). iCalendar and vCard use **`ical.js`** (MPL-2.0, unmodified dependency; it parses both and expands RRULEs). WebDAV, CalDAV and CardDAV are a small hand-written client on Node 24's `fetch`, because the surface is a dozen verbs and a hermetic fake must match it exactly. That rules out `webdav` and `tsdav`.
-- **New npm packages:** `fflate`, `@xmldom/xmldom`, `ical.js`. They go in the bundle's `package.json` (per `tests/bundle-server-deps.test.js`) and in the root `devDependencies`, because CI resolves bundle imports through the root `node_modules`. Kevin's standing rule is to ask before installing a package, so **Task 3 opens with that approval gate**.
+- **New npm packages:** `fflate`, `@xmldom/xmldom`, `ical.js`. They go in the bundle's `package.json` (per `tests/bundle-server-deps.test.js`) and in the root `devDependencies`, because CI resolves bundle imports through the root `node_modules`. the operator's standing rule is to ask before installing a package, so **Task 3 opens with that approval gate**.
 
 ## 4. Tool catalog
 
@@ -99,7 +99,7 @@ Office panel (gateway) ── Quick edit forms ──▶ panel/routes.js ──�
 
 - **Names:** `ws_<service>_<verb>`, with service in `drive | docs | sheets | slides | cal | contacts`. The Google `g` prefix (and the bare `sheets_`) becomes `ws_`: `gdocs_read` → `ws_docs_read`, `gdrive_search` → `ws_drive_search`, `sheets_write` → `ws_sheets_write`, `gcal_create_event` → `ws_cal_create_event`. Plus `ws_undo_last_change`. No existing Crow tool uses `ws_`. Addon tools are dispatched by bare name through `crow_tools` (`router.js:225-245`).
 - **Addressing:**
-  - A file is addressed by `path`, relative to crow-bot's files root, e.g. `"Shared with Crow/Casa Nueva/Menu.xlsx"`. Every file tool also accepts `file_id` (Nextcloud's numeric `oc:fileid`) in place of `path`. Results always return both.
+  - A file is addressed by `path`, relative to crow-bot's files root, e.g. `"Shared with Crow/Household/Menu.xlsx"`. Every file tool also accepts `file_id` (Nextcloud's numeric `oc:fileid`) in place of `path`. Results always return both.
   - Calendars and contacts are addressed by `calendar` / `addressbook` (display name or href id) plus the object `uid`.
 - **Result envelope:** `{ success: true, data }` or `{ success: false, error, code }`, the same contract as the Google MCP. It goes back as one JSON text content block.
 - **Write results** always include:
@@ -242,7 +242,7 @@ Ids:
 
 Calendars:
 - Calendars are crow-bot's CalDAV calendars under `/remote.php/dav/calendars/crow-bot/`. That includes calendars **shared with it**, which appear as `<name>_shared_by_<owner>`.
-- On 2026-10-03 crow-bot had **none**: Menu is shared only with Dayane. Sharing Menu with crow-bot (edit rights) is a household action and an acceptance step. The bot reaches only what the household shares (D5).
+- On 2026-10-03 crow-bot had **none**: Menu is shared only with Alex. Sharing Menu with crow-bot (edit rights) is a household action and an acceptance step. The bot reaches only what the household shares (D5).
 
 | Tool | Params | Behavior / guardrail | Google twin |
 |---|---|---|---|
@@ -482,7 +482,7 @@ The live API is exempt from the gateway's general rate limiter and has its own l
 | Expired | "… expired" |
 
 - Crow notifications use `servers/shared/notifications.js` `createNotification`, type `system`, with `action_url` pointing at Office › Quick edit for the file.
-- People who have the document open see the plugin's in-editor indicator. A household member on another Crow instance (Dayane) is reached that way, or by the bot in her channel. Cross-instance notification is a follow-up.
+- People who have the document open see the plugin's in-editor indicator. A household member on another Crow instance (Alex) is reached that way, or by the bot in her channel. Cross-instance notification is a follow-up.
 - The bot gets the outcome from `ws_change_status`. The skill tells it to check when the user asks.
 
 ### 5.10 `force_close` (explicit override only)
@@ -493,7 +493,7 @@ The ONLYOFFICE `drop` path of the earlier design is kept, but only as an explici
 3. ≤ 30 s, else `could_not_close_editor`;
 4. the bot writes on top.
 
-A second `drop` is never sent without asking again. Task 1 S6 checks whether a dropped user's view-only connection keeps the session alive. If it does, `force_close` always returns `could_not_close_editor`, and that is recorded for Kevin.
+A second `drop` is never sent without asking again. Task 1 S6 checks whether a dropped user's view-only connection keeps the session alive. If it does, `force_close` always returns `could_not_close_editor`, and that is recorded for the operator.
 
 ## 6. Auth and configuration
 
@@ -583,7 +583,7 @@ ONLYOFFICE `drop` is only sent for a key crow-bot fetched through its own access
   - goes through `withFileWrite` with `wait_s: 10` (a phone shouldn't hang for 30 s);
   - is labeled `Quick edit: <what changed>`;
   - lands on a confirmation with an **Undo** button (carrying the `version_id`) and the file's last 20 versions, each with **Restore**.
-  - If the file is open, the save is **queued** (§5.6). The page says "Dayane has this open. Your change is waiting and will appear in her editor or when she closes it", shows the change's status, and offers **Cancel change**. A small "Apply now (closes her editor)" link re-posts with `if_open=force_close`, behind a confirm page.
+  - If the file is open, the save is **queued** (§5.6). The page says "Alex has this open. Your change is waiting and will appear in her editor or when she closes it", shows the change's status, and offers **Cancel change**. A small "Apply now (closes her editor)" link re-posts with `if_open=force_close`, behind a confirm page.
 - **Auth and plumbing:**
   - Forms POST to panel routes `/api/workspace/quick/{save,undo,restore}`, behind `authMiddleware` + `csrfMiddleware` (the phone-bundle pattern, `bundles/phone/panel/routes.js:96-112`). The hidden `_csrf` field is filled from `req.csrfToken`.
   - Responses are `303` redirects back to the view with a notice code (PRG).
@@ -662,21 +662,21 @@ The parts of `skills/google-workspace.md` that still apply (the daily-briefing /
 
 ### 10.2 Live acceptance on crow (Task 14)
 
-Runs as crow-bot against the real Workspace, after merge and deploy. Steps marked **[KEVIN]** need him:
-- **[KEVIN]** shares Menu (edit) and an address book with crow-bot, and creates a `W2 acceptance` folder shared with crow-bot (edit).
+Runs as crow-bot against the real Workspace, after merge and deploy. Steps marked **[OPERATOR]** need him:
+- **[OPERATOR]** shares Menu (edit) and an address book with crow-bot, and creates a `W2 acceptance` folder shared with crow-bot (edit).
 - One scripted call per tool family through the gateway's `crow_tools`.
-- **Live run [KEVIN, laptop]:**
-  - Kevin keeps a .docx and an .xlsx open and types.
-  - The bot's change returns `queued` naming Kevin, then appears in his open editor within ~20 s with the "Crow is editing…" indicator. Kevin's typing is untouched.
+- **Live run [OPERATOR, laptop]:**
+  - the operator keeps a .docx and an .xlsx open and types.
+  - The bot's change returns `queued` naming the operator, then appears in his open editor within ~20 s with the "Crow is editing…" indicator. the operator's typing is untouched.
   - After he closes, the saved file holds both, and `ws_change_status` says `applied_live`.
   - Undo of that change is applied live as well.
-- **Close-time run [KEVIN, phone]:**
-  - Kevin opens the doc on his phone (view-only).
+- **Close-time run [OPERATOR, phone]:**
+  - the operator opens the doc on his phone (view-only).
   - The bot's change is queued and does **not** apply live; a Crow notification shows.
   - He closes it; within ~1 min the change is applied to the saved file and the "applied" notification carries the undo id.
-- **Override run [KEVIN]:** "apply now even if it kicks me out" closes the laptop editor; his typing is saved first.
-- Quick edit from Kevin's phone **[KEVIN]**.
-- A Menu event created by the bot shows on Kevin's phone **[KEVIN]**. Dayane's phone is checked with the W1 deferred items.
+- **Override run [OPERATOR]:** "apply now even if it kicks me out" closes the laptop editor; his typing is saved first.
+- Quick edit from the operator's phone **[OPERATOR]**.
+- A Menu event created by the bot shows on the operator's phone **[OPERATOR]**. Alex's phone is checked with the W1 deferred items.
 
 ## 11. Risks
 
@@ -697,7 +697,7 @@ Runs as crow-bot against the real Workspace, after merge and deploy. Steps marke
 | Formula cached values are stale after bot writes | `fullCalcOnLoad`, `stale_formulas` flag, skill guidance. A recalc engine (e.g. HyperFormula) is rejected: GPL/commercial license. |
 | Version expiry removes an undo point | Labeled versions (Task 1 verifies exemption). Otherwise R-EXPIRY: undo reports `version_gone` honestly. |
 | 76 tools enlarge AI chat's tool list | Descriptions ≤ 120 useful chars up front (the system prompt truncates there). Follow-up: a per-bot tool allowlist if the prompt budget bites. |
-| `files_lock` app locks never expire | `stale_editor_lock` path + owner-unlock instructions. Follow-up: Kevin may set the files_lock timeout. |
+| `files_lock` app locks never expire | `stale_editor_lock` path + owner-unlock instructions. Follow-up: the operator may set the files_lock timeout. |
 | crow-bot's view depends on household sharing | The skill + Quick edit say so. Acceptance steps share Menu/contacts. |
 | Calendar recurring-instance edits (v1 updates the master only) | Documented in the tool description. Follow-up W2.1: `RECURRENCE-ID` overrides. |
 

@@ -36,11 +36,11 @@
   - zip ≤ 5,000 entries, ≤ 200 MB uncompressed, ratio ≤ 200:1;
   - XML part ≤ 30 MB;
   - `<!DOCTYPE` rejected.
-- **Lock policy (K5, Kevin 2026-10-03, supersedes the earlier "wait then ask"):** default `if_open:"queue"` with `wait_s` 0. A write to an open or locked file is queued and applied live by the Crow ONLYOFFICE plugin, or at close. `if_open:"wait"` returns `open_in_editor` instead (non-queueable tools always do). `if_open:"force_close"` is the explicit user override; it drops only ONLYOFFICE editor sessions, never a person's manual lock, and never twice without asking.
+- **Lock policy (K5, the operator 2026-10-03, supersedes the earlier "wait then ask"):** default `if_open:"queue"` with `wait_s` 0. A write to an open or locked file is queued and applied live by the Crow ONLYOFFICE plugin, or at close. `if_open:"wait"` returns `open_in_editor` instead (non-queueable tools always do). `if_open:"force_close"` is the explicit user override; it drops only ONLYOFFICE editor sessions, never a person's manual lock, and never twice without asking.
 - **Same-file write spacing:** ≥ 1.1 s between two writes to the same file (version ids are mtimes).
 - **Bundle code changes** bump `bundles/workspace/manifest.json` to **0.2.0**. The registry entry in `registry/add-ons.json` must match (`build-registry --check`).
 - **Dependencies:** bundle deps are declared in `bundles/workspace/package.json` (`tests/bundle-server-deps.test.js`) AND in root `devDependencies` (CI resolves bundle imports through root `node_modules`).
-  - New packages: `fflate`, `@xmldom/xmldom`, `ical.js`. **Kevin approves them before install** (Task 3 Step 0).
+  - New packages: `fflate`, `@xmldom/xmldom`, `ical.js`. **the operator approves them before install** (Task 3 Step 0).
 - **Panel code is server-rendered with no client script.** If any inline script is ever added, it must contain no backticks and no `${` (the panel template-literal rule).
 - **Network invariant:** nothing new is exposed. No new host port, no Serve/Funnel change.
 - **Before any gateway restart on crow:** read `~/CROW-SCHEDULE.md` and don't restart inside a registered window.
@@ -49,7 +49,7 @@
 
 Five inputs the spec implies but no tool table spells out. Each is pinned by a named test in the owning task.
 
-1. **Accented and emoji names** (Dayane writes Spanish), typed or stored DECOMPOSED (NFD, e.g. from a Mac or iPhone), e.g. `Menú semanal/Recetas – 2026 🌮.xlsx`, `find:"jalapeño"`, an event `"Cena: tacos al pastor con piña"`. Paths round-trip NFC-encoded, and text matching treats NFC and NFD as equal. The tests use literal `\u0301`/`\u0303` escapes, so the inputs really are NFD.
+1. **Accented and emoji names** (Alex writes Spanish), typed or stored DECOMPOSED (NFD, e.g. from a Mac or iPhone), e.g. `Menú semanal/Recetas – 2026 🌮.xlsx`, `find:"jalapeño"`, an event `"Cena: tacos al pastor con piña"`. Paths round-trip NFC-encoded, and text matching treats NFC and NFD as equal. The tests use literal `\u0301`/`\u0303` escapes, so the inputs really are NFD.
    - Pinned in Task 4 (`paths: accented + emoji segments round-trip`), Task 7 (`find_replace matches NFC/NFD-equivalent accents`) and Task 10 (`event summary with accents survives ICS round-trip`).
 2. **Two bot calls hit the same file at once** (e.g. Kitchen appends two recipe rows in parallel). Both changes land, as two versions, ≥ 1.1 s apart, and neither is lost.
    - Pinned in Task 5 (`concurrent writes to one file serialize and both apply`).
@@ -62,11 +62,11 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 
 ---
 
-## Rulings (decided here; deviations need Kevin)
+## Rulings (decided here; deviations need the operator)
 
 - **R-QUEUE (K5):** the queue (crow.db `workspace_pending_changes`) is the default for open files. Exactly-once comes from compare-and-set state transitions; a lease expiry → `unknown_after_claim` → postcondition check, never a blind re-apply.
 - **R-LIVE (K5):** live apply is a `type:"system"` ONLYOFFICE plugin, bind-mounted into the documentserver container. It reaches Crow same-origin through the Tailscale Serve path `/crow-live` on 8457, authenticates with the session's editor JWT (verified with the shared ONLYOFFICE secret), and claims with a short-lived per-change token. If Task 1 S9 shows `info.jwt` is unavailable or the plugin can't edit, live is disabled and everything applies at close.
-- **R-PROCEED (now `force_close`, override only):** ONLYOFFICE `drop` for the session users from `info`, then wait ≤ 30 s for the lock to clear, then write. If Task 1 finds `drop` doesn't release the lock, or loses typing, proceed returns `could_not_close_editor` (no other escalation) and the skill says "try later". Kevin is told in the Task 1 results.
+- **R-PROCEED (now `force_close`, override only):** ONLYOFFICE `drop` for the session users from `info`, then wait ≤ 30 s for the lock to clear, then write. If Task 1 finds `drop` doesn't release the lock, or loses typing, proceed returns `could_not_close_editor` (no other escalation) and the skill says "try later". the operator is told in the Task 1 results.
 - **R-EXPIRY:** if Task 1 shows labeled versions are **not** exempt from expiry, nothing changes in code. Undo already returns `version_gone` honestly. Note it in the spike results and the skill.
 - **R-COLLIDE:** writes to one file are spaced ≥ 1.1 s. If Task 1 shows Nextcloud skips a version for two quick PUTs even 1.1 s apart, raise the spacing to the smallest observed safe gap + 0.5 s and record it.
 - **R-HOST:** no `Host` header override. Loopback DAV answers 207 without it (verified 2026-10-03).
@@ -95,7 +95,7 @@ Five inputs the spec implies but no tool table spells out. Each is pinned by a n
 | I12 | Contact delete journaled after the DELETE | Journal first (calendar too) | Task 10 |
 | I13 | Calendar re-create after delete unverified | Spike S8, with a fallback ruling | Task 1 |
 | r2-rereview | B1: "newest id = current" is wrong after undo/restore. B2: no audit of the bundle lock file. Minors: second drop, undo-after-override wording, 423 on move/rename/folder trash, stale spike line | `current` flag + Quick edit filters the current row; blocking `npm audit --prefix bundles/workspace` CI step; retry runs with `wait`; skill wording; `explain423`; spike text fixed | Tasks 1, 3, 5, 14 |
-| K5 | Kevin's design change (2026-10-03): smooth writes to open docs | Default queue; live apply through a system ONLYOFFICE plugin (bind-mounted, same-origin Serve path, editor-JWT auth, per-change apply tokens, CAS claims); close-time apply; notifications; `force_close` only as an explicit override; spike S9 gates the live path | Tasks 1, 5, 12, 13, 14, 15, 16 |
+| K5 | the operator's design change (2026-10-03): smooth writes to open docs | Default queue; live apply through a system ONLYOFFICE plugin (bind-mounted, same-origin Serve path, editor-JWT auth, per-change apply tokens, CAS claims); close-time apply; notifications; `force_close` only as an explicit override; spike S9 gates the live path | Tasks 1, 5, 12, 13, 14, 15, 16 |
 | K5-r1 | `new Function` is impossible under safePluginEval; the plugin token is the docservice session token, not the editor JWT; the S9 gate couldn't fail; routes.js was written in Task 14 without live/worker; rate limit; worker skipped `info`; ack ≠ saved; partial failure → double apply; stranded `applying_close`; claims ignored seq; unpinned inverses; unsound undo inverses; Apply-now cancel swallowed; minors | Self-contained `crowCommand` (+ purity test, S9 check); auth binds the token to a LIVE session (current key + user ∈ `info.users`); S9 sends the full token to the loopback listener and records claims/lifetime/view-mode; `panel/routes.js` created in Task 13 with lazy live mount + worker; rate-limit skip prefix + per-document limit; `info` checked when unlocked; `verified` column + not-saved detection; `applied_nothing` gate; `recoverStranded`; `nextApplicable` on claim; `INVERSE_OF` pinning + path override; exact-only inverses else `undo_via_versions`; cancel failure aborts; 76 counts; trash wait 0; stale notify once; callback watchdog; count-based append postcondition | Tasks 1, 12, 13, 14 |
 | r2 | Spike imported fflate before it was installed; the after-version label overwrote human labels on restore; the fake's restore kept pre-restore content under the wrong id; browser CRLF caused stale_view | System `unzip` in the spike; `mayLabel` applied to the after row too; fake keeps `cur` at its id; undo-of-undo + CRLF tests | Tasks 1, 5, 14 |
 | minor | Colon names, SEARCH scope encoding, xlsx soffice check, proceed double-wait, share-root trash | All fixed (`share_root` refusal added) | Tasks 4, 5, 8 |
@@ -182,7 +182,7 @@ tests/workspace-bundle.test.js      MODIFY  walk skips node_modules + binaries
 13. Crow ONLYOFFICE live-edit plugin + live endpoints (K5)
 14. Quick edit page + skill + docs + registry + surface test
 15. PR, CI, merge, deploy on crow (incl. the documentserver recreate window + Serve path)
-16. Live acceptance on crow ([KEVIN] steps: laptop live, phone close-time, override)
+16. Live acceptance on crow ([OPERATOR] steps: laptop live, phone close-time, override)
 
 ---
 
@@ -233,7 +233,7 @@ def add_bookmark(par, name, bid):
 
 def docx():
     d = Document()
-    d.sections[0].header.paragraphs[0].text = "Casa Nueva — header"
+    d.sections[0].header.paragraphs[0].text = "Household — header"
     d.sections[0].footer.paragraphs[0].text = "Página footer"
     d.add_heading("Recetas de la semana", level=1)
     p = d.add_paragraph()
@@ -241,7 +241,7 @@ def docx():
     p.add_run("pastor").italic = True
     p.add_run(" con piña y jalapeño.")
     add_bookmark(p, "tacos", 1)
-    d.add_comment(p.runs[2], text="¿Con salsa verde?", author="Dayane", initials="D")  # python-docx >= 1.2
+    d.add_comment(p.runs[2], text="¿Con salsa verde?", author="Alex", initials="D")  # python-docx >= 1.2
     d.add_heading("Ingredientes", level=2)
     for item in ["Tortillas", "Cebolla", "Cilantro"]:
         d.add_paragraph(item, style="List Bullet")
@@ -275,7 +275,7 @@ def xlsx():
 
 def pptx():
     pr = Presentation()
-    s1 = pr.slides.add_slide(pr.slide_layouts[0]); s1.shapes.title.text = "Menú de octubre"; s1.placeholders[1].text = "Casa Nueva"
+    s1 = pr.slides.add_slide(pr.slide_layouts[0]); s1.shapes.title.text = "Menú de octubre"; s1.placeholders[1].text = "Household"
     s2 = pr.slides.add_slide(pr.slide_layouts[1]); s2.shapes.title.text = "Jueves"; s2.placeholders[1].text = "Tacos al pastor\nAgua de jamaica"
     s2.notes_slide.notes_text_frame.text = "Recordar comprar piña"
     tb = s2.shapes.add_textbox(Inches(1), Inches(5), Inches(4), Inches(1)); tb.text_frame.text = "Texto libre"
@@ -393,10 +393,10 @@ fact("S5_config_has_key", !!cfg?.document?.key);
 fact("S5_info_no_session", await cmd({ c: "info", key: cfg.document.key }));
 
 if (args.has("--editor-test")) {
-  // S6 [KEVIN]: open <DIR>/editor.docx in Workspace, type a word, leave the tab open, press Enter here.
+  // S6 [OPERATOR]: open <DIR>/editor.docx in Workspace, type a word, leave the tab open, press Enter here.
   const e = `${DIR}/editor.docx`;
   await dav("PUT", `files/${U}/${enc(e)}`, { body: readFileSync(join(import.meta.dirname, "..", "tests", "fixtures", "workspace", "rich.docx")) });
-  console.log(`\n[KEVIN] Open "${e}" in Workspace (ONLYOFFICE), type the word SPIKE anywhere, keep the tab open, then press Enter here.`);
+  console.log(`\n[OPERATOR] Open "${e}" in Workspace (ONLYOFFICE), type the word SPIKE anywhere, keep the tab open, then press Enter here.`);
   await new Promise((r) => process.stdin.once("data", r));
   const st = await stat(e);
   fact("S6_lock_while_open", { lock: st.lock, type: st.lockType, owner: st.lockOwner });
@@ -423,12 +423,12 @@ if (args.has("--editor-test")) {
   fact("S6b_bot_put_after_unlock_status", (await dav("PUT", `files/${U}/${enc(e)}`, { headers: { "If-Match": sNow.etag }, body: after })).status);
   const vFinal = await versions(st.fileid);
   fact("S6b_person_save_and_bot_write_are_distinct_versions", vFinal.length === vAfterDrop.length + 1);
-  console.log("[KEVIN] What did the editor tab show after the drop? Type a short description and press Enter:");
+  console.log("[OPERATOR] What did the editor tab show after the drop? Type a short description and press Enter:");
   fact("S6_editor_ui", String(await new Promise((r) => process.stdin.once("data", r))).trim());
 }
 
 // S8: calendar delete → re-create at the same href/UID (the undo path) while NC's calendar trash holds it.
-// Needs a calendar crow-bot can write; skipped (fact = "skipped") until Kevin has shared Menu with crow-bot.
+// Needs a calendar crow-bot can write; skipped (fact = "skipped") until the operator has shared Menu with crow-bot.
 {
   const home = await (await dav("PROPFIND", `calendars/${U}/`, { headers: { Depth: "1" } })).text();
   const href = (home.match(/<d:href>(\/remote\.php\/dav\/calendars\/crow-bot\/[^<]*menu[^<]*\/)<\/d:href>/i) || [])[1];
@@ -444,9 +444,9 @@ if (args.has("--editor-test")) {
 }
 
 if (args.has("--capture-fixtures")) {
-  // S7 [KEVIN]: open each rich.* in ONLYOFFICE, type one character and delete it, close the tab; press Enter here.
+  // S7 [OPERATOR]: open each rich.* in ONLYOFFICE, type one character and delete it, close the tab; press Enter here.
   for (const ext of ["docx", "xlsx", "pptx"]) await dav("PUT", `files/${U}/${enc(`${DIR}/rich.${ext}`)}`, { body: readFileSync(join(import.meta.dirname, "..", "tests", "fixtures", "workspace", `rich.${ext}`)) });
-  console.log(`\n[KEVIN] In "${DIR}": open rich.docx, rich.xlsx, rich.pptx one at a time, make a tiny edit (type and delete a character), close each tab. Wait 20 s after the last close, then press Enter.`);
+  console.log(`\n[OPERATOR] In "${DIR}": open rich.docx, rich.xlsx, rich.pptx one at a time, make a tiny edit (type and delete a character), close each tab. Wait 20 s after the last close, then press Enter.`);
   await new Promise((r) => process.stdin.once("data", r));
   const { writeFileSync } = await import("node:fs");
   for (const ext of ["docx", "xlsx", "pptx"]) {
@@ -483,9 +483,9 @@ Any other value: stop. Record it in the results file and apply R-COLLIDE / R-EXP
 Run: `grep -rn "label" ~/.crow/workspace/nextcloud/apps/files_versions/lib/Expiration.php ~/.crow/workspace/nextcloud/apps/files_versions/lib/Storage.php | head -20`
 Expected: the expiry code skips versions that have a label (NC ≥ 26 behavior). Record the file:line as evidence, or record "not exempt" and apply R-EXPIRY.
 
-- [ ] **Step 7: [KEVIN] Editor test**
+- [ ] **Step 7: [OPERATOR] Editor test**
 
-Run: `node scripts/workspace-w2-spike.mjs --editor-test`. Kevin opens the file named in the prompt on his laptop, types `SPIKE`, keeps the tab open and presses Enter in the terminal.
+Run: `node scripts/workspace-w2-spike.mjs --editor-test`. the operator opens the file named in the prompt on his laptop, types `SPIKE`, keeps the tab open and presses Enter in the terminal.
 Expected:
 - `S6_lock_while_open.type` = `1`, owner `onlyoffice`;
 - `S6_put_while_open_status` = 423;
@@ -493,17 +493,17 @@ Expected:
 - `S6_drop.error` = 0;
 - `S6b_bot_put_after_unlock_status` 204 and `S6b_person_save_and_bot_write_are_distinct_versions` true;
 - `S6_seconds_until_unlock` ≤ 30;
-- `S6_typing_saved_contains_SPIKE` true (Kevin's typing is in the saved file);
-- after a drop, record whether the dropped tab can still VIEW and whether that keeps the session alive. The docs say dropped users "can still view"; if status 2 never fires, proceed returns `could_not_close_editor`, the results file says so, and Kevin is told. The temp copy in `/tmp` is deleted at the end of the run.
+- `S6_typing_saved_contains_SPIKE` true (the operator's typing is in the saved file);
+- after a drop, record whether the dropped tab can still VIEW and whether that keeps the session alive. The docs say dropped users "can still view"; if status 2 never fires, proceed returns `could_not_close_editor`, the results file says so, and the operator is told. The temp copy in `/tmp` is deleted at the end of the run.
 
-Kevin's description of the tab is recorded. **If unlock > 30 s or the typing is lost → R-PROCEED fallback.**
+the operator's description of the tab is recorded. **If unlock > 30 s or the typing is lost → R-PROCEED fallback.**
 
-- [ ] **Step 8: [KEVIN] Capture ONLYOFFICE-written fixtures**
+- [ ] **Step 8: [OPERATOR] Capture ONLYOFFICE-written fixtures**
 
 Run: `node scripts/workspace-w2-spike.mjs --capture-fixtures` and follow the prompt.
 Expected: `tests/fixtures/workspace/oo-rich.{docx,xlsx,pptx}` exist and differ from `rich.*` (`cmp` reports a difference).
 
-- [ ] **Step 8b: [KEVIN] S9: ONLYOFFICE plugin probe (gates K5's live path)**
+- [ ] **Step 8b: [OPERATOR] S9: ONLYOFFICE plugin probe (gates K5's live path)**
 
 Purpose: before Task 13, prove the live-plugin assumptions on the real 9.4 CE editor. Read `~/CROW-SCHEDULE.md` first. Nothing in this step degrades prod. The probe is copied into the running container only (**not** persistent; removed at the end), and a temporary Serve path points at a probe listener.
 
@@ -523,7 +523,7 @@ Purpose: before Task 13, prove the live-plugin assumptions on the real 9.4 CE ed
    It writes these facts to the results file and never the token. If the docservice uses a *different* secret on another install, the record says so; on crow all four secrets hash the same.
 3. `sudo tailscale serve --bg --https=8457 --set-path=/crow-live/probe http://127.0.0.1:3399` (removed in step 6).
 4. `docker cp scripts/workspace-w2-plugin-probe crow-workspace-onlyoffice-1:/var/www/onlyoffice/documentserver/sdkjs-plugins/{0C0FFEE0-5EED-4C8B-9B57-000000000001}`, then `docker exec crow-workspace-onlyoffice-1 documentserver-flush-cache.sh`.
-5. **[KEVIN]** opens the spike `editor.docx`, an .xlsx and a .pptx on the **laptop** (edit), then the .docx on the **phone** (view). He reports whether "Crow probe…" appeared and whether "CROW-PROBE" showed in the laptop doc and survived close/save.
+5. **[OPERATOR]** opens the spike `editor.docx`, an .xlsx and a .pptx on the **laptop** (edit), then the .docx on the **phone** (view). He reports whether "Crow probe…" appeared and whether "CROW-PROBE" showed in the laptop doc and survived close/save.
 6. Cleanup (always, also on failure):
    - `docker exec … rm -rf …/{0C0FFEE0-…}` and flush the cache again;
    - `sudo tailscale serve --https=8457 --set-path=/crow-live/probe off`;
@@ -536,12 +536,12 @@ Record in the results file:
 
 Also record:
 - `S9_callcommand_structured_result`: a command with a local object literal and an inner function call returned `{ok:true}` through `safePluginEval`;
-- `S9_command_noop_while_user_edits_cell`: Kevin double-clicks a cell; the probe's sheet command reports whether it ran or no-op'd;
+- `S9_command_noop_while_user_edits_cell`: the operator double-clicks a cell; the probe's sheet command reports whether it ran or no-op'd;
 - `S9_phone_locks_file`: `nc:lock` while the phone is only viewing.
 
 **Gate:**
 - No token, an invalid signature, or a token user not found in `info.users` → R-LIVE fallback (live disabled, close-time only).
-- `S9_callcommand_structured_result` false → the same fallback. Task 13 still ships the plugin code but `LIVE_OPS` is empty, and Kevin is told.
+- `S9_callcommand_structured_result` false → the same fallback. Task 13 still ships the plugin code but `LIVE_OPS` is empty, and the operator is told.
 - An individual method missing → that op leaves `LIVE_OPS`.
 
 - [ ] **Step 9: Write the results file**
@@ -549,7 +549,7 @@ Also record:
 `docs/superpowers/specs/2026-10-03-workspace-w2-spike-results.md` contains:
 - the FACTS JSON of each run;
 - the Step 6 evidence;
-- Kevin's S6 description;
+- the operator's S6 description;
 - one line per ruling: R-PROCEED confirmed/fallback, R-EXPIRY exempt/not, R-COLLIDE spacing value.
 
 - [ ] **Step 10: Commit**
@@ -806,9 +806,9 @@ git show --stat HEAD
   - `redact(text, cfg)`, `envPath()`
 - Produces `server/server.js`: `createWorkspaceServer({ clock } = {})` returns `McpServer`. Each later task adds one `register<Family>(server, ctx)` import there. `ctx = { getConfig, clock }` with `clock = { now(): number, sleep(ms): Promise }`.
 
-- [ ] **Step 0: [KEVIN] Approve the new npm packages**
+- [ ] **Step 0: [OPERATOR] Approve the new npm packages**
 
-Ask Kevin in one message, then wait: "W2 needs three new npm packages: `fflate` 0.8.x (MIT, zip), `@xmldom/xmldom` 0.9.x (MIT, XML DOM) and `ical.js` 2.2.x (MPL-2.0, iCalendar/vCard). They go into `bundles/workspace/package.json` and root devDependencies. OK to install?" Do not proceed without a yes.
+Ask the operator in one message, then wait: "W2 needs three new npm packages: `fflate` 0.8.x (MIT, zip), `@xmldom/xmldom` 0.9.x (MIT, XML DOM) and `ical.js` 2.2.x (MPL-2.0, iCalendar/vCard). They go into `bundles/workspace/package.json` and root devDependencies. OK to install?" Do not proceed without a yes.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1122,7 +1122,7 @@ test("a colon in a name is fine; only URL schemes are refused", () => {
 });
 
 test("leading slash means drive root; trailing slash ignored", () => {
-  assert.deepEqual(splitPath("/Shared with Crow/Casa Nueva/"), ["Shared with Crow", "Casa Nueva"]);
+  assert.deepEqual(splitPath("/Shared with Crow/Household/"), ["Shared with Crow", "Household"]);
 });
 
 test("paths: accented + emoji segments round-trip (Review Focus 1)", () => {
@@ -1210,15 +1210,15 @@ import { connectWorkspace } from "./helpers/workspace-client.js";
 let fake, call, close;
 before(async () => {
   fake = await startFakeNextcloud({ secret: "jwt" });
-  fake.addFolder("Shared with Crow/Casa Nueva", { owner: "admin" });
-  fake.addFile("Shared with Crow/Casa Nueva/Menú.xlsx", Buffer.from("PK"), { owner: "admin" });
-  fake.addFile("Shared with Crow/Casa Nueva/notes.md", Buffer.from("# hi"), { owner: "admin", lock: { type: 1, owner: "onlyoffice", displayName: "ONLYOFFICE" } });
+  fake.addFolder("Shared with Crow/Household", { owner: "admin" });
+  fake.addFile("Shared with Crow/Household/Menú.xlsx", Buffer.from("PK"), { owner: "admin" });
+  fake.addFile("Shared with Crow/Household/notes.md", Buffer.from("# hi"), { owner: "admin", lock: { type: 1, owner: "onlyoffice", displayName: "ONLYOFFICE" } });
   ({ call, close } = await connectWorkspace(fake));
 });
 after(async () => { await close(); fake.close(); });
 
 test("ws_drive_list_folder lists children with lock state", async () => {
-  const r = await call("ws_drive_list_folder", { path: "Shared with Crow/Casa Nueva" });
+  const r = await call("ws_drive_list_folder", { path: "Shared with Crow/Household" });
   assert.equal(r.success, true);
   const names = r.data.items.map((i) => i.name).sort();
   assert.deepEqual(names, ["Menú.xlsx", "notes.md"]);
@@ -1233,16 +1233,16 @@ test("ws_drive_search escapes LIKE wildcards and XML", async () => {
 });
 
 test("ws_drive_find_folder finds by exact name", async () => {
-  const r = await call("ws_drive_find_folder", { name: "Casa Nueva" });
+  const r = await call("ws_drive_find_folder", { name: "Household" });
   assert.equal(r.data.found, true);
-  assert.equal(r.data.path, "Shared with Crow/Casa Nueva");
+  assert.equal(r.data.path, "Shared with Crow/Household");
 });
 
 test("ws_drive_get_metadata and get_permissions", async () => {
-  const m = await call("ws_drive_get_metadata", { path: "Shared with Crow/Casa Nueva/notes.md" });
+  const m = await call("ws_drive_get_metadata", { path: "Shared with Crow/Household/notes.md" });
   assert.equal(m.data.owner.id, "admin");
   assert.equal(m.data.lock.type, "editor");
-  const p = await call("ws_drive_get_permissions", { path: "Shared with Crow/Casa Nueva/notes.md" });
+  const p = await call("ws_drive_get_permissions", { path: "Shared with Crow/Household/notes.md" });
   assert.equal(p.data.crow_bot.can_write, true);
   assert.match(p.data.note, /cannot see other people's shares/);
 });
@@ -1351,7 +1351,7 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
     return `<d:propstat><d:prop>
 <d:getetag>${xmlEsc(n.etag)}</d:getetag><d:getlastmodified>${new Date(n.mtime * 1000).toUTCString()}</d:getlastmodified>
 ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/><d:getcontentlength>${n.bytes.length}</d:getcontentlength><d:getcontenttype>application/octet-stream</d:getcontenttype>`}
-<oc:fileid>${n.fileId}</oc:fileid><oc:permissions>${n.perms}</oc:permissions><oc:owner-id>${n.owner}</oc:owner-id><oc:owner-display-name>${n.owner === "admin" ? "Kevin" : n.owner}</oc:owner-display-name>
+<oc:fileid>${n.fileId}</oc:fileid><oc:permissions>${n.perms}</oc:permissions><oc:owner-id>${n.owner}</oc:owner-id><oc:owner-display-name>${n.owner === "admin" ? "the operator" : n.owner}</oc:owner-display-name>
 <nc:lock>${lock ? 1 : ""}</nc:lock>${lock ? `<nc:lock-owner-type>${lock.type}</nc:lock-owner-type><nc:lock-owner>${xmlEsc(lock.owner)}</nc:lock-owner><nc:lock-owner-displayname>${xmlEsc(lock.displayName || lock.owner)}</nc:lock-owner-displayname><nc:lock-time>${lock.time || clockS}</nc:lock-time>` : ""}
 </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>`;
   };
@@ -1440,7 +1440,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
     }
     // ---- principals ----
     const pm = u.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
-    if (pm && req.method === "PROPFIND") { const names = { admin: "Kevin", dayane: "Dayane", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
+    if (pm && req.method === "PROPFIND") { const names = { admin: "the operator", alex: "Alex", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
     // ---- OCS ----
     const cfgm = u.match(/^\/ocs\/v2\.php\/apps\/onlyoffice\/api\/v1\/config\/(\d+)/);
     if (cfgm) { const id = Number(cfgm[1]); if (!state.keys.has(id)) state.keys.set(id, `k${id}`); res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ document: { key: state.keys.get(id) }, editorConfig: { user: { id: `${instance}_crow-bot` } } })); }
@@ -1780,7 +1780,7 @@ export function defineTools(server, ctx, defs) {
 import { z } from "zod";
 import { WsError } from "../result.js";
 export const fileRef = {
-  path: z.string().max(4096).optional().describe("Path inside Crow's Workspace drive, e.g. 'Shared with Crow/Casa Nueva/Menu.xlsx'"),
+  path: z.string().max(4096).optional().describe("Path inside Crow's Workspace drive, e.g. 'Shared with Crow/Household/Menu.xlsx'"),
   file_id: z.number().int().positive().optional().describe("Nextcloud file id (alternative to path)"),
 };
 export const writeOpts = {
@@ -1952,21 +1952,21 @@ test("editor lock clears inside 30 s → waits, then writes", async () => {
 });
 
 test("default with no queue provider = no wait, open_in_editor at once; queue provider → enqueue is called, nothing written", async () => {
-  fake.addFile("S/q.docx", Buffer.from("d")); fake.openInEditor("S/q.docx", ["dayane"]);
+  fake.addFile("S/q.docx", Buffer.from("d")); fake.openInEditor("S/q.docx", ["alex"]);
   const t0 = clock.now();
   await assert.rejects(W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock }), (e) => e.code === "open_in_editor");
   assert.equal(clock.now(), t0, "default wait_s is 0");
   let got = null; const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await W.withFileWrite(cfg, { path: "S/q.docx" }, appendMut("!"), { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_x" }; } } });
-  assert.deepEqual(r, { queued: true, change_id: "pc_x" }); assert.equal(got.lock.data.open_by[0], "Dayane");
+  assert.deepEqual(r, { queued: true, change_id: "pc_x" }); assert.equal(got.lock.data.open_by[0], "Alex");
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
 });
 
 test("still open after 30 s (if_open wait) → open_in_editor naming the person, can_proceed", async () => {
   fake.addFile("S/o.docx", Buffer.from("d"));
-  fake.openInEditor("S/o.docx", ["dayane"]);
+  fake.openInEditor("S/o.docx", ["alex"]);
   await assert.rejects(W.withFileWrite(cfg, { path: "S/o.docx" }, appendMut("!"), { clock, ifOpen: "wait", waitS: 30 }),
-    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Dayane" && e.data.can_proceed === true && /open in the editor/.test(e.message));
+    (e) => e.code === "open_in_editor" && e.data.open_by[0] === "Alex" && e.data.can_proceed === true && /open in the editor/.test(e.message));
 });
 
 test("proceed → drop → editor saves its typing first → bot change on top", async () => {
@@ -1985,7 +1985,7 @@ test("drop that never releases → could_not_close_editor", async () => {
 });
 
 test("a person's manual lock is never overridden, even with proceed", async () => {
-  fake.addFile("S/m.docx", Buffer.from("d"), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
+  fake.addFile("S/m.docx", Buffer.from("d"), { lock: { type: 0, owner: "alex", displayName: "Alex" } });
   await assert.rejects(W.withFileWrite(cfg, { path: "S/m.docx" }, appendMut("!"), { clock, ifOpen: "force_close", waitS: 0 }),
     (e) => e.code === "locked_by_person" && e.data.can_proceed === false);
   assert.ok(!fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.key === "k" + fake.node("S/m.docx").fileId));
@@ -2062,20 +2062,20 @@ test("version_id carries the PUT's own etag, not a later write's", async () => {
 
 test("undo of an undo works, and restoring onto a human-labeled version keeps that label (review r2)", async () => {
   const n = fake.addFile("S/uu.txt", Buffer.from("v1"));
-  n.versions[0].label = "Kevin: approved";
+  n.versions[0].label = "the operator: approved";
   const r = await W.withFileWrite(cfg, { path: "S/uu.txt" }, appendMut("+bot"), { clock });
   const u = await W.undoFileChange(cfg, { path: "S/uu.txt" }, r.version_id, { clock });
   assert.equal(text(fake.node("S/uu.txt").bytes), "v1");
-  assert.equal(fake.versionsOf("S/uu.txt").find((x) => x.bytes.toString() === "v1").label, "Kevin: approved");
+  assert.equal(fake.versionsOf("S/uu.txt").find((x) => x.bytes.toString() === "v1").label, "the operator: approved");
   await W.undoFileChange(cfg, { path: "S/uu.txt" }, u.version_id, { clock });
   assert.equal(text(fake.node("S/uu.txt").bytes), "v1+bot");
 });
 
 test("a person's own version label is never overwritten (review I9)", async () => {
   const n = fake.addFile("S/lab.txt", Buffer.from("a"));
-  n.versions[0].label = "Kevin: final draft";
+  n.versions[0].label = "the operator: final draft";
   await W.withFileWrite(cfg, { path: "S/lab.txt" }, appendMut("b"), { clock });
-  assert.equal(fake.versionsOf("S/lab.txt")[0].label, "Kevin: final draft");
+  assert.equal(fake.versionsOf("S/lab.txt")[0].label, "the operator: final draft");
 });
 
 test("undo of a created file moves it to the trash; a forged version_id is refused", async () => {
@@ -2448,9 +2448,9 @@ test("export converts via the connector into the drive, never overwriting", asyn
 });
 
 test("share: user shares only, permissions by role", async () => {
-  const r = await call("ws_drive_share", { path: "S/r.docx", user: "dayane", role: "writer" });
+  const r = await call("ws_drive_share", { path: "S/r.docx", user: "alex", role: "writer" });
   assert.equal(r.success, true);
-  assert.deepEqual(fake.state.shares.at(-1), { id: "1", path: "/S/r.docx", share_with: "dayane", share_type: 0, permissions: 3 });
+  assert.deepEqual(fake.state.shares.at(-1), { id: "1", path: "/S/r.docx", share_with: "alex", share_type: 0, permissions: 3 });
   assert.equal((await call("ws_drive_share", { path: "S/r.docx", user: "bad user/../", role: "reader" })).code, "bad_user");
 });
 
@@ -2477,18 +2477,18 @@ test("after an undo, list_versions flags the restored row as current and still l
 });
 
 test("move/rename/trash of an open file (or a folder with an open child) explain who has it open (re-review minor)", async () => {
-  fake.addFile("S/mv.docx", Buffer.from("PK")); fake.openInEditor("S/mv.docx", ["dayane"]);
+  fake.addFile("S/mv.docx", Buffer.from("PK")); fake.openInEditor("S/mv.docx", ["alex"]);
   assert.equal((await call("ws_drive_rename", { path: "S/mv.docx", new_name: "x.docx" })).code, "open_in_editor");
-  fake.addFolder("S/dir"); fake.addFile("S/dir/in.docx", Buffer.from("PK")); fake.openInEditor("S/dir/in.docx", ["dayane"]);
+  fake.addFolder("S/dir"); fake.addFile("S/dir/in.docx", Buffer.from("PK")); fake.openInEditor("S/dir/in.docx", ["alex"]);
   const t = await call("ws_drive_trash_file", { path: "S/dir", wait_s: 0 });
   assert.equal(t.code, "locked_inside"); assert.match(t.error, /open/);
 });
 
 test("trash refuses an open file and names who has it", async () => {
   fake.addFile("S/open.docx", Buffer.from("PK"));
-  fake.openInEditor("S/open.docx", ["dayane"]);
+  fake.openInEditor("S/open.docx", ["alex"]);
   const r = await call("ws_drive_trash_file", { path: "S/open.docx", wait_s: 0 });
-  assert.equal(r.code, "open_in_editor"); assert.deepEqual(r.data.open_by, ["Dayane"]);
+  assert.equal(r.code, "open_in_editor"); assert.deepEqual(r.data.open_by, ["Alex"]);
 });
 
 test("no tool RESULT or ERROR ever contains the app password or JWT secret (spec §10.1)", async () => {
@@ -5038,9 +5038,9 @@ test("all-day on the DST day stays a date (Review Focus 4); single-day end is ma
 
 test("datetimes need an offset; attendees get SCHEDULE-AGENT=CLIENT by default", async () => {
   assert.equal((await call("ws_cal_create_event", { calendar: "Menu", summary: "x", start: "2026-10-10T18:00", end: "2026-10-10T19:00" })).code, "bad_time");
-  await call("ws_cal_create_event", { calendar: "Menu", summary: "Con invitados", start: "2026-10-10T18:00:00-05:00", end: "2026-10-10T19:00:00-05:00", attendees: ["dayane@example.org"] });
+  await call("ws_cal_create_event", { calendar: "Menu", summary: "Con invitados", start: "2026-10-10T18:00:00-05:00", end: "2026-10-10T19:00:00-05:00", attendees: ["alex@example.org"] });
   const obj = [...pim.calendars.get("menu_shared_by_admin").objects.values()].find((o) => o.text.includes("Con invitados")).text;
-  assert.match(obj.replace(/\r\n /g, ""), /ATTENDEE;[^:]*SCHEDULE-AGENT=CLIENT[^:]*:mailto:dayane@example\.org/);
+  assert.match(obj.replace(/\r\n /g, ""), /ATTENDEE;[^:]*SCHEDULE-AGENT=CLIENT[^:]*:mailto:alex@example\.org/);
 });
 
 test("update + delete are journaled and undoable; undo refuses after a human edit; journal files are 600", async () => {
@@ -5054,7 +5054,7 @@ test("update + delete are journaled and undoable; undo refuses after a human edi
   assert.equal((await call("ws_cal_get_event", { calendar: "Menu", uid: c.data.uid })).success, true);
   const u2 = await call("ws_cal_update_event", { calendar: "Menu", uid: c.data.uid, location: "Casa" });
   const file = [...pim.calendars.get("menu_shared_by_admin").objects.entries()].find(([, o]) => o.text.includes(c.data.uid))[0];
-  pim.addEvent("menu_shared_by_admin", file, pim.calendars.get("menu_shared_by_admin").objects.get(file).text.replace("Casa", "Casa de Dayane"));
+  pim.addEvent("menu_shared_by_admin", file, pim.calendars.get("menu_shared_by_admin").objects.get(file).text.replace("Casa", "Casa de Alex"));
   assert.equal((await call("ws_undo_last_change", { path: u2.data.ref, version_id: u2.data.version_id })).code, "changed_since");
   const dir = join(home, "data", "workspace-tools", "journal");
   assert.equal(statSync(dir).mode & 0o777, 0o700);
@@ -5600,7 +5600,7 @@ for (const src of ["rich.docx", "oo-rich.docx"]) {
     put(`l-${src}`, src);
     const r = await call("ws_docs_list_comments", { path: `S/l-${src}` });
     const c = r.data.comments.find((x) => x.content === "¿Con salsa verde?");
-    assert.equal(c.author, "Dayane"); assert.match(c.quoted_text, /con piña y jalapeño/);
+    assert.equal(c.author, "Alex"); assert.match(c.quoted_text, /con piña y jalapeño/);
   });
 
   test(`${src}: add (real anchor) → reply → resolve; resolved hidden unless asked`, async () => {
@@ -5975,11 +5975,11 @@ const put = (n) => fake.addFile(`S/${n}`, readFileSync(join(FIX, "oo-rich.docx")
 const notifs = async () => (await db.execute("SELECT title, body FROM notifications ORDER BY id")).rows;
 
 test("open file → queued (success, who, change_id), nothing written, notification created", async () => {
-  put("q1.docx"); fake.openInEditor("S/q1.docx", ["dayane"]);
+  put("q1.docx"); fake.openInEditor("S/q1.docx", ["alex"]);
   const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await call("ws_docs_find_replace", { path: "S/q1.docx", find: "Tortillas", replace: "Totopos" });
   assert.equal(r.success, true); assert.equal(r.data.queued, true); assert.match(r.data.change_id, /^pc_/);
-  assert.deepEqual(r.data.open_by, ["Dayane"]); assert.equal(r.data.apply, "live_or_on_close");
+  assert.deepEqual(r.data.open_by, ["Alex"]); assert.equal(r.data.apply, "live_or_on_close");
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts);
   assert.ok((await notifs()).some((n) => /change waiting for q1\.docx/.test(n.title)));
   assert.equal((await call("ws_change_status", { change_id: r.data.change_id })).data.state, "pending");
@@ -6032,7 +6032,7 @@ test("exactly once: CAS claims; an expired live lease becomes unknown_after_clai
 });
 
 test("a person's manual lock: queued, applied only after unlock; force_close refused", async () => {
-  fake.addFile("S/q5.docx", readFileSync(join(FIX, "oo-rich.docx")), { lock: { type: 0, owner: "dayane", displayName: "Dayane" } });
+  fake.addFile("S/q5.docx", readFileSync(join(FIX, "oo-rich.docx")), { lock: { type: 0, owner: "alex", displayName: "Alex" } });
   const r = await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota." });
   assert.equal(r.data.queued, true);
   assert.equal((await call("ws_docs_append", { path: "S/q5.docx", markdown: "Nota.", if_open: "force_close" })).code, "locked_by_person");
@@ -6459,7 +6459,7 @@ import { connectWorkspace } from "./helpers/workspace-client.js";
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const sign = (payload, secret = "jwt") => { const h = `${b64({ alg: "HS256", typ: "JWT" })}.${b64(payload)}`; return `${h}.${createHmac("sha256", secret).update(h).digest("base64url")}`; };
-const editorJwt = (key, extra = {}) => sign({ document: { key, permissions: { edit: true } }, editorConfig: { user: { id: "ocinst_admin", name: "Kevin" }, mode: "edit" }, exp: Math.floor(Date.now() / 1000) + 3600, ...extra });
+const editorJwt = (key, extra = {}) => sign({ document: { key, permissions: { edit: true } }, editorConfig: { user: { id: "ocinst_admin", name: "the operator" }, mode: "edit" }, exp: Math.floor(Date.now() / 1000) + 3600, ...extra });
 // the fake's session for S/l.docx has users ["ocinst_admin"] (openInEditor) → tokens for other users are refused
 let fake, call, close, base, server, key, changeId;
 before(async () => {
@@ -7051,12 +7051,12 @@ test("stale view and paragraphs with links/images are refused, nothing written (
 });
 
 test("file open in the editor → queued page naming who, with Cancel and a confirm-gated Apply now (K5)", async () => {
-  fake.openInEditor("Shared with Crow/Casa/r.docx", ["dayane"], { releaseAfterMs: 3000, typed: null });
+  fake.openInEditor("Shared with Crow/Casa/r.docx", ["alex"], { releaseAfterMs: 3000, typed: null });
   const puts = fake.calls.filter((c) => c.method === "PUT").length;
   const r = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x" });
   assert.equal(r.status, 200);
   const html = await r.text();
-  assert.match(html, /Dayane/); assert.match(html, /waiting/i); assert.match(html, /action="\/api\/workspace\/quick\/cancel"/);
+  assert.match(html, /Alex/); assert.match(html, /waiting/i); assert.match(html, /action="\/api\/workspace\/quick\/cancel"/);
   assert.match(html, /name="if_open" value="force_close"/); assert.match(html, /data-turbo="false"/);
   assert.equal(fake.calls.filter((c) => c.method === "PUT").length, puts, "queued, not written");
   const p = await post("/api/workspace/quick/save", { _csrf: "tok", path: "Shared with Crow/Casa/r.docx", kind: "docx", target: "1", shown: "Tacos al pastor con piña y jalapeño.", value: "x", if_open: "force_close" });
@@ -7396,7 +7396,7 @@ Expected: `suite`, `static-checks` and `audit` are all `completed`/`success`. An
 
 - [ ] **Step 4: Merge** (standing grant for improvement-plan items; CI must be green), then delete the branch.
 
-- [ ] **Step 4b: Register the documentserver recreate window** in `~/CROW-SCHEDULE.md`. The new bind mount needs `docker compose up -d onlyoffice` (the container is recreated). Run it only when `info` shows no live sessions on the files Crow has pending changes for, and when Kevin and Dayane confirm nothing is open; otherwise wait. Cap the window at 15 min: if the documentserver healthcheck isn't green by then, roll back with `git -C ~/crow revert` of the compose change and `up -d` again, enforced by a detached deadman (`systemd-run --user --on-active=15min …`) per the unattended-window rule. Clear the window when done.
+- [ ] **Step 4b: Register the documentserver recreate window** in `~/CROW-SCHEDULE.md`. The new bind mount needs `docker compose up -d onlyoffice` (the container is recreated). Run it only when `info` shows no live sessions on the files Crow has pending changes for, and when the operator and Alex confirm nothing is open; otherwise wait. Cap the window at 15 min: if the documentserver healthcheck isn't green by then, roll back with `git -C ~/crow revert` of the compose change and `up -d` again, enforced by a detached deadman (`systemd-run --user --on-active=15min …`) per the unattended-window rule. Clear the window when done.
 
 - [ ] **Step 5: Deploy on crow**
 
@@ -7415,7 +7415,7 @@ Then:
 1. `docker compose -p crow-workspace -f ~/.crow/bundles/workspace/docker-compose.yml up -d onlyoffice` (inside the Step 4b window);
 2. `bash ~/.crow/bundles/workspace/ops/bootstrap.sh` (the cache-flush step logs "live plugin 0.2.0");
 3. add the Serve path (`sudo tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live`);
-4. verify that `curl -s https://crow.dachshund-chromatic.ts.net:8457/crow-live/v1/pending?key=x` → 401 from the tailnet;
+4. verify that `curl -s https://crow.example.ts.net:8457/crow-live/v1/pending?key=x` → 401 from the tailnet;
 5. verify that `tailscale serve status` shows no Funnel on 8457;
 6. `docker exec crow-workspace-onlyoffice-1 ls /var/www/onlyoffice/documentserver/sdkjs-plugins | grep 6F1C2A5E`. Then `journalctl` shows the workspace addon connected with 76 tools.
 
@@ -7423,13 +7423,13 @@ Confirm `auto_update_last_result` is not "Skipped". Check whether `crow-r4-gatew
 
 ---
 
-### Task 16: Live acceptance on crow ([KEVIN] steps marked)
+### Task 16: Live acceptance on crow ([OPERATOR] steps marked)
 
 **Files:**
 - Create: `scripts/workspace-w2-acceptance.mjs` (kept for re-runs)
 - Modify: `docs/superpowers/specs/2026-10-03-workspace-w2-spike-results.md` (append an "Acceptance" section)
 
-- [ ] **Step 1: [KEVIN] Share what the bot needs**
+- [ ] **Step 1: [OPERATOR] Share what the bot needs**
 
 In Workspace as admin:
 - share the **Menu** calendar with Crow bot (**can edit**);
@@ -7481,16 +7481,16 @@ const ls = await call("ws_drive_list_versions", { path: `${F}/acc.docx` });
 check("labels visible", ls.data.versions.some((v) => /Crow|Undo/.test(v.label)));
 
 if (process.argv.includes("--lock-test")) {
-  console.log(`\n[KEVIN] Open "${F}/acc.docx" in Workspace on the laptop, type the word KEVIN, keep the tab open, then press Enter.`);
+  console.log(`\n[OPERATOR] Open "${F}/acc.docx" in Workspace on the laptop, type the word KEVIN, keep the tab open, then press Enter.`);
   await new Promise((r) => process.stdin.once("data", r));
   const t0 = Date.now();
   const w = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot.", if_open: "wait", wait_s: 30 });
-  check("open_in_editor names Kevin within ~30 s", w.code === "open_in_editor" && w.data.open_by.length > 0 && Date.now() - t0 < 40000, JSON.stringify(w.data?.open_by));
+  check("open_in_editor names the operator within ~30 s", w.code === "open_in_editor" && w.data.open_by.length > 0 && Date.now() - t0 < 40000, JSON.stringify(w.data?.open_by));
   const p = await call("ws_docs_append", { path: `${F}/acc.docx`, markdown: "Línea del bot.", if_open: "force_close" });
   check("force_close → write lands", p.success, p.error);
   const md = (await call("ws_docs_read", { path: `${F}/acc.docx` })).data.markdown;
-  check("Kevin's typing kept and bot line on top", md.includes("KEVIN") && md.includes("Línea del bot."));
-  console.log("[KEVIN] Describe what the editor tab showed, then press Enter:"); await new Promise((r) => process.stdin.once("data", r));
+  check("the operator's typing kept and bot line on top", md.includes("KEVIN") && md.includes("Línea del bot."));
+  console.log("[OPERATOR] Describe what the editor tab showed, then press Enter:"); await new Promise((r) => process.stdin.once("data", r));
 }
 
 // cleanup (trash + delete; all recoverable)
@@ -7505,42 +7505,42 @@ process.exit(rows.every((r) => r[0] === "PASS") ? 0 : 1);
 - [ ] **Step 3: Run the scripted acceptance**
 
 Run: `node scripts/workspace-w2-acceptance.mjs`
-Expected: all checks pass. Before cleanup runs, look at the Menu event on Kevin's phone **[KEVIN]**: DAVx⁵ sync shows "W2: tacos (prueba)" on 2026-10-08. To give Kevin time, run with `--lock-test` or add a pause.
+Expected: all checks pass. Before cleanup runs, look at the Menu event on the operator's phone **[OPERATOR]**: DAVx⁵ sync shows "W2: tacos (prueba)" on 2026-10-08. To give the operator time, run with `--lock-test` or add a pause.
 
-- [ ] **Step 3b: [KEVIN] K5 live and close-time runs**
+- [ ] **Step 3b: [OPERATOR] K5 live and close-time runs**
 
 1. **Laptop, live:**
-   - Kevin opens `W2 acceptance/acc.docx` and `W2 acceptance/acc.xlsx` on the laptop and keeps typing.
-   - Claude runs `ws_docs_find_replace` (Tortillas → Totopos) and `ws_sheets_write` (B2 → 7). Expected: both return `queued: true` naming Kevin.
-   - Within ~20 s Kevin sees "Crow is editing…", then the changes appear; his own typing is untouched.
+   - the operator opens `W2 acceptance/acc.docx` and `W2 acceptance/acc.xlsx` on the laptop and keeps typing.
+   - Claude runs `ws_docs_find_replace` (Tortillas → Totopos) and `ws_sheets_write` (B2 → 7). Expected: both return `queued: true` naming the operator.
+   - Within ~20 s the operator sees "Crow is editing…", then the changes appear; his own typing is untouched.
    - `ws_change_status` → `applied_live`. After he closes, the saved file has both, and the version history has his save.
 2. **Undo live:** `ws_undo_last_change` with the `change_id` → the inverse appears live (or at close).
 3. **Phone, close-time:**
-   - Kevin opens `acc.docx` on the phone (view-only). Claude queues `ws_docs_append`.
+   - the operator opens `acc.docx` on the phone (view-only). Claude queues `ws_docs_append`.
    - Expected: no live apply, and a Crow notification "change waiting".
    - He closes it; within ~1 min it's `applied_close`, and the notification carries the undo id.
 4. **Plugin absent:** with the laptop tab opened **before** Task 15's deploy (if one is still around), or after disabling plugins in the connector admin, the change waits and applies at close.
-5. **Override:** Kevin says "apply now even if it kicks me out" → `if_open: "force_close"` → his editor closes, his typing is saved first, and the change is on top.
+5. **Override:** the operator says "apply now even if it kicks me out" → `if_open: "force_close"` → his editor closes, his typing is saved first, and the change is on top.
 
-- [ ] **Step 4: [KEVIN] Lock test** (`if_open: "wait"` path and the `force_close` override; the default is the queue, covered by Step 3b)
+- [ ] **Step 4: [OPERATOR] Lock test** (`if_open: "wait"` path and the `force_close` override; the default is the queue, covered by Step 3b)
 
 Run: `node scripts/workspace-w2-acceptance.mjs --lock-test` and follow the prompts.
-Expected: three more PASS lines. Kevin's description of the editor (disconnect/reload) is recorded.
+Expected: three more PASS lines. the operator's description of the editor (disconnect/reload) is recorded.
 
 - [ ] **Step 4b: pi-bot path** (review I11)
 
 Run one pi bot turn that needs Workspace. For example, `scripts/pi-bots` CLI or Bot Builder "test turn" with a bot whose tool set includes `workspace`, asking "list the W2 acceptance folder".
 Expected: a `ws_drive_list_folder` result. If the server dies at import, the I11 fallback is wrong; fix the product before closing W2.
 
-- [ ] **Step 5: [KEVIN] Gateway path + Quick edit from the phone**
+- [ ] **Step 5: [OPERATOR] Gateway path + Quick edit from the phone**
 
-1. In Crow's AI chat, Kevin asks: "List what's in my Workspace W2 acceptance folder". The answer comes from `ws_drive_list_folder` through `crow_tools`. Check the gateway log for the call.
-2. On his phone, Kevin opens Crow → Office → Quick edit, opens a .docx in `W2 acceptance`, edits a paragraph, saves, sees "Saved." with Undo, taps Undo, and sees "Undone."
+1. In Crow's AI chat, the operator asks: "List what's in my Workspace W2 acceptance folder". The answer comes from `ws_drive_list_folder` through `crow_tools`. Check the gateway log for the call.
+2. On his phone, the operator opens Crow → Office → Quick edit, opens a .docx in `W2 acceptance`, edits a paragraph, saves, sees "Saved." with Undo, taps Undo, and sees "Undone."
 3. Then he opens an .xlsx and edits a cell.
 
 - [ ] **Step 6: Record and commit**
 
-Append an "Acceptance (date)" section to `docs/superpowers/specs/2026-10-03-workspace-w2-spike-results.md`: the PASS table, Kevin's notes, and anything deferred (Dayane's phone check rides with the W1 deferred items).
+Append an "Acceptance (date)" section to `docs/superpowers/specs/2026-10-03-workspace-w2-spike-results.md`: the PASS table, the operator's notes, and anything deferred (Alex's phone check rides with the W1 deferred items).
 
 ```bash
 git add scripts/workspace-w2-acceptance.mjs
