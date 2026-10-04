@@ -465,7 +465,7 @@ test("B2: an explicit cwd is honored and returned; the world root keeps storage 
 
 test("B2: a chosen directory's own .mcp.json survives byte-identical across a world build", async () => {
   // Regression: the per-bot writer replaces the whole file (closed-world).
-  // Writing it into the chosen cwd destroyed r4-tehcy/.mcp.json and
+  // Writing it into the chosen cwd destroyed r4-acme/.mcp.json and
   // crow/.mcp.json on 2026-09-12/13 — every project MCP server vanished.
   const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
   const chosen = mkdtempSync(join(dir, "chosen-"));

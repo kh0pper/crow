@@ -346,7 +346,7 @@ test("unit: verifiedAdvertisedAddress rejects a block spliced from another nonce
     assert.deepEqual(verifiedAdvertisedAddress(mk("n1", addr), identity.ed25519Pubkey), addr);
     assert.equal(verifiedAdvertisedAddress(mk("n2", addr, "n1"), identity.ed25519Pubkey), null, "spliced from another connection");
     assert.equal(verifiedAdvertisedAddress({ ...mk("n1", addr), addr_sig: "zz" }, identity.ed25519Pubkey), null, "garbage sig");
-    assert.equal(verifiedAdvertisedAddress(mk("n1", { gateway_url: "http://10.0.0.21:3002", tailscale_ip: "192.168.1.5" }), identity.ed25519Pubkey), null, "LAN addresses are not tailnet");
+    assert.equal(verifiedAdvertisedAddress(mk("n1", { gateway_url: "http://10.0.0.202:3002", tailscale_ip: "192.168.1.5" }), identity.ed25519Pubkey), null, "LAN addresses are not tailnet");
     assert.deepEqual(verifiedAdvertisedAddress(mk("n1", { tailscale_ip: "fd7a:115c:a1e0::1", sync_port: 3009 }), identity.ed25519Pubkey), { tailscale_ip: "fd7a:115c:a1e0::1", sync_port: 3009 });
     assert.deepEqual(
       verifiedAdvertisedAddress(mk("n1", { gateway_url: "https://a.example.ts.net", tailscale_ip: "100.64.0.7" }), identity.ed25519Pubkey),

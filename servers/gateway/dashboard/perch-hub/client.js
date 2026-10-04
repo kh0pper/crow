@@ -38,7 +38,7 @@ export function perchHubJs(lang = "en") {
      "No transcript yet." four times. The operator's own typed message is the
      ONE thing not duplicated, because \`el('perch-send').onclick=\` is a single
      slot the newest instance owns outright: exactly the asymmetry in the
-     transcript Kevin pasted (every streamed element ×6, his message ×1).
+     transcript Casey pasted (every streamed element ×6, his message ×1).
 
      So instances are made mutually exclusive HERE, rather than by closing one
      more path. A window-level registry gives two things a closure variable
@@ -282,7 +282,7 @@ export function perchHubJs(lang = "en") {
      session, which is correct for a SESSION list and is exactly why the
      launcher cannot be derived from rows: on an instance where the one
      attached bot has eight live sessions there is no idle row left, and that
-     is the state Kevin reported with no way to start a ninth. Same filter as
+     is the state Casey reported with no way to start a ninth. Same filter as
      listRows (perch_attached), same reason: POST /bots/<id>/interactive 403s
      for a bot with no perch gateway record. Reads the /roost payload
      loadList() already fetched — no second request. */
@@ -578,7 +578,7 @@ export function perchHubJs(lang = "en") {
     }
     btn.disabled=false;
     setLaunchNote('');
-    /* One attached bot is the common case (and Kevin's): no BOT picker, one
+    /* One attached bot is the common case (and Casey's): no BOT picker, one
        tap. The MODEL picker is still offered — it is per-bot, not per-roster,
        and this is the path his instance actually takes. */
     if(bots.length===1){
@@ -1030,7 +1030,7 @@ export function perchHubJs(lang = "en") {
      that browser. bindOnce handles the modern spelling; the legacy branch
      repeats its bookkeeping because MediaQueryList.addListener is not
      addEventListener. */
-  /* PHONE TRANSCRIPT (2026-10-02, Kevin): under 600px the 64px role gutter
+  /* PHONE TRANSCRIPT (2026-10-02, Casey): under 600px the 64px role gutter
      beside every message wasted a fifth of the screen. #perch-hub-root gets
      .perch-narrow there, and css.js lays each message out full width with the
      role label on its own small line above it. A class (not a bare media

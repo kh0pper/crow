@@ -57,12 +57,12 @@ test("rejects empty / non-string input", () => {
   assert.equal(resolveSafeMarkdownPath(null, root), null);
 });
 
-test("default root is /home/kh0pp (a repo .md resolves)", () => {
+test("default root is /home/alex (a repo .md resolves)", () => {
   // Uses the real default allowRoot. The repo's own CLAUDE.md is a stable,
-  // always-present .md under /home/kh0pp/crow (skip if the repo is checked out
-  // elsewhere, since the default root is hardcoded to /home/kh0pp).
+  // always-present .md under /home/alex/crow (skip if the repo is checked out
+  // elsewhere, since the default root is hardcoded to /home/alex).
   const repoMd = join(fileURLToPath(new URL("..", import.meta.url)), "CLAUDE.md");
-  if (!repoMd.startsWith("/home/kh0pp/")) return; // not on the target layout
+  if (!repoMd.startsWith("/home/alex/")) return; // not on the target layout
   const r = resolveSafeMarkdownPath(repoMd);
   assert.equal(r, realpathSync(repoMd));
 });

@@ -145,7 +145,7 @@ export function countLivePi() {
  * file, and nothing here may ever throw into the bridge tick /
  * gateway_runner sweep. The "under homedir" test is boundary-safe
  * (`=== home || startsWith(home + sep)`) so a sibling path like
- * `/home/kh0pp2/.crow` next to `/home/kh0pp` is NOT mistaken for a
+ * `/home/alex2/.crow` next to `/home/alex` is NOT mistaken for a
  * subpath of home.
  *
  * Seams (test-only, following the reapStalePi opts idiom): `_homedir`

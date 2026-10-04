@@ -15,7 +15,7 @@ async function approveFresh(d, id, o = {}) {
 
 let db;
 const plan = () => validatePlan({ business_name: "Smile Dental", number: "512-555-0101", goal: "Book a cleaning", language: "en",
-  limits: { days_of_week: ["tue"], time_window: { start: "15:00", end: "18:00", tz: "America/Chicago" } }, shareable: { name: "Kevin" } });
+  limits: { days_of_week: ["tue"], time_window: { start: "15:00", end: "18:00", tz: "America/Chicago" } }, shareable: { name: "Casey" } });
 const bot = { kind: "bot", id: "bobby", thread: "discord:42", gateway: "discord" };
 
 beforeEach(async () => {

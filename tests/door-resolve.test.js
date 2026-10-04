@@ -11,7 +11,7 @@ const P = {
   "crow-local-27b-copilot": { baseUrl: "http://100.64.9.1:8010/v1", apiKey: "none", models: [{ id: "qwen3.8-27b" }], gpuPolicy: { engine: { managed: "external", host: "crow", label: "gufo" } } },
   "r4-gemma": { baseUrl: "http://100.64.9.1:3008/llm/p/r4-gemma/v1", apiKey: "none", models: [{ id: "gemma-4-e2b-it" }], gpuPolicy: { runtime: "native", owner: "r4", port: 18120 } },
   "qwen-cloud": { baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", apiKey: "sk-secret", models: [{ id: "qwen3.8-max" }] },
-  "raven-flash-next": { baseUrl: "http://10.0.0.126:8030/v1", apiKey: "none", models: [{ id: "qwen3.8-flash-next" }], gpuPolicy: { engine: { managed: "external", host: "raven", label: "gufo" } } },
+  "raven-flash-next": { baseUrl: "http://10.0.0.203:8030/v1", apiKey: "none", models: [{ id: "qwen3.8-flash-next" }], gpuPolicy: { engine: { managed: "external", host: "raven", label: "gufo" } } },
   "lan-box": { baseUrl: "http://10.0.0.50:8000/v1", apiKey: "k-lan", models: [{ id: "lan-model" }] },
   "lan-optin": { baseUrl: "http://10.0.0.51:8000/v1", apiKey: "none", models: [{ id: "optin-model" }], gpuPolicy: { door_forward: true } },
   "evil-bundle": { baseUrl: "http://169.254.169.254/latest", apiKey: "none", bundleId: "x", models: [{ id: "meta" }] },
@@ -29,7 +29,7 @@ test("isForbiddenTarget: link-local, metadata hosts, Tailscale's own address, ga
   for (const u of ["http://169.254.169.254/latest", "http://169.254.1.2:80/v1", "http://[fe80::1]:8000/v1", "http://[fd00:ec2::254]/", "http://100.100.100.200/", "http://100.100.100.100/", "http://metadata.google.internal/", "http://metadata/", "not a url"]) {
     assert.equal(isForbiddenTarget(u), true, u);
   }
-  for (const u of ["http://127.0.0.1:18102/v1", "http://100.64.9.1:8006/v1", "http://10.0.0.126:8030/v1"]) assert.equal(isForbiddenTarget(u), false, u);
+  for (const u of ["http://127.0.0.1:18102/v1", "http://100.64.9.1:8006/v1", "http://10.0.0.203:8030/v1"]) assert.equal(isForbiddenTarget(u), false, u);
 });
 
 test("isForbiddenTarget: IPv4-mapped IPv6 and trailing-dot bypasses are closed (re-review N1)", () => {

@@ -27,7 +27,7 @@ One JSON file on tmpfs, at `$CROW_BOX_RESERVATION_PATH` or `/run/user/<uid>/crow
 - **Manual holds** use the CLI:
 
 ```bash
-node ~/crow/scripts/ops/box-reserve.mjs hold --owner kevin --reason "serving dsv4 tonight" [--minutes 480] [--allow p1,p2] [--force]
+node ~/crow/scripts/ops/box-reserve.mjs hold --owner casey --reason "serving dsv4 tonight" [--minutes 480] [--allow p1,p2] [--force]
 node ~/crow/scripts/ops/box-reserve.mjs status
 node ~/crow/scripts/ops/box-reserve.mjs release
 ```

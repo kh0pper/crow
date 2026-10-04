@@ -77,14 +77,14 @@ test("resolveBoardDef: matching row → parsed arrays, builtin false", async () 
     const d = new Database(p);
     d.prepare(
       "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (?,?,?,?,?)"
-    ).run(7, "TEHCY", '["a","b"]', '["b"]', '[{"key":"phase","label":"Phase","storage":"column"}]');
+    ).run(7, "ACME", '["a","b"]', '["b"]', '[{"key":"phase","label":"Phase","storage":"column"}]');
     d.close();
   }
   const tdb = createDbClient(p);
   try {
     const def = await resolveBoardDef(tdb, { projectId: 7 });
     assert.equal(def.builtin, false);
-    assert.equal(def.display_name, "TEHCY");
+    assert.equal(def.display_name, "ACME");
     assert.deepEqual(def.status_values, ["a", "b"]);
     assert.deepEqual(def.terminal_values, ["b"]);
     assert.deepEqual(def.fields, [{ key: "phase", label: "Phase", storage: "column" }]);

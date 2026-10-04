@@ -87,7 +87,7 @@ Desde **Crow's Nest** > **Contactos** > **Mi perfil**, puedes actualizar:
 
 O pídele a tu IA:
 
-> "Crow, actualiza mi nombre para mostrar a 'Kevin H.'"
+> "Crow, actualiza mi nombre para mostrar a 'Casey H.'"
 
 ## Importar y exportar
 

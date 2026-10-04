@@ -90,7 +90,7 @@ export function ensureTableHeaders(html) {
 
 /**
  * Wrap phone numbers in tel: links for mobile accessibility.
- * Matches common US phone formats: (512) 555-1234, 512-555-1234, 512.555.1234
+ * Matches common US phone formats: (512) 555-0123, 512-555-0123, 512.555.0123
  */
 export function linkPhoneNumbers(html) {
   // Match phone numbers not already inside href attributes or <a> tags

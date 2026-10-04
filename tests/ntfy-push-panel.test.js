@@ -47,7 +47,7 @@ test("auto mode: channel, address form, phone/last-push status, test + repair; v
 });
 
 test("env mode: says so, offers the test but not repair or the address form", () => {
-  const e = { ...env(), NTFY_TOPIC: "kevin", NTFY_EXTERNAL_URL: "https://n.example" };
+  const e = { ...env(), NTFY_TOPIC: "casey", NTFY_EXTERNAL_URL: "https://n.example" };
   const html = renderNtfyPushPanel({ csrf: "c", lang: "es", env: e });
   assert.match(html, new RegExp(t("ntfyPush.sourceEnv", "es").slice(0, 20)));
   assert.match(html, /value="ntfy_test"/);

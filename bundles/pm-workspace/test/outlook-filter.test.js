@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseMailIgnore, filterMessages } from "../server/digest/adapters/outlook.js";
 
 const MSGS = [
-  { subject: "TEHCY Support Request Assigned: #4821", from: "support@esc11.net" },
+  { subject: "ACME Support Request Assigned: #4821", from: "support@example.org" },
   { subject: "Re: agenda for the biweekly", from: "someone@example.org" },
   { subject: "Weekly notice", from: "noreply@newsletter.example" },
   { subject: null, from: "nobody@example.org" },
@@ -16,7 +16,7 @@ test("empty or unset OUTLOOK_MAIL_IGNORE keeps every message", () => {
 });
 
 test("subject match is case-insensitive and drops only the matching message", () => {
-  const out = filterMessages(MSGS, parseMailIgnore("tehcy support request assigned"));
+  const out = filterMessages(MSGS, parseMailIgnore("acme support request assigned"));
   assert.equal(out.length, 3);
   assert.ok(out.every((m) => !/Support Request/.test(m.subject || "")));
 });

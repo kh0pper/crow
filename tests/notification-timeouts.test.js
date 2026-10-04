@@ -118,7 +118,7 @@ test("email sender settles within the cap against a hung upstream", async () => 
     {
       RESEND_API_KEY: "re_test_key",
       MPA_EMAIL_FROM: "crow@test.invalid",
-      MPA_EMAIL_TO: "kevin@test.invalid",
+      MPA_EMAIL_TO: "casey@test.invalid",
       NTFY_CLICK_BASE_URL: undefined,
       CROW_GATEWAY_URL: undefined,
       CROW_PUSH_SEND_TIMEOUT_MS: String(CAP_MS),

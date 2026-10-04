@@ -241,7 +241,7 @@ async function ensurePetRow(db) {
  *      of your Crows" in the panel.
  *
  * Inventory of every way the slot can empty, or an egg can appear beside an
- * empty slot, and what covers it (spec §4.2; Kevin 2026-09-22 rejected the
+ * empty slot, and what covers it (spec §4.2; Casey 2026-09-22 rejected the
  * earlier "wait on the shelf" deviation; tests/ramble-eggs-receipt.test.js
  * pins each row multi-instance):
  *
@@ -261,7 +261,7 @@ async function ensurePetRow(db) {
  *                                 early on it, so nothing can be stranded.
  *   - a NEST claimed           -> promoted (`claimNest`)
  *   - a swap LAPSING (`expireTrades`) unlocking the last shelf egg
- *                              -> NOT promoted by the sweep (Kevin,
+ *                              -> NOT promoted by the sweep (Casey,
  *                                 2026-09-22). The egg waits and the pet card
  *                                 offers a one-tap Warm it (`nextPromotable`).
  *                                 'expired' is NOT terminal: a `completed`

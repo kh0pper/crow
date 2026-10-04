@@ -16,7 +16,7 @@ const { ensureModelWarm, releaseModel, onLifecycleEvent } = await import("../ser
 
 const cfg = { providers: {
   "raven-flash-next": {
-    baseUrl: "http://10.0.0.126:8030/v1", host: "cloud", bundleId: "halogen", // contradictory on purpose
+    baseUrl: "http://10.0.0.203:8030/v1", host: "cloud", bundleId: "halogen", // contradictory on purpose
     models: [{ id: "flash-next" }],
     gpuPolicy: { engine: { managed: "external", host: "raven", label: "halogen" } },
   },

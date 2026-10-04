@@ -89,9 +89,9 @@ test("rebindBlock disables a bundle absent on this instance, with a reason", () 
 
 test("rebindBlock leaves the repo cwd alone — the repo is instance-neutral", () => {
   const { home } = instanceB();
-  const block = { command: "n", args: ["x.js"], cwd: "/home/kh0pp/crow/bundles/browser", env: {} };
+  const block = { command: "n", args: ["x.js"], cwd: "/home/alex/crow/bundles/browser", env: {} };
   const r = rebindBlock("crow-browser", block, BINDING_B(home), home);
-  assert.equal(r.block.cwd, "/home/kh0pp/crow/bundles/browser");
+  assert.equal(r.block.cwd, "/home/alex/crow/bundles/browser");
   assert.deepEqual(r.rebound, []);
 });
 

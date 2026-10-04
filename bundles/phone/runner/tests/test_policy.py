@@ -33,12 +33,12 @@ def test_booking_within_limits():
 
 def test_disclosure_templates_exact():
     assert (
-        policy.disclosure("en", "Kevin")
-        == "Hi, I'm an automated assistant calling on behalf of Kevin. This call may be recorded."
+        policy.disclosure("en", "Casey")
+        == "Hi, I'm an automated assistant calling on behalf of Casey. This call may be recorded."
     )
     assert (
-        policy.disclosure("es", "Kevin")
-        == "Hola, soy un asistente automatizado que llama de parte de Kevin. Esta llamada puede ser grabada."
+        policy.disclosure("es", "Casey")
+        == "Hola, soy un asistente automatizado que llama de parte de Casey. Esta llamada puede ser grabada."
     )
     assert policy.filler("es") and policy.callback_line("en")
 

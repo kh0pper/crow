@@ -9,7 +9,7 @@ import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
 const ENTRIES = [
   { id: 1, kind: "extension", label: "Crow Workspace — WORKSPACE_ADMIN_PASSWORD", bundle_id: "workspace", env_key: "WORKSPACE_ADMIN_PASSWORD", username: "admin", url: null, origin: "typed", status: "active", updated_at: "2026-10-03T12:00:00.000Z" },
-  { id: 2, kind: "manual", label: "<script>alert(1)</script>", bundle_id: null, env_key: null, username: "kevin", url: "https://ws.example:8456", origin: "manual", status: "active", updated_at: "2026-10-03T12:00:00.000Z" },
+  { id: 2, kind: "manual", label: "<script>alert(1)</script>", bundle_id: null, env_key: null, username: "casey", url: "https://ws.example:8456", origin: "manual", status: "active", updated_at: "2026-10-03T12:00:00.000Z" },
   { id: 3, kind: "extension", label: "Vaultwarden — admin token", bundle_id: "vaultwarden", env_key: "VAULTWARDEN_ADMIN_TOKEN", username: null, url: "http://localhost:8097/admin", origin: "generated", status: "extension_removed", updated_at: "2026-10-03T12:00:00.000Z", readable: true },
   { id: 4, kind: "manual", label: "From the old machine", bundle_id: null, env_key: null, username: null, url: null, origin: "manual", status: "active", updated_at: "2026-10-03T12:00:00.000Z", readable: false },
   { id: 5, kind: "extension", label: "Vaultwarden — live token", bundle_id: "vaultwarden", env_key: "X", username: null, url: null, origin: "generated", status: "active", updated_at: "2026-10-03T12:00:00.000Z", readable: true },
@@ -130,11 +130,11 @@ test("Add posts the form and reloads; an empty form is refused client-side", asy
   s.click(s.document.getElementById("pw-add-go"));
   await s.settle();
   assert.equal(s.calls.filter((c) => c.url.endsWith("/add")).length, 0);
-  s.document.getElementById("pw-add-label").value = "Workspace phone (Kevin)";
+  s.document.getElementById("pw-add-label").value = "Workspace phone (Casey)";
   s.document.getElementById("pw-add-secret").value = "abcd-efgh";
   s.click(s.document.getElementById("pw-add-go"));
   await s.settle();
-  assert.deepEqual(s.calls.find((c) => c.url.endsWith("/add")).body, { label: "Workspace phone (Kevin)", username: "", url: "", secret: "abcd-efgh" });
+  assert.deepEqual(s.calls.find((c) => c.url.endsWith("/add")).body, { label: "Workspace phone (Casey)", username: "", url: "", secret: "abcd-efgh" });
   assert.equal(s.reloads.n, 1);
 });
 

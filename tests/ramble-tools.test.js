@@ -290,8 +290,8 @@ test("phase 3 tools: gift and propose_swap validate the contact and the egg, que
 
 test("ramble_query_world labels a named stranger's mark 'mark by <name> · key4'", async () => {
   const { insertRemoteMark } = await import("../bundles/ramble/server/marks.js");
-  await insertRemoteMark(db, { mark_id: "named-tool", author: "f665c26b" + "1".repeat(56), kind: "mark", anchor_kind: "geo", geohash: encodeGeohash(30.2672, -97.7431, 7), lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "named", created_at: Date.now(), nostr_event_id: "ev-named-tool", author_name: "Kevin" });
+  await insertRemoteMark(db, { mark_id: "named-tool", author: "f665c26b" + "1".repeat(56), kind: "mark", anchor_kind: "geo", geohash: encodeGeohash(30.2672, -97.7431, 7), lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "named", created_at: Date.now(), nostr_event_id: "ev-named-tool", author_name: "Casey" });
   const q = await h.ramble_query_world({ lat: 30.2672, lon: -97.7431, visibility: "public" });
   const m = JSON.parse(q.content[0].text).marks.find((x) => x.mark_id === "named-tool");
-  assert.equal(m.label, "mark by Kevin · f665");
+  assert.equal(m.label, "mark by Casey · f665");
 });

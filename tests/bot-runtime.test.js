@@ -619,8 +619,8 @@ test("flag-missing default: OFF on a plain (non-MPA-shaped) data dir", async () 
 test("flag-missing default: ON on a ~/.crow-mpa-shaped data dir (isMpaHost fallback)", async () => {
   const prevHome = process.env.CROW_HOME;
   const prevData = process.env.CROW_DATA_DIR;
-  process.env.CROW_HOME = "/home/kh0pp/.crow-mpa";
-  process.env.CROW_DATA_DIR = "/home/kh0pp/.crow-mpa/data";
+  process.env.CROW_HOME = "/home/alex/.crow-mpa";
+  process.env.CROW_DATA_DIR = "/home/alex/.crow-mpa/data";
   try {
     const conn = trackConn(makeConn()); // no feature_flags row at all
     const timers = fakeTimers();

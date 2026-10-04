@@ -5,7 +5,7 @@
  * ceiling (review S1: a paired peer can mint fresh SSO sessions, each with its own
  * 5 tries) locks re-auth for everyone after 20 failures in an hour.
  * With dashboard 2FA on, ONLY a TOTP code counts; otherwise the dashboard password.
- * With neither (Kevin Q6), method() is "none" and nothing can be granted — no bypass.
+ * With neither (Casey Q6), method() is "none" and nothing can be granted — no bypass.
  * A gateway restart forgets everything, which only means "ask again".
  */
 import { createHash } from "node:crypto";

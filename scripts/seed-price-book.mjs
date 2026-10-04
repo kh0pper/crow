@@ -7,7 +7,7 @@
  * editable in the dashboard: /dashboard/metering). Run against a specific
  * instance's data dir:
  *
- *   CROW_DATA_DIR=/home/kh0pp/.crow/data node scripts/seed-price-book.mjs
+ *   CROW_DATA_DIR=/home/alex/.crow/data node scripts/seed-price-book.mjs
  *
  * The seed logic lives in servers/shared/price-book.js (shared with the panel).
  */
