@@ -426,41 +426,21 @@ export async function runPostListenSetup(server, app, deps) {
       const identity = loadOrCreateIdentity();
 
       // An operator-set CROW_PEER_GATEWAY_URL wins (and corrects a drifted
-      // self row). Otherwise prefer the Tailscale HTTPS serve URL, fall back to
-      // the Tailscale IP, then localhost.
+      // self row). Otherwise derive the TAILNET dial address: a private
+      // (non-Funnel, non-:443) Serve endpoint proxying to our port, else
+      // http://<tailnet ip>:<port>. Never "the first HTTPS URL" in serve
+      // status — that picked the :443 door (Funnel on crow, the private
+      // :443 Serve on black-swan), which instance sync never dials.
       const configuredUrl = configuredSelfGatewayUrl();
-      let gatewayUrl = configuredUrl || `http://localhost:${PORT}`;
-      if (!configuredUrl) try {
-        const { execFileSync } = await import("child_process");
-        // Check if Tailscale serve is configured (provides HTTPS URLs)
-        const serveStatus = execFileSync("tailscale", ["serve", "status"], { timeout: 3000, stdio: "pipe" }).toString();
-        const serveMatch = serveStatus.match(/https:\/\/[\w.-]+\.ts\.net(?::\d+)?/);
-        if (serveMatch) {
-          // Find the serve entry that proxies to our port
-          const lines = serveStatus.split("\n");
-          for (let i = 0; i < lines.length; i++) {
-            const urlMatch = lines[i].match(/(https:\/\/[\w.-]+\.ts\.net(?::\d+)?)/);
-            if (urlMatch && lines[i + 1]?.includes(`localhost:${PORT}`)) {
-              gatewayUrl = urlMatch[1];
-              break;
-            }
-          }
-          // If no port-specific match, use the first HTTPS URL
-          if (gatewayUrl.startsWith("http://") && serveMatch) {
-            gatewayUrl = serveMatch[0];
-          }
-        }
-        // Fall back to Tailscale IP if no serve URL found
-        if (gatewayUrl.startsWith("http://localhost")) {
-          const tsIp = execFileSync("tailscale", ["ip", "-4"], { timeout: 3000, stdio: "pipe" }).toString().trim();
-          if (tsIp) gatewayUrl = `http://${tsIp}:${PORT}`;
-        }
-      } catch {}
+      const { deriveSelfDialAddress } = await import("../../shared/self-dial-address.js");
+      const derived = deriveSelfDialAddress({ port: PORT, configuredUrl });
+      const gatewayUrl = derived.gateway_url || `http://localhost:${PORT}`;
 
       await ensureLocalInstanceRegistered(createDbClient(), {
         crowId: identity.crowId,
         gatewayUrl,
         gatewayUrlConfigured: Boolean(configuredUrl),
+        tailscaleIp: derived.tailscale_ip,
       });
     } catch (err) {
       // Non-fatal — instance registry is optional for basic operation

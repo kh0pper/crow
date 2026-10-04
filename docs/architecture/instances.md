@@ -169,6 +169,15 @@ All instances in a chain must share the same cryptographic identity (same master
 - **Federation HTTP**: Should run over HTTPS or Tailscale (encrypted tunnel). Bearer tokens prevent unauthorized access even on trusted networks.
 - **No public exposure**: Instance registration requires explicit user action. Instances are not discoverable on the public internet.
 
+### Tailnet sync transport (`servers/sharing/tailnet-sync.js`)
+
+Paired instances of the same user replicate over an authenticated WebSocket at `/api/instance-sync/stream`, dialed over Tailscale:
+
+- **Dial address.** A peer row is dialed at its `gateway_url` (a private Serve HTTPS endpoint or `http://<tailnet ip>:<port>`), then `ws://<tailscale_ip>:<port>` for its learned backend port and the standard ports. Port **443 is never dialed** — that is the public Funnel door. At pairing an instance advertises its *derived tailnet dial address* (`CROW_PEER_GATEWAY_URL` if set; else a non-Funnel, non-443 Serve endpoint proxying to its port; else its tailnet IP + backend port) and its `tailscale_ip` — never `CROW_GATEWAY_URL`, the public URL. Rows that already hold an undialable `:443` URL are repaired at boot (the MagicDNS host is resolved to its tailnet IP via `tailscale status`) and then by the peer's signed handshake address, which replaces an undialable `gateway_url`.
+- **Handshake.** Both sides sign a hello with the shared identity key. A challenge-response step binds each side's proof to the other side's fresh nonce, and no feed key is sent before it verifies, so a replayed hello gets nothing. Older peers that do not offer it still link; once a peer has completed challenge-response, a handshake from it without one is refused (downgrade guard).
+- **One link per pair.** The lower instance id dials; the other side dials only as a fallback after a grace period, and the accept side refuses a fallback dial (`1013`) while a link or its own dial is up.
+- **Half-open links.** Both ends ping every 30 s and terminate a link that missed a pong for a whole interval; the dialer then re-dials.
+
 ### Signature Verification
 
 Every Hypercore feed entry is signed by the originating instance's Ed25519 key. The receiving instance verifies signatures before applying changes. Tampered entries are rejected and logged.

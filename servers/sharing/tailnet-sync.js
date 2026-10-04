@@ -15,11 +15,18 @@
  *   3. Server verifies sig against identity.ed25519Pubkey (same identity for
  *      paired instances). Replies with its own {instance_id, nonce_hex, sig_hex}
  *      over its own nonce so the client can verify too.
+ *   3b. Challenge-response (when the client offers `cr: 1`): the server's
+ *      reply carries cr_sig over the CLIENT's nonce, the client answers with
+ *      cr_proof over the SERVER's nonce, and no feed key flows before the
+ *      proof verifies — so a replayed hello (either direction) gets nothing.
+ *      See "challenge-response (CR)" below for mixed-version rules.
  *   4. After mutual auth, both sides:
  *        a. Run feed-key-exchange: send our outgoing feed key for them as a
  *           text frame {feed_key_hex}; persist theirs on receipt.
  *        b. Wrap the WS as a Duplex stream and call
  *           instanceSyncManager.replicate(remoteId, stream).
+ *        c. Ping every HEARTBEAT_MS; a missed pong terminates a half-open
+ *           link so the dialer re-dials.
  *
  * Coexists with Hyperswarm — Hyperswarm stays for contact-peer (different-
  * user) traffic; tailnet-sync handles instance-sync (same-user) where we
@@ -33,6 +40,10 @@ import NoiseSecretStream from "@hyperswarm/secret-stream";
 import { sign, verify } from "./identity.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { getOwnTailnetIp } from "../shared/tailnet-ip.js";
+import {
+  isTailnetAddress, gatewayUrlHost, lookupTailnetIpForHost, rememberPeerSyncPort,
+  SYNC_PORT_KEY_PREFIX, SYNC_CR_KEY_PREFIX,
+} from "../shared/self-dial-address.js";
 import {
   recordDialAttempt, recordDialFailure, recordLinkUp, recordLinkClosed,
   recordNoDialAddress, clearNoDialAddress, recordAddressBackfill, forgetPeerDialHealth,
@@ -50,7 +61,13 @@ const IDLE_RECHECK_MS = 15_000;
 // A peer that answers "unknown peer"/"not paired" (it revoked us, or never
 // paired) is re-tried at this slow cadence, not every backoff cycle.
 const REFUSED_RECHECK_MS = 30 * 60_000;
-export const SYNC_PORT_KEY_PREFIX = "tailnet_sync_port:";
+export { SYNC_PORT_KEY_PREFIX, SYNC_CR_KEY_PREFIX };
+// HALF-OPEN: a link whose peer vanished without a FIN/RST (NAT rebind, host
+// suspend, a tailnet path that silently drops) used to look "linked" forever
+// — no data, no close, no re-dial. Both ends ping on this cadence; a missed
+// pong for a whole interval terminates the socket, and the dialer re-dials.
+// Every ws peer auto-answers pings, so older peers need no change.
+const HEARTBEAT_MS = 30_000;
 // Dialer election picks the lower instance id. If the elected side cannot
 // reach us (it has no address for us — black-swan's shape, 2026-08..10) no
 // link would ever form. After this long with no link at all, the other side
@@ -72,13 +89,7 @@ export function _setAllowLoopbackAddressesForTest(v) { _allowLoopbackAddresses =
  * proxy, SSO, probes) for that row.
  */
 export function isTailnetIp(ip) {
-  const v = String(ip || "").replace(/^\[|\]$/g, "").toLowerCase();
-  if (isIP(v) === 4) {
-    const [a, b] = v.split(".").map(Number);
-    return a === 100 && b >= 64 && b <= 127;
-  }
-  if (isIP(v) === 6) return /^fd7a:115c:a1e0:/.test(v);
-  return false;
+  return isTailnetAddress(ip);
 }
 
 function testLoopback(host) {
@@ -135,13 +146,104 @@ function addrMessage(instanceId, nonce, addr) {
   return `addr:${instanceId}:${nonce}:${canonicalAddr(addr)}`;
 }
 
-function buildHandshakePayload(identity, localInstanceId, addr = null) {
+/* ------------------------------------------------- challenge-response (CR) */
+//
+// The hello above signs a nonce the SENDER chose, so on its own it proves
+// nothing about freshness: a captured hello replays verbatim, and the server
+// answered a replay with its feed key (CR follow-up to #415). CR binds each
+// side's proof to the OTHER side's fresh nonce:
+//
+//   client hello  {instance_id, nonce_hex=cN, sig_hex, cr: 1}
+//   server hello  {instance_id, nonce_hex=sN, sig_hex,
+//                  cr_sig = sign("cr-resp:<server>:<client>:<cN>:<sN>")}
+//   client proof  {cr_proof = sign("cr-proof:<client>:<server>:<sN>:<cN>")}
+//   ... feed keys flow only AFTER the server verified the proof.
+//
+// Mixed versions: an old client sends no `cr` (the server answers the old
+// way); an old server sends no `cr_sig` (the client sends no proof). Once a
+// peer has completed CR with us, its flag is stored (LOCAL override) and a
+// later CR-less handshake under its id is REFUSED — that closes the downgrade
+// a replayed pre-upgrade hello would otherwise get.
+const CR_VERSION = 1;
+const NONCE_RE = /^[0-9a-f]{16,128}$/;
+function crRespMessage(serverId, clientId, clientNonce, serverNonce) {
+  return `cr-resp:${serverId}:${clientId}:${clientNonce}:${serverNonce}`;
+}
+function crProofMessage(clientId, serverId, serverNonce, clientNonce) {
+  return `cr-proof:${clientId}:${serverId}:${serverNonce}:${clientNonce}`;
+}
+function safeVerify(message, sigHex, pubkeyHex) {
+  if (typeof sigHex !== "string") return false;
+  try { return verify(message, sigHex, pubkeyHex); } catch { return false; }
+}
+
+/** True once `peerId` has completed a CR handshake with us (downgrade guard). */
+async function peerCrRequired(ctx, peerId) {
+  const localId = ctx.instanceSyncManager?.localInstanceId;
+  if (!localId) return false;
+  try {
+    const { rows } = await ctx.db.execute({
+      sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
+      args: [`${SYNC_CR_KEY_PREFIX}${peerId}`, localId],
+    });
+    return rows[0]?.value === String(CR_VERSION);
+  } catch {
+    return false;
+  }
+}
+
+async function markPeerCr(ctx, peerId) {
+  const localId = ctx.instanceSyncManager?.localInstanceId;
+  if (!localId) return;
+  try {
+    const r = await ctx.db.execute({
+      sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(key, instance_id) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+            WHERE dashboard_settings_overrides.value IS NOT excluded.value`,
+      args: [`${SYNC_CR_KEY_PREFIX}${peerId}`, localId, String(CR_VERSION)],
+    });
+    if (Number(r.rowsAffected ?? 0) > 0) {
+      console.log(`[tailnet-sync] peer ${String(peerId).slice(0, 12)}… completed a challenge-response handshake; CR-less handshakes from it are refused from now on`);
+    }
+  } catch { /* table missing on an old DB — no downgrade guard, CR still enforced per-connection */ }
+}
+
+/**
+ * Arm the half-open detector on a replicating socket: ping every
+ * `ctx.heartbeatMs` (0 disables), terminate when a whole interval passes
+ * without a pong. Cleared on close.
+ */
+function armHeartbeat(ws, ctx, peerId) {
+  const every = ctx.heartbeatMs ?? HEARTBEAT_MS;
+  if (!every || every <= 0) return;
+  let alive = true;
+  const onPong = () => { alive = true; };
+  ws.on("pong", onPong);
+  const timer = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!alive) {
+      console.warn(`[tailnet-sync] link to ${String(peerId).slice(0, 12)}… missed its heartbeat (no pong in ${every} ms) — half-open; terminating so the dialer re-dials`);
+      recordDialFailure(peerId, `link half-open: no pong in ${every} ms`);
+      clearInterval(timer);
+      try { ws.terminate(); } catch { /* already gone */ }
+      return;
+    }
+    alive = false;
+    try { ws.ping(); } catch { /* close follows */ }
+  }, every);
+  timer.unref?.();
+  ws.once("close", () => { clearInterval(timer); ws.off("pong", onPong); });
+}
+
+function buildHandshakePayload(identity, localInstanceId, addr = null, extra = null) {
   const nonce = randomBytes(16).toString("hex");
   const message = `${localInstanceId}:${nonce}`;
   const payload = {
     instance_id: localInstanceId,
     nonce_hex: nonce,
     sig_hex: sign(message, identity.ed25519Priv),
+    ...(extra || {}),
   };
   if (addr && (addr.gateway_url || addr.tailscale_ip)) {
     const clean = { gateway_url: addr.gateway_url || null, tailscale_ip: addr.tailscale_ip || null, sync_port: addr.sync_port || null };
@@ -153,6 +255,10 @@ function buildHandshakePayload(identity, localInstanceId, addr = null) {
 
 function verifyHandshakePayload(payload, expectedPubkeyHex) {
   if (!payload?.instance_id || !payload?.nonce_hex || !payload?.sig_hex) return false;
+  // Hex nonces only: keeps the hello message space disjoint from the
+  // colon-delimited CR messages, so no signature can be reused across them.
+  if (typeof payload.nonce_hex !== "string" || !NONCE_RE.test(payload.nonce_hex)) return false;
+  if (typeof payload.instance_id !== "string" || payload.instance_id.includes(":")) return false;
   const message = `${payload.instance_id}:${payload.nonce_hex}`;
   try { return verify(message, payload.sig_hex, expectedPubkeyHex); } catch { return false; }
 }
@@ -234,26 +340,32 @@ export async function backfillPeerAddress(ctx, peerId, addr) {
       // Not a crow_instances column (no schema change): a LOCAL-scope
       // override (never synced), keyed per peer. Refreshed on every signed
       // handshake — it is the peer's own port, not operator data.
-      const key = `${SYNC_PORT_KEY_PREFIX}${peerId}`;
       const localId = ctx.instanceSyncManager?.localInstanceId;
-      if (localId) {
-        const r = await db.execute({
-          sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
-                VALUES (?, ?, ?, datetime('now'))
-                ON CONFLICT(key, instance_id) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
-                WHERE dashboard_settings_overrides.value IS NOT excluded.value`,
-          args: [key, localId, String(addr.sync_port)],
-        });
-        if (Number(r.rowsAffected ?? 0) > 0) written.sync_port = addr.sync_port;
-      }
+      if (localId && await rememberPeerSyncPort(db, localId, peerId, addr.sync_port)) written.sync_port = addr.sync_port;
     }
     for (const col of ["gateway_url", "tailscale_ip"]) {
-      if (!addr[col] || (row[col] != null && String(row[col]).trim() !== "")) continue;
-      const r = await db.execute({
-        sql: `UPDATE crow_instances SET ${col} = ?, updated_at = datetime('now') WHERE id = ? AND (${col} IS NULL OR TRIM(${col}) = '')`,
-        args: [addr[col], peerId],
-      });
-      if (Number(r.rowsAffected ?? 0) > 0) written[col] = addr[col];
+      if (!addr[col]) continue;
+      const current = row[col] != null ? String(row[col]).trim() : "";
+      if (current === "") {
+        const r = await db.execute({
+          sql: `UPDATE crow_instances SET ${col} = ?, updated_at = datetime('now') WHERE id = ? AND (${col} IS NULL OR TRIM(${col}) = '')`,
+          args: [addr[col], peerId],
+        });
+        if (Number(r.rowsAffected ?? 0) > 0) written[col] = addr[col];
+      } else if (col === "gateway_url" && current !== addr[col] && peerToWsUrlCandidates({ gateway_url: current }).length === 0) {
+        // REPAIR: the stored URL is one this transport can never dial (the
+        // :443 door pairing used to hand out — black-swan's row). The peer's
+        // signed, sanitized (tailnet, dialable) address replaces it. A
+        // dialable stored URL is still never overwritten.
+        const r = await db.execute({
+          sql: "UPDATE crow_instances SET gateway_url = ?, updated_at = datetime('now') WHERE id = ? AND gateway_url = ?",
+          args: [addr[col], peerId, row[col]],
+        });
+        if (Number(r.rowsAffected ?? 0) > 0) {
+          written[col] = addr[col];
+          console.log(`[tailnet-sync] replaced undialable gateway_url ${current} for ${String(peerId).slice(0, 12)}… with its signed address ${addr[col]}`);
+        }
+      }
     }
   } catch (err) {
     console.warn(`[tailnet-sync] address backfill for ${String(peerId).slice(0, 12)}… failed: ${err.message}`);
@@ -487,10 +599,40 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     }
   }
 
+  // Challenge-response: a CR-capable client gets a reply bound to ITS nonce
+  // and must answer OUR nonce before any feed key flows. A CR-less hello
+  // from a peer that has done CR before is a downgrade (a replayed old
+  // hello) and is refused.
+  const useCr = !ctx.legacyHandshake && peerHandshake.cr === CR_VERSION;
+  if (!useCr && !ctx.legacyHandshake && await peerCrRequired(ctx, remoteInstanceId)) {
+    log.warn?.(`[tailnet-sync] refusing a handshake without challenge-response from ${remoteInstanceId} (it has completed CR before — replay or downgrade)`);
+    ws.close(1008, "challenge required");
+    return;
+  }
+
   // Our own handshake (proves to the client we hold the same identity), with
   // our signed dial address — sent only AFTER the peer is known to be a live
   // paired instance here, so a revoked/unknown instance learns nothing.
-  ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(ctx))));
+  const localId = instanceSyncManager.localInstanceId;
+  const ourHs = buildHandshakePayload(identity, localId, await resolveSelfAddress(ctx));
+  if (useCr) ourHs.cr_sig = sign(crRespMessage(localId, remoteInstanceId, peerHandshake.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv);
+  ws.send(JSON.stringify(ourHs));
+
+  if (useCr) {
+    let proof;
+    try { proof = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS); }
+    catch (err) {
+      log.warn?.(`[tailnet-sync] challenge proof missing from ${remoteInstanceId}: ${err.message}`);
+      try { ws.close(1008, "no proof"); } catch {}
+      return;
+    }
+    if (!safeVerify(crProofMessage(remoteInstanceId, localId, ourHs.nonce_hex, peerHandshake.nonce_hex), proof?.cr_proof, identity.ed25519Pubkey)) {
+      log.warn?.(`[tailnet-sync] challenge proof INVALID from ${remoteInstanceId} (replayed hello?)`);
+      ws.close(1008, "bad proof");
+      return;
+    }
+    await markPeerCr(ctx, remoteInstanceId);
+  }
 
   // Learn the peer's dial address if our row lacks it (signed, verified above).
   await backfillPeerAddress(ctx, remoteInstanceId, verifiedAdvertisedAddress(peerHandshake, identity.ed25519Pubkey));
@@ -544,6 +686,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const noiseStream = new NoiseSecretStream(false, wsStream);
   noiseStream.on("error", () => {});
   noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
+  armHeartbeat(ws, ctx, remoteInstanceId);
   await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
   recordLinkUp(remoteInstanceId, { direction: "inbound" });
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
@@ -769,8 +912,10 @@ export class PeerDialer {
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
       try {
-        // Send our handshake (with our signed dial address).
-        ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(this.ctx))));
+        // Send our handshake (with our signed dial address), offering CR.
+        const ourHs = buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(this.ctx),
+          this.ctx.legacyHandshake ? null : { cr: CR_VERSION });
+        ws.send(JSON.stringify(ourHs));
         // Read server handshake.
         const serverHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(serverHs, identity.ed25519Pubkey)) {
@@ -816,6 +961,32 @@ export class PeerDialer {
           ws.close(1008, "not paired");
           frameReader.detach();
           return;
+        }
+
+        // Challenge-response: the server's reply must be bound to OUR fresh
+        // nonce (a replayed server hello is not); then we answer its nonce.
+        // A CR-less reply from a server that has done CR with us before is a
+        // downgrade and is refused.
+        if (!this.ctx.legacyHandshake) {
+          if (serverHs.cr_sig !== undefined) {
+            if (!safeVerify(crRespMessage(remoteInstanceId, instanceSyncManager.localInstanceId, ourHs.nonce_hex, serverHs.nonce_hex), serverHs.cr_sig, identity.ed25519Pubkey)) {
+              console.warn(`[tailnet-sync] ${wsUrl} challenge response invalid (not bound to our nonce — replayed?); closing`);
+              recordDialFailure(peerId, `${wsUrl}: challenge response invalid`);
+              closedByUs = true;
+              ws.close(1008, "bad challenge response");
+              frameReader.detach();
+              return;
+            }
+            ws.send(JSON.stringify({ cr_proof: sign(crProofMessage(instanceSyncManager.localInstanceId, remoteInstanceId, serverHs.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv) }));
+            await markPeerCr(this.ctx, remoteInstanceId);
+          } else if (await peerCrRequired(this.ctx, remoteInstanceId)) {
+            console.warn(`[tailnet-sync] ${wsUrl} answered without challenge-response, but this peer has done CR before (replay or downgrade); closing`);
+            recordDialFailure(peerId, `${wsUrl}: answered without challenge-response (downgrade refused)`);
+            closedByUs = true;
+            ws.close(1008, "challenge required");
+            frameReader.detach();
+            return;
+          }
         }
 
         // Learn the server's dial address if our row lacks it.
@@ -865,6 +1036,7 @@ export class PeerDialer {
         const noiseStream = new NoiseSecretStream(true, wsStream);
         noiseStream.on("error", () => {});
         noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
+        armHeartbeat(ws, this.ctx, remoteInstanceId);
         await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
         linked = true;
         recordLinkUp(remoteInstanceId, { direction: "outbound" });
@@ -908,6 +1080,56 @@ export class PeerDialer {
       this._noteDialFailure(wsUrl, err);
     });
   }
+}
+
+/**
+ * Boot repair for peer rows the transport can never dial: gateway_url is the
+ * :443 door (what pairing used to hand out) and tailscale_ip is empty — the
+ * exact shape that stalled black-swan for six weeks. The URL's MagicDNS HOST
+ * is right even though its port is not, so tailscaled already knows the
+ * host's tailnet address: fill tailscale_ip from `tailscale status --json`.
+ * The dial ladder then reaches the backend directly, the peer's signed
+ * handshake teaches its real port and (backfillPeerAddress) replaces the
+ * undialable URL. Only an EMPTY tailscale_ip is filled; only a tailnet
+ * address is written. Never throws. Returns the repaired peer ids.
+ */
+export async function repairUndialablePeerRows(ctx) {
+  const repaired = [];
+  const { db, instanceSyncManager } = ctx;
+  const lookup = ctx.lookupTailnetIp || ((host) => lookupTailnetIpForHost(host));
+  let rows = [];
+  try {
+    ({ rows } = await db.execute({
+      sql: "SELECT id, name, gateway_url, tailscale_ip FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+      args: [instanceSyncManager.localInstanceId],
+    }));
+  } catch { return repaired; }
+  for (const r of rows) {
+    const url = r.gateway_url ? String(r.gateway_url).trim() : "";
+    if (!url || (r.tailscale_ip && String(r.tailscale_ip).trim())) continue;
+    if (peerToWsUrlCandidates({ gateway_url: url }).length > 0) continue; // dialable as-is
+    const host = gatewayUrlHost(url);
+    let ip = null;
+    try { ip = host ? await lookup(host) : null; } catch { ip = null; }
+    if (!ip || !(isTailnetIp(ip) || testLoopback(ip))) {
+      console.warn(`[tailnet-sync] peer ${String(r.id).slice(0, 12)}… (${r.name || "unnamed"}) has undialable gateway_url ${url} and no tailscale_ip; ${host ? `tailnet lookup of ${host} found nothing` : "no host to look up"} — waiting for its signed handshake`);
+      continue;
+    }
+    try {
+      const u = await db.execute({
+        sql: "UPDATE crow_instances SET tailscale_ip = ?, updated_at = datetime('now') WHERE id = ? AND (tailscale_ip IS NULL OR TRIM(tailscale_ip) = '')",
+        args: [ip, r.id],
+      });
+      if (Number(u.rowsAffected ?? 0) > 0) {
+        repaired.push(r.id);
+        recordAddressBackfill(r.id, { tailscale_ip: ip });
+        console.log(`[tailnet-sync] repaired peer ${String(r.id).slice(0, 12)}… (${r.name || "unnamed"}): undialable gateway_url ${url}; tailscale_ip ${ip} from the tailnet (MagicDNS ${host})`);
+      }
+    } catch (err) {
+      console.warn(`[tailnet-sync] repair of ${String(r.id).slice(0, 12)}… failed: ${err.message}`);
+    }
+  }
+  return repaired;
 }
 
 /**
@@ -1002,10 +1224,10 @@ export async function startTailnetSyncClients(ctx) {
     for (const [id, dialer] of dialers) {
       if (!seenIds.has(id)) {
         dialer.stop(); dialers.delete(id); forgetPeerDialHealth(id);
-        // Its learned port goes with it (revoked / unpaired).
+        // Its learned port and CR flag go with it (revoked / unpaired).
         db.execute({
-          sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
-          args: [`${SYNC_PORT_KEY_PREFIX}${id}`, instanceSyncManager.localInstanceId],
+          sql: "DELETE FROM dashboard_settings_overrides WHERE key IN (?, ?) AND instance_id = ?",
+          args: [`${SYNC_PORT_KEY_PREFIX}${id}`, `${SYNC_CR_KEY_PREFIX}${id}`, instanceSyncManager.localInstanceId],
         }).catch(() => {});
       }
     }
@@ -1031,6 +1253,7 @@ export async function startTailnetSyncClients(ctx) {
     }
   }
 
+  await repairUndialablePeerRows(ctx);
   await refresh();
   // Periodically rescan in case new peers get paired or gateway_urls change.
   const rescan = setInterval(refresh, 60_000);
