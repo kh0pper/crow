@@ -15,6 +15,16 @@ A paired browser — a phone today, a Raspberry Pi 3 with a 7" touchscreen next 
 
 - The page is served at `/display`, not `/kiosk`, because the installed maker-lab bundle owns `/kiosk/*`. The API stays under `/api/kiosk/*` and the dashboard panel at `/dashboard/kiosk`.
 
+## Talk to Crow in the dashboard (session mode)
+The Crow's Nest header bird opens the same page inside the dashboard, with no pairing: tap the bird and choose **Talk to Crow**, or press and hold the bird (a held Enter/Space on the focused bird does the same). It uses the microphone and speaker of the device you are on. The row and the long-press exist only while the Kiosk extension is installed.
+
+- Page: `/display/session`; WebSocket: `/api/kiosk/session/dashboard`. Both sit behind the same network rule as the dashboard (never Funnel) **and** require the dashboard's own session cookie — the bundle mints no token for this. The page answers `401` without a session; the socket is refused before the upgrade.
+- The socket handshake must come from this origin (`Sec-Fetch-Site: same-origin`, or an `Origin` that names the `Host` / `X-Forwarded-Host`), and its first `hello` frame must echo the `crow_csrf` cookie — the same double-submit rule as every dashboard POST. A reverse proxy in front of Crow must forward `Host` or `X-Forwarded-Host`.
+- Nothing is stored: the display exists in memory for the life of the socket, under an id derived from a hash of the session. It is not a paired device, so it is not listed in **Kiosk**, cannot be announced to, and cannot be claimed by a device id. The login is re-checked at every question and once a minute; logging out closes the display. Its windows, timers and short conversation are dropped two minutes after the overlay closes.
+- Assistant: the one chosen under **Kiosk → Talk to Crow in the dashboard**, else the first enabled assistant. It runs with the same tool limits as a paired display, and memories stay off. With no enabled assistant the page says so and links to the Kiosk panel.
+- Closing (the close button, or Esc) stops the microphone and any audio at once and removes the frame.
+- The page is framed by the dashboard only (`frame-ancestors 'self'`); the paired page at `/display` still refuses all framing.
+
 ## Voice services
 - Speech-to-text: the Faster-Whisper bundle (loopback :8004); the kiosk adds a `distil-small.en` profile at first pairing. Each display can switch to the faster, less accurate `tiny.en` (Speech model) and set its end-of-speech wait (300–900 ms, default 450). Crow warms the display's speech model at gateway start, on connect, and after a settings change, so the first question is not slow.
 - Voice: the Kokoro TTS bundle (loopback :8880) when installed.

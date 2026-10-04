@@ -99,6 +99,20 @@ export function csrfMiddleware(req, res, next) {
 }
 
 /**
+ * The same double-submit rule for a caller that is not an Express request: a
+ * WebSocket whose first frame carries the token. `req` is the upgrade request
+ * (its Cookie header holds `crow_csrf`); `presented` is the value the page
+ * echoed. Honors the `CROW_CSRF_STRICT=0` kill-switch exactly like the
+ * middleware. The caller must already have verified the session.
+ */
+export function csrfTokenAccepted(req, presented) {
+  if (!strictMode()) return true;
+  const cookieValue = parseCookies(req)[CSRF_COOKIE];
+  if (!cookieValue || typeof presented !== "string" || !presented) return false;
+  return safeEqual(presented, cookieValue);
+}
+
+/**
  * Emit a hidden input carrying the CSRF token. For classic `<form>` submits
  * that don't go through Turbo's auto-header-attach path.
  */

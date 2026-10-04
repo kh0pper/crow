@@ -486,6 +486,25 @@ export function dashboardAuth(req, res, next) {
 }
 
 /**
+ * The live dashboard session carried by a request that never passes through
+ * Express — a raw WebSocket upgrade — or by a route that must answer 401
+ * instead of redirecting to the login page (a page shown inside a frame).
+ * Same two checks as dashboardAuth, in the same order: the network rule
+ * (which also refuses Tailscale Funnel), then the session cookie against the
+ * session store. Resolves the session token, or null. Never throws.
+ */
+export async function sessionFromRequest(req) {
+  if (!req || !req.headers || !isAllowedNetwork(req)) return null;
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  try {
+    return (await verifySession(token)) === true ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Set session cookie on response.
  */
 export function setSessionCookie(res, token, maxAgeMs = SESSION_MAX_AGE) {

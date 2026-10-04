@@ -189,3 +189,39 @@ test("lever D: the page reports speech_pause from the VAD and the bytes sent at 
   assert.ok(onFrame.indexOf("r.pause") < onFrame.indexOf("r.end"), "the pause is sent before a same-frame end");
   assert.match(src, /send\(\{ type: "turn_end", vad_reason: reason, voiced_bytes: turn\.voicedBytes \}\);/);
 });
+
+// ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----
+
+test("session mode: no pairing and no stored token — the socket is the dashboard session's, and hello echoes the CSRF cookie", () => {
+  const src = read("kiosk.js");
+  assert.match(src, /const SESSION = document\.documentElement\.dataset\.mode === "session";/);
+  const connect = src.slice(src.indexOf("function connect()"), src.indexOf("const send = "));
+  assert.match(connect, /const id = SESSION \? null : ls\.get\(LS_DEV\), tok = SESSION \? null : ls\.get\(LS_TOK\);/, "session mode never reads a device token");
+  assert.match(connect, /if \(!SESSION && \(!id \|\| !tok\)\) \{ pair\(\); return; \}/, "session mode never pairs");
+  assert.match(connect, /\/api\/kiosk\/session\$\{SESSION \? "\/dashboard" : ""\}/);
+  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS \}/);
+  assert.match(connect, /closeDecision\(ev\.code, ev\.reason, SESSION \? "session" : "paired"\)/);
+  assert.doesNotMatch(src, /ls\.set\([^)]*\)[^\n]*SESSION|SESSION[^\n]*ls\.set\(/, "nothing is stored for a session display");
+  assert.doesNotMatch(read("kiosk.html"), /data-mode/, "the mode is stamped by the server on /display/session only");
+});
+
+test("session mode: the dashboard can stop the mic, audio and socket at once; Escape inside the frame asks the dashboard to close", () => {
+  const src = read("kiosk.js");
+  const block = src.slice(src.indexOf("if (SESSION) {\n  // The dashboard closes the overlay"));
+  assert.ok(block.length > 100, "session block present");
+  const rel = block.slice(block.indexOf("window.crowKioskRelease"), block.indexOf("document.addEventListener(\"keydown\""));
+  for (const needle of ["halted = true", "clearTimeout(reconnectTimer)", "releaseAudio()", "ctx?.close()", "s?.close(1000"]) assert.ok(rel.includes(needle), needle);
+  assert.match(block, /e\.key === "Escape" && window\.parent !== window\) window\.parent\.postMessage\("crow-talk-close", location\.origin\)/, "posted to this origin only, never '*'");
+  const release = src.slice(src.indexOf("function releaseAudio()"), src.indexOf("function setBird("));
+  for (const needle of ["mic?.close()", "player?.flush()", "ctx?.suspend()"]) assert.ok(release.includes(needle), needle);
+  assert.doesNotMatch(src, /postMessage\([^)]*["']\*["']\)/);
+});
+
+test("session mode: 'no assistant' links to the Kiosk panel in the top window; the link is built with DOM calls", () => {
+  const src = read("kiosk.js");
+  assert.match(src, /a\.href = "\/dashboard\/kiosk"; a\.target = "_top"; a\.textContent = t\("session_bot_link"\)/);
+  assert.match(src, /if \(m\.code === "no_bound_bot"\) banner\(SESSION \? "session_no_bot" : "no_bot"\)/);
+  const css = read("kiosk.css");
+  assert.match(css, /\[data-mode="session"\] \.k-banner\s*\{[^}]*right:/, "the banner leaves room for the dashboard's close button");
+  assert.match(css, /\[data-mode="session"\] \.k-top\s*\{[^}]*padding-right:/);
+});

@@ -5,9 +5,15 @@ import { e2eMs } from "./metrics.js";
  * Close codes: 4401 unauthorized/unpaired → the token is dead, re-pair; 4000 superseded →
  * the display is open elsewhere, stop (no ping-pong). Everything else — 4401 hello_timeout,
  * 1006 network drops, 1011 server_error (a transient verify/setup failure) — reconnects
- * with backoff and KEEPS the token.
+ * with backoff and KEEPS the token. `mode` is "session" on /display/session.
  */
-export function closeDecision(code, reason) {
+export function closeDecision(code, reason, mode) {
+  // A session display (the dashboard's Talk to Crow) has no token to forget and nothing to pair:
+  // an ended login or a missing assistant stops it with a message; a tap tries again.
+  if (mode === "session") {
+    if (code === 4401 && (reason === "unauthorized" || reason === "unpaired")) return { action: "halt", banner: "session_expired" };
+    if (code === 4403 && reason === "no_bot") return { action: "halt", banner: "session_no_bot" };
+  }
   if (code === 4401 && (reason === "unauthorized" || reason === "unpaired")) return { action: "forget_token" };
   if (code === 4000 && reason === "superseded") return { action: "halt", banner: "opened_elsewhere" };
   return { action: "reconnect" };

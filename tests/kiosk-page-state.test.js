@@ -256,3 +256,20 @@ test("smoke 2026-10-04 item 7: the status ring keeps the last 20 displayed statu
   r.push("banner", "y".repeat(500));
   assert.equal(r.list().at(-1).text.length, 120);
 });
+
+// ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----
+
+test("session mode: an ended login or a missing assistant halts with its own message — it never forgets a token or starts pairing", () => {
+  assert.deepEqual(closeDecision(4401, "unauthorized", "session"), { action: "halt", banner: "session_expired" });
+  assert.deepEqual(closeDecision(4403, "no_bot", "session"), { action: "halt", banner: "session_no_bot" });
+  assert.deepEqual(closeDecision(4000, "superseded", "session"), { action: "halt", banner: "opened_elsewhere" });
+  for (const [code, reason] of [[4401, "hello_timeout"], [1006, ""], [1011, "server_error"], [4403, ""]]) {
+    assert.deepEqual(closeDecision(code, reason, "session"), { action: "reconnect" }, `${code} ${reason}`);
+  }
+  for (const [code, reason] of [[4401, "unauthorized"], [4401, "unpaired"], [4403, "no_bot"], [1006, ""]]) {
+    assert.notEqual(closeDecision(code, reason, "session").action, "forget_token", `${code} ${reason}`);
+  }
+  // The paired page is unchanged, with or without the new argument.
+  assert.equal(closeDecision(4401, "unauthorized", "paired").action, "forget_token");
+  assert.equal(closeDecision(4403, "no_bot").action, "reconnect");
+});

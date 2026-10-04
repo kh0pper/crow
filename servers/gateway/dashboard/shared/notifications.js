@@ -12,6 +12,7 @@
  */
 
 import { t, tJs } from "./i18n.js";
+import { crowTalkRowHtml } from "./crow-talk.js";
 
 // ─── Shared notification JS (used by both classic and tamagotchi modes) ───
 
@@ -223,17 +224,14 @@ export function sharedNotifJs(lang) {
 
 // ─── Classic mode: bell icon + health pulse ───
 
-export function headerIconsHtml(lang, { companionAvailable } = {}) {
-  const kioskBtn = companionAvailable ? `
-<button class="header-icon-btn kiosk-toggle-btn" id="kiosk-toggle-btn" onclick="toggleKioskMode()" title="${t("kiosk.toggle", lang)}">
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <path d="M12 18.5A3.5 3.5 0 1 0 8.5 15"/>
-    <path d="M12 2a7 7 0 0 1 7 7c0 3.5-2 5-3.5 6.5"/>
-    <circle cx="12" cy="9" r="1" fill="currentColor"/>
-  </svg>
-</button>` : "";
+/**
+ * `talkAvailable` (the Kiosk extension's session display is installed): the
+ * tray's first row is "Talk to Crow" and a long-press on the bell opens the
+ * voice overlay (shared/crow-talk.js). Otherwise neither exists.
+ */
+export function headerIconsHtml(lang, { talkAvailable } = {}) {
+  const talk = talkAvailable === true;
   return `
-${kioskBtn}
 <button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -252,14 +250,14 @@ ${kioskBtn}
     <div id="health-stats" class="dropdown-body">${t("common.loading", lang)}</div>
   </div>
 </div>
-<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)" title="${t("notif.notifications", lang)}">
+<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)" title="${t(talk ? "talk.bellLabelHold" : "notif.notifications", lang)}"${talk ? ` data-crow-talk role="button" tabindex="0" aria-controls="notif-dropdown" aria-expanded="false" aria-label="${t("talk.bellLabelHold", lang)}"` : ""}>
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
     <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
   </svg>
   <span id="notif-badge" class="notif-badge" style="display:none">0</span>
   <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>
-  <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">
+  <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">${talk ? crowTalkRowHtml(lang, { holdTarget: "bell" }) : ""}
     <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
     <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
   </div>
@@ -422,86 +420,6 @@ export const headerIconsCss = `
     0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.6); }
     50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
   }
-  /* ─── Kiosk Mode ─── */
-  .kiosk-toggle-btn {
-    border-color: var(--crow-accent);
-    color: var(--crow-accent);
-  }
-  .kiosk-toggle-btn:hover {
-    background: color-mix(in srgb, var(--crow-accent) 10%, transparent);
-  }
-  .kiosk-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-    background: #000;
-  }
-  .kiosk-overlay.active {
-    display: block;
-  }
-  .kiosk-overlay iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-  }
-  /* Close button — HIDDEN by default. The companion app renders its own
-   * 'Nest' button inside the iframe for the happy path. We only show this
-   * fallback when the iframe FAILS to load (companion host unreachable,
-   * refused-to-connect, CSP block) so the user isn't stranded with no way
-   * back. Two visibility triggers:
-   *   (a) .kiosk-overlay--error — set in JS after the 6s load timeout.
-   *   (b) .kiosk-overlay--show-exit — reserved for future manual toggle. */
-  .kiosk-exit-btn {
-    position: absolute;
-    top: 0.75rem;
-    right: 0.75rem;
-    z-index: 10001;
-    display: none;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    border: 1px solid rgba(255,255,255,0.25);
-    background: rgba(0,0,0,0.6);
-    color: #fff;
-    cursor: pointer;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(4px);
-    transition: background 0.15s, border-color 0.15s;
-  }
-  .kiosk-exit-btn:hover {
-    background: rgba(0,0,0,0.85);
-    border-color: rgba(255,255,255,0.5);
-  }
-  .kiosk-exit-btn:focus-visible {
-    outline: 2px solid var(--crow-accent);
-    outline-offset: 2px;
-  }
-  .kiosk-overlay--error .kiosk-exit-btn,
-  .kiosk-overlay--show-exit .kiosk-exit-btn { display: flex; }
-  /* Inline error message replaces the iframe slot when load fails. */
-  .kiosk-error-msg {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-family: var(--crow-body-font);
-    text-align: center;
-    padding: 2rem;
-    gap: 1rem;
-  }
-  .kiosk-error-msg h3 { font-size: 1.2rem; margin: 0; }
-  .kiosk-error-msg p { margin: 0; opacity: 0.7; font-size: 0.9rem; max-width: 520px; }
-  .kiosk-error-msg button {
-    background: transparent; border: 1px solid rgba(255,255,255,0.4);
-    color: #fff; padding: 0.5rem 1.25rem; border-radius: 8px;
-    cursor: pointer; font-size: 0.85rem;
-  }
-  .kiosk-error-msg button:hover { background: rgba(255,255,255,0.1); }
   /* ─── Incoming Call Toast ─── */
   .crow-call-toast {
     position: fixed;
@@ -662,18 +580,29 @@ export function headerIconsJs(lang) {
     }
   }
 
+  function setNotifDropdown(open) {
+    var dd = document.getElementById('notif-dropdown');
+    if (!dd) return;
+    dd.style.display = open ? 'block' : 'none';
+    var owner = document.getElementById('notif-icon-btn');
+    if (owner && owner.hasAttribute('aria-expanded')) owner.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) loadNotifications();
+  }
+
   function toggleNotifDropdown(e) {
     e.stopPropagation();
+    // The click that only ended a long-press (Talk to Crow) is not a tap.
+    if (window.crowTalkSwallowTap && window.crowTalkSwallowTap()) return;
     var dd = document.getElementById('notif-dropdown');
     var healthDd = document.getElementById('health-dropdown');
     healthDd.style.display = 'none';
-    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
-    if (dd.style.display === 'block') loadNotifications();
+    setNotifDropdown(dd.style.display === 'none');
   }
 
   document.addEventListener('click', function() {
-    document.getElementById('health-dropdown').style.display = 'none';
-    document.getElementById('notif-dropdown').style.display = 'none';
+    var healthDd = document.getElementById('health-dropdown');
+    if (healthDd) healthDd.style.display = 'none';
+    setNotifDropdown(false);
   });
 
   document.querySelectorAll('.header-dropdown').forEach(function(el) {
@@ -748,17 +677,17 @@ export function headerIconsJs(lang) {
 
 // ─── Tamagotchi mode: animated pixel crow with combined dropdown ───
 
-export function tamagotchiHtml(lang, { companionAvailable } = {}) {
-  const kioskBtn = companionAvailable ? `
-<button class="header-icon-btn kiosk-toggle-btn" id="kiosk-toggle-btn" onclick="toggleKioskMode()" title="${t("kiosk.toggle", lang)}">
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <path d="M12 18.5A3.5 3.5 0 1 0 8.5 15"/>
-    <path d="M12 2a7 7 0 0 1 7 7c0 3.5-2 5-3.5 6.5"/>
-    <circle cx="12" cy="9" r="1" fill="currentColor"/>
-  </svg>
-</button>` : "";
+/**
+ * The bird is the one header button. Tap → the tray. With `talkAvailable` (the
+ * Kiosk extension's session display is installed) the tray's first row is
+ * "Talk to Crow" and a long-press on the bird opens the voice overlay directly
+ * (shared/crow-talk.js); without it the bird is not armed and a long-press is
+ * an ordinary tap.
+ */
+export function tamagotchiHtml(lang, { talkAvailable } = {}) {
+  const talk = talkAvailable === true;
+  const birdLabel = t(talk ? "talk.birdLabelHold" : "talk.birdLabel", lang);
   return `
-${kioskBtn}
 <button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -768,7 +697,8 @@ ${kioskBtn}
   </svg>
 </button>
 <div class="crow-tama-wrap" id="crow-tama-wrap">
-  <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" onclick="toggleCrowDropdown(event)">
+  <button type="button" class="crow-tama-btn" id="crow-bird-btn" onclick="toggleCrowDropdown(event)" aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"${talk ? " data-crow-talk" : ""}>
+  <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" aria-hidden="true" focusable="false">
     <g class="crow-body-group">
       <!-- Feet -->
       <g class="crow-feet">
@@ -797,8 +727,9 @@ ${kioskBtn}
     <!-- Alarmed exclamation -->
     <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="var(--crow-body-font)">!</text>
   </svg>
+  </button>
   <!-- Combined dropdown -->
-  <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">
+  <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">${talk ? crowTalkRowHtml(lang, { holdTarget: "bird" }) : ""}
     <div class="dropdown-title">
       <span>${t("notif.status", lang)}</span>
       <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button>
@@ -830,6 +761,21 @@ export const tamagotchiCss = `
     display: block;
     overflow: visible;
   }
+  /* The bird is a real button (keyboard + screen reader), with none of a button's chrome. */
+  .crow-tama-btn {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    overflow: visible;
+  }
+  .crow-tama-btn:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
 
   /* ─ Bounce keyframes ─ */
   @keyframes crow-bounce-happy {
@@ -1039,16 +985,24 @@ export function tamagotchiJs(lang) {
     } catch (err) { console.warn('ptt', err); }
   }
 
-  function toggleCrowDropdown(e) {
-    e.stopPropagation();
+  function setCrowDropdown(open) {
     var dd = document.getElementById('crow-dropdown');
-    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
-    if (dd.style.display === 'block') loadNotifications();
+    if (!dd) return;
+    dd.style.display = open ? 'block' : 'none';
+    var bird = document.getElementById('crow-bird-btn');
+    if (bird) bird.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) loadNotifications();
   }
 
-  document.addEventListener('click', function() {
-    document.getElementById('crow-dropdown').style.display = 'none';
-  });
+  function toggleCrowDropdown(e) {
+    e.stopPropagation();
+    // The click that only ended a long-press (Talk to Crow) is not a tap.
+    if (window.crowTalkSwallowTap && window.crowTalkSwallowTap()) return;
+    var dd = document.getElementById('crow-dropdown');
+    setCrowDropdown(!dd || dd.style.display === 'none');
+  }
+
+  document.addEventListener('click', function() { setCrowDropdown(false); });
 
   function healthColor(pct) {
     if (pct >= 90) return 'crow-health-crit';
