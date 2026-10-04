@@ -20,7 +20,7 @@
  * built by the real scripts/init-db.js (CROW_DATA_DIR-scoped), mirroring
  * tests/chat-template-kwargs.test.js and tests/messages-panel-ai-configured
  * .test.js. `process.env.HOME` is pointed at a throwaway dir per-scenario so
- * `getProviderConfig()` (reads `~/.crow/.env`, NOT CROW_DATA_DIR-scoped)
+ * `getProviderConfig()` (reads `<CROW_HOME>/.env`, NOT CROW_DATA_DIR-scoped; CROW_HOME follows HOME here)
  * deterministically returns null or a real value regardless of what's on
  * the operator machine actually running this suite.
  */
@@ -44,7 +44,7 @@ writeFileSync(
 );
 
 process.env.CROW_DATA_DIR = dataDir;
-process.env.HOME = noEnvHome; // default: no ~/.crow/.env — getProviderConfig() null
+process.env.HOME = noEnvHome; process.env.CROW_HOME = join(noEnvHome, ".crow"); // default: no ~/.crow/.env — getProviderConfig() null
 
 let db = null;
 let server = null;
@@ -81,7 +81,7 @@ beforeEach(async () => {
   await db.execute("DELETE FROM providers");
   await db.execute("DELETE FROM chat_conversations");
   await db.execute("DELETE FROM dashboard_settings WHERE key = 'ai_profiles'");
-  process.env.HOME = noEnvHome;
+  process.env.HOME = noEnvHome; process.env.CROW_HOME = join(noEnvHome, ".crow");
   const { invalidateConfigCache } = await import("../servers/gateway/ai/provider.js");
   invalidateConfigCache();
 });
@@ -167,7 +167,7 @@ test("env-configured install: env still wins even when a usable providers-table 
   // env config must still be the one that wins in Path C.
   await insertProvider({ id: "local-llm", models: [{ id: "qwen3-4b" }] });
 
-  process.env.HOME = envHome;
+  process.env.HOME = envHome; process.env.CROW_HOME = join(envHome, ".crow");
   const { invalidateConfigCache } = await import("../servers/gateway/ai/provider.js");
   invalidateConfigCache();
   try {
@@ -176,7 +176,7 @@ test("env-configured install: env still wins even when a usable providers-table 
     assert.equal(json.provider, "openai");
     assert.equal(json.model, "gpt-4o-mini");
   } finally {
-    process.env.HOME = noEnvHome;
+    process.env.HOME = noEnvHome; process.env.CROW_HOME = join(noEnvHome, ".crow");
     invalidateConfigCache();
   }
 });

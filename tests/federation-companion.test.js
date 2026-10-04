@@ -7,11 +7,12 @@ import { tmpdir, homedir } from "node:os";
 
 // Stage peer-tokens + a test ~/.crow/installed.json pointing at a fake
 // companion entry. The federation-companion handler reads
-// ~/.crow/installed.json directly — no env var — so we isolate the test
-// by pre-seeding the real path under a tmp HOME before importing the
-// module. The prior-state is restored in the after() hook.
+// <CROW_HOME>/installed.json, so we isolate the test by pointing both HOME
+// and CROW_HOME at a tmp dir before importing the module. The prior state is
+// restored in the after() hook.
 
 const origHome = process.env.HOME;
+const origCrowHome = process.env.CROW_HOME;
 const origPeerTokens = process.env.CROW_PEER_TOKENS_PATH;
 
 const tmpHome = mkdtempSync(join(tmpdir(), "crow-fc-test-"));
@@ -21,6 +22,7 @@ const peerTokensPath = join(tmpHome, ".crow", "peer-tokens.json");
 writeFileSync(peerTokensPath, "{}", { mode: 0o600 });
 process.env.CROW_PEER_TOKENS_PATH = peerTokensPath;
 process.env.HOME = tmpHome;
+process.env.CROW_HOME = join(tmpHome, ".crow");
 
 function setInstalled(contents) {
   writeFileSync(join(tmpHome, ".crow", "installed.json"), JSON.stringify(contents));
@@ -66,6 +68,7 @@ after(async () => {
   }
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch {}
   if (origHome !== undefined) process.env.HOME = origHome; else delete process.env.HOME;
+  if (origCrowHome !== undefined) process.env.CROW_HOME = origCrowHome; else delete process.env.CROW_HOME;
   if (origPeerTokens !== undefined) process.env.CROW_PEER_TOKENS_PATH = origPeerTokens;
   else delete process.env.CROW_PEER_TOKENS_PATH;
 });
