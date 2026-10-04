@@ -137,6 +137,19 @@ Tres tareas — **alimentar** (`feed`), **acicalar** (`preen`), **jugar** (`play
 
 `POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completa una. Repetir un tipo ya hecho hoy es un no-op (`done: false`); en ambos casos la respuesta trae el estado actual de la mascota.
 
+## Caminar
+
+En la página de tu pájaro puedes fijar una meta diaria de pasos (6.000 para empezar; entre 2.000 y 30.000). Caminar hacia ella le va dando energía a tu pájaro — hasta +30 al día al llegar a la meta — y alcanzarla da 3 de alpiste. Un día sin caminar no cuesta nada.
+
+- **En la app de Crow para Android (1.6.0 o posterior)** toca **Contar mis pasos** una vez y permite *Actividad física*. La app lee el contador de pasos del propio teléfono cada vez que abres Ramble; nada funciona en segundo plano. El primer día puede empezar en cero ("contando desde ahora") salvo que el teléfono se haya reiniciado ese día.
+- **En cualquier otro lugar** (el navegador del teléfono, un iPhone, un teléfono sin contador de pasos) toca **Caminé hoy**. Alegra a tu pájaro (+15) pero no da alpiste, porque no hay un conteo detrás.
+
+**Quién ve qué.** Tu número de pasos se queda en tus propios Crows. Tus contactos solo ven una pequeña marca de "caminó hoy" en la foto de perfil de tu pájaro — nunca un número. La marca aparece cuando marcas que caminaste o pasas de 2.000 pasos, y se borra después de medianoche. Como aparece cuando caminas, sí indica más o menos *cuándo* caminaste.
+
+**El aviso de la tarde.** Si esta semana has caminado con Ramble y a las 6 de la tarde vas por debajo de la mitad de tu meta, tu pájaro envía un recordatorio amable por las notificaciones de Crow. Nunca más de uno al día. Puedes desactivarlo, o dejar los fines de semana tranquilos, en **Meta y recordatorios** de la tarjeta de caminar.
+
+API: `GET /api/ramble/steps`, `POST /api/ramble/steps/reading { device_id, counter, elapsed_ms, boot_count }`, `POST /api/ramble/steps/walked`, `PUT /api/ramble/steps/settings { goal?, nudge?, nudge_weekends? }`.
+
 ## Nidos y el estante de huevos
 
 Los nidos son puntos de aparición en el mundo. Cada semana ISO, cada celda geohash-7 (unos 150 m de lado) tiene un nido o no, decidido por una fórmula pública — `sha256("ramble-nest-v1:" + celda + ":" + semana)`, hay nido cuando los primeros 32 bits mod `nest.rate` (24 por defecto) dan 0 — así que todo el mundo ve los mismos nidos sin ninguna intervención del servidor y sin que se revele nada sobre las personas. El mapa los muestra como pines de huevo en cuanto haces zoom (nivel 15 o más cerca), obtenidos de `GET /api/ramble/nests?bbox=south,west,north,east`.
@@ -254,6 +267,25 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `energy.max.per.heart` | 10 | Cuánto alarga la barra cada contenedor de corazón. |
 | `energy.max.cap` | 300 | Lo máximo que puede llegar a medir la barra, por muchos corazones que encuentres. |
 | `unlock.max.accuracy.m` | 100 | Qué tan precisa debe ser tu ubicación para que un lugar cuente como visitado. |
+
+### Pasos
+
+| Clave | Por defecto | Efecto |
+|---|---|---|
+| `steps.goal` | 6000 | Meta diaria de pasos (2.000–30.000). Se fija en la página del pájaro. |
+| `steps.max.day` | 40000 | Máximo de pasos acreditados por día entre todos tus dispositivos. |
+| `steps.max.per.min` | 250 | Máximo de pasos acreditados por minuto transcurrido desde la última lectura (o desde el arranque). |
+| `steps.devices.per.day` | 4 | Máximo de dispositivos distintos acreditados por día. |
+| `steps.energy.full` | 30 | Energía por un día en la meta. |
+| `steps.energy.chunk` | 5 | El pago de energía por pasos más pequeño (menos pagos, más grandes). |
+| `steps.checkin.energy` | 15 | Energía por marcar "Caminé hoy" a mano. |
+| `steps.goal.seed` | 3 | Alpiste que se paga por alcanzar la meta. |
+| `steps.badge.min` | 2000 | Pasos (con tope en la meta) que dan la marca de "caminó hoy". |
+| `steps.nudge` | 1 | Aviso de la tarde activado (1) o desactivado (0). Se ajusta en la tarjeta de caminar. |
+| `steps.nudge.weekends` | 1 | Avisar también en fines de semana (1) o no (0). |
+| `steps.nudge.hour` | 18 | Hora local más temprana para el aviso. |
+| `steps.nudge.until` | 21 | Hora local más tardía para el aviso (exclusiva). |
+| `steps.nudge.below` | 50 | Avisar solo si los pasos de hoy están por debajo de este porcentaje de la meta. |
 
 ## Herramientas MCP
 
