@@ -35,11 +35,11 @@
 
 ## Staging Files
 
-- [README.md](http://100.118.41.122:8080/api/pir/staging/2502592/README.md) — Full documentation
-- [loader.py](http://100.118.41.122:8080/api/pir/staging/2502592/loader.py) — DB loader (dry-run passed)
-- [source_inventory.json](http://100.118.41.122:8080/api/pir/staging/2502592/source_inventory.json) — File inventory
-- [claims.json](http://100.118.41.122:8080/api/pir/staging/2502592/claims.json) — Verified row counts
-- [draft_acknowledgment.txt](http://100.118.41.122:8080/api/pir/staging/2502592/draft_acknowledgment.txt) — Reply to TEA
+- [README.md](http://100.64.20.1:8080/api/pir/staging/2502592/README.md) — Full documentation
+- [loader.py](http://100.64.20.1:8080/api/pir/staging/2502592/loader.py) — DB loader (dry-run passed)
+- [source_inventory.json](http://100.64.20.1:8080/api/pir/staging/2502592/source_inventory.json) — File inventory
+- [claims.json](http://100.64.20.1:8080/api/pir/staging/2502592/claims.json) — Verified row counts
+- [draft_acknowledgment.txt](http://100.64.20.1:8080/api/pir/staging/2502592/draft_acknowledgment.txt) — Reply to TEA
 
 ## Draft Reply to TEA
 

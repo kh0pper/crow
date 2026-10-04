@@ -62,7 +62,7 @@ En la instancia home, registra el satélite:
 "Registra mi servidor black-swan como instancia satélite"
 ```
 
-La IA usa `crow_register_instance` para agregar el satélite al registro de instancias. Necesitas la URL del gateway del satélite (p. ej., `http://100.121.254.89:3001` vía Tailscale).
+La IA usa `crow_register_instance` para agregar el satélite al registro de instancias. Necesitas la URL del gateway del satélite (p. ej., `http://100.64.20.2:3001` vía Tailscale).
 
 En el satélite, registra la instancia home de la misma manera. Ambos lados necesitan conocerse mutuamente.
 

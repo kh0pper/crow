@@ -1,6 +1,6 @@
 /**
  * provider-engine — the external-engine marker (spec
- * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.1/§2.2).
+ * the private engineering notes §2.1/§2.2).
  * Pure helpers, no I/O.
  */
 import { test } from "node:test";

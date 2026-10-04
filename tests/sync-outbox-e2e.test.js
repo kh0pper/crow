@@ -1,7 +1,6 @@
 /**
  * tests/sync-outbox-e2e.test.js — Task 6 of the stdio-sync-outbox plan: the
- * multi-process e2e + mixed-doors race. See docs/superpowers/specs/
- * 2026-08-15-stdio-sync-outbox-design.md, "Testing" — binding authority for
+ * multi-process e2e + mixed-doors race. See the private engineering notes, "Testing" — binding authority for
  * both scenarios below.
  *
  * Test 1 is the proving test this defect family never had: a REAL stdio

@@ -2,7 +2,7 @@
  * Box reservation — the shared "this machine is spoken for" signal between
  * unattended GPU windows and the gateway's gpu-orchestrator.
  *
- * Spec: docs/superpowers/specs/2026-09-04-box-reservation-scheduling-scope.md
+ * Spec in the private engineering notes
  * (§3.1 record, §3.2 orchestrator behavior, §6 decisions: reservations win,
  * 8 h default max hold, crow-embed exempt via DEFAULT_ALLOW).
  *

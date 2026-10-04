@@ -41,9 +41,9 @@ See: _staging/2502592/draft_acknowledgment.txt
 
 ## Staging Files
 
-- [README.md](http://100.118.41.122:8080/api/pir/staging/2502592/README.md)
-- [loader.py](http://100.118.41.122:8080/api/pir/staging/2502592/loader.py)
-- [source_inventory.json](http://100.118.41.122:8080/api/pir/staging/2502592/source_inventory.json)
+- [README.md](http://100.64.20.1:8080/api/pir/staging/2502592/README.md)
+- [loader.py](http://100.64.20.1:8080/api/pir/staging/2502592/loader.py)
+- [source_inventory.json](http://100.64.20.1:8080/api/pir/staging/2502592/source_inventory.json)
 
 ## Instructions
 

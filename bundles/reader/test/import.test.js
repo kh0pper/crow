@@ -111,7 +111,7 @@ test("assertPublicHost rejects an IPv4-mapped IPv6 loopback literal", async () =
 
 test("assertPublicHost rejects CGNAT/Tailscale range 100.64/10", async () => {
   const { assertPublicHost } = await import("../server/import.js");
-  await assert.rejects(assertPublicHost("http://100.121.254.89/x", {}), /private address/);
+  await assert.rejects(assertPublicHost("http://100.64.20.2/x", {}), /private address/);
   await assert.rejects(assertPublicHost("http://100.127.255.255/x", {}), /private address/);
   // Just below the CGNAT range: must pass WITHOUT the opt-out, or the
   // boundary assertion is vacuous (the opt-out short-circuits the guard).

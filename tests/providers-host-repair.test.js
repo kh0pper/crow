@@ -9,7 +9,7 @@ import { repairProviderHosts, syncProvidersFromModelsJson, setProviderSyncManage
 import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
 
 const PEER = "49cf71ca878643ba7717f344329266fd";
-const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237", "100.118.41.122"]);
+const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237", "100.64.20.1"]);
 
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "providers-host-repair-"));
@@ -54,7 +54,7 @@ test("repairs exactly this instance's in-scope bad writes, nothing else; idempot
     await insert(t.db, "raven-halogen-smoke", "local", "http://10.0.0.126:8731/v1", t.own);
     await insert(t.db, "raven-flash-next", "raven", "http://10.0.0.126:8030/v1", t.own);
     await insert(t.db, "peer-wrote-local", "local", "http://10.0.0.126:9999/v1", PEER);
-    await insert(t.db, "own-addr-local", "local", "http://100.118.41.122:8003/v1", t.own);
+    await insert(t.db, "own-addr-local", "local", "http://100.64.20.1:8003/v1", t.own);
     await insert(t.db, "dns-local", "local", "https://api.z.ai/v4", t.own);
     await insert(t.db, "cloud-ok", "cloud", "https://api.together.xyz/v1", t.own);
     await insert(t.db, "bundle-foreign", "local", "http://10.0.0.126:7000/v1", t.own, { bundleId: "b" });

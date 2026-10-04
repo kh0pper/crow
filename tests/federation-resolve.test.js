@@ -79,7 +79,7 @@ test("resolve: ambiguous duplicate names → 400 with matches list", async () =>
 
 test("resolve: short hostname fallback match", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
-    { id: "aaa1", name: "Corp Primary", hostname: "grackle.dachshund.ts.net", gateway_url: "https://g" },
+    { id: "aaa1", name: "Corp Primary", hostname: "grackle.example.ts.net", gateway_url: "https://g" },
   ]);
   try {
     const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=grackle`);

@@ -27,6 +27,6 @@ kevin.hopper1@gmail.com
 
 **Open items:** Item 4 is now fully resolved. Item 3 (financial monitoring records) remains pending the OAG ruling (anticipated ~June 26, 2026).
 
-**Preview:** [correspondence_reply.txt](http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt)
+**Preview:** [correspondence_reply.txt](http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt)
 
 Reply APPROVE to send this reply, REVISE with feedback to adjust, REJECT to cancel.

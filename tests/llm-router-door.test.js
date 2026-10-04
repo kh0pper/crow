@@ -66,7 +66,7 @@ function post(path, body, headers = {}) {
 }
 
 test("isTrustedDoorSource: loopback and tailnet only", () => {
-  for (const a of ["127.0.0.1", "::1", "100.64.0.1", "100.118.41.122", "100.127.255.254", "fd7a:115c:a1e0::1"]) assert.equal(isTrustedDoorSource(a), true, a);
+  for (const a of ["127.0.0.1", "::1", "100.64.0.1", "100.64.20.1", "100.127.255.254", "fd7a:115c:a1e0::1"]) assert.equal(isTrustedDoorSource(a), true, a);
   for (const a of ["10.0.0.50", "192.168.1.2", "172.17.0.2", "100.128.0.1", "8.8.8.8", ""]) assert.equal(isTrustedDoorSource(a), false, a);
 });
 

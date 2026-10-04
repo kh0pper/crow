@@ -1,0 +1,18 @@
+# Allowlist for scripts/check-public-hygiene.mjs.
+#
+# tailnet: <label>  — a placeholder tailnet name allowed in <host>.<label>.ts.net
+# secret: <value>   — an exact fake secret value used by a test
+#
+# Only placeholders and obviously fake values belong here. Never add a real
+# tailnet name or a real credential.
+
+tailnet: example
+tailnet: example-tailnet
+tailnet: tailnet-example
+tailnet: your-tailnet
+tailnet: tu-tailnet
+tailnet: tn
+tailnet: tail
+tailnet: tail12345
+
+secret: sk-real-secret-do-not-touch

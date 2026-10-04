@@ -29,26 +29,26 @@ const WS_PATH = "/api/instance-sync/stream";
 
 test("https gateway_url with Serve port → wss on the HOSTNAME (grackle row shape)", () => {
   const urls = peerToWsUrlCandidates({
-    gateway_url: "https://grackle.dachshund-chromatic.ts.net:8444",
-    tailscale_ip: "100.121.254.89",
+    gateway_url: "https://grackle.example.ts.net:8444",
+    tailscale_ip: "100.64.20.2",
   });
-  assert.equal(urls[0], `wss://grackle.dachshund-chromatic.ts.net:8444${WS_PATH}`);
+  assert.equal(urls[0], `wss://grackle.example.ts.net:8444${WS_PATH}`);
   // Never the broken combination: plain ws into the Serve HTTPS port.
-  assert.ok(!urls.includes(`ws://100.121.254.89:8444${WS_PATH}`));
+  assert.ok(!urls.includes(`ws://100.64.20.2:8444${WS_PATH}`));
 });
 
 test("tailnet-IP fallback candidate uses the backend fallbackPort, not the Serve port", () => {
   const urls = peerToWsUrlCandidates(
     {
-      gateway_url: "https://grackle.dachshund-chromatic.ts.net:8444",
-      tailscale_ip: "100.121.254.89",
+      gateway_url: "https://grackle.example.ts.net:8444",
+      tailscale_ip: "100.64.20.2",
     },
     3002
   );
   assert.deepEqual(urls, [
-    `wss://grackle.dachshund-chromatic.ts.net:8444${WS_PATH}`,
-    `ws://100.121.254.89:3002${WS_PATH}`,
-    `ws://100.121.254.89:3001${WS_PATH}`,
+    `wss://grackle.example.ts.net:8444${WS_PATH}`,
+    `ws://100.64.20.2:3002${WS_PATH}`,
+    `ws://100.64.20.2:3001${WS_PATH}`,
   ]);
 });
 
@@ -59,22 +59,22 @@ test("http gateway_url dials plain ws on its own port", () => {
 
 test("port 443 (public Funnel) is never dialed — falls back to tailnet IP", () => {
   const urls = peerToWsUrlCandidates(
-    { gateway_url: "https://grackle.dachshund-chromatic.ts.net", tailscale_ip: "100.121.254.89" },
+    { gateway_url: "https://grackle.example.ts.net", tailscale_ip: "100.64.20.2" },
     3002
   );
   assert.deepEqual(urls, [
-    `ws://100.121.254.89:3002${WS_PATH}`,
-    `ws://100.121.254.89:3001${WS_PATH}`,
+    `ws://100.64.20.2:3002${WS_PATH}`,
+    `ws://100.64.20.2:3001${WS_PATH}`,
   ]);
 });
 
 test("no gateway_url → tailnet IP + fallbackPort only", () => {
-  const urls = peerToWsUrlCandidates({ tailscale_ip: "100.118.41.122" }, 3001);
+  const urls = peerToWsUrlCandidates({ tailscale_ip: "100.64.20.1" }, 3001);
   // #144 minor: the peer's backend port isn't advertised, so the ladder
   // tries the caller's own port plus the fleet-standard 3001/3002.
   assert.deepEqual(urls, [
-    `ws://100.118.41.122:3001${WS_PATH}`,
-    `ws://100.118.41.122:3002${WS_PATH}`,
+    `ws://100.64.20.1:3001${WS_PATH}`,
+    `ws://100.64.20.1:3002${WS_PATH}`,
   ]);
 });
 
@@ -85,32 +85,32 @@ test("neither gateway_url nor tailscale_ip → no candidates", () => {
 
 test("malformed gateway_url falls back to the tailnet IP candidate", () => {
   const urls = peerToWsUrlCandidates(
-    { gateway_url: "not a url ::", tailscale_ip: "100.121.254.89" },
+    { gateway_url: "not a url ::", tailscale_ip: "100.64.20.2" },
     3002
   );
   assert.deepEqual(urls, [
-    `ws://100.121.254.89:3002${WS_PATH}`,
-    `ws://100.121.254.89:3001${WS_PATH}`,
+    `ws://100.64.20.2:3002${WS_PATH}`,
+    `ws://100.64.20.2:3001${WS_PATH}`,
   ]);
 });
 
 test("candidates are deduped when gateway_url already IS the tailnet-IP dial", () => {
   const urls = peerToWsUrlCandidates(
-    { gateway_url: "http://100.121.254.89:3002", tailscale_ip: "100.121.254.89" },
+    { gateway_url: "http://100.64.20.2:3002", tailscale_ip: "100.64.20.2" },
     3002
   );
   assert.deepEqual(urls, [
-    `ws://100.121.254.89:3002${WS_PATH}`,
-    `ws://100.121.254.89:3001${WS_PATH}`,
+    `ws://100.64.20.2:3002${WS_PATH}`,
+    `ws://100.64.20.2:3001${WS_PATH}`,
   ]);
 });
 
 test("non-standard caller port leads the fallback ladder, then the fleet-standard ports", () => {
-  const urls = peerToWsUrlCandidates({ tailscale_ip: "100.118.41.122" }, 3006);
+  const urls = peerToWsUrlCandidates({ tailscale_ip: "100.64.20.1" }, 3006);
   assert.deepEqual(urls, [
-    `ws://100.118.41.122:3006${WS_PATH}`,
-    `ws://100.118.41.122:3001${WS_PATH}`,
-    `ws://100.118.41.122:3002${WS_PATH}`,
+    `ws://100.64.20.1:3006${WS_PATH}`,
+    `ws://100.64.20.1:3001${WS_PATH}`,
+    `ws://100.64.20.1:3002${WS_PATH}`,
   ]);
 });
 

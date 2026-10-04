@@ -60,10 +60,10 @@ test("container-only short form -> skipped (no host port)", () => {
 });
 
 test("parseSsListeners parses addr:port incl ipv6 + %iface", () => {
-  const out = `LISTEN 0 511    127.0.0.1:3001 0.0.0.0:*\nLISTEN 0 4096   100.118.41.122:8003 0.0.0.0:*\nLISTEN 0 128    [::]:8880 [::]:*\nLISTEN 0 4096   127.0.0.53%lo:53 0.0.0.0:*`;
+  const out = `LISTEN 0 511    127.0.0.1:3001 0.0.0.0:*\nLISTEN 0 4096   100.64.20.1:8003 0.0.0.0:*\nLISTEN 0 128    [::]:8880 [::]:*\nLISTEN 0 4096   127.0.0.53%lo:53 0.0.0.0:*`;
   assert.deepEqual(parseSsListeners(out), [
     { port: 3001, boundAddr: "127.0.0.1" },
-    { port: 8003, boundAddr: "100.118.41.122" },
+    { port: 8003, boundAddr: "100.64.20.1" },
     { port: 8880, boundAddr: "[::]" },
     { port: 53, boundAddr: "127.0.0.53%lo" },
   ]);
@@ -88,7 +88,7 @@ test("parameterized endpoint listening -> up, not conflict, shows bound addr", (
 
 test("template-bound model bundle listening on resolved addr -> status up (not down)", () => {
   const rows = attributeAndDetect([ep("vllm-rocm-qwen35-4b", 8011, "template")],
-    [{ port: 8011, boundAddr: "100.118.41.122" }], core);
+    [{ port: 8011, boundAddr: "100.64.20.1" }], core);
   const r = rows.find(x => x.port === 8011);
   assert.equal(r.status, "up");
   assert.equal(r.conflict, false);
@@ -97,7 +97,7 @@ test("template-bound model bundle listening on resolved addr -> status up (not d
 test(":8004 two listeners on different specific addrs -> NOT a conflict", () => {
   const rows = attributeAndDetect(
     [ep("faster-whisper-server", 8004, "loopback"), ep("llamacpp-vulkan-qwen3-embed", 8004, "template")],
-    [{ port: 8004, boundAddr: "127.0.0.1" }, { port: 8004, boundAddr: "100.118.41.122" }], core);
+    [{ port: 8004, boundAddr: "127.0.0.1" }, { port: 8004, boundAddr: "100.64.20.1" }], core);
   const r = rows.find(x => x.port === 8004);
   assert.equal(r.conflict, false);
   assert.equal(r.shared, true);
@@ -106,7 +106,7 @@ test(":8004 two listeners on different specific addrs -> NOT a conflict", () => 
 test("swap-group: two declared, one live listener -> shared, up, not conflict", () => {
   const rows = attributeAndDetect(
     [ep("swap-model-a", 8003, "template"), ep("swap-model-b", 8003, "template")],
-    [{ port: 8003, boundAddr: "100.118.41.122" }], core);
+    [{ port: 8003, boundAddr: "100.64.20.1" }], core);
   const r = rows.find(x => x.port === 8003);
   assert.equal(r.shared, true);
   assert.equal(r.status, "up");
@@ -128,7 +128,7 @@ test("core service port shown, not conflict", () => {
 test("manifest-only endpoint (no compose publish) -> kind managed", () => {
   const rows = attributeAndDetect(
     [{ bundleId: "x", bundleName: "X", port: 9100, bind: "0.0.0.0", bindKind: "all", proto: "tcp", source: "manifest" }],
-    [{ port: 9100, boundAddr: "100.118.41.122" }], core);
+    [{ port: 9100, boundAddr: "100.64.20.1" }], core);
   const r = rows.find(x => x.port === 9100);
   assert.equal(r.kind, "managed");
 });

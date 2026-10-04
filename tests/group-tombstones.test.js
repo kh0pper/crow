@@ -1,7 +1,7 @@
 // tests/group-tombstones.test.js
 //
 // Item 2b — contact_groups offline-peer tombstones: the EXECUTABLE acceptance gate
-// (design §5, spec docs/superpowers/specs/2026-07-13-group-tombstones-design.md).
+// (design §5, spec in the private engineering notes).
 // Covers W2 (strict delete-wins in _applyGroup) + G1 (STATEMENT-LEVEL tombstone
 // guards on the insert/update writes): tests T1, T2, T3, T4, T5, T8.
 //

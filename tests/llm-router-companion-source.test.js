@@ -68,7 +68,7 @@ test("a LAN source is refused on the companion path, before anything is acquired
 });
 
 test("loopback and the tailnet CGNAT range (and its IPv6 ULA) are accepted on the companion path", async () => {
-  for (const addr of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.118.41.122", "100.127.255.254", "fd7a:115c:a1e0::1"]) {
+  for (const addr of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.64.20.1", "100.127.255.254", "fd7a:115c:a1e0::1"]) {
     await withRemote(addr, async () => {
       const r = await chat();
       assert.equal(r.status, 200, addr);
@@ -91,13 +91,13 @@ test("GET /llm/v1/models follows the same rule; the health probes stay open", as
     assert.equal((await fetch(`${appUrl}/llm/health`)).status, 200);
     assert.equal((await fetch(`${appUrl}/llm`)).status, 200);
   });
-  await withRemote("100.118.41.122", async () => {
+  await withRemote("100.64.20.1", async () => {
     assert.equal((await fetch(`${appUrl}/llm/v1/models`)).status, 200);
   });
 });
 
 test("I1: loopback carrying a forwarded public client is refused on the companion path, the door and /llm/acquire", async () => {
-  const xff = { "x-forwarded-for": "168.171.4.20, 100.90.185.114" };
+  const xff = { "x-forwarded-for": "168.171.4.20, 100.64.20.3" };
   const r = await chat(xff);
   assert.equal(r.status, 403);
   assert.equal(forwarded, 0);
@@ -108,7 +108,7 @@ test("I1: loopback carrying a forwarded public client is refused on the companio
 });
 
 test("I1: loopback with a tailnet forwarded client is allowed; plain loopback is allowed", async () => {
-  assert.equal((await chat({ "x-forwarded-for": "100.67.188.54" })).status, 200);
+  assert.equal((await chat({ "x-forwarded-for": "100.64.20.4" })).status, 200);
   assert.equal(forwarded, 1);
   assert.equal((await chat()).status, 200);
 });

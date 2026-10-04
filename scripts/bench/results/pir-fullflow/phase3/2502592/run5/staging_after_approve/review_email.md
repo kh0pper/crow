@@ -58,10 +58,10 @@ kevin.hopper1@gmail.com
 
 ## Staging Files
 
-- [README.md](http://100.118.41.122:8080/api/pir/staging/2502592/README.md) — Dataset documentation and quality flags
-- [loader.py](http://100.118.41.122:8080/api/pir/staging/2502592/loader.py) — Staged loader (dry-run passed, 4,742 rows)
-- [source_inventory.json](http://100.118.41.122:8080/api/pir/staging/2502592/source_inventory.json) — Complete file inventory
-- [draft_acknowledgment.txt](http://100.118.41.122:8080/api/pir/staging/2502592/draft_acknowledgment.txt) — Reply to TEA
+- [README.md](http://100.64.20.1:8080/api/pir/staging/2502592/README.md) — Dataset documentation and quality flags
+- [loader.py](http://100.64.20.1:8080/api/pir/staging/2502592/loader.py) — Staged loader (dry-run passed, 4,742 rows)
+- [source_inventory.json](http://100.64.20.1:8080/api/pir/staging/2502592/source_inventory.json) — Complete file inventory
+- [draft_acknowledgment.txt](http://100.64.20.1:8080/api/pir/staging/2502592/draft_acknowledgment.txt) — Reply to TEA
 
 ---
 

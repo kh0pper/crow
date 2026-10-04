@@ -15,7 +15,7 @@ test("contactName: a typed local name wins; a placeholder yields to the peer's n
   assert.equal(contactName({ display_name: null, peer_display_name: null, crow_id: "crow:abc" }), "crow:abc");
   assert.equal(contactName({ display_name: "crow:abc", peer_display_name: "", crow_id: "crow:abc" }), "crow:abc", "an empty peer name is no name");
   assert.equal(contactName({ display_name: "crow:abc", crow_id: "crow:abc" }, { fallback: "crow:abc..." }), "crow:abc...", "the caller's fallback replaces crow_id");
-  assert.equal(contactName({ display_name: "Dayane", crow_id: "crow:abc" }, { fallback: "x" }), "Dayane", "a fallback never beats a name");
+  assert.equal(contactName({ display_name: "Alex", crow_id: "crow:abc" }, { fallback: "x" }), "Alex", "a fallback never beats a name");
   assert.equal(contactName({}), null);
   assert.equal(contactName(null), null);
   assert.equal(contactName(undefined, { fallback: "f" }), "f");

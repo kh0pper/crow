@@ -1,5 +1,5 @@
 /**
- * External-engine marker (spec docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.1).
+ * External-engine marker (spec in the private engineering notes §2.1).
  *
  * A provider row is an EXTERNAL ENGINE when
  *

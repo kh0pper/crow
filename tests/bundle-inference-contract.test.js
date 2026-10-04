@@ -220,7 +220,7 @@ test("leak: tailnet IP nested inside an env_vars default fails", () => {
   const dir = tmpBundle("demo");
   const m = {
     ...BASE,
-    env_vars: [{ name: "SOME_URL", description: "d", default: "http://100.118.41.122:8003/v1" }],
+    env_vars: [{ name: "SOME_URL", description: "d", default: "http://100.64.20.1:8003/v1" }],
   };
   const r = validateManifest(m, dir);
   assert.equal(r.ok, false);
@@ -229,7 +229,7 @@ test("leak: tailnet IP nested inside an env_vars default fails", () => {
 
 test("leak: *.ts.net hostname anywhere in a manifest string fails", () => {
   const dir = tmpBundle("demo");
-  const m = { ...BASE, notes: "See https://crow.dachshund-chromatic.ts.net:8444/ for the dashboard." };
+  const m = { ...BASE, notes: "See https://crow.example.ts.net:8444/ for the dashboard." };
   const r = validateManifest(m, dir);
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => e.includes("leaked *.ts.net hostname")), r.errors.join("; "));

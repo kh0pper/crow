@@ -240,13 +240,13 @@ test("a scratch project name drives the network name (smoke/restore projects)", 
 
 test("add-user.sh: group household, one-time password printed once and sent via stdin; idempotent; bad logins refused", () => {
   const ctx = setup();
-  const r1 = run("add-user.sh", ctx, ["dayane", "Dayane"]);
+  const r1 = run("add-user.sh", ctx, ["alex", "Alex"]);
   assert.equal(r1.status, 0, r1.out);
-  const pw = /One-time password for dayane: ([A-Za-z0-9]{20})\n/.exec(r1.stdout)[1];
-  assert.match(read(ctx, "calls.log"), /user:add --password-from-env --display-name=Dayane --group household dayane/);
+  const pw = /One-time password for alex: ([A-Za-z0-9]{20})\n/.exec(r1.stdout)[1];
+  assert.match(read(ctx, "calls.log"), /user:add --password-from-env --display-name=Alex --group household alex/);
   assert.ok(!read(ctx, "calls.log").includes(pw));
   assert.ok(read(ctx, "stdin.log").includes(pw));
-  const r2 = run("add-user.sh", ctx, ["dayane", "Dayane"]);
+  const r2 = run("add-user.sh", ctx, ["alex", "Alex"]);
   assert.match(r2.stdout, /already exists/);
   assert.doesNotMatch(r2.stdout, /One-time password/);
   assert.notEqual(run("add-user.sh", ctx, ["Bad Login", "X"]).status, 0);

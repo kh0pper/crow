@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
  * grackle-d3-import — the one-shot D3 importer: grackle's Crow data into
- * crow main. Spec: docs/superpowers/specs/2026-10-02-grackle-decommission-
- * d3-d5-design.md §4 (+ §9 Kevin's decisions). Runbook: the plan's W3.
+ * crow main. Spec in the private engineering notes §4 (+ §9 operator decisions). Runbook: the plan's W3.
  *
  *   node scripts/ops/grackle-d3-import.mjs \
  *     --source <grackle-backup.db> --target <crow.db> \

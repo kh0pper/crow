@@ -16,7 +16,7 @@ Both open items from the May 22 follow-up are now resolved. No further action ne
 
 ## Proposed reply
 
-Preview: http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt
+Preview: http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt
 
 ---
 

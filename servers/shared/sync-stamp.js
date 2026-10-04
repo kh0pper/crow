@@ -5,8 +5,7 @@
  * _advanceCounter and the emitChange row-stamp block) so a second door
  * into the db (the stdio-mounted MCP process, which has no live
  * InstanceSyncManager) can mint the same monotonic Lamport series and
- * stamp rows the same way — see docs/superpowers/specs/2026-08-15-
- * stdio-sync-outbox-design.md, "The shared emitter module".
+ * stamp rows the same way — see the private engineering notes, "The shared emitter module".
  *
  * `mintLamport`/`advanceCounter` are the ONLY writers of sync_state.local_counter
  * outside this module; instance-sync.js's _nextLamport/_advanceCounter delegate

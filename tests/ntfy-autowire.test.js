@@ -1,5 +1,5 @@
 /**
- * ntfy autowire (spec docs/superpowers/specs/2026-10-03-ntfy-autowire-design.md).
+ * ntfy autowire (spec in the private engineering notes).
  * Hermetic: a fake `docker exec … ntfy` runner, a loopback HTTP stand-in for ntfy,
  * and temp CROW_DATA_DIRs. Never touches a real container.
  */

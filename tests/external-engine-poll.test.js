@@ -1,5 +1,5 @@
 /**
- * external-engine-poll (spec docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.3).
+ * external-engine-poll (spec in the private engineering notes §2.3).
  * Every probe goes through an injected fetch — no network. cfg is passed
  * explicitly, the clock via `now`.
  */

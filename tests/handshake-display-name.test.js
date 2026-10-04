@@ -86,9 +86,9 @@ test("invite_accepted with NO displayName → contact named crowId (byte-identic
 test("invite_accepted with a displayName → the contact takes it", async () => {
   const { db, cleanup } = freshDb();
   try {
-    await handleInviteAccepted(db, stubMgrs(), invitePayload({ displayName: "Dayane" }), PK, { id: "named" });
+    await handleInviteAccepted(db, stubMgrs(), invitePayload({ displayName: "Alex" }), PK, { id: "named" });
     const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] })).rows[0];
-    assert.equal(row.display_name, "Dayane");
+    assert.equal(row.display_name, "Alex");
   } finally { cleanup(); }
 });
 
@@ -222,8 +222,8 @@ test("crow_accept_invite OMITS displayName when profile_display_name is unset (b
 test("crow_accept_invite includes the sanitized displayName when profile_display_name is set", async () => {
   const { db, cleanup } = freshDb();
   try {
-    const payload = await acceptWith({ db, profileName: "Dayane" });
-    assert.equal(payload.displayName, "Dayane");
+    const payload = await acceptWith({ db, profileName: "Alex" });
+    assert.equal(payload.displayName, "Alex");
   } finally { cleanup(); }
 });
 
@@ -256,10 +256,10 @@ test("invite_accepted with displayName + avatar: peer fields stored; a bad avata
   try {
     const acks = [];
     const mgrs = ackingMgrs(acks);
-    await handleInviteAccepted(db, mgrs, invitePayload({ displayName: "Dayane", avatar: PNG_AV }), PK, { id: "av-1" });
+    await handleInviteAccepted(db, mgrs, invitePayload({ displayName: "Alex", avatar: PNG_AV }), PK, { id: "av-1" });
     let row = await peerOf(db, "crow:realpeer9");
-    assert.equal(row.display_name, "Dayane", "a brand-new row still takes the handshake name (today's behaviour)");
-    assert.equal(row.peer_display_name, "Dayane");
+    assert.equal(row.display_name, "Alex", "a brand-new row still takes the handshake name (today's behaviour)");
+    assert.equal(row.peer_display_name, "Alex");
     assert.equal(row.peer_avatar, PNG_AV);
     assert.equal(acks.length, 1, "acked");
 
@@ -308,9 +308,9 @@ test("crow_accept_invite includes a valid avatar in the acceptance and omits a l
   const { db, cleanup } = freshDb();
   try {
     await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_avatar_url', ?, datetime('now'))", args: [PNG_AV] });
-    let payload = await acceptWith({ db, profileName: "Dayane" });
+    let payload = await acceptWith({ db, profileName: "Alex" });
     assert.equal(payload.avatar, PNG_AV);
-    assert.equal(payload.displayName, "Dayane");
+    assert.equal(payload.displayName, "Alex");
     await db.execute({ sql: "UPDATE dashboard_settings SET value = 'https://example.com/me.png' WHERE key = 'profile_avatar_url'", args: [] });
     payload = await acceptWith({ db, profileName: null }); // the name row from the first accept is still there
     assert.ok(!("avatar" in payload), "a URL is not an avatar → key omitted");

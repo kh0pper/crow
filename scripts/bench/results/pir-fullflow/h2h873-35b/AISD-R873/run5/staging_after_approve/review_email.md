@@ -28,7 +28,7 @@ The draft reply pushes back on all three points:
 ### Draft Reply Preview
 
 View the reply here:
-http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
+http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
 
 ---
 

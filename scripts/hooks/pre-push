@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Sample pre-push hook: run the public-hygiene check before anything leaves
+# this machine. This repo is public — see "Public repository hygiene" in
+# CLAUDE.md.
+#
+# Enable for THIS clone only (nothing is installed globally):
+#   git config core.hooksPath scripts/hooks
+# or copy it:
+#   cp scripts/hooks/pre-push "$(git rev-parse --git-common-dir)/hooks/pre-push"
+#
+# The check scans the tracked files of the working tree. Locally it also
+# applies your untracked personal-token denylist (~/.crow-public-denylist,
+# one token per line, mode 600; override with CROW_PUBLIC_DENYLIST).
+# Bypass once, deliberately: git push --no-verify
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+exec node "$root/scripts/check-public-hygiene.mjs"

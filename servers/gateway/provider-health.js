@@ -108,7 +108,7 @@ export function getProviderHealth() {
 }
 
 /*
- * External engines (spec docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.3)
+ * External engines (spec in the private engineering notes §2.3)
  * — a SEPARATE map, written by external-engine-poll.js. An external engine is
  * never "owned": this instance only watches it from its own network position.
  *

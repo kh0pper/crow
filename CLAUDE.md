@@ -11,6 +11,14 @@ Index for working on this repo. Load-bearing rules inline; deep reference is in 
 
 - **Bundle code changes need a `manifest.json` version bump.** The Extensions page installs a bundle by copying it to `~/.crow/bundles/<id>/`, and `repairInstalledBundleAssets` refreshes that copy ONLY when the repo manifest version differs from the installed one (`refreshVersionedBundle`). Ship new `server/`/`panel/` files without a bump and every installed instance keeps running the old copy (grackle's Ramble after phase 1, 2026-09-07). A node-server bundle must also declare its bare imports in its own `package.json` (guarded by `tests/bundle-server-deps.test.js`) or the installed copy cannot resolve them.
 
+## Public repository hygiene
+
+This repository is **public**. Process documents (design specs, implementation plans, session handoffs, ledgers, incident write-ups) live in the private engineering repo (`~/crow-engineering`, a clone of Gitea `kh0pp/crow-engineering`: `specs/`, `plans/`, `handoffs/`, `runbooks/`), never here. Code comments refer to them as "the private engineering notes", without paths.
+
+- Never write personal names, real hostnames or tailnet names, real IP addresses, or credentials into tracked files, commit messages, or PR text. Use placeholders: `crow.example.ts.net` / `<tailnet-host>`, `100.64.0.x`, neutral names ("alex", "second user").
+- The guard is `scripts/check-public-hygiene.mjs` (CI `static-checks` + `tests/public-hygiene.test.js`). It refuses process-doc paths (`docs/superpowers/`, `handoffs/`, `*handoff*.md`, `.claude/`), literals piped into `sudo -S`, sshpass with an inline password, real-looking `*.ts.net` hosts, and common secret patterns. Placeholders and known-fake test values go in `scripts/public-hygiene-allowlist.txt`.
+- Locally it also applies an untracked personal-token denylist, `~/.crow-public-denylist` (one token per line, mode 600; CI skips it). Enable the sample pre-push hook per clone with `git config core.hooksPath scripts/hooks`.
+
 ## Network exposure invariant
 
 The Crow's Nest dashboard and all private routes (MCP, AI chat, storage, push, instance sync) **must never** be reachable via Tailscale Funnel. Only `/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, and `/manifest.json` are public-safe.
@@ -37,6 +45,7 @@ When the AI behavior (formatting, routing) changes → `crow.md` only. When the 
 
 - **Build / scripts**: `package.json`, `docker-compose.yml`, `scripts/`.
 - **Architecture per server**: `docs/architecture/{memory,research,sharing,storage,blog,gateway,dashboard}-server.md`.
+- **Design specs, plans, handoffs**: the private engineering repo (`~/crow-engineering`: `specs/`, `plans/`, `handoffs/`; the former `docs/superpowers/` tree is archived there under `archive/crow-docs-superpowers/`). Not in this repo — see "Public repository hygiene".
 - **DB schema (source of truth)**: `scripts/init-db.js`. FTS5 triggers are inline; if you change a table that has an FTS shadow (`memories`, `sources`, `blog_posts`, `kb_articles`), update the virtual table + insert/update/delete triggers in the same place.
 - **Dashboard / Turbo Drive / Turbo Streams**: `docs/architecture/dashboard.md`. Vendored Turbo at `servers/gateway/public/vendor/turbo-8.0.5.umd.js` (pinned). Opt out with systemd drop-in env `CROW_ENABLE_TURBO=0`.
 - **MCP config**: `.mcp.json` is generated — run `npm run mcp-config` after editing `.env`. Registry at `scripts/server-registry.js`. Use `npm run mcp-config -- --combined` for a single `crow-core` entry.

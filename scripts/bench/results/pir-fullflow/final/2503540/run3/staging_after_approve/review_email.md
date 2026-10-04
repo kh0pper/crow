@@ -30,7 +30,7 @@ kevin.hopper1@gmail.com
 
 ### Preview
 
-<a href="http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt">View reply file</a>
+<a href="http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt">View reply file</a>
 
 ### Open items
 

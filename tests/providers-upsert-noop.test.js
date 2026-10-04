@@ -67,7 +67,7 @@ function spySyncManager() {
 function baseProvider() {
   return {
     id: "noop-test-prov",
-    baseUrl: "http://100.118.41.122:8003/v1",
+    baseUrl: "http://100.64.20.1:8003/v1",
     apiKey: null,
     host: "local",
     bundleId: null,
@@ -114,7 +114,7 @@ test("identical re-upsert is a no-op: unchanged:true, lamport stable, emitChange
 
 // --- b. each content column changed one at a time → write + bump + second emit ---
 const columnMutations = {
-  base_url: (p) => { p.baseUrl = "http://100.121.254.89:9999/v1"; },
+  base_url: (p) => { p.baseUrl = "http://100.64.20.2:9999/v1"; },
   api_key: (p) => { p.apiKey = "sk-changed"; },
   host: (p) => { p.host = "cloud"; },
   bundle_id: (p) => { p.bundleId = "some-bundle"; },

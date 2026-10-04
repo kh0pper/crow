@@ -162,8 +162,8 @@ test("provider rows stamp managed/external only when true — a plain row keeps 
 
 test("scopeOf: loopback, LAN, tailnet and bare host names are on your network; the rest is cloud", () => {
   for (const u of ["http://127.0.0.1:18100/v1", "http://localhost:3001/llm/v1", "http://10.0.0.126:8030/v1",
-                   "http://192.168.1.5/v1", "http://172.20.0.2/v1", "http://100.118.41.122:8003/v1",
-                   "https://crow.dachshund-chromatic.ts.net:8444/v1", "http://[::1]:8000/v1",
+                   "http://192.168.1.5/v1", "http://172.20.0.2/v1", "http://100.64.20.1:8003/v1",
+                   "https://crow.example.ts.net:8444/v1", "http://[::1]:8000/v1",
                    "http://[fd7a:115c:a1e0::1]/v1", "http://grackle:9100/v1", "http://nas.local/v1"]) {
     assert.equal(scopeOf(u), "network", u);
   }
@@ -179,9 +179,9 @@ const keys = (l) => l.map((m) => m.provider + "/" + m.id);
 
 test("aliases of one endpoint+model collapse to ONE entry, the rest kept as aliases", () => {
   const out = pickerModels([
-    { provider: "crow-chat", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", managed: true, availability: "up" },
-    { provider: "crow-local", id: "q35", baseUrl: "http://100.118.41.122:8003/v1", name: "Qwen 35B", availability: "up" },
-    { provider: "crow-swap-agentic", id: "q35", baseUrl: "http://100.118.41.122:8003/v1/", managed: true, availability: "up" },
+    { provider: "crow-chat", id: "q35", baseUrl: "http://100.64.20.1:8003/v1", managed: true, availability: "up" },
+    { provider: "crow-local", id: "q35", baseUrl: "http://100.64.20.1:8003/v1", name: "Qwen 35B", availability: "up" },
+    { provider: "crow-swap-agentic", id: "q35", baseUrl: "http://100.64.20.1:8003/v1/", managed: true, availability: "up" },
   ], { pi: PI });
   // Fix round 1 I1: aliases fold only within the same runnability, so the one
   // pi can spawn stays its own entry and the two bundle rows fold together.
@@ -194,8 +194,8 @@ test("aliases of one endpoint+model collapse to ONE entry, the rest kept as alia
 
 test("I1: a bot naming an unrunnable alias never swallows the runnable one from another bot's picker", () => {
   const rows = [
-    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", managed: true, availability: "up" },
-    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.118.41.122:8003/v1", availability: "up" },
+    { provider: "crow-chat", id: "qwen3.6-35b-a3b", baseUrl: "http://100.64.20.1:8003/v1", managed: true, availability: "up" },
+    { provider: "crow-local", id: "qwen3.6-35b-a3b", baseUrl: "http://100.64.20.1:8003/v1", availability: "up" },
   ];
   // Bot A is set to crow-chat/…; this is bot B's launcher (default elsewhere).
   const forB = pickerModels(rows, { pi: PI, referenced: ["crow-chat/qwen3.6-35b-a3b"], defaultKey: "zai-coding/glm-5" });
@@ -229,7 +229,7 @@ test("among equally runnable aliases the referenced row, then the managed row, i
 
 test("the same model id on DIFFERENT endpoints is two models, not one", () => {
   const out = pickerModels([
-    { provider: "crow-voice", id: "qwen3.5-4b", baseUrl: "http://100.118.41.122:8011/v1" },
+    { provider: "crow-voice", id: "qwen3.5-4b", baseUrl: "http://100.64.20.1:8011/v1" },
     { provider: "qwen3.5-4b", id: "qwen3.5-4b", baseUrl: "http://127.0.0.1:18100/v1" },
   ]);
   assert.equal(out.length, 2);
@@ -257,9 +257,9 @@ test("order: the default first, then on-network, then cloud; usable before unusa
   const out = pickerModels([
     { provider: "zai-coding", id: "glm-5", name: "GLM-5", baseUrl: "https://api.z.ai/v4", availability: "up" },
     { provider: "cloud-x", id: "dead", name: "Aardvark", baseUrl: "https://c.example/v1", availability: "up" },
-    { provider: "crow-local-27b", id: "27b", name: "Qwen 27B", baseUrl: "http://100.118.41.122:8006/v1", availability: "unavailable" },
+    { provider: "crow-local-27b", id: "27b", name: "Qwen 27B", baseUrl: "http://100.64.20.1:8006/v1", availability: "unavailable" },
     { provider: "raven-flash-next", id: "fn", name: "Flash Next", baseUrl: "http://10.0.0.126:8030/v1", availability: "up", external: true },
-    { provider: "crow-local", id: "q35", name: "Qwen 35B", baseUrl: "http://100.118.41.122:8003/v1", availability: "up" },
+    { provider: "crow-local", id: "q35", name: "Qwen 35B", baseUrl: "http://100.64.20.1:8003/v1", availability: "up" },
   ], { pi: { custom: new Set(["zai-coding", "crow-local-27b", "raven-flash-next", "crow-local"]), builtin: new Set() },
        defaultKey: "zai-coding/glm-5" });
   assert.deepEqual(keys(out), [

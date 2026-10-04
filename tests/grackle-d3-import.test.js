@@ -1,6 +1,6 @@
 /**
  * scripts/ops/grackle-d3-import.mjs — the D3 importer (grackle → crow main).
- * Spec: docs/superpowers/specs/2026-10-02-grackle-decommission-d3-d5-design.md
+ * Spec in the private engineering notes
  * §4, §5.3 and §9; plan Task 1 ("Rules pinned by tests"); review fix round 1
  * (C1, I1–I8, minors).
  *
@@ -396,7 +396,7 @@ describe("apply: what lands where", () => {
       assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND contact_id IS NULL AND revoked_at IS NULL", pid)[0].n, 1, `project ${pid}`);
     }
     assert.equal(query(s.target, "SELECT uuid FROM project_members WHERE project_id = 6 AND contact_id IS NULL")[0].uuid, "crow-own-6");
-    // Dayane: same contact, different role → matched, crow's role kept
+    // Alex: same contact, different role → matched, crow's role kept
     assert.deepEqual(query(s.target, "SELECT role FROM project_members WHERE project_id = 6 AND contact_id = 3"), [{ role: "viewer" }]);
     // a contact crow lacked but would sync: imported, and the grant points at it
     const nobody = query(s.target, "SELECT id, verified FROM contacts WHERE crow_id = 'crow:nobody'")[0];
@@ -420,7 +420,7 @@ describe("apply: what lands where", () => {
     assert.deepEqual(m.ramble_marks.keys, [{ mark_id: "mark-g1" }]);
     assert.deepEqual(m.ramble_settings.keys, [{ key: "only_grackle" }]);
     assert.deepEqual(m.contacts.keys, [{ crow_id: "crow:nobody" }]);
-    // the message lands on crow's Dayane (remapped contact), crow's rows win on a clash
+    // the message lands on crow's Alex (remapped contact), crow's rows win on a clash
     assert.equal(query(s.target, "SELECT contact_id FROM messages WHERE nostr_event_id = 'ev-grackle'")[0].contact_id, 3);
     assert.equal(query(s.target, "SELECT COUNT(*) AS n FROM messages WHERE nostr_event_id = 'ev-bot'")[0].n, 0);
     assert.equal(query(s.target, "SELECT value FROM ramble_settings WHERE key = 'shared'")[0].value, "crow-value");

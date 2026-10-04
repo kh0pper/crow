@@ -19,7 +19,7 @@ TEA also attached two PDFs:
 
 The draft reply acknowledges both points and thanks TEA for completing the request. There are no further open items on Item 4.
 
-**Preview:** http://100.118.41.122:8080/api/pir/staging/2503540/correspondence_reply.txt
+**Preview:** http://100.64.20.1:8080/api/pir/staging/2503540/correspondence_reply.txt
 
 ### Open items
 

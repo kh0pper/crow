@@ -52,11 +52,11 @@ kevin.hopper1@gmail.com
 
 ## Staging Files
 
-- [README.md](http://100.118.41.122:8080/api/pir/staging/2502803/README.md)
-- [loader.py](http://100.118.41.122:8080/api/pir/staging/2502803/loader.py)
-- [source_inventory.json](http://100.118.41.122:8080/api/pir/staging/2502803/source_inventory.json)
-- [row_counts.json](http://100.118.41.122:8080/api/pir/staging/2502803/row_counts.json)
-- [draft_acknowledgment.txt](http://100.118.41.122:8080/api/pir/staging/2502803/draft_acknowledgment.txt)
+- [README.md](http://100.64.20.1:8080/api/pir/staging/2502803/README.md)
+- [loader.py](http://100.64.20.1:8080/api/pir/staging/2502803/loader.py)
+- [source_inventory.json](http://100.64.20.1:8080/api/pir/staging/2502803/source_inventory.json)
+- [row_counts.json](http://100.64.20.1:8080/api/pir/staging/2502803/row_counts.json)
+- [draft_acknowledgment.txt](http://100.64.20.1:8080/api/pir/staging/2502803/draft_acknowledgment.txt)
 
 ## Instructions
 

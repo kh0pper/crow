@@ -3,7 +3,7 @@
 // The box-reservation file is the shared signal between unattended GPU
 // windows (pi-lab dsv4-window.sh writes it) and the gateway's
 // gpu-orchestrator (reads it before ANY model start). Spec:
-// docs/superpowers/specs/2026-09-04-box-reservation-scheduling-scope.md §3.1.
+// the private engineering notes §3.1.
 //
 // Contract pinned here: missing/expired -> null; corrupt -> reserved (fail
 // closed); DEFAULT_ALLOW always unioned in; 8h default max hold unless force.

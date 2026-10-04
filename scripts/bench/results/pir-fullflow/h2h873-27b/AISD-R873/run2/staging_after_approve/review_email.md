@@ -18,7 +18,7 @@ The draft reply:
 - Demands a direct statutory citation for #4(c), rejecting the cost estimates as an answer.
 - Declines to close the request; items #9(b) and #4(c) remain open.
 
-**Preview:** http://100.118.41.122:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
+**Preview:** http://100.64.20.1:8080/api/pir/staging/AISD-R873/correspondence_reply.txt
 
 ### Open items
 

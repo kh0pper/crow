@@ -92,7 +92,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
 | 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; never Funnel) | W1 2026-10 |
 | 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (Workspace editor; never Funnel). Plus one Serve PATH on the same port, no new port: `/crow-live` → `http://127.0.0.1:<gateway port>/api/workspace/live` (W2 K5 live-edit plugin; set up by the operator from Office › For the admin) | W1 2026-10, W2 path |
-| 8010 | 100.118.41.122 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
+| 8010 | 100.64.20.1 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
 | 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existing |
@@ -129,7 +129,7 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 
 ## Second host: raven
 
-Raven (10.0.0.126, `raven.dachshund-chromatic.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
+Raven (10.0.0.126, `raven.example.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
 
 | port | bind | what | status |
 |---|---|---|---|

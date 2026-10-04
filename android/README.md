@@ -38,7 +38,7 @@ APK location: `app/build/outputs/apk/debug/app-debug.apk`
 
 1. Install the APK on your Android device
 2. On first launch, the Settings screen opens
-3. Enter your Crow gateway URL (e.g., `http://100.121.254.89:3001`)
+3. Enter your Crow gateway URL (e.g., `http://100.64.20.2:3001`)
 4. Tap "Test Connection" to verify
 5. If accessing remotely, install and connect Tailscale first
 6. Tap "Save" to start using the app

@@ -62,7 +62,7 @@ public class CrowWebViewClient extends WebViewClient {
         if (c.endsWith(".ts.net")) {
             int dot = c.indexOf('.');
             if (dot < 0) return false;
-            String tailnet = c.substring(dot + 1); // e.g. "dachshund-chromatic.ts.net"
+            String tailnet = c.substring(dot + 1); // e.g. "example.ts.net"
             return r.equals(tailnet) || r.endsWith("." + tailnet);
         }
 

@@ -32,12 +32,12 @@ Columns: YEAR, DISTRICT, DISTNAME, PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS
 - 3 EML files are duplicates of an amendment letter under PIR #2502592 — not substantive responses.
 
 ## Staging Files
-- [README.md](http://100.118.41.122:8080/api/pir/staging/2502803/README.md) — full documentation with quality flags
-- [loader.py](http://100.118.41.122:8080/api/pir/staging/2502803/loader.py) — data loader (--dry-run passed, --commit on approval)
-- [source_inventory.json](http://100.118.41.122:8080/api/pir/staging/2502803/source_inventory.json) — complete file inventory with cross-reference
+- [README.md](http://100.64.20.1:8080/api/pir/staging/2502803/README.md) — full documentation with quality flags
+- [loader.py](http://100.64.20.1:8080/api/pir/staging/2502803/loader.py) — data loader (--dry-run passed, --commit on approval)
+- [source_inventory.json](http://100.64.20.1:8080/api/pir/staging/2502803/source_inventory.json) — complete file inventory with cross-reference
 
 ## Draft Acknowledgment to TEA
-[View draft reply](http://100.118.41.122:8080/api/pir/staging/2502803/draft_acknowledgment.txt)
+[View draft reply](http://100.64.20.1:8080/api/pir/staging/2502803/draft_acknowledgment.txt)
 
 ```
 Dear Ms. Eaton,

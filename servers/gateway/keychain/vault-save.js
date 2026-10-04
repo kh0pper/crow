@@ -17,7 +17,7 @@
  *   non-https serverUrl is refused (VAULT_REASONS.insecureUrl) before anything is spawned.
  * - R-D: one stable vault device per Crow instance. Only a device GUID is persisted, in
  *   <CROW_HOME>/secrets/vault-device-id (600 in a 700 dir, beside the keychain key. The
- *   r4 and pi-lab backups do not copy secrets/; dayane's whole-volume tar would, so its
+ *   r4 and pi-lab backups do not copy secrets/; a container instance's whole-volume tar would, so its
  *   backup.sh excludes the whole secrets dir (spec §9.7)); each save seeds a fresh appdata dir's data.json with it.
  *   Session, tokens and keys never outlive a save.
  * - R-E: reasons are only the fixed VAULT_REASONS sentences, never CLI stdout/stderr.

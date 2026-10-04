@@ -8,7 +8,7 @@ import { addressClass, isPrivateHost } from "../servers/shared/locality.js";
 
 const OWN_ID = "0867ac2809dedd885ba7769b21966f8e";
 const PEER_ID = "49cf71ca878643ba7717f344329266fd";
-const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237", "100.118.41.122"]);
+const CROW = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237", "100.64.20.1"]);
 const CROW_NO_TS = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]);
 const LOOP_ONLY = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -40,11 +40,11 @@ test("inferHost: own/loopback → local; every foreign address → cloud (the re
   assert.equal(inferHost("http://127.0.0.1:8003/v1", null, o), "local");
   assert.equal(inferHost("http://localhost:3001/llm/v1", null, o), "local");
   assert.equal(inferHost("http://[::1]:8080/v1", null, o), "local");
-  assert.equal(inferHost("http://100.118.41.122:8003/v1", null, o), "local");
+  assert.equal(inferHost("http://100.64.20.1:8003/v1", null, o), "local");
   assert.equal(inferHost("http://10.0.0.237:8003/v1", null, o), "local");
   assert.equal(inferHost("http://10.0.0.126:8030/v1", null, o), "cloud");
   assert.equal(inferHost("http://192.168.1.50:8000/v1", null, o), "cloud");
-  assert.equal(inferHost("http://100.121.254.89:9100/v1", null, o), "cloud");
+  assert.equal(inferHost("http://100.64.20.2:9100/v1", null, o), "cloud");
   assert.equal(inferHost("https://api.z.ai/api/coding/paas/v4", null, o), "cloud");
   assert.equal(inferHost("http://raven:8030/v1", null, o), "cloud"); // D8 unchanged
   assert.equal(inferHost("", null, o), "local");
@@ -56,8 +56,8 @@ test("inferHost: valid existing host short-circuits; invalid falls through", () 
   assert.equal(inferHost("http://10.0.0.126:8030/v1", "local", { ownAddrs: CROW }), "local");
   assert.equal(inferHost("http://10.0.0.126:8030/v1", PEER_ID, { ownAddrs: CROW }), PEER_ID);
   assert.equal(inferHost("http://10.0.0.126:8030/v1", "raven", { ownAddrs: CROW }), "cloud");
-  assert.equal(inferHost("http://100.121.254.89:9100/v1", "grackle-5fc01ac74463b6f4",
-    { ownAddrs: new Set(["127.0.0.1", "100.121.254.89"]) }), "local");
+  assert.equal(inferHost("http://100.64.20.2:9100/v1", "grackle-5fc01ac74463b6f4",
+    { ownAddrs: new Set(["127.0.0.1", "100.64.20.2"]) }), "local");
 });
 
 test("isForeignInstanceHost: only a DIFFERENT 32-hex id is foreign; id read lazily", () => {
@@ -99,9 +99,9 @@ test("repairHostDecision D3: another instance's write is never touched", () => {
 });
 
 test("repairHostDecision scope: re-stamped BUNDLE row (the live crow-chat case) is never touched", () => {
-  // On grackle: crow-chat is host=local, base_url crow's 100.118.41.122, instance_id = grackle
-  const GRACKLE = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.21", "100.121.254.89"]);
-  const crowChat = row("local", "http://100.118.41.122:8003/v1", { bundleId: "llamacpp-vulkan-qwen36-35b-a3b" });
+  // On grackle: crow-chat is host=local, base_url crow's 100.64.20.1, instance_id = grackle
+  const GRACKLE = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.21", "100.64.20.2"]);
+  const crowChat = row("local", "http://100.64.20.1:8003/v1", { bundleId: "llamacpp-vulkan-qwen36-35b-a3b" });
   assert.equal(repairHostDecision(crowChat, { ownInstanceId: OWN_ID, ownAddrs: GRACKLE }), null);
 });
 
@@ -109,7 +109,7 @@ test("repairHostDecision: never touches valid non-local hosts, own addresses, DN
   const o = { ownInstanceId: OWN_ID, ownAddrs: CROW };
   assert.equal(repairHostDecision(row("cloud", "http://10.0.0.126:8030/v1"), o), null);
   assert.equal(repairHostDecision(row(PEER_ID, "http://10.0.0.126:8030/v1"), o), null);
-  assert.equal(repairHostDecision(row("local", "http://100.118.41.122:8003/v1"), o), null);
+  assert.equal(repairHostDecision(row("local", "http://100.64.20.1:8003/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "http://127.0.0.1:8020/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "https://api.z.ai/api/coding/paas/v4"), o), null);
   assert.equal(repairHostDecision(row("local", "http://raven:8030/v1"), o), null);
@@ -122,8 +122,8 @@ test("repairHostDecision: never touches valid non-local hosts, own addresses, DN
 
 test("repairHostDecision G1: 100.x targets skipped while no CGNAT own address — BOTH branches", () => {
   const o = { ownInstanceId: OWN_ID, ownAddrs: CROW_NO_TS };
-  assert.equal(repairHostDecision(row("local", "http://100.118.41.122:8003/v1"), o), null);
-  assert.equal(repairHostDecision(row("raven", "http://100.121.254.89:9100/v1"), o), null);
+  assert.equal(repairHostDecision(row("local", "http://100.64.20.1:8003/v1"), o), null);
+  assert.equal(repairHostDecision(row("raven", "http://100.64.20.2:9100/v1"), o), null);
   assert.equal(repairHostDecision(row("local", "http://10.0.0.126:8731/v1"), o), "cloud");
 });
 
@@ -163,8 +163,8 @@ test("addressClass", () => {
 });
 
 test("isPrivateHost (display only)", () => {
-  for (const h of ["10.0.0.126", "100.121.254.89", "fd00::5", "raven", "localhost",
-                   "grackle.dachshund-chromatic.ts.net", "nas.local", "box.lan", "x.home.arpa", "y.internal"]) {
+  for (const h of ["10.0.0.126", "100.64.20.2", "fd00::5", "raven", "localhost",
+                   "grackle.example.ts.net", "nas.local", "box.lan", "x.home.arpa", "y.internal"]) {
     assert.equal(isPrivateHost(h), true, h);
   }
   for (const h of ["8.8.8.8", "api.z.ai", "api.together.xyz", "", null]) {
@@ -174,9 +174,9 @@ test("isPrivateHost (display only)", () => {
 
 test("hostLabel", () => {
   const ctx = { ownAddrs: CROW, ownInstanceId: OWN_ID, instanceNames: new Map([[PEER_ID, "Primary"]]) };
-  assert.deepEqual(hostLabel({ host: "local", baseUrl: "http://100.118.41.122:8003/v1" }, ctx), { kind: "this", text: "this machine" });
+  assert.deepEqual(hostLabel({ host: "local", baseUrl: "http://100.64.20.1:8003/v1" }, ctx), { kind: "this", text: "this machine" });
   assert.deepEqual(hostLabel({ host: "local", baseUrl: "" }, ctx), { kind: "this", text: "this machine" });
-  assert.deepEqual(hostLabel({ host: "local", baseUrl: "http://100.121.254.89:9100/v1" }, ctx), { kind: "network", text: "network" });
+  assert.deepEqual(hostLabel({ host: "local", baseUrl: "http://100.64.20.2:9100/v1" }, ctx), { kind: "network", text: "network" });
   assert.deepEqual(hostLabel({ host: "local", baseUrl: "https://api.z.ai/v4" }, ctx), { kind: "cloud", text: "cloud" });
   assert.deepEqual(hostLabel({ host: "cloud", baseUrl: "http://10.0.0.126:8030/v1" }, ctx), { kind: "network", text: "network" });
   assert.deepEqual(hostLabel({ host: "cloud", baseUrl: "https://api.together.xyz/v1" }, ctx), { kind: "cloud", text: "cloud" });

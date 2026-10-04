@@ -140,11 +140,11 @@ test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain m
   const { isTrustedDoorRequest } = await import("../servers/gateway/models/door-resolve.js");
   assert.equal(isTrustedDoorRequest("127.0.0.1", {}), true, "plain loopback");
   assert.equal(isTrustedDoorRequest("::ffff:127.0.0.1", {}), true);
-  assert.equal(isTrustedDoorRequest("100.90.185.114", {}), true, "plain tailnet");
+  assert.equal(isTrustedDoorRequest("100.64.20.3", {}), true, "plain tailnet");
   assert.equal(isTrustedDoorRequest("10.0.0.50", {}), false, "LAN socket");
   assert.equal(isTrustedDoorRequest("10.0.0.50", { "x-forwarded-for": "127.0.0.1" }), false, "a header never upgrades an untrusted socket");
   // public client behind Caddy + Serve (Serve appends the black-swan hop)
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.90.185.114" }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.64.20.3" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "8.8.8.8" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-real-ip": "8.8.8.8" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for=192.0.2.60;proto=https;by=203.0.113.43' }), false);
@@ -152,8 +152,8 @@ test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain m
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "unknown" }), false, "an unparseable entry is untrusted");
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "" }), true, "an empty header names nobody");
   // tailnet clients through Serve
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.67.188.54" }), true);
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.67.188.54:51234, 127.0.0.1" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.4" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.4:51234, 127.0.0.1" }), true);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for="[fd7a:115c:a1e0::5]:443", for=100.64.0.9' }), true);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": ["100.64.0.1", "8.8.8.8"] }), false, "repeated headers: every value counts");
 });
@@ -174,7 +174,7 @@ test("a forwardable-looking row on a public address is refused (the cloud allowl
   const P3 = {
     "cloud-optin": { baseUrl: "https://api.z.ai/api/coding/paas/v4", apiKey: "sk-paid", models: [{ id: "glm" }], gpuPolicy: { door_forward: true } },
     "cloud-bundle": { baseUrl: "https://maas.example.com/v1", apiKey: "sk-paid", bundleId: "x", models: [{ id: "q" }] },
-    "ts-host": { baseUrl: "http://crow.dachshund-chromatic.ts.net:8011/v1", apiKey: "none", bundleId: "y", models: [{ id: "v" }] },
+    "ts-host": { baseUrl: "http://crow.example.ts.net:8011/v1", apiKey: "none", bundleId: "y", models: [{ id: "v" }] },
   };
   for (const id of ["cloud-optin", "cloud-bundle"]) {
     const r = resolveDoorTarget({ providers: P3, providerHeader: id, model: null, companionModelIds: [] });
