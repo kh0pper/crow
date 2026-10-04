@@ -34,11 +34,59 @@ export function createThinkGate() {
   };
 }
 
-export function createSentenceChunker(onSentence) {
+/**
+ * Clause break for the FIRST chunk only (kiosk latency lever 3): , ; : or a dash
+ * followed by whitespace (so "1,000" and "3:30" never split). Only taken when the
+ * clause already holds FIRST_CLAUSE_MIN_WORDS words, so "Sure," or "Well," is not
+ * spoken alone with a falling tone; with no break at all, the first chunk goes
+ * at FIRST_CLAUSE_MAX_WORDS complete words.
+ */
+export const CLAUSE_END = /[,;:\u2014\u2013]["')\]]?\s|\s[\u2014\u2013]\s/;
+export const FIRST_CLAUSE_MIN_WORDS = 3;
+export const FIRST_CLAUSE_MAX_WORDS = 8;
+// Words only: a free-standing dash or punctuation token is not a word ("Okay — sure," is 2).
+const wordCount = (s) => (s.match(/[\p{L}\p{N}][^\s]*/gu) || []).length;
+
+/** Where the first chunk ends (index into buf), or -1 to keep waiting. */
+export function firstClauseEnd(buf, { minWords = FIRST_CLAUSE_MIN_WORDS, maxWords = FIRST_CLAUSE_MAX_WORDS } = {}) {
+  const s = SENTENCE_END.exec(buf);
+  const sentenceEnd = s ? s.index + s[0].length : -1;
+  const clauses = new RegExp(CLAUSE_END.source, "g");   // local /g copy: no shared lastIndex
+  for (let m; (m = clauses.exec(buf));) {
+    const end = m.index + m[0].length;
+    if (sentenceEnd >= 0 && end > sentenceEnd) break;
+    if (wordCount(buf.slice(0, end)) >= minWords) return end;
+  }
+  if (sentenceEnd >= 0) return sentenceEnd;
+  // No break yet: after maxWords COMPLETE words (a trailing space proves the last one ended).
+  const words = [...buf.matchAll(/\S+\s+/g)].filter((w) => /[\p{L}\p{N}]/u.test(w[0]));
+  if (words.length >= maxWords) { const w = words[maxWords - 1]; return w.index + w[0].length; }
+  return -1;
+}
+
+/**
+ * Sentence chunker (glasses behaviour by default). opts.firstClause (kiosk): the
+ * FIRST chunk is the first clause (see firstClauseEnd) so TTS starts ~half a
+ * sentence earlier; every later chunk is a full sentence.
+ */
+export function createSentenceChunker(onSentence, { firstClause = false } = {}) {
   let buf = "";
+  let first = firstClause;
   return {
     async push(text) {
       buf += text;
+      if (first) {
+        // Leading whitespace/newlines (after </think>, before a tool call) never use up the first-clause split.
+        const lead = buf.length - buf.trimStart().length;
+        if (lead === buf.length) return;
+        const rel = firstClauseEnd(buf.slice(lead));
+        if (rel < 0) return;
+        const end = lead + rel;
+        first = false;
+        const chunk = buf.slice(0, end);
+        buf = buf.slice(end);
+        await onSentence(chunk);
+      }
       for (;;) {
         const m = SENTENCE_END.exec(buf);
         if (!m) break;

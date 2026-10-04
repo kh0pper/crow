@@ -18,6 +18,8 @@ export const ESCALATION_PROBE_EVERY_MS = 500;
 export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
 const DEGRADED_NOTE = "The larger model is not available right now. Answer with what you have, and call a tool directly if one is needed.";
+// A denied discovery call keeps the turn going: the schemas are already in the tool list.
+const SOFT_DENY = { crow_discover: "Tool discovery is not needed here: every tool you can use is already listed with its parameters. Call the right tool directly, or answer from what you know." };
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
 export function createVoiceTurnRunner(deps) {
@@ -27,6 +29,12 @@ export function createVoiceTurnRunner(deps) {
   const confirm = deps.confirm || createConfirmGate({ now });
   const botCache = new Map();
   const fillerCache = new Map();
+  // Saved-history messages the router must not count as "recent tool context":
+  // in-process display-tool calls and calls the gate REFUSED (denied tools such as
+  // crow_discover, policy/confirm refusals). The convo store keeps these objects
+  // by reference, so the mark survives into later turns (smoke 2026-10-04: a
+  // refused/looping crow_discover escalated the next three plain questions).
+  const routeNeutral = new WeakSet();
 
   async function loadBot(db, botId) {
     if (!botId) return null;
@@ -133,7 +141,9 @@ export function createVoiceTurnRunner(deps) {
         const sttProfile = await deps.getSttProfile(db, device);
         if (!sttProfile) { fail("no_stt_profile", false); return result; }
         const stt = await deps.createSttAdapter(sttProfile);
-        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal });
+        // opts.sttModel(profile): a per-display model override (kiosk: tiny.en), or null for the profile's own.
+        const model = typeof opts.sttModel === "function" ? opts.sttModel(sttProfile) : null;
+        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");
       }
@@ -190,6 +200,7 @@ export function createVoiceTurnRunner(deps) {
       // crow_wm timer must not make the next 2-3 plain questions "recent tool context"
       // and send them to the (possibly cold) 35B.
       const isExtraCall = (m) => {
+        if (routeNeutral.has(m)) return true;
         if (m.role === "tool") return extraByName.has(m.tool_name);
         if (m.role !== "assistant" || !m.tool_calls) return false;
         try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name)); } catch { return false; }
@@ -228,6 +239,8 @@ export function createVoiceTurnRunner(deps) {
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
         // (tool-executor resolveToolCategory), so every check sees both spellings.
         const names = eff && !String(eff).startsWith("crow_") ? [eff, `crow_${eff}`] : [eff];
+        const soft = SOFT_DENY[tc.name] || names.map((n) => SOFT_DENY[n]).find(Boolean);
+        if (soft && (deny.has(tc.name) || names.some((n) => deny.has(n)))) return soft;
         if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`;
         if (!memoryOn && names.some((n) => deps.isMemoryTool(n))) return MEMORY_OFF;
         if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
@@ -245,7 +258,8 @@ export function createVoiceTurnRunner(deps) {
         return `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`;
       };
 
-      const chunker = createSentenceChunker((s) => say(s));
+      // First chunk = first clause (latency lever 3); later chunks are whole sentences.
+      const chunker = createSentenceChunker((s) => say(s), { firstClause: opts.firstClause !== false });
       let rounds = 0;
       let nextMax = 600;
       while (rounds < (deps.maxToolRounds || 10)) {
@@ -274,29 +288,45 @@ export function createVoiceTurnRunner(deps) {
           } else if (ev.type === "done") break;
         }
         if (aborted()) { result.aborted = true; break; }
+        let assistantMsg = null;
         if (content || calls.length) {
-          const m = { role: "assistant", content };
-          if (calls.length) m.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
-          messages.push(m);
+          assistantMsg = { role: "assistant", content };
+          if (calls.length) assistantMsg.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
+          messages.push(assistantMsg);
         }
         if (!calls.length) break;
         const local = [];
         const remote = [];
+        // Route-neutral = in-process display tools + calls refused because the tool is not on this
+        // display (deny list / memory off). Confirm and policy refusals still count as tool context:
+        // the "yes" that follows a confirmation must keep its escalation (review I3).
+        let neutralCalls = 0;
         for (const tc of calls) {
           const gate = policyGate(tc);
-          if (gate) { local.push({ id: tc.id, name: tc.name, result: gate }); continue; }
+          if (gate) {
+            const offDisplay = gate === MEMORY_OFF || Object.values(SOFT_DENY).includes(gate) || /is not available on this display/.test(gate);
+            if (offDisplay) neutralCalls++;
+            local.push({ id: tc.id, name: tc.name, result: gate, neutral: offDisplay });
+            continue;
+          }
           const x = extraByName.get(tc.name);
           if (x) {
+            neutralCalls++;
             let out;
             try { out = await x.execute(tc.arguments || {}); } catch (err) { out = JSON.stringify({ action: "error", message: err.message }); }
-            local.push({ id: tc.id, name: tc.name, result: out });
+            local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
           remote.push(tc);
         }
         const remoteResults = remote.length ? await executor.executeToolCalls(remote) : [];
+        // A text-free assistant turn whose every call was refused/in-process is neutral too.
+        if (assistantMsg && !content.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
+        // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
         for (const r of [...local, ...remoteResults]) {
-          messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
+          const toolMsg = { role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name };
+          if (r.neutral === true && local.includes(r)) routeNeutral.add(toolMsg);
+          messages.push(toolMsg);
           if (typeof r.result === "string" && r.result.length > 500) nextMax = 4000;
         }
       }

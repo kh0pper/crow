@@ -92,3 +92,42 @@ test("wrapPcmAsWav writes a 44-byte RIFF header for 16 kHz mono s16", () => {
   assert.equal(w.readUInt32LE(24), 16000);
   assert.equal(w.readUInt32LE(40), 320);
 });
+
+test("smoke 2026-10-04 lever 3: firstClauseEnd — a clause of 3+ words, a sentence, or 8 complete words; never inside 1,000 or 3:30", () => {
+  const cut = (s) => { const e = H.firstClauseEnd(s); return e < 0 ? null : s.slice(0, e); };
+  assert.equal(cut("Lisbon is the capital, and "), "Lisbon is the capital, ");
+  assert.equal(cut("Sure, "), null, "a 1-word clause waits (no lone 'Sure,' with a falling tone)");
+  assert.equal(cut("Sure, Lisbon is the capital. It"), "Sure, Lisbon is the capital. ", "then the sentence end wins");
+  assert.equal(cut("It costs 1,000 dollars and "), null, "a number comma is not a clause");
+  assert.equal(cut("The meeting is at 3:30 today and it will "), "The meeting is at 3:30 today and it ", "8 complete words");
+  assert.equal(cut("one two three four five six seven eight"), null, "the 8th word may still be growing");
+  assert.equal(cut("The answer is simple — it is "), "The answer is simple — ");
+  assert.equal(cut("First of all; the "), "First of all; ");
+  assert.equal(cut("A leap year has 366 days. It "), "A leap year has 366 days. ");
+  assert.equal(cut("Hi."), null, "no trailing space: the sentence may continue (3.5)");
+});
+
+test("smoke 2026-10-04 lever 3: chunker with firstClause splits once, then sentences; the default (glasses) is unchanged", async () => {
+  const out = [];
+  const c = H.createSentenceChunker(async (s) => { out.push(s); }, { firstClause: true });
+  for (const t of ["Lisbon", " is", " the", " capital", " of", " Portugal,", " a", " city", " by", " the", " sea.", " It", " is", " old,", " and", " lovely"]) await c.push(t);
+  await c.flush();
+  assert.deepEqual(out, ["Lisbon is the capital of Portugal, ", "a city by the sea. ", "It is old, and lovely"]);
+  const g = [];
+  const d = H.createSentenceChunker(async (s) => { g.push(s); });
+  await d.push("Lisbon is the capital, a city. It");
+  await d.flush();
+  assert.deepEqual(g, ["Lisbon is the capital, a city. ", "It"]);
+});
+
+test("review I2/M8/M9: leading whitespace never uses up the first-clause split; a dash is not a word; CLAUSE_END has no shared /g state", async () => {
+  const out = [];
+  const c = H.createSentenceChunker(async (s) => { out.push(s); }, { firstClause: true });
+  await c.push("\n\n");
+  await c.push("Lisbon is the capital, and a city by the sea. It is old.");
+  await c.flush();
+  assert.deepEqual(out.map((s) => s.trim()), ["Lisbon is the capital,", "and a city by the sea.", "It is old."]);
+  assert.equal(H.firstClauseEnd("Okay — sure, "), -1, "'Okay — sure,' is two words: wait");
+  assert.equal(H.firstClauseEnd("The ratio is 3 - 2 and "), -1, "a spaced hyphen is not a clause break");
+  assert.equal(H.CLAUSE_END.global, false);
+});

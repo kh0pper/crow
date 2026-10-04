@@ -276,3 +276,67 @@ test("smoke 2026-10-04: the router sees the plain transcript — a turnContext c
   assert.equal(r.escalated, false);
   assert.match(h.log.at(-1).messages.at(-1).content, /^\[Display\] Open windows: none\.\n\nWhat is the capital of Portugal\?$/, "the model still gets the context");
 });
+
+test("smoke 2026-10-04 lever 3: the FIRST chunk is the first clause, later chunks are whole sentences (opt-out keeps sentences)", async () => {
+  const text = ["Lisbon", " is", " the", " capital", " of", " Portugal,", " a", " city", " by", " the", " sea.", " It", " is", " old,", " and", " lovely."];
+  const h = harness({ rounds: [[...text.map((t) => ({ type: "content_delta", text: t })), { type: "done" }]] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital?", sink: h.sink });
+  assert.deepEqual(h.calls.spoken, ["Lisbon is the capital of Portugal,", "a city by the sea.", "It is old, and lovely."]);
+  const off = harness({ rounds: [[...text.map((t) => ({ type: "content_delta", text: t })), { type: "done" }]] });
+  await off.runner.runVoiceTurn({ db: {}, device: off.device, transcript: "capital?", sink: off.sink, firstClause: false });
+  assert.deepEqual(off.calls.spoken, ["Lisbon is the capital of Portugal, a city by the sea.", "It is old, and lovely."]);
+});
+
+test("smoke 2026-10-04: refused tool calls (denied crow_discover) never make the next turns 'recent tool context'; a real tool call still does", async () => {
+  const h = harness({
+    rounds: [
+      [{ type: "tool_call", id: "x1", name: "crow_discover", arguments: {} }, { type: "done" }],
+      [{ type: "content_delta", text: "Lisbon." }, { type: "done" }],
+      [{ type: "content_delta", text: "Madrid." }, { type: "done" }],
+      [{ type: "tool_call", id: "p1", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }],
+      [{ type: "content_delta", text: "Two projects." }, { type: "done" }],
+      [{ type: "content_delta", text: "Paris." }, { type: "done" }],
+    ],
+    chatTools: ["crow_projects", "crow_discover"],
+  });
+  const deny = ["crow_discover"];
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, denyTools: deny });
+  assert.deepEqual(h.log[0].tools, ["crow_projects"], "crow_discover is not advertised");
+  assert.match(h.log[1].messages.at(-1).content, /^Tool discovery is not needed here/, "review I1: a denied discover keeps the turn going (no 'not available' answer)");
+  assert.doesNotMatch(h.log[1].messages.at(-1).content, /end your turn/);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Spain?", sink: h.sink, denyTools: deny });
+  assert.ok(!h.calls.routed[1].includes("tool"), "the refused crow_discover round-trip is invisible to the router");
+  assert.ok(h.log[2].messages.some((m) => m.role === "tool"), "…but the model still sees it in its history");
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "my projects?", sink: h.sink, denyTools: deny });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of France?", sink: h.sink, denyTools: deny });
+  assert.ok(h.calls.routed[3].includes("tool"), "an executed (non-kiosk-native) tool call still counts as recent tool context");
+});
+
+test("smoke 2026-10-04 lever 2: opts.sttModel(profile) picks the transcription model; null keeps the profile's", async () => {
+  const seen = [];
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (audio, o) => { seen.push(o.model ?? null); return { text: "hi" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttModel: (p) => (p.provider === "fasterwhisper" ? "Systran/faster-whisper-tiny.en" : null) });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttModel: () => null });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en", null, null]);
+});
+
+test("review I3: a confirmation refusal still counts as tool context — the 'yes' that follows keeps its route", async () => {
+  const h = harness({ rounds: [[{ type: "tool_call", id: "c1", name: "crow_delete_post", arguments: { id: 7 } }, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [{ type: "content_delta", text: "Done." }, { type: "done" }]],
+    chatTools: ["crow_delete_post"] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delete post 7", sink: h.sink });
+  assert.match(h.log[1].messages.at(-1).content, /Confirmation required/);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "yes", sink: h.sink });
+  assert.ok(h.calls.routed[1].includes("tool"), "the confirm round-trip stays visible to the router");
+});
+
+test("review M7: route-neutrality follows the refused call, not its id — a real call sharing an empty id still counts", async () => {
+  const h = harness({ rounds: [[{ type: "tool_call", id: "", name: "crow_discover", arguments: {} }, { type: "tool_call", id: "", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }], [{ type: "content_delta", text: "Two." }, { type: "done" }], [{ type: "content_delta", text: "Ok." }, { type: "done" }]],
+    chatTools: ["crow_projects", "crow_discover"] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "projects?", sink: h.sink, denyTools: ["crow_discover"] });
+  assert.deepEqual(h.calls.executed, ["crow_projects"]);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "and?", sink: h.sink, denyTools: ["crow_discover"] });
+  assert.equal(h.calls.routed[1].filter((r) => r === "tool").length, 1, "the executed crow_projects result counts; the refused discover does not");
+});
