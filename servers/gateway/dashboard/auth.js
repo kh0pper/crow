@@ -11,6 +11,7 @@
 import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { createDbClient, auditLog } from "../../db.js";
 import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
+import { forwardedAddrs } from "../models/door-resolve.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -393,7 +394,7 @@ export async function destroySession(token) {
  * CROW_ALLOWED_IPS. Does NOT include bare loopback — callers decide whether
  * to trust localhost based on the request's Tailscale header context.
  */
-function isPrivateOrAllowlistedIp(addr) {
+export function isPrivateOrAllowlistedIp(addr) {
   if (/^10\./.test(addr)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return true;
   if (/^192\.168\./.test(addr)) return true;
@@ -453,6 +454,87 @@ export function isAllowedNetwork(req) {
   if (addr === "127.0.0.1" || addr === "::1" || addr === "localhost") return false;
 
   return isPrivateOrAllowlistedIp(addr);
+}
+
+function headerValues(h) {
+  if (h == null) return [];
+  return (Array.isArray(h) ? h : [h]).flatMap((v) => String(v).split(","));
+}
+
+/** A Host / X-Forwarded-Host value naming a tailnet- or LAN-scoped host:
+ * localhost, a *.ts.net MagicDNS name, or a loopback/private/tailnet IP. */
+function isPrivateScopedHost(raw) {
+  let h = String(raw || "").trim().toLowerCase();
+  const br = h.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (br) h = br[1];
+  else h = h.replace(/:\d+$/, "");
+  h = h.replace(/\.$/, "");
+  if (!h) return false;
+  if (!/^[a-z0-9.:-]+$/.test(h)) return false;
+  if (h === "localhost" || h.endsWith(".ts.net")) return true;
+  if (isLoopbackAddr(h)) return true;
+  if (/^fd7a:115c:a1e0:/.test(h)) return true;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) && isPrivateOrAllowlistedIp(h);
+}
+
+function isLoopbackAddr(a) {
+  const v = String(a || "").replace(/^::ffff:/, "");
+  return v === "::1" || v === "localhost" || /^127\./.test(v);
+}
+
+/**
+ * The network gate for unauthenticated peer enrollment
+ * (POST /instance/enroll-request). The dashboard's rules (isAllowedNetwork),
+ * tightened so it can never allow what the dashboard refuses:
+ *
+ *   - Funnel traffic is refused, and CROW_DASHBOARD_PUBLIC does NOT open it.
+ *   - Tailscale-User-Login alone is never trusted (any non-Tailscale proxy
+ *     passes a client's copy through).
+ *   - The decision uses the TCP peer (req.socket), never req.ip, which
+ *     `trust proxy` rewrites from a client-supplied X-Forwarded-For.
+ *   - Loopback socket = a same-box proxy (Tailscale Serve, which REPLACES the
+ *     inbound X-Forwarded-For with the real client, or Caddy/nginx). It must
+ *     name its client (X-Forwarded-For / X-Real-IP / Forwarded), and EVERY
+ *     address named must be private, tailnet or CROW_ALLOWED_IPS — so an
+ *     internet client behind a public reverse proxy, or a spoofed hop, is
+ *     refused. A loopback request naming no client (a bare local process, or
+ *     a proxy that forwards no client address) is refused, as the dashboard
+ *     refuses bare loopback; `crow instance pair` always dials the peer's
+ *     tailnet URL, so it never arrives that way.
+ *   - Non-loopback socket: a direct client; it must not claim proxied hops,
+ *     and its own address must be private, tailnet or allow-listed.
+ *
+ *   - Through a loopback proxy, the Host and X-Forwarded-Host the client used
+ *     must be tailnet/LAN-scoped (localhost, *.ts.net, private/tailnet IP): a
+ *     public front door chained into this host's Serve (a public reverse proxy
+ *     on another node → this host's Serve → the gateway) has its X-Forwarded-For replaced by Serve with the
+ *     front door's tailnet IP, but still carries the public host name.
+ *
+ * Residual: a front door that ALSO rewrites Host to a *.ts.net name is
+ * indistinguishable from tailnet traffic; the mandatory one-time code is the
+ * gate there.
+ */
+export function isAllowedEnrollNetwork(req) {
+  const headers = req.headers || {};
+  if (headers["tailscale-funnel-request"]) return false;
+  const sock = String(req.socket?.remoteAddress || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
+  if (!sock) return false;
+  const hops = forwardedAddrs(headers);
+  if (hops.some((a) => a === null)) return false;
+  if (isLoopbackAddr(sock)) {
+    if (hops.length === 0) return false;
+    // A front door chained INTO Serve (public proxy → this host's Serve over
+    // the tailnet) arrives with Serve's replaced X-Forwarded-For naming only
+    // the front door's tailnet IP — but the Host the client asked for rides
+    // along. Every host named must be a tailnet/LAN-scoped one.
+    if (!headers.host || !isPrivateScopedHost(headers.host)) return false;
+    for (const h of headerValues(headers["x-forwarded-host"])) {
+      if (String(h).trim() && !isPrivateScopedHost(h)) return false;
+    }
+    return hops.every((a) => !isLoopbackAddr(a) && isPrivateOrAllowlistedIp(a.replace(/^::ffff:/, "")));
+  }
+  if (hops.length > 0) return false;
+  return isPrivateOrAllowlistedIp(sock);
 }
 
 /**

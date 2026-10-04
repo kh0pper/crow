@@ -6376,7 +6376,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",

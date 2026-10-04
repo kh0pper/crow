@@ -46,3 +46,9 @@ test("create writes vCard 3.0 with N derived from the name; accents survive", as
 test("read-only address book refuses writes", async () => {
   assert.equal((await call("ws_contacts_create", { addressbook: "Lectura", full_name: "x" })).code, "read_only");
 });
+
+test("a shared address book named \"Contacts (admin)\" resolves from its base name \"Contacts\"", async () => {
+  pim.addBook("contacts_shared_by_admin", "Contacts (admin)");
+  const r = await call("ws_contacts_search", { addressbook: "Contacts", query: "zzz" });
+  assert.equal(r.success, true, JSON.stringify(r));
+});

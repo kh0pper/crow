@@ -164,9 +164,9 @@ export default {
     <div style="margin-top:1.25rem;padding:0.75rem;background:var(--crow-bg-deep);border-radius:4px;font-size:0.82rem;color:var(--crow-text-muted)">
       <strong>To pair a new instance:</strong>
       <ol style="margin:0.5rem 0 0 1.25rem;padding:0">
-        <li>On the peer, set <code>CROW_ENROLL_ENABLED=1</code> and restart its gateway (pairing mode).</li>
-        <li>On this instance, run: <code style="display:block;margin:4px 0;padding:6px;background:var(--crow-bg)">node scripts/cli/instance-pair.js --peer-url https://&lt;peer-host&gt;</code></li>
-        <li>Turn off <code>CROW_ENROLL_ENABLED</code> on the peer after pairing completes.</li>
+        <li>On the peer, run <code>node scripts/cli/instance-pair.js --generate-otc</code>, then set <code>CROW_ENROLL_ENABLED=1</code> and <code>CROW_ENROLL_OTC=&lt;code&gt;</code> and restart its gateway (pairing mode).</li>
+        <li>On this instance, run: <code style="display:block;margin:4px 0;padding:6px;background:var(--crow-bg)">node scripts/cli/instance-pair.js --peer-url https://&lt;peer-host&gt; --otc &lt;code&gt;</code></li>
+        <li>Remove <code>CROW_ENROLL_ENABLED</code> and <code>CROW_ENROLL_OTC</code> on the peer after pairing completes. The code works once.</li>
       </ol>
     </div>
     `;
