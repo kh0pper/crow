@@ -818,6 +818,17 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     }
   }
 
+  // A version that ADDS an MCP server must register it for existing installs (W2: the
+  // workspace bundle gained a server; refresh used to copy server/ and never register it).
+  if (repoManifest.server && !repoManifest.server.url) {
+    const addons = readJsonSafe(MCP_ADDONS_PATH, {});
+    if (!addons[id]) {
+      addons[id] = mcpAddonEntryFor(repoManifest, null);
+      writeJsonSafe(MCP_ADDONS_PATH, addons);
+      touched.push("mcp-addons entry (restart to load)");
+    }
+  }
+
   // Commit marker last — see the include loop above.
   if (copyBundleRefreshItem(appSrc, destDir, "manifest.json")) touched.push("manifest.json");
 
@@ -1118,6 +1129,30 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
 }
 
 /**
+ * The mcp-addons.json entry for a manifest that declares `server` — the single shape both
+ * install (either branch) and the version refresh write. envKeys values come only from an
+ * install request; every truthy env_vars default rides along (unchanged install behaviour).
+ */
+export function mcpAddonEntryFor(manifest, reqEnv = null) {
+  const env = {};
+  for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
+  for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}) };
+}
+
+/**
+ * Keys Configure may push into an MCP entry. OPT-IN (review C1): only a manifest whose server declares
+ * `configureEnv: "envKeys-only"` is filtered. kodi/media/tax read secrets from process.env that they do
+ * not list in envKeys, so filtering everyone would silently break their Configure.
+ */
+function mcpForwardableKeys(manifest) {
+  if (!manifest || manifest.server?.configureEnv !== "envKeys-only") return null; // unchanged behaviour
+  const listed = new Set(manifest.server?.envKeys || []);
+  const blocked = new Set((manifest.env_vars || []).filter((v) => v && (v.secret === true || v.generate) && !listed.has(v.name)).map((v) => v.name));
+  return (k) => !blocked.has(k);
+}
+
+/**
  * Push env values into the add-on's mcp-addons.json entry.
  *
  * MCP children are spawned with { ...process.env, ...(config.env||{}) } from
@@ -1128,17 +1163,18 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  *
  * @returns {boolean} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH) {
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
+  const allowed = mcpForwardableKeys(manifest);
   const merged = { ...(entry.env || {}) };
   // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
   // so a blank here would SHADOW a working ambient value rather than clear it. The two
   // install-time writers of this file (see the mcp_server registration paths) guard the
   // same way. Clearing a value stays the .env file's job.
   for (const [k, v] of Object.entries(envVars || {})) {
-    if (v) merged[k] = v;
+    if (v && (!allowed || allowed(k))) merged[k] = v;
   }
   entry.env = merged;
   mcpAddons[bundleId] = entry;
@@ -2199,17 +2235,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // Bundle types can also have MCP servers — register if manifest has server config
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        const env = {};
-        if (manifest.server.envKeys && reqEnv) {
-          for (const key of manifest.server.envKeys) {
-            if (reqEnv[key]) env[key] = reqEnv[key];
-          }
-        }
-        if (manifest.env_vars) {
-          for (const v of manifest.env_vars) {
-            if (v.default && !env[v.name]) env[v.name] = v.default;
-          }
-        }
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
         // shared by more than one gateway on a host (e.g. grackle runs a
         // main gateway + a separate-DB instance off the same ~/.crow), so a
@@ -2218,11 +2243,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = {
-          command: manifest.server.command,
-          args: manifest.server.args || [],
-          ...(Object.keys(env).length > 0 ? { env } : {}),
-        };
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2259,24 +2280,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        const env = {};
-        // Collect user-provided env vars
-        if (manifest.server.envKeys && reqEnv) {
-          for (const key of manifest.server.envKeys) {
-            if (reqEnv[key]) env[key] = reqEnv[key];
-          }
-        }
-        // Also include default values from manifest.env_vars
-        if (manifest.env_vars) {
-          for (const v of manifest.env_vars) {
-            if (v.default && !env[v.name]) env[v.name] = v.default;
-          }
-        }
-        mcpAddons[bundleId] = {
-          command: manifest.server.command,
-          args: manifest.server.args || [],
-          ...(Object.keys(env).length > 0 ? { env } : {}),
-        };
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -3321,7 +3325,7 @@ export default function bundlesRouter() {
         : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id));
 
       // And the gateway's own env, exactly as install does for docker bundles:
       // gateway-side panel routes read their config from process.env (the phone
