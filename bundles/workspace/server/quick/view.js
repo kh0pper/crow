@@ -35,6 +35,7 @@ export const QUICK_STRINGS = {
     err_busy: "The file is being saved right now. Try again in a few seconds.",
     err_stale_editor_lock: "This file is still marked as open in the editor, but nobody is editing it. Ask the file's owner to open its ⋯ menu in Workspace and choose Unlock, then try again.",
     err_still_waiting: "It could not be applied right now, so your change is still waiting. It will be applied when the editor closes.",
+    err_apply_now_unconfirmed: "The waiting change was cancelled and Crow tried to save it now, but could not confirm the save finished. Check the file below before trying again: your change may already be there.",
     err_bad_args: "That request was not valid. Go back and try again.",
     err_generic: "Something went wrong. Nothing was changed; try again.",
     notQueueable: "This paragraph can't wait in the queue (its first words also start an earlier paragraph, or it is empty). Try again after the editor closes.",
@@ -63,6 +64,7 @@ export const QUICK_STRINGS = {
     err_busy: "El archivo se está guardando en este momento. Inténtalo de nuevo en unos segundos.",
     err_stale_editor_lock: "Este archivo sigue marcado como abierto en el editor, pero nadie lo está editando. Pide al dueño del archivo que abra su menú ⋯ en Workspace y elija Desbloquear; luego inténtalo de nuevo.",
     err_still_waiting: "No se pudo aplicar ahora, así que tu cambio sigue esperando. Se aplicará cuando se cierre el editor.",
+    err_apply_now_unconfirmed: "Se canceló el cambio en espera y Crow intentó guardarlo ahora, pero no pudo confirmar que se guardó. Revisa el archivo abajo antes de intentarlo de nuevo: puede que tu cambio ya esté ahí.",
     err_bad_args: "Esa solicitud no era válida. Vuelve e inténtalo de nuevo.",
     err_generic: "Algo salió mal. No se cambió nada; inténtalo de nuevo.",
     notQueueable: "Este párrafo no puede esperar en la cola (sus primeras palabras también empiezan un párrafo anterior, o está vacío). Inténtalo de nuevo cuando se cierre el editor.",
@@ -84,6 +86,7 @@ function noticeText(t, query) {
   const n = String(query.notice || "");
   if (["saved", "undone", "restored", "cancelled"].includes(n)) return t[n];
   if (n === "still_waiting") return t.err_still_waiting;
+  if (n === "apply_now_unconfirmed") return t.err_apply_now_unconfirmed; // not "Could not save": it may have saved
   // never reflect a message from the URL: a known code gets its localized text, anything else a generic one
   return `${t.errorPrefix} ${Object.hasOwn(t, `err_${n}`) ? t[`err_${n}`] : t.err_generic}`;
 }
