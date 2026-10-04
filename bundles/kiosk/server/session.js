@@ -49,6 +49,13 @@ export function createSessionHub(deps) {
       }
     }
 
+    /** `ready` carries display_config; re-sent after a panel save (the page tolerates repeats). */
+    async function sendReady() {
+      const cfg = await deps.displayConfig(device);
+      sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: cfg });
+    }
+    self.pushReady = sendReady;
+
     async function onHello(msg) {
       authing = true;
       let d;
@@ -63,19 +70,21 @@ export function createSessionHub(deps) {
       sessions.set(d.id, self);
       if (prior && prior.ws !== ws) { try { prior.ws.close(4000, "superseded"); } catch {} }
       try {
-        sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: await deps.displayConfig(d) });
+        await sendReady();
         sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
       } catch (err) { deps.log?.(`[kiosk] hello setup failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       state("idle");
       Promise.resolve().then(() => deps.warmup(d)).catch(() => {});
     }
 
-    async function onTurnEnd() {
+    async function onTurnEnd(msg) {
       if (!inTurn) return;
       inTurn = false;
       const pcm = Buffer.concat(frames);
       frames = []; bytes = 0;
-      if (pcm.length < MIN_TURN_BYTES) { sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
+      // Nothing said (the page's no-speech timeout): never send room noise to STT —
+      // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
+      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
       abort = new AbortController();
       const my = abort;
@@ -140,7 +149,7 @@ export function createSessionHub(deps) {
           state("listening");
           return;
         case "turn_end":
-          onTurnEnd().catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
+          onTurnEnd(msg).catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
           return;
         case "barge_in":
           if (abort) abort.abort();
@@ -191,6 +200,15 @@ export function createSessionHub(deps) {
       return true;
     },
     refreshDevice(id, d) { const s = sessions.get(id); if (s && d) Object.assign(s.device, d); },
+    /** Push a fresh `ready` (display_config) to a live page after its settings change. */
+    async pushConfig(id) {
+      const s = sessions.get(id);
+      if (!s || s.ws.readyState !== 1 || !s.pushReady) return false;
+      await s.pushReady();
+      return true;
+    },
+    /** The live session's device row (or null when the display is offline). */
+    deviceOf: (id) => sessions.get(id)?.device || null,
     isConnected: (id) => sessions.has(id),
     connectedIds: () => [...sessions.keys()],
   };

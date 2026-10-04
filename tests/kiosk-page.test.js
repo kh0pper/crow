@@ -131,3 +131,16 @@ test("Task 8 carry: every model-supplied string (title, name, blocks, ingredient
   assert.equal(root.querySelector("article p").textContent, X);
   v.apply({ action: "update", window: { id: "content-1", kind: "content", title: "ok", blocks: [{ type: "text", text: "<script>alert(1)</script>" }] } }); check();
 });
+
+// Final-review item 1 (page half): once a turn ends — including a no_speech
+// timeout — no further PCM frame leaves the page.
+test("ending a turn (no_speech included) stops the frame upload: onFrame gates on turn.ended, endTurn sets it and stops the mic", () => {
+  const src = read("kiosk.js");
+  const onFrame = src.slice(src.indexOf("function onFrame("), src.indexOf("async function startTurn("));
+  assert.match(onFrame, /^function onFrame\([^)]*\) \{\s*if \(!turn \|\| turn\.ended\) return;/, "the gate precedes ws.send");
+  assert.ok(onFrame.indexOf("turn.ended) return") < onFrame.indexOf("ws.send(pcm)"));
+  const endTurn = src.slice(src.indexOf("function endTurn("), src.indexOf("function report("));
+  const iEnded = endTurn.indexOf("turn.ended = true"), iStop = endTurn.indexOf("mic?.stop()"), iSend = endTurn.indexOf('type: "turn_end"');
+  assert.ok(iEnded > 0 && iStop > iEnded && iSend > iStop, "ended + mic stop happen before turn_end is sent");
+  assert.match(src.slice(src.indexOf("function startTurn"), src.indexOf("function endTurn")), /noSpeechMs/, "the no-speech timeout ends the turn through the VAD → endTurn");
+});
