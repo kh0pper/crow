@@ -89,6 +89,9 @@ export async function runPostListenSetup(server, app, deps) {
         // run on a different port (crow:3001, grackle:3002), so we derive
         // each peer's port from THEIR gateway_url, not ours.
         gatewayPort: 3002,
+        // This gateway's own backend port, advertised (signed) in the
+        // handshake so a peer that learns our tailscale_ip dials it directly.
+        syncPort: Number(PORT) || null,
       };
       setupTailnetSyncServer(server, ctx);
       await startTailnetSyncClients(ctx);

@@ -18,6 +18,7 @@ import { readSetting, writeSetting } from "../registry.js";
 import { t, fill } from "../../shared/i18n.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { revokePeer } from "../../../../sharing/revoke-peer.js";
+import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 
 function localInstanceIdOrNull() {
   try { return getOrCreateLocalInstanceId(); } catch { return null; }
@@ -27,6 +28,38 @@ function localInstanceIdOrNull() {
  *  the home instance, not this instance's own row. */
 export function canRevokeRow(row, localId) {
   return !!row && row.status !== "revoked" && !Number(row.is_home) && row.id !== localId;
+}
+
+function fmtMs(ms) {
+  return ms == null ? "?" : new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/**
+ * The "Sync link" cell: this gateway's tailnet instance-sync dialer view of
+ * the peer — linked / no dial address / last attempt + last error. Text only
+ * (every value is escaped); empty for this instance's own row.
+ */
+export function renderSyncLinkCell(h, lang) {
+  if (!h) return escapeHtml(t("settings.pairedNoDialYet", lang));
+  const lines = [];
+  if (h.linkedAt != null && h.linkClosedAt == null) {
+    lines.push(`<span style="color:#4caf50">●</span> ${escapeHtml(fill(t("settings.pairedLinkUp", lang), { direction: h.linkDirection || "?", when: fmtMs(h.linkedAt) }))}`);
+  } else if (h.linkClosedAt != null) {
+    lines.push(escapeHtml(fill(t("settings.pairedLinkClosed", lang), { when: fmtMs(h.linkClosedAt) })));
+  }
+  if (h.noAddressSince != null) {
+    lines.push(`<span style="color:#e53935">●</span> ${escapeHtml(fill(t("settings.pairedNoAddress", lang), { when: fmtMs(h.noAddressSince), missing: (h.missing || []).join("; ") }))}`);
+  }
+  if (h.lastAttemptAt != null) {
+    lines.push(escapeHtml(fill(t("settings.pairedLastAttempt", lang), { when: fmtMs(h.lastAttemptAt), url: h.lastAttemptUrl || "?" })));
+  }
+  if (h.lastError && (h.linkedAt == null || h.lastErrorAt >= h.linkedAt)) {
+    lines.push(`<span style="color:#ff9800">${escapeHtml(fill(t("settings.pairedLastError", lang), { when: fmtMs(h.lastErrorAt), error: h.lastError }))}</span>`);
+  }
+  if (h.backfilled) {
+    lines.push(escapeHtml(fill(t("settings.pairedLearned", lang), { fields: h.backfilled.fields.join(", ") })));
+  }
+  return lines.length ? lines.join("<br>") : escapeHtml(t("settings.pairedNoDialYet", lang));
 }
 
 export default {
@@ -59,6 +92,7 @@ export default {
       args: [],
     });
 
+    const dialHealth = getPeerDialHealth();
     const tableRows = rows.map((r) => {
       const statusColor = r.status === "active" ? "#4caf50" : r.status === "revoked" ? "#e53935" : "#ff9800";
       const trustBadge = r.trusted
@@ -87,10 +121,11 @@ export default {
           <td style="padding:8px">${trustBadge}</td>
           <td style="padding:8px;font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(r.gateway_url || "-")}</td>
           <td style="padding:8px;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(lastSeen)}</td>
+          <td style="padding:8px;font-size:0.75rem;color:var(--crow-text-muted);max-width:22rem;overflow-wrap:anywhere">${r.id === localId || r.status === "revoked" ? "" : renderSyncLinkCell(dialHealth[r.id], lang)}</td>
           <td style="padding:8px">${revokeCell}</td>
         </tr>
       `;
-    }).join("") || `<tr><td colspan="7" style="padding:16px;text-align:center;color:var(--crow-text-muted)">No instances registered yet.</td></tr>`;
+    }).join("") || `<tr><td colspan="8" style="padding:16px;text-align:center;color:var(--crow-text-muted)">No instances registered yet.</td></tr>`;
 
     return `${flash}<style>
       .pi-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
@@ -105,7 +140,7 @@ export default {
 
     <div class="table-scroll"><table class="pi-table">
       <thead><tr>
-        <th>ID</th><th>Name</th><th>Status</th><th>Trust</th><th>Gateway URL</th><th>Last seen</th><th>${escapeHtml(t("settings.pairedActions", lang))}</th>
+        <th>ID</th><th>Name</th><th>Status</th><th>Trust</th><th>Gateway URL</th><th>Last seen</th><th>${escapeHtml(t("settings.pairedSyncLink", lang))}</th><th>${escapeHtml(t("settings.pairedActions", lang))}</th>
       </tr></thead>
       <tbody>${tableRows}</tbody>
     </table></div>
