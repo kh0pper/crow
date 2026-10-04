@@ -56,11 +56,37 @@ test("total uncompressed size limit is enforced before inflating", () => {
   assert.equal(ZIP_LIMITS.maxXml, 30 * 1024 * 1024);
 });
 
-test("an XML part over the XML limit is refused (too_large)", () => {
-  const z = zipSync({ "[Content_Types].xml": strToU8("<x/>"), "big.xml": strToU8(`<a>${"y".repeat(3000)}</a>`) });
-  const pkg = OoxmlPackage.open(z, { ...ZIP_LIMITS, maxXml: 1000 });
-  assert.throws(() => pkg.xml("big.xml"), (e) => e.code === "too_large");
-  assert.doesNotThrow(() => pkg.xml("[Content_Types].xml"));
+test("an XML part over the XML limit is refused (too_large) from its declared size, before inflating", () => {
+  for (const name of ["big.xml", "word/_rels/document.xml.rels"]) {
+    const z = zipSync({ "[Content_Types].xml": strToU8("<x/>"), [name]: strToU8(`<a>${"y".repeat(3000)}</a>`) });
+    assert.throws(() => OoxmlPackage.open(z, { ...ZIP_LIMITS, maxXml: 1000 }), (e) => e.code === "too_large" && e.message.includes(name));
+  }
+  // a big non-XML part (an image) is governed by the total/ratio caps only
+  const img = zipSync({ "[Content_Types].xml": strToU8("<x/>"), "word/media/image1.png": strToU8("y".repeat(3000)) }, { level: 0 });
+  assert.doesNotThrow(() => OoxmlPackage.open(img, { ...ZIP_LIMITS, maxXml: 1000 }));
+  const ok = OoxmlPackage.open(zipSync({ "[Content_Types].xml": strToU8("<x/>"), "small.xml": strToU8("<a/>") }), { ...ZIP_LIMITS, maxXml: 1000 });
+  assert.doesNotThrow(() => ok.xml("small.xml"));
+});
+
+test("the part map is prototype-safe: entries named like Object.prototype members behave as plain names", () => {
+  const z = zipSync({ "[Content_Types].xml": strToU8("<x/>"), constructor: strToU8("c"), toString: strToU8("t") });
+  const pkg = OoxmlPackage.open(z);
+  assert.equal(Buffer.from(pkg.bytes("constructor")).toString(), "c");
+  assert.equal(Buffer.from(pkg.bytes("toString")).toString(), "t");
+  assert.deepEqual(Object.keys(unzipSync(pkg.save())), ["[Content_Types].xml", "constructor", "toString"]);
+  const plain = OoxmlPackage.open(zipSync({ "[Content_Types].xml": strToU8("<x/>") }));
+  for (const n of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) assert.equal(plain.has(n), false, n);
+  assert.deepEqual(plain.names(), ["[Content_Types].xml"]);
+  plain.setBytes("__proto__", strToU8("p"));
+  assert.equal(plain.has("__proto__"), true);
+  assert.equal(Buffer.from(plain.bytes("__proto__")).toString(), "p");
+});
+
+test("a zip entry named __proto__ is refused cleanly (it cannot be held by the unzip map)", () => {
+  // build the entry under a same-length placeholder name, then rename it in the raw bytes (local + central headers)
+  const raw = Buffer.from(zipSync({ "[Content_Types].xml": strToU8("<x/>"), "__xxxxx__": strToU8("p") }));
+  const renamed = Buffer.from(raw.toString("latin1").split("__xxxxx__").join("__proto__"), "latin1");
+  assert.throws(() => OoxmlPackage.open(renamed), (e) => e.code === "malformed_document" && /__proto__/.test(e.message));
 });
 
 test("a DOCTYPE hidden in a non-first part is refused when that part is parsed", () => {
