@@ -28,6 +28,7 @@ after(async () => { await close(); fake.close(); });
 const put = (n) => fake.addFile(`S/${n}`, readFileSync(join(FIX, "oo-rich.docx")), { owner: "admin" });
 const notifs = async () => (await db.execute("SELECT title, body FROM notifications ORDER BY id")).rows;
 const tick = () => W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+const tickAt = (offsetMs) => W.makeTick({ db, getConfig, clock: { now: () => Date.now() + offsetMs, sleep: async () => {} } })();
 const status = async (id) => (await call("ws_change_status", { change_id: id })).data;
 const closeSession = (path, key) => { fake.node(path).lock = null; fake.state.sessions.delete(key); };
 const md = async (path) => (await call("ws_docs_read", { path })).data.markdown;
@@ -176,9 +177,26 @@ test("viewer left, key cached (info error 0, users [], file unlocked): the queue
   fake.viewerLeft("S/q31.docx", key);
   const s = await (await import("../bundles/workspace/server/nc/onlyoffice.js")).docSession(getConfig(), fake.node("S/q31.docx").fileId);
   assert.equal(s.known, true); assert.equal(s.live, false); assert.deepEqual(s.users, []);
-  await tick();
+  await tickAt(0);
+  assert.equal((await status(r.data.change_id)).state, "pending", "first sighting of an empty session: confirm on a later tick");
+  await tickAt(W.EMPTY_CONFIRM_MS - 1000);
+  assert.equal((await status(r.data.change_id)).state, "pending", "not yet EMPTY_CONFIRM_MS");
+  await tickAt(W.EMPTY_CONFIRM_MS + 1000);
   assert.equal((await status(r.data.change_id)).state, "applied_close");
   assert.match(await md("S/q31.docx"), /Tras el teléfono\./);
+});
+
+test("an empty session that does not hold still (an editor's connection blip: the user comes back, or the file is saved) restarts the confirmation", async () => {
+  put("q34.docx"); const key = fake.openInEditor("S/q34.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const r = await call("ws_docs_append", { path: "S/q34.docx", markdown: "Nunca encima." });
+  fake.viewerLeft("S/q34.docx", key); await tickAt(0);
+  fake.state.sessions.get(key).users = ["ocinst_admin"]; await tickAt(5000); // back in the session
+  fake.state.sessions.get(key).users = []; await tickAt(W.EMPTY_CONFIRM_MS + 1000);
+  assert.equal((await status(r.data.change_id)).state, "pending", "the blip reset the confirmation");
+  fake.node("S/q34.docx").etag = `"saved-by-editor"`; await tickAt(2 * W.EMPTY_CONFIRM_MS + 2000);
+  assert.equal((await status(r.data.change_id)).state, "pending", "a save (new etag) also resets it");
+  await tickAt(3 * W.EMPTY_CONFIRM_MS + 3000);
+  assert.equal((await status(r.data.change_id)).state, "applied_close", "steady: applies");
 });
 
 test("unlocked file, key known with ONE user (a session starting before the connector locks): waits, nothing written", async () => {
@@ -203,7 +221,7 @@ test("LOCKED file, key cached with no users (the post-close save window): waits,
   assert.equal((await notifs()).slice(n0).filter((n) => /Unlock/.test(n.body)).length, 0, "not a stale lock");
   const { classifyLock } = await import("../bundles/workspace/server/nc/locks.js");
   const { stat } = await import("../bundles/workspace/server/nc/dav.js");
-  assert.equal((await classifyLock(getConfig(), await stat(getConfig(), ["S", "q33.docx"]))).code, "open_in_editor", "classifyLock agrees: still open, not stale");
+  assert.equal((await classifyLock(getConfig(), await stat(getConfig(), ["S", "q33.docx"]))).code, "busy", "classifyLock agrees: being saved, not stale (and nobody to name or close)");
   closeSession("S/q33.docx", key);
   await tick();
   assert.equal((await status(r.data.change_id)).state, "applied_close");

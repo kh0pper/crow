@@ -86,7 +86,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const sessionOf = async (fileId, force) => {
     const c = sessions.get(fileId, force); if (c) return c.v;
     const s = await docSession(getConfig(), fileId).catch(() => null);
-    return sessions.set(fileId, s, s?.live ? SESSION_TTL_MS : NEGATIVE_TTL_MS);
+    return sessions.set(fileId, s, s && !s.live ? NEGATIVE_TTL_MS : SESSION_TTL_MS); // an unreadable session (null) keeps 30 s
   };
   const canWrite = async (fileId, uid, path, force) => {
     const k = `${fileId}\u0000${uid}`; const c = writes.get(k, force);

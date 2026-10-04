@@ -47,7 +47,7 @@ test("instructions carry the guardrails (delivered to the client); the manifest 
     assert.match(WORKSPACE_INSTRUCTIONS, re, String(re));
   }
   const m = JSON.parse(readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "manifest.json"), "utf8"));
-  assert.equal(m.version, "0.2.0");
+  assert.equal(m.version, "0.2.1");
   assert.deepEqual(m.server, { command: "node", args: ["server/index.js"], envKeys: [], configureEnv: "envKeys-only" });
   assert.equal(m.npm_required, true);
   assert.deepEqual(m.skills, ["skills/workspace.md"]);

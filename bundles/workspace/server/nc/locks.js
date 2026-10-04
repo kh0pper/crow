@@ -25,6 +25,11 @@ export async function classifyLock(cfg, e) {
   if (!s.known) {
     return { code: "stale_editor_lock", message: `"${e.name}" is still marked as open in the editor, but nobody is editing it. Ask ${e.ownerName || "the file's owner"} to open the file's ⋯ menu in Workspace and choose Unlock, then try again.`, data: { since: l.since, lock_type: "editor", can_proceed: false, owner: e.ownerName } };
   }
+  if (!s.users.length) {
+    // the last editor left and the editor is still saving (the connector unlocks once that save lands): nobody to
+    // name and nobody to close — "busy" (retry shortly; a queued change simply waits for the unlock)
+    return { code: "busy", key: s.key, users: [], message: `"${e.name}" is being saved after its editor closed. Try again in a few seconds.`, data: { open_by: [], since: l.since, lock_type: "editor", can_proceed: false } };
+  }
   const who = await Promise.all(s.uids.map((u) => displayName(cfg, u)));
   return {
     code: "open_in_editor", key: s.key, users: s.users,

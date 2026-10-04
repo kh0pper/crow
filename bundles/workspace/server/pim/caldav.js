@@ -47,12 +47,14 @@ export async function resolveCollection(cfg, kind, nameOrId) {
   const what = kind === "card" ? "address book" : "calendar";
   const listing = () => all.map((c) => `${c.name} (${c.id})`).join(", ") || "none — ask the household to share one with Crow bot";
   const ambiguous = () => new WsError("ambiguous", `More than one ${what} is named "${nameOrId}" for Crow bot. Available: ${listing()}`);
+  const shared = (c) => !!c.owner_uid && c.owner_uid !== cfg.user;
+  const baseOf = (c) => (shared(c) ? c.name.replace(/\s+\([^()]*\)$/, "") : c.name);
   const byName = all.filter((c) => norm(c.name) === want);
-  if (byName.length === 1) return byName[0];
-  const byId = all.find((c) => c.id === String(nameOrId).normalize("NFC")); if (byId) return byId;
-  if (byName.length > 1) throw ambiguous();
-  const baseOf = (c) => (c.owner_uid && c.owner_uid !== cfg.user ? c.name.replace(/\s+\([^()]*\)$/, "") : c.name);
   const byBase = all.filter((c) => norm(baseOf(c)) === want);
+  // crow-bot's own "Menu" and a shared "Menu (admin)": "Menu" could mean either — never pick one silently
+  if (byName.length === 1 && !(byBase.length > 1 && !shared(byName[0]))) return byName[0];
+  const byId = all.find((c) => c.id === String(nameOrId).normalize("NFC")); if (byId) return byId;
+  if (byName.length >= 1) throw ambiguous();
   if (byBase.length === 1) return byBase[0];
   if (byBase.length > 1) throw ambiguous();
   throw new WsError(`${kind === "card" ? "addressbook" : "calendar"}_not_found`, `No ${what} named "${nameOrId}" is shared with Crow bot. Available: ${listing()}`);

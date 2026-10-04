@@ -18,7 +18,8 @@
   var POLL_FOCUSED_MS = 5000, POLL_VISIBLE_MS = 15000, POLL_HIDDEN_MS = 60000, ERROR_BACKOFF_MS = 60000;
   var INDICATOR_MIN_MS = 2500, IDLE_STOP_MS = 8 * 3600e3, APPLY_WATCHDOG_MS = 30000;
   var INDICATOR_TEXT = "Crow is editing…";
-  var timer = null, idleSince = Date.now(), busy = false, stopped = false, indicatorAt = 0, indicatorOffTimer = null;
+  var timer = null, idleSince = Date.now(), busy = false, stopped = false, indicatorAt = 0, indicatorOffTimer = null, indicatorShown = false;
+  var backoffUntil = 0, lastPollAt = 0;
   function info() { return window.Asc.plugin.info || {}; }
   function api(path, opts) {
     opts = opts || {};
@@ -43,13 +44,15 @@
   function indicatorOn() {
     clearTimeout(indicatorOffTimer); indicatorOffTimer = null;
     indicatorAt = Date.now();
+    if (indicatorShown) return; // still up from the previous change: one StartAction, one EndAction
+    indicatorShown = true;
     try { window.Asc.plugin.executeMethod("StartAction", ["Information", INDICATOR_TEXT]); } catch (e) { /* no indicator */ }
   }
   function indicatorOff() {
     var wait = Math.max(0, indicatorAt + INDICATOR_MIN_MS - Date.now());
     clearTimeout(indicatorOffTimer);
     indicatorOffTimer = setTimeout(function () {
-      indicatorOffTimer = null;
+      indicatorOffTimer = null; indicatorShown = false;
       try { window.Asc.plugin.executeMethod("EndAction", ["Information", INDICATOR_TEXT]); } catch (e) { /* no indicator */ }
     }, wait);
   }
@@ -58,13 +61,14 @@
     busy = false;
     if (e && e.status === 426) { stopped = true; return; } // outdated plugin: the document must be reloaded
     if (e && (e.status === 401 || e.status === 409)) return schedule(pollDelay()); // nothing for this document now (or not allowed), or a claim lost to the close-time applier: keep the cadence
-    schedule(ERROR_BACKOFF_MS); // 429, 5xx, network
+    backoffUntil = Date.now() + ERROR_BACKOFF_MS; // 429, 5xx, network: a wake-up does not cut this short
+    schedule(ERROR_BACKOFF_MS);
   }
   function poll() {
     var i = info();
     if (stopped || i.isViewMode || !i.jwt || !i.documentId || Date.now() - idleSince > IDLE_STOP_MS) return; // view mode / no token / 8 h idle: stop
     if (busy) return schedule(POLL_FOCUSED_MS);
-    busy = true;
+    busy = true; lastPollAt = Date.now();
     api("/pending?key=" + encodeURIComponent(i.documentId) + "&pv=" + VERSION).then(function (list) {
       if (!list || !list.length) { busy = false; return schedule(pollDelay()); }
       idleSince = Date.now();
@@ -75,21 +79,30 @@
         var done = false;
         // the callback may never fire (e.g. a modal dialog): give up locally; the server lease expires → unknown_after_claim
         var watchdog = setTimeout(function () { if (!done) { done = true; indicatorOff(); busy = false; schedule(ERROR_BACKOFF_MS); } }, APPLY_WATCHDOG_MS);
-        window.Asc.plugin.callCommand(window.crowCommand, false, true, function (res) {
+        var finish = function (res) {
           if (done) return;
           done = true; clearTimeout(watchdog); indicatorOff();
           res = res || { ok: false, reason: "no_result" };
           api("/ack", { method: "POST", body: JSON.stringify({ change_id: ch.change_id, apply_token: cl.apply_token, outcome: res.ok ? "applied" : "failed", applied_nothing: res.applied_nothing === true, reason: res.reason }) })
             .catch(function () { /* the lease expires → unknown_after_claim → postcondition at close */ })
             .then(function () { busy = false; schedule(1000); });
-        });
+        };
+        // a synchronous throw ran nothing of the op: report it (ambiguous → the postcondition decides at close)
+        try { window.Asc.plugin.callCommand(window.crowCommand, false, true, finish); }
+        catch (e) { finish({ ok: false, reason: "call_failed" }); }
       });
     }).catch(failed);
   }
-  function wake() { if (!busy && !stopped) schedule(500); }
+  // Coming back to the tab/window polls soon — never during an error back-off, never sooner than one focused
+  // interval after the last poll (window focus only: no capture, so clicks inside the editor do not trigger it).
+  function wake() {
+    if (busy || stopped) return;
+    var now = Date.now(), at = Math.max(now + 500, backoffUntil, lastPollAt + POLL_FOCUSED_MS);
+    schedule(at - now);
+  }
   try { window.document.addEventListener("visibilitychange", function () { if (visible()) wake(); }); } catch (e) { /* ignore */ }
-  try { if (window.parent && window.parent !== window) window.parent.addEventListener("focus", wake, true); } catch (e) { /* cross-origin */ }
-  window.crowLive = { pollDelay: pollDelay, version: VERSION };
+  try { if (window.parent && window.parent !== window) window.parent.addEventListener("focus", wake); } catch (e) { /* cross-origin */ }
+  window.crowLive = { pollDelay: pollDelay, wake: wake, version: VERSION };
   window.Asc.plugin.init = function () { schedule(3000); };
   window.Asc.plugin.event_onDocumentContentReady = function () { schedule(1000); };
   window.Asc.plugin.button = function () {};

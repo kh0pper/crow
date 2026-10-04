@@ -228,4 +228,7 @@ test("shared collections appear as \"Name (owner)\": exact name, then id, then t
   assert.equal(amb.code, "ambiguous"); assert.match(amb.error, /Viajes \(admin\).*Viajes \(ana\)/);
   assert.equal(await ok("Viajes (ana)"), true, "the exact name still picks one");
   assert.equal((await call("ws_cal_list_events", { calendar: "Notas" })).code, "calendar_not_found", "crow-bot's own collection keeps its full name");
+  pim.addCalendar("recetas", "Recetas", { owner: "crow-bot" }); // crow-bot's own "Recetas" next to the shared "Recetas (admin)"
+  assert.equal((await call("ws_cal_list_events", { calendar: "Recetas" })).code, "ambiguous", "own exact name vs a shared base name: never picked silently");
+  assert.equal(await ok("Recetas (admin)"), true); assert.equal(await ok("recetas"), true, "the id still picks one");
 });

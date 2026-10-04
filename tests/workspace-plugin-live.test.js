@@ -115,3 +115,42 @@ test("view mode never polls", async () => {
   e.start(); await e.advance(120000);
   assert.equal(e.polls().length, 0);
 });
+
+const queueOf = (changes, { throwOnCommand = false } = {}) => async (url) => {
+  if (url.startsWith("/crow-live/v1/pending")) { const c = changes.shift(); return c ? { status: 200, body: [c] } : { status: 401, body: {} }; }
+  if (url === "/crow-live/v1/claim") return { status: 200, body: { lease_until: 0, apply_token: "at" } };
+  if (url === "/crow-live/v1/ack") return { status: 200, body: { ok: true } };
+  return { status: 404, body: {} };
+};
+
+test("a wake-up (tab/window focus) never cuts an error back-off short, nor polls sooner than one focused interval", async () => {
+  const e = editor(async () => ({ status: 429, body: {} }));
+  e.start(); await e.advance(1000);
+  for (let i = 0; i < 10; i++) { e.ctx.crowLive.wake(); await e.advance(1000); }
+  assert.equal(e.polls().length, 1, "still backing off");
+  const ok = editor(none); ok.start(); await ok.advance(1000);
+  ok.ctx.crowLive.wake(); await ok.advance(1000);
+  assert.equal(ok.polls().length, 1, "no poll within 5 s of the last one");
+});
+
+test("two changes back to back: one StartAction, one EndAction (≥ 2 s after the start)", async () => {
+  const c = (id) => ({ change_id: id, tool: "ws_docs_append", args: { markdown: id }, pre: null });
+  const e = editor(queueOf([c("pc_a"), c("pc_b")]));
+  e.start(); await e.advance(1000); await e.advance(10000);
+  assert.equal(e.commands.length, 2);
+  assert.equal(e.methods.filter((m) => m.name === "StartAction").length, 1);
+  assert.equal(e.methods.filter((m) => m.name === "EndAction").length, 1);
+  const [s, end] = [e.methods.find((m) => m.name === "StartAction"), e.methods.find((m) => m.name === "EndAction")];
+  assert.ok(end.at - s.at >= 2000);
+});
+
+test("callCommand throwing: the claim is acked failed (not applied_nothing), the indicator ends, polling continues", async () => {
+  const e = editor(queueOf([{ change_id: "pc_t", tool: "ws_docs_append", args: {}, pre: null }]));
+  e.ctx.Asc.plugin.callCommand = () => { throw new Error("editor busy"); };
+  e.start(); await e.advance(1000); await e.advance(4000);
+  const ack = e.requests.find((r) => r.url === "/crow-live/v1/ack");
+  assert.equal(ack.body.outcome, "failed"); assert.equal(ack.body.applied_nothing, false);
+  assert.ok(e.methods.some((m) => m.name === "EndAction"));
+  const n = e.polls().length; await e.advance(10000);
+  assert.ok(e.polls().length > n, "still polling at the normal cadence");
+});
