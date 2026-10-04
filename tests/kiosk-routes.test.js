@@ -8,7 +8,7 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
-import { createKioskRuntime, KIOSK_DENY_TOOLS, pairRequester, createSttWarmup } from "../bundles/kiosk/server/runtime.js";
+import { createKioskRuntime, KIOSK_DENY_TOOLS, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
 import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { readPortrait, portraitMood } from "../servers/sharing/profile-avatar.js";
@@ -392,4 +392,44 @@ test("approve: a failure binding the bot unpairs the just-created device and rel
     assert.deepEqual(after, before, "no orphan kiosk device left behind");
     assert.equal(k.pairing.listPending().length, 1, "pairing released, still pending");
   } finally { k.stop(); s.close(); }
+});
+
+// Final-review item 3: a panel save reaches the open page (fresh `ready`).
+test("admin display update pushes a fresh ready (display_config) to the live page", async () => {
+  const { ws, msgs } = await connect("kiosk-live-cfg");
+  assert.equal(msgs.filter((m) => m.type === "ready").length, 1);
+  const r = await (await j("/api/kiosk/admin/displays/kiosk-live-cfg", { method: "POST", body: JSON.stringify({ kiosk_settings: { follow_up: true, lang: "es" } }) })).json();
+  assert.equal(r.ok, true);
+  for (let i = 0; i < 50 && msgs.filter((m) => m.type === "ready").length < 2; i++) await new Promise((res) => setTimeout(res, 10));
+  const readies = msgs.filter((m) => m.type === "ready");
+  assert.equal(readies.length, 2, "second ready pushed");
+  assert.equal(readies[1].display_config.follow_up, true);
+  assert.equal(readies[1].display_config.lang, "es");
+  assert.equal(readies[1].display_config.bird.species, "crow");
+  assert.equal(typeof readies[1].server_now, "number");
+  // an omitted field is never cleared by an update
+  const dev = await store.findDevice(db(), "kiosk-live-cfg");
+  assert.equal(dev.bound_bot_id, "household");
+  ws.close();
+});
+
+// Final-review item 4: no "Timer timer is done.", and the display's language.
+test("timerDoneSpeech: unnamed → Time's up.; named → '<name> timer is done.'; Spanish from strings", () => {
+  assert.equal(timerDoneSpeech("Timer", "en"), "Time's up.");
+  assert.equal(timerDoneSpeech("", undefined), "Time's up.");
+  assert.equal(timerDoneSpeech("Pasta", "en"), "Pasta timer is done.");
+  assert.equal(timerDoneSpeech("Pasta", "fr"), "Pasta timer is done.", "unknown lang → en");
+  assert.equal(timerDoneSpeech("Timer", "es"), "Se acabó el tiempo.");
+  assert.equal(timerDoneSpeech("Pasta", "es"), "Terminó el temporizador Pasta.");
+});
+
+test("a finished timer is spoken in the display's language (wired through the runtime)", async () => {
+  const { ws } = await connect("kiosk-timer-es");
+  await j("/api/kiosk/admin/displays/kiosk-timer-es", { method: "POST", body: JSON.stringify({ kiosk_settings: { lang: "es" } }) });
+  const before = speakCalls.length;
+  rt.wm.open("kiosk-timer-es", { kind: "timer", name: "Timer", title: "Timer", seconds: 0.02 });
+  for (let i = 0; i < 100 && speakCalls.length === before; i++) await new Promise((res) => setTimeout(res, 10));
+  assert.equal(speakCalls.at(-1).text, "Se acabó el tiempo.");
+  assert.equal(speakCalls.at(-1).device.id, "kiosk-timer-es");
+  ws.close();
 });

@@ -56,3 +56,57 @@ test("panel and docs say /display for the page URL", () => {
   assert.match(STRINGS.es.no_pending, /\/display/);
   assert.doesNotMatch(STRINGS.en.pair_steps + STRINGS.es.pair_steps + STRINGS.en.no_pending + STRINGS.es.no_pending, /\/kiosk/);
 });
+
+// Final-review item 5: Save never silently rebinds. A current value missing
+// from the options shows a selected "(not set)" instead of the first option,
+// and only the fields the admin changed are posted.
+async function runPanel(device, data = {}) {
+  const { parseHTML } = await import("linkedom");
+  const vm = await import("node:vm");
+  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-devices"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
+  const posts = [];
+  const listing = {
+    devices: [device], pending: [],
+    bots: [{ bot_id: "chef", display_name: "Chef" }, { bot_id: "household", display_name: "Household" }],
+    stt_profiles: [{ id: "stt-a", name: "Whisper A" }, { id: "stt-b", name: "Whisper B" }],
+    tts_profiles: [{ id: "tts-a", name: "Kokoro", provider: "kokoro" }],
+    ...data,
+  };
+  const fetch = async (path, opts = {}) => {
+    if (opts.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
+    return { status: 200, json: async () => (opts.method === "POST" ? { ok: true } : listing) };
+  };
+  const ctx = vm.createContext({ document, window, fetch, JSON, String, setInterval: () => 0, clearInterval: () => {}, encodeURIComponent, Date });
+  window.confirm = () => false;
+  vm.runInContext(CLIENT_SCRIPT, ctx);
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  const card = document.querySelector("#kk-devices section");
+  const [bot, stt, tts] = card.querySelectorAll("select");
+  const save = [...card.querySelectorAll("button")].find((b) => b.textContent === STRINGS.en.save);
+  const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+  return { bot, stt, tts, save, posts, flush, card };
+}
+const KDEV = { id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, kiosk_settings: { follow_up: true, memory_integration: false } };
+
+test("panel Save: a missing bot/voice shows (not set) selected, and an untouched Save rebinds nothing", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "deleted-bot", stt_profile_id: "stt-gone", tts_profile_id: null });
+  for (const sel of [p.bot, p.stt, p.tts]) {
+    assert.equal(sel.querySelector("option").textContent, STRINGS.en.not_set);
+    assert.equal(sel.value, "", "the blank option is selected, not the first real one");
+  }
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 0, "nothing changed: no POST, no silent rebind");
+});
+
+test("panel Save: only changed fields are posted; a known current value has no (not set) option", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
+  assert.equal(p.bot.value, "household");
+  assert.ok(![...p.bot.querySelectorAll("option")].some((o) => o.textContent === STRINGS.en.not_set));
+  for (const o of p.stt.querySelectorAll("option")) o.selected = o.value === "stt-b";
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 1);
+  assert.deepEqual(p.posts[0].body, { stt_profile_id: "stt-b" }, "bot, tts and settings untouched → omitted");
+  assert.equal(p.posts[0].path, "/api/kiosk/admin/displays/kiosk-a");
+});

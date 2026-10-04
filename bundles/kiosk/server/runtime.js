@@ -72,6 +72,18 @@ export function createSttWarmup({ openDb, getSttProfile, createSttAdapter, wrapP
   };
 }
 
+/**
+ * What the display says when a timer ends, in the display's language. The
+ * unnamed timer (wm.js names it "Timer") gets a plain "Time's up." instead of
+ * "Timer timer is done."
+ */
+export function timerDoneSpeech(name, lang) {
+  const S = STRINGS[lang === "es" ? "es" : "en"];
+  const n = String(name || "").trim();
+  if (!n || n.toLowerCase() === "timer") return S.timer_done_say;
+  return S.timer_done_named_say.replace("{name}", n);
+}
+
 export function kioskThemeCss(T) {
   const vars = (o) => Object.entries(o).map(([k, v]) => `--k-${k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase())}:${v};`).join("");
   return `:root{${vars(T.light)}}:root[data-theme="dark"]{${vars({ ...T.light, ...T.dark })}}`;
@@ -93,7 +105,7 @@ export function createKioskRuntime(deps) {
     now,
     onTimerDone: (id, w) => {
       hub?.sendTo(id, { type: "wm", action: "timer_done", id: w.id });
-      hub?.speak(id, `${w.name} timer is done.`);
+      hub?.speak(id, timerDoneSpeech(w.name, hub?.deviceOf?.(id)?.kiosk_settings?.lang));
     },
   });
   const withDb = async (fn) => { const db = deps.openDb(); try { return await fn(db); } finally { try { db.close?.(); } catch {} } };
@@ -264,6 +276,8 @@ export function createKioskRuntime(deps) {
         if (b.kiosk_settings && typeof b.kiosk_settings === "object") patch.kiosk_settings = b.kiosk_settings;
         const d = await deps.deviceStore.updateDeviceProfiles(db, req.params.id, patch);
         hub.refreshDevice(d.id, d);
+        // An open page only reads display_config in `ready`: push a fresh one so the save applies now.
+        try { await hub.pushConfig(d.id); } catch (err) { log(`[kiosk] config push to ${d.id} failed: ${err.message}`); }
         res.json({ ok: true, device: d });
       });
     }));

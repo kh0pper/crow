@@ -284,3 +284,43 @@ test("speech queued during listening plays after an empty_transcript or audio_to
     assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "Pasta timer is done.");
   }
 });
+
+// Final-review item 1: a tap with nothing said never reaches STT (whisper
+// hallucinates "Thank you." on room noise → a ghost reply).
+test("turn_end with vad_reason no_speech discards the audio: empty_transcript, idle, no STT turn; queued speech drains", async () => {
+  const { h, turns } = hub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "ns1" });
+  assert.equal(h.speak("kiosk-a", "Tea timer is done."), true);
+  for (let i = 0; i < 400; i++) ws.bin(Buffer.alloc(640, 3));   // 8 s of room noise, far over MIN_TURN_BYTES
+  ws.text({ type: "turn_end", vad_reason: "no_speech" });
+  await tick(); await tick();
+  assert.equal(turns.length, 0, "no STT/LLM turn ran");
+  const m = ws.msgs();
+  assert.ok(m.some((x) => x.type === "error" && x.code === "empty_transcript" && x.recoverable));
+  assert.ok(!m.some((x) => x.type === "turn_done"));
+  assert.deepEqual(m.filter((x) => x.type === "state").map((x) => x.bird), ["idle", "listening", "idle"]);
+  assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "Tea timer is done.", "speech held during listening still plays");
+  // and the next real turn is unaffected
+  ws.text({ type: "turn_start", turn_id: "ns2" });
+  for (let i = 0; i < 20; i++) ws.bin(Buffer.alloc(640, 7));
+  ws.text({ type: "turn_end", vad_reason: "silence" });
+  await tick(); await tick();
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].audio.length, 44 + 20 * 640, "only the second turn's frames");
+});
+
+// Final-review item 3: a panel save reaches an open page.
+test("pushConfig re-sends ready with fresh display_config to the live session; offline → false", async () => {
+  let n = 0;
+  const { h } = hub({ displayConfig: async (d) => ({ name: d.name, follow_up: d.kiosk_settings?.follow_up ?? false, n: ++n }) });
+  assert.equal(await h.pushConfig("kiosk-a"), false, "offline");
+  const ws = await hello(h);
+  h.refreshDevice("kiosk-a", { kiosk_settings: { lang: "en", follow_up: true } });
+  assert.equal(await h.pushConfig("kiosk-a"), true);
+  const readies = ws.msgs().filter((m) => m.type === "ready");
+  assert.equal(readies.length, 2);
+  assert.deepEqual(readies[1].display_config, { name: "Kitchen", follow_up: true, n: 2 });
+  assert.equal(readies[1].server_now, 42);
+  assert.equal(h.deviceOf("kiosk-a").kiosk_settings.follow_up, true);
+  assert.equal(h.deviceOf("nope"), null);
+});

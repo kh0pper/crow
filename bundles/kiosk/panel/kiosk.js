@@ -32,6 +32,23 @@ export const CLIENT_SCRIPT = `
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.__status = r.status; return j; }); });
   }
   var state = null;
+  /** A select whose current value may be missing from the options: then a blank "(not set)" stays selected, never the first option. */
+  function pick(options, current) {
+    var sel = el('select');
+    var known = options.some(function (o) { return o[0] === current; });
+    if (!known) opt(sel, '', S.not_set, true);
+    options.forEach(function (o) { opt(sel, o[0], o[1], o[0] === current); });
+    return sel;
+  }
+  /** Only what changed is sent: an untouched (or unset) field is never rebound by Save. */
+  function savePatch(a, b) {
+    var p = {}, any = false;
+    if (b.bot !== a.bot && b.bot) { p.bound_bot_id = b.bot; any = true; }
+    if (b.stt !== a.stt) { p.stt_profile_id = b.stt; any = true; }
+    if (b.tts !== a.tts) { p.tts_profile_id = b.tts; any = true; }
+    if (b.fu !== a.fu || b.mem !== a.mem) { p.kiosk_settings = { follow_up: b.fu, memory_integration: b.mem }; any = true; }
+    return any ? p : null;
+  }
 
   function renderPair(data) {
     var box = document.getElementById('kk-pair'); clear(box);
@@ -77,19 +94,25 @@ export const CLIENT_SCRIPT = `
     card.appendChild(el('p', 'kk-dim', d.last_seen ? fill(S.last_seen, { when: new Date(d.last_seen).toLocaleString() }) : S.never_seen));
     var lat = d.latency || {};
     card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms == null ? '>' + 3000 : lat.median_ms, p90: lat.p90_ms == null ? '>' + 3000 : lat.p90_ms, n: lat.n }) + (lat.no_audio ? ' · ' + lat.no_audio + ' ✗' : '') : S.no_latency));   // Infinity serializes as null
-    var bot = el('select'); data.bots.forEach(function (b) { opt(bot, b.bot_id, b.display_name || b.bot_id, b.bot_id === d.bound_bot_id); });
-    var stt = el('select'); data.stt_profiles.forEach(function (p) { opt(stt, p.id, p.name, p.id === d.stt_profile_id); });
-    var tts = el('select'); data.tts_profiles.forEach(function (p) { opt(tts, p.id, p.name, p.id === d.tts_profile_id); });
+    var bot = pick(data.bots.map(function (b) { return [b.bot_id, b.display_name || b.bot_id]; }), d.bound_bot_id);
+    var stt = pick(data.stt_profiles.map(function (p) { return [p.id, p.name]; }), d.stt_profile_id);
+    var tts = pick(data.tts_profiles.map(function (p) { return [p.id, p.name]; }), d.tts_profile_id);
     var ks = d.kiosk_settings || {};
     var fu = el('input'); fu.type = 'checkbox'; fu.checked = !!ks.follow_up;
     var mem = el('input'); mem.type = 'checkbox'; mem.checked = !!ks.memory_integration;
+    var initial = { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked };
     [[S.bot, bot], [S.stt, stt], [S.tts, tts], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
     card.appendChild(el('p', 'kk-dim', S.memory_warn));
     var msg = el('span', 'kk-msg');
     var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
     save.addEventListener('click', function () {
-      api('POST', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id), { bound_bot_id: bot.value, stt_profile_id: stt.value, tts_profile_id: tts.value, kiosk_settings: { follow_up: fu.checked, memory_integration: mem.checked } })
-        .then(function (j) { msg.textContent = j.ok ? S.saved : (S[j.error] || j.error || ''); });
+      var patch = savePatch(initial, { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked });
+      if (!patch) { msg.textContent = S.saved; return; }
+      api('POST', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id), patch)
+        .then(function (j) {
+          if (j.ok) { initial = { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked }; msg.textContent = S.saved; return; }
+          msg.textContent = S[j.error] || j.error || '';
+        });
     });
     var unpair = el('button', 'btn btn-secondary btn-sm', S.unpair); unpair.type = 'button';
     unpair.addEventListener('click', function () {
