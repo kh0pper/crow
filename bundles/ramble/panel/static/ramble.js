@@ -114,6 +114,8 @@
   var walkLastRead = 0;
   var walkInFlight = null;
   var walkState = null;
+  /* Last status the origin-scoped port reported (async, so it is cached). */
+  var walkPortStatus = null;
   window.CrowSteps = window.CrowSteps || {};
   window.CrowSteps.deliver = function (id, payload) {
     var cb = walkReqs[id];
@@ -122,15 +124,53 @@
     cb(payload);
   };
 
+  /* Security fix 2026-10-04 (spec §10 "Exposure"). The app injects
+   * window.CrowStepsPort ONLY into the paired gateway origin (main frame);
+   * requests go out as JSON {op, id} and replies come back as JSON
+   * {id, payload} on the port. window.Crow (every page) then only says
+   * stepsStatus() === "unavailable". A WebView too old for the port keeps
+   * the steps calls on window.Crow, gated natively on the top-level origin. */
+  function stepsPort() {
+    var p = window.CrowStepsPort;
+    return p && typeof p.postMessage === "function" ? p : null;
+  }
+
+  /** Parse one port message; {id, payload} or null for anything malformed. */
+  function stepsPortReply(data) {
+    var m;
+    try { m = typeof data === "string" ? JSON.parse(data) : null; } catch (e) { return null; }
+    if (!m || typeof m !== "object" || typeof m.id !== "string" || !m.payload || typeof m.payload !== "object") return null;
+    return { id: m.id, payload: m.payload };
+  }
+
+  (function wireStepsPort() {
+    var port = stepsPort();
+    if (!port) return;
+    var onMsg = function (ev) {
+      var r = stepsPortReply(ev && ev.data);
+      if (!r) return;
+      if (typeof r.payload.status === "string") walkPortStatus = r.payload.status;
+      window.CrowSteps.deliver(r.id, r.payload);
+    };
+    if (typeof port.addEventListener === "function") port.addEventListener("message", onMsg);
+    else port.onmessage = onMsg;
+  })();
+
   function nativeStepsMode() {
-    var c = window.Crow;
-    if (!c) return "web";
-    if (typeof c.readSteps !== "function" || typeof c.stepsStatus !== "function") return "old-app";
     var st = "";
-    try { st = String(c.stepsStatus()); } catch (e) { return "old-app"; }
+    if (window.CrowStepsPort && typeof window.CrowStepsPort.postMessage === "function") {
+      st = walkPortStatus === null ? "" : String(walkPortStatus);
+    } else {
+      var c = window.Crow;
+      if (!c) return "web";
+      if (typeof c.stepsStatus !== "function") return "old-app";
+      try { st = String(c.stepsStatus()); } catch (e) { return "old-app"; }
+      if (st !== "unavailable" && typeof c.readSteps !== "function") return "old-app";
+    }
     if (st === "ok") return "counter";
     if (st === "needs-permission") return "permission";
     if (st === "denied") return "denied";
+    if (st === "unavailable") return "unpaired";
     return "no-sensor";
   }
 
@@ -162,6 +202,9 @@
     } else if (mode === "no-sensor") {
       out.manual = true;
       out.line = "This phone can’t count steps. Tap when you’ve been out walking.";
+    } else if (mode === "unpaired") {
+      out.manual = true;
+      out.line = "Steps are counted only on the Crow server this app is paired with. Here, tap when you’ve walked.";
     } else if (mode === "old-app") {
       out.manual = true;
       out.line = "Update the Crow app to count steps. Until then, tap when you’ve walked.";
@@ -187,8 +230,24 @@
         delete walkReqs[id];
         resolve({ ok: false, reason: "timeout" });
       }, timeoutMs || 8000);
-      try { window.Crow[method](id); }
+      try { postNative(method, id); }
       catch (e) { delete walkReqs[id]; settled = true; resolve({ ok: false, reason: "bridge" }); }
+    });
+  }
+
+  /* Send one steps request on whichever channel this app has. */
+  function postNative(method, id) {
+    var port = stepsPort();
+    if (port) port.postMessage(JSON.stringify(id ? { op: method, id: id } : { op: method }));
+    else window.Crow[method](id);
+  }
+
+  /* The port's status is asynchronous: ask before deciding the card's mode. */
+  function probeStepsStatus() {
+    if (!stepsPort()) return Promise.resolve(null);
+    return callNative("stepsStatus", 4000).then(function (p) {
+      walkPortStatus = p && typeof p.status === "string" ? p.status : null;
+      return walkPortStatus;
     });
   }
 
@@ -244,7 +303,9 @@
 
   function refreshWalk(force) {
     if (walkInFlight) return walkInFlight;
-    walkInFlight = sendStepReading(force)
+    walkInFlight = probeStepsStatus()
+      .catch(function () { return null; })
+      .then(function () { return sendStepReading(force); })
       .catch(function () { return null; })
       .then(function (st) {
         if (st && st.reading && st.reading.credited > 0) refreshPet();
@@ -279,7 +340,10 @@
     });
     var open = $("rb-walk-open-settings");
     if (open) open.addEventListener("click", function () {
-      try { if (window.Crow && typeof window.Crow.openAppSettings === "function") window.Crow.openAppSettings(); }
+      try {
+        if (stepsPort()) postNative("openAppSettings", "");
+        else if (window.Crow && typeof window.Crow.openAppSettings === "function") window.Crow.openAppSettings();
+      }
       catch (e) { /* nothing to open */ }
     });
     var check = $("rb-walk-checkin");

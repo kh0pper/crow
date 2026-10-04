@@ -2243,15 +2243,48 @@ const STATIC_SRC = () => readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/
 
 test("walking: nativeStepsMode tells the browser, an old app and every app state apart", () => {
   const src = extractFunction(STATIC_SRC(), "nativeStepsMode");
-  const mode = (win) => new Function("window", src + "\nreturn nativeStepsMode();")(win);
+  const mode = (win, portStatus = null) => new Function("window", "walkPortStatus", src + "\nreturn nativeStepsMode();")(win, portStatus);
   assert.equal(mode({}), "web");
   assert.equal(mode({ Crow: { appVersion() { return "1.5.2"; } } }), "old-app");
+  // Legacy channel (WebView without WEB_MESSAGE_LISTENER): steps calls on window.Crow, origin-gated natively.
   for (const st of ["ok", "needs-permission", "denied", "no-sensor"]) {
     const want = st === "ok" ? "counter" : st === "needs-permission" ? "permission" : st;
     assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { return st; } } }), want);
   }
   assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { throw new Error("bridge gone"); } } }), "old-app");
   assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { return "weird"; } } }), "no-sensor");
+  assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { return "unavailable"; } } }), "unpaired", "legacy app, not the paired page");
+  assert.equal(mode({ Crow: { stepsStatus() { return "ok"; } } }), "old-app", "a status without readSteps is not a counter");
+  // Origin-scoped port (security fix 2026-10-04): window.Crow on every page only says "unavailable".
+  const crowEverywhere = { appVersion() { return "1.6.0"; }, stepsStatus() { return "unavailable"; } };
+  assert.equal(mode({ Crow: crowEverywhere }), "unpaired", "new app on another origin or in an iframe");
+  const port = { postMessage() {} };
+  for (const st of ["ok", "needs-permission", "denied", "no-sensor"]) {
+    const want = st === "ok" ? "counter" : st === "needs-permission" ? "permission" : st;
+    assert.equal(mode({ Crow: crowEverywhere, CrowStepsPort: port }, st), want, "port " + st);
+  }
+  assert.equal(mode({ Crow: crowEverywhere, CrowStepsPort: port }, null), "no-sensor", "port status not in yet: manual only");
+  assert.equal(mode({ Crow: crowEverywhere, CrowStepsPort: {} }), "unpaired", "a port without postMessage is ignored");
+});
+
+test("walking: stepsPortReply accepts only {id, payload} JSON from the port", () => {
+  const parse = new Function(extractFunction(STATIC_SRC(), "stepsPortReply") + "\nreturn stepsPortReply;")();
+  assert.deepEqual(parse(JSON.stringify({ id: "s1", payload: { status: "ok" } })), { id: "s1", payload: { status: "ok" } });
+  assert.deepEqual(parse(JSON.stringify({ id: "s2", payload: { ok: true, counter: 5 } })).payload.counter, 5);
+  for (const junk of [undefined, null, 5, "", "not json", "null", "[]", JSON.stringify({ id: 3, payload: {} }),
+    JSON.stringify({ id: "s1" }), JSON.stringify({ id: "s1", payload: "x" }), { id: "s1", payload: {} }]) {
+    assert.equal(parse(junk), null, String(junk));
+  }
+});
+
+test("walking: steps requests go through the origin-scoped port when the app injected it", () => {
+  const src = STATIC_SRC();
+  const post = extractFunction(src, "postNative");
+  assert.ok(/port\.postMessage\(JSON\.stringify\(/.test(post), "port requests are JSON {op, id}");
+  assert.ok(/window\.Crow\[method\]\(id\)/.test(post), "legacy fallback stays");
+  assert.ok(/postNative\(method, id\)/.test(extractFunction(src, "callNative")));
+  assert.ok(/probeStepsStatus\(\)/.test(extractFunction(src, "refreshWalk")), "the async port status is asked before painting");
+  assert.ok(!src.includes("window.CrowStepsPort ="), "the panel never defines the port itself");
 });
 
 test("walking: stepsLabel groups thousands and never shows junk", () => {
@@ -2275,7 +2308,7 @@ test("walking: walkCardState — what each kind of player sees", () => {
   assert.deepEqual([v.allow, v.manual, v.settings, v.showMeter], [true, true, false, false]);
   v = walkCardState("denied", day);
   assert.deepEqual([v.allow, v.manual, v.settings], [false, true, true]);
-  for (const m of ["no-sensor", "old-app", "web"]) {
+  for (const m of ["no-sensor", "old-app", "web", "unpaired"]) {
     v = walkCardState(m, day);
     assert.deepEqual([v.allow, v.manual, v.settings, v.showMeter], [false, true, false, false], m);
     assert.ok(v.line.length > 0, m);

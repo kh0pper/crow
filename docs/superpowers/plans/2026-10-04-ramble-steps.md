@@ -2808,7 +2808,9 @@ Each line is pass/fail; record results as a PR comment. The operator can watch `
 - [ ] **A6 Off switches.** With "An evening nudge if I haven't walked" unticked, no nudge the next evening. With "…on weekends too" unticked, none on Saturday.
 - [ ] **A7 Fallback.** Open Ramble in the phone's browser (not the app): the card offers only **I walked today** with the "Steps are counted in the Crow Android app" line; tapping it marks the day and cheers the bird; no seed changes.
 
-Acceptance passes when A1–A4 and A7 pass and A5–A6 pass on their first evening/weekend. Any failure → a fix PR (bundle changes need another manifest bump), not a hand-edit of the installed copy.
+- [ ] **A8 Origin scope (security fix 2026-10-04).** The pure origin compare is JVM-tested (`cd android && ./gradlew testDebugUnitTest` → `OriginCheckTest`); frame and registration behaviour is device-only. With `chrome://inspect` on the app's WebView (debug APK), in the console of each page: (a) the paired Crow page → `typeof CrowStepsPort` is `"object"` and Ramble counts steps; (b) the same host on another port (Nextcloud `:8456`) → `typeof CrowStepsPort` is `"undefined"`, `Crow.stepsStatus()` is `"unavailable"`, no permission prompt is possible; (c) another tailnet host (e.g. another Crow instance via SSO) → same as (b), and Ramble's walking card shows the "counted only on the Crow server this app is paired with" line with **I walked today**; (d) a cross-origin iframe inside the trusted page (in the paired page's console: `var f=document.createElement('iframe');f.src='https://<other-origin>/';document.body.appendChild(f)`, then in that frame's context) → no `CrowStepsPort`; and a same-origin iframe's `CrowStepsPort.postMessage(...)` gets no reply (main frame only); (e) change the server via the launcher's **Server settings** shortcut to a different origin, return, load it → the new origin gets `CrowStepsPort`, the old origin (navigate back to it) does not.
+
+Acceptance passes when A1–A4, A7 and A8 pass and A5–A6 pass on their first evening/weekend. Any failure → a fix PR (bundle changes need another manifest bump), not a hand-edit of the installed copy.
 
 ---
 

@@ -221,7 +221,7 @@ No step counts and no goal in the push (lock screens are public).
 
 **Manifest:** `<uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />` and `<uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />` (the app must still install on phones without the sensor).
 
-**`window.Crow` additions** (all `@JavascriptInterface` on `CrowBridge`):
+**Steps capabilities** (the four operations below; how they are reached is origin-scoped — see **Exposure**, security fix 2026-10-04):
 
 | Method | Returns | Behaviour |
 |---|---|---|
@@ -230,15 +230,21 @@ No step counts and no goal in the push (lock screens are public).
 | `readSteps(id)` | delivers `{ok:true, counter, elapsed_ms, boot_count, device_id}` or `{ok:false, reason}` | Registers a one-shot `SensorEventListener`; on-change sensors report their current value on activation, so the first event is the reading. Unregisters on the first event or after a 4 s timeout (`reason:"timeout"`). `reason` is also `no-sensor` / `no-permission`. `boot_count` = `Settings.Global.BOOT_COUNT` (−1 → `null`). `device_id` = a random UUID created once and kept in the app's `SharedPreferences`; never `ANDROID_ID`. |
 | `openAppSettings()` | — | Opens this app's system settings page, for the `denied` case. |
 
-**Delivery.** Asynchronous results are delivered on the UI thread by `webView.evaluateJavascript("window.CrowSteps && window.CrowSteps.deliver(<id>, <json>)")`. `id` must match `^[A-Za-z0-9]{1,32}$` or the call is ignored — it is never interpolated unchecked. The JSON is built with `org.json.JSONObject`.
+**Delivery.** On the port channel every result (including `stepsStatus`) comes back as `{"id", "payload"}` JSON through the frame's own `JavaScriptReplyProxy.postMessage`, and the panel hands it to `window.CrowSteps.deliver(id, payload)`. On the legacy fallback, asynchronous results are delivered on the UI thread by `webView.evaluateJavascript("window.CrowSteps && window.CrowSteps.deliver(<id>, <json>)")`, re-checked against the paired origin at delivery time. `id` must match `^[A-Za-z0-9]{1,32}$` or the call is ignored — it is never interpolated unchecked. The JSON is built with `org.json.JSONObject`.
 
-**Detection in the panel.** `window.Crow` absent → browser (`web`); present without `readSteps` → older app (`old-app`, "update the app to count steps"); present with it → ask `stepsStatus()`.
+**Detection in the panel.** `window.CrowStepsPort` present → ask its (async, cached) `stepsStatus`; otherwise `window.Crow` absent → browser (`web`); `stepsStatus()` returning `"unavailable"` → `unpaired` (the app is new but this page is not its paired server, or the legacy gate refused: manual check-in, "counted only on the Crow server this app is paired with"); no `stepsStatus`/`readSteps` → older app (`old-app`, "update the app to count steps"); otherwise use the status.
 
 **Timeouts.** The panel waits up to 5 minutes for a permission answer (a human is deciding) and 8 s for a reading (native gives up at 4 s and reports `timeout`, shown as one quiet status line). A permission answer that arrives late is still caught: the prompt pauses the WebView, and the `visibilitychange` on return repaints the card.
 
 **When the panel reads.** On load, when the page becomes visible again, and when switching to the pet view — at most once a minute, one request in flight. A reading posts to the server, which returns the day's state; the panel then refreshes the pet.
 
-**Exposure.** `window.Crow` is injected into whatever the WebView loads; `CrowWebViewClient` keeps navigation on the gateway origin and opens external links in the system browser, so in practice only the Crow dashboard can call it. The worst a hostile page could learn is a step counter. Noted, accepted.
+**Exposure (security fix 2026-10-04).** `addJavascriptInterface` exposes `window.Crow` to every page and every frame, and `CrowWebViewClient` keeps the same host on ANY port and other same-tailnet hosts in-app — Nextcloud (:8456, user content), ONLYOFFICE (:8457), Home Assistant, another Crow instance, and any cross-origin iframe. So the steps capabilities are NOT on `window.Crow`. They are scoped to the **paired gateway origin**: the exact scheme + host + port of the saved `gateway_url` (the app has a single gateway URL; there is no LAN/tailnet alternate). `OriginCheck` (pure Java, JVM-tested) normalises scheme/host to lowercase and fills the default port (443/80) before an exact compare.
+
+- **Preferred channel:** `WebViewCompat.addWebMessageListener(webView, "CrowStepsPort", {paired origin}, listener)` when `WebViewFeature.WEB_MESSAGE_LISTENER` is supported (any current WebView; minSdk is 34). WebView injects `window.CrowStepsPort` only into frames on that origin; the listener additionally requires `isMainFrame` AND `sourceOrigin` equal to the paired origin (re-read from preferences on every message), and refuses silently otherwise — no reply, no prompt, no read, no settings intent. Requests are `postMessage(JSON.stringify({op, id}))`; replies go back through the `JavaScriptReplyProxy`, never `evaluateJavascript`. In this mode `window.Crow.stepsStatus()` is a constant `"unavailable"` everywhere, which only tells a panel "new app, not here".
+- **Server changes:** the listener is re-registered on every `onResume` when the saved gateway origin changed (the "Server settings" shortcut), so the new origin is trusted and the old one is not.
+- **Fallback** (WebView without the feature): the four methods stay on `window.Crow` but each checks the top-level `webView.getUrl()` origin on the UI thread before acting; `stepsStatus()` returns `"unavailable"` when it does not match. This cannot tell an iframe from the main frame (a `@JavascriptInterface` call carries no origin) — accepted only because the feature is expected everywhere at minSdk 34.
+
+The older `window.Crow` methods (`appVersion`, `launchGlassesPairing`, `setPullToRefresh`) keep the any-page exposure; migrating the whole bridge is a follow-up (ANDROID-BRIDGE-ORIGIN).
 
 ## 11. Testing
 
