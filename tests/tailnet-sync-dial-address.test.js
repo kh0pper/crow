@@ -61,6 +61,7 @@ async function gateway(fleet, side) {
       // Never ladder onto 3001/3002: on a dev box those are LIVE gateways.
       standardPorts: [],
       selfAddress: async () => g.advertise,
+      lookupTailnetIp: async () => null, // never shell out to the dev box's tailscaled
     },
   };
   setupTailnetSyncServer(http, g.ctx);

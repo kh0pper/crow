@@ -28,8 +28,9 @@ import {
   getInstance,
   updateInstance,
   getOrCreateLocalInstanceId,
-  configuredSelfGatewayUrl,
+  selfPairingAddress,
 } from "../../servers/gateway/instance-registry.js";
+import { pickPeerGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState } from "../../servers/shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
@@ -90,13 +91,17 @@ async function networkPair(db, { peerUrl, peerName }) {
   const sourceOutboundBearer = generateSecret();
   // Shared symmetric HMAC key (same both directions for MVP).
   const sharedSigningKey = generateSecret();
+  // Our TAILNET dial address (never CROW_GATEWAY_URL — the public :443 door).
+  const self = await selfPairingAddress(db);
 
   const reqBody = {
     source_instance_id: localId,
     // HOSTNAME is a bash variable, not exported to node — the old
     // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
     source_name: process.env.HOSTNAME || osHostname() || "unknown",
-    source_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
+    source_gateway_url: self.gateway_url,
+    source_tailscale_ip: self.tailscale_ip,
+    source_sync_port: self.sync_port,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
     otc: process.env.CROW_ENROLL_OTC || undefined,
@@ -122,7 +127,9 @@ async function networkPair(db, { peerUrl, peerName }) {
   await storePeerCredsLocally(db, {
     peerId,
     peerName: peerName || peerPayload.peer_name || peerId,
-    peerGatewayUrl: peerPayload.peer_gateway_url || peerUrl,
+    peerGatewayUrl: pickPeerGatewayUrl(peerPayload.peer_gateway_url, peerUrl),
+    peerTailscaleIp: peerPayload.peer_tailscale_ip,
+    peerSyncPort: peerPayload.peer_sync_port,
     peerCrowId: peerPayload.peer_crow_id || peerId,
     // Creds for OUTBOUND calls us → peer:
     auth_token: sourceOutboundBearer,   // we generated; peer stored its hash
@@ -146,6 +153,7 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
   const localId = getOrCreateLocalInstanceId();
   const sourceOutboundBearer = generateSecret();
   const sharedSigningKey = generateSecret();
+  const self = await selfPairingAddress(db);
 
   console.log("=== Give these to the peer operator ===");
   console.log(JSON.stringify({
@@ -153,7 +161,9 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
     // HOSTNAME is a bash variable, not exported to node — the old
     // `process.env.HOSTNAME || "unknown"` named every pair "unknown" (raven, 2026-09-24).
     source_name: process.env.HOSTNAME || osHostname() || "unknown",
-    source_gateway_url: configuredSelfGatewayUrl() || process.env.CROW_GATEWAY_URL || null,
+    source_gateway_url: self.gateway_url,
+    source_tailscale_ip: self.tailscale_ip,
+    source_sync_port: self.sync_port,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
   }, null, 2));
@@ -168,7 +178,9 @@ async function manualPair(db, { peerId, peerName, peerUrl }) {
   await storePeerCredsLocally(db, {
     peerId: peerPayload.peer_instance_id || peerId,
     peerName,
-    peerGatewayUrl: peerPayload.peer_gateway_url || peerUrl,
+    peerGatewayUrl: pickPeerGatewayUrl(peerPayload.peer_gateway_url, peerUrl),
+    peerTailscaleIp: peerPayload.peer_tailscale_ip,
+    peerSyncPort: peerPayload.peer_sync_port,
     peerCrowId: peerPayload.peer_crow_id || peerId,
     auth_token: sourceOutboundBearer,
     signing_key: sharedSigningKey,
@@ -183,16 +195,20 @@ async function storePeerCredsLocally(db, {
   peerId,
   peerName,
   peerGatewayUrl,
+  peerTailscaleIp,
+  peerSyncPort,
   peerCrowId,
   auth_token,
   signing_key,
   peerOutboundBearerHash,
 }) {
+  const tailscaleIp = typeof peerTailscaleIp === "string" && isTailnetAddress(peerTailscaleIp.trim()) ? peerTailscaleIp.trim() : null;
   const existing = await getInstance(db, peerId);
   if (existing) {
     await updateInstance(db, peerId, {
       name: peerName,
       gateway_url: peerGatewayUrl,
+      ...(tailscaleIp ? { tailscale_ip: tailscaleIp } : {}),
       auth_token_hash: peerOutboundBearerHash,
       trusted: 1,
     });
@@ -202,10 +218,13 @@ async function storePeerCredsLocally(db, {
       name: peerName,
       crowId: peerCrowId,
       gatewayUrl: peerGatewayUrl,
+      tailscaleIp,
       authTokenHash: peerOutboundBearerHash,
     });
     await updateInstance(db, peerId, { trusted: 1 });
   }
+  await rememberPeerSyncPort(db, getOrCreateLocalInstanceId(), peerId, peerSyncPort);
+  await forgetPeerHandshakeState(db, getOrCreateLocalInstanceId(), peerId);
 
   setPeerCreds(peerId, { auth_token, signing_key });
 }

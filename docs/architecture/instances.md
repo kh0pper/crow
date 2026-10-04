@@ -169,6 +169,15 @@ All instances in a chain must share the same cryptographic identity (same master
 - **Federation HTTP**: Should run over HTTPS or Tailscale (encrypted tunnel). Bearer tokens prevent unauthorized access even on trusted networks.
 - **No public exposure**: Instance registration requires explicit user action. Instances are not discoverable on the public internet.
 
+### Tailnet sync transport (`servers/sharing/tailnet-sync.js`)
+
+Paired instances of the same user replicate over an authenticated WebSocket at `/api/instance-sync/stream`, dialed over Tailscale:
+
+- **Dial address.** A peer row is dialed at its `gateway_url` when that is not on port 443, then at `ws://<tailscale_ip>:<port>` (its learned backend port first, then the standard ports). Port **443 is never dialed** — on crow it is the public Funnel door. At pairing an instance advertises a `gateway_url` for browsers and HTTP peer calls (`CROW_PEER_GATEWAY_URL` if set; else a non-Funnel Serve endpoint proxying to its port, non-443 preferred; else its tailnet IP + backend port) **plus** its `tailscale_ip` and backend `sync_port` — never `CROW_GATEWAY_URL`, the public URL. A row holding only a `:443` URL with no `tailscale_ip` is repaired at boot and from the refresh loop: the URL's MagicDNS host is resolved to its tailnet IP via `tailscale status`. The peer's signed handshake then teaches its backend port; `gateway_url` itself is left as the browser URL.
+- **Handshake.** Both sides sign a hello with the shared identity key (the Hyperswarm handshake only ever signs a 32-byte hex challenge, so it cannot be used to sign these messages for someone else). A challenge-response step binds each side's proof to the other side's fresh nonce, and no feed key is sent before it verifies, so a replayed hello gets nothing. Older peers that do not offer it still link; once a peer has completed challenge-response, a handshake from it without one is refused (downgrade guard). Only the operator's local `crow instance pair` clears that pin — never an inbound enroll request, a revoke or a pause.
+- **One link per pair.** The lower instance id dials; the other side dials only as a fallback after a grace period, and the accept side refuses a fallback dial (`1013`) while a link or its own dial is up.
+- **Half-open links.** Both ends ping every 30 s and terminate a link that has gone two intervals without a pong; the dialer then re-dials.
+
 ### Signature Verification
 
 Every Hypercore feed entry is signed by the originating instance's Ed25519 key. The receiving instance verifies signatures before applying changes. Tampered entries are rejected and logged.
