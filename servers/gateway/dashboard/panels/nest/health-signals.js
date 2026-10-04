@@ -43,6 +43,7 @@ import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
+import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 import { readReservation } from "../../../box-reservation.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
@@ -324,6 +325,58 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
     actionLabel: t("signals.peers.action", lang),
     actionHref: "/dashboard/settings?section=paired-instances",
   };
+}
+
+// DIALER-RETRY (2026-10-03): a paired peer the tailnet instance-sync dialer
+// has NO usable address for, with no link to it from either side, is a WARN —
+// crow sat six weeks like this for black-swan with 928 entries queued and no
+// signal anywhere. One issue per peer (id "peers-dial:<id>", own 24 h push
+// window). The grace keeps a boot that is still learning addresses quiet.
+export const NO_DIAL_ADDRESS_WARN_MS = 10 * 60 * 1000;
+// Same id, second shape: the peer HAS dial candidates but every dial has
+// failed for this long with no link (wrong port, ufw, dead tailnet path) —
+// the /health probe over the Serve URL can stay green meanwhile.
+export const DIAL_FAILING_WARN_MS = 30 * 60 * 1000;
+export const DIAL_FAILING_MIN_ATTEMPTS = 5;
+
+async function syncDialSignal(db, lang = "en", nowFn = () => Date.now()) {
+  const dial = getPeerDialHealth();
+  if (Object.keys(dial).length === 0) return null;
+  const now = nowFn();
+  const out = [];
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, name FROM crow_instances WHERE status IN ('active','offline')",
+      args: [],
+    });
+    for (const r of rows) {
+      const h = dial[r.id];
+      if (!h) continue;
+      const name = r.name || String(r.id).slice(0, 12);
+      const linkUp = h.linkedAt != null && h.linkClosedAt == null;
+      let issueLabel = null;
+      if (h.noAddressSince != null && now - h.noAddressSince >= NO_DIAL_ADDRESS_WARN_MS) {
+        issueLabel = fill(t("signals.peers.noDialAddress", lang), { name, missing: (h.missing || []).join("; ") || "?" });
+      } else if (!linkUp && h.failingSince != null && h.failCount >= DIAL_FAILING_MIN_ATTEMPTS
+        && now - h.failingSince >= DIAL_FAILING_WARN_MS) {
+        issueLabel = fill(t("signals.peers.dialFailing", lang), {
+          name, minutes: Math.floor((now - h.failingSince) / 60_000), error: h.lastError || "?",
+        });
+      }
+      if (!issueLabel) continue;
+      out.push({
+        id: `peers-dial:${r.id}`,
+        severity: "warn",
+        state: "warn",
+        issueOnly: true,
+        label: t("signals.peers.label", lang),
+        issueLabel,
+        actionLabel: t("signals.peers.action", lang),
+        actionHref: "/dashboard/settings?section=paired-instances",
+      });
+    }
+  } catch {}
+  return out.length ? out : null;
 }
 
 let _reservationReader = (nowMs) => readReservation({ now: nowMs });
@@ -954,6 +1007,7 @@ export async function collectHealthSignals(db, opts = {}) {
     storageSignal(),
     agentsSignal(db),
     peersSignal(db, lang, nowFn),
+    syncDialSignal(db, lang, nowFn),
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
     syncConflictsSignal(db),

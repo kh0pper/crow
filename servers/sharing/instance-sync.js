@@ -3985,6 +3985,19 @@ export class InstanceSyncManager {
     }
   }
 
+  /** True when ANY replication stream (tailnet or Hyperswarm) to the peer is live. */
+  hasActiveStream(remoteInstanceId) {
+    return (this._activeStreams.get(remoteInstanceId)?.size ?? 0) > 0;
+  }
+
+  /** True when a tailnet-sync (dedicated) stream to the peer is live, in either direction. */
+  hasDedicatedStream(remoteInstanceId) {
+    for (const st of this._activeStreams.get(remoteInstanceId) ?? []) {
+      if (this._dedicatedStreams.has(st)) return true;
+    }
+    return false;
+  }
+
   /**
    * Revoke teardown for one peer: close its feeds (which detaches them from
    * every stream, including a shared Hyperswarm connection) and destroy any
