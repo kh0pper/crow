@@ -702,6 +702,29 @@ test("CLI side: the answering peer cannot choose which local peer gets re-keyed 
     assert.equal(viaAddr.code, 0, viaAddr.out);
     assert.equal((await S.row("instV")).auth_token_hash, sha("q".repeat(64)));
 
+    // Bare rows (trusted=0, no hash, not revoked — operator-registered / learned by sync).
+    await S.db.execute("INSERT INTO crow_instances (id, name, crow_id, gateway_url, tailscale_ip, status, trusted) VALUES ('bareFar', 'BF', 'bareFar', 'http://100.64.8.8:3001', '100.64.8.8', 'active', 0)");
+    const bareBefore = { ...(await S.row("bareFar")) };
+    answer = answerAs("bareFar");
+    const bf = await run([]);
+    assert.notEqual(bf.code, 0, "bare row at a different address cannot be claimed");
+    assert.match(bf.out, /--peer-id bareFar/);
+    assert.deepEqual({ ...(await S.row("bareFar")) }, bareBefore, "bare row unchanged");
+    assert.equal(readFileSync(S.tokensPath, "utf8").includes("bareFar"), false);
+
+    await S.db.execute("INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES ('bareNone', 'BN', 'bareNone', 'active', 0)");
+    answer = answerAs("bareNone");
+    const bn = await run([]);
+    assert.equal(bn.code, 0, `bare row with no stored address is filled in: ${bn.out}`);
+    assert.equal((await S.row("bareNone")).gateway_url, "http://100.64.30.30:3001");
+    assert.equal(Number((await S.row("bareNone")).trusted), 1);
+
+    await S.db.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, gateway_url, status, trusted) VALUES ('bareHere', 'BH', 'bareHere', ?, 'active', 0)", args: [fakeUrl] });
+    answer = answerAs("bareHere");
+    const bh = await run([]);
+    assert.equal(bh.code, 0, `bare row whose address matches --peer-url pairs: ${bh.out}`);
+    assert.equal(Number((await S.row("bareHere")).trusted), 1);
+
     // New peer with an unacceptable gateway_url: the typed origin is stored instead.
     answer = answerAs("instN", { peer_gateway_url: "https://user:pw@evil.example.com:8444", peer_tailscale_ip: "8.8.8.8" });
     const n = await run([]);

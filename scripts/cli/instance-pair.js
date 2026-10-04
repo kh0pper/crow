@@ -100,10 +100,12 @@ Re-pairing an instance the peer already knows:
 Refusals (checked on the peer's answer BEFORE anything is written here):
   - the peer answers with an id other than --peer-id, or with this instance's
     own id;
-  - the peer answers with the id of a peer this instance already knows
-    (trusted, credentialed or revoked) while that peer's stored address does
-    not match --peer-url — re-run with --peer-id <id> if it really is that
-    instance; a revoked peer is only re-paired with --peer-id.
+  - the peer answers with the id of a peer this instance already has a row
+    or credentials for (trusted, credentialed, revoked, or an uncredentialed
+    row with a stored address) while that stored address does not match
+    --peer-url — re-run with --peer-id <id> if it really is that instance; a
+    revoked peer is only re-paired with --peer-id; an uncredentialed row with
+    no stored address is simply filled in.
   In each case the PEER has already spent its code and holds new credentials
   for this instance, so re-pairing with it later needs --allow-re-pair on it.
   The peer's advertised gateway_url is kept only if it is a tailnet IP, a
@@ -184,10 +186,12 @@ function isKnownPeer(row, creds) {
 /**
  * THE rule for "which already-known peer is --peer-url": the single known
  * peer whose stored gateway_url host or tailscale_ip equals the URL's host,
- * or null (none, or ambiguous). Used both to pick the re-pair proof to send
- * and to decide whether the peer's answer may update an existing peer.
+ * or null (none, or ambiguous). Used to pick the re-pair proof to send, and —
+ * with includeBare (every row, also uncredentialed ones registered by the
+ * operator or learned by sync) — to decide whether the peer's answer may
+ * update an existing row.
  */
-async function knownPeerForUrl(db, peerUrl) {
+async function knownPeerForUrl(db, peerUrl, { includeBare = false } = {}) {
   const host = urlHost(peerUrl);
   if (!host) return null;
   const creds = loadPeerCreds();
@@ -201,7 +205,7 @@ async function knownPeerForUrl(db, peerUrl) {
   for (const id of ids) {
     if (id === localId) continue;
     const row = await getInstance(db, id).catch(() => null);
-    if (!row || !isKnownPeer(row, creds[id])) continue;
+    if (!row || (!includeBare && !isKnownPeer(row, creds[id]))) continue;
     if (urlHost(row.gateway_url) === host || String(row.tailscale_ip || "").toLowerCase() === host) hits.push(id);
   }
   return hits.length === 1 ? hits[0] : null;
@@ -248,12 +252,18 @@ async function vetPeerAnswer(db, peerPayload, { peerUrl, expectPeerId, localId }
   }
   const row = await getInstance(db, peerId);
   const creds = loadPeerCreds()[peerId];
-  if (isKnownPeer(row, creds)) {
+  if (row || creds) {
     const named = expectPeerId === peerId;
     if (row?.status === "revoked" && !named) {
       throw new Error(`peer answered as ${peerId}, which is REVOKED here; a revoked peer is only re-paired with --peer-id ${peerId}. ${spent}`);
     }
-    if (!named && (await knownPeerForUrl(db, peerUrl)) !== peerId) {
+    // Any existing row (even an uncredentialed one the operator registered or
+    // sync learned) or creds: the answer may claim it only if --peer-id names
+    // it or its stored address is the one dialed. A bare row with NO stored
+    // address has nothing to contradict and may be filled in.
+    const hasAddress = Boolean(row && (urlHost(row.gateway_url) || row.tailscale_ip));
+    const mustMatch = isKnownPeer(row, creds) || hasAddress;
+    if (!named && mustMatch && (await knownPeerForUrl(db, peerUrl, { includeBare: true })) !== peerId) {
       const label = row?.name ? `${peerId} (${row.name})` : peerId;
       throw new Error(`peer answered as ${label}, a peer this instance already knows at a different address than ${peerUrl}. If it really is that instance, re-run with --peer-id ${peerId}. ${spent}`);
     }
