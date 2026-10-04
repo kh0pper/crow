@@ -2,8 +2,6 @@
 
 A paired browser — a phone today, a Raspberry Pi 3 with a 7" touchscreen next — shows your Ramble bird and talks with the Crow assistant you bind to it. Crow does all the work: speech-to-text, the assistant's turn, text-to-speech. The browser only captures audio after a tap and plays the reply.
 
-**Design:** `docs/superpowers/specs/2026-10-03-crow-kiosk-companion-design.md`. **K1 plan:** `docs/superpowers/plans/2026-10-03-kiosk-k1-page-and-voice.md`.
-
 ## Pieces
 - `bundles/kiosk/` — the bundle: page (`public/`), routes + WebSocket (`server/runtime.js`, `server/session.js`), pairing (`server/pairing.js`), windows (`server/wm.js`), MCP tools (`server/server.js`), dashboard panel (`panel/kiosk.js`).
 - `servers/gateway/voice/turn.js` — the transport-free voice turn (bound bot, routing with an 8 s cold fallback, think gate, barge-in, memory stripped by default).
