@@ -96,6 +96,9 @@ mkdirSync(env.CROW_DATA_DIR, { recursive: true });
 // registered itself there) and the orchestrator refcount file.
 env.CROW_INSTANCES_JSON_PATH = join(scratch, "instances.json");
 env.CROW_REFCOUNT_PATH = join(env.CROW_DATA_DIR, "orchestrator-refcounts.json");
+// The nightly API backup dir (routes/admin-backup.js writes there, the Nest
+// backup signal stats it): never the host's real ~/backups/crow.
+env.CROW_BACKUP_DIR = join(scratch, "backups");
 // Box reservation (docs/architecture/box-reservation.md): the orchestrator
 // reads /run/user/<uid>/crow-box-reservation.json unless this is set. A live
 // benchmark window on the host would otherwise turn every model-start test
