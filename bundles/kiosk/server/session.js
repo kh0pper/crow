@@ -26,18 +26,34 @@ export function createSessionHub(deps) {
     let abort = null;
     let busy = false;
     const pendingSpeech = [];
+    let speaking = false;
+    let speechAbort = null;
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
     const state = (bird) => sendJson(ws, { type: "state", bird });
-    const self = { ws, get device() { return device; }, get busy() { return busy; }, queueSpeech: (t) => pendingSpeech.push(t), runSpeech, abortTurn: () => abort?.abort() };
+    const self = { ws, get device() { return device; }, get busy() { return busy || speaking; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
 
-    async function runSpeech(text) {
-      const sink = { event: (ev) => sendJson(ws, ev), audio: (b) => { if (ws.readyState === 1) ws.send(b); } };
-      try { await deps.speak({ device, text, sink }); } catch (err) { deps.log?.(`[kiosk] speak failed: ${err.message}`); }
+    // Speech (timer/announce) is serialized: one at a time, never during a turn,
+    // with its own abort (barge_in / turn_start / close) and an abort-gated sink.
+    async function drainSpeech() {
+      if (speaking) return;
+      while (pendingSpeech.length && ws.readyState === 1 && !busy && !inTurn) {
+        const text = pendingSpeech.shift();
+        speaking = true;
+        const my = (speechAbort = new AbortController());
+        const sink = {
+          event: (ev) => { if (!my.signal.aborted) sendJson(ws, ev); },
+          audio: (b) => { if (!my.signal.aborted && ws.readyState === 1) ws.send(b); },
+        };
+        try { await deps.speak({ device, text, sink, signal: my.signal }); } catch (err) { deps.log?.(`[kiosk] speak failed: ${err.message}`); }
+        finally { speaking = false; if (speechAbort === my) speechAbort = null; }
+      }
     }
 
     async function onHello(msg) {
       authing = true;
-      const d = await deps.verifyKiosk(String(msg.device_id || ""), String(msg.token || ""));
+      let d;
+      try { d = await deps.verifyKiosk(String(msg.device_id || ""), String(msg.token || "")); }
+      catch (err) { authing = false; deps.log?.(`[kiosk] hello verify failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       if (!d) { ws.close(4401, "unauthorized"); return; }
       if (ws.readyState !== 1) return;
       clearT(helloTimer);
@@ -46,8 +62,10 @@ export function createSessionHub(deps) {
       const prior = sessions.get(d.id);
       sessions.set(d.id, self);
       if (prior && prior.ws !== ws) { try { prior.ws.close(4000, "superseded"); } catch {} }
-      sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: await deps.displayConfig(d) });
-      sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
+      try {
+        sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: await deps.displayConfig(d) });
+        sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
+      } catch (err) { deps.log?.(`[kiosk] hello setup failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       state("idle");
       Promise.resolve().then(() => deps.warmup(d)).catch(() => {});
     }
@@ -84,7 +102,7 @@ export function createSessionHub(deps) {
         deps.metrics.serverTurn(device.id, id, res);
         sendJson(ws, { type: "turn_done", turn_id: id, route: res.route, fast_path: res.fastPath, escalated: res.escalated, degraded: res.degraded, aborted: res.aborted, timings: res.timings });
         state("idle");
-        while (pendingSpeech.length && ws.readyState === 1 && !busy) await runSpeech(pendingSpeech.shift());
+        drainSpeech();
       }
     }
 
@@ -95,7 +113,7 @@ export function createSessionHub(deps) {
         let msg;
         try { msg = JSON.parse(raw.toString("utf8")); } catch { ws.close(4401, "unauthorized"); return; }
         if (msg?.type !== "hello") { ws.close(4401, "unauthorized"); return; }
-        onHello(msg).catch(() => ws.close(4401, "unauthorized"));
+        onHello(msg).catch((err) => { deps.log?.(`[kiosk] hello failed: ${err?.message}`); ws.close(1011, "server_error"); });
         return;
       }
       if (isBinary) {
@@ -115,15 +133,17 @@ export function createSessionHub(deps) {
       switch (msg?.type) {
         case "turn_start":
           if (busy) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); return; }
+          if (speechAbort) speechAbort.abort();
           inTurn = true; frames = []; bytes = 0;
           turnId = String(msg.turn_id || `t${(deps.now || Date.now)()}`).slice(0, 64);
           state("listening");
           return;
         case "turn_end":
-          onTurnEnd();
+          onTurnEnd().catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
           return;
         case "barge_in":
           if (abort) abort.abort();
+          if (speechAbort) speechAbort.abort();
           return;
         case "wm_event": {
           const id = String(msg.id || "");
@@ -144,6 +164,7 @@ export function createSessionHub(deps) {
     ws.on("close", () => {
       clearT(helloTimer);
       if (abort) abort.abort();
+      if (speechAbort) speechAbort.abort();
       if (device && sessions.get(device.id) === self) sessions.delete(device.id);
     });
     ws.on("error", () => {});
@@ -165,7 +186,7 @@ export function createSessionHub(deps) {
     speak(id, text) {
       const s = sessions.get(id);
       if (!s || s.ws.readyState !== 1) return false;
-      if (s.busy) s.queueSpeech(text); else s.runSpeech(text);
+      s.queueSpeech(text);
       return true;
     },
     refreshDevice(id, d) { const s = sessions.get(id); if (s && d) Object.assign(s.device, d); },
