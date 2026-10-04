@@ -41,6 +41,12 @@ import { join } from "node:path";
 // tests/bundles-install-job.test.js's header comment for the live incident
 // an unisolated run caused).
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+// resolveDataDir() (servers/db.js) ignores CROW_HOME — without this the
+// router's DB client opens the run's shared data dir (absent in a single-file
+// `npm test` run → "Cannot open database because the directory does not
+// exist") or, under a raw node --test, the LIVE ~/.crow/data/crow.db.
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,12 @@ import { join } from "node:path";
 // a bogus-signature RED run against this exact test installed uptime-kuma, real
 // docker-compose-up-and-all, on the operator's live host).
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+// resolveDataDir() (servers/db.js) ignores CROW_HOME — without this the
+// router's DB client opens the run's shared data dir (absent in a single-file
+// `npm test` run → "Cannot open database because the directory does not
+// exist") or, under a raw node --test, the LIVE ~/.crow/data/crow.db.
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const { default: bundlesRouter } = await import("../servers/gateway/routes/bundles.js");
 
 /** Boot the bundles router alone (as the signed-header bypass reaches it) on an ephemeral port. */

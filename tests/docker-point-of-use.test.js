@@ -15,13 +15,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Scratch CROW_HOME BEFORE importing bundles.js (see bundles-install-job.test.js:
 // module-load path resolution + runInstallJob's unconditional mkdir hazard).
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+// resolveDataDir() (servers/db.js) ignores CROW_HOME — without this the
+// router's DB client opens the run's shared data dir (absent in a single-file
+// `npm test` run → "Cannot open database because the directory does not
+// exist") or, under a raw node --test, the LIVE ~/.crow/data/crow.db.
+process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 
 const { dockerAvailable, _resetDockerProbeForTest } =
   await import("../servers/gateway/dashboard/panels/extensions/data-queries.js");

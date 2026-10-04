@@ -11,7 +11,7 @@
 
 import { randomBytes, createHash } from "crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import { homedir } from "os";
 import { hostname as osHostname } from "os";
 import bus from "../shared/event-bus.js";
@@ -19,7 +19,12 @@ import { livenessStatusSql } from "../shared/instance-status.js";
 import { createDbClient } from "../db.js";
 import { isPeerUsableUrl, deriveSelfDialAddress } from "../shared/self-dial-address.js";
 
-const INSTANCES_JSON_PATH = resolve(homedir(), ".crow", "instances.json");
+// CROW_INSTANCES_JSON_PATH is a test seam (scripts/run-suite.mjs sets it to the
+// scratch dir): every suite gateway used to register itself in the host's REAL
+// ~/.crow/instances.json — 1,647 stale worktree entries on crow by 2026-10-04.
+// Unset in production, so the default path is unchanged.
+const INSTANCES_JSON_PATH = process.env.CROW_INSTANCES_JSON_PATH
+  || resolve(homedir(), ".crow", "instances.json");
 
 /**
  * Generate a new instance UUID (used as primary key in crow_instances).
@@ -306,8 +311,7 @@ function removeFromLocalInstancesJson(id) {
  */
 function writeLocalInstancesJson(instances) {
   try {
-    const dir = resolve(homedir(), ".crow");
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dirname(INSTANCES_JSON_PATH), { recursive: true });
     writeFileSync(INSTANCES_JSON_PATH, JSON.stringify(instances, null, 2));
   } catch (err) {
     console.warn("[instance-registry] Failed to write instances.json:", err.message);

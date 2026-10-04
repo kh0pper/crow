@@ -181,7 +181,14 @@ describe("rehearse against a copy of crow's real API backup", () => {
   const dir = join(homedir(), "backups", "crow");
   const newest = existsSync(dir) ? readdirSync(dir).filter((f) => /^primary-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort().pop() : null;
   const idFile = join(homedir(), ".crow", "data", "instance-id");
-  const skip = !newest || !existsSync(idFile) ? "no crow API backup / instance-id on this host" : false;
+  // Opt-in (2026-10-04): this reads the HOST's live backup dir + instance-id,
+  // so its outcome tracked prod state, not the code. It went red on crow when
+  // r4's nightly backup started overwriting main's at the same
+  // ~/backups/crow/primary-<date>.db path. Run it deliberately as an operator
+  // rehearsal: CROW_TEST_REAL_BACKUP=1 npm test -- tests/grackle-d3-import.test.js
+  const skip = process.env.CROW_TEST_REAL_BACKUP !== "1"
+    ? "real-backup rehearsal is opt-in (CROW_TEST_REAL_BACKUP=1)"
+    : (!newest || !existsSync(idFile) ? "no crow API backup / instance-id on this host" : false);
 
   it("rehearse succeeds when grackle's own local-owner rows (other uuids) meet crow's (C1 on real data)", { skip }, async () => {
     const root = scratch();
