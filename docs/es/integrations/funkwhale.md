@@ -27,18 +27,9 @@ O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
 El bundle está protegido por una verificación de hardware: se niega a instalarse por debajo de **1.5 GB de RAM efectiva** (después de los bundles ya comprometidos) y advierte por debajo de 8 GB en total. El disco crece con tu biblioteca — espera aproximadamente 5–20 GB por cada 1,000 pistas, más cientos de MB para las cachés federadas.
 
-### Almacenamiento: en disco o S3
+### Almacenamiento: disco local o Almacenamiento compartido
 
-Por defecto, los archivos de audio viven en `~/.crow/funkwhale/data/media`. Para enrutar el almacenamiento a MinIO o a un S3 externo, configura esto en `.env` **antes** de instalar:
-
-```bash
-FUNKWHALE_S3_ENDPOINT=https://minio.example.com
-FUNKWHALE_S3_BUCKET=funkwhale-audio
-FUNKWHALE_S3_ACCESS_KEY=...
-FUNKWHALE_S3_SECRET_KEY=...
-```
-
-El paso de post-instalación del bundle detecta estos valores y configura las variables `AWS_*` que Funkwhale realmente lee. Ten en cuenta que la sola presencia de MinIO no es suficiente — debes configurar el bucket y las credenciales, porque Funkwhale necesita su propio aislamiento por bundle.
+Por defecto, los archivos de audio viven en `~/.crow/funkwhale/data/media`. Si **Ajustes → Almacenamiento compartido** está configurado al instalar, el instalador dirige Funkwhale a un bucket `<prefijo>-funkwhale` allí. El formulario de instalación no tiene campos S3 propios del bundle.
 
 ### Federación
 
@@ -68,7 +59,7 @@ Revisa la verificación de hardware — Funkwhale se niega a instalarse por deba
 
 ### Las subidas fallan o el audio no se reproduce
 
-Si configuraste almacenamiento S3, confirma que los valores `FUNKWHALE_S3_*` sean correctos y que el bucket exista y sea escribible. Sin los cuatro configurados, Funkwhale recurre al almacenamiento en disco bajo `~/.crow/funkwhale/data/media`.
+Si el Almacenamiento compartido estaba configurado al instalar, confirma que sea accesible (Ajustes → Almacenamiento compartido) y que el bucket `<prefijo>-funkwhale` exista y sea escribible. Sin Almacenamiento compartido, Funkwhale guarda los medios en disco bajo `~/.crow/funkwhale/data/media`.
 
 ### La federación no funciona
 

@@ -191,6 +191,16 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (typeof v.keychain_configure !== "boolean") errors.push(`env_vars ${v.name}: keychain_configure must be a boolean`);
       else if (v.keychain !== true && v.generatable !== true) errors.push(`env_vars ${v.name}: keychain_configure only applies with keychain: true or generatable: true`);
     }
+    if (v.generate !== undefined) {
+      const KINDS = ["secret", "laravel_key", "vapid_private_key", "vapid_public_key"];
+      if (!KINDS.includes(v.generate)) errors.push(`env_vars ${v.name}: generate must be one of ${KINDS.join(", ")}`);
+      if (v.generate === "vapid_public_key") {
+        const pair = manifest.env_vars.find((o) => o && o.name === v.pair);
+        if (!pair || pair.generate !== "vapid_private_key") errors.push(`env_vars ${v.name}: generate "vapid_public_key" needs pair: <the name of a generate "vapid_private_key" var>`);
+      }
+      if (v.propagate === true && v.store_as !== undefined) errors.push(`env_vars ${v.name}: propagate: true cannot be combined with store_as (the gateway would get a hash)`);
+    }
+    if (v.advanced !== undefined && typeof v.advanced !== "boolean") errors.push(`env_vars ${v.name}: advanced must be a boolean`);
     if (v.generatable === true) {
       if (v.secret !== true) errors.push(`env_vars ${v.name}: generatable needs secret: true`);
       if (v.generate !== undefined) errors.push(`env_vars ${v.name}: generatable is for typed fields; it cannot be combined with generate`);

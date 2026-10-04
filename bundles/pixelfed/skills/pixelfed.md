@@ -34,22 +34,15 @@ Pixelfed is the fediverse's Instagram-alternative: upload photos, browse a chron
 
 Gated by F.0's hardware check. Refused below **1.5 GB effective RAM after committed bundles**, warned below 8 GB total. Disk grows with your library + remote-media cache: 10-50 GB within weeks of active federation is typical. The horizon queue worker is memory-hot when processing image transforms.
 
-## Storage: on-disk or S3
+## Storage: local disk
 
-Default: media lives in `~/.crow/pixelfed/storage/` + `~/.crow/pixelfed/uploads/`. To route to MinIO or external S3, set these in `.env` before install:
+Media lives on local disk (`~/.crow/pixelfed/storage/` + `~/.crow/pixelfed/uploads/`). Crow does not set up object storage for this bundle: Pixelfed hands out bucket URLs (`AWS_URL`) to browsers and remote servers, so the bucket must be publicly reachable. A host-local MinIO is not reachable that way, so the install form no longer offers S3 fields.
 
-```
-PIXELFED_S3_ENDPOINT=https://minio.example.com
-PIXELFED_S3_BUCKET=pixelfed-media
-PIXELFED_S3_ACCESS_KEY=...
-PIXELFED_S3_SECRET_KEY=...
-```
-
-`scripts/post-install.sh` detects these and runs `scripts/configure-storage.mjs`, which uses F.0's `storage-translators.pixelfed()` to write the `AWS_*` + `FILESYSTEM_CLOUD=s3` + `PF_ENABLE_CLOUD=true` envelope Pixelfed actually reads. Same pattern as F.4 Funkwhale.
+To move to a public S3 bucket by hand: add `PIXELFED_S3_ENDPOINT`, `PIXELFED_S3_BUCKET`, `PIXELFED_S3_ACCESS_KEY` and `PIXELFED_S3_SECRET_KEY` to the installed bundle's `.env` (`~/.crow/bundles/pixelfed/.env`), run `node ~/.crow/bundles/pixelfed/scripts/configure-storage.mjs` (it writes the `storage-translators.pixelfed()` envelope into the same `.env`), then recreate the containers from Extensions (Restart).
 
 ## First-run bootstrap
 
-1. Generate a Laravel APP_KEY (32-byte random) and paste into `.env` as `PIXELFED_APP_KEY`. One easy way: `openssl rand -base64 32 | head -c 32`.
+1. Nothing to generate: Crow creates `PIXELFED_APP_KEY` (Laravel `base64:` form) and the database password at install.
 2. After install, expose via Caddy:
    ```
    caddy_add_federation_site {

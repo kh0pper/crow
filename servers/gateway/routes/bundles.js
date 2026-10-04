@@ -57,7 +57,7 @@ import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRe
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
-import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1974,6 +1974,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
     // 1. Copy bundle files to ~/.crow/bundles/<id>
     const destDir = join(BUNDLES_DIR, bundleId);
+    // Seen BEFORE the copy: the source tree may carry its own .env (a dev checkout).
+    const priorInstallEnv = existsSync(join(destDir, ".env"));
     mkdirSync(destDir, { recursive: true });
     cpSync(sourceDir, destDir, { recursive: true });
     appendLog(job, "Copied bundle files");
@@ -2057,7 +2059,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // never shown, never sent to the gateway .env. reqEnv is the request env with
     // generated keys stripped, and is the only request env used below.
     const reqEnv = stripGeneratedKeys(manifest, envVars);
-    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME });
+    let composeTextForEnv = null;
+    try { const cp = join(destDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForEnv = readFileSync(cp, "utf8"); } catch { /* no fallbacks */ }
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv });
     const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;
@@ -2079,7 +2083,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // abort with nothing persisted so a retry mints a fresh token. Typed fields and the
     // optional vault copy run here too — before any pull, so the master password lives
     // for seconds and a later compose failure still leaves the password saved.
-    const kc = await recordKeychainForInstall({ bundleId, manifest, env: installEnv, minted: plan.minted, keychainReq: keychain, log: (m) => appendLog(job, m) });
+    const kc = await recordKeychainForInstall({ bundleId, manifest, env: installEnv, minted: plan.minted, reusedPlain: plan.reusedPlain, keychainReq: keychain, log: (m) => appendLog(job, m) });
     if (!kc.mintedSaved) {
       rmSync(destDir, { recursive: true, force: true });
       return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
@@ -2181,7 +2185,11 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
       // Propagate the manifest-DECLARED env vars to the gateway .env so
       // dependent services connect. Undeclared request keys never reach it.
-      const gatewayEnv = declaredEnvSubset(manifest, reqEnv);
+      // Generated keys reach it only where the manifest says `propagate: true` (gateway-side
+      // code reads them from process.env: phone's runner secret, coturn, MinIO root).
+      const gatewayGenerated = {};
+      for (const k of gatewayGeneratedKeys(manifest)) if (generated[k]) gatewayGenerated[k] = generated[k];
+      const gatewayEnv = declaredEnvSubset(manifest, { ...(reqEnv || {}), ...gatewayGenerated });
       if (Object.keys(gatewayEnv).length > 0) {
         propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
@@ -2917,6 +2925,8 @@ export default function bundlesRouter() {
   // POST /bundles/api/uninstall — Remove a bundle
   router.post("/bundles/api/uninstall", async (req, res) => {
     const { bundle_id, delete_data } = req.body;
+    // Fallback-password retention keys on volumes ACTUALLY removed (a refused/failed down -v keeps them).
+    let volumesRemoved = false;
 
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
@@ -2973,6 +2983,7 @@ export default function bundlesRouter() {
               if (delete_data) downArgs.push("-v");
               try {
                 await runCompose(downArgs, { cwd: bundleDir });
+                if (delete_data) volumesRemoved = true;
                 appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
               } catch (err) {
                 appendLog(job, `Warning: docker compose down: ${err.message}`);
@@ -3074,7 +3085,12 @@ export default function bundlesRouter() {
           needsRestart = true;
         }
 
-        // 5. Remove bundle files
+        // 5. Remove bundle files — first keeping every generated secret's effective value
+        // (incl. one an older install typed, or ran on as a compose fallback) for a reinstall.
+        let composeTextForRetain = null;
+        try { const cp = join(bundleDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForRetain = readFileSync(cp, "utf8"); } catch {}
+        const keptSecrets = retainGeneratedForReinstall(bundle_id, manifest, { destDir: bundleDir, crowHome: CROW_HOME, composeText: composeTextForRetain, includeFallbacks: !volumesRemoved });
+        if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) for a later reinstall (mode 600)`);
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 

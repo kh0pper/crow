@@ -11,10 +11,10 @@
 #   ~/.crow/pixelfed/storage/     Laravel storage/ (uploads, cache, logs)
 #   ~/.crow/pixelfed/uploads/     Public uploads dir (symlinked from storage)
 #
-# Media storage: on-disk by default. Set PIXELFED_S3_* to route to MinIO /
-# external S3 — storage-translators.pixelfed() maps to the AWS_* +
-# FILESYSTEM_CLOUD=s3 envelope Pixelfed expects. configure-storage.mjs in
-# scripts/ does the translation at install time.
+# Media storage: local disk. Crow does not configure object storage for
+# this bundle: Pixelfed hands out bucket URLs (AWS_URL) to browsers and remote
+# servers, so it needs a publicly reachable bucket, which a host-local MinIO
+# is not. The AWS_* passthrough below stays empty unless set by hand.
 #
 # Image: zknt/pixelfed:2026-03-24 (floats within 0.12.x — verify the current
 # tag + CVE feed at implementation time per the plan's image-tag policy).
@@ -119,7 +119,7 @@ services:
       MEDIA_DELETE_LOCAL_AFTER_CLOUD: "true"
       # Remote media cache retention (days)
       PF_REMOTE_MEDIA_DAYS: ${PIXELFED_MEDIA_RETENTION_DAYS:-14}
-      # S3 (empty unless configure-storage.mjs populated them)
+      # S3 passthrough (empty = local disk; set by hand only)
       FILESYSTEM_CLOUD: ${FILESYSTEM_CLOUD:-local}
       PF_ENABLE_CLOUD: ${PF_ENABLE_CLOUD:-false}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}

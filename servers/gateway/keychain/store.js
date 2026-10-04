@@ -160,6 +160,13 @@ export async function markBundleRemoved(db, bundleId) {
   return r.rowsAffected;
 }
 
+/** Whether an extension entry (any status) exists for bundle+key. */
+export async function hasExtensionEntry(db, bundleId, envKey) {
+  await ensureKeychainTable(db);
+  const r = await db.execute({ sql: "SELECT 1 FROM crow_keychain WHERE kind = 'extension' AND bundle_id = ? AND env_key = ? LIMIT 1", args: [bundleId, envKey] });
+  return r.rows.length > 0;
+}
+
 export async function reactivateBundleEntries(db, bundleId, envKeys) {
   await ensureKeychainTable(db);
   let n = 0;

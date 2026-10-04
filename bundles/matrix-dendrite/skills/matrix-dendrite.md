@@ -81,13 +81,13 @@ This calls the public Matrix Federation Tester and returns its structured verdic
 
 ## First-run bootstrap
 
-The entrypoint generates a signing key and `dendrite.yaml` on first boot, then prints the registration shared secret to the container log:
+The entrypoint generates a signing key and `dendrite.yaml` on first boot. Crow generates the registration shared secret at install (`MATRIX_REGISTRATION_SHARED_SECRET` in the bundle's `.env`) and the entrypoint writes it into `dendrite.yaml`. An older install that left it blank gets a random one on first boot, printed to the container log:
 
 ```
 Registration shared secret: <48-char base64>
 ```
 
-1. Copy that secret into `.env` as `MATRIX_REGISTRATION_SHARED_SECRET`.
+1. Older installs only: copy that secret into `.env` as `MATRIX_REGISTRATION_SHARED_SECRET`.
 2. Register the admin account:
    ```bash
    docker exec crow-dendrite \

@@ -10,6 +10,7 @@ import { t, fill } from "../../shared/i18n.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
 import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
+import { formEnvVars } from "../../../bundle-env-form.js";
 
 /** Add-ons shown per group before "Show all" — a fixed count, deliberately not
  *  "two grid rows" (which would need viewport-dependent column measurement). */
@@ -156,10 +157,6 @@ export function renderIcon(addon, size) {
  *   pure render tests and any legacy caller show no banner.
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
-/** env_vars the browser may see: installer-generated secrets are never shown or sent. */
-function visibleEnvVars(addon) {
-  return (addon?.env_vars || []).filter((ev) => !ev.generate);
-}
 
 export function buildExtensionsHTML({
   installed,
@@ -201,7 +198,7 @@ export function buildExtensionsHTML({
       const label = gpuCompat.kind === "vram" ? t("extensions.insufficientVram", lang) : t("extensions.incompatibleHost", lang);
       installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${escapeHtml(label)}</span>`;
     } else {
-      const envVarsAttr = escapeHtml(JSON.stringify(visibleEnvVars(addon)));
+      const envVarsAttr = escapeHtml(JSON.stringify(formEnvVars(addon)));
       const minRam = addon.requires?.min_ram_mb || 0;
       const minDisk = addon.requires?.min_disk_mb || 0;
       installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}" data-community="${addon._community ? "true" : "false"}">${t("extensions.install", lang)}</button>`;
@@ -455,13 +452,7 @@ export function buildExtensionsHTML({
       ports: addon.ports || [],
       webUI: addon.webUI || null,
       requires: addon.requires || {},
-      env_vars: visibleEnvVars(addon).map((ev) => ({
-        name: ev.name, description: ev.description,
-        default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
-        // Configure builds its form from THIS blob: it needs the same opt-ins as Install.
-        generatable: ev.generatable === true, keychain: ev.keychain === true, keychain_configure: ev.keychain_configure === false ? false : undefined,
-        pattern: typeof ev.pattern === "string" ? ev.pattern : undefined,
-      })),
+      env_vars: formEnvVars(addon),
       official: !addon._community,
       featured: !!addon.featured,
       _iconHtml: renderIcon(addon, 48),

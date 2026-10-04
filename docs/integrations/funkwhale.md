@@ -27,18 +27,9 @@ Or install from the **Extensions** panel in the Crow's Nest.
 
 The bundle is gated by a hardware check: it refuses to install below **1.5 GB effective RAM** (after already-committed bundles) and warns below 8 GB total. Disk grows with your library — expect roughly 5–20 GB per 1,000 tracks, plus hundreds of MB for federated caches.
 
-### Storage: on-disk or S3
+### Storage: local disk or Shared Storage
 
-By default, audio files live in `~/.crow/funkwhale/data/media`. To route storage to MinIO or external S3 instead, set these in `.env` **before** installing:
-
-```bash
-FUNKWHALE_S3_ENDPOINT=https://minio.example.com
-FUNKWHALE_S3_BUCKET=funkwhale-audio
-FUNKWHALE_S3_ACCESS_KEY=...
-FUNKWHALE_S3_SECRET_KEY=...
-```
-
-The bundle's post-install step detects these and configures the `AWS_*` variables Funkwhale actually reads. Note that MinIO being present is not enough on its own — you must set the bucket and credentials, because Funkwhale needs its own per-bundle isolation.
+By default, audio files live in `~/.crow/funkwhale/data/media`. If **Settings → Shared Storage** is set up when you install, the installer points Funkwhale at a `<prefix>-funkwhale` bucket there instead. The install form has no per-bundle S3 fields.
 
 ### Federation
 
@@ -68,7 +59,7 @@ Check the hardware gate — Funkwhale refuses to install below 1.5 GB of effecti
 
 ### Uploads fail or audio doesn't play
 
-If you configured S3 storage, confirm the `FUNKWHALE_S3_*` values are correct and the bucket exists and is writable. Without all four set, Funkwhale falls back to on-disk media under `~/.crow/funkwhale/data/media`.
+If Shared Storage was set up at install, confirm it is reachable (Settings → Shared Storage) and that the `<prefix>-funkwhale` bucket exists and is writable. Without Shared Storage, Funkwhale keeps media on disk under `~/.crow/funkwhale/data/media`.
 
 ### Federation not working
 

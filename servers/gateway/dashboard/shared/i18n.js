@@ -582,6 +582,8 @@ export const translations = {
   "extensions.communityWarningDesc": { en: "This add-on comes from a community store. Review its source before installing.", es: "Este complemento proviene de una tienda de la comunidad. Revisa su código antes de instalar." },
   "extensions.installDesc": { en: "This will download and configure the add-on. You can update settings later.", es: "Esto descargará y configurará el complemento. Puedes actualizar la configuración después." },
   "extensions.configuration": { en: "Configuration", es: "Configuración" },
+  "extensions.advancedSettings": { en: "Advanced settings", es: "Configuración avanzada" },
+  "extensions.advancedSettingsHint": { en: "Optional. These already have sensible defaults; change them only if you need to.", es: "Opcional. Ya tienen valores predeterminados razonables; cámbialos solo si lo necesitas." },
   "extensions.installing": { en: "Installing...", es: "Instalando..." },
   "extensions.copyingFiles": { en: "Copying files and pulling images...", es: "Copiando archivos y descargando imágenes..." },
   "extensions.installFailed": { en: "Install failed", es: "Error en la instalación" },
