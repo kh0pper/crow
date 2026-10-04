@@ -17,14 +17,25 @@ export function normalizeCaps(raw) {
   return { windows: asked.length ? [...new Set(asked)] : [...KIOSK_WINDOW_KINDS], iframe: false, max_windows: max };
 }
 
-const WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, thirty: 30, forty: 40, sixty: 60, ninety: 90 };
+const UNITS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const WORDS = { ...UNITS, ...TEENS, ...TENS };
+const NUM_WORD_RE = new RegExp(`\\b(${Object.keys(WORDS).join("|")})\\b`);
+const COMPOUND_RE = new RegExp(`\\b(${Object.keys(TENS).join("|")})[ -](${Object.keys(UNITS).join("|")})\\b`, "g");
 const UNIT_RE = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/g;
 
+/**
+ * Returns null (caller falls back to the LLM) when nothing parses OR when
+ * anything numeric/fractional is left unparsed ("and a half", an unsupported
+ * number word, a second number) rather than silently mis-setting the timer.
+ */
 export function parseDuration(input) {
   let s = String(input || "").toLowerCase();
   s = s.replace(/\bhalf an hour\b/g, "30 minutes")
     .replace(/\b(?:an?|one)\s+(hour|minute|min|second|sec)\b/g, "1 $1")
-    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|sixty|ninety)\b/g, (w) => String(WORDS[w]));
+    .replace(COMPOUND_RE, (_, t, u) => String(TENS[t] + UNITS[u]))
+    .replace(new RegExp(NUM_WORD_RE.source, "g"), (w) => String(WORDS[w]));
   let total = 0, first = -1, last = -1, m;
   UNIT_RE.lastIndex = 0;
   while ((m = UNIT_RE.exec(s))) {
@@ -36,7 +47,9 @@ export function parseDuration(input) {
     last = m.index + m[0].length;
   }
   if (first < 0) return null;
-  return { seconds: Math.round(total), before: s.slice(0, first).trim(), after: s.slice(last).trim() };
+  const before = s.slice(0, first).trim(), after = s.slice(last).trim();
+  if (/\d|\b(half|quarter)\b/.test(before + " " + after) || NUM_WORD_RE.test(before + " " + after)) return null;
+  return { seconds: Math.round(total), before, after };
 }
 
 export function contentBlocks(title, body) {
@@ -64,12 +77,14 @@ export function parseKioskCommand(command) {
   if (m) return { op: "close", kind: m[1] === "recipe" || m[1] === "content" ? m[1] : null, name: null };
   if (/^(next|next step)$/.test(c)) return { op: "step", delta: 1 };
   if (/^(previous|previous step|back|go back|last step)$/.test(c)) return { op: "step", delta: -1 };
-  if (/^(read|repeat) (the )?step$|^what'?s the step$/.test(c)) return { op: "step", delta: 0 };
+  if (/^(read|repeat) (the )?step$|^what(?:'s|s| s) the step$/.test(c)) return { op: "step", delta: 0 };
   m = raw.match(/^(?:(?:set|start)\s+(?:a\s+|an\s+)?)?timer\s+(?:for\s+)?([\s\S]+)$/i);
   if (m) {
     const d = parseDuration(m[1]);
     if (!d || d.seconds < 1 || d.seconds > MAX_TIMER_S) return { op: "error", message: "Say how long, from 1 second to 24 hours, e.g. timer 10 minutes pasta." };
-    const name = cap1((d.after || d.before).replace(/^(called|named|labell?ed|for)\s+/, "").replace(/^["'“”]+|["'“”.]+$/g, "").trim().slice(0, 40)) || "Timer";
+    const rest = d.after || d.before;
+    if (/^[,;]|^(and|then|but|so)\b/.test(rest)) return { op: "error", message: "Say how long, then an optional name, e.g. timer 10 minutes pasta." };
+    const name = cap1(rest.replace(/^(called|named|labell?ed|for)\s+/, "").replace(/^["'“”]+|["'“”.]+$/g, "").trim().slice(0, 40)) || "Timer";
     return { op: "open", window: { kind: "timer", name, title: name, seconds: d.seconds } };
   }
   m = raw.match(/^recipe\s+([\s\S]+)$/i);
@@ -104,16 +119,16 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
     const i = d.windows.findIndex((w) => w.id === winId);
     if (i < 0) return null;
     const [w] = d.windows.splice(i, 1);
-    const h = timers.get(winId);
-    if (h) { clearTimer(h); timers.delete(winId); }
+    const h = timers.get(`${id}:${winId}`);
+    if (h) { clearTimer(h); timers.delete(`${id}:${winId}`); }
     return w;
   }
   function fire(id, winId) {
-    timers.delete(winId);
+    timers.delete(`${id}:${winId}`);
     const w = dev(id).windows.find((x) => x.id === winId);
     if (!w) return;
     w.done = true;
-    onTimerDone(id, copy(w));
+    try { onTimerDone(id, copy(w)); } catch (err) { console.error("[kiosk wm] onTimerDone failed:", err?.message || err); }
   }
   return {
     list: (id) => dev(id).windows.map(copy),
@@ -130,7 +145,7 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
       const w = { ...rest, id: `${spec.kind}-${++d.seq}`, opened_at: t, touched_at: t };
       if (spec.kind === "timer") { w.ends_at = t + seconds * 1000; w.done = false; }
       d.windows.push(w);
-      if (w.kind === "timer") timers.set(w.id, setTimer(() => fire(id, w.id), Math.max(0, w.ends_at - t)));
+      if (w.kind === "timer") timers.set(`${id}:${w.id}`, setTimer(() => fire(id, w.id), Math.max(0, w.ends_at - t)));
       return { window: copy(w), evicted: evicted.filter(Boolean).map(copy) };
     },
     close: (id, winId) => copy(remove(id, winId)),
