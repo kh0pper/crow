@@ -24,8 +24,8 @@ function hub(over = {}) {
   const logs = [];
   const wm = createWmStore({ setTimer: () => ({}), clearTimer: () => {} }); // no real timers: a 120 s timer would hold the test process open
   const h = createSessionHub({
-    verifyKiosk: async (id, tok) => (id === "kiosk-a" && tok === "good" ? { ...DEV } : null),
-    displayConfig: async (d) => ({ name: d.name, bird: { species: "crow", seed: 0, mood: "happy" } }),
+    verifyKiosk: over.verifyKiosk || (async (id, tok) => (id === "kiosk-a" && tok === "good" ? { ...DEV } : null)),
+    displayConfig: over.displayConfig || (async (d) => ({ name: d.name, bird: { species: "crow", seed: 0, mood: "happy" } })),
     runTurn: over.runTurn || (async (o) => { turns.push(o); o.sink.event({ type: "transcript_final", text: "hi" }); o.sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); o.sink.audio(Buffer.alloc(4)); o.sink.event({ type: "tts_end" }); return { route: "fast", fastPath: false, escalated: false, aborted: false, degraded: null, timings: { total_ms: 5 } }; }),
     speak: over.speak || (async ({ text, sink }) => { sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); sink.audio(Buffer.from(text)); sink.event({ type: "tts_end" }); }),
     wm, metrics, wrapPcmAsWav,
@@ -210,4 +210,54 @@ test("unpair clears the device's server windows/timers (even if offline); supers
   assert.equal(wm.list("kiosk-a").length, 0);
   assert.equal(cleared.length, 1, "timer cleared");
   assert.ok(h);
+});
+
+test("server errors during hello close 1011 server_error, never 4401; bad token still 4401", async () => {
+  for (const over of [{ verifyKiosk: async () => { throw new Error("db locked"); } }, { displayConfig: async () => { throw new Error("boom"); } }]) {
+    const { h, logs } = hub(over); const ws = await hello(h);
+    assert.deepEqual(ws.closed, { code: 1011, reason: "server_error" });
+    assert.ok(logs.some((l) => l.includes("[kiosk]")));
+  }
+  const { h } = hub(); const ws = new FakeWs(); h.attach(ws); ws.text({ type: "hello", device_id: "kiosk-a", token: "bad" }); await tick();
+  assert.deepEqual(ws.closed, { code: 4401, reason: "unauthorized" });
+});
+
+function speechHub() {
+  const gates = []; const calls = [];
+  const r = hub({ speak: ({ text, sink, signal }) => new Promise((res) => {
+    calls.push(text);
+    gates.push({ emit: () => sink.audio(Buffer.from(text)), done: res, signal });
+  }) });
+  return { ...r, gates, calls };
+}
+
+test("barge_in during speech aborts it: no more audio frames", async () => {
+  const { h, gates } = speechHub(); const ws = await hello(h);
+  h.speak("kiosk-a", "one"); await tick();
+  gates[0].emit();
+  ws.text({ type: "barge_in" });
+  assert.equal(gates[0].signal.aborted, true);
+  gates[0].emit(); gates[0].done(); await tick();
+  assert.equal(ws.sent.filter((d) => Buffer.isBuffer(d)).length, 1);
+});
+
+test("two concurrent speak() calls are serialized, not interleaved", async () => {
+  const { h, gates, calls } = speechHub(); const ws = await hello(h);
+  h.speak("kiosk-a", "one"); h.speak("kiosk-a", "two"); await tick();
+  assert.deepEqual(calls, ["one"], "second waits");
+  gates[0].emit(); gates[0].done(); await tick(); await tick();
+  assert.deepEqual(calls, ["one", "two"]);
+  gates[1].emit(); gates[1].done(); await tick();
+  assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "onetwo");
+});
+
+test("turn_start during speech aborts the speech, then the turn runs", async () => {
+  const { h, gates, turns } = speechHub(); const ws = await hello(h);
+  h.speak("kiosk-a", "one"); await tick();
+  ws.text({ type: "turn_start", turn_id: "t9" });
+  assert.equal(gates[0].signal.aborted, true);
+  gates[0].emit(); // late audio from the aborted speech never leaves
+  assert.equal(ws.sent.filter((d) => Buffer.isBuffer(d)).length, 0);
+  ws.bin(Buffer.alloc(8000)); ws.text({ type: "turn_end" }); gates[0].done(); await tick(); await tick();
+  assert.equal(turns.length, 1);
 });
