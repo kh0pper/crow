@@ -1051,3 +1051,10 @@
 #ramble .rb-wardrobe-row { display: flex; align-items: center; gap: 10px; }
 #ramble .rb-wardrobe-row .rb-step-txt { flex: 1; min-width: 0; }
 #ramble .rb-wardrobe-row.is-worn strong { color: var(--rb-accent-2); }
+
+/* Walking card (spec 2026-10-04). */
+#ramble .rb-walk-actions { flex-wrap: wrap; margin-top: 8px; }
+#ramble .rb-walk-goal-row { margin-top: 8px; }
+#ramble #rb-walk-goal-val { min-width: 4.5em; text-align: center; }
+#ramble .rb-walk-toggle { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+#ramble .rb-walk-toggle input { width: 18px; height: 18px; }

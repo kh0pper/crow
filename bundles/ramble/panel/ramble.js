@@ -268,9 +268,40 @@ export default {
             <p class="rb-muted rb-fine" id="rb-pet-status"></p>
           </section>
 
+          <section class="rb-card" id="rb-walk">
+            <p class="rb-eyebrow">Walking</p>
+            <div class="rb-meter" id="rb-walk-meter" hidden>
+              <strong class="rb-meter-label">Steps</strong>
+              <span class="rb-meter-bar"><i id="rb-walk-fill"></i></span>
+              <strong id="rb-walk-num">0</strong><span class="rb-meter-of">/ <span id="rb-walk-goal">6,000</span></span>
+            </div>
+            <p class="rb-muted rb-fine" id="rb-walk-line">A walk a day keeps your bird bright.</p>
+            <div class="rb-row rb-walk-actions">
+              <button class="rb-btn" id="rb-walk-allow" type="button" hidden>Count my steps</button>
+              <button class="rb-btn rb-btn-ghost" id="rb-walk-open-settings" type="button" hidden>Open Android settings</button>
+              <button class="rb-btn" id="rb-walk-checkin" type="button" hidden>I walked today</button>
+            </div>
+            <p class="rb-muted rb-fine">Contacts see a little &ldquo;walked today&rdquo; mark on your bird &mdash; never your step count.</p>
+            <details class="rb-fold" id="rb-walk-prefs">
+              <summary class="rb-fine rb-fold-sum">Goal and reminders</summary>
+              <div class="rb-row rb-walk-goal-row">
+                <button class="rb-btn rb-btn-ghost" id="rb-walk-goal-down" type="button" aria-label="Lower the daily goal">&minus;</button>
+                <strong id="rb-walk-goal-val">6,000</strong><span class="rb-muted rb-fine">steps a day</span>
+                <button class="rb-btn rb-btn-ghost" id="rb-walk-goal-up" type="button" aria-label="Raise the daily goal">+</button>
+              </div>
+              <label class="rb-fine rb-walk-toggle"><input type="checkbox" id="rb-walk-nudge"> An evening nudge if I haven&rsquo;t walked</label>
+              <label class="rb-fine rb-walk-toggle"><input type="checkbox" id="rb-walk-weekends"> &hellip;on weekends too</label>
+            </details>
+            <p class="rb-muted rb-fine" id="rb-walk-status"></p>
+          </section>
+
           <details class="rb-card rb-fold" id="rb-runs-on" open>
             <summary class="rb-eyebrow rb-fold-sum">What your bird runs on</summary>
             <div class="rb-steps">
+              <div class="rb-step">
+                <span class="rb-step-n">+30</span>
+                <div class="rb-step-txt"><strong>Walk toward your goal</strong><span class="rb-muted rb-fine">a little as you go, all of it at your daily goal</span></div>
+              </div>
               <div class="rb-step">
                 <span class="rb-step-n">+20</span>
                 <div class="rb-step-txt"><strong>Meet another crow</strong><span class="rb-muted rb-fine">run into someone else out rambling</span></div>

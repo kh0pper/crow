@@ -195,7 +195,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod, stepsMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -216,17 +216,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/wallet.js"),
         bundleImport("server/hearts.js"),
         bundleImport("server/wardrobe.js"),
+        bundleImport("server/steps.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
           !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod ||
-          !cellsMod || !walletMod || !heartsMod || !wardrobeMod) {
+          !cellsMod || !walletMod || !heartsMod || !wardrobeMod || !stepsMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, wardrobeMod, stepsMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -832,6 +833,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
       energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
+      // Spec 2026-10-04 §8: the pet page draws the "walked today" badge.
+      walked_today: await mods.stepsMod.walkedToday(db, { now }),
     });
   }));
 
@@ -1107,6 +1110,55 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // settled outfit (servers/sharing/profile-avatar.js, spec §5.4).
     poke("ramble:outfit-changed", { egg_id: req.params.id });
     res.json({ outfit: out.outfit });
+  }));
+
+  // --- walking (spec 2026-10-04) ------------------------------------------
+  //
+  // The phone's counter arrives through the panel (the Android app's
+  // window.Crow bridge); every number is decided in server/steps.js.
+
+  /** steps.js throws StepsInputError for bad input: that is a 400, not a 500. */
+  function stepsInput(err) {
+    if (err && err.name === "StepsInputError") bad(err.message);
+    throw err;
+  }
+
+  router.get("/api/ramble/steps", handle(async (req, res) => {
+    const now = Date.now();
+    await mods.stepsMod.touchHome(db, { now });
+    res.json(await mods.stepsMod.stepsState(db, { now }));
+  }));
+
+  router.post("/api/ramble/steps/reading", handle(async (req, res) => {
+    const now = Date.now();
+    let reading;
+    try { reading = await mods.stepsMod.recordStepReading(db, req.body || {}, { now, emit }); }
+    catch (err) { stepsInput(err); }
+    await mods.stepsMod.touchHome(db, { now });
+    if (reading.credited > 0) {
+      const settled = await mods.stepsMod.settleDay(db, { now, emit });
+      // Core repaints the profile picture, coalesced (profile-avatar.js).
+      if (settled.walkedNew) poke("ramble:walked-changed", { day: settled.day });
+    }
+    res.json({ reading, ...(await mods.stepsMod.stepsState(db, { now })) });
+  }));
+
+  router.post("/api/ramble/steps/walked", handle(async (req, res) => {
+    const now = Date.now();
+    const out = await mods.stepsMod.recordWalkCheckin(db, { now, emit });
+    await mods.stepsMod.touchHome(db, { now });
+    if (out.walkedNew) poke("ramble:walked-changed", { day: out.day });
+    res.json({ already: out.already, ...(await mods.stepsMod.stepsState(db, { now })) });
+  }));
+
+  router.put("/api/ramble/steps/settings", handle(async (req, res) => {
+    const now = Date.now();
+    let out;
+    try { out = await mods.stepsMod.writeStepSettings(db, req.body || {}, { now, emit }); }
+    catch (err) { stepsInput(err); }
+    if (out.settled && out.settled.walkedNew) poke("ramble:walked-changed", { day: out.settled.day });
+    const { settled, ...state } = out;
+    res.json(state);
   }));
 
   // --- phase 3: contacts wire -------------------------------------------------

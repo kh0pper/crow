@@ -233,6 +233,22 @@ export async function initRambleTables(db) {
       PRIMARY KEY (kind, key)
     );`);
 
+  // Steps (spec 2026-10-04 §4.2): the phone's hardware counter baseline, one
+  // row per device. LOCAL by design and absent from instance-sync's
+  // SYNCED_TABLES: a baseline is one instance's view of one sensor, and two
+  // instances diffing against a shared one would double-credit. The steps
+  // themselves replicate as ramble_wallet rows (kind 'steps').
+  await initTable(db, "ramble_step_devices", `
+    CREATE TABLE IF NOT EXISTS ramble_step_devices (
+      device_id TEXT PRIMARY KEY,
+      boot_count INTEGER,
+      last_counter INTEGER NOT NULL,
+      last_read_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_total INTEGER NOT NULL DEFAULT 0,
+      last_day TEXT
+    );`);
+
   // Phase 2: which nests THIS instance's user has already claimed. Local by
   // design (spec §5): a claim is not shared state, the egg it produced is
   // (ramble_eggs replicates). PK (cell, week) makes a double-tap idempotent;

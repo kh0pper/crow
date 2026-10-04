@@ -14,8 +14,8 @@ android {
         //   - Meta Wearables DAT SDK (mwdat-*) targets API 34+
         minSdk 34
         targetSdk 34
-        versionCode 19
-        versionName "1.5.2"
+        versionCode 20
+        versionName "1.6.0"
     }
 
     // VERSION_NAME is exposed via BuildConfig so the WebView UA + appVersion()
@@ -91,4 +91,7 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
     // testImplementation 'com.meta.wearable:mwdat-mockdevice:0.5.0'
+
+    // Plain-JVM unit tests for pure helpers (OriginCheck). ./gradlew testDebugUnitTest
+    testImplementation 'junit:junit:4.13.2'
 }

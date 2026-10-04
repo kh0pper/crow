@@ -136,6 +136,19 @@ Three chores — **feed**, **preen**, **play** — are yours to do once each per
 
 `POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completes one. A repeat for a kind already done today is a no-op (`done: false`); either way the response carries the pet's current state.
 
+## Walking
+
+Set a daily step goal on the pet page (6,000 to start; anywhere from 2,000 to 30,000). Walking toward it tops up your bird's energy as you go — up to +30 a day at the goal — and reaching it pays 3 bird seed. A day you miss costs nothing.
+
+- **In the Crow Android app (1.6.0 or later)** tap **Count my steps** once and allow *Physical activity*. The app reads the phone's own step counter whenever you open Ramble; nothing runs in the background. The first day may start at zero ("counting from now") unless the phone was restarted today.
+- **Anywhere else** (a phone browser, an iPhone, a phone without a step counter) tap **I walked today**. It cheers your bird up (+15) but pays no seed, since there is no count behind it.
+
+**Who sees what.** Your step count stays on your own Crows. Contacts see only a small "walked today" mark on your bird's profile picture — never a number. The mark appears when you check in or pass 2,000 steps, and clears after midnight. Because it appears when you walk, it does say roughly *when* you walked.
+
+**The evening nudge.** If you have been walking with Ramble this week and by 6 pm you are under half your goal, your bird sends one gentle reminder through Crow notifications. Never more than one a day. Turn it off, or keep weekends quiet, under **Goal and reminders** on the walking card.
+
+API: `GET /api/ramble/steps`, `POST /api/ramble/steps/reading { device_id, counter, elapsed_ms, boot_count }`, `POST /api/ramble/steps/walked`, `PUT /api/ramble/steps/settings { goal?, nudge?, nudge_weekends? }`.
+
 ## Nests and the egg shelf
 
 Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 15 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
@@ -253,6 +266,25 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `energy.max.per.heart` | 10 | How much each heart container lengthens it. |
 | `energy.max.cap` | 300 | The longest the bar can ever get, however many hearts you find. |
 | `unlock.max.accuracy.m` | 100 | How sharp your location has to be before a place counts as visited. |
+
+### Steps
+
+| Key | Default | Effect |
+|---|---|---|
+| `steps.goal` | 6000 | Daily step goal (2,000–30,000). Set on the pet page. |
+| `steps.max.day` | 40000 | Most steps credited per day across all your devices. |
+| `steps.max.per.min` | 250 | Most steps credited per minute elapsed since the last reading (or since boot). |
+| `steps.devices.per.day` | 4 | Most distinct devices credited per day. |
+| `steps.energy.full` | 30 | Energy for a day at goal. |
+| `steps.energy.chunk` | 5 | Smallest step-energy payment (fewer, larger feeds). |
+| `steps.checkin.energy` | 15 | Energy for the manual "I walked today" check-in. |
+| `steps.goal.seed` | 3 | Bird seed paid for reaching the goal. |
+| `steps.badge.min` | 2000 | Steps (capped at the goal) that earn the "walked today" mark. |
+| `steps.nudge` | 1 | Evening nudge on (1) or off (0). Set on the walking card. |
+| `steps.nudge.weekends` | 1 | Nudge on weekends too (1) or not (0). |
+| `steps.nudge.hour` | 18 | Earliest local hour for the nudge. |
+| `steps.nudge.until` | 21 | Latest local hour for the nudge (exclusive). |
+| `steps.nudge.below` | 50 | Nudge only if today's steps are below this percent of the goal. |
 
 ## MCP tools
 
