@@ -38,18 +38,9 @@ Funkwhale is a self-hosted music + podcast server that federates over ActivityPu
 
 Gated by F.0's hardware check. Refused below **1.5 GB effective RAM after committed bundles**, warned below 8 GB total. Disk grows with your library — expect 5-20 GB for 1000 tracks; federated caches add hundreds of MB. Celery workers and the Django API are the memory-hot paths.
 
-## Storage: on-disk or S3
+## Storage: local disk or Shared Storage
 
-Default: audio files live in `~/.crow/funkwhale/data/media`. To route to MinIO or external S3, set these in `.env` before install:
-
-```
-FUNKWHALE_S3_ENDPOINT=https://minio.example.com
-FUNKWHALE_S3_BUCKET=funkwhale-audio
-FUNKWHALE_S3_ACCESS_KEY=...
-FUNKWHALE_S3_SECRET_KEY=...
-```
-
-`scripts/post-install.sh` detects these and runs `scripts/configure-storage.mjs`, which uses F.0's `storage-translators.funkwhale()` to write the `AWS_*` env vars Funkwhale actually reads. MinIO presence alone is not enough — you must also set the bucket + credentials because Funkwhale needs per-bundle isolation.
+Default: audio files live in `~/.crow/funkwhale/data/media`. If **Settings → Shared Storage** is set up when you install, the installer points Funkwhale at a `<prefix>-funkwhale` bucket there instead (`manifest.storage.translator = "funkwhale"`); there are no per-bundle S3 fields in the install form.
 
 ## First-run bootstrap
 

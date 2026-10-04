@@ -84,13 +84,18 @@ test("installBlockingEnvKeys = required AND no default AND compose hard-fails on
   assert.deepEqual(installBlockingEnvKeys("no-such-bundle"), []);
 });
 
-test("real bundles: phone is blocked on PHONE_RUNNER_SECRET; gitea's post-install GITEA_TOKEN is not", async () => {
+test("real bundles: navidrome is blocked on its music path; phone's generated PHONE_RUNNER_SECRET and gitea's post-install GITEA_TOKEN are not", async () => {
   _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
   try {
-    assert.deepEqual(installBlockingEnvKeys("phone"), ["PHONE_RUNNER_SECRET"]);
+    assert.deepEqual(installBlockingEnvKeys("navidrome"), ["NAVIDROME_MUSIC_PATH"]);
+    const nav = await validateInstall("navidrome", { envVars: {}, requireEnv: true, forceInstall: true });
+    assert.equal(nav.code, "missing_required_env");
+    assert.deepEqual(nav.extra.missing_env, ["NAVIDROME_MUSIC_PATH"]);
+
+    // Crow generates the runner secret at install (config-friction stage 1): never asked for.
+    assert.deepEqual(installBlockingEnvKeys("phone"), []);
     const phone = await validateInstall("phone", { envVars: {}, requireEnv: true, forceInstall: true });
-    assert.equal(phone.code, "missing_required_env");
-    assert.deepEqual(phone.extra.missing_env, ["PHONE_RUNNER_SECRET"]);
+    assert.notEqual(phone.code, "missing_required_env");
 
     const giteaManifest = JSON.parse(readFileSync(new URL("../bundles/gitea/manifest.json", import.meta.url), "utf8"));
     assert.ok(giteaManifest.env_vars.some((v) => v.name === "GITEA_TOKEN" && v.required), "precondition: GITEA_TOKEN is manifest-required");

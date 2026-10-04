@@ -1,7 +1,7 @@
 {
   "id": "minio",
   "name": "File Storage (MinIO)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "S3-compatible file storage — upload, organize, and share files through Crow",
   "type": "bundle",
   "author": "Crow",
@@ -37,9 +37,14 @@
     },
     {
       "name": "MINIO_ROOT_PASSWORD",
-      "description": "MinIO admin password (choose a strong password)",
+      "description": "MinIO admin password. Crow generates it at install, shares it with Crow storage, and saves it in Settings → Passwords (this machine only) for the console login.",
       "required": true,
-      "secret": true
+      "secret": true,
+      "generate": "secret",
+      "keychain": true,
+      "keychain_label": "admin password",
+      "keychain_username": "${MINIO_ROOT_USER}",
+      "propagate": true
     },
     {
       "name": "MINIO_USE_SSL",
