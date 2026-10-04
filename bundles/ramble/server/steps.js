@@ -426,3 +426,75 @@ export async function touchHome(db, { now = Date.now() } = {}) {
     });
   } catch { /* a marker, never worth failing a request over */ }
 }
+
+export const HOME_WINDOW_MS = 3 * 24 * 3600 * 1000;
+export const ENGAGED_WINDOW_MS = 7 * 24 * 3600 * 1000;
+
+/** A counter reading older than this means the server may simply not have SEEN today's walk. */
+export const STALE_READING_MS = 3 * 3600 * 1000;
+
+/**
+ * The bird's voice. No numbers: a lock screen is public. (R10: en/es.)
+ * `low`    — the count is fresh and really is under half the goal.
+ * `unseen` — this player counts steps with the app, but no reading has
+ *            arrived for hours: they may well have walked. Ask to be shown,
+ *            never imply they did not walk (S1: never punish).
+ */
+export const NUDGE_TEXT = Object.freeze({
+  en: Object.freeze({
+    low: Object.freeze({ title: "Your bird is by the door", body: "A short walk would cheer you both up." }),
+    unseen: Object.freeze({ title: "Your bird wants to hear about your day", body: "Open Ramble so it can count today's steps, or take a short walk together." }),
+  }),
+  es: Object.freeze({
+    low: Object.freeze({ title: "Tu pájaro te espera en la puerta", body: "Una caminata corta los alegraría a los dos." }),
+    unseen: Object.freeze({ title: "Tu pájaro quiere saber de tu día", body: "Abre Ramble para que cuente los pasos de hoy, o den juntos una caminata corta." }),
+  }),
+});
+export function nudgeText(lang, variant = "low") {
+  const set = Object.hasOwn(NUDGE_TEXT, lang) ? NUDGE_TEXT[lang] : NUDGE_TEXT.en;
+  return Object.hasOwn(set, variant) ? set[variant] : set.low;
+}
+
+/**
+ * Should THIS instance nudge now (spec §9)? Every condition must hold; the
+ * first that fails is the reason. Read-only.
+ */
+export async function nudgeDecision(db, { now = Date.now() } = {}) {
+  const s = await readStepSettings(db);
+  if (!s.nudge) return { send: false, reason: "off" };
+  const d = new Date(now);
+  const dow = d.getDay();
+  if (!s.nudgeWeekends && (dow === 0 || dow === 6)) return { send: false, reason: "weekend" };
+  const hour = d.getHours();
+  if (hour < s.nudgeHour || hour >= s.nudgeUntil) return { send: false, reason: "hour" };
+  const { rows: home } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [HOME_KEY] });
+  const seen = Number(home[0]?.value);
+  if (!Number.isFinite(seen) || now - seen > HOME_WINDOW_MS) return { send: false, reason: "not-home" };
+  const day = localDay(now);
+  if ((await rowDelta(db, NUDGE_KIND, day)) !== null) return { send: false, reason: "already" };
+  // Engagement by the DAY KEY, not created_at: applyRambleWallet merges
+  // created_at to the MIN of two instances' values, so it is not a reliable
+  // clock (eggs.js warns against ordering by it). Keys are YYYY-MM-DD[:dev],
+  // so a string compare against the window's first day is exact.
+  const since = localDay(now - ENGAGED_WINDOW_MS);
+  const { rows: used } = await db.execute({
+    sql: "SELECT 1 FROM ramble_wallet WHERE kind IN (?, ?) AND key >= ? LIMIT 1",
+    args: [STEPS_KIND, WALK_CHECKIN_KIND, since],
+  });
+  if (!used.length) return { send: false, reason: "not-engaged" };
+  if ((await rowDelta(db, WALK_CHECKIN_KIND, day)) !== null) return { send: false, reason: "walked" };
+  const steps = await stepsToday(db, now, s);
+  if (steps * 100 >= s.goal * s.nudgeBelow) return { send: false, reason: "on-track" };
+  // Steps only arrive when the panel is opened. A counter player whose last
+  // reading on THIS instance is hours old may have walked plenty: ask to be
+  // shown rather than say "you haven't walked".
+  const { rows: dev } = await db.execute({ sql: "SELECT MAX(last_read_at) AS t FROM ramble_step_devices", args: [] });
+  const lastRead = Number(dev[0]?.t);
+  const variant = Number.isFinite(lastRead) && lastRead > 0 && now - lastRead > STALE_READING_MS ? "unseen" : "low";
+  return { send: true, reason: "due", day, variant };
+}
+
+/** Claim today's nudge BEFORE sending. True only for the claim that created the row. */
+export async function markNudged(db, day, { now = Date.now(), emit } = {}) {
+  return insertOnce(db, NUDGE_KIND, day, 1, now, emit);
+}
