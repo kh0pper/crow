@@ -33,7 +33,8 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `CROW_CSRF_STRICT` | enabled | Set `0` only as an emergency CSRF kill-switch. |
 | `CORS_ALLOWED_ORIGINS` | *(unset)* | Comma-separated CORS origin allowlist. |
 | `CROW_ENROLL_ENABLED` | `0` | Allow new instance enrollment (pairing). Enable only while pairing. |
-| `CROW_ENROLL_OTC` | *(unset)* | One-time code required for enrollment when set. |
+| `CROW_ENROLL_OTC` | *(unset)* | One-time pairing code — **required** whenever enrollment is enabled (>= 16 chars; generate with `node scripts/cli/instance-pair.js --generate-otc`). Single-use; without it every enroll request is refused. |
+| `CROW_ENROLL_WINDOW_MINUTES` | `30` | How long a pairing code stays valid after the gateway first sees it. |
 | `CROW_HOSTED` / `CROW_HOSTING_API_URL` / `CROW_HOSTING_AUTH_TOKEN` | *(unset)* | Managed-hosting mode only. |
 | `CROW_CROWDSEC_BOUNCER_KEY` / `CROW_CROWDSEC_LAPI_URL` | *(unset)* / `http://127.0.0.1:8091` | CrowdSec bouncer integration (optional bundle). |
 

@@ -13,7 +13,9 @@
  *   - Store { auth_token, signing_key } in ~/.crow/peer-tokens.json.
  *
  * Usage:
- *   node scripts/cli/instance-pair.js --peer-url https://grackle.example.ts.net
+ *   node scripts/cli/instance-pair.js --generate-otc            (on the PEER)
+ *   node scripts/cli/instance-pair.js --peer-url https://peer.example.ts.net:8444 --otc <code>
+ *   node scripts/cli/instance-pair.js --allow-re-pair <source-id>   (on the PEER, re-pair only)
  *   node scripts/cli/instance-pair.js --manual-paste
  *
  * With --peer-url, the peer's gateway must expose the /instance/enroll
@@ -21,7 +23,8 @@
  * file servers/gateway/routes/instance-enroll.js).
  */
 
-import { createDbClient } from "../../servers/db.js";
+import { createDbClient, resolveDataDir } from "../../servers/db.js";
+import { resolve as resolvePath } from "path";
 import { createHash } from "crypto";
 import {
   registerInstance,
@@ -36,6 +39,10 @@ import {
   generateSecret,
   peerTokensPath,
 } from "../../servers/shared/peer-credentials.js";
+import {
+  generateEnrollOtc, ENROLL_OTC_MIN_LENGTH, repairProof, repairProofKey, sha256Hex as guardSha256, writeRepairAllowance, REPAIR_ALLOW_DEFAULT_MINUTES, REPAIR_ALLOW_MAX_MINUTES,
+} from "../../servers/shared/enroll-guard.js";
+import { loadPeerCreds } from "../../servers/shared/peer-credentials.js";
 import { createInterface } from "readline";
 import { hostname as osHostname } from "os";
 
@@ -47,6 +54,10 @@ function parseArgs(argv) {
     else if (a === "--peer-id") out.peerId = argv[++i];
     else if (a === "--peer-name") out.peerName = argv[++i];
     else if (a === "--manual-paste") out.manual = true;
+    else if (a === "--otc") out.otc = argv[++i];
+    else if (a === "--generate-otc") out.generateOtc = true;
+    else if (a === "--allow-re-pair") out.allowRePair = argv[++i];
+    else if (a === "--minutes") out.minutes = argv[++i];
     else if (a === "--help" || a === "-h") out.help = true;
   }
   return out;
@@ -56,12 +67,31 @@ function printHelp() {
   console.log(`Crow instance pair — provision cross-host RPC credentials.
 
 Usage:
-  node scripts/cli/instance-pair.js --peer-url <url> [--peer-name <name>]
+  node scripts/cli/instance-pair.js --generate-otc
+  node scripts/cli/instance-pair.js --peer-url <url> --otc <code> [--peer-name <name>] [--peer-id <id>]
+  node scripts/cli/instance-pair.js --allow-re-pair <instance-id> [--minutes <n>]
   node scripts/cli/instance-pair.js --manual-paste --peer-id <id> --peer-name <name> --peer-url <url>
 
-Network mode (--peer-url):
-  POSTs to <peer-url>/instance/enroll-request with this node's credentials.
-  Peer responds with its own symmetric credentials.
+Pairing ceremony (network mode):
+  1. On the PEER: run --generate-otc, then set CROW_ENROLL_ENABLED=1 and
+     CROW_ENROLL_OTC=<code> in the peer gateway's environment and restart it.
+  2. On THIS instance: --peer-url <peer tailnet URL> --otc <code>
+     (or export CROW_ENROLL_OTC=<code>). The code is single-use and expires
+     CROW_ENROLL_WINDOW_MINUTES (default 30) after the peer gateway first saw it.
+  3. On the PEER: remove CROW_ENROLL_ENABLED and CROW_ENROLL_OTC, restart.
+
+  The peer refuses enrollment without a code of >= ${ENROLL_OTC_MIN_LENGTH} characters, locks a
+  source after 5 wrong codes, and never accepts it over Tailscale Funnel.
+
+Re-pairing an instance the peer already knows:
+  A current CLI proves it still holds its credentials for the peer (without
+  sending them), so re-pairing just works. If those credentials are lost, or
+  the peer revoked this instance, the PEER's operator must first run
+  --allow-re-pair <this instance's id> on the peer (single-use, default
+  ${REPAIR_ALLOW_DEFAULT_MINUTES} min, max ${REPAIR_ALLOW_MAX_MINUTES}); otherwise the peer answers 409 already_paired.
+  The proof is sent only for the peer whose stored address matches --peer-url
+  (or the one named by --peer-id), is bound to that peer's id and this code,
+  and never reveals the credentials.
 
 Manual mode (--manual-paste):
   Prints credentials to paste on the peer side, and reads peer's credentials
@@ -84,7 +114,81 @@ async function readJsonFromStdin() {
   throw new Error("stdin closed before valid JSON was received");
 }
 
-async function networkPair(db, { peerUrl, peerName }) {
+function generateOtcCommand() {
+  const code = generateEnrollOtc();
+  console.log(`One-time pairing code (single-use):
+
+  ${code}
+
+On THIS host (the peer being paired with), add to the gateway's environment
+(the repo .env, or a systemd drop-in) and restart the gateway:
+
+  CROW_ENROLL_ENABLED=1
+  CROW_ENROLL_OTC=${code}
+
+On the OTHER instance, run:
+
+  node scripts/cli/instance-pair.js --peer-url <this host's tailnet URL> --otc ${code}
+
+The code expires CROW_ENROLL_WINDOW_MINUTES (default 30) after this gateway
+first sees it. Remove both variables and restart once pairing completes.`);
+}
+
+async function allowRePairCommand(db, { allowRePair, minutes }) {
+  const peerId = String(allowRePair || "").trim();
+  if (!peerId) throw new Error("--allow-re-pair needs the instance id of the peer that will re-pair");
+  const localId = getOrCreateLocalInstanceId();
+  if (peerId === localId) throw new Error("that is this instance's own id");
+  const row = await getInstance(db, peerId);
+  const hasCreds = Boolean(loadPeerCreds()[peerId]);
+  const dbPath = process.env.CROW_DB_PATH || resolvePath(resolveDataDir(), "crow.db");
+  console.log(`  this instance: ${localId}  (DB ${dbPath})`);
+  if (!row && !hasCreds) {
+    throw new Error(`${peerId} is not known on this instance (${localId}) — a first pairing needs no allowance. If you meant another co-hosted instance, run with its CROW_HOME / CROW_DATA_DIR.`);
+  }
+  const { expiresAt, minutes: m } = await writeRepairAllowance(db, localId, peerId, { minutes });
+  console.log(`✓ ${peerId}${row ? ` (${row.name}, status ${row.status})` : " (not known here yet)"} may re-pair with this gateway once,`);
+  console.log(`  replacing its credentials and dial address, until ${new Date(expiresAt).toISOString()} (${m} min).`);
+  console.log("  Enrollment must also be enabled with a one-time code (see --generate-otc).");
+}
+
+/**
+ * Re-pair proof for the ONE peer this request is meant for: the peer named by
+ * --peer-id, else the single known peer whose stored gateway_url host or
+ * tailscale_ip equals the URL's host. Never a proof for any other peer. The
+ * proof (servers/shared/enroll-guard.js) is bound to that peer's id and to
+ * this code's digest, and keyed by hash(our current bearer) + our current
+ * signing key, so it reveals neither and is useless anywhere else.
+ */
+async function buildRepairProofs(db, reqBody, { peerUrl, peerId, otc }) {
+  const creds = loadPeerCreds();
+  const usable = (id) => typeof creds[id]?.auth_token === "string" && creds[id].auth_token && typeof creds[id]?.signing_key === "string";
+  let target = null;
+  if (peerId) {
+    target = usable(peerId) ? peerId : null;
+  } else {
+    let host = null;
+    try { host = new URL(String(peerUrl)).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch {}
+    const hits = [];
+    for (const id of Object.keys(creds).filter(usable)) {
+      const row = await getInstance(db, id).catch(() => null);
+      if (!row || !host) continue;
+      let rowHost = null;
+      try { rowHost = new URL(String(row.gateway_url)).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch {}
+      if (rowHost === host || String(row.tailscale_ip || "").toLowerCase() === host) hits.push(id);
+    }
+    if (hits.length === 1) target = hits[0];
+  }
+  if (!target) return [];
+  const key = repairProofKey(guardSha256(creds[target].auth_token), creds[target].signing_key);
+  return [repairProof(key, reqBody, { targetId: target, otcDigest: guardSha256(otc) })];
+}
+
+async function networkPair(db, { peerUrl, peerName, peerId: expectPeerId, otc: otcArg }) {
+  const otc = otcArg || process.env.CROW_ENROLL_OTC || "";
+  if (otc.length < ENROLL_OTC_MIN_LENGTH) {
+    throw new Error(`a one-time code is required (>= ${ENROLL_OTC_MIN_LENGTH} chars): on the PEER run \`node scripts/cli/instance-pair.js --generate-otc\`, follow its instructions, then pass --otc <code> here`);
+  }
   const localId = getOrCreateLocalInstanceId();
   // Our outbound bearer (what we send to peer in Authorization: Bearer).
   // Peer stores its hash in crow_instances.auth_token_hash.
@@ -104,8 +208,10 @@ async function networkPair(db, { peerUrl, peerName }) {
     source_sync_port: self.sync_port,
     source_outbound_bearer: sourceOutboundBearer,
     shared_signing_key: sharedSigningKey,
-    otc: process.env.CROW_ENROLL_OTC || undefined,
+    otc,
   };
+  const proofs = await buildRepairProofs(db, reqBody, { peerUrl, peerId: expectPeerId, otc });
+  if (proofs.length) reqBody.repair_proofs = proofs;
   const url = String(peerUrl).replace(/\/+$/, "") + "/instance/enroll-request";
   console.log(`→ POST ${url}`);
   const res = await fetch(url, {
@@ -124,6 +230,9 @@ async function networkPair(db, { peerUrl, peerName }) {
   }
 
   const peerId = peerPayload.peer_instance_id;
+  if (expectPeerId && peerId !== expectPeerId) {
+    console.warn(`⚠ peer answered as ${peerId}, not the --peer-id ${expectPeerId} you named; storing it as ${peerId}`);
+  }
   await storePeerCredsLocally(db, {
     peerId,
     peerName: peerName || peerPayload.peer_name || peerId,
@@ -232,10 +341,13 @@ async function storePeerCredsLocally(db, {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return printHelp();
+  if (args.generateOtc) return generateOtcCommand();
 
   const db = await createDbClient();
   try {
-    if (args.manual) {
+    if (args.allowRePair !== undefined) {
+      await allowRePairCommand(db, args);
+    } else if (args.manual) {
       await manualPair(db, args);
     } else if (args.peerUrl) {
       await networkPair(db, args);
