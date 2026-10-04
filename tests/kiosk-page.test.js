@@ -161,3 +161,21 @@ test("smoke A1 (2026-10-04): [hidden] beats class display — the pairing overla
   // After approval the page hides the overlay via the attribute (which the CSS rule now honours).
   assert.match(read("kiosk.js"), /j\.state === "approved"[^\n]*\$\("pairing"\)\.hidden = true/);
 });
+
+test("smoke 2026-10-04 item 7: every banner/caption write is recorded; a long press on the clock shows the ring; the ring element ships hidden", () => {
+  const src = read("kiosk.js");
+  const sets = src.split("\n").filter((l) => /\$\("cap-bot"\)\.textContent = /.test(l));
+  for (const l of sets) assert.match(l, /note\(/, `every cap-bot write is noted: ${l.trim()}`);
+  // Privacy: user/assistant words never enter the ring (lengths only).
+  assert.match(src, /note\("transcript", `\$\{\(m\.text \|\| ""\)\.length\} chars`\)/);
+  assert.doesNotMatch(src, /note\("transcript", m\.text/);
+  assert.doesNotMatch(src, /note\("caption:reply", m\.text/);
+  assert.match(src, /function banner\(key\) \{[^\n]*note\("banner"/);
+  assert.match(src, /function setBird\(s\) \{\s*if \(s !== birdState\) note\("bird"/);
+  assert.match(src, /\$\("clock"\)\.addEventListener\("pointerdown"[^\n]*700\)/);
+  assert.match(src, /case "error":\s*note\("error"/);
+  const { document } = parseHTML(read("kiosk.html"));
+  const dbg = document.getElementById("debug");
+  assert.ok(dbg && dbg.hasAttribute("hidden"), "#debug ships hidden");
+  assert.doesNotMatch(src, /debug"\)\.innerHTML/, "rendered as text");
+});

@@ -46,7 +46,12 @@ export const CLIENT_SCRIPT = `
     if (b.bot !== a.bot && b.bot) { p.bound_bot_id = b.bot; any = true; }
     if (b.stt !== a.stt) { p.stt_profile_id = b.stt; any = true; }
     if (b.tts !== a.tts) { p.tts_profile_id = b.tts; any = true; }
-    if (b.fu !== a.fu || b.mem !== a.mem) { p.kiosk_settings = { follow_up: b.fu, memory_integration: b.mem }; any = true; }
+    if (b.fu !== a.fu || b.mem !== a.mem || b.vad !== a.vad || b.sm !== a.sm) {
+      p.kiosk_settings = { follow_up: b.fu, memory_integration: b.mem };
+      if (b.vad !== a.vad) p.kiosk_settings.vad_hangover_ms = b.vad;
+      if (b.sm !== a.sm) p.kiosk_settings.stt_model = b.sm;
+      any = true;
+    }
     return any ? p : null;
   }
 
@@ -100,17 +105,23 @@ export const CLIENT_SCRIPT = `
     var ks = d.kiosk_settings || {};
     var fu = el('input'); fu.type = 'checkbox'; fu.checked = !!ks.follow_up;
     var mem = el('input'); mem.type = 'checkbox'; mem.checked = !!ks.memory_integration;
-    var initial = { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked };
-    [[S.bot, bot], [S.stt, stt], [S.tts, tts], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
+    var sm = pick([['default', S.stt_model_default], ['tiny.en', S.stt_model_tiny]], ks.stt_model || 'default');
+    var vad = el('input'); vad.type = 'number'; vad.min = '300'; vad.max = '900'; vad.step = '50'; vad.value = String(ks.vad_hangover_ms || 450);
+    function vadValue() { var n = parseInt(vad.value, 10); return isFinite(n) ? Math.min(900, Math.max(300, n)) : (initial ? initial.vad : (ks.vad_hangover_ms || 450)); }
+    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value }; }
+    var initial = null;
+    initial = current();
+    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
+    card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn));
     var msg = el('span', 'kk-msg');
     var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
     save.addEventListener('click', function () {
-      var patch = savePatch(initial, { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked });
+      var patch = savePatch(initial, current());
       if (!patch) { msg.textContent = S.saved; return; }
       api('POST', '/api/kiosk/admin/displays/' + encodeURIComponent(d.id), patch)
         .then(function (j) {
-          if (j.ok) { initial = { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked }; msg.textContent = S.saved; return; }
+          if (j.ok) { initial = current(); vad.value = String(initial.vad); msg.textContent = S.saved; return; }
           msg.textContent = S[j.error] || j.error || '';
         });
     });

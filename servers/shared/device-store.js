@@ -33,8 +33,13 @@ export const KIOSK_DEFAULTS = Object.freeze({
   sleep_start: "22:30",
   sleep_end: "06:30",
   lang: "en",
-  vad_hangover_ms: 600,
+  vad_hangover_ms: 450,
+  stt_model: "default",
 });
+/** End-of-speech silence wait range (ms), latency lever 1; the panel offers the same range. */
+export const KIOSK_VAD_HANGOVER_RANGE = Object.freeze({ min: 300, max: 900 });
+/** "default" = the STT profile's own model; "tiny.en" = faster, less accurate (bundles/kiosk/server/profiles.js). */
+export const KIOSK_STT_MODEL_CHOICES = Object.freeze(["default", "tiny.en"]);
 
 function sha256Hex(s) {
   return createHash("sha256").update(String(s)).digest("hex");
@@ -70,8 +75,9 @@ export function normalizeKioskSettings(input, prior) {
   if ("lang" in src && (src.lang === "en" || src.lang === "es")) out.lang = src.lang;
   if ("vad_hangover_ms" in src) {
     const n = Number.parseInt(src.vad_hangover_ms, 10);
-    if (Number.isFinite(n)) out.vad_hangover_ms = Math.min(1200, Math.max(300, n));   // latency lever 1 (ruling R20)
+    if (Number.isFinite(n)) out.vad_hangover_ms = Math.min(KIOSK_VAD_HANGOVER_RANGE.max, Math.max(KIOSK_VAD_HANGOVER_RANGE.min, n));   // latency lever 1 (ruling R20)
   }
+  if ("stt_model" in src && KIOSK_STT_MODEL_CHOICES.includes(src.stt_model)) out.stt_model = src.stt_model;
   for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS)) delete out[k];
   return out;
 }

@@ -11,7 +11,7 @@ import { createPairingStore } from "./pairing.js";
 import { createSessionHub } from "./session.js";
 import { createMetricsStore } from "./metrics.js";
 import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks } from "./wm.js";
-import { ensureKioskSttProfile, pickKioskTtsProfile } from "./profiles.js";
+import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { STRINGS } from "./strings.js";
 
 export const PAGE_CSP = [
@@ -30,10 +30,14 @@ export const ASSETS = {
  * Never on a shared display (review C3, ruling F4): crow_delegate's `bot` arg
  * reaches ANY enabled bot, and the bot-schedule tools are the same cross-bot
  * escape (schedule work under another bot's identity).
+ * crow_discover (smoke 2026-10-04): schema discovery returns whole schemas into the
+ * prompt — one multi-round discover loop took a 4B turn from 817 to 5.6k prompt
+ * tokens and 21.5 s to first audio. A voice display calls its tools directly.
  */
 export const KIOSK_DENY_TOOLS = Object.freeze([
   "crow_delegate", "crow_job_status",
   "crow_schedule_bot", "crow_list_bot_schedules", "crow_delete_bot_schedule",
+  "crow_discover",
 ]);
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -52,22 +56,36 @@ export function pairRequester(req) {
 }
 
 /**
- * STT warm-up (ruling R13): one tiny transcription per STT profile at most
- * every 10 minutes, kicked on hello so the first real turn skips the model
- * load. Never throws.
+ * STT warm-up (ruling R13): one 1-s silent transcription per STT profile AND
+ * model (a display on tiny.en warms tiny.en) at most every 10 minutes. The smoke
+ * measured 8.2 s for the first inference after a whisper start even with the
+ * model preloaded, so this runs on hello, at gateway boot (retried until whisper
+ * answers), after a display's voice settings change, and from the runtime's
+ * minute sweep for idle connected displays (bounds a whisper restart's cold
+ * window to ~10 min). A FAILED warm-up is forgotten, so the next call retries.
+ * Resolves true (warmed), false (failed) or null (nothing to do). Never throws.
  */
+const SELF_HOSTED_STT = new Set(["fasterwhisper", "whispercpp"]);
 export function createSttWarmup({ openDb, getSttProfile, createSttAdapter, wrapPcmAsWav, now = Date.now, log = (m) => console.warn(m), everyMs = 10 * 60 * 1000 }) {
   const warmedAt = new Map();
   return async function sttWarmup(device) {
     const db = openDb();
+    let key = null;
     try {
       const p = await getSttProfile(db, device);
-      if (!p || now() - (warmedAt.get(p.id) || 0) < everyMs) return;
-      warmedAt.set(p.id, now());
+      // Self-hosted only: the keep-warm must never bill a cloud STT API every 10 minutes.
+      if (!p || !SELF_HOSTED_STT.has(p.provider)) return null;
+      const model = kioskSttModel(p, device?.kiosk_settings);
+      key = `${p.id}|${model || ""}`;
+      if (now() - (warmedAt.get(key) || 0) < everyMs) return null;
+      warmedAt.set(key, now());
       const stt = await createSttAdapter(p);
-      await stt.transcribe(wrapPcmAsWav(Buffer.alloc(32000), 16000), { filename: "warm.wav", contentType: "audio/wav", language: p.language || undefined, signal: AbortSignal.timeout(30_000) });
+      await stt.transcribe(wrapPcmAsWav(Buffer.alloc(32000), 16000), { filename: "warm.wav", contentType: "audio/wav", language: p.language || undefined, signal: AbortSignal.timeout(30_000), ...(model ? { model } : {}) });
+      return true;
     } catch (err) {
+      if (key) warmedAt.delete(key);
       log(`[kiosk] STT warm-up failed: ${err.message}`);
+      return false;
     } finally { try { db.close?.(); } catch {} }
   };
 }
@@ -120,6 +138,7 @@ export function createKioskRuntime(deps) {
       promptSuffix: kioskPromptSuffix(),
       turnContext: kioskTurnContext(wm, device.id),
       denyTools: KIOSK_DENY_TOOLS,
+      sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
     })),
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
     wm, metrics,
@@ -129,10 +148,48 @@ export function createKioskRuntime(deps) {
     now, log,
   });
 
+  const warm = (d) => Promise.resolve().then(() => deps.sttWarmup?.(d)).catch(() => false);
+  // Sweep keep-warm: at most one attempt per display per 10 min, success or not (no per-minute DB
+  // reads or failure-log spam while whisper is down; hello/boot/admin saves still warm at once).
+  const sweepWarmAt = new Map();
+  const sweepWarm = (d) => {
+    const t = now();
+    if (t - (sweepWarmAt.get(d.id) || 0) < 10 * 60 * 1000) return;
+    sweepWarmAt.set(d.id, t);
+    warm(d);
+  };
   const sweep = (deps.setInterval || setInterval)(() => {
-    for (const id of hub.connectedIds()) for (const w of wm.sweepIdle(id)) hub.sendTo(id, { type: "wm", action: "close", id: w.id });
+    for (const id of hub.connectedIds()) {
+      for (const w of wm.sweepIdle(id)) hub.sendTo(id, { type: "wm", action: "close", id: w.id });
+      // Keep STT warm for an idle connected display (throttled to 10 min inside sttWarmup).
+      const d = hub.deviceOf(id);
+      if (d && !hub.isBusy(id)) sweepWarm(d);
+    }
   }, 60_000);
   sweep.unref?.();
+
+  /**
+   * Gateway boot: warm every paired display's STT once whisper answers. Retried
+   * every `everyMs` (whisper may still be starting) up to `tries` times; stops at
+   * the first round where no warm-up failed. Never throws.
+   */
+  function bootWarmup({ tries = 20, everyMs = 30_000 } = {}) {
+    const setT = deps.setTimeout || setTimeout;
+    let left = tries;
+    const round = async () => {
+      left--;
+      let failed = false, warmed = 0;
+      try {
+        for (const d of await withDb(kioskDevices)) {
+          const r = await warm(d);
+          if (r === false) failed = true; else if (r === true) warmed++;
+        }
+      } catch (err) { failed = true; log(`[kiosk] boot STT warm-up: ${err.message}`); }
+      if (failed && left > 0) { const t = setT(round, everyMs); t?.unref?.(); }
+      else if (warmed) log(`[kiosk] STT warm (${warmed} model${warmed === 1 ? "" : "s"})`);
+    };
+    return round();
+  }
 
   async function kioskDevices(db) { return (await deps.deviceStore.listDevices(db)).filter((d) => d.device_kind === "kiosk"); }
   async function targets(db, display) {
@@ -276,6 +333,8 @@ export function createKioskRuntime(deps) {
         if (b.kiosk_settings && typeof b.kiosk_settings === "object") patch.kiosk_settings = b.kiosk_settings;
         const d = await deps.deviceStore.updateDeviceProfiles(db, req.params.id, patch);
         hub.refreshDevice(d.id, d);
+        // A new STT profile/model pays its first-inference cost now, not on the next question.
+        if ("stt_profile_id" in patch || patch.kiosk_settings?.stt_model !== undefined) warm(d);
         // An open page only reads display_config in `ready`: push a fresh one so the save applies now.
         try { await hub.pushConfig(d.id); } catch (err) { log(`[kiosk] config push to ${d.id} failed: ${err.message}`); }
         res.json({ ok: true, device: d });
@@ -330,5 +389,5 @@ export function createKioskRuntime(deps) {
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, announce, show, stop: () => clearInterval(sweep) };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, announce, show, bootWarmup, stop: () => clearInterval(sweep) };
 }

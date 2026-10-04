@@ -65,5 +65,9 @@ const runtime = createKioskRuntime({
     .finally(() => { try { db.close(); } catch {} });
 }
 
+// Smoke 2026-10-04: the first inference after a whisper start took 8.2 s even with the
+// model preloaded, so warm every paired display's STT now (retried until whisper answers).
+runtime.bootWarmup().catch(() => {});
+
 export default function kioskRouter(dashboardAuth) { return runtime.router(dashboardAuth); }
 export function setupWebSocket(server) { return runtime.attachUpgrade(server); }

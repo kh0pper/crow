@@ -30,7 +30,7 @@ export function createSessionHub(deps) {
     let speechAbort = null;
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
     const state = (bird) => sendJson(ws, { type: "state", bird });
-    const self = { ws, get device() { return device; }, get busy() { return busy || speaking; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
+    const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
 
     // Speech (timer/announce) is serialized: one at a time, never during a turn,
     // with its own abort (barge_in / turn_start / close) and an abort-gated sink.
@@ -84,7 +84,7 @@ export function createSessionHub(deps) {
       frames = []; bytes = 0;
       // Nothing said (the page's no-speech timeout): never send room noise to STT —
       // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
-      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
+      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
       abort = new AbortController();
       const my = abort;
@@ -210,6 +210,8 @@ export function createSessionHub(deps) {
     /** The live session's device row (or null when the display is offline). */
     deviceOf: (id) => sessions.get(id)?.device || null,
     isConnected: (id) => sessions.has(id),
+    /** A turn or speech is running on this display (the STT keep-warm skips it). */
+    isBusy: (id) => !!sessions.get(id)?.busy,   // turn running, speech playing, or the mic open
     connectedIds: () => [...sessions.keys()],
   };
 }

@@ -288,7 +288,7 @@ test("speech queued during listening plays after an empty_transcript or audio_to
 // Final-review item 1: a tap with nothing said never reaches STT (whisper
 // hallucinates "Thank you." on room noise → a ghost reply).
 test("turn_end with vad_reason no_speech discards the audio: empty_transcript, idle, no STT turn; queued speech drains", async () => {
-  const { h, turns } = hub(); const ws = await hello(h);
+  const { h, turns, logs } = hub(); const ws = await hello(h);
   ws.text({ type: "turn_start", turn_id: "ns1" });
   assert.equal(h.speak("kiosk-a", "Tea timer is done."), true);
   for (let i = 0; i < 400; i++) ws.bin(Buffer.alloc(640, 3));   // 8 s of room noise, far over MIN_TURN_BYTES
@@ -299,6 +299,7 @@ test("turn_end with vad_reason no_speech discards the audio: empty_transcript, i
   assert.ok(m.some((x) => x.type === "error" && x.code === "empty_transcript" && x.recoverable));
   assert.ok(!m.some((x) => x.type === "turn_done"));
   assert.deepEqual(m.filter((x) => x.type === "state").map((x) => x.bird), ["idle", "listening", "idle"]);
+  assert.ok(logs.some((l) => /^\[kiosk\] empty turn on kiosk-a \(no speech\): caption only$/.test(l)), "smoke 2026-10-04: the silent-tap path is logged server-side");
   assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "Tea timer is done.", "speech held during listening still plays");
   // and the next real turn is unaffected
   ws.text({ type: "turn_start", turn_id: "ns2" });

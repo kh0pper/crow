@@ -91,3 +91,18 @@ export function pairStartDecision(status, body, attempt) {
 }
 const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);
 export const bannerAfterReady = (cur) => (MIC_BANNERS.has(cur) ? cur : null);
+
+/**
+ * Debug ring of what the page displayed (smoke 2026-10-04). Oldest dropped past `max`;
+ * format() is newest-first, one "HH:MM:SS.mmm kind: text" line each (text capped at 120).
+ */
+export function createStatusRing(max = 20) {
+  const items = [];
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  const stamp = (at) => { const d = new Date(at); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`; };
+  return {
+    push(kind, text, at = Date.now()) { items.push({ at, kind: String(kind), text: String(text ?? "").slice(0, 120) }); if (items.length > max) items.shift(); },
+    list() { return items.slice(); },
+    format() { return items.slice().reverse().map((i) => `${stamp(i.at)} ${i.kind}: ${i.text}`).join("\n"); },
+  };
+}

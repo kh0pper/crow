@@ -118,10 +118,22 @@ test("kiosk_settings are validated and merged; device_kind cannot be flipped to 
   assert.equal(d.kiosk_settings.lang, "en");
   assert.equal(d.kiosk_settings.memory_integration, true, "form string 'true' coerces");
   assert.equal("junk" in d.kiosk_settings, false);
-  assert.equal(d.kiosk_settings.vad_hangover_ms, 300, "clamped to 300..1200");
-  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { vad_hangover_ms: "450" } })).kiosk_settings.vad_hangover_ms, 450);
+  assert.equal(d.kiosk_settings.vad_hangover_ms, 300, "clamped to 300..900");
+  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { vad_hangover_ms: "500" } })).kiosk_settings.vad_hangover_ms, 500);
+  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { vad_hangover_ms: 5000 } })).kiosk_settings.vad_hangover_ms, 900, "clamped to 300..900");
   await store.pairDevice(db, { id: "g1", name: "G" });
   assert.equal((await store.updateDeviceProfiles(db, "g1", { device_kind: "kiosk" })).device_kind, "glasses");
+});
+
+test("smoke 2026-10-04 levers: hangover defaults to 450 ms (range 300-900); stt_model is default|tiny.en, anything else keeps the prior", async () => {
+  assert.equal(store.KIOSK_DEFAULTS.vad_hangover_ms, 450);
+  assert.deepEqual(store.KIOSK_VAD_HANGOVER_RANGE, { min: 300, max: 900 });
+  assert.equal(store.KIOSK_DEFAULTS.stt_model, "default");
+  const db = await freshDb();
+  await store.pairDevice(db, { id: "kiosk-a", name: "K", device_kind: "kiosk" });
+  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { stt_model: "tiny.en" } })).kiosk_settings.stt_model, "tiny.en");
+  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { stt_model: "large-v3" } })).kiosk_settings.stt_model, "tiny.en", "unknown model keeps the prior");
+  assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { stt_model: "default" } })).kiosk_settings.stt_model, "default");
 });
 
 test("companion devices keep their existing semantics (no migration in K1, ruling R1)", async () => {

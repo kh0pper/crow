@@ -1,5 +1,5 @@
-/** Client energy VAD (spec §7.3): 600 ms hangover, 15 s cap, 8 s with no speech ends a tap. */
-export const VAD_DEFAULTS = Object.freeze({ threshold: 0.012, hangoverMs: 600, maxMs: 15_000, minSpeechMs: 120, noSpeechMs: 8000, frameMs: 20 });
+/** Client energy VAD (spec §7.3): 450 ms hangover (smoke 2026-10-04 lever 1; per display 300-900 ms), 15 s cap, 8 s with no speech ends a tap. */
+export const VAD_DEFAULTS = Object.freeze({ threshold: 0.012, hangoverMs: 450, maxMs: 15_000, minSpeechMs: 120, noSpeechMs: 8000, frameMs: 20 });
 
 export function createVad(opts = {}) {
   const o = { ...VAD_DEFAULTS, ...opts };

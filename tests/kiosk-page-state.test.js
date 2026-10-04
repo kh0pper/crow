@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
-  displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS,
+  displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
 } from "../bundles/kiosk/public/state.js";
 import { createPlayer } from "../bundles/kiosk/public/audio.js";
 
@@ -243,4 +243,16 @@ test("fix 6: pair/start needs a well-formed JSON body; anything else retries wit
 test("fix 7: ready clears only connection banners; a mic prompt survives a reconnect", () => {
   for (const k of ["mic_blocked", "needs_gesture", "no_mic", "mic_error"]) assert.equal(bannerAfterReady(k), k);
   for (const k of ["opened_elsewhere", "error_generic", "no_bot", null]) assert.equal(bannerAfterReady(k), null);
+});
+
+test("smoke 2026-10-04 item 7: the status ring keeps the last 20 displayed statuses, newest first, text capped", () => {
+  const r = createStatusRing(20);
+  for (let i = 0; i < 25; i++) r.push("caption:x", `n${i}`, new Date(2026, 9, 4, 1, 2, 3, i).getTime());
+  assert.equal(r.list().length, 20);
+  assert.equal(r.list()[0].text, "n5", "oldest five dropped");
+  const lines = r.format().split("\n");
+  assert.equal(lines.length, 20);
+  assert.equal(lines[0], "01:02:03.024 caption:x: n24");
+  r.push("banner", "y".repeat(500));
+  assert.equal(r.list().at(-1).text.length, 120);
 });

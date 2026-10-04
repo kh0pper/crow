@@ -81,10 +81,11 @@ async function runPanel(device, data = {}) {
   vm.runInContext(CLIENT_SCRIPT, ctx);
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
   const card = document.querySelector("#kk-devices section");
-  const [bot, stt, tts] = card.querySelectorAll("select");
+  const [bot, stt, sm, tts] = card.querySelectorAll("select");
+  const vad = [...card.querySelectorAll("input")].find((i) => i.type === "number");
   const save = [...card.querySelectorAll("button")].find((b) => b.textContent === STRINGS.en.save);
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
-  return { bot, stt, tts, save, posts, flush, card };
+  return { bot, stt, sm, tts, vad, save, posts, flush, card };
 }
 const KDEV = { id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, kiosk_settings: { follow_up: true, memory_integration: false } };
 
@@ -109,4 +110,21 @@ test("panel Save: only changed fields are posted; a known current value has no (
   assert.equal(p.posts.length, 1);
   assert.deepEqual(p.posts[0].body, { stt_profile_id: "stt-b" }, "bot, tts and settings untouched → omitted");
   assert.equal(p.posts[0].path, "/api/kiosk/admin/displays/kiosk-a");
+});
+
+test("smoke 2026-10-04 levers in the panel: end-of-speech wait (300-900 ms) and speech model are per display; only changes are posted", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, vad_hangover_ms: 450, stt_model: "default" } });
+  assert.equal(p.vad.value, "450");
+  assert.equal(p.vad.min, "300"); assert.equal(p.vad.max, "900");
+  assert.equal(p.sm.value, "default");
+  assert.deepEqual([...p.sm.querySelectorAll("option")].map((o) => o.value), ["default", "tiny.en"]);
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 0, "untouched: nothing posted");
+  p.vad.value = "5000";
+  for (const o of p.sm.querySelectorAll("option")) o.selected = o.value === "tiny.en";
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 1);
+  assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, vad_hangover_ms: 900, stt_model: "tiny.en" } }, "typed value clamped to 900");
 });

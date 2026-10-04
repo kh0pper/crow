@@ -8,6 +8,18 @@ export const KIOSK_STT_PROFILE_ID = "kiosk-stt-distil-small-en";
 export const KIOSK_STT_MODEL = "Systran/faster-distil-whisper-small.en";
 const FALLBACK_BASE_URL = "http://localhost:8004/v1";
 
+/**
+ * Per-display speech model (kiosk_settings.stt_model, latency lever 2). "default"
+ * keeps the display's STT profile model (the kiosk profile = distil-small.en);
+ * "tiny.en" is faster on CPU but less accurate. Applied ONLY to a faster-whisper
+ * profile: any other provider (or a non-kiosk profile choice) keeps its own model.
+ */
+export const KIOSK_STT_MODEL_IDS = Object.freeze({ "tiny.en": "Systran/faster-whisper-tiny.en" });
+export function kioskSttModel(profile, kioskSettings) {
+  if (!profile || profile.provider !== "fasterwhisper") return null;
+  return KIOSK_STT_MODEL_IDS[kioskSettings?.stt_model] || null;
+}
+
 function parseList(raw) {
   try { const v = JSON.parse(raw || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }
 }

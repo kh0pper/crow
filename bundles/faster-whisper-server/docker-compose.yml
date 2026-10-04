@@ -13,8 +13,10 @@ services:
       # Never unload a loaded model. The default (300 s) unloaded after five idle
       # minutes, so the first kiosk turn after a quiet spell paid a model load.
       WHISPER__TTL: "-1"
-      # The kiosk's small English model (spec §7.3) is loaded at start.
-      PRELOAD_MODELS: '["Systran/faster-distil-whisper-small.en"]'
+      # The kiosk's small English model (spec §7.3) is loaded at start, plus tiny.en
+      # (~75 MB) — the per-display "Fastest" speech model (smoke 2026-10-04 lever 2) —
+      # so choosing it never pays a download. The gateway warms whichever a display uses.
+      PRELOAD_MODELS: '["Systran/faster-distil-whisper-small.en", "Systran/faster-whisper-tiny.en"]'
       ENABLE_UI: "false"
     # large-v3 int8 + distil-small resident, plus decode buffers for a 90-min
     # meeting recording (R4 meeting recorder) — measured headroom, not a target.

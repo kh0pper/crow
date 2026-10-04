@@ -3,9 +3,9 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady,
+  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing,
 } from "./state.js";
-import { createVad, TURN_GUARD_MS } from "./vad.js";
+import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
 import { mountBird } from "./bird-view.js";
 import { createWindowView } from "./wm-view.js";
@@ -26,7 +26,18 @@ let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = n
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
 
-function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; }
+/*
+ * Debug ring (smoke 2026-10-04: an unidentified message flashed after silent taps).
+ * Every status the page shows — banner, caption, bird state, mic label, wm and
+ * socket events — lands in a 20-entry in-memory ring; a long press on the clock
+ * shows it. Nothing is sent or stored.
+ */
+const statuses = createStatusRing(20);
+const note = (kind, text) => { statuses.push(kind, text, Date.now()); if (!$("debug").hidden) showDebug(); };
+function showDebug() { const d = $("debug"); d.textContent = statuses.format(); d.hidden = false; }
+/** Sets the bot caption for a page/system reason (tap hint, error, clear) — fixed strings, so the text is recorded. */
+function caption(text, why) { $("cap-bot").textContent = text; note(`caption:${why}`, text); }
+function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); }
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
 function releaseAudio() {
   if (turn && !turn.ended) endTurn("manual", null);
@@ -36,6 +47,7 @@ function releaseAudio() {
   try { ctx?.suspend(); } catch {}
 }
 function setBird(s) {
+  if (s !== birdState) note("bird", `${s} (pill: ${t(s === "listening" ? "mic_stop" : s === "speaking" ? "mic_interrupt" : "mic_talk")})`);
   birdState = s;
   bird?.setState(s);
   $("mic").textContent = t(s === "listening" ? "mic_stop" : s === "speaking" ? "mic_interrupt" : "mic_talk");
@@ -106,6 +118,7 @@ function connect() {
     player?.flush();
     serverBird = "idle";
     renderBird();
+    note("ws", `closed ${ev.code} ${ev.reason || ""}`.trim());
     const d = closeDecision(ev.code, ev.reason);
     if (releasesMic(d)) releaseAudio();
     if (d.action === "forget_token") { ls.del(LS_DEV); ls.del(LS_TOK); pair(); return; }
@@ -128,8 +141,9 @@ function onText(m) {
       serverBird = m.bird;
       renderBird();                                  // idle while our audio still plays stays "speaking" (F3)
       break;
-    case "transcript_final": $("cap-user").textContent = m.text || ""; $("cap-bot").textContent = ""; break;
-    case "caption_delta": $("cap-bot").textContent += m.text || ""; break;
+    // Privacy (docs: transcripts live only in the 15-min server conversation): the ring keeps LENGTHS of what was said/answered, never the words.
+    case "transcript_final": $("cap-user").textContent = m.text || ""; note("transcript", `${(m.text || "").length} chars`); caption("", "clear"); break;
+    case "caption_delta": { const was = $("cap-bot").textContent; $("cap-bot").textContent += m.text || ""; if (!was) note("caption:reply", "started"); break; }
     case "tts_start": {
       const d = ttsStartDecision(turn);
       if (!d.play) break;                            // a barged turn's in-flight start: the player stays muted
@@ -138,15 +152,16 @@ function onText(m) {
       player?.begin(m.codec, m.sample_rate, ttsSeq);
       break;
     }
-    case "wm": wmView?.apply(m); if (m.action === "timer_done") chime(); break;
-    case "announce": $("cap-user").textContent = ""; $("cap-bot").textContent = m.text || ""; break;
+    case "wm": note("wm", `${m.action}${m.id ? " " + m.id : ""}${m.windows ? " (" + m.windows.length + ")" : ""}`); wmView?.apply(m); if (m.action === "timer_done") chime(); break;
+    case "announce": $("cap-user").textContent = ""; $("cap-bot").textContent = m.text || ""; note("caption:announce", `${(m.text || "").length} chars`); break;
     case "turn_done":
       if (turn && turn.id === m.turn_id) { turn.done = m; turn.doneAt = performance.now(); settle(turn); }
       break;
     case "error":
+      note("error", `${m.code}${m.recoverable ? "" : " (fatal)"}`);
       if (m.code === "no_bound_bot") banner("no_bot");
       else if (!m.recoverable) banner("error_generic");
-      else $("cap-bot").textContent = t(`err_${m.code}`);
+      else caption(t(`err_${m.code}`), m.code);
       break;
     default:
   }
@@ -169,7 +184,7 @@ function mountUi() {
     });
   }
   if (!clockTimer) tickClock();
-  if (!$("cap-bot").textContent) $("cap-bot").textContent = t("tap_hint");
+  if (!$("cap-bot").textContent) caption(t("tap_hint"), "tap_hint");
 }
 
 async function ensureAudio() {
@@ -206,14 +221,14 @@ async function startTurn(source) {
   if (!(await ensureAudio())) return;
   if (turn) report(turn, true);                  // a pending no-audio wait is cut short: still reported (F9)
   const noSpeechMs = source === "follow_up" ? (config.follow_up_s || 6) * 1000 : 8000;
-  const hangoverMs = Number(config.vad_hangover_ms) || 600;   // latency lever 1 (ruling R20)
+  const hangoverMs = Number(config.vad_hangover_ms) || VAD_DEFAULTS.hangoverMs;   // latency lever 1 (ruling R20; default 450 ms)
   turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null };
   const tn = turn;
   tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
   send({ type: "turn_start", source: source === "wake" ? "wake" : "tap", turn_id: turn.id });
   mic.start(source === "wake");                   // 1.0 s pre-roll only for a wake word (spec §7.3)
   $("cap-user").textContent = "";
-  $("cap-bot").textContent = "";
+  caption("", `turn_start ${source}`);
 }
 function endTurn(reason, speechEndAt) {
   if (!turn || turn.ended) return;
@@ -261,6 +276,14 @@ async function onTap() {
   }
 }
 $("bird").addEventListener("click", onTap);
+// Long press (700 ms) on the clock toggles the status ring; a tap anywhere on it closes it.
+{
+  let hold = null;
+  const cancel = () => { clearTimeout(hold); hold = null; };
+  $("clock").addEventListener("pointerdown", () => { cancel(); hold = setTimeout(() => { hold = null; if ($("debug").hidden) showDebug(); else $("debug").hidden = true; }, 700); });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) $("clock").addEventListener(ev, cancel);
+  $("debug").addEventListener("click", () => { $("debug").hidden = true; });
+}
 $("mic").addEventListener("click", onTap);
 window.addEventListener("pagehide", releaseAudio);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && ls.get(LS_TOK)) connect(); });   // connect() is a no-op while a socket is live

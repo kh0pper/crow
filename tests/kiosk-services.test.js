@@ -9,7 +9,7 @@ test("faster-whisper: pinned to the running digest's tag, never unloads, preload
   const y = read("bundles/faster-whisper-server/docker-compose.yml");
   assert.match(y, /^\s*image: fedirz\/faster-whisper-server:0\.5\.0-cpu\s*$/m);
   assert.match(y, /WHISPER__TTL: "-1"/);
-  assert.match(y, /PRELOAD_MODELS: '\["Systran\/faster-distil-whisper-small\.en"\]'/);
+  assert.match(y, /PRELOAD_MODELS: '\["Systran\/faster-distil-whisper-small\.en", "Systran\/faster-whisper-tiny\.en"\]'/, "kiosk model + the tiny.en lever");
   assert.match(y, /^\s*mem_limit: 8g\s*$/m);
   assert.match(y, /"127\.0\.0\.1:8004:8000"/);
   assert.doesNotMatch(y, /:latest/);
@@ -44,4 +44,15 @@ test("pickKioskTtsProfile prefers the local Kokoro profile; null when absent", a
   const s = settings({ tts_profiles: JSON.stringify([{ id: "edge", provider: "edge" }, { id: "k", provider: "kokoro", baseUrl: "http://localhost:8880/v1" }]) });
   assert.equal((await pickKioskTtsProfile({}, s)).id, "k");
   assert.equal(await pickKioskTtsProfile({}, settings()), null);
+});
+
+test("smoke 2026-10-04 lever 2: kioskSttModel maps tiny.en for faster-whisper only; default keeps the profile model", async () => {
+  const { kioskSttModel, KIOSK_STT_MODEL_IDS } = await import("../bundles/kiosk/server/profiles.js");
+  assert.equal(kioskSttModel({ provider: "fasterwhisper" }, { stt_model: "tiny.en" }), "Systran/faster-whisper-tiny.en");
+  assert.equal(kioskSttModel({ provider: "fasterwhisper" }, { stt_model: "default" }), null);
+  assert.equal(kioskSttModel({ provider: "fasterwhisper" }, undefined), null);
+  assert.equal(kioskSttModel({ provider: "groq" }, { stt_model: "tiny.en" }), null);
+  assert.equal(kioskSttModel(null, { stt_model: "tiny.en" }), null);
+  const y = read("bundles/faster-whisper-server/docker-compose.yml");
+  for (const id of Object.values(KIOSK_STT_MODEL_IDS)) assert.ok(y.includes(id), `${id} is preloaded`);
 });

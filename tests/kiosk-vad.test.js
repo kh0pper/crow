@@ -6,11 +6,12 @@ import { e2eMs, playStartPerfTime } from "../bundles/kiosk/public/metrics.js";
 
 const run = (vad, frames) => { let t = 1000; for (const rms of frames) { t += 20; const r = vad.push(rms, t); if (r.end) return { ...r, t }; } return null; };
 
-test("speech then silence ends after 600 ms hangover; speechEndAt is the last voiced frame", () => {
+test("speech then silence ends after the 450 ms default hangover (smoke lever 1); speechEndAt is the last voiced frame", () => {
   const r = run(createVad(), [...Array(25).fill(0.05), ...Array(40).fill(0.001)]);
   assert.equal(r.reason, "silence");
   assert.equal(r.speechEndAt, 1000 + 25 * 20);
-  assert.equal(r.t - r.speechEndAt, VAD_DEFAULTS.hangoverMs);
+  assert.ok(r.t - r.speechEndAt >= VAD_DEFAULTS.hangoverMs && r.t - r.speechEndAt < VAD_DEFAULTS.hangoverMs + 20, "ends on the first 20 ms frame past the hangover");
+  assert.equal(VAD_DEFAULTS.hangoverMs, 450, "smoke 2026-10-04 lever 1: 600 → 450 ms");
 });
 
 test("pauses shorter than the hangover do not end the turn", () => {

@@ -248,7 +248,7 @@ test("ruling A: with maker-lab's real router mounted first, /display reaches the
 
 // Ruling C (F4) + review C3: never on a shared display.
 test("ruling C: KIOSK_DENY_TOOLS denies cross-bot escapes, and every voice turn carries it", async () => {
-  assert.deepEqual([...KIOSK_DENY_TOOLS].sort(), ["crow_delegate", "crow_delete_bot_schedule", "crow_job_status", "crow_list_bot_schedules", "crow_schedule_bot"]);
+  assert.deepEqual([...KIOSK_DENY_TOOLS].sort(), ["crow_delegate", "crow_delete_bot_schedule", "crow_discover", "crow_job_status", "crow_list_bot_schedules", "crow_schedule_bot"]);
   assert.ok(Object.isFrozen(KIOSK_DENY_TOOLS));
   const { ws } = await connect("kiosk-deny");
   const before = turnCalls.length;
@@ -260,6 +260,11 @@ test("ruling C: KIOSK_DENY_TOOLS denies cross-bot escapes, and every voice turn 
   assert.deepEqual(call.denyTools, KIOSK_DENY_TOOLS);
   assert.equal(call.device.id, "kiosk-deny");
   assert.ok(call.signal instanceof AbortSignal);
+  // Lever 2: the per-display model reaches the turn, for a faster-whisper profile only.
+  assert.equal(call.sttModel({ provider: "fasterwhisper" }), null, "default → the profile's own model");
+  call.device.kiosk_settings = { stt_model: "tiny.en" };
+  assert.equal(call.sttModel({ provider: "fasterwhisper" }), "Systran/faster-whisper-tiny.en");
+  assert.equal(call.sttModel({ provider: "openai" }), null, "never forced onto another provider");
   ws.close();
 });
 
@@ -315,7 +320,7 @@ test("ruling F: createSttWarmup transcribes once per profile per 10 min and neve
   const calls = [];
   const warm = createSttWarmup({
     openDb: () => ({ close() {} }),
-    getSttProfile: async (d, dev) => (dev.stt_profile_id === "boom" ? (() => { throw new Error("x"); })() : { id: dev.stt_profile_id, language: "en" }),
+    getSttProfile: async (d, dev) => (dev.stt_profile_id === "boom" ? (() => { throw new Error("x"); })() : { id: dev.stt_profile_id, provider: "fasterwhisper", language: "en" }),
     createSttAdapter: async (p) => ({ transcribe: async (wav, o) => { calls.push({ p: p.id, len: wav.length, o }); return { text: "" }; } }),
     wrapPcmAsWav, now: () => t, log: () => {},
   });
@@ -328,7 +333,68 @@ test("ruling F: createSttWarmup transcribes once per profile per 10 min and neve
   t += 10 * 60 * 1000 + 1;
   await warm({ stt_profile_id: "fw" });
   assert.deepEqual(calls.map((c) => c.p), ["fw", "other", "fw"]);
-  await warm({ stt_profile_id: "boom" });   // swallowed
+  assert.equal(await warm({ stt_profile_id: "boom" }), false);   // swallowed
+});
+
+test("smoke 2026-10-04: warm-up is per profile AND model, retries after a failure, and never bills a cloud STT", async () => {
+  let t = 1_000_000, fail = true;
+  const calls = [];
+  const profiles = { fw: { id: "fw", provider: "fasterwhisper", language: "en" }, cloud: { id: "cloud", provider: "openai" } };
+  const warm = createSttWarmup({
+    openDb: () => ({ close() {} }),
+    getSttProfile: async (d, dev) => profiles[dev.stt_profile_id],
+    createSttAdapter: async (p) => ({ transcribe: async (wav, o) => { calls.push({ p: p.id, model: o.model ?? null }); if (fail) throw new Error("ECONNREFUSED"); return { text: "" }; } }),
+    wrapPcmAsWav, now: () => t, log: () => {},
+  });
+  assert.equal(await warm({ stt_profile_id: "fw" }), false, "whisper still starting");
+  fail = false;
+  assert.equal(await warm({ stt_profile_id: "fw" }), true, "a failure is not remembered as warm");
+  assert.equal(await warm({ stt_profile_id: "fw" }), null, "throttled");
+  assert.equal(await warm({ stt_profile_id: "fw", kiosk_settings: { stt_model: "tiny.en" } }), true, "a new model warms at once");
+  assert.equal(await warm({ stt_profile_id: "cloud" }), null);
+  assert.deepEqual(calls, [{ p: "fw", model: null }, { p: "fw", model: null }, { p: "fw", model: "Systran/faster-whisper-tiny.en" }]);
+});
+
+test("smoke 2026-10-04: boot warm-up warms every paired display and retries until whisper answers", async () => {
+  const timers = [];
+  let up = false;
+  const warmed = [];
+  const r = createKioskRuntime(runtimeDeps({
+    sttWarmup: async (d) => { if (!up) return false; warmed.push(d.id); return true; },
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; },
+  }));
+  await store.pairDevice(db(), { id: "kiosk-boot", name: "boot", device_kind: "kiosk" });
+  await r.bootWarmup({ tries: 3, everyMs: 30_000 });
+  assert.equal(timers.length, 1, "retry scheduled");
+  assert.equal(timers[0].ms, 30_000);
+  up = true;
+  await timers[0].fn();
+  assert.ok(warmed.includes("kiosk-boot"));
+  assert.equal(timers.length, 1, "no retry after a clean round");
+  up = false;
+  const r2 = createKioskRuntime(runtimeDeps({ sttWarmup: async () => false, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return {}; } }));
+  timers.length = 0;
+  await r2.bootWarmup({ tries: 2, everyMs: 1 });
+  await timers[0].fn();
+  assert.equal(timers.length, 1, "gives up after `tries` rounds");
+  r.stop(); r2.stop();
+});
+
+test("smoke 2026-10-04: changing a display's speech model warms it at once", async () => {
+  const warmed = [];
+  const r = createKioskRuntime(runtimeDeps({ sttWarmup: async (d) => { warmed.push(d.kiosk_settings?.stt_model); return true; } }));
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  await store.pairDevice(db(), { id: "kiosk-model", name: "m", device_kind: "kiosk" });
+  const res = await fetch(b + "/api/kiosk/admin/displays/kiosk-model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kiosk_settings: { stt_model: "tiny.en" } }) });
+  assert.equal((await res.json()).ok, true);
+  for (let i = 0; i < 20 && !warmed.length; i++) await new Promise((x) => setTimeout(x, 5));
+  assert.deepEqual(warmed, ["tiny.en"]);
+  await fetch(b + "/api/kiosk/admin/displays/kiosk-model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kiosk_settings: { follow_up: true } }) });
+  await new Promise((x) => setTimeout(x, 20));
+  assert.deepEqual(warmed, ["tiny.en"], "an unrelated setting does not warm");
+  r.stop(); s.close();
 });
 
 // Review fix 2 (R10): CSRF guards every admin mutation; pairing is not behind it.
