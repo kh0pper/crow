@@ -55,8 +55,8 @@ export async function getFile(cfg, segs, { maxBytes }) {
   return { bytes, etag: normEtag(res.headers.get("etag")), mtime: lm ? Math.floor(Date.parse(lm) / 1000) : 0 };
 }
 
-export function putFile(cfg, segs, bytes, { ifMatch, ifNoneMatch } = {}) {
-  const headers = { "Content-Type": "application/octet-stream" };
+export function putFile(cfg, segs, bytes, { ifMatch, ifNoneMatch, contentType } = {}) {
+  const headers = { "Content-Type": contentType || "application/octet-stream" };
   if (ifMatch) headers["If-Match"] = `"${normEtag(ifMatch)}"`;
   if (ifNoneMatch) headers["If-None-Match"] = ifNoneMatch;
   return ncFetch(cfg, "PUT", filesUrl(cfg, segs), { headers, body: bytes, timeoutMs: 120000 });

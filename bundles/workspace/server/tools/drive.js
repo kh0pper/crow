@@ -8,7 +8,7 @@ import { myShares, createUserShare } from "../nc/ocs.js";
 import { lockInfo, classifyLock } from "../nc/locks.js";
 import { exportAs } from "../nc/onlyoffice.js";
 import { listVersions } from "../nc/versions.js";
-import { withFileWrite, withFileRestore, createFile, MAX_EDIT_BYTES } from "../write-protocol.js";
+import { withFileWrite, withFileRestore, createFile, refuseShareRoot, MAX_EDIT_BYTES } from "../write-protocol.js";
 
 const PERMS = { R: "can_share", W: "can_write", D: "can_delete", C: "can_create", K: "can_create", N: "can_rename", V: "can_move" };
 
@@ -39,6 +39,7 @@ export const driveReadDefs = [
 ];
 
 
+const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
 const OFFICE = /\.(docx|xlsx|pptx)$/i;
 const NAME_RE = /^[^/\\\u0000-\u001f\u007f]{1,255}$/;
 const EXPORTS = { doc: ["pdf", "docx", "odt"], sheet: ["pdf", "xlsx", "ods", "csv"], slide: ["pdf", "pptx", "odp"] };
@@ -107,18 +108,18 @@ export const driveWriteDefs = [
     schema: { ...fileRef, wait_s: writeOpts.wait_s },
     run: async (args, { getConfig, clock }) => {
       const cfg = getConfig(); const segs = await resolveRef(cfg, refOf(args)); const e = await stat(cfg, segs);
-      // A share's mount point (owned by someone else, top of what was shared) is not trashed by DELETE: Nextcloud
-      // only UNSHARES it from Crow bot. Say so instead of claiming "trashed".
-      const parent = segs.length > 1 ? await stat(cfg, segs.slice(0, -1)) : null;
-      const isShareRoot = e.ownerId && e.ownerId !== cfg.user && (!parent || parent.ownerId !== e.ownerId);
-      if (isShareRoot) throw new WsError("share_root", `"${e.name}" is shared with Crow bot by ${e.ownerName || e.ownerId}; deleting it would only remove Crow's access, not the files. Ask the owner to delete it, or trash items inside it.`);
+      await refuseShareRoot(cfg, segs, e);
       await refuseIfOpen(cfg, e, args.wait_s ?? 0, clock);
       await remove(cfg, segs).catch((err) => explain423(cfg, segs, err));
       return { trashed: true, path: e.path, file_id: e.fileId };
     } },
-  { name: "ws_drive_upload_file", description: "Create a NEW file from text or base64 (max 10 MB). Never overwrites.",
-    schema: { folder: z.string().max(4096), name: z.string().min(1).max(255), text: z.string().optional(), base64: z.string().optional() },
-    run: async (args, { getConfig, clock }) => { const cfg = getConfig(); const name = checkName(args.name); return createFile(cfg, splitFolder(args.folder), name, decodeContent(args), { summary: `upload ${name}`, clock }); } },
+  { name: "ws_drive_upload_file", description: "Create a NEW file from text or base64 (max 10 MB). Never overwrites. mime (optional) sets the content type, e.g. text/csv.",
+    schema: { folder: z.string().max(4096), name: z.string().min(1).max(255), text: z.string().optional(), base64: z.string().optional(), mime: z.string().max(255).optional() },
+    run: async (args, { getConfig, clock }) => {
+      const cfg = getConfig(); const name = checkName(args.name);
+      if (args.mime !== undefined && !MIME_RE.test(args.mime)) throw new WsError("bad_mime", "mime must look like type/subtype, e.g. text/csv");
+      return createFile(cfg, splitFolder(args.folder), name, decodeContent(args), { summary: `upload ${name}`, clock, contentType: args.mime });
+    } },
   { name: "ws_drive_upload_new_version", description: "Replace the content of a NON-office file (text, csv, images…). Refused for .docx/.xlsx/.pptx — use ws_docs_find_replace / ws_docs_replace_section / ws_sheets_write instead.",
     schema: { ...fileRef, text: z.string().optional(), base64: z.string().optional(), ...writeOpts },
     run: async (args, { getConfig, clock }) => {

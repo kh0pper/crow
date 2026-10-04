@@ -85,6 +85,7 @@ test("editor lock with no live session → stale_editor_lock, no drop", async ()
   fake.addFile("S/s.docx", Buffer.from("d"), { owner: "admin", lock: { type: 1, owner: "onlyoffice", displayName: "ONLYOFFICE" } });
   await assert.rejects(W.withFileWrite(cfg, { path: "S/s.docx" }, appendMut("!"), { clock, waitS: 0, ifOpen: "force_close" }),
     (e) => e.code === "stale_editor_lock" && /Unlock/.test(e.message));
+  assert.ok(!fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.key === "k" + fake.node("S/s.docx").fileId), "no drop for a stale lock");
 });
 
 test("412 once → re-read and re-apply; twice → changed_concurrently", async () => {
@@ -236,4 +237,131 @@ test("classifyLock keys on lock-owner-type only: a NULL owner (spike S6) is stil
   fake.addFile("S/tok.docx", Buffer.from("d"), { lock: { type: 2, owner: null, displayName: null } });
   const t = await classifyLock(cfg, await stat(cfg, ["S", "tok.docx"]));
   assert.equal(t.code, "locked_by_person"); assert.match(t.message, /^Someone locked/);
+});
+
+// ---- fix round 1 ----
+let injN = 0;
+/** Someone else's save: new bytes, etag and version row (same-second overwrite modelled like the fake). */
+function inject(path, bytes, { author = "admin", mtime } = {}) {
+  const n = fake.node(path);
+  n.bytes = Buffer.from(bytes); n.etag = `"inj${++injN}"`;
+  n.mtime = mtime ?? (fake.state.realisticMtime ? fake.state.realisticMtime() : 1_900_000_000 + injN);
+  const last = n.versions.at(-1);
+  if (last && last.id === n.mtime) Object.assign(last, { bytes: n.bytes, author }); else n.versions.push({ id: n.mtime, bytes: n.bytes, label: null, author });
+  return n;
+}
+const labelsOf = (path) => fake.versionsOf(path).map((v) => v.label);
+
+test("I1: a human label that merely starts with 'Crow' is never relabelled", async () => {
+  const n = fake.addFile("S/hl.txt", Buffer.from("a"));
+  n.versions[0].label = "Crow's nest final";
+  await W.withFileWrite(cfg, { path: "S/hl.txt" }, appendMut("b"), { clock });
+  assert.equal(fake.versionsOf("S/hl.txt")[0].label, "Crow's nest final");
+  assert.ok(W.CROW_LABEL_RE.test("Crow (queued): x") && W.CROW_LABEL_RE.test("Before Quick edit: x") && !W.CROW_LABEL_RE.test("Undo this later"));
+});
+
+test("I2: when the version list cannot be read, nothing is labelled and label_warning is returned", async () => {
+  fake.addFile("S/nl.txt", Buffer.from("a"));
+  let fail = true;
+  fake.extraRoutes = (req, res, body, { send }) => { if (fail && req.method === "PROPFIND" && req.url.includes("/dav/versions/")) { send(500); return true; } return false; };
+  const pp = () => fake.calls.filter((c) => c.method === "PROPPATCH").length;
+  const p0 = pp();
+  const r = await W.withFileWrite(cfg, { path: "S/nl.txt" }, appendMut("b"), { clock });
+  fail = false; fake.extraRoutes = null;
+  assert.equal(pp(), p0, "no PROPPATCH"); assert.ok(r.label_warning); assert.ok(r.version_id);
+  assert.deepEqual(labelsOf("S/nl.txt"), [null, null]);
+});
+
+test("I3: a write that lands right after our PUT is not labelled as Crow's", async () => {
+  fake.addFile("S/aft.txt", Buffer.from("a"));
+  fake.state.afterPutHook = (n) => { if (n.path === "S/aft.txt") { fake.state.afterPutHook = null; inject("S/aft.txt", "a+b+kevin"); } };
+  const r = await W.withFileWrite(cfg, { path: "S/aft.txt" }, appendMut("+b"), { clock });
+  fake.state.afterPutHook = null;
+  const vs = fake.versionsOf("S/aft.txt");
+  assert.equal(vs.at(-1).bytes.toString(), "a+b+kevin"); assert.equal(vs.at(-1).label, null, "kevin's row unlabelled");
+  assert.ok(r.label_warning);
+});
+
+test("I4: a plain restore's undo token uses the file as read AFTER the spacing gap", async () => {
+  const n = fake.addFile("S/rg.txt", Buffer.from("A"));
+  const vA = String(n.versions[0].id);
+  await W.withFileWrite(cfg, { path: "S/rg.txt" }, async () => ({ bytes: Buffer.from("B"), changed: 1, summary: "B" }), { clock });
+  let cMtime = null;
+  fake.state.pendingReleases.push({ at: fake.state.now + 100, fn: () => { cMtime = inject("S/rg.txt", "C").mtime; } });
+  const r = await W.withFileRestore(cfg, { path: "S/rg.txt" }, vA, { clock });
+  assert.ok(cMtime, "the save landed during the gap");
+  assert.equal(text(fake.node("S/rg.txt").bytes), "A");
+  assert.equal(W.decodeVersionId(r.version_id).b, String(cMtime));
+  await W.undoFileChange(cfg, { path: "S/rg.txt" }, r.version_id, { clock });
+  assert.equal(text(fake.node("S/rg.txt").bytes), "C", "undo brings back the content that was current, not an older one");
+});
+
+test("I5: a save landing during the mtime-gap sleep resets the gap (no shared second, both versions kept)", async () => {
+  fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
+  fake.addFile("S/gap.txt", Buffer.from("base"));
+  const v0 = fake.versionsOf("S/gap.txt").length;
+  fake.state.pendingReleases.push({ at: fake.state.now + 300, fn: () => inject("S/gap.txt", "base+kevin") });
+  await W.withFileWrite(cfg, { path: "S/gap.txt" }, appendMut("+bot"), { clock });
+  const vs = fake.versionsOf("S/gap.txt");
+  fake.state.realisticMtime = null;
+  assert.equal(text(fake.node("S/gap.txt").bytes), "base+kevin+bot");
+  assert.equal(vs.length, v0 + 2, "kevin's save and the bot write are separate rows");
+  assert.equal(vs.at(-2).bytes.toString(), "base+kevin");
+});
+
+test("I6: 412 then 423 each get their own retry; the 423 retry queues", async () => {
+  fake.addFile("S/mix.docx", Buffer.from("d"));
+  let n = 0, got = null;
+  const r = await W.withFileWrite(cfg, { path: "S/mix.docx" }, async (bytes) => {
+    n++;
+    if (n === 1) fake.node("S/mix.docx").etag = '"bumped-mix"';
+    if (n === 2) fake.openInEditor("S/mix.docx", ["dayane"]);
+    return { bytes: Buffer.from(bytes), changed: 1, summary: "x" };
+  }, { clock, queue: { enqueue: async (sig) => { got = sig; return { queued: true, change_id: "pc_mix" }; } } });
+  assert.deepEqual(r, { queued: true, change_id: "pc_mix" }); assert.equal(got.lock.code, "open_in_editor"); assert.equal(n, 2);
+});
+
+test("I6: a second 423 (lock re-appears after the retry) goes back through the lock check and queues", async () => {
+  const p = "S/again.docx";
+  fake.addFile(p, Buffer.from("d"));
+  let n = 0;
+  const r = await W.withFileWrite(cfg, { path: p }, async (bytes) => {
+    n++;
+    fake.openInEditor(p, ["dayane"]);
+    if (n === 1) fake.state.pendingReleases.push({ at: fake.state.now + 2000, fn: () => { fake.node(p).lock = null; } });
+    return { bytes: Buffer.from(bytes), changed: 1, summary: "x" };
+  }, { clock, waitS: 10, queue: { enqueue: async () => ({ queued: true, change_id: "pc_again" }) } });
+  assert.deepEqual(r, { queued: true, change_id: "pc_again" }); assert.equal(n, 2);
+  assert.equal(text(fake.node(p).bytes), "d");
+});
+
+test("I7: a forged created-file token never deletes a folder or a share root", async () => {
+  const { normEtag } = await import("../bundles/workspace/server/nc/dav.js");
+  const dir = fake.addFolder("S/forged-dir");
+  const t1 = W.encodeVersionId({ f: dir.fileId, b: "0", a: normEtag(dir.etag) });
+  await assert.rejects(W.undoFileChange(cfg, { path: "S/forged-dir" }, t1, { clock }), (e) => e.code === "not_a_file");
+  assert.ok(fake.node("S/forged-dir"));
+  const top = fake.addFile("SR2/top.txt", Buffer.from("x"), { owner: "dayane" });
+  const t2 = W.encodeVersionId({ f: top.fileId, b: "0", a: normEtag(top.etag) });
+  await assert.rejects(W.undoFileChange(cfg, { path: "SR2/top.txt" }, t2, { clock }), (e) => e.code === "share_root");
+  assert.ok(fake.node("SR2/top.txt"));
+});
+
+test("S1: changed_since carries modified and modified_by_label", async () => {
+  fake.addFile("S/mb.txt", Buffer.from("a"));
+  const r = await W.withFileWrite(cfg, { path: "S/mb.txt" }, appendMut("b"), { clock });
+  inject("S/mb.txt", "ab+kevin"); fake.versionsOf("S/mb.txt").at(-1).label = "Kevin: tweak";
+  await assert.rejects(W.undoFileChange(cfg, { path: "S/mb.txt" }, r.version_id, { clock }),
+    (e) => e.code === "changed_since" && e.data.modified_by_label === "Kevin: tweak" && typeof e.data.modified === "string");
+});
+
+test("I8: a non-JSON 200 from the editor is editor_unreachable, never a SyntaxError quoting the body", async () => {
+  const http = await import("node:http");
+  const srv = http.createServer((req, res) => { res.writeHead(200, { "Content-Type": "text/html" }); res.end("<html>proxy page pw-leak</html>"); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const { ooCommand } = await import("../bundles/workspace/server/nc/onlyoffice.js");
+    await assert.rejects(ooCommand({ ...cfg, ooUrl: `http://127.0.0.1:${srv.address().port}` }, { c: "info", key: "k" }),
+      (e) => e.code === "editor_unreachable" && !/pw-leak/.test(e.message));
+  } finally { srv.close(); }
 });

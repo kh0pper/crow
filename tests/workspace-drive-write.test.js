@@ -131,3 +131,14 @@ test("an upstream 500 echoing the secrets (plain, Basic base64, URL-encoded) nev
   assert.equal(o.success, false);
   assert.doesNotMatch(JSON.stringify(o), new RegExp(`pw-secret-123|${basic.replace(/[+/=]/g, "\\$&")}|Bearer|Basic `));
 });
+
+test("S2: upload_file mime sets the PUT Content-Type; a malformed mime is refused", async () => {
+  const r = await call("ws_drive_upload_file", { folder: "S", name: "m.csv", text: "a,b", mime: "text/csv" });
+  assert.equal(r.success, true);
+  const put = fake.calls.filter((c) => c.method === "PUT" && c.url.endsWith("/S/m.csv")).at(-1);
+  assert.equal(put.headers["content-type"], "text/csv");
+  const d = await call("ws_drive_upload_file", { folder: "S", name: "d.bin", text: "x" });
+  assert.equal(d.success, true);
+  assert.equal(fake.calls.filter((c) => c.method === "PUT" && c.url.endsWith("/S/d.bin")).at(-1).headers["content-type"], "application/octet-stream");
+  assert.equal((await call("ws_drive_upload_file", { folder: "S", name: "e.txt", text: "x", mime: "text/plain\r\nX-Evil: 1" })).code, "bad_mime");
+});

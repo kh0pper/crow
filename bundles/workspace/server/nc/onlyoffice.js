@@ -13,7 +13,8 @@ export async function ooCommand(cfg, payload) {
   try { r = await fetch(`${cfg.ooUrl}/coauthoring/CommandService.ashx`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...payload, token }), signal: AbortSignal.timeout(15000) }); }
   catch { throw new WsError("editor_unreachable", "The document editor did not answer"); }
   if (!r.ok) throw new WsError("editor_unreachable", `The document editor answered HTTP ${r.status}`);
-  return r.json();
+  // A non-JSON body (proxy error page…) must not surface as a SyntaxError quoting that body.
+  try { return await r.json(); } catch { throw new WsError("editor_unreachable", "The document editor gave an unreadable answer"); }
 }
 
 /** The editor session for a file: key, whether it is live, raw users ("<instanceid>_<uid>", spike S6) and bare uids. */

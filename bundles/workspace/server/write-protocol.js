@@ -15,8 +15,11 @@ export const MAX_EDIT_BYTES = 50 * 1024 * 1024;
 export const WRITE_SPACING_MS = 1100; // R-COLLIDE: 1100 ms spacing gives distinct versions (spike)
 /** Wall clock; tools inject their own (tests use a virtual one). */
 export const systemClock = Object.freeze({ now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
-/** Labels Crow may (re)write. Any other non-empty label was given by a person and is never overwritten (review I9). */
-export const CROW_LABEL_RE = /^(Before )?(Crow|Undo|Quick edit)\b/;
+/**
+ * The exact label shapes Crow writes ("Crow: …", "Before Crow: …", "Undo: …", "Quick edit: …", "Crow (queued): …").
+ * Any other non-empty label was given by a person ("Crow's nest final") and is never overwritten (review I9).
+ */
+export const CROW_LABEL_RE = /^(Before )?(Crow|Undo|Quick edit)( \(queued\))?: /;
 
 const queues = new Map();
 // Last write per file, kept PER CLOCK: comparing a time from one clock with another (e.g. wall vs virtual)
@@ -82,12 +85,21 @@ async function spacing(fileId, clock) {
  * Review C2: Nextcloud keys versions by mtime SECONDS and overwrites the version row when two writes
  * share an mtime (files_versions FileEventsListener.php:326-333), across ALL processes (pi bots spawn
  * their own server; Quick edit runs in the gateway). So the spacing rule is enforced against the
- * SERVER's current mtime, not just this process's last write: never PUT until ≥ 1.1 s after the
- * file's current mtime. This also separates an editor's drop-save from the bot write on top of it.
+ * SERVER's current mtime, not just this process's last write: never write until ≥ 1.1 s after the
+ * file's current mtime. A write that lands DURING the sleep resets the gap, so the check loops until the
+ * file is unchanged across a sleep (bounded; If-Match still guards the PUT). Returns the latest read.
  */
-async function mtimeGap(cur, clock) {
-  const ageMs = clock.now() - cur.mtime * 1000;
-  if (ageMs < WRITE_SPACING_MS) await clock.sleep(WRITE_SPACING_MS - Math.max(0, ageMs));
+async function settleMtime(cur, reread, clock) {
+  for (let i = 0; i < 5; i++) {
+    const ageMs = clock.now() - cur.mtime * 1000;
+    if (ageMs >= WRITE_SPACING_MS) return cur;
+    await clock.sleep(WRITE_SPACING_MS - Math.max(0, ageMs));
+    const next = await reread();
+    const same = next.mtime === cur.mtime && normEtag(next.etag) === normEtag(cur.etag);
+    cur = next;
+    if (same) return cur;
+  }
+  return cur;
 }
 
 async function guard(cfg, ref) {
@@ -98,21 +110,51 @@ async function guard(cfg, ref) {
   return { segs, e0 };
 }
 
-const mayLabel = (row) => !!row && (!row.label || CROW_LABEL_RE.test(row.label));
+/**
+ * A share's mount point (owned by someone else, top of what was shared) is not trashed by DELETE: Nextcloud
+ * only UNSHARES it from Crow bot. Every DELETE path (trash tool, undo of a created file) refuses it.
+ */
+export async function refuseShareRoot(cfg, segs, e) {
+  if (!e.ownerId || e.ownerId === cfg.user) return;
+  const parent = segs.length > 1 ? await stat(cfg, segs.slice(0, -1)) : null;
+  if (!parent || parent.ownerId !== e.ownerId) throw new WsError("share_root", `"${e.name}" is shared with Crow bot by ${e.ownerName || e.ownerId}; deleting it would only remove Crow's access, not the files. Ask the owner to delete it, or trash items inside it.`);
+}
 
-async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, putEtag = "") {
+/** Spec §5.4: changed_since carries {modified, modified_by_label} (the label of the version now current, if any). */
+async function changedSince(cfg, now, message) {
+  const rows = await listVersions(cfg, now.fileId).catch(() => null);
+  const row = rows?.find((v) => v.versionId === String(now.mtime));
+  return new WsError("changed_since", message, { modified: now.modified, modified_by_label: row?.label || null });
+}
+
+const mayLabel = (row) => !row.label || CROW_LABEL_RE.test(row.label);
+const tryLabel = (cfg, fileId, versionId, text) => labelVersion(cfg, fileId, versionId, clip(text, 120)).then(() => true, () => false);
+
+/**
+ * Label the before/after versions and build the result. `afterIsOurs(after)` says whether the current file is
+ * still what THIS write produced (PUT etag, or the restored revision's mtime); if not, the after row belongs to
+ * someone else's later write and is never labelled. If the version list cannot be read, nothing is labelled
+ * (a row might carry a person's label we cannot see).
+ */
+async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, { putEtag = "", afterIsOurs } = {}) {
   lastWriteOf(clock).set(fileId, clock.now());
   const after = await stat(cfg, segs);
-  const afterEtag = putEtag || after.etag;
+  const ours = afterIsOurs ? afterIsOurs(after) : true;
+  // Review C2: the after-etag is the one THIS write produced; "" (never a real etag) makes undo refuse.
+  const afterEtag = putEtag || (ours ? after.etag : "");
   const summary = clip(out.summary || "edit", 100);
-  const rows = await listVersions(cfg, fileId).catch(() => []);
-  // Review I9: never overwrite a label a person gave a version; only fill empty or Crow-written ones.
-  const before = beforeVersion === "0" ? null : rows.find((v) => v.versionId === beforeVersion);
-  const okB = !mayLabel(before) ? true : await labelVersion(cfg, fileId, beforeVersion, clip(`Before ${label}: ${summary}`, 120)).then(() => true, () => false);
-  // Review r2: after a restore, after.mtime IS the restored revision's existing row; apply the same rule.
-  // A row not (yet) listed is labelled: it is the version this write just made.
-  const afterRow = rows.find((v) => v.versionId === String(after.mtime));
-  const okA = afterRow && !mayLabel(afterRow) ? true : await labelVersion(cfg, fileId, String(after.mtime), clip(`${label}: ${summary}`, 120)).then(() => true, () => false);
+  const rows = await listVersions(cfg, fileId).catch(() => null);
+  let okB = true, okA = true;
+  if (!rows) { okB = false; okA = false; }
+  else {
+    // Review I9: never overwrite a label a person gave a version; only fill empty or Crow-written ones.
+    const before = beforeVersion === "0" ? null : rows.find((v) => v.versionId === beforeVersion);
+    if (before && mayLabel(before)) okB = await tryLabel(cfg, fileId, beforeVersion, `Before ${label}: ${summary}`);
+    // Review r2: after a restore, after.mtime IS the restored revision's existing row; apply the same rule.
+    const afterRow = rows.find((v) => v.versionId === String(after.mtime));
+    if (!ours) okA = false;
+    else if (!afterRow || mayLabel(afterRow)) okA = await tryLabel(cfg, fileId, String(after.mtime), `${label}: ${summary}`);
+  }
   return {
     ...(out.data || {}), path: after.path, file_id: fileId, changed: out.changed,
     version_id: encodeVersionId({ f: fileId, b: beforeVersion, a: afterEtag }), version_label: `${label}: ${summary}`,
@@ -121,30 +163,39 @@ async function finish(cfg, segs, fileId, beforeVersion, out, label, clock, putEt
 }
 
 const putEtagOf = (res) => normEtag(res.headers.get("oc-etag") || res.headers.get("etag") || "");
+const queueOrThrow = (sig, queue) => { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; };
+
+/**
+ * Spec §5 step 6: a second 423 (the lock re-appeared after the one retry) goes back through the lock check once
+ * more — no wait, no second drop — so if_open "queue" still queues instead of failing.
+ */
+async function lockedAgain(cfg, segs, { ifOpen, clock, queue }) {
+  try { await settleLock(cfg, segs, { waitS: 0, ifOpen, clock, queue, allowDrop: false }); }
+  catch (sig) { return queueOrThrow(sig, queue); }
+  throw new WsError("locked", "The file is locked; try again.");
+}
 
 export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen = "queue", label = "Crow", clock = systemClock, queue = null } = {}) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
-    let dropped = false;
-    for (let attempt = 0; ; attempt++) {
+    let dropped = false, retried412 = false, retried423 = false;
+    for (;;) {
       let e;
       // Spec §5 step 6: a 423 retry goes back to the lock check with the caller's if_open unchanged
       // (queue by default); the only thing it may not do is drop the editor a second time.
       try { const s = await settleLock(cfg, segs, { waitS, ifOpen, clock, queue, allowDrop: !dropped }); e = s.e; dropped ||= s.dropped; }
-      catch (sig) { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; }
+      catch (sig) { return queueOrThrow(sig, queue); }
       await spacing(e.fileId, clock);
-      let cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
-      if (clock.now() - cur.mtime * 1000 < WRITE_SPACING_MS) { await mtimeGap(cur, clock); cur = await getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES }); }
+      const read = () => getFile(cfg, segs, { maxBytes: MAX_EDIT_BYTES });
+      const cur = await settleMtime(await read(), read, clock);
       const out = await mutate(cur.bytes, e);
       if (!out || !out.changed) return { ...(out?.data || {}), path: e.path, file_id: e.fileId, changed: 0, version_id: null };
       const res = await putFile(cfg, segs, out.bytes, { ifMatch: cur.etag });
-      if ((res.status === 412 || res.status === 423) && attempt === 0) continue;
-      if (res.status === 412) throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`);
-      if (res.status === 423) { const again = await stat(cfg, segs); if (again.lock) { const c = await classifyLock(cfg, again); throw new WsError(c.code, c.message, c.data); } throw new WsError("locked", "The file is locked; try again."); }
+      if (res.status === 412) { if (!retried412) { retried412 = true; continue; } throw new WsError("changed_concurrently", `Someone else saved "${e.name}" at the same moment. Read it again and retry.`); }
+      if (res.status === 423) { if (!retried423) { retried423 = true; continue; } return lockedAgain(cfg, segs, { ifOpen, clock, queue }); }
       if (!res.ok) throw httpFail(res, "save the change");
-      // Review C2: the after-etag is the one THIS PUT produced (ETag / OC-ETag header), never a later
-      // stat that could include someone else's write; finish() falls back to stat only if both are absent.
-      return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, putEtagOf(res));
+      const putEtag = putEtagOf(res);
+      return finish(cfg, segs, e.fileId, String(cur.mtime), out, label, clock, { putEtag, afterIsOurs: (a) => !putEtag || normEtag(a.etag) === putEtag });
     }
   });
 }
@@ -152,50 +203,57 @@ export async function withFileWrite(cfg, ref, mutate, { waitS = 0, ifOpen = "que
 export async function withFileRestore(cfg, ref, versionId, { waitS = 0, ifOpen = "queue", label = "Crow", summary = "restore", clock = systemClock, expectEtag = null, queue = null } = {}) {
   const { segs, e0 } = await guard(cfg, ref);
   return serialized(e0.fileId, async () => {
-    let dropped = false;
-    for (let attempt = 0; ; attempt++) {
+    let dropped = false, retried423 = false;
+    for (;;) {
       // NOTE (review C4b): a restore touches the file back to the revision's mtime, so after a restore the
       // "current" version id equals the restored revision's id. finish() then labels that row "Undo: …"
       // (unless a person labelled it), the intended reading in the version sidebar.
       let e;
       try { const s = await settleLock(cfg, segs, { waitS, ifOpen, clock, queue, allowDrop: !dropped }); e = s.e; dropped ||= s.dropped; }
-      catch (sig) { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; }
+      catch (sig) { return queueOrThrow(sig, queue); }
       await spacing(e.fileId, clock);
-      await mtimeGap(e, clock);
+      // Review I4: the entry used for the undo token's "before" and for the etag re-check is the one read
+      // AFTER the gap, never one from before the sleep.
+      const read = () => stat(cfg, segs);
+      const now = await settleMtime(await read(), read, clock);
       // Review C3: re-check AFTER the lock settled (a force_close drop saves the person's typing, which
       // changes the etag). Undo must never restore over work that landed after the Crow edit.
-      if (expectEtag !== null) { const now = await stat(cfg, segs); if (normEtag(now.etag) !== expectEtag) throw new WsError("changed_since", `"${now.name}" changed after that edit (last modified ${now.modified}); nothing was undone. Use ws_drive_list_versions and ws_drive_restore_version to choose explicitly.`, { modified: now.modified }); }
-      const res = await restoreVersion(cfg, e.fileId, versionId);
-      if (res.status === 423 && attempt === 0) continue;
+      if (expectEtag !== null && normEtag(now.etag) !== expectEtag) throw await changedSince(cfg, now, `"${now.name}" changed after that edit (last modified ${now.modified}); nothing was undone. Use ws_drive_list_versions and ws_drive_restore_version to choose explicitly.`);
+      const res = await restoreVersion(cfg, now.fileId, versionId);
+      if (res.status === 423) { if (!retried423) { retried423 = true; continue; } return lockedAgain(cfg, segs, { ifOpen, clock, queue }); }
       if (![201, 204].includes(res.status)) throw httpFail(res, "restore that version");
-      return finish(cfg, segs, e.fileId, String(e.mtime), { changed: 1, summary }, label, clock);
+      // A restore touches the file back to the revision's mtime; any other mtime means someone wrote after it.
+      return finish(cfg, segs, now.fileId, String(now.mtime), { changed: 1, summary }, label, clock, { afterIsOurs: (a) => String(a.mtime) === String(versionId) });
     }
   });
 }
 
 /** A NEW file (If-None-Match: *), version_id with before = "0" (undo moves it to the trash). */
-export async function createFile(cfg, folderSegs, name, bytes, { label = "Crow", summary = "create", clock = systemClock } = {}) {
+export async function createFile(cfg, folderSegs, name, bytes, { label = "Crow", summary = "create", clock = systemClock, contentType } = {}) {
   const segs = [...folderSegs, name];
-  const res = await putFile(cfg, segs, bytes, { ifNoneMatch: "*" });
+  const res = await putFile(cfg, segs, bytes, { ifNoneMatch: "*", contentType });
   if (res.status === 412) throw new WsError("exists", `"${joinPath(segs)}" already exists`);
   if (![201, 204].includes(res.status)) throw httpFail(res, "create the file");
   const e = await stat(cfg, segs);
-  return finish(cfg, segs, e.fileId, "0", { changed: 1, summary }, label, clock, putEtagOf(res));
+  const putEtag = putEtagOf(res);
+  return finish(cfg, segs, e.fileId, "0", { changed: 1, summary }, label, clock, { putEtag, afterIsOurs: (a) => !putEtag || normEtag(a.etag) === putEtag });
 }
 
 export async function undoFileChange(cfg, ref, versionId, { waitS = 0, ifOpen = "queue", clock = systemClock, queue = null } = {}) {
   const v = decodeVersionId(versionId);
-  const segs = await resolveRef(cfg, ref);
-  const e = await stat(cfg, segs);
+  // Review I7: version_ids are unsigned, so the target is validated like any write (a file, writable) — a forged
+  // {f:<folder id>, b:"0"} must never reach DELETE.
+  const { segs, e0: e } = await guard(cfg, ref);
   if (e.fileId !== v.f) throw new WsError("bad_version_id", "That version_id belongs to a different file.");
-  if (normEtag(e.etag) !== v.a) throw new WsError("changed_since", `"${e.name}" changed after that edit (last modified ${e.modified}). Nothing was undone. To go back anyway, use ws_drive_list_versions and ws_drive_restore_version.`, { modified: e.modified });
+  if (normEtag(e.etag) !== v.a) throw await changedSince(cfg, e, `"${e.name}" changed after that edit (last modified ${e.modified}). Nothing was undone. To go back anyway, use ws_drive_list_versions and ws_drive_restore_version.`);
   if (v.b === "0") {
+    await refuseShareRoot(cfg, segs, e);
     // F12: the created-file branch follows the same K5 rules as every write (queue by default, wait 0).
     return serialized(e.fileId, async () => {
       try { await settleLock(cfg, segs, { waitS, ifOpen, clock, queue }); }
-      catch (sig) { if (sig instanceof QueueSignal) return queue.enqueue(sig); throw sig; }
+      catch (sig) { return queueOrThrow(sig, queue); }
       const now = await stat(cfg, segs); // review C3: re-check after the lock settled
-      if (normEtag(now.etag) !== v.a) throw new WsError("changed_since", `"${now.name}" was changed after Crow created it; it was not removed.`, { modified: now.modified });
+      if (normEtag(now.etag) !== v.a) throw await changedSince(cfg, now, `"${now.name}" was changed after Crow created it; it was not removed.`);
       await remove(cfg, segs);
       return { path: e.path, file_id: e.fileId, undone: "The file Crow created was moved to the Workspace trash." };
     });
