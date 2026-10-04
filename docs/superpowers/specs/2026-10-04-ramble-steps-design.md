@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS ramble_step_devices (
   boot_count   INTEGER,          -- Settings.Global.BOOT_COUNT at the last reading, NULL if unknown
   last_counter INTEGER NOT NULL, -- TYPE_STEP_COUNTER value at the last reading
   last_read_at INTEGER NOT NULL, -- server ms of the last reading
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  last_total   INTEGER NOT NULL DEFAULT 0, -- this device's day row right after THIS instance last touched it
+  last_day     TEXT                         -- the day that last_total belongs to
 );
 ```
 
@@ -128,13 +130,14 @@ Junk, negative or out-of-range values fall back to the default, as every other R
 
 Input (from the phone, via the panel): `device_id` (8–64 chars `[A-Za-z0-9-]`, a random UUID the app generates once), `counter` (integer 0…10⁸), `elapsed_ms` (`SystemClock.elapsedRealtime()`, integer ≥ 0), `boot_count` (integer ≥ 0 or null). Everything else is ignored. Malformed input is a 400.
 
-Let `bootAt = now − elapsed_ms` (server clock). Then:
+Let `bootAt = now − elapsed_ms` (server clock) and `current` = this device's `steps` row for today (0 if absent). Then:
 
 1. **No baseline for this device.**
-   - If `bootAt ≥ startOfLocalDay(now)` (the phone booted today), every step on the counter was walked today: raw credit = `counter`, over `elapsed_ms`.
+   - If `bootAt ≥ startOfLocalDay(now)` (the phone booted today), every step on the counter was walked today: raw credit = `counter − current` (another instance may already have counted part of it), over `elapsed_ms`.
    - Otherwise the split between earlier days and today is unknowable: take the baseline, credit **0** ("counting from now" in the panel).
-2. **Reboot** — any of: `boot_count` changed (both known); `counter < last_counter`; `bootAt > last_read_at + 2 min`. The counter now holds only steps since the reboot: raw credit = `counter`, over `elapsed_ms`. Steps between the last reading and the shutdown are lost — documented, unavoidable without background sampling.
-3. **Otherwise** raw credit = `counter − last_counter`, over `now − last_read_at`.
+2. **Foreign credit** — `current` is larger than what this instance left in the row (`last_total` if `last_day` is today, else 0). Another of the user's instances counted this phone in between (the phone switched gateways and came back, which the app's "Server settings" shortcut from #405 makes easy). Diffing against this instance's stale baseline would count that range twice, so: take a new baseline, credit **0**. Steps in the gaps between instances are lost — under-count, never double-count.
+3. **Reboot** — any of: `boot_count` changed (both known); `counter < last_counter`; `bootAt > last_read_at + 2 min`. The counter now holds only steps since the reboot: raw credit = `counter`, over `elapsed_ms`. Steps between the last reading and the shutdown are lost — documented, unavoidable without background sampling.
+4. **Otherwise** raw credit = `counter − last_counter`, over `now − last_read_at`.
 
 Then the caps, in order:
 
@@ -142,7 +145,7 @@ Then the caps, in order:
 - **Device limit:** a device with no `steps` row today is credited 0 once `steps.devices.per.day` devices already have one.
 - **Daily cap:** `min(credit, steps.max.day − today's total)`.
 
-**The baseline always advances to the new counter**, even when credit was clamped — excess is discarded, never banked for later.
+**The baseline always advances to the new counter**, even when credit was clamped — excess is discarded, never banked for later. After every reading `last_total`/`last_day` record the row's value.
 
 **Concurrency.** The baseline update is a compare-and-swap (`UPDATE … WHERE device_id = ? AND last_counter = ? AND last_read_at = ?`; for a first reading, `INSERT … ON CONFLICT DO NOTHING`). A reading that loses the race credits nothing. Two readings racing (the panel opening while the page regains visibility) therefore never double-credit.
 
@@ -171,9 +174,9 @@ The panel offers the button only where this device cannot count: no `window.Crow
 
 ## 8. The "walked today" badge (S2)
 
-- **Engine:** `bird-svg.cjs` gains `drawWalkBadge()` — a small footprint roundel in the lower-right corner of the 200×200 portrait. `drawBird` is untouched (its golden hash stays byte-identical).
+- **Engine:** `bird-svg.cjs` gains `drawWalkBadge()` and `mountWalkBadge(el)` (the markup sink stays in the engine, like `mountBird`) — a small footprint roundel in the lower-right corner of the 200×200 portrait. `drawBird` is untouched (its golden hash stays byte-identical).
 - **Pet page:** `GET /api/ramble/pet` gains `walked_today` (boolean); the panel appends the badge to the pet portrait.
-- **Contacts:** `profile-avatar.js`'s `readPortrait` gains `walked` — `true` when a `walked` row exists for today (one indexed lookup; core keeps its own `localDay` copy, pinned to `eggs.js`'s by a parity test, as it already does for decay). `renderBirdAvatar` appends `engine.drawWalkBadge()` when `walked` and the engine has it (an older installed engine draws no badge rather than failing). `walked` joins the gate's input list, so a change repaints once.
+- **Contacts:** `profile-avatar.js`'s `readPortrait` gains `walked` — `true` when a `walked` row exists for today (one indexed lookup; core keeps its own `localDay` copy, pinned to `eggs.js`'s by a parity test, as it already does for decay). `renderBirdAvatar` appends `engine.drawWalkBadge()` when `walked` and the engine has it (an older installed engine draws no badge rather than failing). The deploy-day engine re-probe (which today only re-loads an engine lacking `applyOutfit`) also re-probes one lacking `drawWalkBadge`, so a single-restart deploy picks the badge up within a minute. `walked` joins the gate's input list, so a change repaints once.
 - **Pacing (spec §5.4):** the route pokes `ramble:walked-changed`; `installBirdAvatarHooks` listens to it like `ramble:outfit-changed`, so the badge rides the existing 20 s settle and one broadcast. The badge clears at local midnight through the existing 30-minute tick — it can linger up to 30 minutes into the next day, which is accepted.
 - **Not on public marks.** Marks carry the plain rolled bird (D10); the badge is portrait-only.
 
@@ -193,14 +196,20 @@ Privacy note: a badge that appears at 14:20 tells a contact roughly when you wal
 6. The player has used walking in the last 7 days (R9).
 7. No manual check-in today, and today's steps are below `steps.nudge.below` % of the goal.
 
+Engagement (6) is judged by the rows' **day keys**, not `created_at` (the wallet merge keeps the earliest `created_at` of two instances, so it is not a clock).
+
+**Stale counts.** Steps only arrive when the panel is opened, so at 18:00 the server may simply not have seen a lunchtime walk. When this instance has a step-counter device whose last reading is more than 3 hours old, the nudge uses the **"show me"** wording (below) instead of implying the player has not walked.
+
 Then `markNudged` (`INSERT OR IGNORE` the `nudge` row, emit) and, **only if that insert was new**, send. At-most-once per day per instance by construction.
 
 **The push.** Type `reminder`, source `ramble:steps`, priority `normal`, action URL `/dashboard/ramble`, expires in 6 hours. Text in the bird's voice, in the dashboard language (R10):
 
-| | Title | Body |
-|---|---|---|
-| en | Your bird is by the door | A short walk would cheer you both up. |
-| es | Tu pájaro te espera en la puerta | Una caminata corta los alegraría a los dos. |
+| | Variant | Title | Body |
+|---|---|---|---|
+| en | low | Your bird is by the door | A short walk would cheer you both up. |
+| en | unseen | Your bird wants to hear about your day | Open Ramble so it can count today's steps, or take a short walk together. |
+| es | low | Tu pájaro te espera en la puerta | Una caminata corta los alegraría a los dos. |
+| es | unseen | Tu pájaro quiere saber de tu día | Abre Ramble para que cuente los pasos de hoy, o den juntos una caminata corta. |
 
 No step counts and no goal in the push (lock screens are public).
 
@@ -214,7 +223,7 @@ No step counts and no goal in the push (lock screens are public).
 
 | Method | Returns | Behaviour |
 |---|---|---|
-| `stepsStatus()` | `"ok"` · `"needs-permission"` · `"denied"` · `"no-sensor"` (sync) | `no-sensor` when `getDefaultSensor(TYPE_STEP_COUNTER)` is null; `denied` after the user refused and Android will no longer show the prompt (`!shouldShowRequestPermissionRationale` after a recorded refusal). |
+| `stepsStatus()` | `"ok"` · `"needs-permission"` · `"denied"` · `"no-sensor"` (sync) | `no-sensor` when `getDefaultSensor(TYPE_STEP_COUNTER)` is null; `denied` only after a refusal that left Android willing to ask again (rationale shown, remembered in `SharedPreferences`) followed by Android no longer offering the rationale ("don't ask again"). A first dialog dismissed by tapping outside also reads as not-granted-without-rationale and must stay `needs-permission`. |
 | `requestStepsPermission(id)` | delivers `{status}` | Launches the `ACTIVITY_RECOGNITION` prompt through an `ActivityResultLauncher` registered as a field (so it exists before the activity starts). |
 | `readSteps(id)` | delivers `{ok:true, counter, elapsed_ms, boot_count, device_id}` or `{ok:false, reason}` | Registers a one-shot `SensorEventListener`; on-change sensors report their current value on activation, so the first event is the reading. Unregisters on the first event or after a 4 s timeout (`reason:"timeout"`). `reason` is also `no-sensor` / `no-permission`. `boot_count` = `Settings.Global.BOOT_COUNT` (−1 → `null`). `device_id` = a random UUID created once and kept in the app's `SharedPreferences`; never `ANDROID_ID`. |
 | `openAppSettings()` | — | Opens this app's system settings page, for the `denied` case. |
@@ -222,6 +231,8 @@ No step counts and no goal in the push (lock screens are public).
 **Delivery.** Asynchronous results are delivered on the UI thread by `webView.evaluateJavascript("window.CrowSteps && window.CrowSteps.deliver(<id>, <json>)")`. `id` must match `^[A-Za-z0-9]{1,32}$` or the call is ignored — it is never interpolated unchecked. The JSON is built with `org.json.JSONObject`.
 
 **Detection in the panel.** `window.Crow` absent → browser (`web`); present without `readSteps` → older app (`old-app`, "update the app to count steps"); present with it → ask `stepsStatus()`.
+
+**Timeouts.** The panel waits up to 5 minutes for a permission answer (a human is deciding) and 8 s for a reading (native gives up at 4 s and reports `timeout`, shown as one quiet status line). A permission answer that arrives late is still caught: the prompt pauses the WebView, and the `visibilitychange` on return repaints the card.
 
 **When the panel reads.** On load, when the page becomes visible again, and when switching to the pet view — at most once a minute, one request in flight. A reading posts to the server, which returns the day's state; the panel then refreshes the pet.
 
@@ -234,7 +245,7 @@ The project rule stands: anything that replicates gets an executable **multi-ins
 **Hermetic server tests** (`@libsql` in-memory, as the existing ramble module tests do):
 - Reading: first reading booted before today = baseline/0; booted today = full counter; plain delta; reboot by `boot_count`; reboot by counter going down; reboot by `bootAt` after the last reading; plausibility clamp; daily cap; device-per-day limit; baseline advances past clamped excess; a lost CAS credits nothing; junk input throws the input error; day attribution across midnight (R4).
 - Settle: energy linear in progress and paid in chunks; full at goal; check-in floor never stacks with steps; `last_fed_at` unchanged by step energy (R5); energy clamped by the heart ceiling; seed bonus once a day, never for a check-in only; lowering the goal completes it; badge at `min(goal, badge.min)` and on check-in; `harvestableCells` ignores `steps:<day>` seed rows; `seedBalance` and `buyItem` count the bonus.
-- Multi-instance (two in-memory dbs, emits captured and applied through the real `applyRambleWallet`): totals converge in any order; the same device's row merges by MAX; a phone moving between instances mid-day stays monotone; two instances' energy ledgers merge to the larger; the displayed total respects the cap after a merge; seed/walked/nudge rows dedupe.
+- Multi-instance (two in-memory dbs, emits captured and applied through the real `applyRambleWallet`): totals converge in any order; the same device's row merges by MAX; a phone moving between instances mid-day stays monotone; a phone going A → B → A is never counted twice; two instances' energy ledgers merge to the larger; the displayed total respects the cap after a merge; seed/walked/nudge rows dedupe.
 - Nudge: each of the seven conditions independently blocks; `markNudged` is at-most-once; the core boot module sends exactly once across repeated ticks, honours a `nudge` row arriving by sync, and never throws out of its timer.
 
 **Route tests** (the bundle's own `createDbClient`, never a second SQLite engine on the same file): `GET /api/ramble/steps`, `POST /api/ramble/steps/reading`, `POST /api/ramble/steps/walked`, `PUT /api/ramble/steps/settings` — happy paths, 400s for junk, emits, the `ramble:walked-changed` poke, `walked_today` on `GET /api/ramble/pet`.

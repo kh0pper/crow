@@ -32,7 +32,7 @@
 ## Review Focus
 
 1. **The phone reboots mid-day, or reports no `boot_count`, or the counter goes backwards.** Expect: never a negative credit, never a re-credit of steps already counted, the baseline always ends at the new counter, and the steps since the reboot are counted. (Task 1 tests: reboot by boot_count, by counter-down, by boot time; "baseline advances past clamped excess".)
-2. **The panel fires two readings at once** (load + visibility change, a double tap) **or a phone moves between two of the user's instances mid-day.** Expect: no double credit on one instance (compare-and-swap), a first reading on the second instance does not re-add what the first already synced, totals stay monotone and capped after merge, and the seed bonus pays once. (Task 1 concurrent test; Task 3 multi-instance tests.)
+2. **The panel fires two readings at once** (load + visibility change, a double tap) **or a phone moves between two of the user's instances mid-day — and back.** Expect: no double credit on one instance (compare-and-swap), a first reading on the second instance does not re-add what the first already synced, a return to the first instance re-baselines instead of re-counting the second's range (foreign-credit guard), totals stay monotone and capped after merge, and the seed bonus pays once. (Task 1 concurrent test; Task 3 multi-instance tests.)
 3. **A player who cannot count steps** — browser, iPhone, the 1.5.x app, a phone without the sensor, permission refused twice. Expect: the card explains why in one line, offers "I walked today", never throws, and never shows a "Count my steps" button that cannot work. (Task 7 `walkCardState` + `nativeStepsMode` tests.)
 4. **Nudge edges:** the gateway restarts inside the evening window, weekends-off on a Saturday, a check-in after the nudge was sent, a second instance with Ramble installed, a player who never used walking, reminders turned off in notification preferences. Expect: at most one nudge per day, none when off/weekend/not-engaged/on-track/not-home, and the core timer never throws. (Task 6 tests; the type-preference gate is `createNotification`'s own and is exercised by sending type `reminder`.)
 5. **Junk from the client or a hand-edited setting** — a fractional/negative/huge counter, a non-string device id, `elapsed_ms` as a string, `steps.goal = "abc"`, a goal of 999 via the API. Expect: 400 from the API, defaults from the settings reader, never a 500 or a NaN in the ledger. (Task 1 parse tests; Task 2 settings tests; Task 4 route 400s.)
@@ -81,7 +81,7 @@ npm test 2>&1 | tail -6  # record the BASELINE pass count for the PR body
 
 **Interfaces:**
 - Consumes: `localDay(ms)`, `startOfLocalDay(ms)` from `eggs.js`.
-- Produces (exported from `steps.js`): kind constants `STEPS_KIND="steps"`, `STEP_ENERGY_KIND="stepenergy"`, `WALKED_KIND="walked"`, `WALK_CHECKIN_KIND="walkcheck"`, `NUDGE_KIND="nudge"`, `STEP_SEED_PREFIX="steps:"`, `HOME_KEY="local.steps.seen_at"`; `STEPS_DEFAULTS` (frozen object: `goal, maxDay, maxPerMin, devicesPerDay, energyFull, energyChunk, checkinEnergy, goalSeed, badgeMin, nudge, nudgeWeekends, nudgeHour, nudgeUntil, nudgeBelow`); `GOAL_MIN=1000`, `GOAL_MAX=30000`; `class StepsInputError extends Error` (`name === "StepsInputError"`); `parseReading(obj) → {device_id, counter, elapsed_ms, boot_count|null}` (throws `StepsInputError`); `readStepSettings(db) → settings object shaped like STEPS_DEFAULTS`; `stepsToday(db, now, settings?) → number` (capped); `recordStepReading(db, reading, {now, emit}) → {credited, reason, clamped, day}` where `reason ∈ "baseline"|"booted-today"|"reboot"|"delta"|"raced"|"device-limit"`; internal helpers `safeEmit`, `rowDelta`, `insertOnce`, `casDelta` (used by Tasks 2 and 6).
+- Produces (exported from `steps.js`): kind constants `STEPS_KIND="steps"`, `STEP_ENERGY_KIND="stepenergy"`, `WALKED_KIND="walked"`, `WALK_CHECKIN_KIND="walkcheck"`, `NUDGE_KIND="nudge"`, `STEP_SEED_PREFIX="steps:"`, `HOME_KEY="local.steps.seen_at"`; `STEPS_DEFAULTS` (frozen object: `goal, maxDay, maxPerMin, devicesPerDay, energyFull, energyChunk, checkinEnergy, goalSeed, badgeMin, nudge, nudgeWeekends, nudgeHour, nudgeUntil, nudgeBelow`); `GOAL_MIN=1000`, `GOAL_MAX=30000`; `class StepsInputError extends Error` (`name === "StepsInputError"`); `parseReading(obj) → {device_id, counter, elapsed_ms, boot_count|null}` (throws `StepsInputError`); `readStepSettings(db) → settings object shaped like STEPS_DEFAULTS`; `stepsToday(db, now, settings?) → number` (capped); `recordStepReading(db, reading, {now, emit}) → {credited, reason, clamped, day}` where `reason ∈ "baseline"|"booted-today"|"foreign"|"reboot"|"delta"|"raced"|"device-limit"`; internal helpers `safeEmit`, `rowDelta`, `insertOnce`, `casDelta` (used by Tasks 2 and 6).
 
 - [ ] **Step 1: Write the failing tests** — create `tests/ramble-steps.test.js`:
 
@@ -127,7 +127,7 @@ async function baseline(db, id = DEV) {
 
 test("ramble_step_devices exists and is LOCAL (never in instance sync)", async () => {
   const db = await freshDb();
-  await db.execute("SELECT device_id, boot_count, last_counter, last_read_at, created_at FROM ramble_step_devices");
+  await db.execute("SELECT device_id, boot_count, last_counter, last_read_at, created_at, last_total, last_day FROM ramble_step_devices");
   const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
   assert.ok(!SYNCED_TABLES.includes("ramble_step_devices"));
 });
@@ -299,9 +299,13 @@ Expected: FAIL — `Cannot find module '../bundles/ramble/server/steps.js'`.
       boot_count INTEGER,
       last_counter INTEGER NOT NULL,
       last_read_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      last_total INTEGER NOT NULL DEFAULT 0,
+      last_day TEXT
     );`);
 ```
+
+(`last_total`/`last_day` are in the CREATE because the table is new in this release — no guarded `ensureColumn` is needed.)
 
 - [ ] **Step 4: Create `bundles/ramble/server/steps.js`**
 
@@ -490,6 +494,13 @@ export async function stepsToday(db, now, settings) {
  * swap BEFORE anything is credited, so of two racing readings exactly one
  * credits. The baseline always advances to the new counter — clamped excess
  * is discarded, never banked.
+ *
+ * ⚠ FOREIGN CREDIT GUARD. `last_total`/`last_day` remember what this
+ * device's row for the day held right after THIS instance last touched it. If
+ * the row has since grown, another of the user's instances credited the same
+ * phone in between (the phone switched gateways and came back): diffing
+ * against our stale baseline would count that range twice. Re-baseline and
+ * credit nothing — this can only under-count.
  */
 export async function recordStepReading(db, reading, { now = Date.now(), emit } = {}) {
   const r = parseReading(reading);
@@ -499,7 +510,7 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
   const bootAt = now - r.elapsed_ms;
 
   const { rows } = await db.execute({
-    sql: "SELECT boot_count, last_counter, last_read_at FROM ramble_step_devices WHERE device_id = ?",
+    sql: "SELECT boot_count, last_counter, last_read_at, last_total, last_day FROM ramble_step_devices WHERE device_id = ?",
     args: [r.device_id],
   });
   const prev = rows[0]
@@ -507,8 +518,11 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
       boot_count: rows[0].boot_count == null ? null : Number(rows[0].boot_count),
       last_counter: Number(rows[0].last_counter),
       last_read_at: Number(rows[0].last_read_at),
+      last_total: Number(rows[0].last_total) || 0,
+      last_day: rows[0].last_day == null ? null : String(rows[0].last_day),
     }
     : null;
+  const current = (await rowDelta(db, STEPS_KIND, key)) ?? 0;
 
   let raw;
   let overMs;
@@ -518,7 +532,7 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
       // Every step on the counter was walked today. Another of the user's
       // instances may already have credited some of them (the phone moved
       // here mid-day, spec §4.1): only the part it has not seen is new.
-      raw = r.counter - ((await rowDelta(db, STEPS_KIND, key)) ?? 0);
+      raw = r.counter - current;
       overMs = r.elapsed_ms;
       reason = "booted-today";
     } else {
@@ -526,6 +540,10 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
       overMs = 0;
       reason = "baseline";
     }
+  } else if (current > (prev.last_day === day ? prev.last_total : 0)) {
+    raw = 0;
+    overMs = 0;
+    reason = "foreign";
   } else if ((r.boot_count !== null && prev.boot_count !== null && r.boot_count !== prev.boot_count)
     || r.counter < prev.last_counter
     || bootAt > prev.last_read_at + BOOT_SLACK_MS) {
@@ -556,17 +574,18 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
   const allowed = Math.ceil(s.maxPerMin * Math.max(1, overMs / 60000));
   if (credit > allowed) { credit = allowed; clamped = true; }
 
-  if (credit > 0 && (await rowDelta(db, STEPS_KIND, key)) === null) {
+  if (credit > 0 && current === 0 && (await rowDelta(db, STEPS_KIND, key)) === null) {
     const { rows: d } = await db.execute({
       sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
       args: [STEPS_KIND, day + ":%"],
     });
-    if (Number(d[0]?.n) >= s.devicesPerDay) return { credited: 0, reason: "device-limit", clamped: false, day };
+    if (Number(d[0]?.n) >= s.devicesPerDay) { credit = 0; reason = "device-limit"; }
   }
   if (credit > 0) {
     const room = Math.max(0, s.maxDay - await rawStepsForDay(db, day));
     if (credit > room) { credit = room; clamped = true; }
   }
+  let total = current;
   if (credit > 0) {
     // Locally ADD; the emitted row carries the full total, and a peer takes MAX.
     await db.execute({
@@ -578,10 +597,16 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
       sql: "SELECT delta, created_at FROM ramble_wallet WHERE kind = ? AND key = ?",
       args: [STEPS_KIND, key],
     });
+    total = Number(w[0].delta);
     await safeEmit(emit, "ramble_wallet", "update", {
-      kind: STEPS_KIND, key, delta: Number(w[0].delta), created_at: Number(w[0].created_at),
+      kind: STEPS_KIND, key, delta: total, created_at: Number(w[0].created_at),
     });
   }
+  // Remember what the row held after OUR turn (the foreign-credit guard above).
+  await db.execute({
+    sql: "UPDATE ramble_step_devices SET last_total = ?, last_day = ? WHERE device_id = ?",
+    args: [total, day, r.device_id],
+  });
   return { credited: credit, reason, clamped, day };
 }
 ```
@@ -1049,6 +1074,23 @@ test("a phone that moves from A to B mid-day: B does not re-add what A already s
   assert.equal(await stepsToday(A.db, AT(11)), 2_600, "MAX, not a sum");
 });
 
+test("A -> B -> A: a phone that returns to A after B credited it is NOT counted twice (foreign-credit guard)", async () => {
+  const A = await instance(), B = await instance();
+  await readAndSettle(A, { device_id: P1, counter: 50_000, elapsed_ms: 20 * H }, AT(9));   // A baseline
+  await readAndSettle(A, { device_id: P1, counter: 52_000, elapsed_ms: 21 * H }, AT(10));  // A: 2,000
+  await deliver(A, B);
+  await readAndSettle(B, { device_id: P1, counter: 52_500, elapsed_ms: 22 * H }, AT(11));  // B baseline
+  await readAndSettle(B, { device_id: P1, counter: 53_000, elapsed_ms: 23 * H }, AT(12));  // B: 2,500
+  await deliver(B, A);
+  const back = await readAndSettle(A, { device_id: P1, counter: 53_500, elapsed_ms: 24 * H }, AT(13));
+  assert.deepEqual([back.credited, back.reason], [0, "foreign"], "A's baseline is stale: re-baseline, credit nothing");
+  assert.equal(await stepsToday(A.db, AT(13)), 2_500, "never more than the steps actually seen (true walk: 3,500; the gaps are lost, never doubled)");
+  const next = await readAndSettle(A, { device_id: P1, counter: 54_000, elapsed_ms: 25 * H }, AT(14));
+  assert.equal(next.credited, 500, "and from the new baseline A counts normally again");
+  await deliver(A, B);
+  assert.equal(await stepsToday(B.db, AT(14)), 3_000);
+});
+
 test("a phone that moves to B after booting BEFORE today: B takes a baseline and A's count stands", async () => {
   const A = await instance(), B = await instance();
   await readAndSettle(A, { device_id: P1, counter: 50_000, elapsed_ms: 20 * H }, AT(9));
@@ -1111,7 +1153,7 @@ test("walked and check-in facts dedupe across instances", async () => {
 - [ ] **Step 2: Run**
 
 Run: `npm test -- tests/ramble-steps-sync.test.js`
-Expected: PASS (7 tests) against Task 1–2 code with no change to `instance-sync.js`. If a test fails, fix the bundle code (not `applyRambleWallet`) unless the failure proves R2 wrong — then stop and report.
+Expected: PASS (8 tests) against Task 1–2 code with no change to `instance-sync.js`. If a test fails, fix the bundle code (not `applyRambleWallet`) unless the failure proves R2 wrong — then stop and report.
 
 - [ ] **Step 3: Commit**
 
@@ -1140,6 +1182,9 @@ git show --stat HEAD
  * Spec 2026-10-04 §5–§7: the walking API on the ramble panel router, mounted
  * the way the gateway mounts it (stub dashboardAuth, real loopback socket).
  * One SQLite engine per file: the bundle's own createDbClient, closed per use.
+ * The router uses the real clock, so a run straddling local midnight could
+ * flake (the test and the server would disagree on "today"); accepted —
+ * the arithmetic is pinned with frozen clocks in tests/ramble-steps.test.js.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -1345,7 +1390,7 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: the `walked` ledger fact (kind `walked`, key `YYYY-MM-DD`) written by Task 2; bus event `ramble:walked-changed` from Task 4.
-- Produces: `RambleBird.drawWalkBadge() → string` (an SVG `<g class="rb-walk-badge">…</g>` positioned for the 200×200 portrait viewBox). `profile-avatar.js`: `export function portraitDay(ms) → "YYYY-MM-DD"`; `readPortrait` returns `{egg_id, species, seed, mood, outfit, walked}`; `renderBirdAvatar` draws the badge when `bird.walked === true` and the engine has `drawWalkBadge`.
+- Produces: `RambleBird.drawWalkBadge() → string`, `RambleBird.mountWalkBadge(el)` (appends it to a mounted portrait) (an SVG `<g class="rb-walk-badge">…</g>` positioned for the 200×200 portrait viewBox). `profile-avatar.js`: `export function portraitDay(ms) → "YYYY-MM-DD"`; `readPortrait` returns `{egg_id, species, seed, mood, outfit, walked}`; `renderBirdAvatar` draws the badge when `bird.walked === true` and the engine has `drawWalkBadge`.
 
 - [ ] **Step 1: Write the failing engine test** — append to `tests/ramble-bird-svg.test.js` (it already loads the engine; reuse its `Bird` binding — check the file's top for the name and use that):
 
@@ -1358,6 +1403,9 @@ test("drawWalkBadge: a small self-contained group inside the 200x200 portrait; d
   assert.ok(badge.length < 1200, "cheap enough to ride every portrait");
   const m = badge.match(/translate\((\d+) (\d+)\)/);
   assert.ok(m && Number(m[1]) + 40 <= 200 && Number(m[2]) + 40 <= 200, "fits the viewBox");
+  const el = { innerHTML: "<g>bird</g>" };
+  Bird.mountWalkBadge(el);
+  assert.equal(el.innerHTML, "<g>bird</g>" + badge, "appends, never replaces the bird");
 });
 ```
 
@@ -1422,6 +1470,31 @@ test("gate: a walked flip repaints once; an unchanged day does not", async () =>
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
 
+test("deploy day: a cached 0.13 engine (applyOutfit, no badge) is re-probed and picks up drawWalkBadge", async () => {
+  __resetBirdAvatarHooksForTest();
+  const dir = mkdtempSync(join(tmpdir(), "bird-engine-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = dir;
+    const target = join(dir, "bundles", "ramble", "server", "bird-svg.cjs");
+    mkdirSync(dirname(target), { recursive: true });
+    // An "0.13" engine: the real one without the badge.
+    writeFileSync(target, "const real = require(" + JSON.stringify(REPO_ENGINE) + "); module.exports = { rollGenome: real.rollGenome, drawBird: real.drawBird, applyOutfit: real.applyOutfit };");
+    const T = 1_760_000_000_000;
+    const old = loadBirdEngine({ now: T });
+    assert.equal(typeof old.drawWalkBadge, "undefined");
+    writeFileSync(target, readFileSync(REPO_ENGINE, "utf8")); // bundle repair copies 0.14 in
+    assert.equal(loadBirdEngine({ now: T + 1000 }), old, "within the minute: still cached");
+    const fresh = loadBirdEngine({ now: T + 61_000 });
+    assert.equal(typeof fresh.drawWalkBadge, "function", "re-probed after one restart, no second restart needed");
+    assert.equal(loadBirdEngine({ now: T + 200_000 }), fresh);
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    __resetBirdAvatarHooksForTest();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("installBirdAvatarHooks: ramble:walked-changed is a coalesced trigger like an outfit change", async () => {
   __resetBirdAvatarHooksForTest();
   const { db, cleanup } = freshDb();
@@ -1468,7 +1541,14 @@ Expected: FAIL — `Bird.drawWalkBadge is not a function`; `portraitDay` is not 
   }
 ```
 
-and add `drawWalkBadge: drawWalkBadge` to the returned API object (the `return { ROSTER: ROSTER, ... }` line).
+plus its mount helper (the markup sink stays inside the engine, like `mountBird`, so the panel's sink-count test is unchanged):
+
+```js
+  /* Appends the badge to an already-mounted portrait (call after mountBird). */
+  function mountWalkBadge(el) { el.innerHTML = el.innerHTML + drawWalkBadge(); }
+```
+
+and add `drawWalkBadge: drawWalkBadge, mountWalkBadge: mountWalkBadge` to the returned API object (the `return { ROSTER: ROSTER, ... }` line).
 
 - [ ] **Step 5: Core** — in `servers/sharing/profile-avatar.js`:
 
@@ -1517,6 +1597,15 @@ In `refreshBirdAvatar`, change the gate inputs line to:
     const inputs = JSON.stringify([bird.species, bird.seed, bird.mood, bird.outfit || {}, bird.walked === true]);
 ```
 
+In `loadBirdEngine`, widen the deploy-day re-probe so a cached 0.13 engine (which HAS `applyOutfit` but lacks the badge) is also re-probed — otherwise a normal single-restart deploy (auto-update) caches the old installed engine before bundle repair copies 0.14.0 in, and the badge never reaches contacts until a second restart:
+
+```js
+    const stale = _engine && (typeof _engine.applyOutfit !== "function" || typeof _engine.drawWalkBadge !== "function")
+      && now - _engineProbedAt >= ENGINE_REPROBE_MS;
+```
+
+and extend the comment above `ENGINE_REPROBE_MS` to say "an engine without applyOutfit or drawWalkBadge".
+
 In `installBirdAvatarHooks`, add next to the other `emitter.on` lines:
 
 ```js
@@ -1549,7 +1638,7 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: Task 1–2 exports; `installedRambleServerDir(crowHome)` from `servers/gateway/boot/ramble-boot.js`; `createNotification(db, opts)` from `servers/shared/notifications.js`; `readSetting(db, key)` from `servers/gateway/dashboard/settings/registry.js`; `emitOrQueue` from `servers/shared/sync-emit.js`.
-- Produces: `steps.js`: `nudgeDecision(db, {now}) → {send: boolean, reason, day?}` with `reason ∈ "off"|"weekend"|"hour"|"not-home"|"already"|"not-engaged"|"walked"|"on-track"|"due"`; `markNudged(db, day, {now, emit}) → boolean`; `NUDGE_TEXT`, `nudgeText(lang) → {title, body}`; `HOME_WINDOW_MS`, `ENGAGED_WINDOW_MS`. `ramble-nudge.js`: `NUDGE_TICK_MS = 600000`; `startRambleNudge({db, serverDir, notify, emit, readLang, intervalMs, clock, load, autoStart}) → {tick(): Promise<{sent, reason}>, stop()}`.
+- Produces: `steps.js`: `nudgeDecision(db, {now}) → {send: boolean, reason, day?, variant?: "low"|"unseen"}`; `STALE_READING_MS` (3 h) with `reason ∈ "off"|"weekend"|"hour"|"not-home"|"already"|"not-engaged"|"walked"|"on-track"|"due"`; `markNudged(db, day, {now, emit}) → boolean`; `NUDGE_TEXT` (`{en|es: {low|unseen: {title, body}}}`), `nudgeText(lang, variant = "low") → {title, body}`; `HOME_WINDOW_MS`, `ENGAGED_WINDOW_MS`. `ramble-nudge.js`: `NUDGE_TICK_MS = 600000`; `startRambleNudge({db, serverDir, notify, emit, readLang, intervalMs, clock, load, autoStart}) → {tick(): Promise<{sent, reason}>, stop()}`.
 
 - [ ] **Step 1: Write the failing tests** — create `tests/ramble-steps-nudge.test.js`:
 
@@ -1594,7 +1683,18 @@ const set = (db, key, value) => db.execute({ sql: "INSERT INTO ramble_settings (
 
 test("due at 18:00 on a weekday for an engaged player at home who has not walked", async () => {
   const db = await engagedDb();
-  assert.deepEqual(await nudgeDecision(db, { now: at(WED, 18, 5) }), { send: true, reason: "due", day: localDay(at(WED, 18)) });
+  assert.deepEqual(await nudgeDecision(db, { now: at(WED, 18, 5) }), { send: true, reason: "due", day: localDay(at(WED, 18)), variant: "low" });
+});
+
+test("a counter player whose last reading is hours old gets the 'show me' nudge, never 'you haven't walked'", async () => {
+  const db = await engagedDb();
+  await db.execute({
+    sql: "INSERT INTO ramble_step_devices (device_id, boot_count, last_counter, last_read_at, created_at) VALUES ('aaaaaaaa-0000-0000-0000-000000000001', 1, 100, ?, ?)",
+    args: [at(WED, 12), at(WED, 12)],
+  });
+  assert.equal((await nudgeDecision(db, { now: at(WED, 18, 5) })).variant, "unseen", "6 h since the last reading");
+  await db.execute({ sql: "UPDATE ramble_step_devices SET last_read_at = ?", args: [at(WED, 17)] });
+  assert.equal((await nudgeDecision(db, { now: at(WED, 18, 5) })).variant, "low", "a fresh reading: the count is real");
 });
 
 test("each condition blocks on its own", async () => {
@@ -1638,16 +1738,20 @@ test("markNudged is at-most-once, and a nudge row arriving by sync silences this
   assert.equal((await nudgeDecision(B, { now: at(WED, 18, 15) })).reason, "already");
 });
 
-test("nudgeText: en and es, no numbers, unknown language falls back to en", () => {
+test("nudgeText: en and es, both variants, no numbers, unknowns fall back", () => {
   assert.deepEqual(Object.keys(NUDGE_TEXT).sort(), ["en", "es"]);
   for (const lang of ["en", "es"]) {
-    const t = nudgeText(lang);
-    assert.ok(t.title.length > 0 && t.body.length > 0);
-    assert.ok(!/\d/.test(t.title + t.body), "lock screens are public: no counts");
+    for (const variant of ["low", "unseen"]) {
+      const t = nudgeText(lang, variant);
+      assert.ok(t.title.length > 0 && t.body.length > 0);
+      assert.ok(!/\d/.test(t.title + t.body), "lock screens are public: no counts");
+    }
+    assert.notEqual(nudgeText(lang, "unseen").body, nudgeText(lang, "low").body);
   }
   assert.notEqual(nudgeText("es").title, nudgeText("en").title);
-  assert.deepEqual(nudgeText("fr"), nudgeText("en"));
+  assert.deepEqual(nudgeText("fr"), nudgeText("en", "low"));
   assert.deepEqual(nudgeText("__proto__"), nudgeText("en"));
+  assert.deepEqual(nudgeText("en", "constructor"), nudgeText("en", "low"));
 });
 
 test("startRambleNudge: sends once across repeated ticks, in the dashboard language, as a reminder", async () => {
@@ -1703,13 +1807,29 @@ Expected: FAIL — `Cannot find module '../servers/gateway/boot/ramble-nudge.js'
 export const HOME_WINDOW_MS = 3 * 24 * 3600 * 1000;
 export const ENGAGED_WINDOW_MS = 7 * 24 * 3600 * 1000;
 
-/** The bird's voice. No numbers: a lock screen is public. (R10: en/es.) */
+/** A counter reading older than this means the server may simply not have SEEN today's walk. */
+export const STALE_READING_MS = 3 * 3600 * 1000;
+
+/**
+ * The bird's voice. No numbers: a lock screen is public. (R10: en/es.)
+ * `low`    — the count is fresh and really is under half the goal.
+ * `unseen` — this player counts steps with the app, but no reading has
+ *            arrived for hours: they may well have walked. Ask to be shown,
+ *            never imply they did not walk (S1: never punish).
+ */
 export const NUDGE_TEXT = Object.freeze({
-  en: Object.freeze({ title: "Your bird is by the door", body: "A short walk would cheer you both up." }),
-  es: Object.freeze({ title: "Tu pájaro te espera en la puerta", body: "Una caminata corta los alegraría a los dos." }),
+  en: Object.freeze({
+    low: Object.freeze({ title: "Your bird is by the door", body: "A short walk would cheer you both up." }),
+    unseen: Object.freeze({ title: "Your bird wants to hear about your day", body: "Open Ramble so it can count today's steps, or take a short walk together." }),
+  }),
+  es: Object.freeze({
+    low: Object.freeze({ title: "Tu pájaro te espera en la puerta", body: "Una caminata corta los alegraría a los dos." }),
+    unseen: Object.freeze({ title: "Tu pájaro quiere saber de tu día", body: "Abre Ramble para que cuente los pasos de hoy, o den juntos una caminata corta." }),
+  }),
 });
-export function nudgeText(lang) {
-  return Object.hasOwn(NUDGE_TEXT, lang) ? NUDGE_TEXT[lang] : NUDGE_TEXT.en;
+export function nudgeText(lang, variant = "low") {
+  const set = Object.hasOwn(NUDGE_TEXT, lang) ? NUDGE_TEXT[lang] : NUDGE_TEXT.en;
+  return Object.hasOwn(set, variant) ? set[variant] : set.low;
 }
 
 /**
@@ -1729,15 +1849,26 @@ export async function nudgeDecision(db, { now = Date.now() } = {}) {
   if (!Number.isFinite(seen) || now - seen > HOME_WINDOW_MS) return { send: false, reason: "not-home" };
   const day = localDay(now);
   if ((await rowDelta(db, NUDGE_KIND, day)) !== null) return { send: false, reason: "already" };
+  // Engagement by the DAY KEY, not created_at: applyRambleWallet merges
+  // created_at to the MIN of two instances' values, so it is not a reliable
+  // clock (eggs.js warns against ordering by it). Keys are YYYY-MM-DD[:dev],
+  // so a string compare against the window's first day is exact.
+  const since = localDay(now - ENGAGED_WINDOW_MS);
   const { rows: used } = await db.execute({
-    sql: "SELECT 1 FROM ramble_wallet WHERE kind IN (?, ?) AND created_at >= ? LIMIT 1",
-    args: [STEPS_KIND, WALK_CHECKIN_KIND, now - ENGAGED_WINDOW_MS],
+    sql: "SELECT 1 FROM ramble_wallet WHERE kind IN (?, ?) AND key >= ? LIMIT 1",
+    args: [STEPS_KIND, WALK_CHECKIN_KIND, since],
   });
   if (!used.length) return { send: false, reason: "not-engaged" };
   if ((await rowDelta(db, WALK_CHECKIN_KIND, day)) !== null) return { send: false, reason: "walked" };
   const steps = await stepsToday(db, now, s);
   if (steps * 100 >= s.goal * s.nudgeBelow) return { send: false, reason: "on-track" };
-  return { send: true, reason: "due", day };
+  // Steps only arrive when the panel is opened. A counter player whose last
+  // reading on THIS instance is hours old may have walked plenty: ask to be
+  // shown rather than say "you haven't walked".
+  const { rows: dev } = await db.execute({ sql: "SELECT MAX(last_read_at) AS t FROM ramble_step_devices", args: [] });
+  const lastRead = Number(dev[0]?.t);
+  const variant = Number.isFinite(lastRead) && lastRead > 0 && now - lastRead > STALE_READING_MS ? "unseen" : "low";
+  return { send: true, reason: "due", day, variant };
 }
 
 /** Claim today's nudge BEFORE sending. True only for the claim that created the row. */
@@ -1802,7 +1933,7 @@ export function startRambleNudge({
       if (!(await mod.markNudged(db, d.day, { now, emit }))) return { sent: false, reason: "already" };
       let lang = "en";
       try { lang = (await readLang(db)) || "en"; } catch { lang = "en"; }
-      const { title, body } = mod.nudgeText(lang);
+      const { title, body } = mod.nudgeText(lang, d.variant || "low");
       await notify(db, {
         title, body, type: "reminder", source: "ramble:steps", priority: "normal",
         action_url: "/dashboard/ramble", expires_in_minutes: 360,
@@ -1889,7 +2020,7 @@ git show --stat HEAD
 - Test: `tests/ramble-panel.test.js` (append)
 
 **Interfaces:**
-- Consumes: Task 4 HTTP API; Task 5 `Bird.drawWalkBadge`; Task 8's native bridge contract — `window.Crow.stepsStatus() → "ok"|"needs-permission"|"denied"|"no-sensor"`, `window.Crow.requestStepsPermission(id)`, `window.Crow.readSteps(id)`, `window.Crow.openAppSettings()`, results delivered as `window.CrowSteps.deliver(id, payload)`.
+- Consumes: Task 4 HTTP API; Task 5 `Bird.mountWalkBadge`; Task 8's native bridge contract — `window.Crow.stepsStatus() → "ok"|"needs-permission"|"denied"|"no-sensor"`, `window.Crow.requestStepsPermission(id)`, `window.Crow.readSteps(id)`, `window.Crow.openAppSettings()`, results delivered as `window.CrowSteps.deliver(id, payload)`.
 - Produces: global `window.CrowSteps.deliver(id, payload)`; pure functions `nativeStepsMode()`, `stepsLabel(n)`, `walkCardState(mode, state)` (extractable by `extractFunction`).
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/ramble-panel.test.js` (it already defines `extractFunction`, `REPO_ROOT_FOR_PANEL`, `readFileSync`, `join`):
@@ -2015,7 +2146,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
 
 - [ ] **Step 4: Client** — in `bundles/ramble/panel/static/ramble.js`:
 
-(a) Update the header comment's innerHTML sentence to: "The innerHTML paths are RambleBird.mountBird and RambleBird.drawWalkBadge, which write markup this page's own engine generated -- never anybody's text."
+(a) Update the header comment's innerHTML sentence to: "The one innerHTML path is the engine's own mount helpers (RambleBird.mountBird, RambleBird.mountWalkBadge), which write markup this page's own engine generated -- never anybody's text." The markup-sink count test (`tests/ramble-panel.test.js` ~line 858, exactly two sinks) and the "no `.hidden =` anywhere" test (~line 867) must stay green: this block uses `setHidden(el, on)` (defined near the top of the file) for every show/hide and adds NO `.innerHTML =` of its own — the badge goes in through the engine's `mountWalkBadge`, exactly as the bird goes in through `mountBird`.
 
 (b) Insert this block immediately AFTER the closing `}` of `function jsonFetch(...)` (so its `var`s are initialised before any view switch can call `refreshWalk`):
 
@@ -2089,7 +2220,11 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
     return out;
   }
 
-  function callNative(method) {
+  /* The permission prompt waits on a human, so it gets minutes, not seconds;
+   * a read gets 8 s (native gives up at 4 s). A late delivery after a timeout
+   * is dropped, and the visibilitychange repaint (the prompt pauses the
+   * WebView) catches the outcome anyway. */
+  function callNative(method, timeoutMs) {
     return new Promise(function (resolve) {
       var id = "s" + (++walkSeq);
       var settled = false;
@@ -2098,7 +2233,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
         if (settled) return;
         delete walkReqs[id];
         resolve({ ok: false, reason: "timeout" });
-      }, 8000);
+      }, timeoutMs || 8000);
       try { window.Crow[method](id); }
       catch (e) { delete walkReqs[id]; settled = true; resolve({ ok: false, reason: "bridge" }); }
     });
@@ -2108,21 +2243,18 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
     if (!st) return;
     walkState = st;
     var v = walkCardState(nativeStepsMode(), st);
-    var meter = $("rb-walk-meter");
-    if (meter) meter.hidden = !v.showMeter;
+    setHidden($("rb-walk-meter"), !v.showMeter);
     var fill = $("rb-walk-fill");
     if (fill) fill.style.width = v.pct + "%";
     setText($("rb-walk-num"), stepsLabel(st.steps));
     setText($("rb-walk-goal"), stepsLabel(st.goal));
     setText($("rb-walk-goal-val"), stepsLabel(st.goal));
     setText($("rb-walk-line"), v.line);
-    var allow = $("rb-walk-allow");
-    if (allow) allow.hidden = !v.allow;
-    var open = $("rb-walk-open-settings");
-    if (open) open.hidden = !v.settings;
+    setHidden($("rb-walk-allow"), !v.allow);
+    setHidden($("rb-walk-open-settings"), !v.settings);
     var check = $("rb-walk-checkin");
+    setHidden(check, !v.manual);
     if (check) {
-      check.hidden = !v.manual;
       check.disabled = v.manualDone;
       check.textContent = v.manualDone ? "Walked today" : "I walked today";
     }
@@ -2139,7 +2271,12 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
     if (!force && Date.now() - walkLastRead < 60000) return Promise.resolve(null);
     walkLastRead = Date.now();
     return callNative("readSteps").then(function (p) {
-      if (!p || !p.ok) return null;
+      if (!p || !p.ok) {
+        /* Some phones deliver the first sensor event late; say so, quietly. */
+        if (p && p.reason === "timeout") setText($("rb-walk-status"), "Couldn\u2019t read the step counter just now. It will try again.");
+        return null;
+      }
+      setText($("rb-walk-status"), "");
       return jsonFetch("/api/ramble/steps/reading", {
         method: "POST",
         body: { device_id: p.device_id, counter: p.counter, elapsed_ms: p.elapsed_ms, boot_count: p.boot_count },
@@ -2178,7 +2315,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
     var allow = $("rb-walk-allow");
     if (allow) allow.addEventListener("click", function () {
       allow.disabled = true;
-      callNative("requestStepsPermission")
+      callNative("requestStepsPermission", 5 * 60 * 1000)
         .then(function () { return refreshWalk(true); })
         .then(function () { allow.disabled = false; });
     });
@@ -2214,7 +2351,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
     if (name === "pet") refreshWalk(false);
 ```
 
-(d) Boot read: find where the file kicks off its initial loads (search for the first top-level `refreshPet();` call that is not inside a function) and add `refreshWalk(true);` on the line after it.
+(d) Boot read: in the startup block near the end of the file, directly after the line `refreshEgg().then(refreshPet);` (~line 2701 — NOT the bare `refreshPet();` inside `openAr`), add `refreshWalk(true);`.
 
 (e) Badge on the pet portrait — in `paintPet`, replace the `mountBird` line:
 
@@ -2222,9 +2359,7 @@ In the "What your bird runs on" list, insert a new first `rb-step` (before "Meet
         try {
           Bird.mountBird(petBird, genome, pet.mood || "happy");
           /* Spec 2026-10-04 §8: the same badge contacts see. Engine markup only. */
-          if (pet.walked_today === true && typeof Bird.drawWalkBadge === "function") {
-            petBird.innerHTML = petBird.innerHTML + Bird.drawWalkBadge();
-          }
+          if (pet.walked_today === true && typeof Bird.mountWalkBadge === "function") Bird.mountWalkBadge(petBird);
         } catch (e) { /* cosmetic */ }
 ```
 
@@ -2266,9 +2401,10 @@ git show --stat HEAD
 
 There is no Android unit-test harness (`android/app/src/test` does not exist) and CI does not build the APK. The proof for this task is (1) a clean compile on crow and (2) the on-device checklist in Task 12. Native code stays a dumb reader (R1) — no arithmetic here.
 
-- [ ] **Step 1: Baseline compile BEFORE editing** (surfaces toolchain problems before they can be blamed on the change)
+- [ ] **Step 1: Baseline compile BEFORE editing** (surfaces toolchain problems before they can be blamed on the change). A worktree has no `android/local.properties` (gitignored) and `ANDROID_HOME` is unset on crow, so copy the main checkout's file first — it is never committed:
 
 ```bash
+cp ~/crow/android/local.properties ~/crow-wt-ramble-steps/android/local.properties
 cd ~/crow-wt-ramble-steps/android && ./gradlew assembleDebug --offline 2>&1 | tail -5
 ```
 Expected: `BUILD SUCCESSFUL`. If it fails for a reason unrelated to this branch (dependency cache, SDK), STOP and report — do not edit build files to work around it.
@@ -2311,13 +2447,21 @@ Fields (with the other `private static final` constants and fields at the top of
     // Ramble walking (spec 2026-10-04 §10). Native is a dumb reader: it never
     // does step arithmetic — the gateway does (baselines, reboots, caps).
     private static final String KEY_STEPS_DEVICE_ID = "steps_device_id";
-    private static final String KEY_STEPS_PERM_ASKED = "steps_perm_asked";
+    private static final String KEY_STEPS_RATIONALE_SEEN = "steps_rationale_seen";
     private static final Pattern STEPS_REQ_ID = Pattern.compile("^[A-Za-z0-9]{1,32}$");
     private static final long STEPS_READ_TIMEOUT_MS = 4000L;
     private String pendingStepsPermId;
 
     private final ActivityResultLauncher<String> stepsPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                // A refusal after which Android would still prompt (rationale = true)
+                // is remembered: only a LATER "not granted + no rationale" is a
+                // permanent "denied". A dismissed dialog (tap outside / back) on the
+                // very first ask also reads not-granted + no rationale, and must stay
+                // "needs-permission".
+                if (!granted && shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) {
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_STEPS_RATIONALE_SEEN, true).apply();
+                }
                 String id = pendingStepsPermId;
                 pendingStepsPermId = null;
                 if (id == null) return;
@@ -2342,12 +2486,17 @@ Methods on `MainActivity` (place them after `requestLocationPermission`):
                 == PackageManager.PERMISSION_GRANTED;
     }
 
-    /** "ok" | "needs-permission" | "denied" | "no-sensor". "denied" = refused and Android will not prompt again. */
+    /**
+     * "ok" | "needs-permission" | "denied" | "no-sensor". "denied" only once the
+     * user has refused at least once with Android still willing to ask
+     * (rationale seen) AND Android has now stopped offering the rationale — i.e.
+     * "don't ask again". Before that, a dismissed dialog is still askable.
+     */
     String stepsStatusString() {
         if (!hasStepCounter()) return "no-sensor";
         if (hasActivityPermission()) return "ok";
-        boolean asked = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(KEY_STEPS_PERM_ASKED, false);
-        if (asked && !shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) return "denied";
+        boolean rationaleSeen = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(KEY_STEPS_RATIONALE_SEEN, false);
+        if (rationaleSeen && !shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) return "denied";
         return "needs-permission";
     }
 
@@ -2449,7 +2598,6 @@ Bridge methods — add inside `public class CrowBridge { ... }` after `setPullTo
                     return;
                 }
                 pendingStepsPermId = id;
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_STEPS_PERM_ASKED, true).apply();
                 stepsPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION);
             });
         }
@@ -2562,7 +2710,7 @@ node scripts/build-registry.mjs --check
 git diff origin/main -- scripts/init-db.js | grep -c SCHEMA_GENERATION
 git diff origin/main -- servers/sharing/instance-sync.js | wc -l
 ```
-Expected: suite `fail 0`, pass count = baseline + the new tests (record both in the PR body); port and registry checks exit 0; `0` SCHEMA_GENERATION lines; `0` lines of `instance-sync.js` diff (R2 — no core sync change). A failure in `tests/sync-stamp.test.js:174` (known pre-existing concurrent-first-boot flake) is re-run alone and in the full suite once more and reported either way. Check how docs pages are built in CI (`grep -n "docs" .github/workflows/*.yml | head`) and, if a docs build job exists, run its command locally; bare `<placeholder>` tokens outside backticks have broken the Deploy Docs job before (commit e345ce9f).
+Expected: suite `fail 0`, pass count = baseline + the new tests (record both in the PR body); port and registry checks exit 0; `0` SCHEMA_GENERATION lines; `0` lines of `instance-sync.js` diff (R2 — no core sync change). A failure in `tests/sync-stamp.test.js:174` (known pre-existing concurrent-first-boot flake) is re-run alone and in the full suite once more and reported either way. `deploy-docs.yml` runs only on pushes to `main`, so the PR's check-runs will NOT build the docs — build them locally, required: `cd docs && npm run build 2>&1 | tail -5` → success. Bare `<placeholder>` tokens outside backticks have broken the Deploy Docs job before (commit e345ce9f).
 
 - [ ] **Step 6: Commit**
 
@@ -2604,7 +2752,7 @@ sudo systemctl restart crow-gateway
 sleep 20
 grep '"version"' ~/.crow/bundles/ramble/manifest.json
 ```
-Expected: `"version": "0.14.0"`. Phase 4 needed a SECOND restart because the first boot refreshed the installed copy after the routes had already loaded the old one — so if the version is now 0.14.0, restart once more:
+Expected: `"version": "0.14.0"`. Phase 4 needed a SECOND restart because the first boot refreshed the installed copy after the routes had already loaded the old one. Task 5 makes the portrait engine re-probe itself, but the panel routes still import the bundle once per process, so restart once more for this deploy (fleet auto-update on other hosts is covered by Task 5's re-probe for the badge and by the next routine restart for the routes):
 
 ```bash
 sudo systemctl restart crow-gateway && sleep 20
@@ -2646,7 +2794,7 @@ Each line is pass/fail; record results as a PR comment. The operator can watch `
 - [ ] **A2 First reading.** The meter shows a number: either today's steps (if the phone was restarted today) or 0 with "Counting from now." A `steps` row does or does not appear accordingly; a `ramble_step_devices` row exists.
 - [ ] **A3 Walk.** Note the count, walk about 200 steps (count them roughly), reopen Ramble (or switch away and back to the pet view after a minute). The count rises by roughly that amount (±20%). Energy rises in chunks of 5 once progress crosses each 1/6 of the goal.
 - [ ] **A4 Goal + bonus + badge.** Open **Goal and reminders**, lower the goal (−) until it is just under today's count. The line reads "Goal reached… (+3 seed)", the seed balance rises by 3 once (repeat − : no second bonus), and the badge appears on the pet portrait. Within ~30 s the profile picture as a contact sees it shows the footprint mark (check from another Crow that has Kevin as a contact, e.g. the Dayane instance's contact list, or ask a contact). Raise the goal back to 6,000.
-- [ ] **A5 Nudge.** On a weekday evening when under half the goal, or by temporarily setting the hour: `sqlite3 ~/.crow/data/crow.db "INSERT INTO ramble_settings (key, value) VALUES ('steps.nudge.hour', strftime('%H','now','localtime')+0) ON CONFLICT(key) DO UPDATE SET value = excluded.value;"` and (only if today's steps are already ≥ half the goal) temporarily raise the goal. Within 10 minutes exactly one notification "Your bird is by the door" arrives on the phone (ntfy). No second one in the next 20 minutes. Then delete the override: `sqlite3 ~/.crow/data/crow.db "DELETE FROM ramble_settings WHERE key = 'steps.nudge.hour';"` (it was a replicated setting written locally without an emit — deleting it locally restores the default).
+- [ ] **A5 Nudge.** Preferred: a real weekday evening. If by 18:00 Kevin is under half his goal and has not checked in, within 10 minutes exactly one notification arrives (ntfy) — "Your bird is by the door" if the panel was opened in the last 3 hours, otherwise "Your bird wants to hear about your day". No second one that evening. Only if a same-day check is needed: register the step in `~/CROW-SCHEDULE.md`, then ONE statement against the live db (`sqlite3 ~/.crow/data/crow.db "INSERT INTO ramble_settings (key, value) VALUES ('steps.nudge.hour', strftime('%H','now','localtime')+0) ON CONFLICT(key) DO UPDATE SET value = excluded.value;"`), observe, and remove it the same way (`... "DELETE FROM ramble_settings WHERE key = 'steps.nudge.hour';"`) — deleting restores the default only because this write was never emitted to the other instances.
 - [ ] **A6 Off switches.** With "An evening nudge if I haven't walked" unticked, no nudge the next evening. With "…on weekends too" unticked, none on Saturday.
 - [ ] **A7 Fallback.** Open Ramble in the phone's browser (not the app): the card offers only **I walked today** with the "Steps are counted in the Crow Android app" line; tapping it marks the day and cheers the bird; no seed changes.
 
@@ -2659,4 +2807,4 @@ Acceptance passes when A1–A4 and A7 pass and A5–A6 pass on their first eveni
 1. **Spec coverage** — §0 deferral correction: Task 9 Step 3. S1 goal/energy/bonus/no-punish: Tasks 1–2 (+ panel Task 7). S2 own progress + boolean badge: Tasks 2, 5, 7. S3 manual check-in: Tasks 2, 4, 7. S4 nudge + settings: Tasks 2 (settings), 6, 7. R1 dumb native: Task 8. R2 wallet rows, no core sync change: Tasks 1–3, gate in Task 9 Step 5. R3 local baseline: Task 1. R4 day attribution: Task 1 test. R5 decay clock: Task 2. R6 badge rule: Task 2. R7 bonus as seed row: Task 2 tests (balance + harvestable). R8 steps home + nudge row: Tasks 2 (`touchHome`), 4 (routes touch it), 6. R9 engaged-only: Task 6. R10 i18n split: Task 6 (`NUDGE_TEXT`), Task 9 (guides). R11 privacy: Task 5 tests (boolean only). R12 no MCP tool: nothing added. §8 badge pacing via the coalesced hook: Task 5. §10 bridge + detection + read cadence: Tasks 7–8. §11 testing: every task; Android = compile + Task 12. Deploy + APK: Tasks 10–11.
 2. **Placeholders** — none. Implementer lookups are explicit with a fallback: `SYNCED_TABLES` export (Task 1), `ramble-tables`/`ramble-panel` exact-shape expectations (Tasks 1, 4), `$` declaration placement (Task 7), the engine binding name in `ramble-bird-svg.test.js` (Task 5), the guide's Configuration format and ES label convention (Task 9), docs CI job (Task 9).
 3. **Type consistency** — `recordStepReading → {credited, reason, clamped, day}` (Tasks 1, 3, 4, 7); `settleDay → {day, steps, energyPaid, seedBonus, walked, walkedNew}` (Tasks 2, 3, 4); `stepsState` shape identical in Tasks 2, 4, 7; `writeStepSettings → {...stepsState, settled}` and the route strips `settled` (Task 4); bridge method names and payloads identical in Tasks 7 and 8; bus event `ramble:walked-changed` in Tasks 4 and 5; kinds/keys per Global Constraints everywhere; `portraitDay` ≡ `localDay` pinned (Task 5).
-4. **Review Focus** — (1) Task 1 reboot ×3 + clamp-discard tests; (2) Task 1 race test + Task 3 phone-moves/two-phones/cap tests; (3) Task 7 `nativeStepsMode` + `walkCardState` tests (all six modes, throwing bridge); (4) Task 6 per-condition, at-most-once, synced-row, busy/failing/missing-module tests; (5) Task 1 `parseReading` + `readStepSettings` junk, Task 2 `writeStepSettings` junk, Task 4 route 400s.
+4. **Review Focus** — (1) Task 1 reboot ×3 + clamp-discard tests; (2) Task 1 race test + Task 3 phone-moves, A→B→A, two-phones and cap tests; (3) Task 7 `nativeStepsMode` + `walkCardState` tests (all six modes, throwing bridge); (4) Task 6 per-condition, at-most-once, synced-row, busy/failing/missing-module tests; (5) Task 1 `parseReading` + `readStepSettings` junk, Task 2 `writeStepSettings` junk, Task 4 route 400s.
