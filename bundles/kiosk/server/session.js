@@ -28,6 +28,28 @@ export function createSessionHub(deps) {
     const pendingSpeech = [];
     let speaking = false;
     let speechAbort = null;
+    // Early STT (lever D): {bytes, ctrl, startedAt, promise, done} for the transcription started
+    // at the page's speech_pause, over the audio received so far. At most ONE runs at a time:
+    // whisper (num_workers 1) cannot cancel a request, so a newer pause while one runs only
+    // records `want` and starts when it settles.
+    let early = null;
+    let earlyWant = false;
+    let earlyDiscards = 0;
+    const nowMs = () => (deps.now || Date.now)();
+    function dropEarly() { if (early && !early.done) early.ctrl.abort(); early = null; earlyWant = false; }
+    function startEarly() {
+      if (!inTurn || !deps.transcribe || bytes < MIN_TURN_BYTES) return;
+      if (early && !early.done) { earlyWant = true; return; }
+      if (early && early.bytes === bytes) return;               // nothing new since the last one
+      if (early) earlyDiscards++;                                // superseded by more speech
+      earlyWant = false;
+      const e = { bytes, ctrl: new AbortController(), startedAt: nowMs(), done: false };
+      e.promise = Promise.resolve()
+        .then(() => deps.transcribe({ device, audio: deps.wrapPcmAsWav(Buffer.concat(frames), 16000), signal: e.ctrl.signal }))
+        .then((r) => ({ text: String(r?.text || "").trim(), ms: nowMs() - e.startedAt }), (err) => ({ error: err }))
+        .then((r) => { e.done = true; if (early === e && earlyWant && inTurn) startEarly(); return r; });
+      early = e;
+    }
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
     const state = (bird) => sendJson(ws, { type: "state", bird });
     const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
@@ -79,12 +101,21 @@ export function createSessionHub(deps) {
 
     async function onTurnEnd(msg) {
       if (!inTurn) return;
+      const turnStartedAt = nowMs();
+      // An early transcription is usable only when no voiced frame arrived after its snapshot
+      // (the page reports how many bytes it had sent at its last voiced frame).
+      const voiced = Number(msg?.voiced_bytes);
+      const usable = early && msg?.vad_reason === "silence" && Number.isFinite(voiced) && early.bytes >= voiced ? early : null;
+      if (early && !usable) earlyDiscards++;
+      if (!usable) dropEarly();
+      const discards = earlyDiscards;
+      early = null; earlyWant = false; earlyDiscards = 0;
       inTurn = false;
       const pcm = Buffer.concat(frames);
       frames = []; bytes = 0;
       // Nothing said (the page's no-speech timeout): never send room noise to STT —
       // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
-      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
+      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { usable?.ctrl.abort(); deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
       abort = new AbortController();
       const my = abort;
@@ -100,7 +131,14 @@ export function createSessionHub(deps) {
       };
       let r = null;
       try {
-        r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps });
+        let transcript = null, sttEarly = null;
+        if (usable) {
+          const er = await usable.promise;
+          if (!er.error && !my.signal.aborted) { transcript = er.text; sttEarly = { used: true, ms: er.ms, discards }; }
+          else if (er.error) deps.log?.(`[kiosk] early STT failed, transcribing again: ${er.error.message}`);
+        }
+        if (!sttEarly) sttEarly = { used: false, discards };
+        r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps, transcript, startedAt: turnStartedAt, sttEarly });
       } catch (err) {
         deps.log?.(`[kiosk] turn failed: ${err.message}`);
         sendJson(ws, { type: "error", code: "turn_failed", recoverable: true });
@@ -129,6 +167,7 @@ export function createSessionHub(deps) {
         if (!inTurn) return;
         bytes += raw.length;
         if (bytes > MAX_TURN_BYTES) {
+          dropEarly();
           inTurn = false; frames = []; bytes = 0;
           sendJson(ws, { type: "error", code: "audio_too_long", recoverable: true });
           state("idle");
@@ -144,9 +183,13 @@ export function createSessionHub(deps) {
         case "turn_start":
           if (busy) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); return; }
           if (speechAbort) speechAbort.abort();
+          dropEarly(); earlyDiscards = 0;
           inTurn = true; frames = []; bytes = 0;
           turnId = String(msg.turn_id || `t${(deps.now || Date.now)()}`).slice(0, 64);
           state("listening");
+          return;
+        case "speech_pause":
+          startEarly();
           return;
         case "turn_end":
           onTurnEnd(msg).catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
@@ -173,6 +216,7 @@ export function createSessionHub(deps) {
     });
     ws.on("close", () => {
       clearT(helloTimer);
+      dropEarly();
       if (abort) abort.abort();
       if (speechAbort) speechAbort.abort();
       if (device && sessions.get(device.id) === self) sessions.delete(device.id);

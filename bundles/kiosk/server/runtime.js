@@ -131,8 +131,8 @@ export function createKioskRuntime(deps) {
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
     displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps }) => withDb((db) => deps.voice.runVoiceTurn({
-      db, device, audio, sink, signal,
+    runTurn: ({ device, audio, sink, signal, caps, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
+      db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
       extraTools: [createWmTool({ store: wm, deviceId: device.id, caps, emit: (ev) => sink.event(ev) })],
       fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps),
       promptSuffix: kioskPromptSuffix(),
@@ -140,6 +140,10 @@ export function createKioskRuntime(deps) {
       denyTools: KIOSK_DENY_TOOLS,
       sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
     })),
+    // Early STT (lever D): same profile + per-display model as the turn's own STT.
+    transcribe: deps.voice.transcribe
+      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings) }))
+      : null,
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
     wm, metrics,
     wrapPcmAsWav: deps.wrapPcmAsWav,

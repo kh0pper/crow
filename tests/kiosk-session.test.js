@@ -30,6 +30,7 @@ function hub(over = {}) {
     speak: over.speak || (async ({ text, sink }) => { sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); sink.audio(Buffer.from(text)); sink.event({ type: "tts_end" }); }),
     wm, metrics, wrapPcmAsWav,
     warmup: over.warmup || (async () => {}),
+    transcribe: over.transcribe || null,
     setTimeout: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; },
     clearTimeout: (t) => { if (t) t.cleared = true; },
     now: () => 42,
@@ -324,4 +325,103 @@ test("pushConfig re-sends ready with fresh display_config to the live session; o
   assert.equal(readies[1].server_now, 42);
   assert.equal(h.deviceOf("kiosk-a").kiosk_settings.follow_up, true);
   assert.equal(h.deviceOf("nope"), null);
+});
+
+// Lever D (early STT): the page sends speech_pause ~120 ms into a silence; the server transcribes the
+// audio so far while the hangover runs, and uses it only if no voiced frame came after the snapshot.
+function deferred() { let resolve, reject; const p = new Promise((a, b) => { resolve = a; reject = b; }); return { p, resolve, reject }; }
+function earlyHub() {
+  const stt = [];
+  const t = hub({ transcribe: (o) => { const d = deferred(); stt.push({ ...o, d }); return d.p; } });
+  return { ...t, stt };
+}
+const F = Buffer.alloc(640, 5);   // one 20 ms frame
+
+test("lever D: speech_pause starts STT on the audio so far; a turn_end with no later voice uses it — no second transcription", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "e1" });
+  for (let i = 0; i < 30; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" });
+  await tick();
+  assert.equal(stt.length, 1);
+  assert.equal(stt[0].audio.length, 44 + 30 * 640, "the snapshot is what had arrived");
+  for (let i = 0; i < 17; i++) ws.bin(Buffer.alloc(640));        // the rest of the hangover: silence
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 30 * 640 });
+  await tick();
+  assert.equal(turns.length, 0, "the turn waits for the early transcript");
+  stt[0].d.resolve({ text: "What is the capital of Portugal?" });
+  await tick(); await tick();
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].transcript, "What is the capital of Portugal?");
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 0 });
+  assert.equal(typeof turns[0].startedAt, "number");
+  assert.equal(stt[0].signal.aborted, false);
+});
+
+test("lever D: speech resumed after the pause → the early transcript is discarded (aborted) and the full audio is transcribed", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "e2" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" });
+  await tick();
+  for (let i = 0; i < 25; i++) ws.bin(F);                          // "...and Spain?" — voice again
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 45 * 640 });
+  await tick(); await tick();
+  assert.equal(stt[0].signal.aborted, true, "the partial is dropped");
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].transcript, null, "the turn transcribes the whole utterance itself");
+  assert.equal(turns[0].audio.length, 44 + 45 * 640);
+  assert.deepEqual(turns[0].sttEarly, { used: false, discards: 1 });
+});
+
+test("lever D: one early STT at a time — a newer pause while one runs waits, then transcribes the longer audio; the newest wins", async () => {
+  const { h, turns, stt } = earlyHub(); const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "e3" });
+  for (let i = 0; i < 20; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" });
+  await tick();
+  for (let i = 0; i < 10; i++) ws.bin(F);
+  ws.text({ type: "speech_pause" });
+  await tick();
+  assert.equal(stt.length, 1, "whisper cannot cancel: never two in flight");
+  stt[0].d.resolve({ text: "What is" });
+  await tick(); await tick();
+  assert.equal(stt.length, 2, "the wanted one starts when the first settles");
+  assert.equal(stt[1].audio.length, 44 + 30 * 640);
+  ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 30 * 640 });
+  stt[1].d.resolve({ text: "What is the time?" });
+  await tick(); await tick(); await tick();
+  assert.equal(turns[0].transcript, "What is the time?");
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 1 });
+});
+
+test("lever D: a failed early STT falls back to transcribing; no_speech and close abort it; without speech_pause nothing changes", async () => {
+  const a = earlyHub(); const wa = await hello(a.h);
+  wa.text({ type: "turn_start", turn_id: "f1" });
+  for (let i = 0; i < 20; i++) wa.bin(F);
+  wa.text({ type: "speech_pause" }); await tick();
+  wa.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 20 * 640 });
+  a.stt[0].d.reject(new Error("ECONNRESET"));
+  await tick(); await tick(); await tick();
+  assert.equal(a.turns[0].transcript, null);
+  assert.equal(a.turns[0].sttEarly.used, false);
+  assert.ok(a.logs.some((l) => /early STT failed/.test(l)));
+
+  const b = earlyHub(); const wb = await hello(b.h);
+  wb.text({ type: "turn_start", turn_id: "f2" });
+  for (let i = 0; i < 20; i++) wb.bin(F);
+  wb.text({ type: "speech_pause" }); await tick();
+  wb.close(1006, "");
+  assert.equal(b.stt[0].signal.aborted, true, "a closed socket drops its early STT");
+
+  const c = earlyHub(); const wc = await hello(c.h);
+  wc.text({ type: "turn_start", turn_id: "f3" });
+  for (let i = 0; i < 3; i++) wc.bin(F);
+  wc.text({ type: "speech_pause" }); await tick();
+  assert.equal(c.stt.length, 0, "under MIN_TURN_BYTES: no early STT");
+  for (let i = 0; i < 20; i++) wc.bin(F);
+  wc.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 23 * 640 });
+  await tick(); await tick();
+  assert.equal(c.turns[0].transcript, null);
+  assert.deepEqual(c.turns[0].sttEarly, { used: false, discards: 0 });
 });

@@ -499,3 +499,36 @@ test("a finished timer is spoken in the display's language (wired through the ru
   assert.equal(speakCalls.at(-1).device.id, "kiosk-timer-es");
   ws.close();
 });
+
+test("lever D (wired): speech_pause → voice.transcribe with the display's model; the turn gets the early transcript", async () => {
+  const tx = [], runs = [];
+  const r = createKioskRuntime(runtimeDeps({
+    voice: {
+      transcribe: async (o) => { tx.push(o); return { text: "early words" }; },
+      runVoiceTurn: async (o) => { runs.push(o); return { route: "fast", timings: {} }; },
+      speakText: async () => true,
+    },
+  }));
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  const { token } = await store.pairDevice(db(), { id: "kiosk-early", name: "e", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-early", { bound_bot_id: "household", kiosk_settings: { stt_model: "tiny.en" } });
+  const ws = new WebSocket(wsUrl(b));
+  const msgs = [];
+  await new Promise((x) => ws.on("open", x));
+  ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-early", token, caps: {} }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((x) => setTimeout(x, 10));
+  ws.send(JSON.stringify({ type: "turn_start", turn_id: "w1" }));
+  ws.send(Buffer.alloc(8000, 3));
+  ws.send(JSON.stringify({ type: "speech_pause" }));
+  ws.send(JSON.stringify({ type: "turn_end", vad_reason: "silence", voiced_bytes: 8000 }));
+  for (let i = 0; i < 50 && !runs.length; i++) await new Promise((x) => setTimeout(x, 10));
+  assert.equal(tx.length, 1);
+  assert.equal(tx[0].sttModel({ provider: "fasterwhisper" }), "Systran/faster-whisper-tiny.en");
+  assert.equal(runs[0].transcript, "early words");
+  assert.equal(runs[0].sttEarly.used, true);
+  assert.equal(typeof runs[0].startedAt, "number");
+  ws.close(); r.stop(); s.close();
+});

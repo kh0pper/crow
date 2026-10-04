@@ -66,3 +66,29 @@ test("latency arithmetic: play start maps audio-clock time to performance time a
   assert.equal(e2eMs({ speechEndAt: 3200, playAt: 5070 }), 1870);
   assert.equal(e2eMs({ speechEndAt: null, playAt: 5070 }), null);
 });
+
+test("lever D: pause fires ONCE, pauseMs into a silence after real speech; resumed voice re-arms it; never before speech", () => {
+  const v = createVad();
+  let t = 1000; const out = [];
+  const feed = (rms, n) => { for (let i = 0; i < n; i++) { t += 20; const r = v.push(rms, t); out.push(r); if (r.end) return r; } return null; };
+  feed(0.001, 20);
+  assert.ok(!out.some((r) => r.pause), "silence before any speech never pauses");
+  feed(0.05, 15);                                  // 300 ms of speech
+  assert.ok(out.slice(-15).every((r) => r.voiced));
+  const speechEnd = t;
+  feed(0.001, 10);                                 // 200 ms of silence
+  const p1 = out.filter((r) => r.pause);
+  assert.equal(p1.length, 1);
+  assert.equal(p1[0].speechEndAt, speechEnd);
+  feed(0.05, 5);                                   // voice resumes before the hangover
+  feed(0.001, 10);
+  assert.equal(out.filter((r) => r.pause).length, 2, "a new silence pauses again");
+  const end = feed(0.001, 40);
+  assert.equal(end.reason, "silence");
+  assert.equal(VAD_DEFAULTS.pauseMs, 120);
+  assert.ok(VAD_DEFAULTS.pauseMs < VAD_DEFAULTS.hangoverMs);
+  const off = createVad({ hangoverMs: 100 });      // pause >= hangover: no pause, just the end
+  t = 1000; out.length = 0;
+  const v2 = off; for (let i = 0; i < 15; i++) { t += 20; v2.push(0.05, t); }
+  let r2; for (let i = 0; i < 20 && !(r2 = v2.push(0.001, (t += 20))).end;) { assert.ok(!r2.pause); i++; }
+});

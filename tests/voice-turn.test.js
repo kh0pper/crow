@@ -340,3 +340,22 @@ test("review M7: route-neutrality follows the refused call, not its id — a rea
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "and?", sink: h.sink, denyTools: ["crow_discover"] });
   assert.equal(h.calls.routed[1].filter((r) => r === "tool").length, 1, "the executed crow_projects result counts; the refused discover does not");
 });
+
+test("lever D: an early transcript skips STT; timings count from the real turn start (startedAt) and record the early STT", async () => {
+  const h = harness();
+  let sttCalls = 0;
+  h.deps.createSttAdapter = async () => ({ transcribe: async () => { sttCalls++; return { text: "x" }; } });
+  const startedAt = h.c.now() - 150;                         // the turn waited 150 ms for the early transcript
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), transcript: "What is the capital of Portugal?", startedAt, sttEarly: { used: true, ms: 620, discards: 1 }, sink: h.sink });
+  assert.equal(sttCalls, 0);
+  assert.equal(r.timings.stt_ms, 150);
+  assert.equal(r.timings.stt_early, "used");
+  assert.equal(r.timings.stt_early_ms, 620);
+  assert.equal(r.timings.stt_early_discards, 1);
+  assert.ok(r.timings.llm_first_token_ms >= 150, "later marks are from startedAt too");
+  const seen = [];
+  h.deps.getSttProfile = async () => ({ id: "k", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (a, o) => { seen.push(o.model ?? null); return { text: "  hi  " }; } });
+  assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi" });
+  assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en"]);
+});

@@ -211,8 +211,10 @@ async function ensureAudio() {
 
 function onFrame(pcm, rms, at) {
   if (!turn || turn.ended) return;               // the worklet only posts during a turn
-  if (ws && ws.readyState === 1) ws.send(pcm);
+  if (ws && ws.readyState === 1) { ws.send(pcm); turn.sentBytes += pcm.byteLength || 0; }
   const r = turn.vad.push(rms, at);
+  if (r.voiced) turn.voicedBytes = turn.sentBytes;          // the server discards an early STT that ends before this
+  if (r.pause) send({ type: "speech_pause" });              // early STT: transcribe now, while the hangover runs (lever D)
   if (r.end) endTurn(r.reason, r.speechEndAt);
 }
 
@@ -222,7 +224,7 @@ async function startTurn(source) {
   if (turn) report(turn, true);                  // a pending no-audio wait is cut short: still reported (F9)
   const noSpeechMs = source === "follow_up" ? (config.follow_up_s || 6) * 1000 : 8000;
   const hangoverMs = Number(config.vad_hangover_ms) || VAD_DEFAULTS.hangoverMs;   // latency lever 1 (ruling R20; default 450 ms)
-  turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null };
+  turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null, sentBytes: 0, voicedBytes: 0 };
   const tn = turn;
   tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
   send({ type: "turn_start", source: source === "wake" ? "wake" : "tap", turn_id: turn.id });
@@ -235,7 +237,7 @@ function endTurn(reason, speechEndAt) {
   turn.ended = true; turn.reason = reason; turn.speechEndAt = speechEndAt;
   clearTimeout(turn.guard); turn.guard = null;
   mic?.stop();
-  send({ type: "turn_end", vad_reason: reason });
+  send({ type: "turn_end", vad_reason: reason, voiced_bytes: turn.voicedBytes });
 }
 /** turn_metrics, once per turn, when playback settles (F3) or the no-audio wait runs out (F9). */
 function report(tn, force = false) {

@@ -125,9 +125,20 @@ export function createVoiceTurnRunner(deps) {
     return { reason: "cold_timeout" };
   }
 
+  /** STT only (the kiosk's early transcription, lever D). The WAV is handed to the adapter and dropped. */
+  async function transcribe({ db, device, audio, signal, sttModel }) {
+    const sttProfile = await deps.getSttProfile(db, device);
+    if (!sttProfile) throw Object.assign(new Error("no STT profile"), { code: "no_stt_profile" });
+    const stt = await deps.createSttAdapter(sttProfile);
+    const model = typeof sttModel === "function" ? sttModel(sttProfile) : null;
+    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
+    return { text: String(r?.text || "").trim() };
+  }
+
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
-    const t0 = now();
+    // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
+    const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = {};
     const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, timings };
     const mark = (k) => { if (timings[k] == null) timings[k] = now() - t0; };
@@ -137,6 +148,12 @@ export function createVoiceTurnRunner(deps) {
     try {
       // 1. STT (the WAV is only ever passed to the adapter; never written anywhere)
       let transcript = opts.transcript;
+      if (opts.sttEarly) {
+        timings.stt_early = opts.sttEarly.used ? "used" : "none";
+        if (opts.sttEarly.discards) timings.stt_early_discards = opts.sttEarly.discards;
+        if (opts.sttEarly.used && Number.isFinite(opts.sttEarly.ms)) timings.stt_early_ms = opts.sttEarly.ms;
+      }
+      if (transcript != null && opts.sttEarly?.used) mark("stt_ms");   // = how long the turn waited for the early transcript
       if (transcript == null) {
         const sttProfile = await deps.getSttProfile(db, device);
         if (!sttProfile) { fail("no_stt_profile", false); return result; }
@@ -357,7 +374,7 @@ export function createVoiceTurnRunner(deps) {
     return true;
   }
 
-  return { runVoiceTurn, speakText, convo };
+  return { runVoiceTurn, speakText, transcribe, convo };
 }
 
 /** The real dependencies (gateway process). Lazy so tests never load them. */

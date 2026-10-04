@@ -179,3 +179,13 @@ test("smoke 2026-10-04 item 7: every banner/caption write is recorded; a long pr
   assert.ok(dbg && dbg.hasAttribute("hidden"), "#debug ships hidden");
   assert.doesNotMatch(src, /debug"\)\.innerHTML/, "rendered as text");
 });
+
+test("lever D: the page reports speech_pause from the VAD and the bytes sent at the last voiced frame on turn_end", () => {
+  const src = read("kiosk.js");
+  const onFrame = src.slice(src.indexOf("function onFrame("), src.indexOf("async function startTurn("));
+  assert.match(onFrame, /turn\.sentBytes \+= /);
+  assert.match(onFrame, /if \(r\.voiced\) turn\.voicedBytes = turn\.sentBytes;/);
+  assert.match(onFrame, /if \(r\.pause\) send\(\{ type: "speech_pause" \}\);/);
+  assert.ok(onFrame.indexOf("r.pause") < onFrame.indexOf("r.end"), "the pause is sent before a same-frame end");
+  assert.match(src, /send\(\{ type: "turn_end", vad_reason: reason, voiced_bytes: turn\.voicedBytes \}\);/);
+});
