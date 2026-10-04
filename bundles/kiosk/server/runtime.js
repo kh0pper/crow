@@ -225,19 +225,27 @@ export function createKioskRuntime(deps) {
         if (!bot) return res.status(400).json({ error: "bot_required" });
         const c = pairing.claim(code);
         if (c.error) return res.status(c.status).json({ error: c.error, retry_after_s: c.retry_after_s });
+        let created = null;
         try {
           const stt = await ensureKioskSttProfile(db, deps.settings);
           const tts = await pickKioskTtsProfile(db, deps.settings);
           const id = "kiosk-" + randomBytes(6).toString("hex");
+          created = id;
           const { token } = await deps.deviceStore.pairDevice(db, { id, name, device_kind: "kiosk", stt_profile_id: stt.id, tts_profile_id: tts ? tts.id : null });
           await deps.deviceStore.updateDeviceProfiles(db, id, { bound_bot_id: botId });
           if (!pairing.complete(c.pending.pair_id, { device_id: id, token })) {
             await deps.deviceStore.unpairDevice(db, id);          // expired between claim and complete: no orphan device
             return res.status(410).json({ error: "pairing_expired" });
           }
+          created = null;                                          // delivered: never clean it up after this
           log(`[kiosk] paired ${id} "${name}" → bot ${botId} (requester ${c.pending.ip})`);
           res.json({ ok: true, device_id: id, tts: tts ? tts.name || tts.id : null });
-        } catch (err) { pairing.release(c.pending.pair_id); throw err; }
+        } catch (err) {
+          // Never leave a paired device whose token is never delivered (e.g. the bot bind failed).
+          if (created) { try { await deps.deviceStore.unpairDevice(db, created); } catch (e) { log(`[kiosk] orphan cleanup ${created} failed: ${e.message}`); } }
+          pairing.release(c.pending.pair_id);
+          throw err;
+        }
       });
     }));
     r.post("/api/kiosk/admin/displays/:id", json, wrap(async (req, res) => {
