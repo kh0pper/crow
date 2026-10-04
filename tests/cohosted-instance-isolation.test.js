@@ -62,13 +62,15 @@ test("own-file patterns never cross-match between the default and a tagged insta
 
 test("isForeignOwner: differing instance id, db path or CROW_HOME is foreign; missing fields never are", () => {
   const me = { instance_id: "a", db_path: "/x/a.db" };
-  assert.equal(isForeignOwner({ instance_id: "b", db_path: "/x/a.db" }, me), true);
+  assert.equal(isForeignOwner({ instance_id: "b" }, { instance_id: "a" }), true);
   assert.equal(isForeignOwner({ instance_id: "a", db_path: "/x/b.db" }, me), true);
   assert.equal(isForeignOwner({ instance_id: "a", db_path: "/x/a.db" }, me), false);
   assert.equal(isForeignOwner({}, me), false);
   assert.equal(isForeignOwner(null, me), false);
   assert.equal(isForeignOwner({ instance_id: "b" }, { db_path: "/x/a.db" }), false);
   assert.equal(isForeignOwner({ crow_home: "/h/.crow-r4" }, { crow_home: "/h/.crow" }), true);
+  // Same CROW_HOME = own, even after the instance-id file was regenerated.
+  assert.equal(isForeignOwner({ crow_home: "/h/.crow", instance_id: "old" }, { crow_home: "/h/.crow", instance_id: "new" }), false);
 });
 
 test("coHostedDataDirWarning flags CROW_HOME without CROW_DATA_DIR only", () => {
@@ -130,7 +132,14 @@ test("newest-backup ownership + boot self-check warn when another instance owns 
   writeFileSync(ownerPath(f), JSON.stringify({ instance_id: "someone-else", crow_home: "/elsewhere/.crow-r4" }));
   assert.equal(backupSelfCheck({ env, log }).status, "foreign");
   assert.ok(warns.some((w) => /WARNING: newest backup .* belongs to another instance/.test(w)), warns.join("\n"));
-  assert.equal(newestBackupOwnership(dir, label, tag, { instance_id: "someone-else" }).status, "ok");
+  assert.equal(newestBackupOwnership(dir, label, tag, { instance_id: "someone-else", crow_home: "/elsewhere/.crow-r4" }).status, "ok");
+
+  // Our own sidecar, but the file was rewritten in place afterwards (an
+  // un-restarted co-hosted gateway on old code): mismatch → warn.
+  const st = { size: 1, mtimeMs: 1000 };
+  writeFileSync(ownerPath(f), JSON.stringify({ crow_home: resolveCrowHome(env), size_bytes: st.size + 5, mtime_ms: st.mtimeMs }));
+  assert.equal(backupSelfCheck({ env, log }).status, "mismatch");
+  assert.ok(warns.some((w) => /was rewritten after this instance wrote it/.test(w)));
 });
 
 test("Nest backup signal warns when this instance's newest file is owned by another instance", async () => {
@@ -330,6 +339,7 @@ test("two gateways from one checkout, same day: backups never collide and per-in
   }
 
   const backupDir = join(fakeHome, "backups", "crow");
+  const date = new Date().toISOString().split("T")[0];
   for (let round = 0; round < 2; round++) {
     for (const s of specs) {
       const r = await postBackup(s.port);
@@ -338,7 +348,6 @@ test("two gateways from one checkout, same day: backups never collide and per-in
     }
   }
 
-  const date = new Date().toISOString().split("T")[0];
   const names = readdirSync(backupDir).filter((n) => n.endsWith(".db")).sort();
   assert.equal(names.length, 2, `exactly one file per instance: ${names.join(", ")}`);
   assert.ok(names.includes(`primary-${date}.db`), "host-default instance keeps the legacy file name");

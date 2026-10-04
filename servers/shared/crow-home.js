@@ -54,7 +54,7 @@ export function coHostedDataDirWarning(env = process.env) {
   if (isDefaultCrowHome(env) || env.CROW_DATA_DIR) return null;
   return `CROW_HOME=${env.CROW_HOME} is set but CROW_DATA_DIR is not — this instance's ` +
     `instance-id, refcounts${env.CROW_DB_PATH ? "" : " and database"} resolve to the host-default ` +
-    `~/.crow/data and are SHARED with the primary instance. ` +
+    `~/.crow/data — SHARED with any host-default instance on this machine. ` +
     `Set CROW_DATA_DIR=${join(env.CROW_HOME, "data")} in its unit.`;
 }
 

@@ -558,11 +558,13 @@ async function backupSignal(db, nowFn, lang) {
     };
   }
 
-  if (own.status === "foreign") {
+  if (own.status === "foreign" || own.status === "mismatch") {
     return {
       id: "backup", severity: "warn", state: "warn", label: t("signals.backup.label", lang),
       value: t("signals.backup.foreign", lang),
-      issueLabel: t("signals.backup.foreignIssue", lang).replace("{owner}", String(own.owner.crow_home || own.owner.instance_id || "?")),
+      issueLabel: own.status === "foreign"
+        ? t("signals.backup.foreignIssue", lang).replace("{owner}", String(own.owner.crow_home || own.owner.instance_id || "?"))
+        : t("signals.backup.mismatchIssue", lang),
       ...runAction,
     };
   }

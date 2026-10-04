@@ -90,7 +90,7 @@ const SIBLING_SURFACES = [
 
 function readInstalledBundleIds() {
   try {
-    const p = join(homedir(), ".crow/installed.json");
+    const p = join(process.env.CROW_HOME || join(homedir(), ".crow"), "installed.json");
     if (!existsSync(p)) return new Set();
     const raw = JSON.parse(readFileSync(p, "utf8"));
     const arr = Array.isArray(raw) ? raw : Object.entries(raw).map(([id, v]) => ({ id, ...v }));

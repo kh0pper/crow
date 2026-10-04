@@ -100,10 +100,12 @@ export function pruneOwnBackups(dir, { label, tag, me, keepDays, nowMs = Date.no
     if (isForeignOwner(readOwner(f.path), me)) continue;
     if (removeBackupFile(f.path)) pruned++;
   }
-  const tmpPrefix = `.${backupStem(label, tag)}-`;
+  // Anchored on the full own name + date, so another instance's temp files
+  // (".primary-crow-r4-…") never match the host-default stem.
+  const tmpRe = new RegExp(`^\\.${backupStem(label, tag).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d{4}-\\d{2}-\\d{2}\\.db\\.tmp-`);
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.startsWith(tmpPrefix) || !name.includes(".tmp-")) continue;
+      if (!tmpRe.test(name)) continue;
       const full = path.join(dir, name);
       try { if (fs.statSync(full).mtimeMs < nowMs - 24 * 3600 * 1000) unlinkQuiet(full); } catch {}
     }
@@ -146,7 +148,22 @@ function requireToken(req, res, next) {
  *   duration_ms: number, pages_copied: number|null, pruned_older_than_days: number,
  *   pruned_count: number}>}
  */
-export async function runBackup({ now = new Date() } = {}) {
+export async function runBackup(opts = {}) {
+  try {
+    return await runBackupInner(opts);
+  } catch (err) {
+    // Every failure (refused overwrite, copy error, leftover WAL, verification)
+    // reaches the Nest signal as a failed attempt newer than our newest file.
+    if (!err.recorded) {
+      try {
+        await recordVerification({ path: null, ok: false, result: err.message, checked_at: new Date().toISOString(), kept_previous: true });
+      } catch {}
+    }
+    throw err;
+  }
+}
+
+async function runBackupInner({ now = new Date() } = {}) {
   const { dir, label, tag, me } = localBackupContext(process.env);
   const keepDays = parseInt(process.env.CROW_BACKUP_KEEP_DAYS || "7", 10);
   const date = now.toISOString().split("T")[0];
@@ -189,7 +206,9 @@ export async function runBackup({ now = new Date() } = {}) {
     });
     // Surfaces as flash=backup_fail on the dashboard path and HTTP 500 on the
     // localhost API — the record is already persisted so the nest signal warns.
-    throw new Error(`backup verification failed: ${verify.result}`);
+    const err = new Error(`backup verification failed: ${verify.result}`);
+    err.recorded = true;
+    throw err;
   }
 
   // The checkpoint above emptied any WAL; a leftover non-empty one would mean
@@ -217,7 +236,10 @@ export async function runBackup({ now = new Date() } = {}) {
   }
   const sidecarTmp = `${tmp}${".owner"}`;
   try {
-    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString() }, null, 2) + "\n");
+    // size + mtime fingerprint: a later in-place rewrite of the file (a
+    // co-hosted gateway still on old code) shows up as a "mismatch".
+    const st = fs.statSync(dest);
+    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString(), size_bytes: st.size, mtime_ms: st.mtimeMs }, null, 2) + "\n");
     fs.renameSync(sidecarTmp, ownerPath(dest));
   } catch (err) {
     unlinkQuiet(sidecarTmp);
@@ -263,6 +285,9 @@ export function backupSelfCheck({ env = process.env, log = console } = {}) {
       log.warn(`[backup] WARNING: newest backup ${own.newest.path} belongs to another instance ` +
         `(crow_home=${own.owner.crow_home || "?"}, instance_id=${own.owner.instance_id || "?"}); ` +
         `this instance (crow_home=${me.crow_home}) has no backup of its own under that name — run a backup.`);
+    } else if (own.status === "mismatch") {
+      log.warn(`[backup] WARNING: newest backup ${own.newest.path} was rewritten after this instance wrote it ` +
+        `(size/mtime no longer match its owner sidecar) — another process overwrote it; run a backup.`);
     } else if (own.status === "unknown") {
       log.log(`[backup] newest backup ${own.newest.path} predates ownership sidecars — owner unknown until the next run`);
     }

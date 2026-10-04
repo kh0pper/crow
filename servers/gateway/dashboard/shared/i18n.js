@@ -211,6 +211,7 @@ export const translations = {
   "signals.backup.unverifiedIssue": { en: "Your latest backup hasn't been checked yet — run a backup to check it", es: "Tu última copia aún no ha sido comprobada — haz una copia para comprobarla" },
   "signals.backup.neverIssue": { en: "Backups aren't set up yet", es: "Las copias de seguridad aún no están configuradas" },
   "signals.backup.staleIssue": { en: "Last backup was {n} days ago", es: "La última copia de seguridad fue hace {n} días" },
+  "signals.backup.mismatchIssue": { en: "Your newest backup file was overwritten after this instance wrote it — run a backup now", es: "Tu copia de seguridad más reciente fue sobrescrita después de que esta instancia la escribiera — haz una copia ahora" },
   "signals.backup.foreign": { en: "belongs to another instance", es: "pertenece a otra instancia" },
   "signals.backup.foreignIssue": { en: "Your newest backup file was written by another Crow instance on this machine ({owner}) — run a backup now", es: "Tu copia de seguridad más reciente la escribió otra instancia de Crow en esta máquina ({owner}) — haz una copia ahora" },
 
@@ -1878,6 +1879,10 @@ export const translations = {
   "hygiene.instancesNone": { en: "None found ({total} entries checked).", es: "No se encontró ninguna ({total} entradas revisadas)." },
   "hygiene.instancesFound": { en: "{n} of {total} entries look like leftover test registrations.", es: "{n} de {total} entradas parecen registros de prueba sobrantes." },
   "hygiene.instancesShowing": { en: "Showing the first {shown}.", es: "Se muestran las primeras {shown}." },
+  "hygiene.colLastSeen": { en: "Last seen", es: "Visto por última vez" },
+  "hygiene.reason.burst": { en: "several ids for one folder", es: "varios ids para una carpeta" },
+  "hygiene.reason.dir-missing": { en: "folder no longer exists", es: "la carpeta ya no existe" },
+  "hygiene.reason.temp-dir": { en: "temporary folder", es: "carpeta temporal" },
   "hygiene.colFolder": { en: "Folder", es: "Carpeta" },
   "hygiene.colReason": { en: "Why", es: "Motivo" },
   "hygiene.instancesButton": { en: "Remove {n} leftover entr(ies)", es: "Quitar {n} entrada(s) sobrante(s)" },

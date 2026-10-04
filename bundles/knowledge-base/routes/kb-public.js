@@ -477,7 +477,9 @@ export default function kbPublicRouter() {
     const { homedir } = await import("os");
 
     const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, "");
-    const mediaDir = resolvePath(homedir(), ".crow", "data", "kb-media");
+    // Per-instance data dir: a co-hosted instance must never serve the primary's media.
+    const dataDir = process.env.CROW_DATA_DIR ? resolvePath(process.env.CROW_DATA_DIR) : resolvePath(homedir(), ".crow", "data");
+    const mediaDir = resolvePath(dataDir, "kb-media");
     const filePath = resolvePath(mediaDir, filename);
 
     // Security: ensure resolved path is within kb-media dir

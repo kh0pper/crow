@@ -142,14 +142,14 @@ export default {
       const rows = shown.map((c) => `<tr>
           <td style="padding:6px;font-family:'JetBrains Mono',monospace;font-size:0.75rem">${escapeHtml(c.id.slice(0, 12))}</td>
           <td style="padding:6px;font-size:0.78rem">${escapeHtml(c.directory)}</td>
-          <td style="padding:6px;font-size:0.78rem">${escapeHtml(c.reason)}</td>
+          <td style="padding:6px;font-size:0.78rem">${escapeHtml(t(`hygiene.reason.${c.reason}`, lang))}</td>
           <td style="padding:6px;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(c.updatedAt || "-")}</td>
         </tr>`).join("");
       const confirmMsg = JSON.stringify(fill(t("hygiene.instancesConfirm", lang), { n: nStale }));
       instancesHtml = `
         <p style="font-size:0.88rem">${escapeHtml(fill(t("hygiene.instancesFound", lang), { n: nStale, total: stale.total }))}${nStale > shown.length ? " " + escapeHtml(fill(t("hygiene.instancesShowing", lang), { shown: shown.length })) : ""}</p>
         <div class="table-scroll"><table class="pi-table">
-          <thead><tr><th>id</th><th>${escapeHtml(t("hygiene.colFolder", lang))}</th><th>${escapeHtml(t("hygiene.colReason", lang))}</th><th>${escapeHtml(t("hygiene.colCreated", lang))}</th></tr></thead>
+          <thead><tr><th>id</th><th>${escapeHtml(t("hygiene.colFolder", lang))}</th><th>${escapeHtml(t("hygiene.colReason", lang))}</th><th>${escapeHtml(t("hygiene.colLastSeen", lang))}</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
         <form method="POST" action="/dashboard/settings" style="margin-top:0.75rem" onsubmit="return confirm(${escapeHtml(confirmMsg)})">

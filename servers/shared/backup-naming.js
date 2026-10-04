@@ -124,28 +124,46 @@ export function ownerRecord({ instanceId = null, dbPath = null, label, tag }, en
 
 /**
  * True only when `owner` provably belongs to a DIFFERENT instance than `me`:
- * the instance ids, the source DB paths or the CROW_HOMEs differ. Missing fields on
+ * the CROW_HOMEs differ (else the DB paths, else the instance ids). Missing fields on
  * either side never count as a mismatch (a legacy sidecar-less file is
  * "unknown", not "foreign").
  */
 export function isForeignOwner(owner, me) {
   if (!owner || !me) return false;
-  if (owner.instance_id && me.instance_id && owner.instance_id !== me.instance_id) return true;
-  if (owner.db_path && me.db_path && resolve(owner.db_path) !== resolve(me.db_path)) return true;
-  if (owner.crow_home && me.crow_home && resolve(owner.crow_home) !== resolve(me.crow_home)) return true;
+  // CROW_HOME is what the file NAME encodes, so it is the primary key: same
+  // home = own file even if the instance-id file was regenerated or the DB
+  // moved. Only when either side lacks it do the weaker keys decide.
+  if (owner.crow_home && me.crow_home) return resolve(owner.crow_home) !== resolve(me.crow_home);
+  if (owner.db_path && me.db_path) return resolve(owner.db_path) !== resolve(me.db_path);
+  if (owner.instance_id && me.instance_id) return owner.instance_id !== me.instance_id;
   return false;
 }
 
 /**
- * Ownership of this instance's newest backup.
- * @returns {{status:"none"|"ok"|"unknown"|"foreign", newest:object|null, owner:object|null}}
+ * True when the sidecar's recorded size/mtime no longer match the file — the
+ * file was rewritten in place by something that did not update the sidecar
+ * (e.g. a co-hosted gateway still on pre-sidecar code). Sidecars without a
+ * fingerprint never count as stale.
+ */
+export function sidecarStale(owner, file) {
+  if (!owner || owner.size_bytes == null || owner.mtime_ms == null) return false;
+  return owner.size_bytes !== file.size || Math.abs(owner.mtime_ms - file.mtimeMs) > 1;
+}
+
+/**
+ * Ownership of this instance's newest backup. "mismatch" = the sidecar is ours
+ * but the file was rewritten after it (size/mtime differ) — its content can no
+ * longer be attributed, so it is treated like "foreign".
+ * @returns {{status:"none"|"ok"|"unknown"|"foreign"|"mismatch", newest:object|null, owner:object|null}}
  */
 export function newestBackupOwnership(dir, label, tag, me) {
   const [newest] = listOwnBackups(dir, label, tag);
   if (!newest) return { status: "none", newest: null, owner: null };
   const owner = readOwner(newest.path);
   if (!owner) return { status: "unknown", newest, owner: null };
-  return { status: isForeignOwner(owner, me) ? "foreign" : "ok", newest, owner };
+  if (isForeignOwner(owner, me)) return { status: "foreign", newest, owner };
+  if (sidecarStale(owner, newest)) return { status: "mismatch", newest, owner };
+  return { status: "ok", newest, owner };
 }
 
 /**
