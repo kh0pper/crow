@@ -104,7 +104,8 @@ export async function readStepSettings(db) {
       const key = String(r.key);
       if (Object.hasOwn(INT_SETTINGS, key)) {
         const [field, lo, hi] = INT_SETTINGS[key];
-        const n = Number(r.value);
+        const text = String(r.value ?? "").trim();
+        const n = /^\d+$/.test(text) ? Number(text) : NaN;
         if (Number.isInteger(n) && n >= lo && n <= hi) out[field] = n;
       } else if (Object.hasOwn(BOOL_SETTINGS, key)) {
         if (r.value === "1" || r.value === "0") out[BOOL_SETTINGS[key]] = r.value === "1";

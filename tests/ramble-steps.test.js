@@ -132,6 +132,7 @@ test("two readings racing never double-credit (compare-and-swap on the baseline)
     read(db, { counter: 51_000, elapsed_ms: 21 * H }, AT(11)),
   ]);
   assert.equal(a.credited + b.credited, 1_000);
+  assert.deepEqual([a.reason, b.reason].sort(), ["delta", "raced"]);
   assert.equal(await stepsToday(db, AT(11)), 1_000);
 });
 
@@ -187,4 +188,46 @@ test("readStepSettings: defaults, valid overrides, junk falls back", async () =>
   assert.equal(s.nudgeWeekends, true);
   await setSetting(db, "steps.goal", "1999");
   assert.equal((await readStepSettings(db)).goal, 6000, "below GOAL_MIN");
+});
+
+test("foreign-credit guard: a row that grew behind our back (peer MAX apply) re-baselines and credits nothing", async () => {
+  const db = await freshDb();
+  await read(db, { counter: 50_000, elapsed_ms: 20 * H }, AT(10));
+  assert.equal((await read(db, { counter: 51_000, elapsed_ms: 21 * H }, AT(11))).credited, 1_000);
+  await db.execute({
+    sql: "UPDATE ramble_wallet SET delta = 1500 WHERE kind = ? AND key = ?",
+    args: [STEPS_KIND, `${localDay(AT(11))}:${DEV}`],
+  });
+  const out = await read(db, { counter: 52_000, elapsed_ms: 22 * H }, AT(12));
+  assert.deepEqual([out.credited, out.reason], [0, "foreign"]);
+  assert.equal(await stepsToday(db, AT(12)), 1_500);
+  const next = await read(db, { counter: 52_500, elapsed_ms: 22 * H + 30 * 60_000 }, AT(12, 30));
+  assert.deepEqual([next.credited, next.reason], [500, "delta"]);
+  assert.equal(await stepsToday(db, AT(12, 30)), 2_000);
+});
+
+test("booted-today first reading where today's row already has steps credits only the unseen part", async () => {
+  const db = await freshDb();
+  await db.execute({
+    sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?)",
+    args: [STEPS_KIND, `${localDay(AT(10))}:${DEV}`, 1_000, AT(9)],
+  });
+  const out = await read(db, { counter: 3_000, elapsed_ms: 2 * H }, AT(10));
+  assert.deepEqual([out.credited, out.reason], [2_000, "booted-today"]);
+  assert.equal(await stepsToday(db, AT(10)), 3_000);
+});
+
+test("readStepSettings: blank, whitespace and exponent/hex forms are junk, not numbers", async () => {
+  const db = await freshDb();
+  await setSetting(db, "steps.energy.full", "");
+  await setSetting(db, "steps.energy.chunk", "  ");
+  await setSetting(db, "steps.goal", "8e3");
+  await setSetting(db, "steps.max.day", "0x9C40");
+  await setSetting(db, "steps.badge.min", " 2500 ");
+  const s = await readStepSettings(db);
+  assert.equal(s.energyFull, 30);
+  assert.equal(s.energyChunk, STEPS_DEFAULTS.energyChunk);
+  assert.equal(s.goal, 6000);
+  assert.equal(s.maxDay, STEPS_DEFAULTS.maxDay);
+  assert.equal(s.badgeMin, 2500, "plain digits with padding still parse");
 });
