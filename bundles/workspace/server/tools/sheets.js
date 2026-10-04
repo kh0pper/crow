@@ -11,7 +11,7 @@ import { splitFolder } from "../nc/paths.js";
 import { createFile } from "../write-protocol.js";
 import { openXlsx, readRange, writeRange, appendRows, addTab, renameTab, deleteTab, setNumberFormat, tabsInfo, patternFor, FORMAT_TYPE_PATTERNS } from "../ooxml/xlsx.js";
 
-const XLSX = Object.freeze({ ext: "xlsx", noun: "an .xlsx spreadsheet", open: openXlsx });
+export const XLSX = Object.freeze({ ext: "xlsx", noun: "an .xlsx spreadsheet", open: openXlsx });
 const TEMPLATE = new URL("../templates/blank.xlsx", import.meta.url);
 
 const cellV = z.union([z.string().max(32767), z.number(), z.boolean(), z.null(), z.record(z.any()), z.array(z.any())]);

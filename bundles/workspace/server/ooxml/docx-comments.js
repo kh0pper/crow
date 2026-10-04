@@ -10,7 +10,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { WsError } from "../result.js";
-import { NS, kids, all, attr, el, parseXml, insertAfter } from "./xml.js";
+import { NS, kids, all, attr, el, parseXml, insertAfter, removeNode } from "./xml.js";
 import { RUN_CONTAINERS, SEP, textMap, makeRun } from "./docx-model.js";
 import { isolate, spliceText, isPlainTextParagraph } from "./docx-edit.js";
 import { addRel, partsOfType, setOverride, REL } from "./opc.js";
@@ -239,4 +239,36 @@ export function applyCommentEdit(d, id, replaceText, summary) {
   d.pkg.markDirty(d.part);
   replyComment(d, id, summary); resolveComment(d, id);
   return { applied: true };
+}
+
+/**
+ * Exact inverse of add_comment (ws__docs_delete_comment): removes comment `id` from comments.xml, its range markers,
+ * its reference run, its commentEx row and its commentsIds / commentsExtensible rows. Refused (target_changed) when
+ * the thread has replies (someone answered it) or, with `content`, when its text is no longer what Crow wrote.
+ */
+export function deleteComment(d, id, { content } = {}) {
+  const cd = commentsPart(d, false);
+  const c = cd && kids(cd.doc.documentElement, W, "comment").find((x) => attr(x, W, "id") === String(id));
+  if (!c) throw new WsError("target_changed", `comment ${id} is no longer in the document`);
+  if (content !== undefined && content !== null && commentText(c).normalize("NFC") !== String(content).normalize("NFC")) throw new WsError("target_changed", `comment ${id} was edited since`);
+  const pid = paraIdOf(c); const ex = extPart(d, false);
+  if (pid && exRows(ex).some((e) => attr(e, W15, "paraIdParent") === pid)) throw new WsError("target_changed", `comment ${id} has replies now; it was not removed`);
+  removeNode(c); d.pkg.markDirty(cd.part);
+  for (const local of ["commentRangeStart", "commentRangeEnd"]) for (const m of all(d.body, W, local).filter((x) => attr(x, W, "id") === String(id))) removeNode(m);
+  for (const ref of all(d.body, W, "commentReference").filter((x) => attr(x, W, "id") === String(id))) {
+    const run = ref.parentNode;
+    if (isW(run, "r") && kids(run).every((k) => k === ref || isW(k, "rPr"))) removeNode(run); else removeNode(ref);
+  }
+  d.pkg.markDirty(d.part);
+  if (pid) {
+    const row = exRows(ex).find((e) => attr(e, W15, "paraId") === pid);
+    if (row) { removeNode(row); d.pkg.markDirty(ex.part); }
+    const ids = idsPart(d); const cex = cexPart(d);
+    const idRows = ids ? kids(ids.doc.documentElement, W16CID, "commentId").filter((e) => attr(e, W16CID, "paraId") === pid) : [];
+    const durable = new Set(idRows.map((e) => attr(e, W16CID, "durableId")));
+    if (idRows.length) { idRows.forEach(removeNode); d.pkg.markDirty(ids.part); }
+    const cexRows = cex ? kids(cex.doc.documentElement, W16CEX, "commentExtensible").filter((e) => durable.has(attr(e, W16CEX, "durableId"))) : [];
+    if (cexRows.length) { cexRows.forEach(removeNode); d.pkg.markDirty(cex.part); }
+  }
+  return { deleted: String(id) };
 }

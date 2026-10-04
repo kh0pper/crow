@@ -11,6 +11,9 @@ import { registerCalendar } from "./tools/calendar.js";
 import { registerContacts } from "./tools/contacts.js";
 import { pruneJournal } from "./pim/journal.js";
 import { systemClock } from "./write-protocol.js";
+import { setQueueProvider } from "./tools/common.js";
+import { queueDescriptor } from "./queue/provider.js";
+import { registerQueue } from "./tools/queue.js";
 
 export const realClock = systemClock;
 
@@ -33,6 +36,9 @@ export function createWorkspaceServer({ clock = realClock } = {}) {
   names.push(...registerCalendar(server, ctx));
   names.push(...registerContacts(server, ctx));
   names.push(...registerUndo(server, ctx));
+  // K5: writes to an open/locked file become pending changes (the crow.db client opens lazily on first use)
+  setQueueProvider(queueDescriptor);
+  names.push(...registerQueue(server, ctx));
   // spec §5.5: prune the PIM undo journal at start and every 6 h (30 days / 500 entries)
   try { pruneJournal(); } catch { /* never block startup */ }
   const pruneTimer = setInterval(() => { try { pruneJournal(); } catch { /* next round */ } }, 6 * 3600e3); pruneTimer.unref();

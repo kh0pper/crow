@@ -447,3 +447,130 @@ export function setNumberFormat(wb, range, pattern = "@") {
   wb.pkg.markDirty(wb.styles.part); wb.pkg.markDirty(R.sheet.part);
   return n;
 }
+
+// ---- queue guards and exact inverse ops (Task 12, K5) -------------------------------------------------
+
+/** The last row holding a value or formula (what appendRows writes after); 0 for an empty tab. */
+export function lastDataRow(wb, sheetName) {
+  const s = sheetByName(wb, sheetName); let last = 0;
+  for (const row of kids(sheetData(wb, s), S, "row")) if (kids(row, S, "c").some((c) => kid(c, S, "v") || kid(c, S, "is") || kid(c, S, "f"))) last = Math.max(last, Number(row.getAttribute("r")));
+  return last;
+}
+/** Row 1 of a tab over its used columns, FORMULA mode, as strings (the header append keys dicts by). */
+export function headerRow(wb, sheetName) {
+  const s = sheetByName(wb, sheetName); const u = usedRange(wb, s);
+  return (readRange(wb, qualified(s, `A1:${colName(Math.max(1, u.c2))}1`), "FORMULA").values[0] || []).map((v) => String(v ?? ""));
+}
+/** FORMULA-mode rows r1..r2 over columns 1..width of a tab. */
+export function rowsFormula(wb, sheetName, r1, r2, width) {
+  const s = sheetByName(wb, sheetName);
+  if (r2 < r1) return [];
+  return readRange(wb, qualified(s, `A${r1}:${colName(Math.max(1, width))}${r2}`), "FORMULA").values;
+}
+/** The raw `s` attribute (or null) of every cell in a range, row-major (for an exact set_number_format inverse). */
+export function styleAttrs(wb, range) {
+  const R = parseRange(wb, range);
+  if (cellCount(R) > MAX_CELLS) throw new WsError("too_large", `at most ${MAX_CELLS} cells`);
+  const g = grid(wb, R.sheet); const out = [];
+  for (let r = R.r1; r <= R.r2; r++) { const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(g.get(r)?.cells.get(c)?.getAttribute("s") ?? null); out.push(row); }
+  return out;
+}
+/** The number-format code of every cell in a range ("General" for a missing cell). */
+export function numFmtCodes(wb, range) {
+  const R = parseRange(wb, range);
+  if (cellCount(R) > MAX_CELLS) throw new WsError("too_large", `at most ${MAX_CELLS} cells`);
+  const g = grid(wb, R.sheet); const out = [];
+  for (let r = R.r1; r <= R.r2; r++) { const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(fmtOf(wb, g.get(r)?.cells.get(c) || null).code); out.push(row); }
+  return out;
+}
+
+const changed = (msg) => new WsError("target_changed", msg);
+/** Normalised cell value for comparisons: "" for empty, booleans as TRUE/FALSE, numbers and numeric text as numbers. */
+export function cellKey(v) {
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  if (typeof v === "number") return String(v);
+  const s = String(v).normalize("NFC");
+  if (/^(true|false)$/i.test(s)) return s.toUpperCase();
+  if (NUM.test(s.trim()) && Number.isFinite(Number(s))) return String(Number(s));
+  return s;
+}
+const rowKeys = (row) => { const k = (row || []).map(cellKey); while (k.length && k.at(-1) === "") k.pop(); return k; };
+export const sameRows = (a, b) => { const n = Math.max(a.length, b.length); for (let i = 0; i < n; i++) if (JSON.stringify(rowKeys(a[i])) !== JSON.stringify(rowKeys(b[i]))) return false; return true; };
+
+/** A cell an editor would create from nothing at (r, c): no content and only the inherited (row/column) style. */
+function bareCell(cell, entry, g, c) {
+  if (cell.childNodes.length || cell.getAttribute("t")) return false;
+  const extra = Array.from(cell.attributes).filter((a) => a.name !== "r" && a.name !== "s"); if (extra.length) return false;
+  const s = cell.getAttribute("s");
+  if (!s || s === "0") return true;
+  const rowStyle = ["1", "true"].includes(entry.row.getAttribute("customFormat")) ? entry.row.getAttribute("s") : null;
+  return s === (rowStyle || g.colStyles?.find((x) => c >= x.min && c <= x.max)?.style || null);
+}
+function dropBare(entry, g, c, sd) {
+  const cell = entry.cells.get(c);
+  if (cell && bareCell(cell, entry, g, c)) { removeNode(cell); entry.cells.delete(c); }
+  if (!entry.cells.size && Array.from(entry.row.attributes).every((a) => a.name === "r" || a.name === "spans") && !entry.row.childNodes.length) { sd.removeChild(entry.row); g.delete(Number(entry.row.getAttribute("r"))); }
+}
+/** The tab's <dimension> as it was before the change: a ref, or "" when the tab had none (undefined/null: leave it). */
+function setDimension(wb, s, ref) {
+  if (ref === undefined || ref === null) return;
+  const dim = kid(sheetDoc(wb, s).documentElement, S, "dimension");
+  if (ref === "") { if (dim) removeNode(dim); return; }
+  if (!/^[A-Z]{1,3}\d{1,7}(:[A-Z]{1,3}\d{1,7})?$/.test(ref)) throw new WsError("bad_args", "dimension must look like A1:E6 (or \"\" for none)");
+  if (dim) dim.setAttribute("ref", ref);
+}
+/** The tab's current <dimension> ref, "" when it has none (to record before a change). */
+export function dimensionOf(wb, sheetName) { return kid(sheetDoc(wb, sheetByName(wb, sheetName)).documentElement, S, "dimension")?.getAttribute("ref") ?? ""; }
+
+/**
+ * Inverse of an append (ws__sheets_clear_rows_exact): rows from_row… must hold EXACTLY `values` (FORMULA mode) and be
+ * the last data rows of the tab; their values are cleared and the cells/rows the append created are removed.
+ * `dimension` (optional) restores the tab's <dimension> ref. Anything else → target_changed, nothing touched.
+ */
+export function clearRowsExact(wb, sheetName, fromRow, values, { dimension } = {}) {
+  const s = sheetByName(wb, sheetName);
+  if (!Number.isInteger(fromRow) || fromRow < 1) throw new WsError("bad_args", "from_row must be a row number");
+  if (!Array.isArray(values) || !values.length || !values.every(Array.isArray)) throw new WsError("bad_args", "values must be the appended rows (a list of rows)");
+  const width = Math.max(1, ...values.map((r) => r.length)); const r2 = fromRow + values.length - 1;
+  if (!sameRows(rowsFormula(wb, s.name, fromRow, r2, width), values)) throw changed(`rows ${fromRow}-${r2} of "${s.name}" no longer hold exactly the appended values`);
+  if (lastDataRow(wb, s.name) !== r2) throw changed(`"${s.name}" has data below the appended rows`);
+  const g = grid(wb, s); const sd = sheetData(wb, s); let n = 0;
+  for (let r = fromRow; r <= r2; r++) {
+    const entry = g.get(r); if (!entry) continue;
+    for (const c of [...entry.cells.keys()].sort((p, q) => p - q)) {
+      const cell = entry.cells.get(c); if (c > width && !cell.childNodes.length) continue;
+      if (c > width) throw changed(`row ${r} of "${s.name}" holds more than the appended values`);
+      for (const ch of Array.from(cell.childNodes)) cell.removeChild(ch);
+      for (const a of ["t", "cm", "vm"]) cell.removeAttribute(a);
+      n++; dropBare(entry, g, c, sd);
+    }
+  }
+  setDimension(wb, s, dimension);
+  wb.pkg.markDirty(s.part); markRecalc(wb);
+  return n;
+}
+
+/**
+ * Inverse of set_number_format (ws__sheets_restore_styles): put each cell's previous `s` attribute back (null = none;
+ * an empty cell with no style left is removed, as it did not exist before). `pattern` (optional): every cell must
+ * still carry that number format, else target_changed.
+ */
+export function restoreStyles(wb, range, sAttrs, { pattern, dimension } = {}) {
+  const R = parseRange(wb, range);
+  const h = R.r2 - R.r1 + 1, w = R.c2 - R.c1 + 1;
+  if (!Array.isArray(sAttrs) || sAttrs.length !== h || !sAttrs.every((row) => Array.isArray(row) && row.length === w)) throw new WsError("bad_args", `s_attrs must be ${h} row(s) of ${w} value(s)`);
+  for (const row of sAttrs) for (const v of row) if (v !== null && !/^\d{1,6}$/.test(String(v)) || (v !== null && Number(v) >= wb.styles.xfs.length)) throw new WsError("bad_args", "s_attrs holds an unknown cell format");
+  if (pattern !== undefined && pattern !== null && numFmtCodes(wb, range).some((row) => row.some((c) => c !== pattern))) throw changed(`the number format of ${range} changed since`);
+  const g = grid(wb, R.sheet); const sd = sheetData(wb, R.sheet); let n = 0;
+  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
+    const want = sAttrs[r - R.r1][c - R.c1];
+    const entry = g.get(r); const cell = entry?.cells.get(c);
+    if (!cell) { if (want === null) continue; const nc = ensureCell(wb, R.sheet, g, r, c); nc.setAttribute("s", String(want)); n++; continue; }
+    if (want === null) cell.removeAttribute("s"); else cell.setAttribute("s", String(want));
+    n++; if (want === null) dropBare(entry, g, c, sd);
+  }
+  setDimension(wb, R.sheet, dimension);
+  wb.pkg.markDirty(R.sheet.part);
+  return n;
+}

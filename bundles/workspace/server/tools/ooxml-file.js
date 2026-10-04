@@ -23,5 +23,5 @@ export function ooxmlWrite(ctx, args, kind, fn, label = "Crow") {
     const r = fn(model);
     if (!r.changed) return { changed: 0, data: r.data };
     return { bytes: model.pkg.save(), changed: r.changed, summary: r.summary, data: r.data };
-  }, { ...writeOptsOf(args), clock: ctx.clock, label });
+  }, { clock: ctx.clock, label, ...writeOptsOf(args) }); // a close-time apply's __label wins over the tool's default
 }

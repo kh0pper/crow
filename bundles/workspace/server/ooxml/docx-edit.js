@@ -204,6 +204,29 @@ export function insertAtHeading(d, heading, md) {
   const r = sectionRange(d, heading); const blocks = topBlocks(d);
   const nodes = markdownToBlocks(d, md); insertBlocksAt(d, blocks[r.start].nextSibling, nodes); return nodes.length;
 }
+/**
+ * Exact inverse of append / insert_at_heading (ws__docs_remove_paragraphs_exact): removes the consecutive top-level
+ * paragraphs whose texts equal `texts` exactly (NFC). With `afterHeading` they must sit right after that heading,
+ * with `atEnd` they must be the last body blocks; otherwise the run must occur exactly once in the document.
+ * Anything else (text changed, moved, ambiguous) → target_changed and nothing is touched.
+ */
+export function removeParagraphsExact(d, texts, { afterHeading, atEnd = false } = {}) {
+  if (!Array.isArray(texts) || !texts.length || texts.some((t) => typeof t !== "string")) throw new WsError("bad_args", "texts must be a non-empty list of paragraph texts");
+  const want = texts.map((t) => t.normalize("NFC"));
+  const blocks = topBlocks(d);
+  const at = (i) => i >= 0 && i + want.length <= blocks.length && want.every((t, k) => blocks[i + k].localName === "p" && paragraphText(blocks[i + k]).normalize("NFC") === t);
+  let starts;
+  if (afterHeading !== undefined && afterHeading !== null) {
+    let r; try { r = sectionRange(d, afterHeading); } catch (e) { if (e.code === "heading_not_found") throw new WsError("target_changed", `the heading "${afterHeading}" is gone`); throw e; }
+    starts = [r.start + 1];
+  } else if (atEnd) starts = [blocks.length - want.length];
+  else starts = blocks.map((_, i) => i);
+  const hits = starts.filter(at);
+  if (hits.length !== 1) throw new WsError("target_changed", hits.length ? "those paragraphs occur more than once; Crow will not guess which to remove" : "those paragraphs are no longer there exactly as Crow added them");
+  for (const b of blocks.slice(hits[0], hits[0] + want.length)) removeNode(b);
+  d.pkg.markDirty(d.part);
+  return want.length;
+}
 /** Heading-to-heading: removes every block after the heading up to the next same-or-higher heading, then inserts. */
 export function replaceSection(d, heading, md) {
   const r = sectionRange(d, heading); const blocks = topBlocks(d);
