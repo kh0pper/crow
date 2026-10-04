@@ -22,7 +22,8 @@ const CANDIDATES = [
   process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "workspace") : null,
   resolve(__dirname, ".."),
 ].filter(Boolean);
-const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.json")) && existsSync(join(p, "server", "config.js"))) || CANDIDATES.at(-1);
+/** The ONE bundle-dir resolver: panel/workspace.js (also copied alone) imports it from this file. */
+export const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.json")) && existsSync(join(p, "server", "config.js"))) || CANDIDATES.at(-1);
 const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 

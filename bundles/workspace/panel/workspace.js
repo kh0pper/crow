@@ -5,7 +5,9 @@
  * bundle's .env and renders a value only if it passes the same shell-safe patterns the
  * manifest enforces (the admin block is copy-pasted into a terminal). Named "Office" so
  * the sidebar never reads "Workspace › Workspace". Copied alone to
- * $CROW_HOME/panels/workspace.js, so it imports nothing from the bundle.
+ * $CROW_HOME/panels/workspace.js, so it never imports the bundle by a relative path. Two tabs: Setup (this page)
+ * and Quick edit (spec §8, rendered by the bundle's server/quick/view.js, found through the bundle-dir resolver of
+ * the sibling routes file).
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -25,6 +27,8 @@ const { parseEnvText } = await import(pathToFileURL(join(__wsAppRoot, "servers",
 const T = {
   en: {
     title: "Office",
+    tabSetup: "Setup",
+    tabQuick: "Quick edit",
     subtitle: "Your private office: files, documents, calendars and contacts.",
     notReady: "Workspace is not fully set up yet. Finish the setup by running this command in a terminal on the machine that hosts Crow, then reopen this page:",
     addressH: "Your Workspace address",
@@ -51,6 +55,8 @@ const T = {
   },
   es: {
     title: "Office",
+    tabSetup: "Configuración",
+    tabQuick: "Edición rápida",
     subtitle: "Tu oficina privada: archivos, documentos, calendarios y contactos.",
     notReady: "Workspace todavía no está completamente configurado. Termina la configuración ejecutando este comando en una terminal de la máquina que aloja Crow y vuelve a abrir esta página:",
     addressH: "La dirección de tu Workspace",
@@ -147,6 +153,22 @@ sudo tailscale serve --https=${u.ooPort} off</pre>`)}
   </div>`;
 }
 
+/**
+ * The bundle dir comes from the ONE resolver in panel/routes.js (exported BUNDLE_DIR). Installed, that file sits
+ * next to this one as workspace-routes.js ($CROW_HOME/panels/); in the repo it is panel/routes.js.
+ */
+async function bundleDir() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sibling = ["workspace-routes.js", "routes.js"].map((f) => join(here, f)).find((p) => existsSync(p));
+  return (await import(pathToFileURL(sibling).href)).BUNDLE_DIR;
+}
+
+export function renderTabs(lang, view) {
+  const t = T[lang === "es" ? "es" : "en"];
+  const tab = (v, label) => `<a href="/dashboard/workspace?view=${v}" style="display:inline-block;min-height:44px;line-height:44px;padding:0 .9rem;border-radius:8px;text-decoration:none;${view === v ? "font-weight:700;background:var(--crow-bg-elevated);" : ""}"${view === v ? ' aria-current="page"' : ""}>${esc(label)}</a>`;
+  return `<nav style="display:flex;gap:.25rem;margin:0 0 1rem">${tab("setup", t.tabSetup)}${tab("quick", t.tabQuick)}</nav>`;
+}
+
 export default {
   id: "workspace",
   name: "Office",
@@ -157,6 +179,14 @@ export default {
   async handler(req, res, { layout, lang }) {
     const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
     const t = T[lang === "es" ? "es" : "en"];
-    res.send(layout({ title: t.title, content: renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome) }));
+    const view = req.query?.view === "quick" ? "quick" : "setup";
+    let content;
+    if (view === "quick") {
+      const { renderQuick } = await import(pathToFileURL(join(await bundleDir(), "server", "quick", "view.js")).href);
+      content = renderTabs(lang, view) + (await renderQuick({ lang, csrf: req.csrfToken, query: req.query || {} }));
+    } else {
+      content = renderTabs(lang, view) + renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome);
+    }
+    res.send(layout({ title: t.title, content }));
   },
 };

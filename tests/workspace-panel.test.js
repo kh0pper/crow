@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import panel, { WORKSPACE_STRINGS, readPublicSettings, workspaceUrls, renderWorkspacePage } from "../bundles/workspace/panel/workspace.js";
+import panel, { WORKSPACE_STRINGS, readPublicSettings, workspaceUrls, renderWorkspacePage, renderTabs } from "../bundles/workspace/panel/workspace.js";
 
 function home(envText) {
   const h = mkdtempSync(join(tmpdir(), "ws-panel-"));
@@ -107,4 +107,30 @@ test("ready page prints the real crowHome in admin commands, not ~/.crow", () =>
   assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/install-backup-timer.sh --dest`));
   assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/add-user.sh`));
   assert.ok(!html.includes("bash ~/.crow/bundles"));
+});
+
+test("tabs: Setup | Quick edit, localized, current tab marked, script-free (spec §8)", () => {
+  const es = renderTabs("es", "quick");
+  assert.ok(es.includes("Edición rápida")); assert.ok(es.includes("Configuración"));
+  assert.match(es, /href="\/dashboard\/workspace\?view=quick"[^>]*aria-current="page"/);
+  assert.match(es, /href="\/dashboard\/workspace\?view=setup"/);
+  assert.match(renderTabs("en", "setup"), /view=setup"[^>]*aria-current="page">Setup</);
+  assert.doesNotMatch(es, /<script/i);
+});
+
+test("handler: ?view=quick renders the tabs + the bundle's Quick edit view; default is Setup; never a script", async () => {
+  const h = home(null); // Workspace not set up: Quick edit says so instead of failing
+  const saved = process.env.CROW_HOME; process.env.CROW_HOME = h;
+  const run = async (query, lang) => { let out = null; await panel.handler({ query, csrfToken: "tok" }, { send: (x) => { out = x; } }, { layout: ({ title, content }) => `<title>${title}</title>${content}`, lang }); return out; };
+  try {
+    const quick = await run({ view: "quick" }, "es");
+    assert.ok(quick.includes("Edición rápida"));
+    assert.match(quick, /view=quick"[^>]*aria-current="page"/);
+    const { QUICK_STRINGS } = await import("../bundles/workspace/server/quick/view.js");
+    assert.ok(quick.includes(QUICK_STRINGS.es.notConfigured), "the Quick edit view itself was rendered");
+    const setup = await run({}, "en");
+    assert.match(setup, /view=setup"[^>]*aria-current="page"/);
+    assert.ok(setup.includes(WORKSPACE_STRINGS.en.notReady));
+    for (const html of [quick, setup]) assert.doesNotMatch(html, /<script/i);
+  } finally { if (saved === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = saved; }
 });
