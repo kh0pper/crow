@@ -261,3 +261,26 @@ test("turn_start during speech aborts the speech, then the turn runs", async () 
   ws.bin(Buffer.alloc(8000)); ws.text({ type: "turn_end" }); gates[0].done(); await tick(); await tick();
   assert.equal(turns.length, 1);
 });
+
+// Task 10 carry: speech queued while the mic was open (inTurn) must not be
+// stranded when the turn ends without running (empty / oversize audio).
+test("speech queued during listening plays after an empty_transcript or audio_too_long turn end", async () => {
+  {
+    const { h } = hub(); const ws = await hello(h);
+    ws.text({ type: "turn_start", turn_id: "e1" });
+    assert.equal(h.speak("kiosk-a", "Tea timer is done."), true);
+    assert.equal(ws.sent.filter((d) => Buffer.isBuffer(d)).length, 0, "not spoken while listening");
+    ws.bin(Buffer.alloc(640)); ws.text({ type: "turn_end" }); await tick(); await tick();
+    assert.ok(ws.msgs().some((m) => m.type === "error" && m.code === "empty_transcript"));
+    assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "Tea timer is done.");
+  }
+  {
+    const { h } = hub(); const ws = await hello(h);
+    ws.text({ type: "turn_start", turn_id: "e2" });
+    assert.equal(h.speak("kiosk-a", "Pasta timer is done."), true);
+    for (let i = 0; i <= MAX_TURN_BYTES / 65536; i++) ws.bin(Buffer.alloc(65536));
+    await tick(); await tick();
+    assert.ok(ws.msgs().some((m) => m.type === "error" && m.code === "audio_too_long"));
+    assert.equal(Buffer.concat(ws.sent.filter((d) => Buffer.isBuffer(d))).toString(), "Pasta timer is done.");
+  }
+});

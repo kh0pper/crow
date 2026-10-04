@@ -75,7 +75,7 @@ export function createSessionHub(deps) {
       inTurn = false;
       const pcm = Buffer.concat(frames);
       frames = []; bytes = 0;
-      if (pcm.length < MIN_TURN_BYTES) { sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); return; }
+      if (pcm.length < MIN_TURN_BYTES) { sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
       abort = new AbortController();
       const my = abort;
@@ -123,6 +123,7 @@ export function createSessionHub(deps) {
           inTurn = false; frames = []; bytes = 0;
           sendJson(ws, { type: "error", code: "audio_too_long", recoverable: true });
           state("idle");
+          drainSpeech();   // speech queued while the mic was open must not be stranded
           return;
         }
         frames.push(Buffer.isBuffer(raw) ? raw : Buffer.from(raw));
