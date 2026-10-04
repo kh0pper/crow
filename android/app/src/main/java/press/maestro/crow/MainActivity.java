@@ -6,9 +6,16 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -33,7 +40,11 @@ import androidx.work.NetworkType;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.WorkManager;
 
+import org.json.JSONObject;
+
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -41,6 +52,33 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_GATEWAY_URL = "gateway_url";
     static final String EXTRA_OPEN_SETTINGS = "open_settings";
     private static final String WORK_NAME = "crow_notification_poll";
+    // Ramble walking (spec 2026-10-04 §10). Native is a dumb reader: it never
+    // does step arithmetic — the gateway does (baselines, reboots, caps).
+    private static final String KEY_STEPS_DEVICE_ID = "steps_device_id";
+    private static final String KEY_STEPS_RATIONALE_SEEN = "steps_rationale_seen";
+    private static final Pattern STEPS_REQ_ID = Pattern.compile("^[A-Za-z0-9]{1,32}$");
+    private static final long STEPS_READ_TIMEOUT_MS = 4000L;
+    private String pendingStepsPermId;
+
+    private final ActivityResultLauncher<String> stepsPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                // A refusal after which Android would still prompt (rationale = true)
+                // is remembered: only a LATER "not granted + no rationale" is a
+                // permanent "denied". A dismissed dialog (tap outside / back) on the
+                // very first ask also reads not-granted + no rationale, and must stay
+                // "needs-permission".
+                if (!granted && shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) {
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_STEPS_RATIONALE_SEEN, true).apply();
+                }
+                String id = pendingStepsPermId;
+                pendingStepsPermId = null;
+                if (id == null) return;
+                try {
+                    JSONObject o = new JSONObject();
+                    o.put("status", stepsStatusString());
+                    deliverSteps(id, o);
+                } catch (Exception ignored) { }
+            });
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
@@ -312,6 +350,47 @@ public class MainActivity extends AppCompatActivity {
         public void setPullToRefresh(boolean enabled) {
             runOnUiThread(() -> swipeRefresh.setEnabled(enabled));
         }
+
+        /** Ramble walking: "ok" | "needs-permission" | "denied" | "no-sensor". */
+        @JavascriptInterface
+        public String stepsStatus() {
+            return stepsStatusString();
+        }
+
+        /** Ask for ACTIVITY_RECOGNITION; delivers {status} to window.CrowSteps.deliver(id, ...). */
+        @JavascriptInterface
+        public void requestStepsPermission(String id) {
+            if (id == null || !STEPS_REQ_ID.matcher(id).matches()) return;
+            runOnUiThread(() -> {
+                if (hasActivityPermission() || !hasStepCounter()) {
+                    try {
+                        JSONObject o = new JSONObject();
+                        o.put("status", stepsStatusString());
+                        deliverSteps(id, o);
+                    } catch (Exception ignored) { }
+                    return;
+                }
+                pendingStepsPermId = id;
+                stepsPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION);
+            });
+        }
+
+        /** Read the step counter once; delivers the reading to window.CrowSteps.deliver(id, ...). */
+        @JavascriptInterface
+        public void readSteps(String id) {
+            if (id == null || !STEPS_REQ_ID.matcher(id).matches()) return;
+            runOnUiThread(() -> readStepsOnce(id));
+        }
+
+        /** For the "denied" case: this app's system settings page. */
+        @JavascriptInterface
+        public void openAppSettings() {
+            runOnUiThread(() -> {
+                Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", getPackageName(), null));
+                startActivity(i);
+            });
+        }
     }
 
     private void loadGateway(String url) {
@@ -384,6 +463,104 @@ public class MainActivity extends AppCompatActivity {
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
         });
+    }
+
+    private boolean hasStepCounter() {
+        SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
+        return sm != null && sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null;
+    }
+
+    private boolean hasActivityPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * "ok" | "needs-permission" | "denied" | "no-sensor". "denied" only once the
+     * user has refused at least once with Android still willing to ask
+     * (rationale seen) AND Android has now stopped offering the rationale — i.e.
+     * "don't ask again". Before that, a dismissed dialog is still askable.
+     */
+    String stepsStatusString() {
+        if (!hasStepCounter()) return "no-sensor";
+        if (hasActivityPermission()) return "ok";
+        boolean rationaleSeen = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(KEY_STEPS_RATIONALE_SEEN, false);
+        if (rationaleSeen && !shouldShowRequestPermissionRationale(Manifest.permission.ACTIVITY_RECOGNITION)) return "denied";
+        return "needs-permission";
+    }
+
+    /** A random id made once per install. Never ANDROID_ID. */
+    private String stepsDeviceId() {
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String id = p.getString(KEY_STEPS_DEVICE_ID, null);
+        if (id == null || id.isEmpty()) {
+            id = UUID.randomUUID().toString();
+            p.edit().putString(KEY_STEPS_DEVICE_ID, id).apply();
+        }
+        return id;
+    }
+
+    /** Hand a result to the panel. The id is re-validated; the JSON is built by org.json. */
+    private void deliverSteps(String id, JSONObject payload) {
+        if (id == null || !STEPS_REQ_ID.matcher(id).matches()) return;
+        final String js = "window.CrowSteps&&window.CrowSteps.deliver(" + JSONObject.quote(id) + "," + payload.toString() + ")";
+        runOnUiThread(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
+    }
+
+    private void deliverStepsError(String id, String reason) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("reason", reason);
+            deliverSteps(id, o);
+        } catch (Exception ignored) { }
+    }
+
+    /**
+     * One-shot read. TYPE_STEP_COUNTER is an on-change sensor, which reports its
+     * current value when a listener is registered, so the first event IS the
+     * reading. Unregister on that event or after the timeout, whichever is first.
+     */
+    private void readStepsOnce(String id) {
+        if (!hasStepCounter()) { deliverStepsError(id, "no-sensor"); return; }
+        if (!hasActivityPermission()) { deliverStepsError(id, "no-permission"); return; }
+        final SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
+        final Sensor sensor = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
+        final Handler main = new Handler(Looper.getMainLooper());
+        final boolean[] done = { false };
+        final SensorEventListener[] holder = new SensorEventListener[1];
+        final Runnable timeout = () -> {
+            if (done[0]) return;
+            done[0] = true;
+            sm.unregisterListener(holder[0]);
+            deliverStepsError(id, "timeout");
+        };
+        holder[0] = new SensorEventListener() {
+            @Override
+            public void onSensorChanged(SensorEvent event) {
+                if (done[0]) return;
+                done[0] = true;
+                main.removeCallbacks(timeout);
+                sm.unregisterListener(this);
+                try {
+                    JSONObject o = new JSONObject();
+                    o.put("ok", true);
+                    o.put("counter", (long) event.values[0]);
+                    o.put("elapsed_ms", SystemClock.elapsedRealtime());
+                    int boot = Settings.Global.getInt(getContentResolver(), Settings.Global.BOOT_COUNT, -1);
+                    o.put("boot_count", boot >= 0 ? (Object) Integer.valueOf(boot) : JSONObject.NULL);
+                    o.put("device_id", stepsDeviceId());
+                    deliverSteps(id, o);
+                } catch (Exception e) {
+                    deliverStepsError(id, "error");
+                }
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor s, int accuracy) { }
+        };
+        sm.registerListener(holder[0], sensor, SensorManager.SENSOR_DELAY_NORMAL, main);
+        main.postDelayed(timeout, STEPS_READ_TIMEOUT_MS);
     }
 
     /** Request RECORD_AUDIO and grant WebView permission on callback */
