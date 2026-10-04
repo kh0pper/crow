@@ -91,6 +91,11 @@ test("page: strict CSP, no-store; unknown assets 404; theme + strings generated"
   assert.ok(!(await r.text()).includes("/kiosk/"), "the page never references the maker-lab-owned /kiosk/ path");
   assert.equal((await fetch(base + "/display/assets/../../manifest.json")).status, 404);
   assert.equal((await fetch(base + "/display/assets/nope.js")).status, 404);
+  // fetch normalises literal dot segments, so the line above the 'nope' check never reaches
+  // the asset handler; these encoded/prototype names DO reach it (review fix 1).
+  for (const f of ["..%2F..%2Fmanifest.json", "%2e%2e%2fmanifest.json", "__proto__", "constructor", "hasOwnProperty"]) {
+    assert.equal((await fetch(base + "/display/assets/" + f)).status, 404, f);
+  }
   assert.match(await (await fetch(base + "/display/assets/theme.css")).text(), /--k-sky/);
   assert.match(await (await fetch(base + "/display/assets/strings.js")).text(), /^export const STRINGS = /);
   assert.match(await (await fetch(base + "/display/assets/bird-svg.js")).text(), /window\.RambleBird/);
@@ -179,7 +184,7 @@ test("core dashboardAuth never treats a kiosk token as a credential (spec §13.1
 test("internal API: loopback + announce token; any forwarding/Tailscale header is refused", async () => {
   assert.equal((await fetch(base + "/api/kiosk/internal/displays")).status, 401);
   assert.equal((await fetch(base + "/api/kiosk/internal/displays", { headers: { Authorization: "Bearer ann-ok" } })).status, 200);
-  for (const h of [{ "X-Forwarded-For": "100.64.0.9" }, { "Tailscale-User-Login": "a@b" }, { Forwarded: "for=1.2.3.4" }]) {
+  for (const h of [{ "X-Forwarded-For": "100.64.0.9" }, { "Tailscale-User-Login": "a@b" }, { Forwarded: "for=1.2.3.4" }, { "X-Forwarded-Host": "evil.example" }]) {
     assert.equal((await fetch(base + "/api/kiosk/internal/displays", { headers: { Authorization: "Bearer ann-ok", ...h } })).status, 403, JSON.stringify(h));
   }
   const r = await (await j("/api/kiosk/internal/announce", { method: "POST", body: JSON.stringify({ text: "Dinner's ready" }), headers: { Authorization: "Bearer ann-ok" } })).json();
@@ -324,4 +329,67 @@ test("ruling F: createSttWarmup transcribes once per profile per 10 min and neve
   await warm({ stt_profile_id: "fw" });
   assert.deepEqual(calls.map((c) => c.p), ["fw", "other", "fw"]);
   await warm({ stt_profile_id: "boom" });   // swallowed
+});
+
+// Review fix 2 (R10): CSRF guards every admin mutation; pairing is not behind it.
+test("CSRF: a rejecting csrfMiddleware blocks admin POST/DELETE; pair/start and pair/status are unaffected", async () => {
+  const k = createKioskRuntime(runtimeDeps({ csrfMiddleware: (req, res) => res.status(403).json({ error: "csrf" }) }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  const req = (path, method, body) => fetch(b + path, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  try {
+    assert.equal((await req("/api/kiosk/admin/approve", "POST", { code: "123456", name: "K", bot_id: "household" })).status, 403);
+    assert.equal((await req("/api/kiosk/admin/displays/kiosk-x", "POST", { name: "Y" })).status, 403);
+    assert.equal((await req("/api/kiosk/admin/displays/kiosk-x", "DELETE")).status, 403);
+    const st = await req("/api/kiosk/pair/start", "POST", {});
+    assert.equal(st.status, 200);
+    const { pair_id, poll_secret } = await st.json();
+    const ps = await fetch(b + `/api/kiosk/pair/status?pair_id=${pair_id}`, { headers: { "X-Kiosk-Poll": poll_secret } });
+    assert.equal(ps.status, 200);
+    assert.equal((await ps.json()).state, "pending");
+  } finally { k.stop(); s.close(); }
+});
+
+// Review fix 3: the MCP server must reach the gateway on the gateway's own port
+// (servers/gateway/index.js: PORT || CROW_GATEWAY_PORT || 3001).
+test("MCP server: gateway port order matches the gateway (PORT before CROW_GATEWAY_PORT)", async () => {
+  const { createKioskServer } = await import("../bundles/kiosk/server/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-mcp-"));
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(dir, "tok"), "t0k\n");
+  const prev = { PORT: process.env.PORT, CROW_GATEWAY_PORT: process.env.CROW_GATEWAY_PORT };
+  const urls = [];
+  const fetchImpl = async (u, o) => { urls.push([u, o.headers.Authorization]); return { ok: true, json: async () => ({ displays: [] }) }; };
+  try {
+    process.env.PORT = "3002"; process.env.CROW_GATEWAY_PORT = "3004";
+    await createKioskServer({ fetchImpl, tokenPath: join(dir, "tok") })._registeredTools.crow_kiosk_list_displays.handler({}, {});
+    delete process.env.PORT;
+    await createKioskServer({ fetchImpl, tokenPath: join(dir, "tok") })._registeredTools.crow_kiosk_list_displays.handler({}, {});
+    assert.deepEqual(urls, [
+      ["http://127.0.0.1:3002/api/kiosk/internal/displays", "Bearer t0k"],
+      ["http://127.0.0.1:3004/api/kiosk/internal/displays", "Bearer t0k"],
+    ]);
+  } finally {
+    for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
+// Review fix 4: a failure after pairDevice must not leave a paired, unbound device
+// whose token is never delivered.
+test("approve: a failure binding the bot unpairs the just-created device and releases the code", async () => {
+  const failing = { ...store, updateDeviceProfiles: async () => { throw new Error("db busy"); } };
+  const k = createKioskRuntime(runtimeDeps({ deviceStore: failing }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  try {
+    const before = (await store.listDevices(db())).filter((d) => d.device_kind === "kiosk").map((d) => d.id);
+    const st = await (await fetch(b + "/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json();
+    const r = await fetch(b + "/api/kiosk/admin/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: st.code, name: "Orphan", bot_id: "household" }) });
+    assert.equal(r.status, 500);
+    const after = (await store.listDevices(db())).filter((d) => d.device_kind === "kiosk").map((d) => d.id);
+    assert.deepEqual(after, before, "no orphan kiosk device left behind");
+    assert.equal(k.pairing.listPending().length, 1, "pairing released, still pending");
+  } finally { k.stop(); s.close(); }
 });
