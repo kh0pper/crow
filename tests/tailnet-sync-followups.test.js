@@ -87,14 +87,18 @@ function fakeTailscale({ serve = null, ip = "100.64.0.5", status = null } = {}) 
 test("unit: the derived self dial address is never the :443 door (crow / black-swan / funnel shapes)", () => {
   assert.equal(serveUrlForPort(CROW_SERVE, 3001), "https://crow.example.ts.net:8444", "crow: the :8444 Serve for its port, not the Funnel :443");
   assert.equal(serveUrlForPort(CROW_SERVE, 3008), "https://crow.example.ts.net:8449", "r4 on the same host gets ITS Serve port");
-  assert.equal(serveUrlForPort(BLACKSWAN_SERVE, 3001), null, "black-swan: only :443 → no Serve dial address");
+  assert.equal(serveUrlForPort(BLACKSWAN_SERVE, 3001), "https://black-swan.example.ts.net", "black-swan: its PRIVATE :443 Serve is a fine browser/HTTP URL");
+  assert.equal(serveUrlForPort({ ...BLACKSWAN_SERVE, Web: { ...BLACKSWAN_SERVE.Web, "black-swan.example.ts.net:8460": { Handlers: { "/": { Proxy: "http://127.0.0.1:3001" } } } } }, 3001),
+    "https://black-swan.example.ts.net:8460", "a non-443 private Serve is preferred");
   assert.equal(serveUrlForPort(FUNNEL_ON_8444, 3001), null, "a Funnel-enabled host:port is never advertised");
 
   const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
   const crow = deriveSelfDialAddress({ port: 3001, env, execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.118.41.122" }) });
   assert.deepEqual(crow, { gateway_url: "https://crow.example.ts.net:8444", tailscale_ip: "100.118.41.122", sync_port: 3001, source: "serve" });
   const bs = deriveSelfDialAddress({ port: 3001, env: { CROW_GATEWAY_URL: "https://black-swan.example.ts.net" }, execFileSyncImpl: fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.90.185.114" }) });
-  assert.deepEqual(bs, { gateway_url: "http://100.90.185.114:3001", tailscale_ip: "100.90.185.114", sync_port: 3001, source: "tailnet-ip" });
+  assert.deepEqual(bs, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114", sync_port: 3001, source: "serve" });
+  const bare = deriveSelfDialAddress({ port: 3009, env: {}, execFileSyncImpl: fakeTailscale({ serve: null, ip: "100.67.188.54" }) });
+  assert.deepEqual(bare, { gateway_url: "http://100.67.188.54:3009", tailscale_ip: "100.67.188.54", sync_port: 3009, source: "tailnet-ip" }, "no Serve → the direct backend");
   const pinned = deriveSelfDialAddress({ port: 3001, env, configuredUrl: "https://pin.example.ts.net:9000", execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE }) });
   assert.equal(pinned.gateway_url, "https://pin.example.ts.net:9000", "CROW_PEER_GATEWAY_URL stays the explicit override");
   assert.equal(deriveSelfDialAddress({ port: 3001, env: {}, execFileSyncImpl: fakeTailscale({ ip: null }) }).gateway_url, null, "no tailnet → nothing advertised");
@@ -135,18 +139,22 @@ async function withScratchSelf(selfUrl, fn, { tailscaleIp = null } = {}) {
   }
 }
 
-test("self row: an undialable (:443 / localhost) self gateway_url is repaired at boot with the derived address; a dialable one is never overwritten", async () => {
+test("self row: a self row with NO usable address (empty / localhost) is repaired at boot with the derived one; a usable row — even a private :443 Serve URL — is never overwritten", async () => {
+  await withScratchSelf("http://localhost:3001", async (db) => {
+    await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.67.188.54:3009", tailscaleIp: "100.67.188.54" });
+    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "http://100.67.188.54:3009", tailscale_ip: "100.67.188.54" });
+  });
   await withScratchSelf("https://black-swan.example.ts.net", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.90.185.114:3001", tailscaleIp: "100.90.185.114" });
-    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "http://100.90.185.114:3001", tailscale_ip: "100.90.185.114" });
+    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114" }, "browser URL kept; tailscale_ip filled");
   });
   await withScratchSelf("https://r4.example.ts.net:8448", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.0.5:3008" });
-    assert.equal((await row(db, "self")).gateway_url, "https://r4.example.ts.net:8448", "dialable row kept");
+    assert.equal((await row(db, "self")).gateway_url, "https://r4.example.ts.net:8448", "usable row kept");
   });
-  await withScratchSelf("https://black-swan.example.ts.net", async (db) => {
+  await withScratchSelf("http://localhost:3001", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://localhost:3001" });
-    assert.equal((await row(db, "self")).gateway_url, "https://black-swan.example.ts.net", "never 'repaired' to another undialable URL");
+    assert.equal((await row(db, "self")).gateway_url, "http://localhost:3001", "never 'repaired' to another unusable URL");
   });
 });
 
@@ -163,7 +171,8 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
       // Black-swan's host shape: only a :443 Serve, no self row yet.
       const exec = fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.90.185.114" });
       const before = await selfPairingAddress(db, { execFileSyncImpl: exec });
-      assert.deepEqual(before, { gateway_url: "http://100.90.185.114:3001", tailscale_ip: "100.90.185.114", sync_port: 3001 });
+      assert.deepEqual(before, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.90.185.114", sync_port: 3001 },
+        "its private Serve for HTTP + the tailnet IP and port sync will dial");
 
       // Crow's host shape through the REAL route, over real HTTP.
       const app = express();
@@ -188,6 +197,11 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
         const port = (await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_port:peerB' AND instance_id = 'self'")).rows[0];
         assert.equal(port?.value, "3001", "the source's backend port is remembered");
 
+        // Re-pairing clears the peer's challenge-response flag (downgrade guard).
+        await db.execute("INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES ('tailnet_sync_cr:peerB', 'self', '1', datetime('now'))");
+        assert.equal((await post({ ...base, source_gateway_url: "http://100.90.185.114:3001" })).status, 200);
+        assert.equal((await db.execute("SELECT COUNT(*) AS n FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_cr:peerB'")).rows[0].n, 0, "CR flag cleared by the re-pair");
+
         // An OLD peer re-pairing with its :443 CROW_GATEWAY_URL never replaces a dialable row.
         const r2 = await post({ ...base, source_gateway_url: "https://black-swan.example.ts.net", source_tailscale_ip: "8.8.8.8" });
         assert.equal(r2.status, 200);
@@ -202,7 +216,7 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
   }
 });
 
-test("MUTUAL :443 repair: both rows hold only a :443 URL (no tailscale_ip) — nothing flows; after a restart the boot repair resolves both hosts over the tailnet, the link forms, sync flows both ways and BOTH rows get the peer's signed dialable URL", async () => {
+test("MUTUAL :443 repair: both rows hold only a :443 URL (no tailscale_ip) — nothing flows; after a restart the boot repair resolves both hosts over the tailnet, the link forms, sync flows both ways, both sides learn the other's port, and the :443 browser URLs are kept", async () => {
   _resetPeerDialHealth();
   const fleet = await makeFleet();
   const { a, b } = fleet;
@@ -242,14 +256,22 @@ test("MUTUAL :443 repair: both rows hold only a :443 URL (no tailscale_ip) — n
     assert.ok(await until(() => linked(a, b), 8000), "link forms after the boot repair");
     assert.ok(await until(() => hasMemory(b.db, 3101)), "stranded A→B arrives");
     assert.ok(await until(() => hasMemory(a.db, 3201)), "stranded B→A arrives");
-    // Both rows: tailscale_ip from the repair; the undialable :443 URL replaced
-    // by the peer's signed dialable advertisement. Mutual: A's row on B gets
-    // the same treatment even though only A dialed (B learned on accept).
-    assert.ok(await until(async () => (await row(a.db, b.id)).gateway_url === `http://127.0.0.1:${B.port}`), "A's row for B repaired");
-    assert.ok(await until(async () => (await row(b.db, a.id)).gateway_url === `http://127.0.0.1:${A.port}`), "B's row for A repaired");
-    assert.equal((await row(a.db, b.id)).tailscale_ip, "127.0.0.1");
-    assert.equal((await row(b.db, a.id)).tailscale_ip, "127.0.0.1");
+    // Both rows: tailscale_ip from the repair, the peer's backend port from
+    // its signed handshake (both directions — B learned on accept), and the
+    // :443 gateway_url kept as the browser/HTTP URL.
+    const portOf = async (side, peer) => Number((await side.db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [`tailnet_sync_port:${peer.id}`, side.id] })).rows[0]?.value);
+    assert.ok(await until(async () => (await portOf(a, b)) === B.port), "A learned B's port");
+    assert.ok(await until(async () => (await portOf(b, a)) === A.port), "B learned A's port");
+    assert.deepEqual({ ...(await row(a.db, b.id)) }, { gateway_url: "https://instb.example.ts.net", tailscale_ip: "127.0.0.1" });
+    assert.deepEqual({ ...(await row(b.db, a.id)) }, { gateway_url: "https://insta.example.ts.net", tailscale_ip: "127.0.0.1" });
     assert.equal(streams(a, b), 1);
+
+    // Prove B's repaired row is dialable BY B: A stops dialing, B's
+    // fallback re-links over the learned tailscale_ip + port.
+    A.stopClients();
+    assert.ok(await until(() => getPeerDialHealth()[a.id]?.lastAttemptRole === "fallback" && linked(a, b), 8000), "B re-links on its own");
+    await writeAndEmit(a, 3102, "A→B over B's dial");
+    assert.ok(await until(() => hasMemory(b.db, 3102)));
   } finally {
     loud();
     await A.close();
@@ -545,6 +567,7 @@ test("SIMULTANEOUS DIAL: both sides know each other and dial at the same instant
   quiet();
   const ROUNDS = 8;
   let collisions = 0;
+  let dialedA = 0;
   try {
     for (let i = 0; i < ROUNDS; i++) {
       const upA0 = A.upgrades; const upB0 = B.upgrades;
@@ -556,8 +579,8 @@ test("SIMULTANEOUS DIAL: both sides know each other and dial at the same instant
       // Independent evidence (server-side upgrade counters) that BOTH sides dialed.
       const dialsByB = A.upgrades - upA0; // B → A
       const dialsByA = B.upgrades - upB0; // A → B
-      assert.ok(dialsByA >= 1, `round ${i}: A dialed`);
-      if (dialsByB >= 1) collisions += 1;
+      if (dialsByA >= 1) dialedA += 1;
+      if (dialsByA >= 1 && dialsByB >= 1) collisions += 1;
       await writeAndEmit(a, 3600 + i * 2, `A→B round ${i}`);
       await writeAndEmit(b, 3601 + i * 2, `B→A round ${i}`);
       assert.ok(await until(() => hasMemory(b.db, 3600 + i * 2)), `round ${i}: A→B flows`);
@@ -567,11 +590,124 @@ test("SIMULTANEOUS DIAL: both sides know each other and dial at the same instant
     }
     // The gate is vacuous unless the two dials really collided: require that
     // B's dial reached A in (nearly) every round, not just once.
-    assert.ok(collisions >= ROUNDS - 1, `both sides dialed in ${collisions}/${ROUNDS} rounds`);
+    // (Either side may legitimately win a given round — B's 0-grace dial can
+    // land before A's dialer exists — so the totals, not each round, carry it.)
+    assert.ok(dialedA >= ROUNDS / 2, `A dialed in ${dialedA}/${ROUNDS} rounds`);
+    assert.ok(collisions >= ROUNDS / 2, `both sides dialed in ${collisions}/${ROUNDS} rounds`);
   } finally {
     loud();
     await A.close();
     await B.close();
+    await fleet.cleanup();
+  }
+});
+
+test("CR, client side downgrade: after CR with B, an endpoint answering B's id WITHOUT cr_sig (a recorded pre-upgrade hello) is refused — no proof, no feed key leaks; positive control: before the flag, the same CR-less answer is accepted as an old server", async () => {
+  _resetPeerDialHealth();
+  const fleet = await makeFleet();
+  const { a, b, identity } = fleet;
+  // An "old server" endpoint signing as B (we hold the identity in tests):
+  // a legacy hello, then a feed-key frame — exactly origin/main's ordering.
+  const http = createServer();
+  const wss = new WebSocketServer({ server: http, path: WS_PATH });
+  const got = [];
+  wss.on("connection", (ws) => {
+    ws.on("message", (d, bin) => {
+      if (bin) return;
+      const m = JSON.parse(d.toString());
+      got.push(m);
+      if (m.instance_id) {
+        ws.send(JSON.stringify(hello(identity, b.id, { cr: false })));
+        ws.send(JSON.stringify({ feed_key_hex: null }));
+      }
+    });
+  });
+  await new Promise((r) => http.listen(0, "127.0.0.1", r));
+  const A = await startGateway(fleet, a);
+  quiet();
+  try {
+    await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${http.address().port}`, b.id] });
+    // Positive control: no flag yet → treated as an old server; A proceeds
+    // past the hello and sends its own feed-key frame.
+    await A.startClients();
+    assert.ok(await until(() => got.some((m) => "feed_key_hex" in m), 5000), "old-server answer accepted before any CR");
+    A.stopClients();
+    for (const c of wss.clients) c.terminate();
+    // The far end closed before any Noise handshake: the stream must not
+    // linger as a phantom link (it parked the dialer forever).
+    assert.ok(await until(() => !a.mgr.hasDedicatedStream(b.id), 3000), "a socket closed mid-Noise-handshake leaves no phantom link");
+    got.length = 0;
+
+    // A has since completed CR with B.
+    await a.db.execute({ sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES (?, ?, '1', datetime('now'))", args: [`tailnet_sync_cr:${b.id}`, a.id] });
+    _resetPeerDialHealth();
+    await A.startClients();
+    assert.ok(await until(() => /downgrade refused/.test(getPeerDialHealth()[b.id]?.lastError || ""), 5000), getPeerDialHealth()[b.id]?.lastError);
+    await sleep(200);
+    assert.ok(got.some((m) => m.instance_id === a.id), "the dialer reached the endpoint");
+    assert.ok(!got.some((m) => "feed_key_hex" in m || "cr_proof" in m), "nothing leaked after the downgrade");
+  } finally {
+    loud();
+    await A.close();
+    for (const c of wss.clients) c.terminate();
+    await new Promise((r) => http.close(r));
+    await fleet.cleanup();
+  }
+});
+
+test("a replayed hello that never proves does NOT park our dialer (inbound 'pending' starts only after the proof)", async () => {
+  _resetPeerDialHealth();
+  const fleet = await makeFleet();
+  const { a, b, identity } = fleet;
+  const A = await startGateway(fleet, a);
+  const B = await startGateway(fleet, b, { fallbackDialAfterMs: 3_600_000 });
+  quiet();
+  const raws = [];
+  try {
+    await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${B.port}`, b.id] });
+    // A captured CR hello "from B", replayed to A and left hanging (the
+    // replayer cannot produce the proof). Before the fix this held A's
+    // inbound-pending mark for the whole 10 s handshake timeout.
+    const h = hello(identity, b.id);
+    for (let i = 0; i < 3; i++) {
+      const r = await openRaw(A.port);
+      r.ws.send(JSON.stringify(h));
+      assert.equal(typeof (await r.nextFrame(1))?.cr_sig, "string", "the replay reached the CR wait");
+      raws.push(r);
+    }
+    await A.startClients();
+    assert.ok(await until(() => linked(a, b), 3000), "A's elected dial links while the replays hang");
+  } finally {
+    loud();
+    for (const r of raws) r.close();
+    await A.close();
+    await B.close();
+    await fleet.cleanup();
+  }
+});
+
+test("Hyperswarm handshake is no signing oracle: it signs only a 32-byte hex challenge — never a tailnet-sync hello or CR message chosen by the caller", async () => {
+  const { PeerManager } = await import("../servers/sharing/peer-manager.js");
+  const fleet = await makeFleet();
+  try {
+    const pm = new PeerManager(fleet.identity);
+    const run = async (challenge) => {
+      const writes = []; let destroyed = false;
+      const conn = { write: (d) => writes.push(JSON.parse(String(d))), destroy: () => { destroyed = true; } };
+      pm._handleMessage(conn, { type: "challenge", challenge }, Buffer.alloc(32), {}, () => {});
+      await sleep(20);
+      return { writes, destroyed };
+    };
+    for (const evil of [`instA:${"ab".repeat(16)}`, `cr-proof:instA:instB:${"cd".repeat(16)}:${"ef".repeat(16)}`, "AB".repeat(32), 42]) {
+      const r = await run(evil);
+      assert.equal(r.writes.length, 0, `nothing signed for ${String(evil).slice(0, 20)}`);
+      assert.equal(r.destroyed, true);
+    }
+    // Positive control: a genuine challenge is still answered.
+    const ok = await run(randomBytes(32).toString("hex"));
+    assert.equal(ok.writes[0]?.type, "challenge-response");
+    assert.equal(typeof ok.writes[0].signature, "string");
+  } finally {
     await fleet.cleanup();
   }
 });

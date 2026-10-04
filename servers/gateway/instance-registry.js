@@ -17,7 +17,7 @@ import { hostname as osHostname } from "os";
 import bus from "../shared/event-bus.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { createDbClient } from "../db.js";
-import { isDialableGatewayUrl, deriveSelfDialAddress } from "../shared/self-dial-address.js";
+import { isPeerUsableUrl, deriveSelfDialAddress } from "../shared/self-dial-address.js";
 
 const INSTANCES_JSON_PATH = resolve(homedir(), ".crow", "instances.json");
 
@@ -407,28 +407,29 @@ export function gatewayBackendPort(env = process.env) {
  * The dial address this instance hands a peer at PAIRING time:
  * { gateway_url, tailscale_ip, sync_port }.
  *
- * gateway_url: CROW_PEER_GATEWAY_URL (explicit override) → the self row's
- * gateway_url when dialable → the derived tailnet address (private Serve
- * endpoint for our port, else http://<tailnet ip>:<port>). NEVER
+ * gateway_url: CROW_PEER_GATEWAY_URL (explicit override) → the derived
+ * address (a NON-Funnel Serve endpoint for our port, else
+ * http://<tailnet ip>:<port>) → the self row's gateway_url. NEVER
  * CROW_GATEWAY_URL — the public URL, on crow the Funnel :443 door, which
- * instance sync never dials (black-swan's six-week stall).
- * tailscale_ip rides along so the peer has the direct backend fallback even
- * when gateway_url is a Serve hostname. Never throws.
+ * refuses private routes and which instance sync never dials (black-swan's
+ * six-week stall). tailscale_ip + sync_port ride along: the sync transport
+ * dials them whenever gateway_url is a :443 URL. Never throws.
  */
 export async function selfPairingAddress(db, { env = process.env, port = gatewayBackendPort(env), execFileSyncImpl } = {}) {
   const configured = configuredSelfGatewayUrl(env);
   let row = null;
   try { row = db ? await getInstance(db, getOrCreateLocalInstanceId()) : null; } catch { row = null; }
-  const derived = deriveSelfDialAddress({
-    port, env, configuredUrl: configured,
-    ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
-  });
+  // Probe tailscale only when needed (each probe is a bounded sync exec).
+  const needDerive = !configured || !(row?.tailscale_ip);
+  const derived = needDerive
+    ? deriveSelfDialAddress({ port, env, configuredUrl: configured, ...(execFileSyncImpl ? { execFileSyncImpl } : {}) })
+    : { gateway_url: configured, tailscale_ip: null };
   let gatewayUrl = configured || null;
-  if (!gatewayUrl && row?.gateway_url && isDialableGatewayUrl(row.gateway_url)) gatewayUrl = row.gateway_url;
-  if (!gatewayUrl && derived.gateway_url && isDialableGatewayUrl(derived.gateway_url)) gatewayUrl = derived.gateway_url;
+  if (!gatewayUrl && derived.gateway_url && isPeerUsableUrl(derived.gateway_url)) gatewayUrl = derived.gateway_url;
+  if (!gatewayUrl && row?.gateway_url && isPeerUsableUrl(row.gateway_url)) gatewayUrl = row.gateway_url;
   return {
     gateway_url: gatewayUrl,
-    tailscale_ip: row?.tailscale_ip || derived.tailscale_ip || null,
+    tailscale_ip: derived.tailscale_ip || row?.tailscale_ip || null,
     sync_port: port,
   };
 }
@@ -454,14 +455,15 @@ export async function ensureLocalInstanceRegistered(db, { crowId, gatewayUrl, na
     if (gatewayUrlConfigured && gatewayUrl && existing.gateway_url !== gatewayUrl) {
       updates.gateway_url = gatewayUrl;
       console.log(`[instance-registry] self gateway_url ${existing.gateway_url || "(none)"} -> ${gatewayUrl} (CROW_PEER_GATEWAY_URL)`);
-    } else if (!gatewayUrlConfigured && gatewayUrl && isDialableGatewayUrl(gatewayUrl)
-      && !isDialableGatewayUrl(existing.gateway_url) && existing.gateway_url !== gatewayUrl) {
-      // Boot repair: a self row holding an UNDIALABLE address (the :443 door,
-      // localhost, empty) is what peers learn from our signed handshake —
-      // replace it with the derived tailnet dial address. A dialable row
-      // (operator- or earlier-set) is still never overwritten by detection.
+    } else if (!gatewayUrlConfigured && gatewayUrl && isPeerUsableUrl(gatewayUrl)
+      && !isPeerUsableUrl(existing.gateway_url) && existing.gateway_url !== gatewayUrl) {
+      // Boot repair: a self row with NO usable address (empty, or the
+      // http://localhost fallback of a boot that raced tailscaled) gets the
+      // derived one. A usable row — including a private :443 Serve URL,
+      // which browsers and HTTP peer calls rely on — is never overwritten
+      // by detection; the sync transport dials tailscale_ip + port for it.
       updates.gateway_url = gatewayUrl;
-      console.log(`[instance-registry] self gateway_url ${existing.gateway_url || "(none)"} -> ${gatewayUrl} (undialable; derived tailnet address)`);
+      console.log(`[instance-registry] self gateway_url ${existing.gateway_url || "(none)"} -> ${gatewayUrl} (no usable address; derived)`);
     }
     if (tailscaleIp && !existing.tailscale_ip) updates.tailscale_ip = tailscaleIp;
     if (Object.keys(updates).length) {

@@ -247,6 +247,15 @@ export class PeerManager {
         // to the same user). Piggyback our local instance_id + outgoing
         // feed key so the peer can open its inbound feed without more
         // round trips.
+        // Sign ONLY a challenge shaped like the one we send (32 random bytes,
+        // hex). Signing an arbitrary peer-chosen string with the identity key
+        // made this a signing oracle for anyone who can reach the topic — it
+        // would sign a tailnet-sync hello ("<id>:<nonce>") or CR proof for
+        // them. Hex-only keeps it disjoint from every colon-delimited message.
+        if (typeof msg.challenge !== "string" || !/^[0-9a-f]{64}$/.test(msg.challenge)) {
+          try { conn.destroy(); } catch {}
+          break;
+        }
         (async () => {
           const response = sign(msg.challenge, this.identity.ed25519Priv);
           const isInstance = state.isInstanceConn || msg.crowId === this.identity.crowId;

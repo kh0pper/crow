@@ -1,22 +1,24 @@
 /**
- * This gateway's TAILNET dial address — what a paired instance should dial to
- * reach it — and the tailnet lookups that repair a peer row pointing at an
- * undialable address.
+ * This gateway's address for paired instances, and the tailnet lookups that
+ * repair a peer row the sync transport cannot dial.
  *
- * Root cause this replaces (black-swan's six-week stall, 2026-08..10): pairing
- * handed peers CROW_GATEWAY_URL when CROW_PEER_GATEWAY_URL was unset, and the
- * gateway's own self-registration fell back to "the first HTTPS URL" in
- * `tailscale serve status`. Both are typically the :443 endpoint — public
- * Funnel on crow, a private Serve on black-swan — and instance sync never
- * dials :443 (Funnel refuses private routes; see peerToWsUrlCandidates). A
- * peer that stored that URL, with no tailscale_ip, had nothing to dial.
+ * Root cause (black-swan's six-week stall, 2026-08..10): pairing handed peers
+ * CROW_GATEWAY_URL when CROW_PEER_GATEWAY_URL was unset, and self-
+ * registration fell back to "the first HTTPS URL" in `tailscale serve
+ * status`. Both are typically the :443 endpoint — the public Funnel on crow
+ * (which refuses private routes), a private Serve on black-swan — and
+ * instance sync never dials :443. A peer that stored that URL with no
+ * tailscale_ip had nothing to dial.
  *
- * Derivation order (deriveSelfDialAddress):
- *   1. CROW_PEER_GATEWAY_URL — the operator's explicit override, used as-is.
- *   2. A Tailscale Serve HTTPS endpoint that proxies "/" to THIS gateway's
- *      backend port, is not Funnel-enabled, and is not on :443.
- *   3. http://<own tailnet IP>:<backend port> — the direct backend dial.
- * Never CROW_GATEWAY_URL: that is the PUBLIC URL (OAuth issuer, blog links).
+ * Two separate things now travel at pairing:
+ *   - gateway_url — the URL for browsers and HTTP peer calls (SSO, proxy):
+ *       1. CROW_PEER_GATEWAY_URL (explicit override), else
+ *       2. a NON-FUNNEL Serve HTTPS endpoint proxying "/" to our backend port
+ *          (non-443 preferred; a private :443 Serve is fine for HTTP), else
+ *       3. http://<own tailnet IP>:<backend port>.
+ *     Never CROW_GATEWAY_URL (the PUBLIC URL: OAuth issuer, blog links).
+ *   - tailscale_ip + sync_port — the direct backend dial the sync transport
+ *     uses whenever gateway_url is not itself dialable (:443).
  *
  * Every probe is bounded (3 s) and never throws.
  */
@@ -69,9 +71,26 @@ export function gatewayUrlHost(raw) {
 }
 
 /**
- * From `tailscale serve status --json`: the private Serve HTTPS endpoint that
- * proxies "/" to localhost:<port>, or null. Funnel-enabled host:ports and
- * :443 are skipped (never a sync dial target).
+ * True when a gateway_url can be handed to a peer at all: http(s), a real,
+ * non-loopback, non-wildcard host. Port 443 is fine HERE — a private :443
+ * Serve (black-swan) is the right URL for browsers and HTTP peer calls; the
+ * sync transport simply dials tailscale_ip + backend port instead of it.
+ */
+export function isPeerUsableUrl(raw) {
+  const u = parseUrl(raw);
+  if (!u?.hostname) return false;
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host)) return false;
+  return !(host === "0.0.0.0" || host === "::");
+}
+
+/**
+ * From `tailscale serve status --json`: the private (non-Funnel) Serve HTTPS
+ * endpoint that proxies "/" to localhost:<port>, or null. A non-443 endpoint
+ * is preferred (the sync transport can dial it directly); a private :443 one
+ * is still returned when it is the only one. Funnel-enabled host:ports are
+ * never returned.
  */
 export function serveUrlForPort(status, port) {
   if (!status || typeof status !== "object" || !port) return null;
@@ -83,12 +102,13 @@ export function serveUrlForPort(status, port) {
     const m = /^(.+):(\d+)$/.exec(hostPort);
     if (!m) continue;
     const servePort = Number(m[2]);
-    if (servePort === 443 || funnel[hostPort]) continue;
+    if (funnel[hostPort]) continue;
     const proxy = cfg?.Handlers?.["/"]?.Proxy;
     if (typeof proxy !== "string" || !want.test(proxy)) continue;
-    hits.push({ url: `https://${m[1].toLowerCase()}:${servePort}`, port: servePort });
+    hits.push({ url: `https://${m[1].toLowerCase()}${servePort === 443 ? "" : `:${servePort}`}`, port: servePort });
   }
-  hits.sort((x, y) => x.port - y.port); // deterministic
+  // Non-443 first (directly dialable by sync), then by port: deterministic.
+  hits.sort((x, y) => (x.port === 443) - (y.port === 443) || x.port - y.port);
   return hits[0]?.url || null;
 }
 
@@ -194,4 +214,33 @@ export function pickPeerGatewayUrl(advertised, typed) {
   if (advertised && isDialableGatewayUrl(advertised)) return String(advertised).replace(/\/+$/, "");
   if (typed && isDialableGatewayUrl(typed)) return String(typed).replace(/\/+$/, "");
   return advertised || typed || null;
+}
+
+/**
+ * `tailscale status --json` via async execFile (never blocks the gateway
+ * event loop), or null. The boot/refresh repair calls it ONCE per pass.
+ */
+export async function tailscaleStatusAsync({ timeoutMs = PROBE_TIMEOUT_MS } = {}) {
+  const { execFile } = await import("node:child_process");
+  return new Promise((resolve) => {
+    execFile("tailscale", ["status", "--json"], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve(null);
+      try { resolve(JSON.parse(String(stdout))); } catch { resolve(null); }
+    });
+  });
+}
+
+/**
+ * A (re-)pairing ceremony resets what tailnet-sync learned about the peer's
+ * protocol: its challenge-response flag (the downgrade guard) is cleared, so
+ * a peer re-paired onto older code can link again. Never throws.
+ */
+export async function forgetPeerHandshakeState(db, localInstanceId, peerId) {
+  if (!db || !localInstanceId || !peerId) return;
+  try {
+    await db.execute({
+      sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
+      args: [`${SYNC_CR_KEY_PREFIX}${peerId}`, localInstanceId],
+    });
+  } catch { /* table missing on an old DB */ }
 }

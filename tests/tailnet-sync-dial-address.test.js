@@ -111,8 +111,8 @@ test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tails
     await b.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${A.port}`, a.id] });
     // A advertises NOTHING — the shape of a peer still on the old code.
     A.advertise = null;
-    // B advertises its tailnet IP, a dialable URL and its own backend port (signed).
-    B.advertise = { gateway_url: `http://127.0.0.1:${B.port}`, tailscale_ip: "127.0.0.1", sync_port: B.port };
+    // B advertises its tailnet IP and its own backend port (signed).
+    B.advertise = { gateway_url: "https://instb.example.ts.net:8444", tailscale_ip: "127.0.0.1", sync_port: B.port };
 
     await A.startClients();
     await B.startClients();
@@ -143,13 +143,11 @@ test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tails
     assert.ok(await until(() => hasMemory(b.db, 1101)), "A→B flows after the link");
     assert.ok(await until(() => hasMemory(a.db, 2101)), "B→A flows after the link");
 
-    // A learned B's tailscale_ip from B's signed handshake, and the
-    // UNDIALABLE :443 gateway_url was replaced by B's signed dialable one
-    // (sync follow-up: the :443 repair). A dialable stored URL is never
-    // overwritten — see the signed-data test below.
+    // A learned B's tailscale_ip from B's signed handshake; the operator-set
+    // gateway_url is NOT overwritten.
     const ra = await row(a.db, b.id);
     assert.equal(ra.tailscale_ip, "127.0.0.1");
-    assert.equal(ra.gateway_url, `http://127.0.0.1:${B.port}`);
+    assert.equal(ra.gateway_url, "https://instb.example.ts.net");
     const portRow = (await a.db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [`tailnet_sync_port:${b.id}`, a.id] })).rows[0];
     assert.equal(Number(portRow?.value), B.port, "B's backend port learned (local override, never synced)");
     assert.equal(getPeerDialHealth()[b.id].noAddressSince, null, "health condition cleared");

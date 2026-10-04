@@ -30,7 +30,7 @@ import {
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../../servers/gateway/instance-registry.js";
-import { pickPeerGatewayUrl, isTailnetAddress, rememberPeerSyncPort } from "../../servers/shared/self-dial-address.js";
+import { pickPeerGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState } from "../../servers/shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
@@ -224,6 +224,7 @@ async function storePeerCredsLocally(db, {
     await updateInstance(db, peerId, { trusted: 1 });
   }
   await rememberPeerSyncPort(db, getOrCreateLocalInstanceId(), peerId, peerSyncPort);
+  await forgetPeerHandshakeState(db, getOrCreateLocalInstanceId(), peerId);
 
   setPeerCreds(peerId, { auth_token, signing_key });
 }

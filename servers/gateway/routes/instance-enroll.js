@@ -35,7 +35,7 @@ import {
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../instance-registry.js";
-import { isDialableGatewayUrl, isTailnetAddress, rememberPeerSyncPort } from "../../shared/self-dial-address.js";
+import { isDialableGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState } from "../../shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
@@ -118,6 +118,7 @@ export function instanceEnrollRouter(db, { execFileSyncImpl } = {}) {
 
       const localId = getOrCreateLocalInstanceId();
       await rememberPeerSyncPort(db, localId, source_instance_id, source_sync_port);
+      await forgetPeerHandshakeState(db, localId, source_instance_id);
       // Our TAILNET dial address — never CROW_GATEWAY_URL (the public
       // Funnel URL on crow; instance sync never dials :443).
       const self = await selfPairingAddress(db, execFileSyncImpl ? { execFileSyncImpl } : {});

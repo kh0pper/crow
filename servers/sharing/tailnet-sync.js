@@ -41,7 +41,7 @@ import { sign, verify } from "./identity.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { getOwnTailnetIp } from "../shared/tailnet-ip.js";
 import {
-  isTailnetAddress, gatewayUrlHost, lookupTailnetIpForHost, rememberPeerSyncPort,
+  isTailnetAddress, gatewayUrlHost, lookupTailnetIpForHost, tailscaleStatusAsync, rememberPeerSyncPort,
   SYNC_PORT_KEY_PREFIX, SYNC_CR_KEY_PREFIX,
 } from "../shared/self-dial-address.js";
 import {
@@ -64,8 +64,8 @@ const REFUSED_RECHECK_MS = 30 * 60_000;
 export { SYNC_PORT_KEY_PREFIX, SYNC_CR_KEY_PREFIX };
 // HALF-OPEN: a link whose peer vanished without a FIN/RST (NAT rebind, host
 // suspend, a tailnet path that silently drops) used to look "linked" forever
-// — no data, no close, no re-dial. Both ends ping on this cadence; a missed
-// pong for a whole interval terminates the socket, and the dialer re-dials.
+// — no data, no close, no re-dial. Both ends ping on this cadence; two whole
+// intervals without a pong terminate the socket, and the dialer re-dials.
 // Every ws peer auto-answers pings, so older peers need no change.
 const HEARTBEAT_MS = 30_000;
 // Dialer election picks the lower instance id. If the elected side cannot
@@ -74,6 +74,9 @@ const HEARTBEAT_MS = 30_000;
 // dials as a fallback. Long enough that the elected side always wins a normal
 // boot race; the accept side refuses a fallback dial while a link is up.
 const FALLBACK_DIAL_AFTER_MS = 120_000;
+// The :443-row repair (repairUndialablePeerRows) re-runs from the refresh
+// loop at most this often.
+const REPAIR_EVERY_MS = 10 * 60_000;
 
 /* ------------------------------------------------------- signed addresses */
 
@@ -211,25 +214,27 @@ async function markPeerCr(ctx, peerId) {
 
 /**
  * Arm the half-open detector on a replicating socket: ping every
- * `ctx.heartbeatMs` (0 disables), terminate when a whole interval passes
+ * `ctx.heartbeatMs` (0 disables), terminate when two whole intervals pass
  * without a pong. Cleared on close.
  */
 function armHeartbeat(ws, ctx, peerId) {
   const every = ctx.heartbeatMs ?? HEARTBEAT_MS;
   if (!every || every <= 0) return;
-  let alive = true;
-  const onPong = () => { alive = true; };
+  let missed = 0;
+  const onPong = () => { missed = 0; };
   ws.on("pong", onPong);
   const timer = setInterval(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
-    if (!alive) {
-      console.warn(`[tailnet-sync] link to ${String(peerId).slice(0, 12)}… missed its heartbeat (no pong in ${every} ms) — half-open; terminating so the dialer re-dials`);
-      recordDialFailure(peerId, `link half-open: no pong in ${every} ms`);
+    // Two whole intervals without a pong (margin for a pong queued behind a
+    // large backlog on a slow relayed path).
+    if (missed >= 2) {
+      console.warn(`[tailnet-sync] link to ${String(peerId).slice(0, 12)}… missed its heartbeat (no pong in ${2 * every} ms) — half-open; terminating so the dialer re-dials`);
+      recordDialFailure(peerId, `link half-open: no pong in ${2 * every} ms`);
       clearInterval(timer);
       try { ws.terminate(); } catch { /* already gone */ }
       return;
     }
-    alive = false;
+    missed += 1;
     try { ws.ping(); } catch { /* close follows */ }
   }, every);
   timer.unref?.();
@@ -352,19 +357,6 @@ export async function backfillPeerAddress(ctx, peerId, addr) {
           args: [addr[col], peerId],
         });
         if (Number(r.rowsAffected ?? 0) > 0) written[col] = addr[col];
-      } else if (col === "gateway_url" && current !== addr[col] && peerToWsUrlCandidates({ gateway_url: current }).length === 0) {
-        // REPAIR: the stored URL is one this transport can never dial (the
-        // :443 door pairing used to hand out — black-swan's row). The peer's
-        // signed, sanitized (tailnet, dialable) address replaces it. A
-        // dialable stored URL is still never overwritten.
-        const r = await db.execute({
-          sql: "UPDATE crow_instances SET gateway_url = ?, updated_at = datetime('now') WHERE id = ? AND gateway_url = ?",
-          args: [addr[col], peerId, row[col]],
-        });
-        if (Number(r.rowsAffected ?? 0) > 0) {
-          written[col] = addr[col];
-          console.log(`[tailnet-sync] replaced undialable gateway_url ${current} for ${String(peerId).slice(0, 12)}… with its signed address ${addr[col]}`);
-        }
       }
     }
   } catch (err) {
@@ -557,7 +549,7 @@ export function handoffToStream(ws, frameReader) {
  * Server-side handler for an authenticated WS connection.
  * Performs reverse handshake, feed-key exchange, then pipes Hypercore replication.
  */
-async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
+async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, markPending = () => {}) {
   const { identity, instanceSyncManager, db, log = console } = ctx;
   const remoteInstanceId = peerHandshake.instance_id;
 
@@ -591,19 +583,21 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   // sorts after ours) is refused while a tailnet link already exists, or
   // while our own elected dial to it is in flight: one dedicated link per
   // pair. The elected direction is always accepted.
-  if (remoteInstanceId > instanceSyncManager.localInstanceId) {
+  const fallbackRefused = () => {
+    if (remoteInstanceId <= instanceSyncManager.localInstanceId) return false;
     const ownWs = ctx.dialers?.get?.(remoteInstanceId)?.ws;
-    if (instanceSyncManager.hasDedicatedStream?.(remoteInstanceId) || (ownWs && ownWs.readyState <= WebSocket.OPEN)) {
-      ws.close(1013, "already linked");
-      return;
-    }
+    return Boolean(instanceSyncManager.hasDedicatedStream?.(remoteInstanceId) || (ownWs && ownWs.readyState <= WebSocket.OPEN));
+  };
+  if (fallbackRefused()) {
+    ws.close(1013, "already linked");
+    return;
   }
 
   // Challenge-response: a CR-capable client gets a reply bound to ITS nonce
   // and must answer OUR nonce before any feed key flows. A CR-less hello
   // from a peer that has done CR before is a downgrade (a replayed old
   // hello) and is refused.
-  const useCr = !ctx.legacyHandshake && peerHandshake.cr === CR_VERSION;
+  const useCr = !ctx.legacyHandshake && Number.isInteger(peerHandshake.cr) && peerHandshake.cr >= CR_VERSION;
   if (!useCr && !ctx.legacyHandshake && await peerCrRequired(ctx, remoteInstanceId)) {
     log.warn?.(`[tailnet-sync] refusing a handshake without challenge-response from ${remoteInstanceId} (it has completed CR before — replay or downgrade)`);
     ws.close(1008, "challenge required");
@@ -632,7 +626,16 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
       return;
     }
     await markPeerCr(ctx, remoteInstanceId);
+    // Our own dial may have started while we waited for the proof.
+    if (fallbackRefused()) {
+      ws.close(1013, "already linked");
+      return;
+    }
   }
+  // Only an AUTHENTICATED inbound (proof verified, or a legacy peer) holds
+  // off our dialer — a replayed hello that never proves must not be able to
+  // park our dialer for a handshake timeout at a time.
+  markPending();
 
   // Learn the peer's dial address if our row lacks it (signed, verified above).
   await backfillPeerAddress(ctx, remoteInstanceId, verifiedAdvertisedAddress(peerHandshake, identity.ed25519Pubkey));
@@ -684,6 +687,10 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   // replays any Noise frames that raced our handshake DB writes.
   const wsStream = handoffToStream(ws, frameReader);
   const noiseStream = new NoiseSecretStream(false, wsStream);
+  // A socket that closes before the Noise handshake completes leaves the
+  // Noise stream open — a phantom "dedicated stream" that made the dialer
+  // idle forever. The socket's close always ends the stream.
+  ws.once("close", () => { try { noiseStream.destroy(); } catch { /* already closed */ } });
   noiseStream.on("error", () => {});
   noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
   armHeartbeat(ws, ctx, remoteInstanceId);
@@ -722,16 +729,21 @@ export function setupTailnetSyncServer(server, ctx) {
           frameReader.detach();
           return;
         }
-        // Mark the peer's inbound handshake in flight (until it becomes a
-        // replicating link or fails) so our own dialer does not race it.
+        // Mark the peer's inbound handshake in flight (from authentication
+        // until it becomes a replicating link or fails) so our own dialer
+        // does not race it. handleAcceptedConnection decides WHEN — after
+        // the challenge-response proof, not on the bare (replayable) hello.
         const pending = (ctx.inboundPending ||= new Map());
         const pid = String(peerHs.instance_id);
-        pending.set(pid, (pending.get(pid) || 0) + 1);
+        let marked = false;
+        const markPending = () => { if (marked) return; marked = true; pending.set(pid, (pending.get(pid) || 0) + 1); };
         try {
-          await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
+          await handleAcceptedConnection(ws, peerHs, frameReader, ctx, markPending);
         } finally {
-          const n = (pending.get(pid) || 1) - 1;
-          if (n > 0) pending.set(pid, n); else pending.delete(pid);
+          if (marked) {
+            const n = (pending.get(pid) || 1) - 1;
+            if (n > 0) pending.set(pid, n); else pending.delete(pid);
+          }
         }
       } catch (err) {
         log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}`);
@@ -1034,6 +1046,10 @@ export class PeerDialer {
         // but symmetric handling costs nothing).
         const wsStream = handoffToStream(ws, frameReader);
         const noiseStream = new NoiseSecretStream(true, wsStream);
+        // A socket that closes before the Noise handshake completes leaves the
+        // Noise stream open — a phantom "dedicated stream" that made the dialer
+        // idle forever. The socket's close always ends the stream.
+        ws.once("close", () => { try { noiseStream.destroy(); } catch { /* already closed */ } });
         noiseStream.on("error", () => {});
         noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
         armHeartbeat(ws, this.ctx, remoteInstanceId);
@@ -1091,12 +1107,23 @@ export class PeerDialer {
  * The dial ladder then reaches the backend directly, the peer's signed
  * handshake teaches its real port and (backfillPeerAddress) replaces the
  * undialable URL. Only an EMPTY tailscale_ip is filled; only a tailnet
- * address is written. Never throws. Returns the repaired peer ids.
+ * address is written. Runs at boot and then from the refresh loop (at most
+ * every REPAIR_EVERY_MS), so a row paired after boot or a tailscaled that
+ * came up late is repaired without a restart. Never throws. Returns the
+ * repaired peer ids.
  */
+const _repairWarned = new Set();
 export async function repairUndialablePeerRows(ctx) {
   const repaired = [];
   const { db, instanceSyncManager } = ctx;
-  const lookup = ctx.lookupTailnetIp || ((host) => lookupTailnetIpForHost(host));
+  // One async `tailscale status --json` per pass (lazily, only when a row
+  // needs it) — never a blocking exec, never one per row.
+  let statusP = null;
+  const lookup = ctx.lookupTailnetIp || (async (host) => {
+    statusP ||= tailscaleStatusAsync();
+    const status = await statusP;
+    return status ? lookupTailnetIpForHost(host, { status }) : null;
+  });
   let rows = [];
   try {
     ({ rows } = await db.execute({
@@ -1112,6 +1139,8 @@ export async function repairUndialablePeerRows(ctx) {
     let ip = null;
     try { ip = host ? await lookup(host) : null; } catch { ip = null; }
     if (!ip || !(isTailnetIp(ip) || testLoopback(ip))) {
+      if (_repairWarned.has(r.id)) continue;
+      _repairWarned.add(r.id);
       console.warn(`[tailnet-sync] peer ${String(r.id).slice(0, 12)}… (${r.name || "unnamed"}) has undialable gateway_url ${url} and no tailscale_ip; ${host ? `tailnet lookup of ${host} found nothing` : "no host to look up"} — waiting for its signed handshake`);
       continue;
     }
@@ -1253,10 +1282,18 @@ export async function startTailnetSyncClients(ctx) {
     }
   }
 
-  await repairUndialablePeerRows(ctx);
-  await refresh();
+  let lastRepairAt = 0;
+  async function refreshWithRepair() {
+    if (Date.now() - lastRepairAt >= (ctx.repairEveryMs ?? REPAIR_EVERY_MS)) {
+      lastRepairAt = Date.now();
+      await repairUndialablePeerRows(ctx);
+    }
+    await refresh();
+  }
+
+  await refreshWithRepair();
   // Periodically rescan in case new peers get paired or gateway_urls change.
-  const rescan = setInterval(refresh, 60_000);
+  const rescan = setInterval(refreshWithRepair, 60_000);
   rescan.unref?.();
 
   return {
