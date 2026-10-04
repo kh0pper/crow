@@ -45,8 +45,8 @@ __pycache__/
 # Credential backups
 .env.bak
 
-# benchmark KLD logit bases (large, regenerable)
-scripts/bench/results/quality/*.dat
+# benchmark outputs (operator-only; the bench harness lives in the private engineering repo)
+scripts/bench/
 
 # --- Anti-drift: machine-local / runtime / generated / backups (2026-05-29) ---
 # These accumulated as untracked working-tree drift and the auto-updater would

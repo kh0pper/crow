@@ -159,11 +159,11 @@ test("convergence quarantine is its OWN namespace and hard-expires", () => {
 });
 
 test("instanceJitterMs is stable per instance and differs between instances", () => {
-  const a = instanceJitterMs("/home/kh0pp/.crow/data");
-  const b = instanceJitterMs("/home/kh0pp/.crow-mpa/data");
-  const c = instanceJitterMs("/home/kh0pp/.crow-r4/data");
+  const a = instanceJitterMs("/home/alex/.crow/data");
+  const b = instanceJitterMs("/home/alex/.crow-mpa/data");
+  const c = instanceJitterMs("/home/alex/.crow-r4/data");
 
-  assert.equal(a, instanceJitterMs("/home/kh0pp/.crow/data"), "must be deterministic across calls");
+  assert.equal(a, instanceJitterMs("/home/alex/.crow/data"), "must be deterministic across calls");
   assert.notEqual(a, b, "co-hosted instances must not share a phase");
   assert.notEqual(b, c);
   assert.notEqual(a, c);

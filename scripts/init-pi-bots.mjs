@@ -27,8 +27,10 @@
  */
 
 import Database from "better-sqlite3";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-const DB_PATH = process.env.CROW_DB_PATH || "/home/kh0pp/.crow-mpa/data/crow.db";
+const DB_PATH = process.env.CROW_DB_PATH || join(homedir(), ".crow-mpa/data/crow.db");
 const CHECK_ONLY = process.argv.includes("--check");
 
 const db = new Database(DB_PATH);

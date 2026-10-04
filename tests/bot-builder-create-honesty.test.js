@@ -1,9 +1,9 @@
 /**
  * Item 4 PR1 (§2.1 items 3-6): create-form / create-action honesty.
  *
- * The Bot Builder used to bake Kevin's personal defaults into every new bot:
+ * The Bot Builder used to bake the original operator's personal defaults into every new bot:
  * a hardcoded crow-local/qwen3.6-35b-a3b model pin (form + silent create
- * fallback + defaultDefinition fallback) and a kevin.hopper@maestro.press
+ * fallback + defaultDefinition fallback) and the operator's own
  * Gmail gateway. A fresh install must never inherit those:
  *   - defaultDefinition REQUIRES a validated model key (throws on empty —
  *     tripwire; the create guard upstream is the real gate), ships
@@ -97,9 +97,9 @@ test("defaultDefinition spawn_env has no PI_PROVIDER (bridge sets it per turn) b
   assert.equal(def.spawn_env.CROW_JOURNAL_MODE, "DELETE");
 });
 
-test("defaultDefinition JSON contains no personal substrings (kevin / maestro.press)", () => {
+test("defaultDefinition JSON contains no personal substrings (no address / maestro.press)", () => {
   const json = JSON.stringify(defaultDefinition("t-bot", 42, "prov/m1")).toLowerCase();
-  assert.ok(!json.includes("kevin"), "definition must not contain 'kevin'");
+  assert.ok(!json.includes("@"), "definition must not contain an email address");
   assert.ok(!json.includes("maestro.press"), "definition must not contain 'maestro.press'");
   assert.ok(!json.includes("crow-local/qwen3.6-35b-a3b"), "definition must not contain the old model pin");
 });

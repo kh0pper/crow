@@ -41,14 +41,14 @@ test("heal: promotes non-empty stranded overrides (override wins over global), d
   setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push(row.key); } });
   try {
     const localId = getOrCreateLocalInstanceId();
-    await seedOverride(db, localId, "profile_display_name", "Kevin");   // (a)+(c): promote, wins over global
+    await seedOverride(db, localId, "profile_display_name", "Casey");   // (a)+(c): promote, wins over global
     await seedOverride(db, localId, "profile_bio", "");                 // (f): empty → delete only
     await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Old Global', datetime('now'))");
     await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_bio', 'Real Bio', datetime('now'))");
 
     const n = await healProfileOverridesOnce(db, { feedsDisabled: false });
     assert.equal(n, 1, "exactly the one non-empty override promoted");
-    assert.equal(await globalValue(db, "profile_display_name"), "Kevin", "(c) override value wins over pre-existing global");
+    assert.equal(await globalValue(db, "profile_display_name"), "Casey", "(c) override value wins over pre-existing global");
     assert.equal(await globalValue(db, "profile_bio"), "Real Bio", "(f) empty override did NOT blank the real global value");
     assert.equal(await overrideCount(db), 0, "all profile overrides cleared (incl. the empty one)");
     assert.ok(emitted.includes("profile_display_name"), "(e) promotion emitted (manager wired)");
@@ -60,7 +60,7 @@ test("heal: promotes non-empty stranded overrides (override wins over global), d
     emitted.length = 0;
     const n2 = await healProfileOverridesOnce(db, { feedsDisabled: false });
     assert.equal(n2, 0, "(b) flag-guarded second run no-ops");
-    assert.equal(await globalValue(db, "profile_display_name"), "Kevin", "deliberate post-heal override untouched");
+    assert.equal(await globalValue(db, "profile_display_name"), "Casey", "deliberate post-heal override untouched");
     assert.equal(emitted.length, 0);
   } finally {
     setSettingsSyncManager(null);

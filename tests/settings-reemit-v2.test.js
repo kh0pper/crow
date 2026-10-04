@@ -45,7 +45,7 @@ function freshMgr(label, id) {
 test("v2 flag: re-runs once even when the v1 flag is done:, then no-ops (v1 orphan ignored)", async () => {
   const m = freshMgr("v2", "local-1"); const db = m.db;
   await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__sync_reemit_allowlist_v1', 'done:9', datetime('now'))");
-  await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Kevin Hopper', datetime('now'))");
+  await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Casey Rivers', datetime('now'))");
   const emitted = [];
   const orig = m.emitChange.bind(m);
   m.emitChange = async (t, o, r) => { emitted.push(r.key); return orig(t, o, r); };
@@ -79,7 +79,7 @@ test("empty-profile guard: empty/whitespace profile values are NOT re-emitted; n
   const m = freshMgr("empty", "local-2"); const db = m.db;
   await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_bio', '', datetime('now'))");
   await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_avatar_url', '  ', datetime('now'))");
-  await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Kevin', datetime('now'))");
+  await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Casey', datetime('now'))");
   // Pins the DELIBERATE scoping: the guard is profile-only (an empty value for
   // another allowlisted key is meaningful and still reconciles).
   await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', '', datetime('now'))");

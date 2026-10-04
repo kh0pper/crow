@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { normalizeNumber, checkNumberPolicy, validatePlan, planHash, OUTCOMES } from "../bundles/phone/server/plan.js";
 
 test("normalizeNumber accepts common US formats", () => {
-  assert.equal(normalizeNumber("(512) 937-2366"), "+15129372366");
-  assert.equal(normalizeNumber("+1 512.937.2366"), "+15129372366");
-  assert.equal(normalizeNumber("15129372366"), "+15129372366");
+  assert.equal(normalizeNumber("(512) 555-0100"), "+15125550100");
+  assert.equal(normalizeNumber("+1 512.555.0100"), "+15125550100");
+  assert.equal(normalizeNumber("15125550100"), "+15125550100");
 });
 
 test("normalizeNumber rejects MMI/star codes, short and non-NANP numbers", () => {
-  for (const bad of ["*67 512 937 2366", "**21*5129372366#", "911", "+44 20 7946 0958", "512-937-236", "5129372366;", "5129372366,123"]) {
+  for (const bad of ["*67 512 555 0100", "**21*5125550100#", "911", "+44 20 7946 0958", "512-555-010", "5125550100;", "5125550100,123"]) {
     assert.throws(() => normalizeNumber(bad), (e) => e.code === "invalid_number", bad);
   }
 });
@@ -18,11 +18,11 @@ test("checkNumberPolicy blocks N11 codes, 900/976, the owner's number, suppresse
   const block = (n, opts = {}) => assert.throws(() => checkNumberPolicy(n, opts), (e) => e.code === "number_blocked", n);
   block("+19115550100");            // N11 area code
   block("+15129115555");            // N11 exchange
-  block("+19005551234");            // 900 area code
+  block("+19005550123");            // 900 area code
   block("+15129765555");            // 976 exchange
-  block("+15129372366", { ownerNumber: "+15129372366" });
-  block("+15125550000", { suppressed: new Set(["+15125550000"]) });
-  checkNumberPolicy("+15125550101", { ownerNumber: "+15129372366", suppressed: new Set() });
+  block("+15125550100", { ownerNumber: "+15125550100" });
+  block("+15125550199", { suppressed: new Set(["+15125550199"]) });
+  checkNumberPolicy("+15125550101", { ownerNumber: "+15125550100", suppressed: new Set() });
 });
 
 test("checkNumberPolicy rejects non-normalized E.164 input", () => {
@@ -33,7 +33,7 @@ test("checkNumberPolicy rejects non-normalized E.164 input", () => {
 
 test("checkNumberPolicy normalizes ownerNumber and blocks on match", () => {
   // Formatted ownerNumber should be normalized and still block the matching E.164
-  assert.throws(() => checkNumberPolicy("+15129372366", { ownerNumber: "(512) 937-2366" }),
+  assert.throws(() => checkNumberPolicy("+15125550100", { ownerNumber: "(512) 555-0100" }),
     (e) => e.code === "number_blocked" && e.reason === "owner_number");
   // Invalid ownerNumber should be ignored, not throw
   checkNumberPolicy("+15125550101", { ownerNumber: "invalid" });
@@ -47,7 +47,7 @@ const base = {
   business_name: "Smile Dental", number: "512-555-0101", goal: "Book a cleaning",
   limits: { date_range: { from: "2026-10-05", to: "2026-10-16" }, days_of_week: ["mon","tue","wed","thu","fri"],
             time_window: { start: "15:00", end: "18:00", tz: "America/Chicago" }, max_price: { amount: 150, currency: "USD" } },
-  shareable: { name: "Kevin Hopper", callback_number: "512-937-2366" },
+  shareable: { name: "Casey Rivers", callback_number: "512-555-0100" },
   language: "en",
 };
 

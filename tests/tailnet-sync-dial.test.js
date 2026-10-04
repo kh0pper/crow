@@ -53,8 +53,8 @@ test("tailnet-IP fallback candidate uses the backend fallbackPort, not the Serve
 });
 
 test("http gateway_url dials plain ws on its own port", () => {
-  const urls = peerToWsUrlCandidates({ gateway_url: "http://10.0.0.21:3002" });
-  assert.equal(urls[0], `ws://10.0.0.21:3002${WS_PATH}`);
+  const urls = peerToWsUrlCandidates({ gateway_url: "http://10.0.0.202:3002" });
+  assert.equal(urls[0], `ws://10.0.0.202:3002${WS_PATH}`);
 });
 
 test("port 443 (public Funnel) is never dialed — falls back to tailnet IP", () => {

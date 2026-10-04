@@ -7,9 +7,10 @@
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-const DB_PATH = process.env.CROW_DB_PATH || "/home/kh0pp/.crow-mpa/data/crow.db";
+const DB_PATH = process.env.CROW_DB_PATH || join(homedir(), ".crow-mpa/data/crow.db");
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 const botId = process.argv[2];
 const checkOnly = process.argv.includes("--check");

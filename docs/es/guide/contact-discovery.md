@@ -17,7 +17,7 @@ Piénsalo como una tarjeta de presentación digital pegada en tu puerta: muestra
 Abre el Crow's Nest y ve a **Settings**. En la sección **Contact Discovery**:
 
 1. Establece el menú desplegable en **Enabled**
-2. Opcionalmente ingresa un **nombre para mostrar** (p. ej., "Alice", "Crow de Investigación de Kevin")
+2. Opcionalmente ingresa un **nombre para mostrar** (p. ej., "Alice", "Crow de Investigación de Casey")
 3. Haz clic en **Save**
 
 O pídeselo a tu IA:

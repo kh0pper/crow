@@ -477,13 +477,13 @@ test("POST /api/ramble/grid rejects an unknown audience or channel", async () =>
 });
 
 test("POST /api/ramble/grid stores a sanitized worldName, clears a rejected one, and bounds the input", async () => {
-  let res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "  Kevin\u202E  " } });
+  let res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "  Casey\u202E  " } });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).worldName, "Kevin");
-  assert.equal((await (await req("/api/ramble/grid")).json()).worldName, "Kevin");
+  assert.equal((await res.json()).worldName, "Casey");
+  assert.equal((await (await req("/api/ramble/grid")).json()).worldName, "Casey");
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "f665c26b" } });
   assert.equal((await res.json()).worldName, null, "a key look-alike clears the name");
-  await req("/api/ramble/grid", { method: "POST", body: { worldName: "Kevin" } });
+  await req("/api/ramble/grid", { method: "POST", body: { worldName: "Casey" } });
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "" } });
   assert.equal((await res.json()).worldName, null, "an empty string clears");
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: null, master: true } });

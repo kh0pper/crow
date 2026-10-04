@@ -91,8 +91,8 @@ after(() => {
   rmSync(dirB, { recursive: true, force: true });
 });
 
-const ADDRS_A = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.237", "100.64.20.1"]);
-const ADDRS_B = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.21", "100.64.20.2"]);
+const ADDRS_A = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.201", "100.64.20.1"]);
+const ADDRS_B = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.202", "100.64.20.2"]);
 
 const EMPTY = { providers: {} };
 
@@ -152,7 +152,7 @@ test("scenario A: A's bad host write converges to cloud on both sides; clocks st
   for (const db of [dbA, dbB]) {
     await db.execute({
       sql: `INSERT INTO providers (id, base_url, host, lamport_ts, instance_id, bundle_id)
-            VALUES ('raven-x', 'http://10.0.0.126:8030/v1', 'raven', 50, ?, NULL)`,
+            VALUES ('raven-x', 'http://10.0.0.203:8030/v1', 'raven', 50, ?, NULL)`,
       args: [A_ID],
     });
   }
@@ -236,7 +236,7 @@ test("scenario D: co-owners computing the same value converge with zero conflict
   for (const [db, id] of [[dbA, A_ID], [dbB, B_ID]]) {
     await db.execute({
       sql: `INSERT INTO providers (id, base_url, host, lamport_ts, instance_id)
-            VALUES ('raven-y', 'http://10.0.0.126:8030/v1', 'raven', 50, ?)`,
+            VALUES ('raven-y', 'http://10.0.0.203:8030/v1', 'raven', 50, ?)`,
       args: [id],
     });
   }

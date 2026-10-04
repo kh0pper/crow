@@ -76,15 +76,15 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
   });
   ensureLamportOrigin(db);
   db.exec(`
-    INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${CROW_ID}', 'crow:/home/kh0pp/crow', 'crow:kdq7zskhat', 'active');
+    INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${CROW_ID}', 'crow:/home/alex/crow', 'crow:kdq7zskhat', 'active');
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${GRACKLE_ID}', 'Primary', 'crow:kdq7zskhat', '${grackleStatus}');
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${BLACK_SWAN_ID}', 'Cloud (black-swan)', 'crow:kdq7zskhat', 'active');
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${RAVEN_ID}', 'unknown', 'crow:kdq7zskhat', 'active');
     INSERT INTO crow_instances (id, name, crow_id, status) VALUES ('${MPA_ID}', 'MPA', 'crow:kdq7zskhat', 'active');
 
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (3, 'crow:alex', 'Alex', 'ed', 'secp');
-    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'crow-uuid-6', 'tea-data', 'TEA data', '/home/kh0pp/.crow/data/projects/6');
-    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (2, 'crow-uuid-2', 'clash', 'Crow clash', '/home/kh0pp/.crow/data/projects/2');
+    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'crow-uuid-6', 'tea-data', 'TEA data', '/home/alex/.crow/data/projects/6');
+    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (2, 'crow-uuid-2', 'clash', 'Crow clash', '/home/alex/.crow/data/projects/2');
     -- real shape: a local-owner row (contact_id NULL) per project
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('crow-own-6', 6, NULL, 'owner');
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('crow-own-2', 2, NULL, 'owner');
@@ -106,7 +106,7 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
     INSERT INTO ramble_pet (owner, mood) VALUES ('self', 'crow-mood');
     -- crow's own incubating egg (one per user; N3)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-c1', 'incubating', 'wren', 90);
-    -- a contact Kevin deleted on crow; the delete never reached grackle (N1)
+    -- a contact Casey deleted on crow; the delete never reached grackle (N1)
     INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at) VALUES ('crow:deleted', 7, 1700000000);
     -- blog: crow already has a post at slug post-nine (same post) and a DIFFERENT post at post-eight (minor d)
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (20, 'post-nine', 'Nine', 'body nine', 'draft');
@@ -165,9 +165,9 @@ export async function buildSource(dir) {
     INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (12, 'crow:deleted', 'Deleted on crow', 'ed4', 'secp4');
 
     -- projects: 1 and 5 are new; 6 is the same project as crow 6; 7 clashes on slug only
-    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (1, 'g-uuid-1', 'proj-one', 'One', '/home/kh0pp/.crow/data/projects/1');
-    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (5, 'g-uuid-5', 'proj-five', 'Five', '/home/kh0pp/.crow/data/projects/5');
-    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'g-uuid-6', 'tea-data', 'TEA data', '/home/kh0pp/.crow/data/projects/6');
+    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (1, 'g-uuid-1', 'proj-one', 'One', '/home/alex/.crow/data/projects/1');
+    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (5, 'g-uuid-5', 'proj-five', 'Five', '/home/alex/.crow/data/projects/5');
+    INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'g-uuid-6', 'tea-data', 'TEA data', '/home/alex/.crow/data/projects/6');
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (7, 'g-uuid-7', 'clash', 'Grackle clash', '/elsewhere/7');
     -- real shape: grackle's OWN local-owner rows, with their own uuids
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-own-1', 1, NULL, 'owner');
@@ -196,7 +196,7 @@ export async function buildSource(dir) {
     INSERT INTO memory_embeddings_blob (memory_id, model, dim, vec) VALUES (7, 'qwen3-embedding-0.6b', 4, x'07070707');
 
     INSERT INTO research_sources (id, project_id, title, source_type, citation_apa, url, s3_key, file_path)
-      VALUES (1, 6, 'TEA report', 'government_doc', 'TEA (2026).', 'https://tea.example/r', 'capstone/r1.pdf', '/home/kh0pp/pdfs/r1.pdf');
+      VALUES (1, 6, 'TEA report', 'government_doc', 'TEA (2026).', 'https://tea.example/r', 'capstone/r1.pdf', '/home/alex/pdfs/r1.pdf');
     INSERT INTO research_sources (id, project_id, title, source_type, citation_apa, url)
       VALUES (2, 1, 'Other', 'web_article', 'Other (2026).', 'https://ex.example/o');
     INSERT INTO source_embeddings (source_id, model, dim, vec) VALUES (1, 'qwen3-embedding-0.6b', 4, x'01010101');

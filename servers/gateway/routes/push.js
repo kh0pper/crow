@@ -134,7 +134,7 @@ export default function pushRouter(authMiddleware) {
   //
   // NTFY_EXTRA_TOPICS is a comma-separated env list set on primary's systemd
   // (via a drop-in) to include paired-instance topics — e.g. MPA publishes
-  // to `kevin-mpa`, so primary's response includes that in `topics` so the
+  // to `casey-mpa`, so primary's response includes that in `topics` so the
   // phone paired to primary receives MPA pushes too without a per-instance
   // pairing rotation.
   //

@@ -9,7 +9,7 @@ const ctx = {
 };
 
 test("hostBadge renders the honest label and escapes it", () => {
-  assert.match(hostBadge({ host: "cloud", baseUrl: "http://10.0.0.126:8030/v1", provider_type: "openai-compat" }, ctx), />network</);
+  assert.match(hostBadge({ host: "cloud", baseUrl: "http://10.0.0.203:8030/v1", provider_type: "openai-compat" }, ctx), />network</);
   assert.match(hostBadge({ host: "cloud", baseUrl: "https://api.together.xyz/v1", provider_type: "openai-compat" }, ctx), />cloud · openai-compat</);
   assert.match(hostBadge({ host: "local", baseUrl: "http://100.64.20.1:8003/v1" }, ctx), />this machine</);
   assert.match(hostBadge({ host: "<b>x", baseUrl: "http://10.0.0.1/v1" }, ctx), /&lt;b&gt;x/);
@@ -18,7 +18,7 @@ test("hostBadge renders the honest label and escapes it", () => {
 // --- external engines (spec 2026-09-23 external-engine-provider §2.4) -------
 
 const ENGINE = { managed: "external", host: "raven", label: "halogen" };
-const RAVEN = "http://10.0.0.126:8030/v1";
+const RAVEN = "http://10.0.0.203:8030/v1";
 const row = (extra = {}) => ({ id: "raven-flash-next", baseUrl: RAVEN, host: "cloud", disabled: false, gpuPolicy: { engine: ENGINE }, ...extra });
 
 test("engineBadge: 'external · <host>' for a marked row (en + es), nothing for an unmarked one", () => {

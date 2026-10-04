@@ -151,13 +151,13 @@ export async function providerModelListWarm(deps) {
 // and on a long-lived instance that is a lot of rows that are aliases of one
 // another: four rows serve the same 35B on :8003, three are Z.AI, two pairs
 // share a cloud endpoint. Listed flat, in provider order, the operator could
-// not find the one model that matters (Kevin, 2026-10-02: raven's
+// not find the one model that matters (Casey, 2026-10-02: raven's
 // flash-next was buried under stale cloud catalogues). pickerModels() turns
 // that into something choosable WITHOUT dropping anything:
 //
 //   - `group`: "network" (loopback, LAN, tailnet, external engines) or
 //     "cloud", read from the entry's baseUrl — never from the row's `host`
-//     column, which says "cloud" for raven-flash-next on 10.0.0.126.
+//     column, which says "cloud" for raven-flash-next on 10.0.0.203.
 //   - `runnable`: can pi actually spawn on this provider? pi resolves
 //     `--provider` against its own models.json plus its built-in providers
 //     (core/model-resolver.js: an unknown provider is a hard spawn error, an
