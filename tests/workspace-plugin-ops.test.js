@@ -18,7 +18,7 @@ const require = createRequire(import.meta.url);
 const ROOT = join(import.meta.dirname, "..");
 const OPS_PATH = join(ROOT, "bundles", "workspace", "onlyoffice-plugin", "ops.js");
 const { crowCommand } = require(OPS_PATH);
-const S9 = readFileSync(join(ROOT, "docs", "superpowers", "specs", "2026-10-03-workspace-w2-spike-results.md"), "utf8");
+const S9 = readFileSync(join(ROOT, "tests", "fixtures", "workspace", "s9-plugin-api-facts.txt"), "utf8");
 const PROBE = readFileSync(join(ROOT, "scripts", "workspace-w2-plugin-probe", "probe.js"), "utf8");
 
 // ---- what S9 verified, per editor and class -------------------------------------------------------------------
