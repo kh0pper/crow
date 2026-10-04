@@ -61,6 +61,18 @@ export const FEED_DELTAS = {
   mark_left: 0,
 };
 
+/**
+ * Spec 2026-10-04 §6: step energy is the one feed whose size varies, so it is
+ * not in FEED_DELTAS. Its amount is bounded here, and it never moves
+ * `last_fed_at` (R5): readings arrive often, and if each reset the decay clock
+ * a bird whose owner opens the app every few hours would never droop at all.
+ */
+export const STEPS_FEED_MAX = 100;
+function stepsAmount(a) {
+  const n = Number(a);
+  return Number.isInteger(n) ? Math.max(0, Math.min(STEPS_FEED_MAX, n)) : 0;
+}
+
 /** The three daily chore kinds tracked in `ramble_pet.chores_json`. */
 export const CHORES = ["feed", "preen", "play"];
 
@@ -120,7 +132,8 @@ async function ensureRow(db) {
  */
 export async function feed(db, event, { now = Date.now(), emit } = {}) {
   const type = event && event.type;
-  if (!Object.prototype.hasOwnProperty.call(FEED_DELTAS, type)) {
+  const isSteps = type === "steps";
+  if (!isSteps && !Object.prototype.hasOwnProperty.call(FEED_DELTAS, type)) {
     throw new Error(`unknown pet feed event type: ${type}`);
   }
 
@@ -138,7 +151,7 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
     week_start = now;
   }
 
-  const delta = FEED_DELTAS[type];
+  const delta = isSteps ? stepsAmount(event.amount) : FEED_DELTAS[type];
   const max = await maxEnergy(db);
   const energy = clampEnergy(row.energy + delta, row.energy, max);
   const mood = moodFor(energy);
@@ -148,7 +161,7 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
   else if (counterCol === "unlocks_week") unlocks_week += 1;
   else if (counterCol === "crows_week") crows_week += 1;
 
-  const last_fed_at = delta > 0 ? now : row.last_fed_at;
+  const last_fed_at = delta > 0 && !isSteps ? now : row.last_fed_at;
 
   await db.execute({
     sql: `UPDATE ramble_pet SET energy = ?, mood = ?, places_week = ?, unlocks_week = ?, crows_week = ?,

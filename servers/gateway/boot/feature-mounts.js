@@ -272,6 +272,39 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[ramble] transport not started:", err?.message ?? err);
   }
 
+  // --- Ramble evening walk nudge (spec 2026-10-04 §9) ---
+  // (The emit builder repeats the transport block's on purpose: failure isolation, and it
+  // keeps this core diff additive. crowHome comes from the same resolveCrowHome().)
+  // Independent of the Nostr transport: a Crow with sharing off still nudges.
+  // Only where the Ramble bundle is INSTALLED (same rule as the transport).
+  try {
+    const crowHome = resolveCrowHome();
+    const { installedRambleServerDir } = await import("./ramble-boot.js");
+    const serverDir = installedRambleServerDir(crowHome);
+    const { getManagersOrNull, getInstanceSyncManager } = await import("../../sharing/managers.js");
+    const mgrs = getManagersOrNull();
+    if (serverDir && mgrs?.db) {
+      const { startRambleNudge } = await import("./ramble-nudge.js");
+      const { createNotification } = await import("../../shared/notifications.js");
+      const { emitOrQueue } = await import("../../shared/sync-emit.js");
+      const { readSetting } = await import("../dashboard/settings/registry.js");
+      const emit = (table, op, row) =>
+        emitOrQueue(getInstanceSyncManager(), mgrs.db, table, op, row).catch(() => {});
+      app.locals.rambleNudge = startRambleNudge({
+        db: mgrs.db,
+        serverDir,
+        notify: createNotification,
+        emit,
+        readLang: (db) => readSetting(db, "language"),
+      });
+      console.log("[ramble] walk nudge scheduler started");
+    } else {
+      console.log("[ramble] walk nudge not started: bundle not installed on this instance or no db");
+    }
+  } catch (err) {
+    console.warn("[ramble] walk nudge not started:", err?.message ?? err);
+  }
+
   // --- Mount AI Chat Routes ---
   try {
     const { default: chatRouter } = await import("../routes/chat.js");

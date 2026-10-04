@@ -22,7 +22,7 @@
 | D10 | Accessory visibility | **Contacts only.** Public marks keep the plain rolled bird: a chosen outfit would be a deliberate signature across rotating personas, far stronger than the soft identifier the flock design already concedes. |
 | D11 | Wardrobe ownership | **Shared wardrobe, per-bird outfit.** Buy an item once, any bird may wear it, each bird remembers its own. Buying per bird would make purchases disposable and would punish hatching. |
 | D12 | Onboarding | **One starter egg, once ever**, given as a narrative gift, with a second tutorial beat when it hatches. |
-| D13 | Steps counter | **Deferred to a future version.** See §10. |
+| D13 | Steps counter | **Deferred here; designed 2026-10-04** in `2026-10-04-ramble-steps-design.md` (§0 there corrects the technical reasons below). |
 
 ---
 
@@ -234,7 +234,7 @@ Each phase is its own implementation plan, PR and deploy.
 
 ## 10. Not in this spec
 
-- **A steps counter (D13).** The browser cannot do it: there is no web standard, and inferring steps from accelerometer events only works while the page is foregrounded. The repo's `android/` app is a thin WebView shell with no activity-recognition permission and no health code, so steps would mean a new permission, a hardware sensor or Health Connect, a foreground service, and a native-to-WebView bridge. Ramble also already measures the better signal: new places by cell, which is exploration rather than effort and cannot be farmed by pacing indoors. Revisit as an Android-shell feature alongside the place counter, not replacing it.
+- **A steps counter (D13).** The browser cannot do it: there is no web standard, and inferring steps from accelerometer events only works while the page is foregrounded. The repo's `android/` app is a thin WebView shell with no activity-recognition permission and no health code, so steps would mean a new permission, a hardware sensor or Health Connect, a foreground service, and a native-to-WebView bridge. Ramble also already measures the better signal: new places by cell, which is exploration rather than effort and cannot be farmed by pacing indoors. Revisit as an Android-shell feature alongside the place counter, not replacing it. **Superseded 2026-10-04:** the app already ships the native↔WebView bridge, and `TYPE_STEP_COUNTER` needs no foreground service — see `2026-10-04-ramble-steps-design.md` §0.
 - **AR photo challenges** — a separate design (contacts-only), already scoped in outline.
 - Trading currencies between users; a marketplace; any competitive or leaderboard mechanic.
 - Stat systems beyond maximum energy.

@@ -16,8 +16,10 @@
  * plain bird and never overwrites a dressed picture. Triggers: the in-process
  * bus events `ramble:hatched` (the panel routes and the transport already
  * poke it), `ramble:bird-activated` (the activate route) and
- * `ramble:outfit-changed` (the wear route), plus a periodic tick for what has
- * no event (decay crossing a mood threshold, an outfit changed on another
+ * `ramble:outfit-changed` (the wear route) and `ramble:walked-changed` (the
+ * walked-today badge), plus a periodic tick for what has
+ * no event (decay crossing a mood threshold, the badge clearing after local
+ * midnight (within one tick), an outfit changed on another
  * instance arriving by sync). Triggers are COALESCED (§5.4) into one settled
  * refresh, and the tick and debounced runs are GATED on this instance's own
  * render inputs, so the user's instances never ping-pong the replicated
@@ -58,7 +60,7 @@ export const AVATAR_TICK_MS = 30 * 60_000;
 /* Deploy day: the gateway can load the bird engine BEFORE bundle repair
  * copies the new installed bird-svg.cjs in (boot order: sharing boot runs
  * the hooks' boot repaint before mcp-mounts' repairInstalledBundleAssets),
- * and require() caches the module — so an engine without applyOutfit is
+ * and require() caches the module — so an engine without applyOutfit or drawWalkBadge is
  * re-probed, at most once a minute, with its require-cache entries dropped.
  * Implemented inside loadBirdEngine's DEFAULT-candidates path only. */
 const ENGINE_REPROBE_MS = 60_000;
@@ -80,7 +82,8 @@ export function loadBirdEngine({ candidates, fresh = false, now = Date.now() } =
   // something happened to re-warm the cache.
   const usingDefaults = candidates === undefined;
   if (usingDefaults && _engine !== undefined && !fresh) {
-    const stale = _engine && typeof _engine.applyOutfit !== "function" && now - _engineProbedAt >= ENGINE_REPROBE_MS;
+    const stale = _engine && (typeof _engine.applyOutfit !== "function" || typeof _engine.drawWalkBadge !== "function")
+      && now - _engineProbedAt >= ENGINE_REPROBE_MS;
     if (!stale) return _engine;
     fresh = true; // fall through to a re-probe
   }
@@ -124,6 +127,15 @@ export function portraitMood(energy, lastFedAt, now = Date.now()) {
   return e >= 60 ? "happy" : e >= 30 ? "tired" : "alarmed";
 }
 
+/**
+ * eggs.js's localDay, copied: core never imports the bundle (an installed copy
+ * may be older or absent). tests/profile-avatar-bird.test.js pins the two.
+ */
+export function portraitDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** The active bird as it should look to contacts: mood + outfit. Never throws. */
 export async function readPortrait(db, { now = Date.now() } = {}) {
   const bird = await readActiveBird(db);
@@ -144,7 +156,17 @@ export async function readPortrait(db, { now = Date.now() } = {}) {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) outfit = parsed;
     }
   } catch { outfit = null; }
-  return { ...bird, mood, outfit };
+  // Spec 2026-10-04 §8 / R11: contacts get ONE boolean from walking — the
+  // `walked` fact the bundle writes — never a count.
+  let walked = false;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT 1 FROM ramble_wallet WHERE kind = 'walked' AND key = ? LIMIT 1",
+      args: [portraitDay(now)],
+    });
+    walked = rows.length > 0;
+  } catch { walked = false; }
+  return { ...bird, mood, outfit, walked };
 }
 
 /** Pure: the portrait (mood default "happy", outfit default none) as an SVG data URI, validated; null on any engine complaint. */
@@ -156,8 +178,10 @@ export function renderBirdAvatar(bird, engine = loadBirdEngine()) {
     // engine without it simply draws the plain bird.
     if (bird.outfit && typeof engine.applyOutfit === "function") genome = engine.applyOutfit(genome, bird.outfit);
     const mood = MOODS.has(bird.mood) ? bird.mood : "happy";
+    // An older installed engine has no badge: it draws the plain bird.
+    const badge = bird.walked === true && typeof engine.drawWalkBadge === "function" ? engine.drawWalkBadge() : "";
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
-      + engine.drawBird(genome, mood) + "</svg>";
+      + engine.drawBird(genome, mood) + badge + "</svg>";
     return validateAvatar("data:image/svg+xml;base64," + Buffer.from(svg, "utf8").toString("base64"));
   } catch { return null; }
 }
@@ -197,7 +221,7 @@ async function readProfilePictureSettings(db) {
  *   picture-source nor the bird-source branch) — the periodic tick uses it so
  *   a dead contact's pending flag never turns every tick into a fan-out.
  * - `gate: true` returns `inputs-same` when THIS instance's own render inputs
- *   ([species, seed, mood, outfit]) are unchanged since it last rendered,
+ *   ([species, seed, mood, outfit, walked]) are unchanged since it last rendered,
  *   without comparing to the stored picture — that picture is REPLICATED and
  *   another of the user's instances may legitimately draw it differently
  *   (engine skew, local decay skew); comparing would make them ping-pong.
@@ -224,7 +248,9 @@ export async function refreshBirdAvatar(db, managers, { gate = false, resend = t
     // picture with a plain one (the user's other, newer instance drew it).
     const dressed = !!bird.outfit && Object.keys(bird.outfit).length > 0;
     if (dressed && typeof engine.applyOutfit !== "function") return { changed: false, reason: "engine-too-old" };
-    const inputs = JSON.stringify([bird.species, bird.seed, bird.mood, bird.outfit || {}]);
+    // Same guard for the walked badge (an old engine must not overwrite a badged picture).
+    if (bird.walked === true && typeof engine.drawWalkBadge !== "function") return { changed: false, reason: "engine-too-old" };
+    const inputs = JSON.stringify([bird.species, bird.seed, bird.mood, bird.outfit || {}, bird.walked === true]);
     if (gate && _lastInputs.get(db) === inputs) {
       // The stored picture is REPLICATED: another of the user's instances may
       // have drawn it from slightly different inputs. Only a change in our own
@@ -307,6 +333,7 @@ export function installBirdAvatarHooks(managers, { emitter = bus, settleMs = AVA
   emitter.on("ramble:hatched", onEvent);
   emitter.on("ramble:bird-activated", onEvent);
   emitter.on("ramble:outfit-changed", onEvent);
+  emitter.on("ramble:walked-changed", onEvent);
   if (Number(tickMs) > 0) {
     _tickTimer = setInterval(() => schedule(false), Number(tickMs));
     _tickTimer.unref?.();

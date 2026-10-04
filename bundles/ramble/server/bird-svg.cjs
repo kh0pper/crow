@@ -159,5 +159,21 @@
   }
   function mountHeart(el) { el.setAttribute("viewBox", "0 0 24 24"); el.innerHTML = drawHeart(); }
   function isValidBird(x) { return !!x && typeof x === "object" && ROSTER.indexOf(x.species) >= 0 && isUint32(x.seed); }
-  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, OUTFIT_SLOTS: OUTFIT_SLOTS, applyOutfit: applyOutfit, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, drawHeart: drawHeart, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, mountHeart: mountHeart, isValidBird: isValidBird };
+  /* "Walked today" (spec 2026-10-04 §8): two footprints on a cream roundel in
+   * the portrait's lower-right corner. A separate group, NOT part of drawBird,
+   * so every existing portrait stays byte-identical and an engine that lacks
+   * this simply draws no badge. Same ink as the egg's feet family. */
+  function drawWalkBadge() {
+    return '<g class="rb-walk-badge" transform="translate(152 152)">'
+      + '<circle cx="18" cy="18" r="18" fill="#fff8e6" stroke="#2b2350" stroke-width="3"/>'
+      + '<ellipse cx="12.5" cy="21" rx="4.2" ry="6.4" fill="#2b2350" transform="rotate(-14 12.5 21)"/>'
+      + '<circle cx="11" cy="11.2" r="2.1" fill="#2b2350"/>'
+      + '<ellipse cx="23.5" cy="17" rx="4.2" ry="6.4" fill="#2b2350" transform="rotate(14 23.5 17)"/>'
+      + '<circle cx="25" cy="7.2" r="2.1" fill="#2b2350"/>'
+      + '</g>';
+  }
+  /* Appends the badge to an already-mounted portrait (call after mountBird). */
+  function mountWalkBadge(el) { el.innerHTML = el.innerHTML + drawWalkBadge(); }
+
+  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, OUTFIT_SLOTS: OUTFIT_SLOTS, applyOutfit: applyOutfit, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, drawHeart: drawHeart, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, mountHeart: mountHeart, drawWalkBadge: drawWalkBadge, mountWalkBadge: mountWalkBadge, isValidBird: isValidBird };
 });

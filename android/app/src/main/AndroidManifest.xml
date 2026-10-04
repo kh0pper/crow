@@ -14,12 +14,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Ramble walking (spec 2026-10-04): the hardware step counter. Runtime
+         permission on API 29+; the app asks only when the player taps
+         "Count my steps". -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <!-- Bluetooth permissions for pairing + audio routing with Meta Ray-Ban (Gen 2) -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
 
     <application
         android:name=".CrowApplication"
