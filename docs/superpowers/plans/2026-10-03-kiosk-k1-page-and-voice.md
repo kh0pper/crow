@@ -5991,28 +5991,82 @@ Validity rules (ruling R8):
 - If a prod transcription was running (the `docker stats` line), say so in the report.
 - Cross-check: the panel's Diagnostics "Median … p90 …" for the phone must equal this computation.
 
-**If A2 FAILS, apply the levers in spec order, one at a time, re-running the full 20 after each:**
+**Run 1 lever text (kept for the record; superseded by the re-run instructions below):** 
+> **If A2 FAILS, apply the levers in spec order, one at a time, re-running the full 20 after each:**
+>
+> - **Lever 1 (VAD hangover 450 ms):**
+>
+>   ```bash
+>   source /tmp/claude-1000/kiosk-smoke/vars.sh
+>   J=$SMOKE/cj; curl -s -c $J -b $J -H "$TS" --data-urlencode "password=$(cat $SMOKE/dash-pass)" http://127.0.0.1:13001/dashboard/login -o /dev/null
+>   CSRF=$(awk '$6=="crow_csrf"{print $7}' $J); DEV=$(curl -s -b $J -H "$TS" http://127.0.0.1:13001/api/kiosk/admin/displays | $NODE -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).devices[0].id))')
+>   curl -s -b $J -H "$TS" -H "X-Crow-Csrf: $CSRF" -H 'Content-Type: application/json' -d '{"kiosk_settings":{"vad_hangover_ms":450}}' http://127.0.0.1:13001/api/kiosk/admin/displays/$DEV
+>   ```
+>
+>   [KEVIN] reloads the phone page, then asks the 20 again.
+> - **Lever 2 (smaller STT model):** set the kiosk profile's model to `Systran/faster-whisper-tiny.en` in the scratch DB:
+>
+>   ```bash
+>   cd $REPO && $NODE --input-type=module -e 'const { createDbClient } = await import("./servers/db.js"); const R = await import("./servers/gateway/dashboard/settings/registry.js"); const db = createDbClient(); const l = JSON.parse(await R.readSetting(db, "stt_profiles")); l.find((p) => p.id === "kiosk-stt-distil-small-en").defaultModel = "Systran/faster-whisper-tiny.en"; await R.writeSetting(db, "stt_profiles", JSON.stringify(l)); process.exit(0)'
+>   ```
+>
+>   Profiles are read per turn, so no restart is needed. Warm it first with one STT call, as in Step 3. If this lever is the one that passes, Task 14's production profile change is a **[KEVIN] decision** (tiny.en is less accurate). STT on the GPU is a separate GPU-window plan, not this smoke.
+> - **Lever 3 (pre-synthesized acknowledgement):** not built in K1. Record A2 FAIL with all three runs' numbers, stop the smoke (teardown), and bring the numbers to Kevin. **Do not merge.**
+>
+> Write which lever was used, or "none", to `findings.md`. The PR body carries it (spec §9).
 
-- **Lever 1 (VAD hangover 450 ms):**
+**Re-run after the 2026-10-04 fix round (smoke run 1 FAILED: median 2714 ms, p90 3836 ms).** Levers 1 and 3 are now built into the branch, and lever 2 is a per-display setting. Run the 20 questions **twice** in the new registered window, and record both runs:
+
+- **Run A (branch defaults):** 450 ms end-of-speech wait, first-clause TTS, `crow_discover` denied, Speech model **Standard (small.en)**.
+- **Run B (lever 2):** the same display with Speech model **Fastest (tiny.en)**. Set it in the scratch panel (Kiosk → the display → Speech model → Save), or over the API:
 
   ```bash
   source /tmp/claude-1000/kiosk-smoke/vars.sh
   J=$SMOKE/cj; curl -s -c $J -b $J -H "$TS" --data-urlencode "password=$(cat $SMOKE/dash-pass)" http://127.0.0.1:13001/dashboard/login -o /dev/null
   CSRF=$(awk '$6=="crow_csrf"{print $7}' $J); DEV=$(curl -s -b $J -H "$TS" http://127.0.0.1:13001/api/kiosk/admin/displays | $NODE -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).devices[0].id))')
-  curl -s -b $J -H "$TS" -H "X-Crow-Csrf: $CSRF" -H 'Content-Type: application/json' -d '{"kiosk_settings":{"vad_hangover_ms":450}}' http://127.0.0.1:13001/api/kiosk/admin/displays/$DEV
+  curl -s -b $J -H "$TS" -H "X-Crow-Csrf: $CSRF" -H 'Content-Type: application/json' -d '{"kiosk_settings":{"stt_model":"tiny.en"}}' http://127.0.0.1:13001/api/kiosk/admin/displays/$DEV
   ```
 
-  [KEVIN] reloads the phone page, then asks the 20 again.
-- **Lever 2 (smaller STT model):** set the kiosk profile's model to `Systran/faster-whisper-tiny.en` in the scratch DB:
+  The save pushes the setting to the open page and warms tiny.en at once. Look for the `[kiosk] STT warm-up failed` line in the journal; it must not appear. No page reload is needed. tiny.en must be in the scratch whisper's `PRELOAD_MODELS`, which the branch compose now includes. Note any transcripts that tiny.en got wrong: the accuracy cost goes to Kevin with the numbers.
 
-  ```bash
-  cd $REPO && $NODE --input-type=module -e 'const { createDbClient } = await import("./servers/db.js"); const R = await import("./servers/gateway/dashboard/settings/registry.js"); const db = createDbClient(); const l = JSON.parse(await R.readSetting(db, "stt_profiles")); l.find((p) => p.id === "kiosk-stt-distil-small-en").defaultModel = "Systran/faster-whisper-tiny.en"; await R.writeSetting(db, "stt_profiles", JSON.stringify(l)); process.exit(0)'
-  ```
+Before Run A, check that the display is really on 450 ms. `normalizeKioskSettings` stores the full defaults at pairing, so a display paired on the OLD branch keeps `vad_hangover_ms: 600`. Re-pair it, or POST `{"kiosk_settings":{"vad_hangover_ms":450}}`, then confirm `display_config.vad_hangover_ms` is 450 in the admin listing. The boot line `[kiosk] STT warm (1 model)` only appears if a display was already paired when the gateway started. Otherwise check the hello warm-up instead: there is no `STT warm-up failed` line, and the first turn's `stt_ms` is not ~8 s.
 
-  Profiles are read per turn, so no restart is needed. Warm it first with one STT call, as in Step 3. If this lever is the one that passes, Task 14's production profile change is a **[KEVIN] decision** (tiny.en is less accurate). STT on the GPU is a separate GPU-window plan, not this smoke.
-- **Lever 3 (pre-synthesized acknowledgement):** not built in K1. Record A2 FAIL with all three runs' numbers, stop the smoke (teardown), and bring the numbers to Kevin. **Do not merge.**
+Gate on each run separately (the same computation as above, with its own `a2-start` stamp). Report these items:
+- both runs' median, p90 and server breakdown;
+- `est_prompt_tokens` (no row should show a crow_discover loop now);
+- the re-ask count;
+- the boot warm-up log line: `[kiosk] STT warm (1 model)` after the gateway start, and the first real turn's `stt_ms`, which must not be ~8 s.
 
-Write which lever was used, or "none", to `findings.md`. The PR body carries it (spec §9).
+If **Run A passes**, small.en stays the default and tiny.en remains an option. If **only Run B passes**, making tiny.en the production default is a **[KEVIN] decision** (accuracy), the same as before. If **both fail**, try the next levers below in order, then stop, tear down and bring the numbers to Kevin. **Do not merge.**
+
+- **Lever 1 (end-of-speech wait).** Now the default: 450 ms per display, adjustable from 300 to 900 ms in the panel (End-of-speech wait). 300 ms is the floor. It saves another 150 ms but cuts off slow speakers, so it is a Kevin call.
+- **Lever 2 (tiny.en).** See Run B.
+- **Lever 3 (first-clause TTS).** Now built in, replacing the unbuilt pre-synthesized acknowledgement. The first spoken chunk ends at the first `, ; : —` after 3 or more words, or at 8 complete words. Later chunks are whole sentences.
+- **Next lever, C (whisper CPU threads; scratch only, needs a whisper recreate in the window).** In faster-whisper-server 0.5.0, `cpu_threads: 0` means the CTranslate2 default of 4 threads, on a 32-thread box. To try more threads, add `environment: { WHISPER__CPU_THREADS: "8" }` to `$SMOKE/stt.override.yml`, then run `$SW up -d --force-recreate` and re-warm with one Step 3 STT call. Then re-run the worse of A and B. Estimate: −25 to −40 % STT. It also changes prod large-v3 (meeting recorder) if adopted, so it is a [KEVIN] decision for Task 14.
+- **Next lever, D (speculative end-of-speech; not built, about a day of work).** The page would send a tentative `turn_end` after about 200 ms of silence, and the server would start STT, and the LLM only after the full wait confirms. If speech resumes, the server aborts and keeps buffering. Estimated saving: (wait − 200 ms) ≈ 250 ms at 450 ms. This is the next build lever if A and B both miss.
+
+Write the levers used and both runs' numbers to `findings.md`. The PR body carries them (spec §9).
+
+**Latency budget (where each ms went, smoke run 1, medians of the last 20 eligible turns; e2e median 2714 ms):**
+
+| segment | run 1 measured | after this round, Run A (est.) | Run B, tiny.en (est.) | source |
+|---|---|---|---|---|
+| end-of-speech silence wait (page VAD, ends on the first 20 ms frame past it) | 600 | 450 | 450 | `vad_hangover_ms` |
+| STT (turn start → transcript) | 830 | 830 | 250–400 | `stt_ms` (distil-small.en int8, CPU, 4 threads) |
+| transcript → first LLM token (bot load, prompt build, 4B TTFT) | 421 | ~420 (p90 better: no crow_discover loops) | ~420 | `llm_first_token_ms − stt_ms` |
+| first token → first TTS chunk sent (sentence wait ≈ 500 + Kokoro first synth ≈ 200) | 715 | ~400 (first clause) | ~400 | `tts_first_chunk_ms − llm_first_token_ms` |
+| server first chunk → sound on the phone (WS + Serve, PCM schedule +20 ms, output latency ≈ 25) | ~150 | ~150 | ~150 | `e2e − wait − tts_first_chunk_ms` |
+| **e2e median** | **2714** | **≈ 2250–2550 (likely FAIL)** | **≈ 1700–2000 (borderline)** | |
+
+*Review caveat on lever 3:* many scripted answers open with a first sentence of 8 words or fewer and no comma (e.g. "Twelve times fourteen is 168."). There the first chunk is the whole sentence, as before, so lever 3 saves 0–300 ms depending on the answer; the ~400 above is the best case. The 450 ms wait really ends at 460 ms, because the VAD works in 20 ms frames.
+
+**Streaming STT investigation (item 5, 2026-10-04; nothing built):** sources checked were `speaches-ai/speaches` v0.5.0 `config.py`, `routers/stt.py` and `model_manager.py`, which match `fedirz/faster-whisper-server:0.5.0-cpu`.
+- **Streaming exists.** The image has a WebSocket `/v1/audio/transcriptions`, a live transcriber. It re-transcribes a sliding window with LocalAgreement, needs at least 1 s of audio per pass, and ends after 2.5 s of inactivity. The POST endpoint's `stream=true` only streams segments of an already-uploaded file.
+- **Why streaming saves nothing here.** Whisper pads every pass to a 30-s window, so each pass costs a full encoder run whatever the audio length. A kiosk question is 2–4 s, so the final pass after end-of-speech costs about what today's single call costs. Estimated saving: 0–100 ms, plus extra CPU (repeated passes while the user talks, and contention with the 4B's host threads).
+- **Two halves fail the same way.** Sending the first half while the user is still speaking runs into the same padding: the second half still pays a full encoder pass, and words split at the cut lose accuracy. Estimated saving: about 0.
+- **Beam size cannot be changed.** The 0.5.0 POST route passes no `beam_size`, so faster-whisper's default beam 5 applies. Greedy decoding would need a newer server or a patched image.
+
+So the STT levers that do work are a smaller model (Run B), more CPU threads (lever C), overlapping STT with the silence wait (lever D), or STT on the GPU (a separate GPU-window plan).
 
 - [ ] **Step 8: [KEVIN] A3 windows, bird states, barge-in; announce/show; dressed bird**
 
@@ -6040,6 +6094,10 @@ Write which lever was used, or "none", to `findings.md`. The PR body carries it 
 
    Expected: the phone shows and speaks "Smoke test announcement."; the tool lists the phone as connected; a "Groceries" content window opens.
 9. Dressed bird: create Ramble tables in the scratch DB with a hatched magpie wearing `{"scarf":"knit","glasses":"round"}` and energy 40 (use `initRambleTables` + the two INSERTs from `tests/kiosk-routes.test.js`). [KEVIN] reloads the phone. The magpie appears tired, with a scarf and glasses, and its beak still opens while it speaks.
+
+10. **The flashing message after silent taps** (smoke run 1, unidentified). [KEVIN] taps the bird and says nothing, three times. When the flash appears, he long-presses the clock (0.7 s). The page shows its last 20 displayed statuses, newest first, with millisecond stamps: banner, caption (with its source), bird state plus the mic-pill label, wm events, errors and socket closes. Screenshot it to `$SMOKE/flash-ring.png`. Tap the list to close it.
+    - The server now logs `[kiosk] empty turn on <id> (no speech): caption only` for each silent tap.
+    - If the ring shows nothing at the flash time, the message is external: Brave or Android (the mic privacy chip or toast). Record that.
 
 - [ ] **Step 9: Live token-scope spot checks (spec §10/§13.1) and unpair**
 
@@ -6129,7 +6187,7 @@ docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' faster-whisper-server
 Register this row in `~/CROW-SCHEDULE.md`:
 
 ```markdown
-| **2026-10-0X HH:MM → +45 min hard cap (attended; deadman kiosk-deploy-deadman restores the previous whisper compose if prod STT is unhealthy)** | **Crow kiosk K1 deploy**: pull ~/crow main; recreate prod faster-whisper from the pinned compose (same image digest; adds TTL -1, distil-small preload, 8g cap) — glasses/meeting-recorder STT down ≤ 2 min; restart crow-gateway; [KEVIN] install Kokoro TTS + Kiosk display from Extensions. No GPU, no model containers. | Claude session (crow) + Kevin | manual | prod whisper healthy on 0.5.0-cpu with both models loaded AND kokoro-tts healthy AND /display 200 via :8444 AND auto_update_last_result not "Skipped" AND row moved to Done |
+| **2026-10-0X HH:MM → +45 min hard cap (attended; deadman kiosk-deploy-deadman restores the previous whisper compose if prod STT is unhealthy)** | **Crow kiosk K1 deploy**: pull ~/crow main; recreate prod faster-whisper from the pinned compose (same image digest; adds TTL -1, distil-small + tiny.en preload, 8g cap) — glasses/meeting-recorder STT down ≤ 2 min; restart crow-gateway; [KEVIN] install Kokoro TTS + Kiosk display from Extensions. No GPU, no model containers. | Claude session (crow) + Kevin | manual | prod whisper healthy on 0.5.0-cpu with all three models loaded (large-v3, distil-small.en, tiny.en) AND kokoro-tts healthy AND /display 200 via :8444 AND auto_update_last_result not "Skipped" AND row moved to Done |
 ```
 
 Then:
@@ -6172,7 +6230,7 @@ curl -s -w "\nlarge-v3 (glasses/meeting default): %{time_total}s\n" -F file=@/tm
 Expected:
 - the image is unchanged and the cap is 8 GiB;
 - the env is set;
-- both models transcribe the test clip correctly. The first large-v3 call pays its one load, and later ones stay warm (TTL -1).
+- all three models (large-v3, distil-small.en, tiny.en — 2026-10-04 fix round) transcribe the test clip correctly. The first large-v3 call pays its one load, and later ones stay warm (TTL -1). After the gateway restart, the journal shows `[kiosk] STT warm (…)` once a display is paired. **Installed copies elsewhere:** `refreshVersionedBundle` never copies a docker bundle's compose, so a faster-whisper install from an older copy has no tiny.en preload. There, choosing "Fastest" pays a ~75 MB download on its first warm-up, retried until it succeeds.
 
 If `q.wav` was deleted with the smoke dir, regenerate it as in Task 13 Step 3.
 
