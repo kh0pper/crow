@@ -2238,3 +2238,91 @@ test("the header perch dresses the bird and adds no backtick inside its template
   const inner = js.replace(/^\s*<script[^>]*>/i, "").replace(/<\/script>\s*$/i, "");
   assert.doesNotThrow(() => new Function(inner), "tamagotchiJs output compiles");
 });
+
+const STATIC_SRC = () => readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/static/ramble.js"), "utf8");
+
+test("walking: nativeStepsMode tells the browser, an old app and every app state apart", () => {
+  const src = extractFunction(STATIC_SRC(), "nativeStepsMode");
+  const mode = (win) => new Function("window", src + "\nreturn nativeStepsMode();")(win);
+  assert.equal(mode({}), "web");
+  assert.equal(mode({ Crow: { appVersion() { return "1.5.2"; } } }), "old-app");
+  for (const st of ["ok", "needs-permission", "denied", "no-sensor"]) {
+    const want = st === "ok" ? "counter" : st === "needs-permission" ? "permission" : st;
+    assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { return st; } } }), want);
+  }
+  assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { throw new Error("bridge gone"); } } }), "old-app");
+  assert.equal(mode({ Crow: { readSteps() {}, stepsStatus() { return "weird"; } } }), "no-sensor");
+});
+
+test("walking: stepsLabel groups thousands and never shows junk", () => {
+  const stepsLabel = new Function(extractFunction(STATIC_SRC(), "stepsLabel") + "\nreturn stepsLabel;")();
+  assert.deepEqual([0, 999, 1000, 6000, 12345, 40000].map(stepsLabel), ["0", "999", "1,000", "6,000", "12,345", "40,000"]);
+  assert.deepEqual([-5, NaN, undefined, "x", 1.9].map(stepsLabel), ["0", "0", "0", "0", "1"]);
+});
+
+test("walking: walkCardState — what each kind of player sees", () => {
+  const src = STATIC_SRC();
+  const walkCardState = new Function(extractFunction(src, "stepsLabel") + "\n" + extractFunction(src, "walkCardState") + "\nreturn walkCardState;")();
+  const day = { goal: 6000, steps: 0, checked_in: false, goal_met: false, seed_today: 0 };
+  let v = walkCardState("counter", { ...day, steps: 2400 });
+  assert.deepEqual([v.showMeter, v.pct, v.allow, v.manual, v.settings], [true, 40, false, false, false]);
+  assert.equal(v.line, "3,600 to go today.");
+  v = walkCardState("counter", { ...day, steps: 0 });
+  assert.match(v.line, /^Counting from now/);
+  v = walkCardState("counter", { ...day, steps: 6100, goal_met: true, seed_today: 3 });
+  assert.deepEqual([v.pct, v.line], [100, "Goal reached. Your bird is glowing (+3 seed)."]);
+  v = walkCardState("permission", day);
+  assert.deepEqual([v.allow, v.manual, v.settings, v.showMeter], [true, true, false, false]);
+  v = walkCardState("denied", day);
+  assert.deepEqual([v.allow, v.manual, v.settings], [false, true, true]);
+  for (const m of ["no-sensor", "old-app", "web"]) {
+    v = walkCardState(m, day);
+    assert.deepEqual([v.allow, v.manual, v.settings, v.showMeter], [false, true, false, false], m);
+    assert.ok(v.line.length > 0, m);
+  }
+  v = walkCardState("web", { ...day, steps: 3000 });
+  assert.equal(v.showMeter, true, "steps counted on another device today still show");
+  v = walkCardState("web", { ...day, checked_in: true });
+  assert.deepEqual([v.manualDone, v.line], [true, "Marked as walked today. Your bird noticed."]);
+  v = walkCardState("counter", null);
+  assert.equal(v.showMeter, true, "no state yet: draws an empty meter, never throws");
+});
+
+test("walking: the card is on the pet view, says contacts never see a count, and adds no template syntax", () => {
+  const html = readFileSync(join(REPO_ROOT_FOR_PANEL, "bundles/ramble/panel/ramble.js"), "utf8");
+  const start = html.indexOf('<section class="rb-card" id="rb-walk">');
+  assert.ok(start > html.indexOf('data-for="pet"'), "inside the pet view");
+  const block = html.slice(start, html.indexOf("</section>", start));
+  for (const id of ["rb-walk-meter", "rb-walk-fill", "rb-walk-num", "rb-walk-goal", "rb-walk-line", "rb-walk-allow",
+    "rb-walk-open-settings", "rb-walk-checkin", "rb-walk-prefs", "rb-walk-goal-down", "rb-walk-goal-val", "rb-walk-goal-up",
+    "rb-walk-nudge", "rb-walk-weekends", "rb-walk-status"]) {
+    assert.ok(block.includes(`id="${id}"`), id);
+  }
+  assert.ok(/never your step count/.test(block));
+  assert.ok(!block.includes("`") && !block.includes("${"), "no template syntax in the template literal");
+  assert.ok(!/<svg[^>]*\shidden/.test(block), "hidden is dead on <svg>");
+  assert.ok(/Walk toward your goal/.test(html), "the runs-on list names walking");
+});
+
+test("walking: static/ramble.js still has zero backticks and exposes the bridge callback", () => {
+  const src = STATIC_SRC();
+  assert.equal((src.match(/`/g) || []).length, 0);
+  assert.ok(src.includes("window.CrowSteps.deliver = function"));
+  assert.ok(/if \(name === "pet"\) refreshWalk\(false\);/.test(src), "switching to the pet reads steps");
+});
+
+test("walking: the goal buttons disable at the floor and the ceiling (F8)", () => {
+  const src = STATIC_SRC();
+  assert.ok(/\$\("rb-walk-goal-down"\)/.test(src) && /\$\("rb-walk-goal-up"\)/.test(src));
+  assert.ok(/down\.disabled = goal <= 2000/.test(src), "minus disabled at the floor");
+  assert.ok(/up\.disabled = goal >= 30000/.test(src), "plus disabled at the ceiling");
+});
+
+test("walking: the panel's goal clamp literals equal the server's GOAL_MIN/GOAL_MAX (F9)", async () => {
+  const { GOAL_MIN, GOAL_MAX } = await import("../bundles/ramble/server/steps.js");
+  const m = STATIC_SRC().match(/Math\.max\((\d+), Math\.min\((\d+), goal \+ by\)\)/);
+  assert.ok(m, "nudgeGoal clamp found");
+  assert.equal(Number(m[1]), GOAL_MIN);
+  assert.equal(Number(m[2]), GOAL_MAX);
+  assert.ok(STATIC_SRC().includes("goal <= " + GOAL_MIN) && STATIC_SRC().includes("goal >= " + GOAL_MAX));
+});

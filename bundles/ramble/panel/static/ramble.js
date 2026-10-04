@@ -5,8 +5,8 @@
  * tooling that treats backticks as its own delimiter; string concatenation is
  * the house style here. Remote content is written with textContent only, never
  * innerHTML: marks arrive from other people's personas. The one innerHTML path
- * is RambleBird.mountBird, which writes markup this page's own engine
- * generated from a (species, seed) pair -- never anybody's text.
+ * is the engine's own mount helpers (RambleBird.mountBird, RambleBird.mountWalkBadge),
+ * which write markup this page's own engine generated -- never anybody's text.
  *
  * CSRF is handled for us -- the dashboard layout wraps window.fetch and adds
  * X-Crow-Csrf to every state-changing same-origin request.
@@ -104,6 +104,202 @@
     });
   }
 
+  /* -------------------------------------------------------------- walking
+   * Spec 2026-10-04. Inside the Crow Android app (1.6.0+) window.Crow can read
+   * the phone's hardware step counter; the server does all the arithmetic.
+   * Everywhere else the card offers a one-tap "I walked today". */
+
+  var walkReqs = {};
+  var walkSeq = 0;
+  var walkLastRead = 0;
+  var walkInFlight = null;
+  var walkState = null;
+  window.CrowSteps = window.CrowSteps || {};
+  window.CrowSteps.deliver = function (id, payload) {
+    var cb = walkReqs[id];
+    if (!cb) return;
+    delete walkReqs[id];
+    cb(payload);
+  };
+
+  function nativeStepsMode() {
+    var c = window.Crow;
+    if (!c) return "web";
+    if (typeof c.readSteps !== "function" || typeof c.stepsStatus !== "function") return "old-app";
+    var st = "";
+    try { st = String(c.stepsStatus()); } catch (e) { return "old-app"; }
+    if (st === "ok") return "counter";
+    if (st === "needs-permission") return "permission";
+    if (st === "denied") return "denied";
+    return "no-sensor";
+  }
+
+  function stepsLabel(n) {
+    var v = Math.floor(Number(n));
+    if (!isFinite(v) || v < 0) v = 0;
+    return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function walkCardState(mode, st) {
+    var s = st || {};
+    var goal = Number(s.goal) > 0 ? Number(s.goal) : 6000;
+    var steps = Math.max(0, Number(s.steps) || 0);
+    var out = { showMeter: false, pct: 0, allow: false, settings: false, manual: false, manualDone: !!s.checked_in, line: "" };
+    if (mode === "counter" || steps > 0) {
+      out.showMeter = true;
+      out.pct = Math.min(100, Math.round(steps * 100 / goal));
+    }
+    if (mode === "counter") {
+      if (s.goal_met) out.line = "Goal reached. Your bird is glowing" + (Number(s.seed_today) > 0 ? " (+" + Number(s.seed_today) + " seed)." : ".");
+      else if (steps === 0) out.line = "Counting from now. A walk a day keeps your bird bright.";
+      else out.line = stepsLabel(goal - steps) + " to go today.";
+    } else if (mode === "permission") {
+      out.allow = true; out.manual = true;
+      out.line = "Let Crow count your steps, and your walks feed your bird.";
+    } else if (mode === "denied") {
+      out.settings = true; out.manual = true;
+      out.line = "Step counting is off. Allow Physical activity for Crow in Android settings, or tap when you’ve walked.";
+    } else if (mode === "no-sensor") {
+      out.manual = true;
+      out.line = "This phone can’t count steps. Tap when you’ve been out walking.";
+    } else if (mode === "old-app") {
+      out.manual = true;
+      out.line = "Update the Crow app to count steps. Until then, tap when you’ve walked.";
+    } else {
+      out.manual = true;
+      out.line = "Steps are counted in the Crow Android app. Here, tap when you’ve walked.";
+    }
+    if (out.manual && out.manualDone) out.line = "Marked as walked today. Your bird noticed.";
+    return out;
+  }
+
+  /* The permission prompt waits on a human, so it gets minutes, not seconds;
+   * a read gets 8 s (native gives up at 4 s). A late delivery after a timeout
+   * is dropped, and the visibilitychange repaint (the prompt pauses the
+   * WebView) catches the outcome anyway. */
+  function callNative(method, timeoutMs) {
+    return new Promise(function (resolve) {
+      var id = "s" + (++walkSeq);
+      var settled = false;
+      walkReqs[id] = function (p) { settled = true; resolve(p || null); };
+      setTimeout(function () {
+        if (settled) return;
+        delete walkReqs[id];
+        resolve({ ok: false, reason: "timeout" });
+      }, timeoutMs || 8000);
+      try { window.Crow[method](id); }
+      catch (e) { delete walkReqs[id]; settled = true; resolve({ ok: false, reason: "bridge" }); }
+    });
+  }
+
+  function paintWalk(st) {
+    if (!st) return;
+    walkState = st;
+    var v = walkCardState(nativeStepsMode(), st);
+    setHidden($("rb-walk-meter"), !v.showMeter);
+    var fill = $("rb-walk-fill");
+    if (fill) fill.style.width = v.pct + "%";
+    setText($("rb-walk-num"), stepsLabel(st.steps));
+    setText($("rb-walk-goal"), stepsLabel(st.goal));
+    setText($("rb-walk-goal-val"), stepsLabel(st.goal));
+    setText($("rb-walk-line"), v.line);
+    setHidden($("rb-walk-allow"), !v.allow);
+    setHidden($("rb-walk-open-settings"), !v.settings);
+    var check = $("rb-walk-checkin");
+    setHidden(check, !v.manual);
+    if (check) {
+      check.disabled = v.manualDone;
+      check.textContent = v.manualDone ? "Walked today" : "I walked today";
+    }
+    var down = $("rb-walk-goal-down");
+    var up = $("rb-walk-goal-up");
+    var goal = Number(st.goal) || 6000;
+    if (down) down.disabled = goal <= 2000;
+    if (up) up.disabled = goal >= 30000;
+    var prefs = st.settings || {};
+    var nudge = $("rb-walk-nudge");
+    if (nudge) nudge.checked = prefs.nudge !== false;
+    var weekends = $("rb-walk-weekends");
+    if (weekends) { weekends.checked = prefs.nudge_weekends !== false; weekends.disabled = prefs.nudge === false; }
+  }
+
+  /** Read the counter (at most once a minute, one at a time) and send it; resolves with the day or null. */
+  function sendStepReading(force) {
+    if (nativeStepsMode() !== "counter") return Promise.resolve(null);
+    if (!force && Date.now() - walkLastRead < 60000) return Promise.resolve(null);
+    walkLastRead = Date.now();
+    return callNative("readSteps").then(function (p) {
+      if (!p || !p.ok) {
+        /* Some phones deliver the first sensor event late; say so, quietly. */
+        if (p && p.reason === "timeout") setText($("rb-walk-status"), "Couldn\u2019t read the step counter just now. It will try again.");
+        return null;
+      }
+      setText($("rb-walk-status"), "");
+      return jsonFetch("/api/ramble/steps/reading", {
+        method: "POST",
+        body: { device_id: p.device_id, counter: p.counter, elapsed_ms: p.elapsed_ms, boot_count: p.boot_count },
+      });
+    });
+  }
+
+  function refreshWalk(force) {
+    if (walkInFlight) return walkInFlight;
+    walkInFlight = sendStepReading(force)
+      .catch(function () { return null; })
+      .then(function (st) {
+        if (st && st.reading && st.reading.credited > 0) refreshPet();
+        return st || jsonFetch("/api/ramble/steps");
+      })
+      .then(paintWalk)
+      .catch(function () { /* walking is a bonus, never a broken page */ })
+      .then(function () { walkInFlight = null; });
+    return walkInFlight;
+  }
+
+  function saveWalkSettings(patch) {
+    setText($("rb-walk-status"), "");
+    return jsonFetch("/api/ramble/steps/settings", { method: "PUT", body: patch })
+      .then(function (st) { paintWalk(st); return refreshPet(); })
+      .catch(function (err) { setText($("rb-walk-status"), err.message); });
+  }
+
+  function nudgeGoal(by) {
+    var goal = (walkState && Number(walkState.goal)) || 6000;
+    var next = Math.max(2000, Math.min(30000, goal + by));
+    if (next !== goal) saveWalkSettings({ goal: next });
+  }
+
+  (function wireWalk() {
+    var allow = $("rb-walk-allow");
+    if (allow) allow.addEventListener("click", function () {
+      allow.disabled = true;
+      callNative("requestStepsPermission", 5 * 60 * 1000)
+        .then(function () { return refreshWalk(true); })
+        .then(function () { allow.disabled = false; });
+    });
+    var open = $("rb-walk-open-settings");
+    if (open) open.addEventListener("click", function () {
+      try { if (window.Crow && typeof window.Crow.openAppSettings === "function") window.Crow.openAppSettings(); }
+      catch (e) { /* nothing to open */ }
+    });
+    var check = $("rb-walk-checkin");
+    if (check) check.addEventListener("click", function () {
+      check.disabled = true;
+      jsonFetch("/api/ramble/steps/walked", { method: "POST", body: {} })
+        .then(function (st) { paintWalk(st); return refreshPet(); })
+        .catch(function (err) { setText($("rb-walk-status"), err.message); check.disabled = false; });
+    });
+    var down = $("rb-walk-goal-down");
+    if (down) down.addEventListener("click", function () { nudgeGoal(-500); });
+    var up = $("rb-walk-goal-up");
+    if (up) up.addEventListener("click", function () { nudgeGoal(500); });
+    var nudge = $("rb-walk-nudge");
+    if (nudge) nudge.addEventListener("change", function () { saveWalkSettings({ nudge: !!nudge.checked }); });
+    var weekends = $("rb-walk-weekends");
+    if (weekends) weekends.addEventListener("change", function () { saveWalkSettings({ nudge_weekends: !!weekends.checked }); });
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) refreshWalk(false); });
+  })();
+
   /* ------------------------------------------------------------- contacts */
 
   var contactsCache = { contacts: [], groups: [] };
@@ -138,6 +334,7 @@
     if (name === "world" && map) { setTimeout(function () { map.invalidateSize(); }, 0); }
     if (name === "world") refreshNests();
     if (name === "egg") refreshEgg();
+    if (name === "pet") refreshWalk(false);
     if (name === "pet") refreshPet();
     if (name === "flock") { refreshContacts().then(refreshFlock); refreshTrades(); }
   }
@@ -1360,7 +1557,11 @@
       var genome = null;
       genome = birdGenome(Bird, bird);
       if (genome) {
-        try { Bird.mountBird(petBird, genome, pet.mood || "happy"); } catch (e) { /* cosmetic */ }
+        try {
+          Bird.mountBird(petBird, genome, pet.mood || "happy");
+          /* Spec 2026-10-04 section 8: the same badge contacts see. Engine markup only. */
+          if (pet.walked_today === true && typeof Bird.mountWalkBadge === "function") Bird.mountWalkBadge(petBird);
+        } catch (e) { /* cosmetic */ }
         var species = Bird.SPECIES[bird.species];
         setText($("rb-pet-name"), (species && species.name) || bird.species);
         /* The traits line is what it HATCHED with; the outfit is appended. */
@@ -2699,6 +2900,7 @@
   jsonFetch("/api/ramble/grid").then(paintGrid).catch(function () { /* leave the chip at off */ });
   refreshContacts();
   refreshEgg().then(refreshPet);
+  refreshWalk(true);
   maybeIntro();
 
   if (map) {
