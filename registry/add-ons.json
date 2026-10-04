@@ -2087,6 +2087,73 @@
       "official": true
     },
     {
+      "id": "kiosk",
+      "name": "Kiosk display",
+      "version": "0.1.0",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "hardware",
+      "tags": [
+        "kiosk",
+        "display",
+        "voice",
+        "home",
+        "bird",
+        "touchscreen"
+      ],
+      "icon": "monitor",
+      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, your chosen bot and text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CROW_HOME",
+          "CROW_GATEWAY_PORT"
+        ]
+      },
+      "panel": "panel/kiosk.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/kiosk.md"
+      ],
+      "capabilities": {
+        "mcp_server_id": "kiosk",
+        "group": "Kiosk",
+        "skills": [
+          "kiosk"
+        ],
+        "runtimes": {
+          "pi": true
+        },
+        "tools": [
+          {
+            "name": "crow_kiosk_list_displays",
+            "label": "List displays",
+            "subgroup": "Display"
+          },
+          {
+            "name": "crow_kiosk_announce",
+            "label": "Announce",
+            "subgroup": "Display"
+          },
+          {
+            "name": "crow_kiosk_show",
+            "label": "Show",
+            "subgroup": "Display"
+          }
+        ]
+      },
+      "requires": {
+        "min_ram_mb": 64,
+        "min_disk_mb": 5
+      },
+      "env_vars": [],
+      "notes": "Voice needs an STT profile (the Faster-Whisper bundle; the kiosk adds its own distil-small.en profile at first pairing) and a TTS profile (install the Kokoro TTS bundle for local voice). Reached at https://<host>:8444/display over the tailnet; never through Funnel.",
+      "official": true
+    },
+    {
       "id": "knowledge-base",
       "name": "Knowledge Base",
       "version": "1.0.2",
