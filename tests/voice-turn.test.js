@@ -263,3 +263,16 @@ test("review fix: bare tool names hit the memory strip, denyTools and the destru
   const x = await bare("delete_post", { id: 7 });
   assert.deepEqual(x.calls.executed, []); assert.match(x.log[1].messages.at(-1).content, /Confirmation required/);
 });
+
+test("smoke 2026-10-04: the router sees the plain transcript — a turnContext containing 'Open' never escalates a plain question", async () => {
+  const { chooseVoiceRoute } = await import("../servers/gateway/routes/llm-router.js");
+  const seen = [];
+  const extra = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async () => '{"ok":true}' };
+  const h = harness();
+  h.deps.chooseVoiceRoute = (msgs, o) => { seen.push(msgs.at(-1).content); return chooseVoiceRoute(msgs, o); };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "What is the capital of Portugal?", sink: h.sink, extraTools: [extra], turnContext: "[Display] Open windows: none." });
+  assert.deepEqual(seen, ["What is the capital of Portugal?"]);
+  assert.equal(r.route, "fast");
+  assert.equal(r.escalated, false);
+  assert.match(h.log.at(-1).messages.at(-1).content, /^\[Display\] Open windows: none\.\n\nWhat is the capital of Portugal\?$/, "the model still gets the context");
+});

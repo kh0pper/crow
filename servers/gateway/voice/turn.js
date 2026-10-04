@@ -194,7 +194,10 @@ export function createVoiceTurnRunner(deps) {
         if (m.role !== "assistant" || !m.tool_calls) return false;
         try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name)); } catch { return false; }
       };
-      const decision = deps.chooseVoiceRoute(messages.filter((m) => !isExtraCall(m)), { hasTools: tools.length > 0 });
+      // The router sees the PLAIN transcript, never the turnContext prefix: "[Display] Open windows: …"
+      // matched TOOL_INTENT_RE ("open") and escalated every kiosk turn to the 35B (smoke 2026-10-04).
+      const routeView = messages.filter((m) => !isExtraCall(m)).map((m) => (m === userMsg ? { ...m, content: transcript } : m));
+      const decision = deps.chooseVoiceRoute(routeView, { hasTools: tools.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
