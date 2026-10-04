@@ -10,10 +10,10 @@ const { botsDbPath, tasksDbPath, botsWorkspaceRoot } =
 
 test("CROW_DB_PATH is honored verbatim and anchors siblings", () => {
   clearEnv();
-  process.env.CROW_DB_PATH = "/home/kh0pp/.crow-mpa/data/crow.db";
-  assert.equal(botsDbPath(), "/home/kh0pp/.crow-mpa/data/crow.db");
-  assert.equal(tasksDbPath(), "/home/kh0pp/.crow-mpa/data/tasks.db");
-  assert.equal(botsWorkspaceRoot(), "/home/kh0pp/.crow-mpa/pi-bots");
+  process.env.CROW_DB_PATH = "/home/alex/.crow-mpa/data/crow.db";
+  assert.equal(botsDbPath(), "/home/alex/.crow-mpa/data/crow.db");
+  assert.equal(tasksDbPath(), "/home/alex/.crow-mpa/data/tasks.db");
+  assert.equal(botsWorkspaceRoot(), "/home/alex/.crow-mpa/pi-bots");
 });
 
 test("falls back to CROW_DATA_DIR when CROW_DB_PATH is unset", () => {

@@ -66,7 +66,7 @@ test("buildHandshakeComplete(ids) with no name emits NO displayName key (old-pee
 });
 
 test("buildHandshakeComplete(ids, name) includes the displayName; a null/empty name is omitted", () => {
-  assert.equal(JSON.parse(buildHandshakeComplete(["e1"], "Kevin")).payload.displayName, "Kevin");
+  assert.equal(JSON.parse(buildHandshakeComplete(["e1"], "Casey")).payload.displayName, "Casey");
   assert.ok(!("displayName" in JSON.parse(buildHandshakeComplete(["e1"], null)).payload));
   assert.ok(!("displayName" in JSON.parse(buildHandshakeComplete(["e1"], "")).payload));
 });
@@ -131,8 +131,8 @@ test("handleHandshakeComplete applies the inviter's name over a PLACEHOLDER stor
   const { db, cleanup } = freshDb();
   try {
     const id = await seedContact(db, "crow:inviter1", PK, "crow:inviter1"); // placeholder (crowId)
-    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Kevin");
-    assert.equal(await nameOf(db, id), "Kevin");
+    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Casey");
+    assert.equal(await nameOf(db, id), "Casey");
   } finally { cleanup(); }
 });
 
@@ -140,7 +140,7 @@ test("handleHandshakeComplete does NOT overwrite a user-typed name (placeholder 
   const { db, cleanup } = freshDb();
   try {
     const id = await seedContact(db, "crow:inviter2", PK, "My Friend"); // user-typed
-    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Kevin");
+    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Casey");
     assert.equal(await nameOf(db, id), "My Friend", "a user-typed name is never overwritten by a handshake name");
   } finally { cleanup(); }
 });
@@ -150,8 +150,8 @@ test("handleHandshakeComplete applies only to the AUTHENTICATED sender's contact
   try {
     const sender = await seedContact(db, "crow:sender", PK, "crow:sender"); // placeholder
     const other = await seedContact(db, "crow:other", OTHER_PK, "crow:other"); // placeholder
-    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Kevin");
-    assert.equal(await nameOf(db, sender), "Kevin", "the sender's contact takes the name");
+    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Casey");
+    assert.equal(await nameOf(db, sender), "Casey", "the sender's contact takes the name");
     assert.equal(await nameOf(db, other), "crow:other", "a different contact is untouched");
   } finally { cleanup(); }
 });
@@ -244,10 +244,10 @@ function ackingMgrs(acks) {
 }
 
 test("buildHandshakeComplete(ids, name, avatar): the avatar key appears only for a non-empty string (old-peer wire compat)", () => {
-  assert.equal(JSON.parse(buildHandshakeComplete(["e1"], "Kevin", PNG_AV)).payload.avatar, PNG_AV);
-  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin")).payload));
-  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin", null)).payload));
-  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin", "")).payload));
+  assert.equal(JSON.parse(buildHandshakeComplete(["e1"], "Casey", PNG_AV)).payload.avatar, PNG_AV);
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Casey")).payload));
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Casey", null)).payload));
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Casey", "")).payload));
   assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"])).payload), "the one-arg form is byte-identical to before");
 });
 
@@ -276,17 +276,17 @@ test("handleHandshakeComplete stores the inviter's name + avatar in the peer fie
   const { db, cleanup } = freshDb();
   try {
     await seedContact(db, "crow:inv-typed", PK, "My Friend");
-    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Kevin", PNG_AV);
+    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Casey", PNG_AV);
     let row = await peerOf(db, "crow:inv-typed");
     assert.equal(row.display_name, "My Friend", "never overwritten");
-    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_display_name, "Casey");
     assert.equal(row.peer_avatar, PNG_AV);
 
     const placeholder = await seedContact(db, "crow:inv-ph", OTHER_PK, "crow:inv-ph");
-    await handleHandshakeComplete(db, ["evt-2"], OTHER_PK.slice(-64), "Kevin");
-    assert.equal(await nameOf(db, placeholder), "Kevin", "the placeholder rule still applies");
+    await handleHandshakeComplete(db, ["evt-2"], OTHER_PK.slice(-64), "Casey");
+    assert.equal(await nameOf(db, placeholder), "Casey", "the placeholder rule still applies");
     row = await peerOf(db, "crow:inv-ph");
-    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_display_name, "Casey");
     assert.equal(row.peer_avatar, null, "no avatar on the wire = left alone");
   } finally { cleanup(); }
 });

@@ -1431,11 +1431,18 @@ function dashboardCss() {
 
   /* Responsive — mobile */
   @media (max-width: 768px) {
+    /* On phones the sidebar is a drawer OVER the page, so it and its backdrop
+       must out-stack anything a panel renders. Map libraries (Leaflet: panes
+       200-700, controls 800-1000) and other widgets ship high z-indexes and
+       were drawing over the open drawer (Ramble map hid the nav). Desktop
+       keeps 100/99: there the sidebar sits beside the content, not over it. */
     .sidebar {
+      z-index: 1100;
       transform: translateX(-100%);
       visibility: hidden;
       transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
     }
+    .sidebar-overlay { z-index: 1090; }
     .sidebar.open {
       transform: translateX(0);
       visibility: visible;

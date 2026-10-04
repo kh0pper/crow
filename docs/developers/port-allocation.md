@@ -129,7 +129,7 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 
 ## Second host: raven
 
-Raven (10.0.0.126, `raven.example.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
+Raven (10.0.0.203, `raven.example.ts.net`) is the second Strix Halo box. Its ports live in their own namespace. The first column is `raven:<port>`, not a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the first cell as **crow** allocations; rows starting `raven:` are skipped. A raven port is verified only by checking raven (`ss -ltn`). Making the checker host-aware is follow-up work.
 
 | port | bind | what | status |
 |---|---|---|---|

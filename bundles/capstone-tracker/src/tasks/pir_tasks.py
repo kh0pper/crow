@@ -145,7 +145,7 @@ def _save_digest_note(digest_text: str, today: date):
             "title": f"PIR Audit Digest — {today.strftime('%b %d, %Y')}",
             "note_type": "text",
             "content": digest_text,
-            "tags": ["pir-audit", "capstone", "insd-5941"],
+            "tags": ["pir-audit", "capstone"] + [t for t in os.environ.get("PIR_AUDIT_EXTRA_TAGS", "").split(",") if t],
         }, timeout=10.0)
         if resp.status_code == 200:
             logger.info("PIR audit note created")
@@ -168,7 +168,7 @@ def _send_digest_email(digest_text: str, today: date, overdue: int,
         svc.send_email(
             subject=subject,
             body_text=digest_text,
-            to_addr=os.environ.get("EMAIL_TO", "kevin.hopper@maestro.press"),
+            to_addr=os.environ.get("EMAIL_TO") or svc.to_addr,
             caller="pir_audit",
             skip_rate_limit=True,
         )
@@ -186,14 +186,15 @@ PIR_CONTACT_PATTERNS = [
     "information.request@harmonytx.org",
     "information.request@ideapublicschools.org",
     "open_records@eisd.net",
-    "sisley.carrillo@eisd.net",
     "recordrequests@iltexas.org",
     "austinisd@govqa.us",
     "openrecords@austinisd.org",
     "publicinformation@houstonisd.org",
     "openrecords@fwisd.org",
     "publicinforequest@dallasisd.org",
-]
+] + [a.strip() for a in os.environ.get("PIR_CONTACT_EXTRA", "").split(",") if a.strip()]
+# PIR_CONTACT_EXTRA: comma-separated extra sender addresses (e.g. an individual
+# records officer) — kept in the env file, never in this public source.
 
 PIR_SUBJECT_PATTERNS = [
     r"public information",

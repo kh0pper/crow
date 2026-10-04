@@ -2,7 +2,7 @@
  * Spec 2026-09-08 §4.4 — one starter egg, once ever, as a narrative gift.
  *
  * ⚠ The grant condition is "has any egg EVER existed", read from ramble_eggs
- * itself, NOT a flag. Kevin intends to reset his game state to a new game once
+ * itself, NOT a flag. Casey intends to reset his game state to a new game once
  * phases 3 and 4 land, specifically to play the prologue as a new player; a
  * flag that outlived the wipe would silently make that reset useless.
  *

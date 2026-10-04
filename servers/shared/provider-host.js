@@ -5,7 +5,7 @@
  *   <instance-id>   32-hex id of the Crow instance serving the endpoint. Written
  *                   only explicitly — inference never writes one (D2).
  *   "cloud"         not managed from here: call base_url directly (public APIs
- *                   and unmanaged network boxes alike; Kevin, D1).
+ *                   and unmanaged network boxes alike; Casey, D1).
  *
  * `host` is NOT an orchestration gate (D9): the only veto it carries is "this
  * belongs to a different Crow instance" (isForeignInstanceHost). Whether this

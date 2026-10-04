@@ -89,10 +89,10 @@ test("mintRemoteBlocks sets CROW_PEER_TOKENS_PATH when peerTokensPath given (per
   const { blocks } = mintRemoteBlocks(def, {
     peerGatewayUrls: { "abc12345deadbeef": "https://g:8444" },
     proxyPath: "/p", node: "/n",
-    peerTokensPath: "/home/kh0pp/.crow-mpa/peer-tokens.json",
+    peerTokensPath: "/home/alex/.crow-mpa/peer-tokens.json",
   });
   const b = blocks["crow-remote-abc12345-crow-memory"];
-  assert.equal(b.env.CROW_PEER_TOKENS_PATH, "/home/kh0pp/.crow-mpa/peer-tokens.json");
+  assert.equal(b.env.CROW_PEER_TOKENS_PATH, "/home/alex/.crow-mpa/peer-tokens.json");
 });
 
 test("mintRemoteBlocks omits CROW_PEER_TOKENS_PATH when not given (proxy falls back to default)", () => {

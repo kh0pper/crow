@@ -23,7 +23,7 @@ let available = false, server = null, port = 0;
 
 // ---------------------------------------------------------------------------
 // Task C — a scripted perch-api, so the real client can be driven into the
-// exact state Kevin reported: ONE perch-attached bot with several live
+// exact state Casey reported: ONE perch-attached bot with several live
 // sessions and therefore NO idle row to spawn from. An empty roost would not
 // reproduce the bug; it passes against the broken build.
 // ---------------------------------------------------------------------------
@@ -945,11 +945,11 @@ async function renderedTranscript() {
   const wide = "## Boards\n\n" +
     "| id | board | cards | owner | updated | status | notes |\n" +
     "|---|---|---|---|---|---|---|\n" +
-    "| 1 | TEHCY resource grant | 12 | Kevin Hopper | 2026-09-10 | in review | " +
+    "| 1 | ACME resource grant | 12 | Casey Rivers | 2026-09-10 | in review | " +
     // An unbreakable token, deliberately: a table of ordinary prose wraps and
     // never overflows, so it would prove nothing about the scroll container.
-    "outputs/2026-09-10T14-22-05Z_november-package-copy-pass_en-es_final.tar.gz |\n" +
-    "| 2 | Comms | 3 | Edrice Bell | 2026-09-08 | approved | waiting on the translation answer |\n\n" +
+    "outputs/2026-09-10T14-22-05Z_sample-package-copy-pass_final.tar.gz |\n" +
+    "| 2 | Comms | 3 | Jordan Lee | 2026-09-08 | approved | waiting on review |\n\n" +
     "```js\nconst aVeryLongLineOfCodeThatCannotWrapAnywhereAtAllBecauseItIsOneToken = 1;\n```\n";
   const hostile = "<img src=x onerror=\"window.__pwned=1\">\n\n" +
     "<script>window.__pwned=1</script>\n\n[click me](javascript:window.__pwned=1)";

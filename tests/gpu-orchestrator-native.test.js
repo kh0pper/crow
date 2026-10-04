@@ -1795,7 +1795,7 @@ test("external engine: idle-revert's mutex groups never name it as default nor l
   const cfg = { providers: {
     "chat-a": dockerProv("http://127.0.0.1:8003/v1", "bundle-a", { gpuPolicy: { mutexGroup: "g" } }),
     "chat-b": dockerProv("http://127.0.0.1:8004/v1", "bundle-b", { gpuPolicy: { mutexGroup: "g" } }),
-    "ext-default": { baseUrl: "http://10.0.0.126:8030/v1", host: "cloud", bundleId: null, gpuPolicy: { mutexGroup: "g", defaultMember: true, engine: ENGINE } },
+    "ext-default": { baseUrl: "http://10.0.0.203:8030/v1", host: "cloud", bundleId: null, gpuPolicy: { mutexGroup: "g", defaultMember: true, engine: ENGINE } },
   } };
   const g = _internals.getMutexGroups(cfg).get("g");
   assert.equal(g.default, null, "idle-revert must never revert TO an external engine");

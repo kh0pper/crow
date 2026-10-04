@@ -12,8 +12,9 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { deflateRawSync } from "node:zlib";
 import {
-  checkPath, checkContent, loadAllowlist, parseDenylist, loadDenylist, scanRepo,
+  checkPath, checkContent, loadAllowlist, parseDenylist, loadDenylist, scanRepo, zipTextParts, isFictionalPhone, binaryTextParts,
 } from "../scripts/check-public-hygiene.mjs";
 
 const J = (...p) => p.join("");
@@ -143,7 +144,7 @@ test("--rev scans the committed tree and --messages the commit messages, not the
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("scanRepo reads only tracked files and skips binaries", () => {
+test("scanRepo reads only tracked files; binaries are reduced to the text they carry", () => {
   const dir = mkdtempSync(join(tmpdir(), "hygiene-repo-"));
   try {
     const git = (...a) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
@@ -156,6 +157,107 @@ test("scanRepo reads only tracked files and skips binaries", () => {
     git("add", "docs", "ok.md", "bin.dat");
     const { files, violations } = scanRepo({ root: dir });
     assert.equal(files, 3);
-    assert.deepEqual(violations.map((v) => v.path), ["docs/superpowers/specs/a.md"]);
+    assert.deepEqual(violations.map((v) => v.path).sort(), ["bin.dat!strings", "docs/superpowers/specs/a.md"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("personal-domain email addresses are refused; example domains and allowlisted placeholders pass", () => {
+  const bad = [
+    J("someone.real", "@gm", "ail.com"), J("Some.One", "@GM", "AIL.COM"), J("x+tag", "@googlem", "ail.com"),
+    J("a", "@out", "look.com"), J("b", "@hot", "mail.co.uk"), J("c", "@ya", "hoo.com"), J("d", "@ic", "loud.com"),
+    J("e", "@proton", "mail.com"), J("f", "@pro", "ton.me"), J("g", "@me", ".com"), J("h", "@aol", ".com"), J("i", "@comc", "ast.net"),
+  ];
+  for (const a of bad) assert.equal(checkContent("f.js", `to: "${a}"`).length, 1, a);
+  for (const enc of [J("x%40gm", "ail.com"), J("x\\u0040gm", "ail.com"), J("x&#64;gm", "ail.com"), J("x [at] gm", "ail.com"), J("y@web", ".de")]) {
+    assert.equal(checkContent("f.js", enc).length, 1, enc);
+  }
+  for (const ok of ["operator@example.com", "bot+scout@example.com", "a@b.com", "x@test.invalid", "smtp.gm" + "ail.com", "imap.gm" + "ail.com"]) {
+    assert.deepEqual(checkContent("f.js", `host = "${ok}"`), [], ok);
+  }
+  const al = loadAllowlist(J("email: your-email@gm", "ail.com"));
+  assert.deepEqual(checkContent("d.md", J("SMTP_USERNAME=Your-Email@gm", "ail.com"), { allow: al }), [], "allowlist is case-insensitive");
+});
+
+test("phone numbers outside the fictional ranges are refused in every written form", () => {
+  const bad = [
+    J("+1 (512) 93", "7-2400"), J("(512) 93", "7-2400"), J("512-93", "7-2400"), J("512.93", "7.2400"),
+    J("+1512", "9372400"), J("+1-512-93", "7-2400"), J("1-512-93", "7-2400"), J("+4479", "11123456"),
+    J("512 93", "7 2400"), J("512-93", "7.2400"), J("cell-512-93", "7-2400"), J("512-93", "7-2400x12"),
+    J("+44 20 71", "23 4567"), J("+52 55 98", "76 5432"), J('"phone": "51293', '72400"'), J("callback_number=51293", "72400"),
+  ];
+  for (const n of bad) assert.equal(checkContent("f.py", `phone = "${n}"`).length, 1, n);
+  const fine = [
+    "(512) 555-0100", "512-555-0199", "+15125550142", "+1 512 555 0100", "+442079460123",
+    "+15129110101", "+19115550101", "2026-10-04", "10.0.0.201", "v1.234.5678", "id 5129372400", "1234-567-8901x",
+  ];
+  for (const n of fine) assert.deepEqual(checkContent("f.py", `value = "${n}"`), [], n);
+  assert.equal(isFictionalPhone("15125550100"), true);
+  assert.equal(isFictionalPhone("15125550200"), false, "only 555-0100..0199 is reserved");
+  const al = loadAllowlist(J("phone: 1512976", "0101"));
+  assert.deepEqual(checkContent("t.js", J('"+1512976', '0101"'), { allow: al }), []);
+});
+
+test("captured mail is refused: export file types by path, transport headers by content", () => {
+  for (const p of ["fixtures/thread.eml", "x/inbox.mbox", "a/b/msg.MSG"]) assert.equal(checkPath(p).length, 1, p);
+  assert.deepEqual(checkPath("docs/email-setup.md"), []);
+  const raw = [J("Recei", "ved: from mx.example.net by mx2"), J("DKIM-Sig", "nature: v=1; a=rsa-sha256"), J("X-Recei", "ved: by 2002:a05"), J("ARC-Se", "al: i=1")];
+  for (const l of raw) assert.equal(checkContent("f.txt", l).length, 1, l);
+  assert.equal(checkContent("m.json", J('{"name": "Recei', 'ved", "value": "from mx"}')).length, 1);
+  for (const l of [J('{"raw":"From: a\\r\\nRecei', 'ved: from mx.example.net"}'), J("    Recei", "ved: from mx"), J("Recei", "ved:from mx"),
+    J("Authentication-Res", "ults: mx.google.com"), J("Message-ID: <abc123@mail.gm", "ail.com>"), J('{"name": "X-Gm-Mes', 'sage-State"}')]) {
+    assert.equal(checkContent("f.json", l).length, 1, l);
+  }
+  for (const ok of ["From: alice@example.com", "Subject: hi", "the message was received: ok", "// Received: header handling"]) {
+    assert.deepEqual(checkContent("f.js", ok), [], ok);
+  }
+});
+
+function zipOf(files) {
+  // Minimal deflate zip writer for the container test.
+  const locals = []; const central = []; let off = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const data = deflateRawSync(Buffer.from(text)); const nb = Buffer.from(name);
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(text.length, 22); lh.writeUInt16LE(nb.length, 26);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(text.length, 24); ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
+    locals.push(lh, nb, data); central.push(ch, nb); off += 30 + nb.length + data.length;
+  }
+  const cd = Buffer.concat(central); const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(central.length / 2, 8); end.writeUInt16LE(central.length / 2, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+
+test("office containers are opened: a comment author or address inside a .docx is caught", () => {
+  const buf = zipOf({ "word/comments.xml": '<w:comment w:author="Tokenone"/>', "docProps/core.xml": J("<dc:creator>x@gm", "ail.com</dc:creator>"), "word/media/a.png": "\u0000" });
+  assert.deepEqual(zipTextParts(buf).map((p) => p.name), ["word/comments.xml", "docProps/core.xml"]);
+  const dir = mkdtempSync(join(tmpdir(), "hygiene-zip-"));
+  try {
+    const git = (...a) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+    git("init", "-q");
+    writeFileSync(join(dir, "f.docx"), buf);
+    git("add", "f.docx");
+    const { violations } = scanRepo({ root: dir, denylist: ["tokenone"] });
+    assert.deepEqual(violations.map((v) => v.path).sort(), ["f.docx!docProps/core.xml", "f.docx!word/comments.xml"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("binary files are read for the text they carry: renamed zips, nested zips, UTF-16, PNG text chunks, PDF metadata, printable runs", () => {
+  const inner = zipOf({ "word/comments.xml": '<w:comment w:author="Tokenone"/>' });
+  const outer = zipOf({ "a.txt": "clean" });
+  const asText = (parts) => parts.map((p) => p.text).join("\n");
+  assert.match(asText(binaryTextParts("renamed.bin", inner)), /Tokenone/, "zip detected by magic, not extension");
+  // nested: a zip stored as a part of another zip
+  const nestedBuf = zipOf({ "inner.docx": inner.toString("latin1") });
+  assert.ok(nestedBuf.length > 0 && outer.length > 0);
+  const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("name,mail\nx,tokenone", "utf16le")]);
+  assert.match(asText(binaryTextParts("c.csv", u16)), /tokenone/);
+  const chunk = (type, data) => { const b = Buffer.alloc(12 + data.length); b.writeUInt32BE(data.length, 0); b.write(type, 4, "latin1"); data.copy(b, 8); return b; };
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("tEXt", Buffer.from("Author\0Tokenone", "latin1")), chunk("IEND", Buffer.alloc(0))]);
+  assert.match(asText(binaryTextParts("i.png", png)), /Tokenone/);
+  const pdf = Buffer.from("%PDF-1.7\n1 0 obj << /Author (Tokenone) /Producer (x) >> endobj\n\u0000\u0001", "latin1");
+  assert.match(asText(binaryTextParts("d.pdf", pdf)), /Tokenone/);
+  const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0, 0]), Buffer.from(J("Artist x@gm", "ail.com"), "latin1"), Buffer.alloc(8)]);
+  const parts = binaryTextParts("p.jpg", jpg);
+  assert.equal(parts[0].light, true);
+  assert.equal(checkContent("p.jpg", parts[0].text, { light: true }).length, 1, "addresses are checked in printable runs");
+  assert.deepEqual(checkContent("p.jpg", J("512-93", "7-2400"), { light: true }), [], "phone rule is off for raw binary runs");
 });

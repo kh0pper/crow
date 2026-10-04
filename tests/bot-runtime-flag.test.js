@@ -31,7 +31,7 @@ test("explicit bot_runtime:true wins regardless of host", async () => {
 });
 
 test("explicit bot_runtime:false wins", async () => {
-  process.env.CROW_DATA_DIR = "/home/kh0pp/.crow-mpa/data"; // would otherwise be true
+  process.env.CROW_DATA_DIR = "/home/alex/.crow-mpa/data"; // would otherwise be true
   assert.equal(await botRuntimeActive(dbWith(JSON.stringify({ bot_runtime: false }))), false);
 });
 
@@ -40,6 +40,6 @@ test("no flag -> defaults to MPA host detection (general instance = false)", asy
 });
 
 test("no flag -> MPA host = true", async () => {
-  process.env.CROW_HOME = "/home/kh0pp/.crow-mpa";
+  process.env.CROW_HOME = "/home/alex/.crow-mpa";
   assert.equal(await botRuntimeActive(dbWith(null)), true);
 });

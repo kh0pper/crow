@@ -51,11 +51,11 @@ test("emit door: peer_display_name / peer_avatar ride the wire (not in EXCLUDED_
   const { mgr, entries } = makeManager();
   const ts = await mgr.emitChange("contacts", "update", {
     crow_id: "crow:pw-emit", ed25519_pubkey: "e", secp256k1_pubkey: secp(901), display_name: "Typed",
-    peer_display_name: "Kevin", peer_avatar: PNG,
+    peer_display_name: "Casey", peer_avatar: PNG,
   });
   assert.ok(typeof ts === "number");
   assert.equal(entries.length, 1);
-  assert.equal(entries[0].row.peer_display_name, "Kevin");
+  assert.equal(entries[0].row.peer_display_name, "Casey");
   assert.equal(entries[0].row.peer_avatar, PNG);
 });
 
@@ -63,11 +63,11 @@ test("apply door: insert + update copy the peer fields; a hostile name is saniti
   const { mgr, db } = makeManager();
   await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "insert", {
     crow_id: "crow:pw-ins", ed25519_pubkey: "e", secp256k1_pubkey: secp(902), display_name: "Typed",
-    avatar_url: "https://example.com/local.png", peer_display_name: "Kevin", peer_avatar: PNG,
+    avatar_url: "https://example.com/local.png", peer_display_name: "Casey", peer_avatar: PNG,
   }, 50));
   let row = await byCrow(db, "crow:pw-ins");
   assert.ok(row, "inserted");
-  assert.equal(row.peer_display_name, "Kevin");
+  assert.equal(row.peer_display_name, "Casey");
   assert.equal(row.peer_avatar, PNG);
   assert.equal(row.display_name, "Typed");
   assert.equal(row.avatar_url, "https://example.com/local.png");
@@ -100,13 +100,13 @@ test("apply door: insert + update copy the peer fields; a hostile name is saniti
 test("apply door: an entry WITHOUT the peer keys (an older sender) leaves the stored peer fields alone", async () => {
   const { mgr, db } = makeManager();
   await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "insert", {
-    crow_id: "crow:pw-old", ed25519_pubkey: "e", secp256k1_pubkey: secp(903), display_name: "T", peer_display_name: "Kevin", peer_avatar: PNG,
+    crow_id: "crow:pw-old", ed25519_pubkey: "e", secp256k1_pubkey: secp(903), display_name: "T", peer_display_name: "Casey", peer_avatar: PNG,
   }, 60));
   await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "update", {
     crow_id: "crow:pw-old", ed25519_pubkey: "e", secp256k1_pubkey: secp(903), display_name: "T2",
   }, 61));
   const row = await byCrow(db, "crow:pw-old");
   assert.equal(row.display_name, "T2");
-  assert.equal(row.peer_display_name, "Kevin", "absent key = not on the wire = untouched");
+  assert.equal(row.peer_display_name, "Casey", "absent key = not on the wire = untouched");
   assert.equal(row.peer_avatar, PNG);
 });

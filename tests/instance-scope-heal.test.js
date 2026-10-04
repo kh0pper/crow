@@ -171,14 +171,14 @@ test("heal: (k) EMPTY-STRING updated_at precedence — '' behaves like NULL on b
       await seedOverride(db, localId, "tts_voice", "af_bella", "");
       await seedGlobal(db, "tts_voice", "en-US-BrianNeural", "2026-07-01 10:00:00");
       // BOTH '' → override wins (globalTs '' short-circuits first)
-      await seedOverride(db, localId, "discovery_name", "Crow of Kevin", "");
+      await seedOverride(db, localId, "discovery_name", "Crow of Casey", "");
       await seedGlobal(db, "discovery_name", "old-name", "");
 
       const n = await healInstanceScopeOverridesOnce(db);
       assert.equal(n, 2, "language + discovery_name promoted");
       assert.equal(await globalValue(db, "language"), "es", "global-ts-'' → override wins");
       assert.equal(await globalValue(db, "tts_voice"), "en-US-BrianNeural", "override-ts-'' → global wins");
-      assert.equal(await globalValue(db, "discovery_name"), "Crow of Kevin", "both-'' → override wins");
+      assert.equal(await globalValue(db, "discovery_name"), "Crow of Casey", "both-'' → override wins");
       assert.equal(await overrideCount(db, "tts_voice"), 0, "losing override deleted");
       assert.equal(await overrideCount(db, "language"), 0);
       assert.equal(await overrideCount(db, "discovery_name"), 0);

@@ -187,10 +187,10 @@ test("contacts marks never carry a world name in either direction", async () => 
     visibility: "contacts", reveal: "open",
     content: { content_text: "for my people", content_kind: "none" },
   });
-  const payload = markPayload({ ...row, author_name: "Kevin" });
+  const payload = markPayload({ ...row, author_name: "Casey" });
   assert.equal(payload.author_name, undefined);
   assert.equal(payload.name, undefined);
-  const back = payloadToMark({ ...payload, author_name: "Kevin", name: "Kevin" }, { author: PK, eventId: "evt-n" });
+  const back = payloadToMark({ ...payload, author_name: "Casey", name: "Casey" }, { author: PK, eventId: "evt-n" });
   assert.equal(back.author_name, undefined, "a contact is named from the contacts table, never from the payload");
 });
 
@@ -199,12 +199,12 @@ test("contactsByPubkey: the display rule (typed name unless a placeholder, then 
   const JPG = "data:image/jpeg;base64," + "B".repeat(32);
   const k = (ch) => ch.repeat(64);
   await db.executeMultiple(`
-    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, peer_display_name, peer_avatar) VALUES ('crow:ph', 'crow:ph', '02${k("1")}', 'Kevin', '${PNG}');
-    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, avatar_url, peer_display_name, peer_avatar) VALUES ('crow:typed', 'My Friend', '02${k("2")}', 'https://example.com/me.png', 'Kevin', '${JPG}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, peer_display_name, peer_avatar) VALUES ('crow:ph', 'crow:ph', '02${k("1")}', 'Casey', '${PNG}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, avatar_url, peer_display_name, peer_avatar) VALUES ('crow:typed', 'My Friend', '02${k("2")}', 'https://example.com/me.png', 'Casey', '${JPG}');
     INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, avatar_url, peer_avatar) VALUES ('crow:localpic', 'Pic', '02${k("3")}', '${PNG}', '${JPG}');
     INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:bare', 'crow:bare', '${k("4")}');`);
   const m = await contactsByPubkey(db);
-  assert.deepEqual(m.get(k("1")), { crow_id: "crow:ph", name: "Kevin", avatar: PNG }, "a placeholder yields to the peer's name; the peer's picture shows");
+  assert.deepEqual(m.get(k("1")), { crow_id: "crow:ph", name: "Casey", avatar: PNG }, "a placeholder yields to the peer's name; the peer's picture shows");
   assert.deepEqual(m.get(k("2")), { crow_id: "crow:typed", name: "My Friend", avatar: JPG }, "a typed name wins; a URL picture falls through to the peer's");
   assert.deepEqual(m.get(k("3")), { crow_id: "crow:localpic", name: "Pic", avatar: PNG }, "a local inline picture beats the peer's");
   assert.deepEqual(m.get(k("4")), { crow_id: "crow:bare", name: "crow:bare", avatar: null }, "nothing known: the id, no picture");

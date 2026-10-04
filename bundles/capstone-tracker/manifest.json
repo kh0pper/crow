@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "PIR / notes / advocacy subsystems extracted from canvas-companion. Custom FastAPI bundle with bundle-owned SQLite at ~/.crow/data/capstone-tracker/capstone.db. E-reader deferred to Phase 4a.5.",
   "type": "bundle",
-  "author": "kh0pp",
+  "author": "Crow",
   "category": "research",
   "tags": ["pir", "research", "notes", "advocacy", "capstone"],
   "icon": "book",

@@ -59,12 +59,12 @@ test("isEstablishedContact: NULL/undefined/'accepted' are established; 'pending'
 });
 
 test("buildProfileMessage: the crow_social envelope with subtype profile; sanitized name, validated picture, nulls propagate", () => {
-  const env = JSON.parse(buildProfileMessage({ displayName: "  Kevin\u202e ", avatar: PNG }));
+  const env = JSON.parse(buildProfileMessage({ displayName: "  Casey\u202e ", avatar: PNG }));
   assert.equal(env.type, "crow_social");
   assert.equal(env.version, 1);
   assert.equal(env.subtype, PROFILE_SUBTYPE);
   assert.equal(PROFILE_SUBTYPE, "profile");
-  assert.deepEqual(env.payload, { v: 1, display_name: "Kevin", avatar: PNG });
+  assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG });
   assert.deepEqual(JSON.parse(buildProfileMessage({})).payload, { v: 1, display_name: null, avatar: null }, "a cleared profile is sent as nulls");
   assert.deepEqual(JSON.parse(buildProfileMessage({ displayName: "crow:x", avatar: "https://x/y.png" })).payload, { v: 1, display_name: null, avatar: null });
 });
@@ -88,17 +88,17 @@ test("applyPeerProfile: undefined leaves a field alone, a string sets it (saniti
   __setEmitSinkForTest({ emitChange: async (table, op, row) => { emits.push({ table, op, crow_id: row.crow_id, peer: row.peer_display_name }); return 1; }, feedsDisabled: false });
   try {
     const id = await seed(db, { crowId: "crow:pal", secp: pk("a"), name: "My Friend", extra: { avatar_url: "https://example.com/local.png" } });
-    let r = await applyPeerProfile(db, id, { displayName: "  Kevin  ", avatar: PNG });
+    let r = await applyPeerProfile(db, id, { displayName: "  Casey  ", avatar: PNG });
     assert.equal(r.changed, true);
     let row = await rowOf(db, id);
-    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_display_name, "Casey");
     assert.equal(row.peer_avatar, PNG);
     assert.equal(row.display_name, "My Friend", "the typed name is untouched");
     assert.equal(row.avatar_url, "https://example.com/local.png", "the local picture is untouched");
     r = await applyPeerProfile(db, id, { avatar: JPG });
     assert.equal(r.changed, true);
     row = await rowOf(db, id);
-    assert.equal(row.peer_display_name, "Kevin", "undefined = left alone");
+    assert.equal(row.peer_display_name, "Casey", "undefined = left alone");
     assert.equal(row.peer_avatar, JPG);
     r = await applyPeerProfile(db, id, { displayName: null, avatar: "https://example.com/not-inline.png" });
     row = await rowOf(db, id);
@@ -109,7 +109,7 @@ test("applyPeerProfile: undefined leaves a field alone, a string sets it (saniti
     assert.equal((await applyPeerProfile(db, id, {})).changed, false, "nothing given, nothing done");
     assert.equal((await applyPeerProfile(db, 999999, { displayName: "X" })).changed, false, "unknown contact");
     assert.deepEqual(emits.map((e) => [e.table, e.op, e.crow_id]), [["contacts", "update", "crow:pal"], ["contacts", "update", "crow:pal"], ["contacts", "update", "crow:pal"]], "exactly one emit per real change");
-    assert.equal(emits[0].peer, "Kevin", "the emitted row carries the peer field");
+    assert.equal(emits[0].peer, "Casey", "the emitted row carries the peer field");
   } finally { __setEmitSinkForTest(null); cleanup(); }
 });
 
@@ -120,12 +120,12 @@ test("handleProfileMessage: accepted from a FULL unblocked contact; dropped from
     const full = await seed(db, { crowId: "crow:full", secp: pk("1"), name: "crow:full" });
     await seed(db, { crowId: "req:" + xonly("2"), secp: xonly("2"), name: null, extra: { request_status: "pending" } });
     const blocked = await seed(db, { crowId: "crow:blocked", secp: pk("3"), name: "Blocked", extra: { is_blocked: 1 } });
-    const payload = { v: 1, display_name: "Kevin", avatar: PNG };
+    const payload = { v: 1, display_name: "Casey", avatar: PNG };
 
     let r = await handleProfileMessage(db, payload, xonly("1"));
     assert.deepEqual([r.applied, r.changed, r.contactId], [true, true, full]);
     let row = await rowOf(db, full);
-    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_display_name, "Casey");
     assert.equal(row.peer_avatar, PNG);
     assert.equal(row.display_name, "crow:full", "the profile message never writes display_name — even over a placeholder");
 
@@ -139,7 +139,7 @@ test("handleProfileMessage: accepted from a FULL unblocked contact; dropped from
     const accepted = await seed(db, { crowId: "crow:acc", secp: pk("7"), name: "crow:acc", extra: { request_status: "accepted" } });
     r = await handleProfileMessage(db, payload, xonly("7"));
     assert.deepEqual([r.applied, r.changed, r.contactId], [true, true, accepted], "an ACCEPTED request is an established contact (R2-1)");
-    assert.equal((await rowOf(db, accepted)).peer_display_name, "Kevin");
+    assert.equal((await rowOf(db, accepted)).peer_display_name, "Casey");
 
     r = await handleProfileMessage(db, payload, xonly("3"));
     assert.deepEqual([r.applied, r.reason], [false, "blocked"]);
@@ -182,9 +182,9 @@ test("the profile subtype reaches handleProfileMessage through the REAL receive 
     };
     await wireNostrReceive(managers);
     assert.ok(handlers, "the ladder was captured");
-    await handlers.onSocial("profile", { v: 1, display_name: "Ladder Kevin", avatar: JPG }, xonly("4"));
+    await handlers.onSocial("profile", { v: 1, display_name: "Ladder Casey", avatar: JPG }, xonly("4"));
     const row = await rowOf(db, full);
-    assert.equal(row.peer_display_name, "Ladder Kevin");
+    assert.equal(row.peer_display_name, "Ladder Casey");
     assert.equal(row.peer_avatar, JPG);
     await handlers.onSocial("profile", { v: 1, display_name: "Nope", avatar: JPG }, xonly("5"));
     assert.equal(Number((await db.execute("SELECT COUNT(*) AS n FROM contacts")).rows[0].n), 1, "a stranger on the ladder creates nothing");
@@ -194,7 +194,7 @@ test("the profile subtype reaches handleProfileMessage through the REAL receive 
 test("profileRecipients + broadcastProfile: every full unblocked human keyed contact, once; failures counted, not thrown; no manager = skipped", async () => {
   const { db, cleanup } = freshDb();
   try {
-    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Kevin', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG] });
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Casey', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG] });
     await seed(db, { crowId: "crow:full", secp: pk("a"), name: "Full" });
     await seed(db, { crowId: "crow:full2", secp: xonly("b"), name: "Full x-only" });
     await seed(db, { crowId: "crow:blocked", secp: pk("c"), name: "B", extra: { is_blocked: 1 } });
@@ -213,7 +213,7 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
     assert.deepEqual(sent.map((s) => s.contact.secp256k1_pubkey), [pk("a"), xonly("b"), pk("e")]);
     const env = JSON.parse(sent[0].content);
     assert.equal(env.subtype, "profile");
-    assert.deepEqual(env.payload, { v: 1, display_name: "Kevin", avatar: PNG });
+    assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG });
     assert.equal(await readBroadcastPending(db), false, "a clean fan-out clears the pending flag");
 
     let n = 0;
@@ -231,7 +231,7 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
 test("broadcastProfile: a zero-relay publish (every relay refused, e.g. a >64KB avatar over the default relay ceiling) is a failure, not a success — the pending flag stays set (fix round, item 1, CRITICAL)", async () => {
   const { db, cleanup } = freshDb();
   try {
-    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Kevin', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG] });
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Casey', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG] });
     await seed(db, { crowId: "crow:full", secp: pk("a"), name: "Full" });
 
     const zeroRelays = { sendControl: async () => ({ eventId: "e", relays: [] }) };

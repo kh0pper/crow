@@ -60,7 +60,7 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
     return `<d:propstat><d:prop>
 <d:getetag>${xmlEsc(n.etag)}</d:getetag><d:getlastmodified>${new Date(n.mtime * 1000).toUTCString()}</d:getlastmodified>
 ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/><d:getcontentlength>${n.bytes.length}</d:getcontentlength><d:getcontenttype>${n.mime || "application/octet-stream"}</d:getcontenttype>`}
-<oc:fileid>${n.fileId}</oc:fileid><oc:permissions>${n.perms}</oc:permissions><oc:owner-id>${n.owner}</oc:owner-id><oc:owner-display-name>${n.owner === "admin" ? "Kevin" : n.owner}</oc:owner-display-name>
+<oc:fileid>${n.fileId}</oc:fileid><oc:permissions>${n.perms}</oc:permissions><oc:owner-id>${n.owner}</oc:owner-id><oc:owner-display-name>${n.owner === "admin" ? "Casey" : n.owner}</oc:owner-display-name>
 <nc:lock>${lock ? 1 : ""}</nc:lock>${lock ? `<nc:lock-owner-type>${lock.type}</nc:lock-owner-type>${lock.owner == null ? "" : `<nc:lock-owner>${xmlEsc(lock.owner)}</nc:lock-owner>`}${(lock.displayName ?? lock.owner) == null ? "" : `<nc:lock-owner-displayname>${xmlEsc(lock.displayName ?? lock.owner)}</nc:lock-owner-displayname>`}<nc:lock-time>${lock.time || clockS}</nc:lock-time>` : ""}
 </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>`;
   };
@@ -151,7 +151,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
     }
     // ---- principals ----
     const pm = u.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
-    if (pm && req.method === "PROPFIND") { const names = { admin: "Kevin", alex: "Alex", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname><cal:calendar-user-address-set><d:href>mailto:${pm[1]}@crow.test</d:href></cal:calendar-user-address-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
+    if (pm && req.method === "PROPFIND") { const names = { admin: "Casey", alex: "Alex", "crow-bot": "Crow bot" }; return names[pm[1]] ? send(207, ms(`<d:response><d:href>${u}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname><cal:calendar-user-address-set><d:href>mailto:${pm[1]}@crow.test</d:href></cal:calendar-user-address-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)) : send(404); }
     // ---- OCS ----
     const cfgm = u.match(/^\/ocs\/v2\.php\/apps\/onlyoffice\/api\/v1\/config\/(\d+)/);
     if (cfgm) { const id = Number(cfgm[1]); if (!state.keys.has(id)) state.keys.set(id, `k${id}`); res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ document: { key: state.keys.get(id) }, editorConfig: { user: { id: `${instance}_crow-bot` } } })); }

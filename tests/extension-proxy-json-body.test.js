@@ -125,7 +125,7 @@ test("a JSON POST through the extension proxy delivers its body to the backend",
   installWebUiBundle("perch-hub", { port: up.port });
   const gw = await startGateway();
   try {
-    const payload = { cwd: "/home/kh0pp/r4-tehcy", prompt: "hello" };
+    const payload = { cwd: "/home/alex/r4-acme", prompt: "hello" };
     const res = await post(gw.port, "/proxy/perch-hub/api/hub/spawn", payload);
 
     assert.equal(res.status, 200, "the proxied POST must complete, not hang");
@@ -147,7 +147,7 @@ test("the forwarded Content-Length matches the bytes actually sent", async () =>
   installWebUiBundle("perch-hub", { port: up.port });
   const gw = await startGateway();
   try {
-    const payload = { cwd: "/home/kh0pp/r4-tehcy", note: "café ☕ über — naïve" };
+    const payload = { cwd: "/home/alex/r4-acme", note: "café ☕ über — naïve" };
     const res = await post(gw.port, "/proxy/perch-hub/api/hub/spawn", payload);
 
     assert.equal(res.status, 200);

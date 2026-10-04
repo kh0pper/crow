@@ -122,3 +122,16 @@ test("generalLimiterSkip: dashboard, glasses, llm AND every Ramble surface are e
   assert.equal(skip("/api/other", ["/api/other"]), true, "an operator prefix is honoured");
   assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/ramble/") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/ramble/"));
 });
+
+// Kiosk (preflight ruling F2): the display page polls pair/status every 2 s
+// (300 req / 10 min > the 200 / 15 min general bucket). Every kiosk surface has
+// its own gate (pair/start its own limiter, admin = dashboard session, session =
+// hello token, internal = loopback + announce token).
+test("generalLimiterSkip: the kiosk display page and /api/kiosk/ are exempt; lookalikes are not", () => {
+  const skip = (path) => generalLimiterSkip({ path });
+  for (const p of ["/display", "/display/assets/kiosk.js", "/api/kiosk/pair/status", "/api/kiosk/pair/start", "/api/kiosk/admin/displays"]) {
+    assert.equal(skip(p), true, p);
+  }
+  for (const p of ["/api/kioskx", "/kiosk", "/api/other"]) assert.equal(skip(p), false, p);
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/display") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/kiosk/"));
+});

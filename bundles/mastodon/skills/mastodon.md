@@ -88,7 +88,7 @@ mastodon_post {
 
 ```
 mastodon_post_with_media {
-  "file_path": "/home/kev/photos/sunset.jpg",
+  "file_path": "/home/alex/photos/sunset.jpg",
   "caption": "Dusk over the ridge",
   "alt_text": "Orange and purple sky over a forested ridge",
   "visibility": "public"

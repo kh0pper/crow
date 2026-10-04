@@ -1,0 +1,65 @@
+/* Crow kiosk — 800×480 landscape first, single column under 600 px. Colors from PERCH_TOKENS via theme.css (--k-*). */
+/* The hidden attribute must win over any class display (.k-pairing/.k-windows are display:grid): smoke A1 2026-10-04. */
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--k-sky); color: var(--k-ink); font-family: system-ui, sans-serif; font-size: 20px; line-height: 1.35; overflow: hidden; -webkit-user-select: none; user-select: none; }
+button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; border: 0; background: none; cursor: pointer; touch-action: manipulation; }
+.k-app { display: grid; grid-template-rows: 48px 1fr auto; height: 100vh; padding: 8px 16px; gap: 8px; }
+.k-top { display: flex; align-items: baseline; gap: 16px; }
+.k-clock { font-size: 34px; font-weight: 700; }
+.k-date { color: var(--k-dim); }
+.k-stage { display: grid; grid-template-columns: 2fr 3fr; gap: 16px; min-height: 0; }
+.k-bird { position: relative; display: grid; place-items: center; border-radius: 24px; background: var(--k-card); border: 1px solid var(--k-line); }
+.k-bird-art, .k-bird-svg { width: min(100%, 300px); aspect-ratio: 1; display: block; }
+.k-ring { position: absolute; inset: 12%; border-radius: 50%; border: 6px solid var(--k-teal); opacity: 0; }
+.k-dots { position: absolute; bottom: 14%; display: flex; gap: 8px; opacity: 0; }
+.k-dots i { width: 12px; height: 12px; border-radius: 50%; background: var(--k-teal); }
+/* Idle breathing animates the HTML wrapper (compositor-only). CSS transforms are NEVER put on hook
+   groups that carry an SVG transform attribute (rb-bird, rb-beak, rb-tail, rb-wing): CSS would replace
+   the attribute and move the bird (review M3). SVG-child animation repaints on the main thread, so it
+   runs only while listening/thinking/speaking, never at idle. */
+.k-bird-art { will-change: transform; }
+.is-idle .k-bird-art { animation: k-breath 6s ease-in-out infinite; }
+.k-bird-svg .rb-head, .k-bird-svg .rb-eye, .k-bird-svg .rb-beak-lower { transform-box: fill-box; transform-origin: center; }
+.k-bird-svg .rb-beak-lower { transform-origin: 0% 50%; transform: rotate(calc(var(--beak, 0) * 24deg)); }
+.blink .rb-eye { transform: scaleY(0.12); }
+.is-listening .rb-head { transform: rotate(-8deg); transition: transform .25s; }
+.is-listening .k-ring { animation: k-pulse 1.4s ease-out infinite; }
+.is-thinking .rb-head { animation: k-bob 1s ease-in-out infinite; }
+.is-thinking .k-dots { opacity: 1; }
+.is-thinking .k-dots i { animation: k-dot 1s ease-in-out infinite; }
+.is-thinking .k-dots i:nth-child(2) { animation-delay: .15s; }
+.is-thinking .k-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes k-breath { 50% { transform: scale(1.03); } }
+@keyframes k-pulse { 0% { opacity: .7; transform: scale(.9); } 100% { opacity: 0; transform: scale(1.15); } }
+@keyframes k-bob { 50% { transform: translateY(-4px) rotate(4deg); } }
+@keyframes k-dot { 50% { opacity: .2; } }
+.k-windows { min-height: 0; display: grid; grid-template-rows: auto 1fr; gap: 8px; }
+.k-tabs { display: flex; gap: 8px; overflow-x: auto; }
+.k-tabs button { padding: 0 16px; border-radius: 28px; background: var(--k-card); border: 1px solid var(--k-line); }
+.k-tabs .is-active { background: var(--k-teal-soft); border-color: var(--k-teal); }
+.k-win { position: relative; overflow: auto; padding: 16px 64px 16px 20px; border-radius: 20px; background: var(--k-card); border: 1px solid var(--k-line); touch-action: pan-y; }
+.k-win-title { margin: 0 0 8px; font-size: 26px; }
+.k-win-close { position: absolute; top: 4px; right: 4px; font-size: 32px; }
+.k-timer { font-size: 72px; font-weight: 700; margin: 8px 0; font-variant-numeric: tabular-nums; }
+.k-steps .is-current { font-weight: 700; color: var(--k-teal); }
+.k-step-of, .k-sub { color: var(--k-dim); font-size: 20px; }
+.k-win-timer.is-done { position: fixed; inset: 0; z-index: 10; display: grid; place-content: center; text-align: center; border-radius: 0; background: var(--k-teal); color: var(--k-card); }
+.k-captions { min-height: 64px; }
+.k-captions p { margin: 0; }
+.k-cap-user { color: var(--k-dim); }
+.k-cap-bot { font-size: 22px; }
+.k-mic { position: fixed; right: 16px; bottom: 16px; min-height: 56px; padding: 0 24px; border-radius: 28px; background: var(--k-teal); color: var(--k-card); font-weight: 700; }
+.k-pairing { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; background: var(--k-sky); }
+.k-pair-code { font-size: 96px; font-weight: 800; letter-spacing: .08em; margin: 8px 0; color: var(--k-teal); font-variant-numeric: tabular-nums; }
+.k-debug { position: fixed; left: 8px; right: 8px; top: 48px; z-index: 20; max-height: 70vh; overflow: auto; padding: 12px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-line); white-space: pre-wrap; font: 14px/1.4 ui-monospace, monospace; }
+.k-banner { position: fixed; left: 16px; right: 16px; top: 8px; padding: 12px 16px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-attn); }
+@media (max-width: 599px) {
+  .k-app { grid-template-rows: 40px auto 1fr auto; height: auto; min-height: 100vh; overflow: auto; }
+  html, body { overflow: auto; }
+  .k-stage { grid-template-columns: 1fr; }
+  .k-bird-art, .k-bird-svg { width: min(70vw, 260px); }
+  .k-captions { padding-bottom: 88px; }
+}
+@media (prefers-reduced-motion: reduce) { .k-bird *, .k-bird { animation: none !important; transition: none !important; } }
+.no-anim .k-bird *, .no-anim .k-bird { animation: none !important; transition: none !important; }
