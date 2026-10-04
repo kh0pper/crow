@@ -66,6 +66,18 @@ The AI uses `crow_register_instance` to add the satellite to the instance regist
 
 On the satellite, register the home instance the same way. Both sides need to know about each other.
 
+### Pairing over the network (cross-host credentials)
+
+To give two instances the credentials they use to call each other, pair them with `crow instance pair`:
+
+1. **On the peer** run `node scripts/cli/instance-pair.js --generate-otc`. It prints a one-time code. Add `CROW_ENROLL_ENABLED=1` and `CROW_ENROLL_OTC=<code>` to the peer gateway's environment (the repo `.env` or a systemd drop-in) and restart it.
+2. **On this instance** run `node scripts/cli/instance-pair.js --peer-url https://<peer>.<tailnet>.ts.net:<port> --otc <code>`.
+3. **On the peer** remove both variables and restart.
+
+The code works once and expires 30 minutes after the peer's gateway first sees it (`CROW_ENROLL_WINDOW_MINUTES`). Enrollment is only reachable over your tailnet or local network, never over Funnel.
+
+Re-pairing an instance the peer already trusts works the same way, as long as this instance still holds its old credentials for the peer (add `--peer-id <peer's instance id>` if the URL you type differs from the address stored for it). If it lost them, or the peer revoked it, the peer's operator first runs `node scripts/cli/instance-pair.js --allow-re-pair <this instance's id>` on the peer; without that the peer answers `409 already_paired` and changes nothing.
+
 ### 4. Verify Connectivity
 
 ```

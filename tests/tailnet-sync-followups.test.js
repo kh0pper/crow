@@ -34,6 +34,7 @@ import {
 } from "../servers/shared/self-dial-address.js";
 import { ensureLocalInstanceRegistered, selfPairingAddress } from "../servers/gateway/instance-registry.js";
 import { instanceEnrollRouter } from "../servers/gateway/routes/instance-enroll.js";
+import { writeRepairAllowance } from "../servers/shared/enroll-guard.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 
@@ -163,7 +164,7 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
   process.env.CROW_ENROLL_ENABLED = "1";
   process.env.CROW_GATEWAY_URL = "https://crow.example.ts.net"; // the public Funnel door
   delete process.env.CROW_PEER_GATEWAY_URL;
-  delete process.env.CROW_ENROLL_OTC;
+  process.env.CROW_ENROLL_OTC = "otc-one-xxxxxxxxxxxxxxxxxxxxxxxx"; // mandatory since ENROLL-OTC-OPTIONAL
   delete process.env.CROW_TAILNET_IP;
   process.env.PORT = "3001";
   try {
@@ -182,11 +183,19 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
       try {
         const post = async (body) => {
           const res = await fetch(`http://127.0.0.1:${srv.address().port}/instance/enroll-request`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+            method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "100.64.20.3" }, body: JSON.stringify(body), // as Serve forwards it
           });
           return { status: res.status, body: await res.json() };
         };
-        const base = { source_instance_id: "peerB", source_name: "B", source_outbound_bearer: "x".repeat(40), shared_signing_key: "k".repeat(40) };
+        let otc = process.env.CROW_ENROLL_OTC;
+        const base = { source_instance_id: "peerB", source_name: "B", source_outbound_bearer: "x".repeat(40), shared_signing_key: "k".repeat(40), get otc() { return otc; } };
+        // peerB is trusted after the first enroll: every later one needs a
+        // fresh single-use code AND the local operator's re-pair allowance.
+        const allowRePair = async (n) => {
+          otc = `otc-${n}-xxxxxxxxxxxxxxxxxxxxxxxxx`;
+          process.env.CROW_ENROLL_OTC = otc;
+          await writeRepairAllowance(db, "self", "peerB", { minutes: 5 });
+        };
         const r1 = await post({ ...base, source_gateway_url: "http://100.64.20.3:3001", source_tailscale_ip: "100.64.20.3", source_sync_port: 3001 });
         assert.equal(r1.status, 200);
         assert.equal(r1.body.peer_gateway_url, "https://crow.example.ts.net:8444", "the private Serve endpoint, not the Funnel URL");
@@ -201,10 +210,12 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
         // challenge-response pin intact — otherwise anyone who can reach the
         // endpoint while enrollment is on could downgrade the peer.
         await db.execute("INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES ('tailnet_sync_cr:peerB', 'self', '1', datetime('now'))");
+        await allowRePair(2);
         assert.equal((await post({ ...base, source_gateway_url: "http://100.64.20.3:3001" })).status, 200, "the enroll itself succeeds (pairing semantics unchanged)");
         assert.equal((await db.execute("SELECT value FROM dashboard_settings_overrides WHERE key = 'tailnet_sync_cr:peerB' AND instance_id = 'self'")).rows[0]?.value, "1", "CR pin intact after an inbound enroll");
 
         // An OLD peer re-pairing with its :443 CROW_GATEWAY_URL never replaces a dialable row.
+        await allowRePair(3);
         const r2 = await post({ ...base, source_gateway_url: "https://black-swan.example.ts.net", source_tailscale_ip: "8.8.8.8" });
         assert.equal(r2.status, 200);
         assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.64.20.3:3001", tailscale_ip: "100.64.20.3" }, "dialable row kept; non-tailnet IP ignored");

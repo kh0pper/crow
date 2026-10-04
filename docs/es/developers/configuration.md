@@ -33,7 +33,8 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 | `CROW_CSRF_STRICT` | habilitado | Define `0` solo como interruptor de emergencia para desactivar CSRF. |
 | `CORS_ALLOWED_ORIGINS` | *(sin definir)* | Lista de orígenes CORS permitidos, separados por comas. |
 | `CROW_ENROLL_ENABLED` | `0` | Permite la inscripción de nuevas instancias (emparejamiento). Habilítala solo mientras emparejas. |
-| `CROW_ENROLL_OTC` | *(sin definir)* | Código de un solo uso requerido para la inscripción cuando está definido. |
+| `CROW_ENROLL_OTC` | *(sin definir)* | Código de emparejamiento de un solo uso — **obligatorio** siempre que la inscripción esté habilitada (>= 16 caracteres; genéralo con `node scripts/cli/instance-pair.js --generate-otc`). Sin él se rechaza toda solicitud de inscripción. |
+| `CROW_ENROLL_WINDOW_MINUTES` | `30` | Cuánto tiempo sigue siendo válido un código de emparejamiento desde que el gateway lo ve por primera vez. |
 | `CROW_HOSTED` / `CROW_HOSTING_API_URL` / `CROW_HOSTING_AUTH_TOKEN` | *(sin definir)* | Solo para el modo de hosting administrado. |
 | `CROW_CROWDSEC_BOUNCER_KEY` / `CROW_CROWDSEC_LAPI_URL` | *(sin definir)* / `http://127.0.0.1:8091` | Integración con el bouncer de CrowdSec (bundle opcional). |
 

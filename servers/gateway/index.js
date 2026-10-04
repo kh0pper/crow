@@ -509,6 +509,9 @@ try {
   app.use(instanceEnrollRouter(createDbClient()));
   if (process.env.CROW_ENROLL_ENABLED === "1") {
     console.log("⚠ Instance enrollment ENABLED (POST /instance/enroll-request). Disable after pairing.");
+    if (String(process.env.CROW_ENROLL_OTC || "").length < 16) {
+      console.warn("⚠ CROW_ENROLL_OTC is unset or shorter than 16 characters — every enrollment will be refused. Generate one with `node scripts/cli/instance-pair.js --generate-otc`.");
+    }
   }
 } catch (err) {
   console.warn("[instance-enroll] Failed to mount:", err.message);
