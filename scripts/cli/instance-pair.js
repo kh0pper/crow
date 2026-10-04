@@ -33,7 +33,10 @@ import {
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../../servers/gateway/instance-registry.js";
-import { pickPeerGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState } from "../../servers/shared/self-dial-address.js";
+import {
+  pickPeerGatewayUrl, isTailnetAddress, rememberPeerSyncPort, forgetPeerHandshakeState,
+  isDialableGatewayUrl, gatewayUrlHost, ownTailnetSuffix,
+} from "../../servers/shared/self-dial-address.js";
 import {
   setPeerCreds,
   generateSecret,
@@ -41,6 +44,7 @@ import {
 } from "../../servers/shared/peer-credentials.js";
 import {
   generateEnrollOtc, ENROLL_OTC_MIN_LENGTH, repairProof, repairProofKey, sha256Hex as guardSha256, writeRepairAllowance, REPAIR_ALLOW_DEFAULT_MINUTES, REPAIR_ALLOW_MAX_MINUTES,
+  ENROLL_ID_RE, acceptableAdvertisedUrl, tailnetSuffix,
 } from "../../servers/shared/enroll-guard.js";
 import { loadPeerCreds } from "../../servers/shared/peer-credentials.js";
 import { createInterface } from "readline";
@@ -92,6 +96,19 @@ Re-pairing an instance the peer already knows:
   The proof is sent only for the peer whose stored address matches --peer-url
   (or the one named by --peer-id), is bound to that peer's id and this code,
   and never reveals the credentials.
+
+Refusals (checked on the peer's answer BEFORE anything is written here):
+  - the peer answers with an id other than --peer-id, or with this instance's
+    own id;
+  - the peer answers with the id of a peer this instance already knows
+    (trusted, credentialed or revoked) while that peer's stored address does
+    not match --peer-url — re-run with --peer-id <id> if it really is that
+    instance; a revoked peer is only re-paired with --peer-id.
+  In each case the PEER has already spent its code and holds new credentials
+  for this instance, so re-pairing with it later needs --allow-re-pair on it.
+  The peer's advertised gateway_url is kept only if it is a tailnet IP, a
+  MagicDNS name in this tailnet, or a 10/8 / 192.168/16 address; otherwise the
+  existing dialable address, else the --peer-url origin, is stored.
 
 Manual mode (--manual-paste):
   Prints credentials to paste on the peer side, and reads peer's credentials
@@ -152,36 +169,108 @@ async function allowRePairCommand(db, { allowRePair, minutes }) {
   console.log("  Enrollment must also be enabled with a one-time code (see --generate-otc).");
 }
 
+function urlHost(raw) {
+  try { return new URL(String(raw)).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch { return null; }
+}
+
+/** True when this instance already has trust state for `id`: a trusted or
+ * credentialed row, a revoked row, or peer-tokens.json creds. */
+function isKnownPeer(row, creds) {
+  if (creds) return true;
+  if (!row) return false;
+  return Number(row.trusted) === 1 || Boolean(row.auth_token_hash) || row.status === "revoked";
+}
+
+/**
+ * THE rule for "which already-known peer is --peer-url": the single known
+ * peer whose stored gateway_url host or tailscale_ip equals the URL's host,
+ * or null (none, or ambiguous). Used both to pick the re-pair proof to send
+ * and to decide whether the peer's answer may update an existing peer.
+ */
+async function knownPeerForUrl(db, peerUrl) {
+  const host = urlHost(peerUrl);
+  if (!host) return null;
+  const creds = loadPeerCreds();
+  const ids = new Set(Object.keys(creds));
+  try {
+    const { rows } = await db.execute("SELECT id FROM crow_instances");
+    for (const r of rows) ids.add(r.id);
+  } catch { /* table missing */ }
+  const localId = getOrCreateLocalInstanceId();
+  const hits = [];
+  for (const id of ids) {
+    if (id === localId) continue;
+    const row = await getInstance(db, id).catch(() => null);
+    if (!row || !isKnownPeer(row, creds[id])) continue;
+    if (urlHost(row.gateway_url) === host || String(row.tailscale_ip || "").toLowerCase() === host) hits.push(id);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
 /**
  * Re-pair proof for the ONE peer this request is meant for: the peer named by
- * --peer-id, else the single known peer whose stored gateway_url host or
- * tailscale_ip equals the URL's host. Never a proof for any other peer. The
+ * --peer-id, else knownPeerForUrl. Never a proof for any other peer. The
  * proof (servers/shared/enroll-guard.js) is bound to that peer's id and to
  * this code's digest, and keyed by hash(our current bearer) + our current
  * signing key, so it reveals neither and is useless anywhere else.
  */
 async function buildRepairProofs(db, reqBody, { peerUrl, peerId, otc }) {
   const creds = loadPeerCreds();
-  const usable = (id) => typeof creds[id]?.auth_token === "string" && creds[id].auth_token && typeof creds[id]?.signing_key === "string";
-  let target = null;
-  if (peerId) {
-    target = usable(peerId) ? peerId : null;
-  } else {
-    let host = null;
-    try { host = new URL(String(peerUrl)).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch {}
-    const hits = [];
-    for (const id of Object.keys(creds).filter(usable)) {
-      const row = await getInstance(db, id).catch(() => null);
-      if (!row || !host) continue;
-      let rowHost = null;
-      try { rowHost = new URL(String(row.gateway_url)).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch {}
-      if (rowHost === host || String(row.tailscale_ip || "").toLowerCase() === host) hits.push(id);
-    }
-    if (hits.length === 1) target = hits[0];
-  }
-  if (!target) return [];
-  const key = repairProofKey(guardSha256(creds[target].auth_token), creds[target].signing_key);
+  const target = peerId || await knownPeerForUrl(db, peerUrl);
+  const c = target ? creds[target] : null;
+  if (!c || typeof c.auth_token !== "string" || !c.auth_token || typeof c.signing_key !== "string") return [];
+  const key = repairProofKey(guardSha256(c.auth_token), c.signing_key);
   return [repairProof(key, reqBody, { targetId: target, otcDigest: guardSha256(otc) })];
+}
+
+/**
+ * Decide, BEFORE anything is written locally, whether the peer's answer may
+ * be stored. The answering peer must not choose which local peer gets
+ * re-keyed: a peer (or a mistyped URL) answering with the id of a DIFFERENT,
+ * already-known peer would otherwise take over that identity here. Throws
+ * with an operator-facing message; returns the validated peer id.
+ */
+async function vetPeerAnswer(db, peerPayload, { peerUrl, expectPeerId, localId }) {
+  const peerId = peerPayload?.peer_instance_id;
+  const spent = `The peer has already recorded this pairing attempt: its one-time code is spent and it now holds new credentials for this instance (${localId}), so re-pairing with it later needs \`node scripts/cli/instance-pair.js --allow-re-pair ${localId}\` on the peer. Nothing was written here.`;
+  if (typeof peerId !== "string" || !ENROLL_ID_RE.test(peerId)) {
+    throw new Error(`peer answered with an invalid instance id. ${spent}`);
+  }
+  const bearer = peerPayload.peer_outbound_bearer;
+  if (typeof bearer !== "string" || bearer.length < 32) {
+    throw new Error(`peer answered without a usable peer_outbound_bearer (>= 32 chars). ${spent}`);
+  }
+  if (expectPeerId && peerId !== expectPeerId) {
+    throw new Error(`peer answered as ${peerId}, not the --peer-id ${expectPeerId} you named. ${spent}`);
+  }
+  if (peerId === localId) {
+    throw new Error(`peer answered with THIS instance's own id (${localId}) — the URL points back at this instance. ${spent}`);
+  }
+  const row = await getInstance(db, peerId);
+  const creds = loadPeerCreds()[peerId];
+  if (isKnownPeer(row, creds)) {
+    const named = expectPeerId === peerId;
+    if (row?.status === "revoked" && !named) {
+      throw new Error(`peer answered as ${peerId}, which is REVOKED here; a revoked peer is only re-paired with --peer-id ${peerId}. ${spent}`);
+    }
+    if (!named && (await knownPeerForUrl(db, peerUrl)) !== peerId) {
+      const label = row?.name ? `${peerId} (${row.name})` : peerId;
+      throw new Error(`peer answered as ${label}, a peer this instance already knows at a different address than ${peerUrl}. If it really is that instance, re-run with --peer-id ${peerId}. ${spent}`);
+    }
+  }
+  return { peerId, row };
+}
+
+/** The gateway_url to store for the peer: its answer only when it passes the
+ * route's acceptance rule (and does not downgrade a dialable row), else the
+ * existing dialable address, else the origin the operator typed. Never a URL
+ * with userinfo. */
+function vetPeerGatewayUrl(answerUrl, { row, peerUrl, ownTailnet }) {
+  const ok = acceptableAdvertisedUrl(answerUrl, { ownTailnet });
+  const existing = row?.gateway_url && isDialableGatewayUrl(row.gateway_url) ? row.gateway_url : null;
+  if (ok && (isDialableGatewayUrl(ok) || !existing)) return ok;
+  if (existing) return existing;
+  try { return new URL(String(peerUrl)).origin; } catch { return null; }
 }
 
 async function networkPair(db, { peerUrl, peerName, peerId: expectPeerId, otc: otcArg }) {
@@ -229,17 +318,16 @@ async function networkPair(db, { peerUrl, peerName, peerId: expectPeerId, otc: o
     throw new Error("peer response missing peer_instance_id or peer_outbound_bearer");
   }
 
-  const peerId = peerPayload.peer_instance_id;
-  if (expectPeerId && peerId !== expectPeerId) {
-    console.warn(`⚠ peer answered as ${peerId}, not the --peer-id ${expectPeerId} you named; storing it as ${peerId}`);
-  }
+  const { peerId, row: knownRow } = await vetPeerAnswer(db, peerPayload, { peerUrl, expectPeerId, localId });
+  const ownTailnet = tailnetSuffix(gatewayUrlHost(self.gateway_url)) || ownTailnetSuffix();
+  const answerName = typeof peerPayload.peer_name === "string" ? peerPayload.peer_name.slice(0, 128) : null;
   await storePeerCredsLocally(db, {
     peerId,
-    peerName: peerName || peerPayload.peer_name || peerId,
-    peerGatewayUrl: pickPeerGatewayUrl(peerPayload.peer_gateway_url, peerUrl),
+    peerName: peerName || answerName || knownRow?.name || peerId,
+    peerGatewayUrl: vetPeerGatewayUrl(peerPayload.peer_gateway_url, { row: knownRow, peerUrl, ownTailnet }),
     peerTailscaleIp: peerPayload.peer_tailscale_ip,
     peerSyncPort: peerPayload.peer_sync_port,
-    peerCrowId: peerPayload.peer_crow_id || peerId,
+    peerCrowId: peerId,
     // Creds for OUTBOUND calls us → peer:
     auth_token: sourceOutboundBearer,   // we generated; peer stored its hash
     signing_key: sharedSigningKey,      // both sides share

@@ -18,6 +18,11 @@
  * never replicated by instance sync).
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { isPeerUsableUrl, isTailnetAddress, gatewayUrlHost } from "./self-dial-address.js";
+
+/** The shape of an instance id accepted at enrollment, on either side. */
+export const ENROLL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
 
 export const ENROLL_OTC_MIN_LENGTH = 16;
 export const REPAIR_ALLOW_KEY_PREFIX = "enroll_repair_allow:";
@@ -169,4 +174,39 @@ export async function otcFirstSeen(db, localId, digest, now = Date.now()) {
   });
   const v = Number(await readLocal(db, key, localId));
   return Number.isFinite(v) ? v : now;
+}
+
+function isDialPrivateV4(host) {
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  // 10/8 and 192.168/16 (LAN); NOT 172.16/12 (docker bridges) or loopback.
+  return a === 10 || (a === 192 && b === 168);
+}
+
+/** `<tailnet>.ts.net` of a host, or null. */
+export function tailnetSuffix(host) {
+  const parts = String(host || "").toLowerCase().split(".");
+  if (parts.length < 3 || parts[parts.length - 1] !== "net" || parts[parts.length - 2] !== "ts") return null;
+  return parts.slice(-3).join(".");
+}
+
+/**
+ * A peer-advertised gateway_url we are willing to store: a tailnet IP, a
+ * MagicDNS name in OUR tailnet (`ownTailnet` = `<tailnet>.ts.net`, from our
+ * own advertised address; other tailnets' — possibly public Funnel — hosts are
+ * refused), or a 10/8 / 192.168/16 LAN address. Anything else is dropped.
+ */
+export function acceptableAdvertisedUrl(raw, { ownTailnet = null } = {}) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const url = raw.trim().replace(/\/+$/, "");
+  if (!isPeerUsableUrl(url)) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.username || u.password) return null;
+  const host = gatewayUrlHost(url);
+  if (!host) return null;
+  if (isTailnetAddress(host) || isDialPrivateV4(host)) return url;
+  if (ownTailnet && tailnetSuffix(host) === ownTailnet) return url;
+  return null;
 }

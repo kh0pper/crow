@@ -59,7 +59,7 @@ import {
   selfPairingAddress,
 } from "../instance-registry.js";
 import {
-  isDialableGatewayUrl, isPeerUsableUrl, isTailnetAddress, gatewayUrlHost, SYNC_PORT_KEY_PREFIX, ownTailnetSuffix,
+  isDialableGatewayUrl, isTailnetAddress, gatewayUrlHost, SYNC_PORT_KEY_PREFIX, ownTailnetSuffix,
 } from "../../shared/self-dial-address.js";
 import {
   setPeerCreds,
@@ -71,6 +71,7 @@ import {
 import {
   ENROLL_OTC_MIN_LENGTH, MAX_REPAIR_PROOFS, sha256Hex, safeEqual, verifyRepairProofs, repairProofKey,
   hasRepairAllowance, otcFirstSeen, OTC_USED_KEY_PREFIX, REPAIR_ALLOW_KEY_PREFIX,
+  ENROLL_ID_RE, acceptableAdvertisedUrl, tailnetSuffix,
 } from "../../shared/enroll-guard.js";
 import { isAllowedEnrollNetwork } from "../dashboard/auth.js";
 import { forwardedAddrs } from "../models/door-resolve.js";
@@ -80,7 +81,7 @@ import { hostname as osHostname } from "os";
 export const ENROLL_FAIL_PER_SOURCE = 5;
 export const ENROLL_FAIL_GLOBAL = 20;
 const DEFAULT_WINDOW_MINUTES = 30;
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ID_RE = ENROLL_ID_RE;
 const PAIR_CLI = "node scripts/cli/instance-pair.js";
 
 function windowMs(env = process.env) {
@@ -101,40 +102,9 @@ function clientKey(req) {
 /** Kept as the route-level name; the decision lives with the dashboard gate. */
 export const enrollSourceAllowed = (req) => isAllowedEnrollNetwork(req);
 
-function isDialPrivateV4(host) {
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return false;
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  // 10/8 and 192.168/16 (LAN); NOT 172.16/12 (docker bridges) or loopback.
-  return a === 10 || (a === 192 && b === 168);
-}
-
-/** `<tailnet>.ts.net` of a host, or null. */
-function tailnetSuffix(host) {
-  const parts = String(host || "").toLowerCase().split(".");
-  if (parts.length < 3 || parts[parts.length - 1] !== "net" || parts[parts.length - 2] !== "ts") return null;
-  return parts.slice(-3).join(".");
-}
-
-/**
- * A peer-advertised gateway_url we are willing to store: a tailnet IP, a
- * MagicDNS name in OUR tailnet (`ownTailnet` = `<tailnet>.ts.net`, from our
- * own advertised address; other tailnets' — possibly public Funnel — hosts are
- * refused), or a 10/8 / 192.168/16 LAN address. Anything else is dropped.
- */
-export function acceptableAdvertisedUrl(raw, { ownTailnet = null } = {}) {
-  if (typeof raw !== "string" || !raw.trim()) return null;
-  const url = raw.trim().replace(/\/+$/, "");
-  if (!isPeerUsableUrl(url)) return null;
-  let u;
-  try { u = new URL(url); } catch { return null; }
-  if (u.username || u.password) return null;
-  const host = gatewayUrlHost(url);
-  if (!host) return null;
-  if (isTailnetAddress(host) || isDialPrivateV4(host)) return url;
-  if (ownTailnet && tailnetSuffix(host) === ownTailnet) return url;
-  return null;
-}
+// acceptableAdvertisedUrl / tailnetSuffix live in servers/shared/enroll-guard.js
+// (the CLI applies the same rule to the peer's answer).
+export { acceptableAdvertisedUrl };
 
 export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.now() } = {}) {
   const router = express.Router();

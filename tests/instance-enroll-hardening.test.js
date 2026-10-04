@@ -202,7 +202,7 @@ test("two-instance pairing through the real CLI: OTC mandatory, single-use, re-p
       const allow = await cli(P, ["--allow-re-pair", S.id, "--minutes", "5"]);
       assert.equal(allow.code, 0, allow.out);
       assert.ok(await P.override(`enroll_repair_allow:${S.id}`));
-      const allowed = await cli(S, ["--peer-url", peer.url, "--otc", otc3]);
+      const allowed = await cli(S, ["--peer-url", peer.url, "--otc", otc3, "--peer-id", P.id]);
       assert.equal(allowed.code, 0, allowed.out);
       await assertMutuallyPaired(P, S);
       assert.equal(await P.override(`enroll_repair_allow:${S.id}`), null, "allowance is single-use");
@@ -624,4 +624,94 @@ test("dial address when our own tailnet suffix is not in our advertised URL: lea
     assert.equal(r4.status, 400, "no address at all: refused");
     assert.equal(await P.row("m4"), null);
   } finally { restore(); P.cleanup(); }
+});
+
+test("CLI side: the answering peer cannot choose which local peer gets re-keyed — another known peer's id, a --peer-id mismatch, our own id or a bad id abort with nothing written; legit re-pairs (address match, --peer-id) still work; unacceptable gateway_url never stored", async () => {
+  const restore = snapshotEnv();
+  const S = await makeSide("instS", "100.64.0.2");
+  let answer = null;
+  const fake = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => { b += c; });
+    req.on("end", () => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(answer)); });
+  });
+  await new Promise((r) => fake.listen(0, "127.0.0.1", r));
+  const fakeUrl = `http://127.0.0.1:${fake.address().port}`;
+  const answerAs = (id, extra = {}) => ({
+    peer_instance_id: id, peer_crow_id: id, peer_name: "M", peer_outbound_bearer: "p".repeat(64),
+    peer_gateway_url: "http://100.64.30.30:3001", peer_tailscale_ip: "100.64.30.30", peer_sync_port: 3001, ...extra,
+  });
+  try {
+    // A trusted victim peer V, paired at a different address.
+    await S.db.execute({
+      sql: "INSERT INTO crow_instances (id, name, crow_id, gateway_url, tailscale_ip, auth_token_hash, status, trusted) VALUES ('instV', 'V', 'instV', 'http://100.64.7.1:3001', '100.64.7.1', ?, 'active', 1)",
+      args: [sha("v".repeat(64))],
+    });
+    for (const [k, v] of [["tailnet_sync_port:instV", "3001"], ["tailnet_sync_cr:instV", "1"]]) {
+      await S.db.execute({ sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value) VALUES (?, 'instS', ?)", args: [k, v] });
+    }
+    writeFileSync(S.tokensPath, JSON.stringify({ instV: { auth_token: "t".repeat(64), signing_key: "s".repeat(64), created_at: "x", rotated_at: null } }, null, 2), { mode: 0o600 });
+    const snap = async () => ({
+      row: { ...(await S.row("instV")) }, tokens: readFileSync(S.tokensPath, "utf8"),
+      port: await S.override("tailnet_sync_port:instV"), cr: await S.override("tailnet_sync_cr:instV"),
+      rows: (await S.db.execute("SELECT id FROM crow_instances ORDER BY id")).rows.map((r) => r.id).join(","),
+    });
+    const before = await snap();
+    const otc = generateEnrollOtc();
+    const run = (args) => cli(S, ["--peer-url", fakeUrl, "--otc", otc, ...args]);
+
+    for (const [label, ans, args, re] of [
+      ["another known peer's id", answerAs("instV"), [], /already knows[\s\S]*--peer-id instV/],
+      ["--peer-id mismatch", answerAs("instV"), ["--peer-id", "instM"], /not the --peer-id instM/],
+      ["our own id", answerAs("instS"), [], /own id/],
+      ["invalid id", answerAs("bad id!"), [], /invalid instance id/],
+      ["short bearer", answerAs("instN", { peer_outbound_bearer: "short" }), [], /peer_outbound_bearer/],
+    ]) {
+      answer = ans;
+      const r = await run(args);
+      assert.notEqual(r.code, 0, label);
+      assert.match(r.out, re, label);
+      assert.match(r.out, /already recorded this pairing attempt[\s\S]*--allow-re-pair instS/, `${label}: the operator is told the peer's side is spent`);
+      assert.deepEqual(await snap(), before, `${label}: nothing written`);
+    }
+
+    // Revoked V: only with --peer-id.
+    await S.db.execute("UPDATE crow_instances SET status = 'revoked' WHERE id = 'instV'");
+    const revokedBefore = await snap();
+    answer = answerAs("instV", { peer_gateway_url: `http://127.0.0.1:${fake.address().port}` });
+    await S.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = 'instV'", args: [fakeUrl] });
+    const revokedSnap = await snap();
+    const rv = await run([]);
+    assert.notEqual(rv.code, 0);
+    assert.match(rv.out, /REVOKED/);
+    assert.deepEqual(await snap(), revokedSnap, "revoked row not revived by an address match");
+    assert.ok(revokedBefore);
+    await S.db.execute({ sql: "UPDATE crow_instances SET status = 'active', gateway_url = 'http://100.64.7.1:3001' WHERE id = 'instV'" });
+
+    // Legit re-pair via --peer-id.
+    answer = answerAs("instV");
+    const viaId = await run(["--peer-id", "instV"]);
+    assert.equal(viaId.code, 0, viaId.out);
+    assert.equal((await S.row("instV")).auth_token_hash, sha("p".repeat(64)));
+    assert.equal((await S.row("instV")).gateway_url, "http://100.64.30.30:3001");
+
+    // Legit re-pair via address match (stored address host == --peer-url host).
+    await S.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = 'instV'", args: [fakeUrl] });
+    answer = answerAs("instV", { peer_outbound_bearer: "q".repeat(64) });
+    const viaAddr = await run([]);
+    assert.equal(viaAddr.code, 0, viaAddr.out);
+    assert.equal((await S.row("instV")).auth_token_hash, sha("q".repeat(64)));
+
+    // New peer with an unacceptable gateway_url: the typed origin is stored instead.
+    answer = answerAs("instN", { peer_gateway_url: "https://user:pw@evil.example.com:8444", peer_tailscale_ip: "8.8.8.8" });
+    const n = await run([]);
+    assert.equal(n.code, 0, n.out);
+    const nrow = await S.row("instN");
+    assert.equal(nrow.gateway_url, fakeUrl, "public / userinfo URL never stored; the --peer-url origin is");
+    assert.equal(nrow.tailscale_ip, null);
+  } finally {
+    await new Promise((r) => { fake.close(r); fake.closeAllConnections(); });
+    restore();
+    S.cleanup();
+  }
 });
