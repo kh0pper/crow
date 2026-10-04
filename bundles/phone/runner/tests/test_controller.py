@@ -8,7 +8,7 @@ from crow_phone import policy
 PLAN = {"business_name": "Smile Dental", "number_e164": "+15125550101", "goal": "Book a cleaning", "language": "en",
         "limits": {"date_range": {"from": "2026-10-05", "to": "2026-10-16"}, "days_of_week": ["tue"],
                    "time_window": {"start": "15:00", "end": "18:00", "tz": "America/Chicago"}},
-        "shareable": {"name": "Kevin Hopper"}, "notes": None}
+        "shareable": {"name": "Casey Rivers"}, "notes": None}
 
 
 def R(text="", *calls):
@@ -19,7 +19,7 @@ async def run(line, replies, plan=PLAN, verify=True, **kw):
     events = []
     async def _verify():
         return verify
-    c = CallController("c1", plan, "Kevin", line, ScriptedBrain(replies), lambda t, d: events.append((t, d)), _verify, **kw)
+    c = CallController("c1", plan, "Casey", line, ScriptedBrain(replies), lambda t, d: events.append((t, d)), _verify, **kw)
     result = await c.run()
     return result, events, line
 
@@ -27,12 +27,12 @@ async def run(line, replies, plan=PLAN, verify=True, **kw):
 async def test_booking_inside_limits_disclosure_first():
     line = FakeLine(["Smile Dental, how can I help?", "We have Tuesday October 6th at 3:30.", "You're all set."])
     result, events, _ = await run(line, [
-        R("I'd like to book a cleaning for Kevin Hopper. Do you have a Tuesday afternoon?"),
+        R("I'd like to book a cleaning for Casey Rivers. Do you have a Tuesday afternoon?"),
         R("", ("record_booking", {"date": "2026-10-06", "time": "15:30", "location": "Smile Dental"})),
         R("Tuesday October 6th at 3:30 works, thank you."),
         R("", ("end_call", {"outcome": "booked", "summary": "Cleaning Tue Oct 6 3:30pm"})),
     ])
-    assert line.said[0] == policy.disclosure("en", "Kevin")
+    assert line.said[0] == policy.disclosure("en", "Casey")
     assert result["outcome"] == "booked" and result["booking"]["date"] == "2026-10-06"
     assert line.hung_up
 
@@ -57,7 +57,7 @@ async def test_ivr_digits_honored_then_human_gets_disclosure():
         R("", ("end_call", {"outcome": "info_gathered", "summary": "reached front desk"})),
     ])
     assert line.digits == ["2"]
-    assert policy.disclosure("en", "Kevin") in line.said
+    assert policy.disclosure("en", "Casey") in line.said
     assert result["outcome"] == "info_gathered"
 
 
@@ -82,7 +82,7 @@ async def test_markup_never_spoken_recovered_in_ivr():
     ], plan=plan)
     assert line.digits == ["1"]
     assert all("<" not in s for s in line.said)
-    assert line.said[0] == policy.disclosure("es", "Kevin")
+    assert line.said[0] == policy.disclosure("es", "Casey")
 
 
 async def test_unrecoverable_markup_twice_gives_filler_and_callback():
@@ -112,7 +112,7 @@ async def test_hold_then_new_human_is_disclosed_again():
         R("Hello, I'd like to book a cleaning."),
         R("", ("end_call", {"outcome": "info_gathered", "summary": "transferred"})),
     ])
-    assert line.said.count(policy.disclosure("en", "Kevin")) == 2
+    assert line.said.count(policy.disclosure("en", "Casey")) == 2
 
 
 async def test_max_duration_on_hold_is_needs_callback():
@@ -158,7 +158,7 @@ class SlowLine(FakeLine):
 async def test_timeout_before_human_discloses_before_callback():
     result, _, line = await run(SlowLine([]), [], max_seconds=0.05)
     assert result["outcome"] == "needs_callback"
-    assert line.said == [policy.disclosure("en", "Kevin"), policy.callback_line("en")]
+    assert line.said == [policy.disclosure("en", "Casey"), policy.callback_line("en")]
 
 
 async def test_refused_tool_drops_reply_speech():
@@ -199,7 +199,7 @@ async def test_run_never_raises_on_brain_error():
     async def _v():
         return True
     line = FakeLine(["Hello."])
-    c = CallController("c1", PLAN, "Kevin", line, Boom(), lambda t, d: events.append((t, d)), _v)
+    c = CallController("c1", PLAN, "Casey", line, Boom(), lambda t, d: events.append((t, d)), _v)
     result = await c.run()
     assert result["outcome"] == "failed" and result["error"] == "RuntimeError: boom"
     assert line.hung_up and any(t == "result" and d["outcome"] == "failed" for t, d in events)
@@ -241,7 +241,7 @@ async def test_refused_batch_does_not_leak_state_and_later_booking_works():
         R("Sounds great", ("record_booking", good), ("press_digits", {"digits": "1"})),
         second,
     ])
-    c = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _v)
+    c = CallController("c1", PLAN, "Casey", line, brain, lambda t, d: events.append((t, d)), _v)
     result = await c.run()
     assert snaps == [None]
     assert not any("Sounds great" in s for s in line.said)
@@ -285,7 +285,7 @@ class TimedLine(FakeLine):
 
 
 def _ctl(line, **kw):
-    return CallController("c", PLAN, "Kevin", line, ScriptedBrain([]), lambda t, d: None, None, **kw)
+    return CallController("c", PLAN, "Casey", line, ScriptedBrain([]), lambda t, d: None, None, **kw)
 
 
 def test_farend_timeout_is_per_line():
@@ -303,8 +303,8 @@ async def test_initial_silence_assistant_speaks_first_disclosure_then_greeting()
         R("What are your Saturday hours?"),
         R("", ("end_call", {"outcome": "info_gathered", "summary": "Sat 9-1"})),
     ], initial_silence=0.01)
-    assert line.said[:2] == [policy.disclosure("en", "Kevin"), policy.greeting("en")]
-    assert line.said.count(policy.disclosure("en", "Kevin")) == 1
+    assert line.said[:2] == [policy.disclosure("en", "Casey"), policy.greeting("en")]
+    assert line.said.count(policy.disclosure("en", "Casey")) == 1
     assert line.timeouts[0] == 0.01 and line.timeouts[1] == 20
     assert result["outcome"] == "info_gathered"
 
@@ -312,7 +312,7 @@ async def test_initial_silence_assistant_speaks_first_disclosure_then_greeting()
 async def test_initial_silence_spanish_greeting():
     line = TimedLine([None, None])
     result, _, _ = await run(line, [], plan={**PLAN, "language": "es"}, initial_silence=0.01)
-    assert line.said == [policy.disclosure("es", "Kevin"), "¿Hola?"]
+    assert line.said == [policy.disclosure("es", "Casey"), "¿Hola?"]
     assert result["outcome"] == "needs_callback"
 
 
@@ -322,7 +322,7 @@ async def test_business_speaks_first_unchanged_no_greeting():
         R("What are your Saturday hours?"),
         R("", ("end_call", {"outcome": "info_gathered", "summary": "Sat 9-1"})),
     ], initial_silence=0.01)
-    assert line.said[0] == policy.disclosure("en", "Kevin")
+    assert line.said[0] == policy.disclosure("en", "Casey")
     assert policy.greeting("en") not in line.said
     assert result["outcome"] == "info_gathered"
 
@@ -331,7 +331,7 @@ async def test_silence_after_greeting_is_needs_callback():
     line = TimedLine([None, None])
     result, _, _ = await run(line, [], initial_silence=0.01)
     assert result["outcome"] == "needs_callback"
-    assert line.said == [policy.disclosure("en", "Kevin"), policy.greeting("en")]
+    assert line.said == [policy.disclosure("en", "Casey"), policy.greeting("en")]
 
 
 async def test_menu_after_greeting_is_still_a_menu():
@@ -343,7 +343,7 @@ async def test_menu_after_greeting_is_still_a_menu():
     ], initial_silence=0.01)
     assert line.digits == ["2"]
     assert not any(t == "tool" and d["name"] == "press_digits" and not d["ok"] for t, d in events)
-    assert line.said.count(policy.disclosure("en", "Kevin")) == 2  # before the greeting, and again for Ana
+    assert line.said.count(policy.disclosure("en", "Casey")) == 2  # before the greeting, and again for Ana
     assert result["outcome"] == "info_gathered"
 
 
@@ -372,7 +372,7 @@ async def run_w(line, replies, wrapups=None, plan=PLAN, **kw):
     async def _verify():
         return True
     brain = ScriptedBrain(replies, wrapups)
-    c = CallController("c1", plan, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify, **kw)
+    c = CallController("c1", plan, "Casey", line, brain, lambda t, d: events.append((t, d)), _verify, **kw)
     result = await c.run()
     return result, events, line, brain
 
@@ -469,7 +469,7 @@ async def _run_stop(script, replies, wrapups):
         return True
     line = StopAfter(script, ref)
     brain = ScriptedBrain(replies, wrapups)
-    ref[0] = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify)
+    ref[0] = CallController("c1", PLAN, "Casey", line, brain, lambda t, d: events.append((t, d)), _verify)
     return await ref[0].run(), events, line, brain
 
 
@@ -596,7 +596,7 @@ async def _run_stop_mid_reply(script, make_replies, wrapups=None):
         return _r
     line = FakeLine(script)
     brain = ScriptedBrain(make_replies(stop), wrapups)
-    ref[0] = CallController("c1", PLAN, "Kevin", line, brain, lambda t, d: events.append((t, d)), _verify)
+    ref[0] = CallController("c1", PLAN, "Casey", line, brain, lambda t, d: events.append((t, d)), _verify)
     return await ref[0].run(), events, line
 
 

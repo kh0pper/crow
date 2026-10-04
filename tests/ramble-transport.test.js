@@ -920,20 +920,20 @@ test("world name rides only pseudonym/real rows: a rotating row never carries it
   const h = await makeHarness();
   await setMaster(h.db, true);
   await setCell(h.db, "public", "geo", true);
-  await h.db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('world.name', ?)", args: ["Kevin"] });
+  await h.db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('world.name', ?)", args: ["Casey"] });
   const rot = await seedPublicMark(h.db, "rotating row", { author_level: "rotating" });
   const pseud = await seedPublicMark(h.db, "pseudonym row", { author_level: "pseudonym" });
   const real = await seedPublicMark(h.db, "real row", { author_level: "real" });
   await h.transport.drainOnce();
   const byText = (t) => h.published.find((e) => JSON.parse(e.content).text === t);
   assert.equal(JSON.parse(byText("rotating row").content).name, undefined);
-  assert.equal(JSON.parse(byText("pseudonym row").content).name, "Kevin");
-  assert.equal(JSON.parse(byText("real row").content).name, "Kevin");
-  assert.equal(eventToMark(byText("pseudonym row")).author_name, "Kevin");
+  assert.equal(JSON.parse(byText("pseudonym row").content).name, "Casey");
+  assert.equal(JSON.parse(byText("real row").content).name, "Casey");
+  assert.equal(eventToMark(byText("pseudonym row")).author_name, "Casey");
   // A row with no level of its own follows the instance level (createMark stores author_level ?? null).
   await h.db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('public_identity_level', 'pseudonym') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
   const bare = await seedPublicMark(h.db, "bare row", { author_level: null });
   await h.transport.drainOnce();
-  assert.equal(JSON.parse(byText("bare row").content).name, "Kevin");
+  assert.equal(JSON.parse(byText("bare row").content).name, "Casey");
   void rot; void pseud; void real; void bare;
 });

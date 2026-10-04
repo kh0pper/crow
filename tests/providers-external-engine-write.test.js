@@ -53,7 +53,7 @@ function freshLibsql(fixtureProviders = {}) {
 }
 
 const ENGINE = { managed: "external", host: "raven", label: "halogen" };
-const RAVEN = "http://10.0.0.126:8030/v1";
+const RAVEN = "http://10.0.0.203:8030/v1";
 const ravenRow = (extra = {}) => ({
   id: "raven-flash-next",
   baseUrl: RAVEN,
@@ -196,7 +196,7 @@ test("replicated contradictory row: repairProviderHosts still repairs its host",
     await seedRaw(h.db, { id: "rep-repair", host: "local", gpuPolicy: { engine: ENGINE, runtime: "native" }, instanceId: "own-instance" });
     const res = await repairProviderHosts(h.db, {
       ownInstanceId: "own-instance",
-      ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+      ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.201"]),
     });
     assert.deepEqual(res.changes.map((c) => c.id), ["rep-repair"]);
     assert.equal((await stored(h.db, "rep-repair")).host, "cloud");
@@ -209,7 +209,7 @@ test("replicated contradictory row: the reconciler re-asserts it (same bundle, e
   });
   try {
     await seedRaw(h.db, { id: "rep-recon", bundleId: "halogen", gpuPolicy: { engine: ENGINE } });
-    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.203"]) });
     assert.equal(res.failed, 0);
     const p = policyOf(await stored(h.db, "rep-recon"));
     assert.equal(p.mutexGroup, "g");
@@ -225,7 +225,7 @@ test("Q3: the reconciler keeps a stored engine when it re-asserts a gpuPolicy", 
   });
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
-    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+    const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.203"]) });
     assert.equal(res.failed, 0);
     const p = policyOf(await stored(h.db, "raven-flash-next"));
     assert.equal(p.mutexGroup, "g", "file content asserted");
@@ -244,7 +244,7 @@ test("reconciler isolation: one refused entry is counted each run but logged ONC
   console.warn = (m) => warns.push(String(m));
   try {
     await upsertProvider(h.db, ravenRow({ gpuPolicy: { engine: ENGINE } }));
-    const own = { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) };
+    const own = { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.203"]) };
     const first = await syncProvidersFromModelsJson(h.db, own);
     const second = await syncProvidersFromModelsJson(h.db, own); // the next hourly pass
     assert.equal(first.failed, 1);
@@ -280,11 +280,11 @@ for (const raw of ["[1]", "7"]) {
       const writer = (await stored(h.db, "rep-malformed")).instance_id;
       const rep = await repairProviderHosts(h.db, {
         ownInstanceId: writer,
-        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.201"]),
       });
       assert.deepEqual(rep.changes.map((c) => c.id), ["rep-malformed"]);
       // 4. the reconciler (owned entry; a valid object policy from the file)
-      const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.126"]) });
+      const res = await syncProvidersFromModelsJson(h.db, { ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.203"]) });
       assert.equal(res.failed, 0);
       assert.equal(Number((await stored(h.db, "rep-malformed")).disabled), 0);
     } finally { h.cleanup(); }
@@ -321,7 +321,7 @@ test("repairProviderHosts: a non-EXTERNAL_ENGINE error is NOT swallowed", async 
     await assert.rejects(
       repairProviderHosts(failingInserts(h.db), {
         ownInstanceId: "own-instance",
-        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.237"]),
+        ownAddrs: new Set(["localhost", "127.0.0.1", "::1", "10.0.0.201"]),
       }),
       (err) => err.code === "SQLITE_BUSY",
     );

@@ -96,7 +96,7 @@ test("D9: loopback base_urls never sync; tailnet/LAN/cloud do; malformed/missing
     ["http://127.0.0.1:8011/v1", false],
     ["http://[::1]:8080/v1", false],
     ["http://100.64.20.1:8003/v1", true],
-    ["http://10.0.0.21:9005/v1", true],
+    ["http://10.0.0.202:9005/v1", true],
     ["https://api.example.com/v1", true],
   ];
   for (const [base_url, expected] of cases) {

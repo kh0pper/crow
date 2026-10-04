@@ -1050,8 +1050,7 @@ Please:
 2. Complete Duo authentication
 3. The next sync will use the authenticated session
 
-Dashboard: http://grackle:8080
-Tailscale: http://100.121.254.89:8080
+Dashboard: http://<your-host>:8080
 
 Note: Cookies are stored, so you shouldn't need to do this often.
         """
@@ -1080,10 +1079,10 @@ Note: Cookies are stored, so you shouldn't need to do this often.
                     <li>The next sync will use your session</li>
                 </ol>
             </div>
-            <p><a href="https://unt.instructure.com">Open Canvas</a></p>
+            <p><a href="{canvas_url}">Open Canvas</a></p>
         </body>
         </html>
-        """
+        """.replace("{canvas_url}", os.environ.get("CANVAS_URL", "#"))
 
         return self.send_email(
             subject=subject,

@@ -140,7 +140,7 @@ test("the warm variant does not try to warm an INJECTED loader", async () => {
 
 // ---------------------------------------------------------------------------
 // The picker view — pickerModels / scopeOf / loadPiProviderNames
-// (Kevin 2026-10-02: "an outdated list of models … a ton of stale entries",
+// (Casey 2026-10-02: "an outdated list of models … a ton of stale entries",
 // and raven-flash-next, his production model, could not be found in it)
 // ---------------------------------------------------------------------------
 
@@ -152,7 +152,7 @@ test("provider rows stamp managed/external only when true — a plain row keeps 
   const list = providerModelList(cfg({
     plain: { baseUrl: "u", models: [{ id: "a" }] },
     bundled: { baseUrl: "u2", bundleId: "b", models: [{ id: "b" }] },
-    gufo: { baseUrl: "http://10.0.0.126:8030/v1", gpuPolicy: { engine: { managed: "external" } }, models: [{ id: "c" }] },
+    gufo: { baseUrl: "http://10.0.0.203:8030/v1", gpuPolicy: { engine: { managed: "external" } }, models: [{ id: "c" }] },
   }));
   assert.deepEqual(list[0], { id: "a", provider: "plain", baseUrl: "u" });
   assert.equal(list[1].managed, true);
@@ -161,7 +161,7 @@ test("provider rows stamp managed/external only when true — a plain row keeps 
 });
 
 test("scopeOf: loopback, LAN, tailnet and bare host names are on your network; the rest is cloud", () => {
-  for (const u of ["http://127.0.0.1:18100/v1", "http://localhost:3001/llm/v1", "http://10.0.0.126:8030/v1",
+  for (const u of ["http://127.0.0.1:18100/v1", "http://localhost:3001/llm/v1", "http://10.0.0.203:8030/v1",
                    "http://192.168.1.5/v1", "http://172.20.0.2/v1", "http://100.64.20.1:8003/v1",
                    "https://crow.example.ts.net:8444/v1", "http://[::1]:8000/v1",
                    "http://[fd7a:115c:a1e0::1]/v1", "http://grackle:9100/v1", "http://nas.local/v1"]) {
@@ -258,7 +258,7 @@ test("order: the default first, then on-network, then cloud; usable before unusa
     { provider: "zai-coding", id: "glm-5", name: "GLM-5", baseUrl: "https://api.z.ai/v4", availability: "up" },
     { provider: "cloud-x", id: "dead", name: "Aardvark", baseUrl: "https://c.example/v1", availability: "up" },
     { provider: "crow-local-27b", id: "27b", name: "Qwen 27B", baseUrl: "http://100.64.20.1:8006/v1", availability: "unavailable" },
-    { provider: "raven-flash-next", id: "fn", name: "Flash Next", baseUrl: "http://10.0.0.126:8030/v1", availability: "up", external: true },
+    { provider: "raven-flash-next", id: "fn", name: "Flash Next", baseUrl: "http://10.0.0.203:8030/v1", availability: "up", external: true },
     { provider: "crow-local", id: "q35", name: "Qwen 35B", baseUrl: "http://100.64.20.1:8003/v1", availability: "up" },
   ], { pi: { custom: new Set(["zai-coding", "crow-local-27b", "raven-flash-next", "crow-local"]), builtin: new Set() },
        defaultKey: "zai-coding/glm-5" });

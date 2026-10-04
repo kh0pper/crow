@@ -69,7 +69,7 @@ step "waiting for Nextcloud install"
 wait_for "Nextcloud" nc_installed
 
 step "applying the admin password"
-# 1b. Apply the typed admin password via stdin, then scrub it from this machine (Kevin Q2).
+# 1b. Apply the typed admin password via stdin, then scrub it from this machine (Casey Q2).
 #     Runs before tailnet detection, so a missing tailnet name never delays it.
 ADMIN_PW="$(env_get WORKSPACE_ADMIN_PASSWORD)"
 if [ -n "$ADMIN_PW" ]; then
@@ -164,7 +164,7 @@ else
 fi
 
 step "groups and sharing policy"
-# 5. Groups + sharing policy (Kevin Q5): crow-bot can't make public links and is never
+# 5. Groups + sharing policy (Casey Q5): crow-bot can't make public links and is never
 #    suggested by autocomplete (household users enumerate only their group; typing the
 #    exact login still works).
 occ group:add household >/dev/null 2>&1 || true

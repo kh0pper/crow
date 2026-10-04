@@ -147,7 +147,7 @@ test("shouldEmail: 'attention' at priority=high is excluded; 'system' at priorit
   };
   process.env.RESEND_API_KEY = "re_test_key";
   process.env.MPA_EMAIL_FROM = "crow@test.invalid";
-  process.env.MPA_EMAIL_TO = "kevin@test.invalid";
+  process.env.MPA_EMAIL_TO = "casey@test.invalid";
 
   const realFetch = globalThis.fetch;
   const calls = [];
@@ -500,7 +500,7 @@ async function withResultStore(fn) {
 
 test("reportResult: a gated card's result ALWAYS pushes a high-priority attention notification with the card deep link", async () => {
   await withResultStore(async ({ tdb, cdb }) => {
-    const HUMAN = { kind: "human", id: "kevin", jobId: null };
+    const HUMAN = { kind: "human", id: "casey", jobId: null };
     const { id: itemId } = await createCard(
       tdb,
       { title: "Ship the thing", status: "pending", project_id: 1, autonomy: "gated" },
@@ -523,7 +523,7 @@ test("reportResult: a gated card's result ALWAYS pushes a high-priority attentio
 
 test("reportResult: an 'auto' card's approved result does NOT push (only 'gated' cards do)", async () => {
   await withResultStore(async ({ tdb, cdb }) => {
-    const HUMAN = { kind: "human", id: "kevin", jobId: null };
+    const HUMAN = { kind: "human", id: "casey", jobId: null };
     const { id: itemId } = await createCard(
       tdb,
       { title: "Auto card", status: "pending", project_id: 1, autonomy: "auto" },

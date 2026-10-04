@@ -61,9 +61,9 @@ test("still open after 30 s (if_open wait) → open_in_editor naming the person,
 
 test("proceed → drop → editor saves its typing first → bot change on top", async () => {
   fake.addFile("S/p.docx", Buffer.from("base"));
-  fake.openInEditor("S/p.docx", ["admin"], { releaseAfterMs: 5000, typed: Buffer.from("base+kevin") });
+  fake.openInEditor("S/p.docx", ["admin"], { releaseAfterMs: 5000, typed: Buffer.from("base+casey") });
   const r = await W.withFileWrite(cfg, { path: "S/p.docx" }, appendMut("+bot"), { clock, ifOpen: "force_close" });
-  assert.equal(text(fake.node("S/p.docx").bytes), "base+kevin+bot");
+  assert.equal(text(fake.node("S/p.docx").bytes), "base+casey+bot");
   assert.ok(fake.calls.some((c) => c.method === "OO" && c.body?.c === "drop" && c.body.users[0] === "ocinst_admin"));
   assert.ok(r.version_id);
 });
@@ -125,20 +125,20 @@ test("undo restores the before-version; refuses once the file changed since", as
 test("undo with proceed: the editor's drop-save changes the file → changed_since, nothing restored (review C3)", async () => {
   fake.addFile("S/up.docx", Buffer.from("orig"));
   const r = await W.withFileWrite(cfg, { path: "S/up.docx" }, appendMut("+bot"), { clock });
-  fake.openInEditor("S/up.docx", ["admin"], { releaseAfterMs: 3000, typed: Buffer.from("orig+bot+kevin") });
+  fake.openInEditor("S/up.docx", ["admin"], { releaseAfterMs: 3000, typed: Buffer.from("orig+bot+casey") });
   await assert.rejects(W.undoFileChange(cfg, { path: "S/up.docx" }, r.version_id, { clock, ifOpen: "force_close" }), (e) => e.code === "changed_since");
-  assert.equal(text(fake.node("S/up.docx").bytes), "orig+bot+kevin");
+  assert.equal(text(fake.node("S/up.docx").bytes), "orig+bot+casey");
 });
 
 test("proceed: the person's save and the bot write become two DISTINCT versions (same-second overwrite modelled, review C2)", async () => {
   fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
   fake.addFile("S/two.docx", Buffer.from("base"));
-  fake.openInEditor("S/two.docx", ["admin"], { releaseAfterMs: 500, typed: Buffer.from("base+kevin") });
+  fake.openInEditor("S/two.docx", ["admin"], { releaseAfterMs: 500, typed: Buffer.from("base+casey") });
   const v0 = fake.versionsOf("S/two.docx").length;
   await W.withFileWrite(cfg, { path: "S/two.docx" }, appendMut("+bot"), { clock, ifOpen: "force_close" });
   const vs = fake.versionsOf("S/two.docx");
-  assert.equal(vs.length, v0 + 2, "kevin's save and the bot write are separate rows");
-  assert.equal(vs.at(-2).bytes.toString(), "base+kevin");
+  assert.equal(vs.length, v0 + 2, "casey's save and the bot write are separate rows");
+  assert.equal(vs.at(-2).bytes.toString(), "base+casey");
   fake.state.realisticMtime = null;
 });
 
@@ -153,20 +153,20 @@ test("version_id carries the PUT's own etag, not a later write's", async () => {
 
 test("undo of an undo works, and restoring onto a human-labeled version keeps that label (review r2)", async () => {
   const n = fake.addFile("S/uu.txt", Buffer.from("v1"));
-  n.versions[0].label = "Kevin: approved";
+  n.versions[0].label = "Casey: approved";
   const r = await W.withFileWrite(cfg, { path: "S/uu.txt" }, appendMut("+bot"), { clock });
   const u = await W.undoFileChange(cfg, { path: "S/uu.txt" }, r.version_id, { clock });
   assert.equal(text(fake.node("S/uu.txt").bytes), "v1");
-  assert.equal(fake.versionsOf("S/uu.txt").find((x) => x.bytes.toString() === "v1").label, "Kevin: approved");
+  assert.equal(fake.versionsOf("S/uu.txt").find((x) => x.bytes.toString() === "v1").label, "Casey: approved");
   await W.undoFileChange(cfg, { path: "S/uu.txt" }, u.version_id, { clock });
   assert.equal(text(fake.node("S/uu.txt").bytes), "v1+bot");
 });
 
 test("a person's own version label is never overwritten (review I9)", async () => {
   const n = fake.addFile("S/lab.txt", Buffer.from("a"));
-  n.versions[0].label = "Kevin: final draft";
+  n.versions[0].label = "Casey: final draft";
   await W.withFileWrite(cfg, { path: "S/lab.txt" }, appendMut("b"), { clock });
-  assert.equal(fake.versionsOf("S/lab.txt")[0].label, "Kevin: final draft");
+  assert.equal(fake.versionsOf("S/lab.txt")[0].label, "Casey: final draft");
 });
 
 test("undo of a created file moves it to the trash; a forged version_id is refused", async () => {
@@ -232,8 +232,8 @@ test("classifyLock keys on lock-owner-type only: a NULL owner (spike S6) is stil
   const { stat } = await import("../bundles/workspace/server/nc/dav.js");
   fake.addFile("S/cls.docx", Buffer.from("d")); fake.openInEditor("S/cls.docx", ["admin", "alex"]);
   const c = await classifyLock(cfg, await stat(cfg, ["S", "cls.docx"]));
-  assert.equal(c.code, "open_in_editor"); assert.deepEqual(c.data.open_by, ["Kevin", "Alex"]);
-  assert.deepEqual(c.users, ["ocinst_admin", "ocinst_alex"]); assert.match(c.message, /Kevin and Alex have/);
+  assert.equal(c.code, "open_in_editor"); assert.deepEqual(c.data.open_by, ["Casey", "Alex"]);
+  assert.deepEqual(c.users, ["ocinst_admin", "ocinst_alex"]); assert.match(c.message, /Casey and Alex have/);
   fake.addFile("S/tok.docx", Buffer.from("d"), { lock: { type: 2, owner: null, displayName: null } });
   const t = await classifyLock(cfg, await stat(cfg, ["S", "tok.docx"]));
   assert.equal(t.code, "locked_by_person"); assert.match(t.message, /^Someone locked/);
@@ -274,11 +274,11 @@ test("I2: when the version list cannot be read, nothing is labelled and label_wa
 
 test("I3: a write that lands right after our PUT is not labelled as Crow's", async () => {
   fake.addFile("S/aft.txt", Buffer.from("a"));
-  fake.state.afterPutHook = (n) => { if (n.path === "S/aft.txt") { fake.state.afterPutHook = null; inject("S/aft.txt", "a+b+kevin"); } };
+  fake.state.afterPutHook = (n) => { if (n.path === "S/aft.txt") { fake.state.afterPutHook = null; inject("S/aft.txt", "a+b+casey"); } };
   const r = await W.withFileWrite(cfg, { path: "S/aft.txt" }, appendMut("+b"), { clock });
   fake.state.afterPutHook = null;
   const vs = fake.versionsOf("S/aft.txt");
-  assert.equal(vs.at(-1).bytes.toString(), "a+b+kevin"); assert.equal(vs.at(-1).label, null, "kevin's row unlabelled");
+  assert.equal(vs.at(-1).bytes.toString(), "a+b+casey"); assert.equal(vs.at(-1).label, null, "casey's row unlabelled");
   assert.match(r.label_warning, /someone else saved the file right after/); await assert.rejects(W.undoFileChange(cfg, { path: "S/aft.txt" }, r.version_id, { clock }), (e) => e.code === "changed_since");
 });
 
@@ -299,10 +299,10 @@ test("I4: a plain restore's undo token uses the file as read AFTER the spacing g
 test("a restore overtaken by someone's save issues no undo token and says why", async () => {
   const n = fake.addFile("S/ov.txt", Buffer.from("A")); const vA = String(n.versions[0].id);
   await W.withFileWrite(cfg, { path: "S/ov.txt" }, async () => ({ bytes: Buffer.from("B"), changed: 1, summary: "B" }), { clock });
-  // the first stat after the restore MOVE (content back to "A") sees Kevin's save land on top
+  // the first stat after the restore MOVE (content back to "A") sees Casey's save land on top
   let hit = false;
   fake.extraRoutes = async (req) => {
-    if (!hit && req.method === "PROPFIND" && req.url.includes("/files/crow-bot/S/ov.txt") && fake.node("S/ov.txt").bytes.toString() === "A") { hit = true; inject("S/ov.txt", "A+kevin"); }
+    if (!hit && req.method === "PROPFIND" && req.url.includes("/files/crow-bot/S/ov.txt") && fake.node("S/ov.txt").bytes.toString() === "A") { hit = true; inject("S/ov.txt", "A+casey"); }
     return false;
   };
   const r = await W.withFileRestore(cfg, { path: "S/ov.txt" }, vA, { clock });
@@ -314,13 +314,13 @@ test("I5: a save landing during the mtime-gap sleep resets the gap (no shared se
   fake.state.realisticMtime = () => Math.floor(clock.now() / 1000);
   fake.addFile("S/gap.txt", Buffer.from("base"));
   const v0 = fake.versionsOf("S/gap.txt").length;
-  fake.state.pendingReleases.push({ at: fake.state.now + 300, fn: () => inject("S/gap.txt", "base+kevin") });
+  fake.state.pendingReleases.push({ at: fake.state.now + 300, fn: () => inject("S/gap.txt", "base+casey") });
   await W.withFileWrite(cfg, { path: "S/gap.txt" }, appendMut("+bot"), { clock });
   const vs = fake.versionsOf("S/gap.txt");
   fake.state.realisticMtime = null;
-  assert.equal(text(fake.node("S/gap.txt").bytes), "base+kevin+bot");
-  assert.equal(vs.length, v0 + 2, "kevin's save and the bot write are separate rows");
-  assert.equal(vs.at(-2).bytes.toString(), "base+kevin");
+  assert.equal(text(fake.node("S/gap.txt").bytes), "base+casey+bot");
+  assert.equal(vs.length, v0 + 2, "casey's save and the bot write are separate rows");
+  assert.equal(vs.at(-2).bytes.toString(), "base+casey");
 });
 
 test("I6: 412 then 423 each get their own retry; the 423 retry queues", async () => {
@@ -364,9 +364,9 @@ test("I7: a forged created-file token never deletes a folder or a share root", a
 test("S1: changed_since carries modified and modified_by_label", async () => {
   fake.addFile("S/mb.txt", Buffer.from("a"));
   const r = await W.withFileWrite(cfg, { path: "S/mb.txt" }, appendMut("b"), { clock });
-  inject("S/mb.txt", "ab+kevin"); fake.versionsOf("S/mb.txt").at(-1).label = "Kevin: tweak";
+  inject("S/mb.txt", "ab+casey"); fake.versionsOf("S/mb.txt").at(-1).label = "Casey: tweak";
   await assert.rejects(W.undoFileChange(cfg, { path: "S/mb.txt" }, r.version_id, { clock }),
-    (e) => e.code === "changed_since" && e.data.modified_by_label === "Kevin: tweak" && typeof e.data.modified === "string");
+    (e) => e.code === "changed_since" && e.data.modified_by_label === "Casey: tweak" && typeof e.data.modified === "string");
 });
 
 test("I8: a non-JSON 200 from the editor is editor_unreachable, never a SyntaxError quoting the body", async () => {

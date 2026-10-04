@@ -121,7 +121,7 @@ export function keychainGeneratedKeys(manifest) {
     .map((v) => v.name);
 }
 
-/** Typed fields the forms may offer to save to the keychain: opt-in only (Kevin Q1). */
+/** Typed fields the forms may offer to save to the keychain: opt-in only (Casey Q1). */
 export function keychainEligibleKeys(manifest) {
   return (manifest?.env_vars || [])
     .filter((v) => v && typeof v.name === "string" && v.secret === true && !v.generate && (v.generatable === true || v.keychain === true))

@@ -8,8 +8,8 @@ test("toPublicBot exposes only whitelisted fields, never the raw definition", ()
     definition: JSON.stringify({
       models: { default: "crow-local/qwen3.6-35b-a3b" },
       tools: { crow_mcp: ["crow-tasks/tasks_list", "crow-memory/crow_store_memory"], pi_builtin: ["read"] },
-      gateways: [{ type: "gmail", address: "kevin.hopper+scout@maestro.press", allowlist: ["secret@x"] }],
-      permission_policy: { bash: "deny", write_paths: ["/home/kh0pp/.crow-mpa/pi-bots/scout"] },
+      gateways: [{ type: "gmail", address: "bot+scout@example.com", allowlist: ["secret@x"] }],
+      permission_policy: { bash: "deny", write_paths: ["/home/alex/.crow-mpa/pi-bots/scout"] },
       system_prompt: "SECRET PROMPT do not leak",
       spawn_env: { PI_PROVIDER: "crow-local", SECRET_KEY: "abc123" },
     }),
@@ -47,6 +47,6 @@ test("toPublicTool sets exposed:true when canonicalId is in the exposure set", (
 });
 
 test("toPublicSkill is just a name", () => {
-  assert.deepEqual(toPublicSkill({ name: "research-pipeline", path: "/home/kh0pp/.crow/skills/research-pipeline.md" }),
+  assert.deepEqual(toPublicSkill({ name: "research-pipeline", path: "/home/alex/.crow/skills/research-pipeline.md" }),
     { name: "research-pipeline" });
 });

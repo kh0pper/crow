@@ -378,8 +378,8 @@ test("caws also carry a valid bird, but never coordinates", () => {
 
 test("world name: rides in content only when given and clean; eventToMark reads it through the sanitizer", () => {
   const row = { ...openMarkRow, author_level: "pseudonym" };
-  const withName = JSON.parse(markToEvent(row, { name: "  Kevin\u202E " }).content);
-  assert.equal(withName.name, "Kevin");
+  const withName = JSON.parse(markToEvent(row, { name: "  Casey\u202E " }).content);
+  assert.equal(withName.name, "Casey");
   assert.equal(JSON.parse(markToEvent(row, {}).content).name, undefined, "no name given, none sent");
   assert.equal(JSON.parse(markToEvent(row, { name: "f665c26b" }).content).name, undefined, "a key look-alike is dropped");
   assert.equal(JSON.parse(markToEvent(row, { name: "crow:x" }).content).name, undefined);

@@ -226,9 +226,9 @@ function summarise() {
   const st = S.map((s) => s.structured).filter(Boolean);
   sum.S9_callcommand_structured_result = st.length ? st.every((o) => o.callback && o.result && o.result.ok === true) : null;
   const ind = S.map((s) => s.indicator).filter(Boolean);
-  sum.S9_indicator_method = ind.length ? ind.map((o) => `start ${o.start}, end ${o.end}`).join("; ") + " (Kevin confirms whether 'Crow probe…' was visible)" : null;
+  sum.S9_indicator_method = ind.length ? ind.map((o) => `start ${o.start}, end ${o.end}`).join("; ") + " (Casey confirms whether 'Crow probe…' was visible)" : null;
   const ed = S.map((s) => s.edit).filter(Boolean);
-  sum.S9_edit_command = ed.length ? ed.map((o) => (o.callback ? JSON.stringify(o.result) : `no callback (${o.threw || "timeout"})`)).join("; ") + " (Kevin confirms CROW-PROBE survived close/save)" : null;
+  sum.S9_edit_command = ed.length ? ed.map((o) => (o.callback ? JSON.stringify(o.result) : `no callback (${o.threw || "timeout"})`)).join("; ") + " (Casey confirms CROW-PROBE survived close/save)" : null;
   // Cell edit-mode no-op: ticks inside the marked window
   const start = facts.marks.find((m) => m.label === "cell_edit_start"), end = facts.marks.find((m) => m.label === "cell_edit_end");
   const ticks = S.flatMap((s) => s.ticks || []);

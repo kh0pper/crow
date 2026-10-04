@@ -103,10 +103,10 @@ const noSleep = async () => {};
 
 test("env mode is unchanged: topic, extras, token, and URL derivation from the gateway URL", () => {
   const { env } = tmpData();
-  Object.assign(env, { NTFY_TOPIC: "kevin", NTFY_EXTRA_TOPICS: "kevin-mpa, kevin ,kevin-mpa,", NTFY_AUTH_TOKEN: "tk_env", CROW_GATEWAY_URL: "https://crow.example.ts.net:8444" });
+  Object.assign(env, { NTFY_TOPIC: "casey", NTFY_EXTRA_TOPICS: "casey-mpa, casey ,casey-mpa,", NTFY_AUTH_TOKEN: "tk_env", CROW_GATEWAY_URL: "https://crow.example.ts.net:8444" });
   const c = resolveNtfyConfig(env);
   assert.equal(c.source, "env");
-  assert.deepEqual(c.topics, ["kevin", "kevin-mpa"]);
+  assert.deepEqual(c.topics, ["casey", "casey-mpa"]);
   assert.equal(c.publishToken, "tk_env");
   assert.equal(c.subscriberToken, "tk_env", "env hosts keep handing NTFY_AUTH_TOKEN to apps");
   assert.equal(c.externalUrl, "https://crow.example.ts.net:2586");
@@ -116,7 +116,7 @@ test("env mode is unchanged: topic, extras, token, and URL derivation from the g
   assert.equal(resolveNtfyConfig({ ...env, NTFY_EXTERNAL_URL: "https://n.example:8445" }).externalUrl, "https://n.example:8445");
   // A stored auto config never shadows env.
   writeStoredNtfyConfig({ topic: "crow-x", publisherToken: "tk_p", subscriberToken: "tk_s" }, env);
-  assert.equal(resolveNtfyConfig(env).topic, "kevin");
+  assert.equal(resolveNtfyConfig(env).topic, "casey");
 });
 
 test("auto mode reads ntfy-push.json; env fields override; nothing configured → null", () => {
@@ -425,10 +425,10 @@ test("/api/push/ntfy-config: env hosts answer exactly as before; nothing configu
   await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR }, async () => {
     assert.deepEqual(await routeGet("/api/push/ntfy-config"), { enabled: false });
   });
-  await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "kevin", NTFY_EXTRA_TOPICS: "kevin-mpa", NTFY_AUTH_TOKEN: "tk_e", NTFY_EXTERNAL_URL: "https://ntfy.example" }, async () => {
-    assert.deepEqual(await routeGet("/api/push/ntfy-config"), { enabled: true, url: "https://ntfy.example", topic: "kevin", topics: ["kevin", "kevin-mpa"], authToken: "tk_e" });
+  await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "casey", NTFY_EXTRA_TOPICS: "casey-mpa", NTFY_AUTH_TOKEN: "tk_e", NTFY_EXTERNAL_URL: "https://ntfy.example" }, async () => {
+    assert.deepEqual(await routeGet("/api/push/ntfy-config"), { enabled: true, url: "https://ntfy.example", topic: "casey", topics: ["casey", "casey-mpa"], authToken: "tk_e" });
   });
-  await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "kevin" }, async () => {
+  await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "casey" }, async () => {
     assert.deepEqual(await routeGet("/api/push/ntfy-config"), { enabled: false }, "no external URL and no gateway URL");
   });
 });
@@ -468,7 +468,7 @@ test("a refused publish (403) is reported, not swallowed; unconfigured → skipp
   const { env } = tmpData();
   const srv = await fakeNtfyHttp(403);
   try {
-    await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "kevin-r4", NTFY_HOST: "127.0.0.1", NTFY_PORT: String(srv.port) }, async () => {
+    await withEnv({ CROW_DATA_DIR: env.CROW_DATA_DIR, NTFY_TOPIC: "casey-r4", NTFY_HOST: "127.0.0.1", NTFY_PORT: String(srv.port) }, async () => {
       const { sendNtfyNotification } = await import("../servers/gateway/push/ntfy.js");
       const r = await sendNtfyNotification({ title: "Hi" });
       assert.equal(r.ok, false);

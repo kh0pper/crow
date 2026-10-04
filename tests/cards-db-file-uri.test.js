@@ -2,7 +2,7 @@
  * Card database resolution when `project_spaces.tasks_db_uri` is a `file:` URI.
  *
  * WHY THIS EXISTS. Production stores that column as a URI —
- * `file:/home/kh0pp/.crow-r4/data/tasks.db` on r4 — and better-sqlite3 has no
+ * `file:/home/alex/.crow-r4/data/tasks.db` on r4 — and better-sqlite3 has no
  * URI support at all: `new Database("file:/x")` raises SQLITE_CANTOPEN because
  * it treats the whole string as a relative filename. Every test written for the
  * job rail seeded a PLAIN path (or the global fallback), so nothing ever
@@ -39,8 +39,8 @@ test("resolveSqlitePath leaves a plain absolute path untouched", () => {
 test("resolveSqlitePath strips the scheme from the form production stores", () => {
   // Exactly what r4 holds in project_spaces.tasks_db_uri.
   assert.equal(
-    resolveSqlitePath("file:/home/kh0pp/.crow-r4/data/tasks.db"),
-    "/home/kh0pp/.crow-r4/data/tasks.db",
+    resolveSqlitePath("file:/home/alex/.crow-r4/data/tasks.db"),
+    "/home/alex/.crow-r4/data/tasks.db",
   );
 });
 

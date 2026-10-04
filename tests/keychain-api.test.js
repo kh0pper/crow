@@ -180,7 +180,7 @@ test("C5 — deleting an in-use generated token needs an explicit confirmation",
 test("Export then Import (re-auth required): the file round-trips; a wrong passphrase imports nothing", async () => {
   const s = await setup();
   try {
-    await K.addManualSecret(s.db, s.key(), { label: "Phone", username: "kevin", secret: "app-pass" });
+    await K.addManualSecret(s.db, s.key(), { label: "Phone", username: "casey", secret: "app-pass" });
     assert.equal((await s.call("/export", { body: { passphrase: "correct horse battery" } })).status, 403);
     await s.call("/reauth", { body: { password: "right-password" } });
     assert.equal((await s.call("/export", { body: { passphrase: "short" } })).status, 400);
@@ -207,7 +207,7 @@ test("Export then Import (re-auth required): the file round-trips; a wrong passp
 test("add needs no grant; delete needs one; both audited", async () => {
   const s = await setup();
   try {
-    const add = await s.call("/add", { body: { label: "Workspace phone (Kevin)", username: "kevin", url: "https://ws:8456", secret: "abcd-efgh-ijkl" } });
+    const add = await s.call("/add", { body: { label: "Workspace phone (Casey)", username: "casey", url: "https://ws:8456", secret: "abcd-efgh-ijkl" } });
     assert.equal(add.status, 200);
     assert.equal((await s.call("/delete", { body: { id: add.body.id } })).status, 403);
     await s.call("/reauth", { body: { password: "right-password" } });
@@ -221,7 +221,7 @@ test("add needs no grant; delete needs one; both audited", async () => {
 test("vault-save: grant required, credentials passed through once, never audited", async () => {
   const s = await setup();
   try {
-    const { id } = await K.addManualSecret(s.db, s.key(), { label: "Phone", username: "kevin", secret: "app-pass" });
+    const { id } = await K.addManualSecret(s.db, s.key(), { label: "Phone", username: "casey", secret: "app-pass" });
     assert.equal((await s.call("/vault-save", { body: { id, vault_email: "k@example.invalid", vault_password: "Master-PW" } })).status, 403);
     await s.call("/reauth", { body: { password: "right-password" } });
     const r = await s.call("/vault-save", { body: { id, vault_email: "k@example.invalid", vault_password: "Master-PW" } });

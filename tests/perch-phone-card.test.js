@@ -159,7 +159,7 @@ import { OUTCOMES } from "../bundles/phone/server/plan.js";
 test("numbers display as (512) 555-0101 for US/Canada and stay E.164 otherwise", () => {
   const f = extract(perchPhoneCardJs("en"), "phoneNumberText");
   assert.equal(f("+15125550101"), "(512) 555-0101");
-  assert.equal(f("+442071234567"), "+442071234567");
+  assert.equal(f("+442079460123"), "+442079460123");
   assert.equal(f(null), "");
 });
 

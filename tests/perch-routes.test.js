@@ -464,7 +464,7 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
   const asst = (content) => JSON.stringify({ type: "message", id: "m", message: { role: "assistant", content } });
   writeFileSync(join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl"),
     JSON.stringify({ type: "message", id: "u", message: { role: "user", content: "**not mine to render**" } }) + "\n" +
-    asst([{ type: "text", text: "## Boards\n\nThere are **four**.\n\n| id | name |\n|---|---|\n| 1 | TEHCY |" }]) + "\n" +
+    asst([{ type: "text", text: "## Boards\n\nThere are **four**.\n\n| id | name |\n|---|---|\n| 1 | ACME |" }]) + "\n" +
     asst([{ type: "toolCall", id: "c1", name: "board_list_boards", arguments: {} }]) + "\n" +
     asst([{ type: "text", text: "   " }]) + "\n");
   const c = raw();
@@ -483,7 +483,7 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
 
   assert.match(prose.html, /<h2[^>]*>Boards<\/h2>/);
   assert.match(prose.html, /<strong>four<\/strong>/);
-  assert.match(prose.html, /<table>[\s\S]*TEHCY[\s\S]*<\/table>/, "gfm tables, which is most of what a bot answers with");
+  assert.match(prose.html, /<table>[\s\S]*ACME[\s\S]*<\/table>/, "gfm tables, which is most of what a bot answers with");
   assert.equal(prose.message.content[0].text.startsWith("## Boards"), true,
     "the RAW text still rides the payload — the client falls back to it");
 

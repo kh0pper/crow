@@ -1,6 +1,6 @@
-# OPERATOR-EDITED TEMPLATE: adjust User=, WorkingDirectory=, and paths for
-# your host before installing (install-runtime.sh writes the per-instance
-# /etc/crow/pibot-<i>.env this unit loads). Values here reflect a deploy example.
+# OPERATOR-EDITED TEMPLATE: install-runtime.sh renders User= (the installing
+# user) and the /home/crow/crow checkout path for this host, and writes the
+# per-instance /etc/crow/pibot-<i>.env this unit loads.
 [Unit]
 Description=Crow Bot Builder — gateway host (Telegram/Slack) [%i]
 After=network-online.target
@@ -8,10 +8,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=kh0pp
-WorkingDirectory=/home/kh0pp/crow
+User=crow
+WorkingDirectory=/home/crow/crow
 EnvironmentFile=/etc/crow/pibot-%i.env
-ExecStart=/usr/bin/env node /home/kh0pp/crow/scripts/pi-bots/gateways/gateway_runner.mjs
+ExecStart=/usr/bin/env node /home/crow/crow/scripts/pi-bots/gateways/gateway_runner.mjs
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
