@@ -16,6 +16,8 @@
  * fact, which core turns into artwork.
  */
 import { localDay, startOfLocalDay } from "./eggs.js";
+import { feed as petFeed } from "./pet.js";
+import { SEED_KIND } from "./wallet.js";
 
 export const STEPS_KIND = "steps";               // key `<day>:<device>`, delta = steps credited that day (grows)
 export const STEP_ENERGY_KIND = "stepenergy";    // key `<day>`, delta = energy paid from walking that day (grows)
@@ -302,4 +304,125 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
     args: [total, day, r.device_id],
   });
   return { credited: credit, reason, clamped, day };
+}
+
+/**
+ * Settle today (spec §6): pay step energy in chunks up to the day's target,
+ * the seed bonus once the counted steps reach the goal, and the `walked` fact
+ * once R6 holds. Runs after a credited reading, a check-in, or a goal change.
+ * The energy ledger is written BEFORE the feed, by compare-and-swap: a lost
+ * race or a crash between the two can only under-pay.
+ */
+export async function settleDay(db, { now = Date.now(), emit } = {}) {
+  const s = await readStepSettings(db);
+  const day = localDay(now);
+  const steps = await stepsToday(db, now, s);
+  const checkedIn = (await rowDelta(db, WALK_CHECKIN_KIND, day)) !== null;
+
+  const stepTarget = Math.floor(s.energyFull * Math.min(1, steps / s.goal));
+  const floor = checkedIn ? s.checkinEnergy : 0;
+  const target = Math.max(stepTarget, floor);
+  const paid = await rowDelta(db, STEP_ENERGY_KIND, day);
+  const inc = target - (paid ?? 0);
+  let energyPaid = 0;
+  if (inc > 0 && (inc >= s.energyChunk || target >= s.energyFull || target === floor)) {
+    if (await casDelta(db, STEP_ENERGY_KIND, day, paid, target, now, emit)) {
+      await petFeed(db, { type: "steps", amount: inc }, { now, emit });
+      energyPaid = inc;
+    }
+  }
+
+  let seedBonus = 0;
+  if (steps >= s.goal && s.goalSeed > 0
+    && await insertOnce(db, SEED_KIND, STEP_SEED_PREFIX + day, s.goalSeed, now, emit)) {
+    seedBonus = s.goalSeed;
+  }
+
+  const walked = checkedIn || steps >= Math.min(s.goal, s.badgeMin);
+  const walkedNew = walked ? await insertOnce(db, WALKED_KIND, day, 1, now, emit) : false;
+  return { day, steps, energyPaid, seedBonus, walked: walked || (await rowDelta(db, WALKED_KIND, day)) !== null, walkedNew };
+}
+
+/** "I walked today" (spec §7): idempotent per day; mood only, never seed. */
+export async function recordWalkCheckin(db, { now = Date.now(), emit } = {}) {
+  const fresh = await insertOnce(db, WALK_CHECKIN_KIND, localDay(now), 1, now, emit);
+  const settled = await settleDay(db, { now, emit });
+  return { already: !fresh, ...settled };
+}
+
+export async function walkedToday(db, { now = Date.now() } = {}) {
+  return (await rowDelta(db, WALKED_KIND, localDay(now))) !== null;
+}
+
+/** The day as the panel shows it. Read-only. */
+export async function stepsState(db, { now = Date.now() } = {}) {
+  const s = await readStepSettings(db);
+  const day = localDay(now);
+  const steps = await stepsToday(db, now, s);
+  const { rows } = await db.execute({
+    sql: `SELECT kind, delta FROM ramble_wallet
+          WHERE (kind IN (?, ?, ?) AND key = ?) OR (kind = ? AND key = ?)`,
+    args: [WALK_CHECKIN_KIND, WALKED_KIND, STEP_ENERGY_KIND, day, SEED_KIND, STEP_SEED_PREFIX + day],
+  });
+  const of = (kind) => rows.find((r) => r.kind === kind);
+  const { rows: dev } = await db.execute({
+    sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
+    args: [STEPS_KIND, day + ":%"],
+  });
+  return {
+    day,
+    goal: s.goal,
+    steps,
+    progress: Math.min(1, steps / s.goal),
+    goal_met: steps >= s.goal,
+    checked_in: !!of(WALK_CHECKIN_KIND),
+    walked: !!of(WALKED_KIND),
+    energy_today: Number(of(STEP_ENERGY_KIND)?.delta ?? 0),
+    energy_full: s.energyFull,
+    seed_today: Number(of(SEED_KIND)?.delta ?? 0),
+    goal_seed: s.goalSeed,
+    counted_devices: Number(dev[0]?.n ?? 0),
+    settings: { goal: s.goal, nudge: s.nudge, nudge_weekends: s.nudgeWeekends },
+  };
+}
+
+/** The three user-facing settings. Replicated LWW via ramble_settings. */
+export async function writeStepSettings(db, patch, { now = Date.now(), emit } = {}) {
+  if (!patch || typeof patch !== "object") throw new StepsInputError("settings must be an object");
+  const writes = [];
+  if (patch.goal !== undefined) {
+    if (!Number.isInteger(patch.goal) || patch.goal < GOAL_MIN || patch.goal > GOAL_MAX) {
+      throw new StepsInputError(`goal must be a whole number from ${GOAL_MIN} to ${GOAL_MAX}`);
+    }
+    writes.push(["steps.goal", String(patch.goal)]);
+  }
+  for (const [field, key] of [["nudge", "steps.nudge"], ["nudge_weekends", "steps.nudge.weekends"]]) {
+    if (patch[field] === undefined) continue;
+    if (typeof patch[field] !== "boolean") throw new StepsInputError(`${field} must be true or false`);
+    writes.push([key, patch[field] ? "1" : "0"]);
+  }
+  if (!writes.length) throw new StepsInputError("nothing to change");
+  for (const [key, value] of writes) {
+    // eslint-disable-next-line no-await-in-loop
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [key, value],
+    });
+    // eslint-disable-next-line no-await-in-loop
+    await safeEmit(emit, "ramble_settings", "update", { key, value });
+  }
+  const settled = await settleDay(db, { now, emit });
+  return { ...(await stepsState(db, { now })), settled };
+}
+
+/** R8: this instance is where the player walks from. Local key, never emitted. */
+export async function touchHome(db, { now = Date.now() } = {}) {
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [HOME_KEY, String(now)],
+    });
+  } catch { /* a marker, never worth failing a request over */ }
 }

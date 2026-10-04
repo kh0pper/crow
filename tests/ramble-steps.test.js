@@ -11,8 +11,12 @@ import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { startOfLocalDay, localDay } from "../bundles/ramble/server/eggs.js";
 import {
   recordStepReading, stepsToday, parseReading, readStepSettings, StepsInputError,
-  STEPS_KIND, STEPS_DEFAULTS,
+  STEPS_KIND, STEPS_DEFAULTS, settleDay, recordWalkCheckin, stepsState, walkedToday, writeStepSettings,
+  touchHome, STEP_ENERGY_KIND, WALKED_KIND, HOME_KEY,
 } from "../bundles/ramble/server/steps.js";
+import { feed } from "../bundles/ramble/server/pet.js";
+import { seedBalance, harvestableCells } from "../bundles/ramble/server/wallet.js";
+import { buyItem } from "../bundles/ramble/server/wardrobe.js";
 
 // A fixed local day; AT(h, m) is that day at h:m local time.
 const DAY0 = startOfLocalDay(Date.UTC(2026, 9, 5, 18));
@@ -230,4 +234,176 @@ test("readStepSettings: blank, whitespace and exponent/hex forms are junk, not n
   assert.equal(s.goal, 6000);
   assert.equal(s.maxDay, STEPS_DEFAULTS.maxDay);
   assert.equal(s.badgeMin, 2500, "plain digits with padding still parse");
+});
+
+// add to imports:
+//   import { feed, petState } from "../bundles/ramble/server/pet.js";
+//   import { seedBalance, harvestableCells } from "../bundles/ramble/server/wallet.js";
+//   and from steps.js also: settleDay, recordWalkCheckin, stepsState, walkedToday, writeStepSettings,
+//   touchHome, STEP_ENERGY_KIND, WALKED_KIND, HOME_KEY
+
+async function petRow(db) {
+  const { rows } = await db.execute("SELECT energy, last_fed_at, places_week FROM ramble_pet WHERE owner = 'self'");
+  return { energy: Number(rows[0].energy), last_fed_at: rows[0].last_fed_at == null ? null : Number(rows[0].last_fed_at), places_week: Number(rows[0].places_week) };
+}
+async function seedPet(db, energy, lastFedAt) {
+  await db.execute({
+    sql: "INSERT INTO ramble_pet (owner, energy, last_fed_at) VALUES ('self', ?, ?) ON CONFLICT(owner) DO UPDATE SET energy = excluded.energy, last_fed_at = excluded.last_fed_at",
+    args: [energy, lastFedAt],
+  });
+}
+/** Put `n` steps on today's ledger for a second device, bypassing the sensor maths. */
+const plantSteps = (db, now, n, dev = DEV2) => db.execute({
+  sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('steps', ?, ?, ?) ON CONFLICT(kind, key) DO UPDATE SET delta = excluded.delta",
+  args: [`${localDay(now)}:${dev}`, n, now],
+});
+
+test("feed({type:'steps'}) adds a bounded amount and never touches last_fed_at or the weekly counters (R5)", async () => {
+  const db = await freshDb();
+  await seedPet(db, 40, AT(6));
+  await feed(db, { type: "steps", amount: 7 }, { now: AT(9) });
+  assert.deepEqual(await petRow(db), { energy: 47, last_fed_at: AT(6), places_week: 0 });
+  await feed(db, { type: "steps", amount: -5 }, { now: AT(9) });
+  await feed(db, { type: "steps", amount: "junk" }, { now: AT(9) });
+  await feed(db, { type: "steps", amount: 2.5 }, { now: AT(9) });
+  assert.equal((await petRow(db)).energy, 47, "junk amounts pay nothing");
+  await feed(db, { type: "steps", amount: 1e9 }, { now: AT(9) });
+  assert.equal((await petRow(db)).energy, 100, "bounded, then clamped by the heart ceiling");
+  await assert.rejects(() => feed(db, { type: "stepz" }, { now: AT(9) }), /unknown pet feed event type/);
+});
+
+test("energy grows with progress in chunks, reaches energy.full at the goal, and stops there", async () => {
+  const db = await freshDb();
+  await seedPet(db, 50, AT(6));
+  await plantSteps(db, AT(9), 1_000);
+  let out = await settleDay(db, { now: AT(9) });
+  assert.equal(out.energyPaid, 5, "floor(30 * 1000/6000) = 5, one chunk");
+  await plantSteps(db, AT(10), 1_500);
+  out = await settleDay(db, { now: AT(10) });
+  assert.equal(out.energyPaid, 0, "target 7: an increment of 2 is under the chunk");
+  await plantSteps(db, AT(12), 6_500);
+  out = await settleDay(db, { now: AT(12) });
+  assert.equal(out.energyPaid, 25);
+  await plantSteps(db, AT(14), 9_000);
+  out = await settleDay(db, { now: AT(14) });
+  assert.equal(out.energyPaid, 0, "never past energy.full");
+  assert.deepEqual(await petRow(db), { energy: 80, last_fed_at: AT(6), places_week: 0 });
+  assert.equal(Number((await db.execute({ sql: "SELECT delta FROM ramble_wallet WHERE kind = ? AND key = ?", args: [STEP_ENERGY_KIND, localDay(AT(14))] })).rows[0].delta), 30);
+});
+
+test("the check-in pays a floor that counted steps rise above but never add to, and never pays seed", async () => {
+  const db = await freshDb();
+  await seedPet(db, 20, AT(6));
+  let out = await recordWalkCheckin(db, { now: AT(9) });
+  assert.deepEqual([out.already, out.energyPaid, out.seedBonus, out.walked, out.walkedNew], [false, 15, 0, true, true]);
+  out = await recordWalkCheckin(db, { now: AT(9, 5) });
+  assert.deepEqual([out.already, out.energyPaid, out.walkedNew], [true, 0, false]);
+  await plantSteps(db, AT(10), 3_000);   // step target 15 = the floor
+  assert.equal((await settleDay(db, { now: AT(10) })).energyPaid, 0);
+  await plantSteps(db, AT(11), 4_000);   // step target 20
+  assert.equal((await settleDay(db, { now: AT(11) })).energyPaid, 5);
+  assert.equal(await seedBalance(db), 0, "a check-in alone never pays seed (S3)");
+  await plantSteps(db, AT(12), 6_000);
+  out = await settleDay(db, { now: AT(12) });
+  assert.deepEqual([out.energyPaid, out.seedBonus], [10, 3]);
+  assert.equal((await petRow(db)).energy, 50);
+});
+
+test("the seed bonus pays once a day; lowering the goal under today's steps completes it", async () => {
+  const db = await freshDb();
+  await plantSteps(db, AT(10), 4_000);
+  assert.equal((await settleDay(db, { now: AT(10) })).seedBonus, 0);
+  const st = await writeStepSettings(db, { goal: 4_000 }, { now: AT(10) });
+  assert.equal(st.goal_met, true);
+  assert.equal(st.settled.seedBonus, 3);
+  assert.equal((await writeStepSettings(db, { goal: 3_500 }, { now: AT(10) })).settled.seedBonus, 0, "once a day");
+  assert.equal(await seedBalance(db), 3);
+});
+
+test("the bonus row counts toward the balance and is never mistaken for harvestable seed", async () => {
+  const db = await freshDb();
+  const cells = ["9vg4e2s", "9vg4e2t", "9vg4e2u", "9vg4e2v", "9vg4e2w", "9vg4e2x", "9vg4e2y", "9vg4e2z"];
+  const before = await harvestableCells(db, cells, { now: AT(10) });
+  assert.ok(before.length > 0);
+  await plantSteps(db, AT(10), 7_000);
+  await settleDay(db, { now: AT(10) });
+  assert.equal(await seedBalance(db), 3);
+  assert.deepEqual(await harvestableCells(db, cells, { now: AT(10) }), before);
+});
+
+test("the badge: min(goal, badge.min) counted steps, or a check-in; the new-fact flag fires once", async () => {
+  const db = await freshDb();
+  await plantSteps(db, AT(10), 1_999);
+  assert.equal((await settleDay(db, { now: AT(10) })).walked, false);
+  assert.equal(await walkedToday(db, { now: AT(10) }), false);
+  await plantSteps(db, AT(11), 2_000);
+  let out = await settleDay(db, { now: AT(11) });
+  assert.deepEqual([out.walked, out.walkedNew], [true, true]);
+  out = await settleDay(db, { now: AT(11, 5) });
+  assert.deepEqual([out.walked, out.walkedNew], [true, false]);
+  assert.equal(await walkedToday(db, { now: AT(11) }), true);
+  assert.equal(await walkedToday(db, { now: AT(11) + 24 * H }), false, "tomorrow starts unwalked");
+  // The goal floor is 2,000 (= the default badge.min), so a goal can only be
+  // the lower line when badge.min has been raised above it.
+  const db2 = await freshDb();
+  await setSetting(db2, "steps.badge.min", 5_000);
+  await writeStepSettings(db2, { goal: 4_000 }, { now: AT(10) });
+  await plantSteps(db2, AT(10), 3_999);
+  assert.equal((await settleDay(db2, { now: AT(10) })).walked, false);
+  await plantSteps(db2, AT(10, 5), 4_000);
+  assert.equal((await settleDay(db2, { now: AT(10, 5) })).walked, true, "a goal under badge.min is its own badge line");
+});
+
+test("step energy is clamped by the heart-derived ceiling", async () => {
+  const db = await freshDb();
+  await seedPet(db, 95, AT(6));
+  await plantSteps(db, AT(12), 6_000);
+  await settleDay(db, { now: AT(12) });
+  assert.equal((await petRow(db)).energy, 100);
+});
+
+test("stepsState reports the day without writing anything", async () => {
+  const db = await freshDb();
+  await plantSteps(db, AT(10), 3_000);
+  const st = await stepsState(db, { now: AT(10) });
+  assert.deepEqual(st, {
+    day: localDay(AT(10)), goal: 6000, steps: 3000, progress: 0.5, goal_met: false,
+    checked_in: false, walked: false, energy_today: 0, energy_full: 30, seed_today: 0, goal_seed: 3,
+    counted_devices: 1, settings: { goal: 6000, nudge: true, nudge_weekends: true },
+  });
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_wallet WHERE kind != 'steps'")).rows[0].n, 0);
+});
+
+test("writeStepSettings validates, persists, and emits each setting", async () => {
+  const db = await freshDb();
+  const ops = [];
+  const emit = async (table, op, row) => ops.push({ table, op, row });
+  for (const bad of [{}, { goal: 1_999 }, { goal: 30_001 }, { goal: 6000.5 }, { goal: "6000" }, { nudge: "yes" }, { nudge_weekends: 1 }, null]) {
+    await assert.rejects(() => writeStepSettings(db, bad, { now: AT(10), emit }), (e) => e.name === "StepsInputError", JSON.stringify(bad));
+  }
+  const st = await writeStepSettings(db, { goal: 7_500, nudge: false, nudge_weekends: false }, { now: AT(10), emit });
+  assert.deepEqual(st.settings, { goal: 7500, nudge: false, nudge_weekends: false });
+  assert.deepEqual(ops.filter((o) => o.table === "ramble_settings").map((o) => [o.row.key, o.row.value]),
+    [["steps.goal", "7500"], ["steps.nudge", "0"], ["steps.nudge.weekends", "0"]]);
+});
+
+test("touchHome writes the local-only steps-home marker without emitting", async () => {
+  const db = await freshDb();
+  await touchHome(db, { now: AT(10) });
+  const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [HOME_KEY] });
+  assert.equal(Number(rows[0].value), AT(10));
+  assert.ok(HOME_KEY.startsWith("local."), "instance sync drops local. keys in both directions");
+});
+
+test("the goal seed bonus counts toward buying in the wardrobe (balance 9 + 3 bonus buys a 12-seed hat)", async () => {
+  const db = await freshDb();
+  await db.execute({ sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('seed', 'pickup:test', 9, ?)", args: [AT(8)] });
+  assert.equal(await seedBalance(db), 9);
+  const before = await buyItem(db, "hat.beanie", { now: AT(9), purchaseId: "p1" });
+  assert.deepEqual([before.ok, before.reason], [false, "short"], "9 seed cannot buy a 12-seed hat");
+  await plantSteps(db, AT(10), 6_000);
+  assert.equal((await settleDay(db, { now: AT(10) })).seedBonus, 3);
+  const after = await buyItem(db, "hat.beanie", { now: AT(11), purchaseId: "p2" });
+  assert.equal(after.ok, true, "affordable only because of the bonus");
+  assert.equal(after.balance, 0);
 });
