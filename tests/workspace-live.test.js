@@ -345,7 +345,11 @@ test("fix3 R2: the gateway's global 1 MB JSON parser skips the live prefix (only
   const m = /const _hasOwnParser = \(p\) => ([^\n]*\n[^\n]*);/.exec(src);
   assert.ok(m, "the predicate is where it was");
   const pred = m[1];
-  assert.ok(pred.includes('p.startsWith("/api/workspace/live/v1/")'));
+  assert.ok(pred.includes('startsWith("/api/workspace/live/v1/")'));
+  // final M3: Express routes case-insensitively, so the skip must too (else a mixed-case path is parsed by the 1 MB parser before the token check)
+  const skip = new Function("p", `return ${pred};`);
+  for (const p of ["/api/workspace/live/v1/claim", "/API/Workspace/Live/V1/claim", "/llm/v1/chat"]) assert.equal(skip(p), true, p);
+  for (const p of ["/api/workspace/quick/save", "/dashboard"]) assert.equal(skip(p), false, p);
   assert.match(readFileSync(join(ROOT, "bundles", "workspace", "server", "live", "routes-live.js"), "utf8"), /router\.use\(preAuth, json\(\{ limit: "256kb" \}\), auth\)/);
 });
 

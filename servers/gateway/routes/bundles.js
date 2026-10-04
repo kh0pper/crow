@@ -885,7 +885,13 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   // A version that ADDS an MCP server must register it for existing installs (W2: the
   // workspace bundle gained a server; refresh used to copy server/ and never register it).
   if (repoManifest.server && !repoManifest.server.url) {
-    const addons = readJsonSafe(MCP_ADDONS_PATH, {});
+    // A file that exists but does not parse is left alone: rewriting it from {} would wipe every other add-on.
+    // Like a failed npm_required install, the manifest (commit marker) stays old so the next boot retries.
+    const addons = readJsonSafe(MCP_ADDONS_PATH, null) ?? (existsSync(MCP_ADDONS_PATH) ? null : {});
+    if (!addons) {
+      console.warn(`[bundles] ${id}: ${MCP_ADDONS_PATH} exists but could not be parsed; MCP server not registered, left at ${oldVersion} so the next boot retries`);
+      return { oldVersion, newVersion: oldVersion, touched: [...touched, "mcp-addons.json unreadable — will retry"] };
+    }
     if (!addons[id]) {
       addons[id] = mcpAddonEntryFor(repoManifest, null);
       writeJsonSafe(MCP_ADDONS_PATH, addons);
