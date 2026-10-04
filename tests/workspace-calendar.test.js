@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { statSync, readdirSync, utimesSync, mkdirSync, writeFileSync } from "node:fs";
+import { statSync, readdirSync, utimesSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeNextcloud } from "./helpers/workspace-fake-nextcloud.js";
 import { installFakePim } from "./helpers/workspace-fake-pim.js";
@@ -166,4 +166,51 @@ test("pruneJournal drops entries older than 30 days and keeps at most maxEntries
   pruneJournal({ maxEntries: 1 });
   assert.equal(readdirSync(dir).filter((f) => f.endsWith(".json")).length, 1);
   assert.equal(loadChange(fresh).ref, "cal:x/new", "the newest entry is the one kept");
+});
+
+const journalEntry = (versionId) => JSON.parse(readFileSync(join(home, "data", "workspace-tools", "journal", `${versionId.slice(3)}.json`), "utf8"));
+
+test("T10-I2: a daily series since 2010 lists the window's 7 occurrences (TZID wall time kept); an hourly series since 2010 too", async () => {
+  pim.addEvent("menu_shared_by_admin", "diario.ics", cal("BEGIN:VEVENT", "UID:diario-1", "DTSTAMP:20261001T000000Z", "DTSTART;TZID=America/Chicago:20100104T073000", "DTEND;TZID=America/Chicago:20100104T080000", "RRULE:FREQ=DAILY", "SUMMARY:Desayuno diario", "END:VEVENT"));
+  const r = await call("ws_cal_list_events", { calendar: "Menu", time_min: "2026-10-29T00:00:00-05:00", time_max: "2026-11-05T00:00:00-06:00", query: "Desayuno diario", max_results: 50 });
+  assert.equal(r.data.truncated, undefined);
+  assert.deepEqual(r.data.events.map((e) => e.start), ["2026-10-29T07:30:00-05:00", "2026-10-30T07:30:00-05:00", "2026-10-31T07:30:00-05:00", "2026-11-01T07:30:00-06:00", "2026-11-02T07:30:00-06:00", "2026-11-03T07:30:00-06:00", "2026-11-04T07:30:00-06:00"]);
+  pim.addEvent("menu_shared_by_admin", "hora.ics", cal("BEGIN:VEVENT", "UID:hora-1", "DTSTAMP:20261001T000000Z", "DTSTART:20100101T001500Z", "DTEND:20100101T002000Z", "RRULE:FREQ=HOURLY;INTERVAL=6", "SUMMARY:Regar plantas", "END:VEVENT"));
+  const h = await call("ws_cal_list_events", { calendar: "Menu", time_min: "2026-10-29T00:00:00Z", time_max: "2026-10-30T00:00:00Z", query: "Regar" });
+  assert.equal(h.data.truncated, undefined);
+  assert.deepEqual(h.data.events.map((e) => e.start), ["2026-10-29T00:15:00Z", "2026-10-29T06:15:00Z", "2026-10-29T12:15:00Z", "2026-10-29T18:15:00Z"]);
+});
+
+test("T10-I2: a rule too dense to expand is flagged truncated with a warning naming the event", async () => {
+  pim.addEvent("menu_shared_by_admin", "denso.ics", cal("BEGIN:VEVENT", "UID:denso-1", "DTSTAMP:20261001T000000Z", "DTSTART:20200101T000000Z", "DTEND:20200101T000001Z", "RRULE:FREQ=SECONDLY;BYMINUTE=0", "SUMMARY:Ping", "END:VEVENT"));
+  const r = await call("ws_cal_list_events", { calendar: "Menu", time_min: "2026-10-29T00:00:00Z", time_max: "2026-10-30T00:00:00Z" });
+  assert.equal(r.success, true); assert.equal(r.data.truncated, true);
+  assert.ok(r.data.warnings.some((w) => w.includes('"Ping"') && w.includes("denso-1")), JSON.stringify(r.data.warnings));
+  pim.calendars.get("menu_shared_by_admin").objects.delete("denso.ics");
+});
+
+test("T10-I3: after_etag comes from the PUT's ETag, so a person's edit right after the bot's write is never undone", async () => {
+  const c = await call("ws_cal_create_event", { calendar: "Menu", summary: "Jueves: enchiladas", start: "2026-10-15", end: "2026-10-15" });
+  const before = fake.calls.length;
+  pim.afterPut = (col, file) => col.objects.set(file, { text: col.objects.get(file).text.replace("enchiladas", "enchiladas verdes (Dayane)"), etag: pim.nextEtag() });
+  const u = await call("ws_cal_update_event", { calendar: "Menu", uid: c.data.uid, summary: "Jueves: enchiladas rojas" });
+  const e = journalEntry(u.data.version_id);
+  assert.ok(e.after_etag); assert.equal(e.after_etag_posthoc, undefined);
+  assert.ok(!fake.calls.slice(before).some((x) => x.method === "GET"), "no GET needed when the PUT answers with an ETag");
+  assert.equal((await call("ws_undo_last_change", { path: u.data.ref, version_id: u.data.version_id })).code, "changed_since");
+  assert.match(pim.calendars.get("menu_shared_by_admin").objects.get(`${c.data.uid}.ics`).text, /verdes \(Dayane\)/, "the person's edit survives");
+  // no ETag on the PUT → GET fallback, marked post-hoc
+  pim.omitPutEtag = true;
+  try {
+    const u2 = await call("ws_cal_update_event", { calendar: "Menu", uid: c.data.uid, location: "Casa" });
+    const e2 = journalEntry(u2.data.version_id);
+    assert.ok(e2.after_etag); assert.equal(e2.after_etag_posthoc, true);
+  } finally { pim.omitPutEtag = false; }
+});
+
+test("T10-I4: undo of a create that loses a DELETE race (412) answers changed_since", async () => {
+  const c = await call("ws_cal_create_event", { calendar: "Menu", summary: "Viernes: pizza", start: "2026-10-16", end: "2026-10-16" });
+  pim.failNext = { method: "DELETE", status: 412 };
+  assert.equal((await call("ws_undo_last_change", { path: c.data.ref, version_id: c.data.version_id })).code, "changed_since");
+  assert.ok(pim.calendars.get("menu_shared_by_admin").objects.has(`${c.data.uid}.ics`));
 });

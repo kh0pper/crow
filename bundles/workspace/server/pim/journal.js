@@ -33,8 +33,8 @@ export function loadChange(versionId) {
   catch { throw new WsError("version_gone", "That change is no longer in the undo journal (changes are kept 30 days)."); }
 }
 /** Record the etag the server gave the object after the journaled write (best effort: a miss leaves null). */
-export function settleChange(versionId, afterEtag) {
-  try { const e = loadChange(versionId); writeEntry(ensureDir(), e.id, { ...e, after_etag: afterEtag ?? null }); } catch { /* entry stays null → undo refuses */ }
+export function settleChange(versionId, afterEtag, { after_etag_posthoc = false } = {}) {
+  try { const e = loadChange(versionId); writeEntry(ensureDir(), e.id, { ...e, after_etag: afterEtag ?? null, ...(after_etag_posthoc ? { after_etag_posthoc: true } : {}) }); } catch { /* entry stays null → undo refuses */ }
 }
 export function pruneJournal({ maxAgeDays = 30, maxEntries = 500 } = {}) {
   let files; try { files = readdirSync(dir()).filter((f) => f.endsWith(".json") || f.endsWith(".tmp")); } catch { return 0; }

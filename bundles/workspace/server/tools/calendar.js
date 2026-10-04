@@ -24,16 +24,21 @@ export const calendarDefs = [
       const cfg = c.getConfig(); const cal = await C.resolveCalendar(cfg, a.calendar);
       const lo = bound(a.time_min, c.clock.now()); const hi = bound(a.time_max, lo.at.getTime() + 30 * 86400000);
       if (hi.at <= lo.at || hi.at - lo.at > 366 * 86400000) throw new WsError("bad_time", "time_max must be after time_min and within 366 days");
-      const q = a.query ? a.query.normalize("NFC").toLowerCase() : null; let events = [];
+      const q = a.query ? a.query.normalize("NFC").toLowerCase() : null; let events = []; const warnings = [];
       for (const o of await C.queryEvents(cfg, cal, new Date(lo.at.getTime() - SLACK), new Date(hi.at.getTime() + SLACK))) {
-        events.push(...C.expandEvents(o.text, lo.at, hi.at, a.single_events, { floatStart: lo.wall, floatEnd: hi.wall }).map((e) => ({ ...e, ref: ref(cal, e.uid) })));
+        const x = C.expandEvents(o.text, lo.at, hi.at, a.single_events, { floatStart: lo.wall, floatEnd: hi.wall });
+        if (x.truncated) {
+          let what = "an event"; try { const u = C.eventIdentity(o.text); what = `"${u.summary}" (uid ${u.uid})`; } catch { /* keep generic */ }
+          warnings.push(`The repeats of ${what} could not all be worked out for this window; some occurrences may be missing. Try a shorter window.`);
+        }
+        events.push(...x.events.map((e) => ({ ...e, ref: ref(cal, e.uid) })));
       }
       if (q) events = events.filter((e) => `${e.summary}\n${e.description}\n${e.location}`.normalize("NFC").toLowerCase().includes(q));
       events.sort((x, y) => startMs(x.start) - startMs(y.start));
-      return { calendar: cal.name, events: events.slice(0, a.max_results) };
+      return { calendar: cal.name, events: events.slice(0, a.max_results), ...(warnings.length ? { truncated: true, warnings } : {}) };
     } },
   { name: "ws_cal_get_event", description: "One event by uid: parsed fields plus raw ICS.", schema: { calendar: z.string().min(1).max(200), uid: z.string().min(1).max(500) },
-    run: async (a, c) => { const cfg = c.getConfig(); const cal = await C.resolveCalendar(cfg, a.calendar); const o = await C.findByUid(cfg, cal, a.uid); const ev = C.expandEvents(o.text, new Date(-8.64e15), new Date(8.64e15), false, { floatStart: -8.64e15, floatEnd: 8.64e15 })[0] || {}; return { ...ev, ref: ref(cal, a.uid), ics: o.text }; } },
+    run: async (a, c) => { const cfg = c.getConfig(); const cal = await C.resolveCalendar(cfg, a.calendar); const o = await C.findByUid(cfg, cal, a.uid); const ev = C.expandEvents(o.text, new Date(-8.64e15), new Date(8.64e15), false, { floatStart: -8.64e15, floatEnd: 8.64e15 }).events[0] || {}; return { ...ev, ref: ref(cal, a.uid), ics: o.text }; } },
   { name: "ws_cal_create_event", description: "Create an event. start/end: YYYY-MM-DD for all-day (end exclusive; same day is fine) or date-times with an offset. send_updates 'none' (default) sends no invitations. Undoable.",
     schema: { calendar: z.string().min(1).max(200), summary: z.string().min(1).max(500), start: z.string().max(40), end: z.string().max(40), description: z.string().max(20000).optional(), location: z.string().max(1000).optional(), attendees: z.array(z.string().max(320)).max(50).optional(), send_updates: z.enum(["none", "all"]).optional().default("none") },
     run: async (a, c) => {

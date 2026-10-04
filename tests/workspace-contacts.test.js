@@ -21,7 +21,8 @@ test("search + get; update keeps unknown vCard properties; update/delete are jou
   assert.equal(s.data.contacts[0].full_name, "Abuela Rosa"); assert.deepEqual(s.data.contacts[0].phones, ["+52 55 1234 5678"]);
   const u = await call("ws_contacts_update", { addressbook: "Casa", uid: "ab-1", emails: ["rosa@example.org"] });
   const text = pim.books.get("casa_shared_by_admin").objects.get("abuela.vcf").text;
-  assert.match(text, /X-CUSTOM:keep-me/); assert.match(text, /EMAIL[^:]*:rosa@example\.org/); assert.match(text, /TEL;TYPE=CELL:\+52 55 1234 5678/); assert.match(text, /VERSION:3\.0/);
+  assert.match(text, /X-CUSTOM:keep-me/); assert.match(text, /EMAIL[^:]*:rosa@example\.org/);
+  assert.match(text, /\r\nREV:\d{8}T\d{6}Z\r\n/, "T10-I1: REV keeps every digit"); assert.match(text, /TEL;TYPE=CELL:\+52 55 1234 5678/); assert.match(text, /VERSION:3\.0/);
   assert.ok(u.data.version_id.startsWith("j1."));
   const g = await call("ws_contacts_get", { addressbook: "Casa", uid: "ab-1" });
   assert.deepEqual(g.data.emails, ["rosa@example.org"]);

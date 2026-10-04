@@ -10,9 +10,12 @@ export function installFakePim(fake) {
   const calendars = new Map(); const books = new Map();
   const etag = () => `"p${++n}"`;
   const api = {
-    calendars, books,
+    calendars, books, nextEtag: () => etag(),
     /** Test hook: the next REPORT on this collection answers with these raw hrefs (hostile-server tests). */
     injectHrefs: null,
+    /** Test hooks: afterPut(collection, file) runs right after a PUT is stored (a person editing in the gap);
+     *  omitPutEtag drops the ETag header from PUT answers; failNext = {method, status} fails the next such request. */
+    afterPut: null, omitPutEtag: false, failNext: null,
     addCalendar(id, name, { writable = true, owner = "admin" } = {}) { calendars.set(id, { id, name, writable, owner, objects: new Map() }); },
     addEvent(calId, file, ics) { calendars.get(calId).objects.set(file, { text: ics, etag: etag() }); },
     addBook(id, name, { writable = true, owner = "admin" } = {}) { books.set(id, { id, name, writable, owner, objects: new Map() }); },
@@ -42,12 +45,15 @@ export function installFakePim(fake) {
       return true;
     }
     const o = c.objects.get(m[3]);
+    if (api.failNext && api.failNext.method === req.method) { const f = api.failNext; api.failNext = null; send(f.status); return true; }
     if (req.method === "GET") { if (!o) send(404); else send(200, o.text, { ETag: o.etag, "Content-Type": "text/calendar" }); return true; }
     if (req.method === "PUT") {
       if (c.writable === false) { send(403); return true; }
       if (req.headers["if-none-match"] === "*" && o) { send(412); return true; }
       if (req.headers["if-match"] && (!o || req.headers["if-match"] !== o.etag)) { send(412); return true; }
-      const e = etag(); c.objects.set(m[3], { text: body.toString(), etag: e }); send(o ? 204 : 201, "", { ETag: e }); return true;
+      const e = etag(); c.objects.set(m[3], { text: body.toString(), etag: e });
+      if (api.afterPut) { const h = api.afterPut; api.afterPut = null; h(c, m[3]); }
+      send(o ? 204 : 201, "", api.omitPutEtag ? {} : { ETag: e }); return true;
     }
     if (req.method === "DELETE") { if (!o) { send(404); return true; } if (req.headers["if-match"] && req.headers["if-match"] !== o.etag) { send(412); return true; } c.objects.delete(m[3]); send(204); return true; }
     return false;

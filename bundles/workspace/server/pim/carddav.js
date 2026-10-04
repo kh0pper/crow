@@ -71,6 +71,6 @@ export function buildCard(f) {
 }
 export function updateCard(text, f) {
   const v = vcardOf(text); applyFields(v, f);
-  v.updatePropertyWithValue("rev", ICAL.Time.fromJSDate(new Date(), true).toString().replace(/[-:]/g, ""));
+  v.updatePropertyWithValue("rev", ICAL.Time.fromJSDate(new Date(), true)); // review T10-I1: hand ical.js the Time, never a pre-formatted string
   return crlf(v.toString());
 }

@@ -104,8 +104,13 @@ export async function myAddress(cfg) {
  */
 export async function journaledWrite(cfg, entry, write) {
   const version_id = recordChange({ ...entry, after_etag: null });
-  await write();
-  if (entry.op !== "delete") settleChange(version_id, (await getObject(cfg, entry.href).catch(() => null))?.etag ?? null);
+  const res = await write();
+  if (entry.op === "delete") return version_id;
+  // Review T10-I3: the PUT response's ETag is exactly what the bot wrote. A GET afterwards could pick up a
+  // person's edit made in the gap (and undo would then revert their work), so it is only a fallback, and is marked.
+  const putTag = res?.headers?.get?.("etag");
+  if (putTag) settleChange(version_id, normEtag(putTag));
+  else settleChange(version_id, (await getObject(cfg, entry.href).catch(() => null))?.etag ?? null, { after_etag_posthoc: true });
   return version_id;
 }
 export const newObjectHref = (cfg, coll, uid, ext) => pimHref(cfg, coll.kind, [coll.id, `${uid}.${ext}`]);
@@ -141,10 +146,57 @@ function eventOut(ev, startT, endT, extra = {}) {
  * wall-clock ms), so an all-day item on 2026-11-01 is in a window 2026-11-01T20:00-06:00…23:00-06:00 even
  * though that is already Nov 2 in UTC (Review Focus 4).
  */
+/** uid + NFC summary of an object's series master (for messages). */
+export function eventIdentity(ics) {
+  const comp = parseCal(ics); const vevents = comp.getAllSubcomponents("vevent");
+  const m = vevents.find((v) => !v.hasProperty("recurrence-id")) || vevents[0];
+  return { uid: String(m?.getFirstPropertyValue("uid") || ""), summary: String(m?.getFirstPropertyValue("summary") || "").normalize("NFC") };
+}
+const EXPAND_BUDGET = 50000; // iterator steps per calendar object (~0.25 s); past it the result says truncated
+const FF_UNIT_S = { SECONDLY: 1, MINUTELY: 60, HOURLY: 3600, DAILY: 86400, WEEKLY: 604800 };
+/**
+ * Review T10-I2: a long-running rule (daily since 2010, hourly, ...) would exhaust the iterator budget before
+ * reaching the window. For plain FREQ[+INTERVAL][+UNTIL] rules (no COUNT, no BY* parts) the master's DTSTART is
+ * moved forward by whole periods to just before the window, on the rule's own grid (days/weeks in wall-clock time,
+ * so a TZID series keeps its local time; sub-daily rules only when DTSTART is UTC or floating). Returns a new
+ * master component, or null when the rule is not safe to fast-forward.
+ */
+function fastForward(master, targetMs, msOf) {
+  const rrules = master.getAllProperties("rrule");
+  if (rrules.length !== 1 || master.hasProperty("rdate")) return null;
+  const rule = rrules[0].getFirstValue();
+  const unit = FF_UNIT_S[rule.freq];
+  if (!unit || rule.count || Object.keys(rule.parts || {}).some((k) => k !== "WKST")) return null;
+  const ev = new ICAL.Event(master); const start = ev.startDate;
+  if (unit < 86400 && !(isFloating(start) || isUtc(start))) return null;
+  const periodMs = unit * 1000 * (rule.interval || 1);
+  const k = Math.floor((targetMs - msOf(start)) / periodMs) - 1;
+  if (k <= 0) return null;
+  const dur = ev.duration;
+  const m2 = new ICAL.Component(master.toJSON());
+  const s2 = start.clone();
+  if (unit >= 86400) s2.adjust(k * (rule.interval || 1) * (unit / 86400), 0, 0, 0); else s2.adjust(0, 0, 0, k * (rule.interval || 1) * unit);
+  const e2 = s2.clone(); e2.addDuration(dur);
+  const tzid = master.getFirstProperty("dtstart").getParameter("tzid");
+  m2.removeAllProperties("duration");
+  for (const [n, t] of [["dtstart", s2], ["dtend", e2]]) {
+    m2.updatePropertyWithValue(n, t);
+    if (tzid && !t.isDate) m2.getFirstProperty(n).setParameter("tzid", tzid);
+  }
+  return m2;
+}
+/**
+ * Events of one calendar object overlapping [start, end) → {events, truncated}. Timed events compare in absolute
+ * time; all-day and floating events compare by wall clock against the window's own local bounds (floatStart/
+ * floatEnd = window wall-clock ms), so an all-day item on 2026-11-01 is in a window 2026-11-01T20:00-06:00…23:00-06:00
+ * even though that is already Nov 2 in UTC (Review Focus 4). truncated:true means the repeat expansion hit its
+ * budget before the end of the window, so later occurrences may be missing.
+ */
 export function expandEvents(ics, start, end, single = true, { floatStart = start.getTime(), floatEnd = end.getTime() } = {}) {
   const comp = parseCal(ics); const vevents = comp.getAllSubcomponents("vevent");
-  const master = vevents.find((v) => !v.hasProperty("recurrence-id")) || vevents[0]; if (!master) return [];
-  const ev = new ICAL.Event(master, { exceptions: vevents.filter((v) => v !== master && v.hasProperty("recurrence-id")) });
+  const master = vevents.find((v) => !v.hasProperty("recurrence-id")) || vevents[0]; if (!master) return { events: [], truncated: false };
+  const exceptions = vevents.filter((v) => v !== master && v.hasProperty("recurrence-id"));
+  let ev = new ICAL.Event(master, { exceptions });
   const ws = start.getTime(); const we = end.getTime();
   const ms = (t) => (isFloating(t) ? naiveMs(t) : t.toUnixTime() * 1000);
   const lo = (t) => (isFloating(t) ? floatStart : ws); const hi = (t) => (isFloating(t) ? floatEnd : we);
@@ -152,14 +204,24 @@ export function expandEvents(ics, start, end, single = true, { floatStart = star
     const e = e0 || s; const a = ms(s); const b = ms(e);
     return b > a ? a < hi(s) && b > lo(e) : a >= lo(s) && a < hi(s); // zero-length: the instant must be inside
   };
-  if (!ev.isRecurring() || !single) return overlaps(ev.startDate, ev.endDate) ? [eventOut(ev, ev.startDate, ev.endDate)] : [];
-  const out = []; const it = ev.iterator(); let next; let guard = 0;
-  while ((next = it.next()) && guard++ < 5000) {
-    if (ms(next) >= hi(next) + 14 * 3600e3) break; // overridden instances may move; stop well past the window
-    const det = ev.getOccurrenceDetails(next);
-    if (overlaps(det.startDate, det.endDate)) out.push(eventOut(det.item, det.startDate, det.endDate, { recurrence_id: iso(det.recurrenceId) }));
-  }
-  return out;
+  if (!ev.isRecurring() || !single) return { events: overlaps(ev.startDate, ev.endDate) ? [eventOut(ev, ev.startDate, ev.endDate)] : [], truncated: false };
+  const SLACK = 14 * 3600e3;
+  const durMs = Math.max(0, ms(ev.endDate) - ms(ev.startDate));
+  const ff = fastForward(master, Math.min(lo(ev.startDate), ws) - durMs - SLACK, ms);
+  if (ff) ev = new ICAL.Event(ff, { exceptions });
+  const out = []; let truncated = false; let steps = 0;
+  try {
+    const it = ev.iterator(); let next;
+    for (;;) {
+      if (steps++ >= EXPAND_BUDGET) { truncated = true; break; }
+      next = it.next(); if (!next) break;
+      if (ms(next) >= hi(next) + SLACK) break; // overridden instances may move; stop well past the window
+      if (ms(next) + durMs + SLACK < lo(next)) continue; // far before the window: no need to resolve details
+      const det = ev.getOccurrenceDetails(next);
+      if (overlaps(det.startDate, det.endDate)) out.push(eventOut(det.item, det.startDate, det.endDate, { recurrence_id: iso(det.recurrenceId) }));
+    }
+  } catch { truncated = true; } // ical.js gave up on the rule: report what we have, flagged
+  return { events: out, truncated };
 }
 function timeOf(v, field) {
   if (D.test(v)) { const t = ICAL.Time.fromDateString(v); if (Number.isNaN(new Date(`${v}T00:00:00Z`).getTime())) throw new WsError("bad_time", `${field} is not a real date`); return t; }

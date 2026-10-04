@@ -34,8 +34,10 @@ export async function pimUndo(cfg, args) {
   }
   if (!cur || !e.after_etag || cur.etag !== e.after_etag) throw changedSince();
   if (e.op === "create") {
-    const version_id = await journaledWrite(cfg, { ...base, op: "delete", before_text: cur.text }, () => deleteObject(cfg, e.href, cur.etag));
-    return { ref: e.ref, undone: "removed", version_id };
+    try {
+      const version_id = await journaledWrite(cfg, { ...base, op: "delete", before_text: cur.text }, () => deleteObject(cfg, e.href, cur.etag));
+      return { ref: e.ref, undone: "removed", version_id };
+    } catch (err) { if (err instanceof WsError && err.code === "changed_concurrently") throw changedSince(); throw err; } // review T10-I4
   }
   try {
     const version_id = await journaledWrite(cfg, { ...base, op: "update", before_text: cur.text }, () => putChecked(cfg, e.href, e.before_text, { ifMatch: cur.etag }, "revert it"));
