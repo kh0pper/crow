@@ -6,6 +6,9 @@ import { registerDocs, docsWriteDefs } from "./tools/docs.js";
 import { registerSheets } from "./tools/sheets.js";
 import { registerSlides } from "./tools/slides.js";
 import { registerUndo } from "./tools/undo.js";
+import { registerCalendar } from "./tools/calendar.js";
+import { registerContacts } from "./tools/contacts.js";
+import { pruneJournal } from "./pim/journal.js";
 import { systemClock } from "./write-protocol.js";
 
 export const realClock = systemClock;
@@ -25,7 +28,12 @@ export function createWorkspaceServer({ clock = realClock } = {}) {
   names.push(...registerDocs(server, ctx, docsWriteDefs));
   names.push(...registerSheets(server, ctx));
   names.push(...registerSlides(server, ctx));
+  names.push(...registerCalendar(server, ctx));
+  names.push(...registerContacts(server, ctx));
   names.push(...registerUndo(server, ctx));
+  // spec §5.5: prune the PIM undo journal at start and every 6 h (30 days / 500 entries)
+  try { pruneJournal(); } catch { /* never block startup */ }
+  const pruneTimer = setInterval(() => { try { pruneJournal(); } catch { /* next round */ } }, 6 * 3600e3); pruneTimer.unref();
   server.__wsToolNames = names;
   return server;
 }

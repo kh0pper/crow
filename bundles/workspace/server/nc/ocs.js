@@ -2,7 +2,7 @@ import { WsError } from "../result.js";
 import { ncFetch, httpFail } from "./http.js";
 import { parseMultistatus, propText } from "./multistatus.js";
 import { NS } from "../ooxml/xml.js";
-import { joinPath } from "./paths.js";
+import { joinPath, principalUrl } from "./paths.js";
 
 export async function ocsGet(cfg, path) {
   const r = await ncFetch(cfg, "GET", `${cfg.ncUrl}${path}${path.includes("?") ? "&" : "?"}format=json`, { headers: { Accept: "application/json" } });
@@ -18,7 +18,7 @@ export async function ocsPost(cfg, path, form) {
 const nameCache = new Map();
 export async function displayName(cfg, uid) {
   if (nameCache.has(uid)) return nameCache.get(uid);
-  const r = await ncFetch(cfg, "PROPFIND", `${cfg.ncUrl}/remote.php/dav/principals/users/${encodeURIComponent(uid)}/`, { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>` });
+  const r = await ncFetch(cfg, "PROPFIND", principalUrl(cfg, uid), { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>` });
   const name = r.status === 207 ? (propText(parseMultistatus(await r.text())[0]?.props || new Map(), NS.d, "displayname") || uid) : uid;
   nameCache.set(uid, name); return name;
 }
