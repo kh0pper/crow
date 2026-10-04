@@ -163,3 +163,16 @@ test("every scarf and glasses value draws, differently, and the value text never
     assert.ok(Bird.drawBird(Bird.applyOutfit(g, { hat: v })) !== plain, `hat=${v} draws`);
   }
 });
+
+test("drawWalkBadge: a small self-contained group inside the 200x200 portrait; drawBird is untouched", () => {
+  const badge = Bird.drawWalkBadge();
+  assert.ok(badge.startsWith('<g class="rb-walk-badge"'));
+  assert.ok(badge.endsWith("</g>"));
+  assert.ok(!/<script|on[a-z]+=|href/i.test(badge), "inert markup only");
+  assert.ok(badge.length < 1200, "cheap enough to ride every portrait");
+  const m = badge.match(/translate\((\d+) (\d+)\)/);
+  assert.ok(m && Number(m[1]) + 40 <= 200 && Number(m[2]) + 40 <= 200, "fits the viewBox");
+  const el = { innerHTML: "<g>bird</g>" };
+  Bird.mountWalkBadge(el);
+  assert.equal(el.innerHTML, "<g>bird</g>" + badge, "appends, never replaces the bird");
+});

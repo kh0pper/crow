@@ -18,13 +18,14 @@ import { createClient } from "@libsql/client";
 import {
   birdEngineCandidates, loadBirdEngine, readActiveBird, renderBirdAvatar, renderActiveBirdAvatar,
   refreshBirdAvatar, installBirdAvatarHooks, __resetBirdAvatarHooksForTest,
-  portraitMood, readPortrait, AVATAR_SETTLE_MS, AVATAR_TICK_MS,
+  portraitMood, readPortrait, portraitDay, AVATAR_SETTLE_MS, AVATAR_TICK_MS,
 } from "../servers/sharing/profile-avatar.js";
 import { validateAvatar, AVATAR_MAX_BYTES } from "../servers/sharing/avatar.js";
 import { setSettingsSyncManager } from "../servers/gateway/dashboard/settings/registry.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { PROFILE_BROADCAST_PENDING_KEY, readBroadcastPending } from "../servers/sharing/peer-profile.js";
 import { applyRambleEgg } from "../servers/sharing/instance-sync.js";
+import { localDay } from "../bundles/ramble/server/eggs.js";
 import { moodFor, DECAY_INTERVAL_MS, DECAY_PER_INTERVAL } from "../bundles/ramble/server/pet.js";
 
 const REPO_ENGINE = join(import.meta.dirname, "..", "bundles", "ramble", "server", "bird-svg.cjs");
@@ -541,4 +542,132 @@ test("deploy day: a cached engine without applyOutfit is re-probed (default path
 test("defaults: a short settle and a half-hourly tick", () => {
   assert.equal(AVATAR_SETTLE_MS, 20_000);
   assert.equal(AVATAR_TICK_MS, 30 * 60_000);
+});
+
+const putWallet = (db, kind, key, delta = 1) => db.execute({
+  sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(kind, key) DO NOTHING",
+  args: [kind, key, delta, Date.now()],
+});
+
+test("portraitDay is exactly eggs.js's localDay (core keeps its own copy; this pins them)", () => {
+  for (const t of [0, 1_760_000_000_000, 1_760_000_000_000 + 13 * 3_600_000, Date.UTC(2026, 11, 31, 23, 59), Date.UTC(2027, 2, 14, 7, 30)]) {
+    assert.equal(portraitDay(t), localDay(t), String(t));
+  }
+});
+
+test("readPortrait: walked comes ONLY from today's walked fact — a boolean, never a count", async () => {
+  const db = createClient({ url: "file::memory:" });
+  await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+  const now = Date.now();
+  assert.equal((await readPortrait(db, { now })).walked, false);
+  await putWallet(db, "walked", portraitDay(now - 86_400_000));
+  assert.equal((await readPortrait(db, { now })).walked, false, "yesterday's walk is not today's badge");
+  await putWallet(db, "steps", portraitDay(now) + ":eeeeeeee-0000-0000-0000-000000000000", 7777);
+  let p = await readPortrait(db, { now });
+  assert.equal(p.walked, false, "a step count alone never reaches the portrait");
+  assert.ok(!JSON.stringify(p).includes("7777"));
+  await putWallet(db, "walked", portraitDay(now));
+  p = await readPortrait(db, { now });
+  assert.equal(p.walked, true);
+  assert.deepEqual(Object.keys(p).sort(), ["egg_id", "mood", "outfit", "seed", "species", "walked"]);
+});
+
+test("renderBirdAvatar: the badge only when walked, only with an engine that can draw it", () => {
+  const full = loadBirdEngine();
+  const plain = renderBirdAvatar({ species: "crow", seed: 2 });
+  const walked = renderBirdAvatar({ species: "crow", seed: 2, walked: true });
+  assert.notEqual(walked, plain);
+  assert.ok(Buffer.from(walked.split(",")[1], "base64").toString("utf8").includes(full.drawWalkBadge()));
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, walked: "yes" }), plain, "strictly boolean");
+  const oldEngine = { rollGenome: full.rollGenome, drawBird: full.drawBird, applyOutfit: full.applyOutfit };
+  assert.equal(renderBirdAvatar({ species: "crow", seed: 2, walked: true }, oldEngine), plain, "the pure renderer never throws on an old engine");
+});
+
+test("an engine that cannot draw the walked badge never overwrites a badged picture; walked=false still paints", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const badged = renderBirdAvatar({ species: "crow", seed: 2, walked: true });
+    await putSetting(db, "profile_avatar_url", badged);
+    const full = loadBirdEngine();
+    const old = { rollGenome: full.rollGenome, drawBird: full.drawBird, applyOutfit: full.applyOutfit };
+    const sent = [];
+    // not walked today: an old engine paints normally
+    let r = await refreshBirdAvatar(db, mgrsWith(db, sent), { engine: old });
+    assert.equal(r.reason, "rendered");
+    assert.equal(await setting(db, "profile_avatar_url"), renderBirdAvatar({ species: "crow", seed: 2 }));
+    // walked today: the old engine skips, leaving the badged picture alone
+    await putSetting(db, "profile_avatar_url", badged);
+    await putWallet(db, "walked", portraitDay(Date.now()));
+    const before = sent.length;
+    r = await refreshBirdAvatar(db, mgrsWith(db, sent), { engine: old });
+    assert.deepEqual(r, { changed: false, reason: "engine-too-old" });
+    assert.equal(await setting(db, "profile_avatar_url"), badged);
+    assert.equal(sent.length, before);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("gate: a walked flip repaints once; an unchanged day does not", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const m = mgrsWith(db, sent);
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered");
+    await putWallet(db, "walked", portraitDay(Date.now()));
+    assert.equal((await refreshBirdAvatar(db, m, { gate: true })).reason, "rendered");
+    assert.equal(await setting(db, "profile_avatar_url"), renderBirdAvatar({ species: "crow", seed: 2, walked: true }));
+    assert.deepEqual(await refreshBirdAvatar(db, m, { gate: true }), { changed: false, reason: "inputs-same" });
+    assert.equal(sent.length, 2);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("deploy day: a cached 0.13 engine (applyOutfit, no badge) is re-probed and picks up drawWalkBadge", async () => {
+  __resetBirdAvatarHooksForTest();
+  const dir = mkdtempSync(join(tmpdir(), "bird-engine-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = dir;
+    const target = join(dir, "bundles", "ramble", "server", "bird-svg.cjs");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, "const real = require(" + JSON.stringify(REPO_ENGINE) + "); module.exports = { rollGenome: real.rollGenome, drawBird: real.drawBird, applyOutfit: real.applyOutfit };");
+    const T = 1_760_000_000_000;
+    const old = loadBirdEngine({ now: T });
+    assert.equal(typeof old.drawWalkBadge, "undefined");
+    writeFileSync(target, readFileSync(REPO_ENGINE, "utf8")); // bundle repair copies 0.14 in
+    assert.equal(loadBirdEngine({ now: T + 1000 }), old, "within the minute: still cached");
+    const fresh = loadBirdEngine({ now: T + 61_000 });
+    assert.equal(typeof fresh.drawWalkBadge, "function", "re-probed after one restart, no second restart needed");
+    assert.equal(loadBirdEngine({ now: T + 200_000 }), fresh);
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    __resetBirdAvatarHooksForTest();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("installBirdAvatarHooks: ramble:walked-changed is a coalesced trigger like an outfit change", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 2 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter, settleMs: 200, tickMs: 0 });
+    await settle(db, "profile_avatar_url", renderBirdAvatar({ species: "crow", seed: 2 }));
+    assert.equal(sent.length, 1, "boot repaint");
+    await putWallet(db, "walked", portraitDay(Date.now()));
+    emitter.emit("ramble:walked-changed", { day: portraitDay(Date.now()) });
+    emitter.emit("ramble:walked-changed", { day: portraitDay(Date.now()) });
+    const badged = renderBirdAvatar({ species: "crow", seed: 2, walked: true });
+    await settle(db, "profile_avatar_url", badged);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(sent.length, 2, "one broadcast for the badge");
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
