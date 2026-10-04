@@ -118,8 +118,9 @@
   var walkPortStatus = null;
   window.CrowSteps = window.CrowSteps || {};
   window.CrowSteps.deliver = function (id, payload) {
+    if (!Object.prototype.hasOwnProperty.call(walkReqs, id)) return;
     var cb = walkReqs[id];
-    if (!cb) return;
+    if (typeof cb !== "function") return;
     delete walkReqs[id];
     cb(payload);
   };
@@ -321,7 +322,10 @@
     setText($("rb-walk-status"), "");
     return jsonFetch("/api/ramble/steps/settings", { method: "PUT", body: patch })
       .then(function (st) { paintWalk(st); return refreshPet(); })
-      .catch(function (err) { setText($("rb-walk-status"), err.message); });
+      .catch(function (err) {
+        paintWalk(walkState);
+        setText($("rb-walk-status"), err.message);
+      });
   }
 
   function nudgeGoal(by) {

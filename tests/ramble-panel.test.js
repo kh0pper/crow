@@ -2359,3 +2359,11 @@ test("walking: the panel's goal clamp literals equal the server's GOAL_MIN/GOAL_
   assert.equal(Number(m[2]), GOAL_MAX);
   assert.ok(STATIC_SRC().includes("goal <= " + GOAL_MIN) && STATIC_SRC().includes("goal >= " + GOAL_MAX));
 });
+
+test("walking: deliver guards its id lookup; a failed settings save repaints the server state (final review)", () => {
+  const src = STATIC_SRC();
+  assert.ok(/Object\.prototype\.hasOwnProperty\.call\(walkReqs, id\)/.test(src));
+  assert.ok(/typeof cb !== "function"/.test(src));
+  const save = src.slice(src.indexOf("function saveWalkSettings"), src.indexOf("function nudgeGoal"));
+  assert.ok(/\.catch\(function \(err\) \{\s*paintWalk\(walkState\);/.test(save), "catch repaints before the error");
+});

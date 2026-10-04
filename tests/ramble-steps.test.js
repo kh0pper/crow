@@ -274,7 +274,7 @@ test("feed({type:'steps'}) adds a bounded amount and never touches last_fed_at o
 
 test("energy grows with progress in chunks, reaches energy.full at the goal, and stops there", async () => {
   const db = await freshDb();
-  await seedPet(db, 50, AT(6));
+  await seedPet(db, 50, AT(8));   // fed at 8: no decay interval (6 h) elapses before the last paying settle at 12
   await plantSteps(db, AT(9), 1_000);
   let out = await settleDay(db, { now: AT(9) });
   assert.equal(out.energyPaid, 5, "floor(30 * 1000/6000) = 5, one chunk");
@@ -287,13 +287,13 @@ test("energy grows with progress in chunks, reaches energy.full at the goal, and
   await plantSteps(db, AT(14), 9_000);
   out = await settleDay(db, { now: AT(14) });
   assert.equal(out.energyPaid, 0, "never past energy.full");
-  assert.deepEqual(await petRow(db), { energy: 80, last_fed_at: AT(6), places_week: 0 });
+  assert.deepEqual(await petRow(db), { energy: 80, last_fed_at: AT(8), places_week: 0 });
   assert.equal(Number((await db.execute({ sql: "SELECT delta FROM ramble_wallet WHERE kind = ? AND key = ?", args: [STEP_ENERGY_KIND, localDay(AT(14))] })).rows[0].delta), 30);
 });
 
 test("the check-in pays a floor that counted steps rise above but never add to, and never pays seed", async () => {
   const db = await freshDb();
-  await seedPet(db, 20, AT(6));
+  await seedPet(db, 20, AT(7));   // no decay interval elapses before the last paying settle at 12
   let out = await recordWalkCheckin(db, { now: AT(9) });
   assert.deepEqual([out.already, out.energyPaid, out.seedBonus, out.walked, out.walkedNew], [false, 15, 0, true, true]);
   out = await recordWalkCheckin(db, { now: AT(9, 5) });
@@ -406,4 +406,14 @@ test("the goal seed bonus counts toward buying in the wardrobe (balance 9 + 3 bo
   const after = await buyItem(db, "hat.beanie", { now: AT(11), purchaseId: "p2" });
   assert.equal(after.ok, true, "affordable only because of the bonus");
   assert.equal(after.balance, 0);
+});
+
+test("settleDay applies the pet's owed decay BEFORE paying step energy (final review 2026-10-04)", async () => {
+  const db = await freshDb();
+  const now = AT(18);
+  await seedPet(db, 20, now - 48 * H);
+  await recordWalkCheckin(db, { now });
+  const { petState } = await import("../bundles/ramble/server/pet.js");
+  const st = await petState(db, { now });
+  assert.equal(st.energy, 15, "decay is applied first, then the +15 check-in survives");
 });

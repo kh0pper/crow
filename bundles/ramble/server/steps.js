@@ -16,7 +16,7 @@
  * fact, which core turns into artwork.
  */
 import { localDay, startOfLocalDay } from "./eggs.js";
-import { feed as petFeed } from "./pet.js";
+import { feed as petFeed, petState } from "./pet.js";
 import { SEED_KIND } from "./wallet.js";
 
 export const STEPS_KIND = "steps";               // key `<day>:<device>`, delta = steps credited that day (grows)
@@ -327,6 +327,9 @@ export async function settleDay(db, { now = Date.now(), emit } = {}) {
   let energyPaid = 0;
   if (inc > 0 && (inc >= s.energyChunk || target >= s.energyFull || target === floor)) {
     if (await casDelta(db, STEP_ENERGY_KIND, day, paid, target, now, emit)) {
+      // Apply the pet's owed lazy decay first: step feeds deliberately leave last_fed_at
+      // alone (R5), so decay applied AFTER would clamp the energy we just paid away.
+      await petState(db, { now });
       await petFeed(db, { type: "steps", amount: inc }, { now, emit });
       energyPaid = inc;
     }

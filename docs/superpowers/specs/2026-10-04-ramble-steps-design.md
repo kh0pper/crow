@@ -168,6 +168,8 @@ Every new or changed row is emitted (`ramble_wallet`, op `update`).
 
 **Two instances.** If both credit different devices on the same day while out of contact, each pays its own `stepenergy` increment against its own pet row; the pet row is last-writer-wins, so one of the two increments is lost on merge (the existing behaviour for any two concurrent feeds) and `stepenergy` merges to the larger. Under-pay, bounded, never over-pay.
 
+(final review 2026-10-04) One narrow exception: if a peer applies the pet row before the matching `stepenergy` row and a reading is settled in that window, a day's step energy can be paid twice. This is bounded by `steps.energy.full` (30) per day, and rare because the ledger row is emitted before the pet row. Accepted.
+
 ## 7. The manual check-in (S3)
 
 `POST /api/ramble/steps/walked` → `INSERT OR IGNORE` a `walkcheck` row for today (emit), then `settleDay`. Idempotent per day. It sets the badge (R6) and pays `steps.checkin.energy` as a floor that counted steps can rise above but never add to. It never pays seed.

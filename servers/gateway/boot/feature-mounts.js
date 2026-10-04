@@ -273,14 +273,12 @@ export async function mountFeatureRoutes(app, deps) {
   }
 
   // --- Ramble evening walk nudge (spec 2026-10-04 §9) ---
-  // (The crowHome resolution and emit builder repeat the transport block's on purpose:
-  // failure isolation, and it keeps this core diff additive.)
+  // (The emit builder repeats the transport block's on purpose: failure isolation, and it
+  // keeps this core diff additive. crowHome comes from the same resolveCrowHome().)
   // Independent of the Nostr transport: a Crow with sharing off still nudges.
   // Only where the Ramble bundle is INSTALLED (same rule as the transport).
   try {
-    const { join } = await import("node:path");
-    const { homedir } = await import("node:os");
-    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const crowHome = resolveCrowHome();
     const { installedRambleServerDir } = await import("./ramble-boot.js");
     const serverDir = installedRambleServerDir(crowHome);
     const { getManagersOrNull, getInstanceSyncManager } = await import("../../sharing/managers.js");
@@ -300,6 +298,8 @@ export async function mountFeatureRoutes(app, deps) {
         readLang: (db) => readSetting(db, "language"),
       });
       console.log("[ramble] walk nudge scheduler started");
+    } else {
+      console.log("[ramble] walk nudge not started: bundle not installed on this instance or no db");
     }
   } catch (err) {
     console.warn("[ramble] walk nudge not started:", err?.message ?? err);
