@@ -25,7 +25,7 @@ export const WORKSPACE_INSTRUCTIONS = [
 ].join("\n");
 
 export function createWorkspaceServer({ clock = realClock } = {}) {
-  const server = new McpServer({ name: "crow-workspace", version: "0.2.0" }, { instructions: WORKSPACE_INSTRUCTIONS });
+  const server = new McpServer({ name: "crow-workspace", version: "0.2.1" }, { instructions: WORKSPACE_INSTRUCTIONS });
   const ctx = Object.freeze({ getConfig, clock });
   const names = [];
   names.push(...registerDrive(server, ctx)); // further tool families register here (Tasks 6-11)

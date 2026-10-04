@@ -40,6 +40,15 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
       state.sessions.set(key, { path, users: users.map((u) => `${instance}_${u}`), releaseAfterMs, typed });
       return key;
     },
+    /**
+     * "Viewer left, key cached" (live acceptance 2026-10-04): after a view-only session (a phone) closes, ONLYOFFICE
+     * keeps the document key — info answers error 0 with users [] — while the connector has unlocked the file.
+     * `{ locked: true }` keeps the editor lock instead (the post-close save window of an editing session).
+     */
+    viewerLeft(path, key, { locked = false } = {}) {
+      const n = nodes.get(path); if (!locked) n.lock = null;
+      const sess = state.sessions.get(key); if (sess) sess.users = [];
+    },
     advance(ms) { state.now += ms; for (const r of [...state.pendingReleases]) if (state.now >= r.at) { state.pendingReleases.splice(state.pendingReleases.indexOf(r), 1); r.fn(); } },
     lastSearchBody: () => lastSearch,
     versionsOf: (path) => nodes.get(path).versions,
@@ -89,7 +98,7 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
         const depth = req.headers.depth === "1" ? 1 : 0;
         return send(207, ms(respFor(n) + (depth && n.type === "dir" ? childrenOf(p).map(respFor).join("") : "")));
       }
-      if (req.method === "GET") { if (!n || n.type === "dir") return send(404); return send(200, n.bytes, { "Content-Type": "application/octet-stream", ETag: n.etag, "Last-Modified": new Date(n.mtime * 1000).toUTCString(), "Content-Length": String(n.bytes.length) }); }
+      if (req.method === "GET") { if (!n || n.type === "dir") return send(404); const sent = { bytes: n.bytes, etag: n.etag, mtime: n.mtime }; state.afterGetHook?.(n); return send(200, sent.bytes, { "Content-Type": "application/octet-stream", ETag: sent.etag, "Last-Modified": new Date(sent.mtime * 1000).toUTCString(), "Content-Length": String(sent.bytes.length) }); }
       if (req.method === "PUT") {
         if (n && lockBlocks(n)) return send(423, "<d:error xmlns:d=\"DAV:\"/>");
         if (req.headers["if-none-match"] === "*" && n) return send(412);

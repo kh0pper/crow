@@ -1,6 +1,6 @@
 {
   "name": "crow-workspace",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Crow Workspace MCP server: ws_* tools for Nextcloud files, OOXML documents, calendars and contacts",
   "type": "module",
   "main": "server/index.js",

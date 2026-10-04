@@ -61,17 +61,21 @@ function docxTarget(d, target, shown) {
  * own refusal (open_in_editor: "try again when the editor closes") so a duplicated prefix never edits another paragraph.
  */
 const quickQueueGuard = (cfg, kind, target, shown) => async ({ entry, lock }) => {
-  const { bytes } = await getFile(cfg, splitPath(entry.path), { maxBytes: QUICK_MAX_BYTES });
-  if (kind === "xlsx") return xlsxStale(openXlsx(bytes), target, shown);
-  if (kind === "pptx") return pptxStale(openPptx(bytes), target, shown);
+  // The bytes checked here are the bytes the queued twin's snapshot is taken from (guardedQueue passes them on):
+  // a save landing between two separate reads could otherwise become the "expected" value and be overwritten.
+  const saved = await getFile(cfg, splitPath(entry.path), { maxBytes: QUICK_MAX_BYTES });
+  const { bytes } = saved;
+  if (kind === "xlsx") { xlsxStale(openXlsx(bytes), target, shown); return saved; }
+  if (kind === "pptx") { pptxStale(openPptx(bytes), target, shown); return saved; }
   const d = openDocx(bytes);
   const p = docxTarget(d, target, shown);
   const prefix = passagePrefix(shown);
   if (!prefix || findPassage(kids(d.body, NS.w, "p"), prefix) !== p) {
     throw new WsError(lock.code || "open_in_editor", `${lock.message || "The file is open."} This paragraph cannot wait in the queue; try again after the editor closes.`, { ...(lock.data || {}), not_queueable: true });
   }
+  return saved;
 };
-const guardedQueue = (queue, check) => ({ enqueue: async (sig) => { await check(sig); return queue.enqueue(sig); } });
+const guardedQueue = (queue, check) => ({ enqueue: async (sig) => { const saved = await check(sig); return queue.enqueue({ ...sig, saved }); } });
 
 /** T14-I2: put a twin cancelled by "Apply now" back in the queue, so a failed forced save never loses the change. */
 async function repend(changeId) {
@@ -89,8 +93,9 @@ export async function quickSave(cfg, formIn, clock) {
   try { return await save(cfg, formIn, clock); }
   catch (err) {
     // Final review M1: once the PUT was sent the change may already be in the file — never put the twin back (it
-    // would apply a second time); the error is shown as is.
-    if (wasPutSent(err)) throw err;
+    // would apply a second time), and never say "nothing was changed": the waiting change WAS cancelled and the
+    // save may or may not have landed.
+    if (wasPutSent(err)) throw new WsError("apply_now_unconfirmed", `The waiting change was cancelled and the save was sent, but it could not be confirmed (${err?.code || "error"}); check the file before trying again.`, { change_id: cancelFirst, cause: err?.code || null });
     // T14-I2: the forced save failed BEFORE writing (busy, a person's lock, too large, …): the change goes back in the queue.
     let back = false;
     try { back = await repend(cancelFirst); } catch { back = false; }

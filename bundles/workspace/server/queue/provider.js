@@ -18,9 +18,11 @@ const DROP = new Set(["if_open", "wait_s"]);
 export function queueDescriptor(tool, args, { requestedBy = "bot" } = {}) {
   if (!QUEUEABLE.has(tool)) return null;
   return {
-    enqueue: async ({ entry, lock }) => {
+    // `saved` ({bytes, mtime}): a caller that already read the saved file to check it (Quick edit's guard) passes
+    // those bytes, so the snapshot is taken from exactly what was checked — no second read for a save to slip into.
+    enqueue: async ({ entry, lock, saved = null }) => {
       const cfg = getConfig(); const db = workspaceDb() || await openWorkspaceDb();
-      const { bytes, mtime } = await getFile(cfg, splitPath(entry.path), { maxBytes: MAX_EDIT_BYTES });
+      const { bytes, mtime } = saved || await getFile(cfg, splitPath(entry.path), { maxBytes: MAX_EDIT_BYTES });
       const clean = Object.fromEntries(Object.entries(args).filter(([k]) => !DROP.has(k)));
       const snap = snapshot(tool, clean, bytes); // the tool's own error (bad_range, heading_not_found…) surfaces now, not at close
       const precondition = { ...(snap || {}), base_version: String(mtime) };

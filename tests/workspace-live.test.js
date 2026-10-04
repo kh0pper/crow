@@ -360,3 +360,32 @@ test("fix3 R4: no set_number_format inverse exists any more (ws__sheets_restore_
   assert.equal(C.INVERSE_OF.ws_sheets_set_number_format, undefined);
   assert.equal(C.pinInverse({ tool: "ws_sheets_set_number_format", path: "S/a.xlsx" }, [{ tool: "ws__sheets_restore_styles", args: {} }]), null);
 });
+
+test("latency: a non-live session, a key that matched nothing and a user who joined after the cache are re-asked after NEGATIVE_TTL_MS (5 s), not 30 s", async () => {
+  const { liveRouter, NEGATIVE_TTL_MS } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  assert.equal(NEGATIVE_TTL_MS, 5000);
+  let now = Date.now();
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => now } }));
+  const s5 = a.listen(0); const b5 = `http://127.0.0.1:${s5.address().port}`;
+  const pend = (k) => fetch(`${b5}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k)}` } }).then((r) => r.status);
+  try {
+    // a session someone else is in; the operator joins after the first poll cached it
+    doc("rj.docx"); const kr = fake.openInEditor("S/rj.docx", ["bob"], { releaseAfterMs: 10 ** 9 });
+    await call("ws_docs_append", { path: "S/rj.docx", markdown: "Hola." });
+    assert.equal(await pend(kr), 401, "not in the session yet");
+    fake.state.sessions.get(kr).users.push("ocinst_admin");
+    assert.equal(await pend(kr), 401, "inside the negative window: cached");
+    now += NEGATIVE_TTL_MS + 1000;
+    assert.equal(await pend(kr), 200, "re-asked after 5 s");
+    // a session whose last viewer left (key cached, nobody in it), then the operator opens it again
+    doc("vl.docx"); const kv = fake.openInEditor("S/vl.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    await call("ws_docs_append", { path: "S/vl.docx", markdown: "Hola." });
+    fake.viewerLeft("S/vl.docx", kv);
+    assert.equal(await pend(kv), 401);
+    fake.state.sessions.get(kv).users = ["ocinst_admin"];
+    assert.equal(await pend(kv), 401, "cached miss");
+    now += NEGATIVE_TTL_MS + 1000;
+    assert.equal(await pend(kv), 200, "seen within ~5 s");
+  } finally { s5.close(); }
+});

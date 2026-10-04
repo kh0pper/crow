@@ -214,3 +214,21 @@ test("T10-I4: undo of a create that loses a DELETE race (412) answers changed_si
   assert.equal((await call("ws_undo_last_change", { path: c.data.ref, version_id: c.data.version_id })).code, "changed_since");
   assert.ok(pim.calendars.get("menu_shared_by_admin").objects.has(`${c.data.uid}.ics`));
 });
+
+test("shared collections appear as \"Name (owner)\": exact name, then id, then the base name when exactly one matches", async () => {
+  pim.addCalendar("Recetas_shared_by_admin", "Recetas (admin)");
+  pim.addCalendar("viajes_shared_by_admin", "Viajes (admin)"); pim.addCalendar("viajes_shared_by_ana", "Viajes (ana)", { owner: "ana" });
+  pim.addCalendar("propio", "Notas (casa)", { owner: "crow-bot" });
+  const ok = async (calendar) => (await call("ws_cal_list_events", { calendar, time_min: "2026-10-01T00:00:00Z", time_max: "2026-10-02T00:00:00Z" })).success;
+  assert.equal(await ok("Recetas (admin)"), true, "exact display name");
+  assert.equal(await ok("Recetas_shared_by_admin"), true, "collection id");
+  assert.equal(await ok("Recetas"), true, "base name, one match");
+  assert.equal(await ok("recetas"), true, "base name, case-insensitive");
+  const amb = await call("ws_cal_list_events", { calendar: "Viajes" });
+  assert.equal(amb.code, "ambiguous"); assert.match(amb.error, /Viajes \(admin\).*Viajes \(ana\)/);
+  assert.equal(await ok("Viajes (ana)"), true, "the exact name still picks one");
+  assert.equal((await call("ws_cal_list_events", { calendar: "Notas" })).code, "calendar_not_found", "crow-bot's own collection keeps its full name");
+  pim.addCalendar("recetas", "Recetas", { owner: "crow-bot" }); // crow-bot's own "Recetas" next to the shared "Recetas (admin)"
+  assert.equal((await call("ws_cal_list_events", { calendar: "Recetas" })).code, "ambiguous", "own exact name vs a shared base name: never picked silently");
+  assert.equal(await ok("Recetas (admin)"), true); assert.equal(await ok("recetas"), true, "the id still picks one");
+});
