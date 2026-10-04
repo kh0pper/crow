@@ -110,6 +110,9 @@ services:
       JWT_SECRET: ${WORKSPACE_ONLYOFFICE_JWT_SECRET:?generated at install}
       JWT_HEADER: Authorization
       ALLOW_PRIVATE_IP_ADDRESS: "true"
+    volumes:
+      # Crow live-edit plugin (K5): read-only, served from the document server's own origin.
+      - ./onlyoffice-plugin:/var/www/onlyoffice/documentserver/sdkjs-plugins/{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1}:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost/healthcheck"]
       interval: 30s

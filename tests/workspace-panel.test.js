@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import panel, { WORKSPACE_STRINGS, readPublicSettings, workspaceUrls, renderWorkspacePage } from "../bundles/workspace/panel/workspace.js";
+import panel, { WORKSPACE_STRINGS, readPublicSettings, workspaceUrls, renderWorkspacePage, renderTabs } from "../bundles/workspace/panel/workspace.js";
 
 function home(envText) {
   const h = mkdtempSync(join(tmpdir(), "ws-panel-"));
@@ -41,10 +41,13 @@ test("URLs: Workspace, DAV base, editor", () => {
 });
 
 test("page: address, DAVx⁵, iPhone CalDAV, tailnet note, Serve commands, backup/add-user/uninstall cleanup", () => {
-  const html = renderWorkspacePage(readPublicSettings(home(ENV)), "en");
+  const saved = [process.env.PORT, process.env.CROW_GATEWAY_PORT]; delete process.env.PORT; delete process.env.CROW_GATEWAY_PORT;
+  let html; try { html = renderWorkspacePage(readPublicSettings(home(ENV)), "en"); } finally { if (saved[0] !== undefined) process.env.PORT = saved[0]; if (saved[1] !== undefined) process.env.CROW_GATEWAY_PORT = saved[1]; }
   for (const s of ["https://box.tailnet-example.ts.net:8456", "https://box.tailnet-example.ts.net:8456/remote.php/dav", "DAVx",
     WORKSPACE_STRINGS.en.tailnetNote, "sudo tailscale serve --bg --https=8456 http://127.0.0.1:3070",
     "sudo tailscale serve --bg --https=8457 http://127.0.0.1:3071", "ops/install-backup-timer.sh --dest", "ops/add-user.sh",
+    "sudo tailscale serve --bg --https=8457 --set-path=/crow-live http://127.0.0.1:3001/api/workspace/live", "live-edit plugin reach Crow", "Tailnet only; never use funnel",
+    "sudo tailscale serve --https=8457 --set-path=/crow-live off",
     "sudo tailscale serve --https=8456 off", "systemctl --user disable --now crow-workspace-backup.timer"]) assert.ok(html.includes(s), s);
   assert.doesNotMatch(html, /tailscale funnel --/);
 });
@@ -104,4 +107,45 @@ test("ready page prints the real crowHome in admin commands, not ~/.crow", () =>
   assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/install-backup-timer.sh --dest`));
   assert.ok(html.includes(`bash ${h}/bundles/workspace/ops/add-user.sh`));
   assert.ok(!html.includes("bash ~/.crow/bundles"));
+});
+
+test("tabs: Setup | Quick edit, localized, current tab marked, script-free (spec §8)", () => {
+  const es = renderTabs("es", "quick");
+  assert.ok(es.includes("Edición rápida")); assert.ok(es.includes("Configuración"));
+  assert.match(es, /href="\/dashboard\/workspace\?view=quick"[^>]*aria-current="page"/);
+  assert.match(es, /href="\/dashboard\/workspace\?view=setup"/);
+  assert.match(renderTabs("en", "setup"), /view=setup"[^>]*aria-current="page">Setup</);
+  assert.doesNotMatch(es, /<script/i);
+});
+
+test("handler: ?view=quick renders the tabs + the bundle's Quick edit view; default is Setup; never a script", async () => {
+  const h = home(null); // Workspace not set up: Quick edit says so instead of failing
+  const saved = process.env.CROW_HOME; process.env.CROW_HOME = h;
+  const run = async (query, lang) => { let out = null; await panel.handler({ query, csrfToken: "tok" }, { send: (x) => { out = x; } }, { layout: ({ title, content }) => `<title>${title}</title>${content}`, lang }); return out; };
+  try {
+    const quick = await run({ view: "quick" }, "es");
+    assert.ok(quick.includes("Edición rápida"));
+    assert.match(quick, /view=quick"[^>]*aria-current="page"/);
+    const { QUICK_STRINGS } = await import("../bundles/workspace/server/quick/view.js");
+    assert.ok(quick.includes(QUICK_STRINGS.es.notConfigured), "the Quick edit view itself was rendered");
+    const setup = await run({}, "en");
+    assert.match(setup, /view=setup"[^>]*aria-current="page"/);
+    assert.ok(setup.includes(WORKSPACE_STRINGS.en.notReady));
+    for (const html of [quick, setup]) assert.doesNotMatch(html, /<script/i);
+  } finally { if (saved === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = saved; }
+});
+
+test("installed alone without its routes file: ?view=quick shows a note, never a 500", async () => {
+  const { copyFileSync } = await import("node:fs");
+  const { pathToFileURL } = await import("node:url");
+  const dir = mkdtempSync(join(tmpdir(), "ws-panel-alone-"));
+  copyFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "panel", "workspace.js"), join(dir, "workspace.js"));
+  const saved = process.env.CROW_APP_ROOT; process.env.CROW_APP_ROOT = join(import.meta.dirname, "..");
+  try {
+    const { default: alone, WORKSPACE_STRINGS: S } = await import(pathToFileURL(join(dir, "workspace.js")).href);
+    let out = null;
+    await alone.handler({ query: { view: "quick" }, csrfToken: "tok" }, { send: (x) => { out = x; } }, { layout: ({ content }) => content, lang: "en" });
+    assert.ok(out.includes(S.en.quickUnavailable)); assert.ok(out.includes("Quick edit"));
+    assert.doesNotMatch(out, /<script/i);
+  } finally { if (saved === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = saved; }
 });

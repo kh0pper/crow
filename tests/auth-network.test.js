@@ -300,6 +300,17 @@ function runFunnelMw(path, { funnel = true } = {}) {
   return { statusCode, nexted };
 }
 
+// Crow Workspace K5: the live-edit endpoints (editor-session-token auth, reached only through the tailnet Serve
+// path /crow-live on the editor port) are never public — not in PUBLIC_FUNNEL_PREFIXES, rejected with the header.
+test("funnel: the Workspace live-edit API (/api/workspace/live) is never funnel-exposed", async () => {
+  for (const path of ["/api/workspace/live/v1/pending", "/api/workspace/live/v1/claim", "/api/workspace/live/v1/ack", "/api/workspace/quick/save"]) {
+    assert.equal(runFunnelMw(path).statusCode, 403, path);
+    assert.equal(runFunnelMw(path, { funnel: false }).nexted, true, `${path} without the Funnel header passes this layer`);
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => "/api/workspace/live/v1/pending".startsWith(p)));
+});
+
 test("funnel: public prefixes pass, lookalike paths are rejected", () => {
   assert.equal(runFunnelMw("/blog").nexted, true);
   assert.equal(runFunnelMw("/blog/feed.xml").nexted, true);

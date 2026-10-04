@@ -5,7 +5,9 @@
  * bundle's .env and renders a value only if it passes the same shell-safe patterns the
  * manifest enforces (the admin block is copy-pasted into a terminal). Named "Office" so
  * the sidebar never reads "Workspace › Workspace". Copied alone to
- * $CROW_HOME/panels/workspace.js, so it imports nothing from the bundle.
+ * $CROW_HOME/panels/workspace.js, so it never imports the bundle by a relative path. Two tabs: Setup (this page)
+ * and Quick edit (spec §8, rendered by the bundle's server/quick/view.js, found through the bundle-dir resolver of
+ * the sibling routes file).
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -25,6 +27,9 @@ const { parseEnvText } = await import(pathToFileURL(join(__wsAppRoot, "servers",
 const T = {
   en: {
     title: "Office",
+    tabSetup: "Setup",
+    tabQuick: "Quick edit",
+    quickUnavailable: "Quick edit is not available yet: Workspace is not set up, or its files are still being installed (see Setup).",
     subtitle: "Your private office: files, documents, calendars and contacts.",
     notReady: "Workspace is not fully set up yet. Finish the setup by running this command in a terminal on the machine that hosts Crow, then reopen this page:",
     addressH: "Your Workspace address",
@@ -44,12 +49,16 @@ const T = {
     officeP: "Document editor address (Workspace opens it for you):",
     adminH: "For the admin",
     serveP: "Run once on this machine to publish Workspace on your tailnet. Never use “tailscale funnel” for these:",
+    liveP: "Lets Crow's live-edit plugin reach Crow, so Crow's changes appear in documents that are open. Tailnet only; never use funnel:",
     backupP: "Turn on nightly encrypted backups (shows the backup passphrase once; keep it offline):",
     userP: "Add a household account yourself (prints a one-time password):",
     uninstallP: "Uninstalling keeps your files and database in ~/.crow/workspace, the generated secrets (${CROW_HOME}/secrets/bundle-env/workspace.env, kept so a reinstall can reopen your data), the backup timer and the tailnet addresses. \"Delete data\" does not remove those bind-mounted files. Before uninstalling, disable the backup timer first, then remove the Serve mappings:",
   },
   es: {
     title: "Office",
+    tabSetup: "Configuración",
+    tabQuick: "Edición rápida",
+    quickUnavailable: "La edición rápida aún no está disponible: Workspace no está configurado o sus archivos se están instalando (ver Configuración).",
     subtitle: "Tu oficina privada: archivos, documentos, calendarios y contactos.",
     notReady: "Workspace todavía no está completamente configurado. Termina la configuración ejecutando este comando en una terminal de la máquina que aloja Crow y vuelve a abrir esta página:",
     addressH: "La dirección de tu Workspace",
@@ -69,6 +78,7 @@ const T = {
     officeP: "Dirección del editor de documentos (Workspace la abre por ti):",
     adminH: "Para el administrador",
     serveP: "Ejecuta una vez en esta máquina para publicar Workspace en tu tailnet. Nunca uses “tailscale funnel” para esto:",
+    liveP: "Permite que el complemento de edición en vivo de Crow llegue a Crow, para que sus cambios aparezcan en los documentos abiertos. Solo tailnet; nunca uses funnel:",
     backupP: "Activa las copias de seguridad cifradas cada noche (muestra la frase de cifrado una sola vez; guárdala fuera de línea):",
     userP: "Agrega tú mismo una cuenta del hogar (muestra una contraseña de un solo uso):",
     uninstallP: "Desinstalar conserva tus archivos y la base de datos en ~/.crow/workspace, los secretos generados (${CROW_HOME}/secrets/bundle-env/workspace.env, se guardan para que una reinstalación pueda reabrir tus datos), el temporizador de copias y las direcciones de la tailnet. \"Borrar datos\" no elimina esos archivos montados. Antes de desinstalar, desactiva primero el temporizador de copias y luego quita las asignaciones de Serve:",
@@ -83,6 +93,11 @@ const PORT_RE = /^[0-9]{2,5}$/;
 const shq = (s) => (/^[A-Za-z0-9_\/.@+:-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`);
 const NC_HOST_PORT = 3070;
 const OO_HOST_PORT = 3071;
+/** This gateway's own port (servers/gateway/index.js: PORT, then CROW_GATEWAY_PORT, else 3001): the live plugin's Serve path target. */
+function gatewayPort() {
+  const p = Number.parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
+  return Number.isInteger(p) && p > 0 && p < 65536 ? p : 3001;
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export function readPublicSettings(crowHome) {
@@ -130,12 +145,43 @@ export function renderWorkspacePage(settings, lang, crowHome = join(homedir(), "
     ${card(t.laptopH, `<p>${esc(t.laptopP)}</p>`)}
     ${card(t.adminH, `<p>${esc(t.serveP)}</p><pre>sudo tailscale serve --bg --https=${u.ncPort} http://127.0.0.1:${NC_HOST_PORT}
 sudo tailscale serve --bg --https=${u.ooPort} http://127.0.0.1:${OO_HOST_PORT}</pre>
+      <p>${esc(t.liveP)}</p><pre>sudo tailscale serve --bg --https=${u.ooPort} --set-path=/crow-live http://127.0.0.1:${gatewayPort()}/api/workspace/live</pre>
       <p>${esc(t.backupP)}</p><pre>bash ${esc(opsDir)}/install-backup-timer.sh --dest &lt;backup folder&gt; --mount &lt;drive mountpoint&gt;</pre>
       <p>${esc(t.userP)}</p><pre>bash ${esc(opsDir)}/add-user.sh &lt;login&gt; "&lt;Name&gt;"</pre>
       <p>${esc(t.uninstallP)}</p><pre>systemctl --user disable --now crow-workspace-backup.timer
+sudo tailscale serve --https=${u.ooPort} --set-path=/crow-live off
 sudo tailscale serve --https=${u.ncPort} off
 sudo tailscale serve --https=${u.ooPort} off</pre>`)}
   </div>`;
+}
+
+/**
+ * The bundle dir comes from the ONE resolver in panel/routes.js (exported BUNDLE_DIR). Installed, that file sits
+ * next to this one as workspace-routes.js ($CROW_HOME/panels/); in the repo it is panel/routes.js.
+ */
+async function bundleDir() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sibling = ["workspace-routes.js", "routes.js"].map((f) => join(here, f)).find((p) => existsSync(p));
+  return sibling ? (await import(pathToFileURL(sibling).href)).BUNDLE_DIR : null;
+}
+/** Quick edit from the bundle; if the routes file or the bundle's view is missing, a note instead of a 500. */
+async function renderQuickView(t, lang, req) {
+  try {
+    const dir = await bundleDir();
+    const view = dir && join(dir, "server", "quick", "view.js");
+    if (!view || !existsSync(view)) return `<p class="ws-note">${esc(t.quickUnavailable)}</p>`;
+    const { renderQuick } = await import(pathToFileURL(view).href);
+    return await renderQuick({ lang, csrf: req.csrfToken, query: req.query || {} });
+  } catch (e) {
+    console.warn(`[workspace] Quick edit unavailable: ${e.message}`);
+    return `<p class="ws-note">${esc(t.quickUnavailable)}</p>`;
+  }
+}
+
+export function renderTabs(lang, view) {
+  const t = T[lang === "es" ? "es" : "en"];
+  const tab = (v, label) => `<a href="/dashboard/workspace?view=${v}" style="display:inline-block;min-height:44px;line-height:44px;padding:0 .9rem;border-radius:8px;text-decoration:none;${view === v ? "font-weight:700;background:var(--crow-bg-elevated);" : ""}"${view === v ? ' aria-current="page"' : ""}>${esc(label)}</a>`;
+  return `<nav style="display:flex;gap:.25rem;margin:0 0 1rem">${tab("setup", t.tabSetup)}${tab("quick", t.tabQuick)}</nav>`;
 }
 
 export default {
@@ -148,6 +194,13 @@ export default {
   async handler(req, res, { layout, lang }) {
     const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
     const t = T[lang === "es" ? "es" : "en"];
-    res.send(layout({ title: t.title, content: renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome) }));
+    const view = req.query?.view === "quick" ? "quick" : "setup";
+    let content;
+    if (view === "quick") {
+      content = renderTabs(lang, view) + (await renderQuickView(t, lang, req));
+    } else {
+      content = renderTabs(lang, view) + renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome);
+    }
+    res.send(layout({ title: t.title, content }));
   },
 };

@@ -10,6 +10,9 @@ tools:
   - crow-memory
 ---
 
+**Deprecated.** For a self-hosted office use Crow Workspace and its `workspace` skill (ws_* tools).
+
+
 # Nextcloud Integration
 
 ## When to Activate

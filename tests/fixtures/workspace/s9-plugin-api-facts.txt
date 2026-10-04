@@ -1,0 +1,4 @@
+# ONLYOFFICE 9.4 plugin API facts verified by the W2 S9 probe (2026-10-04).
+# Source: scripts/workspace-w2-plugin-probe/probe.js run against a real editor session.
+API present: AddSheet, AddText, CreateParagraph, CreateRun, GetActiveSheet, GetAllHeadingParagraphs, GetAllParagraphs, GetAllShapes, GetDocContent, GetDocument, GetPresentation, GetRange, GetSheet, GetSlideByIndex, GetStyle, GetText, GetTextPr, GetUsedRange, GetValue, InsertParagraph, Push, RemoveAllElements, Search, SearchAndReplace, SetName, SetNumberFormat, SetStyle, SetTextPr, SetValue
+API missing: AddComment, SetBold, SetColor, SetItalic, SetUnderline

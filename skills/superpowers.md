@@ -76,7 +76,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-projects |
 | "lights", "temperature", "smart home", "turn on/off" | "luces", "temperatura", "hogar inteligente" | home-assistant | home-assistant |
 | "ollama", "local model", "run locally", "embeddings" | "ollama", "modelo local", "ejecutar local" | ollama | crow-memory |
-| "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |
+| "workspace", "nextcloud", "nextcloud files" | "workspace", "nextcloud", "documento", "calendario" | workspace | crow-workspace |
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "camera", "security cam", "motion", "doorbell", "NVR", "who was at", "surveillance", "frigate" | "cámara", "vigilancia", "movimiento", "timbre", "quién estuvo en" | frigate (add-on) | crow-frigate |
 | "motioneye", "motion daemon", "pi camera", "usb webcam", "lightweight camera" | "motioneye", "cámara de pi", "webcam usb", "cámara ligera" | motioneye (add-on) | (iframe-only, no MCP) |

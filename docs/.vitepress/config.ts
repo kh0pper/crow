@@ -327,6 +327,7 @@ export default defineConfig({
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
           { text: 'Integration Overview', link: '/guide/integration-overview' },
           { text: 'Storage', link: '/guide/storage' },
+          { text: 'Crow Workspace', link: '/guide/workspace' },
           { text: 'Blog', link: '/guide/blog' },
           { text: 'Podcast', link: '/guide/podcast' },
           { text: 'Songbook', link: '/guide/songbook' },

@@ -1,0 +1,12 @@
+{
+  "name": "Crow live edits",
+  "guid": "asc.{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1}",
+  "version": "0.2.0",
+  "minVersion": "8.0.0",
+  "variations": [{
+    "description": "Applies changes Crow queued for this document, in the open editor.",
+    "url": "index.html", "icons": ["icon.png"], "isViewer": true,
+    "EditorsSupport": ["word", "cell", "slide"], "type": "system", "initDataType": "none",
+    "buttons": [], "events": ["onDocumentContentReady"]
+  }]
+}

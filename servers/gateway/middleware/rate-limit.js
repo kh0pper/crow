@@ -125,10 +125,14 @@ export function fixedWindowLimit({
  * session burns the bucket. `/ramble/` (proxied map tiles: ~50 per view, and
  * the panel's static assets) and `/api/ramble/` (the panel's data calls) were
  * added 2026-09-07 after one phone walk 429'd the egg check-in and then the
- * page's own scripts on reload.
+ * page's own scripts on reload. `/api/workspace/live/` (Crow Workspace K5: the
+ * ONLYOFFICE plugin's polls, which arrive via the tailnet Serve path from the
+ * loopback proxy, so every editor shares one IP bucket) has its own limit of
+ * 60 requests/min per document and editor-session-token auth in the workspace
+ * bundle's server/live/routes-live.js.
  */
 export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
-  "/dashboard", "/api/meta-glasses/", "/llm", "/ramble/", "/api/ramble/",
+  "/dashboard", "/api/meta-glasses/", "/llm", "/ramble/", "/api/ramble/", "/api/workspace/live/",
 ]);
 
 /** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */

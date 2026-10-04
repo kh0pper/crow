@@ -1,0 +1,12 @@
+{
+  "name": "Crow W2 probe",
+  "guid": "asc.{0C0FFEE0-5EED-4C8B-9B57-000000000001}",
+  "version": "0.0.1",
+  "minVersion": "8.0.0",
+  "variations": [{
+    "description": "W2 spike S9: temporary probe of the live-plugin assumptions. Removed after the run.",
+    "url": "index.html", "icons": ["icon.png"], "isViewer": true,
+    "EditorsSupport": ["word", "cell", "slide"], "type": "system", "initDataType": "none",
+    "buttons": [], "events": ["onDocumentContentReady"]
+  }]
+}

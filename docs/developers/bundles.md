@@ -36,6 +36,8 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id is a `bundles/<id>` dir with a `manifest.json` (a real bundle) |
 | `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | each entry has a `name` |
 
+**Refresh on a version bump.** When a bundle's `version` changes, the gateway re-copies its code into the installed copy (`~/.crow/bundles/<id>/`). Docker bundles get a narrow set (`server/`, `panel/`, `skills/`, `package*.json`, declared roots) — never the compose file or anything a container mounts. A docker bundle that needs more opts in with `"refreshFiles": ["docker-compose.yml", "<plugin dir>"]`: plain bundle-relative paths, never `.env*`, `data`, `node_modules`, `.git`, `manifest.json`, or a path a read-write bind mount reaches (those are refused). Running containers keep the old files until the bundle is restarted.
+
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
 ## Draft / unpublished

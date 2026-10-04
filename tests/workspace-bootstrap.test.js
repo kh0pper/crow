@@ -351,3 +351,24 @@ test("F5 — every ops script that reads the .env through envfile.py guards pyth
     assert.ok(src.indexOf("command -v python3") < src.indexOf("envfile.py\" get") , f + ": guard comes before the first use");
   }
 });
+
+test("Crow live plugin (K5): one editor cache flush per plugin version, through the script's own dc; a failed flush is retried", () => {
+  const ctx = setup();
+  mkdirSync(join(ctx.bundle, "onlyoffice-plugin"));
+  writeFileSync(join(ctx.bundle, "onlyoffice-plugin", "config.json"), JSON.stringify({ version: "0.2.0" }));
+  writeFileSync(join(ctx.bin, "dc-fail"), "#!/usr/bin/env bash\ncase \"$*\" in *flush-cache*) printf '%s\\n' \"$*\" >> \"$FAKE_STATE/calls.log\"; exit 1;; esac\nexec \"$(dirname \"$0\")/dc\" \"$@\"\n");
+  chmodSync(join(ctx.bin, "dc-fail"), 0o755);
+  const r0 = run("bootstrap.sh", ctx, [], { env: { WORKSPACE_DC: join(ctx.bin, "dc-fail") } });
+  assert.equal(r0.status, 0, r0.out); assert.match(r0.out, /could not flush the editor cache yet/);
+  assert.equal(envOf(ctx).WORKSPACE_LIVE_PLUGIN_FLUSHED, undefined);
+  const r1 = run("bootstrap.sh", ctx);
+  assert.equal(r1.status, 0, r1.out); assert.match(r1.out, /live plugin 0\.2\.0: editor cache flushed/);
+  assert.equal(envOf(ctx).WORKSPACE_LIVE_PLUGIN_FLUSHED, "0.2.0");
+  assert.equal(read(ctx, "calls.log").split("\n").filter((l) => /exec -T onlyoffice documentserver-flush-cache\.sh/.test(l)).length, 2, "one failed + one successful attempt");
+  assert.doesNotMatch(read(ctx, "calls.log"), /docker exec/, "no hard-coded container name");
+  const r2 = run("bootstrap.sh", ctx);
+  assert.match(r2.out, /live plugin 0\.2\.0: up to date/);
+  assert.equal(read(ctx, "calls.log").split("\n").filter((l) => /flush-cache/.test(l)).length, 2, "no flush when the version is unchanged");
+  writeFileSync(join(ctx.bundle, "onlyoffice-plugin", "config.json"), JSON.stringify({ version: "0.3.0" }));
+  assert.match(run("bootstrap.sh", ctx).out, /live plugin 0\.3\.0: editor cache flushed/);
+});

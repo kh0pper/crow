@@ -144,6 +144,25 @@ occ config:app:set onlyoffice defFormats --value='{"docx":true,"xlsx":true,"pptx
 occ config:app:set onlyoffice editFormats --value='{"odt":true,"ods":true,"odp":true}' >/dev/null
 wait_for "ONLYOFFICE" oo_connected
 
+step "Crow live plugin"
+# K5: the plugin is bind-mounted read-only from $BUNDLE_DIR/onlyoffice-plugin (compose). The document server serves
+# plugin files cached for a year, so each new plugin version needs one editor cache flush (open sessions keep
+# working; a reload picks the new plugin up). Not fatal: a failed flush is retried on the next run.
+PLUGIN_CFG="$BUNDLE_DIR/onlyoffice-plugin/config.json"
+if [ -f "$PLUGIN_CFG" ]; then
+  PV="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PLUGIN_CFG")"
+  if [ "$(env_get WORKSPACE_LIVE_PLUGIN_FLUSHED)" = "$PV" ]; then
+    log "live plugin $PV: up to date"
+  elif dc exec -T onlyoffice documentserver-flush-cache.sh >/dev/null 2>&1; then
+    env_set WORKSPACE_LIVE_PLUGIN_FLUSHED "$PV"
+    log "live plugin $PV: editor cache flushed"
+  else
+    log "live plugin $PV: could not flush the editor cache yet (will retry on the next run)"
+  fi
+else
+  log "live plugin: not in this bundle copy (skipped)"
+fi
+
 step "groups and sharing policy"
 # 5. Groups + sharing policy (Kevin Q5): crow-bot can't make public links and is never
 #    suggested by autocomplete (household users enumerate only their group; typing the
