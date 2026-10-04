@@ -67,7 +67,7 @@ export async function deleteBlastRadius(db, botId) {
   const seen = await count(db, "SELECT COUNT(*) AS n FROM bot_message_seen WHERE bot_id=?", [botId]);
   let boundDevices = [];
   try {
-    const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+    const { listDevices } = await import("../../../../shared/device-store.js");
     boundDevices = (await listDevices(db).catch(() => [])).filter((d) => d.bound_bot_id === botId);
   } catch { boundDevices = []; }
   // FK-cascade disclosure (review M1): deleting the local-bot contact takes
@@ -174,7 +174,7 @@ export async function handleDeleteConfirm(req, res, { db }) {
 
   // Unbind devices (JSON blob in dashboard_settings — helpers only).
   try {
-    const { listDevices, updateDeviceProfiles } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+    const { listDevices, updateDeviceProfiles } = await import("../../../../shared/device-store.js");
     const devices = await listDevices(db).catch(() => []);
     for (const d of devices) {
       if (d.bound_bot_id === botId) {
