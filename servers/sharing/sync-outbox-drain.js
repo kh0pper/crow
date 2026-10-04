@@ -5,7 +5,7 @@
  * `InstanceSyncManager` in STRICT mode (Task 3's `'appended'|'parked'|
  * 'failed'` per-peer disposition contract), deleting a row only once every
  * CURRENTLY PAIRED peer has a real, durable append recorded against it. See
- * docs/superpowers/specs/2026-08-15-stdio-sync-outbox-design.md, "The
+ * the private engineering notes, "The
  * drain" — binding authority for the mechanism below.
  *
  * Why strict + per-peer accounting instead of "delete once emitChange

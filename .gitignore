@@ -14,6 +14,13 @@ data/claude-ai-test-results.md
 tests/claude-ai/results/*.json
 tests/claude-ai/screenshots/
 
+# Process documents (specs, plans, handoffs, ledgers) live in the private
+# engineering repo, never in this public repo (scripts/check-public-hygiene.mjs).
+docs/superpowers/
+**/handoffs/
+.claude/plans/
+.superpowers/
+
 # Brainstorm runtime state (.superpowers)
 .superpowers/brainstorm/*/.server.pid
 .superpowers/brainstorm/*/.server-info

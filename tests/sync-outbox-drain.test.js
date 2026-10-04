@@ -1,7 +1,7 @@
 /**
  * Tests for servers/sharing/sync-outbox-drain.js — Task 4 of the
  * stdio-sync-outbox plan ("The drain"). See
- * docs/superpowers/specs/2026-08-15-stdio-sync-outbox-design.md, "The
+ * the private engineering notes, "The
  * drain" section — binding authority for the mechanism under test.
  *
  * Schema: real init-db.js against a scratch dir (crow_instances, contacts).

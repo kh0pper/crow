@@ -1,7 +1,7 @@
 import { tJs } from "../shared/i18n.js";
 
 /**
- * The Perch phone call card (spec docs/superpowers/specs/2026-10-01-perch-phone-card-design.md §4.4).
+ * The Perch phone call card (spec in the private engineering notes §4.4).
  *
  * Spliced INSIDE perchHubJs()'s IIFE (client.js), so it shares that scope's
  * el / line / clearEl / csrf / live / current / histSettled. Kept in its own

@@ -1,5 +1,5 @@
 /**
- * External-engine poll (spec docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.3).
+ * External-engine poll (spec in the private engineering notes §2.3).
  *
  * Every CROW_EXTERNAL_ENGINE_POLL_MS (default 60 s; <= 0 disables), for every
  * ENABLED provider row marked gpu_policy.engine.managed === "external":

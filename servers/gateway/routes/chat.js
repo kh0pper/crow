@@ -80,7 +80,7 @@ export function boxReservedError(err, lang) {
   };
 }
 
-/** serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+/** serving.class refusal (the private engineering notes
  *  §3.3): the model has a curated ceiling (windowed/wedge-risk) — say which
  *  class and provider refused, never the generic "didn't load in time". */
 export function servingClassRefusedError(err, lang) {

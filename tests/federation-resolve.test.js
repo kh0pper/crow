@@ -64,7 +64,7 @@ test("resolve: case-insensitive name match", async () => {
 
 test("resolve: ambiguous duplicate names → 400 with matches list", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
-    { id: "aaa1", name: "Crow", hostname: "grackle-a.ts.net", gateway_url: "https://a" },
+    { id: "aaa1", name: "Crow", hostname: "peer-a.ts.net", gateway_url: "https://a" },
     { id: "bbb2", name: "Crow", hostname: "node-b.ts.net", gateway_url: "https://b" },
   ]);
   try {
@@ -79,7 +79,7 @@ test("resolve: ambiguous duplicate names → 400 with matches list", async () =>
 
 test("resolve: short hostname fallback match", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
-    { id: "aaa1", name: "Corp Primary", hostname: "grackle.dachshund.ts.net", gateway_url: "https://g" },
+    { id: "aaa1", name: "Corp Primary", hostname: "grackle.example.ts.net", gateway_url: "https://g" },
   ]);
   try {
     const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=grackle`);

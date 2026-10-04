@@ -220,7 +220,7 @@ test("leak: tailnet IP nested inside an env_vars default fails", () => {
   const dir = tmpBundle("demo");
   const m = {
     ...BASE,
-    env_vars: [{ name: "SOME_URL", description: "d", default: "http://100.64.20.200:8003/v1" }],
+    env_vars: [{ name: "SOME_URL", description: "d", default: "http://100.64.20.1:8003/v1" }],
   };
   const r = validateManifest(m, dir);
   assert.equal(r.ok, false);

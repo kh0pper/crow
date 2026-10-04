@@ -23,7 +23,7 @@
  *
  * Crow servers are never copied out of the homedir file; they are derived
  * per-instance by crow-server-catalog.mjs. See
- * docs/superpowers/specs/2026-08-08-mcp-instance-binding-design.md.
+ * the private engineering notes
  *
  * Also exports probeServerTools(): a dependency-free MCP stdio `tools/list`
  * (initialize -> notifications/initialized -> tools/list) reusing the

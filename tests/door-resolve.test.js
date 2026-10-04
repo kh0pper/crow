@@ -140,11 +140,11 @@ test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain m
   const { isTrustedDoorRequest } = await import("../servers/gateway/models/door-resolve.js");
   assert.equal(isTrustedDoorRequest("127.0.0.1", {}), true, "plain loopback");
   assert.equal(isTrustedDoorRequest("::ffff:127.0.0.1", {}), true);
-  assert.equal(isTrustedDoorRequest("100.64.20.203", {}), true, "plain tailnet");
+  assert.equal(isTrustedDoorRequest("100.64.20.3", {}), true, "plain tailnet");
   assert.equal(isTrustedDoorRequest("10.0.0.50", {}), false, "LAN socket");
   assert.equal(isTrustedDoorRequest("10.0.0.50", { "x-forwarded-for": "127.0.0.1" }), false, "a header never upgrades an untrusted socket");
   // public client behind Caddy + Serve (Serve appends the black-swan hop)
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.64.20.203" }), false);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "168.171.4.20, 100.64.20.3" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "8.8.8.8" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-real-ip": "8.8.8.8" }), false);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for=192.0.2.60;proto=https;by=203.0.113.43' }), false);
@@ -152,8 +152,8 @@ test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain m
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "unknown" }), false, "an unparseable entry is untrusted");
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "" }), true, "an empty header names nobody");
   // tailnet clients through Serve
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.202" }), true);
-  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.202:51234, 127.0.0.1" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.4" }), true);
+  assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": "100.64.20.4:51234, 127.0.0.1" }), true);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { forwarded: 'for="[fd7a:115c:a1e0::5]:443", for=100.64.0.9' }), true);
   assert.equal(isTrustedDoorRequest("127.0.0.1", { "x-forwarded-for": ["100.64.0.1", "8.8.8.8"] }), false, "repeated headers: every value counts");
 });

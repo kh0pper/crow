@@ -351,7 +351,7 @@ async function handleChat(req, res, deps) {
     await deps.acquireFn(providerId, { requester });
   } catch (err) {
     if (err instanceof ServingClassError) {
-      // serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+      // serving.class refusal (the private engineering notes
       // §3.3): DEGRADE like a box reservation — an escalation falls back to
       // the resident fast model with a note; anything else gets a fast 409
       // (never a retry: this class of model never becomes available on its

@@ -133,10 +133,10 @@ test("companion-target: builds peer URL correctly with + without port in gateway
   }));
 
   // gateway_url WITHOUT port → peer port 12393 slotted in
-  const db1 = makeDb([{ id: "peer-d", name: "D", hostname: "d.ts.net", gateway_url: "https://d.dachshund.ts.net" }]);
+  const db1 = makeDb([{ id: "peer-d", name: "D", hostname: "d.ts.net", gateway_url: "https://d.example.ts.net" }]);
   const r1 = await resolveCompanionTarget({ db: db1, origin: "grackle:8444" });
   if (r1.host !== "local") {
-    assert.equal(r1.url, "https://d.dachshund.ts.net:12393/");
+    assert.equal(r1.url, "https://d.example.ts.net:12393/");
   }
 
   overviewCache._resetCache();
@@ -152,9 +152,9 @@ test("companion-target: builds peer URL correctly with + without port in gateway
     },
   }));
   // gateway_url WITH port 8444 → overridden by tile's port 12393
-  const db2 = makeDb([{ id: "peer-e", name: "E", hostname: "e.ts.net", gateway_url: "https://e.dachshund.ts.net:8444" }]);
+  const db2 = makeDb([{ id: "peer-e", name: "E", hostname: "e.ts.net", gateway_url: "https://e.example.ts.net:8444" }]);
   const r2 = await resolveCompanionTarget({ db: db2, origin: "grackle:8444" });
   if (r2.host !== "local") {
-    assert.equal(r2.url, "https://e.dachshund.ts.net:12393/");
+    assert.equal(r2.url, "https://e.example.ts.net:12393/");
   }
 });

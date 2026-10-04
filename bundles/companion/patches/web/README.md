@@ -86,5 +86,5 @@ The pinned SHA lives in two places that must stay in lockstep:
 
 - Python backend patches: `bundles/companion/patches/backend/` and its README
 - Cubism SDK license posture: `bundles/companion/CUBISM-LICENSE.md`
-- Phase plan: `~/.claude/plans/vast-orbiting-fiddle.md` (Phase 3 section)
+- Phase plan: the private engineering notes (Phase 3 section)
 - Phase 0 spike report: `bundles/maker-lab/PHASE-0-REPORT.md`

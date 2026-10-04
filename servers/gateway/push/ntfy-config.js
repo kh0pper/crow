@@ -4,7 +4,7 @@
  * DB-FREE on purpose: the corruption breaker (shared/cross-host-auth.js) and the
  * migration guard call sendNtfyNotification directly because crow.db may be
  * malformed; the config they need must not live in that DB. Design note:
- * docs/superpowers/specs/2026-10-03-ntfy-autowire-design.md.
+ * the private engineering notes
  *
  * Two sources:
  *   env  — NTFY_TOPIC is set: everything behaves exactly as before this module existed.

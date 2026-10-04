@@ -259,7 +259,7 @@ export class ProviderIdConflictError extends Error {
 
 /** Thrown by `registerModel` when a provider row already exists at the
  * target id and is marked as an externally managed engine (spec
- * docs/superpowers/specs/2026-09-23-external-engine-provider-design.md §2.1:
+ * the private engineering notes §2.1:
  * `gpu_policy.engine.managed === "external"`). Crow never starts, stops or
  * converts one of these, so this must be caught immediately after the
  * existing row is resolved — BEFORE allocatePortFn, the conversions

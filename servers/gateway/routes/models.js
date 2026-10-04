@@ -615,7 +615,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
         if (err && err.code === "box_reserved") {
           return res.status(409).json({ error: err.message, code: "BOX_RESERVED", owner: err.owner || null, expires_at: err.expires_at || null });
         }
-        // serving.class refusal (docs/superpowers/specs/2026-09-23-serving-class-design.md
+        // serving.class refusal (the private engineering notes
         // §3.3): same rethrow shape as a box reservation, distinct code.
         if (err && err.code === "serving_class_refused") {
           return res.status(409).json({

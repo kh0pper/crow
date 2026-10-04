@@ -6,7 +6,7 @@
  * blocks (glass retires product-wide). Exists ONLY so the public blog,
  * songbook, and knowledge-base pages keep rendering today's colors until
  * their own review lands in the blog wave (see
- * docs/superpowers/specs/2026-08-15-track2-visual-language-design.md §4.1).
+ * the private engineering notes §4.1).
  *
  * DO NOT edit the values in this file — it is a snapshot, not a living
  * source of truth. Delete this file (and repoint its three consumers at

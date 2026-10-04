@@ -1,6 +1,6 @@
 /**
  * scripts/ops/grackle-d3-import.mjs — the D3 importer (grackle → crow main).
- * Spec: docs/superpowers/specs/2026-10-02-grackle-decommission-d3-d5-design.md
+ * Spec in the private engineering notes
  * §4, §5.3 and §9; plan Task 1 ("Rules pinned by tests"); review fix round 1
  * (C1, I1–I8, minors).
  *

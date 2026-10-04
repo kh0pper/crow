@@ -4,7 +4,7 @@
  * `InstanceSyncManager` (the stdio-mounted MCP server has none) can still
  * durably queue the write for the feeds-owning gateway's drain to deliver
  * later, instead of the write silently vanishing (today's defect). See
- * docs/superpowers/specs/2026-08-15-stdio-sync-outbox-design.md, "The
+ * the private engineering notes, "The
  * shared emitter module".
  *
  * Call sites that HAVE a live manager keep calling it — `emitOrQueue` is a

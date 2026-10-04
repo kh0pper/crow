@@ -4,7 +4,7 @@ Crow runs local models two ways today, and this page documents the arc that is c
 
 ## Two paths today, and where this arc is heading
 
-A **model bundle** is a docker-compose directory under `bundles/` with `category: "ai"`, `inference: true`, and a `providers[]` block; the Extensions page installs it, the gpu-orchestrator starts and stops it with `docker compose`, and every launch flag (`-c`, `-ngl`, `-fa`, KV quant, MTP draft flags) lives in the compose `command:`. The **catalog** path (`registry/model-catalog.json`) downloads curated GGUF weights and spawns `llama-server` natively, but until this arc it rendered only identity flags — no context size, no `-ngl`, no flash attention, no MTP — and its registry was keyed by bare model id, so provider roles (`crow-chat`) and variants over one set of weights (three 27B rows) could not be expressed. Kevin's stated goal is to retire the bundles and make the catalog + native path the only way to install and launch a local model. The full design is `docs/superpowers/specs/2026-09-04-models-bundles-to-catalog-design.md`; this branch is plan 1 of 4 — it gives the native path everything the bundles express today, so later plans can migrate each provider role off its bundle one at a time.
+A **model bundle** is a docker-compose directory under `bundles/` with `category: "ai"`, `inference: true`, and a `providers[]` block; the Extensions page installs it, the gpu-orchestrator starts and stops it with `docker compose`, and every launch flag (`-c`, `-ngl`, `-fa`, KV quant, MTP draft flags) lives in the compose `command:`. The **catalog** path (`registry/model-catalog.json`) downloads curated GGUF weights and spawns `llama-server` natively, but until this arc it rendered only identity flags — no context size, no `-ngl`, no flash attention, no MTP — and its registry was keyed by bare model id, so provider roles (`crow-chat`) and variants over one set of weights (three 27B rows) could not be expressed. Kevin's stated goal is to retire the bundles and make the catalog + native path the only way to install and launch a local model. The full design is in the private engineering notes; this branch is plan 1 of 4 — it gives the native path everything the bundles express today, so later plans can migrate each provider role off its bundle one at a time.
 
 ## Catalog schema v3: the `launch` block
 
@@ -27,7 +27,7 @@ Each catalog entry may carry an optional `launch` block: a fixed set of typed kn
 
 ## `serving.class`: a curated safety ceiling
 
-Every catalog entry carries a required `serving: { class }` field: `resident` (single box, safe behind a cap, starts as today), `windowed` (needs an operator present; two-box and/or evicts production), or `wedge-risk` (a shape that has actually wedged a Strix Halo box). It is a **ceiling on the model, not a runtime toggle** — it lives only in the git-reviewed catalog (`registry/model-catalog.json`), never in `settings.localModels` or any instance setting; an instance may narrow what it runs, never widen it (narrowing is not built yet). `scripts/validate-model-catalog.js` requires the field on every entry and checks it arithmetically (a quant needing more than `SINGLE_BOX_RAM_MB`, 124 GiB, cannot be `resident`) plus against the `two-box` tag and the `first_run_default` model. Full design: `docs/superpowers/specs/2026-09-23-serving-class-design.md`.
+Every catalog entry carries a required `serving: { class }` field: `resident` (single box, safe behind a cap, starts as today), `windowed` (needs an operator present; two-box and/or evicts production), or `wedge-risk` (a shape that has actually wedged a Strix Halo box). It is a **ceiling on the model, not a runtime toggle** — it lives only in the git-reviewed catalog (`registry/model-catalog.json`), never in `settings.localModels` or any instance setting; an instance may narrow what it runs, never widen it (narrowing is not built yet). `scripts/validate-model-catalog.js` requires the field on every entry and checks it arithmetically (a quant needing more than `SINGLE_BOX_RAM_MB`, 124 GiB, cannot be `resident`) plus against the `two-box` tag and the `first_run_default` model. Full design: the private engineering notes.
 
 The gateway enforces the ceiling at the single native start choke point, `acquireOrStartNative` — after the resident fast path (a running model is never refused) and before the box-reservation gate, so a permanent refusal is never reported as a retryable `box_reserved`. A `windowed` or `wedge-risk` start is refused (`ServingClassError`, 409) unless the caller passes an explicit `serving_override` naming that exact class; an uncurated provider (no catalog `catalogId` match) is always allowed. Only `POST /api/models/:id/start` can plumb `serving_override` — chat, the `/llm/v1` router, and `/llm/acquire` can never start a non-resident model at all (the router degrades to a live fast model on an escalation instead, or answers 409). The dashboard shows a class badge on every non-`resident` card and replaces one-tap Start with a notice; it never offers an override button, even a two-step one.
 
@@ -97,7 +97,7 @@ This CLI is how a pi-lab pre-merge llama.cpp build reaches a single model. The d
 
 ## Unified memory and the gfx1151 host profile
 
-This section covers the Strix Halo runtime profile, spec `docs/superpowers/specs/2026-09-23-strix-halo-runtime-profile-design.md`.
+This section covers the Strix Halo runtime profile, spec in the private engineering notes.
 
 **Probe.** `probeHardware()` adds five fields. Every earlier field keeps its meaning.
 
@@ -154,7 +154,7 @@ Under the switch:
 - **Lowest-level primitives** (`bundleUp`, `bundleStop`, `startNativeAndAwaitReady`) throw as well, so a future caller cannot bypass the gate.
 - **Model bundles** (`inference: true`, truthy `requires.gpu`, non-empty `requires.gpu_arch`, non-empty `providers[]`, or an STT/TTS profile seed via `sttProfileSeed`/`ttsProfileSeed` — e.g. ollama, localai, faster-whisper-server, kokoro-tts) cannot be installed, started, stopped, uninstalled, or have shared storage applied through `/bundles/api/*`. This includes starts a peer forwards (`bundleOrchestrationRefusal` in `routes/bundles.js`).
 
-The residency poll and the external-engine poll still run, since both are read-only. Model downloads are not gated. Spec: `docs/superpowers/specs/2026-09-24-raven-instance-no-orchestration-design.md`.
+The residency poll and the external-engine poll still run, since both are read-only. Model downloads are not gated. Spec in the private engineering notes.
 
 ## External engines
 

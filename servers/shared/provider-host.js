@@ -1,5 +1,5 @@
 /**
- * providers.host vocabulary (spec: docs/superpowers/specs/2026-09-22-provider-host-identity-design.md).
+ * providers.host vocabulary (spec in the private engineering notes).
  *
  *   "local"         the WRITER's own machine (loopback / own interface address).
  *   <instance-id>   32-hex id of the Crow instance serving the endpoint. Written

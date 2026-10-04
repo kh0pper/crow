@@ -10,8 +10,8 @@ import {
 
 // --- helpers ------------------------------------------------------------
 
-const CROW_IP = "100.64.20.200";
-const GRACKLE_IP = "100.64.20.201";
+const CROW_IP = "100.64.20.1";
+const GRACKLE_IP = "100.64.20.2";
 const OTHER_IP = "10.9.9.9";
 
 const own = (...ips) => new Set(["localhost", "127.0.0.1", "::1", ...ips]);

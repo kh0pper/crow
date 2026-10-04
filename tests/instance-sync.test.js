@@ -1801,7 +1801,7 @@ test("2c-C5a. conflict dedupe: identical redelivery adds no row; losing_instance
 //
 // Manager-side strict emit ('appended'|'parked'|'failed' per peer) and the
 // mcp-mounts.js setting write that gates emitOrQueue's (stdio door)
-// eligibility check. See docs/superpowers/specs/2026-08-15-stdio-sync-outbox-design.md
+// eligibility check. See the private engineering notes
 // "The drain".
 
 test("T3a. _appendToPeer disposition contract: appended (armed feed succeeds), parked (feed absent, non-strict), failed (append throws)", async () => {

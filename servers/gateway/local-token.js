@@ -4,7 +4,7 @@
  * not run the OAuth dance). Only sha256(token) is stored, in a local-scoped
  * dashboard setting that never syncs to paired instances; the raw value is
  * shown exactly once at generation. See
- * docs/superpowers/specs/2026-06-10-f6c2-connect-token-design.md.
+ * the private engineering notes
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { resolveCrowHome } from "../shared/crow-home.js";

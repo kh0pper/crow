@@ -6,7 +6,7 @@
 //   - servers/gateway/routes/storage-http.js (M2 — upload route ACL)
 //   - bot bridge / panels (M3+)
 //
-// Phase 1 design (see ~/.claude/plans/yeah-let-s-do-some-shimmering-key.md):
+// Phase 1 design (see the private engineering notes):
 //   - Five roles set DEFAULT capability bundles.
 //   - `project_members.capabilities` JSON column overrides defaults PER MEMBER
 //     (mirrors the per-bot permission_policy shape in pi_bot_defs).
