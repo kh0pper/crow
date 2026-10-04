@@ -1114,12 +1114,20 @@
       "type": "bundle",
       "name": "Faster-Whisper Server (local)",
       "category": "ai",
-      "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
+      "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses, the Kiosk display and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
       "host": "local",
       "requires": {
         "platform": "linux-x86_64"
       },
-      "env_vars": [],
+      "env_vars": [
+        {
+          "name": "WHISPER_CPU_THREADS",
+          "description": "CPU threads per transcription (CTranslate2). More threads = faster speech-to-text for the kiosk and glasses; keep it at or below the machine's physical cores. Default 12 (sized for a 16-core box).",
+          "default": "12",
+          "required": false,
+          "propagate": false
+        }
+      ],
       "port": 8004,
       "no_auto_provider": "Not an LLM chat endpoint -- speech-to-text is wired via sttProfileSeed below, which seeds a dedicated STT profile (provider: fasterwhisper) pointing at this container's OpenAI-compatible /v1/audio/transcriptions endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
       "sttProfileSeed": {
@@ -2086,6 +2094,73 @@
       "official": true
     },
     {
+      "id": "kiosk",
+      "name": "Kiosk display",
+      "version": "0.1.4",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "hardware",
+      "tags": [
+        "kiosk",
+        "display",
+        "voice",
+        "home",
+        "bird",
+        "touchscreen"
+      ],
+      "icon": "monitor",
+      "description": "Turn a browser into a home display: your Ramble bird as a voice companion (tap to talk; Crow runs speech-to-text, your chosen bot and text-to-speech), with on-screen timers, recipes and notes. Pair it with a code; tailnet only.",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CROW_HOME",
+          "CROW_GATEWAY_PORT"
+        ]
+      },
+      "panel": "panel/kiosk.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/kiosk.md"
+      ],
+      "capabilities": {
+        "mcp_server_id": "kiosk",
+        "group": "Kiosk",
+        "skills": [
+          "kiosk"
+        ],
+        "runtimes": {
+          "pi": true
+        },
+        "tools": [
+          {
+            "name": "crow_kiosk_list_displays",
+            "label": "List displays",
+            "subgroup": "Display"
+          },
+          {
+            "name": "crow_kiosk_announce",
+            "label": "Announce",
+            "subgroup": "Display"
+          },
+          {
+            "name": "crow_kiosk_show",
+            "label": "Show",
+            "subgroup": "Display"
+          }
+        ]
+      },
+      "requires": {
+        "min_ram_mb": 64,
+        "min_disk_mb": 5
+      },
+      "env_vars": [],
+      "notes": "Voice needs an STT profile (the Faster-Whisper bundle; the kiosk adds its own distil-small.en profile at first pairing) and a TTS profile (install the Kokoro TTS bundle for local voice). Reached at https://<host>:8444/display over the tailnet; never through Funnel.",
+      "official": true
+    },
+    {
       "id": "knowledge-base",
       "name": "Knowledge Base",
       "version": "1.0.2",
@@ -2193,7 +2268,7 @@
       "type": "bundle",
       "name": "Kokoro TTS (local)",
       "category": "ai",
-      "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
+      "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the Kiosk display, AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
       "host": "local",
       "requires": {
         "platform": "linux-x86_64"
@@ -4898,7 +4973,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.14.0",
+      "version": "0.14.1",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
