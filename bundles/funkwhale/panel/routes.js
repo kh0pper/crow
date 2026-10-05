@@ -6,6 +6,9 @@
 import { Router } from "express";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
+import http from "node:http";
+import https from "node:https";
+import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -62,18 +65,117 @@ function clampPage(req, defaultSize, maxSize) {
   return { page, page_size: pageSize };
 }
 
-/** Check if a host is on the Funkwhale allow-list or resolves to a public address (exported for tests). */
-export async function validateHostOrReject(hostname) {
+export const ARTWORK_MAX_BYTES = 5 * 1024 * 1024;
+export const ARTWORK_TIMEOUT_MS = 10_000;
+export const ARTWORK_MAX_HOPS = 3;
+
+/** The host names the artwork proxy may reach on a private address: the configured Funkwhale
+ * host, plus "localhost" and "127.0.0.1". Matched on URL.hostname exactly as written, never on
+ * what a name resolves to. */
+function allowedPrivateHosts() {
   let fwHost = null;
   try { fwHost = new URL(URL_BASE()).hostname; } catch {}
-  const allow = new Set([fwHost, "localhost", "127.0.0.1"].filter(Boolean));
-  if (allow.has(hostname)) return { ok: true };
+  return new Set([fwHost, "localhost", "127.0.0.1"].filter(Boolean));
+}
+
+/**
+ * Decide whether the artwork proxy may connect to `hostname` (a URL.hostname, so an IPv6 literal
+ * arrives bracketed). Resolves the name ONCE, every address family, and returns the answers so the
+ * caller connects to exactly what was checked (a second lookup could answer differently: DNS
+ * rebinding). An allow-listed host is resolved but not classified; any other host passes only
+ * when every answer is a public address. → { ok: true, addresses } | { ok: false, reason }.
+ * Exported for tests.
+ */
+export async function validateHostOrReject(hostname, { lookup = dnsLookup } = {}) {
+  const allowListed = allowedPrivateHosts().has(hostname);
+  const bare = String(hostname || "").replace(/^\[|\]$/g, "");
+  let addresses;
   try {
-    const addr = await dnsLookup(hostname, { family: 4 });
-    if (!isPublicIp(addr.address)) return { ok: false, reason: "private_host" };
-    return { ok: true };
+    addresses = isIP(bare) ? [{ address: bare, family: isIP(bare) }] : await lookup(bare, { all: true });
   } catch {
     return { ok: false, reason: "dns_lookup_failed" };
+  }
+  if (!Array.isArray(addresses) || addresses.length === 0) return { ok: false, reason: "dns_lookup_failed" };
+  if (!allowListed && addresses.some((a) => !isPublicIp(a.address))) return { ok: false, reason: "private_host" };
+  return { ok: true, addresses };
+}
+
+export class ArtworkRefused extends Error {
+  constructor(code, status) { super(code); this.code = code; this.status = status; }
+}
+
+/** One GET connected to `pinned` (never a fresh lookup). Resolves { redirect } or { contentType, body }. */
+function getPinned(u, pinned, { headers, maxBytes, signal }) {
+  const mod = u.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = mod.get(u, {
+      headers,
+      signal,
+      lookup: (_h, opts, cb) => (opts && opts.all ? cb(null, [{ address: pinned.address, family: pinned.family }]) : cb(null, pinned.address, pinned.family)),
+    }, (res) => {
+      const fail = (err) => { res.resume(); req.destroy(); reject(err); };
+      const status = res.statusCode;
+      if (status >= 300 && status < 400) {
+        res.resume();
+        if (!res.headers.location) return reject(new ArtworkRefused("redirect_without_location", 502));
+        return resolve({ redirect: res.headers.location });
+      }
+      if (status < 200 || status >= 300) return fail(new ArtworkRefused(`upstream_${status}`, 502));
+      const type = String(res.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      // Images only; SVG is refused because it can carry script on the dashboard's origin.
+      if (!type.startsWith("image/") || type === "image/svg+xml") return fail(new ArtworkRefused("not_an_image", 415));
+      const declared = Number(res.headers["content-length"]);
+      if (Number.isFinite(declared) && declared > maxBytes) return fail(new ArtworkRefused("too_large", 502));
+      const parts = [];
+      let n = 0;
+      res.on("data", (c) => {
+        n += c.length;
+        if (n > maxBytes) { req.destroy(); reject(new ArtworkRefused("too_large", 502)); } else parts.push(c);
+      });
+      res.on("end", () => { if (n <= maxBytes) resolve({ contentType: type, body: Buffer.concat(parts) }); });
+      res.on("error", (err) => reject(err));
+    });
+    req.on("error", (err) => reject(err));
+  });
+}
+
+/**
+ * Fetch artwork for the dashboard. Every hop (the first request and each redirect, at most
+ * `maxHops` redirects) passes the same rule: http(s) only, host checked by validateHostOrReject,
+ * connection pinned to the checked address. The Funkwhale token is sent only to the Funkwhale
+ * origin. Images only, at most `maxBytes`, the whole fetch within `timeoutMs`.
+ * → { contentType, body: Buffer }; throws ArtworkRefused.
+ */
+export async function fetchArtwork(src, { lookup = dnsLookup, maxBytes = ARTWORK_MAX_BYTES, timeoutMs = ARTWORK_TIMEOUT_MS, maxHops = ARTWORK_MAX_HOPS, signal } = {}) {
+  const ctl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, timeoutMs);
+  const onAbort = () => ctl.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let fwOrigin = null;
+  try { fwOrigin = new URL(URL_BASE()).origin; } catch {}
+  try {
+    let u;
+    try { u = new URL(src); } catch { throw new ArtworkRefused("invalid_url", 400); }
+    for (let hop = 0; ; hop++) {
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new ArtworkRefused("unsupported_scheme", hop ? 502 : 400);
+      const check = await validateHostOrReject(u.hostname, { lookup });
+      if (!check.ok) throw new ArtworkRefused(check.reason, check.reason === "private_host" ? 403 : 502);
+      if (ctl.signal.aborted) throw new ArtworkRefused(timedOut ? "timeout" : "aborted", 504);
+      const headers = {};
+      if (fwOrigin && u.origin === fwOrigin && TOKEN()) headers.Authorization = `Bearer ${TOKEN()}`;
+      const r = await getPinned(u, check.addresses[0], { headers, maxBytes, signal: ctl.signal });
+      if (!r.redirect) return r;
+      if (hop >= maxHops) throw new ArtworkRefused("too_many_redirects", 502);
+      try { u = new URL(r.redirect, u); } catch { throw new ArtworkRefused("bad_redirect", 502); }
+    }
+  } catch (err) {
+    if (err instanceof ArtworkRefused) throw err;
+    if (ctl.signal.aborted) throw new ArtworkRefused(timedOut ? "timeout" : "aborted", 504);
+    throw new ArtworkRefused("upstream_error", 502);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -329,50 +431,22 @@ export default function funkwhaleRouter(authMiddleware) {
 
   router.get("/api/funkwhale/artwork", authMiddleware, async (req, res) => {
     const src = req.query.src;
-    if (!src) return res.status(400).json({ error: "src required" });
-
-    let srcUrl;
-    try { srcUrl = new URL(src); } catch { return res.status(400).json({ error: "invalid url" }); }
-    if (srcUrl.protocol !== "http:" && srcUrl.protocol !== "https:") {
-      return res.status(400).json({ error: "unsupported scheme" });
-    }
-
-    const hostCheck = await validateHostOrReject(srcUrl.hostname);
-    if (!hostCheck.ok) return res.status(403).json({ error: hostCheck.reason || "host not allowed" });
-
-    // Inject Funkwhale bearer when host matches FUNKWHALE_URL
-    const headers = {};
-    try {
-      if (URL_BASE() && srcUrl.hostname === new URL(URL_BASE()).hostname && TOKEN()) {
-        headers.Authorization = `Bearer ${TOKEN()}`;
-      }
-    } catch {}
+    if (!src || typeof src !== "string") return res.status(400).json({ error: "src required" });
 
     const controller = new AbortController();
     req.on("close", () => { try { controller.abort(); } catch {} });
 
     try {
-      const upstream = await fetch(src, {
-        headers,
-        redirect: "follow",
-        signal: controller.signal,
-      });
-      if (!upstream.ok || !upstream.body) {
-        return res.status(upstream.status || 502).json({ error: `upstream ${upstream.status}` });
-      }
-      res.status(upstream.status);
-      const ct = upstream.headers.get("content-type") || "application/octet-stream";
-      const cl = upstream.headers.get("content-length");
-      res.setHeader("Content-Type", ct);
-      if (cl) res.setHeader("Content-Length", cl);
+      const art = await fetchArtwork(src, { signal: controller.signal });
+      res.status(200);
+      res.setHeader("Content-Type", art.contentType);
+      res.setHeader("Content-Length", String(art.body.length));
+      res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Cache-Control", "private, max-age=3600");
-
-      const body = upstream.body;
-      const nodeStream = (typeof body?.getReader === "function") ? Readable.fromWeb(body) : body;
-      await pipeline(nodeStream, res, { signal: controller.signal });
+      res.end(art.body);
     } catch (err) {
-      if (err?.name === "AbortError") return;
-      if (!res.headersSent) res.status(502).json({ error: err.message });
+      if (err?.code === "aborted") return; // client disconnected
+      if (!res.headersSent) res.status(err?.status || 502).json({ error: err?.code || "upstream_error" });
     }
   });
 

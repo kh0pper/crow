@@ -121,17 +121,19 @@ test("reader assertPublicHost refuses every not-public URL and passes public one
   for (const u of PUBLIC) await assertPublicHost(u, {});
 });
 
-test("funkwhale artwork host check refuses every not-public IPv4 form and passes public ones", async () => {
-  // 127.0.0.1 is on the route's explicit allow-list (the local Funkwhale), so forms that the URL
-  // parser rewrites to it are out of this table; IPv6 literals never resolve with its family-4 lookup.
-  const v4 = NOT_PUBLIC.filter(([u]) => !hostOf(u).includes(":") && new URL(u).hostname !== "127.0.0.1");
+test("funkwhale artwork host check refuses every not-public form, IPv6 literals included, and passes public ones", async () => {
+  // The route's allow-list matches URL.hostname exactly: "localhost", "127.0.0.1" and the
+  // configured Funkwhale host. Forms the URL parser rewrites to "127.0.0.1" are allow-listed by
+  // that rule, so they are out of this table; every other form (bracketed IPv6 included) is not.
+  const lookup = async () => { throw new Error("an IP literal must never be looked up"); };
+  const forms = NOT_PUBLIC.filter(([u]) => new URL(u).hostname !== "127.0.0.1");
   const miss = [];
-  for (const [u, why] of v4) {
-    const r = await validateHostOrReject(new URL(u).hostname);
-    if (r.ok) miss.push(`${u} (${why})`);
+  for (const [u, why] of forms) {
+    const r = await validateHostOrReject(new URL(u).hostname, { lookup });
+    if (r.ok || r.reason !== "private_host") miss.push(`${u} (${why}): ${JSON.stringify(r)}`);
   }
   assert.deepEqual(miss, []);
-  for (const u of PUBLIC.filter((x) => !hostOf(x).includes(":"))) assert.deepEqual(await validateHostOrReject(new URL(u).hostname), { ok: true }, u);
+  for (const u of PUBLIC) assert.equal((await validateHostOrReject(new URL(u).hostname, { lookup })).ok, true, u);
 });
 
 test("media isLocalAddress: only directly-local addresses count as local, in any textual form", () => {
