@@ -57,7 +57,6 @@ const BUNDLES = join(ROOT, "bundles");
  */
 const KNOWN_VIOLATIONS = [
   // tracked: media phase 0
-  { bundle: "media", file: "server/tasks.js", spec: "../../../servers/shared/notifications.js", tracked: "media phase 0" },
   { bundle: "media", file: "server/ai-analyzer.js", spec: "../../gateway/ai/provider.js", tracked: "media phase 0" },
   { bundle: "media", file: "panel/media.js", spec: 'join(…, ".crow", "bundles", "media", "server")', tracked: "media phase 0" },
   { bundle: "media", file: "panel/routes.js", spec: 'join(…, ".crow", "bundles", "media", "server")', tracked: "media phase 0" },

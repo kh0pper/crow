@@ -32,6 +32,33 @@ export async function fetchFeedXml(url, authHeaders) {
 }
 
 /**
+ * Conditional fetch for a feed that is polled often (a show the briefing waits for).
+ * → { changed: false } when the server answers 304, else { changed: true, xml, etag }.
+ */
+export async function fetchFeedIfChanged(url, etag, authHeaders) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+  try {
+    const headers = { "User-Agent": USER_AGENT, Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*" };
+    if (authHeaders) Object.assign(headers, authHeaders);
+    if (etag) headers["If-None-Match"] = etag;
+    const res = await fetch(url, { signal: controller.signal, headers });
+    if (res.status === 304) return { changed: false };
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    return { changed: true, xml: await res.text(), etag: res.headers.get("etag") || null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** "3540", "59:00" or "1:02:03" (an episode's itunes:duration) → seconds, or null. */
+export function parseDuration(text) {
+  const t = String(text ?? "").trim();
+  if (!/^\d{1,6}(:\d{1,2}){0,2}$/.test(t)) return null;
+  return t.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+}
+
+/**
  * Build auth headers from an auth_config JSON object.
  * @param {string|object} config - auth_config (JSON string or object)
  * @returns {object|null} Headers object or null
@@ -277,6 +304,7 @@ function parseRss(xml) {
       summary: stripHtml(getCDATA(getTag(item, "description") || "")),
       image: extractItemImage(item),
       enclosureAudio: audioEnclosure ? audioEnclosure[1] : null,
+      duration: parseDuration(getTag(item, "itunes:duration")),
       sourceUrl: sourceUrlMatch ? sourceUrlMatch[1] : null,
     });
   }
