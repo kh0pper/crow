@@ -2,7 +2,7 @@
   "id": "rookery",
   "name": "Open Science Reviewer",
   "origin": "community",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
   "type": "bundle",
   "author": "kh0pper",

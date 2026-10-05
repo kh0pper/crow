@@ -17,7 +17,8 @@ import { homedir } from "node:os";
 
 // Resolve bundle server directory (installed vs repo)
 function resolveBundleServer() {
-  const installed = join(homedir(), ".crow", "bundles", "kodi", "server");
+  // This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+  const installed = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "kodi", "server");
   if (existsSync(installed)) return installed;
   return join(import.meta.dirname, "..", "server");
 }

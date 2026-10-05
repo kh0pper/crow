@@ -72,9 +72,9 @@ async function handler(req, res, { db, layout, appRoot }) {
     try {
       await import(pathToFileURL(initPath).href);
     } catch {
-      // Fallback to ~/.crow/bundles/podcast/server/init-tables.js
+      // Fallback to this instance's installed copy (<CROW_HOME>/bundles/podcast/server/init-tables.js)
       const os = await import("node:os");
-      initPath = join(os.default.homedir(), ".crow", "bundles", "podcast", "server", "init-tables.js");
+      initPath = join(process.env.CROW_HOME || join(os.default.homedir(), ".crow"), "bundles", "podcast", "server", "init-tables.js");
     }
     const { initPodcastTables } = await import(pathToFileURL(initPath).href);
     await initPodcastTables(db);
