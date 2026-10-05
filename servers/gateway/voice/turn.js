@@ -453,7 +453,11 @@ export function createVoiceTurnRunner(deps) {
       const routeView = messages.filter((m) => !isExtraCall(m)).map((m) => (m === userMsg ? { ...m, content: transcript } : m));
       // A must-run tool that needs only a few words and an enumeration (play, open) is forced on the
       // quick model instead of being escalated: mustRoute "fast".
-      const decision = mustX?.mustRoute === "fast" ? { route: "fast", reason: "must-fast", key: bot.fast_voice_model || deps.fastKey } : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 });
+      // opts.noEscalate (the kiosk's post-deploy turn check): never the router, never an escalation, so the
+      // turn can never start a model and its result does not depend on which model is resident.
+      const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
+        ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
+        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -613,6 +617,13 @@ export function createVoiceTurnRunner(deps) {
       // not captioned and not spoken until that round's calls are known. No display call → the text is
       // released. A display call → the text is dropped, and the tool's result says what really happened.
       const holdIntent = extra.some((x) => offered.has(x.definition.name) && typeof x.holdText === "function" && x.holdText(transcript) === true);
+      // holdToEnd (a compound request, "close the timer and then show me a list"): nothing the model says is
+      // heard until the turn is over. The turn then ends on the server's own lines for the display calls
+      // that did something; the model's closing sentence could claim the half that never happened. With
+      // no such call, the model's last text is released at the end (a plain answer, only later).
+      const holdEnd = extra.some((x) => offered.has(x.definition.name) && typeof x.holdToEnd === "function" && x.holdToEnd(transcript) === true);
+      const endLines = [];
+      let heldLast = "";
       let endedFinal = false;
       timings.tools_offered = tools.length;
       while (!budgetHit) {
@@ -624,9 +635,10 @@ export function createVoiceTurnRunner(deps) {
         let calls = [];
         // Until the must-run tool has succeeded, nothing the model says is captioned or spoken:
         // "I've displayed the list" is only true after the call.
-        const hold = !mustDone;
+        const hold = !mustDone || holdEnd;
         const defer = !hold && holdIntent && !finalRound;
         let deferred = "";
+        let heldRound = "";
         const roundTools = narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
         offeredNames = new Set(roundTools.map((t) => t.name));   // the offered-tools guard checks what this request really carried
         let roundText = "";
@@ -655,7 +667,10 @@ export function createVoiceTurnRunner(deps) {
         // server honours a named choice; the llama.cpp builds in use accept and ignore it.
         const seen = toolChoiceMode.get(modelKey);
         const learned = seen && now() - seen.at < LEARNED_TTL_MS ? seen.mode : null;
-        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (learned && WEAKER[learned] < WEAKER[firstMode] ? learned : firstMode) : "none";
+        // A learned "required" is used only while the engine is still known to honour it (the model key may
+        // now be served by another engine).
+        const usable = learned && WEAKER[learned] < WEAKER[firstMode] && (learned !== "required" || forcing.required === true);
+        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (usable ? learned : firstMode) : "none";
         let steppedDown = false;
         for (;;) {
           const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
@@ -669,6 +684,7 @@ export function createVoiceTurnRunner(deps) {
                 content += ev.text;
                 const spoken = echo.feed(think.feed(ev.text));
                 if (spoken && defer) deferred += spoken;
+                else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
                   roundText += spoken;
                   if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
@@ -711,6 +727,7 @@ export function createVoiceTurnRunner(deps) {
         content = stripContextEcho(content, echoGuard);
         if (aborted()) { result.aborted = true; break; }
         if (budgetHit) break;
+        if (holdEnd) heldLast = heldRound;
         const displayCall = calls.some((c) => extraByName.has(c.name));
         if (defer && deferred && !displayCall) {
           // No display call came with it: the deferred text is the answer after all.
@@ -790,6 +807,7 @@ export function createVoiceTurnRunner(deps) {
               ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
             // A display tool that changed the screen is user-visible progress.
             if (ok) roundDisplay = true;
+            if (holdEnd && ok && res.effect !== false && typeof res.say === "string" && res.say.trim()) endLines.push(res.say.trim());
             if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
@@ -881,6 +899,17 @@ export function createVoiceTurnRunner(deps) {
         await speakFallback("budget", spokenChars > 0);
         return result;
       } else {
+        if (holdEnd && !overflow && !endedFinal) {
+          // The end of a held compound turn: what the display really did, in the server's words; else the
+          // model's last text when no display call did anything and nothing was owed.
+          const line = endLines.join(" ") || (mustDone ? heldLast.trim() : "");
+          if (line) {
+            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${line}` : line });
+            await say(line);
+            spokenChars += line.length;
+            messages.push({ role: "assistant", content: line });
+          }
+        }
         await chunker.flush();
         if (aborted()) result.aborted = true;
         // The budget can fire while the last chunk is still synthesizing (the stream already ended).
