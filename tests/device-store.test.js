@@ -170,3 +170,11 @@ test("kiosk theme: auto by default; only auto/light/dark are accepted, anything 
   assert.equal(await set("auto"), "auto");
   assert.equal(store.normalizeKioskSettings({ theme: "sepia" }, null).theme, "auto", "a bad value on a fresh record falls back to the default");
 });
+
+test("kiosk_settings.profile: one of pi3/phone/tablet/desktop, default pi3 (audio first); anything else keeps the prior value", () => {
+  assert.equal(store.KIOSK_DEFAULTS.profile, "pi3");
+  assert.deepEqual(store.KIOSK_PROFILE_CHOICES, ["pi3", "phone", "tablet", "desktop"]);
+  assert.equal(store.normalizeKioskSettings({ profile: "phone" }, null).profile, "phone");
+  assert.equal(store.normalizeKioskSettings({ profile: "tv" }, { profile: "tablet" }).profile, "tablet");
+  assert.equal(store.normalizeKioskSettings({}, null).profile, "pi3");
+});

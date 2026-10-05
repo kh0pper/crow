@@ -652,3 +652,25 @@ test("a paired display (no opts) is untouched by the session hooks: token check 
   await h.revalidateSessions();
   assert.equal(ws.closed, null);
 });
+
+test("hello: caps go through the display's profile; a K1 page still gets every K1 window; a profile change applies without a reconnect", async () => {
+  const V2 = { v: 2, screen: { w: 800, h: 480, touch: true }, audio: { out: true, in: true }, codecs: [], frames: 2, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "media", "app"] };
+  const { h, turns } = hub({ verifyKiosk: async (id, tok) => (id === "kiosk-a" && tok === "good" ? { ...DEV, kiosk_settings: { lang: "en", profile: "pi3" } } : null) });
+  const ws = new FakeWs();
+  h.attach(ws);
+  ws.text({ type: "hello", device_id: "kiosk-a", token: "good", caps: V2 });
+  await tick();
+  const turn = async () => { ws.text({ type: "turn_start", turn_id: `t${turns.length}` }); ws.bin(Buffer.alloc(8000)); ws.text({ type: "turn_end" }); for (let i = 0; i < 20; i += 1) await tick(); };
+  await turn();
+  assert.equal(turns.length, 1);
+  assert.deepEqual([turns[0].caps.v, turns[0].caps.video, turns[0].caps.windows], [2, "none", ["timer", "recipe", "content"]]);
+  h.refreshDevice("kiosk-a", { kiosk_settings: { lang: "en", profile: "tablet" } });
+  await turn();
+  assert.equal(turns.length, 2);
+  assert.equal(turns[1].caps.video, "hd", "the saved profile is used on the next turn of the same connection");
+  const k1 = hub();
+  const old = await hello(k1.h);
+  old.text({ type: "turn_start", turn_id: "k" }); old.bin(Buffer.alloc(8000)); old.text({ type: "turn_end" });
+  for (let i = 0; i < 20; i += 1) await tick();
+  assert.deepEqual([k1.turns[0].caps.windows, k1.turns[0].caps.video, k1.turns[0].caps.max_windows], [["timer", "recipe", "content"], "none", 4]);
+});

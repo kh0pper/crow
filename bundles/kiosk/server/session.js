@@ -11,7 +11,7 @@
  *       false closes 4401 (the login ended); a throw at a turn closes 1011 (retry).
  *   onClose(device)          the socket closed and was not replaced by a newer one.
  */
-import { normalizeCaps } from "./wm.js";
+import { effectiveCaps } from "./caps.js";
 import { validTimeZone } from "./clock.js";
 
 export const HELLO_TIMEOUT_MS = 5000;
@@ -31,7 +31,8 @@ export function createSessionHub(deps) {
     let gone = false;              // closed by us (login ended): frames still in flight are ignored
     let authCheck = null;          // this turn's revalidate() promise (session displays only)
     let authing = false;
-    let caps = normalizeCaps(null);
+    let caps = effectiveCaps(null, null);
+    let rawCaps = null;   // what the page reported; kept so a profile change applies without a reconnect
     let tz = null;                 // the page's IANA zone from hello (null = unknown: the server's zone is used)
     let inTurn = false;
     let frames = [];
@@ -69,7 +70,7 @@ export function createSessionHub(deps) {
     }
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
     const state = (bird) => sendJson(ws, { type: "state", bird });
-    const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
+    const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
 
     /**
      * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
@@ -129,7 +130,8 @@ export function createSessionHub(deps) {
       if (ws.readyState !== 1) return;
       clearT(helloTimer);
       device = d;
-      caps = normalizeCaps(msg.caps);
+      rawCaps = msg.caps;
+      caps = effectiveCaps(rawCaps, d.kiosk_settings?.profile);
       tz = validTimeZone(msg.tz);
       const prior = sessions.get(d.id);
       sessions.set(d.id, self);
@@ -314,7 +316,7 @@ export function createSessionHub(deps) {
       s.queueSpeech(text);
       return true;
     },
-    refreshDevice(id, d) { const s = sessions.get(id); if (s && d) Object.assign(s.device, d); },
+    refreshDevice(id, d) { const s = sessions.get(id); if (s && d) { Object.assign(s.device, d); s.recap?.(); } },
     /** Push a fresh `ready` (display_config) to a live page after its settings change. */
     async pushConfig(id) {
       const s = sessions.get(id);
