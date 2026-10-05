@@ -13,8 +13,10 @@ import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
 import { INTENT_MAX_CHARS, intentText } from "../bundles/kiosk/server/intent-text.js";
 import { matchT0, spokenWords } from "../bundles/kiosk/server/phrases.js";
 import { parseOpen, parsePlay, lookupItem, mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, mentionsCard, showIntent, followUp, windowIntent, teachTo, mentionsPlayWord, compound, compoundParts } from "../bundles/kiosk/server/patterns.js";
+import { stationKey, createStationsSource, normalizeStations } from "../bundles/kiosk/server/sources/stations.js";
 
 const store = createWmStore({ setTimer: () => ({}), clearTimer: () => {} });
+const STATIONS = createStationsSource({ list: () => normalizeStations([{ name: "WXYZ HD1", aliases: ["ninety point one"], url: "https://stream.example.invalid/1" }, { name: "WXYZ HD2", aliases: ["HD two"], url: "https://stream.example.invalid/2" }]) });
 const MATCHERS = {
   matchClockFastPath: (s) => matchClockFastPath(s, { now: 0, tz: "UTC" }),
   wantsDisplay, wantsNewDisplay, newDisplayKind, wantsMemory,
@@ -29,12 +31,16 @@ const MATCHERS = {
   mentionsCard: (s) => mentionsCard(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
   showIntent: (s) => showIntent(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
   followUp, mentionsPlayWord, windowIntent, teachTo,
+  stationKey,
+  stationSearch: (s) => STATIONS.search(s, { explicit: true }),
+  stationChoose: (s) => STATIONS.choose(STATIONS.search("wxyz hd"), s),
 };
 const BUDGET_MS = 50;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */
 function cpuMs(fn) { const a = process.cpuUsage(); fn(); const d = process.cpuUsage(a); return (d.user + d.system) / 1000; }
 
-const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twenty ", "the 25th of ", "cuantos dias faltan para ", "de ", " ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’"];
+const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twenty ", "the 25th of ", "cuantos dias faltan para ", "de ", " ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’",
+  "h d ", "w x y z ", "hd1 ", "ninety point ", "to ", "too ", "wxyz hd "];
 const TAILS = ["", "!", " x", " what time is it", " zzz what time is it now please x", " | <title>"];
 
 test("adversarial input: 50,000-repeat runs, with and without a trailing mismatch — every matcher answers well inside 50 ms of CPU time", () => {

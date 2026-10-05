@@ -111,8 +111,10 @@ export function createProductDisplay({ surface = "four", chat, forcing, state = 
   const media = shipped ? undefined : { active: () => !!playing };
   const ctx = {
     store, deviceId: "eval", caps: FIXTURE.caps, lang, sources: shipped ? [] : FIXTURE.sources, items: shipped ? [] : FIXTURE.items, emit: (ev) => events.push(ev), media,
-    // The fixture's display can play and open anything: what is measured is the call, not a library.
-    resolvePlay: (i) => result(true, "playing", lang === "es" ? `Reproduciendo ${i.what}.` : `Playing ${i.what}.`),
+    // The fixture's display can play and open anything the MODEL asks for: what is measured is the call, not
+    // a library. With no model (c.strict: a spoken pattern looking something up) it is sure of nothing, as a
+    // real source is of words it does not know — so no utterance of the set is answered before the model.
+    resolvePlay: (i, c) => (c?.strict ? null : result(true, "playing", lang === "es" ? `Reproduciendo ${i.what}.` : `Playing ${i.what}.`)),
     openItem: (i) => result(true, "opened", lang === "es" ? "Abierto." : "Opened."),
     mediaVerb: () => (playing ? result(true, "done", lang === "es" ? "Listo." : "Okay.") : result(true, "nothing_playing", lang === "es" ? "No hay nada sonando." : "Nothing is playing.", { effect: false })),
   };

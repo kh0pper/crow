@@ -424,13 +424,29 @@ export function lookupItem(items, name) {
   return pre.length >= 2 && pre.length <= 4 ? { many: pre } : null;
 }
 
-/** → an intent for the executor, or null. ctx.items = what this display may open. (T1 play is added with the media session.) */
+/** A bare answer to "Which one?" is a few words: longer than this, it is a new sentence for the model. */
+export const CHOICE_MAX_WORDS = 8;
+
+/**
+ * → an intent for the executor, or null. ctx.items = what this display may open; ctx.sources = the
+ * play sources it has; ctx.pendingChoices(deviceId) = "Which one?" was just asked about something to play.
+ * The executor resolves a play intent strictly: it plays only what a source is sure of, and returns
+ * nothing (the model gets the turn) otherwise.
+ */
 export function matchT1(transcript, ctx) {
   const o = parseOpen(transcript);
   if (o) {
     const hit = lookupItem(ctx.items || [], o.name);
     if (hit?.match) return { verb: "open", app: hit.match.id };
     if (hit?.many) return { verb: "choices", names: hit.many.map((i) => i.title) };
+  }
+  if (!(ctx.sources || []).length) return null;
+  const p = parsePlay(transcript);
+  if (p) return { verb: "play", what: p.what, source: "auto" };
+  // "Which one? Say its name." → the next utterance may be just the name ("WXYZ two", "the second album's title").
+  if (typeof ctx.pendingChoices === "function" && ctx.pendingChoices(ctx.deviceId) === true) {
+    const w = words(transcript, CHOICE_MAX_WORDS);
+    if (w) return { verb: "play", what: w.join(" "), source: "auto", choice: true };
   }
   return null;
 }
