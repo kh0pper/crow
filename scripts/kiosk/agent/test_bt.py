@@ -272,6 +272,19 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await bt._run([sys.executable, "-c", "import time; time.sleep(5)"], 0.2))
         self.assertEqual(await bt._run([sys.executable, "-c", "print('hi')"], 5), "hi\n")
 
+    async def test_the_window_opens_when_the_helper_starts_and_the_first_state_is_reported(self):
+        ctl = FakeCtl(connect_works=False)
+        sp = self.mk(ctl, check_s=0.01)
+        self.clock.t = 50000                  # long after "boot"
+        stop = []
+        task = asyncio.create_task(sp.loop(lambda: bool(stop)))
+        await asyncio.sleep(0.05)
+        stop.append(1)
+        await asyncio.wait_for(task, 1)
+        self.assertGreaterEqual(ctl.connects(), 1, "the window is fresh when the helper starts")
+        first = self.pushed[0]
+        self.assertEqual((first["connected"], first["retry_window"]), (False, True))
+
     def test_sink_parsing_and_name(self):
         out = (
             "47\talsa_output.platform-3f00b840.mailbox.stereo-fallback\tPipeWire\ts16le 2ch 48000Hz\tSUSPENDED\n"

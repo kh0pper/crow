@@ -238,7 +238,16 @@ class BtSpeaker:
     async def loop(self, stopping=lambda: False):
         if self.mac is None:
             return
-        self.open_retry_window(self.clock())  # boot counts as a drop
+        # The window opens when this helper starts (not at boot), so an agent that crash-looped earlier
+        # still gets its full 10 minutes once it runs.
+        self.open_retry_window(self.clock())
+        first = True
         while not stopping():
             await self.tick()
+            if first:
+                first = False
+                if self.on_state:      # always report the starting state once (a log line on the Pi)
+                    st = self.state()
+                    st["retry_window"] = self.in_retry_window(self.clock())
+                    await self.on_state(st)
             await asyncio.sleep(self.check_s)

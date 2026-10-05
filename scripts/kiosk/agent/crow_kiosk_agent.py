@@ -177,12 +177,11 @@ class Agent:
             self.gate.set_media(msg["on"])
 
     async def _push_bt_state(self, state):
-        log.info(
-            "speaker: %s",
-            "connected"
-            if state["connected"]
-            else ("link up, no audio sink" if state.get("link") else "away"),
-        )
+        what = "connected" if state["connected"] else ("link up, no audio sink" if state.get("link") else "disconnected")
+        extra = ""
+        if "retry_window" in state:
+            extra = " (retry window open)" if state["retry_window"] else " (no retry window)"
+        log.info("speaker: %s%s", what, extra)
         await self.send(protocol.bt_state_msg(state))
 
     async def bt_reconnect(self, req=None):
