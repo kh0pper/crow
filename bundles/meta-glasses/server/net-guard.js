@@ -8,31 +8,20 @@ import http from "node:http";
 import https from "node:https";
 import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { appImport } from "./app-root.js";
+
+const { isPublicIp } = await appImport("servers/shared/ip-classify.js");
 
 export const ARTWORK_MAX_BYTES = 5 * 1024 * 1024;
 export const ARTWORK_TIMEOUT_MS = 10_000;
 
-function v4Private(a) {
-  const p = a.split(".").map(Number);
-  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [x, y] = p;
-  return x === 0 || x === 10 || x === 127 || (x === 169 && y === 254) || (x === 172 && y >= 16 && y <= 31)
-    || (x === 192 && y === 168) || (x === 100 && y >= 64 && y <= 127) || x >= 224;
-}
-
-/** True for any address the gateway must not fetch for a device: unspecified, loopback, private, link-local, CGNAT, multicast, and IPv6 equivalents (including v4-mapped). */
+/**
+ * True for any address the gateway must not fetch for a device: anything that is not public
+ * unicast, in any spelling (v4-mapped/compatible/NAT64/6to4/Teredo IPv6 included), and anything
+ * unparseable. Classification lives in servers/shared/ip-classify.js.
+ */
 export function isPrivateAddress(address) {
-  const a = String(address || "").replace(/^\[|\]$/g, "").toLowerCase();
-  const kind = isIP(a);
-  if (kind === 4) return v4Private(a);
-  if (kind !== 6) return true;
-  const mapped = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return v4Private(mapped[1]);
-  if (a === "::" || a === "::1") return true;
-  const first = parseInt(a.split(":")[0] || "0", 16);
-  return (first & 0xfe00) === 0xfc00     // fc00::/7 unique local
-    || (first & 0xffc0) === 0xfe80       // fe80::/10 link-local
-    || (first & 0xff00) === 0xff00;      // multicast
+  return !isPublicIp(address);
 }
 
 export class FetchRefused extends Error {
