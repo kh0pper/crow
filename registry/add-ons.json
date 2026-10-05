@@ -1304,7 +1304,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -3252,7 +3252,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -3505,7 +3505,7 @@
     {
       "id": "meta-glasses",
       "name": "Meta Glasses",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
       "type": "mcp-server",
       "author": "Crow",
@@ -4990,7 +4990,7 @@
     {
       "id": "reader",
       "name": "Reader",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "E-reader for project material — import PDFs, web pages, and files; read in a clean paragraph view; originals kept as archival copies. TTS, annotations, and memory promotion arrive in later milestones.",
       "type": "mcp-server",
       "author": "Crow",
