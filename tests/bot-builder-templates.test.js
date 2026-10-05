@@ -11,16 +11,16 @@ import {
 } from "../servers/gateway/dashboard/panels/bot-builder/templates.js";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
 
-test("registry shape: five templates, valid channel types, i18n en+es for every card string", () => {
+test("registry shape: six templates, blank last, valid channel types, i18n en+es for every card string", () => {
   assert.deepEqual(BOT_TEMPLATES.map((t) => t.id),
-    ["personal-assistant", "email-responder", "discord-qa", "project-manager", "blank"]);
+    ["personal-assistant", "email-responder", "discord-qa", "project-manager", "personal-voice", "blank"]);
   for (const tp of BOT_TEMPLATES) {
     for (const part of ["title", "desc", "needs"]) {
       const key = `botbuilder.tpl_${tp.id}_${part}`;
       const entry = translations[key];
       assert.ok(entry && entry.en && entry.es, `${key} must exist with non-empty en+es`);
     }
-    assert.ok(["crow-messages", "gmail", "discord", "none"].includes(tp.gwType), `${tp.id} gwType`);
+    assert.ok(["crow-messages", "gmail", "discord", "glasses", "none"].includes(tp.gwType), `${tp.id} gwType`);
     assert.ok(!("permission_policy" in tp), `${tp.id} must not overlay permission policy (spec §D2)`);
   }
 });
@@ -82,4 +82,14 @@ test("no maintainer-specific content in any template (fix-the-product rule)", ()
   for (const bad of ["kh0" + "pp", "maestro.press", "crow-local/qwen"]) {
     assert.ok(!json.toLowerCase().includes(bad), `templates must not contain '${bad}'`);
   }
+});
+
+test("personal-voice: a glasses channel, no skills, a short spoken-style prompt, memory always and music only when installed", () => {
+  const tpl = getTemplate("personal-voice");
+  assert.equal(tpl.gwType, "glasses");
+  assert.deepEqual(tpl.skills, [], "no skill bodies: they are what makes a voice prompt too large");
+  assert.ok(tpl.system_prompt.length < 500);
+  const def = applyTemplate(freshDef(), tpl, { availableMcp: new Set(["crow-memory/crow_search_memories", "crow-memory/crow_store_memory"]), availableSkills: ["anything"] });
+  assert.deepEqual(def.tools.crow_mcp, ["crow-tasks/tasks_list", "crow-memory/crow_search_memories", "crow-memory/crow_store_memory"], "music tools are dropped when the music add-on is not installed");
+  assert.equal(def.tracker_config.type, "none");
 });

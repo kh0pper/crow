@@ -74,6 +74,33 @@ export const BOT_TEMPLATES = [
       "a time.",
   },
   {
+    // For a voice device (glasses, a headset through the phone app): a short persona and few
+    // tools, so the whole prompt fits a small quick voice model with room for the turn.
+    id: "personal-voice",
+    gwType: "glasses",
+    tools: {
+      crow_mcp: [
+        "crow-memory/crow_search_memories",
+        "crow-memory/crow_store_memory",
+        "funkwhale/fw_play",
+        "funkwhale/fw_play_album",
+        "funkwhale/fw_pause",
+        "funkwhale/fw_resume",
+        "funkwhale/fw_stop_playback",
+        "funkwhale/fw_next_track",
+        "funkwhale/fw_now_playing",
+      ],
+    },
+    skills: [],
+    tracker: "none",
+    system_prompt:
+      "You are a personal voice assistant. The user hears you and cannot see a " +
+      "screen, so answer in one or two short spoken sentences, in plain words. " +
+      "Use your memory tools when the user asks you to remember or recall " +
+      "something, and your music tools when they ask for music. If you are " +
+      "unsure, say so rather than guessing.",
+  },
+  {
     id: "blank",
     gwType: "none",
     tools: {},

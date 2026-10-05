@@ -5,6 +5,17 @@
  * interpolated HTML for device fields.
  */
 
+import { existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Installed, this file is <crow-home>/panels/meta-glasses.js and its routes file is the sibling
+// meta-glasses-routes.js; in the repo the sibling is routes.js. Importing the same file the
+// panel loader imported gives the SAME module (one session map), and its appImport reaches the app.
+const here = dirname(fileURLToPath(import.meta.url));
+const routesFile = existsSync(join(here, "meta-glasses-routes.js")) ? join(here, "meta-glasses-routes.js") : join(here, "routes.js");
+const routesModule = () => import(pathToFileURL(routesFile).href);
+
 const CLIENT_SCRIPT = `
 (function() {
   // Under Turbo Drive, this IIFE re-executes on every navigation into the
@@ -103,6 +114,13 @@ const CLIENT_SCRIPT = `
       if (d.bound_bot_id) meta.appendChild(document.createTextNode(' · bot: ' + d.bound_bot_id));
       card.appendChild(meta);
 
+      // Will these glasses answer? The bound assistant against the quick voice model, and a voice
+      // the app can play. Each line says what the wearer will hear.
+      card.appendChild(fitLine(d));
+      card.appendChild(voicePickers(d));
+      if (d.voice === 'none') card.appendChild(warnLine('No voice these glasses can play: add a local Kokoro or Piper voice profile. Until then nothing is spoken.'));
+      card.appendChild(turnsBlock(d.recent_turns || []));
+
       // Per-device OCR toggle (Phase 5 B.2). Off by default; enabling
       // runs a second vision call per capture to extract text and
       // writes it to the searchable library after redacting a small
@@ -126,9 +144,8 @@ const CLIENT_SCRIPT = `
       ocrRow.appendChild(ocrHelp);
       card.appendChild(ocrRow);
 
-      // Per-device photo retention (Phase 5 B.4). Default 'never'.
-      // Disk-only rows are never auto-pruned; the 30d / 1y settings
-      // only apply once a row has been backfilled to MinIO.
+      // Per-device photo retention. New pairings default to 30 days; the daily job prunes every
+      // photo past the rule, in object storage or on disk.
       var retRow = el('div', { className: 'mg-retention-row' });
       retRow.style.cssText = 'margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--crow-border);display:flex;align-items:center;gap:0.5rem;font-size:0.85rem';
       retRow.appendChild(el('label', { for: 'mg-retention-' + d.id }, 'Photo retention:'));
@@ -160,6 +177,73 @@ const CLIENT_SCRIPT = `
 
       root.appendChild(card);
     });
+  }
+
+  var MG_PROFILES = { stt: [], tts: [] };
+  // Speech-to-text and voice for this device. Default = the instance's (for the voice: the
+  // instance's when the app can play it, else a local one that can).
+  function voicePickers(d) {
+    var row = el('div', { className: 'mg-voice-row' });
+    [['stt', 'stt_profile_id', 'Speech-to-text'], ['tts', 'tts_profile_id', 'Voice']].forEach(function(spec) {
+      var label = el('label', null, spec[2] + ': ');
+      var sel = el('select');
+      sel.appendChild(el('option', { value: '' }, 'Default'));
+      (MG_PROFILES[spec[0]] || []).forEach(function(p) {
+        var o = el('option', { value: p.id }, p.name + (spec[0] === 'tts' && !p.playable ? ' (the app cannot play it)' : ''));
+        if (d[spec[1]] === p.id) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', function() {
+        var body = {}; body[spec[1]] = sel.value;
+        sel.disabled = true;
+        fetch('/api/meta-glasses/devices/' + encodeURIComponent(d.id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify(body) })
+          .then(function() { sel.disabled = false; refreshDevices(); }, function() { sel.disabled = false; });
+      });
+      label.appendChild(sel);
+      row.appendChild(label);
+    });
+    return row;
+  }
+  function warnLine(text) {
+    var w = el('div', { className: 'mg-fit mg-fit-warn' }, text);
+    return w;
+  }
+  function fitLine(d) {
+    if (!d.bound_bot_id) return warnLine('No assistant bound. The glasses will say "These glasses have no assistant yet." Choose one in Bot Builder (the Personal voice assistant template is made for this).');
+    var f = d.fit;
+    if (!f) return el('div', { className: 'mg-fit' }, 'Assistant fit: not known right now.');
+    if (f.level === 'full') return el('div', { className: 'mg-fit mg-fit-ok' }, 'Assistant fits the quick voice model' + (f.model ? ' (' + f.model + ')' : '') + '.');
+    if (f.level === 'no_skills') return el('div', { className: 'mg-fit' }, 'Assistant fits the quick voice model only without its skills; answers use its persona and tools.');
+    if (f.level === 'too_large') return warnLine('Assistant is too large for the quick voice model: the glasses will say so instead of answering. Choose a smaller assistant.');
+    return warnLine('The bound assistant is switched off or missing. The glasses will say so.');
+  }
+  function turnsBlock(turns) {
+    var box = el('div', { className: 'mg-turns' });
+    if (!turns.length) { box.appendChild(el('div', { className: 'mg-turns-sum' }, 'No voice turns since the gateway started.')); return box; }
+    var totals = turns.map(function(t) { return (t.timings && t.timings.total_ms) || 0; }).sort(function(a, b) { return a - b; });
+    var med = totals[Math.floor(totals.length / 2)];
+    var failed = turns.filter(function(t) { return t.failed; }).length;
+    var shortcuts = turns.filter(function(t) { return t.fast_path; }).length;
+    box.appendChild(el('div', { className: 'mg-turns-sum' }, 'Last ' + turns.length + ' turns: median ' + (med / 1000).toFixed(1) + ' s, ' + failed + ' with a failure line, ' + shortcuts + ' answered without the model.'));
+    var det = el('details');
+    det.appendChild(el('summary', null, 'Recent turns'));
+    var table = el('table', { className: 'mg-turns-table' });
+    var head = el('tr');
+    ['When', 'Route', 'Outcome', 'Seconds', 'Tools'].forEach(function(h) { head.appendChild(el('th', null, h)); });
+    table.appendChild(head);
+    turns.forEach(function(t) {
+      var tr = el('tr');
+      var tm = t.timings || {};
+      tr.appendChild(el('td', null, t.at ? new Date(t.at).toLocaleTimeString() : ''));
+      tr.appendChild(el('td', null, t.fast_path ? 'shortcut' : (t.route || '') + (t.escalated ? ' (escalated)' : '') + (t.look ? ' + camera' : '')));
+      tr.appendChild(el('td', null, t.aborted ? 'stopped' : (t.failed || 'ok')));
+      tr.appendChild(el('td', null, tm.total_ms != null ? (tm.total_ms / 1000).toFixed(1) : ''));
+      tr.appendChild(el('td', null, Array.isArray(tm.tools) ? tm.tools.join(', ') : ''));
+      table.appendChild(tr);
+    });
+    det.appendChild(table);
+    box.appendChild(det);
+    return box;
   }
 
   async function setOcrEnabled(id, enabled, checkbox) {
@@ -214,6 +298,7 @@ const CLIENT_SCRIPT = `
       var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
       var data = await res.json();
       if (!document.getElementById('mg-devices')) return;
+      MG_PROFILES = data.profiles || { stt: [], tts: [] };
       renderDevices(data.devices || []);
     } catch (e) {
       if (!root.isConnected) return;
@@ -385,6 +470,15 @@ const SHARED_STYLES = `
   .mg-lib-search { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
   .mg-lib-search input { flex: 1; padding: 0.45rem 0.6rem; background: var(--crow-bg-deep, #111); border: 1px solid var(--crow-border); border-radius: 4px; color: var(--crow-text); font-size: 0.85rem; }
   .mg-lib-detail { border: 1px solid var(--crow-border); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; background: var(--crow-surface); }
+  .mg-fit { font-size: 0.8rem; margin-top: 0.4rem; color: var(--crow-text-muted); }
+  .mg-fit-ok { color: var(--crow-success); }
+  .mg-fit-warn { color: var(--crow-warning, #b45309); }
+  .mg-voice-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.4rem; font-size: 0.8rem; }
+  .mg-voice-row select { padding: 0.2rem; background: var(--crow-bg-deep, #111); border: 1px solid var(--crow-border); border-radius: 4px; color: var(--crow-text); font-size: 0.8rem; }
+  .mg-turns { margin-top: 0.5rem; font-size: 0.78rem; color: var(--crow-text-muted); }
+  .mg-turns summary { cursor: pointer; margin-top: 0.25rem; }
+  .mg-turns-table { width: 100%; border-collapse: collapse; margin-top: 0.35rem; }
+  .mg-turns-table th, .mg-turns-table td { text-align: left; padding: 0.15rem 0.35rem; border-bottom: 1px solid var(--crow-border); vertical-align: top; }
   .mg-lib-detail img { max-width: 100%; height: auto; border-radius: 6px; display: block; margin-bottom: 0.75rem; }
 `;
 
@@ -461,7 +555,8 @@ async function renderLibraryTab({ req, res, db, layout, styles, tabBar }) {
   let s3Ready = false;
   let mintUrl = null;
   try {
-    const { isAvailable, getPresignedUrl } = await import("../../../servers/storage/s3-client.js");
+    const { appImport } = await routesModule();
+    const { isAvailable, getPresignedUrl } = await appImport("servers/storage/s3-client.js");
     s3Ready = await isAvailable();
     mintUrl = getPresignedUrl;
   } catch {}
@@ -666,8 +761,8 @@ async function renderNotesTab({ req, res, db, layout, styles, tabBar }) {
       } else {
         // Re-mint photo:// refs + render markdown. Importing lazily so the
         // panel module doesn't drag in the whole blog renderer at load.
-        const { remintPhotoRefs } = await import("./routes.js");
-        const { renderMarkdown } = await import("../../../servers/blog/renderer.js");
+        const { remintPhotoRefs, appImport } = await routesModule();
+        const { renderMarkdown } = await appImport("servers/blog/renderer.js");
         const reminted = await remintPhotoRefs(db, String(d.note_content || ""));
         const rendered = renderMarkdown(reminted || "*(empty note)*");
         let actionItems = [];

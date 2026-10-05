@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT } from "../servers/gateway/voice/turn.js";
+import { toolCategoryOf } from "../servers/gateway/ai/tool-executor.js";
+import { createVoiceTurnRunner, wasOffered, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
 function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { t += ms; }, advance: (ms) => { t += ms; } }; }
@@ -52,6 +53,7 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
     maxToolRounds: 10,
     effectiveToolName: (tc) => (/^crow_(memory|projects|blog)$/.test(tc.name) && tc.arguments?.action ? "crow_" + String(tc.arguments.action).replace(/^crow_/, "") : tc.name),
     isExternalSendTool: () => false, isConnectedAddonTool: () => false, botVoiceScope: () => null,
+    toolCategory: toolCategoryOf,
     // `skills_text` stands in for the bound bot's resolved skill bodies (the real generator inlines them).
     generateSystemPrompt: async ({ botDef, omitSkills }) => `PERSONA:${botDef.display_name}${botDef.skills_text && !omitSkills ? `\n\n${botDef.skills_text}` : ""}`,
     isMemoryTool: (n) => n === "crow_memory" || n === "crow_search_memories",
@@ -149,7 +151,7 @@ test("box reserved → immediate fallback, no 8 s wait", async () => {
 
 test("destructive tool: two-turn spoken confirmation", async () => {
   const del = { type: "tool_call", id: "d1", name: "crow_delete_post", arguments: { id: 7 } };
-  const h = harness({ rounds: [[del, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [del, { type: "done" }], [{ type: "content_delta", text: "Deleted." }, { type: "done" }]] });
+  const h = harness({ chatTools: ["crow_blog"], rounds: [[del, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [del, { type: "done" }], [{ type: "content_delta", text: "Deleted." }, { type: "done" }]] });
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "delete post 7", sink: h.sink });
   assert.deepEqual(h.calls.executed, []);
   assert.match(h.log[1].messages.at(-1).content, /Confirmation required/);
@@ -260,7 +262,7 @@ test("review fix: acquire resolving false falls back at once", async () => {
 test("review fix: bare tool names hit the memory strip, denyTools and the destructive gate (REAL effectiveToolName/isMemoryTool)", async () => {
   const real = await (await import("../servers/gateway/voice/turn.js")).defaultVoiceDeps();
   const bare = async (name, args, extra = {}) => {
-    const h = harness({ rounds: [[{ type: "tool_call", id: "b1", name, arguments: args }, { type: "done" }], [{ type: "content_delta", text: "Ok." }, { type: "done" }]], chatTools: ["crow_projects"] });
+    const h = harness({ rounds: [[{ type: "tool_call", id: "b1", name, arguments: args }, { type: "done" }], [{ type: "content_delta", text: "Ok." }, { type: "done" }]], chatTools: ["crow_projects", "crow_blog"] });
     h.deps.effectiveToolName = real.effectiveToolName; h.deps.isMemoryTool = real.isMemoryTool;
     const runner = createVoiceTurnRunner(h.deps);
     await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "go", sink: h.sink, ...extra });
@@ -801,7 +803,7 @@ const says = (text) => [{ type: "content_delta", text }, { type: "done" }];
 const choices = (h) => h.log.map((e) => e.opts.toolChoice ?? null);
 
 test("outcomes: the round log and timings.tools carry name:code for every call — ok, the tool's own error code, or why the gate refused — and never arguments", async () => {
-  const h = harness({ chatTools: ["crow_projects", "crow_delete_post"], rounds: [
+  const h = harness({ chatTools: ["crow_projects", "crow_delete_post", "crow_other"], rounds: [
     [{ type: "tool_call", id: "a", name: "crow_wm", arguments: { command: "SECRET-ARG display x" } }, { type: "tool_call", id: "b", name: "crow_projects", arguments: { action: "list" } },
       { type: "tool_call", id: "c", name: "crow_delegate", arguments: { goal: "SECRET-ARG" } }, { type: "tool_call", id: "d", name: "crow_delete_post", arguments: { id: 7 } },
       { type: "tool_call", id: "e", name: "crow_memory", arguments: { action: "search_memories" } }, { type: "tool_call", id: "f", name: "crow_other", arguments: {} }, { type: "done" }],
@@ -1087,4 +1089,99 @@ test("must-run: the tool says which result counts (mustDone) — an ok that put 
   const ro = await only.runner.runVoiceTurn({ db: {}, device: only.device, transcript: "show me a list", sink: only.sink, extraTools: [{ ...mustTool([{ ok: true, action: "close" }]), mustDone: (x) => x?.action === "open" }], displayMissedText: "MISSED" });
   assert.equal(ro.failed, "display_missed");
   assert.deepEqual(only.calls.spoken, ["MISSED"]);
+});
+
+// ── Endpoint-neutral options: memory permission from the caller, a camera the endpoint supplies, a result hook ──
+test("memoryOn from the caller decides memory, whatever kiosk_settings says; without it the display setting decides as before", async () => {
+  const mem = [[{ type: "tool_call", id: "m", name: "crow_memory", arguments: { action: "search_memories" } }, { type: "done" }], says("Noted. ")];
+  const on = harness({ rounds: mem });
+  on.device.kiosk_settings = undefined;   // not a display: no kiosk settings at all
+  await on.runner.runVoiceTurn({ db: {}, device: on.device, transcript: "remember the gate code", sink: on.sink, memoryOn: true });
+  assert.ok(on.log[0].tools.includes("crow_memory"), "offered");
+  assert.deepEqual(on.calls.executed, ["crow_memory"]);
+  const off = harness({ rounds: mem });
+  off.device.kiosk_settings = { memory_integration: true };
+  await off.runner.runVoiceTurn({ db: {}, device: off.device, transcript: "remember the gate code", sink: off.sink, memoryOn: false });
+  assert.ok(!off.log[0].tools.includes("crow_memory"), "the caller said no");
+  assert.deepEqual(off.calls.executed, []);
+  const legacy = harness({ rounds: mem });
+  legacy.device.kiosk_settings = { memory_integration: true };
+  await legacy.runner.runVoiceTurn({ db: {}, device: legacy.device, transcript: "remember the gate code", sink: legacy.sink });
+  assert.deepEqual(legacy.calls.executed, ["crow_memory"], "no memoryOn: the display setting still decides");
+});
+
+test("the camera tool: refused on every turn that does not supply it; runs (in process) on a turn whose endpoint supplies it as an extra tool", async () => {
+  const call = [[{ type: "tool_call", id: "c", name: "crow_glasses_capture_photo", arguments: {} }, { type: "done" }], says("It is a red mug. ")];
+  const none = harness({ rounds: call });
+  const r0 = await none.runner.runVoiceTurn({ db: {}, device: none.device, transcript: "what is this", sink: none.sink });
+  assert.ok(!none.log[0].tools.includes("crow_glasses_capture_photo"), "never advertised by default");
+  assert.deepEqual(none.calls.executed, [], "and never executed");
+  assert.match(r0.timings.tools[0], /crow_glasses_capture_photo:refused_policy/);
+  const ran = [];
+  const cam = harness({ rounds: call });
+  const camera = { definition: { name: "crow_glasses_capture_photo", description: "camera", inputSchema: { type: "object" } }, when: () => true, must: () => true,
+    execute: async (args, ctx) => { ran.push(ctx.transcript); return JSON.stringify({ ok: true, description: "a red mug" }); } };
+  const r1 = await cam.runner.runVoiceTurn({ db: {}, device: cam.device, transcript: "what is this", sink: cam.sink, extraTools: [camera] });
+  assert.deepEqual(cam.log[0].tools.filter((n) => n === "crow_glasses_capture_photo"), ["crow_glasses_capture_photo"], "advertised once: the endpoint's definition replaces the generic one");
+  assert.deepEqual(ran, ["what is this"]);
+  assert.deepEqual(cam.calls.executed, [], "it ran in process, not through the tool executor");
+  assert.equal(r1.failed, null);
+  assert.match(r1.timings.tools[0], /crow_glasses_capture_photo:ok/);
+});
+
+test("onToolResult: the replacement is what the model reads and what is saved; in-process tools and refused calls never pass through it; a throwing hook changes nothing", async () => {
+  const seen = [];
+  const h = harness({ chatTools: ["crow_projects", "crow_delegate"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "x" } }, { type: "tool_call", id: "d", name: "crow_delegate", arguments: {} }, { type: "done" }], says("Done. ")] });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: JSON.stringify({ ok: true, _audio_stream: { url: "https://media.example.invalid/secret?token=abc", codec: "mp3" }, prose: "Playing it." }) })), close: async () => {} });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "list my projects", sink: h.sink, denyTools: ["crow_delegate"],
+    onToolResult: async ({ name, result }) => { seen.push(name); return "Playing it."; } });
+  assert.deepEqual(seen, ["crow_projects"], "only executor results reach the hook; the refused call does not");
+  const toolMsg = h.log[1].messages.find((m) => m.role === "tool" && m.tool_name === "crow_projects");
+  assert.equal(toolMsg.content, "Playing it.");
+  assert.ok(!JSON.stringify(h.log[1].messages).includes("token=abc"), "the envelope never reaches the model");
+  assert.ok(!JSON.stringify(h.runner.convo.get(h.device.id)).includes("token=abc"), "nor the saved conversation");
+  const t = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "x" } }, { type: "done" }], says("Done. ")] });
+  await t.runner.runVoiceTurn({ db: {}, device: t.device, transcript: "list projects", sink: t.sink, onToolResult: async () => { throw new Error("boom"); } });
+  assert.equal(t.log[1].messages.find((m) => m.role === "tool").content, "ok", "the original result stands");
+});
+
+// ── Only what was offered runs (every voice turn: kiosk, glasses, any endpoint) ──
+test("offered tools only: a call to a tool the turn did not offer is refused (not_offered) and never executed; an offered category's own action and an offered tool still run", async () => {
+  const call = (name, args = {}) => [{ type: "tool_call", id: name, name, arguments: args }, { type: "done" }];
+  const off = harness({ chatTools: ["crow_memory"], rounds: [call("crow_create_project", { name: "INJECTED" }), says("I can't do that here. ")] });
+  off.device.kiosk_settings = { memory_integration: true };
+  const r0 = await off.runner.runVoiceTurn({ db: {}, device: off.device, transcript: "remember this", sink: off.sink });
+  assert.deepEqual(off.calls.executed, [], "never reached the executor");
+  assert.deepEqual(r0.timings.tools, ["crow_create_project:not_offered"]);
+  assert.match(off.log[1].messages.at(-1).content, /is not available here/);
+  const wrapped = harness({ chatTools: ["crow_memory"], rounds: [call("crow_tools", { action: "fw_play", params: {} }), says("No. ")] });
+  wrapped.device.kiosk_settings = { memory_integration: true };
+  await wrapped.runner.runVoiceTurn({ db: {}, device: wrapped.device, transcript: "remember this", sink: wrapped.sink });
+  assert.deepEqual(wrapped.calls.executed, [], "the add-on wrapper was not offered either");
+  const on = harness({ chatTools: ["crow_projects"], rounds: [call("crow_list_projects"), call("crow_projects", { action: "list_projects" }), says("Two projects. ")] });
+  await on.runner.runVoiceTurn({ db: {}, device: on.device, transcript: "list my projects", sink: on.sink });
+  assert.deepEqual(on.calls.executed, ["crow_list_projects", "crow_projects"], "an action of an offered category, and the category tool itself");
+});
+
+test("wasOffered: own name, an offered category's action, a selected add-on behind an offered wrapper; nothing else", () => {
+  const cat = (n) => toolCategoryOf(n);
+  const offered = new Set(["crow_memory", "crow_tools", "crow_glasses_capture_photo"]);
+  const sel = (n) => n === "fw_play";
+  assert.equal(wasOffered({ name: "crow_glasses_capture_photo" }, offered), true);
+  assert.equal(wasOffered({ name: "crow_store_memory" }, offered, { categoryOf: cat }), true);
+  assert.equal(wasOffered({ name: "store_memory" }, offered, { categoryOf: cat }), true);
+  assert.equal(wasOffered({ name: "crow_create_project" }, offered, { categoryOf: cat }), false);
+  assert.equal(wasOffered({ name: "fw_play" }, offered, { categoryOf: cat, selectedAddon: sel }), true);
+  assert.equal(wasOffered({ name: "fw_delete_playlist" }, offered, { categoryOf: cat, selectedAddon: sel }), false);
+  assert.equal(wasOffered({ name: "fw_play" }, new Set(["crow_memory"]), { categoryOf: cat, selectedAddon: sel }), false, "no wrapper offered: no add-on by name");
+  assert.equal(wasOffered({ name: "" }, offered), false);
+  assert.equal(wasOffered({ name: "crow_create_project" }, new Set(["crow_glasses_capture_photo"]), { categoryOf: cat }), false, "a photo turn offers the camera only");
+});
+
+test("onToolResult contract: { name, tool, result, isError }; tool is the unwrapped name of a proxy call", async () => {
+  const seen = [];
+  const h = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }], says("Done. ")] });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "boom", isError: true })), close: async () => {} });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "list projects", sink: h.sink, onToolResult: async (a) => { seen.push(a); } });
+  assert.deepEqual(seen, [{ name: "crow_projects", tool: "crow_list_projects", result: "boom", isError: true }]);
 });

@@ -39,6 +39,26 @@ const outcomeCode = (v, fallback) => (typeof v === "string" && /^[a-z][a-z0-9_]{
 const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || "_";
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
+/**
+ * Only a tool OFFERED on this turn may run. The model can name any tool, and a photo, a page or a
+ * tool result can tell it which (an injected "call crow_create_project" must never reach the
+ * executor). A call counts as offered when:
+ *  - its own name is in the turn's tool list (a category tool, an add-on tool, an endpoint's extra);
+ *  - it names a core action whose category tool is in the list (small models call
+ *    `crow_search_memories` instead of `crow_memory {action}`; both reach the same server);
+ *  - it names a selected add-on tool directly while the `crow_tools` wrapper is offered.
+ * offered: Set of tool names sent with the request. categoryOf(name) → core category | null.
+ * selectedAddon(name) → true for an add-on tool the bound bot selected.
+ */
+export function wasOffered(tc, offered, { categoryOf = () => null, selectedAddon = () => false } = {}) {
+  const name = String(tc?.name || "");
+  if (!name) return false;
+  if (offered.has(name)) return true;
+  const cat = categoryOf(name);
+  if (cat && offered.has(`crow_${cat}`)) return true;
+  return offered.has("crow_tools") && selectedAddon(name) === true;
+}
+
 export function createVoiceTurnRunner(deps) {
   const now = deps.now || Date.now;
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -63,7 +83,11 @@ export function createVoiceTurnRunner(deps) {
       .filter((t) => !deny.has(t.name) && (memoryOn || t.name !== "crow_memory") && !extraNames.has(t.name))
       .concat(extra.map((x) => x.definition));
   }
-  const turnDeny = (denyTools) => new Set(["crow_glasses_capture_photo", ...(Array.isArray(denyTools) ? denyTools : [])]);
+  // The camera tool is refused unless THIS turn's endpoint supplies it as an extra tool (a session with a camera).
+  const turnDeny = (denyTools, extra = []) => new Set([
+    ...(extra.some((x) => x?.definition?.name === "crow_glasses_capture_photo") ? [] : ["crow_glasses_capture_photo"]),
+    ...(Array.isArray(denyTools) ? denyTools : []),
+  ]);
   const withSuffix = (system, suffix) => (suffix ? `${system}\n\n${suffix}` : system);
 
   /**
@@ -88,7 +112,8 @@ export function createVoiceTurnRunner(deps) {
     const bot = await loadBot(db, botId);
     if (!bot) return null;
     const key = bot.fast_voice_model || deps.fastKey;
-    const tools = turnTools(bot, { memoryOn, extra: Array.isArray(extraTools) ? extraTools : [], deny: turnDeny(denyTools) });
+    const extra = Array.isArray(extraTools) ? extraTools : [];
+    const tools = turnTools(bot, { memoryOn, extra, deny: turnDeny(denyTools, extra) });
     const fit = await promptFit({ db, bot, tools, promptSuffix, key });
     return { level: fit.level, ctx: fit.ctx, est_tokens: fit.est, est_no_skills_tokens: fit.est_no_skills, reserve_tokens: fit.reserve, model: key };
   }
@@ -214,7 +239,13 @@ export function createVoiceTurnRunner(deps) {
    * fallback spoken (default: none); fallbackText — the localized fallback line; tooLargeText —
    * the localized line for a bot whose prompt cannot fit the model (default BOT_TOO_LARGE_TEXT);
    * memoryWhen(transcript) — with memories on, whether THIS question asks for them (default: always);
-   * displayMissedText — the localized line for a must-run tool that never succeeded.
+   * displayMissedText — the localized line for a must-run tool that never succeeded;
+   * memoryOn (boolean) — whether memory tools may be used on this endpoint at all (default: the
+   * display's kiosk_settings.memory_integration);
+   * onToolResult({ name, tool, result, isError }) → string | undefined — a caller may REPLACE a remote
+   * tool's result before the model reads it (and before it is saved). `name` is the tool the model
+   * called, `tool` the one that really ran (a proxy call unwrapped). Never called for the caller's own
+   * extraTools or for a refused call; a hook that throws, or returns anything but a string, changes nothing.
    *
    * extraTools[i] = { definition, execute(args, { transcript }) → JSON string, when?, must?, mustNote?, mustDone? }:
    *   when(transcript) false → not offered this turn (a forced call is refused, never run);
@@ -325,13 +356,14 @@ export function createVoiceTurnRunner(deps) {
           budgetFired();
         }, left);
       }
-      const memoryOn = device.kiosk_settings?.memory_integration === true;
+      // opts.memoryOn (boolean): the endpoint's own answer; without it, the display setting decides as before.
+      const memoryOn = typeof opts.memoryOn === "boolean" ? opts.memoryOn : device.kiosk_settings?.memory_integration === true;
       const extra = Array.isArray(opts.extraTools) ? opts.extraTools : [];
       const extraByName = new Map(extra.map((x) => [x.definition.name, x]));
       // denyTools (kiosk: crow_delegate, crow_job_status — review C3): never advertised AND
       // refused by the gate below even if force-called, so a room cannot hand work to
       // another bot (crow_delegate's `bot` arg accepts ANY enabled bot) or read it back.
-      const deny = turnDeny(opts.denyTools);
+      const deny = turnDeny(opts.denyTools, extra);
       // extraTools[i].when(transcript) (kiosk: crow_wm): offered only when the PLAIN transcript
       // needs it. Live test 2026-10-04: with the display tool on every turn the 4B answered plain
       // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
@@ -435,6 +467,11 @@ export function createVoiceTurnRunner(deps) {
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
       const refuse = (code, message, neutral = false) => ({ code, message, neutral });
+      const offeredNames = new Set(tools.map((t) => t.name));
+      const offeredCheck = {
+        categoryOf: typeof deps.toolCategory === "function" ? deps.toolCategory : () => null,
+        selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
+      };
       const policyGate = (tc) => {
         const eff = deps.effectiveToolName(tc);
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
@@ -446,6 +483,10 @@ export function createVoiceTurnRunner(deps) {
         if (names.some((n) => deps.isMemoryTool(n))) {
           if (!memoryOn) return refuse("refused_policy", MEMORY_OFF, true);
           if (!memoryOffered) return refuse("not_offered", MEMORY_NOT_ASKED, true);
+        }
+        // Never run a tool this turn did not offer (an endpoint's extra tools have their own not-offered path below).
+        if (!extraByName.has(tc.name) && !wasOffered(tc, offeredNames, offeredCheck)) {
+          return refuse("not_offered", `"${shortName(eff)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
         }
         if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
           return refuse("refused_policy", `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
@@ -647,14 +688,26 @@ export function createVoiceTurnRunner(deps) {
         if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
         if (assistantMsg && !kept.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
+        // opts.onToolResult: what the model reads (and what is saved) for a remote result may be replaced.
+        const replaced = new Map();
+        if (typeof opts.onToolResult === "function") {
+          for (const [i, r] of (remoteResults || []).entries()) {
+            if (!remote[i] || !r) continue;
+            try {
+              const rep = await opts.onToolResult({ name: r.name, tool: deps.effectiveToolName(remote[i]) || r.name, result: r.result, isError: r.isError === true });
+              if (typeof rep === "string") replaced.set(r, rep);
+            } catch (err) { log(`[voice-turn] ${device.id} onToolResult failed for ${logName(r.name)}: ${err?.message || err}`); }
+          }
+        }
         // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
         let lastToolMsg = null;
-        for (const r of [...local, ...remoteResults]) {
-          const toolMsg = { role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name };
+        for (const r of [...local, ...(remoteResults || [])]) {
+          const content = replaced.has(r) ? replaced.get(r) : r.result;
+          const toolMsg = { role: "tool", content, tool_call_id: r.id, tool_name: r.name };
           if (r.neutral === true && local.includes(r)) routeNeutral.add(toolMsg);
           messages.push(toolMsg);
           lastToolMsg = toolMsg;
-          if (typeof r.result === "string" && r.result.length > 500) nextMax = 4000;
+          if (typeof content === "string" && content.length > 500) nextMax = 4000;
         }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
         const progress = roundSpoken > 0 || roundDisplay;
@@ -761,6 +814,7 @@ export async function defaultVoiceDeps() {
     chooseVoiceRoute: router.chooseVoiceRoute,
     fastKey: router.VOICE_ROUTE_KEYS.fast,
     getChatTools: tx.getChatTools,
+    toolCategory: tx.toolCategoryOf,
     createToolExecutor: tx.createToolExecutor,
     maxToolRounds: tx.MAX_TOOL_ROUNDS,
     effectiveToolName: tx.effectiveToolName,
