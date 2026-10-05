@@ -345,3 +345,152 @@ test("content cards do not stack: a new display card replaces the previous one; 
   s.store.open("other", { kind: "content", title: "Elsewhere", blocks: [] });
   assert.equal(s.store.list("k").filter((w) => w.kind === "content")[0].title, "Direct");
 });
+
+// ── Live re-test 2026-10-04 (kiosk 0.1.7): a claimed display that never happened; a failed command with no retry ──
+test("wantsNewDisplay: only a request for NEW content on the screen (show / display / put up / a new timer / a recipe) — never the close and step family, never a question about what is there", () => {
+  const table = [
+    // The live utterances.
+    ["Show me a list of three fruits.", true],
+    ["show me a shopping list with milk, eggs and bread", true],
+    ["set a timer for one minute and label it check", true],
+    // New content.
+    ["Display the grocery list", true],
+    ["Can you display my notes?", true],
+    ["Put the recipe up", true],
+    ["put that on the screen", true],
+    ["pull up the weather", true],
+    ["Start a countdown for ten minutes", true],
+    ["Set an alarm for an hour", true],
+    ["I need a five minute timer", true],
+    ["timer for ten minutes", true],
+    ["Show me the recipe for pancakes", true],
+    ["Find me a recipe for pancakes", true],
+    ["Muéstrame la lista de la compra", true],
+    ["muestrame la receta de tortilla", true],
+    ["ponlo en la pantalla", true],
+    ["Pon un temporizador de diez minutos", true],
+    ["pon una alarma en una hora", true],
+    // The control family and questions: display intent, but nothing new to put up.
+    ["next step", false],
+    ["show me the next step", false],
+    ["what's the next step?", false],
+    ["read the step again", false],
+    ["Close that", false],
+    ["Please dismiss it.", false],
+    ["close all", false],
+    ["clear the screen", false],
+    ["stop the timer", false],
+    ["cancel the alarm", false],
+    ["How long is left on the timer?", false],
+    ["how much time is left on the countdown", false],
+    ["Is the timer still running?", false],
+    ["what's on the display?", false],
+    ["How do I set a timer on my phone?", false],
+    ["I need to stop the timer", false],
+    ["I want to cancel the alarm", false],
+    ["can you turn off the alarm", false],
+    ["how can I display photos on my TV", false],
+    ["¿Cómo pongo un temporizador en el móvil?", false],
+    ["quiero parar la alarma", false],
+    ["siguiente paso", false],
+    ["Cierra eso", false],
+    ["para el temporizador", false],
+    ["cuánto queda del temporizador", false],
+    // Not display intent at all.
+    ["Tell me a joke", false],
+    ["What time is it?", false],
+    ["", false],
+  ];
+  for (const [text, want] of table) {
+    assert.equal(W.wantsNewDisplay(text), want, JSON.stringify(text));
+    if (want) assert.equal(W.wantsDisplay(text), true, `new display implies display intent: ${text}`);
+  }
+});
+
+test("the display tool says when a turn MUST end with something on the screen, and carries the note for the corrective round", async () => {
+  const s = setup();
+  assert.equal(typeof s.tool.must, "function");
+  assert.equal(s.tool.must("Show me a list of three fruits."), true);
+  assert.equal(s.tool.must("Tell me a joke"), false);
+  await s.run("display Shopping list | milk, eggs, bread");
+  assert.equal(s.tool.when("Tell me a joke"), true, "offered because a window is open…");
+  assert.equal(s.tool.must("Tell me a joke"), false, "…but an open window never makes a display mandatory");
+  assert.equal(s.tool.must("close that"), false);
+  assert.match(s.tool.mustNote, /nothing/i);
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "open" }), true, "only something newly put up counts");
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "close" }), false);
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "step" }), false);
+  assert.equal(s.tool.mustDone({ action: "error", code: "placeholder" }), false);
+  assert.equal(s.tool.mustDone(null), false);
+  assert.match(s.tool.mustNote, /crow_wm/);
+  assert.doesNotMatch(s.tool.mustNote, /[<>]/);
+  const timerOnly = setup({ windows: ["timer"] });
+  assert.equal(timerOnly.tool.must("Show me a list of three fruits."), false, "a display that cannot show cards is never required to");
+  assert.equal(timerOnly.tool.must("set a timer for one minute and label it check"), true);
+});
+
+test("every result carries a machine code for the log (never the command or its text): ok, or why nothing happened", async () => {
+  const s = setup();
+  const code = async (command, transcript) => JSON.parse(await s.tool.execute({ command }, transcript === undefined ? undefined : { transcript })).code;
+  assert.equal(await code("display Fruits | apples, bananas, cherries", "show me a list of three fruits"), "ok");
+  assert.equal(await code("timer 1 minute check"), "ok");
+  assert.equal(await code("close all"), "ok");
+  assert.equal(await code("dance"), "unknown_command");
+  assert.equal(await code(""), "unknown_command");
+  assert.equal(await code("show Fruits | apples"), "unknown_command");
+  assert.equal(await code("display <title> | <text>"), "placeholder");
+  assert.equal(await code("display Notes | "), "placeholder");
+  assert.equal(await code("timer tea"), "bad_timer");
+  assert.equal(await code("timer 30 hours"), "bad_timer");
+  assert.equal(await code("recipe Pancakes | flour"), "bad_recipe");
+  assert.equal(await code("display Info | a joke", "Tell me a joke"), "no_intent");
+  assert.equal(await code("next step"), "nothing_open");
+  assert.equal(await code("close"), "nothing_open");
+  const timerOnly = setup({ windows: ["timer"] });
+  assert.equal(JSON.parse(await timerOnly.tool.execute({ command: "display Notes | hi" })).code, "unsupported_window");
+  for (const c of ["unknown_command", "placeholder", "bad_timer", "bad_recipe", "no_intent", "nothing_open", "unsupported_window", "ok"]) assert.ok(W.WM_CODES.includes(c), c);
+});
+
+test("a failed command names the closest form to use, by example, so one retry can succeed", async () => {
+  const s = setup();
+  const msg = async (command) => { const r = await s.run(command); assert.equal(r.action, "error", command); assert.doesNotMatch(r.message, /[<>]/); return r.message; };
+  // What a model that wants a card tends to send instead of "display Title | text".
+  for (const c of ["show Fruits | apples, bananas, cherries", "list apples, bananas, cherries", "add apples, bananas and cherries to Shopping list", "update Shopping list | apples", "Fruits | apples, bananas, cherries", "note buy milk", "content Fruits: apples", "card Fruits"]) {
+    const m = await msg(c);
+    assert.match(m, /display Shopping list \| milk, eggs, bread/, c);
+    assert.doesNotMatch(m, /timer 10 minutes|recipe Pancakes/, `${c}: only the closest form`);
+    assert.match(m, /real/i, c);
+  }
+  for (const c of ["set timer pasta", "countdown 10", "remind me in ten minutes", "alarm 7am", "start a 5 timer"]) {
+    const m = await msg(c);
+    assert.match(m, /timer 10 minutes pasta/, c);
+    assert.doesNotMatch(m, /display Shopping list|recipe Pancakes/, c);
+  }
+  for (const c of ["cook pancakes", "recipe Pancakes", "recipe Pancakes | flour", "ingredients flour, eggs"]) {
+    const m = await msg(c);
+    assert.match(m, /recipe Pancakes \| flour; milk; eggs \| Mix the batter \|\| Cook two minutes a side/, c);
+  }
+  // A placeholder names the form of what was tried.
+  assert.match(await msg("display <title> | <text>"), /display Shopping list \| milk, eggs, bread/);
+  assert.match(await msg("recipe <title> | <ingredient> | <step>"), /recipe Pancakes/);
+  assert.match(await msg("timer 5 minutes <name>"), /timer 10 minutes pasta/);
+  // Nothing recognisable: the whole list, as before.
+  const all = await msg("dance");
+  for (const frag of ["timer 10 minutes pasta", "recipe Pancakes", "display Shopping list", "close all"]) assert.ok(all.includes(frag), frag);
+  assert.deepEqual(s.store.list("k"), [], "none of these opened anything");
+});
+
+test("a retry in the right form replaces the card; a card with the same title is replaced too (old id closed, new id opened)", async () => {
+  const s = setup();
+  await s.run("display Shopping list | milk, eggs, bread");
+  const first = s.store.list("k")[0].id;
+  assert.equal((await s.run("show Fruits | apples, bananas, cherries")).code, "unknown_command");
+  assert.equal(s.store.list("k")[0].id, first, "the failed command changed nothing");
+  s.emitted.length = 0;
+  assert.equal((await s.run("display Fruits | apples, bananas, cherries")).ok, true);
+  assert.deepEqual(s.emitted.map((e) => [e.action, e.id || e.window?.id]), [["close", first], ["open", "content-2"]]);
+  s.emitted.length = 0;
+  assert.equal((await s.run("display Fruits | apples, bananas, cherries, dates")).ok, true);
+  assert.deepEqual(s.emitted.map((e) => [e.action, e.id || e.window?.id]), [["close", "content-2"], ["open", "content-3"]], "same title: still a fresh window");
+  assert.deepEqual(s.store.list("k").map((w) => [w.title, w.blocks.at(-1).text]), [["Fruits", "apples, bananas, cherries, dates"]]);
+});

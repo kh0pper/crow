@@ -162,6 +162,13 @@ test("smoke A1 (2026-10-04): [hidden] beats class display — the pairing overla
   assert.match(read("kiosk.js"), /j\.state === "approved"[^\n]*\$\("pairing"\)\.hidden = true/);
 });
 
+test("the debug list shows each tool call's outcome for the turn (name:code from turn_done — no arguments, no text)", () => {
+  const src = read("kiosk.js");
+  const done = src.slice(src.indexOf('case "turn_done":'), src.indexOf('case "error":'));
+  assert.match(done, /m\.timings\?\.tools/);
+  assert.match(done, /note\("tools", toolsLine\(m\.timings\)\)/);
+});
+
 test("smoke 2026-10-04 item 7: every banner/caption write is recorded; a long press on the clock shows the ring; the ring element ships hidden", () => {
   const src = read("kiosk.js");
   const sets = src.split("\n").filter((l) => /\$\("cap-bot"\)\.textContent = /.test(l));

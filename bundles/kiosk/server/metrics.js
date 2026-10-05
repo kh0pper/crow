@@ -53,7 +53,9 @@ export function createMetricsStore({ max = 100 } = {}) {
      * that ended on the fallback line (r.failed): its audio is the apology, not an answer.
      * r.failed (from the voice turn): tool_rounds | tool_repeat | no_text | budget | error |
      * bot_too_large (the assistant's prompt cannot fit the quick voice model: no model call) |
-     * context_full (the request would not fit the context: not sent). Every one is a failure here.
+     * context_full (the request would not fit the context: not sent) | display_missed (a turn that
+     * asked for something on the screen ended with nothing put there: the could-not-show line was
+     * spoken). Every one is a failure here. timings.tools carries each tool call's outcome (name:code).
      */
     summary(dev, { last = 20 } = {}) {
       const ok = [...(devs.get(dev)?.values() || [])].filter((r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && !r.barged && r.vad_reason === "silence").slice(-last);

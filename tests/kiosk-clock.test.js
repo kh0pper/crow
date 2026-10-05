@@ -50,3 +50,35 @@ test("clock fast path: anything that is not the plain question goes to the model
     assert.equal(matchClockFastPath(q, { now: AT, tz: "America/Chicago" }), null, q);
   }
 });
+
+// ── Live re-test 2026-10-04: "What's today's date?" (or a close variant) missed the shortcut ──────
+test("phrase table: every listed way of asking the time or the date is a shortcut, with fillers and politeness around it (en + es)", () => {
+  const at = (q) => matchClockFastPath(q, { now: AT, tz: "America/Chicago" });
+  const TIME_EN = ["what time is it", "what's the time", "what is the time", "do you know what time it is", "can you tell me the time", "tell me the time", "time please",
+    "What time is it right now?", "Hey, what time is it?", "So what time is it?", "Um, what's the time?", "Okay Crow, what's the time?", "Could you tell me what time it is?", "What's the current time?", "What time is it, please?", "what time is it crow", "And what time is it now?", "Do you have the time?", "What time do you have?", "Can you tell me what time it is, please?", "Well, what is the time?"];
+  for (const q of TIME_EN) assert.equal(at(q)?.say, "It's 3:42 PM.", q);
+  const DATE_EN = ["what's today's date", "what is today's date", "what's the date", "what is the date today", "what day is it", "what day is it today", "what's today", "today's date",
+    "What’s today’s date?", "Whats todays date", "Hey, what's today's date?", "So what is today's date?", "What is the date?", "What's the date today, please?", "What date is it?", "What date is it today?", "What day is today?", "What is today?", "What's the day today?", "Can you tell me today's date?", "Do you know what day it is?", "Tell me what day it is", "Okay, what is today's date?", "What's today's date, Crow?", "What is the date for today?", "What day of the week is it?", "And what's the date?"];
+  for (const q of DATE_EN) assert.equal(at(q)?.say, "Today is Sunday, October 4, 2026.", q);
+  const es = (q) => matchClockFastPath(q, { now: AT, tz: "Europe/Madrid" });
+  for (const q of ["qué hora es", "me dices la hora", "¿Qué hora es ahora?", "Oye, ¿qué hora es?", "¿Me puedes decir qué hora es?", "¿Tienes hora?", "que hora es por favor", "¿Sabes qué hora es?", "Dime qué hora es", "La hora, por favor"]) assert.equal(es(q)?.say, "Son las 22:42.", q);
+  for (const q of ["qué día es hoy", "qué fecha es hoy", "a qué estamos hoy", "¿Qué día es?", "¿A qué día estamos?", "¿Cuál es la fecha de hoy?", "Oye, ¿qué día es hoy?", "¿Me dices qué día es hoy?", "¿Qué fecha es?", "¿Sabes qué día es hoy?", "la fecha de hoy, por favor"]) assert.equal(es(q)?.say, "Hoy es domingo, 4 de octubre de 2026.", q);
+});
+
+test("phrase table: questions that only CONTAIN those words go to the model", () => {
+  const no = ["what time is the game", "what's the date of the meeting", "what day is the party", "What time is it in Tokyo?", "What time does the store close today?", "What's the date tomorrow?", "What day is it tomorrow?", "What was the date yesterday?", "what's today's weather", "What's today's plan?", "today", "time", "date", "please", "what", "What is the time difference with London?", "What time is it going to rain?", "what day is it in Australia", "Tell me the time in Paris", "what's the date on the milk", "do you know what time the bus comes",
+    "qué hora es en Tokio", "a qué hora es la cena", "qué día es la fiesta", "qué fecha es el examen", "qué día es mañana", "hoy", "hora"];
+  for (const q of no) assert.equal(matchClockFastPath(q, { now: AT, tz: "America/Chicago" }), null, q);
+});
+
+test("phrase table: CLOCK_PHRASES is the single source — each core phrase matches bare, and with a lead-in and a tail", async () => {
+  const { CLOCK_PHRASES } = await import("../bundles/kiosk/server/clock.js");
+  for (const [key, want] of [["time_en", /^It's /], ["date_en", /^Today is /], ["time_es", /^(Son las|Es la) /], ["date_es", /^Hoy es /]]) {
+    const t = CLOCK_PHRASES[key];
+    assert.ok(t.cores.length >= 5, key);
+    for (const core of t.cores) {
+      assert.match(matchClockFastPath(core, { now: AT, tz: "UTC" })?.say || "", want, `${key}: ${core}`);
+      assert.match(matchClockFastPath(`${t.leads[0]} ${core} ${t.tails[0]}`, { now: AT, tz: "UTC" })?.say || "", want, `${key}: ${t.leads[0]} ${core} ${t.tails[0]}`);
+    }
+  }
+});

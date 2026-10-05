@@ -167,7 +167,7 @@ export const CLIENT_SCRIPT = `
     mem.addEventListener('change', fit.show);
     [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
-    card.appendChild(el('p', 'kk-dim', S.memory_warn));
+    card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
     var msg = el('span', 'kk-msg');
     var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
     save.addEventListener('click', function () {

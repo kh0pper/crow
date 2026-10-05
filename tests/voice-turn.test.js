@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT } from "../servers/gateway/voice/turn.js";
+import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
 function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { t += ms; }, advance: (ms) => { t += ms; } }; }
@@ -387,9 +387,9 @@ test("stall fix: a model looping the SAME tool is stopped after 2 rounds; the fi
   assert.ok(h.events.some((e) => e.type === "caption_delta" && e.text === FALLBACK_TEXT));
   assert.deepEqual(h.events.filter((e) => /^tts_/.test(e.type)).map((e) => e.type), ["tts_start", "tts_end"]);
   assert.ok(h.calls.logs.some((l) => /round 1: crow_projects/.test(l)) && h.calls.logs.some((l) => /round 2: crow_projects/.test(l)));
-  assert.ok(h.calls.logs.some((l) => /turn failed \(tool_repeat\).*crow_projects → crow_projects/.test(l)));
+  assert.ok(h.calls.logs.some((l) => /turn failed \(tool_repeat\).*crow_projects:ok → crow_projects:ok/.test(l)));
   assert.ok(!h.calls.logs.some((l) => /secret-arg/.test(l)), "no tool arguments in the logs");
-  assert.deepEqual(r.timings.tools, ["crow_projects", "crow_projects"]);
+  assert.deepEqual(r.timings.tools, ["crow_projects:ok", "crow_projects:ok"], "each call's outcome, never its arguments");
   // The saved conversation is a clean exchange: no looping tool chatter, no stop note.
   const saved = h.runner.convo.get(h.device.id);
   assert.deepEqual(saved.map((m) => m.role), ["user", "assistant"]);
@@ -783,4 +783,308 @@ test("when() and prompt fit: the fit level is decided with EVERY extra tool coun
   assert.equal(h.log[0].messages[0].content, h.log[1].messages[0].content, "same system message whether or not the tool is offered");
   const fit = await h.runner.assessBot({ db: {}, botId: "general", extraTools: [wide] });
   assert.equal(fit.level, "no_skills", "the panel's check counts the tool the same way");
+});
+
+// ── Live re-test 2026-10-04 (kiosk 0.1.7): claimed displays, silent tool failures, memory on a plain question ──
+/** A display tool as the kiosk builds it: offered on display intent, MUST run on "show me …", results carry a code. */
+function mustTool(results = [], seen = []) {
+  return {
+    definition: { name: "crow_wm", description: "show", inputSchema: { type: "object" } },
+    when: (t) => /show me|timer|close/i.test(t),
+    must: (t) => /show me/i.test(t),
+    mustNote: "[Display] Nothing is on the screen yet. Call crow_wm now.",
+    execute: async (args) => { seen.push(args); return JSON.stringify(results.shift() ?? { ok: true, code: "ok" }); },
+  };
+}
+const wmCall = (command, id = "w") => [{ type: "tool_call", id, name: "crow_wm", arguments: { command } }, { type: "done" }];
+const says = (text) => [{ type: "content_delta", text }, { type: "done" }];
+const choices = (h) => h.log.map((e) => e.opts.toolChoice ?? null);
+
+test("outcomes: the round log and timings.tools carry name:code for every call — ok, the tool's own error code, or why the gate refused — and never arguments", async () => {
+  const h = harness({ chatTools: ["crow_projects", "crow_delete_post"], rounds: [
+    [{ type: "tool_call", id: "a", name: "crow_wm", arguments: { command: "SECRET-ARG display x" } }, { type: "tool_call", id: "b", name: "crow_projects", arguments: { action: "list" } },
+      { type: "tool_call", id: "c", name: "crow_delegate", arguments: { goal: "SECRET-ARG" } }, { type: "tool_call", id: "d", name: "crow_delete_post", arguments: { id: 7 } },
+      { type: "tool_call", id: "e", name: "crow_memory", arguments: { action: "search_memories" } }, { type: "tool_call", id: "f", name: "crow_other", arguments: {} }, { type: "done" }],
+    says("Done. "),
+  ] });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: t.name === "crow_other" ? "Error: SECRET-RESULT" : "ok", isError: t.name === "crow_other" })), close: async () => {} });
+  const runner = createVoiceTurnRunner(h.deps);
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me things", sink: h.sink, denyTools: ["crow_delegate"], extraTools: [mustTool([{ action: "error", code: "placeholder", message: "SECRET-RESULT" }])] });
+  assert.deepEqual(r.timings.tools, ["crow_wm:placeholder+crow_projects:ok+crow_delegate:refused_policy+crow_delete_post:needs_confirm+crow_memory:refused_policy+crow_other:error"]);
+  const line = h.calls.logs.find((l) => /round 1:/.test(l));
+  assert.match(line, /kiosk-a round 1: crow_wm:placeholder, crow_projects:ok, crow_delegate:refused_policy, crow_delete_post:needs_confirm, crow_memory:refused_policy, crow_other:error$/);
+  assert.ok(!h.calls.logs.some((l) => /SECRET/.test(l)), "no argument or result text in any log line");
+  assert.doesNotMatch(JSON.stringify(r.timings), /SECRET/);
+  // A hidden extra tool that is force-called, and an extra tool whose result has no code.
+  const n = harness({ chatTools: [], rounds: [wmCall("display x"), says("Hi. ")] });
+  const rn = await n.runner.runVoiceTurn({ db: {}, device: n.device, transcript: "Tell me a joke", sink: n.sink, extraTools: [mustTool()] });
+  assert.deepEqual(rn.timings.tools, ["crow_wm:not_offered"]);
+  const plain = harness({ chatTools: [], rounds: [wmCall("timer 1 minute"), says("Set. ")] });
+  const { must, mustNote, ...basic } = mustTool([{ ok: true }]);
+  const rp = await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "set a timer", sink: plain.sink, extraTools: [basic] });
+  assert.deepEqual(rp.timings.tools, ["crow_wm:ok"], "ok:true without a code is ok");
+});
+
+test("memory only when asked: with memories ON, memoryWhen(transcript) decides whether the memory tool is offered; a forced call is refused and never run", async () => {
+  const asked = [];
+  const memoryWhen = (t) => { asked.push(t); return /remember/i.test(t); };
+  const mk = (rounds) => { const h = harness({ rounds }); h.device.kiosk_settings.memory_integration = true; return h; };
+  const plain = mk([[{ type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "search_memories", params: { query: "date" } } }, { type: "done" }], says("It is Sunday. ")]);
+  const r = await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "What's today's date?", sink: plain.sink, memoryWhen, turnContext: "[Now] remember this prefix is never the transcript" });
+  assert.deepEqual(asked, ["What's today's date?"], "asked with the plain transcript");
+  assert.deepEqual(plain.log[0].tools, ["crow_projects", "crow_delegate"], "no memory tool on a plain question");
+  assert.deepEqual(plain.calls.executed, [], "a forced memory call never runs");
+  assert.match(plain.log[1].messages.at(-1).content, /did not ask/i);
+  assert.match(plain.log[1].messages.at(-1).content, /aloud/i);
+  assert.deepEqual(r.timings.tools, ["crow_memory:not_offered"]);
+  await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "capital of Portugal?", sink: plain.sink, memoryWhen });
+  assert.deepEqual(plain.calls.routed.at(-1), ["system", "user", "assistant", "user"], "the refused call is not 'recent tool context' for the router");
+  const recall = mk([[{ type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "search_memories", params: { query: "wifi" } } }, { type: "done" }], says("It is on the fridge. ")]);
+  const rr = await recall.runner.runVoiceTurn({ db: {}, device: recall.device, transcript: "Do you remember the wifi password?", sink: recall.sink, memoryWhen });
+  assert.deepEqual(recall.log[0].tools, ["crow_memory", "crow_projects", "crow_delegate"]);
+  assert.deepEqual(recall.calls.executed, ["crow_memory"]);
+  assert.deepEqual(rr.timings.tools, ["crow_memory:ok"]);
+  // No memoryWhen (another caller): memories ON offers the tool on every turn, as before. Memories OFF never asks.
+  const always = mk([says("Hi. ")]);
+  await always.runner.runVoiceTurn({ db: {}, device: always.device, transcript: "hello", sink: always.sink });
+  assert.deepEqual(always.log[0].tools, ["crow_memory", "crow_projects", "crow_delegate"]);
+  const off = harness();
+  let n = 0;
+  await off.runner.runVoiceTurn({ db: {}, device: off.device, transcript: "remember this", sink: off.sink, memoryWhen: () => { n++; return true; } });
+  assert.deepEqual(off.log[0].tools, ["crow_projects", "crow_delegate"]);
+  assert.equal(n, 0);
+});
+
+test("memory only when asked: the prompt-fit level still counts the memory tool, so it cannot flip between a plain and a recall turn", async () => {
+  const bot = bigBot({ skills_text: "SKILL ".repeat(3700) });
+  const h = harness({ bot, ctx: FAST_CTX, chatTools: ["crow_memory"], rounds: [says("One. "), says("Two. ")] });
+  h.deps.getChatTools = () => [{ name: "crow_memory", description: "M".repeat(2500), inputSchema: { type: "object" } }];
+  h.device.kiosk_settings.memory_integration = true;
+  const runner = createVoiceTurnRunner(h.deps);
+  const memoryWhen = (t) => /remember/.test(t);
+  const a = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hello", sink: h.sink, memoryWhen });
+  const b = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "remember milk", sink: h.sink, memoryWhen });
+  assert.deepEqual(h.log.map((e) => e.tools.length), [0, 1]);
+  assert.equal(a.timings.prompt_fit, b.timings.prompt_fit);
+  assert.equal(h.log[0].messages[0].content, h.log[1].messages[0].content);
+});
+
+test("must-run tool, the only tool offered: the first round carries tool_choice for it; once it has run, later rounds do not; the confirmation is spoken", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [wmCall("display Fruits | apples"), says("Here are three fruits. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [mustTool([], seen)] });
+  assert.deepEqual(choices(h), [{ name: "crow_wm" }, null]);
+  assert.deepEqual(seen, [{ command: "display Fruits | apples" }]);
+  assert.deepEqual(h.calls.spoken, ["Here are three fruits."]);
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.tool_choice, "named");
+  assert.equal(r.timings.display_missed, undefined);
+  assert.deepEqual(r.timings.tools, ["crow_wm:ok"]);
+});
+
+test("must-run: not a must turn (or no must tool) → no tool_choice and text streams as before", async () => {
+  const h = harness({ chatTools: [], rounds: [says("Closed. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "close that", sink: h.sink, extraTools: [mustTool()] });
+  assert.deepEqual(choices(h), [null]);
+  assert.deepEqual(h.calls.spoken, ["Closed."]);
+  assert.equal(r.timings.tool_choice, undefined);
+});
+
+test("must-run with other tools offered: nothing is forced (the model may need to fetch first), but the backstop still applies", async () => {
+  const h = harness({ chatTools: ["crow_projects"], rounds: [
+    [{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_notes" } }, { type: "done" }],
+    wmCall("display Notes | buy milk"), says("Your notes are up. "),
+  ] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me my notes", sink: h.sink, extraTools: [mustTool()] });
+  assert.deepEqual(choices(h), [null, null, null]);
+  assert.equal(r.timings.tool_choice, "none");
+  assert.deepEqual(r.timings.tools, ["crow_projects:ok", "crow_wm:ok"]);
+  assert.deepEqual(h.calls.spoken, ["Your notes are up."]);
+  assert.equal(r.failed, null);
+});
+
+test("must-run: a backend that REJECTS a named tool_choice gets 'required', then none — remembered per model, so later turns send no rejected request", async () => {
+  const h = harness({ chatTools: [] });
+  const sent = [];
+  const reject = new Set(["named"]);
+  h.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) {
+    const kind = opts.toolChoice ? (typeof opts.toolChoice === "string" ? opts.toolChoice : "named") : "none";
+    sent.push(kind);
+    if (reject.has(kind)) throw Object.assign(new Error("Provider error (400): tool_choice not supported"), { code: "provider_error", status: 400 });
+    if (messages.at(-1).role === "tool") { yield { type: "content_delta", text: "It is up. " }; yield { type: "done" }; return; }
+    yield { type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "display A | b" } }; yield { type: "done" };
+  } });
+  const runner = createVoiceTurnRunner(h.deps);
+  const ask = () => runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, extraTools: [mustTool()] });
+  const r1 = await ask();
+  assert.deepEqual(sent, ["named", "required", "none"]);
+  assert.equal(r1.failed, null);
+  assert.equal(r1.timings.tool_choice, "required");
+  assert.ok(h.calls.logs.some((l) => /tool_choice/.test(l) && /named/.test(l) && /400/.test(l)));
+  sent.length = 0;
+  await ask();
+  assert.deepEqual(sent, ["required", "none"], "the named form is not tried again on this model");
+  reject.add("required");
+  sent.length = 0;
+  const r3 = await ask();
+  assert.deepEqual(sent, ["required", "none", "none"], "'required' rejected too → the same round is sent without tool_choice");
+  assert.equal(r3.failed, null);
+  sent.length = 0;
+  const r4 = await ask();
+  assert.deepEqual(sent, ["none", "none"]);
+  assert.equal(r4.timings.tool_choice, "none");
+});
+
+test("must-run: any other provider failure on a forced round is still a turn_failed (never retried as if tool_choice were the problem)", async () => {
+  const h = harness({ chatTools: [] });
+  let n = 0;
+  h.deps.createChatAdapter = async () => ({ async *chatStream() { n++; throw Object.assign(new Error("Provider error (503): overloaded"), { code: "provider_error", status: 503 }); } });
+  const runner = createVoiceTurnRunner(h.deps);
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, extraTools: [mustTool()] });
+  assert.equal(n, 1);
+  assert.equal(r.failed, "error");
+  // Only a "bad request" (400 / 422) can mean "this tool_choice form is not accepted": a 403 is not retried.
+  const f = harness({ chatTools: [] });
+  let m = 0;
+  f.deps.createChatAdapter = async () => ({ async *chatStream() { m++; throw Object.assign(new Error("Provider error (403): forbidden"), { code: "provider_error", status: 403 }); } });
+  const rf = await createVoiceTurnRunner(f.deps).runVoiceTurn({ db: {}, device: f.device, transcript: "show me a list", sink: f.sink, extraTools: [mustTool()] });
+  assert.equal(m, 1);
+  assert.equal(rf.failed, "error");
+  // A 400 that is NOT about tool_choice (every form fails): the turn fails, and nothing is remembered —
+  // the next turn asks for the named tool again.
+  const b = harness({ chatTools: [] });
+  const sent = [];
+  let broken = true;
+  b.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) {
+    sent.push(opts.toolChoice ? (typeof opts.toolChoice === "string" ? opts.toolChoice : "named") : "none");
+    if (broken) throw Object.assign(new Error("Provider error (400): bad request"), { code: "provider_error", status: 400 });
+    if (messages.at(-1).role === "tool") { yield { type: "content_delta", text: "Up. " }; yield { type: "done" }; return; }
+    yield { type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "display A | b" } }; yield { type: "done" };
+  } });
+  const br = createVoiceTurnRunner(b.deps);
+  const r1 = await br.runVoiceTurn({ db: {}, device: b.device, transcript: "show me a list", sink: b.sink, extraTools: [mustTool()] });
+  assert.deepEqual(sent, ["named", "required", "none"]);
+  assert.equal(r1.failed, "error");
+  broken = false; sent.length = 0;
+  const r2 = await br.runVoiceTurn({ db: {}, device: b.device, transcript: "show me a list", sink: b.sink, extraTools: [mustTool()] });
+  assert.deepEqual(sent, ["named", "none"], "still asks by name");
+  assert.equal(r2.failed, null);
+});
+
+test("must-run backstop: a model that only CLAIMS the display (no call) is never heard — one corrective round with the tool's note, then the real confirmation", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [says("I've displayed a list of three fruits for you. "), wmCall("display Fruits | apples, bananas, cherries"), says("The list is on the screen. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [mustTool([], seen)], turnContext: "[Display] Open windows: content 'Shopping list'." });
+  assert.equal(h.log.length, 3);
+  assert.deepEqual(h.calls.spoken, ["The list is on the screen."], "the false claim was never spoken");
+  assert.ok(!h.events.some((e) => e.type === "caption_delta" && /I've displayed/.test(e.text)), "nor captioned");
+  // The corrective round: same tools, the false claim is not in the request, the note rides on the last message.
+  assert.deepEqual(h.log[1].tools, h.log[0].tools);
+  assert.deepEqual(h.log[1].messages.map((m) => m.role), ["system", "user"]);
+  assert.match(h.log[1].messages.at(-1).content, /Show me a list of three fruits\.\n\n\[Display\] Nothing is on the screen yet\. Call crow_wm now\.$/);
+  assert.equal(h.log[1].messages[0].content, h.log[0].messages[0].content, "the system message is untouched");
+  assert.deepEqual(choices(h), [{ name: "crow_wm" }, { name: "crow_wm" }, null]);
+  assert.equal(seen.length, 1);
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.display_corrected, true);
+  assert.equal(r.timings.display_missed, undefined);
+  // Nothing of the detour is saved: no false claim, no note.
+  const saved = h.runner.convo.get("kiosk-a");
+  assert.ok(!saved.some((m) => /I've displayed|Nothing is on the screen/.test(String(m.content))));
+  assert.equal(saved[0].content, "Show me a list of three fruits.");
+});
+
+test("must-run backstop: no display after the corrective round either → the turn does not end on a false claim; the truthful line is spoken, display_missed is recorded", async () => {
+  const h = harness({ chatTools: [], rounds: [says("I've displayed a list of three fruits for you. "), says("Done! The fruits are on your screen now. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [mustTool()], displayMissedText: "No pude ponerlo en la pantalla.", fallbackText: "FALLBACK" });
+  assert.equal(h.log.length, 2, "one corrective round, no more");
+  assert.deepEqual(h.calls.spoken, ["No pude ponerlo en la pantalla."]);
+  assert.deepEqual(h.events.filter((e) => e.type === "caption_delta").map((e) => e.text), ["No pude ponerlo en la pantalla."]);
+  assert.equal(r.failed, "display_missed");
+  assert.equal(r.timings.display_missed, true);
+  assert.equal(r.timings.display_corrected, true);
+  assert.ok(!h.events.some((e) => e.type === "error"));
+  assert.deepEqual(h.runner.convo.get("kiosk-a").map((m) => m.content), ["Show me a list of three fruits.", "No pude ponerlo en la pantalla."]);
+  assert.ok(h.calls.logs.some((l) => /turn failed \(display_missed\)/.test(l)));
+  const d = harness({ chatTools: [], rounds: [says("Shown. "), says("Shown. ")] });
+  await d.runner.runVoiceTurn({ db: {}, device: d.device, transcript: "show me a list", sink: d.sink, extraTools: [mustTool()] });
+  assert.deepEqual(d.calls.spoken, [DISPLAY_MISSED_TEXT], "a default line when the caller passes none");
+});
+
+test("must-run: a failed command gets ONE retry (the round cap leaves room for it); words spoken around a failed call are held back", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [
+    [{ type: "content_delta", text: "Here is your list. " }, { type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "show Fruits | apples" } }, { type: "done" }],
+    wmCall("display Fruits | apples, bananas, cherries", "w2"),
+    says("Three fruits are on the screen. "),
+  ] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, maxToolRounds: 3, extraTools: [mustTool([{ action: "error", code: "unknown_command", message: "Use: display Shopping list | milk" }], seen)] });
+  assert.equal(h.log.length, 3);
+  assert.match(h.log[1].messages.at(-1).content, /Use: display Shopping list \| milk/, "the model sees which form to use");
+  assert.deepEqual(choices(h), [{ name: "crow_wm" }, { name: "crow_wm" }, null], "still required on the retry");
+  assert.deepEqual(seen.map((a) => a.command), ["show Fruits | apples", "display Fruits | apples, bananas, cherries"]);
+  assert.deepEqual(h.calls.spoken, ["Three fruits are on the screen."], "'Here is your list.' was said before anything was shown: held back");
+  assert.ok(!h.runner.convo.get("kiosk-a").some((m) => /Here is your list/.test(String(m.content))), "and what was never heard is not saved as if it had been said");
+  assert.equal(h.log[1].messages.find((m) => m.role === "assistant").content, "", "nor shown back to the model as its own words");
+  assert.deepEqual(r.timings.tools, ["crow_wm:unknown_command", "crow_wm:ok"]);
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.display_missed, undefined);
+});
+
+test("must-run: the retry fails too → no third attempt and no wasted answer round; the truthful line", async () => {
+  const seen = [];
+  const e = { action: "error", code: "unknown_command", message: "Use: display …" };
+  const h = harness({ chatTools: [], rounds: [wmCall("show a"), wmCall("show b"), says("never requested")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, maxToolRounds: 3, extraTools: [mustTool([e, { ...e }], seen)], displayMissedText: "MISSED" });
+  assert.equal(h.log.length, 2);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(h.calls.spoken, ["MISSED"]);
+  assert.equal(r.failed, "display_missed");
+  assert.deepEqual(r.timings.tools, ["crow_wm:unknown_command", "crow_wm:unknown_command"]);
+});
+
+test("must-run: a failed command followed by a text-only answer still gets the corrective round (the note rides on the tool result)", async () => {
+  const h = harness({ chatTools: [], rounds: [wmCall("show a"), says("Here are three fruits: apples, bananas and cherries. "), wmCall("display Fruits | apples", "w2"), says("They are on the screen. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, maxToolRounds: 3, extraTools: [mustTool([{ action: "error", code: "unknown_command", message: "Use: display" }])] });
+  assert.equal(h.log.length, 4);
+  assert.equal(h.log[2].messages.at(-1).role, "tool");
+  assert.match(h.log[2].messages.at(-1).content, /^\{.*unknown_command.*\}\n\n\[Display\] Nothing is on the screen yet/s);
+  assert.deepEqual(h.calls.spoken, ["They are on the screen."]);
+  assert.equal(r.failed, null);
+  assert.ok(!h.runner.convo.get("kiosk-a").some((m) => /Nothing is on the screen yet|Here are three fruits/.test(String(m.content))), "the note and the unspoken answer are not saved");
+});
+
+test("must-run: barge-in and the first-audio budget keep their own endings", async () => {
+  const ac = new AbortController();
+  const h = harness({ chatTools: [], rounds: [says("I've displayed it. "), says("Done. ")] });
+  const tool = mustTool();
+  const orig = h.deps.createChatAdapter;
+  let n = 0;
+  h.deps.createChatAdapter = async (k) => { const a = await orig(k); return { async *chatStream(...args) { if (++n === 2) ac.abort(); yield* a.chatStream(...args); } }; };
+  const runner = createVoiceTurnRunner(h.deps);
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, signal: ac.signal, extraTools: [tool] });
+  assert.equal(r.aborted, true);
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.spoken, []);
+  // A forced round that never answers: the budget's own fallback, not display_missed.
+  const slow = harness({ chatTools: [], rounds: [[{ type: "hang" }]] });
+  const rs = await slow.runner.runVoiceTurn({ db: {}, device: slow.device, transcript: "show me a list", sink: slow.sink, extraTools: [mustTool()], firstAudioBudgetMs: 40, displayMissedText: "MISSED" });
+  assert.equal(rs.failed, "budget");
+  assert.deepEqual(slow.calls.spoken, [FALLBACK_TEXT]);
+  assert.equal(rs.timings.display_missed, undefined);
+});
+
+test("must-run: the tool says which result counts (mustDone) — an ok that put nothing new up (a close) does not satisfy the turn", async () => {
+  const seen = [];
+  const tool = { ...mustTool([{ ok: true, code: "ok", action: "close" }, { ok: true, code: "ok", action: "open" }], seen), mustDone: (r) => r?.ok === true && r.action === "open" };
+  const h = harness({ chatTools: [], rounds: [wmCall("close"), wmCall("display A | b", "w2"), says("It is up. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, maxToolRounds: 3, extraTools: [tool] });
+  assert.deepEqual(choices(h), [{ name: "crow_wm" }, { name: "crow_wm" }, null], "still required after the close");
+  assert.deepEqual(r.timings.tools, ["crow_wm:ok", "crow_wm:ok"]);
+  assert.deepEqual(h.calls.spoken, ["It is up."]);
+  assert.equal(r.failed, null);
+  const only = harness({ chatTools: [], rounds: [wmCall("close"), says("Closed it. "), says("Closed it. ")] });
+  const ro = await only.runner.runVoiceTurn({ db: {}, device: only.device, transcript: "show me a list", sink: only.sink, extraTools: [{ ...mustTool([{ ok: true, action: "close" }]), mustDone: (x) => x?.action === "open" }], displayMissedText: "MISSED" });
+  assert.equal(ro.failed, "display_missed");
+  assert.deepEqual(only.calls.spoken, ["MISSED"]);
 });

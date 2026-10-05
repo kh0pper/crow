@@ -8,7 +8,7 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision,
+  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
@@ -176,6 +176,7 @@ function onText(m) {
     case "wm": note("wm", `${m.action}${m.id ? " " + m.id : ""}${m.windows ? " (" + m.windows.length + ")" : ""}`); wmView?.apply(m); if (m.action === "timer_done") chime(); break;
     case "announce": $("cap-user").textContent = ""; $("cap-bot").textContent = m.text || ""; note("caption:announce", `${(m.text || "").length} chars`); break;
     case "turn_done":
+      if (m.timings?.tools || m.timings?.tool_choice) note("tools", toolsLine(m.timings));
       if (turn && turn.id === m.turn_id) { turn.done = m; turn.doneAt = performance.now(); settle(turn); }
       break;
     case "error":
