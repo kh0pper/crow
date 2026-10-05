@@ -7,10 +7,6 @@
  * blog_theme_mode (global color mode), blog_theme_blog_mode (blog-only
  * override), and blog_theme_serif (Fraunces headings). Glass and the old
  * dashboard-color-mode override retired product-wide in Task 5 (spec §3.4).
- *
- * set_kiosk below is UNRELATED to theme — it's dispatched from the same
- * POST route (panels/settings.js dispatches by action, not by section) and
- * has always lived here; it survives this rewrite untouched.
  */
 
 import { formField } from "../../shared/components.js";
@@ -82,12 +78,6 @@ export default {
   },
 
   async handleAction({ req, res, db, action }) {
-    if (action === "set_kiosk") {
-      await upsertSetting(db, "kiosk_mode", req.body.kiosk === "true" ? "true" : "false");
-      res.json({ ok: true });
-      return true;
-    }
-
     if (action === "update_theme") {
       const themeFields = {
         blog_theme_mode: req.body.theme_mode,
