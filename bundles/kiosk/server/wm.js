@@ -64,12 +64,64 @@ export function contentBlocks(title, body) {
 }
 
 const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-const USAGE = "Not available on this display. Use: timer <duration> <name>, stop timer [name], recipe <title> | <ingredients> | <steps>, display <title> | <text>, close, close all, next step.";
+// Every message the model reads is written with concrete examples, never angle-bracket
+// placeholders: the 4B copied "<title> | <text> — || starts a paragraph…" onto a card (live test 2026-10-04).
+const USAGE = "Not available on this display. It understands, for example: timer 10 minutes pasta; stop timer pasta; recipe Pancakes | flour; eggs | Mix the batter || Cook two minutes a side; display Shopping list | milk, eggs, bread; next step; close; close all. Otherwise answer aloud.";
+const PLACEHOLDER_MSG = "Nothing was shown: that command had placeholder or empty text instead of real content. Answer the user aloud now; do not call this tool again unless you have the real words.";
+const NO_INTENT_MSG = "Nothing was shown: nobody asked to see anything. Answer the user aloud instead; do not call this tool again for this question.";
+
+/**
+ * Does the PLAIN transcript (never the turn-context prefix) ask for the display — to show
+ * something, a timer, a recipe, a step, or to close a window? Conservative word lists, en + es.
+ * The display tool is offered to the model only on such turns (or while a window is open), and
+ * a content card is refused on any other turn: a plain question gets a spoken answer in one
+ * model round, not a card repeating it.
+ */
+const DISPLAY_INTENT = [
+  /\bshow (me|us|it|that|this|them|the|my|our)\b/,
+  /\bdisplay\b/,
+  /\bput\b.{0,40}?\b(up|on (the |my |your )?(screen|display))\b/,
+  /\bon (the |my |your )?(screen|display)\b/,
+  /\b(pull|bring) up\b/,
+  /\b(timers?|countdown|count down|alarms?)\b/,
+  /\brecipes?\b/,
+  /\b(next|previous|last|first|this|that) step\b|\b(read|repeat) (the |that )?step\b|\bstep (again|\d+)\b/,
+  /^(please |can you |could you )?(close|dismiss|hide)\b/,
+  /\bclear (the )?(screen|display)\b/,
+  // Spanish (a leading \b cannot sit before an accented letter, so those use a space/start anchor).
+  /\bmu[eé]stra(me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(me|nos)\b/,
+  /\ben (la |mi |tu )?pantalla\b/,
+  /\b(temporizador(es)?|cron[oó]metro|cuenta atr[aá]s|cuenta regresiva|alarmas?)\b/,
+  /\brecetas?\b/,
+  /(^| )(siguiente|anterior|pr[oó]ximo|[uú]ltimo|primer|este|ese) paso\b|\b(lee|leer|repite|repetir) (el |ese )?paso\b/,
+  /^(por favor )?(cierra|cerrar|quita|oculta)\b/,
+  /\b(borra|limpia) (la )?pantalla\b/,
+];
+export function wantsDisplay(transcript) {
+  const t = String(transcript || "").toLowerCase().replace(/[¿¡“”"'’,.!?;:]+/g, " ").replace(/\s+/g, " ").trim();
+  return !!t && DISPLAY_INTENT.some((re) => re.test(t));
+}
+
+/**
+ * Text that must never reach the screen: empty, a syntax placeholder (<title>, a bare
+ * "title"/"text"…), or an echo of the tool's own syntax help.
+ */
+const PLACEHOLDER_TOKEN = /<\s*[a-z_ ]{1,24}\s*>/i;
+const PLACEHOLDER_WORDS = new Set(["title", "text", "name", "body", "content", "ingredient", "ingredients", "step", "steps"]);
+const SYNTAX_ECHO = /starts a paragraph|lines starting|become a list|a bar separates|double bar separates|\btitle \| (text|ingredients)\b/i;
+export function isPlaceholderText(s, words = PLACEHOLDER_WORDS) {
+  const t = String(s ?? "").trim();
+  if (!t || PLACEHOLDER_TOKEN.test(t) || SYNTAX_ECHO.test(t)) return true;
+  return words.has(t.toLowerCase().replace(/^[\s"'“”()[\]-]+|[\s"'“”()[\].:;—–-]+$/g, ""));
+}
+const TIMER_NAME_PLACEHOLDERS = new Set(["name"]);
+const placeholderError = () => ({ op: "error", message: PLACEHOLDER_MSG });
 
 export function parseKioskCommand(command) {
   const raw = String(command || "").trim();
   const c = raw.toLowerCase().replace(/[.!?]+$/, "").replace(/\s+/g, " ");
   if (!c) return { op: "error", message: USAGE };
+  if (PLACEHOLDER_TOKEN.test(raw)) return placeholderError();
   if (/^close (all|everything)( windows)?$|^clear (the )?screen$/.test(c)) return { op: "close_all" };
   let m = c.match(/^(?:stop|cancel|dismiss|clear|close) (?:the )?timer(?: (?:for |called |named )?(.+))?$/);
   if (m) return { op: "close", kind: "timer", name: m[1] || null };
@@ -85,6 +137,7 @@ export function parseKioskCommand(command) {
     const rest = d.after || d.before;
     if (/^[,;]|^(and|then|but|so)\b/.test(rest)) return { op: "error", message: "Say how long, then an optional name, e.g. timer 10 minutes pasta." };
     const name = cap1(rest.replace(/^(called|named|labell?ed|for)\s+/, "").replace(/^["'“”]+|["'“”.]+$/g, "").trim().slice(0, 40)) || "Timer";
+    if (isPlaceholderText(name, TIMER_NAME_PLACEHOLDERS)) return placeholderError();
     return { op: "open", window: { kind: "timer", name, title: name, seconds: d.seconds } };
   }
   m = raw.match(/^recipe\s+([\s\S]+)$/i);
@@ -93,15 +146,18 @@ export function parseKioskCommand(command) {
     const title = (parts[0] || "").trim().slice(0, 80);
     const ingredients = (parts[1] || "").split(/;|\n/).map((x) => x.trim()).filter(Boolean).slice(0, 40);
     const steps = parts.slice(2).join(" | ").split(/\|\||\n/).map((x) => x.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean).slice(0, 40);
-    if (!title || !steps.length) return { op: "error", message: "Use: recipe <title> | <ingredient>; <ingredient> | <step> || <step>" };
+    if (!title || !steps.length) return { op: "error", message: "A recipe needs a name and at least one step, e.g. recipe Pancakes | flour; eggs | Mix the batter || Cook two minutes a side" };
+    if ([title, ...ingredients, ...steps].some((x) => isPlaceholderText(x))) return placeholderError();
     return { op: "open", window: { kind: "recipe", title, ingredients, steps, step: 0 } };
   }
   m = raw.match(/^(?:display|show results|show info)\s+([\s\S]+)$/i);
   if (m) {
-    const body = m[1];
-    const i = body.indexOf(" | ");
-    const title = (i > 0 ? body.slice(0, i) : "Info").trim().slice(0, 80);
-    return { op: "open", window: { kind: "content", title, blocks: contentBlocks(title, i > 0 ? body.slice(i + 3) : body) } };
+    // "Title | text": the first single bar (a double bar is a paragraph break, never the title bar).
+    const parts = m[1].match(/^([^|]*?)\s*\|(?!\|)\s*([\s\S]*)$/);
+    const title = ((parts ? parts[1] : "") || "Info").trim().slice(0, 80);
+    const text = (parts ? parts[2] : m[1]).trim();
+    if (isPlaceholderText(title) || isPlaceholderText(text)) return placeholderError();
+    return { op: "open", window: { kind: "content", title, blocks: contentBlocks(title, text) } };
   }
   return { op: "error", message: USAGE };
 }
@@ -137,6 +193,9 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
       const d = dev(id);
       const t = now();
       const evicted = [];
+      // One content card per display: a new one replaces the last (live test 2026-10-04: cards piled
+      // up as chips). Timers and recipes keep their own windows.
+      if (spec.kind === "content") for (const w of d.windows.filter((x) => x.kind === "content")) evicted.push(remove(id, w.id));
       while (d.windows.length >= maxWindows) {
         const victim = d.windows.find((w) => w.kind !== "timer") || d.windows[0];
         evicted.push(remove(id, victim.id));
@@ -185,10 +244,11 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
   };
 }
 
+// Concrete examples only (see USAGE). Kept short: this is in every prompt that offers the tool.
 const COMMAND_HELP = {
-  timer: "- timer <duration> <name> — e.g. timer 10 minutes pasta\n- stop timer [name]",
-  recipe: "- recipe <title> | <ingredient>; <ingredient> | <step> || <step>\n- next step / previous step / read step",
-  content: "- display <title> | <text> — || starts a paragraph; lines starting '- ' become a list",
+  timer: "- timer 10 minutes pasta\n- stop timer pasta",
+  recipe: "- recipe Pancakes | flour; milk; eggs | Mix the batter || Cook two minutes a side\n- next step / previous step / read step",
+  content: "- display Shopping list | milk, eggs, bread",
 };
 
 export function createWmTool({ store, deviceId, caps, emit }) {
@@ -197,12 +257,21 @@ export function createWmTool({ store, deviceId, caps, emit }) {
   const closes = ["close", ...c.windows.filter((k) => k !== "content").map((k) => `close ${k}`), "close all"].join(" / ");
   const definition = {
     name: "crow_wm",
-    description: `Show things on this display. Call it only when someone asks to see, time or follow something — never for ordinary questions.\nCommands:\n${lines}\n- ${closes}`,
-    inputSchema: { type: "object", properties: { command: { type: "string", description: "One command from the list, e.g. timer 10 minutes pasta" } }, required: ["command"] },
+    description: `Show things on this display. Call it only when someone asks to see, time or follow something — never for ordinary questions, and never to repeat what you say aloud.\nCommands, by example (use the real words):\n${lines}\n- ${closes}\nA bar separates the title from the rest; a double bar separates steps or paragraphs; lines starting with a dash become a list.`,
+    inputSchema: { type: "object", properties: { command: { type: "string", description: "One command like the examples, e.g. timer 10 minutes pasta" } }, required: ["command"] },
   };
-  async function execute(args) {
+  /**
+   * Offered to the model this turn? Display intent in the plain transcript, or a window is open
+   * (follow-ups: "add two minutes", "what's next"). A FINISHED timer does not count: it stays on
+   * screen until dismissed, and would otherwise put the tool back on every plain question.
+   */
+  const when = (transcript) => wantsDisplay(transcript) || store.list(deviceId).some((w) => !(w.kind === "timer" && w.done));
+  /** turn = { transcript } when called from a voice turn (the echo-card guard); absent elsewhere. */
+  async function execute(args, turn) {
     const cmd = parseKioskCommand(String(args?.command || ""));
     if (cmd.op === "error") return JSON.stringify({ action: "error", message: cmd.message });
+    // No echo cards: a content card on a turn that never asked to see anything only repeats the spoken answer.
+    if (cmd.op === "open" && cmd.window.kind === "content" && typeof turn?.transcript === "string" && !wantsDisplay(turn.transcript)) return JSON.stringify({ action: "error", message: NO_INTENT_MSG });
     if (cmd.op === "open") {
       if (!c.windows.includes(cmd.window.kind)) return JSON.stringify({ action: "error", message: `This display can't show a ${cmd.window.kind} window.` });
       const { window, evicted } = store.open(deviceId, cmd.window);
@@ -215,7 +284,7 @@ export function createWmTool({ store, deviceId, caps, emit }) {
     for (const e of fp.events) emit(e);
     return JSON.stringify({ ok: true, action: cmd.op, say: fp.say });
   }
-  return { definition, execute };
+  return { definition, execute, when };
 }
 
 function applyControl(cmd, store, deviceId) {

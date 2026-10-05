@@ -31,7 +31,7 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
   const c = clock();
   const log = [];
   const state = { i: 0 };
-  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [], logs: [] };
+  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [], hasTools: [], logs: [] };
   const deps = {
     log: (m) => calls.logs.push(m),
     now: c.now, sleep: async (ms) => { calls.sleeps++; await c.sleep(ms); },
@@ -45,7 +45,7 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
     acquire: async (p) => { calls.acquired.push(p); return acquire(p); },
     probeReady: async () => probe(),
     contextLenFor: async (key) => (typeof ctx === "function" ? ctx(key) : ctx),
-    chooseVoiceRoute: (msgs) => (calls.routed.push(msgs.map((m) => m.role)), route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
+    chooseVoiceRoute: (msgs, o) => (calls.routed.push(msgs.map((m) => m.role)), calls.hasTools.push(o?.hasTools), route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
     fastKey: "crow-voice/qwen3.5-4b",
     getChatTools: () => chatTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
     createToolExecutor: () => ({ executeToolCalls: async (tcs) => { calls.executed.push(...tcs.map((t) => t.name)); return tcs.map((t) => ({ id: t.id, name: t.name, result: "ok" })); }, close: async () => {} }),
@@ -706,4 +706,81 @@ test("assessBot: the bind-time fit check runs the turn's own ladder (tools filte
   assert.equal(a.est_tokens, Math.ceil((JSON.stringify([t.log[0].messages[0]]).length + JSON.stringify(t.log[0].toolDefs).length) / 3.2));
   const withMem = await small.runner.assessBot({ ...opts, botId: "general", memoryOn: true });
   assert.ok(withMem.est_tokens > a.est_tokens, "memory on adds the memory tool to the estimate");
+});
+
+// ── Live test 2026-10-04: every plain question ran two crow_wm rounds (7.2 s) and left junk cards ──
+/** A display tool offered only when the plain transcript asks for it (the kiosk's crow_wm). */
+function displayTool(seen = []) {
+  return {
+    definition: { name: "crow_wm", description: "show", inputSchema: { type: "object" } },
+    when: (t) => /timer|show me/i.test(t),
+    execute: async (args, turn) => { seen.push({ args, turn }); return JSON.stringify({ ok: true }); },
+  };
+}
+
+test("an extra tool with when(): plain questions never see it and end in ONE model round; display questions do", async () => {
+  for (const q of ["Tell me a joke", "What time is it?"]) {
+    const h = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "content_delta", text: "Here you go. " }, { type: "done" }]] });
+    const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: q, sink: h.sink, extraTools: [displayTool()], turnContext: "[Display] Open windows: none. show me a timer" });
+    assert.deepEqual(h.log[0].tools, ["crow_projects"], `${q}: the display tool is not offered (and the context prefix never counts)`);
+    assert.equal(h.log.length, 1, `${q}: one model round`);
+    assert.equal(r.failed, null);
+    assert.equal(r.timings.tool_rounds, undefined);
+  }
+  for (const q of ["set a timer for one minute and label it check", "show me the shopping list"]) {
+    const seen = [];
+    const h = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "timer 1 minute check" } }, { type: "done" }], [{ type: "content_delta", text: "Done. " }, { type: "done" }]] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: q, sink: h.sink, extraTools: [displayTool(seen)], turnContext: "[Display] Open windows: none." });
+    assert.deepEqual(h.log[0].tools, ["crow_projects", "crow_wm"], q);
+    assert.deepEqual(seen, [{ args: { command: "timer 1 minute check" }, turn: { transcript: q } }], "the tool gets the plain transcript, never the context prefix");
+  }
+});
+
+test("an extra tool that was not offered is refused if force-called: never executed, the model is told to answer aloud, and the next turn is not 'tool context'", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [
+    [{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "display Info | a joke" } }, { type: "done" }],
+    [{ type: "content_delta", text: "Why did the crow cross the road? " }, { type: "done" }],
+    [{ type: "content_delta", text: "Lisbon. " }, { type: "done" }],
+  ] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Tell me a joke", sink: h.sink, extraTools: [displayTool(seen)] });
+  assert.deepEqual(seen, [], "never executed: nothing can be opened");
+  assert.deepEqual(h.log[0].tools, [], "nothing was offered");
+  const refusal = h.log[1].messages.at(-1);
+  assert.equal(refusal.role, "tool");
+  assert.match(refusal.content, /aloud/i);
+  assert.match(refusal.content, /not needed/i);
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.spoken, ["Why did the crow cross the road?"]);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, extraTools: [displayTool(seen)] });
+  assert.deepEqual(h.calls.routed.at(-1), ["system", "user", "assistant", "user"], "the refused call and its result are invisible to the router");
+});
+
+test("when() and routing: a bot whose only tool is the hidden display tool routes with hasTools=false; offered → true; no when() keeps today's behaviour", async () => {
+  const plain = harness({ chatTools: [] });
+  await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "Tell me a joke", sink: plain.sink, extraTools: [displayTool()] });
+  assert.deepEqual(plain.calls.hasTools, [false]);
+  const shown = harness({ chatTools: [] });
+  await shown.runner.runVoiceTurn({ db: {}, device: shown.device, transcript: "show me the shopping list", sink: shown.sink, extraTools: [displayTool()] });
+  assert.deepEqual(shown.calls.hasTools, [true]);
+  const always = harness({ chatTools: [] });
+  const { when, ...noWhen } = displayTool();
+  await always.runner.runVoiceTurn({ db: {}, device: always.device, transcript: "Tell me a joke", sink: always.sink, extraTools: [noWhen] });
+  assert.deepEqual(always.log[0].tools, ["crow_wm"], "an extra tool without when() is always offered");
+  assert.deepEqual(always.calls.hasTools, [true]);
+});
+
+test("when() and prompt fit: the fit level is decided with EVERY extra tool counted, so hiding one never flips the system message between turns", async () => {
+  // A bot that fits the context only when the (large) display tool is left out.
+  const wide = { ...displayTool(), definition: { name: "crow_wm", description: "D".repeat(6000), inputSchema: { type: "object" } } };
+  const bot = bigBot({ skills_text: "SKILL ".repeat(3600) });   // ~6.7k tokens: inside 8,192 − 1,024 alone, outside it with the tool
+  const h = harness({ bot, ctx: FAST_CTX, chatTools: [], rounds: [[{ type: "content_delta", text: "One. " }, { type: "done" }], [{ type: "content_delta", text: "Two. " }, { type: "done" }]] });
+  const a = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Tell me a joke", sink: h.sink, extraTools: [wide] });
+  const b = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me the shopping list", sink: h.sink, extraTools: [wide] });
+  assert.deepEqual(h.log.map((e) => e.tools.length), [0, 1]);
+  assert.equal(a.timings.prompt_fit, "no_skills");
+  assert.equal(b.timings.prompt_fit, "no_skills");
+  assert.equal(h.log[0].messages[0].content, h.log[1].messages[0].content, "same system message whether or not the tool is offered");
+  const fit = await h.runner.assessBot({ db: {}, botId: "general", extraTools: [wide] });
+  assert.equal(fit.level, "no_skills", "the panel's check counts the tool the same way");
 });

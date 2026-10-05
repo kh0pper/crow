@@ -27,6 +27,8 @@ export const STOP_TOOLS_NOTE = "Tool limit reached for this question. Answer the
 const DEGRADED_NOTE = "The larger model is not available right now. Answer with what you have, and call a tool directly if one is needed.";
 // A denied discovery call keeps the turn going: the schemas are already in the tool list.
 const SOFT_DENY = { crow_discover: "Tool discovery is not needed here: every tool you can use is already listed with its parameters. Call the right tool directly, or answer from what you know." };
+// An extra tool with when(transcript) is offered only on turns that need it; a forced call on any other turn gets this.
+const EXTRA_NOT_NEEDED = "Not needed for this question: nothing was done. Answer the user aloud now, in one or two short sentences. Do not call another tool.";
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
 export function createVoiceTurnRunner(deps) {
@@ -305,7 +307,12 @@ export function createVoiceTurnRunner(deps) {
       // refused by the gate below even if force-called, so a room cannot hand work to
       // another bot (crow_delegate's `bot` arg accepts ANY enabled bot) or read it back.
       const deny = turnDeny(opts.denyTools);
-      const tools = turnTools(bot, { memoryOn, extra, deny });
+      // extraTools[i].when(transcript) (kiosk: crow_wm): offered only when the PLAIN transcript
+      // needs it. Live test 2026-10-04: with the display tool on every turn the 4B answered plain
+      // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
+      const offered = new Set(extra.filter((x) => typeof x.when !== "function" || x.when(transcript) === true).map((x) => x.definition.name));
+      const allTools = turnTools(bot, { memoryOn, extra, deny });
+      const tools = allTools.filter((t) => !extraByName.has(t.name) || offered.has(t.name));
       executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
@@ -360,7 +367,9 @@ export function createVoiceTurnRunner(deps) {
       // in the system message; a general assistant with many skills was ~41k tokens against the
       // 4B's 8,192 and every turn failed. Full prompt → the one without skill bodies → no call.
       const modelKey = result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey);
-      const fit = await promptFit({ db, bot, tools, promptSuffix: opts.promptSuffix, key: modelKey, full: withSuffix(system, opts.promptSuffix) });
+      // Decided on allTools (every extra counted, as the panel does), so an extra tool that is
+      // hidden this turn never flips the level — and the system message — between turns.
+      const fit = await promptFit({ db, bot, tools: allTools, promptSuffix: opts.promptSuffix, key: modelKey, full: withSuffix(system, opts.promptSuffix) });
       const ctx = fit.ctx;
       if (fit.level !== "full") {
         timings.prompt_fit = fit.level;
@@ -525,7 +534,8 @@ export function createVoiceTurnRunner(deps) {
           if (x) {
             neutralCalls++;
             let out;
-            try { out = await x.execute(tc.arguments || {}); } catch (err) { out = JSON.stringify({ action: "error", message: err.message }); }
+            if (!offered.has(tc.name)) out = JSON.stringify({ action: "error", message: EXTRA_NOT_NEEDED });   // never run
+            else try { out = await x.execute(tc.arguments || {}, { transcript }); } catch (err) { out = JSON.stringify({ action: "error", message: err.message }); }
             // A display tool that changed the screen is user-visible progress.
             try { if (JSON.parse(out)?.ok === true) roundDisplay = true; } catch {}
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
