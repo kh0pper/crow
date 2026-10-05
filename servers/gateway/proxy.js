@@ -139,6 +139,16 @@ async function connectToServer(integration) {
 }
 
 /**
+ * The environment of a bundle add-on's stdio child started BY THE GATEWAY. `CROW_ADDON_HOST=gateway`
+ * marks the one long-lived copy the gateway supervises, so an add-on can keep background work
+ * (schedules, polling) out of the short-lived private copies that bots and other MCP clients start
+ * from the same mcp-addons.json entry. Set last: an add-on's own env cannot claim or drop it.
+ */
+export function addonStdioEnv(config = {}, base = process.env) {
+  return { ...base, ...(config.env || {}), CROW_ADDON_HOST: "gateway" };
+}
+
+/**
  * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
  * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
  */
@@ -176,7 +186,7 @@ async function connectAddonServer(id, config) {
     } else {
       // stdio (default, backward-compatible)
       const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
-      const env = { ...process.env, ...(config.env || {}) };
+      const env = addonStdioEnv(config);
       transport = new StdioClientTransport({
         command: config.command,
         args: config.args || [],
