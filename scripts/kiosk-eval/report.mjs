@@ -59,13 +59,14 @@ const pct = (n, d) => `${n}/${d}`;
 /** rows of ONE model → its figures. */
 export function summarize(rows) {
   const out = { main: { four: { correct: 0, total: 0 }, single: { correct: 0, total: 0 } }, held: { four: { correct: 0, total: 0 }, single: { correct: 0, total: 0 } },
-    held_ids: new Set(), held_offered: new Set(), untruthful: [], forced: { total: 0, first_call: 0 }, backstop: { total: 0, done: 0, corrected: 0, could_not: 0 }, must_cases: new Set(), wrong: [], trials: 0 };
+    held_ids: new Set(), held_offered: new Set(), untruthful: [], plain_window: { total: 0, changed: 0 }, forced: { total: 0, first_call: 0 }, backstop: { total: 0, done: 0, corrected: 0, could_not: 0 }, must_cases: new Set(), wrong: [], trials: 0 };
   for (const r of rows) {
     const set = r.set === "held" ? "held" : "main";
     const cell = out[set][r.arm];
     cell.total += 1;
     if (r.ok) cell.correct += 1; else out.wrong.push(`${r.id}/${r.arm}/t${r.trial}: ${r.offered_expected ? (r.tools.join(" → ") || "no call") : "expected tool not offered"}${r.failed ? ` (${r.failed})` : ""}`);
     out.trials = Math.max(out.trials, r.trial + 1);
+    if (r.arm === "four" && r.plain && r.window_open) { out.plain_window.total += 1; if (r.changed) out.plain_window.changed += 1; }
     if (set === "held") { out.held_ids.add(r.id); if (r.offered_expected) out.held_offered.add(r.id); }
     if (r.arm !== "four" || !r.must) continue;
     out.must_cases.add(r.id);
@@ -114,14 +115,15 @@ export const readRows = (file) => readFileSync(file, "utf8").split("\n").filter(
 function main() {
   const files = process.argv.slice(2).filter((a) => a.startsWith("--in=")).map((a) => a.slice(5));
   if (!files.length) { console.error("usage: report.mjs --in=<quick.jsonl> --in=<larger.jsonl>"); process.exit(2); }
-  const reports = files.map((f) => { const rows = readRows(f); const head = rows.find((r) => r.header) || {}; return { label: head.label || f, engine: head.engine, rows: rows.filter((r) => !r.header) }; });
+  const reports = files.map((f) => { const rows = readRows(f); const head = rows.find((r) => r.header) || {}; return { label: head.label || f, engine: head.engine, run: head.run || null, head: head.head || null, rows: rows.filter((r) => !r.header) }; });
   const v = verdict(reports);
   console.log("The gated figures are measured on a fixture display with three sources, four launcher items and a media session (the surface WM1b ships). The 'shipped' leg, when present, is the display as this release ships it (show and window tools only) and is not gated.");
   for (const rep of reports) {
     const s = summarize(rep.rows);
-    console.log(`\n${rep.label} (${rep.engine || "?"}), ${s.trials} trial(s)${rep.label === "shipped" ? " — informational" : ""}`);
+    console.log(`\n${rep.label} (${rep.engine || "?"}), ${s.trials} trial(s)${rep.label === "shipped" ? " — informational" : ""}${rep.run ? `, run ${rep.run}` : ""}${rep.head ? `, head ${String(rep.head).slice(0, 12)}` : ""}`);
     console.log(`  the 40:    four ${pct(s.main.four.correct, s.main.four.total)}   single ${pct(s.main.single.correct, s.main.single.total)}`);
     console.log(`  held out:  four ${pct(s.held.four.correct, s.held.four.total)}   single ${pct(s.held.single.correct, s.held.single.total)}   right tool offered on ${s.held_offered.size} of ${s.held_ids.size}`);
+    console.log(`  plain questions with a window open that changed the screen anyway: ${s.plain_window.changed} of ${s.plain_window.total} (four-tool arm; reported, not gated)`);
     console.log(`  must-run:  ${s.must_cases.size} utterances; forced ${pct(s.forced.first_call, s.forced.total)} first-request calls; unforced ${pct(s.backstop.done, s.backstop.total)} done, ${s.backstop.could_not} could-not lines`);
     for (const w of s.wrong.slice(0, 60)) console.log(`    wrong  ${w}`);
   }

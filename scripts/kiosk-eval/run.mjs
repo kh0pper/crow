@@ -26,10 +26,20 @@ import { createToolForcing } from "../../servers/gateway/voice/tool-forcing.js";
 import { CASES, judge } from "./cases.mjs";
 import { WM_VERBS } from "../../bundles/kiosk/server/tools.js";
 import { HELD_OUT } from "./held-out.mjs";
+import { HELD_OUT_R1 } from "./held-out-r1.mjs";
+import { execFileSync } from "node:child_process";
 import { createProductDisplay } from "./product.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const MAX_ATTEMPTS = 3;
+/** The held-out set is SPENT when it is the run-1 set (it found the revision-4 defect; it never judges the fix). */
+export const heldOutSpent = (set = HELD_OUT, spent = HELD_OUT_R1) => set.length > 0 && set.some((c) => spent.some((s) => s.say.trim().toLowerCase() === c.say.trim().toLowerCase()));
+/** A run writes into a NEW file: an existing non-empty --out is refused unless --resume. → null | the reason. */
+export function outGuard(out, resume, { exists = existsSync, read = (f) => readFileSync(f, "utf8") } = {}) {
+  if (resume) return null;
+  if (exists(out) && read(out).trim()) return `${out} exists and is not empty: a rerun writes into a new directory (or pass --resume to continue this one)`;
+  return null;
+}
 /** An utterance the shipped display can serve: a plain question, a card, or a window verb, with nothing playing. */
 export const shippedCase = (c) => !c.state?.playing && [].concat(c.expect || []).every((w) => w.tool === "crow_show" || (w.tool === "crow_wm" && WM_VERBS.includes(w.do)));
 
@@ -55,6 +65,8 @@ export async function runTurn(c, arm, make) {
   const done = r.calls.filter((x) => x.result?.ok === true);
   return {
     ok: r.errors.length === 0 && judge(c, r), offered_expected, fast_path: r.fast_path, must: g.must !== null,
+    // A plain question asked while a window is open, and whether the turn changed the screen anyway (reported).
+    window_open: (c.state?.windows?.length || 0) > 0, plain: c.expect === null, changed: done.some((x) => x.result?.effect !== false),
     must_done: g.must !== null && r.failed === null && done.some((x) => x.tool === g.must),
     failed: r.failed, tool_choice: r.tool_choice, corrected: r.corrected, requests: r.requests, tools: r.tools,
     // For reading a wrong turn afterwards. Arguments are cut short; this file stays in the run's own scratch directory.
@@ -98,12 +110,15 @@ async function main() {
   const arg = Object.fromEntries(process.argv.slice(2).filter((a) => a.startsWith("--")).map((a) => { const i = a.indexOf("="); return i < 0 ? [a.slice(2), "1"] : [a.slice(2, i), a.slice(i + 1)]; }));
   const cfg = { baseUrl: arg["base-url"], model: arg.model };
   if (!cfg.baseUrl || !cfg.model || !arg.out) { console.error("usage: run.mjs --base-url=<model server /v1> --model=<id> --out=<file.jsonl> [--label=quick|larger] [--trials=3] [--ctx=8192] [--pause-ms=250] [--resume]"); process.exit(2); }
+  const og = outGuard(arg.out, arg.resume === "1");
+  if (og) { console.error(og); process.exit(2); }
+  if (heldOutSpent()) { console.error("the held-out set is the SPENT run-1 set (held-out-r1.mjs): write a new one first"); process.exit(2); }
   const pf = await preflight(cfg);
   if (!pf.ok) { console.error(`model ${cfg.model} is not resident at ${cfg.baseUrl}: nothing was sent and nothing was started`); process.exit(3); }
   const label = arg.label || cfg.model;
   const done = new Set();
   if (arg.resume && existsSync(arg.out)) for (const l of readFileSync(arg.out, "utf8").split("\n").filter(Boolean)) { const r = JSON.parse(l); if (r.key) done.add(r.key); }
-  else writeFileSync(arg.out, `${JSON.stringify({ header: true, label, model: cfg.model, engine: pf.engine, at: new Date().toISOString(), trials: Number(arg.trials || 3), cases: CASES.length, held_out: HELD_OUT.length, shipped: arg.shipped === "1" })}\n`);
+  else writeFileSync(arg.out, `${JSON.stringify({ header: true, label, model: cfg.model, engine: pf.engine, at: new Date().toISOString(), trials: Number(arg.trials || 3), cases: CASES.length, held_out: HELD_OUT.length, shipped: arg.shipped === "1", run: arg.run || null, head: (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })() })}\n`);
   const chat = createOpenAIAdapter({ baseUrl: cfg.baseUrl, model: cfg.model });
   // The product's own forcing rule, asked of this server.
   const forcing = createToolForcing({ resolveKey: async () => ({ baseUrl: cfg.baseUrl, model: cfg.model, apiKey: "none" }), log: (m) => console.error(m) });

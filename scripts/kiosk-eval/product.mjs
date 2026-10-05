@@ -199,6 +199,7 @@ export function createProductDisplay({ surface = "four", chat, forcing, state = 
       calls: calls.slice(), other: other.slice(), spoken: spoken.join(" "), failed: r.failed ?? null, fast_path: r.fastPath === true,
       requests: stats.requests, errors: stats.errors.slice(), first: stats.first, tool_choice: r.timings?.tool_choice ?? null,
       corrected: r.timings?.display_corrected === true, final: r.timings?.final ?? null, tools: r.timings?.tools || [], ms: Date.now() - t0,
+      windows: store.list("eval").map((w) => ({ kind: w.kind, title: String(w.title || "") })),
     };
   }
   return { ask, gates, fastPaths, store, options };

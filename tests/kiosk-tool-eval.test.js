@@ -302,3 +302,48 @@ test("displayTurnOptions: onToolResult is passed through to the voice turn uncha
   const show = withHook.extraTools.find((x) => x.definition.name === "crow_show");
   assert.equal(JSON.parse(await show.execute({ kind: "list", title: "Fruits", body: "a\nb" }, { transcript: "Show me a list of fruits." })).outcome, "shown", "a display result is never replaced");
 });
+
+// ── Revision 5: the rerun's guards and the scorer's timer rule ──────────────────────────────────
+import { heldOutSpent, outGuard } from "../scripts/kiosk-eval/run.mjs";
+import { HELD_OUT_R1 } from "../scripts/kiosk-eval/held-out-r1.mjs";
+
+test("the spent run-1 set is kept verbatim, a run refuses while HELD_OUT is (or overlaps) it, and a new set must not overlap the rule tests' examples", () => {
+  assert.equal(HELD_OUT_R1.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R1, HELD_OUT_R1), true);
+  assert.equal(heldOutSpent([{ say: "Something brand new to say." }], HELD_OUT_R1), false);
+  assert.equal(heldOutSpent([], HELD_OUT_R1), false);
+  const rules = readFileSync(new URL("../tests/kiosk-offer-rules.test.js", import.meta.url), "utf8").toLowerCase();
+  if (!heldOutSpent()) {
+    for (const c of HELD_OUT) {
+      assert.ok(!HELD_OUT_R1.some((s) => s.say.toLowerCase() === c.say.toLowerCase()), `${c.id} is a spent utterance`);
+      assert.ok(!rules.includes(c.say.toLowerCase()), `${c.id} is an example in the rule tests`);
+    }
+  }
+});
+
+test("a rerun writes into a NEW file: an existing non-empty output is refused unless --resume", () => {
+  const fs = { exists: (f) => f === "/x/old.jsonl" || f === "/x/empty.jsonl", read: (f) => (f === "/x/old.jsonl" ? '{"header":true}\n' : "") };
+  assert.match(outGuard("/x/old.jsonl", false, fs), /exists and is not empty/);
+  assert.equal(outGuard("/x/old.jsonl", true, fs), null);
+  assert.equal(outGuard("/x/empty.jsonl", false, fs), null);
+  assert.equal(outGuard("/x/new.jsonl", false, fs), null);
+});
+
+test("scorer: a change to an open timer that leaves a SECOND timer of that name is wrong; the product changes the one timer", async () => {
+  const c = { id: "t1", lang: "en", state: { windows: [make.timer("Bread")] }, say: "Better make that eight minutes instead.", expect: make.show("timer", { title: "Bread", body: "8 minutes" }, { sameTitle: "Bread" }) };
+  const call = { tool: "crow_show", args: { kind: "timer", title: "Bread", body: "8 minutes" }, result: { ok: true, outcome: "updated" } };
+  assert.equal(judge(c, { calls: [call], spoken: "Okay.", windows: [{ kind: "timer", title: "Bread" }, { kind: "timer", title: "Bread" }] }), false);
+  assert.equal(judge(c, { calls: [call], spoken: "Okay.", windows: [{ kind: "timer", title: "Bread" }] }), true);
+  const chat = scripted((n) => (n === 1 ? [{ name: "crow_show", args: { kind: "timer", title: "Bread", body: "8 minutes" } }] : "Done."));
+  const row = await runTurn(c, "four", (o) => createProductDisplay({ ...o, chat, forcing: NOTHING }));
+  assert.equal(row.ok, true, JSON.stringify(row.calls));
+});
+
+test("report: plain questions asked with a window open that changed the screen anyway are counted (reported, not gated)", () => {
+  const rows = [
+    { set: "main", arm: "four", trial: 0, id: "a", ok: false, plain: true, window_open: true, changed: true, offered_expected: true, tools: [], must: false },
+    { set: "main", arm: "four", trial: 0, id: "b", ok: true, plain: true, window_open: true, changed: false, offered_expected: true, tools: [], must: false },
+    { set: "main", arm: "single", trial: 0, id: "a", ok: false, plain: true, window_open: true, changed: true, offered_expected: true, tools: [], must: false },
+  ];
+  assert.deepEqual(summarize(rows).plain_window, { total: 2, changed: 1 });
+});

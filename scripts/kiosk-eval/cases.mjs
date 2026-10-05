@@ -98,11 +98,15 @@ export function matches(w, call) {
  * Correct = every expected thing happened, nothing else happened, and the turn ended normally with
  * something said. A call that was refused and then put right does not count against the turn.
  */
-export function judge(c, { calls = [], other = [], failed = null, spoken = "" } = {}) {
+export function judge(c, { calls = [], other = [], failed = null, spoken = "", windows = null } = {}) {
   const done = calls.filter((x) => x.result?.ok === true && x.result.effect !== false);
   if (failed !== null || !String(spoken).trim() || other.length) return false;
   if (c.expect === null) return done.length === 0;
   const want = [].concat(c.expect);
+  // A change to an open timer (sameTitle) must leave ONE timer of that name, not a second one beside it.
+  if (Array.isArray(windows)) for (const w of want) {
+    if (w.tool === "crow_show" && w.sameTitle && [].concat(w.kind || []).includes("timer") && windows.filter((x) => x.kind === "timer" && same(x.title, w.sameTitle)).length > 1) return false;
+  }
   return done.length === want.length && want.every((w) => done.some((call) => matches(w, call)));
 }
 /** The sample calls of a case, as the four tools take them (the tests' proof that every case can be completed). */
