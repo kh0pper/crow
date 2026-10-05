@@ -2367,3 +2367,10 @@ test("walking: deliver guards its id lookup; a failed settings save repaints the
   const save = src.slice(src.indexOf("function saveWalkSettings"), src.indexOf("function nudgeGoal"));
   assert.ok(/\.catch\(function \(err\) \{\s*paintWalk\(walkState\);/.test(save), "catch repaints before the error");
 });
+
+test("the map wrapper is its own stacking context, so map panes cannot draw over dashboard overlays", async () => {
+  const css = await (await req("/ramble/static/ramble.css")).text();
+  const rule = css.match(/#ramble \.rb-map \{([^}]*)\}/);
+  assert.ok(rule, "the map wrapper rule exists");
+  assert.match(rule[1], /isolation:\s*isolate/, "the wrapper isolates the map library's z-indexes");
+});

@@ -132,11 +132,20 @@ test("I1: just under the cap, adversarial delimiter runs stay bounded (was 2.1 s
   const n = BOT_MD_MAX_INPUT - 1;
   for (const u of ["\\[ x\n", "\\[ x\n\n", "\\( a ", "$$ x\n\n", "x\n\\[ y \\]\n", "\\[ x\n> y\n\n", "$x$ ", "\\(\\("]) {
     const src = rep(u, n);
-    const t0 = cpuMs();
-    const html = renderBotMarkdown(src);
-    const ms = cpuMs() - t0;
+    // Best of two runs, against a bound sized for a loaded CI runner: a clean
+    // render is ~125 ms here alone and was 635 ms inside CI's parallel suite
+    // (three red runs on 2026-10-04 at a 600 ms bound), while the quadratic
+    // regression this guards was 2.1 s here alone — several times the bound on
+    // any machine.
+    let ms = Infinity;
+    let html = "";
+    for (let i = 0; i < 2; i++) {
+      const t0 = cpuMs();
+      html = renderBotMarkdown(src);
+      ms = Math.min(ms, cpuMs() - t0);
+    }
     assert.ok(html.length > 0, "still rendered");
-    assert.ok(ms < 600, `${JSON.stringify(u)} x${n} took ${ms.toFixed(0)} ms`);
+    assert.ok(ms < 1500, `${JSON.stringify(u)} x${n} took ${ms.toFixed(0)} ms`);
   }
 });
 
