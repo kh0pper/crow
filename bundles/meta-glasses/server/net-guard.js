@@ -10,7 +10,7 @@ import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { appImport } from "./app-root.js";
 
-const { isPublicIp } = await appImport("servers/shared/ip-classify.js");
+const { isPublicEgressIp } = await appImport("servers/shared/ip-classify.js");
 
 export const ARTWORK_MAX_BYTES = 5 * 1024 * 1024;
 export const ARTWORK_TIMEOUT_MS = 10_000;
@@ -18,10 +18,11 @@ export const ARTWORK_TIMEOUT_MS = 10_000;
 /**
  * True for any address the gateway must not fetch for a device: anything that is not public
  * unicast, in any spelling (v4-mapped/compatible/NAT64/6to4/Teredo IPv6 included), and anything
- * unparseable. Classification lives in servers/shared/ip-classify.js.
+ * unparseable, plus this host's own addresses and its on-link neighbours (isPublicEgressIp in
+ * servers/shared/ip-classify.js).
  */
 export function isPrivateAddress(address) {
-  return !isPublicIp(address);
+  return !isPublicEgressIp(address);
 }
 
 export class FetchRefused extends Error {

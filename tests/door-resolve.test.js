@@ -184,3 +184,35 @@ test("a forwardable-looking row on a public address is refused (the cloud allowl
   assert.equal(resolveDoorTarget({ providers: P3, providerHeader: "ts-host", model: "v", companionModelIds: [] }).kind, "forward", "a tailnet hostname is local");
   assert.deepEqual(listDoorModels(P3).map((m) => m.id), ["ts-host/v"]);
 });
+
+test("isLocalClassTarget decides on the expanded address: look-alikes, translated and tunnelled IPv4 are not local", async () => {
+  const { isLocalClassTarget } = await import("../servers/gateway/models/door-resolve.js");
+  const local = [
+    "http://127.0.0.1:8011/v1", "http://127.1:8011/v1", "http://10.1.2.3/v1", "http://172.16.0.1/v1", "http://192.168.1.10/v1",
+    "http://100.64.20.5:3001/v1", "http://[::1]:8011/v1", "http://[0:0:0:0:0:0:0:1]/v1", "http://[fc00::1]/v1",
+    "http://[fd7a:115c:a1e0::5]/v1", "http://[FD12:3456::1]/v1", "http://[::ffff:127.0.0.1]/v1", "http://[::ffff:a00:1]/v1",
+    "http://localhost:8011/v1", "http://localhost./v1", "http://crow.example.ts.net:8011/v1",
+  ];
+  const notLocal = [
+    ["http://[fc::1]/v1", "00fc::, outside fc00::/7"], ["http://[fd::1]/v1", "00fd::"], ["http://[fcd::1]/v1", "0fcd::"],
+    ["http://[fd1::1]/v1", "0fd1::"], ["http://[::ffff:8.8.8.8]/v1", "v4-mapped public"],
+    ["http://[64:ff9b::a00:1]/v1", "NAT64 of 10.0.0.1"], ["http://[2002:a00:1::1]/v1", "6to4 of 10.0.0.1"],
+    ["http://[2001:0:4136:e378:8000:63bf:80ff:fffe]/v1", "Teredo of 127.0.0.1"], ["http://[::a00:1]/v1", "v4-compatible"],
+    ["http://[fec0::1]/v1", "deprecated site-local"], ["http://[fe80::1]/v1", "link-local"], ["http://169.254.169.254/v1", "metadata"],
+    ["http://[::]/v1", "unspecified"], ["http://0.0.0.0/v1", "unspecified"], ["http://172.32.0.1/v1", "public"],
+    ["http://8.8.8.8/v1", "public"], ["http://[2606:4700::1111]/v1", "public"], ["http://api.example.com/v1", "DNS name"], ["not a url", "unparseable"],
+  ];
+  assert.deepEqual(local.filter((u) => isLocalClassTarget(u) !== true), [], "local refused");
+  assert.deepEqual(notLocal.filter(([u]) => isLocalClassTarget(u) !== false).map(([u, why]) => `${u} (${why})`), [], "treated as local");
+});
+
+test("the door refuses a managed row whose address only looks unique-local", () => {
+  const P4 = {
+    "fake-ula": { baseUrl: "http://[fc::1]:8011/v1", apiKey: "none", bundleId: "x", models: [{ id: "m" }] },
+    "nat64": { baseUrl: "http://[64:ff9b::a00:1]:8011/v1", apiKey: "none", bundleId: "y", models: [{ id: "n" }] },
+    "real-ula": { baseUrl: "http://[fd7a:115c:a1e0::5]:8011/v1", apiKey: "none", bundleId: "z", models: [{ id: "u" }] },
+  };
+  for (const id of ["fake-ula", "nat64"]) assert.equal(resolveDoorTarget({ providers: P4, providerHeader: id, model: null, companionModelIds: [] }).code, "NOT_FORWARDABLE", id);
+  assert.equal(resolveDoorTarget({ providers: P4, providerHeader: "real-ula", model: "u", companionModelIds: [] }).kind, "forward");
+  assert.deepEqual(listDoorModels(P4).map((m) => m.id), ["real-ula/u"]);
+});

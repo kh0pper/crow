@@ -16,7 +16,9 @@
  * metadata targets are refused for every row. The source-address and
  * Funnel checks live in the route (llm-router.js), not here.
  */
+import { isIP } from "node:net";
 import { isExternalEngine } from "../../shared/provider-engine.js";
+import { classifyIp } from "../../shared/ip-classify.js";
 
 export const DOOR_PROVIDER_HEADER = "x-crow-provider";
 export const DOOR_HOP_HEADER = "x-crow-door-hop";
@@ -151,22 +153,31 @@ export function isTrustedDoorSource(addr) {
 }
 
 /** Is this target on loopback, a private range, or the tailnet? Decided on the
- * canonical host as an ADDRESS (never the display-only isPrivateHost): IPv4
- * 127/8, 10/8, 172.16/12, 192.168/16, 100.64/10; IPv6 ::1, fc00::/7
- * (incl. Tailscale's fd7a:115c:a1e0::/48); the names `localhost` and
- * `*.ts.net`. Any other DNS name counts as public (final review minor 2). */
+ * host as an ADDRESS (never the display-only isPrivateHost), by the shared
+ * classifier (servers/shared/ip-classify.js) on the expanded address, never on
+ * a string prefix: IPv4 127/8, 10/8, 172.16/12, 192.168/16, 100.64/10 (also in
+ * their v4-mapped IPv6 spelling); IPv6 ::1 and fc00::/7 (incl. Tailscale's
+ * fd7a:115c:a1e0::/48); the names `localhost` and `*.ts.net`. Not local:
+ * link-local (isForbiddenTarget refuses it), the deprecated fec0::/10, an
+ * IPv4 reached through a translator or tunnel (NAT64, 6to4, Teredo,
+ * v4-compatible), and look-alikes such as `fc::1` (00fc::, outside fc00::/7).
+ * Any other DNS name counts as public (final review minor 2). */
+const LOCAL_CLASS = new Set(["loopback", "private", "cgnat", "ula"]);
+
 export function isLocalClassTarget(url) {
   let h;
-  try { h = canonicalTargetHost(new URL(url).hostname); } catch { return false; }
+  try { h = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase(); } catch { return false; }
+  if (h.endsWith(".")) h = h.slice(0, -1);
   if (!h) return false;
   if (h === "localhost" || h.endsWith(".ts.net")) return true;
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  if (h === "::1") return true;
-  return /^f[cd][0-9a-f]{0,2}:/.test(h);
+  const family = isIP(h);
+  if (!family) return false;
+  const { cls, v4, via } = classifyIp(h);
+  if (via !== null && via !== "mapped") return false;
+  if (!LOCAL_CLASS.has(cls)) return false;
+  // "private" on a bare IPv6 address is fec0::/10 (deprecated site-local), not RFC 1918.
+  if (cls === "private" && family === 6 && v4 === null) return false;
+  return true;
 }
 
 /** One forwarding-header value -> the bare address it names, or null when it
