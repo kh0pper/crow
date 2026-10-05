@@ -107,6 +107,19 @@ function toOpenAIMessages(messages, tools) {
   });
 }
 
+/**
+ * options.toolChoice → the request's `tool_choice`: "auto" | "none" | "required", or
+ * { name } for one named function. Anything else is dropped. Only meaningful with tools.
+ * Servers differ: a vLLM server honours all forms; the llama.cpp server builds in use
+ * accept a named choice and ignore it — so a caller that NEEDS the call must also check
+ * that it happened (the voice turn does).
+ */
+function toOpenAIToolChoice(choice) {
+  if (choice === "auto" || choice === "none" || choice === "required") return choice;
+  if (choice && typeof choice === "object" && typeof choice.name === "string" && choice.name) return { type: "function", function: { name: choice.name } };
+  return undefined;
+}
+
 export default function createOpenAIAdapter(config) {
   const baseUrl = (config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const apiKey = config.apiKey;
@@ -138,6 +151,8 @@ export default function createOpenAIAdapter(config) {
       };
       if (openaiTools) {
         body.tools = openaiTools;
+        const toolChoice = toOpenAIToolChoice(options.toolChoice);
+        if (toolChoice) body.tool_choice = toolChoice;
       }
       // Pass-through for vLLM/llama.cpp chat-template flags (e.g.
       // { enable_thinking: false } to suppress qwen3's reasoning block on the
@@ -163,16 +178,17 @@ export default function createOpenAIAdapter(config) {
 
       if (!response.ok) {
         const errBody = await response.text().catch(() => "");
-        if (response.status === 401) {
-          throw Object.assign(new Error(`API key is invalid (401 from provider)`), { code: "auth_error" });
+        const status = response.status;
+        if (status === 401) {
+          throw Object.assign(new Error(`API key is invalid (401 from provider)`), { code: "auth_error", status });
         }
-        if (response.status === 429) {
-          throw Object.assign(new Error(`Rate limited by provider — try again later`), { code: "rate_limit" });
+        if (status === 429) {
+          throw Object.assign(new Error(`Rate limited by provider — try again later`), { code: "rate_limit", status });
         }
-        if (response.status === 404) {
-          throw Object.assign(new Error(`Model '${model}' not found (404)`), { code: "model_error" });
+        if (status === 404) {
+          throw Object.assign(new Error(`Model '${model}' not found (404)`), { code: "model_error", status });
         }
-        throw Object.assign(new Error(`Provider error (${response.status}): ${errBody.slice(0, 200)}`), { code: "provider_error" });
+        throw Object.assign(new Error(`Provider error (${status}): ${errBody.slice(0, 200)}`), { code: "provider_error", status });
       }
 
       const reader = response.body.getReader();
