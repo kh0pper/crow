@@ -217,3 +217,12 @@ test("fit in the dashboard-voice picker: every assistant has its status, the war
   assert.ok(nbox.querySelector(".kk-warn"));
   for (const L of ["en", "es"]) { assert.ok(STRINGS[L].dash_voice_none_fit); assert.match(STRINGS[L].dash_voice_auto, L === "en" ? /fits/ : /quepa/); }
 });
+
+test("the memories switch says how memories are used: when asked to remember or recall, not on every question (en + es)", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
+  assert.ok(p.card.textContent.includes(STRINGS.en.memory_hint));
+  assert.match(STRINGS.en.memory_hint, /remember or recall/);
+  assert.match(STRINGS.en.memory_hint, /not on every question/);
+  assert.match(STRINGS.es.memory_hint, /recordar/);
+  assert.match(STRINGS.es.memory_hint, /no en cada pregunta/);
+});

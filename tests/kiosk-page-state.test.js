@@ -297,3 +297,13 @@ test("session mode: an ended login or a missing assistant halts with its own mes
   assert.equal(closeDecision(4401, "unauthorized", "paired").action, "forget_token");
   assert.equal(closeDecision(4403, "no_bot").action, "reconnect");
 });
+
+test("toolsLine: the turn's tool outcomes as one debug line — rounds joined by →, plus the display flags; only safe characters survive", async () => {
+  const { toolsLine } = await import("../bundles/kiosk/public/state.js");
+  assert.equal(toolsLine({ tools: ["crow_wm:unknown_command", "crow_wm:ok"] }), "crow_wm:unknown_command → crow_wm:ok");
+  assert.equal(toolsLine({ tools: ["crow_projects:ok+crow_wm:placeholder"], display_corrected: true, display_missed: true, tool_choice: "named" }), "crow_projects:ok+crow_wm:placeholder · tool_choice named · corrected · display missed");
+  assert.equal(toolsLine({ tools: [], display_missed: true, display_corrected: true, tool_choice: "none" }), "(no tool call) · tool_choice none · corrected · display missed");
+  assert.equal(toolsLine({ tools: ["crow_wm:ok<script>", 7, null] }), "crow_wm:ok_script_");
+  assert.equal(toolsLine({}), "");
+  assert.equal(toolsLine(null), "");
+});

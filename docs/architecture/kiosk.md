@@ -40,9 +40,11 @@ Saved conversation is trimmed, oldest exchange first, when it would push a reque
 ## Display tool and clock
 - The display tool (`crow_wm`: timers, recipes, a content card) is offered to the model only on turns that need it: the spoken question asks to show, time, follow or close something (English and Spanish word lists in `server/wm.js`, `wantsDisplay`), or a window is already open. A plain question gets no display tool, so it is answered aloud in one model round.
 - A content card is refused when the question did not ask to see anything, and any card whose title or text is empty or a syntax placeholder is refused. A new content card replaces the previous one; timers and recipes keep their own windows.
-- Every turn carries the display's local date, time and time zone on the user message (the page reports its zone when it connects; without one the server's zone is used). "What time is it?" and "What's the date?" are answered directly, without the model (`server/clock.js`).
+- Every turn carries the display's local date, time and time zone on the user message (the page reports its zone when it connects; without one the server's zone is used). "What time is it?" and "What's the date?" are answered directly, without the model (`server/clock.js`, a phrase table).
+- **A display turn tells the truth.** When the question asks for something new on the screen (show, display, put up, a new timer, a recipe: `wantsNewDisplay`), the turn must end with a successful display call. While the display tool is the only tool offered, the request requires it (`tool_choice`); nothing the model says is spoken before the call has succeeded; a turn that ends without one gets one corrective round, and if nothing is on the screen after that the display says that it could not put it there (`failed: "display_missed"`) instead of claiming it did. A failed command is answered with the exact form to use and gets one retry.
+- Each tool call's outcome is logged as `name:code` (`ok`, `unknown_command`, `placeholder`, `no_intent`, `not_offered`, `refused_policy`, …), never its arguments or text; the page's debug list (long press on the clock) shows the same line.
 
 ## Privacy
 - The page sends its time zone name when it connects, so the display can tell the time.
 - Nothing is sent before a tap. No audio is stored; transcripts live only in the display's short in-memory conversation (15 min).
-- Memories are off by default on a display (`memory_integration`).
+- Memories are off by default on a display (`memory_integration`). When they are on, the memory tool is offered only when the question asks to remember, recall or forget something (`server/memory-intent.js`): the assistant uses memories when asked, not on every question.

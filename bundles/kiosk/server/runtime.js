@@ -16,6 +16,7 @@ import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SET
 import { STRINGS } from "./strings.js";
 import { createBotFit } from "./fit.js";
 import { kioskNowContext, matchClockFastPath } from "./clock.js";
+import { wantsMemory } from "./memory-intent.js";
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -70,6 +71,11 @@ export function kioskFallbackText(lang) {
 /** Spoken + captioned when the bound assistant's prompt cannot fit the quick voice model (no model call is made). */
 export function kioskTooLargeText(lang) {
   return STRINGS[lang === "es" ? "es" : "en"].err_bot_too_large;
+}
+
+/** Spoken + captioned when a turn that asked for something on the screen ends with nothing put there. */
+export function kioskDisplayMissedText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].display_missed_say;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -183,6 +189,8 @@ export function createKioskRuntime(deps) {
       firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
       fallbackText: kioskFallbackText(device.kiosk_settings?.lang),
       tooLargeText: kioskTooLargeText(device.kiosk_settings?.lang),
+      displayMissedText: kioskDisplayMissedText(device.kiosk_settings?.lang),
+      memoryWhen: wantsMemory,
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe

@@ -8,7 +8,8 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
-import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, kioskTooLargeText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, kioskTooLargeText, kioskDisplayMissedText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
 import { kioskPromptSuffix } from "../bundles/kiosk/server/wm.js";
 import { createBotFit, FIT_TTL_MS } from "../bundles/kiosk/server/fit.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
@@ -730,5 +731,36 @@ test("live test (wired): a kiosk turn offers crow_wm only when asked, carries th
   // The timer fast path still wins for the wm family.
   assert.match((await call.fastPaths("set a timer for 2 minutes")).say, /^Timer set/);
   rt.wm.closeAll("kiosk-clock");
+  w.close();
+});
+
+// ── Live re-test 2026-10-04 (0.1.7): truthful display turns, memory only when asked ───────────────
+test("display truth (wired): every kiosk turn carries the must-run display tool, the memory-intent gate and the could-not-show line in the display's language", async () => {
+  assert.equal(kioskDisplayMissedText("en"), STRINGS.en.display_missed_say);
+  assert.equal(kioskDisplayMissedText("es"), STRINGS.es.display_missed_say);
+  assert.equal(kioskDisplayMissedText(undefined), STRINGS.en.display_missed_say);
+  const { token } = await store.pairDevice(db(), { id: "kiosk-truth-es", name: "es", device_kind: "kiosk", kiosk_settings: { lang: "es", memory_integration: true } });
+  await store.updateDeviceProfiles(db(), "kiosk-truth-es", { bound_bot_id: "household" });
+  const w = new WebSocket(wsUrl(base));
+  const msgs = [];
+  await new Promise((r) => w.on("open", r));
+  w.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  w.send(JSON.stringify({ type: "hello", device_id: "kiosk-truth-es", token, caps: {} }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+  const before = turnCalls.length;
+  w.send(JSON.stringify({ type: "turn_start", turn_id: "d1" }));
+  w.send(Buffer.alloc(8000));
+  w.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+  const call = turnCalls.at(-1);
+  assert.equal(call.device.id, "kiosk-truth-es");
+  assert.equal(call.displayMissedText, STRINGS.es.display_missed_say);
+  assert.equal(call.memoryWhen, wantsMemory, "one function decides both the offer and the forced-call gate");
+  const wmTool = call.extraTools[0];
+  assert.equal(wmTool.must("Show me a list of three fruits."), true);
+  assert.equal(wmTool.must("Tell me a joke"), false);
+  assert.match(wmTool.mustNote, /crow_wm/);
+  // The round cap leaves room for one retry of a failed display command plus the spoken confirmation.
+  assert.ok(call.maxToolRounds >= 3);
   w.close();
 });
