@@ -375,3 +375,19 @@ test("kiosk paths are never public-funnel paths (spec §10; page at /display per
     assert.equal((await fetch(base + "/api/kiosk/pair/start", { method: "POST", headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
   } finally { srv.close(); }
 });
+
+test("the display ticket mount is never a public-funnel path", async () => {
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const p of ["/display/t", "/display/t/"]) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((x) => p.startsWith(x) || x.startsWith(p)), p);
+  const app = express();
+  app.use(rejectFunneledMiddleware());
+  app.all("/display/t/:ticket/stream", (req, res) => res.send("audio"));
+  const srv = http.createServer(app);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    assert.equal((await fetch(base + "/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream", { headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
+    assert.equal((await fetch(base + "/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream", { method: "HEAD", headers: { "Tailscale-Funnel-Request": "?1" } })).status, 403);
+    assert.equal((await fetch(base + "/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream")).status, 200, "without the Funnel header the stub answers: the 403 above is the Funnel refusal");
+  } finally { srv.close(); }
+});
