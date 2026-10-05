@@ -284,3 +284,15 @@ test("one set of turn options: the evaluation runs the runtime's own displayTurn
   const same = displayTurnOptions({ store: d.store, deviceId: "x", caps: FIXTURE.caps, lang: "en", sources: [], items: [], emit: () => {} }, { settings: { lang: "en" } });
   assert.equal(same.promptSuffix, ship.options.promptSuffix, "the same function, the same text");
 });
+
+test("displayTurnOptions: onToolResult is told what each display call did, and can never change or break the result", async () => {
+  const seen = [];
+  const store = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING }).store;
+  const ctx = { store, deviceId: "otr", caps: FIXTURE.caps, lang: "en", sources: [], items: [], emit: () => {} };
+  const o = displayTurnOptions(ctx, { settings: { lang: "en" }, onToolResult: (name, res, turn) => { seen.push([name, res?.outcome, turn?.transcript]); throw new Error("ignored"); } });
+  const show = o.extraTools.find((x) => x.definition.name === "crow_show");
+  const out = JSON.parse(await show.execute({ kind: "list", title: "Fruits", body: "a\nb" }, { transcript: "Show me a list of fruits." }));
+  assert.equal(out.outcome, "shown");
+  assert.deepEqual(seen, [["crow_show", "shown", "Show me a list of fruits."]]);
+  assert.equal(typeof displayTurnOptions(ctx, {}).extraTools[0].when, "function", "without the hook the tools are the display tools themselves");
+});

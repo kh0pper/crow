@@ -89,10 +89,23 @@ export function kioskDisplayMissedText(lang) {
  *   ctx  { store, deviceId, caps (effective), lang, sources, items, emit, media?, … }
  *   o    { now() → ms, tz, settings (the display's kiosk_settings, or a function returning them: the STT
  *          model is read when the turn transcribes), mediaLine() → "Playing: …" | "",
- *          wrapTools(tools) → tools (the evaluation records calls through it) }
+ *          wrapTools(tools) → tools (the evaluation records calls through it),
+ *          onToolResult(name, result, turn) (told after each display tool call, with the parsed result;
+ *          a throw there is logged by the caller's wrapper and never changes the result) }
  */
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null } = {}) {
-  const tools = createDisplayTools(ctx);
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null } = {}) {
+  const made = createDisplayTools(ctx);
+  // onToolResult: a later slice (the media session) needs to know what each display call did.
+  const tools = typeof onToolResult !== "function" ? made : made.map((t) => ({
+    ...t,
+    async execute(args, turn) {
+      const out = await t.execute(args, turn);
+      let res = null;
+      try { res = JSON.parse(out); } catch {}
+      try { await onToolResult(t.definition.name, res, turn); } catch {}
+      return out;
+    },
+  }));
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
   return {
