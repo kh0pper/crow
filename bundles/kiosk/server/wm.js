@@ -159,11 +159,13 @@ const NEW_DISPLAY = {
 const NOT_NEW = [
   /\b(next|previous|last|first|this|that) step\b|\b(read|repeat) (the |that )?step\b|\bstep (again|\d+)\b/,
   /^(please |can you |could you )?(close|dismiss|hide|stop|cancel|clear|pause|remove|delete)\b/,
-  /\bhow (long|much)\b|\b(left|remaining|still running)\b/,
+  /\bhow (long|much|do|can|to|would|should)\b|\b(left|remaining|still running)\b/,
+  /\b(stop|cancel|pause|silence|turn off|switch off)\b.{0,20}\b(timer|countdown|alarm)\b/,
   /\bwhat( s| is)? (on|in) (the |my )?(screen|display)\b/,
   /(^| )(siguiente|anterior|pr[oó]ximo|[uú]ltimo|primer|este|ese) paso\b|\b(lee|leer|repite|repetir) (el |ese )?paso\b/,
   /^(por favor )?(cierra|cerrar|quita|oculta|para|det[eé]n|cancela|borra|limpia)\b/,
-  /\bcu[aá]nto (queda|falta|tiempo)\b|\bqu[eé] hay\b/,
+  /\bcu[aá]nto (queda|falta|tiempo)\b|\bqu[eé] hay\b|\bc[oó]mo\b/,
+  /\b(parar|para|detener|cancelar|cancela|apagar|apaga)\b.{0,20}\b(temporizador|cron[oó]metro|alarma)\b/,
 ];
 export function newDisplayKind(transcript) {
   const t = intentText(transcript);
@@ -386,7 +388,9 @@ export function createWmTool({ store, deviceId, caps, emit }) {
     for (const e of fp.events) emit(e);
     return JSON.stringify({ ok: true, code: "ok", action: cmd.op, say: fp.say });
   }
-  return { definition, execute, when, must, mustNote: MUST_NOTE };
+  /** Which result satisfies a must turn: something newly put on the screen (a close or a step does not). */
+  const mustDone = (result) => result?.ok === true && result.action === "open";
+  return { definition, execute, when, must, mustNote: MUST_NOTE, mustDone };
 }
 
 function applyControl(cmd, store, deviceId) {

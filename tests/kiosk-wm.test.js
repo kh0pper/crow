@@ -385,6 +385,13 @@ test("wantsNewDisplay: only a request for NEW content on the screen (show / disp
     ["how much time is left on the countdown", false],
     ["Is the timer still running?", false],
     ["what's on the display?", false],
+    ["How do I set a timer on my phone?", false],
+    ["I need to stop the timer", false],
+    ["I want to cancel the alarm", false],
+    ["can you turn off the alarm", false],
+    ["how can I display photos on my TV", false],
+    ["¿Cómo pongo un temporizador en el móvil?", false],
+    ["quiero parar la alarma", false],
     ["siguiente paso", false],
     ["Cierra eso", false],
     ["para el temporizador", false],
@@ -410,6 +417,11 @@ test("the display tool says when a turn MUST end with something on the screen, a
   assert.equal(s.tool.must("Tell me a joke"), false, "…but an open window never makes a display mandatory");
   assert.equal(s.tool.must("close that"), false);
   assert.match(s.tool.mustNote, /nothing/i);
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "open" }), true, "only something newly put up counts");
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "close" }), false);
+  assert.equal(s.tool.mustDone({ ok: true, code: "ok", action: "step" }), false);
+  assert.equal(s.tool.mustDone({ action: "error", code: "placeholder" }), false);
+  assert.equal(s.tool.mustDone(null), false);
   assert.match(s.tool.mustNote, /crow_wm/);
   assert.doesNotMatch(s.tool.mustNote, /[<>]/);
   const timerOnly = setup({ windows: ["timer"] });

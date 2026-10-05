@@ -216,9 +216,10 @@ export function createVoiceTurnRunner(deps) {
    * memoryWhen(transcript) — with memories on, whether THIS question asks for them (default: always);
    * displayMissedText — the localized line for a must-run tool that never succeeded.
    *
-   * extraTools[i] = { definition, execute(args, { transcript }) → JSON string, when?, must?, mustNote? }:
+   * extraTools[i] = { definition, execute(args, { transcript }) → JSON string, when?, must?, mustNote?, mustDone? }:
    *   when(transcript) false → not offered this turn (a forced call is refused, never run);
-   *   must(transcript) true  → the turn must end with a successful call ({ ok: true }) of this tool:
+   *   must(transcript) true  → the turn must end with a successful call of this tool ({ ok: true }, or
+   *     mustDone(result) when the tool says which results count):
    *     tool_choice requires it while it is the only tool offered; text is held back (not spoken)
    *     until it has run; a turn that ends without it gets ONE corrective round with mustNote on
    *     the last message; if it still has not run, displayMissedText is spoken instead of the text.
@@ -545,10 +546,10 @@ export function createVoiceTurnRunner(deps) {
             }
           } catch (err) {
             if (budgetHit) break;   // the budget's own abort surfacing from the provider fetch
-            // The backend refused the request (4xx before any output) and it carried a tool_choice:
+            // The backend refused the request (400/422 before any output) and it carried a tool_choice:
             // step down and send the same round again. The step is remembered for this model only
             // once the weaker request goes through — that is what shows tool_choice was the cause.
-            if (toolChoice && !started && !aborted() && err?.code === "provider_error" && err.status >= 400 && err.status < 500) {
+            if (toolChoice && !started && !aborted() && err?.code === "provider_error" && (err.status === 400 || err.status === 422)) {
               const next = choiceMode === "named" ? "required" : "none";
               log(`[voice-turn] ${device.id} ${modelKey} refused a request with tool_choice ${choiceMode} (HTTP ${err.status}); trying ${next}`);
               choiceMode = next;
@@ -573,16 +574,16 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         let assistantMsg = null;
-        if (content || calls.length) {
-          assistantMsg = { role: "assistant", content };
+        const kept = hold ? "" : content;   // held text was never heard: it is not kept as something said
+        if (kept || calls.length) {
+          assistantMsg = { role: "assistant", content: kept };
           if (calls.length) assistantMsg.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
           messages.push(assistantMsg);
         }
         if (!calls.length) {
           if (mustDone) break;
-          // The model's turn ended with nothing on the screen. Its text was held back; it is dropped
+          // The model's turn ended with nothing on the screen. Its text was held back and is dropped
           // (never spoken, never saved). One corrective round, then the truthful line (after the loop).
-          if (assistantMsg) messages.pop();
           if (corrected) break;
           corrected = true;
           timings.display_corrected = true;
@@ -628,7 +629,8 @@ export function createVoiceTurnRunner(deps) {
             const ok = res?.ok === true;
             outcome.set(tc, ok ? "ok" : outcomeCode(res?.code, "error"));
             // A display tool that changed the screen is user-visible progress.
-            if (ok) { roundDisplay = true; if (tc.name === mustName) mustDone = true; }
+            if (ok) roundDisplay = true;
+            if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
@@ -644,7 +646,7 @@ export function createVoiceTurnRunner(deps) {
         if (roundDisplay) displayProgress = true;
         if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
-        if (assistantMsg && !content.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
+        if (assistantMsg && !kept.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
         // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
         let lastToolMsg = null;
         for (const r of [...local, ...remoteResults]) {

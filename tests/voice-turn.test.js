@@ -943,6 +943,13 @@ test("must-run: any other provider failure on a forced round is still a turn_fai
   const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, extraTools: [mustTool()] });
   assert.equal(n, 1);
   assert.equal(r.failed, "error");
+  // Only a "bad request" (400 / 422) can mean "this tool_choice form is not accepted": a 403 is not retried.
+  const f = harness({ chatTools: [] });
+  let m = 0;
+  f.deps.createChatAdapter = async () => ({ async *chatStream() { m++; throw Object.assign(new Error("Provider error (403): forbidden"), { code: "provider_error", status: 403 }); } });
+  const rf = await createVoiceTurnRunner(f.deps).runVoiceTurn({ db: {}, device: f.device, transcript: "show me a list", sink: f.sink, extraTools: [mustTool()] });
+  assert.equal(m, 1);
+  assert.equal(rf.failed, "error");
   // A 400 that is NOT about tool_choice (every form fails): the turn fails, and nothing is remembered —
   // the next turn asks for the named tool again.
   const b = harness({ chatTools: [] });
@@ -1017,6 +1024,8 @@ test("must-run: a failed command gets ONE retry (the round cap leaves room for i
   assert.deepEqual(choices(h), [{ name: "crow_wm" }, { name: "crow_wm" }, null], "still required on the retry");
   assert.deepEqual(seen.map((a) => a.command), ["show Fruits | apples", "display Fruits | apples, bananas, cherries"]);
   assert.deepEqual(h.calls.spoken, ["Three fruits are on the screen."], "'Here is your list.' was said before anything was shown: held back");
+  assert.ok(!h.runner.convo.get("kiosk-a").some((m) => /Here is your list/.test(String(m.content))), "and what was never heard is not saved as if it had been said");
+  assert.equal(h.log[1].messages.find((m) => m.role === "assistant").content, "", "nor shown back to the model as its own words");
   assert.deepEqual(r.timings.tools, ["crow_wm:unknown_command", "crow_wm:ok"]);
   assert.equal(r.failed, null);
   assert.equal(r.timings.display_missed, undefined);
@@ -1063,4 +1072,19 @@ test("must-run: barge-in and the first-audio budget keep their own endings", asy
   assert.equal(rs.failed, "budget");
   assert.deepEqual(slow.calls.spoken, [FALLBACK_TEXT]);
   assert.equal(rs.timings.display_missed, undefined);
+});
+
+test("must-run: the tool says which result counts (mustDone) — an ok that put nothing new up (a close) does not satisfy the turn", async () => {
+  const seen = [];
+  const tool = { ...mustTool([{ ok: true, code: "ok", action: "close" }, { ok: true, code: "ok", action: "open" }], seen), mustDone: (r) => r?.ok === true && r.action === "open" };
+  const h = harness({ chatTools: [], rounds: [wmCall("close"), wmCall("display A | b", "w2"), says("It is up. ")] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list", sink: h.sink, maxToolRounds: 3, extraTools: [tool] });
+  assert.deepEqual(choices(h), [{ name: "crow_wm" }, { name: "crow_wm" }, null], "still required after the close");
+  assert.deepEqual(r.timings.tools, ["crow_wm:ok", "crow_wm:ok"]);
+  assert.deepEqual(h.calls.spoken, ["It is up."]);
+  assert.equal(r.failed, null);
+  const only = harness({ chatTools: [], rounds: [wmCall("close"), says("Closed it. "), says("Closed it. ")] });
+  const ro = await only.runner.runVoiceTurn({ db: {}, device: only.device, transcript: "show me a list", sink: only.sink, extraTools: [{ ...mustTool([{ ok: true, action: "close" }]), mustDone: (x) => x?.action === "open" }], displayMissedText: "MISSED" });
+  assert.equal(ro.failed, "display_missed");
+  assert.deepEqual(only.calls.spoken, ["MISSED"]);
 });
