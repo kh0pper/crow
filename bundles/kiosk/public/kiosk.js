@@ -1,4 +1,9 @@
-/** Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); Pi agent hooks arrive in K2. */
+/**
+ * Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); Pi agent hooks arrive in K2.
+ * Session mode (/display/session, inside the dashboard's Talk to Crow overlay): the viewer is already
+ * logged in to the dashboard, so there is no pairing and no stored token — the socket is authorised by
+ * the dashboard session cookie and hello echoes the CSRF cookie.
+ */
 import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
@@ -12,6 +17,7 @@ import { createWindowView } from "./wm-view.js";
 
 const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
+const SESSION = document.documentElement.dataset.mode === "session";
 const CAPS = { windows: ["timer", "recipe", "content"], iframe: false, max_windows: 4, agent: false };
 /** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
@@ -39,7 +45,10 @@ const note = (kind, text) => { statuses.push(kind, text, Date.now()); if (!$("de
 function showDebug() { const d = $("debug"); d.textContent = statuses.format(); d.hidden = false; }
 /** Sets the bot caption for a page/system reason (tap hint, error, clear) — fixed strings, so the text is recorded. */
 function caption(text, why) { $("cap-bot").textContent = text; note(`caption:${why}`, text); }
-function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); }
+function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); if (key === "session_no_bot") b.append(" ", kioskPanelLink()); }
+/** Session mode: the fix for "no assistant" is one tap away — the Kiosk panel, in the dashboard itself. */
+function kioskPanelLink() { const a = document.createElement("a"); a.href = "/dashboard/kiosk"; a.target = "_top"; a.textContent = t("session_bot_link"); return a; }
+const cookie = (name) => { for (const c of document.cookie.split(";")) { const [k, ...v] = c.trim().split("="); if (k === name) return v.join("="); } return ""; };
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
 function releaseAudio() {
   if (turn && !turn.ended) endTurn("manual", null);
@@ -56,7 +65,8 @@ function setBird(s) {
 }
 /** The server's state, held in "speaking" while local audio still plays (ruling F3). */
 const renderBird = () => setBird(displayedBird(serverBird, !!player?.playing));
-function applyTheme() { document.documentElement.dataset.theme = isNight(new Date(), config.sleep_start, config.sleep_end) ? "dark" : "light"; }
+/** A display dims by its sleep hours; inside the dashboard the page follows the dashboard (the OS scheme). */
+function applyTheme() { document.documentElement.dataset.theme = (SESSION ? matchMedia("(prefers-color-scheme: dark)").matches : isNight(new Date(), config.sleep_start, config.sleep_end)) ? "dark" : "light"; }
 function tickClock() {
   const d = new Date();
   $("clock").textContent = d.toLocaleTimeString(lang, { hour: "numeric", minute: "2-digit" });
@@ -99,13 +109,14 @@ function scheduleReconnect(ms) { clearTimeout(reconnectTimer); reconnectTimer = 
 function connect() {
   clearTimeout(reconnectTimer); reconnectTimer = null;
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
-  const id = ls.get(LS_DEV), tok = ls.get(LS_TOK);
-  if (!id || !tok) { pair(); return; }
+  const id = SESSION ? null : ls.get(LS_DEV), tok = SESSION ? null : ls.get(LS_TOK);
+  if (!SESSION && (!id || !tok)) { pair(); return; }
   halted = false;
-  const sock = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/kiosk/session`);
+  const sock = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/kiosk/session${SESSION ? "/dashboard" : ""}`);
   ws = sock;
   sock.binaryType = "arraybuffer";
-  sock.onopen = () => { if (ws === sock) sock.send(JSON.stringify({ type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
+  let opened = false;
+  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
   sock.onmessage = (ev) => {
     if (ws !== sock) return;
     if (typeof ev.data !== "string") { player?.push(ev.data); return; }
@@ -121,10 +132,18 @@ function connect() {
     serverBird = "idle";
     renderBird();
     note("ws", `closed ${ev.code} ${ev.reason || ""}`.trim());
-    const d = closeDecision(ev.code, ev.reason);
+    const d = closeDecision(ev.code, ev.reason, SESSION ? "session" : "paired");
     if (releasesMic(d)) releaseAudio();
     if (d.action === "forget_token") { ls.del(LS_DEV); ls.del(LS_TOK); pair(); return; }
     if (d.action === "halt") { halted = true; banner(d.banner); return; }
+    // Session mode: a socket refused before it opened may mean the login ended (the upgrade answers 401,
+    // which a page cannot see). Ask the page URL once; 401 there stops the retries with a message.
+    if (SESSION && !opened) {
+      fetch(location.pathname, { method: "HEAD", cache: "no-store" }).then((r) => {
+        if (r.status !== 401 || ws || halted) return;
+        clearTimeout(reconnectTimer); reconnectTimer = null; halted = true; releaseAudio(); banner("session_expired");
+      }).catch(() => {});
+    }
     scheduleReconnect(backoffMs(attempt++));   // incl. 1011 server_error: the token is kept
   };
 }
@@ -161,7 +180,7 @@ function onText(m) {
       break;
     case "error":
       note("error", `${m.code}${m.recoverable ? "" : " (fatal)"}`);
-      { const d = errorDecision(m.code, m.recoverable); if (d.banner) banner(d.banner); else caption(t(d.caption), m.code); }
+      { const d = errorDecision(m.code, m.recoverable, SESSION ? "session" : "paired"); if (d.banner) banner(d.banner); else caption(t(d.caption), m.code); }
       break;
     default:
   }
@@ -288,7 +307,21 @@ $("bird").addEventListener("click", onTap);
 }
 $("mic").addEventListener("click", onTap);
 window.addEventListener("pagehide", releaseAudio);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && ls.get(LS_TOK)) connect(); });   // connect() is a no-op while a socket is live
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && (SESSION || ls.get(LS_TOK))) connect(); });   // connect() is a no-op while a socket is live
+if (SESSION) {
+  // The dashboard closes the overlay (its own close button, or Escape): it calls this first so the
+  // microphone, any playing audio and the socket stop at once, then removes the frame.
+  window.crowKioskRelease = () => {
+    halted = true;
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    releaseAudio();
+    try { ctx?.close(); } catch {}
+    const s = ws; ws = null;
+    try { s?.close(1000, "closed"); } catch {}
+  };
+  // Escape pressed while focus is inside the frame never reaches the dashboard: ask it to close.
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && window.parent !== window) window.parent.postMessage("crow-talk-close", location.origin); });
+}
 
 $("mic").textContent = t("mic_talk");
 connect();

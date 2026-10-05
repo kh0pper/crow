@@ -158,6 +158,22 @@ export function deriveSelfDialAddress({
 }
 
 /**
+ * This node's MagicDNS tailnet suffix (`<tailnet>.ts.net`, lower-case, no
+ * trailing dot) from `tailscale status --json` (MagicDNSSuffix, else
+ * Self.DNSName minus its first label) — or null. Never throws.
+ */
+export function ownTailnetSuffix({ execFileSyncImpl = execFileSync, status } = {}) {
+  const st = status ?? runJson(execFileSyncImpl, ["status", "--json"]);
+  if (!st || typeof st !== "object") return null;
+  const clean = (v) => String(v || "").toLowerCase().replace(/\.$/, "");
+  const suffix = clean(st.MagicDNSSuffix || st.CurrentTailnet?.MagicDNSSuffix);
+  if (suffix.endsWith(".ts.net")) return suffix;
+  const name = clean(st.Self?.DNSName);
+  const parts = name.split(".");
+  return parts.length >= 4 && name.endsWith(".ts.net") ? parts.slice(1).join(".") : null;
+}
+
+/**
  * The tailnet IP (IPv4 preferred) of the tailnet node whose MagicDNS name is
  * `hostname`, from `tailscale status --json` — or null. Used to repair a peer
  * row that holds only an undialable :443 MagicDNS URL: the HOST is right, the

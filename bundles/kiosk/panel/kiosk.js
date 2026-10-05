@@ -112,6 +112,34 @@ export const CLIENT_SCRIPT = `
     if (!data.tts_profiles.some(function (p) { return p.provider === 'kokoro'; })) box.appendChild(el('p', 'kk-warn', S.tts_missing));
   }
 
+  /** Which assistant answers the dashboard's own Talk to Crow (no display, no pairing). */
+  function renderDash(data) {
+    var box = document.getElementById('kk-dash'); if (!box) return;
+    clear(box);
+    var dv = data.dashboard_voice;
+    box.hidden = !(dv && dv.available);
+    if (box.hidden) return;
+    box.appendChild(el('h2', null, S.dash_voice_title));
+    box.appendChild(el('p', 'kk-dim', S.dash_voice_intro));
+    if (!data.bots.length) { box.appendChild(el('p', 'kk-warn', S.dash_voice_none)); return; }
+    var sel = el('select'); opt(sel, '', S.dash_voice_auto, !dv.bot_id);
+    data.bots.forEach(function (b) { opt(sel, b.bot_id, b.display_name || b.bot_id, b.bot_id === dv.bot_id); });
+    var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
+    var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
+    function showNow() {
+      var hit = data.bots.filter(function (b) { return b.bot_id === dv.effective_bot_id; })[0];
+      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : '';
+    }
+    showNow();
+    sel.addEventListener('change', function () {
+      api('POST', '/api/kiosk/admin/dashboard-voice', { bot_id: sel.value }).then(function (j) {
+        if (!j.ok) { msg.textContent = S[j.error] || j.error || ''; return; }
+        dv.bot_id = j.bot_id; dv.effective_bot_id = j.effective_bot_id; showNow(); msg.textContent = S.saved;
+      });
+    });
+    box.appendChild(now); box.appendChild(msg);
+  }
+
   function renderDevice(d, data) {
     var card = el('section', 'kk-card');
     var head = el('h3', null, d.name);
@@ -174,6 +202,7 @@ export const CLIENT_SCRIPT = `
   function render(data) {
     state = data;
     renderPair(data);
+    renderDash(data);
     var list = document.getElementById('kk-devices'); clear(list);
     list.appendChild(el('h2', null, S.displays));
     if (!data.devices.length) list.appendChild(el('p', 'kk-dim', S.no_displays));
@@ -185,7 +214,7 @@ export const CLIENT_SCRIPT = `
     api('GET', '/api/kiosk/admin/displays').then(function (j) {
       if (!j.devices || !state) return;
       var changed = JSON.stringify(j.pending) !== JSON.stringify(state.pending) || j.devices.length !== state.devices.length;
-      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section')) render(j);
+      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section, #kk-dash')) render(j);
       else state = j;
     });
   }
@@ -220,6 +249,9 @@ export default {
   route: "/dashboard/kiosk",
   navOrder: 56,
   category: "hardware",
+  // The dashboard header offers "Talk to Crow" only when the installed panel says its
+  // routes serve the session display (/display/session); an older copy does not.
+  sessionDisplay: true,
   async handler(req, res, { layout, lang }) {
     const L = STRINGS[lang] ? lang : "en";
     const S = STRINGS[L];
@@ -231,6 +263,7 @@ export default {
         <h1>${esc(S.panel_title)}</h1>
         <p class="kk-dim">${esc(S.panel_intro)}</p>
         <div id="kk-pair" class="kk-card"></div>
+        <div id="kk-dash" class="kk-card" hidden></div>
         <div id="kk-devices"></div>
       </div>
       <script type="application/json" id="kk-strings">${json}</script>

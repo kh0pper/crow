@@ -266,4 +266,34 @@ test("error frames: no bot → banner; bot_too_large → its own caption (never 
   assert.deepEqual(errorDecision("turn_failed", true), { caption: "err_turn_failed" });
   for (const L of ["en", "es"]) for (const d of [errorDecision("bot_too_large", false), errorDecision("turn_failed", true)]) assert.ok(STRINGS[L][d.caption], `${L}.${d.caption}`);
   assert.notEqual(STRINGS.en.err_bot_too_large, STRINGS.en.err_turn_failed);
+  // "paired" (or no mode) is the paired display; session mode is below.
+  assert.deepEqual(errorDecision("bot_too_large", false, "paired"), { caption: "err_bot_too_large" });
+  assert.deepEqual(errorDecision("no_bound_bot", false, "paired"), { banner: "no_bot" });
+});
+
+test("session mode error frames: no assistant AND assistant-too-large both show the banner that links to the Kiosk panel; the rest is unchanged", async () => {
+  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
+  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
+  assert.deepEqual(errorDecision("no_bound_bot", false, "session"), { banner: "session_no_bot" });
+  assert.deepEqual(errorDecision("bot_too_large", false, "session"), { banner: "session_no_bot" });
+  assert.deepEqual(errorDecision("no_tts_profile", false, "session"), { banner: "error_generic" });
+  assert.deepEqual(errorDecision("turn_failed", true, "session"), { caption: "err_turn_failed" });
+  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].session_no_bot); assert.ok(STRINGS[L].session_bot_link); }
+});
+
+// ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----
+
+test("session mode: an ended login or a missing assistant halts with its own message — it never forgets a token or starts pairing", () => {
+  assert.deepEqual(closeDecision(4401, "unauthorized", "session"), { action: "halt", banner: "session_expired" });
+  assert.deepEqual(closeDecision(4403, "no_bot", "session"), { action: "halt", banner: "session_no_bot" });
+  assert.deepEqual(closeDecision(4000, "superseded", "session"), { action: "halt", banner: "opened_elsewhere" });
+  for (const [code, reason] of [[4401, "hello_timeout"], [1006, ""], [1011, "server_error"], [4403, ""]]) {
+    assert.deepEqual(closeDecision(code, reason, "session"), { action: "reconnect" }, `${code} ${reason}`);
+  }
+  for (const [code, reason] of [[4401, "unauthorized"], [4401, "unpaired"], [4403, "no_bot"], [1006, ""]]) {
+    assert.notEqual(closeDecision(code, reason, "session").action, "forget_token", `${code} ${reason}`);
+  }
+  // The paired page is unchanged, with or without the new argument.
+  assert.equal(closeDecision(4401, "unauthorized", "paired").action, "forget_token");
+  assert.equal(closeDecision(4403, "no_bot").action, "reconnect");
 });

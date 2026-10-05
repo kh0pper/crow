@@ -2,6 +2,14 @@
  * Kiosk WebSocket session (spec §4.5). Transport-agnostic: `ws` is anything
  * with send/close/readyState and "message"/"close" events. The token lives
  * ONLY in the first frame (hello); the upgrade URL is never read for it.
+ *
+ * attach(ws, opts) — `opts` is given only for a dashboard SESSION display (the
+ * caller has already verified the dashboard session on the upgrade request):
+ *   authorize(hello) → { device } | { close: { code, reason } } | null
+ *       replaces the device-token check; hello's device_id/token are never read.
+ *   revalidate() → boolean   asked at every turn_start and by revalidateSessions();
+ *       false closes 4401 (the login ended); a throw at a turn closes 1011 (retry).
+ *   onClose(device)          the socket closed and was not replaced by a newer one.
  */
 import { normalizeCaps } from "./wm.js";
 import { validTimeZone } from "./clock.js";
@@ -18,8 +26,10 @@ export function createSessionHub(deps) {
   const clearT = deps.clearTimeout || clearTimeout;
   const sendJson = (ws, obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
 
-  function attach(ws) {
+  function attach(ws, opts = {}) {
     let device = null;
+    let gone = false;              // closed by us (login ended): frames still in flight are ignored
+    let authCheck = null;          // this turn's revalidate() promise (session displays only)
     let authing = false;
     let caps = normalizeCaps(null);
     let tz = null;                 // the page's IANA zone from hello (null = unknown: the server's zone is used)
@@ -61,6 +71,25 @@ export function createSessionHub(deps) {
     const state = (bird) => sendJson(ws, { type: "state", bird });
     const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort() };
 
+    /**
+     * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
+     * A check that FAILS (the session store could not be read) fails closed for a turn — 1011, the
+     * page reconnects and is verified again at the upgrade — but the idle sweep just tries later.
+     */
+    async function stillAuthorized(forTurn = true) {
+      if (!opts.revalidate) return true;
+      let ok = false;
+      try { ok = (await opts.revalidate()) === true; }
+      catch (err) {
+        deps.log?.(`[kiosk] session check failed: ${err?.message}`);
+        if (forTurn) { gone = true; ws.close(1011, "server_error"); }
+        return false;
+      }
+      if (!ok) { gone = true; ws.close(4401, "unauthorized"); }
+      return ok;
+    }
+    if (opts.revalidate) self.revalidate = () => stillAuthorized(false);
+
     // Speech (timer/announce) is serialized: one at a time, never during a turn,
     // with its own abort (barge_in / turn_start / close) and an abort-gated sink.
     async function drainSpeech() {
@@ -88,7 +117,13 @@ export function createSessionHub(deps) {
     async function onHello(msg) {
       authing = true;
       let d;
-      try { d = await deps.verifyKiosk(String(msg.device_id || ""), String(msg.token || "")); }
+      try {
+        if (opts.authorize) {
+          const r = await opts.authorize(msg);
+          if (r?.close) { ws.close(r.close.code, r.close.reason); return; }
+          d = r?.device || null;
+        } else d = await deps.verifyKiosk(String(msg.device_id || ""), String(msg.token || ""));
+      }
       catch (err) { authing = false; deps.log?.(`[kiosk] hello verify failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       if (!d) { ws.close(4401, "unauthorized"); return; }
       if (ws.readyState !== 1) return;
@@ -125,6 +160,12 @@ export function createSessionHub(deps) {
       // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
       if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
       busy = true;
+      if (authCheck) {
+        // The login was re-checked when this turn started; nothing runs for a session that ended.
+        const ok = await authCheck;
+        authCheck = null;
+        if (!ok || ws.readyState !== 1) { busy = false; if (usable) usable.ctrl.abort(); return; }
+      }
       abort = new AbortController();
       const my = abort;
       const id = turnId;
@@ -177,6 +218,7 @@ export function createSessionHub(deps) {
     }
 
     ws.on("message", (raw, isBinary) => {
+      if (gone) return;
       if (!device) {
         if (authing) return;
         if (isBinary) { ws.close(4401, "unauthorized"); return; }
@@ -210,9 +252,12 @@ export function createSessionHub(deps) {
           inTurn = true; frames = []; bytes = 0;
           turnId = String(msg.turn_id || `t${(deps.now || Date.now)()}`).slice(0, 64);
           state("listening");
+          if (opts.revalidate) authCheck = stillAuthorized();
           return;
         case "speech_pause":
-          startEarly();
+          // A session display transcribes nothing until this turn's login check has passed.
+          if (authCheck) { const snap = { bytes, n: frames.length }; authCheck.then((ok) => { if (ok && !gone) startEarly(snap); }); }
+          else startEarly();
           return;
         case "turn_end":
           onTurnEnd(msg).catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
@@ -242,7 +287,10 @@ export function createSessionHub(deps) {
       dropEarly();
       if (abort) abort.abort();
       if (speechAbort) speechAbort.abort();
-      if (device && sessions.get(device.id) === self) sessions.delete(device.id);
+      if (device && sessions.get(device.id) === self) {
+        sessions.delete(device.id);
+        try { opts.onClose?.(device); } catch (err) { deps.log?.(`[kiosk] close hook failed: ${err?.message}`); }
+      }
     });
     ws.on("error", () => {});
   }
@@ -273,6 +321,10 @@ export function createSessionHub(deps) {
       if (!s || s.ws.readyState !== 1 || !s.pushReady) return false;
       await s.pushReady();
       return true;
+    },
+    /** Session displays: close every one whose dashboard login has ended (the runtime's minute sweep). */
+    async revalidateSessions() {
+      for (const s of [...sessions.values()]) if (s.revalidate) await s.revalidate();
     },
     /** The live session's device row (or null when the display is offline). */
     deviceOf: (id) => sessions.get(id)?.device || null,

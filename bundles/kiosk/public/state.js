@@ -5,9 +5,15 @@ import { e2eMs } from "./metrics.js";
  * Close codes: 4401 unauthorized/unpaired → the token is dead, re-pair; 4000 superseded →
  * the display is open elsewhere, stop (no ping-pong). Everything else — 4401 hello_timeout,
  * 1006 network drops, 1011 server_error (a transient verify/setup failure) — reconnects
- * with backoff and KEEPS the token.
+ * with backoff and KEEPS the token. `mode` is "session" on /display/session.
  */
-export function closeDecision(code, reason) {
+export function closeDecision(code, reason, mode) {
+  // A session display (the dashboard's Talk to Crow) has no token to forget and nothing to pair:
+  // an ended login or a missing assistant stops it with a message; a tap tries again.
+  if (mode === "session") {
+    if (code === 4401 && (reason === "unauthorized" || reason === "unpaired")) return { action: "halt", banner: "session_expired" };
+    if (code === 4403 && reason === "no_bot") return { action: "halt", banner: "session_no_bot" };
+  }
   if (code === 4401 && (reason === "unauthorized" || reason === "unpaired")) return { action: "forget_token" };
   if (code === 4000 && reason === "superseded") return { action: "halt", banner: "opened_elsewhere" };
   return { action: "reconnect" };
@@ -91,12 +97,15 @@ export function pairStartDecision(status, body, attempt) {
 }
 /**
  * What an `error` frame shows: a banner (a display that cannot work until its settings change)
- * or a caption (this turn only). bot_too_large is a caption: the server has just spoken and
- * captioned the same line, and this replaces it in the page's language.
+ * or a caption (this turn only). On a paired display bot_too_large is a caption: the server has
+ * just spoken and captioned the same line, and this replaces it in the page's language. In session
+ * mode (the dashboard's Talk to Crow) both "no assistant" and "assistant too large" show the
+ * banner that links to the Kiosk panel, where the assistant is chosen; the spoken line stays as the caption.
  */
-export function errorDecision(code, recoverable) {
-  if (code === "no_bound_bot") return { banner: "no_bot" };
-  if (code === "bot_too_large") return { caption: "err_bot_too_large" };
+export function errorDecision(code, recoverable, mode) {
+  const session = mode === "session";
+  if (code === "no_bound_bot") return { banner: session ? "session_no_bot" : "no_bot" };
+  if (code === "bot_too_large") return session ? { banner: "session_no_bot" } : { caption: "err_bot_too_large" };
   return recoverable ? { caption: `err_${code}` } : { banner: "error_generic" };
 }
 const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);

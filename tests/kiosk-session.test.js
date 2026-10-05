@@ -546,3 +546,109 @@ test("hello tz: the page's IANA time zone reaches every turn; a missing or inval
   assert.equal(await run({ evil: 1 }), null);
   assert.equal(await run("x".repeat(500)), null);
 });
+
+// ---- Session displays (the dashboard's Talk to Crow): attach(ws, { authorize, revalidate, onClose }) ----
+
+const SDEV = { id: "dash-0123456789abcdef", name: "Dashboard", device_kind: "kiosk", bound_bot_id: "household", kiosk_settings: { lang: "en" } };
+const PCM = Buffer.alloc(8000);
+
+test("session display: authorize replaces the device-token check (verifyKiosk is never asked) and hello's device_id/token are not read", async () => {
+  let verified = 0, seen = null;
+  const { h } = hub({ verifyKiosk: async () => { verified++; return { ...DEV }; } });
+  const ws = new FakeWs();
+  h.attach(ws, { authorize: async (msg) => { seen = msg; return { device: { ...SDEV } }; } });
+  ws.text({ type: "hello", mode: "session", csrf: "c", device_id: "kiosk-a", token: "good" }); await tick();
+  assert.equal(verified, 0);
+  assert.equal(seen.csrf, "c");
+  assert.equal(ws.msgs()[0].type, "ready");
+  assert.equal(h.isConnected(SDEV.id), true);
+  assert.equal(h.isConnected("kiosk-a"), false, "the paired display's id is not claimed");
+});
+
+test("session display: authorize → null closes 4401; → { close } closes with that code; a throw closes 1011", async () => {
+  for (const [authorize, want] of [
+    [async () => null, { code: 4401, reason: "unauthorized" }],
+    [async () => ({ close: { code: 4403, reason: "no_bot" } }), { code: 4403, reason: "no_bot" }],
+    [async () => { throw new Error("db"); }, { code: 1011, reason: "server_error" }],
+  ]) {
+    const { h } = hub(); const ws = new FakeWs();
+    h.attach(ws, { authorize });
+    ws.text({ type: "hello", mode: "session" }); await tick();
+    assert.deepEqual(ws.closed, want);
+    assert.equal(h.connectedIds().length, 0);
+  }
+});
+
+test("session display: the login is re-checked at every turn — once it has ended nothing is transcribed or run and the socket closes 4401", async () => {
+  let live = true, transcribed = 0;
+  const { h, turns } = hub({ transcribe: async () => { transcribed++; return { text: "hi" }; } });
+  const ws = new FakeWs();
+  h.attach(ws, { authorize: async () => ({ device: { ...SDEV } }), revalidate: async () => live });
+  ws.text({ type: "hello", mode: "session" }); await tick();
+  ws.text({ type: "turn_start", turn_id: "t1" }); ws.bin(PCM); ws.text({ type: "turn_end", vad_reason: "manual" }); await tick(); await tick();
+  assert.equal(turns.length, 1, "runs while the login is live");
+  live = false;
+  ws.text({ type: "turn_start", turn_id: "t2" }); ws.bin(PCM); ws.text({ type: "speech_pause" }); ws.text({ type: "turn_end", vad_reason: "silence", voiced_bytes: 8000 });
+  await tick(); await tick();
+  assert.deepEqual(ws.closed, { code: 4401, reason: "unauthorized" });
+  assert.equal(turns.length, 1, "no turn after the login ended");
+  assert.equal(transcribed, 0, "and no speech was transcribed");
+  const n = ws.sent.length;
+  ws.text({ type: "turn_start", turn_id: "t3" });
+  assert.equal(ws.sent.length, n, "frames still in flight after the close are ignored");
+});
+
+test("session display: a failing login check closes 1011 (retry), never 4401, and runs nothing", async () => {
+  const { h, turns } = hub();
+  const ws = new FakeWs();
+  h.attach(ws, { authorize: async () => ({ device: { ...SDEV } }), revalidate: async () => { throw new Error("database is locked"); } });
+  ws.text({ type: "hello", mode: "session" }); await tick();
+  ws.text({ type: "turn_start", turn_id: "t1" }); ws.bin(PCM); ws.text({ type: "turn_end", vad_reason: "manual" }); await tick(); await tick();
+  assert.deepEqual(ws.closed, { code: 1011, reason: "server_error" });
+  assert.equal(turns.length, 0);
+});
+
+test("session display: the idle sweep tolerates a session store it cannot read (no display is dropped for a database blip)", async () => {
+  const { h } = hub();
+  const ws = new FakeWs();
+  h.attach(ws, { authorize: async () => ({ device: { ...SDEV } }), revalidate: async () => { throw new Error("database is locked"); } });
+  ws.text({ type: "hello", mode: "session" }); await tick();
+  await h.revalidateSessions();
+  assert.equal(ws.closed, null);
+});
+
+test("session display: revalidateSessions closes only displays whose login ended; paired displays are never asked", async () => {
+  const live = { a: true, b: false };
+  const { h } = hub();
+  const paired = await hello(h);
+  const wa = new FakeWs(), wb = new FakeWs();
+  h.attach(wa, { authorize: async () => ({ device: { ...SDEV, id: "dash-a" } }), revalidate: async () => live.a });
+  h.attach(wb, { authorize: async () => ({ device: { ...SDEV, id: "dash-b" } }), revalidate: async () => live.b });
+  wa.text({ type: "hello" }); wb.text({ type: "hello" }); await tick();
+  await h.revalidateSessions();
+  assert.equal(wa.closed, null);
+  assert.deepEqual(wb.closed, { code: 4401, reason: "unauthorized" });
+  assert.equal(paired.closed, null);
+});
+
+test("session display: onClose fires when the socket goes away, but not for a socket replaced by a newer one of the same login", async () => {
+  const closed = [];
+  const { h } = hub();
+  const opts = { authorize: async () => ({ device: { ...SDEV } }), onClose: (d) => closed.push(d.id) };
+  const first = new FakeWs(), second = new FakeWs();
+  h.attach(first, opts); first.text({ type: "hello" }); await tick();
+  h.attach(second, opts); second.text({ type: "hello" }); await tick();
+  assert.deepEqual(first.closed, { code: 4000, reason: "superseded" });
+  assert.deepEqual(closed, [], "superseded: the display is still open");
+  second.close(1000, "bye");
+  assert.deepEqual(closed, [SDEV.id]);
+});
+
+test("a paired display (no opts) is untouched by the session hooks: token check as before, no revalidation", async () => {
+  const { h, turns } = hub();
+  const ws = await hello(h);
+  ws.text({ type: "turn_start", turn_id: "t1" }); ws.bin(PCM); ws.text({ type: "turn_end", vad_reason: "manual" }); await tick(); await tick();
+  assert.equal(turns.length, 1);
+  await h.revalidateSessions();
+  assert.equal(ws.closed, null);
+});

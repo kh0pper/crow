@@ -2096,7 +2096,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.1.5",
+      "version": "0.1.7",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -4973,7 +4973,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.14.1",
+      "version": "0.14.2",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
