@@ -198,7 +198,7 @@ export const CLIENT_SCRIPT = `
         diag.appendChild(el('p', 'kk-dim', S.diag_cols));
         (j.turns || []).slice(0, 20).forEach(function (t) {
           var tm = t.timings || {};
-          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms + (tm.stt_early === 'used' ? ' (early ' + tm.stt_early_ms + ')' : ''), tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '') + (tm.prompt_fit ? ' · ' + tm.prompt_fit : '') + (t.failed ? ' · ✗ ' + t.failed : '')].join(' · ')));
+          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms + (tm.stt_early === 'used' ? ' (early ' + tm.stt_early_ms + ')' : ''), tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '') + (tm.prompt_fit ? ' · ' + tm.prompt_fit : '') + (tm.families && tm.families.withheld && tm.families.withheld.length ? ' · ' + S.diag_withheld + ' ' + tm.families.withheld.join(', ') : '') + (t.failed ? ' · ✗ ' + t.failed : '')].join(' · ')));
         });
       });
     });

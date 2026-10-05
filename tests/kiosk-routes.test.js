@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import express from "express";
@@ -10,7 +10,9 @@ import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
 import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, kioskTooLargeText, kioskDisplayMissedText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
 import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
-import { kioskPromptSuffix } from "../bundles/kiosk/server/wm.js";
+import { displayPromptSuffix } from "../bundles/kiosk/server/prompt.js";
+import { effectiveCaps } from "../bundles/kiosk/server/caps.js";
+import { TURN_CHECK, TURN_CHECK_DEVICE, TURN_CHECK_CARD_TRIES } from "../bundles/kiosk/server/runtime.js";
 import { createBotFit, FIT_TTL_MS } from "../bundles/kiosk/server/fit.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.js";
@@ -621,8 +623,8 @@ test("fit: the listing gives every assistant its fit (with and without memories)
     assert.equal(by.household.display_name, "House");
     const q = f.asked.find((o) => o.botId === "fit-general" && o.memoryOn === false);
     assert.deepEqual(q.denyTools, KIOSK_DENY_TOOLS);
-    assert.equal(q.promptSuffix, kioskPromptSuffix());
-    assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_wm"]);
+    assert.equal(q.promptSuffix, displayPromptSuffix(null));
+    assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
     const n = f.asked.length;
     await (await fetch(f.b + "/api/kiosk/admin/displays")).json();
     assert.equal(f.asked.length, n, "the 5 s panel poll does not re-read every skill file: fits are cached");
@@ -729,22 +731,26 @@ test("live test (wired): a kiosk turn offers crow_wm only when asked, carries th
   const call = turnCalls.at(-1);
   assert.equal(call.device.id, "kiosk-clock");
   // A: the display tool decides per turn, from the plain transcript.
-  const wmTool = call.extraTools[0];
-  assert.equal(wmTool.definition.name, "crow_wm");
-  assert.equal(wmTool.when("Tell me a joke"), false);
-  assert.equal(wmTool.when("What time is it?"), false);
-  assert.equal(wmTool.when("set a timer for one minute and label it check"), true);
-  assert.equal(wmTool.when("show me the shopping list"), true);
+  assert.deepEqual(call.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
+  const [showTool, wmTool] = call.extraTools;
+  assert.equal(call.familiesOnIntent, true, "other tool families are offered only on intent");
+  for (const t of [showTool, wmTool]) {
+    assert.equal(t.when("Tell me a joke"), false);
+    assert.equal(t.when("What time is it?"), false);
+    assert.equal(t.when("set a timer for one minute and label it check"), true);
+    assert.equal(t.when("show me the shopping list"), true);
+  }
   // D: date, time and zone ride on the turn context (the user message), never the system suffix.
-  assert.match(call.turnContext, /^\[Now\] \w+day, \w+ \d{1,2}, \d{4}, \d{1,2}:\d\d [AP]M \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
+  assert.match(call.turnContext("Tell me a joke"), /^\[Now\] \w+day, \w+ \d{1,2}, \d{4}, \d{1,2}:\d\d [AP]M \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
   assert.doesNotMatch(call.promptSuffix, /\d{4}|[AP]M\b|Tokyo/, "the system message stays byte-stable");
-  assert.equal(call.promptSuffix, kioskPromptSuffix());
+  assert.equal(call.promptSuffix, displayPromptSuffix(effectiveCaps({}, undefined)));
   assert.match(call.promptSuffix, /\[Now\]/, "the model is told what the bracketed lines are");
   const fp = await call.fastPaths("What time is it?");
   assert.match(fp.say, /^It's \d{1,2}:\d\d [AP]M\.$/);
   assert.match((await call.fastPaths("¿Qué día es hoy?")).say, /^Hoy es \w+, \d{1,2} de \w+ de \d{4}\.$/);
   assert.equal(await call.fastPaths("Tell me a joke"), null);
   assert.equal(await call.fastPaths("What time is it in Lisbon?"), null);
+  assert.equal(await call.fastPaths("cierra todo"), null, "nothing is open: the phrase does not fire");
   // The timer fast path still wins for the wm family.
   assert.match((await call.fastPaths("set a timer for 2 minutes")).say, /^Timer set/);
   rt.wm.closeAll("kiosk-clock");
@@ -773,11 +779,108 @@ test("display truth (wired): every kiosk turn carries the must-run display tool,
   assert.equal(call.device.id, "kiosk-truth-es");
   assert.equal(call.displayMissedText, STRINGS.es.display_missed_say);
   assert.equal(call.memoryWhen, wantsMemory, "one function decides both the offer and the forced-call gate");
-  const wmTool = call.extraTools[0];
+  const wmTool = call.extraTools.find((x) => x.definition.name === "crow_show");
   assert.equal(wmTool.must("Show me a list of three fruits."), true);
   assert.equal(wmTool.must("Tell me a joke"), false);
-  assert.match(wmTool.mustNote, /crow_wm/);
+  assert.match(wmTool.mustNote, /crow_show/);
+  assert.equal(wmTool.missedText, undefined, "crow_show uses the display's own could-not-show line");
   // The round cap leaves room for one retry of a failed display command plus the spoken confirmation.
   assert.ok(call.maxToolRounds >= 3);
   w.close();
+});
+
+test("WM1a (wired): a turn that asks for new content gets a context with no titles; a turn that changes the open card gets its words; the bind-time fit counts the same tools the turn offers", async () => {
+  const { token } = await store.pairDevice(db(), { id: "kiosk-wm1a", name: "wm1a", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-wm1a", { bound_bot_id: "household" });
+  const w = new WebSocket(wsUrl(base));
+  const msgs = [];
+  try {
+    await new Promise((r) => w.on("open", r));
+    w.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    w.send(JSON.stringify({ type: "hello", device_id: "kiosk-wm1a", token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    rt.wm.open("kiosk-wm1a", { kind: "content", title: "Fruits", blocks: [{ type: "heading", text: "Fruits" }, { type: "list", items: ["apple", "pear"] }] });
+    const before = turnCalls.length;
+    w.send(JSON.stringify({ type: "turn_start", turn_id: "w1" }));
+    w.send(Buffer.alloc(8000));
+    w.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    const call = turnCalls.at(-1);
+    assert.equal(call.device.id, "kiosk-wm1a");
+    assert.match(call.turnContext("Now show me a list of vegetables."), /\[Display\] Open windows: 1 card\.$/);
+    assert.match(call.turnContext("What is on that card?"), /content 'Fruits'/);
+    assert.match(call.turnContext("Add grapes to the fruits list."), /The card "Fruits" now says: apple; pear\./);
+    assert.deepEqual(call.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"], "play and open are not offered until they have something to play or open");
+    assert.equal(call.extraTools[0].definition.inputSchema.properties.kind.enum.length, 4);
+    const [showTool, wmTool] = call.extraTools;
+    assert.deepEqual([showTool.when("What is the capital of Portugal?"), wmTool.when("What is the capital of Portugal?")], [false, true], "a plain question with a card up: crow_wm only");
+    assert.equal(showTool.must("Add grapes to the fruits list."), true);
+  } finally { rt.wm.closeAll("kiosk-wm1a"); w.close(); }
+});
+
+test("turn check (wired): loopback and the announce token only; fixed sentences through the same turn options a display uses, on a fixed display id that does not exist, never escalated; no card → not ok, after three tries", async () => {
+  assert.deepEqual(TURN_CHECK.en.length, 3);
+  assert.equal(TURN_CHECK_CARD_TRIES, 3);
+  const noToken = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bot_id: "household" }) });
+  assert.equal(noToken.status, 401);
+  const before = turnCalls.length;
+  const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: "household" }) });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.version, "0.2.0");
+  assert.deepEqual(j.turns.map((t) => t.transcript), [TURN_CHECK.en[0], TURN_CHECK.en[1], TURN_CHECK.en[2], TURN_CHECK.en[2], TURN_CHECK.en[2]]);
+  assert.deepEqual([j.ok, j.card_tries], [false, 3], "the stub never puts a card up: not ok, after three tries");
+  const calls = turnCalls.slice(before);
+  assert.equal(calls.length, 5);
+  for (const c of calls) {
+    assert.equal(c.device.id, TURN_CHECK_DEVICE);
+    assert.equal(c.device.bound_bot_id, "household");
+    assert.equal(c.noEscalate, true, "never the router, never a model start");
+    assert.equal(c.audio, undefined, "a transcript, never audio");
+    assert.deepEqual(c.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
+    assert.equal(c.familiesOnIntent, true);
+    assert.equal(typeof c.fastPaths, "function");
+  }
+  assert.deepEqual(rt.wm.list(TURN_CHECK_DEVICE), [], "nothing is left behind");
+  const bad = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
+  assert.equal(bad.status, 400);
+});
+
+test("turn check: ok only when the clock took the no-model path, the plain question had no tools, and the card is really on the screen (a truthful could-not is NOT a pass)", async () => {
+  const mk = (cardOn) => {
+    const runs = [];
+    const voice = {
+      convo: { save: (id, m) => runs.push(`convo:${id}:${m.length}`) },
+      runVoiceTurn: async (o) => {
+        runs.push(o.transcript);
+        if (o.transcript === TURN_CHECK.en[0]) return { route: "fast", fastPath: true, timings: {} };
+        if (o.transcript === TURN_CHECK.en[1]) return { route: "fast", failed: null, timings: { tools_offered: 0 } };
+        if (cardOn(runs.filter((x) => x === TURN_CHECK.en[2]).length)) {
+          await o.extraTools.find((x) => x.definition.name === "crow_show").execute({ kind: "list", title: "Fruits", body: "apples\nbananas" }, { transcript: o.transcript });
+          return { route: "fast", failed: null, timings: { tools: ["crow_show:shown"], tools_offered: 2 } };
+        }
+        return { route: "fast", failed: "display_missed", timings: { tools: [], tools_offered: 2 } };
+      },
+      speakText: async () => true,
+    };
+    return { runs, r: createKioskRuntime(runtimeDeps({ voice })) };
+  };
+  for (const [cardOn, ok, tries] of [[(n) => n === 1, true, 1], [(n) => n === 3, true, 3], [() => false, false, 3]]) {
+    const { runs, r } = mk(cardOn);
+    const app = express(); app.use(r.router((req, res, next) => next()));
+    const { s, base: b } = await listen(app, r);
+    try {
+      const res = await fetch(b + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: "household" }) });
+      const j = await res.json();
+      assert.deepEqual([j.ok, j.card_tries], [ok, tries]);
+      assert.deepEqual(r.wm.list(TURN_CHECK_DEVICE), [], "the card is cleared after the check");
+      assert.equal(runs[0], `convo:${TURN_CHECK_DEVICE}:0`, "the check starts from an empty conversation");
+    } finally { s.close(); }
+  }
+});
+
+test("one set of turn options: the runtime's display turn (and so the turn check) is built by displayTurnOptions, the function the evaluation runs", () => {
+  const rt = readFileSync(new URL("../bundles/kiosk/server/runtime.js", import.meta.url), "utf8");
+  assert.match(rt, /const turnOptions = \(device, caps, tz, emit\) => displayTurnOptions\(/);
+  assert.equal((rt.match(/createDisplayTools\(/g) || []).length, 2, "one in displayTurnOptions, one for the bind-time fit");
 });

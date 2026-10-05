@@ -38,12 +38,32 @@ The quick voice model has a small context (8,192 tokens on the stock local model
 
 Saved conversation is trimmed, oldest exchange first, when it would push a request over. The **Kiosk** panel shows the same result for every assistant in the picker — fits, works without its skills, or too large — and refuses to bind a too-large one. A general-purpose assistant with many skills belongs on a larger model; give a display a small household assistant.
 
+## How a spoken request is resolved
+
+A request goes through the cheapest step that can answer it, and every step ends in the same executor (`server/executor.js`) with the same result shape.
+
+1. **A control phrase with a live target** (`server/phrases.js`): "close that", "next step", "cierra todo". A fixed table of whole utterances in English and Spanish, compared word by word. It acts only when its target exists (a window to close, a recipe to step through) and names a window by its whole title or whole words of it; otherwise the request goes on.
+2. **An anchored pattern whose slot resolves on this display** (`server/patterns.js`): the verb at the start of the utterance, then a name that must match something the display has. No match means no action here.
+3. **The assistant, with the display tools** (`server/tools.js`, `server/display-tools.js`): `crow_show` (a card: text, a list, steps, a timer), `crow_wm` (close windows, move through steps), and, once a display has something to play or open, `crow_play` and `crow_open`. Each has at most three flat arguments, and every list of choices is built on the server for this display.
+
+The clock answers without a model: the time, today's date, tomorrow and yesterday, the weekday of a named date, and the days until one (`server/clock.js`).
+
+**Offered, and required.** A display tool is offered to the model only on a turn whose words are about it (or, for `crow_wm`, while a window is open). It is *required* when the person is asking for the thing now: new content, a change to the open card, a play or open request. On a required turn the model's text is held until the call has succeeded; a turn that ends without one gets one corrective round, and after that the display says that it could not, in its own words, instead of claiming it did. A sentence with two requests ("close the timer and then show me a list") is given to the model whole, with every tool that applies.
+
+**Results.** A tool result is `{ ok, outcome, say, final }`. A final result ends the turn on `say`, one sentence in the display's language, so a second model round is not needed to confirm what happened. If the model already spoke a sentence and the call changed something, `say` is not added on top. If the call changed nothing or failed, `say` is always spoken. A non-final result goes back to the model with the fix to make.
+
+**Forcing.** A forced tool call is sent only to an engine known to honour it (read from the model server's own model list). An engine that ignores a forced call is sent none, and the corrective round does the work. `"required"` is never sent to an engine that is not known to honour it.
+
+**Other tools.** The assistant's other tool families (projects, messages, files, news, add-ons) are offered to the quick model only on a turn whose words ask for them, or on the turn right after one that used them. A family that is not on offer is never run, whatever the model calls. Each turn's log line and the Diagnostics list say which families were not offered. Memory keeps its own rule (when asked to remember or recall).
+
+**Display profiles.** Each display has a type (small wall display, phone, tablet, desktop). What a display may show is the lesser of its type and what its page reports it can draw. A display with no type set is treated as the small wall display: audio first. The type is not stored until someone picks it in the Kiosk panel or the display's first connection guesses it from what its page reports (a phone says it is mobile; a small screen on an ARM Linux browser is a wall display); a guessed type is marked as guessed in the panel.
+
 ## Display tool and clock
-- The display tool (`crow_wm`: timers, recipes, a content card) is offered to the model only on turns that need it: the spoken question asks to show, time, follow or close something (English and Spanish word lists in `server/wm.js`, `wantsDisplay`), or a window is already open. A plain question gets no display tool, so it is answered aloud in one model round.
-- A content card is refused when the question did not ask to see anything, and any card whose title or text is empty or a syntax placeholder is refused. A new content card replaces the previous one; timers and recipes keep their own windows.
-- Every turn carries the display's local date, time and time zone on the user message (the page reports its zone when it connects; without one the server's zone is used). "What time is it?" and "What's the date?" are answered directly, without the model (`server/clock.js`, a phrase table).
-- **A display turn tells the truth.** When the question asks for something new on the screen (show, display, put up, a new timer, a recipe: `wantsNewDisplay`), the turn must end with a successful display call. While the display tool is the only tool offered, the request requires it (`tool_choice`); nothing the model says is spoken before the call has succeeded; a turn that ends without one gets one corrective round, and if nothing is on the screen after that the display says that it could not put it there (`failed: "display_missed"`) instead of claiming it did. A failed command is answered with the exact form to use and gets one retry.
-- Each tool call's outcome is logged as `name:code` (`ok`, `unknown_command`, `placeholder`, `no_intent`, `not_offered`, `refused_policy`, …), never its arguments or text; the page's debug list (long press on the clock) shows the same line.
+- A plain question is answered aloud in one model round with no display tool on offer. While a window is open, `crow_wm` alone is offered on such a turn (closes and steps).
+- A card is refused when the question did not ask to see anything, and any card whose title or text is empty or a placeholder is refused, with the fix. A card sent under the title of the card that is open updates it; a new content card replaces the previous one; a timer always gets its own window, so setting one never cancels another.
+- Every turn carries the display's local date, time and time zone on the user message (the page reports its zone when it connects; without one the server's zone is used).
+- Each tool call's outcome is logged as `name:outcome` (`shown`, `updated`, `placeholder`, `no_intent`, `not_offered`, `refused_policy`, …), never its arguments or text; the page's debug list (long press on the clock) shows the same line.
+- `POST /api/kiosk/internal/turn-check` (loopback and the announce token only) runs three fixed sentences through the same turn a display uses, on a display that does not exist, and reports what happened. It never escalates to the larger model (so it can never start one), and it passes only when the card it asks for is really on the screen (that sentence is tried up to three times). It is the check to run after an update.
 
 ## Privacy
 - The page sends its time zone name when it connects, so the display can tell the time.

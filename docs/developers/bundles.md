@@ -51,6 +51,19 @@ A bundle runs from its installed copy, never from the app checkout. The MCP serv
 
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
+## Voice display phrase lists (`capabilities.voice_intent`)
+
+An add-on whose tools an assistant may use by voice can say which words mean "this request is for me":
+
+```json
+"capabilities": {
+  "tools": [{ "name": "mb_play" }],
+  "voice_intent": { "en": ["music", "song", "songs", "next track"], "es": ["musica", "cancion", "canciones"] }
+}
+```
+
+Each entry is a plain phrase of one to four words (letters and digits; accents and case are ignored), at most 40 per language, in `en` and `es`. Matching is by whole words, so list the singular and the plural. A voice display offers the add-on's tools to its quick model only on a turn that contains one of these phrases, or on the turn right after one that used them. An add-on with no list is used only on turns sent to the larger model, and the display's Diagnostics list shows it as not offered. Patterns are not accepted: anything that is not a short plain phrase is ignored.
+
 ## Draft / unpublished
 
 - `"draft": true` excludes a bundle from the generated registry.
