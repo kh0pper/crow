@@ -55,7 +55,7 @@ export function parseOpen(transcript, { pull = true } = {}) {
   return name.length <= 6 ? { name: name.join(" ") } : null;
 }
 
-/** "play some jazz" → { what: "some jazz" }; "put on the Beatles" → { what: "beatles" }. */
+/** "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" }. */
 export function parsePlay(transcript) {
   const w = words(transcript, PLAY_MAX_WORDS);
   if (!w || hasAny(w, NOT_PLAY)) return null;

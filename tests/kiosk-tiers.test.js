@@ -160,8 +160,8 @@ test("T1 open: the verb at the START, a name that resolves on this display; anyt
 
 test("T1 play: only the words are parsed here (the lookup arrives with the media session)", () => {
   assert.deepEqual(parsePlay("Play some jazz."), { what: "some jazz" });
-  assert.deepEqual(parsePlay("Could you put on the Beatles, please?"), { what: "beatles" });
-  assert.deepEqual(parsePlay("Listen to Kind of Blue"), { what: "kind of blue" });
+  assert.deepEqual(parsePlay("Could you put on the Night Owls, please?"), { what: "night owls" });
+  assert.deepEqual(parsePlay("Listen to Blue Lanterns"), { what: "blue lanterns" });
   assert.deepEqual(parsePlay("Pon música de salsa"), { what: "musica de salsa" });
   assert.deepEqual(parsePlay("Quiero escuchar la radio"), { what: "radio" });
   for (const q of ["Who plays the lead in that show?", "play", "Pon un temporizador de cinco minutos", "Put on the screen a list of fruits", "Pon en la pantalla una receta", "I want to play outside", "Ponme una lista de frutas"]) assert.equal(parsePlay(q), null, q);
