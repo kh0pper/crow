@@ -38,6 +38,8 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 
 **Refresh on a version bump.** When a bundle's `version` changes, the gateway re-copies its code into the installed copy (`~/.crow/bundles/<id>/`). Docker bundles get a narrow set (`server/`, `panel/`, `skills/`, `package*.json`, declared roots) — never the compose file or anything a container mounts. A docker bundle that needs more opts in with `"refreshFiles": ["docker-compose.yml", "<plugin dir>"]`: plain bundle-relative paths, never `.env*`, `data`, `node_modules`, `.git`, `manifest.json`, or a path a read-write bind mount reaches (those are refused). Running containers keep the old files until the bundle is restarted.
 
+**Opting an installed copy out.** An installed copy that you maintain by hand (for example a fork deployed over a first-party bundle id) is skipped when its *installed* manifest (`~/.crow/bundles/<id>/manifest.json`) carries `"refresh": false`. The gateway logs the skip on each boot while the versions differ. Only the literal `false` opts out, and the missing-file repair (a deleted `panel/`, `settings-section.js` or `manifest.json`) still runs.
+
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
 ## Draft / unpublished
