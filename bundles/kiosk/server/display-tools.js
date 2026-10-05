@@ -21,6 +21,8 @@ const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 /** The crow_wm verbs this display can act on: window verbs always, playback verbs once a media session exists. */
 export const wmVerbs = (ctx) => [...WM_VERBS, ...(ctx.media ? MEDIA_VERBS : [])];
 
+/** First words of a K1 command that close windows or step a recipe. */
+const K1_WINDOW_WORDS = new Set(["close", "dismiss", "hide", "clear", "next", "previous", "prev", "back", "step", "read", "repeat", "cierra", "siguiente", "anterior"]);
 const UPDATE_WORDS = new Set(["add", "remove", "delete", "change", "update", "replace", "rename", "cross", "scratch", "lose", "drop", "erase", "strike", "agrega", "agregale", "anade", "anadele", "quita", "quitale", "cambia", "actualiza", "borra", "tacha"]);
 const SMALL_WORDS = new Set(["the", "and", "for", "our", "list", "card", "note", "los", "las", "del", "una", "lista", "nota"]);
 /**
@@ -111,7 +113,10 @@ export function createDisplayTools(ctx) {
         if (typeof a?.command === "string" && !a?.do) {
           if (typeof turn?.transcript === "string" && rules.crow_show.must(turn.transcript)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "use_crow_show", say: "Nothing was shown: put a card on the screen with crow_show, not with this tool. Call crow_show now with kind, title and body.", final: false });
           // Revision 6: the K1 form changes nothing on a turn whose words are about neither the windows nor a card.
-          if (typeof turn?.transcript === "string" && openWindow() && !windowIntent(turn.transcript) && !showIntent(turn.transcript, items)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "no_intent", say: "Nothing was changed: nobody asked to change the screen. Answer the user aloud instead; do not call this tool again for this question.", final: false });
+          // A K1 command that closes or steps needs the window test alone (as the do form does); one that puts
+          // something up needs a card or window request.
+          const changesWindows = K1_WINDOW_WORDS.has(String(a.command).trim().toLowerCase().split(/[\s|:,]+/)[0] || "");
+          if (typeof turn?.transcript === "string" && openWindow() && !windowIntent(turn.transcript) && (changesWindows || !showIntent(turn.transcript, items))) return JSON.stringify({ ok: false, outcome: "invalid", reason: "no_intent", say: "Nothing was changed: nobody asked to change the screen. Answer the user aloud instead; do not call this tool again for this question.", final: false });
           return legacy.execute(a, turn);
         }
         if (!enumOf("crow_wm", "do").includes(a?.do)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "bad_argument", say: "Nothing was done: do must be one of the listed values.", final: false });

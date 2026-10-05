@@ -299,23 +299,43 @@ const WINDOW_OBJECTS = new Set(["it", "that", "this", "them", "those", "these", 
   "window", "windows", "screen", "display", "list", "lists", "card", "cards", "timer", "timers", "recipe", "recipes", "step", "steps", "alarm",
   "ventana", "ventanas", "pantalla", "lista", "listas", "tarjeta", "temporizador", "temporizadores", "receta", "recetas", "paso", "pasos", "alarma"]);
 const WINDOW_RUNS = runs(["get rid of", "go back", "go back one", "all of them", "them all", "take it away", "take that away", "take it down", "take that down", "take it off", "take that off",
-  "get that off", "get it off", "off the screen", "dont need that", "dont need it", "dont need this", "no longer need", "done with", "finished with", "through with",
-  "ya termine con", "ya acabe con", "ya no la necesito", "ya no lo necesito", "next step", "previous step", "last step", "siguiente paso", "paso anterior", "keep going", "carry on"]);
+  "get that off", "get it off", "off the screen", "dont need that", "dont need it", "dont need this", "no longer need",
+  "ya no la necesito", "ya no lo necesito", "next step", "previous step", "last step", "siguiente paso", "paso anterior", "keep going", "carry on", "back one step", "back a step", "one step back", "next one", "previous one", "the next one", "the last one"]);
+// "done / finished / through with" close something only when what follows is a window word or a pronoun ("done
+// with that list", "finished with it"), never "done with work for today".
+const DONE_RUNS = runs(["done with", "finished with", "through with", "ya termine con", "ya acabe con"]);
+const DONE_OBJECTS = new Set(["it", "that", "this", "them", "those", "these", "everything", "eso", "esto", "todo"]);
+const DONE_DETS = new Set(["the", "that", "this", "my", "those", "these", "el", "la", "las", "los", "esa", "ese", "esta", "este", "mi"]);
+const WINDOW_NOUNS = new Set(["window", "windows", "screen", "display", "list", "lists", "card", "cards", "timer", "timers", "recipe", "recipes", "step", "steps", "alarm",
+  "ventana", "ventanas", "pantalla", "lista", "listas", "tarjeta", "temporizador", "temporizadores", "receta", "recetas", "paso", "pasos", "alarma"]);
+function doneWithWindow(w) {
+  for (const p of DONE_RUNS) for (let i = 0; i + p.length <= w.length; i += 1) {
+    if (!sameAt(w, i, p)) continue;
+    const a = w[i + p.length], b = w[i + p.length + 1], c = w[i + p.length + 2];
+    // "with it", "with the list", "with the pasta one" / "with the pasta timer" (one word between).
+    const named = (x) => WINDOW_NOUNS.has(x || "") || x === "one";
+    if (DONE_OBJECTS.has(a) || WINDOW_NOUNS.has(a) || (DONE_DETS.has(a) && (named(b) || named(c)))) return true;
+  }
+  return false;
+}
 // Stepping asked as a question ("what's after this?", "what comes next?").
-const STEP_QUESTIONS = runs(["whats after this", "whats after that", "whats next", "what comes next", "what comes after", "what do i do next", "y ahora que", "que sigue", "y luego que"]);
+const STEP_QUESTIONS = runs(["whats after this", "whats after that", "whats next", "whats the next", "what comes next", "what comes after", "what do i do next", "y ahora que", "que sigue", "y luego que"]);
 const PARTICLES = new Set(["up", "out", "away", "off", "down"]);
+// "next one", "previous one", "la siguiente": a stepping verb takes "one" as its object.
+const STEP_VERBS_W = new Set(["next", "previous", "siguiente", "anterior"]);
+const objectFor = (verb, x) => WINDOW_OBJECTS.has(x) || (STEP_VERBS_W.has(verb) && x === "one");
 function windowVerbHere(w, core) {
   // At the start: alone ("Close."), or with what it acts on next ("Clear them all"); "siguiente tema", "cancel culture" are not.
   if (core.length && WINDOW_CLITICS.has(core[0])) return true;
   if (core.length && WINDOW_VERBS_W.has(core[0])) {
     const k = PARTICLES.has(core[1]) ? 2 : 1;   // "tidy up the screen", "clear out the list"
-    if (core.length === k || WINDOW_OBJECTS.has(core[k]) || ((core[k] === "the" || core[k] === "el" || core[k] === "la" || core[k] === "my") && WINDOW_OBJECTS.has(core[k + 1] || ""))) return true;
+    if (core.length === k || objectFor(core[0], core[k]) || ((core[k] === "the" || core[k] === "el" || core[k] === "la" || core[k] === "my") && WINDOW_OBJECTS.has(core[k + 1] || ""))) return true;
   }
   for (let i = 0; i < w.length; i += 1) {
     if (WINDOW_CLITICS.has(w[i])) return true;
     if (!WINDOW_VERBS_W.has(w[i])) continue;
     const a = w[i + 1], b = w[i + 2];
-    if (WINDOW_OBJECTS.has(a) || ((a === "the" || a === "my" || a === "that" || a === "this" || a === "el" || a === "mi") && WINDOW_OBJECTS.has(b))) return true;
+    if (objectFor(w[i], a) || ((a === "the" || a === "my" || a === "that" || a === "this" || a === "el" || a === "mi") && WINDOW_OBJECTS.has(b))) return true;
   }
   return false;
 }
@@ -328,7 +348,7 @@ export function windowIntent(transcript) {
   if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p))) return false;
   // A display word or a follow-up counts only outside a statement ("the recipe was my aunt's", "hide and seek is fun").
   if (!hasAny(w, STATEMENT_VERBS) && (wantsDisplay(transcript) || followUp(transcript))) return true;
-  return hasAnyRun(w, WINDOW_RUNS) || windowVerbHere(w, core);
+  return hasAnyRun(w, WINDOW_RUNS) || doneWithWindow(w) || windowVerbHere(w, core);
 }
 export function followUp(transcript) {
   const w = plain(transcript);

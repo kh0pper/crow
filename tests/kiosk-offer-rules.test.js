@@ -342,3 +342,35 @@ test("R6-4/5: household 'put … on' is not a name to play; 'what's new in the a
   for (const say of ["Put the kettle on, I'm cold.", "Have your coat on before you go.", "Put the heating on for a bit."]) assert.ok(!t.offered(say).includes("crow_play"), say);
   assert.equal(t.by.crow_open.holdText("What's new in the apps this week?"), false, "offered (an app word), never held");
 });
+
+// ── Revision 6b probe re-check ───────────────────────────────────────────────────────────────────
+test("6b-1: the K1 command form that closes or steps needs the window test alone — a card-ish question does not let it through", async () => {
+  const d = liveWm({ windows: [W_TIMER] });
+  const before = snapshot(d.store);
+  for (const command of ["close", "close all", "next step", "close timer"]) {
+    const r = await d.run({ command }, "How long is a timer for soft eggs usually?");
+    assert.equal(r.ok === true, false, command);
+    assert.equal(snapshot(d.store), before, `${command}: unchanged`);
+  }
+  assert.equal((await liveWm({ windows: [W_TIMER] }).run({ command: "close timer" }, "Close the timer.")).ok, true, "a real close through the K1 form still works");
+});
+
+test("6b-2: 'done / finished / through with' close only when a window word or pronoun follows", async () => {
+  for (const say of ["I'm done with work for today.", "We're finished with dinner, finally.", "She's through with school next year.", "Ya terminé con la tarea de mi hijo."]) {
+    assert.equal(windowIntent(say), false, say);
+    const d = liveWm({ windows: [W_CARD] });
+    const before = snapshot(d.store);
+    await d.run({ do: "close" }, say);
+    assert.equal(snapshot(d.store), before, say);
+  }
+  for (const say of ["I'm done with it.", "Finished with that list, thanks.", "Ya terminé con la lista."]) assert.equal(windowIntent(say), true, say);
+});
+
+test("6b-3: stepping phrases — back one step, back a step, what's the next one, next one", async () => {
+  for (const [say, verb] of [["Back one step, I missed it.", "previous_step"], ["Go back a step.", "previous_step"], ["What's the next step?", "next_step"], ["Next one, my hands are sticky.", "next_step"], ["Previous one please.", "previous_step"]]) {
+    assert.equal(windowIntent(say), true, say);
+    const d = liveWm({ windows: [{ ...W_RECIPE, step: 1 }] });
+    assert.equal((await d.run({ do: verb }, say)).outcome, "done", say);
+  }
+  assert.equal(windowIntent("Cancel one of my meetings tomorrow."), false, "'one' is an object only for next/previous");
+});
