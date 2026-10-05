@@ -106,14 +106,14 @@ test("slugifyBotId + uniqueBotId collision suffix", async () => {
 
 // ---- step 0 (template) ----
 
-test("GET ?new=1 renders step 0: turbo opt-out, csrf, five template cards, no bare keys", async () => {
+test("GET ?new=1 renders step 0: turbo opt-out, csrf, six template cards, no bare keys", async () => {
   const html = await renderGet();
   assert.match(html, /<form method="POST"[^>]*data-turbo="false"/, "step form must opt out of Turbo Drive");
   assert.match(html, /name="_csrf"/, "step form must carry CSRF");
   assert.match(html, /name="action" value="wizard_step"/);
   assert.match(html, /name="step" value="0"/);
   const radios = html.match(/name="tpl"/g) || [];
-  assert.equal(radios.length, 5, "five template radio cards");
+  assert.equal(radios.length, 6, "six template radio cards (personal-voice added)");
   assert.ok(!/botbuilder\.[a-zA-Z_]/.test(html), "no bare i18n keys");
 });
 
