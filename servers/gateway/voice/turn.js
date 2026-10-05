@@ -12,6 +12,7 @@ import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction,
 } from "./turn-helpers.js";
+import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
@@ -19,6 +20,8 @@ export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
 /** Spoken + captioned when a turn ends with no answer (tool loop, empty reply, budget); callers pass a localized one. */
 export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again.";
+/** Spoken + captioned INSTEAD of a model call when the bound bot's prompt cannot fit the model even without its skills; callers pass a localized one. */
+export const BOT_TOO_LARGE_TEXT = "This assistant is too large for the quick voice model. Choose another assistant for this display in the Kiosk settings.";
 /** Rides on the last tool result before the forced final round (kept off the saved conversation). */
 export const STOP_TOOLS_NOTE = "Tool limit reached for this question. Answer the user now from what you already have, in one or two short sentences. Do not call another tool.";
 const DEGRADED_NOTE = "The larger model is not available right now. Answer with what you have, and call a tool directly if one is needed.";
@@ -39,6 +42,44 @@ export function createVoiceTurnRunner(deps) {
   // by reference, so the mark survives into later turns (smoke 2026-10-04: a
   // refused/looping crow_discover escalated the next three plain questions).
   const routeNeutral = new WeakSet();
+  const fitLogged = new Set();
+
+  /** The tool list a turn advertises (also what the bind-time fit check counts). */
+  function turnTools(bot, { memoryOn, extra, deny }) {
+    const extraNames = new Set(extra.map((x) => x.definition.name));
+    return deps.getChatTools({ botDef: bot })
+      .filter((t) => !deny.has(t.name) && (memoryOn || t.name !== "crow_memory") && !extraNames.has(t.name))
+      .concat(extra.map((x) => x.definition));
+  }
+  const turnDeny = (denyTools) => new Set(["crow_glasses_capture_photo", ...(Array.isArray(denyTools) ? denyTools : [])]);
+  const withSuffix = (system, suffix) => (suffix ? `${system}\n\n${suffix}` : system);
+
+  /**
+   * The fit ladder for one bot on one model (prompt-fit.js): the full system message, else the
+   * one without the bot's skill bodies, else too large. `full` = an already-built full message.
+   */
+  async function promptFit({ db, bot, tools, promptSuffix, key, full }) {
+    const ctx = await deps.contextLenFor(key, db);
+    return choosePromptFit({
+      ctx, tools,
+      full: full ?? withSuffix(await deps.generateSystemPrompt({ botDef: bot }), promptSuffix),
+      lean: async () => withSuffix(await deps.generateSystemPrompt({ botDef: bot, omitSkills: true }), promptSuffix),
+    });
+  }
+
+  /**
+   * Bind-time check (Kiosk panel): would this bot's voice prompt fit its quick voice model?
+   * Runs the turn's own tool filter and ladder. null = no such enabled bot.
+   * → { level: "full" | "no_skills" | "too_large", ctx (null = unknown), est_tokens, est_no_skills_tokens, reserve_tokens, model }
+   */
+  async function assessBot({ db, botId, memoryOn = false, extraTools, denyTools, promptSuffix }) {
+    const bot = await loadBot(db, botId);
+    if (!bot) return null;
+    const key = bot.fast_voice_model || deps.fastKey;
+    const tools = turnTools(bot, { memoryOn, extra: Array.isArray(extraTools) ? extraTools : [], deny: turnDeny(denyTools) });
+    const fit = await promptFit({ db, bot, tools, promptSuffix, key });
+    return { level: fit.level, ctx: fit.ctx, est_tokens: fit.est, est_no_skills_tokens: fit.est_no_skills, reserve_tokens: fit.reserve, model: key };
+  }
 
   async function loadBot(db, botId) {
     if (!botId) return null;
@@ -158,8 +199,12 @@ export function createVoiceTurnRunner(deps) {
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
-   * fallback spoken (default: none); fallbackText — the localized fallback line.
-   * result.failed: null | "tool_rounds" | "tool_repeat" | "no_text" | "budget" | "error".
+   * fallback spoken (default: none); fallbackText — the localized fallback line; tooLargeText —
+   * the localized line for a bot whose prompt cannot fit the model (default BOT_TOO_LARGE_TEXT).
+   * result.failed: null | "tool_rounds" | "tool_repeat" | "no_text" | "budget" | "error"
+   *   | "bot_too_large" (the bot's prompt does not fit the model even without its skills: no model call)
+   *   | "context_full" (this request would not fit the context even with no saved history: not sent).
+   * timings.prompt_fit: "no_skills" | "too_large" when the full prompt did not fit (absent when it did).
    */
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
@@ -259,10 +304,8 @@ export function createVoiceTurnRunner(deps) {
       // denyTools (kiosk: crow_delegate, crow_job_status — review C3): never advertised AND
       // refused by the gate below even if force-called, so a room cannot hand work to
       // another bot (crow_delegate's `bot` arg accepts ANY enabled bot) or read it back.
-      const deny = new Set(["crow_glasses_capture_photo", ...(Array.isArray(opts.denyTools) ? opts.denyTools : [])]);
-      const tools = deps.getChatTools({ botDef: bot })
-        .filter((t) => !deny.has(t.name) && (memoryOn || t.name !== "crow_memory") && !extraByName.has(t.name))
-        .concat(extra.map((x) => x.definition));
+      const deny = turnDeny(opts.denyTools);
+      const tools = turnTools(bot, { memoryOn, extra, deny });
       executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
@@ -272,7 +315,7 @@ export function createVoiceTurnRunner(deps) {
       // dropped from the saved conversation.
       const userMsg = { role: "user", content: opts.turnContext ? `${opts.turnContext}\n\n${transcript}` : transcript };
       const messages = [
-        { role: "system", content: opts.promptSuffix ? `${system}\n\n${opts.promptSuffix}` : system },
+        { role: "system", content: withSuffix(system, opts.promptSuffix) },
         ...history,
         userMsg,
       ];
@@ -312,6 +355,37 @@ export function createVoiceTurnRunner(deps) {
       }
       if (aborted()) { result.aborted = true; return result; }
       if (budgetHit) { await speakFallback("budget", false); return result; }
+
+      // 4b. Prompt fit, against the model this turn really uses. A bound bot's skills are inlined
+      // in the system message; a general assistant with many skills was ~41k tokens against the
+      // 4B's 8,192 and every turn failed. Full prompt → the one without skill bodies → no call.
+      const modelKey = result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey);
+      const fit = await promptFit({ db, bot, tools, promptSuffix: opts.promptSuffix, key: modelKey, full: withSuffix(system, opts.promptSuffix) });
+      const ctx = fit.ctx;
+      if (fit.level !== "full") {
+        timings.prompt_fit = fit.level;
+        const nums = `~${fit.est} prompt tokens with skills, ~${fit.est_no_skills} without, +${fit.reserve} reserved for the turn, context ${ctx}`;
+        if (fit.level === "too_large") {
+          result.failed = "bot_too_large";
+          timings.failed = "bot_too_large";
+          timings.est_prompt_tokens = fit.est_no_skills;
+          log(`[voice-turn] ${device.id} bot ${bot.bot_id} is too large for ${modelKey} even without its skills (${nums}); no model call`);
+          const line = String(opts.tooLargeText || BOT_TOO_LARGE_TEXT);
+          sink.event({ type: "caption_delta", text: line });
+          try { await say.force(line); } catch (err) { log(`[voice-turn] ${device.id} could not speak the too-large line: ${err.message}`); }
+          if (aborted()) { result.aborted = true; return result; }
+          say.end();
+          fail("bot_too_large", false);
+          return result;
+        }
+        // A degraded escalation's note joined the full message above; it joins the lean one the same way.
+        messages[0] = { ...messages[0], content: result.degraded ? `${fit.system}\n\n${DEGRADED_NOTE}` : fit.system };
+        const once = `${device.id}|${bot.bot_id}|${modelKey}`;
+        if (!fitLogged.has(once)) {
+          fitLogged.add(once);
+          log(`[voice-turn] ${device.id} bot ${bot.bot_id} runs without its skills on ${modelKey}: the full prompt does not fit (${nums})`);
+        }
+      }
 
       // 5. Streamed tool loop
       const scope = deps.botVoiceScope(bot);
@@ -361,6 +435,7 @@ export function createVoiceTurnRunner(deps) {
       let finalSpoken = 0;
       let lastStuckSig = null;
       let nudged = null;
+      let overflow = false;
       const toolLog = [];
       while (!budgetHit) {
         rounds++;
@@ -372,10 +447,21 @@ export function createVoiceTurnRunner(deps) {
         nextMax = 600;
         // Keep prompt + completion inside the model's context (review M6: the 4B is 8192;
         // tool schemas alone are ~5k tokens). ~3.2 chars/token is a deliberate over-estimate.
-        const ctx = await deps.contextLenFor(result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey), db);
-        const estPrompt = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 3.2);
+        let estPrompt = estimatePromptTokens(messages, tools);
+        // Never send a request that cannot fit (every round: history and tool results grow). Saved
+        // history goes first, oldest exchange first; the system message and this turn stay.
+        for (let n; !requestFits(estPrompt, ctx) && (n = dropOldestExchange(messages, userMsg)) > 0;) {
+          timings.history_dropped = (timings.history_dropped || 0) + n;
+          estPrompt = estimatePromptTokens(messages, tools);
+        }
+        timings.est_prompt_tokens = estPrompt;
+        if (!requestFits(estPrompt, ctx)) {
+          log(`[voice-turn] ${device.id} round ${rounds} not sent: ~${estPrompt} prompt tokens do not fit ${modelKey} (context ${ctx}) with no saved history left`);
+          overflow = true;
+          break;
+        }
         const maxTokens = ctx ? Math.max(64, Math.min(roundMax, ctx - estPrompt - 128)) : roundMax;
-        timings.est_prompt_tokens = estPrompt; timings.max_tokens = maxTokens;   // in [kiosk-metrics]; the smoke records both
+        timings.max_tokens = maxTokens;   // with est_prompt_tokens in [kiosk-metrics]; the smoke records both
         try {
           for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal })) {
             if (aborted() || budgetHit) break;
@@ -488,6 +574,7 @@ export function createVoiceTurnRunner(deps) {
         if (aborted()) result.aborted = true;
         // The budget can fire while the last chunk is still synthesizing (the stream already ended).
         else if (budgetHit && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
+        else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
         else if (cut && finalSpoken === 0 && answeredChars === 0 && !displayProgress) { await speakFallback(cut, spokenChars > 0); return result; }
         else if (spokenChars === 0 && !displayProgress) { await speakFallback("no_text", false); return result; }
       }
@@ -501,6 +588,8 @@ export function createVoiceTurnRunner(deps) {
       if (budgetHit) { await speakFallback("budget", true).catch(() => {}); return result; }
       result.failed = "error";
       timings.failed = "error";
+      // The cause used to reach the client only; the gateway log is where it gets diagnosed.
+      log(`[voice-turn] ${device?.id} turn failed (error): ${err?.message || err}`);
       fail("turn_failed", true, err.message);
       return result;
     } finally {
@@ -520,7 +609,7 @@ export function createVoiceTurnRunner(deps) {
     return true;
   }
 
-  return { runVoiceTurn, speakText, transcribe, convo };
+  return { runVoiceTurn, speakText, transcribe, assessBot, convo };
 }
 
 /** The real dependencies (gateway process). Lazy so tests never load them. */

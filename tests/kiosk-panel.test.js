@@ -46,7 +46,7 @@ test("page string keys exist in en and es (page keys are a subset of STRINGS)", 
     for (const m of src.matchAll(/hint:\s*["']([a-z_]+)["']/g)) keys.add(m[1]);
     for (const m of src.matchAll(/return\s+["'](mic_blocked|no_mic|mic_error|needs_gesture)["']/g)) keys.add(m[1]);
   }
-  for (const c of ["turn_busy", "empty_transcript", "audio_too_long", "turn_failed", "tts_error", "acquire_failed"]) keys.add("err_" + c);
+  for (const c of ["turn_busy", "empty_transcript", "audio_too_long", "turn_failed", "tts_error", "acquire_failed", "bot_too_large"]) keys.add("err_" + c);
   assert.ok(keys.size >= 15, "found " + keys.size);
   for (const k of keys) { assert.ok(STRINGS.en[k], "en missing " + k); assert.ok(STRINGS.es[k], "es missing " + k); }
 });
@@ -74,7 +74,7 @@ async function runPanel(device, data = {}) {
   };
   const fetch = async (path, opts = {}) => {
     if (opts.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
-    return { status: 200, json: async () => (opts.method === "POST" ? { ok: true } : listing) };
+    return { status: 200, json: async () => (opts.method === "POST" ? (data.postReply || { ok: true }) : listing) };
   };
   const ctx = vm.createContext({ document, window, fetch, JSON, String, setInterval: () => 0, clearInterval: () => {}, encodeURIComponent, Date });
   window.confirm = () => false;
@@ -85,7 +85,10 @@ async function runPanel(device, data = {}) {
   const vad = [...card.querySelectorAll("input")].find((i) => i.type === "number");
   const save = [...card.querySelectorAll("button")].find((b) => b.textContent === STRINGS.en.save);
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
-  return { bot, stt, sm, tts, vad, save, posts, flush, card };
+  const change = (node) => node.dispatchEvent(new window.Event("change"));
+  // linkedom: selecting one option clears the others (and un-selecting ANY option clears the selected one), so only the target is set.
+  const choose = (sel, value) => { [...sel.querySelectorAll("option")].find((o) => o.value === value).selected = true; change(sel); };
+  return { bot, stt, sm, tts, vad, save, posts, flush, card, document, window, change, choose, pairForm: document.querySelector("#kk-pair form") };
 }
 const KDEV = { id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, kiosk_settings: { follow_up: true, memory_integration: false } };
 
@@ -127,4 +130,64 @@ test("smoke 2026-10-04 levers in the panel: end-of-speech wait (300-900 ms) and 
   await p.flush();
   assert.equal(p.posts.length, 1);
   assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, vad_hangover_ms: 900, stt_model: "tiny.en" } }, "typed value clamped to 900");
+});
+
+// Assistant fit: the picker says, BEFORE binding, whether an assistant's prompt fits the quick voice model.
+const FIT_BOTS = [
+  { bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full" },
+  { bot_id: "general", display_name: "General", fit: "no_skills", fit_memory: "no_skills" },
+  { bot_id: "edge", display_name: "Edge", fit: "no_skills", fit_memory: "too_large" },
+  { bot_id: "huge", display_name: "Huge", fit: "too_large", fit_memory: "too_large" },
+  { bot_id: "mystery", display_name: "Mystery", fit: null, fit_memory: null },
+];
+
+test("fit in the pairing form: every assistant is listed with its status; picking a too-large one shows the distinct warning before Pair", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, postReply: { error: "bot_too_large" } });
+  const sel = p.pairForm.querySelector("select");
+  const labels = Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
+  assert.equal(labels.chef, "Chef");
+  assert.equal(labels.general, `General — ${STRINGS.en.fit_tag_no_skills}`);
+  assert.equal(labels.huge, `Huge — ${STRINGS.en.fit_tag_too_large}`);
+  assert.equal(labels.mystery, "Mystery", "unknown fit: no claim either way");
+  const line = p.pairForm.querySelector(".kk-fit");
+  assert.equal(line.textContent, "", "nothing chosen yet");
+  p.choose(sel, "general");
+  assert.equal(line.textContent, STRINGS.en.fit_no_skills);
+  assert.ok(line.classList.contains("kk-fit-warn") && !line.classList.contains("kk-fit-bad"));
+  p.choose(sel, "huge");
+  assert.equal(line.textContent, STRINGS.en.fit_too_large);
+  assert.ok(line.classList.contains("kk-fit-bad"), "too large is visually distinct");
+  p.choose(sel, "chef");
+  assert.equal(line.textContent, STRINGS.en.fit_full);
+  assert.ok(!line.classList.contains("kk-fit-bad") && !line.classList.contains("kk-fit-warn"));
+  // The server's refusal is shown in words.
+  p.choose(sel, "huge");
+  p.pairForm.querySelector("input[name=code]").value = "123456";
+  p.pairForm.dispatchEvent(new p.window.Event("submit"));
+  await p.flush();
+  assert.equal(p.pairForm.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large);
+});
+
+test("fit on a paired display: the bound assistant's status is shown, follows the picker and the memory box, and a refused save is explained", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "huge", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, postReply: { error: "bot_too_large" } });
+  const line = p.card.querySelector(".kk-fit");
+  assert.equal(line.textContent, STRINGS.en.fit_too_large, "a display already bound to a too-large assistant says so");
+  assert.ok(line.classList.contains("kk-fit-bad"));
+  assert.ok([...p.bot.querySelectorAll("option")].some((o) => o.textContent === `Huge — ${STRINGS.en.fit_tag_too_large}`));
+  p.choose(p.bot, "edge");
+  assert.equal(line.textContent, STRINGS.en.fit_no_skills);
+  const mem = [...p.card.querySelectorAll("input")].filter((i) => i.type === "checkbox")[1];
+  mem.checked = true; p.change(mem);
+  assert.equal(line.textContent, STRINGS.en.fit_too_large, "with memories on this assistant no longer fits");
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 1);
+  assert.equal(p.card.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large);
+});
+
+test("fit strings: the three states and the refusal exist in en and es; the page's too-large line is its own string", () => {
+  for (const L of ["en", "es"]) {
+    for (const k of ["fit_full", "fit_no_skills", "fit_too_large", "fit_tag_no_skills", "fit_tag_too_large", "bot_too_large", "err_bot_too_large"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
+  }
+  assert.match(CLIENT_SCRIPT, /kk-fit-bad/);
 });

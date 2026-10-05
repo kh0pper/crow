@@ -19,6 +19,14 @@ A paired browser — a phone today, a Raspberry Pi 3 with a 7" touchscreen next 
 - Speech-to-text: the Faster-Whisper bundle (loopback :8004); the kiosk adds a `distil-small.en` profile at first pairing. Each display can switch to the faster, less accurate `tiny.en` (Speech model) and set its end-of-speech wait (300–900 ms, default 450). Crow warms the display's speech model at gateway start, on connect, and after a settings change, so the first question is not slow.
 - Voice: the Kokoro TTS bundle (loopback :8880) when installed.
 
+## Does the assistant fit?
+The quick voice model has a small context (8,192 tokens on the stock local model), and an assistant's system prompt carries the full text of every skill it has. Before each model call the voice turn estimates the request (`servers/gateway/voice/prompt-fit.js`) and never sends one that cannot fit:
+- the full prompt fits → nothing changes;
+- it does not → the turn runs **without the assistant's skill bodies** (persona and tools stay); the turn's metrics carry `prompt_fit: "no_skills"`;
+- still too large → no model call: the display says that the assistant is too large and to choose another one in the Kiosk settings (`failed: "bot_too_large"`).
+
+Saved conversation is trimmed, oldest exchange first, when it would push a request over. The **Kiosk** panel shows the same result for every assistant in the picker — fits, works without its skills, or too large — and refuses to bind a too-large one. A general-purpose assistant with many skills belongs on a larger model; give a display a small household assistant.
+
 ## Privacy
 - Nothing is sent before a tap. No audio is stored; transcripts live only in the display's short in-memory conversation (15 min).
 - Memories are off by default on a display (`memory_integration`).

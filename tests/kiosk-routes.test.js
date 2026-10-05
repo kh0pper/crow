@@ -8,7 +8,9 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
-import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, kioskTooLargeText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
+import { kioskPromptSuffix } from "../bundles/kiosk/server/wm.js";
+import { createBotFit, FIT_TTL_MS } from "../bundles/kiosk/server/fit.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
@@ -559,4 +561,134 @@ test("lever D (wired): speech_pause → voice.transcribe with the display's mode
   assert.equal(runs[0].sttEarly.used, true);
   assert.equal(typeof runs[0].startedAt, "number");
   ws.close(); r.stop(); s.close();
+});
+
+// ── Assistant fit (a bound assistant whose prompt does not fit the quick voice model) ─────────────
+/** A runtime whose voice runner answers assessBot from a table: bot_id → level, or { off, on } by memory setting. */
+async function fitRuntime(levels) {
+  const asked = [];
+  const voice = {
+    runVoiceTurn: async (o) => { turnCalls.push(o); return { route: "fast", timings: {} }; },
+    speakText: async () => true,
+    assessBot: async (o) => {
+      asked.push(o);
+      const v = levels[o.botId];
+      if (v === undefined) return null;
+      if (v instanceof Error) throw v;
+      const level = typeof v === "string" ? v : (o.memoryOn ? v.on : v.off);
+      return { level, ctx: level === "unknown" ? null : 8192, est_tokens: 1, est_no_skills_tokens: 1, reserve_tokens: 1024, model: "crow-voice/quick" };
+    },
+  };
+  const k = createKioskRuntime(runtimeDeps({ voice }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  const post = (path, body) => fetch(b + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return { k, b, post, asked, close: () => { k.stop(); s.close(); } };
+}
+const FIT_BOTS = "('fit-general','General','{}',1),('fit-huge','Huge','{}',1),('fit-edge','Edge','{}',1),('fit-unknown','Unknown','{}',1),('fit-broken','Broken','{}',1)";
+
+test("fit: the listing gives every assistant its fit (with and without memories), computed by the voice runner with the kiosk's own tool list", async () => {
+  await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
+  const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-edge": { off: "no_skills", on: "too_large" }, "fit-unknown": "unknown", "fit-broken": new Error("skills dir unreadable") });
+  try {
+    const body = await (await fetch(f.b + "/api/kiosk/admin/displays")).json();
+    const by = Object.fromEntries(body.bots.map((x) => [x.bot_id, x]));
+    assert.deepEqual([by.household.fit, by.household.fit_memory], ["full", "full"]);
+    assert.deepEqual([by["fit-general"].fit, by["fit-general"].fit_memory], ["no_skills", "no_skills"]);
+    assert.deepEqual([by["fit-huge"].fit, by["fit-huge"].fit_memory], ["too_large", "too_large"]);
+    assert.deepEqual([by["fit-edge"].fit, by["fit-edge"].fit_memory], ["no_skills", "too_large"]);
+    assert.deepEqual([by["fit-unknown"].fit, by["fit-unknown"].fit_memory], [null, null], "unknown model context: no status");
+    assert.deepEqual([by["fit-broken"].fit, by["fit-broken"].fit_memory], [null, null], "a failed check is no status, never a refusal");
+    assert.equal(by.household.display_name, "House");
+    const q = f.asked.find((o) => o.botId === "fit-general" && o.memoryOn === false);
+    assert.deepEqual(q.denyTools, KIOSK_DENY_TOOLS);
+    assert.equal(q.promptSuffix, kioskPromptSuffix());
+    assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_wm"]);
+    const n = f.asked.length;
+    await (await fetch(f.b + "/api/kiosk/admin/displays")).json();
+    assert.equal(f.asked.length, n, "the 5 s panel poll does not re-read every skill file: fits are cached");
+  } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
+});
+
+test("fit: pairing a display to a too-large assistant is refused (bot_too_large) and the code stays usable; without-skills and unknown fits pair", async () => {
+  await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
+  const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-broken": new Error("x") });
+  try {
+    const st = await (await f.post("/api/kiosk/pair/start", {})).json();
+    const no = await f.post("/api/kiosk/admin/approve", { code: st.code, name: "Kitchen", bot_id: "fit-huge" });
+    assert.equal(no.status, 400);
+    assert.deepEqual(await no.json(), { error: "bot_too_large" });
+    assert.equal(f.k.pairing.listPending().length, 1, "the code was not used up");
+    const ok = await (await f.post("/api/kiosk/admin/approve", { code: st.code, name: "Kitchen", bot_id: "fit-general" })).json();
+    assert.equal(ok.ok, true);
+    assert.equal((await store.findDevice(db(), ok.device_id)).bound_bot_id, "fit-general");
+    const st2 = await (await f.post("/api/kiosk/pair/start", {})).json();
+    assert.equal((await (await f.post("/api/kiosk/admin/approve", { code: st2.code, name: "Hall", bot_id: "fit-broken" })).json()).ok, true, "a failed fit check never blocks pairing");
+  } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
+});
+
+test("fit: rebinding a display to a too-large assistant is refused; other saves on an already-bound display are not; the fit uses the display's memory setting", async () => {
+  await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
+  const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-edge": { off: "no_skills", on: "too_large" } });
+  try {
+    await store.pairDevice(db(), { id: "kiosk-fit-a", name: "Fit A", device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "household" });
+    const no = await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-huge" });
+    assert.equal(no.status, 400);
+    assert.deepEqual(await no.json(), { error: "bot_too_large" });
+    assert.equal((await store.findDevice(db(), "kiosk-fit-a")).bound_bot_id, "household", "nothing was saved");
+    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge" })).status, 200, "fits without skills while memories are off");
+    // A display that is ALREADY on a too-large assistant can still save its other settings (and can leave it).
+    await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "fit-huge" });
+    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-huge", kiosk_settings: { vad_hangover_ms: 600 } })).status, 200);
+    assert.equal((await store.findDevice(db(), "kiosk-fit-a")).kiosk_settings.vad_hangover_ms, 600);
+    // Memories on: the same assistant no longer fits → refused with the display's own setting.
+    await store.updateDeviceProfiles(db(), "kiosk-fit-a", { bound_bot_id: "household", kiosk_settings: { memory_integration: true } });
+    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge" })).status, 400);
+    assert.equal((await f.post("/api/kiosk/admin/displays/kiosk-fit-a", { bound_bot_id: "fit-edge", kiosk_settings: { memory_integration: false } })).status, 200, "the posted memory setting is the one that counts");
+  } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
+});
+
+test("fit (wired): every kiosk voice turn carries the too-large line in the display's language", async () => {
+  assert.equal(kioskTooLargeText("en"), STRINGS.en.err_bot_too_large);
+  assert.equal(kioskTooLargeText("es"), STRINGS.es.err_bot_too_large);
+  assert.equal(kioskTooLargeText(undefined), STRINGS.en.err_bot_too_large);
+  for (const L of ["en", "es"]) assert.match(STRINGS[L].err_bot_too_large, /Kiosk/, "the line says where to fix it");
+  const { token } = await store.pairDevice(db(), { id: "kiosk-fit-es", name: "es", device_kind: "kiosk", kiosk_settings: { lang: "es" } });
+  await store.updateDeviceProfiles(db(), "kiosk-fit-es", { bound_bot_id: "household" });
+  const w = new WebSocket(wsUrl(base));
+  const msgs = [];
+  await new Promise((r) => w.on("open", r));
+  w.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  w.send(JSON.stringify({ type: "hello", device_id: "kiosk-fit-es", token, caps: {} }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+  const before = turnCalls.length;
+  w.send(JSON.stringify({ type: "turn_start", turn_id: "f1" }));
+  w.send(Buffer.alloc(8000));
+  w.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(turnCalls.at(-1).tooLargeText, STRINGS.es.err_bot_too_large);
+  w.close();
+});
+
+test("fit cache: one check per assistant and memory setting per 30 s; fresh bypasses it; unknown context and errors are null", async () => {
+  let t = 0;
+  const calls = [];
+  const fit = createBotFit({
+    now: () => t, log: () => {},
+    assess: async (d, botId, mem) => { calls.push(`${botId}|${mem}`); if (botId === "boom") throw new Error("x"); return botId === "nil" ? null : { level: mem ? "too_large" : "no_skills", ctx: botId === "noctx" ? null : 8192 }; },
+  });
+  assert.equal(await fit({}, "a", false), "no_skills");
+  assert.equal(await fit({}, "a", false), "no_skills");
+  assert.equal(await fit({}, "a", true), "too_large");
+  assert.deepEqual(calls, ["a|false", "a|true"]);
+  assert.equal(await fit({}, "a", false, { fresh: true }), "no_skills");
+  assert.equal(calls.length, 3);
+  t += FIT_TTL_MS;
+  await fit({}, "a", false);
+  assert.equal(calls.length, 4, "expired after 30 s");
+  assert.equal(await fit({}, "noctx", false), null);
+  assert.equal(await fit({}, "nil", false), null);
+  assert.equal(await fit({}, "boom", false), null);
 });

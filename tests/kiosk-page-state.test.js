@@ -256,3 +256,14 @@ test("smoke 2026-10-04 item 7: the status ring keeps the last 20 displayed statu
   r.push("banner", "y".repeat(500));
   assert.equal(r.list().at(-1).text.length, 120);
 });
+
+test("error frames: no bot → banner; bot_too_large → its own caption (never the generic banner); other fatal → generic banner; recoverable → caption", async () => {
+  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
+  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
+  assert.deepEqual(errorDecision("no_bound_bot", false), { banner: "no_bot" });
+  assert.deepEqual(errorDecision("bot_too_large", false), { caption: "err_bot_too_large" });
+  assert.deepEqual(errorDecision("no_tts_profile", false), { banner: "error_generic" });
+  assert.deepEqual(errorDecision("turn_failed", true), { caption: "err_turn_failed" });
+  for (const L of ["en", "es"]) for (const d of [errorDecision("bot_too_large", false), errorDecision("turn_failed", true)]) assert.ok(STRINGS[L][d.caption], `${L}.${d.caption}`);
+  assert.notEqual(STRINGS.en.err_bot_too_large, STRINGS.en.err_turn_failed);
+});

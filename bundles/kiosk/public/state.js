@@ -89,6 +89,16 @@ export function pairStartDecision(status, body, attempt) {
   if (status === 200 && body && /^\d{6}$/.test(String(body.code)) && body.pair_id && body.poll_secret) return { action: "show" };
   return status === 429 ? { action: "retry", hint: "pair_busy", ms: 15_000 } : { action: "retry", hint: "pair_error", ms: backoffMs(attempt) };
 }
+/**
+ * What an `error` frame shows: a banner (a display that cannot work until its settings change)
+ * or a caption (this turn only). bot_too_large is a caption: the server has just spoken and
+ * captioned the same line, and this replaces it in the page's language.
+ */
+export function errorDecision(code, recoverable) {
+  if (code === "no_bound_bot") return { banner: "no_bot" };
+  if (code === "bot_too_large") return { caption: "err_bot_too_large" };
+  return recoverable ? { caption: `err_${code}` } : { banner: "error_generic" };
+}
 const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);
 export const bannerAfterReady = (cur) => (MIC_BANNERS.has(cur) ? cur : null);
 

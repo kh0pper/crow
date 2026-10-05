@@ -3,7 +3,7 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing,
+  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
@@ -159,9 +159,7 @@ function onText(m) {
       break;
     case "error":
       note("error", `${m.code}${m.recoverable ? "" : " (fatal)"}`);
-      if (m.code === "no_bound_bot") banner("no_bot");
-      else if (!m.recoverable) banner("error_generic");
-      else caption(t(`err_${m.code}`), m.code);
+      { const d = errorDecision(m.code, m.recoverable); if (d.banner) banner(d.banner); else caption(t(d.caption), m.code); }
       break;
     default:
   }
