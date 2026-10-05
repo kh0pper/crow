@@ -40,6 +40,15 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 
 **Opting an installed copy out.** An installed copy that you maintain by hand (for example a fork deployed over a first-party bundle id) is skipped when its *installed* manifest (`~/.crow/bundles/<id>/manifest.json`) carries `"refresh": false`. The gateway logs the skip on each boot while the versions differ. Only the literal `false` opts out, and the missing-file repair (a deleted `panel/`, `settings-section.js` or `manifest.json`) still runs.
 
+### Running from the installed copy
+
+A bundle runs from its installed copy, never from the app checkout. The MCP server is spawned from `<CROW_HOME>/bundles/<id>/`, and the gateway loads a second copy of the panel and panel-routes files from `<CROW_HOME>/panels/<id>.js` and `<CROW_HOME>/panels/<id>-routes.js`. A relative path out of the bundle (`../../../servers/db.js`, or `../server/x.js` from a panel file) resolves only in the checkout: the installed server dies at spawn with `ERR_MODULE_NOT_FOUND`, an installed panel never loads, and an import inside a `try/catch` quietly switches the feature off.
+
+- **App code** (`servers/…`, another first-party bundle's module): from the MCP server, `import { appImport } from "./app-root.js"` and `await appImport("servers/db.js")` (copy `server/app-root.js` from an existing bundle); from code the gateway loads, use the panel handler's `appRoot` or `process.env.CROW_APP_ROOT`, which the gateway exports for itself and its children.
+- **The bundle's own modules from a panel file**: by path from this instance's installed copy, `join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "<id>", "server", …)`. Never hardcode `~/.crow`: co-hosted instances each have their own `CROW_HOME`.
+
+`tests/bundle-installed-copy-imports.test.js` lays every bundle out as an install does, in a scratch home outside the repo, and fails on any import that resolves only from the checkout.
+
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
 ## Draft / unpublished
