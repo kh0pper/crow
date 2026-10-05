@@ -12,10 +12,16 @@ import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "./db.js";
 import { generateToken, validateToken, shouldSkipGates } from "./confirm.js";
 import { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } from "./feed-fetcher.js";
+import { readFileSync } from "node:fs";
+
+/** The bundle's version, from its manifest (the installed copy's, when installed). */
+export const MEDIA_VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8")).version || "0.0.0"; } catch { return "0.0.0"; }
+})();
 
 export function createMediaServer(dbPath, options = {}) {
   const server = new McpServer(
-    { name: "crow-media", version: "0.1.0" },
+    { name: "crow-media", version: MEDIA_VERSION },
     options.instructions ? { instructions: options.instructions } : undefined
   );
 
@@ -655,38 +661,24 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_listen ---
   server.tool(
     "crow_media_listen",
-    "Generate or retrieve TTS audio for an article. Requires node-edge-tts package (npm install node-edge-tts).",
+    "Make or fetch spoken audio for an article, read by the local voice. Nothing is sent to a cloud voice; with no local voice there is no audio.",
     {
       article_id: z.number().describe("Article ID"),
-      voice: z.string().max(100).optional().describe("Edge TTS voice (default: reads from TTS settings, fallback: en-US-BrianNeural)"),
+      voice: z.string().max(100).optional().describe("A voice id of the local engine (optional; ignored unless the engine lists it)"),
     },
     async ({ article_id, voice }) => {
       try {
-        const { isEdgeTtsAvailable, getOrGenerateAudio } = await import("./tts.js");
-        if (!(await isEdgeTtsAvailable())) {
-          return {
-            content: [{ type: "text", text: "node-edge-tts is not installed. Run: npm install node-edge-tts" }],
-            isError: true,
-          };
-        }
-        // Read voice from crow-wide TTS settings if not explicitly provided
-        let effectiveVoice = voice;
-        if (!effectiveVoice) {
-          try {
-            const vRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
-            effectiveVoice = vRow.rows[0]?.value || "en-US-BrianNeural";
-          } catch { effectiveVoice = "en-US-BrianNeural"; }
-        }
-        const result = await getOrGenerateAudio(db, article_id, effectiveVoice);
-        const durationMin = result.duration ? `${Math.floor(result.duration / 60)}:${String(Math.round(result.duration % 60)).padStart(2, "0")}` : "unknown";
+        const { getOrGenerateAudio } = await import("./tts.js");
+        const result = await getOrGenerateAudio(db, article_id, voice || null);
+        const d = Math.round(result.duration || 0);
         return {
           content: [{
             type: "text",
-            text: `Audio ${result.cached ? "retrieved from cache" : "generated"}.\nDuration: ~${durationMin}\nURL: /api/media/articles/${article_id}/audio`,
+            text: `Audio ${result.cached ? "retrieved from cache" : "made with the local voice"}.\nDuration: ${Math.floor(d / 60)}:${String(d % 60).padStart(2, "0")}\nURL: /api/media/articles/${article_id}/audio`,
           }],
         };
       } catch (err) {
-        return { content: [{ type: "text", text: `TTS error: ${err.message}` }], isError: true };
+        return { content: [{ type: "text", text: err.message }], isError: true };
       }
     }
   );
@@ -694,80 +686,40 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_briefing ---
   server.tool(
     "crow_media_briefing",
-    "Generate a news briefing: AI narration script from top articles, optionally with TTS audio.",
+    "Make a news briefing now from the site feeds: a dated script of the newest stories (at most two per source), read aloud by the local voice. Returns the script at once; the audio follows on the Briefings tab.",
     {
-      topic: z.string().max(500).optional().describe("Topic filter (matches categories or search)"),
-      max_articles: z.number().min(1).max(20).optional().describe("Max articles to include (default 5)"),
-      voice: z.string().max(100).optional().describe("TTS voice (omit to skip audio generation)"),
+      topic: z.string().max(200).optional().describe("Only stories whose title or source category contains this"),
+      max_articles: z.number().min(1).max(20).optional().describe("Most stories to include (default 8)"),
+      audio: z.boolean().optional().describe("false = text only (default true)"),
+      voice: z.string().max(100).optional().describe("A voice id of the local engine (optional; ignored unless the engine lists it)"),
     },
-    async ({ topic, max_articles, voice }) => {
-      const limit = max_articles || 5;
-
-      // Get top unread articles
-      let sql = `SELECT a.id, a.title, a.url, a.pub_date, a.summary,
-                        s.name as source_name, s.category as source_category
-                 FROM media_articles a
-                 JOIN media_sources s ON s.id = a.source_id
-                 LEFT JOIN media_article_states st ON st.article_id = a.id
-                 WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
-      const args = [];
-      if (topic) {
-        const escaped = escapeLikePattern(topic);
-        sql += " AND (s.category LIKE ? ESCAPE '\\' OR a.title LIKE ? ESCAPE '\\')";
-        args.push(`%${escaped}%`, `%${escaped}%`);
-      }
-      sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
-      args.push(limit);
-
-      const { rows: articles } = await db.execute({ sql, args });
-      if (articles.length === 0) {
-        return { content: [{ type: "text", text: "No unread articles found for briefing." }] };
-      }
-
-      // Build narration script
-      const lines = [`Here's your ${topic ? `${topic} ` : ""}news briefing with ${articles.length} stories.\n`];
-      for (let i = 0; i < articles.length; i++) {
-        const a = articles[i];
-        lines.push(`Story ${i + 1}: ${a.title}.`);
-        if (a.summary) lines.push(a.summary.slice(0, 300));
-        lines.push(`From ${a.source_name}.\n`);
-      }
-      const script = lines.join("\n");
-
-      // Store briefing
-      const articleIds = articles.map(a => a.id);
-      let audioPath = null;
-      let duration = null;
-
-      if (voice) {
+    async ({ topic, max_articles, audio, voice }) => {
+      try {
+        const { createBriefing, writeBriefing, voiceBriefing, failBriefing, getBriefing } = await import("./briefing.js");
+        const { readSchedule } = await import("./schedule.js");
+        const { instanceLang } = await import("./settings.js");
+        const { refreshSources } = await import("./tasks.js");
+        const { cfg } = await readSchedule(db);
+        const lang = await instanceLang(db);
+        const id = await createBriefing(db, { kind: "manual", lang });
         try {
-          const { isEdgeTtsAvailable, generateAudio, resolveAudioDir } = await import("./tts.js");
-          if (await isEdgeTtsAvailable()) {
-            const { join } = await import("node:path");
-            const audioDir = resolveAudioDir();
-            const ts = Date.now();
-            audioPath = join(audioDir, `briefing-${ts}.mp3`);
-            const result = await generateAudio(script, voice, audioPath);
-            duration = result.duration;
-          }
-        } catch {}
+          await writeBriefing(db, id, { kind: "manual", topic: topic || null, maxStories: max_articles || cfg.max_stories, tz: cfg.tz, lang, refreshCapMs: 20_000 }, { refresh: refreshSources });
+        } catch (err) {
+          await failBriefing(db, id, err.message);
+          throw err;
+        }
+        // The voice can take longer than a tool call may: it finishes in the background and the row says how it went.
+        const voiced = voiceBriefing(db, id, { audio: audio !== false, voice: voice || null })
+          .catch(async (err) => { await failBriefing(db, id, err.message); return { ok: false, error: err.message }; });
+        if (audio === false) await voiced;
+        const b = await getBriefing(db, id);
+        const tail = audio === false
+          ? "Text only, as asked."
+          : `The local voice is reading it now; the audio will be on the Briefings tab shortly (/dashboard/media?open=briefing:${id}).`;
+        return { content: [{ type: "text", text: `${b.title} (briefing ${id}, ${b.items.length} ${b.items.length === 1 ? "story" : "stories"})\n\n${b.script}\n\n${tail}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `The briefing could not be made: ${err.message}` }], isError: true };
       }
-
-      const insertResult = await db.execute({
-        sql: `INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec, voice)
-              VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [
-          topic ? `${topic} Briefing` : "News Briefing",
-          script, audioPath, JSON.stringify(articleIds), duration, voice || null,
-        ],
-      });
-
-      let text = `Briefing generated (ID: ${insertResult.lastInsertRowid})\n${articles.length} article(s) included.\n\n${script}`;
-      if (audioPath) {
-        text += `\nAudio: /api/media/briefings/${insertResult.lastInsertRowid}/audio`;
-      }
-
-      return { content: [{ type: "text", text }] };
     }
   );
 
@@ -1126,46 +1078,48 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_schedule_briefing ---
   server.tool(
     "crow_media_schedule_briefing",
-    "Schedule automatic briefing generation using Crow's scheduling system.",
+    "Show or change the daily news briefing: its time, whether it is on, how many stories, and a show (a subscribed podcast source) whose episode of the day plays after it. With no arguments it reports the current schedule. The briefing is ready at the set time; audio is made by the local voice.",
     {
-      cron: z.string().max(100).describe("Cron expression (e.g. '0 8 * * 1-5' for weekday mornings at 8am)"),
-      topic: z.string().max(500).optional().describe("Topic filter for briefing articles"),
-      max_articles: z.number().min(1).max(20).optional().describe("Max articles (default 5)"),
-      voice: z.string().max(100).optional().describe("TTS voice (omit to skip audio)"),
-      enabled: z.boolean().optional().describe("Enable or disable (default true)"),
+      time: z.string().max(5).optional().describe("Daily time as HH:MM in the schedule's time zone, e.g. '08:00'"),
+      cron: z.string().max(100).optional().describe("Instead of time: a five-field cron expression, e.g. '0 8 * * 1-5'"),
+      enabled: z.boolean().optional().describe("Turn the daily briefing on or off"),
+      max_articles: z.number().min(1).max(20).optional().describe("Most stories (default 8)"),
+      tz: z.string().max(64).optional().describe("Time zone name, e.g. 'America/Chicago' (default: this host's)"),
+      show_source_id: z.number().optional().describe("Source id of a show to play after the briefing (see crow_media_list_sources); 0 removes it"),
+      show_days: z.array(z.number().min(0).max(6)).max(7).optional().describe("Weekdays the show follows, 0 = Sunday (default Monday to Friday)"),
+      show_title_prefix: z.string().max(80).optional().describe("Only an episode whose title starts with this counts (for feeds that also carry extras). Omitted: the stored one is kept; \"\" clears it"),
     },
-    async ({ cron, topic, max_articles, voice, enabled }) => {
-      const config = JSON.stringify({
-        topic: topic || null,
-        max_articles: max_articles || 5,
-        voice: voice || null,
-      });
-
-      // Check for existing schedule
-      const existing = await db.execute({
-        sql: "SELECT id FROM schedules WHERE task = 'media:briefing'",
-        args: [],
-      });
-
-      if (existing.rows.length > 0) {
-        // Update existing
-        await db.execute({
-          sql: "UPDATE schedules SET cron = ?, config = ?, enabled = ? WHERE id = ?",
-          args: [cron, config, enabled !== false ? 1 : 0, existing.rows[0].id],
-        });
-        return {
-          content: [{ type: "text", text: `Updated briefing schedule: ${cron}\nTopic: ${topic || "all"}\nArticles: ${max_articles || 5}\nVoice: ${voice || "none"}` }],
-        };
+    async ({ time, cron, enabled, max_articles, tz, show_source_id, show_days, show_title_prefix }) => {
+      try {
+        const { saveSchedule, readSchedule, scheduleView } = await import("./schedule.js");
+        const input = {};
+        if (time !== undefined) input.time = time;
+        if (cron !== undefined) input.cron = cron;
+        if (enabled !== undefined) input.enabled = enabled;
+        if (max_articles !== undefined) input.max_stories = max_articles;
+        if (tz !== undefined) input.tz = tz;
+        if (show_source_id !== undefined) {
+          input.attach = show_source_id > 0 ? [{ source_id: show_source_id, ...(show_days ? { days: show_days } : {}), ...(show_title_prefix !== undefined ? { title_prefix: show_title_prefix } : {}) }] : [];
+        }
+        let state;
+        if (Object.keys(input).length === 0) {
+          const s = await readSchedule(db);
+          state = { ...s, view: scheduleView(s.row, s.cfg) };
+        } else {
+          state = await saveSchedule(db, input);
+        }
+        const { view, cfg } = state;
+        const next = view.next ? new Intl.DateTimeFormat("en-US", { timeZone: cfg.tz, weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(view.next)) : null;
+        const lines = [
+          view.state === "unset" ? "No daily briefing is scheduled." : view.state === "off" ? `The daily briefing is off (schedule ${view.cron}).` : view.state === "bad_cron" ? `The schedule "${view.cron}" is not one News can run.` : `Daily briefing: ${view.time || view.cron} (${cfg.tz}).`,
+          next ? `Next: ${next}. Work starts ${cfg.lead_min} minutes earlier so it is ready on time.` : null,
+          `Stories: up to ${cfg.max_stories}. Voice: local only.`,
+          cfg.attach.length ? `Then plays: source ${cfg.attach.map((a) => `${a.source_id} on days ${a.days.join(",")}${a.title_prefix ? ` (titles starting "${a.title_prefix}")` : ""}`).join("; ")}.` : "No show follows it.",
+        ].filter(Boolean);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `The schedule was not changed: ${err.message}` }], isError: true };
       }
-
-      // Create new
-      await db.execute({
-        sql: "INSERT INTO schedules (task, cron, config, enabled, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
-        args: ["media:briefing", cron, config, enabled !== false ? 1 : 0],
-      });
-      return {
-        content: [{ type: "text", text: `Scheduled briefing: ${cron}\nTopic: ${topic || "all"}\nArticles: ${max_articles || 5}\nVoice: ${voice || "none"}\n\nThe media task runner checks for due schedules every 30 minutes.` }],
-      };
     }
   );
 
@@ -1185,8 +1139,8 @@ export function createMediaServer(dbPath, options = {}) {
 3. Read — crow_media_get_article for full article content
 4. Search — crow_media_search for full-text search across all articles
 5. Interact — crow_media_article_action to star, save, or give feedback
-6. Listen — crow_media_listen to generate TTS audio for an article
-7. Briefings — crow_media_briefing to generate an AI-narrated news briefing
+6. Listen — crow_media_listen to have the local voice read an article
+7. Briefings — crow_media_briefing for a spoken briefing now; crow_media_schedule_briefing for the daily one
 8. Playlists — crow_media_playlist and crow_media_playlist_items to organize content
 9. Smart Folders — crow_media_smart_folders to create saved filter presets
 10. Digest — crow_media_digest_settings + crow_media_digest_preview for email digests

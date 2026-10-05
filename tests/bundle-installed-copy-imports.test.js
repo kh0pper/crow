@@ -56,10 +56,8 @@ const BUNDLES = join(ROOT, "bundles");
  * matches a real violation.
  */
 const KNOWN_VIOLATIONS = [
-  // tracked: media phase 0
-  { bundle: "media", file: "server/ai-analyzer.js", spec: "../../gateway/ai/provider.js", tracked: "media phase 0" },
-  { bundle: "media", file: "panel/media.js", spec: 'join(…, ".crow", "bundles", "media", "server")', tracked: "media phase 0" },
-  { bundle: "media", file: "panel/routes.js", spec: 'join(…, ".crow", "bundles", "media", "server")', tracked: "media phase 0" },
+  // tracked: media phase 1 (the analyzer is removed there)
+  { bundle: "media", file: "server/ai-analyzer.js", spec: "../../gateway/ai/provider.js", tracked: "media phase 1" },
   // tracked: glasses phase 0
   { bundle: "meta-glasses", file: "panel/meta-glasses.js", spec: "../../../servers/storage/s3-client.js", tracked: "glasses phase 0" },
   { bundle: "meta-glasses", file: "panel/meta-glasses.js", spec: "./routes.js", tracked: "glasses phase 0" },

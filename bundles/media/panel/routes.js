@@ -16,9 +16,9 @@ import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 
-// Resolve bundle server directory (installed vs repo)
+// Resolve bundle server directory (this instance's installed copy, else the repo)
 function resolveBundleServer() {
-  const installed = join(homedir(), ".crow", "bundles", "media", "server");
+  const installed = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "media", "server");
   if (existsSync(installed)) return installed;
   // Fallback: panel is in bundles/media/panel/, server is in bundles/media/server/
   return join(import.meta.dirname, "..", "server");
@@ -70,6 +70,47 @@ function safeHttpUrl(value) {
     return "";
   }
   return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+}
+
+/** Import a module from the bundle's server directory */
+const bundleModule = (name) => import(pathToFileURL(join(serverDir, name)).href);
+
+// The tables are created by the stdio server at its start; the panel must not depend on that having happened.
+{
+  const db = createDbClient();
+  try { await (await bundleModule("init-tables.js")).initMediaTables(db); }
+  catch (err) { console.warn(`[media] table check failed: ${err.message}`); }
+  finally { db.close(); }
+}
+
+/**
+ * Stream one of the bundle's audio files. The path comes from a database row, so it is served only
+ * when it is a real .mp3 inside the audio directory. One byte range is supported; a range that is
+ * malformed or cannot be satisfied answers 416.
+ */
+async function sendAudio(req, res, audioPath) {
+  const { insideAudioDir } = await bundleModule("speech.js");
+  if (!insideAudioDir(audioPath)) return res.status(404).json({ error: "Audio file not found." });
+  const { statSync, createReadStream } = await import("node:fs");
+  const size = statSync(audioPath).size;
+  const base = { "Content-Type": "audio/mpeg", "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600" };
+  const range = req.headers.range;
+  if (range === undefined) {
+    res.writeHead(200, { ...base, "Content-Length": size });
+    return createReadStream(audioPath).pipe(res);
+  }
+  const m = /^bytes=(\d{0,15})-(\d{0,15})$/.exec(String(range).trim());
+  let start = NaN, end = NaN;
+  if (m && (m[1] !== "" || m[2] !== "")) {
+    if (m[1] === "") { start = Math.max(0, size - Number(m[2])); end = size - 1; if (Number(m[2]) === 0) start = NaN; }
+    else { start = Number(m[1]); end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1); }
+  }
+  if (!(start >= 0 && start <= end && start < size)) {
+    res.writeHead(416, { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" });
+    return res.end();
+  }
+  res.writeHead(206, { ...base, "Content-Range": `bytes ${start}-${end}/${size}`, "Content-Length": end - start + 1 });
+  createReadStream(audioPath, { start, end }).pipe(res);
 }
 
 /**
@@ -376,54 +417,48 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  // --- Article audio (TTS) ---
+  // --- Article audio ---
   router.get("/api/media/articles/:id/audio", authMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
-      const cached = await db.execute({
-        sql: "SELECT audio_path FROM media_audio_cache WHERE article_id = ?",
-        args: [id],
-      });
+      const cached = await db.execute({ sql: "SELECT audio_path FROM media_audio_cache WHERE article_id = ?", args: [id] });
+      if (cached.rows.length === 0) return res.status(404).json({ error: "No audio has been made for this article yet." });
+      await db.execute({ sql: "UPDATE media_audio_cache SET last_accessed = datetime('now') WHERE article_id = ?", args: [id] });
+      await sendAudio(req, res, cached.rows[0].audio_path);
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
 
-      if (cached.rows.length === 0) {
-        return res.status(404).json({ error: "No audio generated for this article. Use crow_media_listen first." });
-      }
+  // --- Article audio, made on demand by the local voice ---
+  router.post("/api/media/articles/:id/listen", authMiddleware, csrfMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { getOrGenerateAudio } = await importBundleModule("tts.js");
+      const result = await getOrGenerateAudio(db, id);
+      res.json({ audio_url: `/api/media/articles/${id}/audio`, cached: result.cached, duration: result.duration });
+    } catch (err) {
+      res.status(err.code ? 503 : 500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
 
-      const audioPath = cached.rows[0].audio_path;
-      const { existsSync, statSync, createReadStream } = await import("node:fs");
-      if (!existsSync(audioPath)) {
-        return res.status(404).json({ error: "Audio file not found." });
-      }
-
-      // Update last accessed
-      await db.execute({
-        sql: "UPDATE media_audio_cache SET last_accessed = datetime('now') WHERE article_id = ?",
-        args: [id],
-      });
-
-      const stat = statSync(audioPath);
-      const range = req.headers.range;
-
-      if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-        res.writeHead(206, {
-          "Content-Range": `bytes ${start}-${end}/${stat.size}`,
-          "Accept-Ranges": "bytes",
-          "Content-Length": end - start + 1,
-          "Content-Type": "audio/mpeg",
-        });
-        createReadStream(audioPath, { start, end }).pipe(res);
-      } else {
-        res.writeHead(200, {
-          "Content-Length": stat.size,
-          "Content-Type": "audio/mpeg",
-          "Accept-Ranges": "bytes",
-        });
-        createReadStream(audioPath).pipe(res);
-      }
+  // --- Briefings: the latest one (the stable answer other parts of Crow use) ---
+  // ?audio=0 drops the "has audio" rule; ?max_age_hours=N and ?kind=daily narrow it. 404 when none qualifies.
+  router.get("/api/media/briefings/latest", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { getLatestBriefing } = await importBundleModule("briefing.js");
+      const maxAge = Number(req.query.max_age_hours);
+      const kind = ["daily", "manual"].includes(req.query.kind) ? req.query.kind : null;
+      const b = await getLatestBriefing(db, { withAudio: req.query.audio !== "0", maxAgeHours: Number.isFinite(maxAge) && maxAge > 0 ? maxAge : null, kind });
+      if (!b) return res.status(404).json({ error: "no_briefing" });
+      res.json(b);
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
@@ -431,19 +466,51 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  // --- TTS generation (on-demand) ---
-  router.post("/api/media/articles/:id/listen", authMiddleware, csrfMiddleware, async (req, res) => {
+  // --- Briefings: the daily schedule ---
+  router.get("/api/media/briefings/schedule", authMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
-      const id = parseInt(req.params.id, 10);
-      const { getOrGenerateAudio, isEdgeTtsAvailable } = await importBundleModule("tts.js");
-      if (!(await isEdgeTtsAvailable())) {
-        return res.status(503).json({ error: "node-edge-tts is not installed. Run: npm install node-edge-tts" });
+      const { readSchedule, scheduleView } = await importBundleModule("schedule.js");
+      const s = await readSchedule(db);
+      res.json({ view: scheduleView(s.row, s.cfg), cfg: s.cfg });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.post("/api/media/briefings/schedule", authMiddleware, csrfMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { saveSchedule } = await importBundleModule("schedule.js");
+      const body = req.body || {};
+      const input = {};
+      if (typeof body.time === "string" && body.time) input.time = body.time;
+      if (body.enabled !== undefined) input.enabled = body.enabled === true || body.enabled === "1";
+      if (body.max_stories !== undefined) input.max_stories = Number(body.max_stories);
+      if (body.show_source_id !== undefined) {
+        const id = Number(body.show_source_id);
+        input.attach = id > 0 ? [{ source_id: id, days: body.show_weekdays_only === false ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5], ...(typeof body.show_title_prefix === "string" ? { title_prefix: body.show_title_prefix.slice(0, 80) } : {}) }] : [];
       }
-      const voiceRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
-      const voice = voiceRow.rows[0]?.value || "en-US-BrianNeural";
-      const result = await getOrGenerateAudio(db, id, voice);
-      res.json({ audio_url: `/api/media/articles/${id}/audio`, cached: result.cached, duration: result.duration });
+      const s = await saveSchedule(db, input);
+      res.json({ ok: true, view: s.view, cfg: s.cfg });
+    } catch (err) {
+      res.status(["bad_time", "bad_cron", "bad_tz", "bad_source"].includes(err.code) ? 400 : 500).json({ error: err.message, code: err.code || null });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Briefings: one, by id ---
+  router.get("/api/media/briefings/:id", authMiddleware, async (req, res, next) => {
+    if (!/^\d{1,12}$/.test(req.params.id)) return next();
+    const db = createDbClient();
+    try {
+      const { getBriefing } = await importBundleModule("briefing.js");
+      const b = await getBriefing(db, Number(req.params.id));
+      if (!b) return res.status(404).json({ error: "not_found" });
+      res.json(b);
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
@@ -456,29 +523,11 @@ export default function mediaRouter(authMiddleware) {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
-      const result = await db.execute({
-        sql: "SELECT audio_path FROM media_briefings WHERE id = ?",
-        args: [id],
-      });
-
-      if (result.rows.length === 0 || !result.rows[0].audio_path) {
-        return res.status(404).json({ error: "Briefing audio not found." });
-      }
-
-      const audioPath = result.rows[0].audio_path;
-      const { existsSync, statSync, createReadStream } = await import("node:fs");
-      if (!existsSync(audioPath)) {
-        return res.status(404).json({ error: "Audio file not found." });
-      }
-
-      const stat = statSync(audioPath);
-      res.writeHead(200, {
-        "Content-Length": stat.size,
-        "Content-Type": "audio/mpeg",
-      });
-      createReadStream(audioPath).pipe(res);
+      const result = await db.execute({ sql: "SELECT audio_path FROM media_briefings WHERE id = ?", args: [id] });
+      if (result.rows.length === 0 || !result.rows[0].audio_path) return res.status(404).json({ error: "Briefing audio not found." });
+      await sendAudio(req, res, result.rows[0].audio_path);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      if (!res.headersSent) res.status(500).json({ error: err.message });
     } finally {
       db.close();
     }
@@ -609,74 +658,29 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  // --- Generate Briefing ---
+  // --- Make a briefing now ---
+  // Answers at once with the new briefing's id; the feeds are refreshed, the script written and the
+  // local voice run in the background. The tab polls GET /api/media/briefings/:id until it is ready.
   router.post("/api/media/briefings", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
-      const topic = req.body.topic || null;
-      const count = Math.min(parseInt(req.body.count || "5", 10), 20);
-      const generateAudio = req.body.voice === "1" || req.body.voice === "true";
-
-      // Get top unread articles
-      let sql = `SELECT a.id, a.title, a.summary, a.content_full, a.content_raw,
-                        s.name as source_name, s.category as source_category
-                 FROM media_articles a
-                 JOIN media_sources s ON s.id = a.source_id
-                 LEFT JOIN media_article_states st ON st.article_id = a.id
-                 WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
-      const args = [];
-      if (topic) {
-        const { escapeLikePattern: esc } = await import(pathToFileURL(dbModulePath).href);
-        const escaped = esc(topic);
-        sql += " AND (s.category LIKE ? ESCAPE '\\' OR a.title LIKE ? ESCAPE '\\')";
-        args.push(`%${escaped}%`, `%${escaped}%`);
-      }
-      sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
-      args.push(count);
-
-      const { rows: articles } = await db.execute({ sql, args });
-      if (articles.length === 0) {
-        return res.status(400).json({ error: "No unread articles found" + (topic ? ` matching "${topic}"` : "") });
-      }
-
-      // Build briefing script
-      const title = topic ? `Briefing: ${topic}` : `News Briefing`;
-      const scriptLines = articles.map((a, i) => {
-        const text = a.summary || (a.content_full || a.content_raw || "").slice(0, 500);
-        return `${i + 1}. ${a.title} (${a.source_name})\n${text}`;
-      });
-      const script = scriptLines.join("\n\n");
-      const articleIds = JSON.stringify(articles.map(a => a.id));
-
-      let audioPath = null;
-      let durationSec = null;
-
-      if (generateAudio) {
-        try {
-          const { isEdgeTtsAvailable, generateAudio: genAudio, resolveAudioDir } = await importBundleModule("tts.js");
-          if (await isEdgeTtsAvailable()) {
-            const { join } = await import("node:path");
-            const { createHash } = await import("node:crypto");
-            const audioDir = resolveAudioDir();
-            const hash = createHash("sha256").update(script).digest("hex").slice(0, 12);
-            const outPath = join(audioDir, `briefing-${hash}.mp3`);
-            const bVoiceRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
-            const bVoice = bVoiceRow.rows[0]?.value || "en-US-BrianNeural";
-            const result = await genAudio(`${title}. ${script}`, bVoice, outPath);
-            audioPath = outPath;
-            durationSec = result.duration;
-          }
-        } catch (e) {
-          console.warn("[media] Briefing TTS failed:", e.message);
-        }
-      }
-
-      const result = await db.execute({
-        sql: "INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec) VALUES (?, ?, ?, ?, ?)",
-        args: [title, script, audioPath, articleIds, durationSec],
-      });
-
-      res.json({ id: result.lastInsertRowid, title, article_count: articles.length, has_audio: !!audioPath });
+      const { createBriefing, makeBriefing, failBriefing, getBriefing } = await importBundleModule("briefing.js");
+      const { readSchedule } = await importBundleModule("schedule.js");
+      const { instanceLang } = await importBundleModule("settings.js");
+      const { refreshSources } = await importBundleModule("tasks.js");
+      const topic = typeof req.body?.topic === "string" && req.body.topic.trim() ? req.body.topic.trim().slice(0, 200) : null;
+      const count = Math.min(Math.max(parseInt(req.body?.count || "0", 10) || 0, 0), 20);
+      const busy = await db.execute("SELECT id FROM media_briefings WHERE status = 'generating' AND COALESCE(kind, 'manual') != 'daily' AND julianday(created_at) > julianday('now', '-10 minutes') ORDER BY id DESC LIMIT 1");
+      if (busy.rows[0]) return res.status(202).json(await getBriefing(db, busy.rows[0].id));
+      const { cfg } = await readSchedule(db);
+      const lang = await instanceLang(db);
+      const id = await createBriefing(db, { kind: "manual", lang });
+      const job = createDbClient();
+      makeBriefing(job, id, { kind: "manual", topic, maxStories: count || cfg.max_stories, tz: cfg.tz, lang, refreshCapMs: 20_000 }, { refresh: refreshSources, audio: req.body?.audio !== false && req.body?.audio !== "0" })
+        .catch((err) => { console.warn(`[media] briefing ${id} failed: ${err.message}`); return failBriefing(job, id, err.message); })
+        .catch(() => {})
+        .finally(() => { try { job.close(); } catch {} });
+      res.status(202).json(await getBriefing(db, id));
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
@@ -688,8 +692,8 @@ export default function mediaRouter(authMiddleware) {
   router.get("/api/media/briefings", authMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
-      const { rows } = await db.execute("SELECT * FROM media_briefings ORDER BY created_at DESC LIMIT 20");
-      res.json({ briefings: rows });
+      const { listBriefings } = await importBundleModule("briefing.js");
+      res.json({ briefings: await listBriefings(db, { limit: 20 }) });
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
