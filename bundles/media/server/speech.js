@@ -15,6 +15,8 @@ import { appImport } from "./app-root.js";
 import { resolveDataDir } from "./db.js";
 import { readLocalSetting, TTS_PROFILE_KEY, TTS_VOICE_ES_KEY } from "./settings.js";
 
+const { isLocalNetworkIp } = await appImport("servers/shared/ip-classify.js");
+
 export const LOCAL_PROVIDERS = ["kokoro", "piper"];
 const DEFAULT_URL = { kokoro: "http://localhost:8880", piper: "http://localhost:5000" };
 export const MAX_REQUEST_CHARS = 1200;
@@ -37,16 +39,14 @@ export function insideAudioDir(p, audioDir = resolveAudioDir()) {
   } catch { return false; }
 }
 
-/** Loopback, RFC 1918, CGNAT/tailnet (100.64/10), IPv6 loopback, unique-local and link-local. */
+/**
+ * Loopback, RFC 1918, CGNAT/tailnet (100.64/10), link-local and unique-local, in any spelling
+ * (including the v4-mapped hex form the URL parser produces). Decided on the parsed address, so a
+ * public address written with a short first group (`fc::1`, `fe9::1`) is not mistaken for local.
+ * See servers/shared/ip-classify.js.
+ */
 export function isLocalAddress(ip) {
-  const s = String(ip || "").toLowerCase();
-  const v4 = s.startsWith("::ffff:") ? s.slice(7) : s;
-  if (isIP(v4) === 4) {
-    const [a, b] = v4.split(".").map(Number);
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  if (isIP(s) !== 6) return false;
-  return s === "::1" || s.startsWith("fc") || s.startsWith("fd") || /^fe[89ab]/.test(s);
+  return isLocalNetworkIp(ip);
 }
 
 /** Does this base URL point at this host or the operator's own network? Names are resolved; every address must be local. */

@@ -8,6 +8,9 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import { resolveDataDir } from "./db.js";
 import { runExtraction } from "./extract.js";
+import { appImport } from "./app-root.js";
+
+const { isPublicIp } = await appImport("servers/shared/ip-classify.js");
 
 const FETCH_TIMEOUT_MS = 20000;
 const USER_AGENT = "Mozilla/5.0 (compatible; Crow-Reader/1.0; +https://github.com/kh0pper/crow)";
@@ -57,44 +60,13 @@ function textToSections(raw) {
 }
 
 /**
- * SSRF guard: block loopback/private/link-local hosts unless configured open.
+ * SSRF guard: refuse any address that is not public unicast, in any spelling
+ * (the URL parser rewrites `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`; NAT64,
+ * 6to4, Teredo and v4-compatible IPv6 carry an IPv4 inside), unless configured
+ * open. Classification lives in servers/shared/ip-classify.js.
  * Accepted risk: DNS rebinding TOCTOU (this lookup and the fetch resolve
  * independently); fine for a single-user authenticated dashboard.
- * Exported for direct unit testing.
  */
-function isPrivateAddress(address) {
-  return (
-    /^127\.|^10\.|^192\.168\.|^169\.254\.|^0\./.test(address) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
-    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address) ||
-    // "::" (unspecified) connects to localhost on Linux; URL parsing
-    // canonicalizes every all-zero IPv6 literal to this exact form.
-    address === "::1" || address === "::" ||
-    /^f[cd]/i.test(address) || /^fe80/i.test(address)
-  );
-}
-
-/**
- * Unwrap an IPv4-mapped IPv6 address (::ffff:a.b.c.d) to its embedded IPv4
- * tail. Two textual forms have to be handled: DNS lookups typically report
- * the dotted-decimal form (::ffff:127.0.0.1), but the WHATWG URL parser
- * canonicalizes bracketed IPv6 literals to pure hex groups
- * (::ffff:7f00:1) before assertPublicHost ever sees the hostname. Returns
- * null when the address isn't an IPv4-mapped IPv6 address.
- */
-function unwrapIPv4MappedIPv6(address) {
-  const lower = address.toLowerCase();
-  const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-  if (dotted) return dotted[1];
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
-  if (hex) {
-    const hi = parseInt(hex[1], 16);
-    const lo = parseInt(hex[2], 16);
-    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join(".");
-  }
-  return null;
-}
-
 export async function assertPublicHost(url, config) {
   if (config.READER_ALLOW_PRIVATE_URLS === "1") return;
   const { lookup } = await import("node:dns/promises");
@@ -102,10 +74,7 @@ export async function assertPublicHost(url, config) {
   const host = new URL(url).hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
   for (const { address } of addrs) {
-    // IPv4-mapped IPv6 embeds a routable-looking IPv4 tail that the
-    // bare-address checks above never match; unwrap and re-check it.
-    const mapped = unwrapIPv4MappedIPv6(address);
-    if (isPrivateAddress(address) || (mapped && isPrivateAddress(mapped))) {
+    if (!isPublicIp(address)) {
       throw new Error(`URL resolves to a private address (${address}); set READER_ALLOW_PRIVATE_URLS=1 to permit`);
     }
   }

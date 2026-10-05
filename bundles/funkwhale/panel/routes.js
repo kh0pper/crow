@@ -7,6 +7,13 @@ import { Router } from "express";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// Address classification, resolved from the app root so it also works from an installed copy
+// (the gateway sets CROW_APP_ROOT; the repo-relative fallback covers running from the checkout).
+const appRoot = process.env.CROW_APP_ROOT || join(import.meta.dirname, "..", "..", "..");
+const { isPublicIp } = await import(pathToFileURL(join(appRoot, "servers", "shared", "ip-classify.js")).href);
 
 const URL_BASE = () => (process.env.FUNKWHALE_URL || "http://funkwhale-api:5000").replace(/\/+$/, "");
 const TOKEN = () => process.env.FUNKWHALE_ACCESS_TOKEN || "";
@@ -55,22 +62,15 @@ function clampPage(req, defaultSize, maxSize) {
   return { page, page_size: pageSize };
 }
 
-/** Check if a host is on the Funkwhale allow-list or must pass private-IP guard. */
-async function validateHostOrReject(hostname) {
+/** Check if a host is on the Funkwhale allow-list or resolves to a public address (exported for tests). */
+export async function validateHostOrReject(hostname) {
   let fwHost = null;
   try { fwHost = new URL(URL_BASE()).hostname; } catch {}
   const allow = new Set([fwHost, "localhost", "127.0.0.1"].filter(Boolean));
   if (allow.has(hostname)) return { ok: true };
   try {
     const addr = await dnsLookup(hostname, { family: 4 });
-    const [a, b] = addr.address.split(".").map(Number);
-    const isPrivate = a === 10
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168)
-      || (a === 169 && b === 254)
-      || a === 127
-      || (a === 100 && b >= 64 && b <= 127);
-    if (isPrivate) return { ok: false, reason: "private_host" };
+    if (!isPublicIp(addr.address)) return { ok: false, reason: "private_host" };
     return { ok: true };
   } catch {
     return { ok: false, reason: "dns_lookup_failed" };
