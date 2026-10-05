@@ -66,8 +66,10 @@ export const CLIENT_SCRIPT = `
     if (b.bot !== a.bot && b.bot) { p.bound_bot_id = b.bot; any = true; }
     if (b.stt !== a.stt) { p.stt_profile_id = b.stt; any = true; }
     if (b.tts !== a.tts) { p.tts_profile_id = b.tts; any = true; }
-    if (b.fu !== a.fu || b.mem !== a.mem || b.vad !== a.vad || b.sm !== a.sm || b.th !== a.th || b.pf !== a.pf) {
+    if (b.fu !== a.fu || b.mem !== a.mem || b.vad !== a.vad || b.sm !== a.sm || b.th !== a.th || b.pf !== a.pf || b.mv !== a.mv || b.pml !== a.pml) {
       p.kiosk_settings = { follow_up: b.fu, memory_integration: b.mem };
+      if (b.mv !== a.mv) p.kiosk_settings.max_volume = b.mv;
+      if (b.pml !== a.pml) p.kiosk_settings.pause_media_on_listen = b.pml;
       if (b.vad !== a.vad) p.kiosk_settings.vad_hangover_ms = b.vad;
       if (b.sm !== a.sm) p.kiosk_settings.stt_model = b.sm;
       if (b.th !== a.th) p.kiosk_settings.theme = b.th;
@@ -164,16 +166,19 @@ export const CLIENT_SCRIPT = `
     var pf = pick([['', S.profile_unset], ['pi3', S.profile_pi3], ['phone', S.profile_phone], ['tablet', S.profile_tablet], ['desktop', S.profile_desktop]], ks.profile || '');
     var vad = el('input'); vad.type = 'number'; vad.min = '300'; vad.max = '900'; vad.step = '50'; vad.value = String(ks.vad_hangover_ms || 450);
     function vadValue() { var n = parseInt(vad.value, 10); return isFinite(n) ? Math.min(900, Math.max(300, n)) : (initial ? initial.vad : (ks.vad_hangover_ms || 450)); }
-    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value }; }
+    var mv = pick([10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(function (n) { return [String(n), n + '%']; }), String(ks.max_volume || 100));
+    var pml = el('input'); pml.type = 'checkbox'; pml.checked = !!ks.pause_media_on_listen;
+    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value, mv: parseInt(mv.value, 10) || 100, pml: pml.checked }; }
     var initial = null;
     initial = current();
     var fit = fitLine(data.bots, bot, function () { return mem.checked; });
     mem.addEventListener('change', fit.show);
-    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
+    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
     card.appendChild(el('p', 'kk-dim', S.profile_hint + (ks.profile_source === 'guessed' ? ' ' + S.profile_guessed : '')));
     card.appendChild(el('p', 'kk-dim', S.theme_hint));
+    card.appendChild(el('p', 'kk-dim', S.pause_media_hint));
     var msg = el('span', 'kk-msg');
     var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
     save.addEventListener('click', function () {
@@ -207,6 +212,62 @@ export const CLIENT_SCRIPT = `
     return card;
   }
 
+  /** Station presets: this instance's own list (name, spoken names, stream address). Saved as a whole; one bad row refuses the save. */
+  function renderStations() {
+    var box = document.getElementById('kk-stations'); if (!box) return;
+    api('GET', '/api/kiosk/admin/stations').then(function (j) {
+      clear(box);
+      box.appendChild(el('h2', null, S.stations_title));
+      box.appendChild(el('p', 'kk-dim', S.stations_intro));
+      var rows = el('div', 'kk-stations');
+      var msg = el('p', 'kk-msg');
+      function row(st) {
+        var r = el('div', 'kk-station');
+        var name = el('input'); name.maxLength = 60; name.placeholder = S.station_name; name.value = st.name || '';
+        var al = el('input'); al.maxLength = 220; al.placeholder = S.station_aliases; al.value = (st.aliases || []).join(', ');
+        var url = el('input'); url.maxLength = 500; url.placeholder = 'https://'; url.value = st.url || ''; url.type = 'url';
+        var loc = el('input'); loc.type = 'checkbox'; loc.checked = st.local === true; loc.title = S.station_local_hint;
+        var locL = el('label', 'kk-local', S.station_local); locL.insertBefore(loc, locL.firstChild);
+        var res = el('span', 'kk-msg');
+        var test = el('button', 'btn btn-secondary btn-sm', S.station_test); test.type = 'button';
+        test.addEventListener('click', function () {
+          res.textContent = S.station_testing;
+          api('POST', '/api/kiosk/admin/stations/test', { url: url.value, local: loc.checked }).then(function (t) {
+            res.textContent = t.ok ? fill(S.station_test_ok, { type: t.content_type || '' }) : (S['station_err_' + t.error] || S.station_err_unreachable);
+          });
+        });
+        var del = el('button', 'btn btn-secondary btn-sm', S.station_remove); del.type = 'button';
+        del.addEventListener('click', function () { rows.removeChild(r); });
+        [name, al, url, locL, test, del, res].forEach(function (n) { r.appendChild(n); });
+        r.read = function () { var v = { name: name.value, aliases: al.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).slice(0, 5), url: url.value.trim() }; if (loc.checked) v.local = true; return v; };
+        return r;
+      }
+      (j.stations || []).forEach(function (st) { rows.appendChild(row(st)); });
+      var add = el('button', 'btn btn-secondary btn-sm', S.station_add); add.type = 'button';
+      add.addEventListener('click', function () { if (rows.children.length < (j.max || 50)) rows.appendChild(row({})); });
+      var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
+      save.addEventListener('click', function () {
+        var list = [];
+        for (var i = 0; i < rows.children.length; i++) { var v = rows.children[i].read(); if (v.name || v.url) list.push(v); }
+        // A home-network station is checked against its policy (the same Test) before anything is saved.
+        var local = list.filter(function (x) { return x.local; });
+        var checks = local.map(function (x) { return api('POST', '/api/kiosk/admin/stations/test', { url: x.url, local: true }); });
+        Promise.all(checks).then(function (results) {
+          for (var j = 0; j < results.length; j++) {
+            if (!results[j].ok) { msg.textContent = fill(S.station_local_refused, { name: local[j].name }) + ' ' + (S['station_err_' + results[j].error] || S.station_err_unreachable); return; }
+          }
+          api('POST', '/api/kiosk/admin/stations', { stations: list }).then(function (k) {
+            msg.textContent = k.ok ? S.saved : k.error === 'local_check_failed' ? fill(S.station_local_refused, { name: k.station || '' }) + ' ' + (S['station_err_' + k.reason] || S.station_err_unreachable) : (S['station_' + k.error] || k.error || '');
+            if (k.ok) renderStations();
+          });
+        });
+      });
+      box.appendChild(rows);
+      var bar = el('div', 'kk-bar'); [add, save, msg].forEach(function (n) { bar.appendChild(n); });
+      box.appendChild(bar);
+    });
+  }
+
   function render(data) {
     state = data;
     renderPair(data);
@@ -222,11 +283,12 @@ export const CLIENT_SCRIPT = `
     api('GET', '/api/kiosk/admin/displays').then(function (j) {
       if (!j.devices || !state) return;
       var changed = JSON.stringify(j.pending) !== JSON.stringify(state.pending) || j.devices.length !== state.devices.length;
-      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section, #kk-dash')) render(j);
+      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section, #kk-dash, #kk-stations')) render(j);
       else state = j;
     });
   }
   load();
+  renderStations();
   window.__kkRefresh = setInterval(refreshPending, 5000);
 })();
 `;
@@ -247,6 +309,10 @@ const STYLES = `
   .kk-bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   .kk-form { display: grid; gap: 4px; max-width: 420px; }
   .kk-form input[name=code] { font-size: 1.4rem; letter-spacing: .15em; width: 9ch; }
+  .kk-station { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+  .kk-station input { min-width: 10ch; flex: 1 1 12ch; }
+  .kk-station input[type=url] { flex: 2 1 24ch; }
+  .kk-station .kk-local { margin: 0; gap: 4px; }
   .kk-row { font-family: ui-monospace, monospace; font-size: .8rem; margin: 2px 0; }
 `;
 
@@ -273,6 +339,7 @@ export default {
         <div id="kk-pair" class="kk-card"></div>
         <div id="kk-dash" class="kk-card" hidden></div>
         <div id="kk-devices"></div>
+        <div id="kk-stations" class="kk-card"></div>
       </div>
       <script type="application/json" id="kk-strings">${json}</script>
       <script>${CLIENT_SCRIPT}<\/script>`;
