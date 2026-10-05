@@ -71,6 +71,7 @@ const expectsAudio = (turn) => !turn.done.aborted && (!!turn.tts || turn.done.ti
  */
 export function reportDecision(turn, { playing, now, force = false }) {
   if (!turn || turn.reported || !turn.done) return { report: false };
+  if (!force) { const w = effectWaitMs(turn, now); if (w > 0) return { report: false, retryInMs: w }; }
   if (force || turn.barged || !expectsAudio(turn)) return { report: true };
   if (turn.playAt == null) {
     const waited = now - turn.doneAt;
@@ -82,8 +83,51 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
   return {
     type: "turn_metrics", turn_id: turn.id, source: turn.source, vad_reason: turn.reason,
     e2e_ms: e2eMs({ speechEndAt: turn.speechEndAt, playAt: turn.playAt }),
+    effect_ms: turn.effectAt == null ? null : e2eMs({ speechEndAt: turn.speechEndAt ?? turn.endedAt, playAt: turn.effectAt }),
     barged: !!turn.barged, output_latency_ms: outputLatencyMs,
   };
+}
+
+/*
+ * Ducking (review C1). The music is turned down (or paused) while a turn is OPEN: the mic is open,
+ * the server's bird is not idle (listening, thinking, speaking), or this page's TTS is playing.
+ * "Open" never depends on turn_done: a turn that never ran (empty, too long, busy) or a socket
+ * that closed mid-turn ends with the server's idle state, the mic closed, or the socket's own close.
+ */
+export function duckDecision({ turnOpen, serverBird, playing }) {
+  return !!turnOpen || (typeof serverBird === "string" && serverBird !== "idle") || !!playing;
+}
+/** Backstop: ducked this long with the bird idle and no TTS playing, the music comes back whatever the page thinks. */
+export const DUCK_BACKSTOP_MS = 30_000;
+export function duckBackstop({ duckedFor, serverBird, playing }) {
+  return duckedFor >= DUCK_BACKSTOP_MS && serverBird === "idle" && !playing;
+}
+
+/*
+ * Effect time (ruling S12): end of speech to the moment the thing happened. The first `wm` or `media`
+ * change that arrives after turn_end and before the turn's closing frame is stamped; a media `load`
+ * is stamped when the element reports `playing` for that item, if within EFFECT_WAIT_MS of the load.
+ * ev = { kind: "wm" | "media" | "load" | "playing", id?, at } (performance.now() ms). Mutates turn.
+ */
+export const EFFECT_WAIT_MS = 6000;
+export function noteEffect(turn, ev) {
+  if (!turn || !turn.ended || turn.effectAt != null || !ev) return false;
+  if (ev.kind === "playing") {
+    const l = turn.effectLoad;
+    if (!l || l.id !== ev.id || ev.at - l.at > EFFECT_WAIT_MS) return false;
+    turn.effectAt = ev.at;
+    return true;
+  }
+  if (turn.done || turn.effectLoad) return false;
+  if (ev.kind === "load") { turn.effectLoad = { id: ev.id, at: ev.at }; return false; }
+  turn.effectAt = ev.at;
+  return true;
+}
+/** A load still waiting for its `playing` holds the turn's report (up to EFFECT_WAIT_MS). → ms to wait, or 0. */
+export function effectWaitMs(turn, now) {
+  const l = turn?.effectLoad;
+  if (!l || turn.effectAt != null) return 0;
+  return Math.max(0, EFFECT_WAIT_MS - (now - l.at));
 }
 
 /** A dead token or a halt leaves the display idle for a long time: release the mic so the phone's indicator goes off. */

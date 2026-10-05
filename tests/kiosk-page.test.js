@@ -299,7 +299,60 @@ test("the page reports caps v2: screen, audio, the kinds this build draws; no ki
   const at = src.indexOf("const CAPS");
   const lit = src.slice(at, src.indexOf("};", at) + 2);
   assert.match(lit, /v: 2/);
-  assert.match(lit, /kinds: \["card", "timer"\]/);
+  assert.match(lit, /kinds: \["card", "timer", "nowplaying"\]/);
   assert.match(lit, /screen: \{ w: screen\.width, h: screen\.height/);
   assert.doesNotMatch(lit, /"media"|"app"|"camera"/);
+});
+
+test("media: one <audio> element (preload none) and a now-playing chip that [hidden] hides; media-view is served and small", () => {
+  const { document } = parseHTML(read("kiosk.html"));
+  const audios = document.querySelectorAll("audio");
+  assert.equal(audios.length, 1);
+  assert.equal(audios[0].id, "media");
+  assert.equal(audios[0].getAttribute("preload"), "none");
+  assert.equal(audios[0].getAttribute("src"), null, "no address in the page: the server sends a ticket path");
+  const chip = document.getElementById("np-chip");
+  assert.equal(chip.tagName, "BUTTON");
+  assert.ok(chip.hasAttribute("hidden"));
+  assert.ok(Object.hasOwn(ASSETS, "media-view.js"));
+  assert.ok(statSync(new URL("media-view.js", PUB)).size < 10 * 1024, "media-view.js stays under 10 KB");
+});
+
+test("media wiring: ducking follows the mic, the server's bird and the TTS — never turn_done; turn_over and errors re-check it", () => {
+  const src = read("kiosk.js");
+  const sync = src.slice(src.indexOf("function syncDuck()"), src.indexOf("function applyTheme()"));
+  assert.match(sync, /duckDecision\(\{ turnOpen: !!\(turn && !turn\.ended\), serverBird, playing \}\)/);
+  assert.doesNotMatch(sync, /turn\.done/);
+  assert.match(src, /const renderBird = \(\) => \{ setBird\([^;]+\); syncDuck\(\); \};/, "every bird change (state frames, socket close, TTS drain) re-checks the duck");
+  const over = src.slice(src.indexOf('case "turn_over":'), src.indexOf('case "turn_done":'));
+  assert.match(over, /syncDuck\(\)/);
+  assert.match(over, /turn\.reported = true/, "a turn that never ran sends no metrics");
+  const err = src.slice(src.indexOf('case "error":'), src.indexOf("default:", src.indexOf('case "error":')));
+  assert.match(err, /syncDuck\(\)/);
+  const start = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
+  assert.ok(start.indexOf("syncDuck()") < start.indexOf('send({ type: "turn_start"'), "ducking starts at the tap, before the server answers");
+  assert.match(src, /case "media":[\s\S]{0,300}mediaView\?\.apply\(m\)/);
+});
+
+test("now-playing window: title and source as text, six buttons that send the touch verbs", () => {
+  const { document } = parseHTML("<div id=w></div>");
+  const root = document.getElementById("w");
+  const sent = [];
+  let np = { title: "<b>Song</b>", subtitle: "Artist", source: "music", paused: false, muted: false };
+  const v = createWindowView(root, { t: (k) => k, now: () => 0, nowPlaying: () => np, onMedia: (verb) => sent.push(verb) });
+  v.apply({ action: "open", window: { id: "w1", kind: "nowplaying", title: "Now playing" } });
+  assert.equal(root.querySelector(".k-np-title").textContent, "<b>Song</b>");
+  assert.equal(root.querySelector("b"), null, "never parsed as markup");
+  assert.equal(root.querySelector(".k-np-sub").textContent, "Artist · music");
+  const buttons = [...root.querySelectorAll(".k-np-controls button")];
+  assert.equal(buttons.length, 6);
+  for (const b of buttons) b.dispatchEvent(new document.defaultView.Event("click"));
+  assert.deepEqual(sent, ["previous", "pause", "next", "volume_down", "volume_up", "mute"]);
+  np = { ...np, paused: true, muted: true };
+  v.refresh();
+  sent.length = 0;
+  for (const b of root.querySelectorAll(".k-np-controls button")) b.dispatchEvent(new document.defaultView.Event("click"));
+  assert.deepEqual(sent, ["previous", "resume", "next", "volume_down", "volume_up", "unmute"]);
+  v.apply({ action: "close", id: "w1" });
+  assert.equal(root.hidden, true, "the server's close (the session ended) takes the window away");
 });

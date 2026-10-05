@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS,
 } from "../bundles/kiosk/public/state.js";
 import { createPlayer } from "../bundles/kiosk/public/audio.js";
 
@@ -322,4 +323,68 @@ test("applyTheme reads the theme setting, and a pushed config applies it without
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
   assert.match(src, /function applyTheme\(\) \{[^\n]*themeFor\(config\.theme,/);
   assert.match(src, /if \(!clockTimer\) tickClock\(\); else applyTheme\(\);/);
+});
+
+// ── ducking (review C1): what the page knows after each way a turn can end ─────────────────────
+test("duck rule: open while the mic is open, the server's bird is not idle, or TTS plays — never keyed on turn_done", () => {
+  const duck = (turn, serverBird, playing = false) => duckDecision({ turnOpen: !!(turn && !turn.ended), serverBird, playing });
+  // A tap: the mic opens before the server has said anything.
+  assert.equal(duck({ ended: false, done: null }, "idle"), true, "ducked at the tap");
+  // Empty turn: the page ended the mic (no speech), the server sends turn_over + state idle and no turn_done.
+  assert.equal(duck({ ended: true, done: null }, "idle"), false, "an empty turn restores the music");
+  // turn_busy: the server answers turn_over (busy); the page ends its turn; the bird is whatever the server says.
+  assert.equal(duck({ ended: true, done: { aborted: true, over: "busy" } }, "idle"), false);
+  // Socket closed mid-turn: onclose marks the turn ended and the bird idle.
+  assert.equal(duck({ ended: true, done: null }, "idle"), false, "a dropped socket restores the music");
+  // Thinking and speaking keep it ducked; the page's own TTS still draining keeps it ducked after the server said idle.
+  assert.equal(duck({ ended: true, done: null }, "thinking"), true);
+  assert.equal(duck({ ended: true, done: {} }, "idle", true), true);
+  // Barge: TTS flushed, the server's speaking turned to idle on the page.
+  assert.equal(duck({ ended: true, done: {}, barged: true }, "idle", false), false);
+  // Follow-up with nothing said: the follow-up mic opens (ducked), the VAD ends it, the server says idle.
+  assert.equal(duck({ ended: false, done: null, source: "follow_up" }, "listening"), true);
+  assert.equal(duck({ ended: true, done: null, source: "follow_up" }, "idle"), false);
+  assert.equal(duck(null, "idle"), false);
+});
+
+test("duck backstop: 30 s ducked with the bird idle and no TTS brings the music back; never while the bird is busy or TTS plays", () => {
+  assert.equal(DUCK_BACKSTOP_MS, 30_000);
+  assert.equal(duckBackstop({ duckedFor: 30_000, serverBird: "idle", playing: false }), true);
+  assert.equal(duckBackstop({ duckedFor: 29_999, serverBird: "idle", playing: false }), false);
+  assert.equal(duckBackstop({ duckedFor: 60_000, serverBird: "thinking", playing: false }), false);
+  assert.equal(duckBackstop({ duckedFor: 60_000, serverBird: "idle", playing: true }), false);
+});
+
+test("effect time: the first wm/media change between turn_end and the turn's close; a load counts when it is heard (≤ 6 s)", () => {
+  const t1 = { ended: false, done: null, effectAt: null, effectLoad: null, speechEndAt: 1000 };
+  assert.equal(noteEffect(t1, { kind: "wm", at: 900 }), false, "before turn_end: not this turn's effect");
+  t1.ended = true;
+  assert.equal(noteEffect(t1, { kind: "wm", at: 1400 }), true);
+  assert.equal(noteEffect(t1, { kind: "wm", at: 1500 }), false, "only the first");
+  assert.equal(turnMetrics(t1).effect_ms, 400);
+  // A load waits for its playing event.
+  const t2 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: 1000 };
+  assert.equal(noteEffect(t2, { kind: "load", id: "m1", at: 1200 }), false);
+  assert.equal(noteEffect(t2, { kind: "wm", at: 1300 }), false, "a window opened after the load does not count instead of the audio");
+  t2.done = {};
+  assert.equal(noteEffect(t2, { kind: "playing", id: "m2", at: 1500 }), false, "another item");
+  assert.equal(noteEffect(t2, { kind: "playing", id: "m1", at: 2600 }), true, "after turn_done too: the audio is the effect");
+  assert.equal(turnMetrics(t2).effect_ms, 1600);
+  const t3 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: 0 };
+  noteEffect(t3, { kind: "load", id: "m1", at: 100 });
+  assert.equal(noteEffect(t3, { kind: "playing", id: "m1", at: 100 + EFFECT_WAIT_MS + 1 }), false, "past the wait: no effect time");
+  assert.equal(turnMetrics(t3).effect_ms, null);
+  // A turn whose speech end is unknown (manual stop) is timed from turn_end.
+  const t4 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: null, endedAt: 50 };
+  noteEffect(t4, { kind: "media", at: 80 });
+  assert.equal(turnMetrics(t4).effect_ms, 30);
+});
+
+test("report waits for a pending load's playing event (up to 6 s), unless forced", () => {
+  const t = { done: { timings: {} }, doneAt: 0, reported: false, tts: false, playAt: null, ended: true, effectAt: null, effectLoad: { id: "m1", at: 0 } };
+  assert.deepEqual(reportDecision(t, { playing: false, now: 1000 }), { report: false, retryInMs: EFFECT_WAIT_MS - 1000 });
+  assert.equal(reportDecision(t, { playing: false, now: EFFECT_WAIT_MS }).report, true);
+  assert.equal(reportDecision(t, { playing: false, now: 10, force: true }).report, true);
+  t.effectAt = 900;
+  assert.equal(reportDecision(t, { playing: false, now: 1000 }).report, true);
 });
