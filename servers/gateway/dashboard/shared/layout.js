@@ -11,6 +11,7 @@ import { CROW_HERO_SVG } from "./crow-hero.js";
 import { designTokensCss } from "./design-tokens.js";
 import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
+import { crowTalkCss, crowTalkJs, crowTalkOverlayHtml } from "./crow-talk.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 import { textSizeCss, textSizeHeadScript } from "./text-size.js";
 
@@ -249,19 +250,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       }
     } catch (e) {}
   </script>
-  <div id="kiosk-overlay" class="kiosk-overlay">
-    <!-- Always-present close button so a broken/unreachable companion iframe
-         never strands the user with no way back to the dashboard. The iframe
-         is inserted AFTER this element so it can't cover it (z-index + right
-         alignment in CSS). Escape also still works when the OUTER document
-         has focus. -->
-    <button type="button" id="kiosk-exit-btn" class="kiosk-exit-btn" onclick="exitKioskMode()" title="Exit kiosk (Esc)">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="18" y1="6" x2="6" y2="18"/>
-        <line x1="6" y1="6" x2="18" y2="18"/>
-      </svg>
-    </button>
-  </div>
+  ${crowTalkOverlayHtml(lang)}
   <div class="dashboard">
     <!-- The aside's id exists so the two toggle controls can point
          aria-controls at the thing they operate; the class is what CSS
@@ -303,109 +292,13 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     ${afterContent || ""}
   </div>
   <script>
-    // ─── Kiosk Mode ───
-    function toggleKioskMode() {
-      var overlay = document.getElementById('kiosk-overlay');
-      if (overlay.classList.contains('active')) {
-        exitKioskMode();
-        return;
-      }
-      var companionUrl = window.__crowCompanionUrl
-        || ('https://' + location.hostname + ':12393/');
-
-      // Per-device kiosk (Part 3): this display's device id (set once via the
-      // URL ?kiosk_device=<id>, then remembered) is passed to the companion as
-      // ?device=<id> so it shows the bound bot's preset + feature toggles.
-      try {
-        var kd = new URLSearchParams(location.search).get('kiosk_device');
-        if (kd) localStorage.setItem('crow_kiosk_device', kd);
-        kd = kd || localStorage.getItem('crow_kiosk_device');
-        if (kd) companionUrl += (companionUrl.indexOf('?') < 0 ? '?' : '&') + 'device=' + encodeURIComponent(kd);
-      } catch (e) {}
-
-      overlay.classList.add('active');
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_kiosk&kiosk=true'
-      });
-
-      var iframe = document.createElement('iframe');
-      iframe.src = companionUrl;
-      iframe.setAttribute('allow', 'microphone; camera; autoplay; fullscreen');
-      iframe.setAttribute('allowfullscreen', '');
-      iframe.style.cssText = 'width:100%;height:100%;border:none';
-
-      // Load-failure detection. Cross-origin iframes don't fire 'error' on
-      // HTTP failures — the browser blocks that channel. We use a 6-second
-      // timeout: if the iframe hasn't fired 'load' by then, the host is
-      // assumed unreachable and we replace the blank iframe with a visible
-      // error message. The kiosk-exit button is already in the DOM so the
-      // user can always get out, regardless of iframe state.
-      var loaded = false;
-      iframe.addEventListener('load', function() { loaded = true; });
-      overlay.appendChild(iframe);
-
-      setTimeout(function() {
-        if (loaded || !overlay.classList.contains('active')) return;
-        try { iframe.remove(); } catch (e) {}
-        // Surface the error state — this reveals the .kiosk-exit-btn as a
-        // fallback since the companion's own Nest button never rendered.
-        overlay.classList.add('kiosk-overlay--error');
-        var host;
-        try { host = new URL(companionUrl).host; } catch (e) { host = companionUrl; }
-        var err = document.createElement('div');
-        err.className = 'kiosk-error-msg';
-        var h3 = document.createElement('h3');
-        h3.textContent = 'Companion unreachable';
-        var p = document.createElement('p');
-        p.textContent = 'Tried to connect to ' + host + ' but got no response. ' +
-          'The companion container may be stopped or its port not open.';
-        var btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = 'Close';
-        btn.addEventListener('click', exitKioskMode);
-        err.appendChild(h3);
-        err.appendChild(p);
-        err.appendChild(btn);
-        overlay.appendChild(err);
-      }, 6000);
-    }
-    function exitKioskMode() {
-      var overlay = document.getElementById('kiosk-overlay');
-      if (!overlay) return;
-      overlay.classList.remove('active');
-      overlay.classList.remove('kiosk-overlay--error');
-      overlay.classList.remove('kiosk-overlay--show-exit');
-      // Remove every child EXCEPT the exit button (it's a permanent escape
-      // hatch — teardown would leave the overlay unusable on re-entry).
-      var kids = Array.prototype.slice.call(overlay.children);
-      for (var i = 0; i < kids.length; i++) {
-        if (kids[i].id !== 'kiosk-exit-btn') overlay.removeChild(kids[i]);
-      }
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_kiosk&kiosk=false'
-      });
-    }
+    // ─── Talk to Crow (voice overlay + the header bird's long-press) ───
+    ${crowTalkJs()}
     // Document/window-level listeners must only attach ONCE per document
     // lifetime. Under Turbo these scripts re-execute on every nav; without
     // this guard, each nav stacks additional keydown + message listeners.
     if (!window.__crowLayoutKeyListeners) {
       window.__crowLayoutKeyListeners = true;
-      document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && document.getElementById('kiosk-overlay') && document.getElementById('kiosk-overlay').classList.contains('active')) {
-          exitKioskMode();
-          e.stopPropagation();
-        }
-      });
-
-      // Listen for companion requesting exit
-      window.addEventListener('message', function(e) {
-        if (e.data === 'crow-exit-kiosk') exitKioskMode();
-      });
-
       // Global Escape-closes-sidebar listener — also only once per document
       document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') closeSidebar();
@@ -1409,6 +1302,7 @@ function dashboardCss() {
 
   /* Header icons (notifications, health) */
   ${headerIconsCss}
+  ${crowTalkCss}
 
   /* Tamagotchi crow */
   ${tamagotchiCss}

@@ -54,6 +54,10 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 .k-pair-code { font-size: 96px; font-weight: 800; letter-spacing: .08em; margin: 8px 0; color: var(--k-teal); font-variant-numeric: tabular-nums; }
 .k-debug { position: fixed; left: 8px; right: 8px; top: 48px; z-index: 20; max-height: 70vh; overflow: auto; padding: 12px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-line); white-space: pre-wrap; font: 14px/1.4 ui-monospace, monospace; }
 .k-banner { position: fixed; left: 16px; right: 16px; top: 8px; padding: 12px 16px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-attn); }
+.k-banner a { color: var(--k-teal); font-weight: 700; text-decoration: underline; }
+/* Session mode (inside the dashboard's Talk to Crow overlay): the dashboard's close button sits over the top-right corner. */
+[data-mode="session"] .k-top { padding-right: 56px; }
+[data-mode="session"] .k-banner { right: 68px; }
 @media (max-width: 599px) {
   .k-app { grid-template-rows: 40px auto 1fr auto; height: auto; min-height: 100vh; overflow: auto; }
   html, body { overflow: auto; }

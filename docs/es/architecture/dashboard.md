@@ -284,6 +284,8 @@ Consulta [Creación de paneles](/es/developers/creating-panels) para un tutorial
 
 El Crow's Nest incluye un sistema de notificaciones con un ícono de campana y un dropdown estilo tamagotchi en la barra superior.
 
+El encabezado tiene un solo botón, el pájaro (`tamagotchiHtml` en `shared/notifications.js`; la campana lo sustituye cuando el pájaro está desactivado). Un toque abre la bandeja: notificaciones y estado del sistema. Cuando la extensión Kiosk está instalada, la primera fila de la bandeja es **Hablar con Crow** y una pulsación larga sobre el pájaro (alrededor de medio segundo: ratón, dedo, o Enter/Espacio mantenido) abre directamente la superposición de voz; al soltar nunca se abre además la bandeja. La superposición, su control de cierre y el gesto viven en `shared/crow-talk.js`; la página que muestra es la [pantalla de sesión](/es/architecture/kiosk) de la extensión Kiosk. Sin la extensión no hay fila y una pulsación larga es un toque normal. Pruebas: `tests/dashboard-bird-talk.test.js`.
+
 ### Esquema
 
 La tabla `notifications` almacena todas las notificaciones:

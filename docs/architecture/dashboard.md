@@ -303,6 +303,8 @@ See [Creating Panels](/developers/creating-panels) for a development tutorial.
 
 The Crow's Nest includes a notification system with a bell icon and tamagotchi-style dropdown in the top bar.
 
+The header has one button, the bird (`tamagotchiHtml` in `shared/notifications.js`; the bell replaces it when the bird is turned off). A tap opens the tray: notifications and system health. When the Kiosk extension is installed, the tray's first row is **Talk to Crow** and a long press on the bird (about half a second — mouse, touch, or a held Enter/Space) opens the voice overlay directly; the release never also opens the tray. The overlay, its close control and the gesture live in `shared/crow-talk.js`; the page inside it is the Kiosk extension's [session display](/architecture/kiosk). Without the extension there is no row and a long press is an ordinary tap. Tests: `tests/dashboard-bird-talk.test.js`.
+
 ### Schema
 
 The `notifications` table stores all notifications:

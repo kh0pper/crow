@@ -8,9 +8,9 @@ Kiosk mode turns a Crow display into a full-screen [AI Companion](/architecture/
 
 ## Launching
 
-In [Crow's Nest](/architecture/dashboard), click the **Companion** button in the header (shown when a companion is available). The avatar opens full-screen in an overlay; press **Esc** or the exit button to leave. The state is remembered, so a dedicated kiosk re-enters the companion automatically on load.
+Open the companion at its own address — port `12393` on the Crow host — in a full-screen browser on the display. The browser asks for the microphone (and the camera, if face tracking is on) the first time.
 
-Under the hood the overlay loads the companion (`:12393`) in an iframe with microphone/camera/autoplay granted. If the companion host is unreachable, a visible error replaces the blank frame and the exit button stays available.
+The Crow's Nest header no longer has a **Companion** button. Its one button, the bird, opens the tray on a tap and **Talk to Crow** on a long press; Talk to Crow is the [Kiosk display](/architecture/kiosk) page (your Ramble bird, tap to talk), not the avatar companion.
 
 ## Per-device customization
 

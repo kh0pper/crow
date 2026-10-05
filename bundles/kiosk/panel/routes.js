@@ -23,8 +23,10 @@ const bImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 
 const { APP_ROOT, appImport } = await bImport("server/app-root.js");
 const { createDbClient } = await appImport("servers/db.js");
-const { isAllowedNetwork } = await appImport("servers/gateway/dashboard/auth.js");
-const { csrfMiddleware } = await appImport("servers/gateway/dashboard/shared/csrf.js");
+// sessionFromRequest / verifySession / csrfTokenAccepted are the gateway's own dashboard-session
+// checks; the runtime turns session mode (the dashboard's Talk to Crow) off when any is missing.
+const { isAllowedNetwork, sessionFromRequest, verifySession } = await appImport("servers/gateway/dashboard/auth.js");
+const { csrfMiddleware, csrfTokenAccepted } = await appImport("servers/gateway/dashboard/shared/csrf.js");
 const deviceStore = await appImport("servers/shared/device-store.js");
 const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
 const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
@@ -48,6 +50,7 @@ const sttWarmup = createSttWarmup({
 const runtime = createKioskRuntime({
   Router, json: express.json, WebSocketServer,
   isAllowedNetwork, csrfMiddleware,
+  sessionFromRequest, verifySession, csrfTokenAccepted,
   openDb: () => createDbClient(),
   deviceStore, voice, sttWarmup, wrapPcmAsWav,
   settings: { readSetting, writeSetting },

@@ -108,10 +108,14 @@ export const translations = {
   "time.hAgo": { en: "h ago", es: "h atrás" },
   "time.dAgo": { en: "d ago", es: "d atrás" },
 
-  // ─── Kiosk Mode ───
-  "kiosk.toggle": { en: "Companion", es: "Compañero" },
-  "kiosk.exit": { en: "Exit Companion", es: "Salir del compañero" },
-  "kiosk.unavailable": { en: "AI Companion is not running", es: "El compañero de IA no está activo" },
+  // ─── Talk to Crow (header bird: tap = tray, press and hold = voice overlay) ───
+  "talk.row": { en: "Talk to Crow", es: "Hablar con Crow" },
+  "talk.rowHintBird": { en: "Tip: press and hold the bird to skip this menu.", es: "Consejo: mantén pulsado el pájaro para saltarte este menú." },
+  "talk.rowHintBell": { en: "Tip: press and hold the bell to skip this menu.", es: "Consejo: mantén pulsada la campana para saltarte este menú." },
+  "talk.close": { en: "Close (Esc)", es: "Cerrar (Esc)" },
+  "talk.birdLabel": { en: "Crow: notifications and status", es: "Crow: notificaciones y estado" },
+  "talk.birdLabelHold": { en: "Crow: notifications and status. Press and hold to talk to Crow.", es: "Crow: notificaciones y estado. Mantén pulsado para hablar con Crow." },
+  "talk.bellLabelHold": { en: "Notifications. Press and hold to talk to Crow.", es: "Notificaciones. Mantén pulsado para hablar con Crow." },
 
   // ─── Notifications ───
   "notif.systemHealth": { en: "System Health", es: "Estado del sistema" },

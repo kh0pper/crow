@@ -12,6 +12,7 @@ import { createSessionHub } from "./session.js";
 import { createMetricsStore } from "./metrics.js";
 import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks } from "./wm.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
+import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
 
 export const PAGE_CSP = [
@@ -19,6 +20,16 @@ export const PAGE_CSP = [
   "media-src 'self' blob:", "connect-src 'self' ws://127.0.0.1:8770", "frame-src https://www.youtube-nocookie.com",
   "worker-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'",
 ].join("; ");
+/**
+ * Session mode (the dashboard's Talk to Crow overlay): the same page at
+ * /display/session for a user who is already logged in to the dashboard. The
+ * only CSP difference is that the dashboard itself (same origin) may frame it.
+ */
+export const SESSION_PAGE_PATH = "/display/session";
+export const SESSION_WS_PATH = "/api/kiosk/session/dashboard";
+export const SESSION_PAGE_CSP = PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+/** How long a closed session display keeps its windows/timers/conversation (a phone's network blip reconnects well inside it). */
+export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
 export const ASSETS = {
   "kiosk.js": "text/javascript", "state.js": "text/javascript", "audio.js": "text/javascript",
   "resample.js": "text/javascript", "pcm-worklet.js": "text/javascript", "vad.js": "text/javascript",
@@ -186,8 +197,58 @@ export function createKioskRuntime(deps) {
       const d = hub.deviceOf(id);
       if (d && !hub.isBusy(id)) sweepWarm(d);
     }
+    // Session displays: a login that ended closes its display within a minute even when idle,
+    // and a display closed for longer than the grace period leaves nothing behind.
+    hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
+    expireSessionDisplays();
   }, 60_000);
   sweep.unref?.();
+
+  // ── Session mode (dashboard Talk to Crow) ─────────────────────────────────
+  // Off entirely unless the gateway provides the core session helpers.
+  const sessionMode = typeof deps.sessionFromRequest === "function" && typeof deps.verifySession === "function" && typeof deps.csrfTokenAccepted === "function";
+  const closedSessionDisplays = new Map();   // device id → closed-at (ms)
+  function expireSessionDisplays(at = now()) {
+    for (const [id, closedAt] of closedSessionDisplays) {
+      if (hub.isConnected(id)) { closedSessionDisplays.delete(id); continue; }
+      if (at - closedAt < SESSION_DISPLAY_GRACE_MS) continue;
+      closedSessionDisplays.delete(id);
+      wm.closeAll(id);
+      try { deps.voice.convo?.clear?.(id); } catch {}
+      sweepWarmAt.delete(id);
+    }
+  }
+  /**
+   * The display a logged-in dashboard user talks through. It exists only in
+   * memory, for the life of the socket: nothing is written to the device
+   * store, so it is never listed, announced to, or pairable. Its id is a
+   * domain-separated hash of the session token (stable across reconnects of
+   * the same login, useless as a credential).
+   */
+  async function sessionDevice(db, sessionToken, botId) {
+    const stt = await ensureKioskSttProfile(db, deps.settings);
+    const tts = await pickKioskTtsProfile(db, deps.settings);
+    let lang = "en";
+    try { lang = (await deps.settings.readSetting(db, "language")) === "es" ? "es" : "en"; } catch {}
+    return {
+      id: sessionDisplayId(sessionToken),
+      name: "Dashboard",
+      device_kind: "kiosk",
+      bound_bot_id: botId,
+      stt_profile_id: stt.id,
+      tts_profile_id: tts ? tts.id : null,
+      kiosk_settings: deps.deviceStore.normalizeKioskSettings({ lang }, null),
+    };
+  }
+  /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
+  async function authorizeSessionHello(req, sessionToken, msg) {
+    if (!deps.csrfTokenAccepted(req, msg?.csrf)) return null;
+    return withDb(async (db) => {
+      const botId = await resolveSessionBot(db, deps.settings);
+      if (!botId) return { close: { code: 4403, reason: "no_bot" } };
+      return { device: await sessionDevice(db, sessionToken, botId) };
+    });
+  }
 
   /**
    * Gateway boot: warm every paired display's STT once whisper answers. Retried
@@ -272,6 +333,17 @@ export function createKioskRuntime(deps) {
       res.setHeader("Permissions-Policy", "microphone=(self), camera=()");
       res.type("html").send(readFileSync(join(deps.files.publicDir, "kiosk.html"), "utf8"));
     });
+    // Session mode: the page for a logged-in dashboard user. Same network gate as /display, then the
+    // dashboard session itself (401, not a redirect: it is shown inside the dashboard's own frame).
+    r.get(SESSION_PAGE_PATH, wrap(async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      if (!sessionMode) return res.status(404).type("text/plain").send("Not found");
+      if (!(await deps.sessionFromRequest(req))) return res.status(401).type("text/plain").send("Sign in to Crow to talk here.");
+      res.setHeader("Content-Security-Policy", SESSION_PAGE_CSP);
+      res.setHeader("Permissions-Policy", "microphone=(self), camera=()");
+      const html = readFileSync(join(deps.files.publicDir, "kiosk.html"), "utf8");
+      res.type("html").send(html.replace("<html ", '<html data-mode="session" '));
+    }));
     r.get("/display/assets/:file", (req, res) => {
       const f = req.params.file;
       res.setHeader("Cache-Control", "no-cache");
@@ -302,7 +374,9 @@ export function createKioskRuntime(deps) {
         const devices = (await kioskDevices(db)).map((d) => ({ ...d, connected: hub.isConnected(d.id), latency: metrics.summary(d.id) }));
         const bots = (await db.execute({ sql: "SELECT bot_id, display_name FROM pi_bot_defs WHERE enabled = 1 ORDER BY display_name", args: [] })).rows.map((x) => ({ bot_id: x.bot_id, display_name: x.display_name }));
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
-        return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles") };
+        const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
+        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await resolveSessionBot(db, deps.settings) };
+        return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles"), dashboard_voice };
       });
       res.json(body);
     }));
@@ -336,6 +410,18 @@ export function createKioskRuntime(deps) {
           pairing.release(c.pending.pair_id);
           throw err;
         }
+      });
+    }));
+    // Which assistant answers the dashboard's Talk to Crow ("" = automatic: the first enabled one).
+    r.post("/api/kiosk/admin/dashboard-voice", json, wrap(async (req, res) => {
+      const botId = String(req.body?.bot_id || "").slice(0, 128);
+      await withDb(async (db) => {
+        if (botId) {
+          const ok = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
+          if (!ok) return res.status(400).json({ error: "bot_required" });
+        }
+        await deps.settings.writeSetting(db, SESSION_BOT_SETTING, botId);
+        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await resolveSessionBot(db, deps.settings) });
       });
     }));
     r.post("/api/kiosk/admin/displays/:id", json, wrap(async (req, res) => {
@@ -392,23 +478,40 @@ export function createKioskRuntime(deps) {
 
   function attachUpgrade(server) {
     const wss = new deps.WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 256 * 1024 });
+    const refuse = (socket, status, text) => { try { socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`); } catch {} socket.destroy(); };
+    const accept = (req, socket, head, attachOpts) => wss.handleUpgrade(req, socket, head, (ws) => {
+      let alive = true;
+      ws.on("pong", () => { alive = true; });
+      const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, 15_000);
+      ws.on("close", () => clearInterval(ping));
+      hub.attach(ws, attachOpts);
+    });
     server.on("upgrade", (req, socket, head) => {
-      if (String(req.url || "").split("?")[0] !== "/api/kiosk/session") return;
-      if (req.headers["tailscale-funnel-request"] || !deps.isAllowedNetwork(req)) {
-        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-        socket.destroy();
-        return;
+      const path = String(req.url || "").split("?")[0];
+      if (path !== "/api/kiosk/session" && path !== SESSION_WS_PATH) return;
+      if (req.headers["tailscale-funnel-request"] || !deps.isAllowedNetwork(req)) return refuse(socket, 403, "Forbidden");
+      if (path === "/api/kiosk/session") return accept(req, socket, head);   // paired displays: the token arrives in hello
+      // Session mode. Everything is decided BEFORE the upgrade: a browser page on another site can
+      // make the browser send the cookie, so the handshake must come from this origin, and the
+      // cookie must be a live dashboard session. hello then has to echo the CSRF cookie.
+      if (!sessionMode) return refuse(socket, 404, "Not Found");
+      if (!sameOriginUpgrade(req)) {
+        log(`[kiosk] session display refused: Origin ${String(req.headers.origin || "(none)").slice(0, 120)} is not this host (${String(req.headers.host || "").slice(0, 120)}); a reverse proxy must forward Host or X-Forwarded-Host`);
+        return refuse(socket, 403, "Forbidden");
       }
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        let alive = true;
-        ws.on("pong", () => { alive = true; });
-        const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, 15_000);
-        ws.on("close", () => clearInterval(ping));
-        hub.attach(ws);
-      });
+      socket.on("error", () => {});
+      Promise.resolve().then(() => deps.sessionFromRequest(req)).then((token) => {
+        if (socket.destroyed) return;
+        if (!token) return refuse(socket, 401, "Unauthorized");
+        accept(req, socket, head, {
+          authorize: (msg) => authorizeSessionHello(req, token, msg),
+          revalidate: () => deps.verifySession(token),
+          onClose: (d) => { closedSessionDisplays.set(d.id, now()); },
+        });
+      }).catch((err) => { log(`[kiosk] session upgrade failed: ${err?.message}`); refuse(socket, 401, "Unauthorized"); });
     });
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, announce, show, bootWarmup, stop: () => clearInterval(sweep) };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, announce, show, bootWarmup, expireSessionDisplays, stop: () => clearInterval(sweep) };
 }

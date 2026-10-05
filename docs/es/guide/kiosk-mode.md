@@ -8,9 +8,9 @@ El modo kiosco convierte una pantalla de Crow en un [Compañero de IA](/es/archi
 
 ## Iniciar
 
-En [Crow's Nest](/es/architecture/dashboard), haz clic en el botón **Compañero** del encabezado (visible cuando hay un compañero disponible). El avatar se abre a pantalla completa en un overlay; presiona **Esc** o el botón de salida para salir. El estado se recuerda, así que un kiosco dedicado vuelve a entrar al compañero automáticamente al cargar.
+Abre el compañero en su propia dirección —el puerto `12393` del host de Crow— en un navegador a pantalla completa en la pantalla. El navegador pide el micrófono (y la cámara, si el seguimiento facial está activado) la primera vez.
 
-Por debajo, el overlay carga el compañero (`:12393`) en un iframe con micrófono/cámara/autoplay concedidos. Si el host del compañero no responde, un error visible reemplaza el marco en blanco y el botón de salida sigue disponible.
+El encabezado de Crow's Nest ya no tiene el botón **Compañero**. Su único botón, el pájaro, abre la bandeja con un toque y **Hablar con Crow** con una pulsación larga; Hablar con Crow es la página de la [Pantalla kiosk](/es/architecture/kiosk) (tu pájaro de Ramble, toca para hablar), no el compañero con avatar.
 
 ## Personalización por dispositivo
 

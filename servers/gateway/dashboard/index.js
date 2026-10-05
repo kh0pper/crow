@@ -48,7 +48,7 @@ import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
+import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel, getPanelRoutes } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
@@ -57,7 +57,7 @@ import federationCompanionRouterFactory from "../routes/federation-companion.js"
 import federationResolveRouterFactory from "../routes/federation-resolve.js";
 import { getTrustedInstances } from "./panels/nest/data-queries.js";
 import { getPeerOverview } from "./overview-cache.js";
-import { resolveCompanionTarget } from "./companion-target.js";
+import { isCrowTalkAvailable } from "./shared/crow-talk.js";
 import { createDbClient } from "../../db.js";
 
 // Import built-in panels
@@ -866,36 +866,14 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       const tamaEnabled = tamaVal !== "false";
       lang = langVal || "en";
 
-      // Companion target resolution — checks LOCAL first (bundle installed
-      // + docker up), falls back to any TRUSTED PEER whose cached overview
-      // includes a companion tile. If any path succeeds, the header icon
-      // renders and clicking it launches the companion iframe at whichever
-      // host the resolver picked. This lets a kiosk running on grackle
-      // open the companion hosted on crow (or vice versa) without the
-      // user having to know where it lives.
-      const companionTarget = await resolveCompanionTarget({ db, origin: req.headers.host });
-      const companionAvailable = companionTarget.available;
-      const headerOpts = { companionAvailable };
+      // The header is one button, the bird: tap → tray, long-press → the
+      // Talk to Crow voice overlay. The overlay is the Kiosk extension's
+      // session display, so both the tray row and the long-press exist only
+      // when the INSTALLED Kiosk panel declares it and its routes loaded.
+      const talkAvailable = isCrowTalkAvailable(getPanel("kiosk"), getPanelRoutes().has("kiosk"));
+      const headerOpts = { talkAvailable };
       const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
-
-      // Expose the resolved URL to the kiosk-toggle inline JS. The layout
-      // reads window.__crowCompanionUrl; if the host isn't "local" we also
-      // pass the host name for aria/title text. Stringified safely — URL
-      // is already constructed server-side from validated gateway_url.
-      const companionConfigJs = `<script>
-        window.__crowCompanionUrl = ${JSON.stringify(companionTarget.url || "")};
-        window.__crowCompanionHost = ${JSON.stringify(companionTarget.host || "")};
-        window.__crowCompanionHostName = ${JSON.stringify(companionTarget.name || "")};
-      </script>`;
-
-      // Auto-restore kiosk mode if it was active
-      let kioskAutoStart = "";
-      if (companionAvailable) {
-        if ((await readSetting(db, "kiosk_mode")) === "true") {
-          kioskAutoStart = "if (typeof toggleKioskMode === 'function') toggleKioskMode();";
-        }
-      }
 
       const result = await panel.handler(req, res, {
         db,
@@ -908,12 +886,8 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           navGroups,
           lang,
           headerIcons: activeHeaderHtml,
-          // companionConfigJs sets window.__crowCompanionUrl before any
-          // kiosk-button click can fire. Placing it in afterContent puts
-          // it inside <body>, ensuring globals are set even for a user
-          // who clicks before the layout's inline scripts run.
-          afterContent: companionConfigJs + playerBarHtml(lang),
-          scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs + kioskAutoStart,
+          afterContent: playerBarHtml(lang),
+          scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs,
         }),
       });
 
