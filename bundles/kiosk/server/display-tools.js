@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, mentionsCard, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, compound, compoundParts } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -71,10 +71,14 @@ export function createDisplayTools(ctx) {
   };
   const playWhen = (t) => mentionsPlay(t) || asksPlay(t);
   const openWhen = (t) => mentionsOpen(t, items);
-  const showWhen = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null || mentionsCard(t, items);
+  // Offered on showIntent (the executor's own test, so offered ⇒ executable) or a change to the open card.
+  const showWhen = (t) => showIntent(t, items) || updates(t) !== null;
+  // Text is HELD only on the narrower pre-revision-4 tests: a wider offer never delays the spoken answer.
+  const showHold = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null;
+  const playHold = (t) => mentionsPlayWord(t) || asksPlay(t);
   const rules = {
     crow_play: {
-      when: playWhen, holdText: playWhen, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
+      when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
@@ -88,7 +92,7 @@ export function createDisplayTools(ctx) {
       // Not "a window happens to be open": on a plain question with a card up, only crow_wm is offered.
       // Revision 4: with a window open crow_show is always offered (a follow-up like "and garlic bread on
       // there too" or "make it twenty minutes instead" has no display word). Required only by `must`.
-      when: (t) => showWhen(t) || openWindow(), holdText: showWhen, holdToEnd: toEnd(showWhen), narrow: single,
+      when: (t) => showWhen(t) || openWindow(), holdText: showHold, holdToEnd: toEnd(showWhen), narrow: single,
       // A request for NEW content this display can show, or a change to the card that is open.
       must: (t) => newCard(t) || updates(t) !== null,
       mustNote: MUST_NOTES.crow_show,

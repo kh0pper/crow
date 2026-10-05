@@ -11,7 +11,7 @@
  * ctx.strict (T0/T1): a missing target returns null — the phrase does not fire.
  */
 import { parseDuration, contentBlocks, isPlaceholderText, wantsDisplay, MAX_TIMER_S } from "./wm.js";
-import { asksCard } from "./patterns.js";
+import { showIntent, followUp } from "./patterns.js";
 import { spokenWords, sameAt, KIND_NOUNS } from "./phrases.js";
 import { MEDIA_VERBS } from "./tools.js";
 import { STRINGS } from "./strings.js";
@@ -69,6 +69,24 @@ function show(i, ctx, S) {
   const need = kind === "timer" ? "timer" : kind === "steps" ? "recipe" : kind === "text" || kind === "list" ? "content" : null;
   if (!need || !win.includes(need)) return bad("unsupported_window");
   if (isPlaceholderText(title, PH_TITLE)) return bad("placeholder");
+  // Revision 5: offer and executor agree (showIntent is the predicate crow_show is offered on). A turn with NO
+  // display intent — a plain question while a window is open — may only CHANGE what is already open, and
+  // only when the words are a follow-up (a change word or a pronoun, never a question): it can never put a
+  // new card, recipe or timer up, nor overwrite a card just because the model copied its title.
+  const open = ctx.store.list(ctx.deviceId);
+  const sameOpen = (k) => open.some((w) => w.kind === k && !w.done && lower(w.title) === lower(title));
+  const t = ctx.turn?.transcript;
+  let replaceTimer = false;
+  if (typeof t === "string" && !showIntent(t, ctx.items)) {
+    const follow = followUp(t) || !!ctx.turn.update;
+    const target = kind === "timer" ? sameOpen("timer") : kind === "steps" ? sameOpen("recipe") : sameOpen("content");
+    if (!follow || !target) {
+      const cards = open.filter((w) => w.kind === "content");
+      if (follow && (kind === "text" || kind === "list") && (ctx.turn.update || cards.length === 1)) return bad("update_title", { title: ctx.turn.update || cards[0].title });
+      return bad("no_intent");
+    }
+    replaceTimer = kind === "timer";
+  }
   let spec, say = null;
   if (kind === "timer") {
     const d = parseDuration(body);
@@ -93,8 +111,6 @@ function show(i, ctx, S) {
     // that is an update of it ("add grapes to the fruits list" has no display word in it).
     // ctx.turn.update (set by the tool on a turn that asks to change the open card) names that card: a call
     // under another title is sent back with the title to use.
-    const isUpdate = ctx.store.list(ctx.deviceId).some((w) => w.kind === "content" && lower(w.title) === lower(title));
-    if (typeof ctx.turn?.transcript === "string" && !wantsDisplay(ctx.turn.transcript) && asksCard(ctx.turn.transcript, ctx.items) === null && !isUpdate) return ctx.turn.update ? bad("update_title", { title: ctx.turn.update }) : bad("no_intent");
     if (isPlaceholderText(body, PH_BODY)) return bad("placeholder");
     let blocks;
     if (kind === "list") {
@@ -106,8 +122,9 @@ function show(i, ctx, S) {
     } else blocks = contentBlocks(title, body.split(/\n[ \t]*\n/).join("||"));
     spec = { kind: "content", title, blocks };
   }
-  // put(): the same title replaces that card or recipe; a timer always gets a window of its own.
-  const { window, evicted, updated } = ctx.store.put(ctx.deviceId, spec);
+  // put(): the same title replaces that card or recipe; a timer gets its own window, except on a follow-up
+  // ("make it twenty minutes instead"), which changes the running timer of that name and never leaves a second one.
+  const { window, evicted, updated } = ctx.store.put(ctx.deviceId, spec, { replaceTimer });
   const events = [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window }];
   return result(true, updated ? "updated" : "shown", say ?? fill(updated ? S.say_updated : S.say_shown, { title }), { title: window.title, events });
 }

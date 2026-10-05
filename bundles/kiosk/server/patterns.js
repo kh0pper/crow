@@ -15,6 +15,7 @@
  *                           and the requests one by one — a must-run test reads each of them.
  */
 import { spokenWords, stripPolite, sameAt, KIND_NOUNS } from "./phrases.js";
+import { wantsDisplay } from "./wm.js";
 
 const ARTICLES = new Set(["the", "my", "our", "a", "an", "some", "el", "la", "los", "las", "mi", "mis", "un", "una", "algo", "de"]);
 const OPEN_VERBS = [["open", "up"], ["open"], ["launch"], ["go", "to"], ["abre"], ["abreme"], ["abrir"], ["lanza"], ["ve", "a"]];
@@ -71,15 +72,41 @@ export function parsePlay(transcript) {
 const PLAY_WORDS = new Set(["play", "music", "song", "songs", "radio", "station", "album", "albums", "playlist", "playlists", "listen", "hear", "tune", "tunes", "news", "podcast", "podcasts",
   "reproduce", "reproducir", "toca", "tocar", "musica", "cancion", "canciones", "emisora", "estacion", "disco", "escuchar", "escucha", "oir", "noticias"]);
 const PLAY_RUNS = runs(["put on", "pon algo"]);
-// Revision 4: a kind of music (a genre, a style, "hits") names something to play even with no verb
-// ("a little bossa nova for dinner would be nice"). A bounded category list, en + es; no artist or
-// title is ever listed. Words that are common outside music ("country", "pop", "house", "soul",
-// "metal", "salsa", "banda") count only inside the multi-word forms below.
-const GENRE_WORDS = new Set(["jazz", "blues", "rock", "reggae", "reggaeton", "cumbia", "cumbias", "bachata", "merengue", "mariachi", "ranchera", "rancheras",
+// Revisions 4–5: a KIND of music names something to play even with no verb ("a little bossa nova for
+// dinner would be nice") — but only inside a REQUEST FRAME (playFrame below), never in a question or an
+// information request ("tell me about the history of jazz"). Bounded category lists, en + es; no artist
+// or title is ever listed. Kinds: genres and styles, moods, decades, instruments, sound kinds.
+const MUSIC_KINDS = new Set(["jazz", "blues", "rock", "reggae", "reggaeton", "cumbia", "cumbias", "bachata", "merengue", "mariachi", "ranchera", "rancheras",
   "bolero", "boleros", "samba", "tango", "flamenco", "funk", "disco", "techno", "edm", "punk", "gospel", "opera", "lofi", "ambient", "indie", "oldies",
-  "hits", "exitos", "classical", "clasica", "symphony", "sinfonia", "orchestra", "orquesta", "acoustic", "acustica", "instrumental", "lullaby", "lullabies"]);
-const GENRE_RUNS = runs(["bossa nova", "hip hop", "lo fi", "r and b", "rnb", "country music", "pop music", "soul music", "heavy metal", "house music", "salsa music",
-  "musica country", "musica pop", "musica salsa", "musica nortena", "musica banda", "musica regional", "rock and roll", "rock n roll"]);
+  "hits", "exitos", "classical", "clasica", "symphony", "sinfonia", "orchestra", "orquesta", "acoustic", "acustica", "instrumental", "lullaby", "lullabies",
+  "nortena", "electronic", "electronica", "motown", "kpop",
+  // moods
+  "upbeat", "mellow", "chill", "calm", "relaxing", "romantic", "romantico", "romantica", "tranquilo", "tranquila", "energetic", "cheerful", "alegre", "suave",
+  // decades
+  "fifties", "sixties", "seventies", "eighties", "nineties", "cincuenta", "sesenta", "setenta", "ochenta", "noventa", "setentas", "ochentas", "noventas",
+  // instruments and sound kinds
+  "piano", "guitar", "guitarra", "violin", "cello", "saxophone", "sax", "beats", "classics", "carols", "villancicos"]);
+const MUSIC_RUNS = runs(["bossa nova", "hip hop", "lo fi", "r and b", "rnb", "heavy metal", "rock and roll", "rock n roll", "k pop", "top forty", "top 40",
+  "white noise", "ruido blanco", "rain sounds", "sonido de lluvia", "musica regional"]);
+// Ambiguous outside music ("add salsa to the list", "what country"): a genre only right after a quantity
+// word — "some country", "a little soul", "algo de salsa", "un poco de pop".
+const AMBIGUOUS_KINDS = new Set(["country", "pop", "soul", "salsa", "metal", "house", "banda", "rap"]);
+function ambiguousKind(w) {
+  for (let i = 1; i < w.length; i += 1) {
+    if (!AMBIGUOUS_KINDS.has(w[i])) continue;
+    const a = w[i - 1], b = w[i - 2];
+    if (a === "some" || a === "little" || a === "more" || (a === "of" && b === "bit") || (a === "de" && (b === "algo" || b === "poco" || b === "mas"))) return true;
+  }
+  return false;
+}
+// A decade written as a number: 50s … 90s, 2000s.
+const DECADE_TOKENS = new Set(["50s", "60s", "70s", "80s", "90s", "2000s"]);
+// The request frame for a bare kind of music: a quantity or "again" word, a request cue, or "if you have
+// any"; never a question start or an information request.
+const FRAME_WORDS = new Set(["some", "something", "again", "algo", "otra", "please", "anything"]);
+const FRAME_RUNS = runs(["a little", "a bit of", "a bit", "un poco", "otra vez", "de nuevo", "if you have", "if youve got", "if you got", "would be nice", "would be good", "seria bueno", "estaria bien"]);
+const INFO_STARTS = runs(["tell me about", "tell me", "explain", "describe", "teach me", "hablame de", "hablame", "cuentame", "explica", "explicame", "describe"]);
+const INFO_RUNS = runs(["history of", "historia de", "what does", "que significa", "where does", "de donde viene", "origin of", "origen de"]);
 const OPEN_WORDS = new Set(["open", "launch", "app", "apps", "start", "abre", "abreme", "abrir", "lanza", "aplicacion", "aplicaciones"]);
 const OPEN_RUNS = runs(["take me to", "go to", "bring back", "llevame a", "ve a"]);
 // "start a timer", "open the recipe": the card and timer verbs keep these.
@@ -95,16 +122,29 @@ function namesItem(w, items) {
   return false;
 }
 
+/** A word naming a play target directly (0.1.8 to revision 3): offered on these, as before. */
+export function mentionsPlayWord(transcript) {
+  const w = plain(transcript);
+  return !!w && !hasAny(w, NOT_PLAY) && (hasAny(w, PLAY_WORDS) || hasAnyRun(w, PLAY_RUNS));
+}
+const namesMusicKind = (w) => hasAny(w, MUSIC_KINDS) || hasAnyRun(w, MUSIC_RUNS) || hasAny(w, DECADE_TOKENS) || ambiguousKind(w);
+/** Revision 5: a request frame — not a question, not an information request, and a quantity word, "again", a request cue or "if you have any". */
+function playFrame(w) {
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p)) || hasAnyRun(w, INFO_RUNS)) return false;
+  return hasAny(w, FRAME_WORDS) || hasAnyRun(w, FRAME_RUNS) || asks(w);
+}
 export function mentionsPlay(transcript) {
   const w = plain(transcript);
-  return !!w && !hasAny(w, NOT_PLAY) && (hasAny(w, PLAY_WORDS) || hasAnyRun(w, PLAY_RUNS) || hasAny(w, GENRE_WORDS) || hasAnyRun(w, GENRE_RUNS));
+  if (!w || hasAny(w, NOT_PLAY)) return false;
+  return hasAny(w, PLAY_WORDS) || hasAnyRun(w, PLAY_RUNS) || (namesMusicKind(w) && playFrame(w));
 }
 /** items: what this display may open ([{ id, title, aliases? }]). Naming one of them is a mention; so is an open word. */
 export function mentionsOpen(transcript, items = []) {
   const w = plain(transcript);
   if (!w) return false;
   if (namesItem(w, items)) return true;
-  return !hasAny(w, NOT_OPEN) && !hasAny(w, NOT_PLAY) && !hasAny(w, PLAY_WORDS) && !hasAny(w, GENRE_WORDS) && (hasAny(w, OPEN_WORDS) || hasAnyRun(w, OPEN_RUNS));
+  return !hasAny(w, NOT_OPEN) && !hasAny(w, NOT_PLAY) && !hasAny(w, PLAY_WORDS) && !namesMusicKind(w) && (hasAny(w, OPEN_WORDS) || hasAnyRun(w, OPEN_RUNS));
 }
 
 // ── must run: the person is asking for it now ────────────────────────────────────────────────────
@@ -138,26 +178,65 @@ const CARD_NOUNS = Object.freeze({ ...Object.fromEntries(Object.entries(KIND_NOU
 const MAKE_STARTS = runs(["make", "make me", "make us", "write", "write me", "write down", "create", "start", "set", "haz", "crea", "escribe"]);
 // Reading, closing or changing what is there is not a request for a NEW card.
 const NOT_CARD = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "stop", "pause", "app", "apps", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela", "para"]);
-// Revision 4: words that place something ON the screen ("up there", "on the screen", "en la pantalla").
-const PLACE_RUNS = runs(["up there", "on there", "up on the screen", "on the screen", "on screen", "on the display", "on the tv", "on the big screen", "put it up", "put that up",
-  "en la pantalla", "en pantalla", "ahi arriba", "alla arriba", "en la tele"]);
-const DETERMINERS = new Set(["a", "an", "the", "some", "my", "our", "una", "un", "la", "el", "los", "las", "unos", "unas", "mi", "mis"]);
+// Revisions 4–5: words that place something ON the screen. STRONG phrases name the screen itself; WEAK
+// ones ("up there", "on the tv") count only with a card noun, a display verb, or an object pronoun right
+// before them ("put the steps up there", "put it up there") — never "is it cold up there in Denver".
+const PLACE_STRONG = runs(["up on the screen", "on the screen", "on screen", "on the display", "on the big screen", "on my screen", "put it up", "put that up", "put them up",
+  "en la pantalla", "en pantalla", "en mi pantalla"]);
+const PLACE_WEAK = runs(["up there", "on there", "on the tv", "on the television", "en la tele", "ahi arriba", "alla arriba"]);
+const DISPLAY_VERBS = new Set(["put", "show", "display", "throw", "stick", "pon", "ponlo", "ponla", "ponme", "muestra", "muestrame", "pasa", "pasalo"]);
+const OBJECT_PRONOUNS = new Set(["it", "that", "this", "them", "those", "these", "eso", "esto", "lo", "la", "los", "las"]);
+const DETERMINERS = new Set(["a", "an", "the", "some", "my", "our", "una", "un", "la", "el", "los", "las", "unos", "unas", "mi", "mis", "nuestra", "nuestro"]);
+// A statement ABOUT a list or a timer ("the list my boss sent is long") is not a request for one.
+const NOUN_PREPS = new Set(["for", "of", "to", "with", "de", "del", "con", "para"]);
+const STATEMENT_VERBS = new Set(["is", "was", "are", "were", "has", "had", "have", "sent", "got", "went", "said", "looks", "seems", "es", "era", "fue", "son", "tiene", "tenia", "esta", "estaba", "parece", "dijo"]);
+function placesOnScreen(w) {
+  if (hasAnyRun(w, PLACE_STRONG)) return true;
+  for (const p of PLACE_WEAK) for (let i = 0; i + p.length <= w.length; i += 1) {
+    if (!sameAt(w, i, p)) continue;
+    if (OBJECT_PRONOUNS.has(w[i - 1]) || w.some((x) => Object.hasOwn(CARD_NOUNS, x)) || hasAny(w, DISPLAY_VERBS)) return true;
+  }
+  return false;
+}
 /**
- * Revision 4: is the request ABOUT a card on the screen — a placement phrase anywhere, or a card noun
- * ("a list", "the steps", "una lista", "los pasos", a timer, a recipe) right after a determiner, in an
- * utterance that does not start as a question (a placement phrase counts in a question too: "how do
- * you make it? put the steps up there"). crow_show is OFFERED on these; must-run stays asksCard /
- * the new-content patterns. → boolean.
+ * Revisions 4–5: is the request ABOUT a card on the screen? (1) a placement phrase (placesOnScreen: anywhere,
+ * a question included: "how do you make it? put the steps up there"); or (2) a card noun phrase that OPENS
+ * the utterance ("a list of…", "the steps for…", "una lista con…", "my list for the store: …") with no
+ * statement verb and no question start; or (3) a card noun with a request cue. Never a noun inside an
+ * item's name. → boolean. One predicate for the offer AND the executor (showIntent).
  */
 export function mentionsCard(transcript, items = []) {
   const w = plain(transcript);
   if (!w) return false;
-  if (hasAnyRun(w, PLACE_RUNS)) return true;
-  if (namesItem(w, items)) return false;
+  if (placesOnScreen(w)) return true;
+  if (namesItem(w, items) || hasAny(w, NOT_CARD_READ)) return false;
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p))) return false;
+  // A bare noun opens a request only before a preposition ("lista de…", "timer for…"); "list the planets" is a verb.
+  const opens = (Object.hasOwn(CARD_NOUNS, core[0]) && (core.length === 1 || NOUN_PREPS.has(core[1]))) || (DETERMINERS.has(core[0]) && Object.hasOwn(CARD_NOUNS, core[1] || ""));
+  if (opens && !hasAny(w, STATEMENT_VERBS)) return true;
+  return w.some((x) => Object.hasOwn(CARD_NOUNS, x)) && asks(w);
+}
+// Reading or closing a card is not a request for a new one (the "para" of asksCard's veto is a stop verb
+// only at the start, which the open-at-start rule above never sees as a card noun).
+const NOT_CARD_READ = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela"]);
+
+/** Revision 5: the display-intent test BOTH the offer (crow_show.when) and the executor (show's echo guard) use. */
+export function showIntent(transcript, items = []) {
+  return wantsDisplay(transcript) || asksCard(transcript, items) !== null || mentionsCard(transcript, items);
+}
+
+// Revision 5: a FOLLOW-UP to what is on the screen — the only way a turn with no display intent may change
+// an open card or timer: a change word, or an object pronoun, and not a question.
+const FOLLOW_WORDS = new Set(["add", "also", "too", "instead", "remove", "change", "update", "replace", "swap", "plus", "more", "less", "extra", "another", "make", "throw", "put", "take", "drop", "rename",
+  "mas", "tambien", "agrega", "agregale", "anade", "anadele", "quita", "quitale", "cambia", "cambialo", "pon", "ponle", "ponlo", "mejor", "otro", "otra", "menos", "hazlo"]);
+const FOLLOW_RUNS = runs(["as well", "en vez", "en lugar"]);
+export function followUp(transcript) {
+  const w = plain(transcript);
+  if (!w) return false;
   const core = stripPolite(w);
   if (QUESTION_STARTS.some((p) => sameAt(core, 0, p))) return false;
-  for (let i = 1; i < w.length; i += 1) if (Object.hasOwn(CARD_NOUNS, w[i]) && DETERMINERS.has(w[i - 1])) return true;
-  return false;
+  return hasAny(w, FOLLOW_WORDS) || hasAnyRun(w, FOLLOW_RUNS) || hasAny(w, OBJECT_PRONOUNS);
 }
 
 /** → "timer" | "recipe" | "content" | null. items: what this display may open (a noun inside an item's name is that item). */

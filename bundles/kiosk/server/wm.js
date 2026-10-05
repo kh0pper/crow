@@ -308,9 +308,12 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
      * the same title never produces a second card. A TIMER is never replaced — two timers may share a
      * name, and setting one must not cancel another. → { window, evicted, updated }.
      */
-    put(id, spec) {
+    put(id, spec, { replaceTimer = false } = {}) {
       const title = String(spec.title || "").toLowerCase();
-      const same = spec.kind === "timer" ? null : dev(id).windows.find((w) => w.kind === spec.kind && String(w.title || "").toLowerCase() === title);
+      // A timer gets a window of its own, unless replaceTimer (a follow-up "make it twenty minutes instead"):
+      // then it replaces the RUNNING timer of the same name.
+      const same = spec.kind === "timer" && !replaceTimer ? null
+        : dev(id).windows.find((w) => w.kind === spec.kind && !(w.kind === "timer" && w.done) && String(w.title || "").toLowerCase() === title);
       const gone = same ? [copy(remove(id, same.id))] : [];
       const r = open(id, spec);
       return { window: r.window, evicted: [...gone, ...r.evicted], updated: !!same };
