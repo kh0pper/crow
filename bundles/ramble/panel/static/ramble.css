@@ -278,6 +278,10 @@
 
 #ramble .rb-map {
   position: relative;
+  /* Own stacking context: the map library's panes and controls carry z-indexes
+     up to 1000, which would otherwise draw over the dashboard's notification
+     tray, dialogs and drawer. */
+  isolation: isolate;
   height: 56vh;
   min-height: 340px;
   border: var(--rb-line-w) solid var(--rb-line);
