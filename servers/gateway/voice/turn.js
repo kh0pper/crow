@@ -10,7 +10,7 @@
  */
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
-  negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction,
+  negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
@@ -334,10 +334,13 @@ export function createVoiceTurnRunner(deps) {
         const fp = await opts.fastPaths(transcript);
         if (fp) {
           result.fastPath = true;
+          if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
           for (const ev of fp.events || []) sink.event(ev);
           if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
           say.end();
-          convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say || "" }]);
+          // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
+          // assistant message would only confuse the next turn's chat template.
+          if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
           return result;
         }
       }
@@ -385,9 +388,11 @@ export function createVoiceTurnRunner(deps) {
       // live state (e.g. open windows) rides on THIS turn's user message only, closed by a note
       // line, and is dropped from the saved conversation. A small model may still read it back
       // (live 2026-10-05): echoGuard lists every injected line the echo gate removes from what is
-      // spoken, captioned, saved and put on a card.
-      const userMsg = { role: "user", content: withTurnContext(opts.turnContext, transcript) };
-      const echoGuard = [opts.turnContext ? TURN_CONTEXT_NOTE : null, opts.turnContext, mustX?.mustNote];
+      // spoken, captioned, saved and put on a card. opts.turnContext may be a function of the plain
+      // transcript: the context STRING is computed first, then wrapped and guarded.
+      const ctxLine = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      const userMsg = { role: "user", content: withTurnContext(ctxLine, transcript) };
+      const echoGuard = [ctxLine ? TURN_CONTEXT_NOTE : null, ctxLine, mustX?.mustNote];
       const messages = [
         { role: "system", content: withSuffix(system, opts.promptSuffix) },
         ...history,
@@ -406,7 +411,9 @@ export function createVoiceTurnRunner(deps) {
       // The router sees the PLAIN transcript, never the turnContext prefix: "[Display] Open windows: …"
       // matched TOOL_INTENT_RE ("open") and escalated every kiosk turn to the 35B (smoke 2026-10-04).
       const routeView = messages.filter((m) => !isExtraCall(m)).map((m) => (m === userMsg ? { ...m, content: transcript } : m));
-      const decision = deps.chooseVoiceRoute(routeView, { hasTools: tools.length > 0 });
+      // A must-run tool that needs only a few words and an enumeration (play, open) is forced on the
+      // quick model instead of being escalated: mustRoute "fast".
+      const decision = mustX?.mustRoute === "fast" ? { route: "fast", reason: "must-fast", key: bot.fast_voice_model || deps.fastKey } : deps.chooseVoiceRoute(routeView, { hasTools: tools.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -535,6 +542,17 @@ export function createVoiceTurnRunner(deps) {
       let mustDone = !mustX;         // the must-run tool has succeeded this turn (true when there is none)
       let corrected = false;
       const toolLog = [];
+      // On a must-run turn the first (and the corrective) round offers only the must-run tool, so a
+      // forced call can be used where the engine honours one — unless another tool family is on
+      // offer this turn (the model may need to fetch before it shows).
+      const narrow = !!mustX && (typeof mustX.narrow !== "function" || mustX.narrow(transcript) !== false)
+        && (mustX.mustRoute === "fast" || tools.every((t) => extraByName.has(t.name)));
+      // On a turn whose words ask a display tool for something (holdText), a round's text is DEFERRED:
+      // not captioned and not spoken until that round's calls are known. No display call → the text is
+      // released. A display call → the text is dropped, and the tool's result says what really happened.
+      const holdIntent = extra.some((x) => offered.has(x.definition.name) && typeof x.holdText === "function" && x.holdText(transcript) === true);
+      let endedFinal = false;
+      timings.tools_offered = tools.length;
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
@@ -545,16 +563,21 @@ export function createVoiceTurnRunner(deps) {
         // Until the must-run tool has succeeded, nothing the model says is captioned or spoken:
         // "I've displayed the list" is only true after the call.
         const hold = !mustDone;
+        const defer = !hold && holdIntent && !finalRound;
+        let deferred = "";
+        const roundTools = narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
+        let roundText = "";
+        let finalRes = null;
         const roundMax = nextMax;
         nextMax = 600;
         // Keep prompt + completion inside the model's context (review M6: the 4B is 8192;
         // tool schemas alone are ~5k tokens). ~3.2 chars/token is a deliberate over-estimate.
-        let estPrompt = estimatePromptTokens(messages, tools);
+        let estPrompt = estimatePromptTokens(messages, roundTools);
         // Never send a request that cannot fit (every round: history and tool results grow). Saved
         // history goes first, oldest exchange first; the system message and this turn stay.
         for (let n; !requestFits(estPrompt, ctx) && (n = dropOldestExchange(messages, userMsg)) > 0;) {
           timings.history_dropped = (timings.history_dropped || 0) + n;
-          estPrompt = estimatePromptTokens(messages, tools);
+          estPrompt = estimatePromptTokens(messages, roundTools);
         }
         timings.est_prompt_tokens = estPrompt;
         if (!requestFits(estPrompt, ctx)) {
@@ -567,20 +590,22 @@ export function createVoiceTurnRunner(deps) {
         // tool_choice requires the must-run tool while it is the ONLY tool offered (with others the
         // model may need to fetch first; the backstop below still applies). Backends differ: a vLLM
         // server honours a named choice; the llama.cpp builds in use accept and ignore it.
-        let choiceMode = !mustDone && !finalRound && tools.length === 1 ? (toolChoiceMode.get(modelKey) || "named") : "none";
+        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (toolChoiceMode.get(modelKey) || "named") : "none";
         let steppedDown = false;
         for (;;) {
           const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
           let started = false;
           try {
-            for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
+            for await (const ev of chat.chatStream(messages, roundTools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
               started = true;
               if (aborted() || budgetHit) break;
               if (ev.type === "content_delta" && ev.text) {
                 mark("llm_first_token_ms");
                 content += ev.text;
                 const spoken = echo.feed(think.feed(ev.text));
-                if (spoken && !hold) {
+                if (spoken && defer) deferred += spoken;
+                else if (spoken && !hold) {
+                  roundText += spoken;
                   if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
                   sink.event({ type: "caption_delta", text: spoken });
                   await chunker.push(spoken);
@@ -621,6 +646,14 @@ export function createVoiceTurnRunner(deps) {
         content = stripContextEcho(content, echoGuard);
         if (aborted()) { result.aborted = true; break; }
         if (budgetHit) break;
+        const displayCall = calls.some((c) => extraByName.has(c.name));
+        if (defer && deferred && !displayCall) {
+          // No display call came with it: the deferred text is the answer after all.
+          roundText += deferred;
+          if (deferred.trim()) { roundSpoken += deferred.trim().length; spokenChars += deferred.trim().length; }
+          sink.event({ type: "caption_delta", text: deferred });
+          await chunker.push(deferred);
+        }
         if (finalRound) {
           // The forced answer: its text is kept, any call it still makes is ignored (never executed,
           // never saved — an unanswered tool call would break the next turn's template).
@@ -630,7 +663,7 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         let assistantMsg = null;
-        const kept = hold ? "" : content;   // held text was never heard: it is not kept as something said
+        const kept = hold || (defer && displayCall) ? "" : content;   // held or dropped text was never heard: it is not kept as something said
         if (kept || calls.length) {
           assistantMsg = { role: "assistant", content: kept };
           if (calls.length) assistantMsg.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
@@ -667,6 +700,7 @@ export function createVoiceTurnRunner(deps) {
         // the "yes" that follows a confirmation must keep its escalation (review I3).
         let neutralCalls = 0;
         for (const tc of calls) {
+          if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
             if (gate.neutral) neutralCalls++;
@@ -683,7 +717,12 @@ export function createVoiceTurnRunner(deps) {
             let res = null;
             try { res = JSON.parse(out); } catch {}
             const ok = res?.ok === true;
-            outcome.set(tc, ok ? "ok" : outcomeCode(res?.code, "error"));
+            // The log code: why (reason), else what happened (outcome), else the 0.1.8 rule.
+            const code = outcomeCode(res?.reason, null) || outcomeCode(res?.outcome, null) || (ok ? "ok" : outcomeCode(res?.code, "error"));
+            outcome.set(tc, code);
+            // effect: the call changed something (a no-op success such as "nothing is open" sets effect: false).
+            finalRes = tc === calls.at(-1) && offered.has(tc.name) && res && res.final === true && typeof res.say === "string" && res.say.trim()
+              ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
             // A display tool that changed the screen is user-visible progress.
             if (ok) roundDisplay = true;
             if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
@@ -698,7 +737,11 @@ export function createVoiceTurnRunner(deps) {
         catch (err) { noteRound(); throw err; }   // the round is still in the log when a tool run throws
         (remoteResults || []).forEach((r, i) => { if (remote[i]) outcome.set(remote[i], r?.isError ? "error" : "ok"); });
         noteRound();
-        if (budgetHit || remoteResults == null) break;
+        // A final result ends the turn only when no must-run tool is still owed, or when it comes from the
+        // must-run tool itself. A final result from ANOTHER tool on a must-run turn is just a result: the
+        // model gets it back, and the turn still has to end with the must-run call or the could-not line.
+        const endsFinal = !!finalRes && (mustDone || finalRes.name === mustName);
+        if ((budgetHit || remoteResults == null) && !endsFinal) break;
         if (roundDisplay) displayProgress = true;
         if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
@@ -724,6 +767,26 @@ export function createVoiceTurnRunner(deps) {
           lastToolMsg = toolMsg;
           if (typeof content === "string" && content.length > 500) nextMax = 4000;
         }
+        if (endsFinal) {
+          // The turn ends on the server's own line: no further model round. What the display hears:
+          //  - nothing was spoken in this round (the usual case: text was held or deferred) → the server's line;
+          //  - the model had already spoken a full sentence AND the call had an effect → that sentence stands;
+          //  - the model had already spoken and the call did nothing or failed → the server's line as well,
+          //    because what was said is not what happened.
+          // The line is short and already known, so it is spoken even when the first-audio budget has run out.
+          timings.final = `${logName(finalRes.name)}:${finalRes.code}`;
+          if (budgetTimer) { (deps.clearTimeout || clearTimeout)(budgetTimer); budgetTimer = null; }
+          const spokeSentence = roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
+          if (!(spokeSentence && finalRes.effect)) {
+            await chunker.flush();
+            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${finalRes.say}` : finalRes.say });
+            await (budgetHit ? say.force(finalRes.say) : say(finalRes.say));
+            spokenChars += finalRes.say.length;
+          }
+          messages.push({ role: "assistant", content: finalRes.say });
+          endedFinal = true;
+          break;
+        }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
         const progress = roundSpoken > 0 || roundDisplay;
         if (!progress && roundSig === lastStuckSig) cut = "tool_repeat";
@@ -741,19 +804,19 @@ export function createVoiceTurnRunner(deps) {
       for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
-      } else if (budgetHit) {
+      } else if (budgetHit && !endedFinal) {
         await speakFallback("budget", spokenChars > 0);
         return result;
       } else {
         await chunker.flush();
         if (aborted()) result.aborted = true;
         // The budget can fire while the last chunk is still synthesizing (the stream already ended).
-        else if (budgetHit && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
+        else if (budgetHit && !endedFinal && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
         else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
-        else if (!mustDone) {
+        else if (!mustDone && !endedFinal) {
           // Never end on a claim that something is on the screen when nothing was put there.
           timings.display_missed = true;
-          await speakFallback("display_missed", spokenChars > 0, String(opts.displayMissedText || DISPLAY_MISSED_TEXT));
+          await speakFallback("display_missed", spokenChars > 0, String(mustX?.missedText || opts.displayMissedText || DISPLAY_MISSED_TEXT));
           return result;
         }
         else if (cut && finalSpoken === 0 && answeredChars === 0 && !displayProgress) { await speakFallback(cut, spokenChars > 0); return result; }
