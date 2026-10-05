@@ -339,11 +339,28 @@ test("scorer: a change to an open timer that leaves a SECOND timer of that name 
   assert.equal(row.ok, true, JSON.stringify(row.calls));
 });
 
-test("report: plain questions asked with a window open that changed the screen anyway are counted (reported, not gated)", () => {
+test("report: plain questions asked with a window open that changed the screen anyway are counted, and any one of them fails that model's gate", () => {
   const rows = [
     { set: "main", arm: "four", trial: 0, id: "a", ok: false, plain: true, window_open: true, changed: true, offered_expected: true, tools: [], must: false },
     { set: "main", arm: "four", trial: 0, id: "b", ok: true, plain: true, window_open: true, changed: false, offered_expected: true, tools: [], must: false },
     { set: "main", arm: "single", trial: 0, id: "a", ok: false, plain: true, window_open: true, changed: true, offered_expected: true, tools: [], must: false },
   ];
   assert.deepEqual(summarize(rows).plain_window, { total: 2, changed: 1 });
+  const v = verdict([{ label: "quick", rows }, { label: "larger", rows: rows.map((r) => ({ ...r, changed: false })) }]);
+  const g = v.gates.filter((x) => /no plain question with a window open changed the screen/.test(x.id));
+  assert.deepEqual(g.map((x) => [x.id.split(":")[0], x.pass]), [["quick", false], ["larger", true]], "a gate per model, n = 0");
+  assert.equal(v.pass, false);
+});
+
+test("the product's own gates: every plain question of the 40 asked with a window open stays unchanged under a model that tries to write on the screen", async () => {
+  const plainWithWindow = CASES.filter((c) => c.expect === null && c.state?.windows?.length);
+  assert.ok(plainWithWindow.length >= 3);
+  for (const c of plainWithWindow) {
+    const w = c.state.windows[0];
+    for (const args of [{ kind: "list", title: w.title, body: "an answer" }, { kind: "steps", title: "Answer", body: "a\n---\nb" }, { kind: "timer", title: w.title, body: "5 minutes" }]) {
+      const chat = scripted((n) => (n === 1 ? [{ name: "crow_show", args }] : "Here is your answer."));
+      const row = await runTurn(c, "four", (o) => createProductDisplay({ ...o, chat, forcing: NOTHING }));
+      assert.deepEqual([row.plain, row.window_open, row.changed], [true, true, false], `${c.id} ${args.kind}: the screen was not changed`);
+    }
+  }
 });

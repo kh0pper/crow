@@ -100,6 +100,8 @@ export function verdict(reports, { cases = 40, heldOut = 20 } = {}) {
       gate(`${rep.label}: four tools against one, ${name} (paired)`, pr.pairs > 0 && !(pr.worse > pr.better && pr.p < SIGN_ALPHA),
         `four ${pct(cell.four.correct, cell.four.total)}, single ${pct(cell.single.correct, cell.single.total)}, difference ${diff > 0 ? "+" : ""}${diff} points; of ${pr.pairs} pairs four was right alone on ${pr.better}, wrong alone on ${pr.worse}; one-sided p = ${pr.p.toFixed(4)} (stop below ${SIGN_ALPHA})`);
     }
+    // A plain question asked while a window is open must never change the screen (four-tool arm, every trial).
+    gate(`${rep.label}: no plain question with a window open changed the screen`, s.plain_window.changed === 0, `${s.plain_window.changed} of ${s.plain_window.total} turns`);
     if (Object.hasOwn(FLOORS, rep.label)) gate(`${rep.label}: the four-tool arm is right on at least ${FLOORS[rep.label]} of the 40`, share(s.main.four.correct, s.main.four.total) >= FLOORS[rep.label], `${pct(s.main.four.correct, s.main.four.total)}`);
     gate(`${rep.label}: held-out requests the product offers the right tool for`, s.held_offered.size >= Math.ceil(heldOut * HELD_OUT_MIN_OFFERED / 20), `${s.held_offered.size} of ${s.held_ids.size}`);
     gate(`${rep.label}: no turn that had to act ended on a claim`, s.untruthful.length === 0, s.untruthful.length ? s.untruthful.join(", ") : "0 turns");
@@ -123,7 +125,7 @@ function main() {
     console.log(`\n${rep.label} (${rep.engine || "?"}), ${s.trials} trial(s)${rep.label === "shipped" ? " — informational" : ""}${rep.run ? `, run ${rep.run}` : ""}${rep.head ? `, head ${String(rep.head).slice(0, 12)}` : ""}`);
     console.log(`  the 40:    four ${pct(s.main.four.correct, s.main.four.total)}   single ${pct(s.main.single.correct, s.main.single.total)}`);
     console.log(`  held out:  four ${pct(s.held.four.correct, s.held.four.total)}   single ${pct(s.held.single.correct, s.held.single.total)}   right tool offered on ${s.held_offered.size} of ${s.held_ids.size}`);
-    console.log(`  plain questions with a window open that changed the screen anyway: ${s.plain_window.changed} of ${s.plain_window.total} (four-tool arm; reported, not gated)`);
+    console.log(`  plain questions with a window open that changed the screen anyway: ${s.plain_window.changed} of ${s.plain_window.total} (four-tool arm; gate: 0)`);
     console.log(`  must-run:  ${s.must_cases.size} utterances; forced ${pct(s.forced.first_call, s.forced.total)} first-request calls; unforced ${pct(s.backstop.done, s.backstop.total)} done, ${s.backstop.could_not} could-not lines`);
     for (const w of s.wrong.slice(0, 60)) console.log(`    wrong  ${w}`);
   }
