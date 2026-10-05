@@ -8,6 +8,49 @@
 
 const ARTICLES_PER_PAGE = 24;
 
+/**
+ * Escape a value for HTML text and quoted-attribute contexts. Local on
+ * purpose: this file is installed as a single standalone module, and feed
+ * data needs the single quote escaped as well.
+ */
+function escapeHtml(value) {
+  if (value == null || value === false) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Feed-supplied URL -> its normalized form when it is an absolute http(s)
+ * URL, otherwise "". Callers render a placeholder (or nothing) for "".
+ */
+function safeHttpUrl(value) {
+  if (typeof value !== "string") return "";
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return "";
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+}
+
+/**
+ * Client-side twin of safeHttpUrl, emitted into each inline script that
+ * needs it (relative URLs resolve against the page). No backticks: this is
+ * client code inside a template literal.
+ */
+const CLIENT_SAFE_URL_FN = `function crowMediaSafeUrl(u) {
+        if (typeof u !== 'string' || !u) return '';
+        try {
+          var proto = new URL(u, location.href).protocol;
+          return (proto === 'http:' || proto === 'https:') ? u : '';
+        } catch (e) { return ''; }
+      }`;
+
 export default {
   id: "media",
   name: "Media",
@@ -33,7 +76,7 @@ export default {
     }
 
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
-    const { escapeHtml, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
+    const { badge, formatDate } = await import(pathToFileURL(componentsPath).href);
 
     // Resolve bundle server directory (installed vs repo)
     const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "media", "server");
@@ -66,6 +109,10 @@ export default {
       const readOpacity = a.is_read ? "opacity:0.7;" : "";
       const summary = a.summary ? escapeHtml(a.summary.slice(0, 180)) + (a.summary.length > 180 ? "..." : "") : "";
       const readTime = a.estimated_read_time ? `${a.estimated_read_time} min` : "";
+      // Feed-supplied URLs: http(s) only, anything else is dropped.
+      const articleUrl = safeHttpUrl(a.url);
+      const imageUrl = safeHttpUrl(a.image_url);
+      const audioUrl = safeHttpUrl(a.audio_url);
 
       // Topics pills
       let topicsHtml = "";
@@ -83,16 +130,16 @@ export default {
       }
 
       // Detect YouTube source
-      const isYouTube = a.source_type === "youtube" || (a.url && a.url.includes("youtube.com/watch"));
-      const youtubeOverlay = isYouTube
-        ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:48px;height:48px;background:rgba(255,0,0,0.85);border-radius:12px;display:flex;align-items:center;justify-content:center"><span style="color:white;font-size:1.4rem;margin-left:3px">&#9654;</span></a>`
+      const isYouTube = a.source_type === "youtube" || articleUrl.includes("youtube.com/watch");
+      const youtubeOverlay = isYouTube && articleUrl
+        ? `<a href="${escapeHtml(articleUrl)}" target="_blank" rel="noopener" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:48px;height:48px;background:rgba(255,0,0,0.85);border-radius:12px;display:flex;align-items:center;justify-content:center"><span style="color:white;font-size:1.4rem;margin-left:3px">&#9654;</span></a>`
         : "";
 
       // Image section
       let imageHtml;
-      if (a.image_url) {
+      if (imageUrl) {
         imageHtml = `<div style="position:relative;padding-top:56.25%;background:var(--crow-bg-deep);border-radius:6px 6px 0 0;overflow:hidden">
-      <img src="${escapeHtml(a.image_url)}" alt="" loading="lazy" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover">
+      <img src="${escapeHtml(imageUrl)}" alt="" loading="lazy" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover">
       ${youtubeOverlay}
     </div>`;
       } else if (a.source_type === "google_news" && a.author) {
@@ -123,7 +170,7 @@ export default {
         <span style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(pubDate)}${readTime ? ` \u00b7 ${readTime}` : ""}</span>
       </div>
       <h4 style="margin:0 0 0.3rem;font-size:0.9rem;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
-        ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}
+        ${articleUrl ? `<a href="${escapeHtml(articleUrl)}" target="_blank" rel="noopener" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}
       </h4>
       ${summary ? `<p style="margin:0;font-size:0.78rem;color:var(--crow-text-secondary);line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;flex:1">${summary}</p>` : '<div style="flex:1"></div>'}
       ${topicsHtml}
@@ -131,10 +178,10 @@ export default {
         <div style="display:flex;gap:0.25rem;align-items:center">
           ${a.source_category ? `<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9px;background:var(--crow-bg-elevated);color:var(--crow-text-muted)">${escapeHtml(a.source_category)}</span>` : ""}
           ${a.is_read ? '<span style="font-size:0.65rem;color:var(--crow-text-muted)">read</span>' : ""}
-          ${a.audio_url ? `<button onclick="window.crowPlayer&&window.crowPlayer.load('${escapeHtml(a.audio_url)}','${escapeHtml(a.title.replace(/'/g, ""))}')" class="btn btn-sm btn-secondary" title="Play audio" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#9654;</button>` : ""}
+          ${audioUrl ? `<button data-media-action="play" data-audio-url="${escapeHtml(audioUrl)}" data-title="${escapeHtml(a.title)}" class="btn btn-sm btn-secondary" title="Play audio" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#9654;</button>` : ""}
         </div>
         <div style="display:flex;gap:0.2rem">
-          <button onclick="crowListenTts(this,${a.id},'${escapeHtml(a.title.replace(/'/g, "").replace(/\\/g, ""))}')" class="btn btn-sm btn-secondary" title="Listen (TTS)" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
+          <button data-media-action="listen" data-article-id="${a.id}" data-title="${escapeHtml(a.title)}" class="btn btn-sm btn-secondary" title="Listen (TTS)" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
           <form method="POST" style="display:inline">
             <input type="hidden" name="action" value="thumbs_up">
             <input type="hidden" name="article_id" value="${a.id}">
@@ -698,8 +745,9 @@ export default {
       } else {
         sourcesList = `<div style="display:flex;flex-direction:column;gap:0.5rem">${sources.map((s) => {
           const config = s.config ? JSON.parse(s.config) : {};
-          const img = config.image
-            ? `<img src="${escapeHtml(config.image)}" alt="" style="width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0">`
+          const sourceImage = safeHttpUrl(config.image);
+          const img = sourceImage
+            ? `<img src="${escapeHtml(sourceImage)}" alt="" style="width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0">`
             : `<div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:var(--crow-body-font);font-size:1rem;flex-shrink:0">${escapeHtml((s.name || "?").charAt(0))}</div>`;
 
           const typeBadge = { google_news: badge("Google News", "draft"), youtube: badge("YouTube", "published"), podcast: badge("Podcast", "connected") }[s.source_type] || badge("RSS", "draft");
@@ -783,7 +831,7 @@ export default {
                   <div style="font-size:0.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.item_title || "Unknown")}</div>
                   ${item.source_name ? `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(item.source_name)}</div>` : ""}
                 </div>
-                <button onclick="crowListenTts(this,${item.item_id},'${escapeHtml((item.item_title || "").replace(/'/g, "").replace(/\\/g, ""))}')" class="btn btn-sm btn-secondary" title="Listen" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
+                <button data-media-action="listen" data-article-id="${item.item_id}" data-title="${escapeHtml(item.item_title || "")}" class="btn btn-sm btn-secondary" title="Listen" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
                 <button onclick="crowRemovePlaylistItem(${playlistId},${item.item_row_id},this)" class="btn btn-sm btn-secondary" title="Remove" style="color:var(--crow-error);font-size:0.8rem;padding:0.1rem 0.3rem">&#10005;</button>
               </div>`).join("\n");
 
@@ -891,7 +939,7 @@ export default {
                 <div style="font-weight:500">${escapeHtml(b.title || "Untitled Briefing")}</div>
                 <div style="font-size:0.8rem;color:var(--crow-text-muted)">${articleCount} articles${durationStr ? ` \u00b7 ${durationStr}` : ""} \u00b7 ${formatDate(b.created_at)}</div>
               </div>
-              ${hasAudio ? `<button onclick="if(window.crowPlayer)window.crowPlayer.load('/api/media/briefings/${b.id}/audio','${escapeHtml((b.title || "Briefing").replace(/'/g, ""))}')" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
+              ${hasAudio ? `<button data-media-action="play" data-audio-url="/api/media/briefings/${b.id}/audio" data-title="${escapeHtml(b.title || "Briefing")}" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
             </div>
           </div>`;
         }).join("\n")}</div>`;
@@ -929,8 +977,9 @@ export default {
           ...legacySubs.map(s => ({ name: s.title, image: s.image_url })),
         ];
         subsHtml = `<div style="display:flex;gap:0.75rem;overflow-x:auto;padding:0.5rem 0">${allSubs.map(s => {
-          const img = s.image
-            ? `<img src="${escapeHtml(s.image)}" alt="" style="width:60px;height:60px;border-radius:8px;object-fit:cover">`
+          const subImage = safeHttpUrl(s.image);
+          const img = subImage
+            ? `<img src="${escapeHtml(subImage)}" alt="" style="width:60px;height:60px;border-radius:8px;object-fit:cover">`
             : `<div style="width:60px;height:60px;border-radius:8px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.5rem">&#127911;</div>`;
           return `<div style="text-align:center;flex-shrink:0;width:80px">${img}<div style="font-size:0.7rem;margin-top:0.25rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.name)}</div></div>`;
         }).join("")}</div>`;
@@ -942,10 +991,11 @@ export default {
       } else {
         episodesHtml = episodes.map(ep => {
           const pubDate = ep.pub_date ? formatDate(ep.pub_date) : "";
+          const episodeAudio = safeHttpUrl(ep.audio_url);
           return `<div class="card" style="padding:0.75rem;margin-bottom:0.5rem">
             <div style="font-weight:500">${escapeHtml(ep.title)}</div>
             <div style="font-size:0.8rem;color:var(--crow-text-muted)">${escapeHtml(ep.source_name)} \u00b7 ${escapeHtml(pubDate)}</div>
-            <audio controls preload="none" style="width:100%;height:32px;margin-top:0.5rem"><source src="${escapeHtml(ep.audio_url)}" type="audio/mpeg"></audio>
+            ${episodeAudio ? `<audio controls preload="none" style="width:100%;height:32px;margin-top:0.5rem"><source src="${escapeHtml(episodeAudio)}" type="audio/mpeg"></audio>` : ""}
           </div>`;
         }).join("\n");
       }
@@ -1006,7 +1056,7 @@ export default {
             <div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.2rem;flex-shrink:0">&#128193;</div>
             <a href="/dashboard/media?tab=feed&${q.category ? `category=${encodeURIComponent(q.category)}&` : ""}${q.unread_only ? "unread_only=true&" : ""}" style="flex:1;text-decoration:none;color:inherit">
               <div style="font-weight:500">${escapeHtml(f.name)}</div>
-              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${filters.join(" \u00b7 ") || "all"} \u00b7 ${count} article(s)</div>
+              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${filters.map(escapeHtml).join(" \u00b7 ") || "all"} \u00b7 ${count} article(s)</div>
             </a>
             <form method="POST" style="display:inline" onsubmit="return confirm('Delete this folder?')">
               <input type="hidden" name="action" value="delete_smart_folder">
@@ -1057,6 +1107,7 @@ export default {
       </div>
       <script>
       (function() {
+        ${CLIENT_SAFE_URL_FN}
         fetch('${libraryEndpoint}')
           .then(function(r) {
             if (!r.ok) throw new Error(r.status === 502 ? '${escapeHtml(libraryLabel)} bundle is not running' : 'Failed to load library');
@@ -1085,8 +1136,8 @@ export default {
             items.forEach(function(item) {
               var title = item.Name || item.title || 'Untitled';
               var subtitle = item.SeriesName || item.grandparentTitle || item.Type || item.type || '';
-              var imageUrl = item.ImageUrl || item.image_url || item.thumb || '';
-              var streamUrl = item.StreamUrl || item.stream_url || item.Media && item.Media[0] && item.Media[0].Part && item.Media[0].Part[0] && item.Media[0].Part[0].key || '';
+              var imageUrl = crowMediaSafeUrl(item.ImageUrl || item.image_url || item.thumb || '');
+              var streamUrl = crowMediaSafeUrl(item.StreamUrl || item.stream_url || item.Media && item.Media[0] && item.Media[0].Part && item.Media[0].Part[0] && item.Media[0].Part[0].key || '');
               var itemType = item.Type || item.type || 'unknown';
               var isAudio = itemType === 'Audio' || itemType === 'audio' || itemType === 'MusicAlbum';
 
@@ -1186,6 +1237,7 @@ export default {
       </div>
       <script>
       (function() {
+        ${CLIENT_SAFE_URL_FN}
         fetch('/api/iptv/channels?favorites_only=true')
           .then(function(r) {
             if (!r.ok) throw new Error(r.status === 502 ? 'IPTV bundle is not running' : 'Failed to load channels');
@@ -1214,8 +1266,8 @@ export default {
             channels.forEach(function(ch) {
               var name = ch.name || ch.title || 'Unknown Channel';
               var program = ch.current_program || ch.now_playing || '';
-              var logo = ch.logo || ch.icon || '';
-              var streamUrl = ch.stream_url || ch.url || '';
+              var logo = crowMediaSafeUrl(ch.logo || ch.icon || '');
+              var streamUrl = crowMediaSafeUrl(ch.stream_url || ch.url || '');
 
               var card = document.createElement('div');
               card.className = 'media-card';
@@ -1317,6 +1369,8 @@ export default {
         var remoteEl = document.getElementById('remote-content');
         if (!remoteEl) return;
 
+        ${CLIENT_SAFE_URL_FN}
+
         function formatKodiTime(t) {
           if (!t) return '';
           var h = t.hours || 0, m = t.minutes || 0, s = t.seconds || 0;
@@ -1342,7 +1396,7 @@ export default {
           }
           var title = data.title || (data.item && data.item.label) || 'Unknown';
           var subtitle = data.artist || data.showtitle || (data.item && data.item.type) || '';
-          var thumb = data.thumbnail || data.thumb || '';
+          var thumb = crowMediaSafeUrl(data.thumbnail || data.thumb || '');
           var speed = data.speed !== undefined ? data.speed : 0;
           var isPlaying = speed > 0;
           var pct = data.percentage !== undefined ? Math.round(data.percentage) : 0;
@@ -1484,6 +1538,29 @@ export default {
     `;
 
     const mediaScripts = `
+      ${CLIENT_SAFE_URL_FN}
+
+      // Buttons that carry feed-supplied text or URLs keep them in data-*
+      // attributes, never in an inline handler; this one delegated listener
+      // dispatches them. Bound once per document: under Turbo this script
+      // re-runs on every navigation into the panel.
+      if (!window.__crowMediaActionsBound) {
+        window.__crowMediaActionsBound = true;
+        document.addEventListener('click', function(e) {
+          var btn = e.target && e.target.closest ? e.target.closest('[data-media-action]') : null;
+          if (!btn) return;
+          var action = btn.getAttribute('data-media-action');
+          var title = btn.getAttribute('data-title') || '';
+          if (action === 'listen') {
+            var articleId = parseInt(btn.getAttribute('data-article-id'), 10);
+            if (articleId) crowListenTts(btn, articleId, title);
+          } else if (action === 'play') {
+            var src = crowMediaSafeUrl(btn.getAttribute('data-audio-url'));
+            if (src && window.crowPlayer) window.crowPlayer.load(src, title);
+          }
+        });
+      }
+
       function crowListenTts(btn, articleId, title) {
         var orig = btn.textContent;
         btn.textContent = '...';

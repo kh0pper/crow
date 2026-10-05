@@ -40,6 +40,29 @@ const dbModulePath = resolveDbModule();
 
 const { createDbClient, sanitizeFtsQuery, escapeLikePattern } = await import(pathToFileURL(dbModulePath).href);
 
+/** Escape a value for HTML text and quoted-attribute contexts. */
+function escapeHtml(value) {
+  if (value == null || value === false) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Feed-supplied URL -> normalized absolute http(s) URL, otherwise "". */
+function safeHttpUrl(value) {
+  if (typeof value !== "string") return "";
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return "";
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+}
+
 /**
  * @param {Function} authMiddleware - Dashboard auth middleware
  * @returns {Router}
@@ -758,20 +781,21 @@ export function mediaPublicRouter() {
 
       const itemsHtml = items.map((item, idx) => {
         const paywalled = item.content_fetch_status === "failed";
+        // Feed-supplied URLs: http(s) only, anything else is dropped.
+        const imageUrl = safeHttpUrl(item.image_url);
+        const linkUrl = safeHttpUrl(item.url) || "#";
         return `<div style="display:flex;gap:0.75rem;align-items:center;padding:0.75rem;border-bottom:1px solid #2a2a3a">
           <span style="font-size:0.8rem;color:#888;width:24px;text-align:center">${idx + 1}</span>
-          ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="" style="width:56px;height:56px;border-radius:4px;object-fit:cover;flex-shrink:0">` : ""}
+          ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="" style="width:56px;height:56px;border-radius:4px;object-fit:cover;flex-shrink:0">` : ""}
           <div style="flex:1;min-width:0">
             <div style="font-size:0.9rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-              <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener" style="color:#e2e8f0;text-decoration:none">${escapeHtml(item.title)}</a>
+              <a href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener" style="color:#e2e8f0;text-decoration:none">${escapeHtml(item.title)}</a>
             </div>
-            <div style="font-size:0.75rem;color:#888">${escapeHtml(item.source_name || "")}${item.pub_date ? " \u00b7 " + item.pub_date.split("T")[0] : ""}</div>
+            <div style="font-size:0.75rem;color:#888">${escapeHtml(item.source_name || "")}${item.pub_date ? " \u00b7 " + escapeHtml(String(item.pub_date).split("T")[0]) : ""}</div>
             ${paywalled ? '<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:rgba(217,165,33,0.15);color:#d9a521">Subscriber content</span>' : ""}
           </div>
         </div>`;
       }).join("");
-
-      function escapeHtml(s) { return s ? s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;") : ""; }
 
       const html = `<!DOCTYPE html>
 <html lang="en"><head>
