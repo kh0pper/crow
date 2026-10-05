@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 // Address classification, resolved from the app root so it also works from an installed copy
 // (the gateway sets CROW_APP_ROOT; the repo-relative fallback covers running from the checkout).
 const appRoot = process.env.CROW_APP_ROOT || join(import.meta.dirname, "..", "..", "..");
-const { isPublicIp } = await import(pathToFileURL(join(appRoot, "servers", "shared", "ip-classify.js")).href);
+const { isPublicEgressIp } = await import(pathToFileURL(join(appRoot, "servers", "shared", "ip-classify.js")).href);
 
 const URL_BASE = () => (process.env.FUNKWHALE_URL || "http://funkwhale-api:5000").replace(/\/+$/, "");
 const TOKEN = () => process.env.FUNKWHALE_ACCESS_TOKEN || "";
@@ -83,7 +83,8 @@ function allowedPrivateHosts() {
  * arrives bracketed). Resolves the name ONCE, every address family, and returns the answers so the
  * caller connects to exactly what was checked (a second lookup could answer differently: DNS
  * rebinding). An allow-listed host is resolved but not classified; any other host passes only
- * when every answer is a public address. → { ok: true, addresses } | { ok: false, reason }.
+ * when every answer is a public address that is neither this host nor an on-link neighbour
+ * (isPublicEgressIp). → { ok: true, addresses } | { ok: false, reason }.
  * Exported for tests.
  */
 export async function validateHostOrReject(hostname, { lookup = dnsLookup } = {}) {
@@ -96,7 +97,7 @@ export async function validateHostOrReject(hostname, { lookup = dnsLookup } = {}
     return { ok: false, reason: "dns_lookup_failed" };
   }
   if (!Array.isArray(addresses) || addresses.length === 0) return { ok: false, reason: "dns_lookup_failed" };
-  if (!allowListed && addresses.some((a) => !isPublicIp(a.address))) return { ok: false, reason: "private_host" };
+  if (!allowListed && addresses.some((a) => !isPublicEgressIp(a.address))) return { ok: false, reason: "private_host" };
   return { ok: true, addresses };
 }
 

@@ -12,6 +12,7 @@
  * Node built-ins only. Imported by bundles through the app root, never a relative path.
  */
 import { isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 
 /** "a.b.c.d" (strict dotted quad, as net.isIP accepts it) → 32-bit unsigned int. */
 function v4ToInt(s) {
@@ -137,4 +138,108 @@ const LOCAL_CLASSES = new Set(["loopback", "private", "cgnat", "linklocal", "ula
 export function isLocalNetworkIp(address) {
   const { cls, via } = classifyIp(address);
   return LOCAL_CLASSES.has(cls) && (via === null || via === "mapped");
+}
+
+// ---------------------------------------------------------------------------
+// Host-aware egress check.
+//
+// "Public" is a property of the address alone, but an outbound guard also has to refuse this
+// host itself and its on-link neighbours: a service listening on [::] answers on the host's own
+// global IPv6 address, and the router and other machines on the same /64 (or a public IPv4 LAN)
+// are one hop away. Those addresses classify as public, so a public-only guard lets a URL (or a
+// redirect) reach them. isPublicEgressIp adds the host's interface table to the rule.
+// ---------------------------------------------------------------------------
+
+const IFACE_TTL_MS = 30_000;
+/** Test hook, shared by every copy of this module in the process (an installed bundle may load
+ * its own): a function returning an os.networkInterfaces()-shaped table, or undefined. */
+const IFACE_OVERRIDE = Symbol.for("crow.ip-classify.interfaces");
+let ifaceCache = { at: 0, nets: [] };
+
+/** Address → { family: 4|6, n: BigInt } in the space the class was decided on: a v4-mapped
+ * address compares as its IPv4. Null when unparseable. */
+function toNumeric(address) {
+  const raw = String(address ?? "").trim().replace(/^\[(.*)\]$/, "$1");
+  if (isIP(raw) === 4) return { family: 4, n: BigInt(v4ToInt(raw)) };
+  const g = parseIPv6(raw);
+  if (!g) return null;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return { family: 4, n: BigInt(v4Of(g[6], g[7])) };
+  return { family: 6, n: g.reduce((acc, x) => (acc << 16n) | BigInt(x), 0n) };
+}
+
+function prefixLenOf(entry, family) {
+  const fromCidr = Number(String(entry.cidr || "").split("/")[1]);
+  if (Number.isInteger(fromCidr)) return fromCidr;
+  const mask = toNumeric(entry.netmask);
+  if (!mask || mask.family !== family) return family === 4 ? 32 : 128;
+  let bits = 0;
+  for (let n = mask.n; n > 0n; n >>= 1n) bits += Number(n & 1n);
+  return bits;
+}
+
+/** os.networkInterfaces()-shaped table → [{ family, n, prefix, bits }]. */
+export function interfaceNets(table) {
+  const out = [];
+  for (const entries of Object.values(table || {})) {
+    for (const e of entries || []) {
+      const a = toNumeric(e?.address);
+      if (!a) continue;
+      const bits = a.family === 4 ? 32 : 128;
+      const prefix = Math.max(0, Math.min(bits, prefixLenOf(e, a.family)));
+      out.push({ family: a.family, n: a.n, prefix, bits });
+    }
+  }
+  return out;
+}
+
+function currentNets() {
+  const override = globalThis[IFACE_OVERRIDE];
+  if (typeof override === "function") return interfaceNets(override());
+  const now = Date.now();
+  if (now - ifaceCache.at > IFACE_TTL_MS) {
+    let table = {};
+    try { table = networkInterfaces(); } catch {}
+    ifaceCache = { at: now, nets: interfaceNets(table) };
+  }
+  return ifaceCache.nets;
+}
+
+/** Install (fn) or clear (null) the interface table used by isOwnNetworkIp/isPublicEgressIp. Tests only. */
+export function setInterfaceTableForTests(fn) {
+  if (typeof fn === "function") globalThis[IFACE_OVERRIDE] = fn;
+  else delete globalThis[IFACE_OVERRIDE];
+  ifaceCache = { at: 0, nets: [] };
+}
+
+/** An on-link prefix shorter than this is not treated as "the neighbourhood" (a mis-reported
+ * mask must not turn the whole internet into a neighbour); the host's own address always is. */
+const MIN_ONLINK_PREFIX = { 4: 8, 6: 32 };
+
+function inNet(a, net) {
+  if (a.family !== net.family) return false;
+  if (a.n === net.n) return true;
+  if (net.prefix < MIN_ONLINK_PREFIX[net.family]) return false;
+  const shift = BigInt(net.bits - net.prefix);
+  return (a.n >> shift) === (net.n >> shift);
+}
+
+/**
+ * True when `address` is one of this host's interface addresses or lies inside an on-link prefix
+ * of one of them (IPv4 and IPv6; a v4-mapped spelling compares as its IPv4, and an IPv4 carried
+ * inside NAT64/6to4/Teredo is checked too). `interfaces` (an os.networkInterfaces() table) is for
+ * tests; by default the live table is read and cached for 30 s.
+ */
+export function isOwnNetworkIp(address, { interfaces } = {}) {
+  const nets = interfaces ? interfaceNets(interfaces) : currentNets();
+  if (!nets.length) return false;
+  const candidates = [toNumeric(address)];
+  const { v4 } = classifyIp(address);
+  if (v4) candidates.push(toNumeric(v4));
+  return candidates.some((a) => a && nets.some((net) => inNet(a, net)));
+}
+
+/** The rule for outbound fetches on a user's behalf: a public address that is neither this host
+ * nor on one of its on-link networks. */
+export function isPublicEgressIp(address, opts) {
+  return isPublicIp(address) && !isOwnNetworkIp(address, opts);
 }
