@@ -6,10 +6,14 @@
  * side effects a shared household display must not trigger). Window state is
  * per device, held here so it survives a page reload and is visible to the model.
  */
+import { INTENT_MAX_CHARS, intentText } from "./intent-text.js";
+
 export const KIOSK_WINDOW_KINDS = Object.freeze(["timer", "recipe", "content"]);
 export const IDLE_CLOSE_MS = 10 * 60 * 1000;
 export const MAX_TIMER_S = 24 * 3600;
 const MAX_TEXT = 4000;
+/** A display command is a title and up to MAX_TEXT of text: anything longer is cut before it is parsed. */
+const MAX_COMMAND = MAX_TEXT + 500;
 
 export function normalizeCaps(raw) {
   const asked = Array.isArray(raw?.windows) ? raw.windows.filter((k) => KIOSK_WINDOW_KINDS.includes(k)) : [];
@@ -124,9 +128,8 @@ const DISPLAY_INTENT = [
   /^(por favor )?(cierra|cerrar|quita|oculta)\b/,
   /\b(borra|limpia) (la )?pantalla\b/,
 ];
-const plain = (transcript) => String(transcript || "").toLowerCase().replace(/[¿¡“”"'’,.!?;:]+/g, " ").replace(/\s+/g, " ").trim();
 export function wantsDisplay(transcript) {
-  const t = plain(transcript);
+  const t = intentText(transcript);
   return !!t && DISPLAY_INTENT.some((re) => re.test(t));
 }
 
@@ -163,7 +166,7 @@ const NOT_NEW = [
   /\bcu[aá]nto (queda|falta|tiempo)\b|\bqu[eé] hay\b/,
 ];
 export function newDisplayKind(transcript) {
-  const t = plain(transcript);
+  const t = intentText(transcript);
   if (!t || NOT_NEW.some((re) => re.test(t))) return null;
   for (const [kind, list] of Object.entries(NEW_DISPLAY)) if (list.some((re) => re.test(t))) return kind;
   return null;
@@ -186,12 +189,28 @@ const SYNTAX_ECHO = /starts a paragraph|lines starting|become a list|a bar separ
 export function isPlaceholderText(s, words = PLACEHOLDER_WORDS) {
   const t = String(s ?? "").trim();
   if (!t || PLACEHOLDER_TOKEN.test(t) || SYNTAX_ECHO.test(t)) return true;
+  if (t.length > 40) return false;   // a bare placeholder word is short; nothing below reads long text
   return words.has(t.toLowerCase().replace(/^[\s"'“”()[\]-]+|[\s"'“”()[\].:;—–-]+$/g, ""));
 }
 
+/** Split at single bars only: a double bar is a step or paragraph break and stays in its part. */
+function splitSingleBars(s) {
+  const out = [];
+  let from = 0;
+  for (let i = s.indexOf("|"); i >= 0; i = s.indexOf("|", i + 1)) {
+    if (s[i + 1] === "|") { i++; continue; }
+    out.push(s.slice(from, i));
+    from = i + 1;
+  }
+  out.push(s.slice(from));
+  return out;
+}
+
 export function parseKioskCommand(command) {
-  const raw = String(command || "").trim();
-  const c = raw.toLowerCase().replace(/[.!?]+$/, "").replace(/\s+/g, " ");
+  const raw = String(command || "").slice(0, MAX_COMMAND).trim();
+  let end = raw.length;
+  while (end > 0 && ".!?".includes(raw[end - 1])) end--;
+  const c = raw.slice(0, end).toLowerCase().replace(/\s+/g, " ");
   if (!c) return err("unknown_command", USAGE);
   if (PLACEHOLDER_TOKEN.test(raw)) return placeholderError(guessForm(raw));
   if (/^close (all|everything)( windows)?$|^clear (the )?screen$/.test(c)) return { op: "close_all" };
@@ -214,7 +233,7 @@ export function parseKioskCommand(command) {
   }
   m = raw.match(/^recipe\s+([\s\S]+)$/i);
   if (m) {
-    const parts = m[1].split(/\s+\|\s+/);
+    const parts = splitSingleBars(m[1]);
     const title = (parts[0] || "").trim().slice(0, 80);
     const ingredients = (parts[1] || "").split(/;|\n/).map((x) => x.trim()).filter(Boolean).slice(0, 40);
     const steps = parts.slice(2).join(" | ").split(/\|\||\n/).map((x) => x.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean).slice(0, 40);
@@ -225,9 +244,9 @@ export function parseKioskCommand(command) {
   m = raw.match(/^(?:display|show results|show info)\s+([\s\S]+)$/i);
   if (m) {
     // "Title | text": the first single bar (a double bar is a paragraph break, never the title bar).
-    const parts = m[1].match(/^([^|]*?)\s*\|(?!\|)\s*([\s\S]*)$/);
-    const title = ((parts ? parts[1] : "") || "Info").trim().slice(0, 80);
-    const text = (parts ? parts[2] : m[1]).trim();
+    const [head, ...rest] = splitSingleBars(m[1]);
+    const title = ((rest.length ? head : "").trim() || "Info").slice(0, 80);
+    const text = (rest.length ? rest.join("|") : head).trim();
     if (isPlaceholderText(title, PH.title) || isPlaceholderText(text, PH.text)) return placeholderError("content");
     return { op: "open", window: { kind: "content", title, blocks: contentBlocks(title, text) } };
   }
@@ -406,6 +425,7 @@ function spokenDuration(sec) {
  * matches no TOOL_INTENT_RE word, so without this the 4B must emit a tool call).
  */
 export function matchWmFastPath(transcript, store, deviceId, caps) {
+  if (typeof transcript !== "string" || transcript.length > INTENT_MAX_CHARS) return null;   // a control phrase is short
   const cmd = parseKioskCommand(normalizeUtterance(transcript));
   if (cmd.op === "open" && cmd.window.kind === "timer" && normalizeCaps(caps).windows.includes("timer")) {
     const { window, evicted } = store.open(deviceId, cmd.window);

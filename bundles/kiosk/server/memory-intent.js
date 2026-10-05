@@ -8,6 +8,8 @@
  * The trade-off, by design: the assistant uses memories when it is ASKED to remember or
  * recall, not on every question. Conservative word lists, en + es; mirrors wantsDisplay.
  */
+import { intentText } from "./intent-text.js";
+
 const MEMORY_INTENT = [
   /\b(remember|recall)\b/,
   /\b(don t|dont|do not|never) forget\b/,
@@ -31,7 +33,6 @@ const MEMORY_INTENT = [
   /\b(tu|mi|la) memoria\b/,
 ];
 export function wantsMemory(transcript) {
-  if (typeof transcript !== "string") return false;
-  const t = transcript.toLowerCase().replace(/[¿¡“”"'’,.!?;:]+/g, " ").replace(/\s+/g, " ").trim();
+  const t = intentText(transcript);
   return !!t && MEMORY_INTENT.some((re) => re.test(t));
 }
