@@ -569,6 +569,19 @@ test("the production predicate stays address-only: a LAN that carries a global I
   }
 });
 
+test("the public rule also asks the shared classifier's host view: an address on a network only the shared classifier sees is never public", async () => {
+  const shared = await import("../servers/shared/ip-classify.js");
+  // The shared view knows an interface this module's snapshot does not (it came up between reads).
+  shared.setInterfaceTableForTests(() => ({ eth1: [{ address: "3ffe:9:9:9::5", cidr: "3ffe:9:9:9::5/64" }] }));
+  try {
+    const net = readHostNetwork({ interfaces: () => ({ eth0: [{ address: "192.168.1.2", cidr: "192.168.1.2/24" }] }), defaults: () => new Set(["eth0"]) });
+    assert.equal(judgeAddress("3ffe:9:9:9::77", net, { local: false }), "private_address", "on a network of this host: refused by the public rule");
+    assert.equal(judgeAddress("3ffe:9:9:8::77", net, { local: false }), null, "next door, on no network of this host: public");
+  } finally {
+    shared.setInterfaceTableForTests(null);
+  }
+});
+
 test("local stream (table): with the tick the ENTERED host may be on the home LAN (the default-route interface's prefixes) or the tailnet; nothing else", async () => {
   const net = hostNet();
   const ok = (a) => judgeAddress(a, net, { local: true, isNotPublic: testClassifier });

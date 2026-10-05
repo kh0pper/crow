@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { isIP, BlockList } from "node:net";
 import { appImport } from "./app-root.js";
 
-const { classifyIp } = await appImport("servers/shared/ip-classify.js");
+const { classifyIp, isOwnNetworkIp } = await appImport("servers/shared/ip-classify.js");
 export { classifyIp };
 
 /** One spelling per address: lower case, no brackets or zone, an IPv4-mapped IPv6 written as its IPv4. */
@@ -39,7 +39,7 @@ export function normAddress(address) {
  * that IPv4 is public (this host has no NAT64; those forms only disguise an address).
  * ADDRESS-ONLY, on purpose: the home-network rule in judgeAddress uses it to recognise the LAN's own
  * global IPv6 prefix, which a host-aware test would call not public. The host view belongs to
- * judgeAddress (see its SWAP POINT), never here.
+ * judgeAddress (its public rule adds the shared isOwnNetworkIp), never here.
  */
 export function isNotPublicAddress(address) {
   const { cls, via } = classifyIp(address);
@@ -131,11 +131,10 @@ export function judgeAddress(address, net, { local = false, isNotPublic = isNotP
   if (!isIP(a)) return "private_address";
   if (net.own.has(a)) return "own_address";
   const hits = net.prefixes.filter((p) => inPrefix(p, a));
-  // SWAP POINT (public rule only): once servers/shared/ip-classify.js exports the host-aware
-  // isOwnNetworkIp/isPublicEgressIp, this line also refuses `|| isOwnNetworkIp(a)` (import it beside
-  // classifyIp) — one shared view of this host's networks on top of this module's own. Not inside
-  // isNotPublicAddress: that would refuse a ticked station on the LAN's own global IPv6 /64.
-  if (!local) return hits.length || isNotPublic(a) ? "private_address" : null;
+  // The public rule also asks the shared classifier's host view (isOwnNetworkIp): one shared view of
+  // this host's networks on top of this module's own. Here only, never inside isNotPublicAddress: that
+  // would refuse a ticked station on the LAN's own global IPv6 /64.
+  if (!local) return hits.length || isNotPublic(a) || isOwnNetworkIp(a) ? "private_address" : null;
   const { cls, via } = classifyIp(a);
   if (via !== null) return "private_address";
   // Any prefix that is not the home LAN or the tailnet (a container or VM bridge, a point-to-point link): never.
