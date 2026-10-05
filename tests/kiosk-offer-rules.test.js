@@ -44,7 +44,8 @@ test("(b) a kind of music named with no verb offers crow_play; a genre with a re
     assert.equal(mentionsPlay(say), true, say);
     assert.ok(tools().offered(say).includes("crow_play"), say);
   }
-  assert.equal(asksPlay("I'd like some blues tonight."), true, "a genre with a request cue must run");
+  assert.equal(asksPlay("I'd like some blues tonight."), false, "revision 5 (N1): a bare kind of music only offers, even with a request cue");
+  assert.equal(asksPlay("I'd like some blues music tonight."), true, "a play word with a cue must run (revision 3)");
   assert.equal(asksPlay("Reggae is from Jamaica, right?"), false, "a question about a genre is offered, never required");
   for (const say of ["What country has the most people?", "Can you add salsa to the shopping?", "Pop the corn in the microwave.", "Is the house warm?", "My soul is tired."]) {
     assert.equal(mentionsPlay(say), false, say);
@@ -146,7 +147,8 @@ test("H3: a wider offer never holds the spoken answer — text is held only on t
   const d = live();
   assert.equal(d.by.crow_play.when("Some reggae while we clean up."), true, "offered");
   assert.equal(d.by.crow_play.holdText("Some reggae while we clean up."), false, "but the answer still streams");
-  assert.equal(d.by.crow_play.holdText("I'd like some reggae."), true, "a request cue holds, as before");
+  assert.equal(d.by.crow_play.holdText("I'd like some reggae."), false, "revision 5 (N1): a bare kind of music never holds, cue or not");
+  assert.equal(d.by.crow_play.holdText("I'd like some reggae music."), true, "a play word with a cue holds, as in revision 3");
   assert.equal(d.by.crow_show.when("The packing list up there."), true);
   assert.equal(d.by.crow_show.holdText("The packing list up there."), false);
   const w = live({ windows: [{ kind: "timer", name: "Bread", title: "Bread", seconds: 300 }] });
@@ -161,4 +163,56 @@ test("M1: moods, decades, instruments and the ambiguous genres offer crow_play o
   for (const say of ["The salsa needs more lime.", "Which country is the biggest?", "My soul is tired.", "The 80s had great cars.", "Upbeat people are nice."]) {
     assert.ok(!t.offered(say).includes("crow_play"), say);
   }
+});
+
+// ── Revision 5, after its re-review ──────────────────────────────────────────────────────────────
+test("N1: a bare kind of music only OFFERS crow_play — a request for something calm/classic/romantic that is not music is never must-run, forced or held", () => {
+  const t = live();
+  for (const say of ["Could you suggest some classics for my book club?", "I want a romantic spot for our anniversary dinner.", "Necesito algo tranquilo para la siesta.",
+    "Please make the email sound a bit more upbeat.", "Can you give me some guitar shopping advice?", "I'd like something cheerful to read on the train.", "Let's find some calm activities for the kids."]) {
+    assert.equal(t.by.crow_play.must(say), false, `${say}: not must-run`);
+    assert.equal(asksPlay(say), false, say);
+    assert.equal(t.by.crow_play.holdText(say), false, `${say}: the answer is never held`);
+  }
+  assert.equal(t.by.crow_play.must("Play some calm piano."), true, "a play verb is still must-run");
+  assert.equal(t.by.crow_play.must("I'd like some jazz music, please."), true, "a play word with a cue is still must-run (revision 3)");
+});
+
+test("N2: with a window open, an information request or a statement never counts as a follow-up — a copied title is refused and the screen is unchanged", async () => {
+  const groceries = { kind: "content", title: "Groceries", blocks: [{ type: "heading", text: "Groceries" }, { type: "list", items: ["milk"] }] };
+  const bread = { kind: "timer", name: "Bread", title: "Bread", seconds: 300 };
+  const soup = { kind: "recipe", title: "Soup", ingredients: ["water"], steps: ["boil", "serve"], step: 0 };
+  const cases = [
+    [groceries, "Tell me more about volcanoes.", { kind: "list", title: "Groceries", body: "lava" }],
+    [groceries, "Dime la población de Chile.", { kind: "list", title: "Groceries", body: "19 millones" }],
+    [groceries, "Tell me a riddle about that.", { kind: "text", title: "Groceries", body: "a riddle" }],
+    [bread, "Explain how that oven setting works.", { kind: "timer", title: "Bread", body: "9 minutes" }],
+    [groceries, "Give me another example of a mammal.", { kind: "list", title: "Groceries", body: "whale" }],
+    [soup, "Tell me something interesting about it.", { kind: "steps", title: "Soup", body: "a\n---\nb" }],
+    [groceries, "Explícame las reglas del ajedrez.", { kind: "list", title: "Groceries", body: "peón" }],
+    [groceries, "I wonder if the store is open later.", { kind: "list", title: "Groceries", body: "maybe" }],
+    [groceries, "My neighbour said that too.", { kind: "list", title: "Groceries", body: "ok" }],
+    [groceries, "La tienda cierra temprano los domingos.", { kind: "list", title: "Groceries", body: "domingo" }],
+  ];
+  for (const [w, say, args] of cases) {
+    const d = live({ windows: [w] });
+    const before = snapshot(d.store);
+    assert.equal(followUp(say), false, `${say}: not a follow-up`);
+    const r = await d.run("crow_show", args, say);
+    assert.equal(r.ok, false, `${say}: refused (${r.reason || r.outcome})`);
+    assert.equal(snapshot(d.store), before, `${say}: the screen is unchanged`);
+  }
+});
+
+test("N2: real edits to the open card or timer are follow-ups and go through", async () => {
+  const groceries = () => ({ kind: "content", title: "Groceries", blocks: [{ type: "heading", text: "Groceries" }, { type: "list", items: ["milk", "eggs"] }] });
+  for (const say of ["Scratch the eggs.", "Lose the milk, we have some.", "Cross off the eggs.", "Take the milk off.", "Drop the eggs from it.", "Quita la leche.", "Tacha los huevos.", "Borra la leche, ya hay.", "Cámbialo a leche de avena.", "Oat milk too.", "Put bread on it as well."]) {
+    assert.equal(followUp(say), true, say);
+    const d = live({ windows: [groceries()] });
+    const r = await d.run("crow_show", { kind: "list", title: "Groceries", body: "bread" }, say);
+    assert.equal(r.outcome, "updated", `${say}: ${r.reason || r.outcome}`);
+  }
+  const t = live({ windows: [{ kind: "timer", name: "Bread", title: "Bread", seconds: 300 }] });
+  assert.equal((await t.run("crow_show", { kind: "timer", title: "Bread", body: "12 minutes" }, "Make it twelve.")).outcome, "updated");
+  assert.equal(t.store.list("d").filter((x) => x.kind === "timer").length, 1);
 });

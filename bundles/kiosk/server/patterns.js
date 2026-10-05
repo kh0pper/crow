@@ -163,7 +163,9 @@ function asks(w) {
 export function asksPlay(transcript) {
   if (parsePlay(transcript) !== null) return true;
   const w = plain(transcript);
-  return !!w && mentionsPlay(transcript) && asks(w);
+  // Must-run exactly as revision 3: a play WORD with a request cue. A bare kind of music (a genre, a mood,
+  // an instrument, a decade) only OFFERS crow_play — never forces it, never holds the answer.
+  return !!w && mentionsPlayWord(transcript) && asks(w);
 }
 export function asksOpen(transcript, items = []) {
   const w = plain(transcript);
@@ -226,17 +228,29 @@ export function showIntent(transcript, items = []) {
   return wantsDisplay(transcript) || asksCard(transcript, items) !== null || mentionsCard(transcript, items);
 }
 
-// Revision 5: a FOLLOW-UP to what is on the screen — the only way a turn with no display intent may change
-// an open card or timer: a change word, or an object pronoun, and not a question.
-const FOLLOW_WORDS = new Set(["add", "also", "too", "instead", "remove", "change", "update", "replace", "swap", "plus", "more", "less", "extra", "another", "make", "throw", "put", "take", "drop", "rename",
-  "mas", "tambien", "agrega", "agregale", "anade", "anadele", "quita", "quitale", "cambia", "cambialo", "pon", "ponle", "ponlo", "mejor", "otro", "otra", "menos", "hazlo"]);
-const FOLLOW_RUNS = runs(["as well", "en vez", "en lugar"]);
+// Revision 5 (narrowed after its re-review): a FOLLOW-UP to what is on the screen — the only way a turn with
+// no display intent may change an open card or timer. An edit verb ("add", "scratch", "cross off", "quita",
+// "tacha", "cámbialo"), a verb with its object pronoun right after it ("make it", "change that", "put it"),
+// or an adding tail ("too", "as well", "instead", "también") in a sentence that is not a statement. Never a
+// question, never an information request ("tell me…", "explain…", "dime…"), and a bare pronoun, a Spanish
+// article, "more" or "another" are not follow-ups.
+const EDIT_WORDS = new Set(["add", "remove", "delete", "change", "update", "replace", "swap", "rename", "scratch", "lose", "drop", "erase", "strike",
+  "agrega", "agregale", "agregalo", "agregala", "anade", "anadele", "quita", "quitale", "quitalo", "quitala", "borra", "borralo", "borrala", "tacha", "tachalo", "tachala",
+  "cambia", "cambialo", "cambiala", "ponle", "ponlo", "ponla", "hazlo", "hazla"]);
+const EDIT_RUNS = runs(["take off", "take out", "cross off", "cross out", "knock off", "scratch off", "get rid of", "make it", "make that", "make them", "set it", "change it", "change that",
+  "put it", "put that", "put them", "turn it", "pon mas", "agrega mas", "en vez", "en lugar"]);
+const OFF_VERBS = new Set(["take", "knock", "cross", "scratch", "tick"]);
+const TAIL_WORDS = new Set(["too", "also", "instead", "tambien", "plus"]);
+const TAIL_RUNS = runs(["as well"]);
+const FOLLOW_INFO_STARTS = runs(["dime", "i wonder", "wonder", "give me an example", "give me another example", "i think", "i guess", "creo que"]);
 export function followUp(transcript) {
   const w = plain(transcript);
   if (!w) return false;
   const core = stripPolite(w);
-  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p))) return false;
-  return hasAny(w, FOLLOW_WORDS) || hasAnyRun(w, FOLLOW_RUNS) || hasAny(w, OBJECT_PRONOUNS);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p)) || FOLLOW_INFO_STARTS.some((p) => sameAt(core, 0, p))) return false;
+  if (hasAny(w, EDIT_WORDS) || hasAnyRun(w, EDIT_RUNS)) return true;
+  if (w.includes("off") && hasAny(w, OFF_VERBS)) return true;   // "take the milk off"
+  return (hasAny(w, TAIL_WORDS) || hasAnyRun(w, TAIL_RUNS)) && !hasAny(w, STATEMENT_VERBS);
 }
 
 /** → "timer" | "recipe" | "content" | null. items: what this display may open (a noun inside an item's name is that item). */

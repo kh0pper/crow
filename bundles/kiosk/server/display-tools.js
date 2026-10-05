@@ -21,7 +21,7 @@ const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 /** The crow_wm verbs this display can act on: window verbs always, playback verbs once a media session exists. */
 export const wmVerbs = (ctx) => [...WM_VERBS, ...(ctx.media ? MEDIA_VERBS : [])];
 
-const UPDATE_WORDS = new Set(["add", "remove", "delete", "change", "update", "replace", "rename", "cross", "agrega", "agregale", "anade", "anadele", "quita", "quitale", "cambia", "actualiza", "borra", "tacha"]);
+const UPDATE_WORDS = new Set(["add", "remove", "delete", "change", "update", "replace", "rename", "cross", "scratch", "lose", "drop", "erase", "strike", "agrega", "agregale", "anade", "anadele", "quita", "quitale", "cambia", "actualiza", "borra", "tacha"]);
 const SMALL_WORDS = new Set(["the", "and", "for", "our", "list", "card", "note", "los", "las", "del", "una", "lista", "nota"]);
 /**
  * Does the plain transcript ask to CHANGE the card that is open ("add grapes to the fruits list")?
