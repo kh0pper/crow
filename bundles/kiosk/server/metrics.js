@@ -9,6 +9,8 @@ export function sanitizeClientMetrics(m) {
     output_latency_ms: clampMs(m?.output_latency_ms),
     vad_reason: REASONS.has(m?.vad_reason) ? m.vad_reason : null,
     barged: m?.barged === true,
+    // End of speech to the moment the thing happened (a window changed, audio became audible). Fast-path turns are judged on it.
+    effect_ms: clampMs(m?.effect_ms),
     source: m?.source === "wake" || m?.source === "tap" || m?.source === "follow_up" ? m.source : null,
   };
 }
@@ -42,7 +44,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

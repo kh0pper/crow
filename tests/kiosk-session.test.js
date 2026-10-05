@@ -29,6 +29,7 @@ function hub(over = {}) {
     runTurn: over.runTurn || (async (o) => { turns.push(o); o.sink.event({ type: "transcript_final", text: "hi" }); o.sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); o.sink.audio(Buffer.alloc(4)); o.sink.event({ type: "tts_end" }); return { route: "fast", fastPath: false, escalated: false, aborted: false, degraded: null, timings: { total_ms: 5 } }; }),
     speak: over.speak || (async ({ text, sink }) => { sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); sink.audio(Buffer.from(text)); sink.event({ type: "tts_end" }); }),
     wm, metrics, wrapPcmAsWav,
+    media: over.media,
     warmup: over.warmup || (async () => {}),
     transcribe: over.transcribe || null,
     ...(over.storeProfile ? { storeProfile: over.storeProfile } : {}),
@@ -696,4 +697,123 @@ test("hello: a paired display with no type set gets the pairing guess, stored on
   const k1 = []; const o = hub({ storeProfile: async (id, p) => { k1.push(p); } });
   await hello(o.h);
   assert.deepEqual(k1, [], "a K1 page reports nothing to guess from");
+});
+
+// ---- Media session messages, the media state on hello, and how a turn that never ran is closed ----
+
+/** A media session stand-in that records what the hub asks of it. */
+function fakeMedia(snap = null) {
+  const calls = [];
+  return { calls, snap,
+    snapshot(id) { calls.push(["snapshot", id]); return this.snap; }, sessionBack: (id) => calls.push(["sessionBack", id]), sessionLost: (id) => calls.push(["sessionLost", id]),
+    closeDevice: (id) => calls.push(["closeDevice", id]), onEvent: (id, m) => calls.push(["onEvent", id, m.id, m.state]), command: (id, m, d) => calls.push(["command", id, m.do, d?.id]) };
+}
+
+test("media messages: media_event and media_cmd reach the media session with the device; before hello they are a refused first frame", async () => {
+  const media = fakeMedia();
+  const { h } = hub({ media });
+  const ws = await hello(h);
+  media.calls.length = 0;
+  ws.text({ type: "media_event", id: "m1", state: "playing" });
+  ws.text({ type: "media_cmd", do: "pause" });
+  assert.deepEqual(media.calls, [["onEvent", "kiosk-a", "m1", "playing"], ["command", "kiosk-a", "pause", "kiosk-a"]]);
+  for (const first of [{ type: "media_event", id: "m1", state: "ended" }, { type: "media_cmd", do: "stop" }]) {
+    const m2 = fakeMedia(); const x = hub({ media: m2 }); const w = new FakeWs(); x.h.attach(w); w.text(first); await tick();
+    assert.deepEqual([w.closed, m2.calls], [{ code: 4401, reason: "unauthorized" }, []]);
+  }
+  // A hub with no media session ignores both (a 0.2.0 server never had them).
+  const plain = hub(); const w = await hello(plain.h);
+  w.text({ type: "media_event", id: "m1", state: "playing" }); w.text({ type: "media_cmd", do: "pause" });
+  assert.equal(w.closed, null);
+});
+
+test("hello always carries the media state: the snapshot when something plays, an explicit stop when nothing does — after the windows, before idle", async () => {
+  const snap = { type: "media", action: "load", id: "m4", form: "audio", url: "/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream", title: "Morning Mix", subtitle: "", source: "radio", volume: 50, muted: false, paused: false };
+  const media = fakeMedia(snap);
+  const { h } = hub({ media });
+  const ws = await hello(h);
+  assert.deepEqual(ws.msgs().map((m) => `${m.type}${m.action ? ":" + m.action : ""}`), ["ready", "wm:snapshot", "media:load", "state"]);
+  assert.deepEqual(ws.msgs()[2], snap);
+  assert.deepEqual(media.calls, [["snapshot", "kiosk-a"], ["sessionBack", "kiosk-a"]]);
+  // Nothing playing (a gateway restart, a session that ran out while the page was away): the page is TOLD so.
+  media.snap = null;
+  const ws2 = await hello(h);
+  assert.deepEqual(ws2.msgs().filter((m) => m.type === "media"), [{ type: "media", action: "stop" }]);
+  // A hub with no media session sends no media frame at all (the 0.2.0 sequence, unchanged).
+  const plain = hub(); const w = await hello(plain.h);
+  assert.deepEqual(w.msgs().map((m) => m.type), ["ready", "wm", "state"]);
+});
+
+test("a closed socket starts the media grace period; a superseded one does not; unpair and an ended login close the media session at once", async () => {
+  const media = fakeMedia();
+  const { h } = hub({ media });
+  const a = await hello(h);
+  const b = await hello(h);                    // supersedes a
+  assert.deepEqual(a.closed, { code: 4000, reason: "superseded" });
+  assert.ok(!media.calls.some((c) => c[0] === "sessionLost"), "the display is still connected: its stream goes on");
+  b.close(1006, "");
+  assert.deepEqual(media.calls.filter((c) => c[0] === "sessionLost"), [["sessionLost", "kiosk-a"]]);
+  const c = await hello(h);
+  media.calls.length = 0;
+  h.closeDevice("kiosk-a", 4401, "unpaired");
+  assert.deepEqual(media.calls, [["closeDevice", "kiosk-a"]]);
+  assert.deepEqual(c.closed, { code: 4401, reason: "unpaired" });
+  // A session display whose login ended: closed at once, not after the grace period.
+  const m2 = fakeMedia(); const x = hub({ media: m2 });
+  let live = true;
+  const w = new FakeWs();
+  x.h.attach(w, { authorize: async () => ({ device: { id: "dash-1", name: "Dashboard", device_kind: "kiosk", bound_bot_id: "household", kiosk_settings: { lang: "en" } } }), revalidate: async () => live });
+  w.text({ type: "hello", mode: "session" }); await tick();
+  live = false;
+  m2.calls.length = 0;
+  await x.h.revalidateSessions();
+  assert.deepEqual(w.closed, { code: 4401, reason: "unauthorized" });
+  assert.deepEqual(m2.calls[0], ["closeDevice", "dash-1"]);
+});
+
+test("every turn_start is answered by exactly one closing frame for its turn_id: turn_done when the turn ran, turn_over (with a reason) when it never did", async () => {
+  let release = null, fail = false;
+  const { h } = hub({ runTurn: (o) => (fail ? Promise.reject(new Error("model down")) : new Promise((r) => { release = () => r({ route: "fast", aborted: o.signal.aborted, timings: {} }); o.signal.addEventListener("abort", () => release()); })) });
+  const ws = await hello(h);
+  const closing = () => ws.msgs().filter((m) => m.type === "turn_done" || m.type === "turn_over").map((m) => `${m.type}:${m.turn_id}${m.reason ? ":" + m.reason : ""}${m.aborted ? ":aborted" : ""}${m.failed ? ":" + m.failed : ""}`);
+  const speak = (id, n = 20) => { ws.text({ type: "turn_start", turn_id: id }); for (let i = 0; i < n; i++) ws.bin(Buffer.alloc(640, 7)); };
+  // 1. a tap with nothing said (the page's no-speech timeout)
+  speak("e1", 400); ws.text({ type: "turn_end", vad_reason: "no_speech" }); await tick();
+  // 2. a tap and an immediate second tap: under 200 ms of audio
+  speak("e2", 1); ws.text({ type: "turn_end", vad_reason: "manual" }); await tick();
+  // 3. too much audio
+  ws.text({ type: "turn_start", turn_id: "long" }); for (let i = 0; i <= MAX_TURN_BYTES / 65536; i++) ws.bin(Buffer.alloc(65536));
+  ws.text({ type: "turn_end", vad_reason: "max" }); await tick();
+  assert.deepEqual(closing(), ["turn_over:e1:empty", "turn_over:e2:empty", "turn_over:long:too_long"]);
+  // The order on the wire: the reason, the closing frame, then idle.
+  const tail = ws.msgs().slice(-3).map((m) => m.type + (m.code ? ":" + m.code : "") + (m.bird ? ":" + m.bird : ""));
+  assert.deepEqual(tail, ["error:audio_too_long", "turn_over", "state:idle"]);
+  // 4. a turn that runs, and a tap that arrives while it does
+  speak("run"); ws.text({ type: "turn_end", vad_reason: "silence" }); await tick();
+  ws.text({ type: "turn_start", turn_id: "busy1" });
+  assert.equal(closing().at(-1), "turn_over:busy1:busy", "the refused turn is closed by its own id, at once");
+  ws.bin(Buffer.alloc(640)); ws.text({ type: "turn_end", vad_reason: "silence" }); await tick();
+  assert.equal(closing().filter((x) => x.includes("busy1")).length, 1, "its turn_end is not answered a second time");
+  // 5. …which is then interrupted
+  ws.text({ type: "barge_in" }); await tick(); await tick();
+  assert.equal(closing().at(-1), "turn_done:run:aborted");
+  // 6. a turn that fails
+  fail = true;
+  speak("bad"); ws.text({ type: "turn_end", vad_reason: "silence" }); await tick(); await tick();
+  assert.equal(closing().at(-1), "turn_done:bad:error");
+  const ids = closing().map((x) => x.split(":")[1]);
+  assert.deepEqual(ids, ["e1", "e2", "long", "busy1", "run", "bad"]);
+  assert.equal(new Set(ids).size, ids.length, "one closing frame per turn, never two");
+  assert.equal(ws.msgs().at(-1).bird, "idle");
+});
+
+test("turn_metrics carries effect_ms, clamped like the other client numbers", async () => {
+  const { h, logs, metrics } = hub();
+  const ws = await hello(h);
+  ws.text({ type: "turn_metrics", turn_id: "f1", e2e_ms: null, effect_ms: 640, source: "tap", vad_reason: "silence" });
+  ws.text({ type: "turn_metrics", turn_id: "f2", effect_ms: "x" });
+  ws.text({ type: "turn_metrics", turn_id: "f3", effect_ms: 9e9 });
+  const line = (id) => JSON.parse(logs.find((l) => l.startsWith("[kiosk-metrics]") && l.includes(`"${id}"`)).slice("[kiosk-metrics] ".length));
+  assert.deepEqual([line("f1").effect_ms, line("f2").effect_ms, line("f3").effect_ms], [640, null, 120000]);
+  assert.equal(metrics.list("kiosk-a").find((r) => r.turn_id === "f1").effect_ms, 640);
 });

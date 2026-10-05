@@ -52,7 +52,12 @@ export const KIOSK_THEME_CHOICES = Object.freeze(["auto", "light", "dark"]);
 export const KIOSK_PROFILE_CHOICES = Object.freeze(["pi3", "phone", "tablet", "desktop"]);
 export const KIOSK_PROFILE_SOURCES = Object.freeze(["operator", "guessed"]);
 /** Optional keys: kept when present, never filled in by a default. */
-const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source"]);
+/**
+ * Media (WM1b): the loudest this display may play (10..100, steps of ten; absent = 100), and whether
+ * music is paused, rather than turned down, while the display listens (absent = turned down).
+ */
+export const KIOSK_MEDIA_KEYS = Object.freeze(["max_volume", "pause_media_on_listen"]);
+const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source", ...KIOSK_MEDIA_KEYS]);
 
 function sha256Hex(s) {
   return createHash("sha256").update(String(s)).digest("hex");
@@ -79,7 +84,7 @@ export function normalizeKioskSettings(input, prior) {
   if (typeof src === "string") { try { src = JSON.parse(src); } catch { src = null; } }
   if (!src || typeof src !== "object") return { ...base };
   const out = { ...base };
-  for (const k of ["follow_up", "memory_integration", "animation"]) if (k in src) out[k] = asBool(src[k]);
+  for (const k of ["follow_up", "memory_integration", "animation", "pause_media_on_listen"]) if (k in src) out[k] = asBool(src[k]);
   if ("follow_up_s" in src) {
     const n = Number.parseInt(src.follow_up_s, 10);
     if (Number.isFinite(n)) out.follow_up_s = Math.min(20, Math.max(2, n));
@@ -99,6 +104,7 @@ export function normalizeKioskSettings(input, prior) {
     } else if (src.profile === null || src.profile === "") { delete out.profile; delete out.profile_source; }   // back to "not set"
   }
   if (!KIOSK_PROFILE_CHOICES.includes(out.profile)) { delete out.profile; delete out.profile_source; }
+  if ("max_volume" in src) { const n = Number.parseInt(src.max_volume, 10); if (Number.isFinite(n)) out.max_volume = Math.min(100, Math.max(10, Math.round(n / 10) * 10)); }
   for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS) && !KIOSK_OPTIONAL_KEYS.has(k)) delete out[k];
   return out;
 }
