@@ -37,6 +37,15 @@ test("buildManagedEntries: an allow-listed cloud row is included with its DB key
   assert.equal(e["anthropic-x"], undefined, "non-OpenAI types never");
 });
 
+test("buildManagedEntries: a bundle row on an address that only looks unique-local needs the cloud allowlist", () => {
+  const look = [
+    { id: "fake-ula", baseUrl: "http://[fc::1]:8011/v1", apiKey: "k", bundleId: "b", disabled: false, provider_type: "openai-compat", models: [{ id: "m" }], gpuPolicy: null },
+    { id: "real-ula", baseUrl: "http://[fd7a:115c:a1e0::5]:8011/v1", apiKey: "none", bundleId: "b", disabled: false, provider_type: "openai-compat", models: [{ id: "m" }], gpuPolicy: null },
+  ];
+  assert.deepEqual(Object.keys(buildManagedEntries(look, { doorBase: DOOR, cloudAllow: [] })), ["real-ula"]);
+  assert.deepEqual(Object.keys(buildManagedEntries(look, { doorBase: DOOR, cloudAllow: ["fake-ula"] })).sort(), ["fake-ula", "real-ula"]);
+});
+
 test("mergeManaged: adds, updates, removes managed ids; hand-written entries are never touched", () => {
   const file = {
     providers: {

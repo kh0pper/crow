@@ -10,7 +10,7 @@ import { resolveDataDir } from "./db.js";
 import { runExtraction } from "./extract.js";
 import { appImport } from "./app-root.js";
 
-const { isPublicIp } = await appImport("servers/shared/ip-classify.js");
+const { isPublicEgressIp } = await appImport("servers/shared/ip-classify.js");
 
 const FETCH_TIMEOUT_MS = 20000;
 const USER_AGENT = "Mozilla/5.0 (compatible; Crow-Reader/1.0; +https://github.com/kh0pper/crow)";
@@ -63,7 +63,8 @@ function textToSections(raw) {
  * SSRF guard: refuse any address that is not public unicast, in any spelling
  * (the URL parser rewrites `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`; NAT64,
  * 6to4, Teredo and v4-compatible IPv6 carry an IPv4 inside), unless configured
- * open. Classification lives in servers/shared/ip-classify.js.
+ * open; this host's own addresses and on-link neighbours are refused too
+ * (isPublicEgressIp in servers/shared/ip-classify.js).
  * Accepted risk: DNS rebinding TOCTOU (this lookup and the fetch resolve
  * independently); fine for a single-user authenticated dashboard.
  */
@@ -74,7 +75,7 @@ export async function assertPublicHost(url, config) {
   const host = new URL(url).hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
   for (const { address } of addrs) {
-    if (!isPublicIp(address)) {
+    if (!isPublicEgressIp(address)) {
       throw new Error(`URL resolves to a private address (${address}); set READER_ALLOW_PRIVATE_URLS=1 to permit`);
     }
   }
