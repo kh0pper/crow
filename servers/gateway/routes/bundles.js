@@ -749,6 +749,15 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   const bothUndefined = oldVersion === undefined && newVersion === undefined;
   if (bothUndefined || oldVersion === newVersion) return null;
 
+  // Operator opt-out: an INSTALLED manifest carrying `"refresh": false` marks
+  // a copy the operator maintains by hand (a fork deployed over a first-party
+  // bundle id). Overwriting it with the repo's code silently removes whatever
+  // the fork added, so leave it alone and say so on every boot it applies.
+  if (installedManifest.refresh === false) {
+    console.log(`[bundles] ${id}: installed copy opts out of refresh ("refresh": false) — repo ${newVersion}, installed ${oldVersion}, left as installed`);
+    return null;
+  }
+
   const isDocker = !!repoManifest.docker;
   const touched = [];
 

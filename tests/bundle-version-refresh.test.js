@@ -145,6 +145,65 @@ describe("version differs → refresh (+ instance-local preservation)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Opt-out: an installed manifest carrying "refresh": false marks an
+// operator-managed copy (a fork deployed over the first-party bundle id). A
+// version difference must NOT overwrite its code or its served panel files.
+// ---------------------------------------------------------------------------
+describe("installed manifest \"refresh\": false → version differs but nothing is overwritten", () => {
+  const id = "widget-pinned";
+  let repoRoot;
+  let runner;
+  let result;
+
+  before(async () => {
+    repoRoot = freshRoot("crowrepo-widgetpinned-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "Widget", version: "1.1.0", type: "mcp-server", category: "misc",
+      description: "d", server: { command: "node", args: ["server/index.js"] },
+      panel: `panel/${id}.js`, panelRoutes: "panel/routes.js",
+    }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { leftpad: "^1.0.0" } }));
+    put(repoRoot, `${id}/server/index.js`, "console.log('repo server');\n");
+    put(repoRoot, `${id}/routes/public.js`, "export default 'repo-route';\n");
+    put(repoRoot, `${id}/panel/${id}.js`, "export default 'repo-panel';\n");
+    put(repoRoot, `${id}/panel/routes.js`, "export default 'repo-routes';\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server", refresh: false }));
+    put(CROW_HOME, `bundles/${id}/server/index.js`, "console.log('operator server');\n");
+    put(CROW_HOME, `bundles/${id}/routes/public.js`, "export default 'operator-route';\n");
+    put(CROW_HOME, `bundles/${id}/panel/${id}.js`, "export default 'operator-panel';\n");
+    put(CROW_HOME, `panels/${id}.js`, "OPERATOR PANEL\n");
+    put(CROW_HOME, `panels/${id}-routes.js`, "OPERATOR ROUTES\n");
+
+    setInstalled([id]);
+    runner = fakeRunner();
+    result = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+  });
+
+  test("code, manifest and served panel files are left exactly as installed", () => {
+    assert.deepEqual(result.errors, []);
+    assert.ok(!result.repaired.some((r) => r.includes("refreshed")), "no refresh is reported");
+    assert.equal(readAt(destBundleDir(id), "server/index.js"), "console.log('operator server');\n");
+    assert.equal(readAt(destBundleDir(id), "routes/public.js"), "export default 'operator-route';\n");
+    assert.equal(readAt(destBundleDir(id), `panel/${id}.js`), "export default 'operator-panel';\n");
+    const manifest = JSON.parse(readAt(destBundleDir(id), "manifest.json"));
+    assert.equal(manifest.version, "1.0.0");
+    assert.equal(manifest.refresh, false);
+    assert.equal(readAt(destPanelsDir(), `${id}.js`), "OPERATOR PANEL\n");
+    assert.equal(readAt(destPanelsDir(), `${id}-routes.js`), "OPERATOR ROUTES\n");
+    assert.equal(runner.calls.length, 0, "npm must not fire for an opted-out bundle");
+  });
+
+  test("only the literal false opts out — a truthy or absent field still refreshes", async () => {
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server", refresh: "false" }));
+    put(CROW_HOME, `bundles/${id}/node_modules/leftpad/index.js`, "module.exports = () => {};\n");
+    const again = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.ok(again.repaired.some((r) => r.includes(`${id}: refreshed 1.0.0 -> 1.1.0`)));
+    assert.equal(readAt(destBundleDir(id), "server/index.js"), "console.log('repo server');\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Test 2: version equal → refresh phase is a no-op; existing missing-only
 // repair behavior is unchanged (a present-but-stale file is NOT touched; a
 // genuinely missing file still gets repaired).
