@@ -7,35 +7,33 @@
  *   DELETE /api/meta-glasses/devices/:id        — unpair a device
  *   POST   /api/meta-glasses/devices/:id        — update per-device overrides
  *   POST   /api/meta-glasses/say                — queue text for TTS broadcast
- *   POST   /api/meta-glasses/debug/voice-turn   — simulate a voice turn from a prompt
  *
  * WebSocket (no Express middleware — token-authed at upgrade):
  *   wss://.../api/meta-glasses/session?device_id=X
  *     Authorization: Bearer <token>
  *
- * Protocol envelope (per plan §WebSocket protocol):
- *   client→server text:   { type: hello | turn_start | turn_end }
- *   client→server binary: Opus frames (20ms, 16 kHz mono) during a turn
- *   server→client text:   { type: ready | transcript_partial | transcript_final |
- *                           llm_delta | tts_start | tts_end | error }
- *   server→client binary: TTS audio chunks per tts_start codec
+ * Session protocol:
+ *   client→server text:   { type: hello | turn_start | turn_end | audio_stream_done | media_control | photo_error }
+ *   client→server binary: 16 kHz mono PCM frames during a turn
+ *   server→client text:   { type: ready | transcript_final | caption_delta | tts_start | tts_end | error |
+ *                           capture_photo | remote_turn | media_control | audio_stream_start | audio_stream_end }
+ *   server→client binary: speech (raw PCM) between tts_start and tts_end; library audio between
+ *                         audio_stream_start and audio_stream_end. The two never overlap.
+ *
+ * The voice turn itself is the gateway's shared one (servers/gateway/voice/turn.js), driven by
+ * ../server/session.js.
  */
 
 import express, { Router } from "express";
-import { join } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { join, resolve, dirname, sep } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 
-// Bus used to push glasses media-state changes to the Nest player bar
+// glassesBus (resolved below) pushes glasses media-state changes to the Nest player bar
 // via /dashboard/streams/glasses (see servers/gateway/routes/streams.js).
-// Imported once here and fired from the few highest-signal mutation
-// sites; the 5-min fallback poll in shared/player.js catches any
-// state changes that bypass these sites (rare voice-turn fast-paths,
-// audio-stream-done callbacks, etc.).
-import glassesBus from "../../../servers/shared/event-bus.js";
 
 function emitGlassesMediaState(deviceId) {
   if (!deviceId) return;
@@ -54,35 +52,129 @@ function emitGlassesMediaState(deviceId) {
   }
 }
 
-/* ---------- Bundle path resolution ---------- */
+/* ---------- Bundle + app path resolution ----------
+ * Installed, this file is a COPY at <crow-home>/panels/meta-glasses-routes.js, so nothing is
+ * reached by a relative path: the bundle dir (installed copy first) and the app root
+ * (CROW_APP_ROOT) are resolved the way the kiosk bundle resolves them.
+ */
+const here = dirname(fileURLToPath(import.meta.url));
+const isBundle = (p) => !!p && existsSync(join(p, "manifest.json")) && existsSync(join(p, "server", "app-root.js"));
+const BUNDLE_DIR = [
+  join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "meta-glasses"),
+  process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "meta-glasses") : null,
+  resolve(here, ".."),
+].filter(Boolean).find(isBundle);
+if (!BUNDLE_DIR) throw new Error("meta-glasses: bundle directory not found");
+const bImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
+const { APP_ROOT, appImport } = await bImport("server/app-root.js");
+export { appImport };
+const serverDir = join(BUNDLE_DIR, "server");
+const gatewayDir = join(APP_ROOT, "servers", "gateway");
+const glassesBus = (await appImport("servers/shared/event-bus.js")).default;
 
-function resolveBundleServer() {
-  const installed = join(homedir(), ".crow", "bundles", "meta-glasses", "server");
-  if (existsSync(installed)) return installed;
-  return join(import.meta.dirname, "..", "server");
-}
-const serverDir = resolveBundleServer();
-
-function resolveGatewayDir() {
-  const fromBundle = join(import.meta.dirname, "..", "..", "..", "servers", "gateway");
-  if (existsSync(join(fromBundle, "ai", "tts", "index.js"))) return fromBundle;
-  const fromHome = join(homedir(), "crow", "servers", "gateway");
-  if (existsSync(join(fromHome, "ai", "tts", "index.js"))) return fromHome;
-  throw new Error("Cannot locate Crow gateway directory from meta-glasses bundle.");
-}
-const gatewayDir = resolveGatewayDir();
-
-async function loadDeviceStore() { return import(pathToFileURL(join(serverDir, "device-store.js")).href); }
+// The device registry is core's (servers/shared/device-store.js), never an installed copy's.
+async function loadDeviceStore() { return appImport("servers/shared/device-store.js"); }
 async function loadTts()         { return import(pathToFileURL(join(gatewayDir, "ai/tts/index.js")).href); }
-async function loadStt()         { return import(pathToFileURL(join(gatewayDir, "ai/stt/index.js")).href); }
-async function loadProvider()    { return import(pathToFileURL(join(gatewayDir, "ai/provider.js")).href); }
 async function loadDb()          { return import(pathToFileURL(join(gatewayDir, "..", "db.js")).href); }
-async function loadToolExec()    { return import(pathToFileURL(join(gatewayDir, "ai/tool-executor.js")).href); }
-async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, "ai/system-prompt.js")).href); }
 async function loadVision()       { return import(pathToFileURL(join(gatewayDir, "ai/vision.js")).href); }
 async function loadResolveProv()  { return import(pathToFileURL(join(gatewayDir, "ai/resolve-provider.js")).href); }
 async function loadSettingsReg()  { return import(pathToFileURL(join(gatewayDir, "dashboard/settings/registry.js")).href); }
 async function loadS3()           { return import(pathToFileURL(join(gatewayDir, "..", "storage", "s3-client.js")).href); }
+
+const { isAllowedNetwork } = await appImport("servers/gateway/dashboard/auth.js");
+const { csrfMiddleware } = await appImport("servers/gateway/dashboard/shared/csrf.js");
+const { musicUpstreamConfig, openPinnedUpstream, UpstreamRefused } = await appImport("servers/gateway/media/pinned-upstream.js");
+const { registerSchedulerHook } = await appImport("servers/gateway/scheduler-hooks.js");
+const { readEnvelope } = await bImport("server/envelope.js");
+const { createLimiter } = await bImport("server/limits.js");
+const { fetchImagePinned, FetchRefused } = await bImport("server/net-guard.js");
+const { createDbClient: openAppDb } = await appImport("servers/db.js");
+const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
+const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
+const { createGlassesTurns, playableTtsProfile, GLASSES_DENY_TOOLS } = await bImport("server/session.js");
+const { stringsFor } = await bImport("server/strings.js");
+
+/* ---------- Device-token routes: who may call, and how often ----------
+ * These routes are reached with a device token, not a dashboard session, and sit outside the
+ * gateway's general rate limiter. They are tailnet-only like everything else here.
+ */
+const GLASSES_KIND = "glasses";
+const isGlassesRecord = (d) => !!d && (d.device_kind || GLASSES_KIND) === GLASSES_KIND;
+// Failed tokens are counted per caller AND device id: behind Tailscale Serve every request comes
+// from 127.0.0.1, so an address alone would let one stale phone lock out every device. The caller
+// is the tailnet identity Serve adds (else the socket address). A token that verifies is never
+// refused; the global ceiling only stops a flood of bad tokens from all callers together.
+const _authFailures = createLimiter({ max: 20, windowMs: 60_000 });      // per caller + device id
+const _authFailuresAll = createLimiter({ max: 300, windowMs: 60_000 });  // every caller together
+const failKey = (req, deviceId) => `${String(req.headers["tailscale-user-login"] || clientAddr(req)).slice(0, 200)}|${String(deviceId || "").slice(0, 128)}`;
+/** A bad token: 429 once this caller (or everyone) is over the limit, else counted and 401. */
+function badTokenStatus(req, deviceId) {
+  const key = failKey(req, deviceId);
+  if (_authFailures.blocked(key) || _authFailuresAll.blocked("all")) return 429;
+  _authFailures.take(key);
+  _authFailuresAll.take("all");
+  return 401;
+}
+const _photoUploads = createLimiter({ max: 30, windowMs: 60_000 });   // per device
+const clientAddr = (req) => String(req.socket?.remoteAddress || "?");
+
+/** Verify a glasses device token (header only). → the device record without hashes, or null. */
+async function verifyGlassesToken(deviceId, token) {
+  if (!deviceId || !token) return null;
+  const { createDbClient } = await loadDb();
+  const { verifyToken } = await loadDeviceStore();
+  const db = createDbClient();
+  try {
+    const device = await verifyToken(db, deviceId, token);
+    return isGlassesRecord(device) ? device : null;
+  } finally { try { db.close(); } catch {} }
+}
+
+/** Express gate for device-token routes. Runs BEFORE any body is read. Sets req.glassesDevice. */
+async function deviceTokenAuth(req, res, next) {
+  if (req.headers["tailscale-funnel-request"] || !isAllowedNetwork(req)) return res.status(403).json({ ok: false, error: "network_refused" });
+  const deviceId = typeof req.query.device_id === "string" ? req.query.device_id : "";
+  const header = req.headers["authorization"] || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  let device = null;
+  try { device = await verifyGlassesToken(deviceId, token); } catch { device = null; }
+  if (!device) {
+    const status = badTokenStatus(req, deviceId);
+    return res.status(status).json({ ok: false, error: status === 429 ? "too_many_attempts" : "bad_token" });
+  }
+  req.glassesDevice = device;
+  return next();
+}
+
+/** Apply a transport action to a device's audio: server state, the chained queue and the phone. */
+function applyMediaControl(deviceId, action) {
+  if (action === "stop") {
+    clearAudioQueue(deviceId);
+    sendMediaControl(deviceId, "stop");
+    _devicePlaybackState.set(deviceId, "idle");
+    _nowPlaying.delete(deviceId);
+  } else if (action === "next") {
+    // Stop the current track, then wake the queue chain; a throwaway waiter absorbs the stale
+    // audio_stream_done of the track that was cut.
+    sendMediaControl(deviceId, "stop");
+    const w = _streamDoneWaiters.get(deviceId);
+    if (w) {
+      clearTimeout(w.timer);
+      _streamDoneWaiters.delete(deviceId);
+      const absorb = setTimeout(() => _streamDoneWaiters.delete(deviceId), 2000);
+      _streamDoneWaiters.set(deviceId, {
+        resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(deviceId); },
+        reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(deviceId); },
+        timer: absorb,
+      });
+      w.resolve();
+    }
+  } else {
+    sendMediaControl(deviceId, action);
+    _devicePlaybackState.set(deviceId, action === "pause" ? "paused" : "playing");
+  }
+  emitGlassesMediaState(deviceId);
+}
 
 /* ---------- Shared session state ---------- */
 
@@ -98,7 +190,7 @@ function triggerCapture(sess) {
       _pendingCaptures.delete(reqId);
       reject(new Error("capture timeout"));
     }, 20_000);
-    _pendingCaptures.set(reqId, { resolve, reject, timer });
+    _pendingCaptures.set(reqId, { resolve, reject, timer, deviceId: sess.device?.id || null });
   });
   sendText(sess.ws, { type: "capture_photo", request_id: reqId });
   return p;
@@ -109,6 +201,19 @@ function triggerCapture(sess) {
 // resolveCrowHome() convention in proxy.js / ext_registry.mjs.
 const _photoDir = join(process.env.CROW_HOME || join(homedir(), ".crow"), "data", "glasses-photos");
 try { mkdirSync(_photoDir, { recursive: true }); } catch {}
+/** A stored disk_path the gateway may read or delete: it must resolve inside the photo folder.
+ * Rows written before server-made names (or imported from another host) can name any path. */
+function photoPathOk(p) {
+  if (typeof p !== "string" || !p) return false;
+  const root = resolve(_photoDir) + sep;
+  return resolve(p).startsWith(root);
+}
+/** Delete a photo's disk copy, only inside the photo folder; anything else is skipped and logged. */
+function removePhotoFile(p, rowId) {
+  if (!p) return;
+  if (!photoPathOk(p)) { console.warn(`[meta-glasses] photo ${rowId}: disk_path is outside the photo folder; file left alone`); return; }
+  try { unlinkSync(p); } catch { /* already gone */ }
+}
 
 /* ---------- Per-device turn mutex (Phase 2) ----------
  * Prevents overlapping voice turns on the same device. A rapid second PTT
@@ -116,7 +221,7 @@ try { mkdirSync(_photoDir, { recursive: true }); } catch {}
  * The lock is released in finally, on ws close, or by the 60s watchdog.
  */
 const _turnLocks = new Map(); // deviceId → { acquiredAt, ws, watchdog }
-const TURN_WATCHDOG_MS = 60_000;
+const TURN_WATCHDOG_MS = 100_000;   // longer than TURN_CAP_MS: the cap ends a turn first
 
 function acquireTurnLock(deviceId, ws) {
   const existing = _turnLocks.get(deviceId);
@@ -145,105 +250,6 @@ function releaseTurnLock(deviceId, ws) {
     clearTimeout(entry.watchdog);
     _turnLocks.delete(deviceId);
   }
-}
-
-/* ---------- Fast-path: simple media voice commands ----------
- * Matches short media commands (stop, pause, resume, next/skip) and executes
- * them directly without going through the LLM. Saves ~4-7 seconds per command.
- * Returns { action, say } if matched, null if the LLM should handle it.
- */
-const MEDIA_FAST_PATHS = [
-  { pattern: /^(stop|stop\s+(the\s+)?(music|audio|playback|playing|song|track))$/i,
-    needsState: ["playing", "paused", "idle"], action: "stop", say: "Stopped." },
-  { pattern: /^(pause|pause\s+(the\s+)?(music|audio|playback|playing|song|track)|pause\s+it)$/i,
-    needsState: ["playing"], action: "pause", say: "Paused." },
-  { pattern: /^(resume|continue|unpause)$/i,
-    needsState: ["paused"], action: "resume", say: "Resuming." },
-  { pattern: /^(next|skip|next\s+(song|track)|skip\s+(song|track))$/i,
-    needsState: ["playing"], action: "next", say: "Next track." },
-];
-
-function matchMediaFastPath(transcript, deviceId) {
-  const state = _devicePlaybackState.get(deviceId) || "idle";
-  // STT often adds trailing punctuation ("Stop.", "Pause!") — strip it
-  const cleaned = transcript.replace(/[.!?,;:]+$/, "").trim();
-  for (const fp of MEDIA_FAST_PATHS) {
-    if (fp.pattern.test(cleaned) && fp.needsState.includes(state)) {
-      return fp;
-    }
-  }
-  return null;
-}
-
-/* ---------- Destructive-action spoken confirmation (Phase 2) ----------
- * First call to a destructive tool returns a "confirmation required" prompt
- * instead of executing. Next turn, the LLM retries the same tool with same
- * args; if the user's transcript starts with an affirmative token within
- * 60s, the call runs. Any mismatch clears the pending state.
- * Per-device map — 'yes' on glasses A cannot fulfill a pending on glasses B.
- */
-const _pendingConfirms = new Map(); // deviceId → { toolName, argsHash, at }
-const CONFIRM_TTL_MS = 60_000;
-const DESTRUCTIVE_EXACT = new Set([
-  "crow_delete_post",
-  "crow_delete_memory",
-  "crow_delete_setlist",
-  "crow_unpublish_post",
-  "crow_remove_backend",
-  "crow_dismiss_all_notifications",
-]);
-const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
-const AFFIRMATIVE_STARTS = /^\s*(yes|yeah|yep|yup|confirmed?|do it|go ahead|proceed|ok|okay)\b/i;
-const NEGATIVE_STARTS = /^\s*(no|nope|cancel|stop|wait|nevermind|never mind)\b/i;
-
-function isDestructiveTool(name) {
-  if (!name) return false;
-  if (DESTRUCTIVE_EXACT.has(name)) return true;
-  if (DESTRUCTIVE_REGEX.test(name)) return true;
-  return false;
-}
-function describeDestructiveAction(tc) {
-  const base = (tc.name || "").replace(/^crow_/, "").replace(/_/g, " ");
-  const arg = tc.arguments || {};
-  const ref = arg.id || arg.slug || arg.post_id || arg.memory_id || arg.setlist_id || "";
-  return ref ? `${base} ${ref}` : base;
-}
-function canonicalArgsHash(args) {
-  // Canonical JSON (sorted keys, stable recursion) — equality check only.
-  const seen = new WeakSet();
-  const canonical = (v) => {
-    if (v === null || typeof v !== "object") return JSON.stringify(v);
-    if (seen.has(v)) return '"__cycle__"';
-    seen.add(v);
-    if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
-    const keys = Object.keys(v).sort();
-    return "{" + keys.map(k => JSON.stringify(k) + ":" + canonical(v[k])).join(",") + "}";
-  };
-  return canonical(args || {});
-}
-
-// Per-device short-term conversation history (non-system messages).
-// Keeps the last N turns so follow-ups like "add purple too" retain
-// context. Expires after CONVO_IDLE_MS of inactivity so long gaps
-// between sessions start fresh.
-const _convoHistory = new Map(); // deviceId → { messages: [...], lastAt: ts }
-const CONVO_MAX_MESSAGES = 24;   // ~8 user/assistant/tool triples
-const CONVO_IDLE_MS = 15 * 60 * 1000; // 15 min
-
-function getConvo(deviceId) {
-  const entry = _convoHistory.get(deviceId);
-  if (!entry) return [];
-  if (Date.now() - entry.lastAt > CONVO_IDLE_MS) {
-    _convoHistory.delete(deviceId);
-    return [];
-  }
-  return entry.messages;
-}
-
-function saveConvo(deviceId, messages) {
-  // Drop the leading system message; we re-generate it every turn.
-  const trimmed = messages.filter(m => m.role !== "system").slice(-CONVO_MAX_MESSAGES);
-  _convoHistory.set(deviceId, { messages: trimmed, lastAt: Date.now() });
 }
 
 /**
@@ -307,1104 +313,7 @@ function sendBinary(ws, chunk) {
   ws.send(chunk);
 }
 
-/**
- * Prepend a RIFF/WAV header onto raw 16-bit signed LE mono PCM. STT
- * providers (Groq/Whisper/Deepgram) expect a container, not headerless
- * PCM — this is the minimal 44-byte header.
- */
-function wrapPcmAsWav(pcm, sampleRate) {
-  const header = Buffer.alloc(44);
-  const byteRate = sampleRate * 2;
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + pcm.length, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);        // PCM chunk size
-  header.writeUInt16LE(1, 20);          // PCM format
-  header.writeUInt16LE(1, 22);          // mono
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(2, 32);          // block align
-  header.writeUInt16LE(16, 34);         // bits per sample
-  header.write("data", 36);
-  header.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([header, pcm]);
-}
-
-
-/* ---------- Phase 6 C.3: continuous recording (note_stream) ---------- */
-
-// Per-device note-stream state. Parallel to _turnLocks but independent — a
-// note_stream session can run for up to 2 hours; PTT is rejected by the
-// phone while streaming. Server-side we also ignore turn_start envelopes
-// arriving from a ws in note_stream mode (belt + suspenders).
-const _noteStreams = new Map(); // deviceId -> state
-
-const NOTE_STREAM_CODEC = "pcm_s16le";
-const NOTE_STREAM_SAMPLE_RATE = 16000;
-const NOTE_STREAM_CHUNK_BYTES = 320_000;       // 10 s × 16 kHz mono s16
-const NOTE_STREAM_INDEX_HEADER = 4;            // 4-byte LE chunk index prefix
-const NOTE_STREAM_SESSION_CAP_MS = 2 * 60 * 60 * 1000;
-const NOTE_STREAM_NO_AUDIO_MS   = 30_000;
-const NOTE_STREAM_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
-const NOTE_STREAM_BACKPRESSURE_CAP = 6;        // in-flight chunks
-const NOTE_STREAM_INAUDIBLE_TIMEOUT_MS = 30_000;
-const NOTE_STREAM_MAX_CONSECUTIVE_DROPS = 3;
-const NOTE_STREAM_DRAIN_TICK_MS = 5_000;       // recheck stalled gaps
-
-function _hhmm(d) {
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-async function _appendLine(db, noteId, text) {
-  const line = text.endsWith("\n") ? text : `${text}\n`;
-  try {
-    await db.execute({
-      sql: `UPDATE research_notes
-               SET content = COALESCE(content, '') || ?,
-                   updated_at = datetime('now')
-             WHERE id = ?`,
-      args: [line, noteId],
-    });
-  } catch (err) {
-    console.warn(`[meta-glasses] note_stream append failed note=${noteId}: ${err.message}`);
-  }
-}
-
-// In-order pump: emit pendingBuffer[nextExpectedIdx] if present; otherwise
-// check whether ANY later idx has been waiting > 30s — if so, insert
-// [… inaudible …] for the missing idx and advance. Loop until nothing
-// further can be emitted.
-async function _drainInOrder(deviceId) {
-  const state = _noteStreams.get(deviceId);
-  if (!state || !state.noteId) return;
-  if (state.draining) return;  // reentrancy guard
-  state.draining = true;
-  const db = (await loadDb()).createDbClient();
-  try {
-    while (true) {
-      const idx = state.nextExpectedIdx;
-      const ready = state.pendingBuffer.get(idx);
-      if (ready) {
-        const ts = _hhmm(new Date());
-        const text = ready.text && ready.text.length > 0 ? ready.text : "[… inaudible …]";
-        await _appendLine(db, state.noteId, `[${ts}] ${text}`);
-        state.pendingBuffer.delete(idx);
-        state.nextExpectedIdx += 1;
-        if (!ready.inaudible) state.consecutiveDrops = 0;
-        continue;
-      }
-      // Nothing for the next idx yet. Check if a LATER idx has been waiting
-      // > 30s — that implies idx is stalled and we should fill inaudible.
-      let forceAdvance = false;
-      for (const [laterIdx, laterEntry] of state.pendingBuffer) {
-        if (laterIdx > idx && Date.now() - laterEntry.completedAt > NOTE_STREAM_INAUDIBLE_TIMEOUT_MS) {
-          forceAdvance = true;
-          break;
-        }
-      }
-      if (!forceAdvance) break;
-      const ts = _hhmm(new Date());
-      await _appendLine(db, state.noteId, `[${ts}] [… inaudible …]`);
-      state.nextExpectedIdx += 1;
-    }
-  } finally {
-    state.draining = false;
-    try { db.close(); } catch {}
-  }
-}
-
-// Called from the WS binary-frame dispatcher when currentInboundMode ===
-// "note_stream" and a binary frame arrives.
-function processNoteStreamChunk(deviceId, raw) {
-  const state = _noteStreams.get(deviceId);
-  if (!state) return;
-  if (!Buffer.isBuffer(raw) || raw.length < NOTE_STREAM_INDEX_HEADER + 2) {
-    console.warn(`[meta-glasses] note_stream dropped malformed frame len=${raw?.length}`);
-    return;
-  }
-
-  // Clear no-audio watchdog on FIRST chunk.
-  if (state.lastChunkAt === 0 && state.noAudioWatchdog) {
-    clearTimeout(state.noAudioWatchdog);
-    state.noAudioWatchdog = null;
-  }
-  state.lastChunkAt = Date.now();
-
-  const idx = raw.readUInt32LE(0);
-  const pcm = Buffer.from(raw.subarray(NOTE_STREAM_INDEX_HEADER));
-
-  // Backpressure: if inflight queue is full, drop the OLDEST chunk and
-  // record [… inaudible …] in its slot. Sustained overflow escalates.
-  if (state.inflightQueue.length >= NOTE_STREAM_BACKPRESSURE_CAP) {
-    const dropped = state.inflightQueue.shift();
-    state.pendingBuffer.set(dropped.idx, {
-      text: "[… inaudible …]",
-      completedAt: Date.now(),
-      inaudible: true,
-    });
-    state.consecutiveDrops += 1;
-    if (state.consecutiveDrops >= NOTE_STREAM_MAX_CONSECUTIVE_DROPS) {
-      endNoteStream(deviceId, "stt_overloaded").catch(() => {});
-      return;
-    }
-  }
-
-  const item = { idx, startedAt: Date.now() };
-  state.inflightQueue.push(item);
-
-  // Fire-and-forget STT. Each chunk is independent; failures → inaudible
-  // (not session end — one bad 10-s slice shouldn't kill a 2-hour meeting).
-  (async () => {
-    try {
-      const { createSttAdapter } = await loadStt();
-      const { adapter } = await createSttAdapter(state.sttProfile);
-      const wav = wrapPcmAsWav(pcm, NOTE_STREAM_SAMPLE_RATE);
-      const stt = await adapter.transcribe(wav, {
-        filename: "chunk.wav",
-        contentType: "audio/wav",
-      });
-      const text = (stt.text || "").trim();
-      state.pendingBuffer.set(idx, { text, completedAt: Date.now() });
-    } catch (err) {
-      console.warn(`[meta-glasses] note_stream STT idx=${idx}: ${err.message}`);
-      state.pendingBuffer.set(idx, {
-        text: "[… inaudible …]",
-        completedAt: Date.now(),
-        inaudible: true,
-      });
-    } finally {
-      state.inflightQueue = state.inflightQueue.filter(x => x.idx !== idx);
-      _drainInOrder(deviceId).catch(() => {});
-    }
-  })();
-}
-
-// Called from runVoiceTurn when a tool result contains the
-// { _note_stream_begin: {...} } sentinel. Opens state + timers + envelope.
-async function handleNoteStreamBegin(env, db) {
-  const { device_id, session_id, note_id, topic } = env || {};
-  if (!device_id || !session_id || !note_id) {
-    return "Cannot begin continuous recording — missing required fields.";
-  }
-  const sess = _sessions.get(device_id);
-  if (!sess?.ws) return "Cannot begin continuous recording — no paired glasses session.";
-
-  // Defensive: end any prior note_stream for this device silently.
-  if (_noteStreams.has(device_id)) {
-    await endNoteStream(device_id, "superseded", { silent: true }).catch(() => {});
-  }
-
-  let sttProfile;
-  try {
-    const { getDefaultSttProfile, getSttProfiles } = await loadStt();
-    sttProfile = sess.device?.stt_profile_id
-      ? (await getSttProfiles(db, { includeKeys: true })).find(p => p.id === sess.device.stt_profile_id)
-      : await getDefaultSttProfile(db, { includeKeys: true });
-  } catch (err) {
-    return `Cannot begin continuous recording — STT load failed: ${err.message}`;
-  }
-  if (!sttProfile) {
-    return "Cannot begin continuous recording — no STT profile configured.";
-  }
-
-  const state = {
-    sessionId: Number(session_id),
-    noteId: Number(note_id),
-    topic: topic || null,
-    sttProfile,
-    nextExpectedIdx: 0,
-    inflightQueue: [],
-    pendingBuffer: new Map(),
-    consecutiveDrops: 0,
-    startedAt: Date.now(),
-    lastChunkAt: 0,
-    wsRef: sess.ws,
-    draining: false,
-  };
-  state.sessionCapTimer = setTimeout(() => {
-    endNoteStream(device_id, "timeout").catch(() => {});
-  }, NOTE_STREAM_SESSION_CAP_MS);
-  state.noAudioWatchdog = setTimeout(() => {
-    const cur = _noteStreams.get(device_id);
-    if (cur && cur.lastChunkAt === 0) {
-      endNoteStream(device_id, "no_audio").catch(() => {});
-    }
-  }, NOTE_STREAM_NO_AUDIO_MS);
-  // Periodic drain tick catches gaps that arrive quietly (no new STT event
-  // to trigger _drainInOrder).
-  state.drainTicker = setInterval(() => {
-    _drainInOrder(device_id).catch(() => {});
-  }, NOTE_STREAM_DRAIN_TICK_MS);
-  _noteStreams.set(device_id, state);
-
-  // Mark WS inbound mode so the binary-frame router dispatches to the
-  // note-stream pipeline instead of the voice-turn buffer.
-  sess.inboundMode = "note_stream";
-
-  sendText(sess.ws, {
-    type: "note_stream_begin",
-    session_id: state.sessionId,
-    codec: NOTE_STREAM_CODEC,
-    sample_rate: NOTE_STREAM_SAMPLE_RATE,
-    channels: 1,
-    chunk_bytes: NOTE_STREAM_CHUNK_BYTES,
-    index_header_bytes: NOTE_STREAM_INDEX_HEADER,
-  });
-
-  return "Continuous recording started. I'll transcribe until you say 'stop recording' or the 2-hour cap is reached.";
-}
-
-// Tear down the note stream. Reasons: "user_stop", "timeout", "disconnect",
-// "no_audio", "stt_overloaded", "superseded", "sco_not_connected".
-async function endNoteStream(deviceId, reason, opts = {}) {
-  const state = _noteStreams.get(deviceId);
-  if (!state) return;
-  // Idempotency — prevent double-end from timer + WS close racing.
-  if (state.ending) return;
-  state.ending = true;
-
-  clearTimeout(state.sessionCapTimer);
-  clearTimeout(state.noAudioWatchdog);
-  clearInterval(state.drainTicker);
-  clearTimeout(state.disconnectGraceTimer);
-
-  // Give any in-flight STT a brief moment to complete (up to 5 s) so the
-  // final drain doesn't write [… inaudible …] for chunks that were about
-  // to come back.
-  const flushDeadline = Date.now() + 5_000;
-  while (state.inflightQueue.length > 0 && Date.now() < flushDeadline) {
-    await new Promise(r => setTimeout(r, 250));
-  }
-  // For anything still in flight, mark inaudible.
-  for (const item of state.inflightQueue) {
-    if (!state.pendingBuffer.has(item.idx)) {
-      state.pendingBuffer.set(item.idx, {
-        text: "[… inaudible …]",
-        completedAt: Date.now(),
-        inaudible: true,
-      });
-    }
-  }
-  state.inflightQueue = [];
-
-  // Final in-order drain: consume anything remaining, in order. We set the
-  // inaudible-completedAt to the past so _drainInOrder advances through gaps.
-  for (const [idx, entry] of state.pendingBuffer) {
-    if (idx > state.nextExpectedIdx) entry.completedAt = 0;
-  }
-  await _drainInOrder(deviceId).catch(() => {});
-
-  // Clear WS inbound mode + state map BEFORE DB/summary work so subsequent
-  // envelopes on the same WS get voice-turn semantics again.
-  const sess = _sessions.get(deviceId);
-  if (sess && sess.inboundMode === "note_stream") sess.inboundMode = "turn";
-  _noteStreams.delete(deviceId);
-
-  // Send note_stream_end envelope (unless suppressed by caller).
-  if (!opts.silent && sess?.ws) {
-    try {
-      sendText(sess.ws, {
-        type: "note_stream_end",
-        session_id: state.sessionId,
-        reason: reason || "user_stop",
-      });
-    } catch {}
-  }
-
-  // Finalize DB state + trigger summarization.
-  try {
-    const db = (await loadDb()).createDbClient();
-    try {
-      // Short-circuit if the session was already ended (e.g. MCP tool fired
-      // end_note_session before our teardown raced in).
-      const { rows } = await db.execute({
-        sql: `SELECT status, note_id, topic FROM glasses_note_sessions WHERE id = ?`,
-        args: [state.sessionId],
-      });
-      if (rows[0] && rows[0].status === "active") {
-        const { summarizeSession } = await import(pathToFileURL(join(serverDir, "server.js")).href);
-        const result = await summarizeSession({ noteId: state.noteId, topic: state.topic }, db);
-        const actionItemsJson = JSON.stringify(result.action_items || []);
-        if (result.parse_error && result.raw_full) {
-          await db.execute({
-            sql: `UPDATE glasses_note_sessions
-                     SET status = 'ended', ended_at = datetime('now'),
-                         summary = NULL, action_items_json = '[]', summary_raw = ?
-                   WHERE id = ?`,
-            args: [String(result.raw_full).slice(0, 50_000), state.sessionId],
-          });
-        } else {
-          await db.execute({
-            sql: `UPDATE glasses_note_sessions
-                     SET status = 'ended', ended_at = datetime('now'),
-                         summary = ?, action_items_json = ?
-                   WHERE id = ?`,
-            args: [result.summary, actionItemsJson, state.sessionId],
-          });
-          if (result.summary) {
-            await db.execute({
-              sql: `UPDATE research_notes
-                       SET content = ? || COALESCE(content, ''), updated_at = datetime('now')
-                     WHERE id = ?`,
-              args: [`## Summary\n${result.summary}\n\n`, state.noteId],
-            });
-          }
-        }
-      }
-    } finally { try { db.close(); } catch {} }
-  } catch (err) {
-    console.warn(`[meta-glasses] note_stream end summarization failed: ${err.message}`);
-  }
-
-  // User-audible escalation TTS for abnormal termination reasons.
-  const spokenReasons = {
-    stt_overloaded: "Recording stopped — transcription can't keep up with real-time speech.",
-    no_audio:       "Can't hear you — check the glasses mic.",
-    sco_not_connected: "Can't record — the glasses mic isn't connected.",
-    timeout:        "Recording stopped — 2-hour cap reached.",
-  };
-  if (spokenReasons[reason] && !opts.silent) {
-    pushTtsToDevice(deviceId, spokenReasons[reason]).catch(() => {});
-  }
-}
-
-/* ---------- TTS codec negotiation ----------
- *
- * The Android client opens an AudioTrack configured for raw 16-bit signed
- * PCM mono and writes whatever bytes arrive on the socket directly into it.
- * That means we must hand it raw PCM in matching sample rate. Each TTS
- * adapter takes a different `format` string for its provider; this helper
- * returns the right one (plus a header-stripping rule for piper which
- * always emits a 44-byte WAV header before the PCM body).
- *
- * Returns null when the adapter cannot produce raw PCM — in that case the
- * caller falls back to advertising the legacy mp3 codec, which the current
- * Android client will play as noise. (Edge / native MediaCodec decode is
- * the next iteration.)
- */
-function negotiatePcm(adapterName) {
-  switch (adapterName) {
-    case "openai-tts":
-      // OpenAI TTS pcm = signed 16-bit LE mono @ 24 kHz, no header.
-      return { synthFormat: "pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
-    case "kokoro":
-      // Kokoro mirrors OpenAI's response_format. Defaults to 24 kHz.
-      return { synthFormat: "pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
-    case "elevenlabs":
-      // ElevenLabs supports `pcm_24000` -> 24 kHz s16le mono raw.
-      return { synthFormat: "pcm_24000", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
-    case "azure":
-      // Azure: raw-24khz-16bit-mono-pcm == 24 kHz s16le mono raw.
-      return { synthFormat: "raw-24khz-16bit-mono-pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
-    case "piper":
-      // Piper emits a 44-byte RIFF/WAV header followed by 22.05 kHz s16le mono.
-      // Strip the header on the first chunk and advertise 22050 Hz.
-      return { synthFormat: undefined, codec: "pcm", sampleRate: 22050, stripHeaderBytes: 44 };
-    default:
-      // edge-tts and others: no raw PCM path. Caller emits mp3 + warning.
-      return null;
-  }
-}
-
-async function* pcmStream(adapter, text, voice, negotiation, extraOpts = {}) {
-  let bytesToStrip = negotiation.stripHeaderBytes || 0;
-  const opts = negotiation.synthFormat ? { ...extraOpts, format: negotiation.synthFormat } : extraOpts;
-  // Buffer the entire synthesis before yielding. Rationale: PCM has no codec
-  // compression, so OpenAI (and most TTS providers) stream bytes at roughly
-  // realtime playback speed — 48 kB/s for 24 kHz s16le mono. The phone's
-  // AudioTrack consumes at the same rate, so any network jitter drains the
-  // client-side buffer and causes underrun (audible as static/clicks).
-  // By buffering here first, we can then blast the PCM to the phone
-  // faster-than-realtime over the WebSocket, giving AudioTrack plenty of
-  // headroom. Cost: +latency equal to synthesis time before first audio.
-  const parts = [];
-  for await (const chunk of adapter.synthesize(text, voice, opts)) {
-    if (bytesToStrip > 0) {
-      if (chunk.length <= bytesToStrip) {
-        bytesToStrip -= chunk.length;
-        continue;
-      }
-      const trimmed = chunk.slice(bytesToStrip);
-      bytesToStrip = 0;
-      if (trimmed.length) parts.push(trimmed);
-    } else {
-      parts.push(chunk);
-    }
-  }
-  const full = Buffer.concat(parts.map(p => Buffer.isBuffer(p) ? p : Buffer.from(p)));
-  // Yield in ~64 KB frames so WebSocket backpressure can apply on slow links.
-  const FRAME = 64 * 1024;
-  for (let off = 0; off < full.length; off += FRAME) {
-    yield full.subarray(off, Math.min(off + FRAME, full.length));
-  }
-}
-
-/* ---------- Bound-bot resolution (Slice B) ---------- */
-
-// Cache parsed pi_bot_defs per bound_bot_id so the fast voice turn doesn't hit
-// the DB every turn. Short TTL — a Bot Builder save should take effect quickly.
-const _boundBotCache = new Map(); // botId → { def, at }
-const BOUND_BOT_TTL_MS = 30_000;
-
-/**
- * Load a bound bot's parsed definition from pi_bot_defs, or null. The returned
- * object is the def JSON with `bot_id` attached. Disabled bots resolve to null
- * (the device falls back to its ai_profile path). Cached with a short TTL.
- */
-async function loadBoundBotDef(db, botId) {
-  if (!botId) return null;
-  const cached = _boundBotCache.get(botId);
-  if (cached && (Date.now() - cached.at) < BOUND_BOT_TTL_MS) return cached.def;
-  let def = null;
-  try {
-    const res = await db.execute({
-      sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?",
-      args: [botId],
-    });
-    const row = res.rows[0];
-    if (row && row.enabled) {
-      try { def = JSON.parse(row.definition); } catch { def = null; }
-      if (def) def.bot_id = row.bot_id;
-    }
-  } catch (err) {
-    console.warn(`[meta-glasses] loadBoundBotDef failed for ${botId}: ${err.message}`);
-    def = null;
-  }
-  _boundBotCache.set(botId, { def, at: Date.now() });
-  return def;
-}
-
-/* ---------- Voice-turn pipeline ---------- */
-
-async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
-  const db = (await loadDb()).createDbClient();
-  let toolExecutor = null;
-  let remoteVoice = null;
-  try {
-    const { getDefaultSttProfile, createSttAdapter, getSttProfiles } = await loadStt();
-    const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
-    const { createAdapterFromProfile, getAiProfiles } = await loadProvider();
-    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS, effectiveToolName, isExternalSendTool, isConnectedAddonTool, botVoiceScope, buildRemoteVoiceContext } = await loadToolExec();
-    const { generateSystemPrompt } = await loadSystemPrompt();
-
-    // 1. STT
-    const sttProfile = device.stt_profile_id
-      ? (await getSttProfiles(db, { includeKeys: true })).find(p => p.id === device.stt_profile_id)
-      : await getDefaultSttProfile(db, { includeKeys: true });
-    if (!sttProfile) {
-      sendText(ws, { type: "error", code: "no_stt_profile", recoverable: false });
-      return;
-    }
-    const { adapter: sttAdapter } = await createSttAdapter(sttProfile);
-    const stt = await sttAdapter.transcribe(audioBuffer, {
-      filename: options.filename || "turn.opus",
-      contentType: options.contentType || "audio/ogg;codecs=opus",
-    });
-    const transcript = (stt.text || "").trim();
-    sendText(ws, { type: "transcript_final", text: transcript, language: stt.language });
-    if (!transcript) {
-      sendText(ws, { type: "error", code: "empty_transcript", recoverable: true });
-      return;
-    }
-
-    // Fast-path: simple media commands skip the LLM entirely (~800ms vs 5-8s)
-    const mediaFast = matchMediaFastPath(transcript, device.id);
-    if (mediaFast) {
-      if (mediaFast.action === "stop") {
-        clearAudioQueue(device.id);
-        sendMediaControl(device.id, "stop");
-        _devicePlaybackState.set(device.id, "idle");
-        _nowPlaying.delete(device.id);
-      } else if (mediaFast.action === "next") {
-        sendMediaControl(device.id, "stop");
-        const w = _streamDoneWaiters.get(device.id);
-        if (w) {
-          clearTimeout(w.timer);
-          _streamDoneWaiters.delete(device.id);
-          const absorb = setTimeout(() => _streamDoneWaiters.delete(device.id), 2000);
-          _streamDoneWaiters.set(device.id, {
-            resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
-            reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
-            timer: absorb,
-          });
-          w.resolve();
-        }
-      } else {
-        sendMediaControl(device.id, mediaFast.action);
-        _devicePlaybackState.set(device.id, mediaFast.action === "pause" ? "paused" : "playing");
-      }
-      emitGlassesMediaState(device.id);
-      // Speak brief confirmation via TTS
-      const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
-      const ttsProfile = device.tts_profile_id
-        ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === device.tts_profile_id)
-        : await getDefaultTtsProfile(db, { includeKeys: true });
-      if (ttsProfile) {
-        try {
-          const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
-          const ttsNeg = negotiatePcm(ttsAdapter.name);
-          if (ttsNeg) {
-            sendText(ws, { type: "tts_start", codec: ttsNeg.codec, sample_rate: ttsNeg.sampleRate });
-            for await (const chunk of pcmStream(ttsAdapter, mediaFast.say, ttsProfile.defaultVoice, ttsNeg)) {
-              sendBinary(ws, chunk);
-            }
-            sendText(ws, { type: "tts_end" });
-          }
-        } catch (err) {
-          console.warn(`[meta-glasses] fast-path TTS error: ${err.message}`);
-        }
-      }
-      // Save to conversation history so subsequent LLM turns have context
-      const priorMessages = getConvo(device.id);
-      saveConvo(device.id, [
-        ...priorMessages,
-        { role: "user", content: transcript },
-        { role: "assistant", content: mediaFast.say },
-      ]);
-      return;
-    }
-
-    // 2. BYOAI chat — a bound bot (device.bound_bot_id, Slice B) supersedes the
-    // device's ai_profile_slug: its persona+skills drive the prompt, its tool
-    // selection scopes the tools, its permission_policy is enforced, and its
-    // fast_voice_model drives THIS turn (never bot.models.default — that's the pi
-    // model). aiProfile is still resolved for the vision-capture fallback below.
-    const boundBot = await loadBoundBotDef(db, device.bound_bot_id);
-    const aiProfiles = await getAiProfiles(db, { includeKeys: true });
-    const slugOf = (n) => n.toLowerCase().replace(/\s+/g, "_").replace(/\./g, "_");
-    const aiProfile = device.ai_profile_slug
-      ? aiProfiles.find(p => slugOf(p.name) === device.ai_profile_slug)
-      : aiProfiles[0];
-    let chatAdapter, chatLabel;
-    if (boundBot && boundBot.fast_voice_model) {
-      // Resolve the "provider_id/model_id" key via a synthesized pointer profile
-      // (resolve-profile.js handles the bare ref — plan S5, lowest risk).
-      const fvm = String(boundBot.fast_voice_model);
-      const slash = fvm.indexOf("/");
-      const provider_id = slash >= 0 ? fvm.slice(0, slash) : fvm;
-      const model_id = slash >= 0 ? fvm.slice(slash + 1) : "";
-      try {
-        ({ adapter: chatAdapter } = await createAdapterFromProfile({ provider_id, model_id }, null, db));
-      } catch (err) {
-        sendText(ws, { type: "error", code: "fast_voice_model_unresolved", recoverable: false, message: err.message });
-        return;
-      }
-      chatLabel = `bot:${boundBot.bot_id}/${fvm}`;
-    } else {
-      // Unbound, or bound with no fast_voice_model: fall back to the device profile.
-      if (!aiProfile) {
-        sendText(ws, { type: "error", code: "no_ai_profile", recoverable: false });
-        return;
-      }
-      ({ adapter: chatAdapter } = await createAdapterFromProfile(aiProfile, aiProfile.defaultModel, db));
-      chatLabel = boundBot ? `bot:${boundBot.bot_id}/profile:${aiProfile.name}` : `${aiProfile.name}/${aiProfile.defaultModel}`;
-    }
-
-    // 3. TTS
-    const ttsProfile = device.tts_profile_id
-      ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === device.tts_profile_id)
-      : await getDefaultTtsProfile(db, { includeKeys: true });
-    if (!ttsProfile) {
-      sendText(ws, { type: "error", code: "no_tts_profile", recoverable: false });
-      return;
-    }
-    const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
-
-    const ttsNeg = negotiatePcm(ttsAdapter.name);
-    if (ttsNeg) {
-      sendText(ws, { type: "tts_start", codec: ttsNeg.codec, sample_rate: ttsNeg.sampleRate });
-    } else {
-      console.warn(`[meta-glasses] TTS adapter '${ttsAdapter.name}' has no PCM path; sending mp3 (will not play correctly on current Android client).`);
-      sendText(ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
-    }
-
-    let textBuffer = "";
-    const SENTENCE_END = /[.!?…。]["')\]]?\s|[\n]/;
-
-    async function flushTts(text) {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      try {
-        const stream = ttsNeg
-          ? pcmStream(ttsAdapter, trimmed, ttsProfile.defaultVoice, ttsNeg)
-          : ttsAdapter.synthesize(trimmed, ttsProfile.defaultVoice, {});
-        for await (const chunk of stream) {
-          sendBinary(ws, chunk);
-        }
-      } catch (err) {
-        sendText(ws, { type: "error", code: "tts_error", recoverable: true, message: err.message });
-      }
-    }
-
-    // Cross-instance voice tools — null unless this bound bot opted into
-    // remote_mcp AND feature_flags.remote_invocation. A down peer / discovery
-    // error degrades to local (returns null, never throws), so the turn works.
-    try {
-      remoteVoice = await buildRemoteVoiceContext(db, boundBot);
-    } catch (err) {
-      console.warn(`[meta-glasses] remote voice tools unavailable: ${err.message}`);
-    }
-    toolExecutor = createToolExecutor({ botDef: boundBot, remote: remoteVoice });
-    const tools = getChatTools({ botDef: boundBot, remoteTools: remoteVoice?.advertised });
-    if (remoteVoice) console.log(`[meta-glasses] remote voice tools: ${remoteVoice.advertised.map(t => t.name).join(", ")}`);
-    const systemPrompt = await generateSystemPrompt({ deviceId: device.id, botDef: boundBot });
-    console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${chatLabel} bound=${boundBot ? boundBot.bot_id : "none"} tools=${tools.length}`);
-
-    const priorMessages = getConvo(device.id);
-    const messages = [
-      { role: "system", content: systemPrompt + `
-
-The user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will.
-
-If a tool returns content explicitly meant to be read aloud (a news briefing, an article, a podcast description, a recall result), recite it in full instead of summarizing — the user is listening, not reading. If a tool result is wrapped in <audio_friendly>…</audio_friendly> tags, read exactly what is between the tags, verbatim, without trimming or paraphrasing.
-
-CAPABILITIES. To play MUSIC or SONGS the user owns: FIRST call fw_search to find a song (or fw_list_library to browse), THEN call fw_play with that track's id, or fw_play_album for a whole album. Control playback with fw_pause, fw_resume, fw_next_track, fw_stop_playback. The crow_media tools are ONLY for NEWS and PODCASTS — never use them to play music or songs. You can also look up things (crow_search_memories / crow_recall / crow_search_notes / crow_deep_recall), set reminders (crow_create_notification), control smart home, draft blog posts (crow_create_post), and take photos (crow_glasses_capture_photo). Use the tools — don't just say you will.
-
-DESTRUCTIVE TOOLS. For any tool that deletes, removes, unpublishes, or dismisses (e.g. crow_delete_memory, crow_unpublish_post, crow_dismiss_all_notifications), the server will return "Confirmation required" the first time you call it. When that happens, speak the exact confirmation question the server provided and then END YOUR TURN — do not call another tool. The user's next spoken answer will be inspected server-side; if they say yes, retry the SAME tool with the SAME arguments on the next turn and it will execute. If they say no or change topic, drop the action.` },
-      ...priorMessages,
-      { role: "user", content: transcript },
-    ];
-
-    async function drainBuffer(force) {
-      while (true) {
-        const match = SENTENCE_END.exec(textBuffer);
-        if (!match) break;
-        const end = match.index + match[0].length;
-        const sentence = textBuffer.slice(0, end);
-        textBuffer = textBuffer.slice(end);
-        await flushTts(sentence);
-      }
-      if (force && textBuffer.trim()) { await flushTts(textBuffer); textBuffer = ""; }
-    }
-
-    let rounds = 0;
-    // Adaptive maxTokens: bumped to 4000 for the round after a long tool
-    // result (>~500 chars) so multi-sentence recitations (news briefings,
-    // articles) aren't silently truncated. Resets to 600 otherwise.
-    let nextMaxTokens = 600;
-    while (rounds < MAX_TOOL_ROUNDS) {
-      rounds++;
-      let assistantContent = "";
-      const toolCalls = [];
-      const roundMaxTokens = nextMaxTokens;
-      nextMaxTokens = 600;
-      // TTS think-gate (per round): reasoning models (qwen3 etc.) emit a
-      // <think>…</think> block before the answer. Keep it in the model output
-      // and the llm_delta stream (thinking is preserved/visible), but NEVER
-      // speak it — only feed post-</think> text into the TTS buffer.
-      let ttsSpeakOpen = false;
-      let ttsPre = "";
-      // enable_thinking:false suppresses qwen3's reasoning preamble on the
-      // voice route — it's freeform inline text (no <think> tags) so it can't
-      // be cleanly stripped from speech; a voice reply should be answer-only
-      // and low-latency anyway. (The <think>-gate above still backstops any
-      // model that DOES use tags.) Ignored by adapters that don't read it.
-      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMaxTokens, chatTemplateKwargs: { enable_thinking: false } })) {
-        if (event.type === "content_delta" && event.text) {
-          sendText(ws, { type: "llm_delta", text: event.text });
-          assistantContent += event.text;
-          // Strip the leading <think>…</think> block from the spoken path only.
-          let speak = event.text;
-          if (!ttsSpeakOpen) {
-            ttsPre += event.text;
-            const lead = ttsPre.replace(/^\s+/, "");
-            if (lead.startsWith("<think>")) {
-              const close = ttsPre.indexOf("</think>");
-              if (close < 0) { speak = ""; }                       // still inside <think>
-              else { speak = ttsPre.slice(close + 8); ttsPre = ""; ttsSpeakOpen = true; }
-            } else if (lead.length < 7 && "<think>".startsWith(lead)) {
-              speak = "";                                           // partial — could still be "<think>"
-            } else {
-              speak = ttsPre; ttsPre = ""; ttsSpeakOpen = true;     // not a think block
-            }
-          }
-          if (speak) { textBuffer += speak; await drainBuffer(false); }
-        } else if (event.type === "tool_call") {
-          toolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
-        } else if (event.type === "done") {
-          break;
-        }
-      }
-      console.log(`[meta-glasses] round ${rounds}: content_len=${assistantContent.length} tool_calls=${toolCalls.length}${toolCalls.length ? " (" + toolCalls.map(t => t.name + "/" + (t.arguments?.action || "?")).join(",") + ")" : ""}`);
-      if (assistantContent || toolCalls.length > 0) {
-        const m = { role: "assistant", content: assistantContent || "" };
-        if (toolCalls.length > 0) {
-          // The OpenAI-compatible adapter expects tool_calls as a JSON string
-          // (it calls JSON.parse on it). Anthropic adapter accepts either.
-          m.tool_calls = JSON.stringify(toolCalls.map(tc => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
-        }
-        messages.push(m);
-      }
-      if (toolCalls.length === 0) break;
-
-      // Intercept crow_glasses_capture_photo so it actually captures via the
-      // connected /session WebSocket instead of hitting the stdio MCP stub.
-      // LLMs call it two ways: direct tool name, or via the crow_tools
-      // addon-proxy wrapper with action="crow_glasses_capture_photo".
-      const isCaptureTool = (tc) =>
-        tc.name === "crow_glasses_capture_photo" ||
-        (tc.name === "crow_tools" && tc.arguments?.action === "crow_glasses_capture_photo");
-      // Policy-aware dispatch gate (Slice B B3, decision 5). UNWRAPS the call to
-      // its EFFECTIVE tool first (effectiveToolName: crow_tools / category proxy
-      // -> real tool) so policy can't be bypassed by hiding an action behind a
-      // proxy, then enforces, in order:
-      //   (1) a bound bot's external_send:draft_only -> BLOCK true sends/publishes
-      //       on the voice turn (Q2: publish stays a draft; sends are refused).
-      //   (2) a bound bot's permission_policy.deny -> BLOCK.
-      //   (3) destructive (by EFFECTIVE name) OR the bot's permission_policy.confirm
-      //       -> two-turn spoken confirmation (the existing UX): first call stores
-      //       pending + returns the gate message; the LLM speaks it and ends the
-      //       turn; on the next turn the SAME effective tool+args plus an
-      //       affirmative transcript within 60s executes. Anything else clears it.
-      // Unbound (boundBot null): policy is empty, so this reduces to the prior
-      // destructive-confirm behavior — now also catching proxy-wrapped destructive
-      // calls that the old name-only gate let through.
-      const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
-      const policy = (boundBot && boundBot.permission_policy) || {};
-      const voiceScope = botVoiceScope(boundBot); // null when unbound
-      const policyGate = (tc) => {
-        const eff = effectiveToolName(tc);
-        // Addon allowlist: a bound bot may only run addon tools it selected, even
-        // if force-called via the crow_tools proxy (closes the gap that scoping
-        // the advertised set alone leaves open). Core-category actions, capture,
-        // discover, and orchestrate are not connected-addon tools, so unaffected.
-        if (voiceScope && isConnectedAddonTool(eff) && !voiceScope.selectedToolNames.has(eff)) {
-          return { decision: "block", say: `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.` };
-        }
-        if (policy.external_send === "draft_only" && isExternalSendTool(eff)) {
-          const say = eff === "crow_publish_post"
-            ? `This assistant is draft-only by voice. Tell the user the post was saved as a draft and can be published from the dashboard. Then end your turn — do not call another tool.`
-            : `This assistant is draft-only by voice and cannot send "${shortName(eff)}" externally. Tell the user it was not sent and they can do it from the dashboard. Then end your turn — do not call another tool.`;
-          return { decision: "block", say };
-        }
-        if (Array.isArray(policy.deny) && policy.deny.includes(eff)) {
-          return { decision: "block", say: `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.` };
-        }
-        const needsConfirm = isDestructiveTool(eff) || (Array.isArray(policy.confirm) && policy.confirm.includes(eff));
-        if (!needsConfirm) return { decision: "allow" };
-        const pending = _pendingConfirms.get(device.id);
-        const hash = canonicalArgsHash(tc.arguments);
-        const transcriptOk = AFFIRMATIVE_STARTS.test(transcript || "");
-        const transcriptNo = NEGATIVE_STARTS.test(transcript || "");
-        if (pending
-            && pending.toolName === eff
-            && pending.argsHash === hash
-            && (Date.now() - pending.at) < CONFIRM_TTL_MS
-            && transcriptOk
-            && !transcriptNo) {
-          _pendingConfirms.delete(device.id);
-          return { decision: "allow" };
-        }
-        _pendingConfirms.set(device.id, { toolName: eff, argsHash: hash, at: Date.now() });
-        return { decision: "confirm", say: `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: eff, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.` };
-      };
-      const localResults = [];
-      const remoteCalls = [];
-      for (const tc of toolCalls) {
-        const gate = policyGate(tc);
-        if (gate.decision === "block" || gate.decision === "confirm") {
-          localResults.push({ id: tc.id, name: tc.name, result: gate.say, isError: false });
-          continue;
-        }
-        if (isCaptureTool(tc)) {
-          const sess = _sessions.get(device.id);
-          if (!sess) {
-            localResults.push({ id: tc.id, name: tc.name, result: "No connected glasses session to capture from.", isError: true });
-            continue;
-          }
-          try {
-            // Resolve effective vision profile: device override → AI profile default → none.
-            const visionConfig = await resolveVisionProfileConfig(db, device, aiProfile);
-            if (visionConfig) {
-              // Filler TTS to bridge cold-start (Qwen3-VL is ~25-30s cold).
-              try { await flushTts("Let me look at that."); } catch {}
-            }
-            const r = await triggerCapture(sess);
-            let description = null;
-            if (visionConfig) {
-              try {
-                const { readFileSync } = await import("node:fs");
-                const basename = decodeURIComponent(r.url.split("/").pop() || "");
-                const diskPath = join(_photoDir, basename);
-                const imageBytes = readFileSync(diskPath);
-                const mime = basename.endsWith(".png") ? "image/png" : "image/jpeg";
-                const { analyzeImage } = await loadVision();
-                const result = await analyzeImage({
-                  providerConfig: visionConfig,
-                  prompt: "Describe what you see in this image. Be concise (1-3 sentences). This will be spoken to the user via TTS.",
-                  imageBytes,
-                  mime,
-                  timeoutMs: 30_000,
-                  maxTokens: 300,
-                });
-                description = result.description;
-              } catch (visionErr) {
-                console.warn(`[meta-glasses] vision analysis failed: ${visionErr.message}`);
-              }
-            }
-            const msg = description
-              ? `Photo captured. URL: ${r.url}. Vision analysis: ${description}. Use the description to answer the user.`
-              : `Photo captured. URL: ${r.url} (${r.size} bytes). Tell the user the photo was saved — do not hallucinate its contents.`;
-            localResults.push({ id: tc.id, name: tc.name, result: msg, isError: false });
-          } catch (err) {
-            localResults.push({ id: tc.id, name: tc.name, result: `Photo capture failed: ${err.message}`, isError: true });
-          }
-        } else {
-          remoteCalls.push(tc);
-        }
-      }
-      const remoteResults = remoteCalls.length ? await toolExecutor.executeToolCalls(remoteCalls) : [];
-      const results = [...localResults, ...remoteResults];
-      // Only one _audio_stream envelope per turn may actually dispatch to the
-      // device — a prior bug allowed two concurrent pushAudioStream invocations
-      // (LLM calling fw_play twice in one turn) to interleave their MP3 bytes
-      // over the single WebSocket, corrupting Android's temp file and producing
-      // static. Collect envelopes during the loop and dispatch only the last.
-      let latestAudioStream = null;
-      for (const r of results) {
-        // Intercept `_audio_stream` envelopes: trigger pushAudioStream to the
-        // paired device and replace the LLM-visible result with a short prose
-        // line so the LLM doesn't parrot the URL or auth sentinel back at the
-        // user. Anything without a JSON envelope passes through unchanged.
-        let piped = r.result;
-        if (typeof piped === "string" && piped.includes('"_audio_stream_control"')) {
-          try {
-            const parsed = JSON.parse(piped);
-            const ctl = parsed?._audio_stream_control;
-            if (ctl?.action === "stop") {
-              clearAudioQueue(device.id);
-              sendMediaControl(device.id, "stop");
-              _devicePlaybackState.set(device.id, "idle");
-              _nowPlaying.delete(device.id);
-              emitGlassesMediaState(device.id);
-              piped = parsed.prose || "Stopped.";
-            } else if (ctl?.action === "pause") {
-              sendMediaControl(device.id, "pause");
-              _devicePlaybackState.set(device.id, "paused");
-              emitGlassesMediaState(device.id);
-              piped = parsed.prose || "Paused.";
-            } else if (ctl?.action === "resume") {
-              sendMediaControl(device.id, "resume");
-              _devicePlaybackState.set(device.id, "playing");
-              emitGlassesMediaState(device.id);
-              piped = parsed.prose || "Resuming.";
-            } else if (ctl?.action === "next") {
-              // Send stop first, then resolve the chain waiter to advance.
-              sendMediaControl(device.id, "stop");
-              const w = _streamDoneWaiters.get(device.id);
-              if (w) {
-                clearTimeout(w.timer);
-                _streamDoneWaiters.delete(device.id);
-                // Absorb stale audio_stream_done from the killed track
-                const absorb = setTimeout(() => _streamDoneWaiters.delete(device.id), 2000);
-                _streamDoneWaiters.set(device.id, {
-                  resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
-                  reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
-                  timer: absorb,
-                });
-                w.resolve();
-              }
-              piped = parsed.prose || "Next track.";
-            }
-          } catch { /* leave untouched */ }
-        }
-        if (typeof piped === "string" && piped.includes('"_audio_stream"')) {
-          try {
-            const parsed = JSON.parse(piped);
-            const env = parsed?._audio_stream;
-            if (env && env.url && env.codec) {
-              // Capture the envelope for deferred dispatch after the loop.
-              // Do NOT fire pushAudioStream here: if the LLM emitted multiple
-              // _audio_stream tool results in this turn, firing each would
-              // race on the single WebSocket (see latestAudioStream comment
-              // above the loop). Earlier envelopes are logged as dropped.
-              if (latestAudioStream) {
-                console.warn(
-                  `[meta-glasses] dropping earlier _audio_stream envelope for ${device.id} ` +
-                  `(url=${latestAudioStream.env.url}) — superseded by later tool result in same turn`,
-                );
-              }
-              latestAudioStream = { env, parsed };
-              piped = parsed.prose || `Started playback (${env.codec}).`;
-            }
-          } catch {
-            // Not a JSON envelope — leave untouched.
-          }
-        }
-        // Phase 6 C.2: capture-and-attach-photo sentinel. The MCP tool
-        // returns { _capture_and_attach: { device_id, session_id?, caption? } };
-        // the panel actually does the work (triggerCapture + note append +
-        // caption backfill row). This keeps the MCP process clean of
-        // WebSocket/session access while still letting the LLM call a
-        // single tool to chain capture + attach.
-        if (typeof piped === "string" && piped.includes('"_capture_and_attach"')) {
-          try {
-            const parsed = JSON.parse(piped);
-            const env = parsed?._capture_and_attach;
-            if (env && env.device_id === device.id) {
-              piped = await handleCaptureAndAttach(env, db);
-            }
-          } catch (err) {
-            piped = `Capture-and-attach failed: ${err.message}`;
-          }
-        }
-        // Phase 6 C.3: note-stream-begin sentinel. crow_glasses_confirm_continuous_recording
-        // returns { _note_stream_begin: { device_id, session_id, note_id, topic }, prose }
-        // — we open server-side state + timers and send the WS envelope.
-        // The `prose` field is what the LLM speaks back; collapse piped to that.
-        if (typeof piped === "string" && piped.includes('"_note_stream_begin"')) {
-          try {
-            const parsed = JSON.parse(piped);
-            const env = parsed?._note_stream_begin;
-            if (env && env.device_id === device.id) {
-              const result = await handleNoteStreamBegin(env, db);
-              piped = parsed.prose || result;
-            }
-          } catch (err) {
-            piped = `Continuous recording start failed: ${err.message}`;
-          }
-        }
-        // Phase 6 C.3: note-stream-end sentinel. crow_glasses_end_note_session
-        // emits this when mode=continuous. Fire-and-forget teardown — the DB
-        // is already updated by the MCP tool; endNoteStream skips re-summary
-        // when status != 'active' and just clears server state + timers +
-        // sends the note_stream_end envelope to the phone.
-        if (typeof piped === "string" && piped.includes('"_note_stream_end"')) {
-          try {
-            const parsed = JSON.parse(piped);
-            const env = parsed?._note_stream_end;
-            if (env && env.device_id === device.id) {
-              endNoteStream(device.id, env.reason || "user_stop").catch(() => {});
-            }
-          } catch {
-            // Malformed sentinel — log-and-swallow; the MCP tool already
-            // succeeded, so don't rewrite piped.
-          }
-        }
-        messages.push({ role: "tool", content: piped, tool_call_id: r.id, tool_name: r.name });
-        if (typeof piped === "string" && piped.length > 500) nextMaxTokens = 4000;
-      }
-      if (latestAudioStream) {
-        const { env, parsed } = latestAudioStream;
-        setAudioQueue(device.id, Array.isArray(env.queue) ? env.queue : []);
-        _devicePlaybackState.set(device.id, "playing");
-        _nowPlaying.set(device.id, {
-          title: parsed.title || null,
-          artist: parsed.artist || null,
-          artworkUrl: parsed.artwork_url || null,
-          queueLength: (Array.isArray(env.queue) ? env.queue.length : 0) + 1,
-        });
-        emitGlassesMediaState(device.id);
-        pushAudioStream(device.id, {
-          url: env.url,
-          codec: env.codec,
-          sampleRate: env.sample_rate,
-          channels: env.channels,
-          auth: env.auth,
-          title: parsed.title || null,
-          artist: parsed.artist || null,
-          artworkUrl: parsed.artwork_url || null,
-        }).then(outcome => {
-          if (!outcome?.delivered) {
-            _devicePlaybackState.set(device.id, "idle");
-            _nowPlaying.delete(device.id);
-            emitGlassesMediaState(device.id);
-          }
-        }).catch(() => {
-          _devicePlaybackState.set(device.id, "idle");
-          _nowPlaying.delete(device.id);
-          emitGlassesMediaState(device.id);
-        });
-      }
-    }
-    await drainBuffer(true);
-    sendText(ws, { type: "tts_end" });
-    saveConvo(device.id, messages);
-  } catch (err) {
-    sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
-  } finally {
-    if (toolExecutor) { try { await toolExecutor.close(); } catch {} }
-    if (remoteVoice) { try { await remoteVoice.close(); } catch {} }
-    try { db.close(); } catch {}
-  }
-}
-
 /* ---------- Phase 6 C.2 helpers: capture-and-attach + caption backfill + remint ---------- */
-
-async function handleCaptureAndAttach({ device_id, session_id, caption }, db) {
-  const sess = _sessions.get(device_id);
-  if (!sess) return "No connected glasses session to capture from.";
-  // Resolve the active session. The MCP tool allows caller to pass
-  // session_id explicitly; otherwise pick the most-recent active one
-  // for this device.
-  let sid = session_id || null;
-  let noteId = null;
-  try {
-    if (sid) {
-      const { rows } = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ? AND status = 'active'`, args: [sid] });
-      noteId = rows[0]?.note_id ?? null;
-      if (!noteId) return "Session not found or not active.";
-    } else {
-      const { rows } = await db.execute({
-        sql: `SELECT id, note_id FROM glasses_note_sessions
-              WHERE device_id = ? AND status = 'active'
-              ORDER BY started_at DESC LIMIT 1`,
-        args: [device_id],
-      });
-      if (!rows[0]) return "No active note session for this device — start one first with crow_glasses_start_note_session.";
-      sid = rows[0].id;
-      noteId = rows[0].note_id;
-    }
-  } catch (err) {
-    return `Capture-and-attach failed (session lookup): ${err.message}`;
-  }
-
-  // Trigger capture. triggerCapture resolves with `{ ok, url, size,
-  // photo_id, minio_key }` when the phone's upload completes (the route
-  // handler now awaits recordGlassesPhoto before resolving the pending).
-  let captureResult;
-  try {
-    captureResult = await triggerCapture(sess);
-  } catch (err) {
-    return `Capture failed: ${err.message}`;
-  }
-  const photoId = captureResult?.photo_id;
-  if (!photoId) return "Capture succeeded but no photo id was returned — attach skipped.";
-
-  // Append markdown ref using the photo:// sentinel scheme. The Notes
-  // tab's renderer re-mints presigned URLs at render time, so the 1 h
-  // TTL never bites a reader.
-  const captionText = caption || "[caption pending]";
-  const stamp = new Date().toTimeString().slice(0, 5);
-  const line = `\n![${captionText.replace(/[\]\[]/g, "")}](photo://${photoId}) *${stamp}*\n`;
-  try {
-    await db.execute({
-      sql: `UPDATE research_notes SET content = COALESCE(content, '') || ?, updated_at = datetime('now') WHERE id = ?`,
-      args: [line, noteId],
-    });
-  } catch (err) {
-    return `Captured but note update failed: ${err.message}`;
-  }
-
-  // If caller didn't supply a caption, enqueue a backfill row. The
-  // scheduler's runCaptionBackfill tick will replace the placeholder
-  // with the auto-caption once recordGlassesPhoto's enrichment
-  // pipeline has written glasses_photos.caption.
-  if (!caption) {
-    try {
-      await db.execute({
-        sql: `INSERT OR IGNORE INTO glasses_caption_backfill (note_id, photo_id)
-              VALUES (?, ?)`,
-        args: [noteId, photoId],
-      });
-    } catch {}
-  }
-
-  return `Photo ${photoId} attached to note ${noteId} with caption "${captionText}".`;
-}
 
 export async function runCaptionBackfill(db) {
   const MAX_ATTEMPTS = 5;
@@ -1507,18 +416,153 @@ export async function remintPhotoRefs(db, content) {
   return String(content).replace(/photo:\/\/(\d+)\b/g, (_, idStr) => resolved.get(Number(idStr)) || PLACEHOLDER);
 }
 
+/* ---------- The voice turn: the shared runner, driven by the glasses session adapter ---------- */
+
+const TURN_CAP_MS = 90_000;                 // a turn is aborted here whatever it is doing
+const TURN_LOCK_WAIT_MS = 8_000;            // how long a new turn waits for a library relay to finish sending
+const _turnAborts = new Map();              // deviceId → AbortController of the turn in flight
+const _voiceDeps = await defaultVoiceDeps();
+const _voice = createVoiceTurnRunner(_voiceDeps);
+
+/** Describe a just-captured photo with the device's (or the default) vision profile. → text | null when no profile resolves. */
+async function describePhoto({ db, device, shot, question }) {
+  const visionConfig = await resolveVisionProfileConfig(db, device, null);
+  if (!visionConfig) return null;
+  const { readFileSync } = await import("node:fs");
+  const basename = decodeURIComponent(String(shot?.url || "").split("/").pop() || "").replace(/[^\w.\-]/g, "");
+  if (!basename) return null;
+  const imageBytes = readFileSync(join(_photoDir, basename));
+  const mime = basename.endsWith(".png") ? "image/png" : basename.endsWith(".heic") ? "image/heic" : "image/jpeg";
+  const { analyzeImage } = await loadVision();
+  const { description } = await analyzeImage({
+    providerConfig: visionConfig,
+    prompt: `Answer in one to three short sentences that will be read aloud. The user asks: ${question}`,
+    imageBytes, mime, timeoutMs: 30_000, maxTokens: 300,
+  });
+  // The turn's answer is the library caption: the photo is never sent to the vision model twice.
+  if (description && shot?.photo_id) {
+    try { await db.execute({ sql: "UPDATE glasses_photos SET caption = ? WHERE id = ?", args: [String(description).slice(0, 1000), shot.photo_id] }); }
+    catch (err) { console.warn(`[meta-glasses] caption write failed for photo ${shot.photo_id}: ${err.message}`); }
+  }
+  return description || null;
+}
+
+/** Start relaying a library stream (and its queue) that a music tool's envelope asked for. */
+function startEnvelopePlayback(deviceId, e) {
+  setAudioQueue(deviceId, e.queue);
+  _devicePlaybackState.set(deviceId, "playing");
+  _nowPlaying.set(deviceId, { title: e.item.title, artist: e.item.artist, artworkUrl: e.item.artworkUrl, queueLength: e.queue.length + 1 });
+  emitGlassesMediaState(deviceId);
+  const idle = () => { _devicePlaybackState.set(deviceId, "idle"); _nowPlaying.delete(deviceId); emitGlassesMediaState(deviceId); };
+  pushAudioStream(deviceId, {
+    url: e.item.url, codec: e.item.codec, sampleRate: e.item.sample_rate, channels: e.item.channels, auth: e.item.auth,
+    title: e.item.title, artist: e.item.artist, artworkUrl: e.item.artworkUrl,
+  }).then((outcome) => { if (!outcome?.delivered) idle(); }).catch(idle);
+}
+
+const glassesTurns = createGlassesTurns({
+  voice: _voice,
+  openDb: () => openAppDb(),
+  findDevice: async (db, id) => (await loadDeviceStore()).findDevice(db, id),
+  listTtsProfiles: async (db) => (await loadTts()).getTtsProfiles(db, { includeKeys: false }),
+  botToolNames: async (db, device) => {
+    let def = null;
+    try { const row = await _voiceDeps.loadBotRow(db, device.bound_bot_id); def = row && row.enabled ? JSON.parse(row.definition) : null; } catch { def = null; }
+    return def ? _voiceDeps.getChatTools({ botDef: def }).map((t) => t.name) : [];
+  },
+  capture: (deviceId) => {
+    const sess = _sessions.get(deviceId);
+    return sess ? triggerCapture(sess) : Promise.reject(new Error("no connected session"));
+  },
+  describePhoto,
+  readEnvelope,
+  playback: { state: (id) => _devicePlaybackState.get(id) || "idle", control: applyMediaControl, start: startEnvelopePlayback },
+  timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+});
+
+/** A turn never runs beside another turn or a library relay on the same socket: wait briefly for the lock, never re-enter it. */
+async function waitForTurnLock(deviceId, ws, ms) {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (!_turnLocks.has(deviceId) && acquireTurnLock(deviceId, ws)) return true;
+    if (Date.now() >= end || ws.readyState !== 1) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/** One spoken turn for a connected device, from the end of speech to the last byte of its reply. */
+async function runSessionTurn(ws, deviceId, audio) {
+  const startedAt = Date.now();
+  if (!(await waitForTurnLock(deviceId, ws, TURN_LOCK_WAIT_MS))) {
+    sendText(ws, { type: "error", code: "turn_busy", recoverable: true });
+    return;
+  }
+  const ac = new AbortController();
+  _turnAborts.set(deviceId, ac);
+  const cap = setTimeout(() => ac.abort(), TURN_CAP_MS);
+  let entry = null;
+  try {
+    entry = await glassesTurns.runTurn({
+      deviceId, audio, startedAt, signal: ac.signal,
+      send: { text: (o) => sendText(ws, o), binary: (b) => sendBinary(ws, b) },
+    });
+  } finally {
+    clearTimeout(cap);
+    if (_turnAborts.get(deviceId) === ac) _turnAborts.delete(deviceId);
+    releaseTurnLock(deviceId, ws);
+  }
+  // Library audio starts only after the turn's speech went out and its lock is free.
+  if (entry?.playback && ws.readyState === 1) startEnvelopePlayback(deviceId, entry.playback);
+}
+
+/** Would the bound assistant's voice prompt fit its quick model? Cached for a minute per device and assistant. */
+const _fitCache = new Map();
+async function botFit(db, d) {
+  if (!d.bound_bot_id) return null;
+  const key = `${d.id}|${d.bound_bot_id}`;
+  const hit = _fitCache.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.fit;
+  let fit = null;
+  try {
+    const r = await _voice.assessBot({ db, botId: d.bound_bot_id, memoryOn: d.voice_settings?.memory !== false, denyTools: GLASSES_DENY_TOOLS, promptSuffix: stringsFor(d.voice_settings?.lang).prompt_suffix });
+    fit = r ? { level: r.level, model: r.model } : { level: "no_bot", model: null };
+  } catch { fit = null; }
+  _fitCache.set(key, { at: Date.now(), fit });
+  return fit;
+}
+
+/** No browser signal says this request came from another site (see the /pair rule). */
+function pairLooksSameOrigin(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site && site !== "same-origin" && site !== "none") return false;
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  // Host only (a forwarded-host header is caller-supplied). A mismatch falls back to the CSRF check.
+  try { return new URL(origin).host === String(req.headers.host || ""); } catch { return false; }
+}
+
 /* ---------- Express router ---------- */
 
 export default function metaGlassesRouter(dashboardAuth) {
   const router = Router();
-  // The Android app uploads captured photos via POST /api/meta-glasses/photo
-  // with an `Authorization: Bearer <device-token>` header and no session
-  // cookie. The route handler verifies the bearer token itself, so skip
-  // dashboardAuth for that one endpoint; without this skip the request hits
-  // the login page before it can reach the handler.
+  // Two kinds of caller. Device-token routes (the phone app) authenticate themselves in
+  // deviceTokenAuth. Everything else needs the dashboard session, and every state-changing
+  // call also needs the CSRF token the dashboard's own fetch wrapper adds.
+  const DEVICE_TOKEN_ROUTES = new Set(["POST /photo", "GET /artwork"]);
   router.use("/api/meta-glasses", (req, res, next) => {
-    if (req.method === "POST" && req.path === "/photo") return next();
-    return dashboardAuth(req, res, next);
+    if (DEVICE_TOKEN_ROUTES.has(`${req.method} ${req.path}`)) return next();
+    return dashboardAuth(req, res, () => {
+      // Pairing is called by the phone app's native code with the dashboard's cookie and no CSRF
+      // header (and no Origin). Without the CSRF token it is accepted only as a JSON body that no
+      // browser marked cross-site: Sec-Fetch-Site absent or same-origin, and an Origin, when
+      // present, equal to this host. That holds even if CORS_ALLOWED_ORIGINS is configured.
+      if (req.method === "POST" && req.path === "/pair") {
+        if (!req.is("application/json")) return res.status(415).json({ ok: false, error: "json_required" });
+        if (pairLooksSameOrigin(req)) return next();
+        return csrfMiddleware(req, res, next);
+      }
+      return csrfMiddleware(req, res, next);
+    });
   });
 
   router.get("/api/meta-glasses/devices", async (req, res) => {
@@ -1527,8 +571,27 @@ export default function metaGlassesRouter(dashboardAuth) {
     const db = createDbClient();
     try {
       const devices = await listDevices(db);
-      const annotated = devices.map(d => ({ ...d, connected: _sessions.has(d.id) }));
-      res.json({ devices: annotated, connected_count: annotated.filter(d => d.connected).length });
+      let ttsProfiles = [];
+      try { ttsProfiles = await (await loadTts()).getTtsProfiles(db, { includeKeys: false }); } catch { ttsProfiles = []; }
+      // Only glasses records: the registry is shared with kiosk displays and companions.
+      // fit = the bound assistant against its quick voice model; voice = whether any profile gives
+      // the raw PCM the app plays; recent_turns = outcome codes and timings only.
+      const annotated = [];
+      for (const d of devices.filter(isGlassesRecord)) {
+        annotated.push({
+          ...d, connected: _sessions.has(d.id), fit: await botFit(db, d),
+          voice: playableTtsProfile(d, ttsProfiles) === false ? "none" : "ok",
+          recent_turns: glassesTurns.recentTurns(d.id),
+        });
+      }
+      let sttProfiles = [];
+      try { sttProfiles = await (await appImport("servers/gateway/ai/stt/index.js")).getSttProfiles(db, { includeKeys: false }); } catch { sttProfiles = []; }
+      // Names and ids only, for the per-device voice pickers.
+      const profiles = {
+        stt: sttProfiles.map((p) => ({ id: p.id, name: p.name || p.id })),
+        tts: ttsProfiles.map((p) => ({ id: p.id, name: p.name || p.id, playable: playableTtsProfile({ tts_profile_id: p.id }, [p]) === p.id })),
+      };
+      res.json({ devices: annotated, connected_count: annotated.filter(d => d.connected).length, profiles });
     } finally {
       db.close();
     }
@@ -1552,8 +615,13 @@ export default function metaGlassesRouter(dashboardAuth) {
     }
     const db = createDbClient();
     try {
+      // Never re-pair over a record of another kind (a kiosk display, a companion).
+      const { findDevice } = await loadDeviceStore();
+      const prior = await findDevice(db, id);
+      if (prior && !isGlassesRecord(prior)) return res.status(409).json({ ok: false, error: "id_in_use" });
       const result = await pairDevice(db, {
         id, name, generation: generation || "unknown",
+        photo_retention: prior ? prior.photo_retention : "30d",
         household_profile: household_profile || null,
         stt_profile_id: stt_profile_id || null,
         ai_profile_slug: ai_profile_slug || null,
@@ -1569,9 +637,10 @@ export default function metaGlassesRouter(dashboardAuth) {
 
   router.delete("/api/meta-glasses/devices/:id", async (req, res) => {
     const { createDbClient } = await loadDb();
-    const { unpairDevice } = await loadDeviceStore();
+    const { unpairDevice, findDevice } = await loadDeviceStore();
     const db = createDbClient();
     try {
+      if (!isGlassesRecord(await findDevice(db, req.params.id))) return res.status(404).json({ ok: false, error: "device not found" });
       const result = await unpairDevice(db, req.params.id);
       const sess = _sessions.get(req.params.id);
       if (sess?.ws) { try { sess.ws.close(1000, "device_unpaired"); } catch {} _sessions.delete(req.params.id); }
@@ -1583,10 +652,13 @@ export default function metaGlassesRouter(dashboardAuth) {
 
   router.post("/api/meta-glasses/devices/:id", async (req, res) => {
     const { createDbClient } = await loadDb();
-    const { updateDeviceProfiles } = await loadDeviceStore();
+    const { updateDeviceProfiles, findDevice } = await loadDeviceStore();
     const db = createDbClient();
     try {
-      const updated = await updateDeviceProfiles(db, req.params.id, req.body || {});
+      if (!isGlassesRecord(await findDevice(db, req.params.id))) return res.status(404).json({ ok: false, error: "device not found" });
+      // The kind is not editable here.
+      const { device_kind: _ignored, kiosk_settings: _ignored2, ...patch } = req.body || {};
+      const updated = await updateDeviceProfiles(db, req.params.id, patch);
       if (!updated) return res.status(404).json({ ok: false, error: "device not found" });
       res.json({ ok: true, device: updated });
     } finally {
@@ -1617,12 +689,7 @@ export default function metaGlassesRouter(dashboardAuth) {
           console.warn(`[meta-glasses] library delete: MinIO removeObject failed for ${row.minio_key}: ${err.message}`);
         }
       }
-      if (row?.disk_path) {
-        try {
-          const { unlinkSync } = await import("node:fs");
-          unlinkSync(row.disk_path);
-        } catch {}
-      }
+      if (row?.disk_path) removePhotoFile(row.disk_path, id);
       await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [id] });
     } catch (err) {
       console.warn(`[meta-glasses] library delete for ${id} failed: ${err.message}`);
@@ -1645,14 +712,13 @@ export default function metaGlassesRouter(dashboardAuth) {
         sql: `SELECT id, minio_key, disk_path FROM glasses_photos WHERE device_id = ?`,
         args: [deviceId],
       });
-      const { unlinkSync } = await import("node:fs");
       let s3;
       try { s3 = await loadS3(); } catch {}
       for (const row of rows) {
         if (s3 && row.minio_key) {
           try { await s3.deleteObject(row.minio_key); } catch {}
         }
-        if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+        removePhotoFile(row.disk_path, row.id);
       }
       const del = await db.execute({
         sql: `DELETE FROM glasses_photos WHERE device_id = ?`,
@@ -1718,29 +784,8 @@ export default function metaGlassesRouter(dashboardAuth) {
     if (!device_id || !url || !codec) {
       return res.status(400).json({ ok: false, error: "device_id, url, codec required" });
     }
-    // URL-host validation: when funkwhale-authed, reject URLs that don't
-    // match FUNKWHALE_URL's hostname. Prevents using this endpoint as a
-    // confused deputy to send FUNKWHALE_ACCESS_TOKEN to arbitrary hosts.
-    if (auth === "funkwhale" && process.env.FUNKWHALE_URL) {
-      try {
-        const fwHost = new URL(process.env.FUNKWHALE_URL).hostname;
-        const validate = (u) => {
-          try { return new URL(u).hostname === fwHost; } catch { return false; }
-        };
-        if (!validate(url)) {
-          return res.status(400).json({ ok: false, error: "url_host_not_allowed" });
-        }
-        if (Array.isArray(queue)) {
-          for (const q of queue) {
-            if (!validate(q?.url)) {
-              return res.status(400).json({ ok: false, error: "queue_url_host_not_allowed" });
-            }
-          }
-        }
-      } catch (err) {
-        return res.status(400).json({ ok: false, error: "url_validation_failed" });
-      }
-    }
+    // The address rule (which host, which path, which credential) is enforced in
+    // pushAudioStream for every caller, this endpoint included.
     // If a queue is provided, seed it before pushing the first track so the
     // existing chain logic picks up tracks 2..N via audio_stream_done ack.
     if (Array.isArray(queue) && queue.length > 0) {
@@ -1757,46 +802,13 @@ export default function metaGlassesRouter(dashboardAuth) {
     if (!text || typeof text !== "string") {
       return res.status(400).json({ ok: false, error: "text required" });
     }
-    const { createDbClient } = await loadDb();
-    const { findDevice } = await loadDeviceStore();
-    const { getDefaultTtsProfile, createTtsAdapter, getTtsProfiles } = await loadTts();
-    const db = createDbClient();
-    try {
-      const targetIds = device_id ? [device_id] : [..._sessions.keys()];
-      let delivered = 0;
-      for (const id of targetIds) {
-        const sess = _sessions.get(id);
-        if (!sess?.ws) continue;
-        const devRec = await findDevice(db, id);
-        const ttsProfile = devRec?.tts_profile_id
-          ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === devRec.tts_profile_id)
-          : await getDefaultTtsProfile(db, { includeKeys: true });
-        if (!ttsProfile) continue;
-        const { adapter } = await createTtsAdapter(ttsProfile);
-        const neg = negotiatePcm(adapter.name);
-        if (neg) {
-          sendText(sess.ws, { type: "tts_start", codec: neg.codec, sample_rate: neg.sampleRate });
-        } else {
-          console.warn(`[meta-glasses] TTS adapter '${adapter.name}' has no PCM path; sending mp3.`);
-          sendText(sess.ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
-        }
-        try {
-          const stream = neg
-            ? pcmStream(adapter, text, ttsProfile.defaultVoice, neg)
-            : adapter.synthesize(text, ttsProfile.defaultVoice, {});
-          for await (const chunk of stream) {
-            sendBinary(sess.ws, chunk);
-          }
-          sendText(sess.ws, { type: "tts_end" });
-          delivered++;
-        } catch (err) {
-          sendText(sess.ws, { type: "error", code: "tts_error", recoverable: true, message: err.message });
-        }
-      }
-      res.json({ ok: true, delivered, targeted: targetIds.length });
-    } finally {
-      db.close();
+    const targetIds = device_id ? [String(device_id)] : [..._sessions.keys()];
+    let delivered = 0;
+    for (const id of targetIds) {
+      const r = await pushTtsToDevice(id, text);
+      if (r.delivered) delivered++;
     }
+    res.json({ ok: true, delivered, targeted: targetIds.length });
   });
 
   /* ---------- Media control REST endpoints ---------- */
@@ -1820,183 +832,88 @@ export default function metaGlassesRouter(dashboardAuth) {
     const { device_id, action } = req.body || {};
     if (!device_id || !action) return res.status(400).json({ error: "device_id and action required" });
     if (!ALLOWED_MEDIA_ACTIONS.has(action)) return res.status(400).json({ error: "unknown action" });
-    const sess = _sessions.get(device_id);
-    if (!sess?.ws) return res.status(404).json({ error: "device not connected" });
-
-    if (action === "stop") {
-      clearAudioQueue(device_id);
-      sendMediaControl(device_id, "stop");
-      _devicePlaybackState.set(device_id, "idle");
-      _nowPlaying.delete(device_id);
-    } else if (action === "next") {
-      // Send stop to phone first, then resolve the chain waiter so it
-      // advances to the next track. Register a temporary waiter to absorb
-      // the stale audio_stream_done from the killed track.
-      sendMediaControl(device_id, "stop");
-      const w = _streamDoneWaiters.get(device_id);
-      if (w) {
-        clearTimeout(w.timer);
-        _streamDoneWaiters.delete(device_id);
-        // Absorb the stale ack from the killed track: register a throwaway
-        // waiter that auto-expires, so the ack doesn't set state to idle.
-        const absorb = setTimeout(() => _streamDoneWaiters.delete(device_id), 2000);
-        _streamDoneWaiters.set(device_id, {
-          resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device_id); },
-          reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device_id); },
-          timer: absorb,
-        });
-        w.resolve(); // wake the chain to push the next track
-      }
-    } else {
-      sendMediaControl(device_id, action);
-      _devicePlaybackState.set(device_id, action === "pause" ? "paused" : "playing");
-    }
-    emitGlassesMediaState(device_id);
+    if (!_sessions.get(device_id)?.ws) return res.status(404).json({ error: "device not connected" });
+    applyMediaControl(device_id, action);
     res.json({ ok: true, state: _devicePlaybackState.get(device_id) || "idle" });
   });
 
   /**
-   * Artwork proxy: phone fetches album art via the gateway so no arbitrary
-   * URLs are fetched on-device. Validates src host against an allow-list
-   * (Funkwhale, localhost). Rejects unknown hosts that resolve to RFC1918 /
-   * link-local / Tailscale CGNAT. Streams bytes back without buffering.
+   * Artwork proxy: the phone fetches album art through the gateway (../server/net-guard.js):
+   * public addresses only (resolved once, connected as resolved), the music server's own origin
+   * excepted; images only, 5 MB, no redirects.
    */
-  router.get("/api/meta-glasses/artwork", async (req, res) => {
-    // Auth: bearer token matching a paired device (same as /session upgrade).
-    const deviceId = req.query.device_id;
-    const authHdr = req.headers["authorization"] || "";
-    const token = authHdr.startsWith("Bearer ") ? authHdr.slice(7) : null;
-    if (!deviceId || !token) return res.status(401).json({ error: "unauthorized" });
-    const { createDbClient } = await loadDb();
-    const db = createDbClient();
-    let device = null;
-    try {
-      const { verifyToken } = await loadDeviceStore();
-      device = await verifyToken(db, deviceId, token);
-    } finally { try { db.close(); } catch {} }
-    if (!device) return res.status(401).json({ error: "invalid token" });
-
-    const src = req.query.src;
-    if (!src) return res.status(400).json({ error: "src required" });
-
-    // Validate URL
+  router.get("/api/meta-glasses/artwork", deviceTokenAuth, async (req, res) => {
+    const src = typeof req.query.src === "string" ? req.query.src : "";
+    if (!src || src.length > 2048) return res.status(400).json({ error: "src required" });
     let srcUrl;
     try { srcUrl = new URL(src); } catch { return res.status(400).json({ error: "invalid url" }); }
-    if (srcUrl.protocol !== "http:" && srcUrl.protocol !== "https:") {
-      return res.status(400).json({ error: "unsupported scheme" });
-    }
-
-    // Build allow-list from env
-    const funkwhaleUrl = process.env.FUNKWHALE_URL || "";
-    const allowHosts = new Set(["localhost", "127.0.0.1"]);
-    try { if (funkwhaleUrl) allowHosts.add(new URL(funkwhaleUrl).hostname); } catch {}
-
-    const isAllowListed = allowHosts.has(srcUrl.hostname);
-    if (!isAllowListed) {
-      // Resolve and reject private ranges
-      const dns = await import("node:dns");
-      try {
-        const addr = await new Promise((resolve, reject) => {
-          dns.lookup(srcUrl.hostname, { family: 4 }, (err, address) => {
-            if (err) reject(err); else resolve(address);
-          });
-        });
-        const parts = addr.split(".").map(Number);
-        const [a, b] = parts;
-        const isPrivate = a === 10
-          || (a === 172 && b >= 16 && b <= 31)
-          || (a === 192 && b === 168)
-          || (a === 169 && b === 254)
-          || a === 127
-          || (a === 100 && b >= 64 && b <= 127); // CGNAT / Tailscale
-        if (isPrivate) return res.status(403).json({ error: "host not allowed" });
-      } catch {
-        return res.status(502).json({ error: "dns lookup failed" });
-      }
-    }
-
-    // Inject Funkwhale bearer if host matches FUNKWHALE_URL
-    const headers = {};
+    if (srcUrl.protocol !== "http:" && srcUrl.protocol !== "https:") return res.status(400).json({ error: "unsupported scheme" });
+    if (srcUrl.username || srcUrl.password) return res.status(400).json({ error: "invalid url" });
+    // The configured music server's exact origin may be private and gets its credential; anything
+    // else must resolve only to public addresses, and is fetched from the address that was checked.
+    const music = musicUpstreamConfig();
+    const isMusic = !!music && srcUrl.origin === music.origin;
+    const ac = new AbortController();
+    req.on("close", () => { try { ac.abort(); } catch {} });
     try {
-      if (funkwhaleUrl && srcUrl.hostname === new URL(funkwhaleUrl).hostname && process.env.FUNKWHALE_ACCESS_TOKEN) {
-        headers.Authorization = `Bearer ${process.env.FUNKWHALE_ACCESS_TOKEN}`;
-      }
-    } catch {}
-
-    // Abort upstream fetch if client disconnects
-    const controller = new AbortController();
-    req.on("close", () => { try { controller.abort(); } catch {} });
-
-    try {
-      const upstream = await fetch(src, { headers, signal: controller.signal, redirect: "follow" });
-      if (!upstream.ok || !upstream.body) {
-        return res.status(upstream.status || 502).json({ error: `upstream ${upstream.status}` });
-      }
-      const ct = upstream.headers.get("content-type") || "application/octet-stream";
-      const cl = upstream.headers.get("content-length");
-      res.setHeader("Content-Type", ct);
-      if (cl) res.setHeader("Content-Length", cl);
-      const reader = upstream.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
+      const got = await fetchImagePinned(srcUrl.toString(), {
+        allowPrivate: isMusic,
+        headers: isMusic ? { Authorization: `Bearer ${music.token}` } : {},
+        signal: ac.signal,
+      });
+      res.setHeader("Content-Type", got.contentType);
+      res.setHeader("Content-Length", String(got.body.length));
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.end(got.body);
     } catch (err) {
-      if (!res.headersSent) res.status(502).json({ error: err.message });
+      if (res.headersSent) return;
+      if (err instanceof FetchRefused) return res.status(err.status).json({ error: err.code });
+      res.status(502).json({ error: "upstream_error" });
     }
   });
 
   /**
-   * Photo upload endpoint: Android POSTs the captured photo bytes here.
-   * Authorized by the device's bearer token (same token as /session).
-   * Returns { ok, url } with a stable URL the LLM / client can serve.
+   * Photo upload: the phone app POSTs the captured bytes here.
+   * Order matters: the device token is checked (deviceTokenAuth) and the per-device rate is
+   * counted BEFORE the body is read. The file name is made here from nothing the caller sent.
    */
+  const PHOTO_EXT = new Map([["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["heic", "image/heic"]]);
+  const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   router.post("/api/meta-glasses/photo",
+    deviceTokenAuth,
+    (req, res, next) => (_photoUploads.take(req.glassesDevice.id) ? next() : res.status(429).json({ ok: false, error: "too_many_uploads" })),
     express.raw({ type: "*/*", limit: "25mb" }),
     async (req, res) => {
-      const deviceId = req.query.device_id;
-      const reqId = req.query.request_id || randomUUID();
-      const ext = (req.query.ext || "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
-      const auth = req.headers["authorization"] || "";
-      const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-      if (!deviceId || !token) return res.status(400).json({ ok: false, error: "device_id+token required" });
+      const device = req.glassesDevice;
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ ok: false, error: "empty_body" });
+      const wanted = String(req.query.ext || "jpg").toLowerCase();
+      const ext = PHOTO_EXT.has(wanted) ? wanted : "jpg";
+      // request_id only pairs this upload with a pending capture; it is never part of a path.
+      const reqId = REQUEST_ID_RE.test(String(req.query.request_id || "")) ? String(req.query.request_id).toLowerCase() : null;
 
-      const { createDbClient } = await loadDb();
-      const { verifyToken } = await loadDeviceStore();
-      const db = createDbClient();
-      let device;
-      try { device = await verifyToken(db, deviceId, token); } finally { try { db.close(); } catch {} }
-      if (!device) return res.status(401).json({ ok: false, error: "bad token" });
-
-      const fname = `${Date.now()}_${reqId}.${ext}`;
+      const fname = `${Date.now()}_${randomUUID()}.${ext}`;
       const diskPath = join(_photoDir, fname);
-      try { writeFileSync(diskPath, req.body); } catch (err) {
+      try { writeFileSync(diskPath, req.body, { flag: "wx" }); } catch (err) {
         return res.status(500).json({ ok: false, error: err.message });
       }
       const url = `/api/meta-glasses/photo/${encodeURIComponent(fname)}`;
       res.json({ ok: true, url, size: req.body.length });
 
-      // Phase 6 C.2: await the library INSERT so we can include the
-      // photoId in the pending capture resolve (so chained tools like
-      // crow_glasses_capture_and_attach_photo get the id). Enrichment
-      // (vision/OCR) still runs fire-and-forget inside recordGlassesPhoto,
-      // so this await is ~50-200ms (MinIO upload + single DB INSERT).
+      // The library INSERT is awaited so a pending capture gets the photo id. A photo that
+      // answers a look turn is described once, by that turn (describePhoto stores the answer
+      // as its caption); any other upload is captioned in the background.
+      // A request id answers only the capture this same device was asked for.
+      const candidate = reqId ? _pendingCaptures.get(reqId) : null;
+      const pending = candidate && candidate.deviceId === device.id ? candidate : null;
       let photoMeta = null;
       try {
-        photoMeta = await recordGlassesPhoto({
-          deviceId: device.id,
-          diskPath, fname,
-          mime: req.body.length > 0 ? (ext === "png" ? "image/png" : "image/jpeg") : "application/octet-stream",
-          size: req.body.length,
-        });
+        photoMeta = await recordGlassesPhoto({ deviceId: device.id, diskPath, fname, mime: PHOTO_EXT.get(ext), size: req.body.length, enrich: !pending });
       } catch (err) {
         console.warn(`[meta-glasses] library insert failed: ${err.message}`);
       }
 
-      const pending = _pendingCaptures.get(reqId);
-      if (pending) {
+      if (pending && _pendingCaptures.get(reqId) === pending) {
         clearTimeout(pending.timer);
         _pendingCaptures.delete(reqId);
         pending.resolve({
@@ -2015,33 +932,6 @@ export default function metaGlassesRouter(dashboardAuth) {
     const p = join(_photoDir, name);
     if (!existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
     res.sendFile(p);
-  });
-
-  /**
-   * Trigger a photo capture on a connected glasses session. Blocks up to
-   * 20 s for the phone to capture, upload, and reply with photo_ready.
-   */
-  router.post("/api/meta-glasses/capture", async (req, res) => {
-    const { device_id } = req.body || {};
-    const targetIds = device_id ? [device_id] : [..._sessions.keys()];
-    const id = targetIds.find(x => _sessions.get(x));
-    if (!id) return res.status(404).json({ ok: false, error: "no connected session" });
-    const sess = _sessions.get(id);
-    const reqId = randomUUID();
-    const p = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        _pendingCaptures.delete(reqId);
-        reject(new Error("capture timeout"));
-      }, 20_000);
-      _pendingCaptures.set(reqId, { resolve, reject, timer });
-    });
-    sendText(sess.ws, { type: "capture_photo", request_id: reqId });
-    try {
-      const result = await p;
-      res.json(result);
-    } catch (err) {
-      res.status(504).json({ ok: false, error: err.message });
-    }
   });
 
   /**
@@ -2082,28 +972,21 @@ export function setupWebSocket(server) {
     const url = req.url || "";
     if (!url.startsWith("/api/meta-glasses/session")) return;
 
+    const refuse = (status, reason) => { try { socket.write(`HTTP/1.1 ${status} ${reason}\r\n\r\n`); } catch {} socket.destroy(); };
+    // An upgrade never passes through Express, so the gateway's Funnel refusal and network
+    // rule are applied here, before anything else is looked at.
+    if (req.headers["tailscale-funnel-request"] || !isAllowedNetwork(req)) return refuse(403, "Forbidden");
+
     const params = new URL(url, "http://localhost").searchParams;
     const deviceId = params.get("device_id");
+    // Header only: a token in the query string would end up in access logs.
     const auth = req.headers["authorization"] || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : params.get("token");
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!deviceId || !token) return refuse(400, "Bad Request");
 
-    if (!deviceId || !token) {
-      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-
-    const db = (await loadDb()).createDbClient();
     let device = null;
-    try {
-      const { verifyToken } = await loadDeviceStore();
-      device = await verifyToken(db, deviceId, token);
-    } finally { try { db.close(); } catch {} }
-    if (!device) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
+    try { device = await verifyGlassesToken(deviceId, token); } catch { device = null; }
+    if (!device) return badTokenStatus(req, deviceId) === 429 ? refuse(429, "Too Many Requests") : refuse(401, "Unauthorized");
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const prior = _sessions.get(deviceId);
@@ -2116,9 +999,10 @@ export function setupWebSocket(server) {
 
       let inTurn = false;
       let turnBuffer = [];
-      let turnOpts = {};
+      let turnBytes = 0;
       let micSampleRate = 16000;
-      let micIsPcm = false;
+      let micIsPcm = true;
+      const MAX_TURN_BYTES = 16000 * 2 * 120;   // two minutes of 16 kHz mono PCM
 
       let alive = true;
       ws.on("pong", () => {
@@ -2134,68 +1018,35 @@ export function setupWebSocket(server) {
 
       ws.on("message", (raw, isBinary) => {
         if (isBinary) {
-          // Phase 6 C.3: route binary frames to the note-stream pipeline
-          // when the device is in continuous-recording mode. Otherwise
-          // fall through to the voice-turn buffer (existing behavior).
-          const sessCur = _sessions.get(device.id);
-          if (sessCur?.inboundMode === "note_stream") {
-            processNoteStreamChunk(device.id, raw);
-            return;
-          }
-          if (inTurn) turnBuffer.push(raw);
+          if (!inTurn) return;
+          turnBytes += raw.length;
+          if (turnBytes <= MAX_TURN_BYTES) turnBuffer.push(raw);
           return;
         }
         let msg;
         try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
         switch (msg.type) {
           case "hello":
-            micIsPcm = msg.codec === "pcm";
-            micSampleRate = msg.sample_rate || 16000;
-            turnOpts = {
-              contentType: micIsPcm ? "audio/wav" : "audio/ogg;codecs=opus",
-              filename: `turn.${micIsPcm ? "wav" : "opus"}`,
-            };
+            micIsPcm = msg.codec === "pcm" || msg.codec == null;
+            micSampleRate = Number.isFinite(msg.sample_rate) && msg.sample_rate >= 8000 && msg.sample_rate <= 48000 ? msg.sample_rate : 16000;
             break;
           case "turn_start":
-            // Phase 6 C.3: reject PTT while a note_stream is active. The
-            // phone is also supposed to enforce this (APK 1.4.7+) but we
-            // belt-and-suspender here so an older phone can't accidentally
-            // corrupt a running note stream.
-            if (_noteStreams.has(device.id)) {
-              sendText(ws, {
-                type: "error",
-                code: "note_session_active",
-                recoverable: true,
-                message: "Stop recording before taking a voice turn.",
-              });
-              break;
-            }
             inTurn = true;
             turnBuffer = [];
+            turnBytes = 0;
             break;
           case "turn_end": {
             if (!inTurn) return;
             inTurn = false;
-            const raw = Buffer.concat(turnBuffer);
+            const pcm = Buffer.concat(turnBuffer);
             turnBuffer = [];
-            const audio = micIsPcm ? wrapPcmAsWav(raw, micSampleRate) : raw;
-            if (!acquireTurnLock(device.id, ws)) {
-              sendText(ws, { type: "error", code: "turn_busy", recoverable: true });
+            if (!micIsPcm) {
+              // The shared turn takes PCM. The phone app has always sent PCM; anything else is refused, not guessed at.
+              sendText(ws, { type: "error", code: "unsupported_codec", recoverable: false });
               break;
             }
-            runVoiceTurn(ws, device, audio, turnOpts)
-              .catch((err) => {
-                sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
-              })
-              .finally(() => releaseTurnLock(device.id, ws));
-            break;
-          }
-          case "note_stream_end": {
-            // Phone-initiated end (user stop button on the notification,
-            // BT SCO drop, app background kill-chain, etc.).
-            if (_noteStreams.has(device.id)) {
-              endNoteStream(device.id, msg.reason || "user_stop").catch(() => {});
-            }
+            runSessionTurn(ws, device.id, wrapPcmAsWav(pcm, micSampleRate))
+              .catch((err) => { console.warn(`[meta-glasses] ${device.id} turn error: ${err?.message || err}`); });
             break;
           }
           case "audio_stream_done": {
@@ -2213,9 +1064,7 @@ export function setupWebSocket(server) {
             break;
           }
           case "media_control": {
-            // Phone-initiated transport action (notification button / BT headset).
-            // Mirror the REST /api/meta-glasses/media/control behavior so server
-            // state stays in sync. DO NOT echo media_control back — phone already acted.
+            // The phone already acted (notification button, headset key): mirror the state, never echo it back.
             const mcAction = msg.action;
             if (mcAction === "stop") {
               clearAudioQueue(device.id);
@@ -2245,14 +1094,12 @@ export function setupWebSocket(server) {
             break;
           }
           case "photo_error": {
-            // Phone reports a capture failure (permission, stream start, etc.).
-            // Reject the matching pending capture so callers see a real error,
-            // not a 20 s timeout.
+            // The phone reports a capture failure: the waiting turn hears about it now, not after a timeout.
             const pending = _pendingCaptures.get(msg.request_id);
-            if (pending) {
+            if (pending && pending.deviceId === device.id) {
               clearTimeout(pending.timer);
               _pendingCaptures.delete(msg.request_id);
-              pending.reject(new Error(`${msg.code || "capture_failed"}: ${msg.message || ""}`));
+              pending.reject(new Error(`${String(msg.code || "capture_failed").slice(0, 40)}`));
             }
             break;
           }
@@ -2261,31 +1108,18 @@ export function setupWebSocket(server) {
 
       ws.on("close", () => {
         clearInterval(pinger);
-        if (_sessions.get(deviceId)?.ws === ws) _sessions.delete(deviceId);
-        clearAudioQueue(deviceId);
-        _devicePlaybackState.delete(deviceId);
-        _nowPlaying.delete(deviceId);
-        emitGlassesMediaState(deviceId);
-        releaseTurnLock(deviceId, ws);
-
-        // Phase 6 C.3: WS disconnect while a note_stream is running starts
-        // a 2-min grace timer. If a new session (same deviceId) registers
-        // before the timer fires, we cancel it — the user is mid-reconnect
-        // after a network blip. Otherwise the stream ends with "disconnect".
-        const ns = _noteStreams.get(deviceId);
-        if (ns && !ns.disconnectGraceTimer && !ns.ending) {
-          ns.disconnectGraceTimer = setTimeout(() => {
-            const cur = _noteStreams.get(deviceId);
-            const newSess = _sessions.get(deviceId);
-            // If a fresh WS is present AND it's different from the closed one,
-            // the user reconnected in time — leave the stream running.
-            if (cur && newSess?.ws && newSess.ws !== ws) {
-              cur.disconnectGraceTimer = null;
-              return;
-            }
-            endNoteStream(deviceId, "disconnect").catch(() => {});
-          }, NOTE_STREAM_DISCONNECT_GRACE_MS);
+        // A turn in flight for this socket stops: its model call and its speech are aborted.
+        const ac = _turnAborts.get(deviceId);
+        if (ac && _turnLocks.get(deviceId)?.ws === ws) ac.abort();
+        // Playback state belongs to the device's CURRENT socket: a superseded one leaves it alone.
+        if (_sessions.get(deviceId)?.ws === ws) {
+          _sessions.delete(deviceId);
+          clearAudioQueue(deviceId);
+          _devicePlaybackState.delete(deviceId);
+          _nowPlaying.delete(deviceId);
+          emitGlassesMediaState(deviceId);
         }
+        releaseTurnLock(deviceId, ws);
       });
       ws.on("error", () => { /* close follows */ });
     });
@@ -2349,7 +1183,7 @@ function cleanOcrResponse(raw) {
   return t;
 }
 
-async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
+async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size, enrich = true }) {
   const { createDbClient } = await loadDb();
   const { readFileSync } = await import("node:fs");
 
@@ -2410,7 +1244,7 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
   // gets photoId back synchronously. The capture-and-attach tool needs
   // the id immediately to write a `photo://<id>` markdown ref; waiting
   // for the 5-30s vision call would time out the MCP tool.
-  _enrichGlassesPhoto({ photoId, deviceId, diskPath, mime }).catch(err =>
+  if (enrich) _enrichGlassesPhoto({ photoId, deviceId, diskPath, mime }).catch(err =>
     console.warn(`[meta-glasses] enrich pipeline error for photo ${photoId}: ${err.message}`)
   );
   return { photoId, minioKey };
@@ -2577,7 +1411,7 @@ async function backfillGlassesPhoto(db, row) {
   const { isAvailable, uploadObject, deleteObject } = await loadS3();
   if (!(await isAvailable())) return { skipped: "no-storage" };
   const { existsSync, readFileSync } = await import("node:fs");
-  if (!row.disk_path || !existsSync(row.disk_path)) {
+  if (!row.disk_path || !photoPathOk(row.disk_path) || !existsSync(row.disk_path)) {
     return { skipped: "disk-missing" };
   }
   const ext = (row.mime?.split("/")[1] || "jpg").split("+")[0];
@@ -2602,7 +1436,6 @@ async function backfillGlassesPhoto(db, row) {
 }
 
 async function reclaimBackfilledDiskCopies(db) {
-  const { unlinkSync } = await import("node:fs");
   const DISK_GRACE_DAYS = 7;
   const { rows } = await db.execute({
     sql: `SELECT id, disk_path FROM glasses_photos
@@ -2612,7 +1445,7 @@ async function reclaimBackfilledDiskCopies(db) {
   });
   let reclaimed = 0;
   for (const row of rows) {
-    if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+    removePhotoFile(row.disk_path, row.id);
     await db.execute({
       sql: `UPDATE glasses_photos SET disk_path = NULL WHERE id = ?`,
       args: [row.id],
@@ -2625,13 +1458,13 @@ async function reclaimBackfilledDiskCopies(db) {
 async function pruneGlassesPhotos(db) {
   const { listDevices } = await loadDeviceStore();
   const { deleteObject } = await loadS3();
-  const { unlinkSync } = await import("node:fs");
   const devices = await listDevices(db);
   const activeIds = new Set(devices.map(d => d.id));
   let prunedTotal = 0;
 
-  // Per-device retention prune (MinIO-backed rows only — disk-only
-  // rows are preserved indefinitely until backfilled).
+  // Per-device retention prune: every row past the device's rule, wherever its bytes live
+  // (object storage, the disk copy, or both). On an instance without object storage every
+  // photo is disk-only, and those must age out too.
   for (const d of devices) {
     const retention = d.photo_retention || "never";
     if (retention === "never") continue;
@@ -2639,13 +1472,12 @@ async function pruneGlassesPhotos(db) {
     if (!days) continue;
     const { rows } = await db.execute({
       sql: `SELECT id, minio_key, disk_path FROM glasses_photos
-            WHERE device_id = ? AND captured_at < datetime('now', ?)
-              AND minio_key IS NOT NULL`,
+            WHERE device_id = ? AND captured_at < datetime('now', ?)`,
       args: [d.id, `-${days} days`],
     });
     for (const row of rows) {
-      try { await deleteObject(row.minio_key); } catch {}
-      if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+      if (row.minio_key) { try { await deleteObject(row.minio_key); } catch {} }
+      removePhotoFile(row.disk_path, row.id);
       await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [row.id] });
       prunedTotal++;
     }
@@ -2676,12 +1508,12 @@ async function pruneGlassesPhotos(db) {
     if (ageDays < ORPHAN_GRACE_DAYS) continue;
     const { rows: orphanRows } = await db.execute({
       sql: `SELECT id, minio_key, disk_path FROM glasses_photos
-            WHERE device_id = ? AND minio_key IS NOT NULL`,
+            WHERE device_id = ?`,
       args: [unpairedDeviceId],
     });
     for (const row of orphanRows) {
-      try { await deleteObject(row.minio_key); } catch {}
-      if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+      if (row.minio_key) { try { await deleteObject(row.minio_key); } catch {} }
+      removePhotoFile(row.disk_path, row.id);
       await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [row.id] });
       prunedTotal++;
     }
@@ -2788,13 +1620,11 @@ export async function runPhotoRetention(db, { budgetMs = 60_000 } = {}) {
  * Backpressure: chunked at 64KB with WebSocket drain awaits, total in-flight
  * bounded at 1MB (bufferedAmount check).
  */
-// Maps `auth: "<sentinel>"` from _audio_stream envelopes to the server-side
-// env-var bearer token to inject. Keeps credentials out of tool results and
-// chat history — only the sentinel string travels through the LLM layer.
-const AUDIO_STREAM_AUTH_SENTINELS = {
-  funkwhale: () => process.env.FUNKWHALE_ACCESS_TOKEN || null,
-};
-
+// Which credential rule an `auth` value names. "funkwhale" = this instance's own music server
+// (servers/gateway/media/pinned-upstream.js decides what may be requested and where the
+// credential goes). "crow-peer:<id>" = a paired instance's /audio/stream, with that peer's
+// bearer and only at its registered gateway host. Anything else is refused: the gateway does
+// not fetch arbitrary addresses for a device.
 export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels, auth, title, artist, artworkUrl } = {}) {
   if (!deviceId || !url || !codec) return { delivered: false, reason: "bad_args" };
   const sess = _sessions.get(deviceId);
@@ -2806,17 +1636,24 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
   const lockReentrant = _turnLocks.get(deviceId)?.ws === sess.ws;
   if (!acquireTurnLock(deviceId, sess.ws)) return { delivered: false, reason: "lock_busy" };
   try {
-    const headers = {};
-    let bearer = null;
-    if (auth && AUDIO_STREAM_AUTH_SENTINELS[auth]) {
-      bearer = AUDIO_STREAM_AUTH_SENTINELS[auth]();
+    const refuseStream = (reason) => {
+      sendText(sess.ws, { type: "audio_stream_end", ok: false, error: reason });
+      return { delivered: false, reason };
+    };
+    let resp;
+    if (auth === "funkwhale") {
+      try {
+        resp = await openPinnedUpstream(url, musicUpstreamConfig());
+      } catch (err) {
+        if (!(err instanceof UpstreamRefused)) throw err;
+        console.warn(`[meta-glasses] library stream refused for ${deviceId}: ${err.code}`);
+        return refuseStream(err.code);
+      }
     } else if (typeof auth === "string" && auth.startsWith("crow-peer:")) {
-      // Federated audio: stream through the owning instance's /audio/stream
-      // proxy, authed with that peer's bearer (same token the voice loop uses).
-      // SECURITY (defense-in-depth): only attach the bearer if `url` targets that
-      // peer's REGISTERED gateway host. The url should always be one we built in
-      // rewriteStream, but never send a peer bearer to an unexpected host.
+      // A paired instance's stream proxy. The peer's bearer goes only to that peer's REGISTERED
+      // gateway host, and a redirect is never followed with or without it.
       const instId = auth.slice("crow-peer:".length);
+      let bearer = null;
       try {
         let gwHost = null;
         const dbc = (await loadDb()).createDbClient();
@@ -2829,86 +1666,24 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
         if (gwHost && targetHost && gwHost === targetHost) {
           const { getPeerCreds } = await import(pathToFileURL(join(gatewayDir, "..", "shared", "peer-credentials.js")).href);
           bearer = getPeerCreds(instId)?.auth_token || null;
-        } else {
-          console.warn(`[meta-glasses] crow-peer auth host mismatch for ${instId} (target=${targetHost} gateway=${gwHost}) — not attaching bearer`);
         }
       } catch (err) {
         console.warn(`[meta-glasses] crow-peer auth resolve failed for ${instId}: ${err.message}`);
       }
-    }
-    if (bearer) headers.Authorization = `Bearer ${bearer}`;
-    // Manual redirect handling to avoid leaking the bearer to signed storage
-    // URLs or attacker-controlled hosts. Validate the Location host on any 3xx,
-    // then drop the bearer and auto-follow the rest of the chain.
-    let resp = await fetch(url, { redirect: "manual", headers });
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get("location");
-      if (!location) {
-        sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_no_location" });
-        return { delivered: false, reason: "redirect_no_location" };
+      if (!bearer) return refuseStream("peer_not_recognised");
+      // Ten seconds to response headers; the stream itself may run as long as the track.
+      const headersAc = new AbortController();
+      const headersTimer = setTimeout(() => headersAc.abort(), 10_000);
+      try { resp = await fetch(url, { redirect: "manual", headers: { Authorization: `Bearer ${bearer}` }, signal: headersAc.signal }); }
+      catch (err) { if (headersAc.signal.aborted) return refuseStream("peer_timeout"); throw err; }
+      finally { clearTimeout(headersTimer); }
+      if (resp.status >= 300 && resp.status < 400) {
+        try { await resp.body?.cancel(); } catch {}
+        return refuseStream("redirect_refused");
       }
-      // For funkwhale, validate the Location host. Signed storage URLs commonly
-      // go cross-host (e.g. to S3/minio) — that's fine as long as the first hop
-      // matches an allow-listed host. After this hop, drop the bearer; signed
-      // URLs carry their own auth in query params.
-      try {
-        const locUrl = new URL(location, url);
-        if (auth === "funkwhale" && process.env.FUNKWHALE_URL) {
-          const fwHost = new URL(process.env.FUNKWHALE_URL).hostname;
-          const origHost = new URL(url).hostname;
-          // Accept: same host as the original (internal redirect) OR a
-          // storage URL that funkwhale itself issued (location can point
-          // anywhere — funkwhale's S3 backend, etc.). The trust anchor is
-          // that the ORIGINAL url was funkwhale-hosted (validated upstream).
-          // We trust funkwhale's redirect target since we trust the server.
-          // We just ensure we're not following a redirect on a non-fw origin.
-          if (origHost !== fwHost) {
-            sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_unexpected_origin" });
-            return { delivered: false, reason: "redirect_unexpected_origin" };
-          }
-        }
-        // Re-fetch without the bearer — signed storage URLs have their own auth.
-        resp = await fetch(locUrl.toString(), { redirect: "follow" });
-      } catch (err) {
-        sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_invalid_url" });
-        return { delivered: false, reason: "redirect_invalid_url" };
-      }
-    }
-    if (!resp.ok || !resp.body) {
-      sendText(sess.ws, { type: "audio_stream_end", ok: false, error: `HTTP ${resp.status}` });
-      return { delivered: false, reason: `http_${resp.status}` };
-    }
-    // Record listen in Funkwhale history (fire-and-forget, only after upstream ok).
-    // NOTE: `url` is the ORIGINAL request URL — DO NOT replace with resp.url
-    // (signed storage URLs won't match the /listen/<uuid>/ regex).
-    // Funkwhale's history endpoint needs the integer track PK, not the UUID —
-    // resolve via GET /api/v1/tracks/{uuid}/ first.
-    if (auth === "funkwhale") {
-      try {
-        const trackUuid = url.match(/\/listen\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i)?.[1];
-        const fwBase = process.env.FUNKWHALE_URL?.replace(/\/$/, "");
-        const fwToken = process.env.FUNKWHALE_ACCESS_TOKEN;
-        if (trackUuid && fwBase && fwToken) {
-          fetch(`${fwBase}/api/v1/tracks/${encodeURIComponent(trackUuid)}/`, {
-            headers: { Authorization: `Bearer ${fwToken}` },
-          })
-            .then((r) => r.ok ? r.json() : null)
-            .then((meta) => {
-              if (!meta?.id) return;
-              return fetch(`${fwBase}/api/v1/history/listenings/`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${fwToken}`,
-                },
-                body: JSON.stringify({ track: meta.id }),
-              });
-            })
-            .catch((err) => console.warn(`[meta-glasses] record listen failed: ${err.message}`));
-        }
-      } catch (err) {
-        console.warn(`[meta-glasses] listen-record prep failed: ${err.message}`);
-      }
+      if (!resp.ok || !resp.body) return refuseStream(`http_${resp.status}`);
+    } else {
+      return refuseStream("auth_required");
     }
     const contentLength = Number(resp.headers.get("content-length")) || undefined;
     // Resolve title/artist/artwork_url: explicit args win, fall back to _nowPlaying
@@ -3067,49 +1842,62 @@ export function isQuietHours(quietHoursStr, date = new Date()) {
  *
  * Returns { delivered: boolean, reason?: string }.
  */
-export async function pushTtsToDevice(deviceId, text, opts = {}) {
+export async function pushTtsToDevice(deviceId, text) {
   if (!deviceId || !text) return { delivered: false, reason: "bad_args" };
   if (!deviceIsPresent(deviceId)) return { delivered: false, reason: "absent" };
-
-  // Wait for the turn mutex if briefly held.
-  const started = Date.now();
-  while (_turnLocks.has(deviceId)) {
-    if (Date.now() - started > MUTEX_DEFER_MS) {
-      return { delivered: false, reason: "mutex_timeout" };
-    }
-    await new Promise(r => setTimeout(r, 500));
-    if (!deviceIsPresent(deviceId)) return { delivered: false, reason: "absent" };
-  }
-  // Acquire the lock so no voice turn starts mid-push.
   const sess = _sessions.get(deviceId);
   if (!sess?.ws) return { delivered: false, reason: "absent" };
-  if (!acquireTurnLock(deviceId, sess.ws)) {
-    return { delivered: false, reason: "lock_busy" };
-  }
+  // Never beside a turn or a relay on the same socket: wait for the lock, give up after MUTEX_DEFER_MS.
+  if (!(await waitForTurnLock(deviceId, sess.ws, MUTEX_DEFER_MS))) return { delivered: false, reason: "mutex_timeout" };
   try {
-    const db = (await loadDb()).createDbClient();
-    try {
-      const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
-      const ttsProfile = sess.device?.tts_profile_id
-        ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === sess.device.tts_profile_id)
-        : await getDefaultTtsProfile(db, { includeKeys: true });
-      if (!ttsProfile) return { delivered: false, reason: "no_tts_profile" };
-      const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
-      const neg = negotiatePcm(ttsAdapter.name);
-      if (neg) sendText(sess.ws, { type: "tts_start", codec: neg.codec, sample_rate: neg.sampleRate });
-      else sendText(sess.ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
-      const stream = neg
-        ? pcmStream(ttsAdapter, text, ttsProfile.defaultVoice, neg)
-        : ttsAdapter.synthesize(text, ttsProfile.defaultVoice, {});
-      for await (const chunk of stream) sendBinary(sess.ws, chunk);
-      sendText(sess.ws, { type: "tts_end" });
-      return { delivered: true };
-    } finally {
-      try { db.close(); } catch {}
-    }
+    return await glassesTurns.speak({
+      deviceId, text,
+      send: { text: (o) => sendText(sess.ws, o), binary: (b) => sendBinary(sess.ws, b) },
+    });
   } catch (err) {
     return { delivered: false, reason: err.message };
   } finally {
     releaseTurnLock(deviceId, sess.ws);
   }
 }
+
+/* ---------- Scheduler hooks ----------
+ * The gateway's scheduler calls these through servers/gateway/scheduler-hooks.js; it never
+ * imports this file. They run only in a gateway that loaded this bundle, whatever its port.
+ */
+
+/** Every tick: caption fill-in. Once a day in the 03:00 hour: photo retention, claimed in the database. */
+async function glassesSchedulerTick(db) {
+  try { await runCaptionBackfill(db); } catch { /* next tick retries */ }
+  const now = new Date();
+  if (now.getHours() !== 3) return;
+  const today = now.toISOString().slice(0, 10);
+  // Compare-and-set on the day: any tick in the hour can win, two gateways on one database
+  // cannot both win, and a non-date value is never overwritten.
+  const claim = await db.execute({
+    sql: `INSERT INTO dashboard_settings (key, value, updated_at)
+          VALUES ('meta_glasses_last_retention_run', ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+          WHERE value GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND value < excluded.value`,
+    args: [today],
+  });
+  if (Number(claim.rowsAffected || 0) < 1) return;
+  const summary = await runPhotoRetention(db);
+  console.log(`[meta-glasses] retention: ${JSON.stringify(summary)}`);
+}
+
+/** A scheduled reminder fired: speak it on connected glasses when the operator opted in and it is not quiet hours. */
+async function glassesReminder(db, { type, text } = {}) {
+  if (!type || !text) return;
+  const { readSetting } = await loadSettingsReg();
+  const toggle = await readSetting(db, `meta_glasses_voice_notify_${type}`);
+  if (toggle !== "1" && toggle !== "true") return;
+  if (isQuietHours((await readSetting(db, "meta_glasses_voice_quiet_hours")) || "")) return;
+  const { listDevices } = await loadDeviceStore();
+  for (const d of (await listDevices(db)).filter(isGlassesRecord)) {
+    const res = await pushTtsToDevice(d.id, text);
+    if (res?.delivered) console.log(`[meta-glasses] reminder spoken on ${d.id}`);
+  }
+}
+
+registerSchedulerHook("meta-glasses", { tick: glassesSchedulerTick, reminder: glassesReminder });
