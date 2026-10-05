@@ -813,7 +813,8 @@ test("WM1a (wired): a turn that asks for new content gets a context with no titl
     assert.deepEqual(call.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"], "play and open are not offered until they have something to play or open");
     assert.equal(call.extraTools[0].definition.inputSchema.properties.kind.enum.length, 4);
     const [showTool, wmTool] = call.extraTools;
-    assert.deepEqual([showTool.when("What is the capital of Portugal?"), wmTool.when("What is the capital of Portugal?")], [false, true], "a plain question with a card up: crow_wm only");
+    assert.deepEqual([showTool.when("What is the capital of Portugal?"), wmTool.when("What is the capital of Portugal?")], [true, true], "a plain question with a card up: both display tools are offered (revision 4: a follow-up needs no display word)");
+    assert.equal(showTool.must("What is the capital of Portugal?"), false, "and nothing is required");
     assert.equal(showTool.must("Add grapes to the fruits list."), true);
   } finally { rt.wm.closeAll("kiosk-wm1a"); w.close(); }
 });

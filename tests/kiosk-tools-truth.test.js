@@ -218,7 +218,7 @@ test("the model spoke on a turn with no display word, then its call did nothing:
   const d = display({ model: () => ({ say: "Done, the pasta timer is closed.", tool: "crow_wm", args: { do: "close", name: "pasta timer" } }) });
   d.store.open("kiosk-live", { kind: "timer", name: "Rice", title: "Rice", seconds: 600 });
   await d.ask("I'm finished with the pasta one.");
-  assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"]);
+  assert.deepEqual(toolNames(d.requests[0]), ["crow_show", "crow_wm"], "a window is open: both display tools (revision 4)");
   assert.match(said(d), /Nothing like that is open\.$/, "the last thing heard is what really happened");
   assert.deepEqual(d.cards(), ["timer:Rice"]);
 });
@@ -277,12 +277,13 @@ test("the K1 command form on a turn that has to show a card is sent back to crow
 });
 
 // ── What is offered ──────────────────────────────────────────────────────────────────────────────
-test("a plain question while a window is open is offered crow_wm only (closes and steps), never crow_show", async () => {
-  const d = display({ model: () => ({ say: "Lisbon." }) });
+test("a plain question while a window is open is offered both display tools, never required or forced (revision 4: follow-ups need no display word); with no window, no tool at all", async () => {
+  const d = display({ forcing: "named", model: () => ({ say: "Lisbon." }) });
   d.store.open("kiosk-live", { kind: "timer", name: "Rice", title: "Rice", seconds: 600 });
   const r = await d.ask("What is the capital of Portugal?");
-  assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"]);
-  assert.equal(r.timings.tools_offered, 1);
+  assert.deepEqual(toolNames(d.requests[0]), ["crow_show", "crow_wm"]);
+  assert.equal(d.requests[0].tool_choice, undefined);
+  assert.equal(r.timings.tools_offered, 2);
   assert.equal(said(d), "Lisbon.");
   d.store.closeAll("kiosk-live");
   const empty = await d.ask("What is the capital of Portugal?");
@@ -375,8 +376,9 @@ test("the card rule is narrow: questions, reading or closing a card, a noun insi
     const d = display({ model: () => ({ say: "Okay." }) });
     const r = await d.ask(say);
     assert.equal(r.failed, null, say);
-    // "timer" is a display word (0.1.8's wantsDisplay), so that question is still offered the tools; nothing is required of it.
-    if (say !== "Is there a timer running?") assert.equal(d.requests[0].tools, undefined, `${say}: no display tool is offered`);
+    // "timer" is a display word (0.1.8's wantsDisplay) and "the list" a card noun after a determiner (revision 4), so those two
+    // are OFFERED crow_show; nothing is required of any of them.
+    if (say !== "Is there a timer running?" && say !== "Can you read me the list?") assert.equal(d.requests[0].tools, undefined, `${say}: no display tool is offered`);
     assert.equal(r.timings.tool_choice, undefined, `${say}: nothing is required`);
     assert.equal(said(d), "Okay.");
   }

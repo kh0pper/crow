@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, mentionsCard, compound, compoundParts } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -71,7 +71,7 @@ export function createDisplayTools(ctx) {
   };
   const playWhen = (t) => mentionsPlay(t) || asksPlay(t);
   const openWhen = (t) => mentionsOpen(t, items);
-  const showWhen = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null;
+  const showWhen = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null || mentionsCard(t, items);
   const rules = {
     crow_play: {
       when: playWhen, holdText: playWhen, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
@@ -86,7 +86,9 @@ export function createDisplayTools(ctx) {
     },
     crow_show: {
       // Not "a window happens to be open": on a plain question with a card up, only crow_wm is offered.
-      when: showWhen, holdText: showWhen, holdToEnd: toEnd(showWhen), narrow: single,
+      // Revision 4: with a window open crow_show is always offered (a follow-up like "and garlic bread on
+      // there too" or "make it twenty minutes instead" has no display word). Required only by `must`.
+      when: (t) => showWhen(t) || openWindow(), holdText: showWhen, holdToEnd: toEnd(showWhen), narrow: single,
       // A request for NEW content this display can show, or a change to the card that is open.
       must: (t) => newCard(t) || updates(t) !== null,
       mustNote: MUST_NOTES.crow_show,

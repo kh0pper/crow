@@ -47,7 +47,12 @@ test("the product's own gates, on every utterance: the tool it needs is OFFERED,
     const g = d.gates(c.say);
     for (const w of [].concat(c.expect || [])) assert.ok(g.offered.includes(w.tool), `${c.id}: ${w.tool} is not offered for "${c.say}" (offered: ${g.offered.join(", ") || "nothing"})`);
     assert.equal(await d.fastPaths(c.say), null, `${c.id}: a no-model path answered an utterance that is meant for the model`);
-    if (c.expect === null) assert.deepEqual(g.offered.filter((t) => t !== "crow_wm"), [], `${c.id}: a plain question is offered crow_wm at most`);
+    // A plain question: with a window open (revision 4) the two display tools, never required; with none, crow_wm at most.
+    if (c.expect === null) {
+      const allowed = c.state?.windows?.length ? ["crow_show", "crow_wm"] : ["crow_wm"];
+      assert.deepEqual(g.offered.filter((t) => !allowed.includes(t)), [], `${c.id}: a plain question is offered ${allowed.join(" + ")} at most`);
+      assert.equal(g.must, null, `${c.id}: nothing is required of a plain question`);
+    }
     if (g.must) must.push(`${c.id}:${g.must.replace("crow_", "")}`);
   }
   // Which utterances the product REQUIRES a call on (text held, forced where the engine allows). The report states these counts.
@@ -87,7 +92,7 @@ test("the forcing rule is the product's: an engine that honours a named choice g
   assert.deepEqual([s.seen[0].tools, s.seen[0].choice], [["crow_do"], { name: "crow_do" }], "the control is forced by the same rule");
   const p = perfect(c37, "four");
   await runTurn(c37, "four", display(c37, "four", p, NAMED));
-  assert.deepEqual([p.seen[0].tools, p.seen[0].choice], [["crow_wm"], null]);
+  assert.deepEqual([p.seen[0].tools, p.seen[0].choice], [["crow_show", "crow_wm"], null], "a plain question with a card up: offered, never forced");
   const k = perfect(c31, "four");
   const r31 = await runTurn(c31, "four", display(c31, "four", k, NAMED));
   assert.equal(k.seen[0].choice, null, "a compound request is never narrowed or forced");

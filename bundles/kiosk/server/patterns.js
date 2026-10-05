@@ -71,6 +71,15 @@ export function parsePlay(transcript) {
 const PLAY_WORDS = new Set(["play", "music", "song", "songs", "radio", "station", "album", "albums", "playlist", "playlists", "listen", "hear", "tune", "tunes", "news", "podcast", "podcasts",
   "reproduce", "reproducir", "toca", "tocar", "musica", "cancion", "canciones", "emisora", "estacion", "disco", "escuchar", "escucha", "oir", "noticias"]);
 const PLAY_RUNS = runs(["put on", "pon algo"]);
+// Revision 4: a kind of music (a genre, a style, "hits") names something to play even with no verb
+// ("a little bossa nova for dinner would be nice"). A bounded category list, en + es; no artist or
+// title is ever listed. Words that are common outside music ("country", "pop", "house", "soul",
+// "metal", "salsa", "banda") count only inside the multi-word forms below.
+const GENRE_WORDS = new Set(["jazz", "blues", "rock", "reggae", "reggaeton", "cumbia", "cumbias", "bachata", "merengue", "mariachi", "ranchera", "rancheras",
+  "bolero", "boleros", "samba", "tango", "flamenco", "funk", "disco", "techno", "edm", "punk", "gospel", "opera", "lofi", "ambient", "indie", "oldies",
+  "hits", "exitos", "classical", "clasica", "symphony", "sinfonia", "orchestra", "orquesta", "acoustic", "acustica", "instrumental", "lullaby", "lullabies"]);
+const GENRE_RUNS = runs(["bossa nova", "hip hop", "lo fi", "r and b", "rnb", "country music", "pop music", "soul music", "heavy metal", "house music", "salsa music",
+  "musica country", "musica pop", "musica salsa", "musica nortena", "musica banda", "musica regional", "rock and roll", "rock n roll"]);
 const OPEN_WORDS = new Set(["open", "launch", "app", "apps", "start", "abre", "abreme", "abrir", "lanza", "aplicacion", "aplicaciones"]);
 const OPEN_RUNS = runs(["take me to", "go to", "bring back", "llevame a", "ve a"]);
 // "start a timer", "open the recipe": the card and timer verbs keep these.
@@ -88,14 +97,14 @@ function namesItem(w, items) {
 
 export function mentionsPlay(transcript) {
   const w = plain(transcript);
-  return !!w && !hasAny(w, NOT_PLAY) && (hasAny(w, PLAY_WORDS) || hasAnyRun(w, PLAY_RUNS));
+  return !!w && !hasAny(w, NOT_PLAY) && (hasAny(w, PLAY_WORDS) || hasAnyRun(w, PLAY_RUNS) || hasAny(w, GENRE_WORDS) || hasAnyRun(w, GENRE_RUNS));
 }
 /** items: what this display may open ([{ id, title, aliases? }]). Naming one of them is a mention; so is an open word. */
 export function mentionsOpen(transcript, items = []) {
   const w = plain(transcript);
   if (!w) return false;
   if (namesItem(w, items)) return true;
-  return !hasAny(w, NOT_OPEN) && !hasAny(w, NOT_PLAY) && !hasAny(w, PLAY_WORDS) && (hasAny(w, OPEN_WORDS) || hasAnyRun(w, OPEN_RUNS));
+  return !hasAny(w, NOT_OPEN) && !hasAny(w, NOT_PLAY) && !hasAny(w, PLAY_WORDS) && !hasAny(w, GENRE_WORDS) && (hasAny(w, OPEN_WORDS) || hasAnyRun(w, OPEN_RUNS));
 }
 
 // ── must run: the person is asking for it now ────────────────────────────────────────────────────
@@ -129,6 +138,28 @@ const CARD_NOUNS = Object.freeze({ ...Object.fromEntries(Object.entries(KIND_NOU
 const MAKE_STARTS = runs(["make", "make me", "make us", "write", "write me", "write down", "create", "start", "set", "haz", "crea", "escribe"]);
 // Reading, closing or changing what is there is not a request for a NEW card.
 const NOT_CARD = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "stop", "pause", "app", "apps", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela", "para"]);
+// Revision 4: words that place something ON the screen ("up there", "on the screen", "en la pantalla").
+const PLACE_RUNS = runs(["up there", "on there", "up on the screen", "on the screen", "on screen", "on the display", "on the tv", "on the big screen", "put it up", "put that up",
+  "en la pantalla", "en pantalla", "ahi arriba", "alla arriba", "en la tele"]);
+const DETERMINERS = new Set(["a", "an", "the", "some", "my", "our", "una", "un", "la", "el", "los", "las", "unos", "unas", "mi", "mis"]);
+/**
+ * Revision 4: is the request ABOUT a card on the screen — a placement phrase anywhere, or a card noun
+ * ("a list", "the steps", "una lista", "los pasos", a timer, a recipe) right after a determiner, in an
+ * utterance that does not start as a question (a placement phrase counts in a question too: "how do
+ * you make it? put the steps up there"). crow_show is OFFERED on these; must-run stays asksCard /
+ * the new-content patterns. → boolean.
+ */
+export function mentionsCard(transcript, items = []) {
+  const w = plain(transcript);
+  if (!w) return false;
+  if (hasAnyRun(w, PLACE_RUNS)) return true;
+  if (namesItem(w, items)) return false;
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p))) return false;
+  for (let i = 1; i < w.length; i += 1) if (Object.hasOwn(CARD_NOUNS, w[i]) && DETERMINERS.has(w[i - 1])) return true;
+  return false;
+}
+
 /** → "timer" | "recipe" | "content" | null. items: what this display may open (a noun inside an item's name is that item). */
 export function asksCard(transcript, items = []) {
   const w = plain(transcript);
