@@ -5,7 +5,8 @@ After=pipewire.service wireplumber.service
 Wants=pipewire.service wireplumber.service
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/local/lib/crow-kiosk/agent/crow_kiosk_agent.py --config /etc/crow-kiosk/agent.json
+# The venv sees Debian's numpy/websockets and adds the upstream onnxruntime wheel (see requirements-agent.txt).
+ExecStart=/opt/crow-kiosk/venv/bin/python /usr/local/lib/crow-kiosk/agent/crow_kiosk_agent.py --config /etc/crow-kiosk/agent.json
 Restart=always
 RestartSec=3
 # No MemoryMax: the Pi kernel boots with cgroup_disable=memory, so a memory cap would be ignored.

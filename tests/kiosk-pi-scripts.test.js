@@ -50,7 +50,16 @@ test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and
     assert.deepEqual(cfg, { bt_sink_mac: "00:11:22:AA:BB:CC", crow_origin: ORIGIN, mic_target: null, wake_model: "/var/lib/crow-kiosk/wake/hey_jarvis_v0.1.onnx" });
     assert.match(readFileSync(join(dir, "etc/systemd/system/apt-daily-upgrade.timer.d/crow-kiosk.conf"), "utf8"), /^OnCalendar=\*-\*-\* 03:30$/m, "upgrades run inside the sleep window");
     assert.doesNotMatch(readFileSync(join(dir, "home/kiosk/.config/systemd/user/crow-kiosk-agent.service"), "utf8"), /^MemoryMax/m, "memcg is off on the Pi: no fake cap");
-    assert.equal(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), `CROW_URL=${ORIGIN}\n`);
+    assert.equal(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), `CROW_URL=${ORIGIN}\nROTATE=0\n`);
+    assert.doesNotMatch(r1.stdout, /python3-onnxruntime/, "Debian's onnxruntime dies with SIGILL on a Pi 3");
+    assert.match(r1.stdout, /apt-get install .*\bwlr-randr\b/);
+    assert.match(r1.stdout, /\+ python3 -m venv --system-site-packages \/opt\/crow-kiosk\/venv/);
+    assert.match(r1.stdout, /pip install --disable-pip-version-check --no-deps --require-hashes -r \/opt\/crow-kiosk\/requirements\.txt/);
+    assert.match(readFileSync(join(dir, "opt/crow-kiosk/requirements.txt"), "utf8"), /^onnxruntime==1\.30\.0 --hash=sha256:[0-9a-f]{64}$/m);
+    assert.match(r1.stdout, /runuser -u kiosk -- \/opt\/crow-kiosk\/venv\/bin\/python \/usr\/local\/lib\/crow-kiosk\/check-onnxruntime\.py/);
+    assert.match(readFileSync(join(dir, "home/kiosk/.config/systemd/user/crow-kiosk-agent.service"), "utf8"), /^ExecStart=\/opt\/crow-kiosk\/venv\/bin\/python /m);
+    assert.equal(readFileSync(join(dir, "etc/ssh/sshd_config.d/10-crow-kiosk.conf"), "utf8").match(/^(PasswordAuthentication|KbdInteractiveAuthentication|PermitRootLogin) no$/gm).length, 3);
+    assert.ok(!existsSync(join(dir, "etc/udev/rules.d/91-crow-kiosk-touch-rotation.rules")), "no rotation by default");
     assert.match(readFileSync(join(dir, "etc/apt/apt.conf.d/52crow-kiosk-unattended-upgrades"), "utf8"), /Automatic-Reboot "true"/);
     assert.match(readFileSync(join(dir, "etc/apt/apt.conf.d/52crow-kiosk-unattended-upgrades"), "utf8"), /Automatic-Reboot-Time "04:30"/);
     assert.match(r1.stdout, /\+ apt-get update/);
@@ -73,6 +82,36 @@ test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and
     assert.equal(JSON.parse(readFileSync(join(dir, "etc/crow-kiosk/agent.json"), "utf8")).bt_sink_mac, null);
     assert.match(readFileSync(join(dir, "etc/crow-kiosk/setup.env"), "utf8"), /^WAKE_SHA=a{64}$/m);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--rotate rotates the display at launch and the touchscreen through libinput, and is remembered", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-rot-"));
+  const env = { ...process.env, SUDO_USER: "alex" };
+  try {
+    const run = (...a) => spawnSync("bash", [join(K, "pi-setup.sh"), ...a, "--dry-run", dir], { encoding: "utf8", env });
+    let r = run("--crow-url", ORIGIN, "--rotate", "180");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(join(dir, "etc/udev/rules.d/91-crow-kiosk-touch-rotation.rules"), "utf8"),
+      /ENV\{ID_INPUT_TOUCHSCREEN\}=="1", ENV\{LIBINPUT_CALIBRATION_MATRIX\}="-1 0 1 0 -1 1"/);
+    assert.match(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), /^ROTATE=180$/m);
+    assert.match(r.stdout, /udevadm trigger --subsystem-match=input --action=change/);
+    r = run();                                     // remembered
+    assert.match(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), /^ROTATE=180$/m);
+    r = run("--rotate", "0");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\+ rm -f \/etc\/udev\/rules\.d\/91-crow-kiosk-touch-rotation\.rules/);
+    assert.equal(run("--rotate", "45").status, 2);
+    const launch = readFileSync(join(K, "kiosk-launch.sh"), "utf8");
+    assert.match(launch, /wlr-randr --output "\$OUTPUT" --transform "\$TRANSFORM"/);
+    assert.ok(launch.indexOf("wlr-randr --output") < launch.indexOf("exec /usr/bin/chromium"), "rotate before Chromium starts");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the ssh check does not pipe sshd -T into grep -q (pipefail + SIGPIPE gave a false warning)", () => {
+  const src = readFileSync(join(K, "pi-setup.sh"), "utf8");
+  assert.doesNotMatch(src, /sshd -T[^\n]*\|\s*grep/);
+  assert.match(src, /SSHD_T="\$\(sshd -T/);
 });
 
 test("pi-setup.sh never writes through a symlink planted in a user's home", (t) => {

@@ -16,7 +16,8 @@
 #   --wake-model-url URL       a custom wake model (e.g. hey_crow.onnx served by Crow); needs
 #   --wake-model-sha256 HEX    its sha256; --clear-wake-model goes back to hey_jarvis
 #   --auto-reboot | --no-auto-reboot   unattended-upgrades may reboot at --reboot-time (default 04:30)
-#   --skip-packages            do not run apt (files and services only)
+#   --rotate 0|90|180|270      rotate the display and the touchscreen (a chassis mounted upside down: 180)
+#   --skip-packages            do not run apt or pip (files and services only)
 #   --dry-run DIR              change nothing: write every file under DIR and print the commands
 #   -h, --help
 #
@@ -32,9 +33,11 @@ OWW_MODELS=(
   "embedding_model.onnx 70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f"
   "hey_jarvis_v0.1.onnx 94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb"
 )
-PACKAGES=(cage chromium python3-numpy python3-onnxruntime python3-websockets unattended-upgrades sysstat
+# No python3-onnxruntime: Debian's 1.21 dies with SIGILL on a Pi 3; the agent venv gets the upstream wheel.
+PACKAGES=(cage chromium wlr-randr python3-numpy python3-websockets python3-venv unattended-upgrades sysstat
           pipewire wireplumber pipewire-pulse pipewire-alsa libspa-0.2-bluetooth bluez pulseaudio-utils)
-SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDIO ACCEPT_OWW WAKE_URL WAKE_SHA AUTO_REBOOT REBOOT_TIME)
+VENV=/opt/crow-kiosk/venv
+SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDIO ACCEPT_OWW WAKE_URL WAKE_SHA AUTO_REBOOT REBOOT_TIME ROTATE)
 
 die() { echo "pi-setup: $*" >&2; exit 2; }
 say() { echo "== $*"; }
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
     --auto-reboot) GIVEN[AUTO_REBOOT]=true; shift ;;
     --no-auto-reboot) GIVEN[AUTO_REBOOT]=false; shift ;;
     --reboot-time) GIVEN[REBOOT_TIME]="${2:-}"; shift 2 ;;
+    --rotate) GIVEN[ROTATE]="${2:-}"; shift 2 ;;
     --skip-packages) SKIP_PACKAGES=1; shift ;;
     --dry-run) DRY=1; ROOT="${2:-}"; [ -n "$ROOT" ] || die "--dry-run needs a directory"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -72,7 +76,7 @@ SETUP_ENV=/etc/crow-kiosk/setup.env
 
 # ---- saved settings: defaults <- saved file <- this run's flags ----------------------------------
 declare -A CFG=([CROW_URL]="" [BT_SINK]="" [MIC_TARGET]="" [FRAME_ORIGINS]="" [ADMIN_USER]="${SUDO_USER:-}"
-                [KEEP_ADMIN_AUDIO]=0 [ACCEPT_OWW]=0 [WAKE_URL]="" [WAKE_SHA]="" [AUTO_REBOOT]=false [REBOOT_TIME]="04:30")
+                [KEEP_ADMIN_AUDIO]=0 [ACCEPT_OWW]=0 [WAKE_URL]="" [WAKE_SHA]="" [AUTO_REBOOT]=false [REBOOT_TIME]="04:30" [ROTATE]=0)
 if [ -f "$(p "$SETUP_ENV")" ]; then
   while IFS='=' read -r k v; do      # parsed, never sourced
     for known in "${SAVED_KEYS[@]}"; do [ "$k" = "$known" ] && CFG[$k]="$v"; done
@@ -102,6 +106,7 @@ if [ -n "${CFG[WAKE_URL]}" ]; then
 fi
 [[ "${CFG[REBOOT_TIME]}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--reboot-time must be HH:MM"
 [[ "${CFG[AUTO_REBOOT]}" =~ ^(true|false)$ ]] || die "bad saved AUTO_REBOOT"
+[[ "${CFG[ROTATE]}" =~ ^(0|90|180|270)$ ]] || die "--rotate must be 0, 90, 180 or 270"
 [[ -z "${CFG[ADMIN_USER]}" || "${CFG[ADMIN_USER]}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --admin-user"
 [ "${CFG[ADMIN_USER]}" != "kiosk" ] || die "--admin-user cannot be the kiosk user"
 if [ "${CFG[KEEP_ADMIN_AUDIO]}" = 1 ] && [ -n "${CFG[BT_SINK]}" ]; then
@@ -193,6 +198,10 @@ if [ "$SKIP_PACKAGES" = 0 ]; then
   say "packages"
   run apt-get update
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${PACKAGES[@]}"
+  say "agent python environment"
+  put 0644 /opt/crow-kiosk/requirements.txt < "$SRC_DIR/files/requirements-agent.txt"
+  [ -x "$(p "$VENV/bin/python")" ] || run python3 -m venv --system-site-packages "$VENV"
+  run "$VENV/bin/pip" install --disable-pip-version-check --no-deps --require-hashes -r /opt/crow-kiosk/requirements.txt
 fi
 
 # ---- 3. kiosk user -----------------------------------------------------------------------------
@@ -216,7 +225,7 @@ for f in "$SRC_DIR"/agent/*.py; do
   put 0644 "/usr/local/lib/crow-kiosk/agent/$name" < "$f"
 done
 put 0755 /usr/local/lib/crow-kiosk/agent/bench_latency.py < "$SRC_DIR/agent/bench_latency.py"
-printf 'CROW_URL=%s\n' "$CROW_ORIGIN" | put 0644 /etc/crow-kiosk/kiosk.env
+printf 'CROW_URL=%s\nROTATE=%s\n' "$CROW_ORIGIN" "${CFG[ROTATE]}" | put 0644 /etc/crow-kiosk/kiosk.env
 python3 - "$CROW_ORIGIN" "${CFG[BT_SINK]}" "$WAKE_FILE" "${CFG[MIC_TARGET]}" <<'PY_AGENTCFG' | put 0644 /etc/crow-kiosk/agent.json
 import json, sys
 origin, mac, wake, mic = sys.argv[1:5]
@@ -229,6 +238,22 @@ python3 "$SRC_DIR/chromium_policy.py" "${POLICY_ARGS[@]}" | put 0644 /etc/chromi
 put 0644 /etc/systemd/system/crow-kiosk-cage.service < "$SRC_DIR/files/crow-kiosk-cage.service"
 put 0644 /etc/pam.d/crow-kiosk < "$SRC_DIR/files/pam-crow-kiosk"
 put 0644 /etc/udev/rules.d/90-crow-kiosk-backlight.rules < "$SRC_DIR/files/90-crow-kiosk-backlight.rules"
+# Touch rotation: wlroots does not rotate touch input with the output transform, so libinput gets a
+# calibration matrix for touchscreens. 180 is verified on the official 7" display; 90/270 are libinput's
+# documented rotation matrices and may need swapping on a given panel (check by tapping a corner).
+case "${CFG[ROTATE]}" in
+  90)  TOUCH_MATRIX="0 -1 1 1 0 0" ;;
+  180) TOUCH_MATRIX="-1 0 1 0 -1 1" ;;
+  270) TOUCH_MATRIX="0 1 0 -1 0 1" ;;
+  *)   TOUCH_MATRIX="" ;;
+esac
+if [ -n "$TOUCH_MATRIX" ]; then
+  printf '# Crow kiosk: touchscreen rotated %s degrees with the display (pi-setup --rotate).\nENV{ID_INPUT_TOUCHSCREEN}=="1", ENV{LIBINPUT_CALIBRATION_MATRIX}="%s"\n' \
+    "${CFG[ROTATE]}" "$TOUCH_MATRIX" | put 0644 /etc/udev/rules.d/91-crow-kiosk-touch-rotation.rules
+elif [ -e "$(p /etc/udev/rules.d/91-crow-kiosk-touch-rotation.rules)" ]; then
+  run rm -f /etc/udev/rules.d/91-crow-kiosk-touch-rotation.rules; changed
+fi
+put 0644 /etc/ssh/sshd_config.d/10-crow-kiosk.conf < "$SRC_DIR/files/10-crow-kiosk-sshd.conf"
 put 0644 /etc/systemd/system.conf.d/90-crow-kiosk-watchdog.conf < "$SRC_DIR/files/90-crow-kiosk-watchdog.conf"
 put 0644 /etc/NetworkManager/conf.d/90-crow-kiosk-wifi-powersave.conf < "$SRC_DIR/files/90-crow-kiosk-wifi-powersave.conf"
 sed -e "s/@AUTO_REBOOT@/${CFG[AUTO_REBOOT]}/" -e "s/@REBOOT_TIME@/${CFG[REBOOT_TIME]}/" \
@@ -296,11 +321,25 @@ say "services"
 run systemctl daemon-reload
 run udevadm control --reload
 run udevadm trigger --subsystem-match=backlight --action=add
+run udevadm trigger --subsystem-match=input --action=change
+if [ "$DRY" = 1 ] || sshd -t; then run systemctl reload ssh.service; else die "sshd -t rejected the configuration; not reloading ssh"; fi
 run systemctl enable crow-kiosk-cage.service
 run systemctl set-default graphical.target
 run systemctl disable --now avahi-daemon.service avahi-daemon.socket
 run touch /etc/cloud/cloud-init.disabled
 if [ "$DRY" = 0 ]; then dpkg-query -W -f='${Version}\n' chromium > /var/lib/crow-kiosk/chromium.version 2>/dev/null || true; fi
+
+# ---- 8b. the agent's interpreter must run onnxruntime (fail loudly, not as a crash loop later) ------
+say "agent runtime check"
+put 0644 /usr/local/lib/crow-kiosk/check-onnxruntime.py < "$SRC_DIR/files/check-onnxruntime.py"
+if [ "$DRY" = 1 ]; then
+  run runuser -u kiosk -- "$VENV/bin/python" /usr/local/lib/crow-kiosk/check-onnxruntime.py /var/lib/crow-kiosk/wake/melspectrogram.onnx
+elif [ "$SKIP_PACKAGES" = 0 ] || [ -x "$VENV/bin/python" ]; then
+  rc=0; runuser -u kiosk -- "$VENV/bin/python" /usr/local/lib/crow-kiosk/check-onnxruntime.py /var/lib/crow-kiosk/wake/melspectrogram.onnx || rc=$?
+  if [ "$rc" != 0 ]; then
+    die "onnxruntime does not run in $VENV (rc=$rc; 132 = SIGILL: a build this CPU cannot execute). The wake word would crash-loop; fix before rebooting."
+  fi
+fi
 
 # ---- 9. apply ------------------------------------------------------------------------------------
 say "apply"
@@ -321,8 +360,13 @@ fi
 # ---- 10. checks --------------------------------------------------------------------------------
 say "checks"
 if [ "$DRY" = 0 ]; then
-  sshd -T 2>/dev/null | grep -qx "passwordauthentication no" && echo "   ok   ssh is key-only" \
-    || echo "   WARN ssh password authentication is not off"
+  # capture first: with pipefail, piping sshd -T into an early-exiting grep fails (SIGPIPE to sshd)
+  SSHD_T="$(sshd -T 2>/dev/null || true)"
+  if grep -qx "passwordauthentication no" <<< "$SSHD_T" && grep -qx "kbdinteractiveauthentication no" <<< "$SSHD_T"; then
+    echo "   ok   ssh is key-only"
+  else
+    echo "   WARN ssh still allows passwords: check /etc/ssh/sshd_config.d/"
+  fi
   if tailscale status >/dev/null 2>&1; then echo "   ok   tailscale is logged in"
   else echo "   todo tailscale: run 'sudo tailscale up', approve the URL, then disable key expiry in the admin console"; fi
 fi
