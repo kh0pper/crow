@@ -279,10 +279,7 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
     w.done = true;
     try { onTimerDone(id, copy(w)); } catch (err) { console.error("[kiosk wm] onTimerDone failed:", err?.message || err); }
   }
-  return {
-    list: (id) => dev(id).windows.map(copy),
-    focused: (id) => copy(dev(id).windows.at(-1)),
-    open(id, spec) {
+  function open(id, spec) {
       const d = dev(id);
       const t = now();
       const evicted = [];
@@ -299,6 +296,22 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
       d.windows.push(w);
       if (w.kind === "timer") timers.set(`${id}:${w.id}`, setTimer(() => fire(id, w.id), Math.max(0, w.ends_at - t)));
       return { window: copy(w), evicted: evicted.filter(Boolean).map(copy) };
+  }
+  return {
+    list: (id) => dev(id).windows.map(copy),
+    focused: (id) => copy(dev(id).windows.at(-1)),
+    open,
+    /**
+     * Open a card or recipe, replacing the one of the same kind with the same title (case-insensitive):
+     * the same title never produces a second card. A TIMER is never replaced — two timers may share a
+     * name, and setting one must not cancel another. → { window, evicted, updated }.
+     */
+    put(id, spec) {
+      const title = String(spec.title || "").toLowerCase();
+      const same = spec.kind === "timer" ? null : dev(id).windows.find((w) => w.kind === spec.kind && String(w.title || "").toLowerCase() === title);
+      const gone = same ? [copy(remove(id, same.id))] : [];
+      const r = open(id, spec);
+      return { window: r.window, evicted: [...gone, ...r.evicted], updated: !!same };
     },
     close: (id, winId) => copy(remove(id, winId)),
     closeKind(id, kind, name) {
