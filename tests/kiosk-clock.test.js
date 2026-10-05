@@ -66,8 +66,8 @@ test("phrase table: every listed way of asking the time or the date is a shortcu
 });
 
 test("phrase table: questions that only CONTAIN those words go to the model", () => {
-  const no = ["what time is the game", "what's the date of the meeting", "what day is the party", "What time is it in Tokyo?", "What time does the store close today?", "What's the date tomorrow?", "What day is it tomorrow?", "What was the date yesterday?", "what's today's weather", "What's today's plan?", "today", "time", "date", "please", "what", "What is the time difference with London?", "What time is it going to rain?", "what day is it in Australia", "Tell me the time in Paris", "what's the date on the milk", "do you know what time the bus comes",
-    "qué hora es en Tokio", "a qué hora es la cena", "qué día es la fiesta", "qué fecha es el examen", "qué día es mañana", "hoy", "hora"];
+  const no = ["what time is the game", "what's the date of the meeting", "what day is the party", "What time is it in Tokyo?", "What time does the store close today?", "What's tomorrow?", "what's today's weather", "What's today's plan?", "today", "time", "date", "please", "what", "What is the time difference with London?", "What time is it going to rain?", "what day is it in Australia", "Tell me the time in Paris", "what's the date on the milk", "do you know what time the bus comes",
+    "qué hora es en Tokio", "a qué hora es la cena", "qué día es la fiesta", "qué fecha es el examen", "hoy", "hora"];
   for (const q of no) assert.equal(matchClockFastPath(q, { now: AT, tz: "America/Chicago" }), null, q);
 });
 
@@ -81,4 +81,59 @@ test("phrase table: CLOCK_PHRASES is the single source — each core phrase matc
       assert.match(matchClockFastPath(`${t.leads[0]} ${core} ${t.tails[0]}`, { now: AT, tz: "UTC" })?.say || "", want, `${key}: ${t.leads[0]} ${core} ${t.tails[0]}`);
     }
   }
+});
+
+// ── WM1a: tomorrow, yesterday, named dates ────────────────────────────────────────────────────
+const AT_SUN = Date.UTC(2026, 9, 4, 20, 42, 10);   // Sunday 4 October 2026, 3:42 PM in America/Chicago
+const chi = (q) => matchClockFastPath(q, { now: AT_SUN, tz: "America/Chicago" })?.say ?? null;
+const mad = (q) => matchClockFastPath(q, { now: AT_SUN, tz: "Europe/Madrid" })?.say ?? null;
+
+test("tomorrow and yesterday: answered with no model, in the language asked", () => {
+  for (const q of ["What day is tomorrow?", "What's tomorrow's date?", "What is the date tomorrow?", "What day is it tomorrow?", "Hey Crow, what's the date tomorrow, please?", "tomorrow's date"]) assert.equal(chi(q), "Tomorrow is Monday, October 5, 2026.", q);
+  for (const q of ["What was yesterday's date?", "What day was yesterday?", "What was the date yesterday?", "yesterday's date"]) assert.equal(chi(q), "Yesterday was Saturday, October 3, 2026.", q);
+  for (const q of ["¿Qué día es mañana?", "qué fecha es mañana", "¿Qué día será mañana?"]) assert.equal(mad(q), "Mañana es lunes, 5 de octubre de 2026.", q);
+  for (const q of ["¿Qué día fue ayer?", "qué fecha fue ayer"]) assert.equal(mad(q), "Ayer fue sábado, 3 de octubre de 2026.", q);
+});
+
+test("tomorrow and yesterday are the display's local days (a zone where it is already tomorrow)", () => {
+  const tokyo = (q) => matchClockFastPath(q, { now: AT_SUN, tz: "Asia/Tokyo" }).say;   // 05:42 on Monday 5 October there
+  assert.equal(tokyo("What day is tomorrow?"), "Tomorrow is Tuesday, October 6, 2026.");
+  assert.equal(tokyo("What day was yesterday?"), "Yesterday was Sunday, October 4, 2026.");
+});
+
+test("the weekday of a named date: the next time it comes round, in the forms speech-to-text writes", () => {
+  for (const q of ["What day is December 25th?", "What day of the week is December 25?", "What day is the 25th of December?", "What day does December 25th fall on?", "What day is Christmas?", "What day is December 25th, 2026?"]) assert.equal(chi(q), "December 25, 2026 is a Friday.", q);
+  assert.equal(chi("What day is October 4th?"), "That's today, Sunday.");
+  assert.equal(chi("What day is October 3rd?"), "October 3, 2027 is a Sunday.", "already past this year: next year's");
+  assert.equal(chi("What day was October 3rd?"), "October 3, 2026 was a Saturday.");
+  assert.equal(chi("What day is February 29th?"), "February 29, 2028 is a Tuesday.", "the next real one");
+  assert.equal(mad("¿Qué día es el 25 de diciembre?"), "El 25 de diciembre de 2026 es viernes.");
+  assert.equal(mad("¿Qué día cae Navidad?"), "El 25 de diciembre de 2026 es viernes.");
+  assert.equal(mad("¿Qué día fue el 3 de octubre?"), "El 3 de octubre de 2026 fue sábado.");
+});
+
+test("days until a named date", () => {
+  for (const q of ["How many days until December 25th?", "How many days till Christmas?", "How many days is it until Christmas?", "Hey, how many days until December 25, please?"]) assert.equal(chi(q), "82 days until December 25.", q);
+  assert.equal(chi("How many days until Halloween?"), "27 days until October 31.");
+  assert.equal(chi("How many days until October 5th?"), "It's tomorrow.");
+  assert.equal(chi("How many days until October 4th?"), "That's today.");
+  assert.equal(mad("¿Cuántos días faltan para Navidad?"), "Faltan 82 días para el 25 de diciembre.");
+  assert.equal(mad("¿Cuántos días quedan para el 31 de octubre?"), "Faltan 27 días para el 31 de octubre.");
+});
+
+test("anything that is not a plain date question still goes to the model", () => {
+  for (const q of ["What day is the meeting?", "What day is the party?", "How many days until the trip?", "How many days until my birthday?", "What day is February 30th?", "What day is the 45th of March?", "How many days until Easter?", "What day is December?", "How many days in December?",
+    "qué día es la fiesta", "cuántos días faltan para el examen", "What day is December 25th in Japan?", "What happened on December 25th?"]) assert.equal(chi(q), null, q);
+});
+
+test("ordinals as speech-to-text writes them: digits, one word, or two words", () => {
+  for (const q of ["What day is December twenty fifth?", "What day is December twenty-fifth?", "What day is the twenty fifth of December?", "What day is December 25?"]) assert.equal(chi(q), "December 25, 2026 is a Friday.", q);
+  assert.equal(chi("What day is October thirty first?"), "October 31, 2026 is a Saturday.");
+  assert.equal(chi("How many days until December thirty second?"), null);
+  assert.equal(chi("What day is December twenty?"), null, "a bare tens word is not a day");
+});
+
+test("'what's tomorrow?' is not a date question here: an assistant with a calendar answers it", () => {
+  assert.equal(chi("What's tomorrow?"), null);
+  assert.equal(chi("What is tomorrow?"), null);
 });

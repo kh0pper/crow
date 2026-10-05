@@ -31,7 +31,7 @@ const BUDGET_MS = 50;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */
 function cpuMs(fn) { const a = process.cpuUsage(); fn(); const d = process.cpuUsage(a); return (d.user + d.system) / 1000; }
 
-const RUNS = [" ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’"];
+const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twenty ", "the 25th of ", "cuantos dias faltan para ", "de ", " ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’"];
 const TAILS = ["", "!", " x", " what time is it", " zzz what time is it now please x", " | <title>"];
 
 test("adversarial input: 50,000-repeat runs, with and without a trailing mismatch — every matcher answers well inside 50 ms of CPU time", () => {
