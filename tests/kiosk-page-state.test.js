@@ -257,6 +257,30 @@ test("smoke 2026-10-04 item 7: the status ring keeps the last 20 displayed statu
   assert.equal(r.list().at(-1).text.length, 120);
 });
 
+test("error frames: no bot → banner; bot_too_large → its own caption (never the generic banner); other fatal → generic banner; recoverable → caption", async () => {
+  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
+  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
+  assert.deepEqual(errorDecision("no_bound_bot", false), { banner: "no_bot" });
+  assert.deepEqual(errorDecision("bot_too_large", false), { caption: "err_bot_too_large" });
+  assert.deepEqual(errorDecision("no_tts_profile", false), { banner: "error_generic" });
+  assert.deepEqual(errorDecision("turn_failed", true), { caption: "err_turn_failed" });
+  for (const L of ["en", "es"]) for (const d of [errorDecision("bot_too_large", false), errorDecision("turn_failed", true)]) assert.ok(STRINGS[L][d.caption], `${L}.${d.caption}`);
+  assert.notEqual(STRINGS.en.err_bot_too_large, STRINGS.en.err_turn_failed);
+  // "paired" (or no mode) is the paired display; session mode is below.
+  assert.deepEqual(errorDecision("bot_too_large", false, "paired"), { caption: "err_bot_too_large" });
+  assert.deepEqual(errorDecision("no_bound_bot", false, "paired"), { banner: "no_bot" });
+});
+
+test("session mode error frames: no assistant AND assistant-too-large both show the banner that links to the Kiosk panel; the rest is unchanged", async () => {
+  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
+  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
+  assert.deepEqual(errorDecision("no_bound_bot", false, "session"), { banner: "session_no_bot" });
+  assert.deepEqual(errorDecision("bot_too_large", false, "session"), { banner: "session_no_bot" });
+  assert.deepEqual(errorDecision("no_tts_profile", false, "session"), { banner: "error_generic" });
+  assert.deepEqual(errorDecision("turn_failed", true, "session"), { caption: "err_turn_failed" });
+  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].session_no_bot); assert.ok(STRINGS[L].session_bot_link); }
+});
+
 // ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----
 
 test("session mode: an ended login or a missing assistant halts with its own message — it never forgets a token or starts pairing", () => {

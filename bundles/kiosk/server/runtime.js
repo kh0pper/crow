@@ -14,6 +14,8 @@ import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskT
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
+import { createBotFit } from "./fit.js";
+import { kioskNowContext, matchClockFastPath } from "./clock.js";
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -63,6 +65,11 @@ export const KIOSK_FIRST_AUDIO_BUDGET_MS = 12_000;
 /** The fallback line in the display's language. */
 export function kioskFallbackText(lang) {
   return STRINGS[lang === "es" ? "es" : "en"].fallback_stuck;
+}
+
+/** Spoken + captioned when the bound assistant's prompt cannot fit the quick voice model (no model call is made). */
+export function kioskTooLargeText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].err_bot_too_large;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -152,21 +159,30 @@ export function createKioskRuntime(deps) {
     },
   });
   const withDb = async (fn) => { const db = deps.openDb(); try { return await fn(db); } finally { try { db.close?.(); } catch {} } };
+  // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (crow_wm on, the deny list, the suffix).
+  const botFit = createBotFit({
+    now, log,
+    assess: async (db, botId, memoryOn) => (deps.voice.assessBot ? deps.voice.assessBot({
+      db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS, promptSuffix: kioskPromptSuffix(),
+      extraTools: [createWmTool({ store: wm, deviceId: "", caps: null, emit: () => {} })],
+    }) : null),
+  });
 
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
     displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
+    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
       extraTools: [createWmTool({ store: wm, deviceId: device.id, caps, emit: (ev) => sink.event(ev) })],
-      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps),
+      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps) || matchClockFastPath(t, { now: now(), tz }),
       promptSuffix: kioskPromptSuffix(),
-      turnContext: kioskTurnContext(wm, device.id),
+      turnContext: `${kioskNowContext(now(), tz)}\n${kioskTurnContext(wm, device.id)}`,
       denyTools: KIOSK_DENY_TOOLS,
       sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
       maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
       firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
       fallbackText: kioskFallbackText(device.kiosk_settings?.lang),
+      tooLargeText: kioskTooLargeText(device.kiosk_settings?.lang),
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
@@ -240,11 +256,13 @@ export function createKioskRuntime(deps) {
       kiosk_settings: deps.deviceStore.normalizeKioskSettings({ lang }, null),
     };
   }
+  /** The session display's assistant; Automatic only picks one that fits (a session display starts with memories off). */
+  const sessionBot = (db) => resolveSessionBot(db, deps.settings, (id) => botFit(db, id, false));
   /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
   async function authorizeSessionHello(req, sessionToken, msg) {
     if (!deps.csrfTokenAccepted(req, msg?.csrf)) return null;
     return withDb(async (db) => {
-      const botId = await resolveSessionBot(db, deps.settings);
+      const botId = await sessionBot(db);
       if (!botId) return { close: { code: 4403, reason: "no_bot" } };
       return { device: await sessionDevice(db, sessionToken, botId) };
     });
@@ -373,9 +391,11 @@ export function createKioskRuntime(deps) {
       const body = await withDb(async (db) => {
         const devices = (await kioskDevices(db)).map((d) => ({ ...d, connected: hub.isConnected(d.id), latency: metrics.summary(d.id) }));
         const bots = (await db.execute({ sql: "SELECT bot_id, display_name FROM pi_bot_defs WHERE enabled = 1 ORDER BY display_name", args: [] })).rows.map((x) => ({ bot_id: x.bot_id, display_name: x.display_name }));
+        // fit / fit_memory: "full" | "no_skills" | "too_large" | null (unknown), with memories off / on.
+        for (const b of bots) { b.fit = await botFit(db, b.bot_id, false); b.fit_memory = await botFit(db, b.bot_id, true); }
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
         const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
-        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await resolveSessionBot(db, deps.settings) };
+        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db) };
         return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles"), dashboard_voice };
       });
       res.json(body);
@@ -387,6 +407,8 @@ export function createKioskRuntime(deps) {
       await withDb(async (db) => {
         const bot = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
         if (!bot) return res.status(400).json({ error: "bot_required" });
+        // A new display starts with memories off. Checked BEFORE the code is claimed.
+        if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
         const c = pairing.claim(code);
         if (c.error) return res.status(c.status).json({ error: c.error, retry_after_s: c.retry_after_s });
         let created = null;
@@ -412,16 +434,17 @@ export function createKioskRuntime(deps) {
         }
       });
     }));
-    // Which assistant answers the dashboard's Talk to Crow ("" = automatic: the first enabled one).
+    // Which assistant answers the dashboard's Talk to Crow ("" = automatic: the first enabled one that fits).
     r.post("/api/kiosk/admin/dashboard-voice", json, wrap(async (req, res) => {
       const botId = String(req.body?.bot_id || "").slice(0, 128);
       await withDb(async (db) => {
         if (botId) {
           const ok = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
           if (!ok) return res.status(400).json({ error: "bot_required" });
+          if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
         }
         await deps.settings.writeSetting(db, SESSION_BOT_SETTING, botId);
-        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await resolveSessionBot(db, deps.settings) });
+        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await sessionBot(db) });
       });
     }));
     r.post("/api/kiosk/admin/displays/:id", json, wrap(async (req, res) => {
@@ -434,6 +457,9 @@ export function createKioskRuntime(deps) {
         if (typeof b.bound_bot_id === "string") {
           const ok = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [b.bound_bot_id] })).rows[0];
           if (!ok) return res.status(400).json({ error: "bot_required" });
+          // Only a CHANGE of assistant is checked: a display already on a too-large one can still save its other settings.
+          const memoryOn = (b.kiosk_settings?.memory_integration ?? cur.kiosk_settings?.memory_integration) === true;
+          if (b.bound_bot_id !== cur.bound_bot_id && (await botFit(db, b.bound_bot_id, memoryOn, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
           patch.bound_bot_id = b.bound_bot_id;
         }
         for (const k of ["stt_profile_id", "tts_profile_id"]) if (typeof b[k] === "string") patch[k] = b[k] || null;

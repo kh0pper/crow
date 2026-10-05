@@ -199,7 +199,7 @@ test("session mode: no pairing and no stored token — the socket is the dashboa
   assert.match(connect, /const id = SESSION \? null : ls\.get\(LS_DEV\), tok = SESSION \? null : ls\.get\(LS_TOK\);/, "session mode never reads a device token");
   assert.match(connect, /if \(!SESSION && \(!id \|\| !tok\)\) \{ pair\(\); return; \}/, "session mode never pairs");
   assert.match(connect, /\/api\/kiosk\/session\$\{SESSION \? "\/dashboard" : ""\}/);
-  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS \}/);
+  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS, tz: TZ \}/, "session mode reports the browser's time zone too");
   assert.match(connect, /closeDecision\(ev\.code, ev\.reason, SESSION \? "session" : "paired"\)/);
   assert.doesNotMatch(src, /ls\.set\([^)]*\)[^\n]*SESSION|SESSION[^\n]*ls\.set\(/, "nothing is stored for a session display");
   assert.doesNotMatch(read("kiosk.html"), /data-mode/, "the mode is stamped by the server on /display/session only");
@@ -220,7 +220,10 @@ test("session mode: the dashboard can stop the mic, audio and socket at once; Es
 test("session mode: 'no assistant' links to the Kiosk panel in the top window; the link is built with DOM calls", () => {
   const src = read("kiosk.js");
   assert.match(src, /a\.href = "\/dashboard\/kiosk"; a\.target = "_top"; a\.textContent = t\("session_bot_link"\)/);
-  assert.match(src, /if \(m\.code === "no_bound_bot"\) banner\(SESSION \? "session_no_bot" : "no_bot"\)/);
+  // Which banner an error frame shows is decided in state.js (errorDecision, unit-tested): in session
+  // mode both "no assistant" and "assistant too large" show session_no_bot — the banner that gets this link.
+  assert.match(src, /errorDecision\(m\.code, m\.recoverable, SESSION \? "session" : "paired"\); if \(d\.banner\) banner\(d\.banner\)/);
+  assert.match(src, /if \(key === "session_no_bot"\) b\.append\(" ", kioskPanelLink\(\)\)/);
   const css = read("kiosk.css");
   assert.match(css, /\[data-mode="session"\] \.k-banner\s*\{[^}]*right:/, "the banner leaves room for the dashboard's close button");
   assert.match(css, /\[data-mode="session"\] \.k-top\s*\{[^}]*padding-right:/);

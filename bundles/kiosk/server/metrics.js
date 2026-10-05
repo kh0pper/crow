@@ -51,6 +51,9 @@ export function createMetricsStore({ max = 100 } = {}) {
      * fallback's first audio is the filler), not aborted, silence-ended. Such a turn
      * with no audio (e2e null) is a FAILURE, counted as Infinity, never dropped. So is a turn
      * that ended on the fallback line (r.failed): its audio is the apology, not an answer.
+     * r.failed (from the voice turn): tool_rounds | tool_repeat | no_text | budget | error |
+     * bot_too_large (the assistant's prompt cannot fit the quick voice model: no model call) |
+     * context_full (the request would not fit the context: not sent). Every one is a failure here.
      */
     summary(dev, { last = 20 } = {}) {
       const ok = [...(devs.get(dev)?.values() || [])].filter((r) => r.route === "fast" && !r.fast_path && !r.escalated && !r.degraded && !r.aborted && !r.barged && r.vad_reason === "silence").slice(-last);

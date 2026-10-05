@@ -40,6 +40,26 @@ export const CLIENT_SCRIPT = `
     options.forEach(function (o) { opt(sel, o[0], o[1], o[0] === current); });
     return sel;
   }
+  /** An assistant's fit on the quick voice model: 'full' | 'no_skills' | 'too_large' | null (unknown), by the display's memory setting. */
+  function fitOf(b, memOn) { return b ? (memOn ? b.fit_memory : b.fit) : null; }
+  function botLabel(b, memOn) {
+    var lv = fitOf(b, memOn), name = b.display_name || b.bot_id;
+    return lv === 'too_large' ? name + ' — ' + S.fit_tag_too_large : lv === 'no_skills' ? name + ' — ' + S.fit_tag_no_skills : name;
+  }
+  /** The status line under an assistant picker. It follows the selection, so the warning shows BEFORE Pair/Save. */
+  function fitLine(bots, sel, memOn) {
+    var p = el('p', 'kk-fit');
+    function show() {
+      var b = null;
+      bots.forEach(function (x) { if (x.bot_id === sel.value) b = x; });
+      var lv = fitOf(b, memOn());
+      p.className = 'kk-fit' + (lv === 'too_large' ? ' kk-fit-bad' : lv === 'no_skills' ? ' kk-fit-warn' : '');
+      p.textContent = lv ? S['fit_' + lv] : '';
+    }
+    sel.addEventListener('change', show);
+    show();
+    return { node: p, show: show };
+  }
   /** Only what changed is sent: an untouched (or unset) field is never rebound by Save. */
   function savePatch(a, b) {
     var p = {}, any = false;
@@ -73,11 +93,12 @@ export const CLIENT_SCRIPT = `
     var code = el('input'); code.name = 'code'; code.inputMode = 'numeric'; code.autocomplete = 'off'; code.placeholder = '123 456'; code.required = true;
     var name = el('input'); name.name = 'name'; name.placeholder = S.name; name.maxLength = 64;
     var bot = el('select'); bot.name = 'bot_id'; opt(bot, '', '— ' + S.bot + ' —', true);
-    data.bots.forEach(function (b) { opt(bot, b.bot_id, b.display_name || b.bot_id, false); });
+    data.bots.forEach(function (b) { opt(bot, b.bot_id, botLabel(b, false), false); });
+    var fit = fitLine(data.bots, bot, function () { return false; });   // a new display starts with memories off
     var go = el('button', 'btn btn-primary', S.approve); go.type = 'submit';
     var msg = el('p', 'kk-msg');
     [[S.code, code], [S.name, name], [S.bot, bot]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); form.appendChild(l); });
-    form.appendChild(go); form.appendChild(msg);
+    form.appendChild(fit.node); form.appendChild(go); form.appendChild(msg);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       if (!bot.value) { msg.textContent = S.bot_required; return; }
@@ -102,12 +123,14 @@ export const CLIENT_SCRIPT = `
     box.appendChild(el('p', 'kk-dim', S.dash_voice_intro));
     if (!data.bots.length) { box.appendChild(el('p', 'kk-warn', S.dash_voice_none)); return; }
     var sel = el('select'); opt(sel, '', S.dash_voice_auto, !dv.bot_id);
-    data.bots.forEach(function (b) { opt(sel, b.bot_id, b.display_name || b.bot_id, b.bot_id === dv.bot_id); });
+    data.bots.forEach(function (b) { opt(sel, b.bot_id, botLabel(b, false), b.bot_id === dv.bot_id); });
     var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
+    box.appendChild(fitLine(data.bots, sel, function () { return false; }).node);   // same status as the display pickers
     var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
     function showNow() {
       var hit = data.bots.filter(function (b) { return b.bot_id === dv.effective_bot_id; })[0];
-      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : '';
+      now.className = hit ? 'kk-dim' : 'kk-warn';
+      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : S.dash_voice_none_fit;   // assistants exist, none fits
     }
     showNow();
     sel.addEventListener('change', function () {
@@ -127,7 +150,8 @@ export const CLIENT_SCRIPT = `
     card.appendChild(el('p', 'kk-dim', d.last_seen ? fill(S.last_seen, { when: new Date(d.last_seen).toLocaleString() }) : S.never_seen));
     var lat = d.latency || {};
     card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms == null ? '>' + 3000 : lat.median_ms, p90: lat.p90_ms == null ? '>' + 3000 : lat.p90_ms, n: lat.n }) + (lat.no_audio ? ' · ' + lat.no_audio + ' ✗' : '') : S.no_latency));   // Infinity serializes as null
-    var bot = pick(data.bots.map(function (b) { return [b.bot_id, b.display_name || b.bot_id]; }), d.bound_bot_id);
+    var memSaved = !!(d.kiosk_settings || {}).memory_integration;
+    var bot = pick(data.bots.map(function (b) { return [b.bot_id, botLabel(b, memSaved)]; }), d.bound_bot_id);
     var stt = pick(data.stt_profiles.map(function (p) { return [p.id, p.name]; }), d.stt_profile_id);
     var tts = pick(data.tts_profiles.map(function (p) { return [p.id, p.name]; }), d.tts_profile_id);
     var ks = d.kiosk_settings || {};
@@ -139,7 +163,9 @@ export const CLIENT_SCRIPT = `
     function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value }; }
     var initial = null;
     initial = current();
-    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
+    var fit = fitLine(data.bots, bot, function () { return mem.checked; });
+    mem.addEventListener('change', fit.show);
+    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn));
     var msg = el('span', 'kk-msg');
@@ -166,7 +192,7 @@ export const CLIENT_SCRIPT = `
         diag.appendChild(el('p', 'kk-dim', S.diag_cols));
         (j.turns || []).slice(0, 20).forEach(function (t) {
           var tm = t.timings || {};
-          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms + (tm.stt_early === 'used' ? ' (early ' + tm.stt_early_ms + ')' : ''), tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '') + (t.failed ? ' · ✗ ' + t.failed : '')].join(' · ')));
+          diag.appendChild(el('p', 'kk-row', [new Date(t.at).toLocaleTimeString(), t.e2e_ms == null ? (t.barged ? S.turn_barged : S.diag_failed) : t.e2e_ms, tm.stt_ms == null ? '—' : tm.stt_ms + (tm.stt_early === 'used' ? ' (early ' + tm.stt_early_ms + ')' : ''), tm.llm_first_token_ms == null ? '—' : tm.llm_first_token_ms, tm.tts_first_chunk_ms == null ? '—' : tm.tts_first_chunk_ms, (t.fast_path ? 'fast-path' : (t.route || '?')) + (t.degraded ? ' (' + t.degraded + ')' : '') + (t.vad_reason ? ' · ' + t.vad_reason : '') + (tm.prompt_fit ? ' · ' + tm.prompt_fit : '') + (t.failed ? ' · ✗ ' + t.failed : '')].join(' · ')));
         });
       });
     });
@@ -203,6 +229,11 @@ const STYLES = `
   .kk-wrap { max-width: 880px; }
   .kk-dim, .kk-hint { color: var(--crow-text-secondary); }
   .kk-warn { color: var(--crow-warning); }
+  .kk-fit { margin: 0 0 6px; font-size: .9rem; color: var(--crow-text-secondary); }
+  .kk-fit:empty { display: none; }
+  .kk-fit-warn { color: var(--crow-warning); }
+  .kk-fit-bad { color: var(--crow-error); font-weight: 600; }
+  .kk-fit-bad::before { content: "\\26A0  "; }
   .kk-card { border: 1px solid var(--crow-border); border-radius: 14px; padding: 12px 16px; margin: 12px 0; background: var(--crow-bg-surface); }
   .kk-card h3 { display: flex; gap: 12px; align-items: baseline; margin: 0 0 4px; }
   .kk-on { color: var(--crow-success); font-size: .85rem; } .kk-off { color: var(--crow-text-muted); font-size: .85rem; }

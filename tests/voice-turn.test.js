@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE } from "../servers/gateway/voice/turn.js";
+import { createVoiceTurnRunner, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
 function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { t += ms; }, advance: (ms) => { t += ms; } }; }
@@ -9,7 +9,7 @@ function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { 
 function scriptedChat(rounds, log, state) {
   return {
     async *chatStream(messages, tools, opts) {
-      log.push({ messages: messages.map((m) => ({ ...m })), tools: tools.map((t) => t.name), opts, systemAfterZero: messages.slice(1).some((m) => m.role === "system") });
+      log.push({ messages: messages.map((m) => ({ ...m })), tools: tools.map((t) => t.name), toolDefs: tools, opts, systemAfterZero: messages.slice(1).some((m) => m.role === "system") });
       const events = rounds[state.i++] || [{ type: "done" }];
       for (const ev of events) {
         if (opts.signal?.aborted) return;
@@ -31,7 +31,7 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
   const c = clock();
   const log = [];
   const state = { i: 0 };
-  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [], logs: [] };
+  const calls = { chatKeys: [], executed: [], spoken: [], sleeps: 0, acquired: [], routed: [], hasTools: [], logs: [] };
   const deps = {
     log: (m) => calls.logs.push(m),
     now: c.now, sleep: async (ms) => { calls.sleeps++; await c.sleep(ms); },
@@ -44,15 +44,16 @@ function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is the capi
     resolveKey: async (key) => ({ baseUrl: "http://esc", model: key }),
     acquire: async (p) => { calls.acquired.push(p); return acquire(p); },
     probeReady: async () => probe(),
-    contextLenFor: async () => ctx,
-    chooseVoiceRoute: (msgs) => (calls.routed.push(msgs.map((m) => m.role)), route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
+    contextLenFor: async (key) => (typeof ctx === "function" ? ctx(key) : ctx),
+    chooseVoiceRoute: (msgs, o) => (calls.routed.push(msgs.map((m) => m.role)), calls.hasTools.push(o?.hasTools), route === "fast" ? { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" } : { route: "escalate", reason: "tool-intent", key: "crow-chat/qwen3.6-35b-a3b" }),
     fastKey: "crow-voice/qwen3.5-4b",
     getChatTools: () => chatTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
     createToolExecutor: () => ({ executeToolCalls: async (tcs) => { calls.executed.push(...tcs.map((t) => t.name)); return tcs.map((t) => ({ id: t.id, name: t.name, result: "ok" })); }, close: async () => {} }),
     maxToolRounds: 10,
     effectiveToolName: (tc) => (/^crow_(memory|projects|blog)$/.test(tc.name) && tc.arguments?.action ? "crow_" + String(tc.arguments.action).replace(/^crow_/, "") : tc.name),
     isExternalSendTool: () => false, isConnectedAddonTool: () => false, botVoiceScope: () => null,
-    generateSystemPrompt: async ({ botDef }) => `PERSONA:${botDef.display_name}`,
+    // `skills_text` stands in for the bound bot's resolved skill bodies (the real generator inlines them).
+    generateSystemPrompt: async ({ botDef, omitSkills }) => `PERSONA:${botDef.display_name}${botDef.skills_text && !omitSkills ? `\n\n${botDef.skills_text}` : ""}`,
     isMemoryTool: (n) => n === "crow_memory" || n === "crow_search_memories",
   };
   const events = [];
@@ -538,4 +539,248 @@ test("review 4: a barge-in over the fallback line marks the turn aborted, not fa
   assert.equal(r.aborted, true);
   assert.equal(r.failed, null);
   assert.equal(r.timings.failed, undefined);
+});
+
+// ── Prompt fit (a bound assistant whose skills do not fit the quick voice model) ──────────────────
+const FAST_CTX = 8192;
+const estOf = (entry) => Math.ceil((JSON.stringify(entry.messages).length + JSON.stringify(entry.toolDefs).length) / 3.2);
+/** A general assistant with many skills: ~35k tokens of skill text behind a short persona. */
+const bigBot = (over = {}) => ({ bot_id: "general", display_name: "General", fast_voice_model: "crow-voice/qwen3.5-4b", skills_text: "SKILL ".repeat(19_000), ...over });
+
+test("prompt fit: skills that overflow the 8,192 context are left out — the request fits, the system message is stable, one log line per display", async () => {
+  const h = harness({ bot: bigBot(), ctx: FAST_CTX, rounds: [[{ type: "content_delta", text: "Lisbon. " }, { type: "done" }], [{ type: "content_delta", text: "Madrid. " }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, promptSuffix: "KIOSK" });
+  assert.equal(h.log.length, 1, "the turn ran");
+  assert.equal(h.log[0].messages[0].content, "PERSONA:General\n\nKIOSK", "persona + suffix kept, skill bodies gone");
+  assert.ok(estOf(h.log[0]) + 128 + 64 <= FAST_CTX, `request estimate ${estOf(h.log[0])} is inside the context`);
+  assert.ok(h.log[0].opts.maxTokens > 64, "a real completion budget, not the 64-token floor");
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.prompt_fit, "no_skills");
+  assert.ok(r.timings.est_prompt_tokens + r.timings.max_tokens + 128 <= FAST_CTX);
+  assert.deepEqual(h.calls.spoken, ["Lisbon."]);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "and Spain?", sink: h.sink, promptSuffix: "KIOSK" });
+  assert.equal(h.log[1].messages[0].content, h.log[0].messages[0].content, "byte-stable system message at this fit level");
+  const lines = h.calls.logs.filter((l) => /without its skills/.test(l));
+  assert.equal(lines.length, 1, "logged once per display, not every turn");
+  assert.match(lines[0], /kiosk-a/); assert.match(lines[0], /general/); assert.match(lines[0], /8192/);
+  assert.match(lines[0], /~\d{5} prompt tokens/, "the numbers are in the line");
+});
+
+test("prompt fit: a prompt that fits is sent unchanged (skills kept, no prompt_fit in the timings)", async () => {
+  const bot = bigBot({ skills_text: "SKILL ".repeat(200) });
+  const h = harness({ bot, ctx: FAST_CTX });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink, promptSuffix: "KIOSK" });
+  assert.equal(h.log[0].messages[0].content, `PERSONA:General\n\n${bot.skills_text}\n\nKIOSK`);
+  assert.equal(r.timings.prompt_fit, undefined);
+  assert.equal(h.log[0].opts.maxTokens, 600);
+  assert.ok(!h.calls.logs.some((l) => /skills/.test(l)));
+});
+
+test("prompt fit: unknown context → today's behaviour (full prompt, default completion)", async () => {
+  const h = harness({ bot: bigBot(), ctx: null });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink });
+  assert.match(h.log[0].messages[0].content, /SKILL SKILL/);
+  assert.equal(h.log[0].opts.maxTokens, 600);
+  assert.equal(r.failed, null);
+  assert.equal(r.timings.prompt_fit, undefined);
+});
+
+test("prompt fit: too large even without skills → NO model call; the specific line is spoken and captioned; error bot_too_large (not recoverable); failed = bot_too_large", async () => {
+  const h = harness({ bot: bigBot({ display_name: "P".repeat(40_000) }), ctx: FAST_CTX });
+  const line = "Este asistente es demasiado grande.";
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink, tooLargeText: line, firstAudioBudgetMs: 12_000 });
+  assert.equal(h.log.length, 0, "no request reached the model");
+  assert.equal(r.failed, "bot_too_large");
+  assert.equal(r.timings.failed, "bot_too_large");
+  assert.equal(r.timings.prompt_fit, "too_large");
+  assert.ok(r.timings.est_prompt_tokens > FAST_CTX);
+  assert.equal(r.route, "fast");
+  assert.deepEqual(h.calls.spoken, [line]);
+  assert.deepEqual(h.events.filter((e) => e.type === "caption_delta").map((e) => e.text), [line]);
+  const errs = h.events.filter((e) => e.type === "error");
+  assert.deepEqual(errs, [{ type: "error", code: "bot_too_large", recoverable: false }]);
+  assert.ok(h.events.findIndex((e) => e.type === "tts_end") < h.events.indexOf(errs[0]), "the error follows the spoken line (the page replaces the caption with its own string)");
+  assert.deepEqual(h.runner.convo.get("kiosk-a"), [], "nothing is saved");
+  assert.ok(h.calls.logs.some((l) => /too large/.test(l) && /general/.test(l) && /8192/.test(l)));
+  // Default line when the caller passes none.
+  const d = harness({ bot: bigBot({ display_name: "P".repeat(40_000) }), ctx: FAST_CTX });
+  await d.runner.runVoiceTurn({ db: {}, device: d.device, transcript: "hi", sink: d.sink });
+  assert.deepEqual(d.calls.spoken, [BOT_TOO_LARGE_TEXT]);
+});
+
+test("prompt fit: the escalated route is checked against the escalation model's context (full prompt there; too large there → no call)", async () => {
+  const ctx = (key) => (key === "crow-chat/qwen3.6-35b-a3b" ? 131_072 : FAST_CTX);
+  const h = harness({ bot: bigBot(), ctx, route: "escalate", probe: () => true });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "search my notes", sink: h.sink });
+  assert.equal(r.escalated, true);
+  assert.match(h.log[0].messages[0].content, /SKILL SKILL/, "the larger model takes the full prompt");
+  assert.equal(r.timings.prompt_fit, undefined);
+  // Escalation unavailable → the fast model, with the fast model's fit (no skills) and the degraded note.
+  const cold = harness({ bot: bigBot(), ctx, route: "escalate", acquire: async () => { throw Object.assign(new Error("reserved"), { code: "box_reserved" }); } });
+  const rc = await cold.runner.runVoiceTurn({ db: {}, device: cold.device, transcript: "search my notes", sink: cold.sink });
+  assert.equal(rc.degraded, "box_reserved");
+  assert.equal(rc.timings.prompt_fit, "no_skills");
+  assert.doesNotMatch(cold.log[0].messages[0].content, /SKILL SKILL/);
+  assert.match(cold.log[0].messages[0].content, /^PERSONA:General\n\nThe larger model is not available/);
+  assert.ok(estOf(cold.log[0]) + 192 <= FAST_CTX);
+  // Too large for the escalation model as well.
+  const small = harness({ bot: bigBot(), ctx: (key) => (key === "crow-chat/qwen3.6-35b-a3b" ? 16_384 : FAST_CTX), route: "escalate", probe: () => true });
+  const rs = await small.runner.runVoiceTurn({ db: {}, device: small.device, transcript: "search my notes", sink: small.sink });
+  assert.equal(rs.escalated, true);
+  assert.equal(rs.timings.prompt_fit, "no_skills", "35k tokens of skills do not fit 16k either");
+  assert.ok(estOf(small.log[0]) + 192 <= 16_384);
+});
+
+test("prompt fit: a later tool round that no longer fits is never sent — the turn ends on the fallback line (context_full)", async () => {
+  const h = harness({ ctx: FAST_CTX, chatTools: ["crow_projects"], rounds: [
+    [{ type: "tool_call", id: "t1", name: "crow_projects", arguments: { action: "list_sources" } }, { type: "done" }],
+    [{ type: "content_delta", text: "never sent" }, { type: "done" }],
+  ] });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "R".repeat(40_000) })), close: async () => {} });
+  const runner = createVoiceTurnRunner(h.deps);
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "list my sources", sink: h.sink, fallbackText: "FALLBACK" });
+  assert.equal(h.log.length, 1, "round 2 (≈12.5k tokens against 8,192) was not sent");
+  assert.equal(r.failed, "context_full");
+  assert.deepEqual(h.calls.spoken, ["FALLBACK"]);
+  assert.ok(!h.events.some((e) => e.type === "error"));
+  assert.deepEqual(runner.convo.get("kiosk-a").map((m) => m.content), ["list my sources", "FALLBACK"], "the oversized tool result is not saved");
+  assert.ok(h.calls.logs.some((l) => /turn failed \(context_full\)/.test(l)));
+});
+
+test("prompt fit: saved history never pushes a fitting bot over — the oldest exchanges are dropped, the system and the current question stay", async () => {
+  const answer = "W".repeat(5000) + ". ";
+  const h = harness({ ctx: FAST_CTX, rounds: Array.from({ length: 8 }, () => [{ type: "content_delta", text: answer }, { type: "done" }]) });
+  let r = null;
+  for (let i = 0; i < 8; i++) r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: `question ${i}`, sink: h.sink });
+  for (const [i, entry] of h.log.entries()) {
+    assert.ok(estOf(entry) + 192 <= FAST_CTX, `turn ${i}: estimate ${estOf(entry)} stays inside the context`);
+    assert.equal(entry.messages[0].role, "system");
+    assert.equal(entry.messages.at(-1).content, `question ${i}`);
+    assert.ok(entry.opts.maxTokens >= 64);
+  }
+  const last = h.log.at(-1).messages;
+  assert.equal(last[1].role, "user", "trimmed history still starts on a user message");
+  assert.ok(last.length < 2 + 7 * 2, "older exchanges were dropped");
+  assert.ok(last.length > 2, "recent history is kept");
+  assert.ok(r.timings.history_dropped >= 2);
+  assert.equal(r.failed, null);
+  assert.equal(h.log.length, 8, "every turn ran");
+});
+
+test("prompt fit: a question that cannot fit even with no history is not sent (context_full)", async () => {
+  const h = harness({ ctx: FAST_CTX });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink, turnContext: "C".repeat(40_000), fallbackText: "FALLBACK" });
+  assert.equal(h.log.length, 0);
+  assert.equal(r.failed, "context_full");
+  assert.deepEqual(h.calls.spoken, ["FALLBACK"]);
+});
+
+test("a real provider error keeps turn_failed and is logged server-side with its message", async () => {
+  const h = harness();
+  h.deps.createChatAdapter = async () => ({ async *chatStream() { throw new Error("upstream 400: context length exceeded"); } });
+  const runner = createVoiceTurnRunner(h.deps);
+  const r = await runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sink: h.sink });
+  assert.equal(r.failed, "error");
+  assert.ok(h.events.some((e) => e.type === "error" && e.code === "turn_failed" && e.recoverable === true));
+  assert.ok(h.calls.logs.some((l) => /kiosk-a/.test(l) && /upstream 400: context length exceeded/.test(l)), "the gateway log names the cause");
+});
+
+test("assessBot: the bind-time fit check runs the turn's own ladder (tools filtered the same way, fast model's context)", async () => {
+  const keys = [];
+  const mk = (bot) => harness({ bot, ctx: (key) => { keys.push(key); return FAST_CTX; } });
+  const opts = { db: {}, extraTools: [{ definition: { name: "crow_wm", description: "show", inputSchema: { type: "object" } }, execute: async () => "{}" }], denyTools: ["crow_delegate"], promptSuffix: "KIOSK" };
+  const small = mk(bigBot({ skills_text: "" }));
+  const a = await small.runner.assessBot({ ...opts, botId: "general" });
+  assert.equal(a.level, "full");
+  assert.equal(a.ctx, FAST_CTX);
+  assert.equal(a.model, "crow-voice/qwen3.5-4b");
+  assert.deepEqual(keys, ["crow-voice/qwen3.5-4b"]);
+  assert.equal((await mk(bigBot()).runner.assessBot({ ...opts, botId: "general" })).level, "no_skills");
+  const big = await mk(bigBot({ display_name: "P".repeat(40_000) })).runner.assessBot({ ...opts, botId: "general" });
+  assert.equal(big.level, "too_large");
+  assert.ok(big.est_tokens > FAST_CTX && big.est_no_skills_tokens > FAST_CTX - 1024);
+  assert.equal(await small.runner.assessBot({ ...opts, botId: "missing" }), null, "an unknown or disabled bot has no fit");
+  // The estimate matches what the turn would send: same system message, same tool list (memory off, deny applied, extra added).
+  const t = mk(bigBot({ skills_text: "" }));
+  await t.runner.runVoiceTurn({ db: {}, device: t.device, transcript: "hi", sink: t.sink, extraTools: opts.extraTools, denyTools: opts.denyTools, promptSuffix: "KIOSK" });
+  assert.equal(a.est_tokens, Math.ceil((JSON.stringify([t.log[0].messages[0]]).length + JSON.stringify(t.log[0].toolDefs).length) / 3.2));
+  const withMem = await small.runner.assessBot({ ...opts, botId: "general", memoryOn: true });
+  assert.ok(withMem.est_tokens > a.est_tokens, "memory on adds the memory tool to the estimate");
+});
+
+// ── Live test 2026-10-04: every plain question ran two crow_wm rounds (7.2 s) and left junk cards ──
+/** A display tool offered only when the plain transcript asks for it (the kiosk's crow_wm). */
+function displayTool(seen = []) {
+  return {
+    definition: { name: "crow_wm", description: "show", inputSchema: { type: "object" } },
+    when: (t) => /timer|show me/i.test(t),
+    execute: async (args, turn) => { seen.push({ args, turn }); return JSON.stringify({ ok: true }); },
+  };
+}
+
+test("an extra tool with when(): plain questions never see it and end in ONE model round; display questions do", async () => {
+  for (const q of ["Tell me a joke", "What time is it?"]) {
+    const h = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "content_delta", text: "Here you go. " }, { type: "done" }]] });
+    const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: q, sink: h.sink, extraTools: [displayTool()], turnContext: "[Display] Open windows: none. show me a timer" });
+    assert.deepEqual(h.log[0].tools, ["crow_projects"], `${q}: the display tool is not offered (and the context prefix never counts)`);
+    assert.equal(h.log.length, 1, `${q}: one model round`);
+    assert.equal(r.failed, null);
+    assert.equal(r.timings.tool_rounds, undefined);
+  }
+  for (const q of ["set a timer for one minute and label it check", "show me the shopping list"]) {
+    const seen = [];
+    const h = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "timer 1 minute check" } }, { type: "done" }], [{ type: "content_delta", text: "Done. " }, { type: "done" }]] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: q, sink: h.sink, extraTools: [displayTool(seen)], turnContext: "[Display] Open windows: none." });
+    assert.deepEqual(h.log[0].tools, ["crow_projects", "crow_wm"], q);
+    assert.deepEqual(seen, [{ args: { command: "timer 1 minute check" }, turn: { transcript: q } }], "the tool gets the plain transcript, never the context prefix");
+  }
+});
+
+test("an extra tool that was not offered is refused if force-called: never executed, the model is told to answer aloud, and the next turn is not 'tool context'", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [
+    [{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "display Info | a joke" } }, { type: "done" }],
+    [{ type: "content_delta", text: "Why did the crow cross the road? " }, { type: "done" }],
+    [{ type: "content_delta", text: "Lisbon. " }, { type: "done" }],
+  ] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Tell me a joke", sink: h.sink, extraTools: [displayTool(seen)] });
+  assert.deepEqual(seen, [], "never executed: nothing can be opened");
+  assert.deepEqual(h.log[0].tools, [], "nothing was offered");
+  const refusal = h.log[1].messages.at(-1);
+  assert.equal(refusal.role, "tool");
+  assert.match(refusal.content, /aloud/i);
+  assert.match(refusal.content, /not needed/i);
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.calls.spoken, ["Why did the crow cross the road?"]);
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, extraTools: [displayTool(seen)] });
+  assert.deepEqual(h.calls.routed.at(-1), ["system", "user", "assistant", "user"], "the refused call and its result are invisible to the router");
+});
+
+test("when() and routing: a bot whose only tool is the hidden display tool routes with hasTools=false; offered → true; no when() keeps today's behaviour", async () => {
+  const plain = harness({ chatTools: [] });
+  await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "Tell me a joke", sink: plain.sink, extraTools: [displayTool()] });
+  assert.deepEqual(plain.calls.hasTools, [false]);
+  const shown = harness({ chatTools: [] });
+  await shown.runner.runVoiceTurn({ db: {}, device: shown.device, transcript: "show me the shopping list", sink: shown.sink, extraTools: [displayTool()] });
+  assert.deepEqual(shown.calls.hasTools, [true]);
+  const always = harness({ chatTools: [] });
+  const { when, ...noWhen } = displayTool();
+  await always.runner.runVoiceTurn({ db: {}, device: always.device, transcript: "Tell me a joke", sink: always.sink, extraTools: [noWhen] });
+  assert.deepEqual(always.log[0].tools, ["crow_wm"], "an extra tool without when() is always offered");
+  assert.deepEqual(always.calls.hasTools, [true]);
+});
+
+test("when() and prompt fit: the fit level is decided with EVERY extra tool counted, so hiding one never flips the system message between turns", async () => {
+  // A bot that fits the context only when the (large) display tool is left out.
+  const wide = { ...displayTool(), definition: { name: "crow_wm", description: "D".repeat(6000), inputSchema: { type: "object" } } };
+  const bot = bigBot({ skills_text: "SKILL ".repeat(3600) });   // ~6.7k tokens: inside 8,192 − 1,024 alone, outside it with the tool
+  const h = harness({ bot, ctx: FAST_CTX, chatTools: [], rounds: [[{ type: "content_delta", text: "One. " }, { type: "done" }], [{ type: "content_delta", text: "Two. " }, { type: "done" }]] });
+  const a = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Tell me a joke", sink: h.sink, extraTools: [wide] });
+  const b = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me the shopping list", sink: h.sink, extraTools: [wide] });
+  assert.deepEqual(h.log.map((e) => e.tools.length), [0, 1]);
+  assert.equal(a.timings.prompt_fit, "no_skills");
+  assert.equal(b.timings.prompt_fit, "no_skills");
+  assert.equal(h.log[0].messages[0].content, h.log[1].messages[0].content, "same system message whether or not the tool is offered");
+  const fit = await h.runner.assessBot({ db: {}, botId: "general", extraTools: [wide] });
+  assert.equal(fit.level, "no_skills", "the panel's check counts the tool the same way");
 });

@@ -95,6 +95,19 @@ export function pairStartDecision(status, body, attempt) {
   if (status === 200 && body && /^\d{6}$/.test(String(body.code)) && body.pair_id && body.poll_secret) return { action: "show" };
   return status === 429 ? { action: "retry", hint: "pair_busy", ms: 15_000 } : { action: "retry", hint: "pair_error", ms: backoffMs(attempt) };
 }
+/**
+ * What an `error` frame shows: a banner (a display that cannot work until its settings change)
+ * or a caption (this turn only). On a paired display bot_too_large is a caption: the server has
+ * just spoken and captioned the same line, and this replaces it in the page's language. In session
+ * mode (the dashboard's Talk to Crow) both "no assistant" and "assistant too large" show the
+ * banner that links to the Kiosk panel, where the assistant is chosen; the spoken line stays as the caption.
+ */
+export function errorDecision(code, recoverable, mode) {
+  const session = mode === "session";
+  if (code === "no_bound_bot") return { banner: session ? "session_no_bot" : "no_bot" };
+  if (code === "bot_too_large") return session ? { banner: "session_no_bot" } : { caption: "err_bot_too_large" };
+  return recoverable ? { caption: `err_${code}` } : { banner: "error_generic" };
+}
 const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);
 export const bannerAfterReady = (cur) => (MIC_BANNERS.has(cur) ? cur : null);
 

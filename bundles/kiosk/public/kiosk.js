@@ -8,7 +8,7 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing,
+  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
@@ -19,6 +19,8 @@ const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
 const SESSION = document.documentElement.dataset.mode === "session";
 const CAPS = { windows: ["timer", "recipe", "content"], iframe: false, max_windows: 4, agent: false };
+/** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
+const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
 const $ = (id) => document.getElementById(id);
 const ls = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -114,7 +116,7 @@ function connect() {
   ws = sock;
   sock.binaryType = "arraybuffer";
   let opened = false;
-  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS } : { type: "hello", device_id: id, token: tok, caps: CAPS })); };
+  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
   sock.onmessage = (ev) => {
     if (ws !== sock) return;
     if (typeof ev.data !== "string") { player?.push(ev.data); return; }
@@ -178,10 +180,7 @@ function onText(m) {
       break;
     case "error":
       note("error", `${m.code}${m.recoverable ? "" : " (fatal)"}`);
-      if (m.code === "no_bound_bot") banner(SESSION ? "session_no_bot" : "no_bot");
-      else if (SESSION && m.code === "bot_too_large") banner("session_no_bot");
-      else if (!m.recoverable) banner("error_generic");
-      else caption(t(`err_${m.code}`), m.code);
+      { const d = errorDecision(m.code, m.recoverable, SESSION ? "session" : "paired"); if (d.banner) banner(d.banner); else caption(t(d.caption), m.code); }
       break;
     default:
   }
