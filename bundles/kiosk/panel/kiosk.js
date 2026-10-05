@@ -123,12 +123,14 @@ export const CLIENT_SCRIPT = `
     box.appendChild(el('p', 'kk-dim', S.dash_voice_intro));
     if (!data.bots.length) { box.appendChild(el('p', 'kk-warn', S.dash_voice_none)); return; }
     var sel = el('select'); opt(sel, '', S.dash_voice_auto, !dv.bot_id);
-    data.bots.forEach(function (b) { opt(sel, b.bot_id, b.display_name || b.bot_id, b.bot_id === dv.bot_id); });
+    data.bots.forEach(function (b) { opt(sel, b.bot_id, botLabel(b, false), b.bot_id === dv.bot_id); });
     var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
+    box.appendChild(fitLine(data.bots, sel, function () { return false; }).node);   // same status as the display pickers
     var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
     function showNow() {
       var hit = data.bots.filter(function (b) { return b.bot_id === dv.effective_bot_id; })[0];
-      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : '';
+      now.className = hit ? 'kk-dim' : 'kk-warn';
+      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : S.dash_voice_none_fit;   // assistants exist, none fits
     }
     showNow();
     sel.addEventListener('change', function () {

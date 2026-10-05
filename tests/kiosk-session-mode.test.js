@@ -438,3 +438,184 @@ test("without the core session helpers (an older gateway) the bundle offers no s
     assert.equal(code, 404);
   } finally { k.stop(); s.close(); }
 });
+
+// ─── assistant fit on a session display ─────────────────────────────────────
+// The dashboard's Talk to Crow runs on the same quick voice model as a paired display, so the
+// same fit rules apply: "Automatic" never lands on an assistant that cannot fit, the panel setting
+// refuses one, and a turn on one says so and links to the Kiosk panel.
+
+/** A second runtime on the same database and core auth, with its own voice runner. */
+async function serve(voice) {
+  const k = kiosk.createKioskRuntime({
+    Router: express.Router, json: express.json, WebSocketServer,
+    isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
+    sessionFromRequest: auth.sessionFromRequest, verifySession: auth.verifySession,
+    openDb: open, deviceStore: store,
+    settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
+    voice, sttWarmup: async () => {},
+    resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
+    themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
+    announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav, log: (m) => logs.push(m),
+  });
+  const app = express();
+  app.use(k.router(auth.dashboardAuth));
+  const s = http.createServer(app);
+  k.attachUpgrade(s);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const b = `http://127.0.0.1:${s.address().port}`;
+  const H = { ...SERVE, Cookie: cookie() };
+  return {
+    k, b,
+    listing: async () => (await fetch(b + "/api/kiosk/admin/displays", { headers: H })).json(),
+    choose: (bot_id) => fetch(b + "/api/kiosk/admin/dashboard-voice", { method: "POST", headers: { ...H, "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify({ bot_id }) }),
+    /** Open the overlay's socket; resolves once ready or closed. */
+    async open(hello = { type: "hello", mode: "session", csrf: CSRF, caps: {} }) {
+      const ws = new WebSocket(b.replace("http", "ws") + WS_PATH, { headers: { ...H, Origin: b } });
+      const msgs = []; let closed = null;
+      ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+      ws.on("close", (code, reason) => { closed = { code, reason: reason.toString() }; });
+      ws.on("error", () => {});
+      await new Promise((r, j) => { ws.on("open", r); ws.on("unexpected-response", (q, res) => j(new Error("refused " + res.statusCode))); });
+      ws.send(JSON.stringify(hello));
+      const until = async (fn, ms = 1500) => { for (let i = 0; i < ms / 10 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); return fn(); };
+      await until(() => msgs.some((m) => m.type === "ready") || closed);
+      const ask = async () => { ws.send(JSON.stringify({ type: "turn_start", turn_id: "f1" })); ws.send(Buffer.alloc(8000)); ws.send(JSON.stringify({ type: "turn_end", vad_reason: "manual" })); await until(() => msgs.some((m) => m.type === "turn_done") || closed); };
+      return { ws, msgs, until, ask, get closed() { return closed; } };
+    },
+    close: () => { k.stop(); s.close(); },
+  };
+}
+/** A voice runner whose assessBot answers from a table (bot_id → level); turns are recorded. */
+function fitVoice(levels, calls = []) {
+  return {
+    runVoiceTurn: async (o) => { calls.push(o); return { route: "fast", timings: {} }; },
+    speakText: async () => true,
+    assessBot: async ({ botId }) => (levels[botId] ? { level: levels[botId], ctx: 8192, est_tokens: 1, est_no_skills_tokens: 1, reserve_tokens: 1024, model: "voice/quick" } : null),
+  };
+}
+const resetChoice = () => withDb((db) => registry.writeSetting(db, "kiosk_dashboard_bot_id", ""));
+
+test("fit: Automatic picks the first assistant that fits — a full fit before a without-skills fit, never a too-large one", async () => {
+  await resetChoice();
+  // a-first is too large, b-house only fits without its skills.
+  const lean = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills" }));
+  try {
+    assert.equal((await lean.listing()).dashboard_voice.effective_bot_id, "b-house", "the too-large first assistant is skipped");
+  } finally { lean.close(); }
+  await withDb((db) => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('c-small','Small','{}',1)", args: [] }));
+  const calls = [];
+  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills", "c-small": "full" }, calls));
+  try {
+    assert.equal((await f.listing()).dashboard_voice.effective_bot_id, "c-small", "a full fit wins over an earlier without-skills fit");
+    const c = await f.open();
+    await c.ask();
+    assert.equal(calls.at(-1).device.bound_bot_id, "c-small", "and that is the assistant the overlay talks to");
+    c.ws.close();
+  } finally { f.close(); await withDb((db) => db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'c-small'", args: [] })); }
+});
+
+test("fit: when no enabled assistant fits, the overlay gets the no-assistant close (4403 no_bot → the message with the Kiosk-panel link)", async () => {
+  await resetChoice();
+  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "too_large" }));
+  try {
+    const l = await f.listing();
+    assert.equal(l.dashboard_voice.effective_bot_id, null);
+    assert.equal(l.bots.length, 2, "the assistants exist — they just do not fit");
+    const c = await f.open();
+    await c.until(() => c.closed);
+    assert.deepEqual(c.closed, { code: 4403, reason: "no_bot" });
+    assert.ok(!c.msgs.some((m) => m.type === "ready"));
+  } finally { f.close(); }
+});
+
+test("fit: the dashboard-voice setting refuses a too-large assistant (as the bind route does) and accepts one that works without its skills", async () => {
+  await resetChoice();
+  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills" }));
+  try {
+    const no = await f.choose("a-first");
+    assert.equal(no.status, 400);
+    assert.deepEqual(await no.json(), { error: "bot_too_large" });
+    assert.equal(await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id")), "", "nothing was saved");
+    const ok = await f.choose("b-house");
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { ok: true, bot_id: "b-house", effective_bot_id: "b-house" });
+    assert.equal((await f.choose("")).status, 200, "back to automatic");
+    const l = await f.listing();
+    assert.deepEqual(l.bots.map((x) => [x.bot_id, x.fit]).sort(), [["a-first", "too_large"], ["b-house", "no_skills"]], "the picker has every assistant's status");
+  } finally { f.close(); await resetChoice(); }
+});
+
+test("fit: with no estimator (an older gateway) or an unknown model context, Automatic is unchanged — the first enabled assistant", async () => {
+  await resetChoice();
+  const f = await serve(fitVoice({}));   // assessBot → null for every assistant
+  try { assert.equal((await f.listing()).dashboard_voice.effective_bot_id, "a-first"); } finally { f.close(); }
+});
+
+test("fit: a session turn on a chosen assistant that no longer fits is not sent to the model — the line is spoken, and the page shows the banner with the Kiosk-panel link", async () => {
+  // The REAL voice turn on scripted services: the chosen assistant's prompt cannot fit 8,192 tokens even without skills.
+  const { createVoiceTurnRunner } = await import("../servers/gateway/voice/turn.js");
+  const { errorDecision } = await import("../bundles/kiosk/public/state.js");
+  const { STRINGS } = await import("../bundles/kiosk/server/strings.js");
+  let modelCalls = 0;
+  const voice = createVoiceTurnRunner({
+    log: (m) => logs.push(m),
+    loadBotRow: async (db, id) => ({ bot_id: id, enabled: 1, definition: JSON.stringify({ bot_id: id, system_prompt: "P".repeat(60_000) }) }),
+    getSttProfile: async () => ({ id: "stt" }), createSttAdapter: async () => ({ transcribe: async () => ({ text: "Tell me a joke" }) }),
+    getTtsProfile: async () => ({ id: "tts", defaultVoice: "v" }),
+    createTtsAdapter: async () => ({ name: "kokoro", async *synthesize(text) { yield Buffer.from(text); } }),
+    createChatAdapter: async () => ({ async *chatStream() { modelCalls++; yield { type: "done" }; } }),
+    resolveKey: async () => ({ baseUrl: "x" }), acquire: async () => null, probeReady: async () => false,
+    contextLenFor: async () => 8192,
+    chooseVoiceRoute: () => ({ route: "fast", reason: null, key: "voice/quick" }), fastKey: "voice/quick",
+    getChatTools: () => [], createToolExecutor: () => ({ executeToolCalls: async () => [], close: async () => {} }), maxToolRounds: 10,
+    effectiveToolName: (tc) => tc.name, isExternalSendTool: () => false, isConnectedAddonTool: () => false, botVoiceScope: () => null,
+    generateSystemPrompt: async ({ botDef }) => botDef.system_prompt, isMemoryTool: () => false,
+  });
+  // Chosen while it still fit (the setting is written directly: the route would refuse it now).
+  await withDb((db) => registry.writeSetting(db, "kiosk_dashboard_bot_id", "b-house"));
+  const f = await serve(voice);
+  try {
+    const l = await f.listing();
+    assert.equal(l.bots.find((x) => x.bot_id === "b-house").fit, "too_large", "the panel shows it with the real estimator");
+    assert.equal(l.dashboard_voice.effective_bot_id, "b-house", "an explicit choice is kept, and reported at the turn");
+    const c = await f.open();
+    assert.ok(c.msgs.some((m) => m.type === "ready"));
+    await c.ask();
+    assert.equal(modelCalls, 0, "no model call");
+    const err = c.msgs.find((m) => m.type === "error");
+    assert.deepEqual(err, { type: "error", code: "bot_too_large", recoverable: false });
+    assert.ok(c.msgs.some((m) => m.type === "caption_delta" && m.text === STRINGS.en.err_bot_too_large), "the spoken line is captioned");
+    assert.equal(c.msgs.find((m) => m.type === "turn_done").failed, "bot_too_large");
+    // What the session page does with that frame: the banner that carries the link to /dashboard/kiosk.
+    assert.deepEqual(errorDecision(err.code, err.recoverable, "session"), { banner: "session_no_bot" });
+    c.ws.close();
+  } finally { f.close(); await resetChoice(); }
+});
+
+test("a session display gets the same turn rules as a paired one: display tool only when asked, the browser's time zone in the turn context, the clock fast path", async () => {
+  await resetChoice();
+  const calls = [];
+  const f = await serve(fitVoice({ "a-first": "full", "b-house": "full" }, calls));
+  try {
+    const c = await f.open({ type: "hello", mode: "session", csrf: CSRF, caps: {}, tz: "Asia/Tokyo" });
+    await c.ask();
+    const call = calls.at(-1);
+    assert.match(call.device.id, /^dash-/);
+    const wmTool = call.extraTools[0];
+    assert.equal(wmTool.definition.name, "crow_wm");
+    assert.equal(wmTool.when("Tell me a joke"), false);
+    assert.equal(wmTool.when("What time is it?"), false);
+    assert.equal(wmTool.when("show me the shopping list"), true);
+    assert.match(call.turnContext, /^\[Now\] .* \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
+    assert.match((await call.fastPaths("What time is it?")).say, /^It's \d{1,2}:\d\d [AP]M\.$/);
+    assert.equal(call.tooLargeText.length > 20, true);
+    // Display-card rules: placeholders refused, one content card at a time.
+    const run = async (command, transcript) => JSON.parse(await wmTool.execute({ command }, { transcript }));
+    assert.equal((await run("display <title> | <text>", "show me something")).action, "error");
+    assert.equal((await run("display Info | a joke", "Tell me a joke")).action, "error");
+    assert.equal((await run("display List | milk", "show me the list")).ok, true);
+    assert.equal((await run("display Weather | sunny", "show me the weather")).ok, true);
+    assert.deepEqual(f.k.wm.list(call.device.id).map((w) => w.title), ["Weather"]);
+    c.ws.close();
+  } finally { f.close(); }
+});

@@ -63,7 +63,7 @@ test("panel and docs say /display for the page URL", () => {
 async function runPanel(device, data = {}) {
   const { parseHTML } = await import("linkedom");
   const vm = await import("node:vm");
-  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-devices"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
+  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-dash" hidden></div><div id="kk-devices"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
   const posts = [];
   const listing = {
     devices: [device], pending: [],
@@ -190,4 +190,30 @@ test("fit strings: the three states and the refusal exist in en and es; the page
     for (const k of ["fit_full", "fit_no_skills", "fit_too_large", "fit_tag_no_skills", "fit_tag_too_large", "bot_too_large", "err_bot_too_large"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
   }
   assert.match(CLIENT_SCRIPT, /kk-fit-bad/);
+});
+
+test("fit in the dashboard-voice picker: every assistant has its status, the warning follows the selection, and 'nothing fits' is said in words", async () => {
+  const dv = { available: true, bot_id: null, effective_bot_id: "chef" };
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, dashboard_voice: dv, postReply: { error: "bot_too_large" } });
+  const box = p.document.getElementById("kk-dash");
+  const sel = box.querySelector("select");
+  const labels = Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
+  assert.equal(labels[""], STRINGS.en.dash_voice_auto);
+  assert.equal(labels.huge, `Huge — ${STRINGS.en.fit_tag_too_large}`);
+  assert.equal(labels.general, `General — ${STRINGS.en.fit_tag_no_skills}`);
+  assert.equal(labels.chef, "Chef");
+  const line = box.querySelector(".kk-fit");
+  assert.equal(line.textContent, "", "Automatic: the line below names who answers");
+  assert.ok(box.textContent.includes(STRINGS.en.dash_voice_now.replace("{name}", "Chef")));
+  p.choose(sel, "huge");
+  assert.equal(line.textContent, STRINGS.en.fit_too_large);
+  assert.ok(line.classList.contains("kk-fit-bad"));
+  await p.flush();
+  assert.equal(box.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large, "the server's refusal is shown");
+  // Automatic with assistants enabled but none that fits.
+  const none = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS.filter((b) => b.bot_id === "huge"), dashboard_voice: { available: true, bot_id: null, effective_bot_id: null } });
+  const nbox = none.document.getElementById("kk-dash");
+  assert.ok(nbox.textContent.includes(STRINGS.en.dash_voice_none_fit));
+  assert.ok(nbox.querySelector(".kk-warn"));
+  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].dash_voice_none_fit); assert.match(STRINGS[L].dash_voice_auto, L === "en" ? /fits/ : /quepa/); }
 });
