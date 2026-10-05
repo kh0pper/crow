@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, existsSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,42 @@ test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and
     assert.equal(JSON.parse(readFileSync(join(dir, "etc/crow-kiosk/agent.json"), "utf8")).bt_sink_mac, null);
     assert.match(readFileSync(join(dir, "etc/crow-kiosk/setup.env"), "utf8"), /^WAKE_SHA=a{64}$/m);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pi-setup.sh never writes through a symlink planted in a user's home", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const env = { ...process.env, SUDO_USER: "alex" };
+  const cases = [
+    ["home/kiosk/.config", "a symlinked directory in the kiosk home"],
+    ["home/kiosk/.config/systemd/user/crow-kiosk-agent.service", "a symlinked target file"],
+    ["home/alex/.config/systemd", "a symlinked directory in the admin home"],
+    ["home/kiosk", "a symlinked home"],
+  ];
+  for (const [planted, what] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), "kiosk-link-"));
+    try {
+      const victim = join(dir, "victim");              // stands in for a root-owned file/dir elsewhere
+      mkdirSync(victim);
+      writeFileSync(join(victim, "secret"), "root-owned\n");
+      const at = join(dir, "stage", planted);
+      mkdirSync(dirname(at), { recursive: true });
+      symlinkSync(victim, at);
+      const r = spawnSync("bash", [join(K, "pi-setup.sh"), "--crow-url", ORIGIN, "--dry-run", join(dir, "stage")], { encoding: "utf8", env });
+      assert.equal(r.status, 2, `${what}: must refuse\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /refusing/);
+      assert.deepEqual(readdirSync(victim), ["secret"], `${what}: nothing written through the link`);
+      assert.ok(lstatSync(at).isSymbolicLink());
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("pi-setup.sh has no recursive chown and writes user homes only as that user", () => {
+  const src = readFileSync(join(K, "pi-setup.sh"), "utf8");
+  assert.doesNotMatch(src, /chown\s+-R/);
+  assert.match(src, /runuser -u "\$u" --/);
+  for (const line of src.split("\n").filter((l) => /(KHOME|AHOME)\/\.config/.test(l) && !l.trim().startsWith("#"))) {
+    assert.match(line, /^\s*(uput|ulink)\s/, `user-home write must go through uput/ulink: ${line.trim()}`);
+  }
 });
 
 test("pi-setup.sh refuses bad arguments before touching anything", (t) => {

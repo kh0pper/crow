@@ -127,11 +127,49 @@ put() {  # put MODE DEST < content ; writes only when the content changed
     install -m "$mode" "$tmp" "$dest"; rm -f "$tmp"; echo "   wrote     $2"; changed
   fi
 }
-link() {  # link TARGET LINKNAME
-  local name; name="$(p "$2")"
-  mkdir -p "$(dirname "$name")"
-  if [ "$(readlink "$name" 2>/dev/null || true)" = "$1" ]; then echo "   unchanged $2"
-  else ln -sfn "$1" "$name"; echo "   linked    $2"; changed; fi
+# Files inside a user's home (kiosk, admin) are user-writable places: root must never write or chown
+# there, or a planted symlink could redirect a root write. So:
+#  - no path component from the home down to the target may be a symlink (checked, refused otherwise);
+#  - the write itself runs AS that user (runuser), so even a race can only reach what the user could
+#    reach anyway; the file is written to a temp name in the same directory and renamed over (mv -T);
+#  - no recursive chown anywhere.
+as_user() {  # as_user USER CMD... (direct in dry-run: the staging tree belongs to the caller)
+  local u="$1"; shift
+  if [ "$DRY" = 1 ]; then "$@"; else runuser -u "$u" -- "$@"; fi
+}
+no_symlinks_below() {  # no_symlinks_below HOME PATH : refuse if HOME or anything between it and PATH is a symlink
+  local home rel cur part
+  home="$(p "$1")"; rel="${2#"$1"}"; cur="$home"
+  [ "${2#"$1"/}" != "$2" ] || die "internal: $2 is not under $1"
+  [ ! -L "$home" ] || die "refusing: $1 is a symlink"
+  IFS='/' read -r -a parts <<< "${rel#/}"
+  for part in "${parts[@]}"; do
+    cur="$cur/$part"
+    [ ! -L "$cur" ] || die "refusing to write through a symlink: ${cur#"$ROOT"}"
+  done
+}
+uput() {  # uput USER HOME MODE DEST < content ; a user-home file, written as USER, never through a symlink
+  local u="$1" home="$2" mode="$3" dest="$4" tmp d
+  no_symlinks_below "$home" "$dest"
+  tmp="$(mktemp)"; cat > "$tmp"; chmod 0644 "$tmp"
+  d="$(p "$dest")"
+  if [ -f "$d" ] && as_user "$u" cmp -s - "$d" < "$tmp"; then
+    rm -f "$tmp"; echo "   unchanged $dest"; return
+  fi
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  as_user "$u" sh -c 'umask 022; mkdir -p "$(dirname "$1")" && t="$1.crow-kiosk-new.$$" && cat > "$t" && chmod "$2" "$t" && mv -fT "$t" "$1"' \
+    sh "$d" "$mode" < "$tmp"
+  rm -f "$tmp"; echo "   wrote     $dest"; changed
+}
+ulink() {  # ulink USER HOME TARGET LINKNAME ; a symlink in a user's home, made as USER
+  local u="$1" home="$2" target="$3" name="$4" n
+  no_symlinks_below "$home" "$(dirname "$name")"
+  n="$(p "$name")"
+  if [ "$(readlink "$n" 2>/dev/null || true)" = "$target" ]; then echo "   unchanged $name"; return; fi
+  [ ! -e "$n" ] || [ -L "$n" ] || die "refusing: $name exists and is not a symlink"
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  as_user "$u" sh -c 'mkdir -p "$(dirname "$2")" && ln -sfnT "$1" "$2"' sh "$target" "$n"
+  echo "   linked    $name"; changed
 }
 KHOME=/home/kiosk
 
@@ -200,12 +238,11 @@ put 0644 /etc/apt/apt.conf.d/80crow-kiosk-after-dpkg < "$SRC_DIR/files/80-crow-k
 put 0644 /etc/systemd/system/apt-daily.timer.d/crow-kiosk.conf < "$SRC_DIR/files/apt-daily-timer.conf"
 put 0644 /etc/systemd/system/apt-daily-upgrade.timer.d/crow-kiosk.conf < "$SRC_DIR/files/apt-daily-upgrade-timer.conf"
 for u in crow-kiosk-agent.service crow-kiosk-mem.service crow-kiosk-mem.timer; do
-  put 0644 "$KHOME/.config/systemd/user/$u" < "$SRC_DIR/files/$u"
+  uput kiosk "$KHOME" 0644 "$KHOME/.config/systemd/user/$u" < "$SRC_DIR/files/$u"
 done
-link "$KHOME/.config/systemd/user/crow-kiosk-agent.service" "$KHOME/.config/systemd/user/default.target.wants/crow-kiosk-agent.service"
-link "$KHOME/.config/systemd/user/crow-kiosk-mem.timer" "$KHOME/.config/systemd/user/timers.target.wants/crow-kiosk-mem.timer"
-put 0644 "$KHOME/.config/wireplumber/wireplumber.conf.d/51-crow-kiosk-bluez.conf" < "$SRC_DIR/files/51-crow-kiosk-bluez.conf"
-run chown -R kiosk:kiosk "$KHOME/.config"
+ulink kiosk "$KHOME" "$KHOME/.config/systemd/user/crow-kiosk-agent.service" "$KHOME/.config/systemd/user/default.target.wants/crow-kiosk-agent.service"
+ulink kiosk "$KHOME" "$KHOME/.config/systemd/user/crow-kiosk-mem.timer" "$KHOME/.config/systemd/user/timers.target.wants/crow-kiosk-mem.timer"
+uput kiosk "$KHOME" 0644 "$KHOME/.config/wireplumber/wireplumber.conf.d/51-crow-kiosk-bluez.conf" < "$SRC_DIR/files/51-crow-kiosk-bluez.conf"
 
 # ---- 5. audio and Bluetooth ownership -----------------------------------------------------------
 say "audio ownership"
@@ -214,9 +251,8 @@ if [ -n "$AU" ] && [ "${CFG[KEEP_ADMIN_AUDIO]}" = 0 ]; then
   # Two PipeWire instances would race for the Bluetooth A2DP endpoints; the kiosk user owns audio.
   AHOME="$(getent passwd "$AU" 2>/dev/null | cut -d: -f6 || true)"; AHOME="${AHOME:-/home/$AU}"
   for u in pipewire.service pipewire.socket pipewire-pulse.service pipewire-pulse.socket wireplumber.service mpris-proxy.service; do
-    link /dev/null "$AHOME/.config/systemd/user/$u"
+    ulink "$AU" "$AHOME" /dev/null "$AHOME/.config/systemd/user/$u"
   done
-  run chown -R "$AU:" "$AHOME/.config/systemd"
   run loginctl disable-linger "$AU"
   echo "   $AU's PipeWire is masked; inspect audio with: sudo -u kiosk XDG_RUNTIME_DIR=/run/user/\$(id -u kiosk) wpctl status"
 fi
