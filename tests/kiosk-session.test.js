@@ -31,6 +31,7 @@ function hub(over = {}) {
     wm, metrics, wrapPcmAsWav,
     warmup: over.warmup || (async () => {}),
     transcribe: over.transcribe || null,
+    ...(over.storeProfile ? { storeProfile: over.storeProfile } : {}),
     setTimeout: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; },
     clearTimeout: (t) => { if (t) t.cleared = true; },
     now: () => 42,
@@ -673,4 +674,26 @@ test("hello: caps go through the display's profile; a K1 page still gets every K
   old.text({ type: "turn_start", turn_id: "k" }); old.bin(Buffer.alloc(8000)); old.text({ type: "turn_end" });
   for (let i = 0; i < 20; i += 1) await tick();
   assert.deepEqual([k1.turns[0].caps.windows, k1.turns[0].caps.video, k1.turns[0].caps.max_windows], [["timer", "recipe", "content"], "none", 4]);
+});
+
+test("hello: a paired display with no type set gets the pairing guess, stored once as guessed; a typed display is never re-guessed; a K1 page gives no guess", async () => {
+  const PHONE = { v: 2, screen: { w: 412, h: 915, touch: true }, audio: { out: true, in: true }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer"], mobile: true, pointer: "coarse", platform: "Linux aarch64" };
+  const stored = [];
+  const { h, turns } = hub({ storeProfile: async (id, p) => { stored.push([id, p]); } });
+  const ws = new FakeWs();
+  h.attach(ws);
+  ws.text({ type: "hello", device_id: "kiosk-a", token: "good", caps: PHONE });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.deepEqual(stored, [["kiosk-a", "phone"]]);
+  ws.text({ type: "turn_start", turn_id: "t" }); ws.bin(Buffer.alloc(8000)); ws.text({ type: "turn_end" });
+  for (let i = 0; i < 20; i += 1) await tick();
+  assert.deepEqual([turns[0].device.kiosk_settings.profile, turns[0].device.kiosk_settings.profile_source], ["phone", "guessed"]);
+  const typed = [];
+  const t = hub({ storeProfile: async (id, p) => { typed.push(p); }, verifyKiosk: async () => ({ ...DEV, kiosk_settings: { lang: "en", profile: "pi3", profile_source: "operator" } }) });
+  const w2 = new FakeWs(); t.h.attach(w2); w2.text({ type: "hello", device_id: "kiosk-a", token: "good", caps: PHONE });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.deepEqual(typed, [], "the operator's choice stands");
+  const k1 = []; const o = hub({ storeProfile: async (id, p) => { k1.push(p); } });
+  await hello(o.h);
+  assert.deepEqual(k1, [], "a K1 page reports nothing to guess from");
 });

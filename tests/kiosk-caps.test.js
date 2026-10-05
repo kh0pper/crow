@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { effectiveCaps, PROFILES, PAGE_KINDS, DEFAULT_PROFILE } from "../bundles/kiosk/server/caps.js";
+import { effectiveCaps, guessProfile, PROFILES, PAGE_KINDS, DEFAULT_PROFILE } from "../bundles/kiosk/server/caps.js";
 
 const V2 = { v: 2, screen: { w: 800, h: 480, touch: true }, audio: { out: true, in: true }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer"] };
 
@@ -47,4 +47,15 @@ test("no profile set, or an unknown one: the audio-first profile — a display n
   const page = { ...V2, kinds: ["card", "timer", "media", "app"], frames: 4 };
   for (const name of [undefined, null, "", "nonsense", "tv"]) assert.deepEqual([effectiveCaps(page, name).video, effectiveCaps(page, name).youtube], ["none", "no"], String(name));
   assert.equal(effectiveCaps(page, "phone").video, "hd", "a profile someone chose is honoured");
+});
+
+test("the pairing guess: a phone says it is mobile; a small ARM Linux screen is the Pi; a coarse pointer on a larger screen is a tablet; a K1 page gives no guess", () => {
+  const v2 = (o) => ({ v: 2, screen: { w: 800, h: 480, touch: true }, kinds: ["card", "timer"], ...o });
+  assert.equal(guessProfile(v2({ mobile: true, platform: "Linux aarch64", screen: { w: 412, h: 915, touch: true } })), "phone");
+  assert.equal(guessProfile(v2({ mobile: false, pointer: "coarse", platform: "Linux aarch64" })), "pi3");
+  assert.equal(guessProfile(v2({ mobile: false, pointer: "coarse", platform: "Linux armv7l" })), "pi3");
+  assert.equal(guessProfile(v2({ mobile: false, pointer: "coarse", platform: "MacIntel", screen: { w: 1024, h: 1366, touch: true } })), "tablet");
+  assert.equal(guessProfile(v2({ mobile: false, pointer: "fine", platform: "Win32", screen: { w: 1920, h: 1080, touch: false } })), "desktop");
+  assert.equal(guessProfile({ windows: ["timer"] }), null);
+  assert.equal(guessProfile(null), null);
 });

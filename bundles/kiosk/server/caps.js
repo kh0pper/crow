@@ -13,11 +13,26 @@ export const PROFILES = Object.freeze({
   tablet: Object.freeze({ video: "hd", youtube: "yes", frames: 2, max_windows: 4 }),
   desktop: Object.freeze({ video: "hd", youtube: "yes", frames: 3, max_windows: 6 }),
 });
+/** How a display with NO stored profile is read (never stored as data). */
 export const DEFAULT_PROFILE = "pi3";
 export const PAGE_KINDS = Object.freeze(["card", "app", "media", "camera", "launcher", "timer", "nowplaying", "toast", "choices"]);
 /** The window store holds this many per display, whatever a profile allows. */
 const STORE_MAX_WINDOWS = 4;
 const int = (v, lo, hi, d) => (Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : d);
+
+/**
+ * The pairing guess (spec §12.2): from what the page reported in hello. A phone says it is mobile; a
+ * small screen on an ARM Linux browser is the Pi kiosk; a coarse pointer with a larger screen is a
+ * tablet; anything else with a screen is a desktop. A K1 page (no caps v2) gives no guess. → name | null.
+ */
+export function guessProfile(raw) {
+  if (!raw || typeof raw !== "object" || raw.v !== 2) return null;
+  const w = int(raw.screen?.w, 0, 10000, 0), h = int(raw.screen?.h, 0, 10000, 0);
+  if (raw.mobile === true) return "phone";
+  if (/^linux (aarch64|armv\d)/i.test(String(raw.platform || "").slice(0, 40)) && Math.max(w, h) > 0 && Math.max(w, h) <= 1024) return "pi3";
+  if (raw.pointer === "coarse") return Math.min(w, h) > 0 && Math.min(w, h) < 600 ? "phone" : "tablet";
+  return w > 0 ? "desktop" : null;
+}
 
 export function effectiveCaps(raw, profileName) {
   // No profile set (or one this build does not know): the audio-first profile. A display gets video only

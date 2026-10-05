@@ -213,6 +213,8 @@ export function createKioskRuntime(deps) {
 
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
+    // The pairing guess for a display with no type set (session.js); a later panel choice replaces it.
+    storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
     displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
     runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,

@@ -161,7 +161,7 @@ export const CLIENT_SCRIPT = `
     var mem = el('input'); mem.type = 'checkbox'; mem.checked = !!ks.memory_integration;
     var sm = pick([['default', S.stt_model_default], ['tiny.en', S.stt_model_tiny]], ks.stt_model || 'default');
     var th = pick([['auto', S.theme_auto], ['light', S.theme_light], ['dark', S.theme_dark]], ks.theme || 'auto');
-    var pf = pick([['pi3', S.profile_pi3], ['phone', S.profile_phone], ['tablet', S.profile_tablet], ['desktop', S.profile_desktop]], ks.profile || 'pi3');
+    var pf = pick([['', S.profile_unset], ['pi3', S.profile_pi3], ['phone', S.profile_phone], ['tablet', S.profile_tablet], ['desktop', S.profile_desktop]], ks.profile || '');
     var vad = el('input'); vad.type = 'number'; vad.min = '300'; vad.max = '900'; vad.step = '50'; vad.value = String(ks.vad_hangover_ms || 450);
     function vadValue() { var n = parseInt(vad.value, 10); return isFinite(n) ? Math.min(900, Math.max(300, n)) : (initial ? initial.vad : (ks.vad_hangover_ms || 450)); }
     function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value }; }
@@ -172,7 +172,7 @@ export const CLIENT_SCRIPT = `
     [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
-    card.appendChild(el('p', 'kk-dim', S.profile_hint));
+    card.appendChild(el('p', 'kk-dim', S.profile_hint + (ks.profile_source === 'guessed' ? ' ' + S.profile_guessed : '')));
     card.appendChild(el('p', 'kk-dim', S.theme_hint));
     var msg = el('span', 'kk-msg');
     var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';

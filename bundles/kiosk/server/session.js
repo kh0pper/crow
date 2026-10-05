@@ -11,7 +11,7 @@
  *       false closes 4401 (the login ended); a throw at a turn closes 1011 (retry).
  *   onClose(device)          the socket closed and was not replaced by a newer one.
  */
-import { effectiveCaps } from "./caps.js";
+import { effectiveCaps, guessProfile, PROFILES } from "./caps.js";
 import { validTimeZone } from "./clock.js";
 
 export const HELLO_TIMEOUT_MS = 5000;
@@ -131,6 +131,15 @@ export function createSessionHub(deps) {
       clearT(helloTimer);
       device = d;
       rawCaps = msg.caps;
+      // A paired display nobody has typed yet gets the pairing guess, stored once as "guessed" (the
+      // operator can change it in the panel). Never for a session display: no device record is written.
+      if (!opts.authorize && !Object.hasOwn(PROFILES, d.kiosk_settings?.profile || "") && typeof deps.storeProfile === "function") {
+        const guess = guessProfile(rawCaps);
+        if (guess) {
+          device = d = { ...d, kiosk_settings: { ...(d.kiosk_settings || {}), profile: guess, profile_source: "guessed" } };
+          Promise.resolve().then(() => deps.storeProfile(d.id, guess)).catch((err) => deps.log?.(`[kiosk] storing the guessed display type failed: ${err.message}`));
+        }
+      }
       caps = effectiveCaps(rawCaps, d.kiosk_settings?.profile);
       tz = validTimeZone(msg.tz);
       const prior = sessions.get(d.id);
