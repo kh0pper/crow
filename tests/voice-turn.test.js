@@ -1668,3 +1668,38 @@ test("forcing: a learned 'required' is not used once the engine no longer honour
   h.log.length = 0; await turn();
   assert.deepEqual(choices(h), [{ name: "crow_show" }, null], "turn 2: named first, never required");
 });
+
+// ── a remote tool's result may be replaced before the model reads it (opt-in) ─────────────────────
+test("onToolResult: the replacement is what the model reads and what is saved; display tools and refused calls never pass through it; `tool` is the tool that really ran", async () => {
+  const seen = [];
+  const h = harness({ chatTools: ["crow_projects", "crow_delegate"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "x" } }, { type: "tool_call", id: "w", name: "crow_wm", arguments: {} },
+    { type: "tool_call", id: "d", name: "crow_delegate", arguments: {} }, { type: "done" }], says("Done. ")] });
+  const envelope = JSON.stringify({ ok: true, _audio_stream: { url: "https://media.example.invalid/secret?token=abc", codec: "mp3" }, prose: "Playing it." });
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: envelope })), close: async () => {} });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a timer and play it", sink: h.sink, extraTools: [displayTool()], denyTools: ["crow_delegate"],
+    onToolResult: async (r) => { seen.push(r); return "Playing it."; } });
+  assert.deepEqual(seen, [{ name: "crow_projects", tool: "crow_x", result: envelope, isError: false }], "only what the executor ran reaches the hook, with the effective tool beside the called name");
+  const toolMsgs = h.log[1].messages.filter((m) => m.role === "tool");
+  assert.equal(toolMsgs.find((m) => m.tool_name === "crow_projects").content, "Playing it.");
+  assert.equal(toolMsgs.find((m) => m.tool_name === "crow_projects").tool_call_id, "p");
+  assert.equal(toolMsgs.length, 3, "every call still gets its result");
+  assert.ok(!JSON.stringify(h.log[1].messages).includes("token=abc"), "the replaced result never reaches the model");
+  assert.ok(!JSON.stringify(h.runner.convo.get(h.device.id)).includes("token=abc"), "nor the saved conversation");
+});
+
+test("onToolResult: a hook that throws, or returns anything but a string, changes nothing; without a hook nothing changes either", async () => {
+  for (const hook of [async () => { throw new Error("boom"); }, async () => undefined, async () => null, () => 42, undefined, "not a function"]) {
+    const t = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "x" } }, { type: "done" }], says("Done. ")] });
+    const r = await t.runner.runVoiceTurn({ db: {}, device: t.device, transcript: "list projects", sink: t.sink, onToolResult: hook });
+    assert.equal(t.log[1].messages.find((m) => m.role === "tool").content, "ok", "the original result stands");
+    assert.equal(r.failed, null);
+    assert.equal(t.calls.logs.some((l) => l.includes("onToolResult failed")), typeof hook === "function" && hook.toString().includes("boom"));
+  }
+  // An error result is passed with isError, and a long replacement still widens the next round like a long result does.
+  const e = harness({ chatTools: ["crow_projects"], rounds: [[{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "x" } }, { type: "done" }], says("Done. ")] });
+  const flags = [];
+  e.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "Error: nope", isError: true })), close: async () => {} });
+  await e.runner.runVoiceTurn({ db: {}, device: e.device, transcript: "list projects", sink: e.sink, onToolResult: ({ isError }) => { flags.push(isError); } });
+  assert.deepEqual(flags, [true]);
+  assert.equal(e.log[1].messages.find((m) => m.role === "tool").content, "Error: nope");
+});

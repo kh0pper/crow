@@ -90,22 +90,12 @@ export function kioskDisplayMissedText(lang) {
  *   o    { now() → ms, tz, settings (the display's kiosk_settings, or a function returning them: the STT
  *          model is read when the turn transcribes), mediaLine() → "Playing: …" | "",
  *          wrapTools(tools) → tools (the evaluation records calls through it),
- *          onToolResult(name, result, turn) (told after each display tool call, with the parsed result;
- *          a throw there is logged by the caller's wrapper and never changes the result) }
+ *          onToolResult({ name, tool, result, isError }) → string | undefined: passed through unchanged to
+ *          the voice turn (turn.js), which may replace a remote tool's result with it; the display tools
+ *          are never wrapped by it }
  */
 export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null } = {}) {
-  const made = createDisplayTools(ctx);
-  // onToolResult: a later slice (the media session) needs to know what each display call did.
-  const tools = typeof onToolResult !== "function" ? made : made.map((t) => ({
-    ...t,
-    async execute(args, turn) {
-      const out = await t.execute(args, turn);
-      let res = null;
-      try { res = JSON.parse(out); } catch {}
-      try { await onToolResult(t.definition.name, res, turn); } catch {}
-      return out;
-    },
-  }));
+  const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
   return {
@@ -126,6 +116,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     tooLargeText: kioskTooLargeText(lang),
     displayMissedText: kioskDisplayMissedText(lang),
     memoryWhen: wantsMemory,
+    ...(typeof onToolResult === "function" ? { onToolResult } : {}),
   };
 }
 

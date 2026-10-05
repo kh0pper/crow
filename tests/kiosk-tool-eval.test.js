@@ -285,14 +285,15 @@ test("one set of turn options: the evaluation runs the runtime's own displayTurn
   assert.equal(same.promptSuffix, ship.options.promptSuffix, "the same function, the same text");
 });
 
-test("displayTurnOptions: onToolResult is told what each display call did, and can never change or break the result", async () => {
-  const seen = [];
+test("displayTurnOptions: onToolResult is passed through to the voice turn unchanged, and the display tools are never wrapped by it", async () => {
   const store = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING }).store;
   const ctx = { store, deviceId: "otr", caps: FIXTURE.caps, lang: "en", sources: [], items: [], emit: () => {} };
-  const o = displayTurnOptions(ctx, { settings: { lang: "en" }, onToolResult: (name, res, turn) => { seen.push([name, res?.outcome, turn?.transcript]); throw new Error("ignored"); } });
-  const show = o.extraTools.find((x) => x.definition.name === "crow_show");
-  const out = JSON.parse(await show.execute({ kind: "list", title: "Fruits", body: "a\nb" }, { transcript: "Show me a list of fruits." }));
-  assert.equal(out.outcome, "shown");
-  assert.deepEqual(seen, [["crow_show", "shown", "Show me a list of fruits."]]);
-  assert.equal(typeof displayTurnOptions(ctx, {}).extraTools[0].when, "function", "without the hook the tools are the display tools themselves");
+  const hook = async () => "replaced";
+  const withHook = displayTurnOptions(ctx, { settings: { lang: "en" }, onToolResult: hook });
+  const without = displayTurnOptions(ctx, { settings: { lang: "en" } });
+  assert.equal(withHook.onToolResult, hook);
+  assert.equal("onToolResult" in without, false);
+  assert.deepEqual(withHook.extraTools.map((t) => Object.keys(t).sort()), without.extraTools.map((t) => Object.keys(t).sort()), "the same display tools, not wrapped");
+  const show = withHook.extraTools.find((x) => x.definition.name === "crow_show");
+  assert.equal(JSON.parse(await show.execute({ kind: "list", title: "Fruits", body: "a\nb" }, { transcript: "Show me a list of fruits." })).outcome, "shown", "a display result is never replaced");
 });
