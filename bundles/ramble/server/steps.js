@@ -180,15 +180,112 @@ export async function stepsToday(db, now, settings) {
   return Math.min(await rawStepsForDay(db, localDay(now)), s.maxDay);
 }
 
+/** How far back a reading's credit may reach: today and this many local days before it. */
+export const SPLIT_DAYS_BACK = 7;
+
+/** The first instant of the local day after the one containing `ms` (DST-safe: days run 23-25 h). */
+function nextLocalMidnight(ms) {
+  return startOfLocalDay(startOfLocalDay(ms) + 36 * 3600 * 1000);
+}
+
+/** [from, to) cut at local midnights: [{ day, ms }], oldest first; empty when to <= from. */
+export function localDaySpans(from, to) {
+  const out = [];
+  for (let t = from; t < to;) {
+    const end = Math.min(nextLocalMidnight(t), to);
+    out.push({ day: localDay(t), ms: end - t });
+    t = end;
+  }
+  return out;
+}
+
+/**
+ * Credit `amount` steps to `<day>:<device>`, within that day's device limit and
+ * steps.max.day. Locally ADDs; the emitted row carries the full total and a
+ * peer takes MAX. Returns what was credited and the row's total afterwards.
+ */
+async function creditDay(db, s, day, deviceId, amount, now, emit) {
+  const key = `${day}:${deviceId}`;
+  const current = (await rowDelta(db, STEPS_KIND, key)) ?? 0;
+  let credit = Math.max(0, amount);
+  let clamped = false;
+  let limited = false;
+  if (credit > 0 && current === 0 && (await rowDelta(db, STEPS_KIND, key)) === null) {
+    const { rows: d } = await db.execute({
+      sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
+      args: [STEPS_KIND, day + ":%"],
+    });
+    if (Number(d[0]?.n) >= s.devicesPerDay) { credit = 0; limited = true; }
+  }
+  if (credit > 0) {
+    const room = Math.max(0, s.maxDay - await rawStepsForDay(db, day));
+    if (credit > room) { credit = room; clamped = true; }
+  }
+  let total = current;
+  if (credit > 0) {
+    await db.execute({
+      sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(kind, key) DO UPDATE SET delta = ramble_wallet.delta + excluded.delta`,
+      args: [STEPS_KIND, key, credit, now],
+    });
+    const { rows: w } = await db.execute({
+      sql: "SELECT delta, created_at FROM ramble_wallet WHERE kind = ? AND key = ?",
+      args: [STEPS_KIND, key],
+    });
+    total = Number(w[0].delta);
+    await safeEmit(emit, "ramble_wallet", "update", {
+      kind: STEPS_KIND, key, delta: total, created_at: Number(w[0].created_at),
+    });
+  }
+  return { credit, clamped, limited, total };
+}
+
+/**
+ * Has another instance credited this device since THIS instance last did?
+ * Our own writes only ever reach `prev.last_day` or earlier (the day of our
+ * last reading), so the row for that day above `last_total`, or ANY row for a
+ * later day, is somebody else's. A null last_day (a device row from before
+ * the column existed) can only check today's row, as before.
+ */
+async function foreignCredit(db, deviceId, prev, day, current) {
+  if (current > (prev.last_day === day ? prev.last_total : 0)) return true;
+  if (prev.last_day === null || prev.last_day === day) return false;
+  const { rows } = await db.execute({
+    sql: "SELECT key, delta FROM ramble_wallet WHERE kind = ? AND key LIKE ? AND key >= ?",
+    args: [STEPS_KIND, "%:" + deviceId, prev.last_day],
+  });
+  for (const r of rows) {
+    const key = String(r.key);
+    if (key.slice(11) !== deviceId) continue;   // LIKE folds ASCII case
+    const d = key.slice(0, 10);
+    const delta = Number(r.delta) || 0;
+    if (d === prev.last_day ? delta > prev.last_total : (d > prev.last_day && d < day && delta > 0)) return true;
+  }
+  return false;
+}
+
 /**
  * Credit one reading (spec §5). The baseline is claimed with a compare-and-
  * swap BEFORE anything is credited, so of two racing readings exactly one
  * credits. The baseline always advances to the new counter — clamped excess
  * is discarded, never banked.
  *
+ * DAY ATTRIBUTION. The counter carries no timestamps, so the steps of an
+ * interval that crosses local midnight(s) — the last reading (or a reboot,
+ * if later) up to now — are split across those days in proportion to the
+ * time spent in each. Each day's share goes to that day's own row under that
+ * day's device limit and cap; `credited` is TODAY's share (only today is
+ * settled: an earlier day's share corrects its history and pays no energy,
+ * seed or badge after the fact), and `earlier` lists the other days. Shares
+ * older than SPLIT_DAYS_BACK days are dropped (an under-count, never a flood
+ * of rows). The plausibility clamp applies to the whole reading before the
+ * split, so a delta's every share is within the per-minute limit of its own
+ * time.
+ *
  * ⚠ FOREIGN CREDIT GUARD. `last_total`/`last_day` remember what this
- * device's row for the day held right after THIS instance last touched it. If
- * the row has since grown, another of the user's instances credited the same
+ * device's row for the day of our last reading held right after THIS
+ * instance last touched it. If that row has since grown, or a row for a
+ * later day appeared, another of the user's instances credited the same
  * phone in between (the phone switched gateways and came back): diffing
  * against our stale baseline would count that range twice. Re-baseline and
  * credit nothing — this can only under-count. Known benign false positive:
@@ -223,6 +320,7 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
   let raw;
   let overMs;
   let reason;
+  let since = now;   // the interval the credited steps were walked in: [since, now]
   if (!prev) {
     if (bootAt >= startOfLocalDay(now)) {
       // Every step on the counter was walked today. Another of the user's
@@ -236,7 +334,7 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
       overMs = 0;
       reason = "baseline";
     }
-  } else if (current > (prev.last_day === day ? prev.last_total : 0)) {
+  } else if (await foreignCredit(db, r.device_id, prev, day, current)) {
     raw = 0;
     overMs = 0;
     reason = "foreign";
@@ -246,10 +344,13 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
     raw = r.counter;
     overMs = r.elapsed_ms;
     reason = "reboot";
+    // The reboot came after our last reading, so its steps did too.
+    since = Math.min(now, Math.max(bootAt, prev.last_read_at));
   } else {
     raw = r.counter - prev.last_counter;
     overMs = Math.max(0, now - prev.last_read_at);
     reason = "delta";
+    since = Math.min(now, prev.last_read_at);
   }
 
   const claim = prev
@@ -270,40 +371,41 @@ export async function recordStepReading(db, reading, { now = Date.now(), emit } 
   const allowed = Math.ceil(s.maxPerMin * Math.max(1, overMs / 60000));
   if (credit > allowed) { credit = allowed; clamped = true; }
 
-  if (credit > 0 && current === 0 && (await rowDelta(db, STEPS_KIND, key)) === null) {
-    const { rows: d } = await db.execute({
-      sql: "SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
-      args: [STEPS_KIND, day + ":%"],
-    });
-    if (Number(d[0]?.n) >= s.devicesPerDay) { credit = 0; reason = "device-limit"; }
+  // Today's share, plus the earlier days' when the interval crossed midnight.
+  let todayShare = credit;
+  let earlier;
+  if (credit > 0 && localDay(since) !== day) {
+    let windowStart = startOfLocalDay(now);
+    for (let i = 0; i < SPLIT_DAYS_BACK; i++) windowStart = startOfLocalDay(windowStart - 12 * 3600 * 1000);
+    const span = now - since;
+    // Cumulative rounding: the shares over the WHOLE interval sum exactly to
+    // `credit`; anything before the window is simply not written.
+    const at = (t) => Math.round(credit * ((t - since) / span));
+    earlier = [];
+    todayShare = 0;
+    let t = Math.max(since, windowStart);
+    for (const { day: d, ms } of localDaySpans(t, now)) {
+      const share = at(t + ms) - at(t);
+      t += ms;
+      if (d === day) { todayShare = share; continue; }
+      // eslint-disable-next-line no-await-in-loop
+      const got = await creditDay(db, s, d, r.device_id, share, now, emit);
+      if (got.clamped) clamped = true;
+      earlier.push({ day: d, credited: got.credit });
+    }
   }
-  if (credit > 0) {
-    const room = Math.max(0, s.maxDay - await rawStepsForDay(db, day));
-    if (credit > room) { credit = room; clamped = true; }
-  }
-  let total = current;
-  if (credit > 0) {
-    // Locally ADD; the emitted row carries the full total, and a peer takes MAX.
-    await db.execute({
-      sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?)
-            ON CONFLICT(kind, key) DO UPDATE SET delta = ramble_wallet.delta + excluded.delta`,
-      args: [STEPS_KIND, key, credit, now],
-    });
-    const { rows: w } = await db.execute({
-      sql: "SELECT delta, created_at FROM ramble_wallet WHERE kind = ? AND key = ?",
-      args: [STEPS_KIND, key],
-    });
-    total = Number(w[0].delta);
-    await safeEmit(emit, "ramble_wallet", "update", {
-      kind: STEPS_KIND, key, delta: total, created_at: Number(w[0].created_at),
-    });
-  }
-  // Remember what the row held after OUR turn (the foreign-credit guard above).
+
+  const got = await creditDay(db, s, day, r.device_id, todayShare, now, emit);
+  if (got.clamped) clamped = true;
+  if (got.limited) reason = "device-limit";
+  // Remember what TODAY's row held after OUR turn (the foreign-credit guard above).
   await db.execute({
     sql: "UPDATE ramble_step_devices SET last_total = ?, last_day = ? WHERE device_id = ?",
-    args: [total, day, r.device_id],
+    args: [got.total, day, r.device_id],
   });
-  return { credited: credit, reason, clamped, day };
+  const out = { credited: got.credit, reason, clamped, day };
+  if (earlier) out.earlier = earlier;
+  return out;
 }
 
 /**

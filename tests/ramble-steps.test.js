@@ -140,13 +140,14 @@ test("two readings racing never double-credit (compare-and-swap on the baseline)
   assert.equal(await stepsToday(db, AT(11)), 1_000);
 });
 
-test("R4: steps since last night's reading land on the day of the reading", async () => {
+test("steps since last night's reading split across the two days by time (3 h yesterday, 8 h today)", async () => {
   const db = await freshDb();
   await read(db, { counter: 1_000, elapsed_ms: 30 * H }, AT(-3)); // 21:00 the previous day
   const out = await read(db, { counter: 4_000, elapsed_ms: 41 * H }, AT(8));
-  assert.equal(out.credited, 3_000);
-  assert.equal(await stepsToday(db, AT(8)), 3_000);
-  assert.equal(await stepsToday(db, AT(-3)), 0);
+  assert.equal(out.credited, 2_182);
+  assert.deepEqual(out.earlier, [{ day: localDay(AT(-3)), credited: 818 }]);
+  assert.equal(await stepsToday(db, AT(8)), 2_182);
+  assert.equal(await stepsToday(db, AT(-3)), 818);
 });
 
 test("the emitted row carries the full running total for that device and day", async () => {
