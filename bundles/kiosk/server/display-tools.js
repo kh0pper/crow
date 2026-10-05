@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, asksOpen, asksPlay, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, compound, compoundParts } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -56,8 +56,11 @@ export function createDisplayTools(ctx) {
   // A must-run test reads each request of a compound sentence on its own: "close the timer and then show
   // me a list" has to end with the list, though the sentence starts with a close.
   const anyPart = (t, test) => compoundParts(t).some(test);
-  const newCard = (t) => anyPart(t, (p) => { const k = newDisplayKind(p); return !!k && (win.includes(k) || (k === "recipe" && win.includes("content"))); });
+  const newCard = (t) => anyPart(t, (p) => { const k = newDisplayKind(p) || asksCard(p, items); return !!k && (win.includes(k) || (k === "recipe" && win.includes("content"))); });
   const single = (t) => !compound(t);
+  // A compound request is held to the end of the turn and ends on the server's lines for what was done (the
+  // results are non-final, so the model also gets each one; its own closing sentence is never heard).
+  const toEnd = (when) => (t) => compound(t) && when(t) === true;
   const run = async (intent, turn) => {
     const { events, ...res } = await executeIntent(intent, { ...ctx, turn, strict: false });
     for (const ev of events) ctx.emit(ev);
@@ -68,22 +71,22 @@ export function createDisplayTools(ctx) {
   };
   const playWhen = (t) => mentionsPlay(t) || asksPlay(t);
   const openWhen = (t) => mentionsOpen(t, items);
-  const showWhen = (t) => wantsDisplay(t) || updates(t) !== null;
+  const showWhen = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null;
   const rules = {
     crow_play: {
-      when: playWhen, holdText: playWhen, must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
+      when: playWhen, holdText: playWhen, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
     },
     crow_open: {
-      when: openWhen, holdText: openWhen, must: (t) => anyPart(t, (p) => asksOpen(p, items)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_open, missedText: S.open_missed_say,
+      when: openWhen, holdText: openWhen, holdToEnd: toEnd(openWhen), must: (t) => anyPart(t, (p) => asksOpen(p, items)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_open, missedText: S.open_missed_say,
       mustDone: (r) => r?.ok === true && ["opened", "focused", "handed_off"].includes(r.outcome),
       execute: (a, turn) => run({ verb: "open", app: enumOf("crow_open", "app").includes(a?.app) ? a.app : "launcher" }, turn),
     },
     crow_show: {
       // Not "a window happens to be open": on a plain question with a card up, only crow_wm is offered.
-      when: showWhen, holdText: showWhen, narrow: single,
+      when: showWhen, holdText: showWhen, holdToEnd: toEnd(showWhen), narrow: single,
       // A request for NEW content this display can show, or a change to the card that is open.
       must: (t) => newCard(t) || updates(t) !== null,
       mustNote: MUST_NOTES.crow_show,
@@ -93,6 +96,7 @@ export function createDisplayTools(ctx) {
     crow_wm: {
       when: (t) => wantsDisplay(t) || openWindow() || mediaOn(),
       holdText: wantsDisplay,
+      holdToEnd: toEnd(wantsDisplay),
       execute: (a, turn) => {
         // The K1 form — one `command` string — is still accepted (not advertised) and parsed by the K1 grammar,
         // except on a turn that has to end with a card: there a card put up through it would not count, and the

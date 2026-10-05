@@ -9,10 +9,12 @@
  *                           A display tool is OFFERED on these.
  *   asksOpen / asksPlay     the person is ASKING for it now (an imperative, or a mention together with
  *                           a request cue and no question word). The tool MUST run on these.
+ *   asksCard                a card noun ("a list", "a timer") with a request cue or a making verb, no
+ *                           question word: crow_show is offered and MUST run (the same rule as play/open).
  *   compound / compoundParts   two requests in one sentence ("close the timer and then show me a list"),
  *                           and the requests one by one — a must-run test reads each of them.
  */
-import { spokenWords, stripPolite, sameAt } from "./phrases.js";
+import { spokenWords, stripPolite, sameAt, KIND_NOUNS } from "./phrases.js";
 
 const ARTICLES = new Set(["the", "my", "our", "a", "an", "some", "el", "la", "los", "las", "mi", "mis", "un", "una", "algo", "de"]);
 const OPEN_VERBS = [["open", "up"], ["open"], ["launch"], ["go", "to"], ["abre"], ["abreme"], ["abrir"], ["lanza"], ["ve", "a"]];
@@ -97,7 +99,7 @@ export function mentionsOpen(transcript, items = []) {
 }
 
 // ── must run: the person is asking for it now ────────────────────────────────────────────────────
-const CUE_WORDS = new Set(["please", "lets", "quiero", "quisiera", "necesito", "pon", "ponme", "dame", "puedes", "podrias"]);
+const CUE_WORDS = new Set(["please", "lets", "quiero", "quisiera", "necesito", "pon", "ponme", "dame", "puedes", "podrias", "hazme", "haznos", "escribeme"]);
 const CUE_RUNS = runs(["put on", "i want", "i wanna", "id like", "i would like", "i need", "we need", "can we", "can you", "could we", "could you", "would you", "let us", "how about", "give me",
   "take me to", "go to", "bring back", "me pones", "me pone", "nos pones", "vamos a", "por favor", "llevame a", "ve a"]);
 // A question about the thing is not a request for it ("who plays the lead?", "what's in the news?").
@@ -117,6 +119,25 @@ export function asksPlay(transcript) {
 export function asksOpen(transcript, items = []) {
   const w = plain(transcript);
   return !!w && mentionsOpen(transcript, items) && (parseOpen(transcript, { pull: false }) !== null || asks(w));
+}
+
+// ── must run: a card, asked for without a display word ("I need a list of three fruits") ─────────────
+// The card nouns of KIND_NOUNS, plus plurals; "text" and "note" are left out ("I need to text my mom").
+const CARD_NOUNS = Object.freeze({ ...Object.fromEntries(Object.entries(KIND_NOUNS).filter(([k]) => k !== "text" && k !== "note")),
+  lists: "content", timers: "timer", alarms: "timer", recipes: "recipe", listas: "content", recetas: "recipe", temporizadores: "timer" });
+// A making verb at the start is a request with no cue: "make a list of chores", "hazme una lista".
+const MAKE_STARTS = runs(["make", "make me", "make us", "write", "write me", "write down", "create", "start", "set", "haz", "crea", "escribe"]);
+// Reading, closing or changing what is there is not a request for a NEW card.
+const NOT_CARD = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "stop", "pause", "app", "apps", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela", "para"]);
+/** → "timer" | "recipe" | "content" | null. items: what this display may open (a noun inside an item's name is that item). */
+export function asksCard(transcript, items = []) {
+  const w = plain(transcript);
+  if (!w || hasAny(w, NOT_CARD) || namesItem(w, items)) return null;
+  const noun = w.find((x) => Object.hasOwn(CARD_NOUNS, x));
+  if (!noun) return null;
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p))) return null;
+  return asks(w) || MAKE_STARTS.some((p) => sameAt(core, 0, p)) ? CARD_NOUNS[noun] : null;
 }
 
 // ── two requests in one sentence ─────────────────────────────────────────────────────────────────

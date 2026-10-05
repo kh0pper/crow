@@ -11,6 +11,7 @@
  * ctx.strict (T0/T1): a missing target returns null — the phrase does not fire.
  */
 import { parseDuration, contentBlocks, isPlaceholderText, wantsDisplay, MAX_TIMER_S } from "./wm.js";
+import { asksCard } from "./patterns.js";
 import { spokenWords, sameAt, KIND_NOUNS } from "./phrases.js";
 import { MEDIA_VERBS } from "./tools.js";
 import { STRINGS } from "./strings.js";
@@ -93,7 +94,7 @@ function show(i, ctx, S) {
     // ctx.turn.update (set by the tool on a turn that asks to change the open card) names that card: a call
     // under another title is sent back with the title to use.
     const isUpdate = ctx.store.list(ctx.deviceId).some((w) => w.kind === "content" && lower(w.title) === lower(title));
-    if (typeof ctx.turn?.transcript === "string" && !wantsDisplay(ctx.turn.transcript) && !isUpdate) return ctx.turn.update ? bad("update_title", { title: ctx.turn.update }) : bad("no_intent");
+    if (typeof ctx.turn?.transcript === "string" && !wantsDisplay(ctx.turn.transcript) && asksCard(ctx.turn.transcript, ctx.items) === null && !isUpdate) return ctx.turn.update ? bad("update_title", { title: ctx.turn.update }) : bad("no_intent");
     if (isPlaceholderText(body, PH_BODY)) return bad("placeholder");
     let blocks;
     if (kind === "list") {

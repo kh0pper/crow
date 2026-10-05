@@ -12,7 +12,7 @@ import { wantsDisplay, wantsNewDisplay, newDisplayKind, parseKioskCommand, match
 import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
 import { INTENT_MAX_CHARS, intentText } from "../bundles/kiosk/server/intent-text.js";
 import { matchT0, spokenWords } from "../bundles/kiosk/server/phrases.js";
-import { parseOpen, parsePlay, lookupItem, mentionsOpen, mentionsPlay, asksOpen, asksPlay, compound } from "../bundles/kiosk/server/patterns.js";
+import { parseOpen, parsePlay, lookupItem, mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, compound, compoundParts } from "../bundles/kiosk/server/patterns.js";
 
 const store = createWmStore({ setTimer: () => ({}), clearTimer: () => {} });
 const MATCHERS = {
@@ -24,6 +24,8 @@ const MATCHERS = {
   mentionsOpen: (s) => mentionsOpen(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
   asksOpen: (s) => asksOpen(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
   lookupItem: (s) => lookupItem([{ id: "a", title: "Lab dashboard", aliases: ["lab"] }], s),
+  asksCard: (s) => asksCard(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  compoundParts,
 };
 const BUDGET_MS = 50;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */

@@ -242,7 +242,7 @@ test("a compound request is not cut after its first action: the timer closes, th
   assert.equal(r.timings.tool_choice, "none");
   assert.deepEqual(r.timings.tools, ["crow_wm:done", "crow_show:shown"]);
   assert.deepEqual(d.cards(), ["content:Fruits"]);
-  assert.equal(said(d), "The timer is off and your list is up.");
+  assert.equal(said(d), "Timer stopped. Here's Fruits.", "the turn ends on the server's lines for what was done, not on the model's own sentence");
   assert.equal(r.failed, null);
   assert.equal(r.timings.final, undefined, "no result ended the turn early");
 });
@@ -341,4 +341,45 @@ test("offered is wider than must-run for play and open: a question about music i
   const o = await need.ask("I need the lab dashboard up.");
   assert.deepEqual(need.requests[0].tool_choice, { type: "function", function: { name: "crow_open" } }, "a request that names an item, with a request cue, must run");
   assert.equal(o.timings.final, "crow_open:unavailable");
+});
+
+// ── WM1a revision 3 ──────────────────────────────────────────────────────────────────────────────
+test("a compound request: a false claim about the half that never happened is never heard — the turn ends on the line for what was done", async () => {
+  const d = display({ model: (body, n) => (n === 1 ? { tool: "crow_show", args: FRUITS } : { say: "I closed the timer and put your list up." }) });
+  d.store.open("kiosk-live", { kind: "timer", name: "Rice", title: "Rice", seconds: 600 });
+  const r = await d.ask("Close the timer and then show me a list of three fruits.");
+  assert.deepEqual(r.timings.tools, ["crow_show:shown"]);
+  assert.equal(said(d), "Here's Fruits.");
+  assert.equal(captions(d), "Here's Fruits.");
+  assert.ok(!said(d).includes("closed the timer"));
+  assert.equal(r.failed, null);
+  assert.deepEqual(d.cards(), ["timer:Rice", "content:Fruits"]);
+});
+
+test("a card asked for without a display word is offered and must run: 'I need a list…', 'Hazme una lista…'; a claim with no call is never heard", async () => {
+  for (const [lang, say, line] of [["en", "I need a list of three fruits.", "Sorry, I couldn't put that on the screen."], ["es", "Hazme una lista de tres frutas.", null]]) {
+    const claim = display({ lang, model: () => ({ say: lang === "es" ? "Aquí tienes la lista en la pantalla." : "Your list is on the screen now." }) });
+    const r = await claim.ask(say);
+    assert.deepEqual(toolNames(claim.requests[0]), ["crow_show"], `${say}: offered, and narrowed to the card tool`);
+    assert.equal(r.failed, "display_missed", say);
+    assert.ok(!said(claim).includes("on the screen now") && !said(claim).includes("Aquí tienes"), say);
+    if (line) assert.equal(claim.spoken.at(-1), line);
+    const ok = display({ lang, forcing: "named", model: () => ({ tool: "crow_show", args: FRUITS }) });
+    const r2 = await ok.ask(say);
+    assert.deepEqual([r2.failed, ok.cards()], [null, ["content:Fruits"]], say);
+  }
+});
+
+test("the card rule is narrow: questions, reading or closing a card, a noun inside an item's name, and 'next steps for' questions are not card requests", async () => {
+  for (const say of ["What are the next steps for the project?", "What's on my list?", "Can you read me the list?", "I need to text my mom.", "Is there a timer running?"]) {
+    const d = display({ model: () => ({ say: "Okay." }) });
+    const r = await d.ask(say);
+    assert.equal(r.failed, null, say);
+    // "timer" is a display word (0.1.8's wantsDisplay), so that question is still offered the tools; nothing is required of it.
+    if (say !== "Is there a timer running?") assert.equal(d.requests[0].tools, undefined, `${say}: no display tool is offered`);
+    assert.equal(r.timings.tool_choice, undefined, `${say}: nothing is required`);
+    assert.equal(said(d), "Okay.");
+  }
+  const make = display({ model: () => ({ say: "Done." }) });
+  assert.equal((await make.ask("Make a list of chores.")).failed, "display_missed", "a making verb with a card noun is a request");
 });

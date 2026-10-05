@@ -122,7 +122,8 @@ const DISPLAY_INTENT = [
   // Spanish (a leading \b cannot sit before an accented letter, so those use a space/start anchor).
   /\bmu[eé]stra(s|me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(s|me|nos)\b/,
   /\ben (la |mi |tu )?pantalla\b/,
-  /\bsteps (for|to)\b|\bpasos (para|de)\b/,
+  // A request for steps ("give me the steps for…", "steps to make…"), not "the next steps for the project".
+  /\b(the|me|us) steps (for|to)\b|\bsteps to make\b|\b(los|me|nos) pasos (para|de)\b/,
   /\b(temporizador(es)?|cron[oó]metro|cuenta atr[aá]s|cuenta regresiva|alarmas?)\b/,
   /\brecetas?\b/,
   /(^| )(siguiente|anterior|pr[oó]ximo|[uú]ltimo|primer|este|ese) paso\b|\b(lee|leer|repite|repetir) (el |ese )?paso\b/,

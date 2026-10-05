@@ -10,7 +10,10 @@ import { randomBytes } from "node:crypto";
 import { createPairingStore } from "./pairing.js";
 import { createSessionHub } from "./session.js";
 import { createMetricsStore } from "./metrics.js";
-import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks } from "./wm.js";
+import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks, wantsNewDisplay } from "./wm.js";
+import { createDisplayTools, cardUpdate } from "./display-tools.js";
+import { matchSpoken } from "./tiers.js";
+import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
@@ -76,6 +79,40 @@ export function kioskTooLargeText(lang) {
 /** Spoken + captioned when a turn that asked for something on the screen ends with nothing put there. */
 export function kioskDisplayMissedText(lang) {
   return STRINGS[lang === "es" ? "es" : "en"].display_missed_say;
+}
+
+/**
+ * Everything a display turn passes to the voice turn besides the audio, from the display's executor
+ * context (display-tools.js). Pure, and the ONE place these options are built: the real turn, the
+ * post-deploy turn check and the evaluation harness all call it, so they cannot drift apart.
+ *   ctx  { store, deviceId, caps (effective), lang, sources, items, emit, media?, … }
+ *   o    { now() → ms, tz, settings (the display's kiosk_settings, or a function returning them: the STT
+ *          model is read when the turn transcribes), mediaLine() → "Playing: …" | "",
+ *          wrapTools(tools) → tools (the evaluation records calls through it) }
+ */
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null } = {}) {
+  const tools = createDisplayTools(ctx);
+  const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
+  const lang = cfg().lang;
+  return {
+    extraTools: typeof wrapTools === "function" ? wrapTools(tools) : tools,
+    // T0 and T1 (the tier framework), then the K1 fast path and the clock, unchanged, behind them.
+    fastPaths: async (t) => (await matchSpoken(t, ctx)) || matchWmFastPath(t, ctx.store, ctx.deviceId, ctx.caps) || matchClockFastPath(t, { now: now(), tz }),
+    // Built from the tools this display really has: a display with nothing to play is never told it can play.
+    promptSuffix: displayPromptSuffix(ctx.caps, tools.map((x) => x.definition.name)),
+    // A turn that asks for NEW content sees kinds and counts only (no open card's title to copy); a turn
+    // that asks to CHANGE the open card sees its words.
+    turnContext: (t) => `${kioskNowContext(now(), tz)}\n${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
+    familiesOnIntent: true,
+    denyTools: KIOSK_DENY_TOOLS,
+    sttModel: (p) => kioskSttModel(p, cfg()),
+    maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
+    firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
+    fallbackText: kioskFallbackText(lang),
+    tooLargeText: kioskTooLargeText(lang),
+    displayMissedText: kioskDisplayMissedText(lang),
+    memoryWhen: wantsMemory,
+  };
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
