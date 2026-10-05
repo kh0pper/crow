@@ -5,7 +5,8 @@
  * so this routes file works both from the repo and when installed
  * to ~/.crow/bundles/media/.
  *
- * Protected by dashboardAuth. Provides feed, article, and source
+ * Protected by dashboardAuth (plus the gateway CSRF check on every
+ * state-changing route). Provides feed, article, and source
  * endpoints consumed by the media dashboard panel.
  */
 
@@ -39,6 +40,14 @@ const serverDir = resolveBundleServer();
 const dbModulePath = resolveDbModule();
 
 const { createDbClient, sanitizeFtsQuery, escapeLikePattern } = await import(pathToFileURL(dbModulePath).href);
+
+// The gateway's double-submit CSRF check, resolved from the app root so it
+// also works from an installed copy (the gateway sets CROW_APP_ROOT; the
+// repo-relative fallback covers running straight from the checkout).
+const appRoot = process.env.CROW_APP_ROOT || join(import.meta.dirname, "..", "..", "..");
+const { csrfMiddleware } = await import(
+  pathToFileURL(join(appRoot, "servers", "gateway", "dashboard", "shared", "csrf.js")).href
+);
 
 /** Escape a value for HTML text and quoted-attribute contexts. */
 function escapeHtml(value) {
@@ -172,7 +181,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Article action (star/save/read/feedback) ---
-  router.post("/api/media/articles/:id/action", authMiddleware, async (req, res) => {
+  router.post("/api/media/articles/:id/action", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -262,7 +271,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/media/sources", authMiddleware, async (req, res) => {
+  router.post("/api/media/sources", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { url, name, category } = req.body;
@@ -307,7 +316,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/sources/:id", authMiddleware, async (req, res) => {
+  router.delete("/api/media/sources/:id", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -326,7 +335,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Refresh source ---
-  router.post("/api/media/sources/:id/refresh", authMiddleware, async (req, res) => {
+  router.post("/api/media/sources/:id/refresh", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -423,7 +432,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- TTS generation (on-demand) ---
-  router.post("/api/media/articles/:id/listen", authMiddleware, async (req, res) => {
+  router.post("/api/media/articles/:id/listen", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -518,7 +527,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/media/playlists", authMiddleware, async (req, res) => {
+  router.post("/api/media/playlists", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const { name, description } = req.body;
@@ -536,7 +545,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Playlist items ---
-  router.post("/api/media/playlists/:id/items", authMiddleware, async (req, res) => {
+  router.post("/api/media/playlists/:id/items", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const playlistId = parseInt(req.params.id, 10);
@@ -566,7 +575,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/playlists/:id/items/:itemId", authMiddleware, async (req, res) => {
+  router.delete("/api/media/playlists/:id/items/:itemId", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const playlistId = parseInt(req.params.id, 10);
@@ -587,7 +596,7 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
-  router.delete("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+  router.delete("/api/media/playlists/:id", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
@@ -601,7 +610,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Generate Briefing ---
-  router.post("/api/media/briefings", authMiddleware, async (req, res) => {
+  router.post("/api/media/briefings", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const topic = req.body.topic || null;
@@ -712,7 +721,7 @@ export default function mediaRouter(authMiddleware) {
   });
 
   // --- Playlist visibility ---
-  router.patch("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+  router.patch("/api/media/playlists/:id", authMiddleware, csrfMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
