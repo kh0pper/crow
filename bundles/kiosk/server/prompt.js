@@ -13,10 +13,19 @@ export function capsSentence(caps) {
   return `This display has ${screen}${c.audio?.out ? " and a speaker" : ""}. It ${c.video && c.video !== "none" ? "can" : "cannot"} play video.`;
 }
 
-export function displayPromptSuffix(caps) {
+/** "a, b or c". */
+const orList = (w) => (w.length > 1 ? `${w.slice(0, -1).join(", ")} or ${w.at(-1)}` : w[0] || "");
+/**
+ * tools: the names of the display tools this display really has (createDisplayTools). The sentence names
+ * only what they can do: a display with no crow_play is never told it can play (it would claim to).
+ * Omitted → the tools every display has (crow_show, crow_wm).
+ */
+export function displayPromptSuffix(caps, tools = ["crow_show", "crow_wm"]) {
+  const has = (n) => Array.isArray(tools) && tools.includes(n);
+  const acts = [...(has("crow_show") ? ["see", "time", "follow"] : []), ...(has("crow_open") ? ["open"] : []), ...(has("crow_play") ? ["play"] : [])];
   return [
     "You are speaking through a shared home display to whoever is in the room. Reply in one to three short spoken sentences of plain prose: no markdown, no lists, no emoji.",
-    "Use a display tool only when someone asks to see, time, follow, open or play something; never for ordinary questions, and never to repeat what you say aloud.",
+    `Use a display tool only when someone asks to ${orList(acts.length ? acts : ["see"])} something; never for ordinary questions, and never to repeat what you say aloud.`,
     capsSentence(caps),
     "A message may begin with lines in square brackets — [Now] is this display's local date and time, [Display] its open windows. Use them to answer; never read them out.",
   ].join("\n");

@@ -93,3 +93,13 @@ test("spoken lines: every say_ line exists in en and es, fits 120 characters wit
   const ph = (s) => (s.match(/\{\w+\}/g) || []).sort().join(",");
   for (const k of keys) { assert.ok(STRINGS.es[k], k); assert.equal(ph(STRINGS.es[k]), ph(STRINGS.en[k]), k); assert.ok(STRINGS.en[k].length <= 90 && STRINGS.es[k].length <= 90, `${k} leaves room for a title`); }
 });
+
+test("prompt suffix names only what the display's tools can do: with show and wm alone it never says open or play", () => {
+  const small = { screen: { w: 800, h: 480, touch: true }, audio: { out: true }, video: "none" };
+  const shipped = displayPromptSuffix(small, ["crow_show", "crow_wm"]);
+  assert.match(shipped, /asks to see, time or follow something;/);
+  assert.doesNotMatch(shipped, /\b(open|play) something\b|, open|or play/);
+  assert.equal(displayPromptSuffix(small), shipped, "the default is the tools every display has");
+  assert.match(displayPromptSuffix(small, ["crow_play", "crow_open", "crow_show", "crow_wm"]), /asks to see, time, follow, open or play something;/);
+  assert.match(displayPromptSuffix(small, ["crow_play", "crow_show", "crow_wm"]), /asks to see, time, follow or play something;/);
+});
