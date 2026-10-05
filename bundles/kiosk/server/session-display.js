@@ -22,18 +22,34 @@ export function sessionDisplayId(sessionToken) {
 
 /**
  * The assistant a session display talks to: the one chosen in the Kiosk panel
- * when it is still enabled, else the first enabled assistant by id — the same
- * default the bot board opens on. null when no assistant is enabled.
+ * when it is still enabled, else ("Automatic") the first enabled assistant by
+ * id — the same default the bot board opens on. null when there is none.
+ *
+ * fitOf(botId) → "full" | "no_skills" | "too_large" | null (the bundle's fit
+ * check, fit.js) makes Automatic fit-aware: the first assistant whose prompt
+ * fits the quick voice model in full (or whose fit is unknown), else the first
+ * that works without its skills; never one that is too large. Without fitOf
+ * the choice is the plain first enabled assistant. An explicit choice is kept
+ * even when it no longer fits: the turn then says so and the page links to
+ * the Kiosk panel.
  */
-export async function resolveSessionBot(db, { readSetting }) {
+export async function resolveSessionBot(db, { readSetting }, fitOf = null) {
   let chosen = "";
   try { chosen = String((await readSetting(db, SESSION_BOT_SETTING)) || ""); } catch { chosen = ""; }
   if (chosen) {
     const row = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [chosen] })).rows[0];
     if (row) return String(row.bot_id);
   }
-  const first = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE enabled = 1 ORDER BY bot_id LIMIT 1", args: [] })).rows[0];
-  return first ? String(first.bot_id) : null;
+  const ids = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE enabled = 1 ORDER BY bot_id", args: [] })).rows.map((r) => String(r.bot_id));
+  if (!fitOf) return ids[0] ?? null;
+  let lean = null;
+  for (const id of ids) {
+    const level = await fitOf(id);
+    if (level === "too_large") continue;
+    if (level !== "no_skills") return id;
+    lean ??= id;
+  }
+  return lean;
 }
 
 const hostOf = (v) => String(v || "").split(",")[0].trim().toLowerCase();

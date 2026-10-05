@@ -111,10 +111,14 @@ ${sections.join("\n\n")}
  *   generic Crow identity / tool guidance); the device stamp is still appended.
  *   The caller adds the voice-style addendum (concise/destructive/orchestrator)
  *   after this, verbatim.
+ * @param {boolean} [options.omitSkills] - With botDef: leave the bot's skill
+ *   bodies out (persona, device stamp and custom prompt stay). The voice turn
+ *   asks for this when the full prompt does not fit the model's context
+ *   (servers/gateway/voice/prompt-fit.js). Default false.
  * @returns {Promise<string>}
  */
 export async function generateSystemPrompt(options = {}) {
-  const { customPrompt, deviceId, botDef } = options;
+  const { customPrompt, deviceId, botDef, omitSkills = false } = options;
 
   // Slice B (B3): a bound bot's own system_prompt + skills define behavior.
   // We deliberately OMIT the generic Crow identity and the static TOOL_GUIDANCE
@@ -123,7 +127,7 @@ export async function generateSystemPrompt(options = {}) {
   if (botDef) {
     const parts = [];
     if (botDef.system_prompt) parts.push(String(botDef.system_prompt));
-    const skills = Array.isArray(botDef.skills) ? botDef.skills : [];
+    const skills = !omitSkills && Array.isArray(botDef.skills) ? botDef.skills : [];
     if (skills.length) {
       try {
         const { text, missing } = resolveSkillText(skills, { crowHome: resolveCrowHome() });

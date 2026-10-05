@@ -105,7 +105,7 @@ test("timer fast path: a spoken 'set a timer' opens it with no LLM; caps respect
 test("at most 4 windows: the oldest non-timer is evicted and a close is emitted", async () => {
   const s = setup();
   await s.run("timer 9 minutes a");
-  for (const n of [1, 2, 3, 4]) await s.run(`display N${n} | x`);
+  for (const n of [1, 2, 3, 4]) await s.run(`recipe N${n} | x | do it`);
   const kinds = s.store.list("k").map((w) => w.title);
   assert.equal(kinds.length, 4);
   assert.ok(!kinds.includes("N1"));
@@ -174,4 +174,174 @@ test("what's the step reads the step (apostrophe stripped by normalisation)", as
   const s = setup();
   await s.run("recipe R | a | one || two");
   assert.equal(W.matchWmFastPath("What's the step?", s.store, "k").say, "Step 1. one");
+});
+
+// ── Live test 2026-10-04 (a small assistant, plain questions): junk cards, placeholder cards, piles of chips ──
+test("wantsDisplay: only display/timer/recipe/window intent offers the display tool (en + es); plain questions do not", () => {
+  const table = [
+    // The live utterances.
+    ["Tell me a joke", false],
+    ["What time is it?", false],
+    ["What's today's date?", false],
+    ["set a timer for one minute and label it check", true],
+    ["show me the shopping list", true],
+    // Plain questions that brush against the word lists.
+    ["What is the capital of Portugal?", false],
+    ["What's a good TV show to watch tonight?", false],
+    ["How close is the moon?", false],
+    ["Is the store close by?", false],
+    ["Explain photosynthesis step by step", false],
+    ["Who put the bins out?", false],
+    ["Why is the sky blue", false],
+    ["", false],
+    // Display intent.
+    ["Display the grocery list", true],
+    ["Put the recipe up", true],
+    ["put that on the screen", true],
+    ["can you list the planets on the display", true],
+    ["Start a countdown for ten minutes", true],
+    ["wake me with an alarm in an hour", true],
+    ["How long is left on the timer?", true],
+    ["Find me a recipe for pancakes", true],
+    ["next step", true],
+    ["what's the next step?", true],
+    ["read the step again", true],
+    ["Close that", true],
+    ["Please dismiss it.", true],
+    ["close all", true],
+    ["clear the screen", true],
+    ["pull up my notes", true],
+    // Spanish.
+    ["Cuéntame un chiste", false],
+    ["¿Qué hora es?", false],
+    ["¿Cuál es la capital de Portugal?", false],
+    ["Pon un temporizador de diez minutos", true],
+    ["Muéstrame la lista de la compra", true],
+    ["muestrame la receta", true],
+    ["ponlo en la pantalla", true],
+    ["siguiente paso", true],
+    ["Cierra eso", true],
+    ["pon una alarma", true],
+    ["cuenta atrás de cinco minutos", true],
+  ];
+  for (const [text, want] of table) assert.equal(W.wantsDisplay(text), want, JSON.stringify(text));
+  assert.equal(W.wantsDisplay("[Display] Open windows: none.\n\nTell me a joke"), true, "callers must pass the PLAIN transcript: the context prefix itself reads as display intent");
+});
+
+test("the display tool is offered on a turn only for display intent, or while a window is open (follow-ups)", async () => {
+  const s = setup();
+  assert.equal(s.tool.when("Tell me a joke"), false);
+  assert.equal(s.tool.when("What time is it?"), false);
+  assert.equal(s.tool.when("set a timer for one minute and label it check"), true);
+  assert.equal(s.tool.when("show me the shopping list"), true);
+  await s.run("timer 1 minute check");
+  assert.equal(s.tool.when("add two minutes"), true, "a window is open: follow-ups keep the tool");
+  assert.equal(s.tool.when("Tell me a joke"), true);
+  s.ft.advance(60_000);
+  assert.equal(s.store.list("k")[0].done, true);
+  assert.equal(s.tool.when("Tell me a joke"), false, "a finished timer waiting to be dismissed does not bring the tool back");
+  assert.equal(s.tool.when("stop the timer"), true);
+  await s.run("display Notes | hi");
+  assert.equal(s.tool.when("Tell me a joke"), true);
+  s.store.closeAll("k");
+  assert.equal(s.tool.when("Tell me a joke"), false);
+});
+
+test("the tool's syntax help uses concrete examples — no angle-bracket placeholders anywhere a model could copy them", async () => {
+  const s = setup();
+  const d = s.tool.definition.description;
+  assert.doesNotMatch(d, /[<>]/, d);
+  for (const frag of ["timer 10 minutes pasta", "stop timer", "recipe ", "next step", "display ", "close all"]) assert.ok(d.includes(frag), frag);
+  assert.ok(d.length <= 700, `description is ${d.length} chars (it is in every prompt that offers the tool)`);
+  assert.doesNotMatch(JSON.stringify(s.tool.definition.inputSchema), /[<>]/);
+  for (const bad of ["dance", "", "recipe", "timer tea", "recipe X | a"]) {
+    const r = await s.run(bad);
+    assert.equal(r.action, "error", bad);
+    assert.doesNotMatch(r.message, /[<>]/, `error for ${JSON.stringify(bad)}: ${r.message}`);
+  }
+});
+
+test("placeholders are never rendered: a display/recipe/timer command made of syntax placeholders or nothing is refused and opens nothing", async () => {
+  const s = setup();
+  const junk = [
+    // The live card: the model copied the old syntax line.
+    "display <title> | <text> — || starts a paragraph; lines starting '- ' become a list",
+    "display <title> | <text>",
+    "display <title> | It is three o'clock",
+    "display Clock | <text>",
+    "display title | text",
+    "display Title | Text",
+    "display | ",
+    "display Notes | ",
+    "display Notes |    ",
+    "display Info | starts a paragraph; lines starting '- ' become a list",
+    "display Shopping list | - milk\\n- eggs (title | text)",
+    "recipe <title> | <ingredient>; <ingredient> | <step> || <step>",
+    "recipe title | ingredients | steps",
+    "recipe Pancakes | flour | <step>",
+    "timer 10 minutes <name>",
+    "timer <duration> <name>",
+    "timer 5 minutes name",
+  ];
+  for (const c of junk) {
+    const r = await s.run(c);
+    assert.equal(r.action, "error", c);
+    assert.match(r.message, /aloud/i, `${c} → the model is told to answer aloud`);
+    assert.doesNotMatch(r.message, /[<>]/);
+  }
+  assert.deepEqual(s.store.list("k"), [], "nothing was opened");
+  assert.equal(s.emitted.length, 0, "nothing was sent to the page");
+  // Real content still works, including words that merely contain the placeholder words.
+  assert.equal((await s.run("display Text messages | You have two new text messages")).ok, true);
+  assert.equal((await s.run("timer 5 minutes name tags")).ok, true);
+  assert.equal((await s.run("recipe Title page cake | flour; eggs | Mix || Bake")).ok, true);
+  assert.equal((await s.run("display a note with no title")).ok, true);
+  // Review: real content that only LOOKS like a placeholder is never refused.
+  assert.equal((await s.run("display Ingredients | flour, eggs")).ok, true, "a card may be titled Ingredients");
+  assert.equal((await s.run("display Steps | Mix, then bake")).ok, true);
+  assert.equal((await s.run("display Math | if a < b and c > d then a < d")).ok, true, "comparison signs are not a placeholder");
+  assert.equal((await s.run("recipe Name day cake | flour; eggs | Mix || Bake")).ok, true);
+  assert.equal((await s.run("timer 3 minutes text mum")).ok, true);
+  assert.equal(W.isPlaceholderText("< b and c >"), false);
+  assert.equal(W.isPlaceholderText("<step one>"), true);
+  assert.equal(W.isPlaceholderText("<title>"), true);
+  assert.equal(W.isPlaceholderText("  "), true);
+  assert.equal(W.isPlaceholderText("Shopping list"), false);
+  assert.equal(W.isPlaceholderText("2 < 3 and 5 > 4"), false);
+});
+
+test("no echo cards: a display card is refused on a turn whose question had no display intent (a timer or recipe is not)", async () => {
+  const s = setup();
+  await s.run("timer 5 minutes tea");   // a window is open, so the tool is offered on the next plain question
+  const run = async (command, transcript) => JSON.parse(await s.tool.execute({ command }, { transcript }));
+  const joke = await run("display Info | Why did the crow sit on the wire? To make a long-distance caw.", "Tell me a joke");
+  assert.equal(joke.action, "error");
+  assert.match(joke.message, /aloud/i);
+  assert.deepEqual(s.store.list("k").map((w) => w.kind), ["timer"], "no card was opened");
+  assert.equal((await run("display Shopping list | - milk\n- eggs", "show me the shopping list")).ok, true);
+  assert.equal((await run("timer 2 minutes eggs", "remind me about the eggs in two minutes")).ok, true, "timers are not echo cards");
+  assert.equal((await run("close all", "never mind")).ok, true, "controls always run");
+  assert.equal((await s.run("display Notes | hi")).ok, true, "no turn context (MCP show, tests): not guarded");
+});
+
+test("content cards do not stack: a new display card replaces the previous one; timers and recipes keep their windows", async () => {
+  const s = setup();
+  await s.run("timer 9 minutes pasta");
+  await s.run("recipe Pancakes | flour | Mix || Cook");
+  await s.run("display Info | one");
+  s.emitted.length = 0;
+  const r = await s.run("display Shopping list | - milk");
+  assert.equal(r.ok, true);
+  assert.deepEqual(s.store.list("k").map((w) => `${w.kind}:${w.title}`), ["timer:Pasta", "recipe:Pancakes", "content:Shopping list"]);
+  assert.deepEqual(s.emitted.map((e) => e.action), ["close", "open"], "the page is told to close the old card, then open the new one");
+  assert.equal(s.emitted[0].id, "content-3");
+  for (const n of [1, 2, 3, 4, 5]) await s.run(`display Card ${n} | x`);
+  assert.equal(s.store.list("k").filter((w) => w.kind === "content").length, 1, "chips stay bounded");
+  assert.equal(s.store.list("k").length, 3);
+  // The store itself enforces it (the MCP show tool opens content windows too).
+  const { evicted } = s.store.open("k", { kind: "content", title: "Direct", blocks: [] });
+  assert.deepEqual(evicted.map((w) => w.title), ["Card 5"]);
+  // Per device.
+  s.store.open("other", { kind: "content", title: "Elsewhere", blocks: [] });
+  assert.equal(s.store.list("k").filter((w) => w.kind === "content")[0].title, "Direct");
 });

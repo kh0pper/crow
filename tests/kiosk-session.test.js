@@ -525,6 +525,28 @@ test("review I2: a queued early STT transcribes the audio AS OF its pause, not t
   assert.equal(turns[0].sttEarly.discards, 2);
 });
 
+test("hello tz: the page's IANA time zone reaches every turn; a missing or invalid one is null (the server's zone is used)", async () => {
+  const run = async (tz) => {
+    const { h, turns } = hub();
+    const ws = new FakeWs();
+    h.attach(ws);
+    ws.text({ type: "hello", device_id: "kiosk-a", token: "good", caps: {}, ...(tz === undefined ? {} : { tz }) });
+    await tick();
+    ws.text({ type: "turn_start", turn_id: "z1" });
+    for (let i = 0; i < 20; i++) ws.bin(Buffer.alloc(640, 7));
+    ws.text({ type: "turn_end", vad_reason: "silence" });
+    await tick(); await tick();
+    assert.equal(turns.length, 1);
+    return turns[0].tz;
+  };
+  assert.equal(await run("America/Chicago"), "America/Chicago");
+  assert.equal(await run("Europe/Madrid"), "Europe/Madrid");
+  assert.equal(await run(undefined), null, "an older page sends none");
+  assert.equal(await run("Mars/Olympus"), null);
+  assert.equal(await run({ evil: 1 }), null);
+  assert.equal(await run("x".repeat(500)), null);
+});
+
 // ---- Session displays (the dashboard's Talk to Crow): attach(ws, { authorize, revalidate, onClose }) ----
 
 const SDEV = { id: "dash-0123456789abcdef", name: "Dashboard", device_kind: "kiosk", bound_bot_id: "household", kiosk_settings: { lang: "en" } };
