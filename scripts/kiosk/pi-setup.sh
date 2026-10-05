@@ -17,6 +17,8 @@
 #   --wake-model-sha256 HEX    its sha256; --clear-wake-model goes back to hey_jarvis
 #   --auto-reboot | --no-auto-reboot   unattended-upgrades may reboot at --reboot-time (default 04:30)
 #   --rotate 0|90|180|270      rotate the display and the touchscreen (a chassis mounted upside down: 180)
+#   --repair-speaker           after setup, re-pair the --bt-sink speaker (operator present: clear the
+#                              speaker's paired list in its app and put it in pairing mode first)
 #   --skip-packages            do not run apt or pip (files and services only)
 #   --dry-run DIR              change nothing: write every file under DIR and print the commands
 #   -h, --help
@@ -45,7 +47,7 @@ usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Flags given on this run (empty = not given)
 declare -A GIVEN=()
-DRY=0 ROOT="" SKIP_PACKAGES=0 FRAMES_GIVEN=()
+DRY=0 ROOT="" SKIP_PACKAGES=0 FRAMES_GIVEN=() REPAIR_SPEAKER=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --crow-url) GIVEN[CROW_URL]="${2:-}"; shift 2 ;;
@@ -63,6 +65,7 @@ while [ $# -gt 0 ]; do
     --no-auto-reboot) GIVEN[AUTO_REBOOT]=false; shift ;;
     --reboot-time) GIVEN[REBOOT_TIME]="${2:-}"; shift 2 ;;
     --rotate) GIVEN[ROTATE]="${2:-}"; shift 2 ;;
+    --repair-speaker) REPAIR_SPEAKER=1; shift ;;
     --skip-packages) SKIP_PACKAGES=1; shift ;;
     --dry-run) DRY=1; ROOT="${2:-}"; [ -n "$ROOT" ] || die "--dry-run needs a directory"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -109,6 +112,7 @@ fi
 [[ "${CFG[ROTATE]}" =~ ^(0|90|180|270)$ ]] || die "--rotate must be 0, 90, 180 or 270"
 [[ -z "${CFG[ADMIN_USER]}" || "${CFG[ADMIN_USER]}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --admin-user"
 [ "${CFG[ADMIN_USER]}" != "kiosk" ] || die "--admin-user cannot be the kiosk user"
+[ "$REPAIR_SPEAKER" = 0 ] || [ -n "${CFG[BT_SINK]}" ] || die "--repair-speaker needs --bt-sink (or a saved one)"
 if [ "${CFG[KEEP_ADMIN_AUDIO]}" = 1 ] && [ -n "${CFG[BT_SINK]}" ]; then
   die "--keep-admin-audio with --bt-sink: two PipeWire instances would race for the speaker"
 fi
@@ -219,6 +223,7 @@ say "files"
 put 0755 /usr/local/lib/crow-kiosk/kiosk-launch.sh < "$SRC_DIR/kiosk-launch.sh"
 put 0755 /usr/local/lib/crow-kiosk/mem-sample.sh < "$SRC_DIR/mem-sample.sh"
 put 0755 /usr/local/lib/crow-kiosk/after-dpkg.sh < "$SRC_DIR/after-dpkg.sh"
+put 0755 /usr/local/lib/crow-kiosk/repair-speaker.sh < "$SRC_DIR/repair-speaker.sh"
 for f in "$SRC_DIR"/agent/*.py; do
   name="$(basename "$f")"
   case "$name" in test_*|bench_*|_*) continue ;; esac
@@ -282,6 +287,15 @@ if [ -n "$AU" ] && [ "${CFG[KEEP_ADMIN_AUDIO]}" = 0 ]; then
   echo "   $AU's PipeWire is masked; inspect audio with: sudo -u kiosk XDG_RUNTIME_DIR=/run/user/\$(id -u kiosk) wpctl status"
 fi
 run rfkill unblock bluetooth
+# Classic Bluetooth only: after a reboot BlueZ tried the speaker over LE and failed (disconnect 0x0e);
+# A2DP needs BR/EDR. BlueZ has no conf.d, so main.conf is edited in place (original kept once as .orig).
+BT_MAIN=/etc/bluetooth/main.conf
+BT_BEFORE="$(cat "$(p "$BT_MAIN")" 2>/dev/null || true)"
+if [ -n "$BT_BEFORE" ] && [ ! -e "$(p "$BT_MAIN.orig")" ] && ! grep -qx "ControllerMode = bredr" <<< "$BT_BEFORE"; then
+  printf '%s\n' "$BT_BEFORE" | put 0644 "$BT_MAIN.orig"
+fi
+printf '%s\n' "$BT_BEFORE" | python3 "$SRC_DIR/bt_main_conf.py" | put 0644 "$BT_MAIN"
+if [ "$(cat "$(p "$BT_MAIN")")" != "$BT_BEFORE" ]; then BT_RESTART=1; else BT_RESTART=0; fi
 if [ -n "${CFG[BT_SINK]}" ] && [ "$DRY" = 0 ]; then
   if ! bluetoothctl info "${CFG[BT_SINK]}" 2>/dev/null | grep -q "Paired: yes"; then
     echo "   warning: ${CFG[BT_SINK]} is not paired. Pairing is an operator step (bluetoothctl: scan on, pair, trust)."
@@ -341,9 +355,18 @@ elif [ "$SKIP_PACKAGES" = 0 ] || [ -x "$VENV/bin/python" ]; then
   fi
 fi
 
+# ---- 8c. Bluetooth daemon -------------------------------------------------------------------------
+# Restarting bluetoothd drops the A2DP endpoints WirePlumber registered; they come back only when the
+# kiosk user's WirePlumber restarts too, so the two always go together.
+KUID="$(id -u kiosk 2>/dev/null || echo '<kiosk-uid>')"
+if [ "$BT_RESTART" = 1 ] && [ "$FIRST_INSTALL" = 0 ]; then
+  say "bluetooth"
+  run systemctl restart bluetooth.service
+  run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user restart wireplumber.service
+fi
+
 # ---- 9. apply ------------------------------------------------------------------------------------
 say "apply"
-KUID="$(id -u kiosk 2>/dev/null || echo '<kiosk-uid>')"
 if [ ! -s "$CHANGE_MARK" ]; then
   echo "   nothing changed"
 elif [ "$FIRST_INSTALL" = 1 ]; then
@@ -355,6 +378,19 @@ elif [ "$DRY" = 1 ] || systemctl is-active --quiet crow-kiosk-cage.service; then
   echo "   restarted the agent and the kiosk (network/watchdog settings apply at the next boot)"
 else
   echo "   the kiosk is not running; changes apply at the next boot (sudo reboot)"
+fi
+
+# ---- 9b. optional: re-pair the speaker (operator present) ------------------------------------------
+if [ "$REPAIR_SPEAKER" = 1 ]; then
+  say "re-pair the speaker"
+  if [ "$FIRST_INSTALL" = 1 ] && [ "$DRY" = 0 ]; then
+    die "--repair-speaker: reboot once after the first install (the kiosk user's session owns Bluetooth audio), then re-run with --repair-speaker"
+  fi
+  # the agent's own reconnect attempts would race the pairing (org.bluez.Error.InProgress): pause it
+  run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user stop crow-kiosk-agent.service
+  rc=0; run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" /usr/local/lib/crow-kiosk/repair-speaker.sh "${CFG[BT_SINK]}" || rc=$?
+  run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user start crow-kiosk-agent.service
+  [ "$rc" = 0 ] || die "re-pairing failed (rc=$rc); the agent is running again"
 fi
 
 # ---- 10. checks --------------------------------------------------------------------------------

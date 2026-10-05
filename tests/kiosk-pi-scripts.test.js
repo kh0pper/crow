@@ -16,7 +16,7 @@ const ORIGIN = "https://crow.example.ts.net:8444";
 
 test("shell scripts pass shellcheck (skips without shellcheck)", (t) => {
   if (!have("shellcheck")) return t.skip("shellcheck not installed");
-  const r = spawnSync("shellcheck", ["pi-setup.sh", "kiosk-launch.sh", "mem-sample.sh", "after-dpkg.sh"], { cwd: K, encoding: "utf8" });
+  const r = spawnSync("shellcheck", ["pi-setup.sh", "kiosk-launch.sh", "mem-sample.sh", "after-dpkg.sh", "repair-speaker.sh"], { cwd: K, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
 
@@ -114,6 +114,62 @@ test("the ssh check does not pipe sshd -T into grep -q (pipefail + SIGPIPE gave 
   assert.match(src, /SSHD_T="\$\(sshd -T/);
 });
 
+test("Bluetooth: classic-only controller mode (original kept), bluetoothd + WirePlumber restarted together", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-bt-"));
+  const env = { ...process.env, SUDO_USER: "alex" };
+  try {
+    const conf = "[General]\n#Name = BlueZ\n#ControllerMode = dual\n\n[Policy]\nAutoEnable=true\n";
+    mkdirSync(join(dir, "etc/bluetooth"), { recursive: true });
+    writeFileSync(join(dir, "etc/bluetooth/main.conf"), conf);
+    mkdirSync(join(dir, "etc/crow-kiosk"), { recursive: true });
+    writeFileSync(join(dir, "etc/crow-kiosk/setup.env"), "CROW_URL=" + ORIGIN + "\nBT_SINK=00:11:22:33:44:55\n");  // not a first install
+    const run = (...a) => spawnSync("bash", [join(K, "pi-setup.sh"), ...a, "--dry-run", dir], { encoding: "utf8", env });
+    let r = run();
+    assert.equal(r.status, 0, r.stderr);
+    const after = readFileSync(join(dir, "etc/bluetooth/main.conf"), "utf8");
+    assert.match(after, /^\[General\]\n#Name = BlueZ\nControllerMode = bredr\n/);
+    assert.match(after, /\[Policy\]\nAutoEnable=true/);
+    assert.equal(readFileSync(join(dir, "etc/bluetooth/main.conf.orig"), "utf8"), conf);
+    const restartBt = r.stdout.indexOf("+ systemctl restart bluetooth.service");
+    const restartWp = r.stdout.indexOf("systemctl --user restart wireplumber.service");
+    assert.ok(restartBt > 0 && restartWp > restartBt, "WirePlumber restarts right after bluetoothd");
+    r = run();
+    assert.doesNotMatch(r.stdout, /restart bluetooth\.service/, "unchanged config: no restart");
+    assert.equal(readFileSync(join(dir, "etc/bluetooth/main.conf.orig"), "utf8"), conf, ".orig is written once");
+    r = run("--repair-speaker");
+    assert.match(r.stdout, /runuser -u kiosk -- env XDG_RUNTIME_DIR=\/run\/user\/\S+ \/usr\/local\/lib\/crow-kiosk\/repair-speaker\.sh 00:11:22:33:44:55/);
+    const stop = r.stdout.indexOf("systemctl --user stop crow-kiosk-agent.service");
+    const repair = r.stdout.indexOf("repair-speaker.sh 00:11:22:33:44:55");
+    const start = r.stdout.indexOf("systemctl --user start crow-kiosk-agent.service");
+    assert.ok(stop > 0 && stop < repair && repair < start, "the agent is paused around the re-pairing");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("repair-speaker.sh: remove, scan until seen, pair, trust, connect — only the given address", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-repair-"));
+  try {
+    const log = join(dir, "calls");
+    const fake = join(dir, "bluetoothctl");
+    writeFileSync(fake, `#!/bin/bash
+echo "$*" >> "${log}"
+case "$1" in
+  devices) n=$(grep -c '^devices' "${log}"); [ "$n" -ge 2 ] && echo "Device 00:11:22:AA:BB:CC Kitchen speaker" ;;
+  info) echo "Device $2"; echo "	Connected: yes" ;;
+  --timeout) sleep 0.2 ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const r = spawnSync("bash", [join(K, "repair-speaker.sh"), "00:11:22:aa:bb:cc", "--yes"], { encoding: "utf8", env: { ...process.env, CROW_KIOSK_BTCTL: fake }, timeout: 30000 });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const calls = readFileSync(log, "utf8").trim().split("\n").filter((l) => !l.startsWith("devices") && !l.startsWith("--timeout"));
+    assert.deepEqual(calls, ["remove 00:11:22:AA:BB:CC", "scan off", "pair 00:11:22:AA:BB:CC", "trust 00:11:22:AA:BB:CC", "connect 00:11:22:AA:BB:CC", "info 00:11:22:AA:BB:CC"]);
+    for (const bad of [["nope"], ["00:11:22:33:44:55;reboot"], ["00:11:22:33:44:55", "--force"]]) {
+      assert.equal(spawnSync("bash", [join(K, "repair-speaker.sh"), ...bad], { env: { ...process.env, CROW_KIOSK_BTCTL: fake } }).status, 2, bad.join(" "));
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("pi-setup.sh never writes through a symlink planted in a user's home", (t) => {
   if (!have("python3")) return t.skip("python3 not available");
   const env = { ...process.env, SUDO_USER: "alex" };
@@ -161,7 +217,7 @@ test("pi-setup.sh refuses bad arguments before touching anything", (t) => {
       ["--crow-url", ORIGIN, "--admin-user", "kiosk"], ["--crow-url", ORIGIN, "--reboot-time", "4am"], ["--nope"],
       ["--crow-url", ORIGIN, "--bt-sink", "00:11:22:33:44:55", "--keep-admin-audio"],
       ["--crow-url", ORIGIN, "--wake-model-url", "https://crow.example.ts.net/x/..", "--wake-model-sha256", "a".repeat(64)],
-      ["--crow-url", ORIGIN, "--mic-target", "x;reboot"]]) {
+      ["--crow-url", ORIGIN, "--mic-target", "x;reboot"], ["--crow-url", ORIGIN, "--repair-speaker"]]) {
       const r = spawnSync("bash", [join(K, "pi-setup.sh"), ...bad, "--dry-run", join(dir, "x")], { encoding: "utf8" });
       assert.equal(r.status, 2, `${bad.join(" ")}: ${r.stdout}${r.stderr}`);
       assert.ok(!existsSync(join(dir, "x", "etc")), "nothing written");
