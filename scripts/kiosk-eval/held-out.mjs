@@ -9,72 +9,56 @@
 import { make } from "./cases.mjs";
 
 const { play, news, open, show, wm, card, recipe, timer } = make;
+// The same "something is playing" state the 40 use (cases.mjs: PLAYING), for lines that need one.
+const PLAYING = Object.freeze({ title: "Morning Mix", source: "radio" });
 
 export const HELD_OUT = Object.freeze([
-  { id: "h01", lang: "en", say: "Something mellow while I chop onions, maybe some old jazz.",
-    expect: play(/jazz/i, { what: "mellow old jazz" }) }, // clear request for jazz; "mellow" or "old" may or may not appear in the query
-
-  { id: "h02", lang: "es", say: "¿Hay alguna emisora con música mexicana para cocinar?",
-    expect: play(/mexic|ranchera|mariachi|norte[ñn]|banda|grupera|regional/i, { what: "música mexicana", source: "radio" }) }, // phrased as a question, but in the kitchen it means "put one on"; any Mexican-music query is fine
-
-  { id: "h03", lang: "en", say: "Mind putting the morning news on?",
-    expect: news(/news|noticias/i) }, // polite request to play the news
-
-  { id: "h04", lang: "en", say: "Those 90s hits from yesterday, could we have them again?",
-    expect: play(/90|nineties/i, { what: "90s hits" }) }, // replay 90s hits; no memory of exactly what played yesterday, so a 90s query is right
-
-  { id: "h05", lang: "en", say: "A little bossa nova for dinner would be nice.",
-    expect: play(/bossa/i, { what: "bossa nova" }) }, // indirect request to play bossa nova
-
-  { id: "h06", lang: "en", say: "Where's my shopping list? I need to add eggs.",
-    expect: open("shopping_list") }, // they want their real shopping list app; opening it is the visible result
-
-  { id: "h07", lang: "es", say: "¿Me abres el panel del laboratorio un momento?",
-    expect: open("lab_dashboard") }, // Spanish alias for the Lab dashboard
-
-  { id: "h08", lang: "en", say: "That coding assistant guide, can I see it on the big screen?",
-    expect: open("coding_guide") }, // names the app exactly
-
-  { id: "h09", lang: "en", say: "How do you make pancakes from scratch? I'd like the steps up there.",
-    expect: show("steps", { title: "Pancakes", body: "flour\nmilk\neggs\n---\nWhisk the batter\nCook two minutes a side" }, { title: /pancake/i }) }, // asks for steps on screen, so a recipe/steps card
-
-  { id: "h10", lang: "en", say: "I need a twelve-minute timer for the pasta.",
-    expect: show("timer", { title: "Pasta", seconds: 720 }, { title: /pasta|timer|12/i }) }, // timer card; loose title, 720 s in the sample
-
-  { id: "h11", lang: "es", say: "Una lista con lo que falta para la lasaña, por favor.",
-    expect: show("list", { title: "Lasaña", body: "láminas de lasaña\ncarne molida\nqueso ricotta\nsalsa de tomate" }, { title: /lasa[ñn]a/i }) }, // a list card for lasagna ingredients
-
-  { id: "h12", lang: "en", say: "What temperature for a roast chicken? Put it on the screen so I don't forget.",
-    expect: show(["text", "list"], { title: "Roast chicken", body: "425°F (220°C), about 20 minutes per pound" }, { title: /chicken|roast/i, body: /\d{3}\s*°?\s*[FC]?/i }) }, // answer spoken AND a card holding the temperature; text or list both fine
-
-  { id: "h13", lang: "en", say: "Oh, and garlic bread on there too.",
-    state: { windows: [card("Shopping list")] },
-    expect: show("list", { title: "Shopping list", body: "one\ntwo\ngarlic bread" }, { sameTitle: "Shopping list", body: /garlic bread/i }) }, // update the open shopping-list card in place, keeping its title and adding the item
-
-  { id: "h14", lang: "en", say: "Actually, make it twenty minutes instead.",
-    state: { windows: [timer("Pasta")] },
-    expect: show("timer", { title: "Pasta", seconds: 1200 }, { sameTitle: "Pasta" }) }, // change the open pasta timer to 20 min; keep it the same timer, not a second one
-
-  { id: "h15", lang: "en", say: "Okay, next step please, my hands are covered in flour.",
-    state: { windows: [recipe("Pancakes")] }, // added: "next step" implies a recipe is open
-    expect: wm("next_step") }, // only one right action
-
-  { id: "h16", lang: "en", say: "That's way too loud, bring it down a bit.",
-    state: { playing: { title: "Morning News", source: "news" } },
-    expect: wm("volume_down") }, // lower the volume; not mute, not stop
-
-  { id: "h17", lang: "es", say: "Ya terminé con la receta, quítala de la pantalla.",
-    state: { windows: [recipe("Pancakes")] }, // added: "quítala" refers to an open recipe
-    expect: wm("close", {}, { name: /pancake|receta|recipe/i }) }, // close the recipe window
-
-  { id: "h18", lang: "en", say: "Skip ahead to the next song, please, I can't stand this tune.",
-    state: { playing: { title: "Rock Playlist", source: "music" } },
-    expect: wm("next") }, // asks outright for the next song; skip within the playlist, not stop or pause
-
-  { id: "h19", lang: "en", say: "How many tablespoons are in a quarter cup?",
-    expect: null }, // spoken answer only (4 tablespoons); nothing on screen asked for
-
-  { id: "h20", lang: "es", say: "¿Cuántos gramos tiene una taza de harina?",
-    expect: null }, // spoken answer only (about 120–125 g of all-purpose flour)
+  { id: "h01", lang: "en", say: "Is there a station playing classic soul right now? Something to cook to.",
+    expect: play(/soul/i, { what: "classic soul", source: "radio" }) }, // "something to cook to" means play it, not just answer yes or no
+  { id: "h02", lang: "es", say: "¿Me pones las noticias de la tarde mientras lavo los platos?",
+    expect: news(/noticias|news/i) }, // asks for the news to be played
+  { id: "h03", lang: "en", say: "Some reggae for doing the dishes, if you've got any.",
+    expect: play(/reggae/i, { what: "reggae", source: "music" }) }, // genre request; music or radio both fine
+  { id: "h04", lang: "en", say: "My mom loves Marisol Vega, so let's have her on before she gets here.",
+    expect: play(/marisol\s*vega/i, { what: "Marisol Vega", source: "music" }) }, // play the artist ("her" is Marisol Vega, not the mom)
+  { id: "h05", lang: "en", say: "Whatever the local sports radio has on, I want to hear the score.",
+    expect: play(/sport/i, { what: "local sports radio", source: "radio" }) }, // tune to the sports station
+  { id: "h06", lang: "en", say: "The Now playing screen, please, I want to see what song this is.",
+    state: { playing: PLAYING }, // added: "what song this is" means something is already playing
+    expect: open("now_playing") }, // only this app is right
+  { id: "h07", lang: "en", say: "Quick look at the lab dashboard before dinner?",
+    expect: open("lab_dashboard") }, // only this app is right
+  { id: "h08", lang: "en", say: "Is there a calculator somewhere in the launcher? I have to halve this recipe.",
+    expect: open("launcher") }, // they want to get to a calculator; opening the launcher is the reachable action
+  { id: "h09", lang: "en", say: "Steps for a simple guacamole up on the screen would really help.",
+    expect: show("steps", { title: "Simple guacamole", body: "avocados\nlime\nsalt\n---\nMash the avocados\nStir in lime and salt" }, { title: /guac/i }) }, // a steps card is explicitly asked for
+  { id: "h10", lang: "en", say: "Rice needs ten minutes, can you count that down for me?",
+    expect: show("timer", { title: "Rice", seconds: 600 }, { title: /rice|arroz/i }) }, // 10-minute timer card
+  { id: "h11", lang: "es", say: "Lo que hace falta para unas enchiladas verdes, en una lista si se puede.",
+    expect: show("list", { title: "Enchiladas verdes", body: "tortillas\ntomatillos\nchiles serranos\npollo\nqueso\ncrema" }, { title: /enchilada/i }) }, // a list is explicitly asked for
+  { id: "h12", lang: "en", say: "Folding dumplings, I always forget how. Could you show me step by step?",
+    expect: show("steps", { title: "Folding dumplings", body: "wrappers\nfilling\n---\nPut filling in the centre\nWet the edge\nFold and pleat to seal" }, { title: /dumpling/i }) }, // step-by-step means a steps card
+  { id: "h13", lang: "es", say: "Cilantro y limones también, que no se me olviden.",
+    state: { windows: [card("Enchiladas verdes")] }, // from [lista de las enchiladas]
+    expect: show("list", { title: "Enchiladas verdes", body: "one\ntwo\ncilantro\nlimones" },
+      { sameTitle: "Enchiladas verdes", body: /^(?=[\s\S]*cilantro)(?=[\s\S]*lim[oó]n)/i }) }, // add both to the SAME list, not a new one
+  { id: "h14", lang: "en", say: "Cross off the tortillas, turns out we have a whole pack.",
+    state: { windows: [card("Enchilada list")] }, // from [enchilada list card]; the fixture card's items are "one","two"
+    expect: show("list", { title: "Enchilada list", body: "one\ntwo" }, { sameTitle: "Enchilada list" }) }, // update the same list; strike-through vs. removal not checked
+  { id: "h15", lang: "en", say: "Hold on, pause that, the phone's ringing.",
+    state: { playing: { title: "Marisol Vega playlist", source: "music" } }, // from [Marisol Vega playlist]
+    expect: wm("pause") }, // pause, not stop or mute
+  { id: "h16", lang: "en", say: "Wait, back one step, I missed how much salt goes in.",
+    state: { windows: [recipe("Dumplings")] }, // from [dumpling recipe steps]
+    expect: wm("previous_step", {}, { name: /dumpling/i }) }, // step back in the recipe, not the music "previous"
+  { id: "h17", lang: "en", say: "Too many windows open now, just clear them all off.",
+    state: { windows: [card("Enchiladas verdes"), recipe("Dumplings"), timer("Rice")] }, // added: the line implies several windows are open
+    expect: wm("close_all") }, // close everything
+  { id: "h18", lang: "es", say: "Uy, qué bajito está eso, súbele que no lo oigo con el extractor.",
+    state: { playing: { title: "Merengue — Los Hermanos Brisa", source: "music" } }, // from [merengue de Los Hermanos Brisa]
+    expect: wm("volume_up") }, // "súbele" plus "too quiet" means turn it up; only volume_up is right
+  { id: "h19", lang: "en", say: "How long does cooked rice keep in the fridge?",
+    expect: null }, // a spoken fact (about 3–4 days); nothing should change
+  { id: "h20", lang: "es", say: "¿A qué hora se pone el sol hoy?",
+    expect: null }, // a spoken answer; nothing should change
 ]);
-
