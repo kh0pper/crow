@@ -16,7 +16,6 @@ triggers:
   - RSS
 tools:
   - crow-media
-  - crow-storage
 ---
 
 # Media Management
@@ -48,18 +47,24 @@ tools:
 3. `crow_media_get_article` — full content for a specific article
 4. `crow_media_article_action` — star, save, thumbs up/down to improve recommendations
 
-### Listen (TTS)
+### Listen
 
-1. `crow_media_listen` with `article_id` — generates audio via edge-tts
-   - Requires: `npm install edge-tts` (optional dependency)
-   - Audio cached by content hash, auto-cleaned when over size limit
-   - Rate limited: 1 concurrent, daily cap via `CROW_MEDIA_TTS_DAILY_LIMIT`
+1. `crow_media_listen` with `article_id`: the local voice reads the article aloud
+   - Local voice only (a self-hosted voice profile such as Kokoro on this host or your own network). Nothing is sent to a cloud voice. With no local voice the tool says so and makes no audio.
+   - One file per article, reused until the article's text changes; cleaned up when the cache is over its size limit
+   - A `voice` argument is used only when the local engine lists that voice id
 
 ### Briefings
 
-1. `crow_media_briefing` — AI-generated narration script from top unread articles
-   - Optional: `topic` filter, `voice` for TTS audio generation
-   - Stored in `media_briefings` table for replay
+1. `crow_media_briefing`: a briefing now. A dated script ("Good morning. It's Tuesday, October 6th…") of the newest stories from the site feeds, at most two per source, each named with its source. No model writes it: every sentence comes from the feed item it names.
+   - Site feeds only. Search feeds (Google News style), video channels and shows are never read into a briefing.
+   - The tool answers with the script at once; the local voice finishes in the background and the audio appears on the Briefings tab
+   - Optional: `topic`, `max_articles` (default 8), `audio: false` for text only
+2. `crow_media_schedule_briefing`: the daily briefing
+   - No arguments: report the schedule. `time: "08:00"` sets it (ready at that time; work starts 15 minutes earlier). `enabled: false` turns it off.
+   - `show_source_id`: a subscribed show (a podcast source, see `crow_media_list_sources`) whose episode of the day plays after the briefing, Monday to Friday by default. If the episode is not out when the narration ends, playback stops and the Briefings tab shows it is still being checked for; a notice follows when it lands.
+   - `show_title_prefix`: only an episode whose title starts with this counts (for feeds that also carry extras). Omitted, the stored one is kept; "" clears it. Without one, a feed that dates its episode titles must carry today's date in the title
+   - The schedule is one row in Crow's schedules (`media:briefing`), so `crow_list_schedules` shows it
 
 ### Playlists
 
@@ -105,6 +110,6 @@ tools:
 ## Important Notes
 
 - YouTube is tracking-only: no audio extraction, no background playback, no ToS violations
-- TTS uses edge-tts (CC BY-NC-SA license) — user installs separately
+- Spoken audio uses the local voice profile only; there is no cloud voice in this bundle
 - Email digests use nodemailer — user installs separately
 - Both are optional dependencies with graceful fallback

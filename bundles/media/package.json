@@ -1,6 +1,6 @@
 {
   "name": "crow-media",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "private": true,
   "dependencies": {
@@ -13,7 +13,6 @@
     "sanitize-html": "^2.17.1"
   },
   "optionalDependencies": {
-    "node-edge-tts": "^1.2.10",
     "nodemailer": "^6.10.0"
   }
 }

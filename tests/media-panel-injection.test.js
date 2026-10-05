@@ -135,9 +135,17 @@ const artBenign = await addArticle(srcBenign, "g6", {
 });
 
 const HOSTILE_BRIEFING = `Briefing: x\\'"><img src=x onerror=PWNED_BRIEF()>`;
+// Media 1.1.0: a briefing offers Play only while its audio file is really there (row contract),
+// and the Briefings tab reads the core schedules table.
+await db.execute(`CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL, cron_expression TEXT NOT NULL, description TEXT,
+  enabled INTEGER DEFAULT 1, last_run TEXT, next_run TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
+mkdirSync(join(SCRATCH, "media", "audio"), { recursive: true });
+const briefingAudio = join(SCRATCH, "media", "audio", "briefing-hostile.mp3");
+writeFileSync(briefingAudio, Buffer.alloc(417, 0xff));
 const briefingId = await insert(
   "INSERT INTO media_briefings (title, script, audio_path, article_ids) VALUES (?, ?, ?, ?)",
-  [HOSTILE_BRIEFING, "script", "/nonexistent/briefing.mp3", "[1]"]);
+  [HOSTILE_BRIEFING, "script", briefingAudio, "[1]"]);
 
 const playlistId = await insert(
   "INSERT INTO media_playlists (name, description, slug, visibility) VALUES (?, ?, ?, 'public')",
@@ -315,9 +323,11 @@ test("playlists tab: hostile playlist names stay inert", async () => {
 
 test("briefings tab: the play button carries its title as data", async () => {
   const doc = assertClean(asPage(await renderTab({ tab: "briefings" })), "briefings tab");
-  const play = doc.querySelector('[data-media-action="play"]');
-  assert.equal(play.getAttribute("data-audio-url"), `/api/media/briefings/${briefingId}/audio`);
-  assert.equal(play.getAttribute("data-title"), HOSTILE_BRIEFING);
+  const play = doc.querySelector('[data-media-action="briefing-play"]');
+  assert.ok(play, "a briefing with its audio file present has a Play button");
+  const data = JSON.parse(play.closest("[data-briefing]").getAttribute("data-briefing"));
+  assert.equal(data.src, `/api/media/briefings/${briefingId}/audio`);
+  assert.equal(data.title, HOSTILE_BRIEFING);
 });
 
 test("folders tab: stored folder filters are escaped", async () => {
@@ -336,6 +346,7 @@ function runClientScript(scripts, { times = 1 } = {}) {
     document: {
       addEventListener: (type, fn) => listeners.push({ type, fn }),
       getElementById: () => null,
+      querySelector: () => null,
     },
     location: { href: "https://dash.example.test/dashboard/media?tab=feed", reload() {} },
     URL,

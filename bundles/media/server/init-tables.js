@@ -22,7 +22,7 @@ async function addColumnIfMissing(db, table, column, definition) {
     const exists = cols.rows.some(r => r.name === column);
     if (!exists) {
       await db.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}` });
-      console.log(`Added column ${table}.${column}`);
+      console.error(`[media] added column ${table}.${column}`);
     }
   } catch (err) {
     console.warn(`Warning: could not check/add ${table}.${column}: ${err.message}`);
@@ -189,6 +189,20 @@ export async function initMediaTables(db) {
     );
   `);
 
+  // The briefing object (media 1.1.0). Additive columns on a bundle-owned table: rows written
+  // before these existed read as kind 'manual', status 'ready'. One daily briefing per occurrence.
+  for (const [column, definition] of [
+    ["kind", "TEXT DEFAULT 'manual'"], ["status", "TEXT DEFAULT 'ready'"], ["scheduled_for", "TEXT"],
+    ["attempts", "INTEGER DEFAULT 0"], ["items_json", "TEXT"], ["chapters", "TEXT"], ["attachments", "TEXT"],
+    ["lang", "TEXT"], ["tts_provider", "TEXT"], ["model", "TEXT"], ["error", "TEXT"], ["file_size", "INTEGER"],
+    ["ready_at", "TEXT"], ["announced_at", "TEXT"], ["owner", "TEXT"],
+  ]) await addColumnIfMissing(db, "media_briefings", column, definition);
+  await initTable(db, "media_briefings occurrence index", `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_media_briefings_scheduled
+      ON media_briefings(scheduled_for) WHERE scheduled_for IS NOT NULL;
+  `);
+  await addColumnIfMissing(db, "media_audio_cache", "provider", "TEXT");
+
   // --- Playlists ---
 
   await initTable(db, "media_playlists table", `
@@ -280,11 +294,11 @@ export async function initMediaTables(db) {
           }
         } catch {}
       }
-      if (fixed > 0) console.log(`[media] Normalized ${fixed} pub_date values to ISO 8601`);
+      if (fixed > 0) console.error(`[media] Normalized ${fixed} pub_date values to ISO 8601`);
     }
   } catch (err) {
     console.warn("[media] pub_date normalization skipped:", err.message);
   }
 
-  console.log("[media] Tables initialized");
+  console.error("[media] Tables initialized");
 }

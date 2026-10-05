@@ -58,7 +58,7 @@ export default {
   route: "/dashboard/media",
   navOrder: 15,
 
-  async handler(req, res, { db, layout, appRoot }) {
+  async handler(req, res, { db, layout, appRoot, lang }) {
     // --- Dynamic imports (replaces static ESM import) ---
     const { pathToFileURL } = await import("node:url");
     const { join } = await import("node:path");
@@ -78,8 +78,8 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { badge, formatDate } = await import(pathToFileURL(componentsPath).href);
 
-    // Resolve bundle server directory (installed vs repo)
-    const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "media", "server");
+    // Resolve bundle server directory (this instance's installed copy, else the repo)
+    const installedServerDir = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "media", "server");
     const repoServerDir = join(appRoot, "bundles", "media", "server");
     const bundleServerDir = existsSync(installedServerDir) ? installedServerDir : repoServerDir;
 
@@ -511,7 +511,10 @@ export default {
     }
 
     // --- GET: Parse query params ---
-    const tab = req.query.tab || "feed";
+    // A notification link (?play=briefing:7, ?open=briefing:7, ?play=episode:41) lands on the Briefings tab.
+    const linkMatch = /^(briefing|episode):(\d{1,12})$/.exec(String(req.query.play || req.query.open || ""));
+    const link = linkMatch ? { kind: linkMatch[1], id: Number(linkMatch[2]), play: !!req.query.play } : null;
+    const tab = req.query.tab || (link ? "briefings" : "feed");
     const searchQuery = req.query.q || "";
     const filterCategory = req.query.category || "";
     const filterSource = req.query.source_id || "";
@@ -902,50 +905,112 @@ export default {
 
     // --- Briefings tab ---
     if (tab === "briefings") {
-      const { rows: briefings } = await db.execute("SELECT * FROM media_briefings ORDER BY created_at DESC LIMIT 20");
+      const { tr, reasonText } = await importBundleModule("strings.js");
+      const { listBriefings } = await importBundleModule("briefing.js");
+      const { readSchedule, scheduleView } = await importBundleModule("schedule.js");
+      const { occurrences } = await importBundleModule("cron-tz.js");
+      const { readJsonSetting, JOB_STATE_KEY } = await importBundleModule("settings.js");
+      const L = lang === "es" ? "es" : "en";
+      const T = (key, vars) => escapeHtml(tr(key, L, vars));
+      const now = Date.now();
+      const { row: schedRow, cfg } = await readSchedule(db);
+      const view = scheduleView(schedRow, cfg, now);
+      const fmt = (ms, opts) => new Intl.DateTimeFormat(L === "es" ? "es-MX" : "en-US", { timeZone: cfg.tz, ...opts }).format(new Date(ms)).replace(/\p{Zs}/gu, " ");
+      const dayTime = (ms) => fmt(ms, { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" });
+      const clock = (ms) => fmt(ms, { hour: "numeric", minute: "2-digit" });
+      const briefings = await listBriefings(db, { limit: 20, now });
 
-      const generateForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
-        <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Generate Briefing</h4>
-        <div id="briefing-form" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
-          <div style="flex:2;min-width:150px">
-            <label style="display:block;font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:4px">Topic (optional)</label>
-            <input type="text" id="briefing-topic" placeholder="e.g. technology, politics"
-                   style="width:100%;padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem;box-sizing:border-box">
-          </div>
-          <div>
-            <label style="display:block;font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:4px">Articles</label>
-            <select id="briefing-count" style="padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem">
-              <option value="5">5</option><option value="10">10</option><option value="15">15</option>
-            </select>
-          </div>
-          <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--crow-text-secondary)">
-            <input type="checkbox" id="briefing-voice" value="1"> Voice
-          </label>
-          <button onclick="crowGenerateBriefing(this)" class="btn btn-primary">Generate</button>
+      // Status lines: when the next one is due, a day that was skipped, and whether the scheduler is alive.
+      const lines = [];
+      if (view.state === "unset") lines.push(T("tab_unset"));
+      else if (view.state === "off") lines.push(T("tab_off"));
+      else if (view.state === "bad_cron") lines.push(T("tab_bad_cron", { cron: view.cron }));
+      else lines.push(view.next ? T("tab_next", { when: dayTime(view.next), tz: cfg.tz }) : T("tab_next_none"));
+      if (view.state === "on") {
+        try {
+          const from = Math.max(now - 24 * 3600000, Date.parse(cfg.active_from || "") || 0);
+          const last = occurrences(view.cron, cfg.tz, from, now).at(-1);
+          const made = last !== undefined && briefings.some((b) => b.scheduled_for === new Date(last).toISOString());
+          if (last !== undefined && !made && now - last > cfg.catch_up_hours * 3600000) lines.push(T("tab_skipped", { when: dayTime(last) }));
+        } catch {}
+        const beat = await readJsonSetting(db, JOB_STATE_KEY);
+        const beatMs = Date.parse(beat?.tick_at || "");
+        if (!Number.isFinite(beatMs)) lines.push(T("tab_runner_never"));
+        else if (now - beatMs > 3 * 60000) lines.push(`<strong>${T("tab_runner_stale", { when: dayTime(beatMs) })}</strong>`);
+        else lines.push(T("tab_runner", { when: clock(beatMs) }));
+      }
+      lines.push(T("tab_voice"));
+
+      const { rows: shows } = await db.execute("SELECT id, name FROM media_sources WHERE enabled = 1 AND source_type = 'podcast' ORDER BY name");
+      const attached = cfg.attach[0] || null;
+      const inputCss = "padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem";
+      const scheduleCard = `<div class="card" style="padding:1rem;margin-bottom:1rem">
+        <h4 style="margin:0 0 0.5rem;font-family:var(--crow-body-font);font-size:0.95rem">${T("tab_schedule")}</h4>
+        <div style="font-size:0.85rem;color:var(--crow-text-secondary);line-height:1.5;margin-bottom:0.75rem">${lines.map((l) => `<div>${l}</div>`).join("")}</div>
+        <div style="display:flex;gap:0.75rem;align-items:end;flex-wrap:wrap">
+          <label style="font-size:0.75rem;color:var(--crow-text-muted)">${T("tab_time")}<br><input type="time" id="media-sched-time" value="${escapeHtml(view.time || "08:00")}" style="${inputCss}"></label>
+          <label style="font-size:0.75rem;color:var(--crow-text-muted)">${T("tab_stories")}<br><input type="number" id="media-sched-stories" min="1" max="20" value="${Number(cfg.max_stories)}" style="${inputCss};width:4.5rem"></label>
+          <label style="font-size:0.75rem;color:var(--crow-text-muted)">${T("tab_show")}<br><select id="media-sched-show" style="${inputCss}">
+            <option value="0">${T("tab_show_none")}</option>
+            ${shows.map((sh) => `<option value="${Number(sh.id)}"${attached && attached.source_id === Number(sh.id) ? " selected" : ""}>${escapeHtml(sh.name)}</option>`).join("")}
+          </select></label>
+          <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--crow-text-secondary)"><input type="checkbox" id="media-sched-weekdays"${!attached || attached.days.join() === "1,2,3,4,5" ? " checked" : ""}> ${T("tab_show_days")}</label>
+          <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--crow-text-secondary)"><input type="checkbox" id="media-sched-on"${view.state === "on" || view.state === "unset" ? " checked" : ""}> ${T("tab_enabled")}</label>
+          <button type="button" class="btn btn-primary" data-media-action="briefing-save" style="min-height:44px">${T("tab_save")}</button>
         </div>
       </div>`;
 
-      let listHtml;
-      if (briefings.length === 0) {
-        listHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No briefings yet. Generate one above or use crow_media_briefing via AI.</p>`;
-      } else {
-        listHtml = `<div style="display:flex;flex-direction:column;gap:0.5rem">${briefings.map(b => {
-          const articleCount = b.article_ids ? JSON.parse(b.article_ids).length : 0;
-          const durationStr = b.duration_sec ? `${Math.floor(b.duration_sec / 60)}:${String(Math.round(b.duration_sec % 60)).padStart(2, "0")}` : "";
-          const hasAudio = !!b.audio_path;
-          return `<div class="card" style="padding:0.75rem">
-            <div style="display:flex;justify-content:space-between;align-items:start;gap:0.5rem">
-              <div>
-                <div style="font-weight:500">${escapeHtml(b.title || "Untitled Briefing")}</div>
-                <div style="font-size:0.8rem;color:var(--crow-text-muted)">${articleCount} articles${durationStr ? ` \u00b7 ${durationStr}` : ""} \u00b7 ${formatDate(b.created_at)}</div>
-              </div>
-              ${hasAudio ? `<button data-media-action="play" data-audio-url="/api/media/briefings/${b.id}/audio" data-title="${escapeHtml(b.title || "Briefing")}" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
-            </div>
-          </div>`;
-        }).join("\n")}</div>`;
-      }
+      const makeCard = `<div class="card" style="padding:1rem;margin-bottom:1rem">
+        <div style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
+          <label style="flex:2;min-width:150px;font-size:0.75rem;color:var(--crow-text-muted)">${T("tab_topic")}<br><input type="text" id="briefing-topic" maxlength="200" style="${inputCss};width:100%;box-sizing:border-box"></label>
+          <button type="button" class="btn btn-primary" data-media-action="briefing-make" data-label="${T("tab_make")}" data-busy="${T("tab_making")}" style="min-height:44px">${T("tab_make")}</button>
+        </div>
+        <div id="media-briefing-msg" role="status" aria-live="polite" data-error="${T("tab_error", { error: "{error}" })}" data-saved="${T("tab_saved")}" style="font-size:0.85rem;color:var(--crow-text-secondary);margin-top:0.5rem"></div>
+      </div>`;
 
-      tabContent = generateForm + listHtml;
+      const duration = (sec) => (sec ? `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")}` : "");
+      const renderBriefing = (b, big) => {
+        const focus = link && link.kind === "briefing" && link.id === b.id;
+        const shows = b.attachments.map((a) => ({ title: String(a.title || ""), status: a.status, url: safeHttpUrl(a.url), episode: String(a.episode_title || ""), article_id: a.article_id || null, wait_until: a.wait_until || null }));
+        const data = { id: b.id, title: b.title, src: b.audio_url, shows };
+        const status = b.status === "generating" ? `<div data-briefing-pending="${b.id}">${T("tab_generating")}</div>`
+          : b.status === "failed" ? `<div style="color:var(--crow-error)">${T("tab_failed", { reason: reasonText(b.error, L) })}</div>`
+          : !b.audio_url ? `<div>${T("tab_no_audio", { reason: reasonText(b.error || "audio_missing", L) })}</div>` : "";
+        const showLines = shows.map((a) => {
+          const until = a.wait_until ? clock(Date.parse(a.wait_until)) : "";
+          if (a.status === "ready" && a.url) {
+            const epFocus = link && link.kind === "episode" && link.id === Number(a.article_id);
+            return `<div>${T("tab_then", { show: a.episode || a.title })} <button type="button" class="btn btn-sm btn-secondary" data-media-action="play" data-audio-url="${escapeHtml(a.url)}" data-title="${escapeHtml(a.title)}" data-subtitle="${escapeHtml(a.episode)}"${epFocus ? " data-media-focus" : ""} style="min-height:44px">&#9654; ${T("tab_play")}</button></div>`;
+          }
+          if (a.status === "missed") return `<div>${T("tab_show_missed", { show: a.title, time: until })}</div>`;
+          return `<div>${T("tab_show_pending", { show: a.title, time: until })}</div>`;
+        }).join("");
+        const meta = [T("tab_stories_n", { n: b.items.length }), duration(b.duration_sec), b.date ? escapeHtml(dayTime(Date.parse(b.date))) : "", b.late ? T("tab_late") : ""].filter(Boolean).join(" · ");
+        const script = b.script ? `<details${link && !link.play && focus ? " open" : ""} style="margin-top:0.5rem"><summary style="cursor:pointer;font-size:0.85rem;min-height:44px;display:flex;align-items:center">${T("tab_read")}</summary>
+            <div style="font-size:0.9rem;line-height:1.55;max-width:68ch">${b.script.split("\n\n").map((p) => `<p style="margin:0.5rem 0">${escapeHtml(p)}</p>`).join("")}</div>
+            ${b.items.length ? `<ol style="font-size:0.8rem;color:var(--crow-text-muted);padding-left:1.2rem">${b.items.map((i) => `<li>${safeHttpUrl(i.link) ? `<a href="${escapeHtml(safeHttpUrl(i.link))}" target="_blank" rel="noopener noreferrer">${escapeHtml(i.title)}</a>` : escapeHtml(i.title)} · ${escapeHtml(i.source)}</li>`).join("")}</ol>` : ""}
+          </details>` : "";
+        return `<div class="card" data-briefing="${escapeHtml(JSON.stringify(data))}" style="padding:${big ? "1rem" : "0.75rem"}">
+          <div style="display:flex;justify-content:space-between;align-items:start;gap:0.5rem">
+            <div>
+              <div style="font-weight:500;font-size:${big ? "1.05rem" : "0.95rem"}">${escapeHtml(b.title || tr("tab_latest", L))}</div>
+              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${meta}</div>
+            </div>
+            ${b.audio_url ? `<button type="button" class="btn btn-primary" data-media-action="briefing-play"${focus && link.play ? " data-media-focus" : ""} style="min-height:44px;min-width:44px;font-size:${focus && link.play ? "1.1rem" : "0.9rem"}">&#9654; ${T("tab_play")}</button>` : ""}
+          </div>
+          <div style="font-size:0.85rem;color:var(--crow-text-secondary);margin-top:0.35rem">${status}${showLines}</div>
+          ${script}
+        </div>`;
+      };
+
+      const listHtml = briefings.length === 0
+        ? `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">${T("tab_none")}</p>`
+        : `<h4 style="margin:0 0 0.5rem;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--crow-text-muted)">${T("tab_latest")}</h4>
+           ${renderBriefing(briefings[0], true)}
+           ${briefings.length > 1 ? `<h4 style="margin:1rem 0 0.5rem;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--crow-text-muted)">${T("tab_earlier")}</h4>
+           <div style="display:flex;flex-direction:column;gap:0.5rem">${briefings.slice(1).map((b) => renderBriefing(b, false)).join("\n")}</div>` : ""}`;
+
+      tabContent = scheduleCard + makeCard + listHtml;
     }
 
     // --- Podcasts tab ---
@@ -1556,7 +1621,13 @@ export default {
             if (articleId) crowListenTts(btn, articleId, title);
           } else if (action === 'play') {
             var src = crowMediaSafeUrl(btn.getAttribute('data-audio-url'));
-            if (src && window.crowPlayer) window.crowPlayer.load(src, title);
+            if (src && window.crowPlayer) window.crowPlayer.load(src, title, btn.getAttribute('data-subtitle') || '');
+          } else if (action === 'briefing-play') {
+            crowPlayBriefing(btn);
+          } else if (action === 'briefing-make') {
+            crowMakeBriefing(btn);
+          } else if (action === 'briefing-save') {
+            crowSaveSchedule(btn);
           }
         });
       }
@@ -1653,24 +1724,86 @@ export default {
           });
       }
 
-      function crowGenerateBriefing(btn) {
-        var topic = document.getElementById('briefing-topic').value;
-        var count = document.getElementById('briefing-count').value;
-        var voice = document.getElementById('briefing-voice').checked ? '1' : '0';
-        btn.textContent = 'Generating...';
-        btn.disabled = true;
-        fetch('/api/media/briefings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ topic: topic, count: count, voice: voice })
-        })
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (data.error) { alert(data.error); btn.textContent = 'Generate'; btn.disabled = false; return; }
-            location.reload();
-          })
-          .catch(function(e) { alert('Error: ' + e.message); btn.textContent = 'Generate'; btn.disabled = false; });
+      // --- Briefings tab and feed cards: one delegated listener; data comes from data- attributes only ---
+            function crowMediaMsg(kind, text) {
+        var box = document.getElementById('media-briefing-msg');
+        if (!box) return;
+        var tpl = kind === 'error' ? (box.getAttribute('data-error') || '{error}') : '';
+        box.textContent = kind === 'error' ? tpl.replace('{error}', text) : text;
       }
+      function crowMediaJson(url, body) {
+        return fetch(url, { method: body ? 'POST' : 'GET', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
+          .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); return d; }); });
+      }
+      function crowBriefingData(el) {
+        var card = el.closest('[data-briefing]');
+        try { return card ? JSON.parse(card.getAttribute('data-briefing')) : null; } catch (e) { return null; }
+      }
+      // A show that is still pending when Play is pressed is appended when it lands. The watcher lives
+      // on window, so it survives moving to another dashboard page; a full reload ends it (the
+      // "is ready" notification covers that case).
+      function crowWatchShows(data) {
+        if (window.__crowMediaShowWatch) clearInterval(window.__crowMediaShowWatch);
+        var waiting = data.shows.filter(function(s) { return s.status === 'pending'; }).map(function(s) { return s.title; });
+        if (!waiting.length) return;
+        var started = Date.now();
+        window.__crowMediaShowWatch = setInterval(function() {
+          if (Date.now() - started > 5 * 3600000 || !waiting.length) { clearInterval(window.__crowMediaShowWatch); return; }
+          crowMediaJson('/api/media/briefings/' + data.id).then(function(b) {
+            (b.attachments || []).forEach(function(a) {
+              var i = waiting.indexOf(a.title);
+              if (i < 0 || a.status === 'pending') return;
+              waiting.splice(i, 1);
+              if (a.status === 'ready' && crowMediaSafeUrl(a.url) && window.crowPlayer) {
+                window.crowPlayer.addToQueue({ src: a.url, title: a.title, subtitle: a.episode_title || '' });
+              }
+            });
+          }).catch(function() {});
+        }, 30000);
+      }
+      function crowPlayBriefing(btn) {
+        var data = crowBriefingData(btn);
+        if (!data || !data.src || !window.crowPlayer) return;
+        var items = [{ src: data.src, title: data.title, subtitle: '' }];
+        data.shows.forEach(function(s) { if (s.status === 'ready' && s.url) items.push({ src: s.url, title: s.title, subtitle: s.episode }); });
+        window.crowPlayer.queue(items);
+        crowWatchShows(data);
+      }
+      function crowWaitForBriefing(id) {
+        var tries = 0;
+        var timer = setInterval(function() {
+          tries++;
+          crowMediaJson('/api/media/briefings/' + id).then(function(b) {
+            if (b.status === 'generating' && tries < 200) return;
+            clearInterval(timer);
+            window.location.href = '/dashboard/media?open=briefing:' + id;
+          }).catch(function() { if (tries >= 200) clearInterval(timer); });
+        }, 3000);
+      }
+      function crowMakeBriefing(btn) {
+        var topic = document.getElementById('briefing-topic');
+        btn.disabled = true;
+        btn.textContent = btn.getAttribute('data-busy');
+        crowMediaMsg('info', btn.getAttribute('data-busy'));
+        crowMediaJson('/api/media/briefings', { topic: topic ? topic.value : '' })
+          .then(function(b) { crowWaitForBriefing(b.id); })
+          .catch(function(e) { crowMediaMsg('error', e.message); btn.disabled = false; btn.textContent = btn.getAttribute('data-label'); });
+      }
+      function crowSaveSchedule(btn) {
+        var v = function(id) { return document.getElementById(id); };
+        btn.disabled = true;
+        crowMediaJson('/api/media/briefings/schedule', {
+          time: v('media-sched-time').value, enabled: v('media-sched-on').checked, max_stories: Number(v('media-sched-stories').value),
+          show_source_id: Number(v('media-sched-show').value), show_weekdays_only: v('media-sched-weekdays').checked
+        }).then(function() { window.location.href = '/dashboard/media?tab=briefings'; })
+          .catch(function(e) { crowMediaMsg('error', e.message); btn.disabled = false; });
+      }
+      (function() {
+        var focus = document.querySelector('[data-media-focus]');
+        if (focus) { try { focus.focus(); focus.scrollIntoView({ block: 'center' }); } catch (e) {} }
+        var pending = document.querySelector('[data-briefing-pending]');
+        if (pending) crowWaitForBriefing(Number(pending.getAttribute('data-briefing-pending')));
+      })();
 
       function crowPlayAll(playlistId) {
         fetch('/api/media/playlists/' + playlistId)

@@ -13,21 +13,6 @@
 
 import { fetchAndParseFeed, postProcessGoogleNewsItems, buildAuthHeaders } from "./feed-fetcher.js";
 
-// Lazy-loaded notification helper (may not exist in standalone mode)
-let _createNotification = null;
-async function notifyIfAvailable(db, opts) {
-  if (_createNotification === undefined) return;
-  try {
-    if (!_createNotification) {
-      const mod = await import("../../../servers/shared/notifications.js");
-      _createNotification = mod.createNotification;
-    }
-    await _createNotification(db, opts);
-  } catch {
-    _createNotification = undefined; // Don't retry on failure
-  }
-}
-
 const CHECK_INTERVAL = 60_000; // Check for due tasks every 60s
 const MAX_CONCURRENT_FETCHES = parseInt(process.env.CROW_MEDIA_MAX_FETCHES || "3", 10);
 
@@ -97,92 +82,125 @@ export function createTaskRunner(db) {
 }
 
 /**
- * Fetch all enabled RSS sources and insert new articles.
+ * Background work (feeds, cleanup, the daily briefing) runs only in the copy of this server that
+ * the gateway starts and supervises (it sets CROW_ADDON_HOST=gateway), and only when the add-on's
+ * own setting allows it. A bot's private copy, started from the same add-on entry for one turn and
+ * then stopped, never runs a job: it could claim the 7:45 briefing and die with it.
+ */
+export function shouldRunBackgroundTasks(env = process.env) {
+  return env.CROW_MEDIA_TASKS === "1" && env.CROW_ADDON_HOST === "gateway";
+}
+
+/** SQLite's datetime('now') is UTC with no zone marker; `new Date()` would read it as local time. */
+export function sqliteUtcMs(value) {
+  return Date.parse(`${String(value || "").replace(" ", "T")}Z`);
+}
+
+/** Is this source due for a fetch? Never fetched, or its interval (default 30 minutes) has passed. */
+export function sourceIsDue(source, nowMs = Date.now()) {
+  const last = sqliteUtcMs(source.last_fetched);
+  if (!Number.isFinite(last)) return true;
+  return (nowMs - last) / 60000 >= (source.fetch_interval_min || 30);
+}
+
+const SOURCE_COLUMNS = "id, name, url, source_type, fetch_interval_min, last_fetched, auth_config";
+
+/**
+ * Fetch all enabled feed sources that are due and insert new articles.
  * Respects per-source fetch intervals and limits concurrent fetches.
  */
 export async function fetchAllFeeds(db) {
   const { rows: sources } = await db.execute({
-    sql: `SELECT id, url, source_type, fetch_interval_min, last_fetched FROM media_sources
+    sql: `SELECT ${SOURCE_COLUMNS} FROM media_sources
           WHERE enabled = 1 AND source_type IN ('rss', 'google_news', 'youtube', 'podcast')`,
     args: [],
   });
-
-  const now = new Date();
-  const due = sources.filter((s) => {
-    if (!s.last_fetched) return true;
-    const elapsed = (now - new Date(s.last_fetched)) / 60000;
-    return elapsed >= (s.fetch_interval_min || 30);
-  });
-
-  if (due.length === 0) return;
-
-  // Process in batches to limit concurrency
+  const due = sources.filter((s) => sourceIsDue(s));
   for (let i = 0; i < due.length; i += MAX_CONCURRENT_FETCHES) {
-    const batch = due.slice(i, i + MAX_CONCURRENT_FETCHES);
-    await Promise.allSettled(batch.map((source) => fetchSingleSource(db, source)));
+    await Promise.allSettled(due.slice(i, i + MAX_CONCURRENT_FETCHES).map((source) => fetchSingleSource(db, source)));
   }
 }
 
-async function fetchSingleSource(db, source) {
+/**
+ * Fetch the given sources now, whatever their interval says (a briefing run starts with this).
+ * Batches of MAX_CONCURRENT_FETCHES; no new batch starts after `capMs`. Never throws.
+ * → { fetched, failed, skipped }
+ */
+export async function refreshSources(db, ids, capMs = 90_000) {
+  const out = { fetched: 0, failed: 0, skipped: 0 };
+  const wanted = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (wanted.length === 0) return out;
+  const started = Date.now();
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE enabled = 1 AND id IN (${wanted.map(() => "?").join(", ")}) ORDER BY id`,
+      args: wanted,
+    });
+    for (let i = 0; i < rows.length; i += MAX_CONCURRENT_FETCHES) {
+      const batch = rows.slice(i, i + MAX_CONCURRENT_FETCHES);
+      if (Date.now() - started >= capMs) { out.skipped += batch.length; continue; }
+      const results = await Promise.all(batch.map((source) => fetchSingleSource(db, source)));
+      for (const r of results) r.ok ? out.fetched++ : out.failed++;
+    }
+  } catch (err) {
+    console.error(`[media] refresh before a briefing failed: ${err.message}`);
+  }
+  return out;
+}
+
+/** Insert a feed's items (duplicates are skipped by UNIQUE(source_id, guid)). → number of new rows */
+export async function insertFeedItems(db, source, items) {
+  let added = 0;
+  for (const item of (items || []).slice(0, 100)) {
+    const guid = item.guid || item.link || item.title;
+    if (!guid) continue;
+    try {
+      const ins = await db.execute({
+        sql: `INSERT OR IGNORE INTO media_articles
+              (source_id, guid, url, title, author, pub_date, content_raw, summary,
+               image_url, audio_url, source_url, content_fetch_status, ai_analysis_status, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+        args: [
+          source.id,
+          guid,
+          item.link || null,
+          item.title,
+          item.author || null,
+          item.pub_date ? normalizeDate(item.pub_date) : null,
+          item.content || null,
+          item.summary ? item.summary.slice(0, 2000) : null,
+          item.image || null,
+          item.enclosureAudio || null,
+          item.sourceUrl || null,
+        ],
+      });
+      if (Number(ins.rowsAffected) > 0) added++;
+    } catch {
+      // Constraint violation: skip
+    }
+  }
+  return added;
+}
+
+/** Fetch one source and store what is new. Never throws. → { ok, added } or { ok: false, error } */
+export async function fetchSingleSource(db, source) {
   try {
     const authHeaders = buildAuthHeaders(source.auth_config);
-    let { feed, items } = await fetchAndParseFeed(source.url, authHeaders);
-
-    // Post-process Google News titles
-    if (source.source_type === 'google_news') {
-      postProcessGoogleNewsItems(items);
-    }
-
-    // Update source metadata
+    const { items } = await fetchAndParseFeed(source.url, authHeaders);
+    if (source.source_type === "google_news") postProcessGoogleNewsItems(items);
     await db.execute({
       sql: `UPDATE media_sources SET last_fetched = datetime('now'), last_error = NULL WHERE id = ?`,
       args: [source.id],
     });
-
-    // Insert new articles (skip duplicates via UNIQUE(source_id, guid))
-    for (const item of items.slice(0, 100)) {
-      const guid = item.guid || item.link || item.title;
-      if (!guid) continue;
-
-      try {
-        await db.execute({
-          sql: `INSERT OR IGNORE INTO media_articles
-                (source_id, guid, url, title, author, pub_date, content_raw, summary,
-                 image_url, audio_url, source_url, content_fetch_status, ai_analysis_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
-          args: [
-            source.id,
-            guid,
-            item.link || null,
-            item.title,
-            item.author || null,
-            item.pub_date ? normalizeDate(item.pub_date) : null,
-            item.content || null,
-            item.summary ? item.summary.slice(0, 2000) : null,
-            item.image || null,
-            item.enclosureAudio || null,
-            item.sourceUrl || null,
-          ],
-        });
-      } catch {
-        // Duplicate or constraint violation — skip
-      }
-    }
+    return { ok: true, added: await insertFeedItems(db, source, items) };
   } catch (err) {
-    // Record error on source
+    // The error is kept on the source. No notification here: one per failing source per cycle
+    // would be a flood. A once-per-failure-streak notice is planned with the source health view.
     await db.execute({
       sql: `UPDATE media_sources SET last_error = ?, last_fetched = datetime('now') WHERE id = ?`,
-      args: [err.message.slice(0, 500), source.id],
+      args: [String(err.message || err).slice(0, 500), source.id],
     }).catch(() => {});
-    // Notify on fetch error
-    await notifyIfAvailable(db, {
-      title: `Feed error: ${source.name || source.url}`,
-      body: err.message.slice(0, 200),
-      type: "system",
-      source: "media:feed-error",
-      priority: "high",
-      expires_in_minutes: 1440, // auto-dismiss after 24h
-    }).catch(() => {});
+    return { ok: false, error: String(err.message || err) };
   }
 }
 
@@ -204,6 +222,10 @@ function normalizeDate(dateStr) {
  * Register all Phase 1 tasks on a task runner.
  */
 export function registerMediaTasks(runner, db) {
+  // The daily briefing is NOT in this queue: it has its own minute loop (schedule.js
+  // startScheduleLoop), so a long feed cycle never delays the 7:45 claim, the 8:00 notice or the
+  // show watcher's 60-second cadence.
+
   runner.registerTask("feed-fetch", fetchAllFeeds, {
     intervalMs: 30 * 60_000, // 30 minutes
     priority: 1,
@@ -307,103 +329,5 @@ export function registerMediaTasks(runner, db) {
   }, {
     intervalMs: 30 * 60_000, // 30 minutes
     priority: 8,
-  });
-
-  // Scheduled briefing generation — polls schedules table for media:briefing tasks
-  runner.registerTask("scheduled-briefings", async (db) => {
-    try {
-      const { rows: due } = await db.execute({
-        sql: `SELECT * FROM schedules
-              WHERE task = 'media:briefing' AND enabled = 1
-                AND (next_run IS NULL OR next_run <= datetime('now'))`,
-        args: [],
-      });
-      if (due.length === 0) return;
-
-      for (const schedule of due) {
-        try {
-          const config = schedule.config ? JSON.parse(schedule.config) : {};
-          const topic = config.topic || null;
-          const maxArticles = config.max_articles || 5;
-
-          // Get top unread articles
-          let sql = `SELECT a.id, a.title, a.summary, a.content_full, a.content_raw,
-                            s.name as source_name
-                     FROM media_articles a
-                     JOIN media_sources s ON s.id = a.source_id
-                     LEFT JOIN media_article_states st ON st.article_id = a.id
-                     WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
-          const args = [];
-          if (topic) {
-            sql += " AND (s.category LIKE ? OR a.title LIKE ?)";
-            args.push(`%${topic}%`, `%${topic}%`);
-          }
-          sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
-          args.push(maxArticles);
-
-          const { rows: articles } = await db.execute({ sql, args });
-          if (articles.length === 0) continue;
-
-          // Build briefing
-          const title = topic ? `Scheduled: ${topic}` : "Scheduled Briefing";
-          const script = articles.map((a, i) => {
-            const text = a.summary || (a.content_full || a.content_raw || "").slice(0, 500);
-            return `${i + 1}. ${a.title} (${a.source_name})\n${text}`;
-          }).join("\n\n");
-
-          let audioPath = null;
-          let durationSec = null;
-
-          if (config.voice) {
-            try {
-              const { isEdgeTtsAvailable, generateAudio, resolveAudioDir } = await import("./tts.js");
-              if (await isEdgeTtsAvailable()) {
-                const { join } = await import("node:path");
-                const { createHash } = await import("node:crypto");
-                const audioDir = resolveAudioDir();
-                const hash = createHash("sha256").update(script).digest("hex").slice(0, 12);
-                const outPath = join(audioDir, `briefing-${hash}.mp3`);
-                const result = await generateAudio(`${title}. ${script}`, config.voice, outPath);
-                audioPath = outPath;
-                durationSec = result.duration;
-              }
-            } catch {}
-          }
-
-          await db.execute({
-            sql: "INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec) VALUES (?, ?, ?, ?, ?)",
-            args: [title, script, audioPath, JSON.stringify(articles.map(a => a.id)), durationSec],
-          });
-
-          // Compute next_run from cron (simple next-minute calculation)
-          // Use a basic approach: set next_run to now + interval based on cron pattern
-          const cronParts = (schedule.cron || "").split(" ");
-          let intervalMs = 24 * 60 * 60_000; // default: daily
-          if (cronParts[4] && cronParts[4] !== "*") {
-            // Has day-of-week constraint — weekly-ish, set next to +24h (runner will re-check)
-            intervalMs = 24 * 60 * 60_000;
-          }
-          const nextRun = new Date(Date.now() + intervalMs).toISOString().replace("T", " ").slice(0, 19);
-          await db.execute({
-            sql: "UPDATE schedules SET last_run = datetime('now'), next_run = ? WHERE id = ?",
-            args: [nextRun, schedule.id],
-          });
-
-          console.log(`[media] Generated scheduled briefing: ${title} (${articles.length} articles)`);
-          await notifyIfAvailable(db, {
-            title: `Briefing ready: ${title}`,
-            body: `${articles.length} article(s) summarized`,
-            type: "media",
-            source: "media:briefing",
-            action_url: "/dashboard/media",
-          });
-        } catch (err) {
-          console.warn(`[media] Scheduled briefing failed:`, err.message);
-        }
-      }
-    } catch {}
-  }, {
-    intervalMs: 30 * 60_000, // 30 minutes (same as digest-sender)
-    priority: 9,
   });
 }

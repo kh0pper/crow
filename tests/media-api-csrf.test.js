@@ -43,6 +43,10 @@ process.env.CROW_DATA_DIR = SCRATCH;
 process.env.CROW_DB_PATH = join(SCRATCH, "crow.db");
 delete process.env.CROW_CSRF_STRICT; // strict (the default)
 
+// The real core schema (schedules, settings, overrides): media 1.1.0's briefing routes use it.
+const { execFileSync } = await import("node:child_process");
+execFileSync(process.execPath, ["scripts/init-db.js"], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, CROW_HOME: SCRATCH, CROW_DATA_DIR: SCRATCH, CROW_DB_PATH: join(SCRATCH, "crow.db") } });
+
 // Dynamic imports: static ones are hoisted above the env writes above.
 const { createDbClient } = await import("../servers/db.js");
 const { initMediaTables } = await import("../bundles/media/server/init-tables.js");
@@ -135,18 +139,29 @@ test("source refresh: refused without the token, reaches the handler with it", a
 test("article listen: refused without the token, reaches the handler with it", async () => {
   await expectRejected("POST", `/api/media/articles/${articleId}/listen`);
   const r = await call("POST", `/api/media/articles/${articleId}/listen`, undefined, { token: TOKEN });
-  // 503 where the optional TTS package is absent (CI); never the CSRF refusal.
+  // 503 when there is no local voice (CI, and this scratch instance); never the CSRF refusal.
   assert.ok([200, 500, 503].includes(r.status), `unexpected status ${r.status}`);
   const body = await r.json();
   assert.ok(body.audio_url || body.error, "a JSON answer from the handler");
 });
 
 test("briefing create: refused without the token, reaches the handler with it", async () => {
-  await expectRejected("POST", "/api/media/briefings", { topic: "nomatch-zzz" });
-  const r = await call("POST", "/api/media/briefings", { topic: "nomatch-zzz" }, { token: TOKEN });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /No unread articles found/);
-  assert.equal(await count("media_briefings"), 0);
+  await expectRejected("POST", "/api/media/briefings", { topic: "nomatch-zzz", audio: false });
+  assert.equal(await count("media_briefings"), 0, "a refused request makes nothing");
+  const r = await call("POST", "/api/media/briefings", { topic: "nomatch-zzz", audio: false }, { token: TOKEN });
+  assert.equal(r.status, 202, "made in the background; answers at once");
+  const b = await r.json();
+  assert.ok(Number(b.id) > 0);
+  assert.equal(b.kind, "manual");
+  assert.equal(await count("media_briefings"), 1);
+});
+
+test("schedule save: refused without the token, reaches the handler with it", async () => {
+  await expectRejected("POST", "/api/media/briefings/schedule", { time: "08:00" });
+  assert.equal(await count("schedules", "task = 'media:briefing'"), 0);
+  const r = await call("POST", "/api/media/briefings/schedule", { time: "08:00", enabled: true }, { token: TOKEN });
+  assert.equal(r.status, 200, JSON.stringify(await r.clone().json()));
+  assert.equal(await count("schedules", "task = 'media:briefing'"), 1);
 });
 
 test("playlists: create, add, patch, remove item, delete are refused without the token and work with it", async () => {
@@ -202,7 +217,7 @@ test("every state-changing /api/media route in the router is CSRF-gated", () => 
     .filter((l) => l.route && l.route.path.startsWith("/api/media/"))
     .flatMap((l) => Object.keys(l.route.methods).filter((m) => m !== "get" && m !== "head")
       .map((m) => ({ method: m, path: l.route.path, names: l.route.stack.map((s) => s.name) })));
-  assert.equal(mutating.length, 11, "the route inventory this test covers");
+  assert.equal(mutating.length, 12, "the route inventory this test covers");
   for (const r of mutating) {
     assert.ok(r.names.includes("csrfMiddleware"), `${r.method.toUpperCase()} ${r.path} lacks csrfMiddleware`);
   }
@@ -250,11 +265,15 @@ test("panel callers: every state-changing request carries X-Crow-Csrf from the c
   };
   const formEls = {
     "briefing-topic": { value: "tech" },
-    "briefing-count": { value: "5" },
-    "briefing-voice": { checked: false },
+    "media-sched-time": { value: "08:00" },
+    "media-sched-on": { checked: true },
+    "media-sched-stories": { value: "8" },
+    "media-sched-show": { value: "0" },
+    "media-sched-weekdays": { checked: true },
   };
   const sandbox = {
     console, URL, Headers, setTimeout, clearTimeout, Promise,
+    setInterval: () => 0, clearInterval() {},
     fetch: (input, init) => {
       sent.push({ url: typeof input === "string" ? input : input.url, init: init || {} });
       return Promise.resolve({ json: async () => json(typeof input === "string" ? input : input.url) });
@@ -290,7 +309,9 @@ test("panel callers: every state-changing request carries X-Crow-Csrf from the c
   sandbox.crowListenTts(fakeEl(), 3, "A");
   sandbox.crowSetPlaylistVisibility(7, "public");
   sandbox.crowRemovePlaylistItem(7, 11, fakeEl());
-  sandbox.crowGenerateBriefing(fakeEl());
+  const attrs = (map) => fakeEl({ getAttribute: (k) => map[k] ?? null });
+  sandbox.crowMakeBriefing(attrs({ "data-label": "Make", "data-busy": "Making" }));
+  sandbox.crowSaveSchedule(fakeEl());
   sandbox.crowPlayAll(7);
   const menuBtn = fakeEl({ parentElement: fakeEl() });
   sandbox.crowShowPlaylistMenu(menuBtn, 3);
@@ -307,6 +328,7 @@ test("panel callers: every state-changing request carries X-Crow-Csrf from the c
     "PATCH /api/media/playlists/:n",
     "POST /api/media/articles/:n/listen",
     "POST /api/media/briefings",
+    "POST /api/media/briefings/schedule",
     "POST /api/media/playlists/:n/items",
   ], "every state-changing caller in the panel script was exercised");
   for (const r of mutating) {
