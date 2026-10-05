@@ -23,20 +23,43 @@ export function kioskNowContext(now, tz) {
   return `[Now] ${fmt("en-US", DATE, now, tz)}, ${fmt("en-US", TIME, now, tz)} (time zone ${zoneOf(tz)})`;
 }
 
-const LEAD_EN = "(?:(?:can|could) you tell me |do you know |tell me )?";
-const LEAD_ES = "(?:me dices |me puedes decir |dime |sabes )?";
-const ASK = {
-  time_en: new RegExp(`^${LEAD_EN}(?:what time is it|what time it is|what(?: is| s|s) the (?:current )?time|the (?:current )?time)(?: right now| now)?$`),
-  date_en: new RegExp(`^${LEAD_EN}(?:what(?: is| s|s) (?:today s|todays|the) date(?: today)?|what day is it(?: today)?|what day is today|the date(?: today)?|today s date)$`),
-  time_es: new RegExp(`^${LEAD_ES}(?:qu[eé] hora es|qu[eé] horas son|qu[eé] hora tienes|la hora)(?: ahora)?$`),
-  date_es: new RegExp(`^${LEAD_ES}(?:qu[eé] d[ií]a es(?: hoy)?|qu[eé] fecha es(?: hoy)?|cu[aá]l es la fecha(?: de hoy)?|a qu[eé] (?:d[ií]a )?estamos(?: hoy)?|la fecha(?: de hoy)?)$`),
-};
+/**
+ * The phrase table (after normalize(): lower case, no accents or apostrophes, punctuation
+ * to spaces, "what is" → "whats"). A question is a shortcut when it is exactly
+ * [lead …] core [tail …] — any number of lead-ins and tails around ONE core phrase — so
+ * "what time is the game" or "what's the date of the meeting" never match.
+ */
+const EN_LEADS = ["hey crow", "ok crow", "okay crow", "hey", "hi", "ok", "okay", "so", "and", "um", "uh", "well", "alright", "all right", "now", "please", "crow", "excuse me", "quick question",
+  "can you tell me", "can you please tell me", "could you tell me", "would you tell me", "tell me", "please tell me", "do you know", "do you happen to know", "i want to know", "id like to know", "let me know"];
+const ES_LEADS = ["oye crow", "oye", "hola", "ok", "vale", "bueno", "y", "por favor", "crow", "me dices", "me puedes decir", "me podrias decir", "puedes decirme", "podrias decirme", "dime", "sabes"];
+export const CLOCK_PHRASES = Object.freeze({
+  time_en: {
+    leads: EN_LEADS,
+    cores: ["what time is it", "what time it is", "whats the time", "whats the current time", "the time", "the current time", "time please", "do you have the time", "have you got the time", "what time do you have"],
+    tails: ["right now", "now", "please", "crow", "thanks", "thank you", "currently", "at the moment", "exactly"],
+  },
+  date_en: {
+    leads: EN_LEADS,
+    cores: ["whats todays date", "whats the date", "whats today", "todays date", "the date", "what day is it", "what day it is", "what day is today", "what date is it", "what date it is", "whats the day", "what day of the week is it"],
+    tails: ["today", "for today", "right now", "now", "please", "crow", "thanks", "thank you"],
+  },
+  time_es: {
+    leads: ES_LEADS,
+    cores: ["que hora es", "que horas son", "que hora tienes", "que hora tenemos", "la hora", "tienes hora", "tienes la hora"],
+    tails: ["ahora", "ahora mismo", "por favor", "gracias", "crow"],
+  },
+  date_es: {
+    leads: ES_LEADS,
+    cores: ["que dia es", "que fecha es", "cual es la fecha", "a que estamos", "a que dia estamos", "a que fecha estamos", "en que dia estamos", "la fecha", "que dia de la semana es"],
+    tails: ["hoy", "de hoy", "por favor", "gracias", "crow"],
+  },
+});
+const alt = (list) => [...list].sort((a, b) => b.length - a.length).join("|");
+const ASK = Object.fromEntries(Object.entries(CLOCK_PHRASES).map(([k, t]) => [k, new RegExp(`^(?:(?:${alt(t.leads)}) )*(?:${alt(t.cores)})(?: (?:${alt(t.tails)}))*$`)]));
 function normalize(t) {
-  return String(t || "").toLowerCase()
-    .replace(/[¿¡“”"'’,.!?;:]+/g, " ").replace(/\s+/g, " ").trim()
-    .replace(/^(hey crow|ok crow|okay crow|oye crow|ok|okay|please|por favor)\s+/, "")
-    .replace(/\s+(please|thanks|thank you|por favor|gracias)$/, "")
-    .trim();
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/['’]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim()
+    .replace(/\bwhat is\b/g, "whats");
 }
 
 /** → { say, events: [] } for the plain clock questions, else null (the model answers, with the [Now] context). */
