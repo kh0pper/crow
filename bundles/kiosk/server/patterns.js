@@ -138,6 +138,8 @@ function playFrame(w) {
 // by <someone>". No name is listed: the frame is the signal. Never a question.
 const BY_RUNS = runs(["something by", "anything by", "a song by", "some songs by", "songs by", "algo de la banda", "una cancion de", "canciones de"]);
 const ON_VERBS = new Set(["have", "put", "get", "throw", "stick"]);
+// "Put the kettle on", "have your coat on": household objects, never a name to play.
+const ON_OBJECTS = new Set(["kettle", "oven", "stove", "lights", "light", "heating", "heat", "heater", "fan", "tv", "television", "coat", "jacket", "shoes", "boots", "hat", "gloves", "sweater", "kettle", "water", "pot", "pan", "lid", "brakes", "alarm", "timer", "hold", "list", "speaker", "speakerphone", "mute"]);
 const ON_ENDS = new Set(["before", "while", "for", "now", "please", "again", "then", "until", "so", "antes", "mientras"]);
 function nameOnFrame(w) {
   const core = stripPolite(w);
@@ -146,7 +148,7 @@ function nameOnFrame(w) {
   for (let i = 0; i < w.length; i += 1) {
     if (!ON_VERBS.has(w[i])) continue;
     // "<verb> <one to four words> on" and the sentence ends there or goes on with a time word.
-    for (let j = i + 2; j <= Math.min(w.length - 1, i + 5); j += 1) if (w[j] === "on" && (j === w.length - 1 || ON_ENDS.has(w[j + 1]))) return true;
+    for (let j = i + 2; j <= Math.min(w.length - 1, i + 5); j += 1) if (w[j] === "on" && (j === w.length - 1 || ON_ENDS.has(w[j + 1])) && !w.slice(i + 1, j).some((x) => ON_OBJECTS.has(x))) return true;
   }
   return false;
 }
@@ -158,8 +160,7 @@ export function mentionsPlay(transcript) {
 /** items: what this display may open ([{ id, title, aliases? }]). Naming one of them is a mention; so is an open word. */
 // Revision 6: something IN the launcher is about opening, even in a question and beside a card word ("is there a
 // calculator somewhere in the launcher? I have to halve this recipe"). "What does a launcher do" is not.
-const LAUNCHER_RUNS = runs(["in the launcher", "on the launcher", "from the launcher", "in your launcher", "in my launcher", "en el lanzador", "del lanzador", "en tu lanzador",
-  "in the apps", "en las aplicaciones", "en las apps"]);
+const LAUNCHER_RUNS = runs(["in the launcher", "on the launcher", "from the launcher", "in your launcher", "in my launcher", "en el lanzador", "del lanzador", "en tu lanzador"]);
 export function mentionsOpen(transcript, items = []) {
   const w = plain(transcript);
   if (!w) return false;
@@ -212,7 +213,7 @@ const OBJECT_PRONOUNS = new Set(["it", "that", "this", "them", "those", "these",
 const DETERMINERS = new Set(["a", "an", "the", "some", "my", "our", "una", "un", "la", "el", "los", "las", "unos", "unas", "mi", "mis", "nuestra", "nuestro"]);
 // A statement ABOUT a list or a timer ("the list my boss sent is long") is not a request for one.
 const NOUN_PREPS = new Set(["for", "of", "to", "with", "de", "del", "con", "para"]);
-const STATEMENT_VERBS = new Set(["is", "was", "are", "were", "has", "had", "have", "sent", "got", "went", "said", "looks", "seems", "es", "era", "fue", "son", "tiene", "tenia", "esta", "estaba", "parece", "dijo"]);
+const STATEMENT_VERBS = new Set(["is", "was", "are", "were", "has", "had", "have", "sent", "got", "went", "said", "looks", "seems", "es", "era", "fue", "son", "tiene", "tenia", "esta", "estaba", "parece", "dijo", "says", "said", "told", "thinks", "dice", "dicen"]);
 function placesOnScreen(w) {
   if (hasAnyRun(w, PLACE_STRONG)) return true;
   for (const p of PLACE_WEAK) for (let i = 0; i + p.length <= w.length; i += 1) {
@@ -236,11 +237,15 @@ export function mentionsCard(transcript, items = []) {
   const core = stripPolite(w);
   if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p))) return false;
   // Revision 6: a countdown asked for with a duration ("count that down, ten minutes", "avísame en cinco minutos").
-  if (countdown(w)) return true;
-  // Revision 6: the form of a card named outright ("as a list", "en una lista"), or a card noun with a hedge
-  // ("…en una lista si se puede", "a list, if you can").
-  if (hasAnyRun(w, CARD_FORMS)) return true;
-  if (w.some((x) => Object.hasOwn(CARD_NOUNS, x)) && hasAnyRun(w, HEDGE_RUNS)) return true;
+  if (countdown(w, core)) return true;
+  // Revision 6: a card form named outright at the END of the request ("…as a list", "…en forma de lista"), or a
+  // card form or card noun with a hedge or a request cue ("…en una lista si se puede", "a list, if you can").
+  // Never in a statement ("our names are in a list at the door").
+  if (!hasAny(w, STATEMENT_VERBS)) {
+    const form = endsWithRun(w, CARD_FORMS);
+    const hedged = hasAnyRun(w, HEDGE_RUNS) || asks(w);
+    if (form || (hedged && (hasAnyRun(w, CARD_FORMS) || w.some((x) => Object.hasOwn(CARD_NOUNS, x))))) return true;
+  }
   // A bare noun opens a request only before a preposition ("lista de…", "timer for…"); "list the planets" is a verb.
   const opens = (Object.hasOwn(CARD_NOUNS, core[0]) && (core.length === 1 || NOUN_PREPS.has(core[1]))) || (DETERMINERS.has(core[0]) && Object.hasOwn(CARD_NOUNS, core[1] || ""));
   if (opens && !hasAny(w, STATEMENT_VERBS)) return true;
@@ -248,13 +253,15 @@ export function mentionsCard(transcript, items = []) {
 }
 const CARD_FORMS = runs(["as a list", "in a list", "on a list for me", "as a card", "en una lista", "en lista", "en forma de lista", "como lista", "en una tarjeta"]);
 const HEDGE_RUNS = runs(["if you can", "if possible", "if you could", "if you dont mind", "si se puede", "si puedes", "si es posible", "si no te importa", "por favor", "please"]);
-// A countdown: a countdown verb and a duration (a number or a number word with a time unit).
-const COUNT_RUNS = runs(["count down", "count it down", "count that down", "count this down", "countdown", "remind me in", "let me know in", "tell me in", "time it", "avisame en", "avisame dentro de", "cuenta", "cuentame", "cronometra"]);
+// A countdown: a countdown phrase that can only be a request, and a time unit. "cuenta" counts only as the
+// imperative at the start ("cuenta diez minutos"); "la cuenta del restaurante", "me di cuenta" never.
+const COUNT_RUNS = runs(["count down", "count it down", "count that down", "count this down", "countdown", "remind me in", "let me know in", "avisame en", "avisame dentro de", "cronometra"]);
 const TIME_UNITS = new Set(["second", "seconds", "minute", "minutes", "min", "mins", "hour", "hours", "segundo", "segundos", "minuto", "minutos", "hora", "horas"]);
-function countdown(w) {
-  if (!hasAnyRun(w, COUNT_RUNS) || !hasAny(w, TIME_UNITS)) return false;
-  return true;
+function countdown(w, core) {
+  if (!hasAny(w, TIME_UNITS)) return false;
+  return hasAnyRun(w, COUNT_RUNS) || (core[0] === "cuenta" && core.length > 1 && core[1] !== "de" && core[1] !== "del");
 }
+const endsWithRun = (w, list) => list.some((p) => p.length <= w.length && sameAt(w, w.length - p.length, p));
 // Reading or closing a card is not a request for a new one (the "para" of asksCard's veto is a stop verb
 // only at the start, which the open-at-start rule above never sees as a card noun).
 const NOT_CARD_READ = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela"]);
@@ -279,19 +286,49 @@ const OFF_VERBS = new Set(["take", "knock", "cross", "scratch", "tick"]);
 const TAIL_WORDS = new Set(["too", "also", "instead", "tambien", "plus"]);
 const TAIL_RUNS = runs(["as well"]);
 const FOLLOW_INFO_STARTS = runs(["dime", "i wonder", "wonder", "give me an example", "give me another example", "i think", "i guess", "creo que"]);
-// Revision 6: the screen guard for crow_wm — a turn may close windows or step a recipe only when its words are
-// about the windows (a display word, a follow-up, or a window verb), never on a plain question.
-const WINDOW_WORDS = new Set(["close", "dismiss", "hide", "clear", "tidy", "remove", "delete", "cancel", "next", "previous", "step", "steps",
-  "cierra", "cierrala", "cierralo", "cierralas", "cierralos", "quita", "quitala", "quitalo", "quitalas", "quitalos", "oculta", "limpia", "borra", "cancela",
-  "siguiente", "anterior", "paso", "pasos"]);
-const WINDOW_RUNS = runs(["get rid of", "go back", "all of them", "them all", "take it away", "take that away", "done with", "finished with", "through with", "ya termine con", "ya acabe con"]);
+// Revision 6 (narrowed after its re-review): the screen guard for crow_wm — a turn may close windows or step a
+// recipe only when its words are about the windows: a display word or a follow-up outside a question, a
+// closing or stepping phrase, or a window verb AT THE START of the request or right before what it acts on
+// ("close it", "clear the list", "quita la receta"). A window word inside an ordinary statement ("the next
+// train leaves at six", "paso por ti", "clear my head") does not count.
+const WINDOW_VERBS_W = new Set(["close", "dismiss", "hide", "clear", "tidy", "remove", "delete", "cancel", "next", "previous",
+  "cierra", "quita", "oculta", "limpia", "borra", "cancela", "siguiente", "anterior"]);
+// A verb with its object attached is a request on its own.
+const WINDOW_CLITICS = new Set(["cierrala", "cierralo", "cierralas", "cierralos", "quitala", "quitalo", "quitalas", "quitalos", "ocultala", "ocultalo", "borrala", "borralo", "cancelala", "cancelalo"]);
+const WINDOW_OBJECTS = new Set(["it", "that", "this", "them", "those", "these", "everything", "all", "eso", "esto", "todo", "todas", "todos", "la", "lo", "las", "los",
+  "window", "windows", "screen", "display", "list", "lists", "card", "cards", "timer", "timers", "recipe", "recipes", "step", "steps", "alarm",
+  "ventana", "ventanas", "pantalla", "lista", "listas", "tarjeta", "temporizador", "temporizadores", "receta", "recetas", "paso", "pasos", "alarma"]);
+const WINDOW_RUNS = runs(["get rid of", "go back", "go back one", "all of them", "them all", "take it away", "take that away", "take it down", "take that down", "take it off", "take that off",
+  "get that off", "get it off", "off the screen", "dont need that", "dont need it", "dont need this", "no longer need", "done with", "finished with", "through with",
+  "ya termine con", "ya acabe con", "ya no la necesito", "ya no lo necesito", "next step", "previous step", "last step", "siguiente paso", "paso anterior", "keep going", "carry on"]);
+// Stepping asked as a question ("what's after this?", "what comes next?").
+const STEP_QUESTIONS = runs(["whats after this", "whats after that", "whats next", "what comes next", "what comes after", "what do i do next", "y ahora que", "que sigue", "y luego que"]);
+const PARTICLES = new Set(["up", "out", "away", "off", "down"]);
+function windowVerbHere(w, core) {
+  // At the start: alone ("Close."), or with what it acts on next ("Clear them all"); "siguiente tema", "cancel culture" are not.
+  if (core.length && WINDOW_CLITICS.has(core[0])) return true;
+  if (core.length && WINDOW_VERBS_W.has(core[0])) {
+    const k = PARTICLES.has(core[1]) ? 2 : 1;   // "tidy up the screen", "clear out the list"
+    if (core.length === k || WINDOW_OBJECTS.has(core[k]) || ((core[k] === "the" || core[k] === "el" || core[k] === "la" || core[k] === "my") && WINDOW_OBJECTS.has(core[k + 1] || ""))) return true;
+  }
+  for (let i = 0; i < w.length; i += 1) {
+    if (WINDOW_CLITICS.has(w[i])) return true;
+    if (!WINDOW_VERBS_W.has(w[i])) continue;
+    const a = w[i + 1], b = w[i + 2];
+    if (WINDOW_OBJECTS.has(a) || ((a === "the" || a === "my" || a === "that" || a === "this" || a === "el" || a === "mi") && WINDOW_OBJECTS.has(b))) return true;
+  }
+  return false;
+}
 export function windowIntent(transcript) {
-  if (wantsDisplay(transcript) || followUp(transcript)) return true;
   const w = plain(transcript);
   if (!w) return false;
   const core = stripPolite(w);
+  if (hasAnyRun(w, STEP_QUESTIONS)) return true;
+  // The question check comes first: "is the timer done?" is a question, not a request to close it.
   if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p))) return false;
-  return hasAny(w, WINDOW_WORDS) || hasAnyRun(w, WINDOW_RUNS);
+  // A display word or a follow-up counts only outside a statement ("the recipe was my aunt's", "hide and seek is fun").
+  if (!hasAny(w, STATEMENT_VERBS) && (wantsDisplay(transcript) || followUp(transcript))) return true;
+  return hasAnyRun(w, WINDOW_RUNS) || windowVerbHere(w, core);
 }
 export function followUp(transcript) {
   const w = plain(transcript);

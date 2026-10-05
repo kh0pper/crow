@@ -84,7 +84,8 @@ export function createDisplayTools(ctx) {
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
     },
     crow_open: {
-      when: openWhen, holdText: openWhen, holdToEnd: toEnd(openWhen), must: (t) => anyPart(t, (p) => asksOpen(p, items)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_open, missedText: S.open_missed_say,
+      // Held only when the person is asking to open something now; "what's new in the apps?" is offered, never held.
+      when: openWhen, holdText: (t) => asksOpen(t, items), holdToEnd: toEnd(openWhen), must: (t) => anyPart(t, (p) => asksOpen(p, items)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_open, missedText: S.open_missed_say,
       mustDone: (r) => r?.ok === true && ["opened", "focused", "handed_off"].includes(r.outcome),
       execute: (a, turn) => run({ verb: "open", app: enumOf("crow_open", "app").includes(a?.app) ? a.app : "launcher" }, turn),
     },

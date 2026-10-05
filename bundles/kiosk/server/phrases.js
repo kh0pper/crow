@@ -8,7 +8,8 @@ import { INTENT_MAX_CHARS } from "./intent-text.js";
 /** Plain words of a short utterance: no accents, apostrophes or punctuation; "what is" → "whats". null when empty or too long to be a control phrase. */
 export function spokenWords(t) {
   if (typeof t !== "string" || t.length > INTENT_MAX_CHARS) return null;
-  const s = t.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/ +/g, " ").trim()
+  // "we're / you're / they're" are statements: kept apart from "were", a question opener (revision 6).
+  const s = t.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\b(we|you|they)['’]re\b/g, "$1 are").replace(/['’]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/ +/g, " ").trim()
     .replace(/\bwhat is\b/g, "whats").replace(/\bwho is\b/g, "whos").replace(/\bthat is\b/g, "thats");
   return s ? s.split(" ") : null;
 }

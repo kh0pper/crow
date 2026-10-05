@@ -280,3 +280,65 @@ test("rev 6: a countdown request the offer accepts is also accepted by the execu
     assert.equal(r.outcome, "shown", `${say}: ${r.reason || r.outcome}`);
   }
 });
+
+// ── Revision 6, after its re-review ──────────────────────────────────────────────────────────────
+import { spokenWords } from "../bundles/kiosk/server/phrases.js";
+
+test("R6-1: contractions are statements — 'we're / you're / they're' never read as the question opener 'were'", async () => {
+  assert.deepEqual(spokenWords("We're out of eggs").slice(0, 3), ["we", "are", "out"]);
+  assert.deepEqual(spokenWords("They’re here")?.slice(0, 2), ["they", "are"]);
+  assert.equal(spokenWords("Were you there?")[0], "were", "a real 'were' question is unchanged");
+  assert.equal(followUp("We're out of butter, add it."), true);
+  const d = live({ windows: [{ kind: "content", title: "Groceries", blocks: [{ type: "heading", text: "Groceries" }, { type: "list", items: ["milk"] }] }] });
+  assert.equal((await d.run("crow_show", { kind: "list", title: "Groceries", body: "milk\nbutter" }, "We're out of butter, add it.")).outcome, "updated");
+});
+
+test("R6-1: closing and stepping phrases by category are window requests (16 shapes)", async () => {
+  const card = { kind: "content", title: "Frutas", blocks: [{ type: "heading", text: "Frutas" }, { type: "list", items: ["pera"] }] };
+  const recipe = { kind: "recipe", title: "Waffles", ingredients: ["flour"], steps: ["mix", "pour", "flip", "serve"], step: 1 };
+  const reqs = [[card, "We're finished with that list.", "close"], [card, "I'm done with the card now.", "close"], [card, "Take it down, please.", "close"], [card, "Take that off the screen.", "close"],
+    [card, "Get that off the screen.", "close"], [card, "I don't need that anymore.", "close"], [card, "We don't need this list anymore.", "close"], [card, "Ya no la necesito, quítala.", "close"],
+    [card, "Clear everything off.", "close_all"], [card, "Close all of them.", "close_all"], [recipe, "What's after this?", "next_step"], [recipe, "Keep going.", "next_step"],
+    [recipe, "Next step, please.", "next_step"], [recipe, "Go back one step.", "previous_step"], [recipe, "¿Qué sigue?", "next_step"], [card, "Ciérrala ya.", "close"]];
+  for (const [w, say, verb] of reqs) {
+    assert.equal(windowIntent(say), true, say);
+    const d = liveWm({ windows: [w] });
+    const r = await d.run({ do: verb }, say);
+    assert.equal(r.outcome, "done", `${say}: ${r.outcome}/${r.reason}`);
+  }
+});
+
+test("R6-2: a window word inside an ordinary statement or question does not let a close or a step through", async () => {
+  const card = { kind: "content", title: "Frutas", blocks: [{ type: "heading", text: "Frutas" }, { type: "list", items: ["pera"] }] };
+  const recipe = { kind: "recipe", title: "Waffles", ingredients: ["flour"], steps: ["mix", "pour", "flip"], step: 0 };
+  const plain = ["The next bus comes at seven.", "Paso por la tienda después del trabajo.", "Siguiente tema: el clima de mañana.", "I need to clear my mind tonight.", "Is the timer almost done?",
+    "Remove the stain with vinegar, my grandma says.", "Cancel culture is everywhere these days.", "The previous owner painted it blue.", "Tell me how to close a bank account.",
+    "We're going back to Peru in May.", "Did you see the step count today?", "Limpiaron toda la calle ayer.", "The recipe was my aunt's.", "She cleared the table already.", "My next class is at noon.", "Hide and seek is fun."];
+  let refused = 0;
+  for (const say of plain) {
+    for (const [w, args] of [[card, { do: "close" }], [recipe, { do: "next_step" }]]) {
+      const d = liveWm({ windows: [w] });
+      const before = snapshot(d.store);
+      await d.run(args, say);
+      if (snapshot(d.store) === before) refused += 1;
+    }
+  }
+  assert.equal(refused, plain.length * 2, `refused ${refused} of ${plain.length * 2}`);
+});
+
+test("R6-3: countdown and card-form rules need a request frame — statements never create a window, and the executor refuses them", async () => {
+  const t = live();
+  for (const say of ["La cuenta del restaurante fue de treinta minutos de espera.", "Me di cuenta a los cinco minutos.", "Time it right and the dough rises in two hours.",
+    "I'm in a list of finalists for the prize.", "Our names are in a list at the door.", "Mi nombre está en la lista desde hace dos horas."]) {
+    assert.ok(!t.offered(say).includes("crow_show"), `${say}: not offered`);
+    const r = await t.run("crow_show", { kind: "timer", title: "X", body: "5 minutes" }, say);
+    assert.equal(r.ok, false, `${say}: refused`);
+  }
+  for (const say of ["Cuenta diez minutos para el arroz.", "Count down fifteen minutes, please.", "The guest list as a list.", "Lo de la compra en una lista, si se puede."]) assert.ok(t.offered(say).includes("crow_show"), say);
+});
+
+test("R6-4/5: household 'put … on' is not a name to play; 'what's new in the apps' is not about opening", () => {
+  const t = live();
+  for (const say of ["Put the kettle on, I'm cold.", "Have your coat on before you go.", "Put the heating on for a bit."]) assert.ok(!t.offered(say).includes("crow_play"), say);
+  assert.equal(t.by.crow_open.holdText("What's new in the apps this week?"), false, "offered (an app word), never held");
+});
