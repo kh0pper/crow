@@ -18,7 +18,8 @@ const TAX_DOCS_DIR = join(homedir(), ".crow", "tax-documents");
 
 // Resolve bundle directory (installed vs repo)
 function resolveBundleDir() {
-  const installed = join(homedir(), ".crow", "bundles", "tax");
+  // This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+  const installed = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "tax");
   if (existsSync(installed)) return installed;
   return join(import.meta.dirname, "..");
 }

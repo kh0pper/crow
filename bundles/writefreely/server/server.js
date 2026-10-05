@@ -22,11 +22,12 @@
  *   wf_export_posts      — dump authenticated user's posts as JSON
  *
  * Rate limiting: content-producing verbs are wrapped with the shared
- * token bucket (matches F.1 pattern, with installed-mode fallback).
+ * token bucket (matches F.1 pattern, reached through ./app-root.js).
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { appImport } from "./app-root.js";
 
 const WF_URL = (process.env.WF_URL || "http://writefreely:8080").replace(/\/+$/, "");
 const WF_ACCESS_TOKEN = process.env.WF_ACCESS_TOKEN || "";
@@ -37,13 +38,13 @@ let getDb = null;
 
 async function loadSharedDeps() {
   try {
-    const rl = await import("../../../servers/shared/rate-limiter.js");
+    const rl = await appImport("servers/shared/rate-limiter.js");
     wrapRateLimited = rl.wrapRateLimited;
   } catch {
     wrapRateLimited = () => (_, h) => h;
   }
   try {
-    const db = await import("../../../servers/db.js");
+    const db = await appImport("servers/db.js");
     getDb = db.createDbClient;
   } catch {
     getDb = null;

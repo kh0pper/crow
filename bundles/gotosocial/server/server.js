@@ -14,11 +14,10 @@
  *
  * Rate limiting:
  *   Content-producing and moderation tools are wrapped with the shared
- *   token-bucket limiter (servers/shared/rate-limiter.js). In "installed
- *   to ~/.crow/bundles/" mode the shared module may not resolve — in
- *   that case the wrapper falls back to pass-through, matching the
- *   knowledge-base / media bundle convention. Crow's main MCP
- *   installation (first-party monorepo mode) gets real rate limiting.
+ *   token-bucket limiter (servers/shared/rate-limiter.js), reached through
+ *   the app root (./app-root.js) so the installed copy under
+ *   <CROW_HOME>/bundles/ gets real rate limiting too. Only when no app
+ *   root can be found does the wrapper fall back to pass-through.
  *
  * Human-in-the-loop moderation:
  *   *_defederate and *_import_blocklist don't fire inline. They INSERT a
@@ -32,6 +31,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { appImport } from "./app-root.js";
 
 const GTS_URL = (process.env.GTS_URL || "http://gotosocial:8080").replace(/\/+$/, "");
 const GTS_ACCESS_TOKEN = process.env.GTS_ACCESS_TOKEN || "";
@@ -44,20 +44,20 @@ let createNotification = null;
 
 async function loadSharedDeps() {
   try {
-    const rl = await import("../../../servers/shared/rate-limiter.js");
+    const rl = await appImport("servers/shared/rate-limiter.js");
     wrapRateLimited = rl.wrapRateLimited;
   } catch {
-    // Installed-mode fallback: no-op wrapper
+    // No app root reachable: no-op wrapper
     wrapRateLimited = () => (_toolId, handler) => handler;
   }
   try {
-    const db = await import("../../../servers/db.js");
+    const db = await appImport("servers/db.js");
     getDb = db.createDbClient;
   } catch {
     getDb = null;
   }
   try {
-    const notif = await import("../../../servers/shared/notifications.js");
+    const notif = await appImport("servers/shared/notifications.js");
     createNotification = notif.createNotification;
   } catch {
     createNotification = null;

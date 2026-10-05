@@ -1,7 +1,7 @@
 {
   "id": "iptv",
   "name": "IPTV",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "IPTV channel management — M3U playlists, EPG program guide, channel groups, and favorites",
   "type": "mcp-server",
   "author": "Crow",

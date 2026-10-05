@@ -1,7 +1,7 @@
 {
   "id": "caddy",
   "name": "Caddy Reverse Proxy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
   "type": "bundle",
   "author": "Crow",

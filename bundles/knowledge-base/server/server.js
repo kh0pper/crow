@@ -12,11 +12,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { sanitizeFtsQuery, escapeLikePattern } from "./db.js";
+import { appImport } from "./app-root.js";
 
-// Lazy-load confirm helpers (may not be available in standalone mode)
+// Confirm helpers come through the app root: a repo-relative import does not
+// exist from the installed copy and silently switched the confirm gates off.
+// (Fallback only when no app root can be found — a truly standalone run.)
 let generateToken, validateToken, shouldSkipGates;
 try {
-  const confirmMod = await import("../../../servers/shared/confirm.js");
+  const confirmMod = await appImport("servers/shared/confirm.js");
   generateToken = confirmMod.generateToken;
   validateToken = confirmMod.validateToken;
   shouldSkipGates = confirmMod.shouldSkipGates;
@@ -30,7 +33,7 @@ try {
 // Lazy-load notification helper
 let createNotification;
 try {
-  const notifMod = await import("../../../servers/shared/notifications.js");
+  const notifMod = await appImport("servers/shared/notifications.js");
   createNotification = notifMod.createNotification;
 } catch {
   createNotification = async () => {};

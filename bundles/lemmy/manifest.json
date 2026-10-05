@@ -1,7 +1,7 @@
 {
   "id": "lemmy",
   "name": "Lemmy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
   "type": "bundle",
   "author": "Crow",

@@ -1,7 +1,7 @@
 {
   "id": "kodi",
   "name": "Kodi",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
   "type": "mcp-server",
   "author": "Crow",

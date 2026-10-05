@@ -6,8 +6,23 @@
  */
 
 import { Router } from "express";
+import { existsSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
+// Installed as a COPY at <CROW_HOME>/panels/caddy-routes.js, where a relative
+// "../server/caddyfile.js" does not exist. The bundle's own modules are found
+// by path: this instance's installed copy, then the app checkout, then the
+// in-repo layout.
+const BUNDLE_DIR = [
+  join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "caddy"),
+  process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "caddy") : null,
+  resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+].filter(Boolean).find((p) => existsSync(join(p, "server", "caddyfile.js")));
+if (!BUNDLE_DIR) throw new Error("caddy: bundle directory not found");
+
+const {
   resolveConfigDir,
   caddyfilePath,
   readCaddyfile,
@@ -15,7 +30,7 @@ import {
   parseSites,
   appendSite,
   removeSite,
-} from "../server/caddyfile.js";
+} = await import(pathToFileURL(join(BUNDLE_DIR, "server", "caddyfile.js")).href);
 
 const CADDY_ADMIN_URL = () =>
   (process.env.CADDY_ADMIN_URL || "http://127.0.0.1:2019").replace(/\/+$/, "");

@@ -1,7 +1,7 @@
 {
   "id": "mastodon",
   "name": "Mastodon",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing. Media is kept on local disk.",
   "type": "bundle",
   "author": "Crow",

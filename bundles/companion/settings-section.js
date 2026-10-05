@@ -58,7 +58,8 @@ async function mirrorToDashboard(db, key, value) {
   } catch {}
 }
 
-const BUNDLE_DIR = join(homedir(), ".crow", "bundles", "companion");
+// This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+const BUNDLE_DIR = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "companion");
 
 /* ---------- .env helpers ---------- */
 

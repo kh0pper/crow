@@ -22,7 +22,7 @@ export default {
     const { escapeHtml, statCard, statGrid, dataTable } = await import(pathToFileURL(componentsPath).href);
 
     // Resolve bundle server
-    const installedDir = join(homedir(), ".crow", "bundles", "campaigns", "server");
+    const installedDir = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "campaigns", "server");
     const repoDir = join(appRoot, "bundles", "campaigns", "server");
     const serverDir = existsSync(installedDir) ? installedDir : repoDir;
     const { createDbClient } = await import(pathToFileURL(join(serverDir, "db.js")).href);
