@@ -382,6 +382,7 @@ export function createVoiceTurnRunner(deps) {
           const line = String(opts.tooLargeText || BOT_TOO_LARGE_TEXT);
           sink.event({ type: "caption_delta", text: line });
           try { await say.force(line); } catch (err) { log(`[voice-turn] ${device.id} could not speak the too-large line: ${err.message}`); }
+          // A barge-in over the line: aborted, but failed stays — the assistant still cannot answer here.
           if (aborted()) { result.aborted = true; return result; }
           say.end();
           fail("bot_too_large", false);

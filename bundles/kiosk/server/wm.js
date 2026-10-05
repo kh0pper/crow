@@ -106,15 +106,20 @@ export function wantsDisplay(transcript) {
  * Text that must never reach the screen: empty, a syntax placeholder (<title>, a bare
  * "title"/"text"…), or an echo of the tool's own syntax help.
  */
-const PLACEHOLDER_TOKEN = /<\s*[a-z_ ]{1,24}\s*>/i;
-const PLACEHOLDER_WORDS = new Set(["title", "text", "name", "body", "content", "ingredient", "ingredients", "step", "steps"]);
+// <title>, <text>, <step> …: one or two words tight inside the brackets ("a < b and c > d" is real text).
+const PLACEHOLDER_TOKEN = /<[a-z_]{2,16}(?: [a-z_]{2,16})?>/i;
+// Bare placeholder words, per field: a card may be TITLED "Ingredients" or "Steps", but not "Title".
+const PH = {
+  title: new Set(["title"]), text: new Set(["text", "body", "content"]),
+  ingredient: new Set(["ingredient", "ingredients"]), step: new Set(["step", "steps"]), timer: new Set(["name"]),
+};
+const PLACEHOLDER_WORDS = new Set(Object.values(PH).flatMap((s) => [...s]));
 const SYNTAX_ECHO = /starts a paragraph|lines starting|become a list|a bar separates|double bar separates|\btitle \| (text|ingredients)\b/i;
 export function isPlaceholderText(s, words = PLACEHOLDER_WORDS) {
   const t = String(s ?? "").trim();
   if (!t || PLACEHOLDER_TOKEN.test(t) || SYNTAX_ECHO.test(t)) return true;
   return words.has(t.toLowerCase().replace(/^[\s"'“”()[\]-]+|[\s"'“”()[\].:;—–-]+$/g, ""));
 }
-const TIMER_NAME_PLACEHOLDERS = new Set(["name"]);
 const placeholderError = () => ({ op: "error", message: PLACEHOLDER_MSG });
 
 export function parseKioskCommand(command) {
@@ -137,7 +142,7 @@ export function parseKioskCommand(command) {
     const rest = d.after || d.before;
     if (/^[,;]|^(and|then|but|so)\b/.test(rest)) return { op: "error", message: "Say how long, then an optional name, e.g. timer 10 minutes pasta." };
     const name = cap1(rest.replace(/^(called|named|labell?ed|for)\s+/, "").replace(/^["'“”]+|["'“”.]+$/g, "").trim().slice(0, 40)) || "Timer";
-    if (isPlaceholderText(name, TIMER_NAME_PLACEHOLDERS)) return placeholderError();
+    if (isPlaceholderText(name, PH.timer)) return placeholderError();
     return { op: "open", window: { kind: "timer", name, title: name, seconds: d.seconds } };
   }
   m = raw.match(/^recipe\s+([\s\S]+)$/i);
@@ -147,7 +152,7 @@ export function parseKioskCommand(command) {
     const ingredients = (parts[1] || "").split(/;|\n/).map((x) => x.trim()).filter(Boolean).slice(0, 40);
     const steps = parts.slice(2).join(" | ").split(/\|\||\n/).map((x) => x.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean).slice(0, 40);
     if (!title || !steps.length) return { op: "error", message: "A recipe needs a name and at least one step, e.g. recipe Pancakes | flour; eggs | Mix the batter || Cook two minutes a side" };
-    if ([title, ...ingredients, ...steps].some((x) => isPlaceholderText(x))) return placeholderError();
+    if (isPlaceholderText(title, PH.title) || ingredients.some((x) => isPlaceholderText(x, PH.ingredient)) || steps.some((x) => isPlaceholderText(x, PH.step))) return placeholderError();
     return { op: "open", window: { kind: "recipe", title, ingredients, steps, step: 0 } };
   }
   m = raw.match(/^(?:display|show results|show info)\s+([\s\S]+)$/i);
@@ -156,7 +161,7 @@ export function parseKioskCommand(command) {
     const parts = m[1].match(/^([^|]*?)\s*\|(?!\|)\s*([\s\S]*)$/);
     const title = ((parts ? parts[1] : "") || "Info").trim().slice(0, 80);
     const text = (parts ? parts[2] : m[1]).trim();
-    if (isPlaceholderText(title) || isPlaceholderText(text)) return placeholderError();
+    if (isPlaceholderText(title, PH.title) || isPlaceholderText(text, PH.text)) return placeholderError();
     return { op: "open", window: { kind: "content", title, blocks: contentBlocks(title, text) } };
   }
   return { op: "error", message: USAGE };

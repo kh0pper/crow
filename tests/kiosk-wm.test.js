@@ -296,6 +296,14 @@ test("placeholders are never rendered: a display/recipe/timer command made of sy
   assert.equal((await s.run("timer 5 minutes name tags")).ok, true);
   assert.equal((await s.run("recipe Title page cake | flour; eggs | Mix || Bake")).ok, true);
   assert.equal((await s.run("display a note with no title")).ok, true);
+  // Review: real content that only LOOKS like a placeholder is never refused.
+  assert.equal((await s.run("display Ingredients | flour, eggs")).ok, true, "a card may be titled Ingredients");
+  assert.equal((await s.run("display Steps | Mix, then bake")).ok, true);
+  assert.equal((await s.run("display Math | if a < b and c > d then a < d")).ok, true, "comparison signs are not a placeholder");
+  assert.equal((await s.run("recipe Name day cake | flour; eggs | Mix || Bake")).ok, true);
+  assert.equal((await s.run("timer 3 minutes text mum")).ok, true);
+  assert.equal(W.isPlaceholderText("< b and c >"), false);
+  assert.equal(W.isPlaceholderText("<step one>"), true);
   assert.equal(W.isPlaceholderText("<title>"), true);
   assert.equal(W.isPlaceholderText("  "), true);
   assert.equal(W.isPlaceholderText("Shopping list"), false);
