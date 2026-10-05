@@ -25,6 +25,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { appImport } from "./app-root.js";
 
 const LEMMY_URL = (process.env.LEMMY_URL || "http://lemmy:8536").replace(/\/+$/, "");
 const LEMMY_JWT = process.env.LEMMY_JWT || "";
@@ -36,19 +37,19 @@ let createNotification = null;
 
 async function loadSharedDeps() {
   try {
-    const rl = await import("../../../servers/shared/rate-limiter.js");
+    const rl = await appImport("servers/shared/rate-limiter.js");
     wrapRateLimited = rl.wrapRateLimited;
   } catch {
     wrapRateLimited = () => (_toolId, handler) => handler;
   }
   try {
-    const db = await import("../../../servers/db.js");
+    const db = await appImport("servers/db.js");
     getDb = db.createDbClient;
   } catch {
     getDb = null;
   }
   try {
-    const notif = await import("../../../servers/shared/notifications.js");
+    const notif = await appImport("servers/shared/notifications.js");
     createNotification = notif.createNotification;
   } catch {
     createNotification = null;

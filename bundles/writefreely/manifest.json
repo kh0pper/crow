@@ -1,7 +1,7 @@
 {
   "id": "writefreely",
   "name": "WriteFreely",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
   "type": "bundle",
   "author": "Crow",
