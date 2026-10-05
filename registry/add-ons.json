@@ -3252,8 +3252,8 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.0.2",
-      "description": "News aggregation, RSS feeds, YouTube channels, podcasts, TTS audio, briefings, playlists, smart folders, email digests",
+      "version": "1.1.0",
+      "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
       "category": "media",
@@ -3339,7 +3339,7 @@
           },
           {
             "name": "crow_media_listen",
-            "label": "Listen (TTS)",
+            "label": "Listen (local voice)",
             "subgroup": "Audio"
           },
           {
@@ -3406,12 +3406,12 @@
         },
         {
           "name": "CROW_MEDIA_AUDIO_MAX_MB",
-          "description": "TTS cache size limit (MB)",
+          "description": "Article audio cache size limit (MB)",
           "default": "500"
         },
         {
           "name": "CROW_MEDIA_TTS_DAILY_LIMIT",
-          "description": "Daily TTS generation limit",
+          "description": "Daily limit on newly made article audio",
           "default": "50"
         },
         {
