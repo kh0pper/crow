@@ -1,0 +1,2 @@
+# Let the video group (the kiosk user) switch the DSI backlight off and on (bl_power is root-only by default).
+SUBSYSTEM=="backlight", ACTION=="add", RUN+="/bin/chgrp video /sys%p/bl_power /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/bl_power /sys%p/brightness"

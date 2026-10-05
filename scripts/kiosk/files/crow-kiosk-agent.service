@@ -1,0 +1,15 @@
+# systemd user unit of the kiosk user: wake word, backlight, touch-while-dark, Bluetooth keep-alive.
+[Unit]
+Description=Crow kiosk agent (wake word + local socket 127.0.0.1:8770)
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/crow-kiosk/agent/crow_kiosk_agent.py --config /etc/crow-kiosk/agent.json
+Restart=always
+RestartSec=3
+# No MemoryMax: the Pi kernel boots with cgroup_disable=memory, so a memory cap would be ignored.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

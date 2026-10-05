@@ -1,0 +1,293 @@
+#!/bin/bash
+# Crow kiosk: set up a Raspberry Pi (Raspberry Pi OS Lite 64-bit, trixie) as a Crow wall display.
+#
+#   sudo scripts/kiosk/pi-setup.sh --crow-url https://<tailnet-host>:8444 [options]
+#
+# Options (remembered in /etc/crow-kiosk/setup.env; a re-run without a flag keeps the saved value)
+#   --crow-url URL             the Crow gateway origin (https, Tailscale Serve); required the first time
+#   --bt-sink MAC              a paired Bluetooth speaker the agent watches and reconnects; --clear-bt-sink
+#   --mic-target NODE          PipeWire node.name of the microphone (pinned; default: the default source)
+#   --allow-frame-origin URL   an extra origin the kiosk may frame (repeatable; replaces the saved list)
+#   --admin-user NAME          the login user whose own PipeWire is masked (default: $SUDO_USER)
+#   --keep-admin-audio         do not mask the admin user's PipeWire (refused together with --bt-sink:
+#                              two PipeWire instances race for the speaker)
+#   --accept-oww-model-license download openWakeWord's feature models + hey_jarvis (CC BY-NC-SA 4.0,
+#                              non-commercial); without it the agent runs tap-only
+#   --wake-model-url URL       a custom wake model (e.g. hey_crow.onnx served by Crow); needs
+#   --wake-model-sha256 HEX    its sha256; --clear-wake-model goes back to hey_jarvis
+#   --auto-reboot | --no-auto-reboot   unattended-upgrades may reboot at --reboot-time (default 04:30)
+#   --skip-packages            do not run apt (files and services only)
+#   --dry-run DIR              change nothing: write every file under DIR and print the commands
+#   -h, --help
+#
+# Idempotent: re-running rewrites only files whose content changed, then restarts the kiosk if it is
+# running and something changed (otherwise: reboot to start it).
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OWW_RELEASE="https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+# sha256 of the v0.5.1 release assets, recorded 2026-10-05
+OWW_MODELS=(
+  "melspectrogram.onnx ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f"
+  "embedding_model.onnx 70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f"
+  "hey_jarvis_v0.1.onnx 94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb"
+)
+PACKAGES=(cage chromium python3-numpy python3-onnxruntime python3-websockets unattended-upgrades sysstat
+          pipewire wireplumber pipewire-pulse pipewire-alsa libspa-0.2-bluetooth bluez pulseaudio-utils)
+SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDIO ACCEPT_OWW WAKE_URL WAKE_SHA AUTO_REBOOT REBOOT_TIME)
+
+die() { echo "pi-setup: $*" >&2; exit 2; }
+say() { echo "== $*"; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# Flags given on this run (empty = not given)
+declare -A GIVEN=()
+DRY=0 ROOT="" SKIP_PACKAGES=0 FRAMES_GIVEN=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --crow-url) GIVEN[CROW_URL]="${2:-}"; shift 2 ;;
+    --bt-sink) GIVEN[BT_SINK]="${2:-}"; shift 2 ;;
+    --clear-bt-sink) GIVEN[BT_SINK]="-"; shift ;;
+    --mic-target) GIVEN[MIC_TARGET]="${2:-}"; shift 2 ;;
+    --allow-frame-origin) FRAMES_GIVEN+=("${2:-}"); shift 2 ;;
+    --admin-user) GIVEN[ADMIN_USER]="${2:-}"; shift 2 ;;
+    --keep-admin-audio) GIVEN[KEEP_ADMIN_AUDIO]=1; shift ;;
+    --accept-oww-model-license) GIVEN[ACCEPT_OWW]=1; shift ;;
+    --wake-model-url) GIVEN[WAKE_URL]="${2:-}"; shift 2 ;;
+    --wake-model-sha256) GIVEN[WAKE_SHA]="${2:-}"; shift 2 ;;
+    --clear-wake-model) GIVEN[WAKE_URL]="-"; GIVEN[WAKE_SHA]="-"; shift ;;
+    --auto-reboot) GIVEN[AUTO_REBOOT]=true; shift ;;
+    --no-auto-reboot) GIVEN[AUTO_REBOOT]=false; shift ;;
+    --reboot-time) GIVEN[REBOOT_TIME]="${2:-}"; shift 2 ;;
+    --skip-packages) SKIP_PACKAGES=1; shift ;;
+    --dry-run) DRY=1; ROOT="${2:-}"; [ -n "$ROOT" ] || die "--dry-run needs a directory"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (see --help)" ;;
+  esac
+done
+[ ${#FRAMES_GIVEN[@]} -eq 0 ] || GIVEN[FRAME_ORIGINS]="${FRAMES_GIVEN[*]}"
+
+p() { echo "${ROOT}$1"; }  # path on the target (under the staging dir in dry-run)
+SETUP_ENV=/etc/crow-kiosk/setup.env
+
+# ---- saved settings: defaults <- saved file <- this run's flags ----------------------------------
+declare -A CFG=([CROW_URL]="" [BT_SINK]="" [MIC_TARGET]="" [FRAME_ORIGINS]="" [ADMIN_USER]="${SUDO_USER:-}"
+                [KEEP_ADMIN_AUDIO]=0 [ACCEPT_OWW]=0 [WAKE_URL]="" [WAKE_SHA]="" [AUTO_REBOOT]=false [REBOOT_TIME]="04:30")
+if [ -f "$(p "$SETUP_ENV")" ]; then
+  while IFS='=' read -r k v; do      # parsed, never sourced
+    for known in "${SAVED_KEYS[@]}"; do [ "$k" = "$known" ] && CFG[$k]="$v"; done
+  done < "$(p "$SETUP_ENV")"
+fi
+for k in "${!GIVEN[@]}"; do CFG[$k]="${GIVEN[$k]}"; done
+for k in BT_SINK WAKE_URL WAKE_SHA; do [ "${CFG[$k]}" != "-" ] || CFG[$k]=""; done
+
+# ---- validation (also in dry-run; nothing has been written yet) ------------------------------------
+[ -n "${CFG[CROW_URL]}" ] || die "--crow-url is required"
+CROW_ORIGIN="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from chromium_policy import origin; print(origin(sys.argv[2]))' "$SRC_DIR" "${CFG[CROW_URL]}" 2>/dev/null)" \
+  || die "--crow-url must be an https origin with no path, e.g. https://crow.example.ts.net:8444"
+CFG[CROW_URL]="$CROW_ORIGIN"
+if [ -n "${CFG[BT_SINK]}" ]; then
+  CFG[BT_SINK]="${CFG[BT_SINK]^^}"
+  [[ "${CFG[BT_SINK]}" =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){5}$ ]] || die "--bt-sink must look like AA:BB:CC:DD:EE:FF"
+fi
+[[ -z "${CFG[MIC_TARGET]}" || "${CFG[MIC_TARGET]}" =~ ^[A-Za-z0-9_.:-]{1,200}$ ]] || die "--mic-target must be a PipeWire node name"
+read -r -a FRAME_ORIGINS <<< "${CFG[FRAME_ORIGINS]}"
+WAKE_FILE=/var/lib/crow-kiosk/wake/hey_jarvis_v0.1.onnx
+if [ -n "${CFG[WAKE_URL]}" ]; then
+  [[ "${CFG[WAKE_URL]}" == https://* ]] || die "--wake-model-url must be https"
+  [[ "${CFG[WAKE_SHA]}" =~ ^[0-9a-f]{64}$ ]] || die "--wake-model-url needs --wake-model-sha256 (64 hex chars)"
+  wname="$(basename "${CFG[WAKE_URL]%%\?*}")"
+  [[ "$wname" =~ ^[a-z0-9_.-]+\.onnx$ && "$wname" != .* ]] || die "--wake-model-url must end in a plain <name>.onnx"
+  WAKE_FILE="/var/lib/crow-kiosk/wake/$wname"
+fi
+[[ "${CFG[REBOOT_TIME]}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--reboot-time must be HH:MM"
+[[ "${CFG[AUTO_REBOOT]}" =~ ^(true|false)$ ]] || die "bad saved AUTO_REBOOT"
+[[ -z "${CFG[ADMIN_USER]}" || "${CFG[ADMIN_USER]}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --admin-user"
+[ "${CFG[ADMIN_USER]}" != "kiosk" ] || die "--admin-user cannot be the kiosk user"
+if [ "${CFG[KEEP_ADMIN_AUDIO]}" = 1 ] && [ -n "${CFG[BT_SINK]}" ]; then
+  die "--keep-admin-audio with --bt-sink: two PipeWire instances would race for the speaker"
+fi
+
+# ---- helpers -----------------------------------------------------------------------------------
+CHANGE_MARK="$(mktemp)"            # put() often runs in a pipeline (a subshell), so a variable would be lost
+trap 'rm -f "$CHANGE_MARK"' EXIT
+changed() { echo x >> "$CHANGE_MARK"; }
+run() {  # run a system command (printed only, in dry-run)
+  if [ "$DRY" = 1 ]; then printf '+ %s\n' "$*"; else "$@"; fi
+}
+put() {  # put MODE DEST < content ; writes only when the content changed
+  local mode="$1" dest tmp
+  dest="$(p "$2")"
+  tmp="$(mktemp)"
+  cat > "$tmp"
+  mkdir -p "$(dirname "$dest")"
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"; echo "   unchanged $2"
+  else
+    install -m "$mode" "$tmp" "$dest"; rm -f "$tmp"; echo "   wrote     $2"; changed
+  fi
+}
+link() {  # link TARGET LINKNAME
+  local name; name="$(p "$2")"
+  mkdir -p "$(dirname "$name")"
+  if [ "$(readlink "$name" 2>/dev/null || true)" = "$1" ]; then echo "   unchanged $2"
+  else ln -sfn "$1" "$name"; echo "   linked    $2"; changed; fi
+}
+KHOME=/home/kiosk
+
+# ---- 1. preflight --------------------------------------------------------------------------------
+say "preflight"
+FIRST_INSTALL=1
+if [ "$DRY" = 0 ]; then
+  [ "$(id -u)" = 0 ] || die "run as root (sudo)"
+  [ "$(uname -m)" = aarch64 ] || die "expected a 64-bit (aarch64) Raspberry Pi OS"
+  grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null || die "not a Raspberry Pi"
+  # shellcheck source=/dev/null
+  . /etc/os-release; [ "${VERSION_CODENAME:-}" = trixie ] || echo "   warning: tested on trixie, this is ${VERSION_CODENAME:-unknown}"
+  ! id kiosk >/dev/null 2>&1 || FIRST_INSTALL=0
+else
+  mkdir -p "$ROOT"; echo "   dry-run: files go under $ROOT; commands are printed, not run"
+  [ ! -f "$(p "$SETUP_ENV")" ] || FIRST_INSTALL=0
+fi
+
+# ---- 2. packages -----------------------------------------------------------------------------
+if [ "$SKIP_PACKAGES" = 0 ]; then
+  say "packages"
+  run apt-get update
+  run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${PACKAGES[@]}"
+fi
+
+# ---- 3. kiosk user -----------------------------------------------------------------------------
+say "kiosk user"
+if [ "$FIRST_INSTALL" = 1 ]; then
+  run useradd --create-home --shell /usr/sbin/nologin --user-group kiosk
+fi
+run usermod --shell /usr/sbin/nologin kiosk
+run passwd --lock kiosk
+run usermod -a -G audio,video,render,input kiosk
+run loginctl enable-linger kiosk
+
+# ---- 4. files ----------------------------------------------------------------------------------
+say "files"
+put 0755 /usr/local/lib/crow-kiosk/kiosk-launch.sh < "$SRC_DIR/kiosk-launch.sh"
+put 0755 /usr/local/lib/crow-kiosk/mem-sample.sh < "$SRC_DIR/mem-sample.sh"
+put 0755 /usr/local/lib/crow-kiosk/after-dpkg.sh < "$SRC_DIR/after-dpkg.sh"
+for f in "$SRC_DIR"/agent/*.py; do
+  name="$(basename "$f")"
+  case "$name" in test_*|bench_*|_*) continue ;; esac
+  put 0644 "/usr/local/lib/crow-kiosk/agent/$name" < "$f"
+done
+put 0755 /usr/local/lib/crow-kiosk/agent/bench_latency.py < "$SRC_DIR/agent/bench_latency.py"
+printf 'CROW_URL=%s\n' "$CROW_ORIGIN" | put 0644 /etc/crow-kiosk/kiosk.env
+python3 - "$CROW_ORIGIN" "${CFG[BT_SINK]}" "$WAKE_FILE" "${CFG[MIC_TARGET]}" <<'PY_AGENTCFG' | put 0644 /etc/crow-kiosk/agent.json
+import json, sys
+origin, mac, wake, mic = sys.argv[1:5]
+print(json.dumps({"crow_origin": origin, "bt_sink_mac": mac or None, "wake_model": wake,
+                  "mic_target": mic or None}, indent=2, sort_keys=True))
+PY_AGENTCFG
+POLICY_ARGS=(--crow-url "$CROW_ORIGIN")
+for o in ${FRAME_ORIGINS[@]+"${FRAME_ORIGINS[@]}"}; do POLICY_ARGS+=(--allow-frame-origin "$o"); done
+python3 "$SRC_DIR/chromium_policy.py" "${POLICY_ARGS[@]}" | put 0644 /etc/chromium/policies/managed/crow-kiosk.json
+put 0644 /etc/systemd/system/crow-kiosk-cage.service < "$SRC_DIR/files/crow-kiosk-cage.service"
+put 0644 /etc/pam.d/crow-kiosk < "$SRC_DIR/files/pam-crow-kiosk"
+put 0644 /etc/udev/rules.d/90-crow-kiosk-backlight.rules < "$SRC_DIR/files/90-crow-kiosk-backlight.rules"
+put 0644 /etc/systemd/system.conf.d/90-crow-kiosk-watchdog.conf < "$SRC_DIR/files/90-crow-kiosk-watchdog.conf"
+put 0644 /etc/NetworkManager/conf.d/90-crow-kiosk-wifi-powersave.conf < "$SRC_DIR/files/90-crow-kiosk-wifi-powersave.conf"
+sed -e "s/@AUTO_REBOOT@/${CFG[AUTO_REBOOT]}/" -e "s/@REBOOT_TIME@/${CFG[REBOOT_TIME]}/" \
+  "$SRC_DIR/files/52-crow-kiosk-unattended-upgrades" | put 0644 /etc/apt/apt.conf.d/52crow-kiosk-unattended-upgrades
+put 0644 /etc/apt/apt.conf.d/20auto-upgrades < "$SRC_DIR/files/20-crow-kiosk-auto-upgrades"
+put 0644 /etc/apt/apt.conf.d/80crow-kiosk-after-dpkg < "$SRC_DIR/files/80-crow-kiosk-after-dpkg"
+put 0644 /etc/systemd/system/apt-daily.timer.d/crow-kiosk.conf < "$SRC_DIR/files/apt-daily-timer.conf"
+put 0644 /etc/systemd/system/apt-daily-upgrade.timer.d/crow-kiosk.conf < "$SRC_DIR/files/apt-daily-upgrade-timer.conf"
+for u in crow-kiosk-agent.service crow-kiosk-mem.service crow-kiosk-mem.timer; do
+  put 0644 "$KHOME/.config/systemd/user/$u" < "$SRC_DIR/files/$u"
+done
+link "$KHOME/.config/systemd/user/crow-kiosk-agent.service" "$KHOME/.config/systemd/user/default.target.wants/crow-kiosk-agent.service"
+link "$KHOME/.config/systemd/user/crow-kiosk-mem.timer" "$KHOME/.config/systemd/user/timers.target.wants/crow-kiosk-mem.timer"
+put 0644 "$KHOME/.config/wireplumber/wireplumber.conf.d/51-crow-kiosk-bluez.conf" < "$SRC_DIR/files/51-crow-kiosk-bluez.conf"
+run chown -R kiosk:kiosk "$KHOME/.config"
+
+# ---- 5. audio and Bluetooth ownership -----------------------------------------------------------
+say "audio ownership"
+AU="${CFG[ADMIN_USER]}"
+if [ -n "$AU" ] && [ "${CFG[KEEP_ADMIN_AUDIO]}" = 0 ]; then
+  # Two PipeWire instances would race for the Bluetooth A2DP endpoints; the kiosk user owns audio.
+  AHOME="$(getent passwd "$AU" 2>/dev/null | cut -d: -f6 || true)"; AHOME="${AHOME:-/home/$AU}"
+  for u in pipewire.service pipewire.socket pipewire-pulse.service pipewire-pulse.socket wireplumber.service mpris-proxy.service; do
+    link /dev/null "$AHOME/.config/systemd/user/$u"
+  done
+  run chown -R "$AU:" "$AHOME/.config/systemd"
+  run loginctl disable-linger "$AU"
+  echo "   $AU's PipeWire is masked; inspect audio with: sudo -u kiosk XDG_RUNTIME_DIR=/run/user/\$(id -u kiosk) wpctl status"
+fi
+run rfkill unblock bluetooth
+if [ -n "${CFG[BT_SINK]}" ] && [ "$DRY" = 0 ]; then
+  if ! bluetoothctl info "${CFG[BT_SINK]}" 2>/dev/null | grep -q "Paired: yes"; then
+    echo "   warning: ${CFG[BT_SINK]} is not paired. Pairing is an operator step (bluetoothctl: scan on, pair, trust)."
+  fi
+fi
+
+# ---- 6. wake models ----------------------------------------------------------------------------
+say "wake models"
+fetch() {  # fetch URL SHA256 DEST
+  local dest; dest="$(p "$3")"
+  if [ -f "$dest" ] && echo "$2  $dest" | sha256sum -c --status 2>/dev/null; then echo "   unchanged $3"; return; fi
+  run mkdir -p "$(dirname "$3")"
+  run curl -fsSL --proto '=https' --max-filesize 10485760 -o "$3.part" "$1"
+  if [ "$DRY" = 0 ]; then
+    echo "$2  $3.part" | sha256sum -c --status || { rm -f "$3.part"; die "sha256 mismatch for $1"; }
+  fi
+  run mv "$3.part" "$3"; run chmod 0644 "$3"
+  [ "$DRY" = 1 ] || changed   # dry-run cannot stage a download; it would never read as unchanged
+}
+if [ "${CFG[ACCEPT_OWW]}" = 1 ]; then
+  for m in "${OWW_MODELS[@]}"; do
+    # shellcheck disable=SC2086 # "name sha" pairs
+    set -- $m; fetch "$OWW_RELEASE/$1" "$2" "/var/lib/crow-kiosk/wake/$1"
+  done
+  [ -z "${CFG[WAKE_URL]}" ] || fetch "${CFG[WAKE_URL]}" "${CFG[WAKE_SHA]}" "$WAKE_FILE"
+else
+  echo "   skipped: openWakeWord models are CC BY-NC-SA 4.0; re-run with --accept-oww-model-license."
+  echo "   Until then the agent runs tap-only (backlight and touch still work)."
+fi
+
+# ---- 7. remember the settings --------------------------------------------------------------------
+CFG[FRAME_ORIGINS]="${FRAME_ORIGINS[*]+${FRAME_ORIGINS[*]}}"
+for k in "${SAVED_KEYS[@]}"; do printf '%s=%s\n' "$k" "${CFG[$k]}"; done | put 0600 "$SETUP_ENV"
+
+# ---- 8. services -------------------------------------------------------------------------------
+say "services"
+run systemctl daemon-reload
+run udevadm control --reload
+run udevadm trigger --subsystem-match=backlight --action=add
+run systemctl enable crow-kiosk-cage.service
+run systemctl set-default graphical.target
+run systemctl disable --now avahi-daemon.service avahi-daemon.socket
+run touch /etc/cloud/cloud-init.disabled
+if [ "$DRY" = 0 ]; then dpkg-query -W -f='${Version}\n' chromium > /var/lib/crow-kiosk/chromium.version 2>/dev/null || true; fi
+
+# ---- 9. apply ------------------------------------------------------------------------------------
+say "apply"
+KUID="$(id -u kiosk 2>/dev/null || echo '<kiosk-uid>')"
+if [ ! -s "$CHANGE_MARK" ]; then
+  echo "   nothing changed"
+elif [ "$FIRST_INSTALL" = 1 ]; then
+  echo "   first install: reboot to start the kiosk (sudo reboot)"
+elif [ "$DRY" = 1 ] || systemctl is-active --quiet crow-kiosk-cage.service; then
+  run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user daemon-reload
+  run runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user restart crow-kiosk-agent.service
+  run systemctl restart crow-kiosk-cage.service
+  echo "   restarted the agent and the kiosk (network/watchdog settings apply at the next boot)"
+else
+  echo "   the kiosk is not running; changes apply at the next boot (sudo reboot)"
+fi
+
+# ---- 10. checks --------------------------------------------------------------------------------
+say "checks"
+if [ "$DRY" = 0 ]; then
+  sshd -T 2>/dev/null | grep -qx "passwordauthentication no" && echo "   ok   ssh is key-only" \
+    || echo "   WARN ssh password authentication is not off"
+  if tailscale status >/dev/null 2>&1; then echo "   ok   tailscale is logged in"
+  else echo "   todo tailscale: run 'sudo tailscale up', approve the URL, then disable key expiry in the admin console"; fi
+fi
+say "done"
