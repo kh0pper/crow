@@ -692,3 +692,43 @@ test("fit cache: one check per assistant and memory setting per 30 s; fresh bypa
   assert.equal(await fit({}, "nil", false), null);
   assert.equal(await fit({}, "boom", false), null);
 });
+
+// ── Live test 2026-10-04: plain questions through the display tool; no idea what time it is ───────
+test("live test (wired): a kiosk turn offers crow_wm only when asked, carries the display's date and time on the user message, and answers the clock with no model call", async () => {
+  const { token } = await store.pairDevice(db(), { id: "kiosk-clock", name: "clock", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-clock", { bound_bot_id: "household" });
+  const w = new WebSocket(wsUrl(base));
+  const msgs = [];
+  await new Promise((r) => w.on("open", r));
+  w.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  w.send(JSON.stringify({ type: "hello", device_id: "kiosk-clock", token, caps: {}, tz: "Asia/Tokyo" }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+  const before = turnCalls.length;
+  w.send(JSON.stringify({ type: "turn_start", turn_id: "c1" }));
+  w.send(Buffer.alloc(8000));
+  w.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+  const call = turnCalls.at(-1);
+  assert.equal(call.device.id, "kiosk-clock");
+  // A: the display tool decides per turn, from the plain transcript.
+  const wmTool = call.extraTools[0];
+  assert.equal(wmTool.definition.name, "crow_wm");
+  assert.equal(wmTool.when("Tell me a joke"), false);
+  assert.equal(wmTool.when("What time is it?"), false);
+  assert.equal(wmTool.when("set a timer for one minute and label it check"), true);
+  assert.equal(wmTool.when("show me the shopping list"), true);
+  // D: date, time and zone ride on the turn context (the user message), never the system suffix.
+  assert.match(call.turnContext, /^\[Now\] \w+day, \w+ \d{1,2}, \d{4}, \d{1,2}:\d\d [AP]M \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
+  assert.doesNotMatch(call.promptSuffix, /\d{4}|[AP]M\b|Tokyo/, "the system message stays byte-stable");
+  assert.equal(call.promptSuffix, kioskPromptSuffix());
+  assert.match(call.promptSuffix, /\[Now\]/, "the model is told what the bracketed lines are");
+  const fp = await call.fastPaths("What time is it?");
+  assert.match(fp.say, /^It's \d{1,2}:\d\d [AP]M\.$/);
+  assert.match((await call.fastPaths("¿Qué día es hoy?")).say, /^Hoy es \w+, \d{1,2} de \w+ de \d{4}\.$/);
+  assert.equal(await call.fastPaths("Tell me a joke"), null);
+  assert.equal(await call.fastPaths("What time is it in Lisbon?"), null);
+  // The timer fast path still wins for the wm family.
+  assert.match((await call.fastPaths("set a timer for 2 minutes")).say, /^Timer set/);
+  rt.wm.closeAll("kiosk-clock");
+  w.close();
+});

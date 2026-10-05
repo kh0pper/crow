@@ -27,6 +27,12 @@ The quick voice model has a small context (8,192 tokens on the stock local model
 
 Saved conversation is trimmed, oldest exchange first, when it would push a request over. The **Kiosk** panel shows the same result for every assistant in the picker — fits, works without its skills, or too large — and refuses to bind a too-large one. A general-purpose assistant with many skills belongs on a larger model; give a display a small household assistant.
 
+## Display tool and clock
+- The display tool (`crow_wm`: timers, recipes, a content card) is offered to the model only on turns that need it: the spoken question asks to show, time, follow or close something (English and Spanish word lists in `server/wm.js`, `wantsDisplay`), or a window is already open. A plain question gets no display tool, so it is answered aloud in one model round.
+- A content card is refused when the question did not ask to see anything, and any card whose title or text is empty or a syntax placeholder is refused. A new content card replaces the previous one; timers and recipes keep their own windows.
+- Every turn carries the display's local date, time and time zone on the user message (the page reports its zone when it connects; without one the server's zone is used). "What time is it?" and "What's the date?" are answered directly, without the model (`server/clock.js`).
+
 ## Privacy
+- The page sends its time zone name when it connects, so the display can tell the time.
 - Nothing is sent before a tap. No audio is stored; transcripts live only in the display's short in-memory conversation (15 min).
 - Memories are off by default on a display (`memory_integration`).

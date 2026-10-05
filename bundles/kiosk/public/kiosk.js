@@ -13,6 +13,8 @@ import { createWindowView } from "./wm-view.js";
 const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
 const CAPS = { windows: ["timer", "recipe", "content"], iframe: false, max_windows: 4, agent: false };
+/** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
+const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
 const $ = (id) => document.getElementById(id);
 const ls = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -103,7 +105,7 @@ function connect() {
   const sock = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/kiosk/session`);
   ws = sock;
   sock.binaryType = "arraybuffer";
-  sock.onopen = () => { if (ws === sock) sock.send(JSON.stringify({ type: "hello", device_id: id, token: tok, caps: CAPS })); };
+  sock.onopen = () => { if (ws === sock) sock.send(JSON.stringify({ type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
   sock.onmessage = (ev) => {
     if (ws !== sock) return;
     if (typeof ev.data !== "string") { player?.push(ev.data); return; }

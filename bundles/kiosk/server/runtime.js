@@ -14,6 +14,7 @@ import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskT
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { STRINGS } from "./strings.js";
 import { createBotFit } from "./fit.js";
+import { kioskNowContext, matchClockFastPath } from "./clock.js";
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -159,12 +160,12 @@ export function createKioskRuntime(deps) {
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
     displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
+    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
       extraTools: [createWmTool({ store: wm, deviceId: device.id, caps, emit: (ev) => sink.event(ev) })],
-      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps),
+      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps) || matchClockFastPath(t, { now: now(), tz }),
       promptSuffix: kioskPromptSuffix(),
-      turnContext: kioskTurnContext(wm, device.id),
+      turnContext: `${kioskNowContext(now(), tz)}\n${kioskTurnContext(wm, device.id)}`,
       denyTools: KIOSK_DENY_TOOLS,
       sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
       maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,

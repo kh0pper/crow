@@ -4,6 +4,7 @@
  * ONLY in the first frame (hello); the upgrade URL is never read for it.
  */
 import { normalizeCaps } from "./wm.js";
+import { validTimeZone } from "./clock.js";
 
 export const HELLO_TIMEOUT_MS = 5000;
 export const MAX_TURN_BYTES = 1024 * 1024;
@@ -21,6 +22,7 @@ export function createSessionHub(deps) {
     let device = null;
     let authing = false;
     let caps = normalizeCaps(null);
+    let tz = null;                 // the page's IANA zone from hello (null = unknown: the server's zone is used)
     let inTurn = false;
     let frames = [];
     let bytes = 0;
@@ -93,6 +95,7 @@ export function createSessionHub(deps) {
       clearT(helloTimer);
       device = d;
       caps = normalizeCaps(msg.caps);
+      tz = validTimeZone(msg.tz);
       const prior = sessions.get(d.id);
       sessions.set(d.id, self);
       if (prior && prior.ws !== ws) { try { prior.ws.close(4000, "superseded"); } catch {} }
@@ -156,7 +159,7 @@ export function createSessionHub(deps) {
         }
         if (!sttEarly) sttEarly = { used: false, discards, discard_ms: discardMs };
         if (my.signal.aborted) throw Object.assign(new Error("aborted"), { aborted: true });
-        r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps, transcript, startedAt: turnStartedAt, sttEarly });
+        r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps, tz, transcript, startedAt: turnStartedAt, sttEarly });
       } catch (err) {
         if (!err?.aborted) {
           deps.log?.(`[kiosk] turn failed: ${err.message}`);

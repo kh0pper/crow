@@ -27,6 +27,12 @@ El modelo de voz rápido tiene un contexto pequeño (8.192 tokens en el modelo l
 
 La conversación guardada se recorta, empezando por el intercambio más antiguo, cuando haría que una petición no cupiera. El panel **Kiosk** muestra el mismo resultado para cada asistente del selector —cabe, funciona sin sus habilidades o demasiado grande— y se niega a vincular uno demasiado grande. Un asistente general con muchas habilidades necesita un modelo mayor; a una pantalla dale un asistente del hogar pequeño.
 
+## Herramienta de pantalla y reloj
+- La herramienta de pantalla (`crow_wm`: temporizadores, recetas, una tarjeta de contenido) solo se ofrece al modelo en los turnos que la necesitan: la pregunta pide mostrar, cronometrar, seguir o cerrar algo (listas de palabras en inglés y español en `server/wm.js`, `wantsDisplay`), o ya hay una ventana abierta. Una pregunta normal no recibe la herramienta, así que se responde en voz alta en una sola ronda del modelo.
+- Una tarjeta de contenido se rechaza cuando la pregunta no pedía ver nada, y también cualquier tarjeta cuyo título o texto esté vacío o sea un marcador de sintaxis. Una tarjeta de contenido nueva sustituye a la anterior; los temporizadores y las recetas conservan sus propias ventanas.
+- Cada turno lleva la fecha, la hora y la zona horaria locales de la pantalla en el mensaje del usuario (la página informa de su zona al conectarse; si no, se usa la del servidor). «¿Qué hora es?» y «¿Qué día es hoy?» se responden directamente, sin el modelo (`server/clock.js`).
+
 ## Privacidad
+- La página envía el nombre de su zona horaria al conectarse, para que la pantalla pueda decir la hora.
 - No se envía nada antes de un toque. No se guarda audio; las transcripciones solo viven en la conversación en memoria de la pantalla (15 min).
 - Los recuerdos están desactivados por defecto en una pantalla (`memory_integration`).

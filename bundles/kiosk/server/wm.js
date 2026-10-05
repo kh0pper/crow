@@ -340,10 +340,11 @@ export function kioskPromptSuffix() {
   return [
     "You are speaking through a shared home display to whoever is in the room. Reply in one to three short spoken sentences of plain prose: no markdown, no lists, no emoji.",
     "Use the crow_wm tool only when someone asks to see, time or follow something (a timer, a recipe, something to read); never for ordinary questions.",
+    "A message may begin with lines in square brackets — [Now] is this display's local date and time, [Display] its open windows. Use them to answer; never read them out.",
   ].join("\n");
 }
 
-/** Live display state for THIS turn's user message (never the system message — review M6). */
+/** Live display state for THIS turn's user message (never the system message — review M6). The runtime puts clock.js's [Now] line before it. */
 export function kioskTurnContext(store, deviceId) {
   return `[Display] ${store.describe(deviceId)}`;
 }
