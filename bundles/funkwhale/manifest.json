@@ -26,6 +26,10 @@
     "group": "Music",
     "skills": ["funkwhale"],
     "runtimes": { "pi": true, "glasses": true },
+    "voice_intent": {
+      "en": ["play", "music", "song", "songs", "album", "albums", "artist", "artists", "playlist", "playlists", "track", "tracks", "listen", "pause", "resume", "skip", "next track", "whats playing"],
+      "es": ["reproduce", "musica", "cancion", "canciones", "album", "albumes", "artista", "artistas", "lista de reproduccion", "escuchar", "pausa", "siguiente cancion", "que suena"]
+    },
     "tools": [
       { "name": "fw_play", "label": "Play", "subgroup": "Playback" },
       { "name": "fw_play_album", "label": "Play album", "subgroup": "Playback" },

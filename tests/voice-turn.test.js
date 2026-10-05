@@ -1480,3 +1480,140 @@ test("forcing: a step-down learned from a refused request is forgotten after ten
   h.log.length = 0; await turn();
   assert.deepEqual(choices(h)[0], { name: "crow_show" }, "after it the engine's own answer is tried again");
 });
+
+// ── WM1a: tool families on intent ─────────────────────────────────────────────────────────────
+import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
+const FAM = (over = {}) => createToolFamilies({ manifests: { projects: { tools: {}, voiceIntent: { en: ["project", "projects"], es: ["proyecto", "proyectos"] } }, sharing: { tools: {}, voiceIntent: { en: ["message", "messages"], es: ["mensaje"] } }, media: { tools: {}, voiceIntent: { en: ["news"], es: ["noticias"] } }, blog: { tools: {} }, memory: { tools: {} } }, ...over });
+const famTurn = (h, transcript, extra = {}) => h.runner.runVoiceTurn({ db: {}, device: h.device, transcript, sink: h.sink, familiesOnIntent: true, ...extra });
+const projCall = [{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }];
+
+test("families: a plain question reaches the quick model with no tools, the router is told there are none, and nothing escalates", async () => {
+  const h = harness({ chatTools: ["crow_projects", "crow_sharing"] });
+  h.deps.toolFamilies = FAM();
+  const r = await famTurn(h, "What is the capital of Portugal?");
+  assert.deepEqual(h.log[0].tools, []);
+  assert.deepEqual(h.calls.hasTools, [false]);
+  assert.equal(r.timings.tools_offered, 0);
+  assert.deepEqual(r.timings.families, { offered: [], withheld: ["core:projects", "core:sharing"] });
+  assert.equal(r.route, "fast");
+});
+
+test("families: a transcript that asks for a family offers it; the previous turn's family stays for ONE follow-up", async () => {
+  const h = harness({ chatTools: ["crow_projects"], rounds: [projCall, says("You have two. "), says("The second is Garden. "), says("Lisbon. "), says("Yes. ")] });
+  h.deps.toolFamilies = FAM();
+  const a = await famTurn(h, "List my projects.");
+  assert.deepEqual(h.log[0].tools, ["crow_projects"]);
+  assert.deepEqual(a.timings.families, { offered: ["core:projects"], withheld: [] });
+  await famTurn(h, "And the second one?");
+  assert.deepEqual(h.log[2].tools, ["crow_projects"], "one follow-up");
+  await famTurn(h, "What is the capital of Portugal?");
+  assert.deepEqual(h.log[3].tools, [], "then it is gone");
+  await famTurn(h, "Really?");
+  assert.deepEqual(h.log[4].tools, []);
+});
+
+test("families: a family that is NOT on offer is never run, whatever the model calls — and it earns no follow-up", async () => {
+  const shareCall = [{ type: "tool_call", id: "s", name: "crow_sharing", arguments: { action: "send_message", params: { to: "alex" } } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_projects", "crow_sharing"], rounds: [shareCall, says("Lisbon. "), says("Yes. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await famTurn(h, "What is the capital of Portugal?");
+  assert.deepEqual(h.log[0].tools, [], "nothing was offered");
+  assert.deepEqual(h.calls.executed, [], "the forced call never reached the executor");
+  assert.deepEqual(r.timings.tools, ["crow_sharing:not_offered"]);
+  assert.match(h.log[1].messages.at(-1).content, /not on offer for this question: nothing was done/);
+  assert.equal(r.failed ?? null, null);
+  assert.match(h.calls.spoken.join(" "), /Lisbon/);
+  await famTurn(h, "Really?");
+  assert.deepEqual(h.log[2].tools, [], "a refused call is not 'the previous turn used it'");
+});
+
+test("families: with one family on offer, a call into ANOTHER family is refused and the offered one still runs", async () => {
+  const both = [{ type: "tool_call", id: "s", name: "crow_sharing", arguments: { action: "send_message" } }, { type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_projects", "crow_sharing"], rounds: [both, says("You have two projects. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await famTurn(h, "List my projects.");
+  assert.deepEqual(h.calls.executed, ["crow_projects"]);
+  assert.deepEqual(r.timings.tools, ["crow_sharing:not_offered+crow_projects:ok"]);
+});
+
+test("families: a tool no family claims is withheld from the quick model, keeps the router's tool view, and runs only on an escalated turn", async () => {
+  const odd = [{ type: "tool_call", id: "o", name: "crow_oddjob", arguments: {} }, { type: "done" }];
+  const quick = harness({ chatTools: ["crow_oddjob"], rounds: [odd, says("Lisbon. ")] });
+  quick.deps.toolFamilies = FAM();
+  const r = await famTurn(quick, "What is the capital of Portugal?");
+  assert.deepEqual(quick.log[0].tools, []);
+  assert.deepEqual(quick.calls.hasTools, [true]);
+  assert.deepEqual(quick.calls.executed, []);
+  assert.deepEqual(r.timings.families, { offered: [], withheld: ["other"] });
+  const esc = harness({ chatTools: ["crow_oddjob"], route: "escalate", probe: () => true, rounds: [odd, says("Done. ")] });
+  esc.deps.toolFamilies = FAM();
+  const e = await famTurn(esc, "Run the odd job.");
+  assert.deepEqual(esc.log[0].tools, ["crow_oddjob"]);
+  assert.deepEqual(esc.calls.executed, ["crow_oddjob"]);
+  assert.deepEqual(e.timings.families, { offered: ["other"], withheld: [] });
+});
+
+test("families: an unlisted family is never offered to the quick model, keeps the router's tool view, is offered on an escalated turn, and is logged once", async () => {
+  const quick = harness({ chatTools: ["crow_blog"] });
+  quick.deps.toolFamilies = FAM();
+  await famTurn(quick, "Publish my post about crows.");
+  assert.deepEqual(quick.log[0].tools, []);
+  assert.deepEqual(quick.calls.hasTools, [true], "the router still sees an assistant with tools");
+  const esc = harness({ chatTools: ["crow_blog"], route: "escalate", probe: () => true, rounds: [says("Done. "), says("Done again. ")] });
+  esc.deps.toolFamilies = FAM();
+  const r = await famTurn(esc, "Publish my post about crows.");
+  assert.equal(r.escalated, true);
+  assert.deepEqual(esc.log[0].tools, ["crow_blog"]);
+  await famTurn(esc, "Publish the other one too.");
+  assert.equal(esc.calls.logs.filter((m) => /no voice intent list/.test(m)).length, 1);
+  assert.match(esc.calls.logs.find((m) => /no voice intent list/.test(m)), /core:blog/);
+});
+
+test("families: the follow-up is recorded under the ADVERTISED tool's family, even when the expanded name is also an add-on's tool", async () => {
+  // The news category tool expands to a name the installed news add-on also declares.
+  const newsCall = [{ type: "tool_call", id: "n", name: "crow_media", arguments: { action: "media_feed" } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_media"], rounds: [newsCall, says("Three stories. "), says("The second is about rain. ")] });
+  h.deps.effectiveToolName = (tc) => (tc.name === "crow_media" && tc.arguments?.action ? `crow_${tc.arguments.action}` : tc.name);
+  h.deps.toolFamilies = FAM({ listExtensions: () => [{ id: "media", capabilities: { tools: [{ name: "crow_media_feed" }], voice_intent: { en: ["news"] } } }] });
+  await famTurn(h, "What's in the news?");
+  assert.deepEqual(h.calls.executed, ["crow_media"]);
+  await famTurn(h, "And the second one?");
+  assert.deepEqual(h.log[2].tools, ["crow_media"], "the follow-up offer finds the advertised tool");
+});
+
+test("families: display tools and memory keep their own gates", async () => {
+  const h = harness({ chatTools: ["crow_memory", "crow_projects"] });
+  h.deps.toolFamilies = FAM();
+  h.device.kiosk_settings.memory_integration = true;
+  await famTurn(h, "Remember that the wifi is maple.", { memoryWhen: (t) => /remember/i.test(t), extraTools: [displayTool()] });
+  assert.deepEqual(h.log[0].tools, ["crow_memory"]);
+  const h2 = harness({ chatTools: ["crow_memory", "crow_projects"] });
+  h2.deps.toolFamilies = FAM();
+  await famTurn(h2, "show me a timer", { extraTools: [displayTool()] });
+  assert.deepEqual(h2.log[0].tools, ["crow_wm"]);
+});
+
+test("families: the same question twice sends byte-identical tool lists; the fit level is decided on every family", async () => {
+  const bot = { bot_id: "household", display_name: "House", fast_voice_model: "crow-voice/qwen3.5-4b", skills_text: "S".repeat(8000) };
+  const h = harness({ bot, chatTools: ["crow_projects"], ctx: 2400, rounds: [says("One. "), says("Two. "), says("Three. ")] });
+  h.deps.toolFamilies = FAM();
+  const a = await famTurn(h, "List my projects.");
+  const b = await famTurn(h, "List my projects.");
+  const c = await famTurn(h, "What is the capital of Portugal?");
+  assert.equal(JSON.stringify(h.log[0].toolDefs), JSON.stringify(h.log[1].toolDefs));
+  assert.equal(a.timings.prompt_fit, "no_skills");
+  assert.equal(c.timings.prompt_fit, a.timings.prompt_fit, "a turn with no tools offered uses the same system message");
+  assert.equal(h.log[0].messages[0].content, h.log[2].messages[0].content);
+  assert.equal(b.timings.prompt_fit, "no_skills");
+  assert.deepEqual(h.log[2].tools, [], "and the third turn really went out with no tools");
+});
+
+test("families are opt-in (regression pin, passes before and after): without familiesOnIntent every tool is offered and run as in 0.1.8", async () => {
+  const shareCall = [{ type: "tool_call", id: "s", name: "crow_sharing", arguments: { action: "inbox" } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_projects", "crow_sharing"], rounds: [shareCall, says("Nothing new. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "What is the capital of Portugal?", sink: h.sink });
+  assert.deepEqual(h.log[0].tools, ["crow_projects", "crow_sharing"]);
+  assert.deepEqual(h.calls.executed, ["crow_sharing"]);
+  assert.equal(r.timings.families, undefined);
+});

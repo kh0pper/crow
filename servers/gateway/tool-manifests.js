@@ -43,6 +43,7 @@ export const TOOL_MANIFESTS = {
   projects: {
     displayName: "Projects",
     description: "Project management: create projects, track sources with auto-APA citation, notes, bibliography, data backend connections, and search",
+    voiceIntent: { en: ["project", "projects", "source", "sources", "citation", "citations", "cite", "bibliography", "research", "note", "notes", "reference", "references", "backend", "backends"], es: ["proyecto", "proyectos", "fuente", "fuentes", "cita", "citas", "citar", "bibliografia", "investigacion", "nota", "notas", "referencia", "referencias"] },
     tools: {
       crow_create_project: { params: "name, description?, type?, tags?", desc: "Create project" },
       crow_list_projects: { params: "status?, type?, limit?, offset?", desc: "List projects" },
@@ -73,6 +74,7 @@ export const TOOL_MANIFESTS = {
   blog: {
     displayName: "Blog",
     description: "Blogging platform: create, edit, publish, list, search, delete posts, themes, RSS export, peer sharing",
+    voiceIntent: { en: ["blog", "post", "posts", "publish", "unpublish", "draft", "drafts", "songbook", "setlist", "setlists", "chord", "chords", "transpose"], es: ["blog", "entrada", "entradas", "publicar", "publica", "publicacion", "borrador", "borradores", "cancionero", "acorde", "acordes", "transponer"] },
     tools: {
       crow_create_post: { params: "title, content, slug?, excerpt?, author?, tags?, cover_image_key?, visibility?", desc: "Create blog post draft" },
       crow_edit_post: { params: "id, title?, content?, slug?, excerpt?, author?, tags?, cover_image_key?, visibility?", desc: "Update a blog post by ID. Only provided fields are changed; omitted fields are untouched." },
@@ -103,6 +105,7 @@ export const TOOL_MANIFESTS = {
   sharing: {
     displayName: "Sharing",
     description: "P2P sharing: invite codes, contacts, encrypted sharing, inbox, Nostr messaging, access revocation",
+    voiceIntent: { en: ["message", "messages", "send", "share", "shared", "invite", "invites", "invitation", "contact", "contacts", "inbox", "voice memo"], es: ["mensaje", "mensajes", "enviar", "envia", "enviale", "manda", "mandale", "compartir", "comparte", "invitacion", "invitaciones", "contacto", "contactos", "bandeja de entrada", "nota de voz"] },
     tools: {
       crow_generate_invite: { params: "display_name?", desc: "Generate invite code" },
       crow_accept_invite: { params: "invite_code, display_name?", desc: "Accept invite code" },
@@ -147,6 +150,7 @@ export const TOOL_MANIFESTS = {
   media: {
     displayName: "Media",
     description: "News & podcast hub: subscribe to RSS/Atom/YouTube/Google News, browse feed, search articles, personalized For You, TTS listen, briefings, playlists, smart folders, digests",
+    voiceIntent: { en: ["news", "headline", "headlines", "briefing", "briefings", "article", "articles", "feed", "feeds", "podcast", "podcasts", "digest", "digests", "rss", "subscribe", "subscription", "subscriptions"], es: ["noticia", "noticias", "titular", "titulares", "resumen", "articulo", "articulos", "podcast", "podcasts", "boletin", "suscribir", "suscribe", "suscripcion", "suscripciones"] },
     tools: {
       crow_media_add_source: { params: "url?, query?, youtube_channel?, name?, category?, fetch_interval_min?", desc: "Subscribe to feed/channel" },
       crow_media_list_sources: { params: "enabled_only?, category?", desc: "List subscribed sources" },
@@ -171,6 +175,7 @@ export const TOOL_MANIFESTS = {
   storage: {
     displayName: "Storage",
     description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management. SDXL background generation for companion avatar.",
+    voiceIntent: { en: ["file", "files", "upload", "uploads", "download", "downloads", "storage", "quota"], es: ["archivo", "archivos", "subir", "sube", "descargar", "descarga", "almacenamiento", "cuota"] },
     tools: {
       crow_upload_file: { params: "file_name, mime_type?, data_base64?, bucket?, reference_type?, reference_id?", desc: "Upload file" },
       crow_list_files: { params: "bucket?, mime_type?, reference_type?, reference_id?, limit?", desc: "List files" },

@@ -38,6 +38,8 @@ export const DISPLAY_MISSED_TEXT = "Sorry, I couldn't put that on the screen.";
 const MUST_RUN_NOTE = "Nothing has been done yet: the required tool has not run successfully in this turn. Call it now with the real content, or say plainly that you could not.";
 const outcomeCode = (v, fallback) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(v) ? v : fallback);
 const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || "_";
+// opts.familiesOnIntent: a tool whose family is not on offer this turn is never run; a forced call gets this.
+const FAMILY_NOT_OFFERED = "That tool is not on offer for this question: nothing was done. Answer the user aloud now from what you know, in one or two short sentences. Do not call another tool.";
 // Without deps.toolForcing (tests, other callers) the 0.1.8 behaviour stands: named, then required, then none.
 const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "legacy" });
 const WEAKER = { named: 2, required: 1, none: 0 };
@@ -81,6 +83,11 @@ export function createVoiceTurnRunner(deps) {
   const fitLogged = new Set();
   // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none"), with when it was learned.
   const toolChoiceMode = new Map();
+  // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
+  // "no intent list" notes were already logged.
+  const lastFamilies = new Map();
+  const famLogged = new Set();
+  const NO_FAMILIES = new Set();
 
   /** The tool list a turn advertises (also what the bind-time fit check counts). */
   function turnTools(bot, { memoryOn, extra, deny }) {
@@ -292,6 +299,7 @@ export function createVoiceTurnRunner(deps) {
     let say = null;
     let history = null;
     let executor = null;
+    let usedFamilies = null;
     /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
     const speakFallback = async (why, spokenBefore, fallbackText = defaultFallbackText) => {
       result.failed = why;
@@ -381,7 +389,34 @@ export function createVoiceTurnRunner(deps) {
       // Memories on: the memory tool is offered only when the question asks to remember or recall
       // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
       const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
-      const tools = allTools.filter((t) => (!extraByName.has(t.name) || offered.has(t.name)) && (memoryOffered || t.name !== "crow_memory"));
+      const baseTools = allTools.filter((t) => (!extraByName.has(t.name) || offered.has(t.name)) && (memoryOffered || t.name !== "crow_memory"));
+      // Tool families on intent: the quick model is offered a family only when the plain transcript
+      // asks for it, or the previous turn used it (one follow-up). Extra (display) tools and memory
+      // keep their own gates above. A plain question therefore goes out with no tools at all.
+      const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
+      const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
+      const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
+      // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
+      const famOf = (t) => (fam && !extraByName.has(t.name) && !deps.isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
+      const quickTools = !fam ? baseTools : baseTools.filter((t) => {
+        const id = famOf(t);
+        if (id === undefined) return true;
+        if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
+        return id !== "other" && famWanted(id);
+      });
+      // Families with no intent list never reach the quick model; they keep the router's view of
+      // "this assistant has tools", so a turn the router escalates can still use them.
+      const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
+      const unlisted = famIds.filter((id) => !fam.hasList(id));
+      let tools = quickTools;
+      let famAll = false;   // an escalated turn is offered every family
+      if (fam) usedFamilies = new Set();
+      // The family a call belongs to: the ADVERTISED tool's family first (a category call's expanded
+      // name can also be an add-on's tool name), then the expanded name's.
+      const callFamily = (tc, names) => {
+        const ids = [fam.familyOf(tc.name), ...names.map((n) => fam.familyOf(n))].filter(Boolean);
+        return ids.find((id) => id !== "addons") || ids[0] || "other";
+      };
       // A must-run tool (kiosk: crow_wm on "show me …"): see the opts doc above.
       const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
       const mustName = mustX?.definition.name;
@@ -418,7 +453,7 @@ export function createVoiceTurnRunner(deps) {
       const routeView = messages.filter((m) => !isExtraCall(m)).map((m) => (m === userMsg ? { ...m, content: transcript } : m));
       // A must-run tool that needs only a few words and an enumeration (play, open) is forced on the
       // quick model instead of being escalated: mustRoute "fast".
-      const decision = mustX?.mustRoute === "fast" ? { route: "fast", reason: "must-fast", key: bot.fast_voice_model || deps.fastKey } : deps.chooseVoiceRoute(routeView, { hasTools: tools.length > 0 });
+      const decision = mustX?.mustRoute === "fast" ? { route: "fast", reason: "must-fast", key: bot.fast_voice_model || deps.fastKey } : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -441,6 +476,16 @@ export function createVoiceTurnRunner(deps) {
       }
       if (aborted()) { result.aborted = true; return result; }
       if (budgetHit) { await speakFallback("budget", false); return result; }
+      // A turn the router escalated (or that fell back from an escalation) is offered every family.
+      if (fam && (result.escalated || result.degraded)) { tools = baseTools; famAll = true; }
+      if (fam) {
+        const on = new Set(tools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"));
+        timings.families = { offered: [...on].sort(), withheld: famIds.filter((id) => !on.has(id)).sort() };
+      }
+      if (unlisted.length) {
+        const once = `${bot.bot_id}|${unlisted.join(",")}`;
+        if (!famLogged.has(once)) { famLogged.add(once); log(`[voice-turn] ${device.id} bot ${bot.bot_id}: tool families with no voice intent list are offered only on escalated turns: ${unlisted.join(", ")}`); }
+      }
 
       // 4b. Prompt fit, against the model this turn really uses. A bound bot's skills are inlined
       // in the system message; a general assistant with many skills was ~41k tokens against the
@@ -483,7 +528,8 @@ export function createVoiceTurnRunner(deps) {
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
       const refuse = (code, message, neutral = false) => ({ code, message, neutral });
-      const offeredNames = new Set(tools.map((t) => t.name));
+      // What was sent with THIS round's request (set again each round below: a narrowed first round sends one tool).
+      let offeredNames = new Set(tools.map((t) => t.name));
       const offeredCheck = {
         categoryOf: typeof deps.toolCategory === "function" ? deps.toolCategory : () => null,
         selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
@@ -500,7 +546,14 @@ export function createVoiceTurnRunner(deps) {
           if (!memoryOn) return refuse("refused_policy", MEMORY_OFF, true);
           if (!memoryOffered) return refuse("not_offered", MEMORY_NOT_ASKED, true);
         }
-        // Never run a tool this turn did not offer (an endpoint's extra tools have their own not-offered path below).
+        // A family that is not on offer this turn is never run, whatever the model calls (saved history
+        // holds earlier calls, and a small model repeats them).
+        if (fam && !extraByName.has(tc.name) && !names.some((n) => deps.isMemoryTool(n))) {
+          const id = callFamily(tc, names);
+          const on = famAll || (id === "addons" || id === "other" ? tools.some((t) => t.name === tc.name) : famWanted(id));
+          if (!on) return refuse("not_offered", FAMILY_NOT_OFFERED, true);
+        }
+        // Never run a tool this round did not offer (an endpoint's extra tools have their own not-offered path below).
         if (!extraByName.has(tc.name) && !wasOffered(tc, offeredNames, offeredCheck)) {
           return refuse("not_offered", `"${shortName(eff)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
         }
@@ -575,6 +628,7 @@ export function createVoiceTurnRunner(deps) {
         const defer = !hold && holdIntent && !finalRound;
         let deferred = "";
         const roundTools = narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
+        offeredNames = new Set(roundTools.map((t) => t.name));   // the offered-tools guard checks what this request really carried
         let roundText = "";
         let finalRes = null;
         const roundMax = nextMax;
@@ -746,7 +800,15 @@ export function createVoiceTurnRunner(deps) {
         let remoteResults = [];
         try { if (remote.length) remoteResults = await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]); }
         catch (err) { noteRound(); throw err; }   // the round is still in the log when a tool run throws
-        (remoteResults || []).forEach((r, i) => { if (remote[i]) outcome.set(remote[i], r?.isError ? "error" : "ok"); });
+        (remoteResults || []).forEach((r, i) => {
+          if (!remote[i]) return;
+          outcome.set(remote[i], r?.isError ? "error" : "ok");
+          if (usedFamilies && !r?.isError) {
+            const eff = deps.effectiveToolName(remote[i]);
+            const id = callFamily(remote[i], eff ? [eff] : []);
+            if (id !== "addons" && id !== "other") usedFamilies.add(id);
+          }
+        });
         noteRound();
         // A final result ends the turn only when no must-run tool is still owed, or when it comes from the
         // must-run tool itself. A final result from ANOTHER tool on a must-run turn is just a result: the
@@ -849,6 +911,9 @@ export function createVoiceTurnRunner(deps) {
       return result;
     } finally {
       if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
+      if (opts.familiesOnIntent === true && device?.id && result.transcript) {
+        if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
+      }
       timings.total_ms = now() - t0;
       if (executor) { try { await executor.close(); } catch {} }
     }
@@ -878,6 +943,9 @@ export async function defaultVoiceDeps() {
   const orch = await import("../gpu-orchestrator.js");
   const { TOOL_MANIFESTS } = await import("../tool-manifests.js");
   const { createToolForcing } = await import("./tool-forcing.js");
+  const { createToolFamilies } = await import("./tool-families.js");
+  const ext = await import("../../../scripts/pi-bots/ext_registry.mjs");
+  const proxy = await import("../proxy.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
   const byId = (list, id) => list.find((p) => p.id === id) || null;
   return {
@@ -899,6 +967,7 @@ export async function defaultVoiceDeps() {
       return (await provider.createAdapterFromProfile({ provider_id, model_id }, null, db)).adapter;
     },
     resolveKey: router.resolveVoiceKey,
+    toolFamilies: createToolFamilies({ manifests: TOOL_MANIFESTS, listExtensions: () => ext.listInstalledExtensions(), connected: () => proxy.connectedServers || new Map() }),
     toolForcing: createToolForcing({
       resolveKey: router.resolveVoiceKey,
       modelEntry: async (key, db) => {

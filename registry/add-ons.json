@@ -1352,6 +1352,43 @@
           "pi": true,
           "glasses": true
         },
+        "voice_intent": {
+          "en": [
+            "play",
+            "music",
+            "song",
+            "songs",
+            "album",
+            "albums",
+            "artist",
+            "artists",
+            "playlist",
+            "playlists",
+            "track",
+            "tracks",
+            "listen",
+            "pause",
+            "resume",
+            "skip",
+            "next track",
+            "whats playing"
+          ],
+          "es": [
+            "reproduce",
+            "musica",
+            "cancion",
+            "canciones",
+            "album",
+            "albumes",
+            "artista",
+            "artistas",
+            "lista de reproduccion",
+            "escuchar",
+            "pausa",
+            "siguiente cancion",
+            "que suena"
+          ]
+        },
         "tools": [
           {
             "name": "fw_play",
@@ -2133,6 +2170,27 @@
         ],
         "runtimes": {
           "pi": true
+        },
+        "voice_intent": {
+          "en": [
+            "announce",
+            "announcement",
+            "kiosk",
+            "kiosks",
+            "displays",
+            "other display",
+            "every display",
+            "all displays"
+          ],
+          "es": [
+            "anuncia",
+            "anuncio",
+            "kiosco",
+            "kioscos",
+            "pantallas",
+            "otra pantalla",
+            "todas las pantallas"
+          ]
         },
         "tools": [
           {
@@ -3290,6 +3348,43 @@
         "runtimes": {
           "pi": true,
           "glasses": true
+        },
+        "voice_intent": {
+          "en": [
+            "news",
+            "headline",
+            "headlines",
+            "briefing",
+            "briefings",
+            "article",
+            "articles",
+            "feed",
+            "feeds",
+            "podcast",
+            "podcasts",
+            "digest",
+            "digests",
+            "rss",
+            "subscribe",
+            "subscription",
+            "subscriptions"
+          ],
+          "es": [
+            "noticia",
+            "noticias",
+            "titular",
+            "titulares",
+            "resumen",
+            "articulo",
+            "articulos",
+            "podcast",
+            "podcasts",
+            "boletin",
+            "suscribir",
+            "suscribe",
+            "suscripcion",
+            "suscripciones"
+          ]
         },
         "tools": [
           {

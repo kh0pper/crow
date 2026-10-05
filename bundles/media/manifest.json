@@ -21,6 +21,10 @@
     "group": "Media",
     "skills": ["media"],
     "runtimes": { "pi": true, "glasses": true },
+    "voice_intent": {
+      "en": ["news", "headline", "headlines", "briefing", "briefings", "article", "articles", "feed", "feeds", "podcast", "podcasts", "digest", "digests", "rss", "subscribe", "subscription", "subscriptions"],
+      "es": ["noticia", "noticias", "titular", "titulares", "resumen", "articulo", "articulos", "podcast", "podcasts", "boletin", "suscribir", "suscribe", "suscripcion", "suscripciones"]
+    },
     "tools": [
       { "name": "crow_media_add_source", "label": "Add source", "subgroup": "Feeds" },
       { "name": "crow_media_list_sources", "label": "List sources", "subgroup": "Feeds" },
