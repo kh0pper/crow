@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, compound, compoundParts } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -109,6 +109,8 @@ export function createDisplayTools(ctx) {
         // display would say it could not show what is on the screen.
         if (typeof a?.command === "string" && !a?.do) {
           if (typeof turn?.transcript === "string" && rules.crow_show.must(turn.transcript)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "use_crow_show", say: "Nothing was shown: put a card on the screen with crow_show, not with this tool. Call crow_show now with kind, title and body.", final: false });
+          // Revision 6: the K1 form changes nothing on a turn whose words are about neither the windows nor a card.
+          if (typeof turn?.transcript === "string" && openWindow() && !windowIntent(turn.transcript) && !showIntent(turn.transcript, items)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "no_intent", say: "Nothing was changed: nobody asked to change the screen. Answer the user aloud instead; do not call this tool again for this question.", final: false });
           return legacy.execute(a, turn);
         }
         if (!enumOf("crow_wm", "do").includes(a?.do)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "bad_argument", say: "Nothing was done: do must be one of the listed values.", final: false });

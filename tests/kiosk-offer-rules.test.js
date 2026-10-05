@@ -216,3 +216,67 @@ test("N2: real edits to the open card or timer are follow-ups and go through", a
   assert.equal((await t.run("crow_show", { kind: "timer", title: "Bread", body: "12 minutes" }, "Make it twelve.")).outcome, "updated");
   assert.equal(t.store.list("d").filter((x) => x.kind === "timer").length, 1);
 });
+
+// ── Revision 6 ───────────────────────────────────────────────────────────────────────────────────
+import { windowIntent } from "../bundles/kiosk/server/patterns.js";
+
+function liveWm({ windows = [], playing = false } = {}) {
+  const store = createWmStore({ now: () => 0, setTimer: () => ({}), clearTimer: () => {} });
+  for (const w of windows) store.open("d", w);
+  const media = { active: () => playing };
+  const list = makeTools({ store, deviceId: "d", caps: CAPS, lang: "en", sources: ["music", "radio", "news"], items: [], emit: () => {}, media,
+    mediaVerb: () => ({ ok: true, outcome: "done", say: "Okay.", final: true, events: [] }) });
+  const wm = list.find((t) => t.definition.name === "crow_wm");
+  return { store, run: async (args, transcript) => JSON.parse(await wm.execute(args, { transcript })) };
+}
+const W_CARD = { kind: "content", title: "Frutas", blocks: [{ type: "heading", text: "Frutas" }, { type: "list", items: ["manzana"] }] };
+const W_TIMER = { kind: "timer", name: "Eggs", title: "Eggs", seconds: 300 };
+const W_RECIPE = { kind: "recipe", title: "Pancakes", ingredients: ["flour"], steps: ["mix", "cook", "serve"], step: 0 };
+
+test("rev 6 (screen guard parity): a plain question with a window open never closes or steps anything, whatever crow_wm call the model makes", async () => {
+  const cases = [[W_CARD, "¿Cuál es el río más largo del mundo?"], [W_CARD, "Dime un dato curioso sobre los pulpos."], [W_TIMER, "What's the tallest building in Asia?"],
+    [W_TIMER, "Tell me a fun fact about owls."], [W_RECIPE, "How many ounces are in a pound?"], [W_RECIPE, "Recommend a good movie for tonight."], [W_CARD, "Mi hermana llega mañana a las seis."]];
+  for (const [w, say] of cases) for (const args of [{ do: "close" }, { do: "close_all" }, { do: "next_step" }, { do: "previous_step" }, { do: "next" }, { command: "close all" }]) {
+    const d = liveWm({ windows: [w] });
+    const before = snapshot(d.store);
+    const r = await d.run(args, say);
+    assert.equal(r.ok === true && r.effect !== false && r.outcome !== "nothing_open", false, `${say} ${JSON.stringify(args)}: ${r.outcome}/${r.reason}`);
+    assert.equal(snapshot(d.store), before, `${say} ${JSON.stringify(args)}: unchanged`);
+  }
+});
+
+test("rev 6: real window requests still work — close, clear them all, quítala, next step, done with it; 'next' while music plays is playback", async () => {
+  for (const [w, say, args, outcome] of [[W_CARD, "Quítala, ya no la necesito.", { do: "close" }, "done"], [W_TIMER, "Close that.", { do: "close" }, "done"], [W_CARD, "Clear them all.", { do: "close_all" }, "done"],
+    [W_RECIPE, "Next step.", { do: "next_step" }, "done"], [W_CARD, "I'm done with it now.", { do: "close" }, "done"], [W_RECIPE, "Go back one.", { do: "previous_step" }, "done"], [W_CARD, "Ciérrala.", { do: "close" }, "done"]]) {
+    assert.equal(windowIntent(say), true, say);
+    const d = liveWm({ windows: [w] });
+    const r = await d.run(args, say);
+    assert.equal(r.outcome, outcome, `${say}: ${r.outcome}/${r.reason}`);
+  }
+  const p = liveWm({ windows: [W_CARD], playing: true });
+  assert.equal((await p.run({ do: "next" }, "Ugh, not this one.")).outcome, "done", "'next' with something playing goes to the media session");
+});
+
+test("rev 6 (pre-filter categories): a name-on frame offers play, the launcher offers open, a countdown with a duration offers show, a card form or a hedge offers show", () => {
+  const t = live();
+  for (const say of ["Let's have Juniper Lane on while we eat.", "Put the Silver Owls on before the guests arrive.", "Something by Rio Calloway, please.", "Get Mara Quist on for a bit."]) assert.ok(t.offered(say).includes("crow_play"), say);
+  for (const say of ["Is there a timer app in the launcher?", "Is there a unit converter somewhere in the launcher? I need it for this recipe.", "Open the launcher."]) assert.ok(t.offered(say).includes("crow_open"), say);
+  for (const say of ["The pasta needs twelve minutes, count that down for me.", "Avísame en cinco minutos.", "Remind me in twenty minutes to flip the steak.", "Count it down from three minutes."]) assert.ok(t.offered(say).includes("crow_show"), say);
+  for (const say of ["Todo lo de la compra, en una lista si se puede.", "The chores for Saturday as a list.", "Ingredients for a tortilla, in a list please.", "Lo que falta para el pastel, en forma de lista."]) assert.ok(t.offered(say).includes("crow_show"), say);
+});
+
+test("rev 6: the new categories stay out of plain conversation with no window open", () => {
+  const t = live();
+  for (const say of ["Who is on the team this year?", "My brother has his boots on already.", "What does a launcher do in a rocket?", "How long should I count when I breathe in?", "Remind me who won the game last night.",
+    "Is it on the list of holidays?", "Can you tell me a story about owls?", "¿Qué tiempo hace en Lima?"]) {
+    assert.deepEqual(t.offered(say), [], say);
+  }
+});
+
+test("rev 6: a countdown request the offer accepts is also accepted by the executor (offer ⇒ executable)", async () => {
+  const d = live();
+  for (const say of ["The pasta needs twelve minutes, count that down for me.", "Avísame en cinco minutos."]) {
+    const r = await d.run("crow_show", { kind: "timer", title: "Pasta", body: "12 minutes" }, say);
+    assert.equal(r.outcome, "shown", `${say}: ${r.reason || r.outcome}`);
+  }
+});

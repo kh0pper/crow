@@ -11,7 +11,7 @@
  * ctx.strict (T0/T1): a missing target returns null — the phrase does not fire.
  */
 import { parseDuration, contentBlocks, isPlaceholderText, wantsDisplay, MAX_TIMER_S } from "./wm.js";
-import { showIntent, followUp } from "./patterns.js";
+import { showIntent, followUp, windowIntent } from "./patterns.js";
 import { spokenWords, sameAt, KIND_NOUNS } from "./phrases.js";
 import { MEDIA_VERBS } from "./tools.js";
 import { STRINGS } from "./strings.js";
@@ -35,6 +35,7 @@ export const INVALID = Object.freeze({
   placeholder: "Nothing was shown: the title or body was a placeholder or empty. Call crow_show again now with the real words. If you do not have the content, tell the user aloud that you could not show it.",
   bad_timer: "Nothing was shown: the body of a timer is how long, from 1 second to 24 hours, like 12 minutes. Call crow_show again with that.",
   bad_steps: "Nothing was shown: steps need at least one step, one per line, after a line with three dashes. Call crow_show again in that form.",
+  no_change: "Nothing was changed: nobody asked to change the screen. Answer the user aloud instead; do not call this tool again for this question.",
   no_intent: "Nothing was shown: nobody asked to see anything. Answer the user aloud instead; do not call this tool again for this question.",
   update_title: "Nothing was changed: to change the card that is open, call crow_show again with exactly its title, {title}, and the whole new body.",
 });
@@ -174,8 +175,18 @@ function step(delta, ctx, S) {
 }
 
 /** intent: { verb, kind?, title?, body?, name?, app?, what?, source?, names? }. Never throws for bad input. */
+/** Verbs that change the windows (crow_wm). */
+const WINDOW_VERBS = new Set(["close", "close_all", "next_step", "previous_step", "next"]);
 export async function executeIntent(intent, ctx) {
   const S = STRINGS[ctx.lang === "es" ? "es" : "en"];
+  // Revision 6: screen-guard parity with show(). On a model turn whose words are not about the windows (a plain
+  // question while something is open), a call that would close windows or step a recipe changes nothing.
+  // "next" with something playing is a playback verb, not a window verb.
+  const t = ctx.turn?.transcript;
+  const playingNext = intent?.verb === "next" && ctx.media?.active?.(ctx.deviceId) === true;
+  if (!ctx.strict && typeof t === "string" && WINDOW_VERBS.has(intent?.verb) && !playingNext && ctx.store.list(ctx.deviceId).length && !windowIntent(t)) {
+    return result(false, "invalid", INVALID.no_change, { final: false, reason: "no_intent" });
+  }
   switch (intent?.verb) {
     case "show": return show(intent, ctx, S);
     case "close": return close(intent, ctx, S);
