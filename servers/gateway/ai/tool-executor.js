@@ -178,6 +178,11 @@ async function createInProcessClient(name, serverFactory) {
  * Resolve which server category owns a tool name.
  * Returns { category, toolName } or null.
  */
+/** The core category a bare or crow_-prefixed action name belongs to, or null (the voice turn's offered-tools check). */
+export function toolCategoryOf(name) {
+  return (typeof name === "string" && name ? resolveToolCategory(name)?.category : null) || null;
+}
+
 function resolveToolCategory(action) {
   for (const [category, manifest] of Object.entries(TOOL_MANIFESTS)) {
     if (manifest.tools[action]) return { category, toolName: action };
@@ -786,7 +791,7 @@ function walkSchemaNode(node) {
  * selection. Core crow_<category> proxies are included only for EXECUTABLE
  * categories the bot selected under (all-or-nothing, decision 4); addon tools
  * only for the bot's selected tool names; background work rides the explicit crow_delegate /
- * crow_job_status schemas (D4); device-native tools (capture, discover) are
+ * crow_job_status schemas (D4); crow_discover is
  * always unioned. Tool
  * selections with no voice equivalent are simply omitted here — B4 surfaces a
  * warning for them (see voiceUnavailableSelections / Q3).
@@ -923,19 +928,9 @@ export function getChatTools(opts = {}) {
     });
   }
 
-  // Bound bots: device-native tools advertised as explicit schemas.
-  // crow_glasses_capture_photo — intercepted in the meta-glasses panel and never
-  // reaches an MCP server, but must be advertised so the model can take photos.
-  if (scope) {
-    tools.push({
-      name: "crow_glasses_capture_photo",
-      description: "Capture a photo from the paired glasses camera (and, when a vision profile is set, describe it). Use when the user asks what you see or to take a picture.",
-      inputSchema: {
-        type: "object",
-        properties: { device_id: { type: "string", description: "Glasses device id (use the active device)" } },
-      },
-    });
-  }
+  // The glasses camera is not advertised here: an endpoint with a camera supplies it to its
+  // own voice turn as an extra tool (bundles/meta-glasses/server/session.js), on the turns
+  // that ask for it and to no other surface.
 
   // Addon tools (from installed extensions)
   if (connectedServers && connectedServers.size > 0) {
