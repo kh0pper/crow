@@ -108,6 +108,20 @@ export function errorDecision(code, recoverable, mode) {
   if (code === "bot_too_large") return session ? { banner: "session_no_bot" } : { caption: "err_bot_too_large" };
   return recoverable ? { caption: `err_${code}` } : { banner: "error_generic" };
 }
+/**
+ * One debug line for a turn's tool calls, from turn_done's timings: "name:code" per call (the
+ * server sends outcomes only — never arguments or text), rounds joined by →, plus the display flags.
+ */
+export function toolsLine(timings) {
+  const tm = timings || {};
+  const tools = (Array.isArray(tm.tools) ? tm.tools : []).filter((x) => typeof x === "string").map((x) => x.replace(/[^\w:+.-]/g, "_").slice(0, 160));
+  const flags = [];
+  if (typeof tm.tool_choice === "string") flags.push(`tool_choice ${tm.tool_choice.replace(/[^a-z_]/g, "").slice(0, 16)}`);
+  if (tm.display_corrected === true) flags.push("corrected");
+  if (tm.display_missed === true) flags.push("display missed");
+  if (!tools.length && !flags.length) return "";
+  return [tools.length ? tools.join(" → ") : "(no tool call)", ...flags].join(" · ");
+}
 const MIC_BANNERS = new Set(["mic_blocked", "needs_gesture", "no_mic", "mic_error"]);
 export const bannerAfterReady = (cur) => (MIC_BANNERS.has(cur) ? cur : null);
 

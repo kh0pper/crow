@@ -7,11 +7,15 @@
  *    answered with no model call.
  * The zone is the one the page reports in `hello` (validated here); without one, the server's.
  */
-const SPACES = /[  ]/g;   // ICU puts a narrow no-break space before AM/PM
+import { INTENT_MAX_CHARS } from "./intent-text.js";
 
-/** An IANA zone this runtime knows, or null. */
+const SPACES = /[\u00a0\u202f]/g;   // ICU puts a narrow no-break space before AM/PM
+
+/** An IANA zone this runtime knows, or null. Length and shape are checked before Intl sees it. */
 export function validTimeZone(tz) {
-  if (typeof tz !== "string" || !/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+){0,2}$/.test(tz) || tz.length > 64) return null;
+  if (typeof tz !== "string" || tz.length < 1 || tz.length > 64 || !/^[A-Za-z0-9_+/-]+$/.test(tz)) return null;
+  const parts = tz.split("/");
+  if (parts.length > 3 || parts.some((x) => !x) || !/^[A-Za-z]/.test(tz)) return null;
   try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return tz; } catch { return null; }
 }
 const zoneOf = (tz) => validTimeZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -23,32 +27,80 @@ export function kioskNowContext(now, tz) {
   return `[Now] ${fmt("en-US", DATE, now, tz)}, ${fmt("en-US", TIME, now, tz)} (time zone ${zoneOf(tz)})`;
 }
 
-const LEAD_EN = "(?:(?:can|could) you tell me |do you know |tell me )?";
-const LEAD_ES = "(?:me dices |me puedes decir |dime |sabes )?";
-const ASK = {
-  time_en: new RegExp(`^${LEAD_EN}(?:what time is it|what time it is|what(?: is| s|s) the (?:current )?time|the (?:current )?time)(?: right now| now)?$`),
-  date_en: new RegExp(`^${LEAD_EN}(?:what(?: is| s|s) (?:today s|todays|the) date(?: today)?|what day is it(?: today)?|what day is today|the date(?: today)?|today s date)$`),
-  time_es: new RegExp(`^${LEAD_ES}(?:qu[eé] hora es|qu[eé] horas son|qu[eé] hora tienes|la hora)(?: ahora)?$`),
-  date_es: new RegExp(`^${LEAD_ES}(?:qu[eé] d[ií]a es(?: hoy)?|qu[eé] fecha es(?: hoy)?|cu[aá]l es la fecha(?: de hoy)?|a qu[eé] (?:d[ií]a )?estamos(?: hoy)?|la fecha(?: de hoy)?)$`),
-};
+/**
+ * The phrase table (after normalize(): lower case, no accents or apostrophes, punctuation
+ * to spaces, "what is" → "whats"). A question is a shortcut when it is exactly lead-ins, ONE
+ * core phrase, tails — so "what time is the game" or "what's the date of the meeting" never match.
+ *
+ * Matched by comparing WORD LISTS, never by a pattern generated from the table: lead-ins overlap
+ * ("hey crow" is also "hey" then "crow"), and a repeated group over overlapping alternatives is
+ * exponential on input like "hey crow hey crow … x". Here every step drops at least one word, and
+ * the transcript is capped (intent-text.js) before anything looks at it.
+ */
+const EN_LEADS = ["hey crow", "ok crow", "okay crow", "hey", "hi", "ok", "okay", "so", "and", "um", "uh", "well", "alright", "all right", "now", "please", "crow", "excuse me", "quick question",
+  "can you tell me", "can you please tell me", "could you tell me", "would you tell me", "tell me", "please tell me", "do you know", "do you happen to know", "i want to know", "id like to know", "let me know"];
+const ES_LEADS = ["oye crow", "oye", "hola", "ok", "vale", "bueno", "y", "por favor", "crow", "me dices", "me puedes decir", "me podrias decir", "puedes decirme", "podrias decirme", "dime", "sabes"];
+export const CLOCK_PHRASES = Object.freeze({
+  time_en: {
+    leads: EN_LEADS,
+    cores: ["what time is it", "what time it is", "whats the time", "whats the current time", "the time", "the current time", "time please", "do you have the time", "have you got the time", "what time do you have"],
+    tails: ["right now", "now", "please", "crow", "thanks", "thank you", "currently", "at the moment", "exactly"],
+  },
+  date_en: {
+    leads: EN_LEADS,
+    cores: ["whats todays date", "whats the date", "whats today", "todays date", "the date", "what day is it", "what day it is", "what day is today", "what date is it", "what date it is", "whats the day", "what day of the week is it"],
+    tails: ["today", "for today", "right now", "now", "please", "crow", "thanks", "thank you"],
+  },
+  time_es: {
+    leads: ES_LEADS,
+    cores: ["que hora es", "que horas son", "que hora tienes", "que hora tenemos", "la hora", "tienes hora", "tienes la hora"],
+    tails: ["ahora", "ahora mismo", "por favor", "gracias", "crow"],
+  },
+  date_es: {
+    leads: ES_LEADS,
+    cores: ["que dia es", "que fecha es", "cual es la fecha", "a que estamos", "a que dia estamos", "a que fecha estamos", "en que dia estamos", "la fecha", "que dia de la semana es"],
+    tails: ["hoy", "de hoy", "por favor", "gracias", "crow"],
+  },
+});
+const words = (phrase) => phrase.split(" ");
+const byLength = (list) => list.map(words).sort((a, b) => b.length - a.length);
+const TABLE = Object.fromEntries(Object.entries(CLOCK_PHRASES).map(([k, t]) => [k, {
+  leads: byLength(t.leads), tails: byLength(t.tails), cores: new Set(t.cores),
+  maxCore: Math.max(...t.cores.map((c) => words(c).length)),
+}]));
+const sameAt = (w, at, phrase) => phrase.every((x, i) => w[at + i] === x);
+/** w[start..end) is a core phrase, or becomes one after dropping tails from its end / lead-ins from its start. */
+function isAsk(w, t) {
+  for (let start = 0; ;) {
+    for (let end = w.length; ;) {
+      if (end - start <= t.maxCore && t.cores.has(w.slice(start, end).join(" "))) return true;
+      const tail = t.tails.find((p) => end - p.length > start && sameAt(w, end - p.length, p));
+      if (!tail) break;
+      end -= tail.length;
+    }
+    const lead = t.leads.find((p) => start + p.length < w.length && sameAt(w, start, p));
+    if (!lead) return false;
+    start += lead.length;
+  }
+}
 function normalize(t) {
-  return String(t || "").toLowerCase()
-    .replace(/[¿¡“”"'’,.!?;:]+/g, " ").replace(/\s+/g, " ").trim()
-    .replace(/^(hey crow|ok crow|okay crow|oye crow|ok|okay|please|por favor)\s+/, "")
-    .replace(/\s+(please|thanks|thank you|por favor|gracias)$/, "")
-    .trim();
+  if (typeof t !== "string" || t.length > INTENT_MAX_CHARS) return "";   // longer than any plain clock question
+  return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/['’]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim()
+    .replace(/\bwhat is\b/g, "whats");
 }
 
 /** → { say, events: [] } for the plain clock questions, else null (the model answers, with the [Now] context). */
 export function matchClockFastPath(transcript, { now = Date.now(), tz = null } = {}) {
   const q = normalize(transcript);
   if (!q) return null;
+  const w = q.split(" ");
   let say = null;
-  if (ASK.time_en.test(q)) say = `It's ${fmt("en-US", TIME, now, tz)}.`;
-  else if (ASK.date_en.test(q)) say = `Today is ${fmt("en-US", DATE, now, tz)}.`;
-  else if (ASK.time_es.test(q)) {
+  if (isAsk(w, TABLE.time_en)) say = `It's ${fmt("en-US", TIME, now, tz)}.`;
+  else if (isAsk(w, TABLE.date_en)) say = `Today is ${fmt("en-US", DATE, now, tz)}.`;
+  else if (isAsk(w, TABLE.time_es)) {
     const hm = fmt("es", { ...TIME, hourCycle: "h23" }, now, tz);
     say = `${hm.startsWith("1:") ? "Es la" : "Son las"} ${hm}.`;
-  } else if (ASK.date_es.test(q)) say = `Hoy es ${fmt("es", DATE, now, tz)}.`;
+  } else if (isAsk(w, TABLE.date_es)) say = `Hoy es ${fmt("es", DATE, now, tz)}.`;
   return say ? { say, events: [] } : null;
 }

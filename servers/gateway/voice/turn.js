@@ -29,6 +29,14 @@ const DEGRADED_NOTE = "The larger model is not available right now. Answer with 
 const SOFT_DENY = { crow_discover: "Tool discovery is not needed here: every tool you can use is already listed with its parameters. Call the right tool directly, or answer from what you know." };
 // An extra tool with when(transcript) is offered only on turns that need it; a forced call on any other turn gets this.
 const EXTRA_NOT_NEEDED = "Not needed for this question: nothing was done. Answer the user aloud now, in one or two short sentences. Do not call another tool.";
+// Memories are on for this display, but opts.memoryWhen said this question does not ask for them.
+const MEMORY_NOT_ASKED = "The user did not ask to remember or recall anything, so memory was not used. Answer the user aloud now from what you know. Do not call another tool.";
+/** Spoken + captioned when a must-run display tool never succeeded: the turn must not end on a claim that something is on the screen. Callers pass a localized one. */
+export const DISPLAY_MISSED_TEXT = "Sorry, I couldn't put that on the screen.";
+// The corrective round's note when the must-run tool brings none of its own (rides on the last message, never saved).
+const MUST_RUN_NOTE = "Nothing has been done yet: the required tool has not run successfully in this turn. Call it now with the real content, or say plainly that you could not.";
+const outcomeCode = (v, fallback) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(v) ? v : fallback);
+const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || "_";
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
 export function createVoiceTurnRunner(deps) {
@@ -45,6 +53,8 @@ export function createVoiceTurnRunner(deps) {
   // refused/looping crow_discover escalated the next three plain questions).
   const routeNeutral = new WeakSet();
   const fitLogged = new Set();
+  // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none").
+  const toolChoiceMode = new Map();
 
   /** The tool list a turn advertises (also what the bind-time fit check counts). */
   function turnTools(bot, { memoryOn, extra, deny }) {
@@ -202,11 +212,26 @@ export function createVoiceTurnRunner(deps) {
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
    * fallback spoken (default: none); fallbackText — the localized fallback line; tooLargeText —
-   * the localized line for a bot whose prompt cannot fit the model (default BOT_TOO_LARGE_TEXT).
+   * the localized line for a bot whose prompt cannot fit the model (default BOT_TOO_LARGE_TEXT);
+   * memoryWhen(transcript) — with memories on, whether THIS question asks for them (default: always);
+   * displayMissedText — the localized line for a must-run tool that never succeeded.
+   *
+   * extraTools[i] = { definition, execute(args, { transcript }) → JSON string, when?, must?, mustNote?, mustDone? }:
+   *   when(transcript) false → not offered this turn (a forced call is refused, never run);
+   *   must(transcript) true  → the turn must end with a successful call of this tool ({ ok: true }, or
+   *     mustDone(result) when the tool says which results count):
+   *     tool_choice requires it while it is the only tool offered; text is held back (not spoken)
+   *     until it has run; a turn that ends without it gets ONE corrective round with mustNote on
+   *     the last message; if it still has not run, displayMissedText is spoken instead of the text.
+   *
    * result.failed: null | "tool_rounds" | "tool_repeat" | "no_text" | "budget" | "error"
    *   | "bot_too_large" (the bot's prompt does not fit the model even without its skills: no model call)
-   *   | "context_full" (this request would not fit the context even with no saved history: not sent).
+   *   | "context_full" (this request would not fit the context even with no saved history: not sent)
+   *   | "display_missed" (a must-run tool never succeeded: the truthful line was spoken).
    * timings.prompt_fit: "no_skills" | "too_large" when the full prompt did not fit (absent when it did).
+   * timings.tools: one entry per tool round, "name:code" per call joined by "+" — code is ok, error,
+   *   the tool's own code (e.g. placeholder), or not_offered / refused_policy / needs_confirm. Never arguments.
+   * timings.tool_choice ("named" | "required" | "none"), display_corrected, display_missed: must-run turns only.
    */
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
@@ -218,7 +243,7 @@ export function createVoiceTurnRunner(deps) {
     const aborted = () => signal?.aborted === true;
     const fail = (code, recoverable = true, message) => sink.event({ type: "error", code, recoverable, ...(message ? { message } : {}) });
     const log = deps.log || ((m) => console.log(m));
-    const fallbackText = String(opts.fallbackText || FALLBACK_TEXT);
+    const defaultFallbackText = String(opts.fallbackText || FALLBACK_TEXT);
     // The first-audio budget cuts the answer (LLM stream, tool wait, answer TTS) through `mute`;
     // the session `signal` (barge-in/close) is never touched by it.
     const mute = new AbortController();
@@ -231,7 +256,7 @@ export function createVoiceTurnRunner(deps) {
     let history = null;
     let executor = null;
     /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
-    const speakFallback = async (why, spokenBefore) => {
+    const speakFallback = async (why, spokenBefore, fallbackText = defaultFallbackText) => {
       result.failed = why;
       timings.failed = why;
       log(`[voice-turn] ${device?.id} turn failed (${why})${timings.tools ? `; tools by round: ${timings.tools.join(" → ")}` : ""}`);
@@ -312,7 +337,13 @@ export function createVoiceTurnRunner(deps) {
       // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
       const offered = new Set(extra.filter((x) => typeof x.when !== "function" || x.when(transcript) === true).map((x) => x.definition.name));
       const allTools = turnTools(bot, { memoryOn, extra, deny });
-      const tools = allTools.filter((t) => !extraByName.has(t.name) || offered.has(t.name));
+      // Memories on: the memory tool is offered only when the question asks to remember or recall
+      // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
+      const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
+      const tools = allTools.filter((t) => (!extraByName.has(t.name) || offered.has(t.name)) && (memoryOffered || t.name !== "crow_memory"));
+      // A must-run tool (kiosk: crow_wm on "show me …"): see the opts doc above.
+      const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
+      const mustName = mustX?.definition.name;
       executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
@@ -401,28 +432,34 @@ export function createVoiceTurnRunner(deps) {
       const scope = deps.botVoiceScope(bot);
       const policy = bot.permission_policy || {};
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
+      // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
+      // neutral = the tool is simply not on this display / not offered (invisible to the router).
+      const refuse = (code, message, neutral = false) => ({ code, message, neutral });
       const policyGate = (tc) => {
         const eff = deps.effectiveToolName(tc);
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
         // (tool-executor resolveToolCategory), so every check sees both spellings.
         const names = eff && !String(eff).startsWith("crow_") ? [eff, `crow_${eff}`] : [eff];
         const soft = SOFT_DENY[tc.name] || names.map((n) => SOFT_DENY[n]).find(Boolean);
-        if (soft && (deny.has(tc.name) || names.some((n) => deny.has(n)))) return soft;
-        if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`;
-        if (!memoryOn && names.some((n) => deps.isMemoryTool(n))) return MEMORY_OFF;
+        if (soft && (deny.has(tc.name) || names.some((n) => deny.has(n)))) return refuse("refused_policy", soft, true);
+        if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return refuse("refused_policy", `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`, true);
+        if (names.some((n) => deps.isMemoryTool(n))) {
+          if (!memoryOn) return refuse("refused_policy", MEMORY_OFF, true);
+          if (!memoryOffered) return refuse("not_offered", MEMORY_NOT_ASKED, true);
+        }
         if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
-          return `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`;
+          return refuse("refused_policy", `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
         }
         if (policy.external_send === "draft_only" && deps.isExternalSendTool(eff)) {
-          return `This assistant is draft-only by voice and cannot send "${shortName(eff)}" externally. Tell the user it was not sent. Then end your turn — do not call another tool.`;
+          return refuse("refused_policy", `This assistant is draft-only by voice and cannot send "${shortName(eff)}" externally. Tell the user it was not sent. Then end your turn — do not call another tool.`);
         }
         if (Array.isArray(policy.deny) && names.some((n) => policy.deny.includes(n))) {
-          return `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`;
+          return refuse("refused_policy", `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
         }
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n)));
         if (!confirmName) return null;
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
-        return `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`;
+        return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`);
       };
 
       // First chunk = first clause (latency lever 3); later chunks are whole sentences.
@@ -444,15 +481,24 @@ export function createVoiceTurnRunner(deps) {
       let finalRound = false;
       let finalSpoken = 0;
       let lastStuckSig = null;
-      let nudged = null;
+      const restores = [];           // notes appended to a message for one request: undone before saving
+      const appendNote = (msg, note) => {
+        restores.push({ msg, content: msg.content });
+        msg.content = `${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}\n\n${note}`;
+      };
       let overflow = false;
+      let mustDone = !mustX;         // the must-run tool has succeeded this turn (true when there is none)
+      let corrected = false;
       const toolLog = [];
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
         let content = "";
         let roundSpoken = 0;
-        const calls = [];
+        let calls = [];
+        // Until the must-run tool has succeeded, nothing the model says is captioned or spoken:
+        // "I've displayed the list" is only true after the call.
+        const hold = !mustDone;
         const roundMax = nextMax;
         nextMax = 600;
         // Keep prompt + completion inside the model's context (review M6: the 4B is 8192;
@@ -472,26 +518,51 @@ export function createVoiceTurnRunner(deps) {
         }
         const maxTokens = ctx ? Math.max(64, Math.min(roundMax, ctx - estPrompt - 128)) : roundMax;
         timings.max_tokens = maxTokens;   // with est_prompt_tokens in [kiosk-metrics]; the smoke records both
-        try {
-          for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal })) {
-            if (aborted() || budgetHit) break;
-            if (ev.type === "content_delta" && ev.text) {
-              mark("llm_first_token_ms");
-              content += ev.text;
-              const spoken = think.feed(ev.text);
-              if (spoken) {
-                if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
-                sink.event({ type: "caption_delta", text: spoken });
-                await chunker.push(spoken);
-              }
-            } else if (ev.type === "tool_call") {
-              mark("llm_first_token_ms");
-              calls.push({ id: ev.id, name: ev.name, arguments: ev.arguments });
-            } else if (ev.type === "done") break;
+        // tool_choice requires the must-run tool while it is the ONLY tool offered (with others the
+        // model may need to fetch first; the backstop below still applies). Backends differ: a vLLM
+        // server honours a named choice; the llama.cpp builds in use accept and ignore it.
+        let choiceMode = !mustDone && !finalRound && tools.length === 1 ? (toolChoiceMode.get(modelKey) || "named") : "none";
+        let steppedDown = false;
+        for (;;) {
+          const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
+          let started = false;
+          try {
+            for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
+              started = true;
+              if (aborted() || budgetHit) break;
+              if (ev.type === "content_delta" && ev.text) {
+                mark("llm_first_token_ms");
+                content += ev.text;
+                const spoken = think.feed(ev.text);
+                if (spoken && !hold) {
+                  if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
+                  sink.event({ type: "caption_delta", text: spoken });
+                  await chunker.push(spoken);
+                }
+              } else if (ev.type === "tool_call") {
+                mark("llm_first_token_ms");
+                calls.push({ id: ev.id, name: ev.name, arguments: ev.arguments });
+              } else if (ev.type === "done") break;
+            }
+          } catch (err) {
+            if (budgetHit) break;   // the budget's own abort surfacing from the provider fetch
+            // The backend refused the request (400/422 before any output) and it carried a tool_choice:
+            // step down and send the same round again. The step is remembered for this model only
+            // once the weaker request goes through — that is what shows tool_choice was the cause.
+            if (toolChoice && !started && !aborted() && err?.code === "provider_error" && (err.status === 400 || err.status === 422)) {
+              const next = choiceMode === "named" ? "required" : "none";
+              log(`[voice-turn] ${device.id} ${modelKey} refused a request with tool_choice ${choiceMode} (HTTP ${err.status}); trying ${next}`);
+              choiceMode = next;
+              steppedDown = true;
+              content = ""; calls = [];
+              continue;
+            }
+            throw err;
           }
-        } catch (err) {
-          if (!budgetHit) throw err;   // the budget's own abort surfacing from the provider fetch
+          if (steppedDown) toolChoiceMode.set(modelKey, choiceMode);
+          break;
         }
+        if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
         if (aborted()) { result.aborted = true; break; }
         if (budgetHit) break;
         if (finalRound) {
@@ -503,19 +574,35 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         let assistantMsg = null;
-        if (content || calls.length) {
-          assistantMsg = { role: "assistant", content };
+        const kept = hold ? "" : content;   // held text was never heard: it is not kept as something said
+        if (kept || calls.length) {
+          assistantMsg = { role: "assistant", content: kept };
           if (calls.length) assistantMsg.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
           messages.push(assistantMsg);
         }
-        if (!calls.length) break;
+        if (!calls.length) {
+          if (mustDone) break;
+          // The model's turn ended with nothing on the screen. Its text was held back and is dropped
+          // (never spoken, never saved). One corrective round, then the truthful line (after the loop).
+          if (corrected) break;
+          corrected = true;
+          timings.display_corrected = true;
+          log(`[voice-turn] ${device.id} round ${rounds}: no ${logName(mustName)} call on a turn that needs one; one corrective round`);
+          appendNote(messages.at(-1), mustX.mustNote || MUST_RUN_NOTE);
+          continue;
+        }
         toolRounds++;
-        // Tool NAMES only (never arguments) — the smoke could not tell which tool looped.
         const roundSig = [...new Set(calls.map((c) => String(c.name)))].sort().join("+");
-        toolLog.push(roundSig);
-        timings.tools = toolLog.slice();
         timings.tool_rounds = toolRounds;
-        log(`[voice-turn] ${device.id} round ${rounds}: ${calls.map((c) => c.name).join(", ")}`);
+        // Each call's OUTCOME — name:code, never arguments or result text — in the log and in
+        // timings.tools (live re-test 2026-10-04: a display call changed nothing and nobody could say why).
+        const outcome = new Map();
+        const noteRound = () => {
+          const parts = calls.map((c) => `${logName(c.name)}:${outcome.get(c) || "pending"}`);
+          toolLog.push(parts.join("+"));
+          timings.tools = toolLog.slice();
+          log(`[voice-turn] ${device.id} round ${rounds}: ${parts.join(", ")}`);
+        };
         const local = [];
         const remote = [];
         let roundDisplay = false;
@@ -526,31 +613,40 @@ export function createVoiceTurnRunner(deps) {
         for (const tc of calls) {
           const gate = policyGate(tc);
           if (gate) {
-            const offDisplay = gate === MEMORY_OFF || Object.values(SOFT_DENY).includes(gate) || /is not available on this display/.test(gate);
-            if (offDisplay) neutralCalls++;
-            local.push({ id: tc.id, name: tc.name, result: gate, neutral: offDisplay });
+            if (gate.neutral) neutralCalls++;
+            outcome.set(tc, gate.code);
+            local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
             continue;
           }
           const x = extraByName.get(tc.name);
           if (x) {
             neutralCalls++;
             let out;
-            if (!offered.has(tc.name)) out = JSON.stringify({ action: "error", message: EXTRA_NOT_NEEDED });   // never run
+            if (!offered.has(tc.name)) out = JSON.stringify({ action: "error", code: "not_offered", message: EXTRA_NOT_NEEDED });   // never run
             else try { out = await x.execute(tc.arguments || {}, { transcript }); } catch (err) { out = JSON.stringify({ action: "error", message: err.message }); }
+            let res = null;
+            try { res = JSON.parse(out); } catch {}
+            const ok = res?.ok === true;
+            outcome.set(tc, ok ? "ok" : outcomeCode(res?.code, "error"));
             // A display tool that changed the screen is user-visible progress.
-            try { if (JSON.parse(out)?.ok === true) roundDisplay = true; } catch {}
+            if (ok) roundDisplay = true;
+            if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
           remote.push(tc);
         }
         // The budget also bounds a slow remote tool: the race stops waiting (the call itself runs on).
-        const remoteResults = remote.length ? await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]) : [];
+        let remoteResults = [];
+        try { if (remote.length) remoteResults = await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]); }
+        catch (err) { noteRound(); throw err; }   // the round is still in the log when a tool run throws
+        (remoteResults || []).forEach((r, i) => { if (remote[i]) outcome.set(remote[i], r?.isError ? "error" : "ok"); });
+        noteRound();
         if (budgetHit || remoteResults == null) break;
         if (roundDisplay) displayProgress = true;
         if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
-        if (assistantMsg && !content.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
+        if (assistantMsg && !kept.trim() && neutralCalls === calls.length) routeNeutral.add(assistantMsg);
         // Neutrality rides on the local result object, never on the call id (ids may be "" — review M7).
         let lastToolMsg = null;
         for (const r of [...local, ...remoteResults]) {
@@ -566,15 +662,15 @@ export function createVoiceTurnRunner(deps) {
         lastStuckSig = progress ? null : roundSig;
         if (!cut && toolRounds >= maxRounds) cut = "tool_rounds";
         if (cut) {
+          // A must-run tool that failed again (or never ran before the cap): no forced answer round —
+          // its text could only be dropped. The truthful line follows the loop.
+          if (!mustDone) { log(`[voice-turn] ${device.id} stopping tools (${cut}) after ${toolRounds} round(s); ${logName(mustName)} never succeeded`); break; }
           log(`[voice-turn] ${device.id} stopping tools (${cut}) after ${toolRounds} round(s); forcing an answer`);
           finalRound = true;
-          if (lastToolMsg) {
-            nudged = { msg: lastToolMsg, content: lastToolMsg.content };
-            lastToolMsg.content = `${typeof lastToolMsg.content === "string" ? lastToolMsg.content : JSON.stringify(lastToolMsg.content)}\n\n${STOP_TOOLS_NOTE}`;
-          }
+          if (lastToolMsg) appendNote(lastToolMsg, STOP_TOOLS_NOTE);
         }
       }
-      if (nudged) nudged.msg.content = nudged.content;
+      for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
       } else if (budgetHit) {
@@ -586,6 +682,12 @@ export function createVoiceTurnRunner(deps) {
         // The budget can fire while the last chunk is still synthesizing (the stream already ended).
         else if (budgetHit && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
         else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
+        else if (!mustDone) {
+          // Never end on a claim that something is on the screen when nothing was put there.
+          timings.display_missed = true;
+          await speakFallback("display_missed", spokenChars > 0, String(opts.displayMissedText || DISPLAY_MISSED_TEXT));
+          return result;
+        }
         else if (cut && finalSpoken === 0 && answeredChars === 0 && !displayProgress) { await speakFallback(cut, spokenChars > 0); return result; }
         else if (spokenChars === 0 && !displayProgress) { await speakFallback("no_text", false); return result; }
       }
