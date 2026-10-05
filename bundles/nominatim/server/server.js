@@ -7,8 +7,12 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient } from "../../../servers/db.js";
+import { appImport } from "./app-root.js";
 import { geocode, reverseGeocode, searchPlaces, checkStatus } from "./geocoder.js";
+
+// App code is reached through the app root: from the installed copy
+// (<CROW_HOME>/bundles/nominatim/) a repo-relative path does not exist.
+const { createDbClient } = await appImport("servers/db.js");
 
 export function createNominatimServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -209,7 +213,9 @@ export function createNominatimServer(dbPath, options = {}) {
       const ref = JSON.parse(backends[0].connection_ref);
 
       // Use the query engine for safe read-only execution
-      const { executeReadQuery } = await import("../../data-dashboard/server/query-engine.js");
+      // The Data Dashboard's query engine, from the app (always shipped) rather than
+      // a sibling installed copy this instance may not have.
+      const { executeReadQuery } = await appImport("bundles/data-dashboard/server/query-engine.js");
       const result = await executeReadQuery(ref.path, query, 5000);
 
       const features = [];
