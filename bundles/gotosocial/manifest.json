@@ -1,7 +1,7 @@
 {
   "id": "gotosocial",
   "name": "GoToSocial",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
   "type": "bundle",
   "author": "Crow",

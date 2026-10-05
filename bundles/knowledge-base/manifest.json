@@ -1,7 +1,7 @@
 {
   "id": "knowledge-base",
   "name": "Knowledge Base",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking and verification workflows",
   "type": "mcp-server",
   "author": "Crow",

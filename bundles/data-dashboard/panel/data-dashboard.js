@@ -22,7 +22,9 @@ export default {
     const { escapeHtml, section, badge, dataTable, formField, formatDate } = await import(pathToFileURL(componentsPath).href);
 
     // Resolve bundle server directory (installed vs repo)
-    const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "data-dashboard", "server");
+    // This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+    const { homedir } = await import("node:os");
+    const installedServerDir = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "data-dashboard", "server");
     const repoServerDir = join(appRoot, "bundles", "data-dashboard", "server");
     const bundleServerDir = existsSync(installedServerDir) ? installedServerDir : repoServerDir;
 

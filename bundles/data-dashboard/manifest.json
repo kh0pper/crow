@@ -1,7 +1,7 @@
 {
   "id": "data-dashboard",
   "name": "Data Dashboard",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
   "type": "bundle",
   "author": "Crow",

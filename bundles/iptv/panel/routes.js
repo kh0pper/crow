@@ -19,7 +19,8 @@ import { homedir } from "node:os";
 function resolveDbModule() {
   const repoPath = join(import.meta.dirname, "..", "..", "..", "servers", "db.js");
   if (existsSync(repoPath)) return repoPath;
-  const bundlePath = join(homedir(), ".crow", "bundles", "iptv", "server", "db.js");
+  // This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+  const bundlePath = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "iptv", "server", "db.js");
   if (existsSync(bundlePath)) return bundlePath;
   return repoPath;
 }

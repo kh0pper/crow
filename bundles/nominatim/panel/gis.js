@@ -6,7 +6,8 @@
  * Renders point markers from geocoded data.
  */
 
-import { escapeHtml, section } from "../../../../servers/gateway/dashboard/shared/components.js";
+// Installed as a COPY at <CROW_HOME>/panels/nominatim.js: no relative imports.
+// App code is resolved from CROW_APP_ROOT (exported by the gateway).
 
 export default {
   id: "gis-map",
@@ -33,7 +34,10 @@ export default {
       });
       if (rows.length > 0) {
         const ref = JSON.parse(rows[0].connection_ref);
-        const { getSchema } = await import("../../data-dashboard/server/query-engine.js");
+        const { join } = await import("node:path");
+        const { pathToFileURL } = await import("node:url");
+        const { getSchema } = await import(pathToFileURL(
+          join(process.env.CROW_APP_ROOT || "", "bundles", "data-dashboard", "server", "query-engine.js")).href);
         const schema = await getSchema(ref.path);
         hasGeoData = schema.tables.some(t =>
           t.columns.some(c => c.name === "lat" || c.name === "latitude") &&

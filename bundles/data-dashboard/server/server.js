@@ -8,7 +8,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient } from "../../../servers/db.js";
+import { appImport } from "./app-root.js";
 import { initDataDashboardTables } from "./init-tables.js";
 import {
   executeReadQuery,
@@ -19,13 +19,13 @@ import {
 } from "./query-engine.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
-import {
-  renderChart,
-  renderMap,
-  cacheKey,
-  s3KeyFor,
-} from "../../../servers/blog/figure-renderer.js";
-import { uploadObject, getClient as getStorageClient } from "../../../servers/storage/s3-client.js";
+
+// App code is reached through the app root, never a repo-relative path: this
+// server runs from its installed copy (<CROW_HOME>/bundles/data-dashboard/),
+// where "../../../servers" does not exist and the process died at spawn.
+const { createDbClient } = await appImport("servers/db.js");
+const { renderChart, renderMap, cacheKey, s3KeyFor } = await appImport("servers/blog/figure-renderer.js");
+const { uploadObject, getClient: getStorageClient } = await appImport("servers/storage/s3-client.js");
 
 const FIGURES_BUCKET = "capstone-research";
 const GATEWAY_INTERNAL_URL = process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";

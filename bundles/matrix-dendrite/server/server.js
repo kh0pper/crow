@@ -27,6 +27,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { appImport } from "./app-root.js";
 
 const MATRIX_URL = (process.env.MATRIX_URL || "http://dendrite:8008").replace(/\/+$/, "");
 const MATRIX_ACCESS_TOKEN = process.env.MATRIX_ACCESS_TOKEN || "";
@@ -39,13 +40,13 @@ let getDb = null;
 
 async function loadSharedDeps() {
   try {
-    const rl = await import("../../../servers/shared/rate-limiter.js");
+    const rl = await appImport("servers/shared/rate-limiter.js");
     wrapRateLimited = rl.wrapRateLimited;
   } catch {
     wrapRateLimited = () => (_, h) => h;
   }
   try {
-    const db = await import("../../../servers/db.js");
+    const db = await appImport("servers/db.js");
     getDb = db.createDbClient;
   } catch {
     getDb = null;

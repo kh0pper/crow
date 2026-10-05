@@ -12,7 +12,8 @@ import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 
 function resolveBundleServer() {
-  const installed = join(homedir(), ".crow", "bundles", "campaigns", "server");
+  // This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+  const installed = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "campaigns", "server");
   if (existsSync(installed)) return installed;
   return join(import.meta.dirname, "..", "server");
 }

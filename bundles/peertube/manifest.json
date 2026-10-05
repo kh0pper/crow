@@ -1,7 +1,7 @@
 {
   "id": "peertube",
   "name": "PeerTube",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — video is kept on local disk, so plan for disk space and keep the transcoding/retention policy tight.",
   "type": "bundle",
   "author": "Crow",

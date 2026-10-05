@@ -1,7 +1,7 @@
 {
   "id": "podcast",
   "name": "Podcasts",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Subscribe to and play podcasts, plus publish your own podcast episodes as blog posts with iTunes-compatible RSS",
   "type": "skill",
   "author": "Crow",

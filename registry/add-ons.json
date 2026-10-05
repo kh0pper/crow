@@ -423,7 +423,7 @@
     {
       "id": "caddy",
       "name": "Caddy Reverse Proxy",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
       "type": "bundle",
       "author": "Crow",
@@ -689,7 +689,7 @@
     {
       "id": "campaigns",
       "name": "Campaigns",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
       "type": "mcp-server",
       "author": "Crow",
@@ -801,7 +801,7 @@
     {
       "id": "companion",
       "name": "AI Companion",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
       "type": "bundle",
       "author": "Crow",
@@ -1008,7 +1008,7 @@
     {
       "id": "data-dashboard",
       "name": "Data Dashboard",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
       "type": "bundle",
       "author": "Crow",
@@ -1617,7 +1617,7 @@
     {
       "id": "gotosocial",
       "name": "GoToSocial",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
       "type": "bundle",
       "author": "Crow",
@@ -1884,7 +1884,7 @@
     {
       "id": "iptv",
       "name": "IPTV",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "IPTV channel management — M3U playlists, EPG program guide, channel groups, and favorites",
       "type": "mcp-server",
       "author": "Crow",
@@ -2163,7 +2163,7 @@
     {
       "id": "knowledge-base",
       "name": "Knowledge Base",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking and verification workflows",
       "type": "mcp-server",
       "author": "Crow",
@@ -2201,7 +2201,7 @@
     {
       "id": "kodi",
       "name": "Kodi",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
       "type": "mcp-server",
       "author": "Crow",
@@ -2358,7 +2358,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -2875,7 +2875,7 @@
     {
       "id": "mastodon",
       "name": "Mastodon",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing. Media is kept on local disk.",
       "type": "bundle",
       "author": "Crow",
@@ -3149,7 +3149,7 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "author": "Crow",
@@ -4059,7 +4059,7 @@
     {
       "id": "nominatim",
       "name": "Nominatim GIS",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
       "type": "bundle",
       "author": "Crow",
@@ -4348,7 +4348,7 @@
     {
       "id": "peertube",
       "name": "PeerTube",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — video is kept on local disk, so plan for disk space and keep the transcoding/retention policy tight.",
       "type": "bundle",
       "author": "Crow",
@@ -4551,7 +4551,7 @@
     {
       "id": "pixelfed",
       "name": "Pixelfed",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Federated photo-sharing server over ActivityPub — Instagram-alternative on the fediverse. Publish photos/stories/collections; remote Mastodon/GoToSocial/Funkwhale followers see your posts in their timelines. Media is kept on local disk.",
       "type": "bundle",
       "author": "Crow",
@@ -4944,7 +4944,7 @@
     {
       "id": "podcast",
       "name": "Podcasts",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Subscribe to and play podcasts, plus publish your own podcast episodes as blog posts with iTunes-compatible RSS",
       "type": "skill",
       "author": "Crow",
@@ -5193,7 +5193,7 @@
       "id": "rookery",
       "name": "Open Science Reviewer",
       "origin": "community",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
       "type": "bundle",
       "author": "kh0pper",
@@ -5692,7 +5692,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6527,7 +6527,7 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
       "type": "bundle",
       "author": "Crow",

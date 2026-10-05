@@ -14,7 +14,8 @@ const REVIEWER_URL = () => {
   const u = process.env.ROOKERY_REVIEWER_URL || "";
   return /^https?:\/\//i.test(u) ? u : "http://127.0.0.1:3061/";
 };
-const BUNDLE_DIR = () => join(os.homedir(), ".crow/bundles/rookery");
+// This instance's installed copy (CROW_HOME: co-hosted instances each have their own).
+const BUNDLE_DIR = () => join(process.env.CROW_HOME || join(os.homedir(), ".crow"), "bundles", "rookery");
 const UV = () => join(os.homedir(), ".local/bin/uv");
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
