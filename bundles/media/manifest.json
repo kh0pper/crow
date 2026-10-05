@@ -1,7 +1,7 @@
 {
   "id": "media",
   "name": "Media Hub",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "News aggregation, RSS feeds, YouTube channels, podcasts, TTS audio, briefings, playlists, smart folders, email digests",
   "type": "mcp-server",
   "author": "Crow",
