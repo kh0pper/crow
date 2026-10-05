@@ -364,3 +364,12 @@ test("the product's own gates: every plain question of the 40 asked with a windo
     }
   }
 });
+
+test("revision 6: the run-2 set is kept verbatim and spent too — a run refuses a held-out set that shares any line with run 1 OR run 2", async () => {
+  const { HELD_OUT_R2 } = await import("../scripts/kiosk-eval/held-out-r2.mjs");
+  assert.equal(HELD_OUT_R2.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R2), true);
+  assert.equal(heldOutSpent(HELD_OUT_R1), true);
+  assert.equal(heldOutSpent([{ say: "A line nobody has written before." }]), false);
+  assert.equal(heldOutSpent([{ say: "A line nobody has written before." }, { say: HELD_OUT_R2[3].say.toUpperCase() }]), true, "one shared line is enough; case does not matter");
+});

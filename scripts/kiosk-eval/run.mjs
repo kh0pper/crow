@@ -27,13 +27,19 @@ import { CASES, judge } from "./cases.mjs";
 import { WM_VERBS } from "../../bundles/kiosk/server/tools.js";
 import { HELD_OUT } from "./held-out.mjs";
 import { HELD_OUT_R1 } from "./held-out-r1.mjs";
+import { HELD_OUT_R2 } from "./held-out-r2.mjs";
+/** Every spent held-out set (each found a defect; none judges a fix). */
+export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2]);
 import { execFileSync } from "node:child_process";
 import { createProductDisplay } from "./product.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const MAX_ATTEMPTS = 3;
-/** The held-out set is SPENT when it is the run-1 set (it found the revision-4 defect; it never judges the fix). */
-export const heldOutSpent = (set = HELD_OUT, spent = HELD_OUT_R1) => set.length > 0 && set.some((c) => spent.some((s) => s.say.trim().toLowerCase() === c.say.trim().toLowerCase()));
+/** The held-out set is SPENT when it shares any utterance with a spent set (run 1 or run 2). `spent` may be one set or a list of sets. */
+export const heldOutSpent = (set = HELD_OUT, spent = SPENT_SETS) => {
+  const all = (Array.isArray(spent[0]) ? spent : [spent]).flat();
+  return set.length > 0 && set.some((c) => all.some((s) => s.say.trim().toLowerCase() === c.say.trim().toLowerCase()));
+};
 /** A run writes into a NEW file: an existing non-empty --out is refused unless --resume. → null | the reason. */
 export function outGuard(out, resume, { exists = existsSync, read = (f) => readFileSync(f, "utf8") } = {}) {
   if (resume) return null;
@@ -112,7 +118,7 @@ async function main() {
   if (!cfg.baseUrl || !cfg.model || !arg.out) { console.error("usage: run.mjs --base-url=<model server /v1> --model=<id> --out=<file.jsonl> [--label=quick|larger] [--trials=3] [--ctx=8192] [--pause-ms=250] [--resume]"); process.exit(2); }
   const og = outGuard(arg.out, arg.resume === "1");
   if (og) { console.error(og); process.exit(2); }
-  if (heldOutSpent()) { console.error("the held-out set is the SPENT run-1 set (held-out-r1.mjs): write a new one first"); process.exit(2); }
+  if (heldOutSpent()) { console.error("the held-out set shares utterances with a SPENT set (held-out-r1.mjs or held-out-r2.mjs): write a new one first"); process.exit(2); }
   const pf = await preflight(cfg);
   if (!pf.ok) { console.error(`model ${cfg.model} is not resident at ${cfg.baseUrl}: nothing was sent and nothing was started`); process.exit(3); }
   const label = arg.label || cfg.model;
