@@ -550,6 +550,25 @@ test("default-route interfaces are read from the kernel's routing tables (IPv4 a
   assert.deepEqual([...readDefaultRouteInterfaces(() => { throw new Error("no proc"); })], [], "unreadable: nothing is the LAN (fail closed)");
 });
 
+test("the production predicate stays address-only: a LAN that carries a global IPv6 /64 still lets a ticked station reach that /64 (the host view is judgeAddress's, never the public test's)", async () => {
+  // 3ffe::/16 was returned to IANA: a global-class prefix that names no one. No predicate injected: the gateway's own.
+  const { isNotPublicAddress } = await import("../bundles/kiosk/server/netscope.js");
+  const shared = await import("../servers/shared/ip-classify.js");
+  const table = { eth0: [{ address: "192.168.1.2", cidr: "192.168.1.2/24" }, { address: "3ffe:1:2:3::5", cidr: "3ffe:1:2:3::5/64" }] };
+  // When the shared classifier is host-aware, point it at the same host, so a host-aware public test would show here.
+  if (typeof shared.setInterfaceTableForTests === "function") shared.setInterfaceTableForTests(() => table);
+  try {
+    const net = readHostNetwork({ interfaces: () => table, defaults: () => new Set(["eth0"]) });
+    assert.equal(isNotPublicAddress("3ffe:1:2:3::77"), false, "the public test judges the address alone");
+    assert.equal(judgeAddress("3ffe:1:2:3::77", net, { local: true }), null, "ticked: the LAN's own global /64 is home");
+    assert.equal(judgeAddress("3ffe:1:2:3::77", net, { local: false }), "private_address", "unticked: an on-link neighbour is never public");
+    assert.equal(judgeAddress("3ffe:1:2:3::5", net, { local: true }), "own_address", "never this host");
+    assert.equal(judgeAddress("3ffe:1:2:4::77", net, { local: true }), "private_address", "ticked: a global address off the LAN is not home");
+  } finally {
+    if (typeof shared.setInterfaceTableForTests === "function") shared.setInterfaceTableForTests(null);
+  }
+});
+
 test("local stream (table): with the tick the ENTERED host may be on the home LAN (the default-route interface's prefixes) or the tailnet; nothing else", async () => {
   const net = hostNet();
   const ok = (a) => judgeAddress(a, net, { local: true, isNotPublic: testClassifier });

@@ -37,8 +37,9 @@ export function normAddress(address) {
  * NOT a public address — the classifier's answer, kept stricter for a relay: an IPv4 carried inside a
  * translated or tunnelled IPv6 form (SIIT, IPv4-compatible, NAT64, 6to4, Teredo) is refused even when
  * that IPv4 is public (this host has no NAT64; those forms only disguise an address).
- * SWAP POINT: when servers/shared/ip-classify.js exports the host-aware isPublicEgressIp (a parallel
- * PR), this body becomes `return !isPublicEgressIp(address) || embeddedTranslated(address);` — one line.
+ * ADDRESS-ONLY, on purpose: the home-network rule in judgeAddress uses it to recognise the LAN's own
+ * global IPv6 prefix, which a host-aware test would call not public. The host view belongs to
+ * judgeAddress (see its SWAP POINT), never here.
  */
 export function isNotPublicAddress(address) {
   const { cls, via } = classifyIp(address);
@@ -130,6 +131,10 @@ export function judgeAddress(address, net, { local = false, isNotPublic = isNotP
   if (!isIP(a)) return "private_address";
   if (net.own.has(a)) return "own_address";
   const hits = net.prefixes.filter((p) => inPrefix(p, a));
+  // SWAP POINT (public rule only): once servers/shared/ip-classify.js exports the host-aware
+  // isOwnNetworkIp/isPublicEgressIp, this line also refuses `|| isOwnNetworkIp(a)` (import it beside
+  // classifyIp) — one shared view of this host's networks on top of this module's own. Not inside
+  // isNotPublicAddress: that would refuse a ticked station on the LAN's own global IPv6 /64.
   if (!local) return hits.length || isNotPublic(a) ? "private_address" : null;
   const { cls, via } = classifyIp(a);
   if (via !== null) return "private_address";
