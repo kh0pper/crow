@@ -1703,3 +1703,13 @@ test("onToolResult: a hook that throws, or returns anything but a string, change
   assert.deepEqual(flags, [true]);
   assert.equal(e.log[1].messages.find((m) => m.role === "tool").content, "Error: nope");
 });
+
+test("offered-tools guard composes with narrowing: on a narrowed first round only the tool that was SENT may run — a family offered on the turn but not in that request is refused", async () => {
+  const proj = [{ type: "tool_call", id: "p", name: "crow_projects", arguments: { action: "list_projects" } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_projects"], rounds: [proj, showCall({})] });
+  const tool = showTool([{ ok: true, outcome: "playing", say: "Playing it.", final: true }], [], { mustRoute: "fast", mustDone: (r) => r?.outcome === "playing" });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "play something for dinner", sink: h.sink, extraTools: [tool, otherTool()] });
+  assert.deepEqual(h.log[0].tools, ["crow_show"], "the first request carried only the must-run tool");
+  assert.deepEqual(h.calls.executed, [], "the projects call was never run");
+  assert.equal(r.timings.tools[0], "crow_projects:not_offered");
+});
