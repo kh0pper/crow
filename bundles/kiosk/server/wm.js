@@ -120,8 +120,9 @@ const DISPLAY_INTENT = [
   /^(please |can you |could you )?(close|dismiss|hide)\b/,
   /\bclear (the )?(screen|display)\b/,
   // Spanish (a leading \b cannot sit before an accented letter, so those use a space/start anchor).
-  /\bmu[eé]stra(me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(me|nos)\b/,
+  /\bmu[eé]stra(s|me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(s|me|nos)\b/,
   /\ben (la |mi |tu )?pantalla\b/,
+  /\bsteps (for|to)\b|\bpasos (para|de)\b/,
   /\b(temporizador(es)?|cron[oó]metro|cuenta atr[aá]s|cuenta regresiva|alarmas?)\b/,
   /\brecetas?\b/,
   /(^| )(siguiente|anterior|pr[oó]ximo|[uú]ltimo|primer|este|ese) paso\b|\b(lee|leer|repite|repetir) (el |ese )?paso\b/,
@@ -152,7 +153,7 @@ const NEW_DISPLAY = {
     /\bdisplay (a|an|the|my|our|me|us|some|this|that|it)\b/,
     /\bput\b.{0,40}?\b(up|on (the |my |your )?(screen|display))\b/,
     /\b(pull|bring) up\b/,
-    /\bmu[eé]stra(me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(me|nos)\b/,
+    /\bmu[eé]stra(s|me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(s|me|nos)\b/,
     /\ben (la |mi |tu )?pantalla\b/,
   ],
 };

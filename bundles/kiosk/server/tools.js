@@ -16,7 +16,7 @@ export const OUTCOMES = Object.freeze({
   crow_play: Object.freeze(["playing", "choices", "audio_instead", "handed_off", "not_found", "unavailable"]),
   crow_open: Object.freeze(["opened", "focused", "handed_off", "needs_login", "host_offline", "not_shared", "unavailable"]),
   crow_show: Object.freeze(["shown", "updated", "invalid"]),
-  crow_wm: Object.freeze(["done", "nothing_open", "nothing_playing", "unavailable"]),
+  crow_wm: Object.freeze(["done", "nothing_open", "nothing_playing", "invalid", "unavailable"]),
 });
 /** The corrective round's note per must-run tool (model-facing, English; rides on the last message, never saved). */
 export const MUST_NOTES = Object.freeze({

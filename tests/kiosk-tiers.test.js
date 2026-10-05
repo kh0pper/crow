@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spokenWords, stripPolite, matchT0, T0_PHRASES, T0_SLOTS, T0_KIND_SLOTS } from "../bundles/kiosk/server/phrases.js";
-import { parseOpen, parsePlay, mentionsOpen, mentionsPlay, asksOpen, asksPlay, compound, lookupItem, matchT1 } from "../bundles/kiosk/server/patterns.js";
+import { parseOpen, parsePlay, mentionsOpen, mentionsPlay, asksOpen, asksPlay, compound, compoundParts, lookupItem, matchT1 } from "../bundles/kiosk/server/patterns.js";
 import { executeIntent, INVALID, SAY_MAX } from "../bundles/kiosk/server/executor.js";
 import { matchSpoken } from "../bundles/kiosk/server/tiers.js";
 import { createWmStore } from "../bundles/kiosk/server/wm.js";
@@ -183,6 +183,10 @@ test("compound: two requests in one sentence; a list of things joined by 'and' i
   for (const q of ["Close the timer and then show me a list of three fruits.", "Get rid of the timer and put the music back on.", "Show me a recipe for lasagna and set a timer for ten minutes.", "Cierra la lista y luego pon música.", "Stop the music, then open the lab dashboard.", "Close that and also show the wifi password."]) assert.equal(compound(q), true, q);
   for (const q of ["Show me a list of fruits and vegetables.", "A recipe for macaroni and cheese, please.", "Play rock and roll.", "Pon sal y pimienta en la lista.", "Close that.", "And then?", ""]) assert.equal(compound(q), false, q);
   assert.equal(compound("x and show ".repeat(200)), false, "over the cap: never a control decision");
+  assert.deepEqual(compoundParts("Close the timer and then show me a list of three fruits."), ["close the timer", "show me a list of three fruits"]);
+  assert.deepEqual(compoundParts("Get rid of the timer and put the music back on."), ["get rid of the timer", "put the music back on"]);
+  assert.deepEqual(compoundParts("Show me a list of fruits and vegetables."), ["show me a list of fruits and vegetables"]);
+  assert.deepEqual(compoundParts(""), []);
 });
 
 test("no model path answers a compound request: the whole sentence goes to the model", async () => {

@@ -12,6 +12,7 @@
  */
 import { parseDuration, contentBlocks, isPlaceholderText, wantsDisplay, MAX_TIMER_S } from "./wm.js";
 import { spokenWords, sameAt, KIND_NOUNS } from "./phrases.js";
+import { MEDIA_VERBS } from "./tools.js";
 import { STRINGS } from "./strings.js";
 
 export const SAY_MAX = 120;
@@ -34,6 +35,7 @@ export const INVALID = Object.freeze({
   bad_timer: "Nothing was shown: the body of a timer is how long, from 1 second to 24 hours, like 12 minutes. Call crow_show again with that.",
   bad_steps: "Nothing was shown: steps need at least one step, one per line, after a line with three dashes. Call crow_show again in that form.",
   no_intent: "Nothing was shown: nobody asked to see anything. Answer the user aloud instead; do not call this tool again for this question.",
+  update_title: "Nothing was changed: to change the card that is open, call crow_show again with exactly its title, {title}, and the whole new body.",
 });
 const PH_TITLE = new Set(["title", "name"]);
 const PH_BODY = new Set(["text", "body", "content"]);
@@ -61,7 +63,7 @@ function show(i, ctx, S) {
   const kind = String(i.kind || "");
   const title = flat(i.title).slice(0, 80);
   const body = String(i.body ?? "").slice(0, 4000);
-  const bad = (reason) => result(false, "invalid", INVALID[reason], { final: false, reason });
+  const bad = (reason, vars) => result(false, "invalid", fill(INVALID[reason], vars), { final: false, reason });
   const win = ctx.caps.windows;
   const need = kind === "timer" ? "timer" : kind === "steps" ? "recipe" : kind === "text" || kind === "list" ? "content" : null;
   if (!need || !win.includes(need)) return bad("unsupported_window");
@@ -88,8 +90,10 @@ function show(i, ctx, S) {
     // No echo cards: a text or list card on a turn that never asked to see anything only repeats the
     // spoken answer. One exception: the card being sent has the title of a card that is already open —
     // that is an update of it ("add grapes to the fruits list" has no display word in it).
+    // ctx.turn.update (set by the tool on a turn that asks to change the open card) names that card: a call
+    // under another title is sent back with the title to use.
     const isUpdate = ctx.store.list(ctx.deviceId).some((w) => w.kind === "content" && lower(w.title) === lower(title));
-    if (typeof ctx.turn?.transcript === "string" && !wantsDisplay(ctx.turn.transcript) && !isUpdate) return bad("no_intent");
+    if (typeof ctx.turn?.transcript === "string" && !wantsDisplay(ctx.turn.transcript) && !isUpdate) return ctx.turn.update ? bad("update_title", { title: ctx.turn.update }) : bad("no_intent");
     if (isPlaceholderText(body, PH_BODY)) return bad("placeholder");
     let blocks;
     if (kind === "list") {
@@ -162,13 +166,22 @@ export async function executeIntent(intent, ctx) {
       if (!closed.length) return ctx.strict ? null : result(true, "nothing_open", S.say_nothing_open, { effect: false });
       return result(true, "done", S.say_all_clear, { events: [{ type: "wm", action: "close_all" }] });
     }
-    case "next": case "next_step": return step(1, ctx, S);
+    case "next_step": return step(1, ctx, S);
+    case "next": {
+      // The bare word: the recipe if it is the window in front, else what is playing, else a recipe anywhere.
+      if (ctx.store.focused(ctx.deviceId)?.kind === "recipe") return step(1, ctx, S);
+      if (ctx.media?.active?.(ctx.deviceId) === true && typeof ctx.mediaVerb === "function") return ctx.mediaVerb(intent, ctx, S);
+      return step(1, ctx, S);
+    }
     case "previous_step": return step(-1, ctx, S);
     case "read_step": return step(0, ctx, S);
     case "choices": { const names = (intent.names || []).map((n) => flat(n).slice(0, 30)).filter(Boolean).slice(0, 3); return result(true, "choices", fill(S.say_choices, { names: joinNames(names, S) }), { names, effect: false }); }
     // The launcher (and with it "not in this list") has nothing to show until the launcher is built.
     case "open": return typeof ctx.openItem === "function" ? ctx.openItem(intent, ctx, S) : (ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable));
     case "play": return typeof ctx.resolvePlay === "function" ? ctx.resolvePlay(intent, ctx, S) : (ctx.strict ? null : result(false, "unavailable", S.say_play_unavailable));
-    default: return ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable, { reason: "unknown_verb" });
+    default:
+      // Playback verbs belong to the media session (ctx.mediaVerb). Without one, nothing is playing.
+      if (MEDIA_VERBS.includes(intent?.verb)) return typeof ctx.mediaVerb === "function" ? ctx.mediaVerb(intent, ctx, S) : (ctx.strict ? null : result(true, "nothing_playing", S.say_nothing_playing, { effect: false }));
+      return ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable, { reason: "unknown_verb" });
   }
 }

@@ -9,7 +9,8 @@
  *                           A display tool is OFFERED on these.
  *   asksOpen / asksPlay     the person is ASKING for it now (an imperative, or a mention together with
  *                           a request cue and no question word). The tool MUST run on these.
- *   compound                two requests in one sentence ("close the timer and then show me a list").
+ *   compound / compoundParts   two requests in one sentence ("close the timer and then show me a list"),
+ *                           and the requests one by one — a must-run test reads each of them.
  */
 import { spokenWords, stripPolite, sameAt } from "./phrases.js";
 
@@ -125,13 +126,24 @@ const REQUEST_VERBS = new Set(["show", "display", "put", "play", "open", "close"
   "muestra", "muestrame", "pon", "ponme", "abre", "cierra", "reproduce", "toca", "para", "deten", "dime", "lee", "agrega", "anade", "quita", "dame", "inicia", "limpia"]);
 /** "…and then …", or a joining word with a request verb within the next three words. "fruits and vegetables" is one request. */
 export function compound(transcript) {
+  return compoundParts(transcript).length > 1;
+}
+/** The requests in the sentence, each as plain words ("close the timer", "show me a list of three fruits"). One entry when it is not compound; none when there is nothing to read. */
+export function compoundParts(transcript) {
   const w = plain(transcript);
-  if (!w) return false;
+  if (!w) return [];
+  const parts = [];
+  let from = 0;
   for (let i = 1; i < w.length - 1; i += 1) {
-    if (SEQUENCE.has(w[i])) return true;
-    if (JOINERS.has(w[i]) && w.slice(i + 1, i + 4).some((x) => REQUEST_VERBS.has(x))) return true;
+    const cut = SEQUENCE.has(w[i]) || (JOINERS.has(w[i]) && !SEQUENCE.has(w[i + 1]) && w.slice(i + 1, i + 4).some((x) => REQUEST_VERBS.has(x)));
+    if (!cut) continue;
+    // "and then": the joining word before a sequence word belongs to the cut, not to the first request.
+    const end = i > from && JOINERS.has(w[i - 1]) && SEQUENCE.has(w[i]) ? i - 1 : i;
+    if (end > from) parts.push(w.slice(from, end).join(" "));
+    from = i + 1;
   }
-  return false;
+  parts.push(w.slice(from).join(" "));
+  return parts.filter(Boolean);
 }
 
 /** items: [{ id, title, aliases? }]. Exact name or alias, else a unique prefix. → { match } | { many } | null. */

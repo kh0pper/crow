@@ -36,8 +36,19 @@ const count = (n, one, many) => (n ? `${n} ${n === 1 ? one : many}` : "");
  * Live display state for THIS turn's user message. countsOnly: kinds and counts with no titles —
  * used on a turn that asks for new content, so there is no open card's title to copy.
  * media: an optional "Playing: …" sentence (the media session adds it).
+ * card: on a turn that asks to CHANGE the open card, its title and what it says now (the model has to
+ * send the whole new body; it cannot add to words it was never shown).
  */
-export function displayTurnContext(store, deviceId, { countsOnly = false, media = "" } = {}) {
+export const CARD_TEXT_MAX = 400;
+function cardText(w) {
+  const parts = [];
+  for (const b of Array.isArray(w?.blocks) ? w.blocks : []) {
+    if (b?.type === "list" && Array.isArray(b.items)) parts.push(b.items.join("; "));
+    else if (b?.type !== "heading" && typeof b?.text === "string") parts.push(b.text);
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, CARD_TEXT_MAX);
+}
+export function displayTurnContext(store, deviceId, { countsOnly = false, media = "", card = false } = {}) {
   let line = store.describe(deviceId);
   if (countsOnly) {
     const n = { content: 0, recipe: 0, timer: 0 };
@@ -45,5 +56,7 @@ export function displayTurnContext(store, deviceId, { countsOnly = false, media 
     const parts = [count(n.content, "card", "cards"), count(n.recipe, "recipe", "recipes"), count(n.timer, "timer", "timers")].filter(Boolean);
     line = parts.length ? `Open windows: ${parts.join(", ")}.` : "Open windows: none.";
   }
-  return `[Display] ${line}${media ? ` ${media}` : ""}`;
+  const open = card ? store.list(deviceId).filter((w) => w.kind === "content").at(-1) : null;
+  const now = open ? ` The card "${open.title}" now says: ${cardText(open) || "nothing"}. To change it, call crow_show with that same title and the whole new body.` : "";
+  return `[Display] ${line}${media ? ` ${media}` : ""}${now}`;
 }
