@@ -8,20 +8,23 @@
  *     to one is recorded and counts as a wrong turn in this set).
  * surface "four" is the product. surface "single" is the control: ONE tool { do, what, kind } whose
  * calls are translated to the same four executors, offered and required by the same rules.
+ * The turn's options come from the runtime's own displayTurnOptions (the function a real display turn
+ * uses), with two differences stated here: the first-audio budget is off (speech is instant and the
+ * evaluation scores the end result, not latency), and every turn goes to the model under test.
+ * shipped: the display as this release ships it (no sources, no launcher items, no media session), so
+ * only crow_show and crow_wm exist; otherwise the fixture display (three sources, four items, media).
+ * A request that comes back empty (no text and no call) or cut at the token limit is a FAILED request,
+ * never an answer.
  */
 import { createVoiceTurnRunner } from "../../servers/gateway/voice/turn.js";
 import { createConvoStore } from "../../servers/gateway/voice/turn-helpers.js";
 import { createToolFamilies } from "../../servers/gateway/voice/tool-families.js";
 import { TOOL_MANIFESTS } from "../../servers/gateway/tool-manifests.js";
-import { createWmStore, wantsNewDisplay, matchWmFastPath } from "../../bundles/kiosk/server/wm.js";
-import { createDisplayTools, cardUpdate } from "../../bundles/kiosk/server/display-tools.js";
+import { createWmStore } from "../../bundles/kiosk/server/wm.js";
 import { SHOW_KINDS, WM_VERBS, MEDIA_VERBS } from "../../bundles/kiosk/server/tools.js";
+import { wmVerbs } from "../../bundles/kiosk/server/display-tools.js";
 import { result } from "../../bundles/kiosk/server/executor.js";
-import { matchSpoken } from "../../bundles/kiosk/server/tiers.js";
-import { displayPromptSuffix, displayTurnContext } from "../../bundles/kiosk/server/prompt.js";
-import { kioskNowContext, matchClockFastPath } from "../../bundles/kiosk/server/clock.js";
-import { wantsMemory } from "../../bundles/kiosk/server/memory-intent.js";
-import { KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, kioskDisplayMissedText } from "../../bundles/kiosk/server/runtime.js";
+import { displayTurnOptions } from "../../bundles/kiosk/server/runtime.js";
 import { AT, TZ, FIXTURE } from "./cases.mjs";
 
 /** A household assistant as people really set one up: a persona with habits, not one line. */
@@ -99,40 +102,60 @@ function singleTool(four, def) {
  * forcing: async () => { named, required, engine } (the real createToolForcing, or a fixed answer).
  * → { ask(transcript) → row, gates(transcript) }.
  */
-export function createProductDisplay({ surface = "four", chat, forcing, state = {}, lang = "en", ctxLen = 8192 }) {
+export function createProductDisplay({ surface = "four", chat, forcing, state = {}, lang = "en", ctxLen = 8192, shipped = false }) {
   const calls = [], other = [], spoken = [], events = [];
   const stats = { requests: 0, errors: [], first: null };
   const store = createWmStore({ now: () => AT, setTimer: () => ({}), clearTimer: () => {} });
   for (const w of state.windows || []) store.open("eval", w);
   const playing = state.playing ? { ...state.playing } : null;
-  const media = { active: () => !!playing };
+  const media = shipped ? undefined : { active: () => !!playing };
   const ctx = {
-    store, deviceId: "eval", caps: FIXTURE.caps, lang, sources: FIXTURE.sources, items: FIXTURE.items, emit: (ev) => events.push(ev), media,
+    store, deviceId: "eval", caps: FIXTURE.caps, lang, sources: shipped ? [] : FIXTURE.sources, items: shipped ? [] : FIXTURE.items, emit: (ev) => events.push(ev), media,
     // The fixture's display can play and open anything: what is measured is the call, not a library.
     resolvePlay: (i) => result(true, "playing", lang === "es" ? `Reproduciendo ${i.what}.` : `Playing ${i.what}.`),
     openItem: (i) => result(true, "opened", lang === "es" ? "Abierto." : "Opened."),
     mediaVerb: () => (playing ? result(true, "done", lang === "es" ? "Listo." : "Okay.") : result(true, "nothing_playing", lang === "es" ? "No hay nada sonando." : "Nothing is playing.", { effect: false })),
   };
-  const four = createDisplayTools(ctx).map((t) => ({
-    ...t,
-    async execute(args, turn) {
-      const before = new Set(store.list("eval").map((w) => w.id));
-      const out = await t.execute(args, turn);
-      const res = JSON.parse(out);
-      const opened = store.list("eval").find((w) => !before.has(w.id));
-      calls.push({ tool: t.definition.name, args: args || {}, result: res, ...(opened?.kind === "timer" ? { seconds: Math.round((opened.ends_at - AT) / 1000) } : {}) });
-      return out;
+  const device = { id: "eval", bound_bot_id: "house", kiosk_settings: { memory_integration: true, lang } };
+  const mediaLine = () => (playing ? `${playing.paused ? "Paused" : "Playing"}: ${playing.title} (${playing.source}).` : "");
+  let four = [], single = null;
+  // The runtime's own options; the display tools are wrapped so every executed call is recorded.
+  const options = displayTurnOptions(ctx, {
+    now: () => AT, tz: TZ, settings: device.kiosk_settings, mediaLine,
+    wrapTools: (tools) => {
+      four = tools.map((t) => ({
+        ...t,
+        async execute(args, turn) {
+          const before = new Set(store.list("eval").map((w) => w.id));
+          const out = await t.execute(args, turn);
+          const res = JSON.parse(out);
+          const opened = store.list("eval").find((w) => !before.has(w.id));
+          calls.push({ tool: t.definition.name, args: args || {}, result: res, ...(opened?.kind === "timer" ? { seconds: Math.round((opened.ends_at - AT) / 1000) } : {}) });
+          return out;
+        },
+      }));
+      const kinds = SHOW_KINDS.filter((k) => four.find((t) => t.definition.name === "crow_show")?.definition.inputSchema.properties.kind.enum.includes(k));
+      single = singleTool(four, singleToolDefinition({ sources: ctx.sources, items: ctx.items, verbs: wmVerbs(ctx), kinds }));
+      return surface === "four" ? four : [single];
     },
-  }));
-  const kinds = SHOW_KINDS.filter((k) => four.find((t) => t.definition.name === "crow_show")?.definition.inputSchema.properties.kind.enum.includes(k));
-  const single = singleTool(four, singleToolDefinition({ sources: FIXTURE.sources, items: FIXTURE.items, verbs: [...WM_VERBS, ...MEDIA_VERBS], kinds }));
-  const extraTools = surface === "four" ? four : [single];
+  });
   const counted = {
     async *chatStream(messages, tools, opts) {
       stats.requests += 1;
       if (!stats.first) stats.first = { tools: tools.map((t) => t.name), choice: opts?.toolChoice ? (typeof opts.toolChoice === "string" ? opts.toolChoice : "named") : "none" };
-      try { yield* chat.chatStream(messages, tools, opts); }
-      catch (err) {
+      let any = false;
+      try {
+        for await (const ev of chat.chatStream(messages, tools, opts)) {
+          if ((ev.type === "content_delta" && ev.text) || ev.type === "tool_call") any = true;
+          else if (ev.type === "done") {
+            // Checked HERE, before the turn sees "done" (it stops reading at it). An empty answer, or one cut
+            // at the token limit, is not an answer: the turn is retried like a failed request.
+            if (!any) stats.errors.push("empty completion");
+            else if (Number.isFinite(opts?.maxTokens) && Number(ev.usage?.output_tokens) >= opts.maxTokens) stats.errors.push("completion cut at the token limit");
+          }
+          yield ev;
+        }
+      } catch (err) {
         // A refused tool_choice (400/422) is the product's own step-down, handled by the turn. Anything else is a failed request.
         if (!(opts?.toolChoice && err?.code === "provider_error" && (err.status === 400 || err.status === 422))) stats.errors.push(String(err?.message || err).slice(0, 200));
         throw err;
@@ -160,10 +183,8 @@ export function createProductDisplay({ surface = "four", chat, forcing, state = 
     toolForcing: forcing,
     toolFamilies: createToolFamilies({ manifests: TOOL_MANIFESTS }),
   });
-  const device = { id: "eval", bound_bot_id: "house", kiosk_settings: { memory_integration: true, lang } };
   const sink = { event: (e) => events.push(e), audio: () => {} };
-  const mediaLine = () => (playing ? `${playing.paused ? "Paused" : "Playing"}: ${playing.title} (${playing.source}).` : "");
-  const fastPaths = async (t) => (await matchSpoken(t, ctx)) || matchWmFastPath(t, store, "eval", FIXTURE.caps) || matchClockFastPath(t, { now: AT, tz: TZ });
+  const fastPaths = options.fastPaths;
   /** What the product's own rules do with this transcript, before any model is asked. */
   function gates(transcript) {
     const offered = four.filter((t) => typeof t.when !== "function" || t.when(transcript) === true).map((t) => t.definition.name);
@@ -173,18 +194,12 @@ export function createProductDisplay({ surface = "four", chat, forcing, state = 
   async function ask(transcript) {
     const t0 = Date.now();
     single.bind(transcript);
-    const r = await runner.runVoiceTurn({
-      db: {}, device, sink, transcript, extraTools, fastPaths,
-      promptSuffix: displayPromptSuffix(FIXTURE.caps),
-      turnContext: (t) => `${kioskNowContext(AT, TZ)}\n${displayTurnContext(store, "eval", { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, store, "eval") !== null })}`,
-      denyTools: KIOSK_DENY_TOOLS, maxToolRounds: KIOSK_MAX_TOOL_ROUNDS, familiesOnIntent: true,
-      displayMissedText: kioskDisplayMissedText(lang), memoryWhen: wantsMemory,
-    });
+    const r = await runner.runVoiceTurn({ db: {}, device, sink, transcript, ...options, firstAudioBudgetMs: 0 });
     return {
       calls: calls.slice(), other: other.slice(), spoken: spoken.join(" "), failed: r.failed ?? null, fast_path: r.fastPath === true,
       requests: stats.requests, errors: stats.errors.slice(), first: stats.first, tool_choice: r.timings?.tool_choice ?? null,
       corrected: r.timings?.display_corrected === true, final: r.timings?.final ?? null, tools: r.timings?.tools || [], ms: Date.now() - t0,
     };
   }
-  return { ask, gates, fastPaths, store };
+  return { ask, gates, fastPaths, store, options };
 }

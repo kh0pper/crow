@@ -5,7 +5,9 @@
  * never through a gateway (a gateway may start a model on demand). Sends nothing unless the server
  * already lists the model, and checks again before every utterance.
  *
- *   node scripts/kiosk-eval/run.mjs --base-url=http://127.0.0.1:8000/v1 --model=<id> --label=quick --trials=3 --out=/path/quick.jsonl [--resume]
+ *   node scripts/kiosk-eval/run.mjs --base-url=http://127.0.0.1:8000/v1 --model=<id> --label=quick --trials=10 --out=/path/quick.jsonl [--resume]
+ *   … --shipped --label=shipped   the display as this release ships it: only the show, window and plain
+ *                                 utterances, on a display with no sources, items or media (reported, not gated)
  *
  * For each trial and each utterance the two arms (four tools, one tool) run back to back, in an
  * order that alternates, so a stall or a busy minute falls on both. Every row is appended to --out
@@ -22,11 +24,14 @@ import { pathToFileURL } from "node:url";
 import createOpenAIAdapter from "../../servers/gateway/ai/adapters/openai.js";
 import { createToolForcing } from "../../servers/gateway/voice/tool-forcing.js";
 import { CASES, judge } from "./cases.mjs";
+import { WM_VERBS } from "../../bundles/kiosk/server/tools.js";
 import { HELD_OUT } from "./held-out.mjs";
 import { createProductDisplay } from "./product.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const MAX_ATTEMPTS = 3;
+/** An utterance the shipped display can serve: a plain question, a card, or a window verb, with nothing playing. */
+export const shippedCase = (c) => !c.state?.playing && [].concat(c.expect || []).every((w) => w.tool === "crow_show" || (w.tool === "crow_wm" && WM_VERBS.includes(w.do)));
 
 /** Read-only: does this server list the model? → { ok, engine } | { ok: false, reason } */
 export async function preflight({ baseUrl, model, fetchImpl = fetch }) {
@@ -98,13 +103,14 @@ async function main() {
   const label = arg.label || cfg.model;
   const done = new Set();
   if (arg.resume && existsSync(arg.out)) for (const l of readFileSync(arg.out, "utf8").split("\n").filter(Boolean)) { const r = JSON.parse(l); if (r.key) done.add(r.key); }
-  else writeFileSync(arg.out, `${JSON.stringify({ header: true, label, model: cfg.model, engine: pf.engine, at: new Date().toISOString(), trials: Number(arg.trials || 3), cases: CASES.length, held_out: HELD_OUT.length })}\n`);
+  else writeFileSync(arg.out, `${JSON.stringify({ header: true, label, model: cfg.model, engine: pf.engine, at: new Date().toISOString(), trials: Number(arg.trials || 3), cases: CASES.length, held_out: HELD_OUT.length, shipped: arg.shipped === "1" })}\n`);
   const chat = createOpenAIAdapter({ baseUrl: cfg.baseUrl, model: cfg.model });
   // The product's own forcing rule, asked of this server.
   const forcing = createToolForcing({ resolveKey: async () => ({ baseUrl: cfg.baseUrl, model: cfg.model, apiKey: "none" }), log: (m) => console.error(m) });
-  const make = (o) => createProductDisplay({ ...o, chat, forcing: () => forcing("eval/model", null), ctxLen: Number(arg.ctx || 8192) });
+  const shipped = arg.shipped === "1";
+  const make = (o) => createProductDisplay({ ...o, chat, forcing: () => forcing("eval/model", null), ctxLen: Number(arg.ctx || 8192), shipped });
   const res = await runAll({
-    sets: [["main", CASES], ["held", HELD_OUT]], trials: Math.max(1, Number(arg.trials || 3)), make,
+    sets: shipped ? [["main", CASES.filter(shippedCase)], ["held", HELD_OUT.filter(shippedCase)]] : [["main", CASES], ["held", HELD_OUT]], trials: Math.max(1, Number(arg.trials || 3)), make,
     check: () => preflight(cfg), write: (row) => appendFileSync(arg.out, `${JSON.stringify(row)}\n`), done,
     pauseMs: Number(arg["pause-ms"] || 250), log: (m) => console.error(m),
   });

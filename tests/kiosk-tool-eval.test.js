@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 import { CASES, FIXTURE, judge, matches, sampleCalls, make } from "../scripts/kiosk-eval/cases.mjs";
 import { HELD_OUT } from "../scripts/kiosk-eval/held-out.mjs";
 import { createProductDisplay, singleToolDefinition, toSingle, fromSingle, PERSONA, HISTORY } from "../scripts/kiosk-eval/product.mjs";
-import { preflight, runTurn, runAll, MAX_ATTEMPTS } from "../scripts/kiosk-eval/run.mjs";
-import { verdict, summarize, margin } from "../scripts/kiosk-eval/report.mjs";
+import { preflight, runTurn, runAll, MAX_ATTEMPTS, shippedCase } from "../scripts/kiosk-eval/run.mjs";
+import { verdict, summarize, paired, signTestP, SIGN_ALPHA, FLOORS } from "../scripts/kiosk-eval/report.mjs";
+import { displayTurnOptions } from "../bundles/kiosk/server/runtime.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, SHOW_KINDS } from "../bundles/kiosk/server/tools.js";
 
 /** A scripted model: plan(n, tools, opts) → [{ name, args }] to call, or a string to say. */
@@ -201,7 +202,7 @@ test("the runner never forces with required, talks only to the model server, and
   assert.ok(sent.every((u) => u.endsWith("/models")), "preflight only reads the model list");
 });
 
-test("verdict: decided on the pooled sampled trials with a margin, on both models, with the held-out set; an incomplete run has no verdict", () => {
+test("verdict: a paired sign test per model and set (stop only when four tools are worse beyond chance), an absolute floor per model, the held-out set; an incomplete run has no verdict", () => {
   const rows = ({ four, single, heldFour = 54, heldSingle = 54, trials = 3, forced = null, untruthful = 0, offered = 20 }) => {
     const out = [];
     for (let t = 0; t < trials; t += 1) for (let i = 0; i < 60; i += 1) for (const arm of ["four", "single"]) {
@@ -216,13 +217,25 @@ test("verdict: decided on the pooled sampled trials with a margin, on both model
     return out;
   };
   const rep = (label, o) => ({ label, engine: label === "quick" ? "vllm" : "llamacpp", rows: rows(o) });
-  assert.equal(margin(120), 2);
-  assert.equal(margin(80), 2);
-  assert.equal(margin(60), 1);
+  // The sign test itself.
+  assert.equal(signTestP(0, 0), 1);
+  assert.ok(Math.abs(signTestP(0, 3) - 0.125) < 1e-9, "three disagreeing pairs, all against four tools: p = 1/8");
+  assert.ok(signTestP(0, 12) < 0.001 && signTestP(5, 5) > 0.5);
+  const pr = paired(rows({ four: 100, single: 103 }), "main");
+  assert.deepEqual([pr.pairs, pr.better, pr.worse], [120, 0, 3]);
   const good = verdict([rep("quick", { four: 100, single: 101, forced: 200 }), rep("larger", { four: 110, single: 112 })]);
   assert.deepEqual([good.pass, good.complete, good.gates.filter((g) => !g.pass)], [true, true, []]);
-  assert.equal(verdict([rep("quick", { four: 100, single: 103, forced: 200 }), rep("larger", { four: 110, single: 110 })]).pass, false, "three worse than the control is outside the margin");
-  assert.equal(verdict([rep("quick", { four: 100, single: 100, forced: 200 }), rep("larger", { four: 110, single: 110, heldFour: 50, heldSingle: 52 })]).pass, false, "the held-out set decides too");
+  assert.match(good.gates.find((g) => /quick: four tools against one, the 40/.test(g.id)).detail, /difference -0\.8 points; of 120 pairs four was right alone on 0, wrong alone on 1/);
+  assert.equal(verdict([rep("quick", { four: 100, single: 103, forced: 200 }), rep("larger", { four: 110, single: 110 })]).pass, true, "three worse in 120 is within chance: not a stop");
+  const worse = verdict([rep("quick", { four: 100, single: 112, forced: 200 }), rep("larger", { four: 110, single: 110 })]);
+  assert.equal(worse.pass, false, "twelve worse and none better is beyond chance");
+  assert.match(worse.gates.find((g) => !g.pass).id, /quick: four tools against one, the 40/);
+  assert.equal(verdict([rep("quick", { four: 100, single: 100, forced: 200 }), rep("larger", { four: 110, single: 110, heldFour: 40, heldSingle: 54 })]).pass, false, "the held-out set decides too");
+  const floor = verdict([rep("quick", { four: 80, single: 80, forced: 200 }), rep("larger", { four: 110, single: 110 })]);
+  assert.equal(floor.pass, false, "equal arms, but under the quick model's floor");
+  assert.deepEqual(floor.gates.filter((g) => !g.pass).map((g) => g.id), [`quick: the four-tool arm is right on at least ${FLOORS.quick} of the 40`]);
+  assert.equal(verdict([rep("quick", { four: 100, single: 100, forced: 200 }), rep("larger", { four: 90, single: 90 })]).pass, false, `the larger model has its own floor (${FLOORS.larger})`);
+  assert.equal(SIGN_ALPHA, 0.025);
   assert.equal(verdict([rep("quick", { four: 100, single: 100, forced: 200, offered: 16 }), rep("larger", { four: 110, single: 110, offered: 16 })]).pass, false, "the product must offer the right tool on 17 of the 20 held out");
   const lie = verdict([rep("quick", { four: 100, single: 100, forced: 200, untruthful: 1 }), rep("larger", { four: 110, single: 110 })]);
   assert.equal(lie.pass, false);
@@ -233,5 +246,41 @@ test("verdict: decided on the pooled sampled trials with a margin, on both model
   assert.match(one.missing.join(" "), /larger model did not run/);
   const noHeld = verdict([{ label: "quick", rows: rows({ four: 100, single: 100, forced: 200 }).filter((r) => r.set === "main") }, rep("larger", { four: 110, single: 110 })]);
   assert.equal(noHeld.complete, false, "no verdict until the held-out set has been written and run");
-  assert.deepEqual(verdict([rep("quick", { four: 80, single: 80, forced: 200 }), rep("larger", { four: 110, single: 110 })]).flags, ["quick: four-tool 80/120 is under 0.75"]);
+  const withShipped = verdict([rep("quick", { four: 100, single: 100, forced: 200 }), rep("larger", { four: 110, single: 110 }), { label: "shipped", rows: rows({ four: 10, single: 100 }) }]);
+  assert.equal(withShipped.pass, true, "the shipped leg is reported, never gated");
+});
+
+// ── WM1a revision 3 ──────────────────────────────────────────────────────────────────────────────
+test("an empty answer or one cut at the token limit is a FAILED request, retried like one — never scored as a wrong answer", async () => {
+  const c = CASES.find((x) => x.id === "c19");
+  for (const bad of [
+    { async *chatStream() { yield { type: "done", usage: { output_tokens: 0 } }; } },
+    { async *chatStream(m, t, opts) { yield { type: "content_delta", text: "Sure, here is a very long" }; yield { type: "done", usage: { output_tokens: opts.maxTokens } }; } },
+  ]) {
+    const row = await runTurn(c, "four", (o) => createProductDisplay({ ...o, chat: bad, forcing: NOTHING }));
+    assert.ok(row.errors.length > 0 && /empty completion|token limit/.test(row.errors[0]), JSON.stringify(row.errors));
+    const rows = [];
+    const res = await runAll({ sets: [["main", [c]]], trials: 1, make: (o) => createProductDisplay({ ...o, chat: bad, forcing: NOTHING }), check: async () => ({ ok: true }), write: (r) => rows.push(r), pause: async () => {} });
+    assert.match(res.aborted, new RegExp(`failed ${MAX_ATTEMPTS} times`));
+    assert.equal(rows.length, 0);
+  }
+});
+
+test("one set of turn options: the evaluation runs the runtime's own displayTurnOptions, and the shipped leg sees the shipped surface", async () => {
+  const src = readFileSync(new URL("../scripts/kiosk-eval/product.mjs", import.meta.url), "utf8");
+  assert.match(src, /displayTurnOptions\(ctx,/);
+  assert.doesNotMatch(src, /displayPromptSuffix|matchClockFastPath|kioskNowContext/, "nothing the runtime builds is rebuilt by hand");
+  const d = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING });
+  assert.match(d.options.promptSuffix, /see, time, follow, open or play something/, "the fixture display has every tool");
+  const ship = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING, shipped: true });
+  assert.match(ship.options.promptSuffix, /see, time or follow something;/);
+  assert.deepEqual(ship.options.extraTools.map((t) => t.definition.name), ["crow_show", "crow_wm"]);
+  const shippedIds = CASES.filter(shippedCase).map((c) => c.id);
+  assert.deepEqual(shippedIds, ["c17", "c18", "c19", "c20", "c21", "c22", "c23", "c24", "c25", "c26", "c27", "c28", "c29", "c30", "c32", "c35", "c37", "c38", "c40"]);
+  for (const c of CASES.filter(shippedCase)) {
+    const row = await runTurn(c, "four", (o) => createProductDisplay({ ...o, chat: perfect(c, "four"), forcing: NOTHING, shipped: true }));
+    assert.equal(row.ok, true, `${c.id} can be completed on the shipped surface`);
+  }
+  const same = displayTurnOptions({ store: d.store, deviceId: "x", caps: FIXTURE.caps, lang: "en", sources: [], items: [], emit: () => {} }, { settings: { lang: "en" } });
+  assert.equal(same.promptSuffix, ship.options.promptSuffix, "the same function, the same text");
 });
