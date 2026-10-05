@@ -1304,7 +1304,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
