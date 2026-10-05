@@ -1422,3 +1422,61 @@ test("fast path: a tier is recorded; a path with nothing to say plays nothing an
   assert.deepEqual(h.events.map((e) => e.type), ["transcript_final", "media"]);
   assert.deepEqual(h.runner.convo.get(h.device.id), []);
 });
+// ── WM1a: forcing per engine ──────────────────────────────────────────────────────────────────
+test("forcing: an engine that honours nothing gets no tool_choice at all, and the backstop still ends the turn truthfully", async () => {
+  const h = harness({ chatTools: [], rounds: [says("I've put it on the screen. "), says("It's there. ")] });
+  h.deps.toolForcing = async () => ({ named: false, required: false, engine: "llamacpp" });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  assert.deepEqual(choices(h), [null, null], "neither a named choice nor required was sent");
+  assert.equal(r.timings.tool_choice, "none");
+  assert.equal(r.failed, "display_missed");
+});
+
+test("forcing: an engine that honours named but not required steps straight from named to none on a 400", async () => {
+  const h = harness({ chatTools: [], rounds: [] });
+  let n = 0;
+  h.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) { n++; h.log.push({ opts, tools: tools.map((t) => t.name) }); if (opts.toolChoice) throw Object.assign(new Error("bad"), { code: "provider_error", status: 400 }); yield { type: "tool_call", id: "s", name: "crow_show", arguments: {} }; yield { type: "done" }; } });
+  h.deps.toolForcing = async () => ({ named: true, required: false, engine: "configured" });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  assert.deepEqual(choices(h), [{ name: "crow_show" }, null], "required was never tried");
+});
+
+test("forcing: with no toolForcing dependency the turn behaves as 0.1.8 (named, then required, then none)", async () => {
+  const h = harness({ chatTools: [], rounds: [] });
+  h.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) { h.log.push({ opts, tools: tools.map((t) => t.name) }); if (opts.toolChoice) throw Object.assign(new Error("bad"), { code: "provider_error", status: 422 }); yield { type: "tool_call", id: "s", name: "crow_show", arguments: {} }; yield { type: "done" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  assert.deepEqual(choices(h), [{ name: "crow_show" }, "required", null]);
+});
+
+test("forcing: an engine nobody recognises gets a named choice (as before this module) and is never sent required", async () => {
+  const h = harness({ chatTools: [], rounds: [] });
+  h.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) { h.log.push({ opts, tools: tools.map((t) => t.name) }); if (opts.toolChoice) throw Object.assign(new Error("bad"), { code: "provider_error", status: 400 }); yield { type: "tool_call", id: "s", name: "crow_show", arguments: {} }; yield { type: "done" }; } });
+  h.deps.toolForcing = async () => ({ named: true, required: false, engine: "unknown" });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  assert.deepEqual(choices(h), [{ name: "crow_show" }, null]);
+  assert.ok(!choices(h).includes("required"));
+  assert.equal(r.timings.tool_choice, "none");
+});
+
+test("forcing: a toolForcing that throws is treated as unknown (named only)", async () => {
+  const h = harness({ chatTools: [], rounds: [[{ type: "tool_call", id: "s", name: "crow_show", arguments: {} }, { type: "done" }], says("Done. ")] });
+  h.deps.toolForcing = async () => { throw new Error("boom"); };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  assert.deepEqual(choices(h)[0], { name: "crow_show" });
+  assert.equal(r.timings.tool_choice, "named");
+});
+
+test("forcing: a step-down learned from a refused request is forgotten after ten minutes", async () => {
+  const h = harness({ chatTools: [], rounds: [] });
+  let refuse = true;
+  h.deps.createChatAdapter = async () => ({ async *chatStream(messages, tools, opts) { h.log.push({ opts, tools: tools.map((t) => t.name) }); if (opts.toolChoice && refuse) throw Object.assign(new Error("bad"), { code: "provider_error", status: 400 }); yield { type: "tool_call", id: "s", name: "crow_show", arguments: {} }; yield { type: "done" }; } });
+  h.deps.toolForcing = async () => ({ named: true, required: false, engine: "unknown" });
+  const turn = () => h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Show me a list of three fruits.", sink: h.sink, extraTools: [showTool()] });
+  await turn();
+  refuse = false;
+  h.log.length = 0; await turn();
+  assert.equal(choices(h)[0], null, "inside ten minutes the learned step-down stands");
+  h.c.advance(10 * 60 * 1000 + 1);
+  h.log.length = 0; await turn();
+  assert.deepEqual(choices(h)[0], { name: "crow_show" }, "after it the engine's own answer is tried again");
+});

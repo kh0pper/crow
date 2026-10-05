@@ -38,6 +38,11 @@ export const DISPLAY_MISSED_TEXT = "Sorry, I couldn't put that on the screen.";
 const MUST_RUN_NOTE = "Nothing has been done yet: the required tool has not run successfully in this turn. Call it now with the real content, or say plainly that you could not.";
 const outcomeCode = (v, fallback) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(v) ? v : fallback);
 const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || "_";
+// Without deps.toolForcing (tests, other callers) the 0.1.8 behaviour stands: named, then required, then none.
+const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "legacy" });
+const WEAKER = { named: 2, required: 1, none: 0 };
+// A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
+const LEARNED_TTL_MS = 10 * 60 * 1000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
 /**
@@ -74,7 +79,7 @@ export function createVoiceTurnRunner(deps) {
   // refused/looping crow_discover escalated the next three plain questions).
   const routeNeutral = new WeakSet();
   const fitLogged = new Set();
-  // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none").
+  // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none"), with when it was learned.
   const toolChoiceMode = new Map();
 
   /** The tool list a turn advertises (also what the bind-time fit check counts). */
@@ -545,6 +550,10 @@ export function createVoiceTurnRunner(deps) {
       // On a must-run turn the first (and the corrective) round offers only the must-run tool, so a
       // forced call can be used where the engine honours one — unless another tool family is on
       // offer this turn (the model may need to fetch before it shows).
+      // Which forced-call forms this model's engine honours (never "required" where it is not known to).
+      let forcing = LEGACY_FORCING;
+      if (mustX && typeof deps.toolForcing === "function") { try { forcing = (await deps.toolForcing(modelKey, db)) || LEGACY_FORCING; } catch { forcing = { named: true, required: false, engine: "unknown" }; } }
+      const firstMode = forcing.named ? "named" : forcing.required ? "required" : "none";
       const narrow = !!mustX && (typeof mustX.narrow !== "function" || mustX.narrow(transcript) !== false)
         && (mustX.mustRoute === "fast" || tools.every((t) => extraByName.has(t.name)));
       // On a turn whose words ask a display tool for something (holdText), a round's text is DEFERRED:
@@ -590,7 +599,9 @@ export function createVoiceTurnRunner(deps) {
         // tool_choice requires the must-run tool while it is the ONLY tool offered (with others the
         // model may need to fetch first; the backstop below still applies). Backends differ: a vLLM
         // server honours a named choice; the llama.cpp builds in use accept and ignore it.
-        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (toolChoiceMode.get(modelKey) || "named") : "none";
+        const seen = toolChoiceMode.get(modelKey);
+        const learned = seen && now() - seen.at < LEARNED_TTL_MS ? seen.mode : null;
+        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (learned && WEAKER[learned] < WEAKER[firstMode] ? learned : firstMode) : "none";
         let steppedDown = false;
         for (;;) {
           const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
@@ -622,7 +633,7 @@ export function createVoiceTurnRunner(deps) {
             // step down and send the same round again. The step is remembered for this model only
             // once the weaker request goes through — that is what shows tool_choice was the cause.
             if (toolChoice && !started && !aborted() && err?.code === "provider_error" && (err.status === 400 || err.status === 422)) {
-              const next = choiceMode === "named" ? "required" : "none";
+              const next = choiceMode === "named" && forcing.required ? "required" : "none";
               log(`[voice-turn] ${device.id} ${modelKey} refused a request with tool_choice ${choiceMode} (HTTP ${err.status}); trying ${next}`);
               choiceMode = next;
               steppedDown = true;
@@ -631,7 +642,7 @@ export function createVoiceTurnRunner(deps) {
             }
             throw err;
           }
-          if (steppedDown) toolChoiceMode.set(modelKey, choiceMode);
+          if (steppedDown) toolChoiceMode.set(modelKey, { mode: choiceMode, at: now() });
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
@@ -866,6 +877,7 @@ export async function defaultVoiceDeps() {
   const router = await import("../routes/llm-router.js");
   const orch = await import("../gpu-orchestrator.js");
   const { TOOL_MANIFESTS } = await import("../tool-manifests.js");
+  const { createToolForcing } = await import("./tool-forcing.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
   const byId = (list, id) => list.find((p) => p.id === id) || null;
   return {
@@ -887,6 +899,17 @@ export async function defaultVoiceDeps() {
       return (await provider.createAdapterFromProfile({ provider_id, model_id }, null, db)).adapter;
     },
     resolveKey: router.resolveVoiceKey,
+    toolForcing: createToolForcing({
+      resolveKey: router.resolveVoiceKey,
+      modelEntry: async (key, db) => {
+        try {
+          const i = String(key).indexOf("/");
+          const row = (await db.execute({ sql: "SELECT models FROM providers WHERE id = ?", args: [i >= 0 ? key.slice(0, i) : key] })).rows[0];
+          return JSON.parse(row?.models || "[]").find((x) => x && (x.id === key.slice(i + 1) || i < 0)) || null;
+        } catch { return null; }
+      },
+      log: (m) => console.warn(m),
+    }),
     probeReady: router.probeVoiceReady,
     acquire: (providerId) => orch.maybeAcquireLocalProvider(providerId, { requester: "kiosk" }),
     chooseVoiceRoute: router.chooseVoiceRoute,
