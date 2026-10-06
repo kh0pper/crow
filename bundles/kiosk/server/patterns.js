@@ -354,6 +354,8 @@ function windowVerbHere(w, core) {
 export function windowIntent(transcript) {
   const w = plain(transcript);
   if (!w) return false;
+  // "Teach me to …" is never about the windows (revision 7, R7-1).
+  if (teachTo(transcript)) return false;
   const core = stripPolite(w);
   if (hasAnyRun(w, STEP_QUESTIONS)) return true;
   // The question check comes first: "is the timer done?" is a question, not a request to close it.

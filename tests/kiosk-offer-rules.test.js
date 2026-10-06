@@ -411,3 +411,19 @@ test("rev 7 INVARIANT in code: for every tool and every sentence, must(t) implie
     for (const x of Object.values(t.by)) if (typeof x.must === "function" && x.must(say)) assert.equal(x.when(say), true, `${x.definition.name}: ${say}`);
   }
 });
+
+test("R7-1: with a window open, 'teach me to …' never closes or steps it, and the window tool does not hold the answer", async () => {
+  const cases = [[W_RECIPE, "Enséñame a doblar la masa, porfa."], [W_TIMER, "¿Me enseñas a usar el temporizador?"], [W_CARD, "Me enseñas a decir gracias en francés."],
+    [W_RECIPE, "¿Me enseñas a picar la cebolla sin llorar?"], [W_CARD, "Enséñame a escribir esta lista en inglés."], [W_TIMER, "Enséñanos a jugar al ajedrez."]];
+  for (const [w, say] of cases) {
+    assert.equal(windowIntent(say), false, say);
+    for (const args of [{ do: "close" }, { do: "close_all" }, { do: "next_step" }, { do: "previous_step" }]) {
+      const d = liveWm({ windows: [w] });
+      const before = snapshot(d.store);
+      await d.run(args, say);
+      assert.equal(snapshot(d.store), before, `${say} ${args.do}: unchanged`);
+    }
+  }
+  const t = liveEs(ES_ITEMS);
+  assert.equal(t.by.crow_wm.holdText("¿Me enseñas a usar el temporizador?"), false);
+});

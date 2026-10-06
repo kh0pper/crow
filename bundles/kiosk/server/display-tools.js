@@ -104,8 +104,8 @@ export function createDisplayTools(ctx) {
     },
     crow_wm: {
       when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn(),
-      holdText: wantsDisplay,
-      holdToEnd: toEnd(wantsDisplay),
+      holdText: (t) => wantsDisplay(t) && !teachTo(t),
+      holdToEnd: toEnd((t) => wantsDisplay(t) && !teachTo(t)),
       execute: (a, turn) => {
         // The K1 form — one `command` string — is still accepted (not advertised) and parsed by the K1 grammar,
         // except on a turn that has to end with a card: there a card put up through it would not count, and the
