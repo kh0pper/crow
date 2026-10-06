@@ -747,7 +747,7 @@ test("live test (wired): a kiosk turn offers crow_wm only when asked, carries th
   assert.match(call.promptSuffix, /\[Now\]/, "the model is told what the bracketed lines are");
   const fp = await call.fastPaths("What time is it?");
   assert.match(fp.say, /^It's \d{1,2}:\d\d [AP]M\.$/);
-  assert.match((await call.fastPaths("¿Qué día es hoy?")).say, /^Hoy es \w+, \d{1,2} de \w+ de \d{4}\.$/);
+  assert.match((await call.fastPaths("¿Qué día es hoy?")).say, /^Hoy es \p{L}+, \d{1,2} de \p{L}+ de \d{4}\.$/u, "Spanish day names carry accents (miércoles, sábado)");
   assert.equal(await call.fastPaths("Tell me a joke"), null);
   assert.equal(await call.fastPaths("What time is it in Lisbon?"), null);
   assert.equal(await call.fastPaths("cierra todo"), null, "nothing is open: the phrase does not fire");
@@ -828,7 +828,7 @@ test("turn check (wired): loopback and the announce token only; fixed sentences 
   const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: "household" }) });
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.equal(j.version, "0.2.0");
+  assert.equal(j.version, "0.2.1");
   assert.deepEqual(j.turns.map((t) => t.transcript), [TURN_CHECK.en[0], TURN_CHECK.en[1], TURN_CHECK.en[2], TURN_CHECK.en[2], TURN_CHECK.en[2]]);
   assert.deepEqual([j.ok, j.card_tries], [false, 3], "the stub never puts a card up: not ok, after three tries");
   const calls = turnCalls.slice(before);
@@ -845,6 +845,31 @@ test("turn check (wired): loopback and the announce token only; fixed sentences 
   assert.deepEqual(rt.wm.list(TURN_CHECK_DEVICE), [], "nothing is left behind");
   const bad = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
   assert.equal(bad.status, 400);
+});
+
+test("turn check speaks with a real display's voice, never the instance default (a default voice the gateway cannot run failed every line)", async () => {
+  await store.pairDevice(db(), { id: "kiosk-tc-a", name: "tc a", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-tc-a", { bound_bot_id: "tc-other", tts_profile_id: "voice-other" });
+  await store.pairDevice(db(), { id: "kiosk-tc-b", name: "tc b", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-tc-b", { bound_bot_id: "tc-bot", tts_profile_id: "voice-bound" });
+  try {
+    const call = async (bot) => {
+      const before = turnCalls.length;
+      const j = await (await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: bot }) })).json();
+      const voices = new Set(turnCalls.slice(before).map((c) => c.device.tts_profile_id));
+      assert.equal(voices.size, 1, "one voice for every line of the check");
+      assert.equal(j.tts_profile_id, [...voices][0], "and the response says which");
+      return j.tts_profile_id;
+    };
+    assert.equal(await call("tc-bot"), "voice-bound", "the voice of the display bound to this assistant");
+    const fallback = await call("tc-nobody");
+    assert.ok(fallback, "no display bound to it: a paired display's voice, not the default");
+    const paired = (await store.listDevices(db())).filter((d) => d.device_kind === "kiosk" && d.tts_profile_id).map((d) => d.tts_profile_id);
+    assert.ok(paired.includes(fallback));
+  } finally {
+    await store.unpairDevice(db(), "kiosk-tc-a");
+    await store.unpairDevice(db(), "kiosk-tc-b");
+  }
 });
 
 test("turn check: ok only when the clock took the no-model path, the plain question had no tools, and the card is really on the screen (a truthful could-not is NOT a pass)", async () => {

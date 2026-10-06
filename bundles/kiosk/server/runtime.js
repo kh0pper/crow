@@ -558,7 +558,11 @@ export function createKioskRuntime(deps) {
       const botId = String(req.body?.bot_id || "").slice(0, 80);
       if (!botId) return res.status(400).json({ error: "bot_id_required" });
       const lang = req.body?.lang === "es" ? "es" : "en";
-      const device = { id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: botId, kiosk_settings: { lang, memory_integration: false } };
+      // Speak with a voice a real display uses (a display bound to this assistant first, else any paired
+      // display), never the instance default: that one can be a voice the gateway cannot run at all.
+      const paired = (await withDb((db) => kioskDevices(db))).filter((d) => d.tts_profile_id);
+      const voiceFrom = paired.find((d) => d.bound_bot_id === botId) || paired[0];
+      const device = { id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: botId, tts_profile_id: voiceFrom?.tts_profile_id ?? null, kiosk_settings: { lang, memory_integration: false } };
       const caps = effectiveCaps(null, null);
       const out = [];
       const once = async (transcript) => {
@@ -579,7 +583,7 @@ export function createKioskRuntime(deps) {
         plain = await once(p);
         for (let i = 0; i < TURN_CHECK_CARD_TRIES && !show?.windows.includes("content"); i += 1) show = await once(s);
       } finally { wm.closeAll(device.id); deps.voice.convo?.save?.(device.id, []); }
-      res.json({ ok: clock.fast_path === true && plain.failed === null && plain.tools_offered === 0 && show.failed === null && show.windows.includes("content"), version: KIOSK_VERSION, card_tries: out.length - 2, turns: out });
+      res.json({ ok: clock.fast_path === true && plain.failed === null && plain.tools_offered === 0 && show.failed === null && show.windows.includes("content"), version: KIOSK_VERSION, card_tries: out.length - 2, tts_profile_id: device.tts_profile_id, turns: out });
     }));
     r.post("/api/kiosk/internal/show", json, wrap(async (req, res) => {
       const title = String(req.body?.title || "").trim().slice(0, 80);
