@@ -173,7 +173,7 @@ test("a plain question: one speech envelope, a voice the app can play, the assis
   assert.equal(rq.model, "quick-test");
   assert.match(rq.messages[0].content, /^You are a household assistant\./);
   assert.ok(rq.messages[0].content.includes(L.prompt_suffix));
-  assert.match(rq.messages.at(-1).content, /^\[Now\] .+\n\nWhat is the capital of Portugal\?$/);
+  assert.match(rq.messages.at(-1).content, /^\[Now\] .+\n\[Note\] [^\n]+\n\nWhat is the capital of Portugal\?$/);
   const offered = (rq.tools || []).map((t) => t.function?.name || t.name);
   for (const denied of [...GLASSES_DENY_TOOLS, LOOK_TOOL, "crow_memory"]) assert.ok(!offered.includes(denied), `${denied} is not offered on a plain question`);
   assert.ok(rq.max_tokens <= 600);

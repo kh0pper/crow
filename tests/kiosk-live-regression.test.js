@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVoiceTurnRunner } from "../servers/gateway/voice/turn.js";
+import { TURN_CONTEXT_NOTE } from "../servers/gateway/voice/context-echo.js";
 import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext } from "../bundles/kiosk/server/wm.js";
 import { kioskNowContext, matchClockFastPath } from "../bundles/kiosk/server/clock.js";
 import { KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS } from "../bundles/kiosk/server/runtime.js";
@@ -89,7 +90,7 @@ test("a clock question the fast path does not take reaches the model WITH the da
   await d.ask("How long until six o'clock?");
   assert.equal(d.requests.length, 1);
   assert.deepEqual(d.requests[0].tools, []);
-  assert.equal(d.requests[0].messages.at(-1).content, "[Now] Sunday, October 4, 2026, 3:42 PM (time zone America/Chicago)\n[Display] Open windows: none.\n\nHow long until six o'clock?");
+  assert.equal(d.requests[0].messages.at(-1).content, `[Now] Sunday, October 4, 2026, 3:42 PM (time zone America/Chicago)\n[Display] Open windows: none.\n${TURN_CONTEXT_NOTE}\n\nHow long until six o'clock?`);
   assert.doesNotMatch(d.requests[0].messages[0].content, /2026|3:42/, "never in the system message");
 });
 
@@ -131,4 +132,21 @@ test("the timer still works ('set a timer for one minute and label it check'), a
   assert.deepEqual(e.windows(), ["timer:Check"], "no echo card");
   assert.match(e.requests[1].messages.at(-1).content, /nobody asked to see anything/);
   assert.equal(d.requests.length, before);
+});
+
+test("live 2026-10-05, replayed: \"Okay.\" answered with the turn context read back — only the answer is spoken, captioned and kept", async () => {
+  // The display's real context for this clock, echoed the way the quick model did, in small stream pieces.
+  const ctx = "[Now] Sunday, October 4, 2026, 3:42 PM (time zone America/Chicago) [Display] Open windows: none. ";
+  const answer = "Got it. Is there anything specific you'd like me to help with?";
+  const reply = ctx + answer;
+  const d = display(function* () { for (let i = 0; i < reply.length; i += 5) yield text(reply.slice(i, i + 5)); });
+  const r = await d.ask("Okay.");
+  assert.equal(r.failed, null);
+  assert.equal(d.spoken.join(" "), answer);
+  assert.equal(d.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), answer);
+  assert.deepEqual(d.windows(), []);
+  const second = await d.ask("Thanks.");
+  assert.equal(second.failed, null);
+  const history = d.requests.at(-1).messages.filter((m) => m.role === "assistant").map((m) => m.content);
+  assert.ok(history.length >= 1 && history.every((c) => !/\[(Now|Display)\]/.test(c)), "the next turn's history carries no echo for the model to copy");
 });
