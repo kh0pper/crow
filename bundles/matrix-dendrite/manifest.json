@@ -1,7 +1,7 @@
 {
   "id": "matrix-dendrite",
   "name": "Matrix (Dendrite)",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
   "type": "bundle",
   "author": "Crow",

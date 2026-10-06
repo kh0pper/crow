@@ -63,7 +63,7 @@ export default {
       { id: "cases", label: "Case Studies", icon: "📄" },
     ];
 
-    const tabNav = `<div style="display:flex;gap:0;border-bottom:1px solid var(--crow-border);margin-bottom:1rem">
+    const tabNav = `<div style="display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--crow-border);margin-bottom:1rem">
       ${tabs.map(t => {
         const active = t.id === tab;
         return `<a href="/dashboard/data-dashboard?tab=${t.id}${backendId ? `&backend_id=${backendId}` : ""}"

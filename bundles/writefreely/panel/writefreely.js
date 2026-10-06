@@ -122,8 +122,9 @@ function styles() {
                      letter-spacing: 0.05em; margin: 0 0 0.7rem; }
     .wf-card { background: var(--crow-bg-elevated); border: 1px solid var(--crow-border);
                border-radius: 10px; padding: 1rem; }
-    .wf-row { display: flex; justify-content: space-between; padding: .25rem 0; font-size: .9rem; color: var(--crow-text-primary); }
+    .wf-row { display: flex; flex-wrap: wrap; column-gap: .75rem; justify-content: space-between; padding: .25rem 0; font-size: .9rem; color: var(--crow-text-primary); }
     .wf-row b { color: var(--crow-text-muted); font-weight: 500; min-width: 140px; }
+    .wf-row span { min-width: 0; overflow-wrap: anywhere; }
     .wf-coll-list { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .6rem; }
     .wf-coll-chip { display: flex; align-items: center; gap: .5rem; background: var(--crow-bg);
                     border: 1px solid var(--crow-border); border-radius: 6px; padding: .3rem .6rem;
