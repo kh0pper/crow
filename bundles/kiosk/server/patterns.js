@@ -412,6 +412,59 @@ export function compoundParts(transcript) {
   return parts.filter(Boolean);
 }
 
+// ── playback words over music (smoke 2026-10-06 F2) ─────────────────────────────────────────────────
+// While something plays on THIS display, a short request made of one playback word and filler acts with
+// no model: "louder louder", "much quieter", "skip it", "stop it already", "pause please". Anything else in
+// the sentence (a name, a question word, a negation, a verb) keeps it away from here: "don't stop", "skip
+// the small talk", "is it louder?" go to the model. Words STT writes for a short command over music
+// ("lauder", "paws") count only as the whole utterance.
+const TRANSPORT_KEYWORDS = Object.freeze({ louder: "volume_up", quieter: "volume_down", softer: "volume_down", pause: "pause", unpause: "resume", resume: "resume",
+  stop: "stop", skip: "next", next: "next", mute: "mute", unmute: "unmute", pausa: "pause", siguiente: "next", silencia: "mute", reanuda: "resume" });
+const TRANSPORT_ALONE = Object.freeze({ lauder: "volume_up", paws: "pause" });
+const TRANSPORT_FILLER = new Set(["it", "that", "this", "the", "music", "song", "track", "radio", "station", "a", "bit", "little", "lot", "much", "more", "way", "even", "still",
+  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora"]);
+export const TRANSPORT_MAX_WORDS = 6;
+/** → a playback verb ("volume_up", "pause", "next", …) or null. The caller acts on it only while something plays. */
+export function transportWords(transcript) {
+  const all = plain(transcript);
+  if (!all) return null;
+  const w = stripPolite(all);
+  if (!w.length || w.length > TRANSPORT_MAX_WORDS) return null;
+  if (w.length === 1 && Object.hasOwn(TRANSPORT_ALONE, w[0])) return TRANSPORT_ALONE[w[0]];
+  let verb = null;
+  for (const x of w) {
+    if (Object.hasOwn(TRANSPORT_KEYWORDS, x)) { if (verb && verb !== TRANSPORT_KEYWORDS[x]) return null; verb = TRANSPORT_KEYWORDS[x]; }
+    else if (!TRANSPORT_FILLER.has(x)) return null;
+  }
+  return verb;
+}
+// What asks the playback to change, more widely: the must-run test for crow_wm (F2b). A playback word or
+// phrase, never in a question, an information request or a statement ("the song was louder", "why did it stop?").
+const TRANSPORT_RUNS = runs(["turn it up", "turn it down", "turn up", "turn down", "turn the radio up", "turn the radio down", "turn the music up", "turn the music down",
+  "turn the volume up", "turn the volume down", "turn the sound up", "turn the sound down", "volume up", "volume down", "go back a song", "back a song", "next song", "next track",
+  "previous song", "previous track", "sube el volumen", "baja el volumen", "subes el volumen", "bajas el volumen", "sube la radio", "baja la radio", "sube la musica", "baja la musica", "subele", "bajale", "mas alto", "mas bajo", "otra cancion"]);
+const NEGATIONS = new Set(["dont", "do", "not", "never", "no", "nunca"]);
+const LEVEL_WORDS = new Set(["louder", "quieter", "softer", "mute", "unmute", "pause", "unpause", "resume", "pausa", "silencia", "reanuda"]);
+const MOVE_WORDS = new Set(["stop", "skip", "next", "siguiente"]);
+const TRANSPORT_OBJECTS = new Set(["it", "that", "this", "music", "song", "track", "radio", "station", "please", "now", "musica", "cancion"]);
+export function asksTransport(transcript) {
+  const w = plain(transcript);
+  if (!w || w.length > PLAY_MAX_WORDS || teachTo(transcript)) return false;
+  if (transportWords(transcript)) return true;
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p)) || hasAnyRun(w, INFO_RUNS)) return false;
+  if (hasAny(w, STATEMENT_VERBS) || hasAny(w, NEGATIONS)) return false;
+  if (hasAnyRun(w, TRANSPORT_RUNS) || w.some((x) => LEVEL_WORDS.has(x))) return true;
+  // "stop", "skip", "next" mean the playback only with nothing after them or the music as their object:
+  // "stop it", "skip this song"; never "stop being silly", "skip the small talk", "next week".
+  for (let i = 0; i < w.length; i += 1) {
+    if (!MOVE_WORDS.has(w[i])) continue;
+    const a = w[i + 1], b = w[i + 2];
+    if (a === undefined || TRANSPORT_OBJECTS.has(a) || ((a === "the" || a === "this" || a === "that") && TRANSPORT_OBJECTS.has(b || ""))) return true;
+  }
+  return false;
+}
+
 /** items: [{ id, title, aliases? }]. Exact name or alias, else a unique prefix. → { match } | { many } | null. */
 export function lookupItem(items, name) {
   const q = norm(name);
@@ -434,6 +487,8 @@ export const CHOICE_MAX_WORDS = 8;
  * nothing (the model gets the turn) otherwise.
  */
 export function matchT1(transcript, ctx) {
+  // F2: a playback word and filler, while something plays on this display.
+  if (ctx.media?.active?.(ctx.deviceId) === true) { const verb = transportWords(transcript); if (verb) return { verb }; }
   const o = parseOpen(transcript);
   if (o) {
     const hit = lookupItem(ctx.items || [], o.name);

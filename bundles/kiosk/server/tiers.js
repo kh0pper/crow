@@ -13,8 +13,8 @@ export async function matchSpoken(transcript, ctx) {
   if (compound(transcript)) return null;
   const strict = { ...ctx, strict: true };
   const t0 = matchT0(transcript);
-  if (t0) { const r = await executeIntent(t0, strict); if (r) return { say: r.say, events: r.events, tier: "t0" }; }
+  if (t0) { const r = await executeIntent(t0, strict); if (r) return { say: r.say, events: r.events, tier: "t0", verb: t0.verb }; }
   const t1 = matchT1(transcript, ctx);
-  if (t1) { const r = await executeIntent(t1, strict); if (r) return { say: r.say, events: r.events, tier: "t1" }; }
+  if (t1) { const r = await executeIntent(t1, strict); if (r) return { say: r.say, events: r.events, tier: "t1", verb: t1.verb }; }
   return null;
 }

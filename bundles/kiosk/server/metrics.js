@@ -12,6 +12,8 @@ export function sanitizeClientMetrics(m) {
     // End of speech to the moment the thing happened (a window changed, audio became audible). Fast-path turns are judged on it.
     effect_ms: clampMs(m?.effect_ms),
     source: m?.source === "wake" || m?.source === "tap" || m?.source === "follow_up" ? m.source : null,
+    // F6: opening the microphone at the tap (a phone releases it after every turn). Not part of e2e: it is before speech.
+    mic_open_ms: clampMs(m?.mic_open_ms),
   };
 }
 
@@ -44,7 +46,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

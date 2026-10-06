@@ -16,6 +16,7 @@ import { spokenWords } from "../phrases.js";
 import { isIP } from "node:net";
 import { publicHop, localHop, isPrivateAddress, isLocalStreamAddress, normAddress } from "../relay.js";
 import { SOURCE_CONTRACT } from "./index.js";
+import { soundKeys, bestDistance, consonants } from "./sound-key.js";
 
 export const STATIONS_SETTING = "kiosk_stations";
 export const MAX_STATIONS = 50;
@@ -100,6 +101,45 @@ export function parseStations(value) {
 /** A station's upstream and the relay's policy for it: public on every hop, or the local-stream policy when ticked. Never a credential. */
 export const stationUpstream = (s) => ({ url: s.url, hop: s.local === true ? localHop(s.url, s.addrs) : publicHop(s.url) });
 
+const SOUND_MEMO = new Map();
+/** A station key's sound keys, whole and by word prefix ("ktpf hd 2" → whole: KTPFJT2…, prefixes: KTPF, KTPFJT…). Memoised (bounded). */
+function soundsOf(key) {
+  let v = SOUND_MEMO.get(key);
+  if (v) return v;
+  const w = key.split(" ");
+  const pre = [];
+  for (let n = 1; n < w.length; n += 1) pre.push(...soundKeys(w.slice(0, n).join(" ")));
+  v = { whole: soundKeys(key), pre: [...new Set(pre)] };
+  if (SOUND_MEMO.size > 2000) SOUND_MEMO.clear();
+  SOUND_MEMO.set(key, v);
+  return v;
+}
+/**
+ * Stations by sound (F1). → [{ s, near }], at most 4:
+ *   one station whose name, alias or a word-start of one SOUNDS the same → [{ s, near: true }];
+ *   two to four that sound the same → all of them (the resolver asks "Which one?");
+ *   none the same, and the request named the radio ("… on the radio"): one a single sound away (four
+ *   consonant sounds or more said) → [{ s, near: false }]; two to four → all of them; anything else → [].
+ *   (Without the radio named, a single sound away is not offered: "Play Candy Puff" is not KTPF.)
+ * A name with fewer than three consonant sounds is never matched this way (too little to go on).
+ */
+export function soundSearch(stations, q, { explicit = false } = {}) {
+  const qs = soundKeys(q).filter((k) => consonants(k) >= 3);
+  if (!qs.length) return [];
+  const scored = stations.map((s) => {
+    const ks = [s.name, ...s.aliases].map(stationKey).filter(Boolean).map(soundsOf);
+    const whole = ks.flatMap((k) => k.whole), pre = ks.flatMap((k) => k.pre);
+    return { s, exact: bestDistance(qs, whole, 2), pre: bestDistance(qs, pre, 0) };
+  });
+  const pick = (list, near) => (list.length >= 1 && list.length <= 4 ? list.map((x) => ({ s: x.s, near: near && list.length === 1 })) : []);
+  const same = scored.filter((x) => x.exact === 0);
+  if (same.length) return pick(same, true);
+  const samePre = scored.filter((x) => x.pre === 0);
+  if (samePre.length) return pick(samePre, true);
+  if (!explicit || Math.max(...qs.map(consonants)) < 4) return [];
+  return pick(scored.filter((x) => x.exact === 1), false);
+}
+
 /** list(): Station[] — the instance's presets as they are now (the runtime keeps them in memory). */
 export function createStationsSource({ list }) {
   const all = () => { try { const l = list(); return Array.isArray(l) ? l : []; } catch { return []; } };
@@ -128,7 +168,11 @@ export function createStationsSource({ list }) {
       if (exact.length > 1) return exact.slice(0, 4).map((s) => cand(s, false));
       const pre = prefixOf(stations, q);
       if (pre.length === 1) return [cand(pre[0], explicit === true)];
-      return pre.length <= 4 ? pre.map((s) => cand(s, false)) : [];
+      if (pre.length) return pre.length <= 4 ? pre.map((s) => cand(s, false)) : [];
+      // Nothing by its written form: how it SOUNDS (smoke 2026-10-06 F1). Never confident by itself:
+      // a lone same-sound hit is `near` (the resolver may play it with no model only when no source has
+      // anything else); two stations that sound alike are offered, never guessed between.
+      return soundSearch(stations, q, { explicit }).map(({ s, near }) => ({ ...cand(s, false), ...(near ? { near: true } : {}) }));
     },
     resolve: (c) => playable(find(c)),
     queue: (c) => [playable(find(c))],
@@ -141,9 +185,24 @@ export function createStationsSource({ list }) {
       let hit = exactOf(stations, q);
       if (!hit.length) hit = prefixOf(stations, q);
       if (!hit.length) hit = stations.filter((s) => keys(s).some((k) => k.endsWith(` ${q}`)));
+      // By sound, among the offered ones only, and only a same-sound hit ("KDBF two" for "KTPF HD2").
+      if (!hit.length) hit = soundSearch(stations, q).filter((x) => x.near).map((x) => x.s);
       return hit.length === 1 ? offered.find((c) => c.id === hit[0].id) || null : null;
     },
   };
+}
+
+/**
+ * The STT prompt bias for a display (F1): the station names and their aliases, as written by the
+ * operator, comma separated, each once. The voice turn bounds it (turn.js sttPromptText).
+ */
+export function stationNamesHint(stations) {
+  const seen = new Set(), out = [];
+  for (const s of Array.isArray(stations) ? stations : []) for (const n of [s?.name, ...(Array.isArray(s?.aliases) ? s.aliases : [])]) {
+    const t = text(n, 60);
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+  }
+  return out.join(", ");
 }
 
 /** The panel's "Test": does this address answer with an audio stream? relay: createRelay() (it reads the response headers only). */

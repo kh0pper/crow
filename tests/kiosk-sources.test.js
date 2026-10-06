@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { SOURCE_CONTRACT, SourceUnavailable, sourceProblem, createSourceRegistry } from "../bundles/kiosk/server/sources/index.js";
-import { stationKey, normalizeStations, parseStations, createStationsSource, probeStation, stationUpstream, STATIONS_SETTING, MAX_STATIONS } from "../bundles/kiosk/server/sources/stations.js";
+import { stationKey, normalizeStations, parseStations, createStationsSource, probeStation, stationUpstream, stationNamesHint, soundSearch, STATIONS_SETTING, MAX_STATIONS } from "../bundles/kiosk/server/sources/stations.js";
+import { soundKeys, wordSound, letterSound } from "../bundles/kiosk/server/sources/sound-key.js";
 import { createRelay, addressClassifier, publicHop, readHostNetwork } from "../bundles/kiosk/server/relay.js";
 import { isSyncable } from "../servers/gateway/dashboard/settings/sync-allowlist.js";
 
@@ -164,4 +165,47 @@ test("probeStation: an audio stream is ok with its type; a playlist, a web page,
   assert.deepEqual(await probeStation({ url: `http://127.0.0.1:${up.address().port}/live` }, relay), { ok: false, error: "private_address" });
   assert.deepEqual(await probeStation({ url: "https://nowhere.example.invalid/live" }, relay), { ok: false, error: "unreachable" });
   for (const url of ["", "nope", "ftp://stream.example.invalid/x", "https://user:pw@stream.example.invalid/x", "javascript:alert(1)", null]) assert.deepEqual(await probeStation({ url }, relay), { ok: false, error: "bad_url" }, String(url));
+});
+
+// Smoke 2026-10-06 F1: STT writes a call sign by its sounds (other letters of the same class, a word that
+// sounds like the first letters, letter names spelled out, letters with hyphens). The same shapes here on a
+// made-up call sign, KTPF.
+const CALL = normalizeStations([
+  { name: "KTPF HD1", aliases: ["KTPF"], url: "https://stream.example.invalid/1" },
+  { name: "KTPF HD2", aliases: [], url: "https://stream.example.invalid/2" },
+  { name: "KTPF HD3", aliases: ["Classic Country"], url: "https://stream.example.invalid/3" },
+]);
+const callIds = (what, opts) => createStationsSource({ list: () => CALL }).search(what, opts).map((c) => `${c.id}${c.confident ? "!" : c.near ? "~" : "?"}`);
+
+test("F1 by sound: the forms STT writes for a call sign find the one station that sounds the same — never confident, `near`", () => {
+  assert.equal(wordSound("cadypef"), "KTPF");
+  assert.equal(letterSound("kdbf"), "KTPF");
+  assert.notEqual(letterSound("wx"), letterSound("wxyz"), "a spoken vowel letter is a syllable: 'w x' is not 'w x y z'");
+  assert.ok(soundKeys("ktpf hd 2").includes("KTPFJT2"));
+  for (const said of ["KDBF", "KDPV", "Cady PF", "Catie PF", "kay tee pee eff", "K-T-P-V"]) assert.deepEqual(callIds(said), ["st_ktpf_hd1~"], said);
+  for (const said of ["K-T-P-V-H-D-2", "CADPV HD 2", "Cadyp V.H.D.2"]) assert.deepEqual(callIds(said), ["st_ktpf_hd2~"], said);
+  // A written match still wins, and is confident as before.
+  assert.deepEqual(callIds("KTPF"), ["st_ktpf_hd1!"]);
+});
+
+test("F1 by sound, never a guess between two: same-sound stations are all offered; one sound off only when the radio was named; short or unrelated words never", () => {
+  const twins = normalizeStations([
+    { name: "KTPF", url: "https://stream.example.invalid/a" },
+    { name: "KDBV", url: "https://stream.example.invalid/b" },
+    { name: "KTPK", url: "https://stream.example.invalid/c" },
+  ]);
+  const t = (what, opts) => createStationsSource({ list: () => twins }).search(what, opts).map((c) => `${c.id}${c.confident ? "!" : c.near ? "~" : "?"}`);
+  assert.deepEqual(t("KDPF"), ["st_ktpf?", "st_kdbv?"], "two stations that sound the same: offered, neither `near`");
+  // One sound away: not offered in an auto search ("Play Candy Puff" is not KTPF) …
+  for (const said of ["candy puff", "BTPF", "KTBJT2"]) assert.deepEqual(callIds(said), [], said);
+  // … offered when the request named the radio.
+  assert.deepEqual(callIds("BTPF", { explicit: true }), ["st_ktpf_hd1?"]);
+  assert.deepEqual(soundSearch(twins, stationKey("TPF"), { explicit: true }), [], "three consonant sounds is too little to be one sound off");
+  for (const miss of ["jazz", "classic rock", "play some music", "the", "wx", "to"]) assert.deepEqual(callIds(miss), [], miss);
+});
+
+test("F1: the STT prompt bias is the station names and aliases as written, each once", () => {
+  assert.equal(stationNamesHint(CALL), "KTPF HD1, KTPF, KTPF HD2, KTPF HD3, Classic Country");
+  assert.equal(stationNamesHint([]), "");
+  assert.equal(stationNamesHint(null), "");
 });

@@ -282,9 +282,32 @@ test("panel media settings: loudest volume (10-100 %) and pause-while-listening 
   assert.equal(pml.checked, false);
   p.choose(mv, "40");
   pml.checked = true;
+  pml.dispatchEvent(new p.window.Event("change"));
   p.save.dispatchEvent(new p.window.Event("click"));
   await p.flush();
   assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, max_volume: 40, pause_media_on_listen: true } });
+});
+
+test("smoke F3: pause-while-listening shows ON for a phone or tablet with nothing stored, and the default is never written; ticking it off stores false; the box follows the type chosen until it is touched", async () => {
+  const label = (p) => [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");
+  let p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone" } });
+  assert.equal(label(p).checked, true, "a phone: on by default");
+  p.choose(p.card.querySelectorAll("select")[6], "40");
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(Object.hasOwn(p.posts[0].body.kiosk_settings, "pause_media_on_listen"), false, "the default is not written by another save");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "tablet" } });
+  const box = label(p);
+  box.checked = false; box.dispatchEvent(new p.window.Event("change"));
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(p.posts[0].body.kiosk_settings.pause_media_on_listen, false, "the operator's choice is stored");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "pi3" } });
+  assert.equal(label(p).checked, false, "a Pi: off by default");
+  p.choose(p.card.querySelectorAll("select")[4], "phone");
+  assert.equal(label(p).checked, true, "untouched, it follows the type chosen");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone", pause_media_on_listen: false } });
+  assert.equal(label(p).checked, false, "a stored choice wins over the default");
 });
 
 test("panel stations: rows render with textContent, Test posts only the address, Save posts the whole list and shows a refusal in words", async () => {

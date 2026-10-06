@@ -336,6 +336,47 @@ test("smoke 2026-10-04 lever 2: opts.sttModel(profile) picks the transcription m
   assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en", null, null]);
 });
 
+test("smoke 2026-10-06 F1: opts.sttPrompt reaches the STT as its prompt (turn and early transcription), bounded, never from a throwing or non-string source", async () => {
+  const { sttPromptText, STT_PROMPT_MAX } = await import("../servers/gateway/voice/turn.js");
+  const seen = [];
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (audio, o) => { seen.push(Object.hasOwn(o, "prompt") ? o.prompt : "(none)"); return { text: "hi" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => "WXYZ HD1, WXYZ HD2, Classic Country" });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => { throw new Error("boom"); } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => "" });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttPrompt: "WXYZ HD1" });
+  assert.deepEqual(seen, ["WXYZ HD1, WXYZ HD2, Classic Country", "(none)", "(none)", "(none)", "WXYZ HD1"]);
+  // Bounded at a comma, control characters gone, nothing but strings.
+  const long = Array.from({ length: 40 }, (_, i) => `Station number ${i}`).join(", ");
+  const cut = sttPromptText(long);
+  assert.ok(cut.length <= STT_PROMPT_MAX && cut.endsWith(String(cut.split(", ").length - 1)), cut);
+  assert.equal(sttPromptText("A\u0000B\nC"), "A B C");
+  for (const bad of [null, 42, {}, ["x"]]) assert.equal(sttPromptText(bad), "");
+});
+
+test("smoke 2026-10-06 F4: a no-model turn records the verb it acted on (a fixed word), never anything else from the path", async () => {
+  const h = harness();
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Pause.", sink: h.sink, fastPaths: async () => ({ say: "", events: [], tier: "t0", verb: "pause" }) });
+  assert.deepEqual([r.timings.tier, r.timings.verb], ["t0", "pause"]);
+  const odd = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "x", sink: h.sink, fastPaths: async () => ({ say: "", events: [], tier: "t1", verb: "Pause the music NOW" }) });
+  assert.equal(odd.timings.verb, undefined, "only a plain verb word is kept");
+});
+
+test("the faster-whisper adapter sends the prompt as the OpenAI `prompt` form field, and none when there is none", async () => {
+  const { default: createFasterWhisperAdapter } = await import("../servers/gateway/ai/stt/adapters/fasterwhisper.js");
+  const real = globalThis.fetch, forms = [];
+  globalThis.fetch = async (url, init) => { forms.push(init.body); return new Response(JSON.stringify({ text: "ok" }), { status: 200 }); };
+  try {
+    const a = createFasterWhisperAdapter({ baseUrl: "http://203.0.113.1:9/v1" });
+    await a.transcribe(Buffer.alloc(4), { prompt: "WXYZ HD1" });
+    await a.transcribe(Buffer.alloc(4), {});
+  } finally { globalThis.fetch = real; }
+  assert.equal(forms[0].get("prompt"), "WXYZ HD1");
+  assert.equal(forms[1].get("prompt"), null);
+});
+
 test("review I3: a confirmation refusal still counts as tool context — the 'yes' that follows keeps its route", async () => {
   const h = harness({ rounds: [[{ type: "tool_call", id: "c1", name: "crow_delete_post", arguments: { id: 7 } }, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [{ type: "content_delta", text: "Done." }, { type: "done" }]],
     chatTools: ["crow_delete_post"] });

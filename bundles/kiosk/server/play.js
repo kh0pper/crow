@@ -88,7 +88,9 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
         if (sure) { const list = await playables(s, sure, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(s, sure, list); } }
         loose.push(...found.filter((c) => c.confident !== true).map((c) => ({ c, s })));
       }
-      if (loose.length === 1 && !strict) { const list = await playables(loose[0].s, loose[0].c, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(loose[0].s, loose[0].c, list); } }
+      // A lone loose candidate plays for the model's call; with no model only when it is a same-sound
+      // station name and nothing else was found anywhere (F1: "Play KDBF" for the only KTPF).
+      if (loose.length === 1 && (!strict || loose[0].c.near === true)) { const list = await playables(loose[0].s, loose[0].c, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(loose[0].s, loose[0].c, list); } }
       if (loose.length >= 2 && loose.length <= 4) {
         const items = loose.slice(0, MAX_CHOICES);
         if (deviceId) asked.set(deviceId, { at: now(), items });
@@ -117,6 +119,38 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
     },
     forget: (deviceId) => { asked.delete(deviceId); },
   };
+}
+
+/**
+ * F8 (smoke 2026-10-06): when playback starts, a display with a screen opens its now-playing window by itself.
+ * Rules, in order:
+ *   - only a display that draws the window (caps.kinds has "nowplaying") and reports a screen (caps.screen.w > 0);
+ *     an audio-first display keeps the chip only;
+ *   - one window, reused: if it is open it is left where it is (never a second one, never pulled to the front);
+ *   - it never pushes another window out: with the display's windows full, it does not open (the chip is there);
+ *   - it never takes the front from a card the person just asked for: if the window in front is not a
+ *     now-playing window and was opened or touched in the last NOWPLAYING_DEFER_MS, or is a timer that has
+ *     gone off, the now-playing window opens just BEHIND it (its tab is in the rail).
+ * → wm events for the page ([] when nothing changes).
+ */
+export const NOWPLAYING_DEFER_MS = 60_000;
+export function autoNowPlaying({ store, deviceId, caps, title, now }) {
+  if (!Array.isArray(caps?.kinds) || !caps.kinds.includes("nowplaying") || !(Number(caps?.screen?.w) > 0)) return [];
+  const open = store.list(deviceId);
+  if (open.some((w) => w.kind === "nowplaying")) return [];
+  if (open.length >= Math.max(1, Number(caps.max_windows) || 4)) return [];
+  const front = open.at(-1);
+  const behind = !!front && ((front.kind === "timer" && front.done) || now - (front.touched_at ?? front.opened_at ?? 0) < NOWPLAYING_DEFER_MS);
+  const { window, evicted } = store.put(deviceId, { kind: "nowplaying", title }, { behind });
+  return [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window, ...(behind ? { behind: true } : {}) }];
+}
+/** The chip was tapped (F8): bring the now-playing window to the front, opening it if needed. → wm events, or null when this display cannot draw it. */
+export function showNowPlaying({ store, deviceId, caps, title }) {
+  if (!Array.isArray(caps?.kinds) || !caps.kinds.includes("nowplaying")) return null;
+  const w = store.list(deviceId).find((x) => x.kind === "nowplaying");
+  if (w) { store.focus(deviceId, w.id); return [{ type: "wm", action: "focus", id: w.id }]; }
+  const { window, evicted } = store.put(deviceId, { kind: "nowplaying", title });
+  return [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window }];
 }
 
 /** media: the media store; resolver: createPlayResolver(); maxVolume(ctx) → this display's cap. */

@@ -5,7 +5,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createMediaView, createDucker, DUCK_FACTOR, START_MS, STALL_MS, RESTORE_DELAY_MS, RESTORE_MS } from "../bundles/kiosk/public/media-view.js";
+import { createMediaView, createDucker, DUCK_FACTOR, START_MS, STALL_MS, RESTORE_DELAY_MS, RESTORE_MS, OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
+import { createMediaStore } from "../bundles/kiosk/server/media.js";
+import { createTicketStore } from "../bundles/kiosk/server/tickets.js";
 
 function timers() {
   let t = 0, seq = 0;
@@ -48,15 +50,16 @@ function fakeAudio() {
 }
 function fakeChip() {
   const ls = [];
-  return { hidden: true, textContent: "", attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, addEventListener: (ev, fn) => ls.push(fn), click() { for (const fn of ls) fn(); } };
+  return { hidden: true, textContent: "", attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; }, addEventListener: (ev, fn) => ls.push(fn), click() { for (const fn of ls) fn(); } };
 }
 const flush = () => new Promise((r) => setImmediate(r));
 function setup() {
   const audio = fakeAudio(), chip = fakeChip(), sent = [], states = [], tm = timers();
-  const view = createMediaView({ audio, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer, onState: (id, s) => states.push(`${id}:${s}`) });
+  let taps = 0;
+  const view = createMediaView({ audio, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer, onState: (id, s) => states.push(`${id}:${s}`), onChipTap: () => { taps += 1; } });
   const load = (id, extra = {}) => view.apply({ type: "media", action: "load", id, form: "audio", url: `/display/t/${id.padEnd(22, "x")}/stream`, title: `Title ${id}`, source: "music", volume: 50, muted: false, ...extra });
   const events = () => sent.filter((m) => m.type === "media_event").map((m) => `${m.id}:${m.state}${m.code ? ":" + m.code : ""}`);
-  return { audio, chip, sent, states, tm, view, load, events };
+  return { audio, chip, sent, states, tm, view, load, events, chipTaps: () => taps };
 }
 
 test("skip while buffering: each new item aborts the last play() — no failure is reported, only the last item plays", async () => {
@@ -102,8 +105,11 @@ test("blocked autoplay: NotAllowedError reports `blocked` once; the chip shows �
   assert.deepEqual(s.sent.at(-1), { type: "media_cmd", do: "resume" });
   s.audio.fire("playing");
   assert.equal(s.chip.textContent, "⏸ Title m1");
+  // F8 (revision 6): once it plays, a tap on the chip opens the now-playing window (the controls are there).
+  const n = s.sent.length, taps = s.chipTaps();
   s.chip.click();
-  assert.deepEqual(s.sent.at(-1), { type: "media_cmd", do: "pause" });
+  assert.equal(s.chipTaps(), taps + 1);
+  assert.equal(s.sent.length, n, "no pause is sent by the chip any more");
 });
 
 test("a stream that fails: only the element's own error event reports load_failed, once", async () => {
@@ -229,4 +235,114 @@ test("a failure the socket did carry is not repeated by flush()", async () => {
   s.load("m1"); s.audio.fire("error");
   s.view.flush();
   assert.deepEqual(s.events(), ["m1:error:load_failed"]);
+});
+
+// ── Smoke 2026-10-06 F4: page and server must agree on paused/playing. The fake <audio> above fires `pause`
+// when a new src is set on a playing element; a browser may too. Each case below was a disagreement
+// before revision 6 (the page told the server "paused" for an item that was playing, or "blocked" for one
+// that played), and each ends with both sides in the same state.
+function linked() {
+  const s = setup();
+  const tickets = createTicketStore({ now: () => 0, setTimer: () => ({}), clearTimer: () => {} });
+  const server = createMediaStore({ now: () => 0, tickets, send: (id, m) => { s.view.apply(m); return true; }, setTimer: () => ({}), clearTimer: () => {} });
+  // Page reports go to the server as they would over the socket.
+  const realSend = s.sent.push.bind(s.sent);
+  s.sent.push = (m) => { realSend(m); if (m.type === "media_event") server.onEvent("d", m); return s.sent.length; };
+  const agree = (label) => {
+    const srv = server.current("d"), page = s.view.info();
+    assert.equal(!!srv, !!page, `${label}: both have an item, or neither`);
+    if (srv) assert.equal(srv.state === "paused", page.paused, `${label}: server ${srv.state}, page ${page.paused ? "paused" : "playing"}`);
+  };
+  const radio = (n) => [{ kind: "station", id: n, title: n, source: "radio", upstream: { url: `https://stream.example.invalid/${n}` } }];
+  const music = () => ["a", "b", "c"].map((n) => ({ kind: "track", id: n, title: n, source: "music", upstream: { url: `https://music.example.invalid/${n}` } }));
+  return { ...s, server, agree, radio, music };
+}
+
+test("F4: a new item while one plays (next song, a station reloaded by 'keep playing') — the pause the element fires for the old one is never reported as the person's; the new one starts; both sides say playing", async () => {
+  const s = linked();
+  s.server.play("d", s.music());
+  s.audio.fire("playing");
+  s.agree("first track");
+  s.server.next("d");
+  await flush();
+  assert.ok(!s.events().some((e) => e.endsWith(":paused")), `no pause reported: ${s.events()}`);
+  s.audio.fire("playing");
+  s.agree("after next");
+  assert.equal(s.chip.textContent.startsWith("⏸"), true);
+  // A station: pause, then "keep playing" reloads it (a new item); the same rule.
+  s.server.play("d", s.radio("st"));
+  s.audio.fire("playing");
+  s.server.pause("d");
+  s.agree("paused");
+  s.server.resume("d");
+  s.audio.fire("playing");
+  s.agree("resumed station");
+});
+
+test("F4: a stale `pause` (the element is playing again when it is read) and a NotAllowedError that lands after the element played are both ignored", async () => {
+  const s = linked();
+  let late = null;
+  s.audio.play = () => { s.audio.plays += 1; return new Promise((res, rej) => { late = rej; }); };
+  s.server.play("d", s.music());
+  s.audio.paused = false; s.audio.fire("playing");
+  const e = new Error("no gesture"); e.name = "NotAllowedError"; late(e);
+  await flush();
+  assert.deepEqual(s.events(), ["m1:playing"], "no `blocked` for an element that is playing");
+  assert.equal(s.chip.textContent, "⏸ a");
+  s.audio.fire("pause");                                    // paused is still false: a stale event
+  assert.deepEqual(s.events(), ["m1:playing"]);
+  s.agree("after the stale events");
+});
+
+test("F4: pause-while-listening (a phone's default) — 'Pause' said during the turn holds after it; 'keep playing' afterwards plays; both sides agree at every step", async () => {
+  const s = linked();
+  s.server.play("d", s.music());
+  s.audio.fire("playing");
+  s.view.hold(true, true);                                  // the tap: paused quietly, never reported
+  assert.equal(s.audio.paused, true);
+  assert.ok(!s.events().some((e) => e.endsWith(":paused")));
+  s.agree("listening (the server still plays; the page's hold is its own)");
+  s.server.pause("d");                                      // "Pause." heard
+  s.view.hold(false, true);                                 // the turn ends
+  assert.equal(s.audio.paused, true, "the person's pause outlives the hold");
+  s.agree("paused by voice");
+  s.view.hold(true, true); s.server.resume("d"); s.view.hold(false, true);
+  s.audio.fire("playing");
+  s.agree("resumed by voice");
+  assert.equal(s.audio.paused, false);
+});
+
+test("F4: a blocked autoplay — the server hears `blocked` and counts it as paused; 'Pause.' then changes nothing and 'Play.' resumes", async () => {
+  const s = linked();
+  s.audio.block = true;
+  s.server.play("d", s.music());
+  await flush();
+  s.agree("blocked");
+  assert.equal(s.server.current("d").state, "paused");
+  assert.equal(s.server.pause("d"), "already");
+  s.audio.block = false;
+  s.server.resume("d");
+  s.audio.fire("playing");
+  s.agree("after resume");
+});
+
+test("F9: with the server gone the chip says so (dimmed, '…'), taps do nothing and the window's controls are off; back within the grace it is as before; past it the element stops and the chip clears", async () => {
+  const s = setup();
+  s.load("m1"); s.audio.fire("playing");
+  s.view.offline(true);
+  assert.equal(s.chip.textContent, "… Title m1");
+  assert.equal(s.chip.attrs["data-offline"], "1");
+  assert.equal(s.view.info().offline, true);
+  const n = s.sent.length;
+  s.chip.click();
+  assert.equal(s.chipTaps(), 0); assert.equal(s.sent.length, n);
+  s.tm.advance(OFFLINE_CLEAR_MS - 1);
+  s.view.offline(false);
+  assert.equal(s.chip.textContent, "⏸ Title m1");
+  assert.equal(s.chip.attrs["data-offline"], undefined);
+  s.view.offline(true);
+  s.tm.advance(OFFLINE_CLEAR_MS);
+  assert.equal(s.chip.hidden, true);
+  assert.equal(s.audio.src, "");
+  assert.equal(s.view.info(), null);
 });

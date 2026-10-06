@@ -22,6 +22,7 @@ export const OUTCOMES = Object.freeze({
 export const MUST_NOTES = Object.freeze({
   crow_show: "[Display] Nothing has been put on the screen in this turn yet. Call crow_show now with the real content, under a title of its own. If you cannot, tell the user plainly that you could not show it; never say that it is on the screen.",
   crow_play: "[Display] Nothing is playing yet. Call crow_play now with what the person asked to hear. If you cannot, tell the user plainly that you could not play it; never say that it is playing.",
+  crow_wm: "[Display] The playback has not been changed yet. Call crow_wm now with the playback verb the person asked for. If you cannot, tell the user plainly that you could not change it; never say that it changed.",
   crow_open: "[Display] Nothing has been opened yet. Call crow_open now with the app from its list (launcher if it is not there). If you cannot, tell the user plainly that you could not open it; never say that it is open.",
 });
 const ITEM_ID = /^[a-z0-9][a-z0-9_:-]{0,39}$/;

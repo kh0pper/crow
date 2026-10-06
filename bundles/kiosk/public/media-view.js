@@ -1,21 +1,15 @@
 /**
- * The display's one <audio> element. The server holds the media session (media.js) and tells the
- * page what to do with `media` messages; the page reports what the element really did with
- * `media_event`. Text is set with textContent only; the URL is always a same-origin ticket path.
- *
- * Rules (review C1/H1/H7/H8):
- *  - A play() promise that rejects with AbortError (a skip, a pause or a new item while it was
- *    still buffering), or for an item that is no longer current, is not a failure. NotAllowedError
- *    is a blocked autoplay ("blocked": the chip shows ▶ and a tap starts it). A failed stream is
- *    reported only from the element's own `error` event, or by the watchdog.
- *  - The same item again (a reconnect's snapshot) never reassigns src: only volume and paused.
- *  - Watchdog: no `playing` within START_MS of asking to play, or `waiting`/`stalled` for STALL_MS,
- *    reports one `error` with code "stalled".
- *  - A pause the page or the server asked for is never reported back as the user's pause.
- *  - A report the socket could not carry (send() returned false: the network dropped) is kept, the
- *    latest per item, and sent again by flush() after the next `ready`. A failure is also sent again
- *    when the server's snapshot names the same item (it can only do that if it never heard of the
- *    failure), so a chip can never show "playing" over silence after a blip (re-review N3).
+ * The display's one <audio> element. The server holds the media session (media.js) and says what to do
+ * (`media`); the page reports what the element did (`media_event`). Text via textContent only; the URL
+ * is always a same-origin ticket path. Rules (reviews C1/H1/H7/H8/N3, smoke F4/F8/F9):
+ *  - play() rejecting with AbortError, for an item no longer current, or after the element plays anyway
+ *    is not a failure; NotAllowedError is a blocked autoplay (chip ▶, a tap starts it). A failure comes
+ *    only from the element's `error` event or the watchdog (no `playing` START_MS after asking; `waiting`/
+ *    `stalled` for STALL_MS → one `error` "stalled").
+ *  - The same item again (a reconnect's snapshot) never reassigns src. A pause the page or server asked
+ *    for, one fired while a new src is set, or a stale one (the element plays again) is never the user's.
+ *  - A report the socket could not carry is kept (latest per item) and sent by flush() after `ready`; a
+ *    snapshot naming a failed item gets the failure again, so the chip never shows playing over silence.
  */
 export const DUCK_FACTOR = 0.15;
 export const RESTORE_DELAY_MS = 400;
@@ -23,6 +17,8 @@ export const RESTORE_MS = 300;
 export const RESTORE_STEP_MS = 30;
 export const START_MS = 10_000;
 export const STALL_MS = 15_000;
+/** F9: offline, the chip dims and controls are off; after this the element stops (= media.js SESSION_GRACE_MS). */
+export const OFFLINE_CLEAR_MS = 30_000;
 
 const level = (v, muted) => (muted ? 0 : Math.max(0, Math.min(1, (Number(v) || 0) / 100)));
 
@@ -57,9 +53,9 @@ export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearT
  * send(obj): a frame to the server. onState(id, state): every reported state (effect time).
  * onChange(): what is shown changed (the now-playing window redraws). t(key): page strings.
  */
-export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, t = (k) => k }) {
+export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, onChipTap = () => {}, t = (k) => k }) {
   const ducker = createDucker(audio, { setTimer, clearTimer });
-  let cur = null, quiet = false, held = false, startDog = null, stallDog = null, unsent = null;
+  let cur = null, quiet = false, held = false, startDog = null, stallDog = null, unsent = null, swapping = false, offline = false, offlineTimer = null;
   const clearDogs = () => { clearTimer(startDog); clearTimer(stallDog); startDog = stallDog = null; };
   function report(state, code) {
     if (!cur) return;
@@ -71,10 +67,11 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
   }
   function fail(code) { if (!cur || cur.failed) return; cur.failed = code; clearDogs(); report("error", code); }
   function render() {
-    if (!cur) { chip.hidden = true; chip.textContent = ""; onChange(); return; }
+    if (!cur) { chip.hidden = true; chip.textContent = ""; chip.removeAttribute?.("data-offline"); onChange(); return; }
     chip.hidden = false;
-    chip.textContent = `${cur.paused || cur.blocked ? "▶" : "⏸"} ${cur.title}`;
-    chip.setAttribute("aria-label", t(cur.paused || cur.blocked ? "media_play" : "media_pause"));
+    chip.textContent = `${offline ? "…" : cur.paused || cur.blocked ? "▶" : "⏸"} ${cur.title}`;
+    chip.setAttribute("aria-label", t(offline ? "media_offline" : cur.blocked ? "media_play" : "media_open"));
+    if (offline) chip.setAttribute("data-offline", "1"); else chip.removeAttribute?.("data-offline");
     onChange();
   }
   /** Ask the element to play the current item. Only the element's own events decide what happened. */
@@ -87,6 +84,7 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     try { p = audio.play(); } catch (err) { p = Promise.reject(err); }
     Promise.resolve(p).catch((err) => {
       if (!cur || cur.id !== id || err?.name === "AbortError") return;
+      if (cur.playing || !audio.paused) return;
       if (err?.name === "NotAllowedError") { clearTimer(startDog); startDog = null; cur.blocked = true; report("blocked"); render(); }
     });
   }
@@ -100,6 +98,8 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
   });
   audio.addEventListener("pause", () => {
     if (quiet) { quiet = false; return; }
+    // F4: not the person's pause (see the header).
+    if (swapping || !audio.paused) return;
     if (!cur || audio.ended || cur.paused) return;
     cur.paused = true; cur.playing = false; clearDogs();
     report("paused"); render();
@@ -115,9 +115,11 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
   audio.addEventListener("stalled", stalled);
 
   chip.addEventListener("click", () => {
-    if (!cur) return;
-    if (cur.paused || cur.blocked) { cur.blocked = false; start(); send({ type: "media_cmd", do: "resume" }); }
-    else send({ type: "media_cmd", do: "pause" });
+    if (!cur || offline) return;
+    // A blocked autoplay needs a tap to start: this is it (the browser counts the tap).
+    if (cur.blocked) { cur.blocked = false; start(); send({ type: "media_cmd", do: "resume" }); }
+    // F8: otherwise the chip opens the now-playing window, where the controls are.
+    onChipTap();
   });
 
   return {
@@ -137,7 +139,8 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
           clearDogs();
           quiet = false;
           cur = { id: m.id, url: m.url, title: String(m.title || ""), subtitle: String(m.subtitle || ""), source: String(m.source || ""), volume: m.volume, muted: !!m.muted, paused: !!m.paused, playing: false, blocked: false, failed: false };
-          audio.src = m.url;
+          swapping = true;
+          try { audio.src = m.url; } finally { swapping = false; }
           if (!cur.paused && !held) start();
           render();
           return;
@@ -166,9 +169,17 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
       if (on && !held) { held = true; if (cur && !cur.paused) quietPause(); }
       else if (!on && held) { held = false; if (cur && !cur.paused) start(); }
     },
+    /** F9: the socket closed (true) or is back (false). */
+    offline(on) {
+      if (on === offline) return;
+      offline = on === true;
+      clearTimer(offlineTimer); offlineTimer = null;
+      if (offline) offlineTimer = setTimer(() => { offlineTimer = null; if (offline && cur) { clearDogs(); cur = null; held = false; quietPause(); quiet = false; audio.removeAttribute("src"); try { audio.load(); } catch {} } render(); }, OFFLINE_CLEAR_MS);
+      render();
+    },
     /** After `ready`: send again what the socket could not carry, if it is still about the current item. */
     flush() { const ev = unsent; unsent = null; if (ev && cur && ev.id === cur.id && send(ev) === false) unsent = ev; },
-    info: () => (cur ? { title: cur.title, subtitle: cur.subtitle, source: cur.source, paused: cur.paused || cur.blocked, muted: cur.muted } : null),
+    info: () => (cur ? { title: cur.title, subtitle: cur.subtitle, source: cur.source, paused: cur.paused || cur.blocked, muted: cur.muted, offline } : null),
     current: () => cur?.id || null,
     ducked: () => ducker.ducked(),
   };

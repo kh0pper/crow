@@ -82,7 +82,7 @@ export function createSessionHub(deps) {
     const state = (bird) => sendJson(ws, { type: "state", bird });
     /** The closing frame of a turn that never ran (see the header). */
     const turnOver = (id, reason) => sendJson(ws, { type: "turn_over", turn_id: id, reason });
-    const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
+    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
 
     /**
      * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
@@ -123,7 +123,7 @@ export function createSessionHub(deps) {
 
     /** `ready` carries display_config; re-sent after a panel save (the page tolerates repeats). */
     async function sendReady() {
-      const cfg = await deps.displayConfig(device);
+      const cfg = await deps.displayConfig(device, rawCaps);
       sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: cfg });
     }
     self.pushReady = sendReady;
@@ -297,6 +297,7 @@ export function createSessionHub(deps) {
           if (msg.kind === "dismissed") { const w = deps.wm.close(device.id, id); if (w) sendJson(ws, { type: "wm", action: "close", id: w.id }); }
           else if (msg.kind === "tapped") deps.wm.focus(device.id, id);
           else if (msg.kind === "close_all") { deps.wm.closeAll(device.id); sendJson(ws, { type: "wm", action: "close_all" }); }   // long-press (spec §8.5)
+          else if (msg.kind === "nowplaying") { for (const ev of deps.openNowPlaying?.(device.id, caps) || []) sendJson(ws, ev); }   // F8: the chip was tapped
           return;
         }
         case "media_event": deps.media?.onEvent(device.id, msg); return;
@@ -357,6 +358,8 @@ export function createSessionHub(deps) {
     },
     /** The live session's device row (or null when the display is offline). */
     deviceOf: (id) => sessions.get(id)?.device || null,
+    /** The live session's effective caps (or null when the display is offline). */
+    capsOf: (id) => sessions.get(id)?.caps || null,
     isConnected: (id) => sessions.has(id),
     /** A turn or speech is running on this display (the STT keep-warm skips it). */
     isBusy: (id) => !!sessions.get(id)?.busy,   // turn running, speech playing, or the mic open

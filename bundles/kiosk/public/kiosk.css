@@ -80,6 +80,7 @@ html.k-ringing, html.k-ringing body { background: var(--k-teal-soft); }
 
 /* Media: the now-playing chip (the session's title, tap to pause or play) and window. */
 .k-np-chip { position: fixed; left: 12px; bottom: 84px; max-width: calc(100% - 24px); min-height: 56px; padding: 8px 16px; border-radius: 28px; background: var(--k-card); border: 1px solid var(--k-line); font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-np-chip[data-offline] { opacity: .55; }
 .k-np-title { margin: 0; font-size: 24px; }
 .k-np-sub { margin: 4px 0 12px; opacity: .75; }
 .k-np-controls { display: flex; flex-wrap: wrap; gap: 8px; }

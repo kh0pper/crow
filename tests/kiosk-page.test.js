@@ -356,3 +356,23 @@ test("now-playing window: title and source as text, six buttons that send the to
   v.apply({ action: "close", id: "w1" });
   assert.equal(root.hidden, true, "the server's close (the session ended) takes the window away");
 });
+
+test("smoke F8: an `open` with `behind` puts the now-playing window under the card in front; F9: offline, its controls are off and it says so", async (t) => {
+  const { document, window } = parseHTML("<html><body><div id=w></div></body></html>");
+  const root = document.getElementById("w");
+  let np = { title: "Morning Mix", subtitle: "", source: "radio", paused: false, muted: false, offline: false };
+  const v = createWindowView(root, { t: (k) => k, now: () => 0, nowPlaying: () => np });
+  t.after(() => v.apply({ action: "close_all" }));
+  v.apply({ action: "open", window: { id: "content-1", kind: "content", title: "Fruits", blocks: [] } });
+  v.apply({ action: "open", behind: true, window: { id: "nowplaying-2", kind: "nowplaying", title: "Now playing" } });
+  assert.deepEqual(v.list().map((w) => w.id), ["nowplaying-2", "content-1"]);
+  assert.equal(root.querySelector("article").dataset.id, "content-1", "the card keeps the front");
+  v.apply({ action: "focus", id: "nowplaying-2" });
+  assert.equal(root.querySelectorAll(".k-np-controls button").length, 6);
+  assert.equal([...root.querySelectorAll(".k-np-controls button")].some((b) => b.disabled), false);
+  np = { ...np, offline: true };
+  v.refresh();
+  assert.equal([...root.querySelectorAll(".k-np-controls button")].every((b) => b.disabled), true);
+  assert.ok(root.textContent.includes("media_offline"));
+  assert.ok(window);
+});

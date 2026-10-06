@@ -75,14 +75,14 @@ const j = (path, opt = {}) => fetch(base + path, { ...opt, headers: { "Content-T
 const wsUrl = (b) => b.replace("http", "ws") + "/api/kiosk/session";
 
 /** Pair a kiosk device directly and open a hello'd session. */
-async function connect(id) {
+async function connect(id, caps = {}) {
   const { token } = await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
   await store.updateDeviceProfiles(db(), id, { bound_bot_id: "household" });
   const ws = new WebSocket(wsUrl(base));
   const msgs = [];
   await new Promise((r) => ws.on("open", r));
   ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
-  ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps: {} }));
+  ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps }));
   for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(msgs[0]?.type, "ready");
   return { ws, msgs };
@@ -1162,4 +1162,44 @@ test("stations (wired): a home-network station needs the operator's tick (dashbo
     // Test with the tick runs the same check before any request.
     assert.deepEqual(await (await post("/api/kiosk/admin/stations/test", { url: "http://172.17.0.5:9000/live", local: true })).json(), { ok: false, error: "private_address" });
   } finally { r.stop(); srv.close(); }
+});
+
+const PHONE_CAPS = { v: 2, screen: { w: 412, h: 915, touch: true }, audio: { out: true, in: true }, max_windows: 4, kinds: ["card", "timer", "nowplaying"], mobile: true, pointer: "coarse", platform: "Linux armv81" };
+const waitFor = async (pred) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 10)); return pred(); };
+
+test("smoke F3/F6 (wired): a phone's display_config says pause while listening and release the mic after each turn; an audio-first display neither; an operator's stored choice wins", async () => {
+  const phone = await connect("kiosk-f3-phone", PHONE_CAPS);
+  const bare = await connect("kiosk-f3-bare", {});
+  try {
+    const cfg = (m) => m.msgs.find((x) => x.type === "ready").display_config;
+    assert.deepEqual([cfg(phone).pause_media_on_listen, cfg(phone).mic_per_turn], [true, true]);
+    assert.deepEqual([cfg(bare).pause_media_on_listen, cfg(bare).mic_per_turn], [false, false]);
+    const row = await store.findDevice(db(), "kiosk-f3-phone");
+    assert.equal(Object.hasOwn(row.kiosk_settings, "pause_media_on_listen"), false, "the default is never written");
+  } finally { phone.ws.close(); bare.ws.close(); }
+  const { audioPolicy } = await import("../bundles/kiosk/server/caps.js");
+  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, null), { pause_media_on_listen: false, mic_per_turn: true });
+  assert.deepEqual(audioPolicy({ profile: "pi3" }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: false }, "a stored type wins over the page's guess");
+  assert.deepEqual(audioPolicy({}, PHONE_CAPS), { pause_media_on_listen: true, mic_per_turn: true }, "no stored type (a session display): the page's guess");
+  assert.deepEqual(audioPolicy({ profile: "desktop", pause_media_on_listen: true }, null), { pause_media_on_listen: true, mic_per_turn: false });
+});
+
+test("smoke F8 (wired): playback starting opens the now-playing window on a display with a screen (after the load), once; the chip's tap brings it forward; an audio-first display gets none", async () => {
+  const phone = await connect("kiosk-f8-phone", PHONE_CAPS);
+  const bare = await connect("kiosk-f8-bare", {});
+  const item = (t) => [{ title: t, source: "radio", upstream: { url: "https://stream.example.invalid/mix", hop: {} } }];
+  try {
+    rt.media.play("kiosk-f8-phone", item("Morning Mix"));
+    rt.media.play("kiosk-f8-bare", item("Morning Mix"));
+    const npOpen = (m) => m.msgs.findIndex((x) => x.type === "wm" && x.action === "open" && x.window?.kind === "nowplaying");
+    assert.ok(await waitFor(() => npOpen(phone) >= 0), "the window opened");
+    const load = phone.msgs.findIndex((x) => x.type === "media" && x.action === "load");
+    assert.ok(load >= 0 && load < npOpen(phone), "the load comes first (the effect time is the audio, not the window)");
+    rt.media.play("kiosk-f8-phone", item("Evening Mix"));
+    await waitFor(() => phone.msgs.filter((x) => x.type === "media" && x.action === "load").length >= 2);
+    assert.equal(phone.msgs.filter((x) => x.type === "wm" && x.action === "open").length, 1, "one window, reused");
+    phone.ws.send(JSON.stringify({ type: "wm_event", kind: "nowplaying" }));
+    assert.ok(await waitFor(() => phone.msgs.some((x) => x.type === "wm" && x.action === "focus")), "the chip's tap brings it forward");
+    assert.equal(bare.msgs.some((x) => x.type === "wm" && x.action === "open"), false, "an audio-first display: the chip only");
+  } finally { rt.media.closeDevice("kiosk-f8-phone"); rt.media.closeDevice("kiosk-f8-bare"); phone.ws.close(); bare.ws.close(); }
 });

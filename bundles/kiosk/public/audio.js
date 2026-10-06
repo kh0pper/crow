@@ -1,9 +1,15 @@
 /** Mic capture (AEC/NS/AGC on, spec §7.3) and in-page playback (so Chromium's echo canceller sees it). */
 import { playStartPerfTime } from "./metrics.js";
 
+/** The capture worklet is added to an AudioContext once: a phone opens the mic again at every tap (F6). */
+const worklets = new WeakSet();
 export async function openMic(ctx, onFrame) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-  await ctx.audioWorklet.addModule("/display/assets/pcm-worklet.js");
+  if (!worklets.has(ctx)) {
+    try { await ctx.audioWorklet.addModule("/display/assets/pcm-worklet.js"); }
+    catch (err) { stream.getTracks().forEach((t) => t.stop()); throw err; }
+    worklets.add(ctx);
+  }
   const src = ctx.createMediaStreamSource(stream);
   const node = new AudioWorkletNode(ctx, "pcm-capture", { numberOfInputs: 1, numberOfOutputs: 0 });
   node.port.onmessage = (e) => onFrame(e.data.pcm, e.data.rms, performance.now());

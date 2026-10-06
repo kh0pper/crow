@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -80,7 +80,8 @@ export function createDisplayTools(ctx) {
   const playHold = (t) => mentionsPlayWord(t) || asksPlay(t);
   const rules = {
     crow_play: {
-      when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
+      // "Turn the radio up" names the radio and asks, but it asks the playback to CHANGE: crow_wm must run, not this (F2).
+      when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, (p) => asksPlay(p) && !asksTransport(p)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
@@ -103,9 +104,15 @@ export function createDisplayTools(ctx) {
       execute: (a, turn) => run({ verb: "show", kind: str(a?.kind, 16), title: str(a?.title, 200), body: str(a?.body, 4000) }, { ...turn, update: typeof turn?.transcript === "string" ? updates(turn.transcript) : null }),
     },
     crow_wm: {
-      when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn(),
-      holdText: (t) => wantsDisplay(t) && !teachTo(t),
-      holdToEnd: toEnd((t) => wantsDisplay(t) && !teachTo(t)),
+      // F2 (smoke 2026-10-06): a turn that asks the playback to change ("turn the radio up a little") is offered
+      // crow_wm and MUST end with a successful call, as crow_show does for a card: the model's "I turned it up"
+      // is held until the call is known, and with no call the turn ends on the truthful could-not line. With
+      // nothing playing the call's own answer ("Nothing is playing.") counts: it is the truth.
+      when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn() || asksTransport(t),
+      holdText: (t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t),
+      holdToEnd: toEnd((t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t)),
+      must: (t) => anyPart(t, asksTransport), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_wm, missedText: S.playback_missed_say,
+      mustDone: (r) => r?.ok === true && (r.outcome === "done" || r.outcome === "nothing_playing"),
       execute: (a, turn) => {
         // The K1 form — one `command` string — is still accepted (not advertised) and parsed by the K1 grammar,
         // except on a turn that has to end with a card: there a card put up through it would not count, and the

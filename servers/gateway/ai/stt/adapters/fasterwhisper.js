@@ -26,6 +26,8 @@ export default function createFasterWhisperAdapter(config) {
       form.append("file", new Blob([audioBuffer], { type: contentType }), filename);
       form.append("model", model);
       if (options.language) form.append("language", options.language);
+      // The OpenAI `prompt` field (faster-whisper-server 0.5.0 accepts it): a bias toward names the speaker uses.
+      if (options.prompt) form.append("prompt", options.prompt);
       form.append("response_format", "verbose_json");
 
       const res = await fetch(`${baseUrl}/audio/transcriptions`, {

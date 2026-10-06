@@ -14,7 +14,7 @@ import { createWmStore, matchWmFastPath, contentBlocks, wantsNewDisplay } from "
 import { createDisplayTools, cardUpdate } from "./display-tools.js";
 import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
-import { effectiveCaps } from "./caps.js";
+import { effectiveCaps, audioPolicy } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
@@ -25,8 +25,8 @@ import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
 import { createMediaStore } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
-import { createStationsSource, normalizeStations, parseStations, probeStation, STATIONS_SETTING } from "./sources/stations.js";
-import { createPlayResolver, createMediaVerbs } from "./play.js";
+import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, STATIONS_SETTING } from "./sources/stations.js";
+import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -100,7 +100,7 @@ export function kioskDisplayMissedText(lang) {
  *          the voice turn (turn.js), which may replace a remote tool's result with it; the display tools
  *          are never wrapped by it }
  */
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null } = {}) {
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
@@ -123,6 +123,8 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     displayMissedText: kioskDisplayMissedText(lang),
     memoryWhen: wantsMemory,
     ...(typeof onToolResult === "function" ? { onToolResult } : {}),
+    // F1: the names this display's sources answer to, as the STT's prompt bias (bounded in turn.js).
+    ...(typeof sttPrompt === "function" ? { sttPrompt } : {}),
   };
 }
 
@@ -227,6 +229,8 @@ export function createKioskRuntime(deps) {
     send: (id, msg) => hub?.sendTo(id, msg) === true,
     onFailed: (id, item) => { const S = STRINGS[langOf(id)]; hub?.speak(id, (item.started ? S.say_play_lost : S.say_play_failed).replace("{title}", item.title || "")); },
     onEnded: closeNowPlaying,
+    // F8: a display with a screen shows what is playing as soon as it starts (rules in play.js autoNowPlaying).
+    onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title, now: now() })) hub?.sendTo(id, ev); },
   });
   // Station presets: this instance's local setting, held in memory, reloaded when the panel saves them.
   let stations = [];
@@ -267,7 +271,9 @@ export function createKioskRuntime(deps) {
     };
   };
   /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation), with this display's media line. */
-  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id) });
+  /** F1: the STT prompt bias — this instance's station names and aliases. */
+  const sttPrompt = () => stationNamesHint(stations);
+  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -281,17 +287,26 @@ export function createKioskRuntime(deps) {
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
     // The pairing guess for a display with no type set (session.js); a later panel choice replaces it.
     storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
-    displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
+    // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
+    displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
     runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
       ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
-      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings) }))
+      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt }))
       : null,
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
     wm, metrics, media,
+    // F8: the chip opens the now-playing window; a display that cannot draw it toggles the playback as before.
+    openNowPlaying: (id, caps) => {
+      if (!media.active(id)) return [];
+      const evs = showNowPlaying({ store: wm, deviceId: id, caps, title: STRINGS[langOf(id)].now_playing_title });
+      if (evs) return evs;
+      media.command(id, { do: media.current(id)?.state === "paused" ? "resume" : "pause" }, hub?.deviceOf?.(id));
+      return [];
+    },
     wrapPcmAsWav: deps.wrapPcmAsWav,
     warmup: (d) => deps.sttWarmup(d),
     helloTimeoutMs: deps.helloTimeoutMs,

@@ -9,7 +9,7 @@ import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
-  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer } from "./audio.js";
@@ -40,7 +40,7 @@ const t = (k) => STRINGS[lang]?.[k] || STRINGS.en?.[k] || "";
 let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null, reconnectTimer = null;
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
-let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false;
+let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null;
 
 /*
  * Debug ring (smoke 2026-10-04: an unidentified message flashed after silent taps).
@@ -160,6 +160,8 @@ function connect() {
     if (ws !== sock) return;
     ws = null;
     if (turn && !turn.ended) { turn.ended = true; mic?.stop(); }
+    releaseMicAfterTurn();
+    mediaView?.offline(true);                       // F9: what plays is shown as not connected
     player?.flush();
     serverBird = "idle";
     renderBird();
@@ -190,6 +192,7 @@ function onText(m) {
       if (config.lang === "en" || config.lang === "es") lang = config.lang;
       serverOffset = (m.server_now || Date.now()) - Date.now();
       mountUi();
+      mediaView?.offline(false);                      // F9: the server is back; its snapshot follows
       mediaView?.flush();                             // a media report the socket could not carry (re-review N3)
       break;
     case "state":
@@ -217,7 +220,7 @@ function onText(m) {
     // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
     case "turn_over":
       if (turn && turn.id === m.turn_id) {
-        if (!turn.ended) { turn.ended = true; clearTimeout(turn.guard); turn.guard = null; mic?.stop(); }
+        if (!turn.ended) { turn.ended = true; clearTimeout(turn.guard); turn.guard = null; mic?.stop(); releaseMicAfterTurn(); }
         turn.reported = true;
         turn.done = { turn_id: m.turn_id, aborted: true, over: String(m.reason || "") };
         turn.doneAt = performance.now();
@@ -274,7 +277,9 @@ async function ensureAudio() {
     });
   }
   if (!mic) {
+    const t0 = performance.now();
     try { mic = await openMic(ctx, onFrame); } catch (err) { banner(micDecision(err, ctx.state)); return false; }
+    micOpenMs = performance.now() - t0;
   }
   const d = micDecision(null, ctx.state);
   if (d !== "ok") { banner(d); return false; }
@@ -299,6 +304,7 @@ async function startTurn(source) {
   const hangoverMs = Number(config.vad_hangover_ms) || VAD_DEFAULTS.hangoverMs;   // latency lever 1 (ruling R20; default 450 ms)
   turn = { id: `t${Date.now()}`, effectAt: null, effectLoad: null, endedAt: null, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null, sentBytes: 0, voicedBytes: 0 };
   const tn = turn;
+  tn.micOpenMs = micOpenMs; micOpenMs = null;     // F6: the reopen cost at this tap (null: it was open)
   tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
   duckOverride = false;
   syncDuck();                                     // at the tap, before the server answers (spec §9.6)
@@ -314,6 +320,14 @@ function endTurn(reason, speechEndAt) {
   mic?.stop();
   syncDuck();
   send({ type: "turn_end", vad_reason: reason, voiced_bytes: turn.voicedBytes });
+  releaseMicAfterTurn();
+}
+/** F6: a phone or tablet lets the microphone go once the speech is in (Android leaves voice-call audio mode). */
+function releaseMicAfterTurn() {
+  if (micAfterTurn(config) !== "release" || !mic) return;
+  try { mic.close(); } catch {}
+  mic = null;
+  note("mic", "released");
 }
 /** turn_metrics, once per turn, when playback settles (F3) or the no-audio wait runs out (F9). */
 function report(tn, force = false) {
@@ -384,6 +398,7 @@ mediaView = createMediaView({
   audio: $("media"), chip: $("np-chip"), send, t,
   onState: (id, state) => { if (state === "playing") noteEffect(turn, { kind: "playing", id, at: performance.now() }); },
   onChange: () => wmView?.refresh(),
+  onChipTap: () => send({ type: "wm_event", kind: "nowplaying" }),   // F8: the server opens (or brings forward) the window
 });
 $("mic").textContent = t("mic_talk");
 connect();

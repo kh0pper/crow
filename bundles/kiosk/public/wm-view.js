@@ -58,6 +58,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
       // What plays comes from the page's own media state (the server's window carries only its title).
       const np = nowPlaying();
       card.append(el("p", "k-np-title", np ? np.title : t("say_nothing_playing")));
+      if (np?.offline) card.append(el("p", "k-np-sub", t("media_offline")));
       if (np && (np.subtitle || np.source)) card.append(el("p", "k-np-sub", [np.subtitle, np.source].filter(Boolean).join(" · ")));
       if (np) {
         const row = el("div", "k-np-controls");
@@ -65,6 +66,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
           const v = verb || (glyph === "⏯" ? (np.paused ? "resume" : "pause") : np.muted ? "unmute" : "mute");
           const b = el("button", null, glyph);
           b.type = "button";
+          if (np.offline) b.disabled = true;           // F9: no server to carry the tap
           b.setAttribute("aria-label", t(key || (v === "resume" ? "media_play" : v === "pause" ? "media_pause" : v === "mute" ? "media_mute" : "media_unmute")));
           b.addEventListener("click", (e) => { e.stopPropagation(); onMedia(v); });
           row.append(b);
@@ -125,7 +127,8 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
     apply(m) {
       switch (m.action) {
         case "snapshot": wins = (m.windows || []).slice(); break;
-        case "open": wins = [...wins.filter((w) => w.id !== m.window.id), m.window]; break;
+        // F8: `behind` — the now-playing window that opened by itself goes under the card that is in front.
+        case "open": { const rest = wins.filter((w) => w.id !== m.window.id); wins = m.behind && rest.length ? [...rest.slice(0, -1), m.window, rest.at(-1)] : [...rest, m.window]; break; }
         case "update": wins = wins.some((w) => w.id === m.window.id) ? wins.map((w) => (w.id === m.window.id ? m.window : w)) : [...wins, m.window]; break;
         case "close": wins = wins.filter((w) => w.id !== m.id); break;
         case "close_all": wins = []; break;

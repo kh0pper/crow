@@ -69,7 +69,7 @@ export const CLIENT_SCRIPT = `
     if (b.fu !== a.fu || b.mem !== a.mem || b.vad !== a.vad || b.sm !== a.sm || b.th !== a.th || b.pf !== a.pf || b.mv !== a.mv || b.pml !== a.pml) {
       p.kiosk_settings = { follow_up: b.fu, memory_integration: b.mem };
       if (b.mv !== a.mv) p.kiosk_settings.max_volume = b.mv;
-      if (b.pml !== a.pml) p.kiosk_settings.pause_media_on_listen = b.pml;
+      if (b.pml !== a.pml && b.pml !== null) p.kiosk_settings.pause_media_on_listen = b.pml;
       if (b.vad !== a.vad) p.kiosk_settings.vad_hangover_ms = b.vad;
       if (b.sm !== a.sm) p.kiosk_settings.stt_model = b.sm;
       if (b.th !== a.th) p.kiosk_settings.theme = b.th;
@@ -167,8 +167,14 @@ export const CLIENT_SCRIPT = `
     var vad = el('input'); vad.type = 'number'; vad.min = '300'; vad.max = '900'; vad.step = '50'; vad.value = String(ks.vad_hangover_ms || 450);
     function vadValue() { var n = parseInt(vad.value, 10); return isFinite(n) ? Math.min(900, Math.max(300, n)) : (initial ? initial.vad : (ks.vad_hangover_ms || 450)); }
     var mv = pick([10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map(function (n) { return [String(n), n + '%']; }), String(ks.max_volume || 100));
-    var pml = el('input'); pml.type = 'checkbox'; pml.checked = !!ks.pause_media_on_listen;
-    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value, mv: parseInt(mv.value, 10) || 100, pml: pml.checked }; }
+    // F3: shown as it takes effect — the stored choice, else on for a phone or a tablet. Sent only once the operator
+    // ticks or unticks it (a default is never written); until then it follows the display type chosen here.
+    var handheld = function (v) { return v === 'phone' || v === 'tablet'; };
+    var pmlSet = typeof ks.pause_media_on_listen === 'boolean';
+    var pml = el('input'); pml.type = 'checkbox'; pml.checked = pmlSet ? ks.pause_media_on_listen : handheld(ks.profile);
+    pml.addEventListener('change', function () { pmlSet = true; });
+    pf.addEventListener('change', function () { if (!pmlSet) pml.checked = handheld(pf.value); });
+    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value, mv: parseInt(mv.value, 10) || 100, pml: pmlSet ? pml.checked : null }; }
     var initial = null;
     initial = current();
     var fit = fitLine(data.bots, bot, function () { return mem.checked; });

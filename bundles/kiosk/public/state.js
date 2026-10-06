@@ -85,8 +85,17 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
     e2e_ms: e2eMs({ speechEndAt: turn.speechEndAt, playAt: turn.playAt }),
     effect_ms: turn.effectAt == null ? null : e2eMs({ speechEndAt: turn.speechEndAt ?? turn.endedAt, playAt: turn.effectAt }),
     barged: !!turn.barged, output_latency_ms: outputLatencyMs,
+    // F6: how long opening the microphone took at this turn's tap (null when it was already open).
+    mic_open_ms: Number.isFinite(turn.micOpenMs) ? Math.round(turn.micOpenMs) : null,
   };
 }
+/**
+ * F6 (smoke 2026-10-06): after a turn's speech has ended, does the page let the microphone go? On a phone or
+ * a tablet (display_config.mic_per_turn, decided on the server from the display type) yes: an open
+ * echo-cancelled capture keeps Android in voice-call audio mode and every sound plays through the call path.
+ * The next tap (or a follow-up turn) opens it again; the permission is kept, so nothing is asked again.
+ */
+export const micAfterTurn = (config) => (config?.mic_per_turn === true ? "release" : "keep");
 
 /*
  * Ducking (review C1). The music is turned down (or paused) while a turn is OPEN: the mic is open,

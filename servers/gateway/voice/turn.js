@@ -21,6 +21,25 @@ export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
 /** Spoken + captioned when a turn ends with no answer (tool loop, empty reply, budget); callers pass a localized one. */
 export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again.";
+/**
+ * The STT prompt bias (opts.sttPrompt): one line of names the speaker is likely to say. Whisper reads
+ * at most ~224 prompt tokens and a long prompt can be "heard" in silence, so it is cut to
+ * STT_PROMPT_MAX characters at a comma; control characters go. A function is called once per turn;
+ * one that throws, or anything that is not a string, gives no prompt.
+ */
+export const STT_PROMPT_MAX = 200;
+export function sttPromptText(p) {
+  let v = p;
+  if (typeof v === "function") { try { v = v(); } catch { v = null; } }
+  if (typeof v !== "string") return "";
+  let t = "";
+  for (const ch of v.slice(0, 1000)) { const c = ch.codePointAt(0); t += c < 32 || (c >= 127 && c < 160) ? " " : ch; }
+  t = t.replace(/\s+/g, " ").trim();
+  if (t.length <= STT_PROMPT_MAX) return t;
+  const cut = t.lastIndexOf(",", STT_PROMPT_MAX);
+  return (cut > 0 ? t.slice(0, cut) : t.slice(0, STT_PROMPT_MAX)).trim();
+}
+
 /** Spoken + captioned INSTEAD of a model call when the bound bot's prompt cannot fit the model even without its skills; callers pass a localized one. */
 export const BOT_TOO_LARGE_TEXT = "This assistant is too large for the quick voice model. Choose another assistant for this display in the Kiosk settings.";
 /** Rides on the last tool result before the forced final round (kept off the saved conversation). */
@@ -236,12 +255,13 @@ export function createVoiceTurnRunner(deps) {
   }
 
   /** STT only (the kiosk's early transcription, lever D). The WAV is handed to the adapter and dropped. */
-  async function transcribe({ db, device, audio, signal, sttModel }) {
+  async function transcribe({ db, device, audio, signal, sttModel, sttPrompt }) {
     const sttProfile = await deps.getSttProfile(db, device);
     if (!sttProfile) throw Object.assign(new Error("no STT profile"), { code: "no_stt_profile" });
     const stt = await deps.createSttAdapter(sttProfile);
     const model = typeof sttModel === "function" ? sttModel(sttProfile) : null;
-    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
+    const prompt = sttPromptText(sttPrompt);
+    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
     return { text: String(r?.text || "").trim() };
   }
 
@@ -329,7 +349,10 @@ export function createVoiceTurnRunner(deps) {
         const stt = await deps.createSttAdapter(sttProfile);
         // opts.sttModel(profile): a per-display model override (kiosk: tiny.en), or null for the profile's own.
         const model = typeof opts.sttModel === "function" ? opts.sttModel(sttProfile) : null;
-        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
+        // opts.sttPrompt: words this endpoint expects to hear (a display's station names), as the STT's
+        // prompt bias. A string or a function returning one; bounded by sttPromptText.
+        const prompt = sttPromptText(opts.sttPrompt);
+        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");
       }
@@ -348,6 +371,9 @@ export function createVoiceTurnRunner(deps) {
         if (fp) {
           result.fastPath = true;
           if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
+          // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
+          // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
+          if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
           for (const ev of fp.events || []) sink.event(ev);
           if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
           say.end();

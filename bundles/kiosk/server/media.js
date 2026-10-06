@@ -38,9 +38,10 @@ export function cleanTitle(v) {
 /**
  * send(deviceId, msg) → delivered?; onFailed(deviceId, { title, started }): a stream that could not
  * be played, after every retry (one spoken line); onEnded(deviceId): the session is over, whatever
- * ended it (the now-playing window goes with it).
+ * ended it (the now-playing window goes with it); onStarted(deviceId): an explicit play has just been
+ * loaded (a new queue; not a queue step or a station reload) — the now-playing window may open (F8).
  */
-export function createMediaStore({ now = Date.now, tickets, send, onFailed = () => {}, onEnded = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createMediaStore({ now = Date.now, tickets, send, onFailed = () => {}, onEnded = () => {}, onStarted = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const devs = new Map();
   const dev = (id) => { let d = devs.get(id); if (!d) { d = { queue: [], index: -1, item: null, state: "idle", volume: DEFAULT_VOLUME, muted: false, seq: 0, lost: null, origin: null, retries: 0, retry: null }; devs.set(id, d); } return d; };
   const live = (id) => { const d = devs.get(id); return d && d.item ? d : null; };
@@ -105,7 +106,10 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       d.origin = origin && origin.source != null && origin.candidateId != null ? { source: String(origin.source), candidateId: String(origin.candidateId) } : null;
       d.muted = false;
       d.volume = step(d.volume === 0 ? DEFAULT_VOLUME : d.volume, maxVolume);
-      return load(id, d, 0);
+      const item = load(id, d, 0);
+      // F8: an explicit play has started (after the page was told to load it). The hook must not break the session.
+      try { onStarted(id); } catch { /* see onEnded */ }
+      return item;
     },
     active: (id) => !!live(id),
     current: (id) => { const d = live(id); return d ? { title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, state: d.state === "paused" ? "paused" : "playing", volume: d.volume, muted: d.muted } : null; },

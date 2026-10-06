@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
-  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn,
 } from "../bundles/kiosk/public/state.js";
-import { createPlayer } from "../bundles/kiosk/public/audio.js";
+import { createPlayer, openMic } from "../bundles/kiosk/public/audio.js";
+import { sanitizeClientMetrics } from "../bundles/kiosk/server/metrics.js";
 
 test("4401 unauthorized/unpaired clears the token; 4401 hello_timeout keeps it and reconnects", () => {
   assert.equal(closeDecision(4401, "unauthorized").action, "forget_token");
@@ -387,4 +388,49 @@ test("report waits for a pending load's playing event (up to 6 s), unless forced
   assert.equal(reportDecision(t, { playing: false, now: 10, force: true }).report, true);
   t.effectAt = 900;
   assert.equal(reportDecision(t, { playing: false, now: 1000 }).report, true);
+});
+
+test("smoke F6: a phone or tablet releases the mic after each turn (display_config.mic_per_turn); anything else keeps it; the reopen cost is reported and kept apart from e2e", () => {
+  assert.equal(micAfterTurn({ mic_per_turn: true }), "release");
+  for (const c of [{ mic_per_turn: false }, {}, null, undefined, { mic_per_turn: "yes" }]) assert.equal(micAfterTurn(c), "keep");
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1000, playAt: 2500, effectAt: null, endedAt: 1000, barged: false, micOpenMs: 184.4 }, {});
+  assert.equal(m.mic_open_ms, 184);
+  assert.equal(m.e2e_ms, 1500, "e2e is still end of speech to first audio: the reopen is before speech");
+  assert.equal(turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {}).mic_open_ms, null);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", mic_open_ms: 300 }).mic_open_ms, 300);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", mic_open_ms: "x" }).mic_open_ms, null);
+});
+
+test("smoke F6: the mic can be opened again on the same audio context — the capture worklet is added once; close() stops every track", async () => {
+  const added = [], stopped = [];
+  const g = globalThis;
+  const saved = { navigator: Object.getOwnPropertyDescriptor(g, "navigator"), AudioWorkletNode: g.AudioWorkletNode };
+  Object.defineProperty(g, "navigator", { configurable: true, value: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop: () => stopped.push(1) }] }) } } });
+  g.AudioWorkletNode = class { constructor() { this.port = { postMessage: () => {}, onmessage: null }; } disconnect() {} };
+  try {
+    const ctx = { audioWorklet: { addModule: async (u) => { added.push(u); } }, createMediaStreamSource: () => ({ connect: () => {}, disconnect: () => {} }) };
+    const a = await openMic(ctx, () => {});
+    a.close();
+    const b = await openMic(ctx, () => {});
+    b.close();
+    assert.deepEqual(added, ["/display/assets/pcm-worklet.js"], "added once per context");
+    assert.equal(stopped.length, 2, "each close() let the microphone go");
+    // A failing worklet does not leave the microphone open.
+    const bad = { audioWorklet: { addModule: async () => { throw new Error("no worklet"); } }, createMediaStreamSource: () => ({}) };
+    await assert.rejects(openMic(bad, () => {}), /no worklet/);
+    assert.equal(stopped.length, 3);
+  } finally {
+    if (saved.navigator) Object.defineProperty(g, "navigator", saved.navigator); else delete g.navigator;
+    g.AudioWorkletNode = saved.AudioWorkletNode;
+  }
+});
+
+test("smoke F6 (source): the page lets the mic go right after it sends turn_end, on turn_over and on a closed socket — and only through micAfterTurn", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const end = src.slice(src.indexOf("function endTurn("), src.indexOf("function releaseMicAfterTurn("));
+  assert.ok(end.indexOf('type: "turn_end"') < end.indexOf("releaseMicAfterTurn()"), "after turn_end");
+  const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
+  assert.match(rel, /micAfterTurn\(config\) !== "release"/);
+  assert.match(rel, /mic\.close\(\)/);
+  assert.equal((src.match(/(?<!function )releaseMicAfterTurn\(\)/g) || []).length, 3, "endTurn, turn_over, socket close");
 });

@@ -20,6 +20,9 @@
  *   Candidate = { id, kind, title, subtitle?, confident, group? }
  *       confident: play it without asking (an exact name, or the only thing it could be). A source
  *       decides this itself. Candidates never carry an address.
+ *       near (optional, not confident): the only thing whose name SOUNDS like the words (a station
+ *       call sign as speech-to-text spelled it). With no model it plays only when no source found
+ *       anything else (play.js); otherwise it is offered like any loose candidate.
  *   Playable  = { kind, id, title, subtitle?, duration_sec?, art?, form: "audio", codec?, source,
  *                 upstream: { url, headers?, hop } }
  *       upstream never leaves the server: the page gets a display ticket. `hop` is the relay's policy

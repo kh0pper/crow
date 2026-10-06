@@ -29,7 +29,7 @@ const call = (name, args, say = "") => [...(say ? [{ choices: [{ index: 0, delta
 const FRUITS = { kind: "list", title: "Fruits", body: "apples\nbananas\ncherries" };
 
 /** model(body, n) → { say } | { tool, args } | { say, tool, args } (text, then the call, in one round). forcing: what the engine honours ("named" = a vLLM-like server that obeys a named choice). */
-function display({ model, forcing = "none", memories = false, lang = "en", botTools = [] }) {
+function display({ model, forcing = "none", memories = false, lang = "en", botTools = [], media = null }) {
   const requests = [], spoken = [], events = [], logs = [], executed = [];
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
@@ -60,7 +60,7 @@ function display({ model, forcing = "none", memories = false, lang = "en", botTo
   });
   const device = { id: "kiosk-live", bound_bot_id: "house", kiosk_settings: { memory_integration: memories, lang } };
   const sink = { event: (e) => events.push(e), audio: () => {} };
-  const ctx = { store, deviceId: device.id, caps: CAPS, lang, sources: [], items: [], emit: (ev) => sink.event(ev) };
+  const ctx = { store, deviceId: device.id, caps: CAPS, lang, sources: [], items: [], emit: (ev) => sink.event(ev), ...(media ? media(device.id) : {}) };
   const ask = (transcript) => runner.runVoiceTurn({
     db: {}, device, sink, transcript,
     extraTools: createDisplayTools(ctx),
@@ -384,4 +384,64 @@ test("the card rule is narrow: questions, reading or closing a card, a noun insi
   }
   const make = display({ model: () => ({ say: "Done." }) });
   assert.equal((await make.ask("Make a list of chores.")).failed, "display_missed", "a making verb with a card noun is a request");
+});
+
+// ── Smoke 2026-10-06 F2: "Louder." over the radio went to the quick model, which SAID it turned the volume
+// up and called nothing. The same turn shape, on a sentence no fast path takes: crow_wm is offered (music is
+// on) and must run; the claim is never heard; with no call the turn ends on the truthful line.
+async function playingRadio() {
+  const { createMediaStore } = await import("../bundles/kiosk/server/media.js");
+  const { createTicketStore } = await import("../bundles/kiosk/server/tickets.js");
+  const { createPlayResolver, createMediaVerbs } = await import("../bundles/kiosk/server/play.js");
+  const { createSourceRegistry } = await import("../bundles/kiosk/server/sources/index.js");
+  const { createStationsSource, normalizeStations } = await import("../bundles/kiosk/server/sources/stations.js");
+  const sent = [];
+  const tickets = createTicketStore({ now: () => AT, setTimer: () => ({}), clearTimer: () => {} });
+  const media = createMediaStore({ now: () => AT, tickets, send: (id, m) => { sent.push(m); return true; }, setTimer: () => ({}), clearTimer: () => {} });
+  const registry = createSourceRegistry([createStationsSource({ list: () => normalizeStations([{ name: "Morning Mix", url: "https://stream.example.invalid/mix" }]) })]);
+  const verbs = createMediaVerbs({ media, resolver: createPlayResolver({ registry, now: () => AT }), maxVolume: () => 100 });
+  return { sent, media, build: (id) => ({ media, maxVolume: 100, sources: registry.kinds(), ...verbs }), start: async (id) => { media.play(id, [{ kind: "station", id: "m", title: "Morning Mix", upstream: { url: "https://stream.example.invalid/mix" } }], { origin: { source: "radio", candidateId: "m" } }); } };
+}
+
+test("smoke F2: a volume claim with no call is never heard — the corrective round turns it up, or the turn ends on 'I couldn't change the playback'", async () => {
+  const SAID = "Could you turn the radio up a little so I can hear it?";
+  // The model claims, then (corrective round) calls: the volume really changes and the server's line ends the turn.
+  let radio = await playingRadio();
+  let d = display({ media: radio.build, model: (body, n) => (n === 1 ? { say: "I turned the display volume up." } : { tool: "crow_wm", args: { do: "volume_up" } }) });
+  await radio.start("kiosk-live");
+  let r = await d.ask(SAID);
+  assert.equal(await matchSpoken(SAID, d.ctx), null, "no fast path takes this sentence: the model gets it");
+  assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"], "only the must-run tool is offered");
+  assert.match(d.requests[1].messages.at(-1).content, /Call crow_wm now/);
+  assert.doesNotMatch(said(d), /turned/, "the claim is never spoken");
+  assert.equal(radio.media.current("kiosk-live").volume, 60);
+  assert.equal(r.failed, null);
+  // The model claims twice and never calls: the truthful line, the volume untouched.
+  radio = await playingRadio();
+  d = display({ media: radio.build, model: () => ({ say: "Done, I turned the display volume up." }) });
+  await radio.start("kiosk-live");
+  r = await d.ask(SAID);
+  assert.equal(said(d), "Sorry, I couldn't change the playback.");
+  assert.equal(captions(d), "Sorry, I couldn't change the playback.");
+  assert.equal(radio.media.current("kiosk-live").volume, 50);
+  assert.equal(r.failed, "display_missed");
+  // Spanish display, same shape.
+  radio = await playingRadio();
+  d = display({ lang: "es", media: radio.build, model: () => ({ say: "Listo, subí el volumen." }) });
+  await radio.start("kiosk-live");
+  await d.ask("¿Me subes el volumen de la radio un poquito, porfa?".replace("¿", ""));
+  assert.equal(said(d), "Lo siento, no pude cambiar la reproducción.");
+});
+
+test("smoke F2: with nothing playing, the call's own answer is the truth ('Nothing is playing.'), and a plain question over music is never required to change anything", async () => {
+  const radio = await playingRadio();
+  let d = display({ media: radio.build, model: (body, n) => (n === 1 ? { say: "Turned it up!" } : { tool: "crow_wm", args: { do: "volume_up" } }) });
+  await d.ask("Could you turn the radio up a little so I can hear it?");
+  assert.equal(said(d), "Nothing is playing.");
+  await radio.start("kiosk-live");
+  d = display({ media: radio.build, model: () => ({ say: "Lisbon." }) });
+  const r = await d.ask("What is the capital of Portugal?");
+  assert.equal(said(d), "Lisbon.");
+  assert.equal(r.failed, null);
+  assert.equal(d.requests[0].tool_choice, undefined);
 });
