@@ -44,12 +44,17 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 .k-timer { font-size: 72px; font-weight: 700; margin: 8px 0; font-variant-numeric: tabular-nums; }
 .k-steps .is-current { font-weight: 700; color: var(--k-teal); }
 .k-step-of, .k-sub { color: var(--k-dim); font-size: 20px; }
-.k-win-timer.is-done { position: fixed; inset: 0; z-index: 10; display: grid; place-content: center; text-align: center; border-radius: 0; background: var(--k-teal); color: var(--k-card); }
+/* A finished timer stays in its pane (the 1fr row): a full-screen layer hid the bird and the talk button, and in
+   session mode put its close button under the dashboard's. The page tint (k-ringing) is the room-wide cue; one tap
+   anywhere on the card dismisses it. */
+html.k-ringing, html.k-ringing body { background: var(--k-teal-soft); }
+.k-win-timer.is-done { grid-row: -2; display: grid; place-content: center; text-align: center; padding: 16px 64px; background: var(--k-teal); border-color: var(--k-teal); color: var(--k-card); cursor: pointer; }
+.k-tap-dismiss { margin: 0; font-weight: 700; }
 .k-captions { min-height: 64px; }
 .k-captions p { margin: 0; }
 .k-cap-user { color: var(--k-dim); }
 .k-cap-bot { font-size: 22px; }
-.k-mic { position: fixed; right: 16px; bottom: 16px; min-height: 56px; padding: 0 24px; border-radius: 28px; background: var(--k-teal); color: var(--k-card); font-weight: 700; }
+.k-mic { position: fixed; z-index: 5; right: 16px; bottom: 16px; min-height: 56px; padding: 0 24px; border-radius: 28px; background: var(--k-teal); color: var(--k-card); font-weight: 700; }
 .k-pairing { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; background: var(--k-sky); }
 .k-pair-code { font-size: 96px; font-weight: 800; letter-spacing: .08em; margin: 8px 0; color: var(--k-teal); font-variant-numeric: tabular-nums; }
 .k-debug { position: fixed; left: 8px; right: 8px; top: 48px; z-index: 20; max-height: 70vh; overflow: auto; padding: 12px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-line); white-space: pre-wrap; font: 14px/1.4 ui-monospace, monospace; }
@@ -58,6 +63,11 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 /* Session mode (inside the dashboard's Talk to Crow overlay): the dashboard's close button sits over the top-right corner. */
 [data-mode="session"] .k-top { padding-right: 56px; }
 [data-mode="session"] .k-banner { right: 68px; }
+/* ...and its top inset follows the phone's status bar (viewport-fit=cover), which this frame cannot read: a window's own
+   close button goes to the card's top-LEFT corner, where no inset can bring the two together. */
+[data-mode="session"] .k-win { padding: 16px 20px 16px 64px; }
+[data-mode="session"] .k-win-close { right: auto; left: 4px; }
+[data-mode="session"] .k-win-timer.is-done { padding: 16px 64px; }
 @media (max-width: 599px) {
   .k-app { grid-template-rows: 40px auto 1fr auto; height: auto; min-height: 100vh; overflow: auto; }
   html, body { overflow: auto; }
