@@ -277,6 +277,38 @@ export const CLIENT_SCRIPT = `
     });
   }
 
+  /** The music library: its storage origin (the address the server's files come from) and an optional first-hop origin. */
+  function renderMusic() {
+    var box = document.getElementById('kk-music'); if (!box) return;
+    api('GET', '/api/kiosk/admin/music').then(function (j) {
+      clear(box);
+      box.appendChild(el('h2', null, S.music_title));
+      if (!j.installed || !j.credential) { box.appendChild(el('p', 'kk-dim', S.music_not_installed)); return; }
+      box.appendChild(el('p', 'kk-dim', S.music_intro));
+      var st = j.settings || {};
+      var so = el('input'); so.type = 'url'; so.maxLength = 300; so.placeholder = 'http://'; so.value = st.storage_origin || '';
+      var ao = el('input'); ao.type = 'url'; ao.maxLength = 300; ao.placeholder = S.music_api_default; ao.value = st.api_origin || '';
+      [[S.music_storage, so], [S.music_api, ao]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); box.appendChild(l); });
+      var ix = j.index || {};
+      box.appendChild(el('p', 'kk-dim', j.available ? (ix.warm ? fill(S.music_index, { albums: ix.albums, artists: ix.artists, genres: ix.genres }) : S.music_index_building) : S.music_needs_storage));
+      var msg = el('span', 'kk-msg');
+      var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
+      save.addEventListener('click', function () {
+        api('POST', '/api/kiosk/admin/music', { storage_origin: so.value, api_origin: ao.value }).then(function (k) {
+          msg.textContent = k.ok ? S.saved : (S['music_' + k.error] || k.error || '');
+          if (k.ok) renderMusic();
+        });
+      });
+      var check = el('button', 'btn btn-secondary btn-sm', S.music_check); check.type = 'button';
+      check.addEventListener('click', function () {
+        msg.textContent = S.station_testing;
+        api('POST', '/api/kiosk/admin/music/check').then(function (k) { msg.textContent = k.ok ? S.music_check_ok : (S['music_check_' + k.reason] || S.music_check_unreachable); });
+      });
+      var bar = el('div', 'kk-bar'); [save, check, msg].forEach(function (n) { bar.appendChild(n); });
+      box.appendChild(bar);
+    });
+  }
+
   function render(data) {
     state = data;
     renderPair(data);
@@ -292,12 +324,13 @@ export const CLIENT_SCRIPT = `
     api('GET', '/api/kiosk/admin/displays').then(function (j) {
       if (!j.devices || !state) return;
       var changed = JSON.stringify(j.pending) !== JSON.stringify(state.pending) || j.devices.length !== state.devices.length;
-      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section, #kk-dash, #kk-stations')) render(j);
+      if (changed && !document.activeElement.closest('#kk-root form, #kk-root section, #kk-dash, #kk-stations, #kk-music')) render(j);
       else state = j;
     });
   }
   load();
   renderStations();
+  renderMusic();
   window.__kkRefresh = setInterval(refreshPending, 5000);
 })();
 `;
@@ -349,6 +382,7 @@ export default {
         <div id="kk-dash" class="kk-card" hidden></div>
         <div id="kk-devices"></div>
         <div id="kk-stations" class="kk-card"></div>
+        <div id="kk-music" class="kk-card"></div>
       </div>
       <script type="application/json" id="kk-strings">${json}</script>
       <script>${CLIENT_SCRIPT}<\/script>`;
