@@ -277,6 +277,31 @@ export const CLIENT_SCRIPT = `
     });
   }
 
+  /** The line under the music settings: ready with its counts, still reading the names, or what is missing. */
+  function musicStatus(j) {
+    var ix = j.index || {};
+    return j.available ? (ix.warm ? fill(S.music_index, { albums: ix.albums, artists: ix.artists, genres: ix.genres }) : S.music_index_building) : S.music_needs_storage;
+  }
+  /**
+   * Smoke 2026-10-06 F5: while the index is still being read the line is asked again every MUSIC_POLL_MS
+   * (only the line changes: what the operator is typing is left alone), until it is ready, the box is gone,
+   * or MUSIC_POLL_MAX tries. One poll at a time.
+   */
+  var MUSIC_POLL_MS = 3000, MUSIC_POLL_MAX = 200, musicPoll = null;
+  function pollMusic(status, j, n) {
+    if (musicPoll) { clearTimeout(musicPoll); musicPoll = null; }
+    if (!j.available || (j.index || {}).warm || n >= MUSIC_POLL_MAX || typeof setTimeout !== 'function') return;
+    musicPoll = setTimeout(function () {
+      musicPoll = null;
+      if (status.isConnected === false) return;
+      api('GET', '/api/kiosk/admin/music').then(function (k) {
+        if (status.isConnected === false) return;
+        status.textContent = musicStatus(k);
+        pollMusic(status, k, n + 1);
+      });
+    }, MUSIC_POLL_MS);
+  }
+
   /** The music library: its storage origin (the address the server's files come from) and an optional first-hop origin. */
   function renderMusic() {
     var box = document.getElementById('kk-music'); if (!box) return;
@@ -289,8 +314,9 @@ export const CLIENT_SCRIPT = `
       var so = el('input'); so.type = 'url'; so.maxLength = 300; so.placeholder = 'http://'; so.value = st.storage_origin || '';
       var ao = el('input'); ao.type = 'url'; ao.maxLength = 300; ao.placeholder = S.music_api_default; ao.value = st.api_origin || '';
       [[S.music_storage, so], [S.music_api, ao]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); box.appendChild(l); });
-      var ix = j.index || {};
-      box.appendChild(el('p', 'kk-dim', j.available ? (ix.warm ? fill(S.music_index, { albums: ix.albums, artists: ix.artists, genres: ix.genres }) : S.music_index_building) : S.music_needs_storage));
+      var status = el('p', 'kk-dim', musicStatus(j));
+      box.appendChild(status);
+      pollMusic(status, j, 0);
       var msg = el('span', 'kk-msg');
       var save = el('button', 'btn btn-primary btn-sm', S.save); save.type = 'button';
       save.addEventListener('click', function () {

@@ -389,3 +389,33 @@ test("panel stations: the Home network tick is off by default and explained in o
   await flush();
   assert.deepEqual(posts.at(-1), { path: "/api/kiosk/admin/stations", body: { stations: [{ name: "Morning Mix", aliases: [], url: "https://stream.example.invalid/mix" }, { name: "Shed", aliases: [], url: "http://192.168.1.20:8000/live", local: true }] } });
 });
+
+test("smoke F5: the Music library line is asked again while the names are being read — only the line changes, the addresses being typed are left alone — and stops once ready", async () => {
+  const { parseHTML } = await import("linkedom");
+  const vm = await import("node:vm");
+  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-devices"></div><div id="kk-music"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
+  const listing = { devices: [], pending: [], bots: [], stt_profiles: [], tts_profiles: [] };
+  const music = (warm) => ({ installed: true, credential: true, available: true, settings: { storage_origin: "http://100.64.20.5:9000", api_origin: "http://127.0.0.1:8600" }, index: warm ? { warm: true, albums: 12, artists: 7, genres: 3 } : { warm: false } });
+  let reads = 0;
+  const fetch = async (path) => {
+    const body = path === "/api/kiosk/admin/music" ? music(++reads >= 3) : path === "/api/kiosk/admin/stations" ? { stations: [], max: 50 } : listing;
+    return { status: 200, json: async () => body };
+  };
+  const timers = [];
+  const ctx = vm.createContext({ document, window, fetch, JSON, String, setInterval: () => 0, clearInterval: () => {}, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: () => {}, encodeURIComponent, Date });
+  vm.runInContext(CLIENT_SCRIPT, ctx);
+  const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r)); };
+  await flush();
+  const box = document.getElementById("kk-music");
+  assert.ok(box.textContent.includes(STRINGS.en.music_index_building));
+  const typed = box.querySelector("input");
+  typed.value = "http://100.64.20.9:9000";
+  assert.equal(timers.length, 1); assert.equal(timers[0].ms, 3000);
+  timers.shift().fn(); await flush();
+  assert.ok(box.textContent.includes(STRINGS.en.music_index_building), "still reading");
+  assert.equal(timers.length, 1, "asked again");
+  timers.shift().fn(); await flush();
+  assert.ok(box.textContent.includes("Ready: 12 albums, 7 artists, 3 genres."));
+  assert.equal(timers.length, 0, "ready: no more polling");
+  assert.equal(box.querySelector("input").value, "http://100.64.20.9:9000", "what was being typed is untouched");
+});
