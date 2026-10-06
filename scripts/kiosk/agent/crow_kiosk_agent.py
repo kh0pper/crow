@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import protocol  # noqa: E402
-from bt import BtSpeaker, pipewire_sink_present, run_bluetoothctl  # noqa: E402
+from bt import BtSpeaker, pipewire_sink_present, route_chromium_to, run_bluetoothctl  # noqa: E402
 from config import load_config, mic_command  # noqa: E402
 from hw import Backlight, find_input_device, read_touch_downs  # noqa: E402
 from wakegate import WakeGate  # noqa: E402
@@ -90,6 +90,7 @@ class Agent:
             run=bt_run,
             sink_present=bt_sink_present,
             on_state=self._push_bt_state,
+            on_connected=self._route_audio,
         )
         self.page_marker = cfg["page_seen_marker"]
         self.watchdog = PageWatchdog(self.clock() / 1000, armed=os.path.exists(self.page_marker))
@@ -178,11 +179,17 @@ class Agent:
 
     async def _push_bt_state(self, state):
         what = "connected" if state["connected"] else ("link up, no audio sink" if state.get("link") else "disconnected")
+        if state.get("hw_fault"):
+            what += ", Bluetooth hardware needs a restart"
         extra = ""
         if "retry_window" in state:
             extra = " (retry window open)" if state["retry_window"] else " (no retry window)"
         log.info("speaker: %s%s", what, extra)
         await self.send(protocol.bt_state_msg(state))
+
+    async def _route_audio(self, mac):
+        name = await route_chromium_to(mac)
+        log.info("audio routed to %s", name or "(speaker sink not found)")
 
     async def bt_reconnect(self, req=None):
         state = await self.bt.reconnect_now()
@@ -262,8 +269,10 @@ class Agent:
             await asyncio.sleep(delay)
 
     async def mic_loop(self):
-        queue = asyncio.Queue(maxsize=MAX_QUEUED_CHUNKS)
+        step = self.cfg["wake_step"]
+        queue = asyncio.Queue(maxsize=MAX_QUEUED_CHUNKS * step)
         reader = self.spawn(self.mic_reader(queue))
+        batch = []
         try:
             while not self.stopping:
                 getter = asyncio.ensure_future(queue.get())
@@ -272,14 +281,18 @@ class Agent:
                     getter.cancel()
                     reader.result()          # re-raises the reader's error -> supervise() restarts "wake"
                     return
-                chunk = getter.result()
+                batch.append(getter.result())
+                if len(batch) < step:
+                    continue
                 t0 = time.monotonic()
-                score = await self.loop.run_in_executor(
-                    self.pool, self.detector.process, chunk
-                )
-                self.stats["chunks"] += 1
+                if step == 1:
+                    scores = [await self.loop.run_in_executor(self.pool, self.detector.process, batch[0])]
+                else:
+                    scores = await self.loop.run_in_executor(self.pool, self.detector.process_many, batch)
+                self.stats["chunks"] += len(batch)
                 self.stats["infer_ms"] += (time.monotonic() - t0) * 1000
-                await self.on_score(score)
+                batch = []
+                await self.on_score(max(scores))
         finally:
             reader.cancel()
 
@@ -383,7 +396,7 @@ def main(argv=None):
             from oww_lite import load_detector
 
             detector = load_detector(
-                cfg["mel_model"], cfg["embedding_model"], cfg["wake_model"]
+                cfg["mel_model"], cfg["embedding_model"], cfg["wake_model"], threads=cfg["wake_threads"]
             )
         except Exception as e:  # noqa: BLE001 - tap keeps working without a wake model
             log.error("wake word unavailable (%s); running tap-only", e)

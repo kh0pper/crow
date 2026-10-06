@@ -1,0 +1,7 @@
+[Unit]
+Description=Crow kiosk: recover a hung Bluetooth controller (rebind hci_uart; never re-pairs)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/crow-kiosk/bt-recover.sh
+TimeoutStartSec=90

@@ -1,0 +1,9 @@
+[Unit]
+Description=Crow kiosk: watch for the agent's Bluetooth recovery request
+
+[Path]
+PathChanged=/run/crow-kiosk/bt-recover.request
+Unit=crow-kiosk-bt-recover.service
+
+[Install]
+WantedBy=multi-user.target

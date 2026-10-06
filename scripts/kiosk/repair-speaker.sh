@@ -20,8 +20,12 @@ MAC="${MAC^^}"
 [ -z "$YES" ] || [ "$YES" = "--yes" ] || { echo "usage: $0 AA:BB:CC:DD:EE:FF [--yes]" >&2; exit 2; }
 
 if [ "$YES" != "--yes" ]; then
-  echo "Clear the speaker's paired-device list in its app, then put it into pairing mode."
-  read -r -p "Press Enter when the speaker is in pairing mode (Ctrl+C to stop) " _ < /dev/tty
+  echo "This REMOVES the Pi's pairing with $MAC and pairs again. The speaker keeps its own key, so it"
+  echo "refuses a new pairing (br-connection-refused) unless its paired-device list is cleared first."
+  echo "  1. clear the speaker's paired-device list in its app"
+  echo "  2. put the speaker into Bluetooth pairing mode"
+  read -r -p "Type CLEARED when both are done (anything else stops): " answer < /dev/tty
+  [ "$answer" = "CLEARED" ] || { echo "stopped; nothing changed"; exit 1; }
 fi
 
 step() { echo "== $*"; }

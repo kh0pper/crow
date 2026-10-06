@@ -108,7 +108,7 @@ def touch_while_dark_msg():
 
 
 def bt_state_msg(state, req=None):
-    allowed = {"type", "configured", "connected", "link", "name", "reconnecting", "result"}
+    allowed = {"type", "configured", "connected", "link", "hw_fault", "name", "reconnecting", "result"}
     out = {k: v for k, v in state.items() if k in allowed}
     out["type"] = "bt_state"
     if req is not None:

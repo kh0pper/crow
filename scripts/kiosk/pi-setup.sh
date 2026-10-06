@@ -17,6 +17,10 @@
 #   --wake-model-sha256 HEX    its sha256; --clear-wake-model goes back to hey_jarvis
 #   --auto-reboot | --no-auto-reboot   unattended-upgrades may reboot at --reboot-time (default 04:30)
 #   --rotate 0|90|180|270      rotate the display and the touchscreen (a chassis mounted upside down: 180)
+#   --wake-threads 1..4        onnxruntime threads for the wake word (default 2; see bench_wake.py)
+#   --wake-step 1..3           80 ms chunks per inference pass (default 1; 2 halves the overhead)
+#   --bt-auto-reboot | --no-bt-auto-reboot   reboot (max once a day) when a hung Bluetooth controller
+#                              cannot be reset otherwise (default off: the display shows the fault)
 #   --repair-speaker           after setup, re-pair the --bt-sink speaker (operator present: clear the
 #                              speaker's paired list in its app and put it in pairing mode first)
 #   --skip-packages            do not run apt or pip (files and services only)
@@ -39,7 +43,7 @@ OWW_MODELS=(
 PACKAGES=(cage chromium wlr-randr python3-numpy python3-websockets python3-venv unattended-upgrades sysstat
           pipewire wireplumber pipewire-pulse pipewire-alsa libspa-0.2-bluetooth bluez pulseaudio-utils)
 VENV=/opt/crow-kiosk/venv
-SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDIO ACCEPT_OWW WAKE_URL WAKE_SHA AUTO_REBOOT REBOOT_TIME ROTATE)
+SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDIO ACCEPT_OWW WAKE_URL WAKE_SHA AUTO_REBOOT REBOOT_TIME ROTATE WAKE_THREADS WAKE_STEP BT_AUTO_REBOOT)
 
 die() { echo "pi-setup: $*" >&2; exit 2; }
 say() { echo "== $*"; }
@@ -65,6 +69,10 @@ while [ $# -gt 0 ]; do
     --no-auto-reboot) GIVEN[AUTO_REBOOT]=false; shift ;;
     --reboot-time) GIVEN[REBOOT_TIME]="${2:-}"; shift 2 ;;
     --rotate) GIVEN[ROTATE]="${2:-}"; shift 2 ;;
+    --wake-threads) GIVEN[WAKE_THREADS]="${2:-}"; shift 2 ;;
+    --wake-step) GIVEN[WAKE_STEP]="${2:-}"; shift 2 ;;
+    --bt-auto-reboot) GIVEN[BT_AUTO_REBOOT]=1; shift ;;
+    --no-bt-auto-reboot) GIVEN[BT_AUTO_REBOOT]=0; shift ;;
     --repair-speaker) REPAIR_SPEAKER=1; shift ;;
     --skip-packages) SKIP_PACKAGES=1; shift ;;
     --dry-run) DRY=1; ROOT="${2:-}"; [ -n "$ROOT" ] || die "--dry-run needs a directory"; shift 2 ;;
@@ -79,7 +87,7 @@ SETUP_ENV=/etc/crow-kiosk/setup.env
 
 # ---- saved settings: defaults <- saved file <- this run's flags ----------------------------------
 declare -A CFG=([CROW_URL]="" [BT_SINK]="" [MIC_TARGET]="" [FRAME_ORIGINS]="" [ADMIN_USER]="${SUDO_USER:-}"
-                [KEEP_ADMIN_AUDIO]=0 [ACCEPT_OWW]=0 [WAKE_URL]="" [WAKE_SHA]="" [AUTO_REBOOT]=false [REBOOT_TIME]="04:30" [ROTATE]=0)
+                [KEEP_ADMIN_AUDIO]=0 [ACCEPT_OWW]=0 [WAKE_URL]="" [WAKE_SHA]="" [AUTO_REBOOT]=false [REBOOT_TIME]="04:30" [ROTATE]=0 [WAKE_THREADS]=2 [WAKE_STEP]=1 [BT_AUTO_REBOOT]=0)
 if [ -f "$(p "$SETUP_ENV")" ]; then
   while IFS='=' read -r k v; do      # parsed, never sourced
     for known in "${SAVED_KEYS[@]}"; do [ "$k" = "$known" ] && CFG[$k]="$v"; done
@@ -110,6 +118,9 @@ fi
 [[ "${CFG[REBOOT_TIME]}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--reboot-time must be HH:MM"
 [[ "${CFG[AUTO_REBOOT]}" =~ ^(true|false)$ ]] || die "bad saved AUTO_REBOOT"
 [[ "${CFG[ROTATE]}" =~ ^(0|90|180|270)$ ]] || die "--rotate must be 0, 90, 180 or 270"
+[[ "${CFG[WAKE_THREADS]}" =~ ^[1-4]$ ]] || die "--wake-threads must be 1..4"
+[[ "${CFG[WAKE_STEP]}" =~ ^[1-3]$ ]] || die "--wake-step must be 1..3"
+[[ "${CFG[BT_AUTO_REBOOT]}" =~ ^[01]$ ]] || die "bad saved BT_AUTO_REBOOT"
 [[ -z "${CFG[ADMIN_USER]}" || "${CFG[ADMIN_USER]}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad --admin-user"
 [ "${CFG[ADMIN_USER]}" != "kiosk" ] || die "--admin-user cannot be the kiosk user"
 [ "$REPAIR_SPEAKER" = 0 ] || [ -n "${CFG[BT_SINK]}" ] || die "--repair-speaker needs --bt-sink (or a saved one)"
@@ -224,18 +235,29 @@ put 0755 /usr/local/lib/crow-kiosk/kiosk-launch.sh < "$SRC_DIR/kiosk-launch.sh"
 put 0755 /usr/local/lib/crow-kiosk/mem-sample.sh < "$SRC_DIR/mem-sample.sh"
 put 0755 /usr/local/lib/crow-kiosk/after-dpkg.sh < "$SRC_DIR/after-dpkg.sh"
 put 0755 /usr/local/lib/crow-kiosk/repair-speaker.sh < "$SRC_DIR/repair-speaker.sh"
+put 0755 /usr/local/lib/crow-kiosk/bt-recover.sh < "$SRC_DIR/bt-recover.sh"
+put 0644 /etc/systemd/system/crow-kiosk-bt-recover.service < "$SRC_DIR/files/crow-kiosk-bt-recover.service"
+put 0644 /etc/systemd/system/crow-kiosk-bt-recover.path < "$SRC_DIR/files/crow-kiosk-bt-recover.path"
+put 0644 /etc/tmpfiles.d/crow-kiosk.conf < "$SRC_DIR/files/crow-kiosk-tmpfiles.conf"
+if [ "${CFG[BT_AUTO_REBOOT]}" = 1 ]; then
+  echo "enabled by pi-setup --bt-auto-reboot" | put 0644 /etc/crow-kiosk/bt-auto-reboot
+elif [ -e "$(p /etc/crow-kiosk/bt-auto-reboot)" ]; then
+  run rm -f /etc/crow-kiosk/bt-auto-reboot; changed
+fi
 for f in "$SRC_DIR"/agent/*.py; do
   name="$(basename "$f")"
   case "$name" in test_*|bench_*|_*) continue ;; esac
   put 0644 "/usr/local/lib/crow-kiosk/agent/$name" < "$f"
 done
 put 0755 /usr/local/lib/crow-kiosk/agent/bench_latency.py < "$SRC_DIR/agent/bench_latency.py"
-printf 'CROW_URL=%s\nROTATE=%s\n' "$CROW_ORIGIN" "${CFG[ROTATE]}" | put 0644 /etc/crow-kiosk/kiosk.env
-python3 - "$CROW_ORIGIN" "${CFG[BT_SINK]}" "$WAKE_FILE" "${CFG[MIC_TARGET]}" <<'PY_AGENTCFG' | put 0644 /etc/crow-kiosk/agent.json
+put 0755 /usr/local/lib/crow-kiosk/agent/bench_wake.py < "$SRC_DIR/agent/bench_wake.py"
+printf 'CROW_URL=%s\nROTATE=%s\nBT_SINK=%s\n' "$CROW_ORIGIN" "${CFG[ROTATE]}" "${CFG[BT_SINK]}" | put 0644 /etc/crow-kiosk/kiosk.env
+python3 - "$CROW_ORIGIN" "${CFG[BT_SINK]}" "$WAKE_FILE" "${CFG[MIC_TARGET]}" "${CFG[WAKE_THREADS]}" "${CFG[WAKE_STEP]}" <<'PY_AGENTCFG' | put 0644 /etc/crow-kiosk/agent.json
 import json, sys
-origin, mac, wake, mic = sys.argv[1:5]
+origin, mac, wake, mic, threads, step = sys.argv[1:7]
 print(json.dumps({"crow_origin": origin, "bt_sink_mac": mac or None, "wake_model": wake,
-                  "mic_target": mic or None}, indent=2, sort_keys=True))
+                  "mic_target": mic or None, "wake_threads": int(threads), "wake_step": int(step)},
+                 indent=2, sort_keys=True))
 PY_AGENTCFG
 POLICY_ARGS=(--crow-url "$CROW_ORIGIN")
 for o in ${FRAME_ORIGINS[@]+"${FRAME_ORIGINS[@]}"}; do POLICY_ARGS+=(--allow-frame-origin "$o"); done
@@ -273,6 +295,7 @@ done
 ulink kiosk "$KHOME" "$KHOME/.config/systemd/user/crow-kiosk-agent.service" "$KHOME/.config/systemd/user/default.target.wants/crow-kiosk-agent.service"
 ulink kiosk "$KHOME" "$KHOME/.config/systemd/user/crow-kiosk-mem.timer" "$KHOME/.config/systemd/user/timers.target.wants/crow-kiosk-mem.timer"
 uput kiosk "$KHOME" 0644 "$KHOME/.config/wireplumber/wireplumber.conf.d/51-crow-kiosk-bluez.conf" < "$SRC_DIR/files/51-crow-kiosk-bluez.conf"
+uput kiosk "$KHOME" 0644 "$KHOME/.config/wireplumber/wireplumber.conf.d/52-crow-kiosk-stream-targets.conf" < "$SRC_DIR/files/52-crow-kiosk-stream-targets.conf"
 
 # ---- 5. audio and Bluetooth ownership -----------------------------------------------------------
 say "audio ownership"
@@ -338,6 +361,11 @@ run udevadm trigger --subsystem-match=backlight --action=add
 run udevadm trigger --subsystem-match=input --action=change
 if [ "$DRY" = 1 ] || sshd -t; then run systemctl reload ssh.service; else die "sshd -t rejected the configuration; not reloading ssh"; fi
 run systemctl enable crow-kiosk-cage.service
+run systemd-tmpfiles --create /etc/tmpfiles.d/crow-kiosk.conf
+run systemctl enable --now crow-kiosk-bt-recover.path
+if [ "$DRY" = 0 ] && [ -e /sys/class/bluetooth/hci0/device ]; then   # remembered so recovery works while hci0 is gone
+  basename "$(readlink -f /sys/class/bluetooth/hci0/device)" > /var/lib/crow-kiosk/bt-serdev
+fi
 run systemctl set-default graphical.target
 run systemctl disable --now avahi-daemon.service avahi-daemon.socket
 run touch /etc/cloud/cloud-init.disabled

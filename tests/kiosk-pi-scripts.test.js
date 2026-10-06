@@ -16,7 +16,7 @@ const ORIGIN = "https://crow.example.ts.net:8444";
 
 test("shell scripts pass shellcheck (skips without shellcheck)", (t) => {
   if (!have("shellcheck")) return t.skip("shellcheck not installed");
-  const r = spawnSync("shellcheck", ["pi-setup.sh", "kiosk-launch.sh", "mem-sample.sh", "after-dpkg.sh", "repair-speaker.sh"], { cwd: K, encoding: "utf8" });
+  const r = spawnSync("shellcheck", ["pi-setup.sh", "kiosk-launch.sh", "mem-sample.sh", "after-dpkg.sh", "repair-speaker.sh", "bt-recover.sh"], { cwd: K, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
 
@@ -47,10 +47,18 @@ test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and
     }
     assert.ok(!readdirSync(join(dir, "usr/local/lib/crow-kiosk/agent")).some((f) => f.startsWith("test_") || f.startsWith("_")), "tests and test helpers are not installed");
     const cfg = JSON.parse(readFileSync(join(dir, "etc/crow-kiosk/agent.json"), "utf8"));
-    assert.deepEqual(cfg, { bt_sink_mac: "00:11:22:AA:BB:CC", crow_origin: ORIGIN, mic_target: null, wake_model: "/var/lib/crow-kiosk/wake/hey_jarvis_v0.1.onnx" });
+    assert.deepEqual(cfg, { bt_sink_mac: "00:11:22:AA:BB:CC", crow_origin: ORIGIN, mic_target: null, wake_model: "/var/lib/crow-kiosk/wake/hey_jarvis_v0.1.onnx", wake_step: 1, wake_threads: 2 });
     assert.match(readFileSync(join(dir, "etc/systemd/system/apt-daily-upgrade.timer.d/crow-kiosk.conf"), "utf8"), /^OnCalendar=\*-\*-\* 03:30$/m, "upgrades run inside the sleep window");
     assert.doesNotMatch(readFileSync(join(dir, "home/kiosk/.config/systemd/user/crow-kiosk-agent.service"), "utf8"), /^MemoryMax/m, "memcg is off on the Pi: no fake cap");
-    assert.equal(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), `CROW_URL=${ORIGIN}\nROTATE=0\n`);
+    assert.equal(readFileSync(join(dir, "etc/crow-kiosk/kiosk.env"), "utf8"), `CROW_URL=${ORIGIN}\nROTATE=0\nBT_SINK=00:11:22:AA:BB:CC\n`);
+    for (const f of ["usr/local/lib/crow-kiosk/bt-recover.sh", "etc/systemd/system/crow-kiosk-bt-recover.service", "etc/systemd/system/crow-kiosk-bt-recover.path",
+      "etc/tmpfiles.d/crow-kiosk.conf", "home/kiosk/.config/wireplumber/wireplumber.conf.d/52-crow-kiosk-stream-targets.conf", "usr/local/lib/crow-kiosk/agent/bench_wake.py"]) {
+      assert.ok(existsSync(join(dir, f)), f);
+    }
+    assert.match(readFileSync(join(dir, "home/kiosk/.config/wireplumber/wireplumber.conf.d/52-crow-kiosk-stream-targets.conf"), "utf8"), /node\.stream\.restore-target = false/);
+    assert.match(readFileSync(join(dir, "etc/tmpfiles.d/crow-kiosk.conf"), "utf8"), /^f \/run\/crow-kiosk\/bt-recover\.request 0620 root kiosk -$/m);
+    assert.match(r1.stdout, /\+ systemctl enable --now crow-kiosk-bt-recover\.path/);
+    assert.ok(!existsSync(join(dir, "etc/crow-kiosk/bt-auto-reboot")), "automatic reboot is off by default");
     assert.doesNotMatch(r1.stdout, /python3-onnxruntime/, "Debian's onnxruntime dies with SIGILL on a Pi 3");
     assert.match(r1.stdout, /apt-get install .*\bwlr-randr\b/);
     assert.match(r1.stdout, /\+ python3 -m venv --system-site-packages \/opt\/crow-kiosk\/venv/);
@@ -170,6 +178,56 @@ exit 0
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("bt-recover.sh: acts only on hci0 evidence, rebinds the serdev device, restarts bluetoothd then WirePlumber, never re-pairs", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-btrec-"));
+  try {
+    const root = join(dir, "root"), bin = join(dir, "bin"), log = join(dir, "calls");
+    const drv = join(root, "sys/bus/serial/drivers/hci_uart_bcm");
+    mkdirSync(drv, { recursive: true }); mkdirSync(bin);
+    mkdirSync(join(drv, "serial0-0"));
+    writeFileSync(join(drv, "unbind"), ""); writeFileSync(join(drv, "bind"), "");
+    const fake = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\necho "${name} $*" >> "${log}"\n${body}\n`, { mode: 0o755 });
+    fake("journalctl", `[ -f "${dir}/fault" ] && echo "Oct 05 kernel: Bluetooth: hci0: command 0x0406 tx timeout"; exit 0`);
+    fake("bluetoothctl", `[ "$1" = show ] && [ -f "${dir}/powered" ] && echo "	Powered: yes"; exit 0`);
+    fake("systemctl", "exit 0"); fake("runuser", "exit 0"); fake("logger", "exit 0"); fake("id", `echo 1001`); fake("sleep", "exit 0");
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CROW_KIOSK_TEST_ROOT: root, CROW_KIOSK_BT_WAIT: "2" };
+    const run = () => spawnSync("bash", [join(K, "bt-recover.sh")], { encoding: "utf8", env });
+    const state = () => readFileSync(join(root, "run/crow-kiosk/bt-recover.state"), "utf8").split(" ")[0];
+    const calls = () => (existsSync(log) ? readFileSync(log, "utf8") : "");
+
+    assert.equal(run().status, 0); assert.equal(state(), "no_fault");
+    assert.equal(readFileSync(join(drv, "unbind"), "utf8"), "", "no evidence: nothing touched");
+
+    writeFileSync(join(dir, "fault"), ""); writeFileSync(join(dir, "powered"), "");
+    assert.equal(run().status, 0); assert.equal(state(), "ok");
+    assert.equal(readFileSync(join(drv, "unbind"), "utf8").trim(), "serial0-0");
+    assert.equal(readFileSync(join(drv, "bind"), "utf8").trim(), "serial0-0");
+    const c = calls();
+    assert.ok(c.indexOf("systemctl restart bluetooth.service") < c.indexOf("runuser -u kiosk"), "bluetoothd first, then the kiosk WirePlumber");
+    assert.match(c, /systemctl --user restart wireplumber\.service/);
+    assert.doesNotMatch(c, /bluetoothctl (remove|pair|trust)/, "recovery never re-pairs");
+
+    assert.equal(run().status, 0); assert.equal(state(), "rate_limited", "at most once per 10 minutes");
+
+    writeFileSync(join(root, "var/lib/crow-kiosk/bt-recover.log"), "");
+    rmSync(join(dir, "powered"));
+    assert.equal(run().status, 0); assert.equal(state(), "needs_restart", "controller stays dead, no auto-reboot");
+    assert.doesNotMatch(calls(), /systemctl reboot/);
+
+    writeFileSync(join(root, "var/lib/crow-kiosk/bt-recover.log"), "");
+    mkdirSync(join(root, "etc/crow-kiosk"), { recursive: true }); writeFileSync(join(root, "etc/crow-kiosk/bt-auto-reboot"), "");
+    assert.equal(run().status, 0);
+    assert.match(calls(), /systemctl reboot/, "operator-enabled reboot");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("kiosk-launch.sh waits (bounded) for the speaker's sink before starting Chromium", () => {
+  const launch = readFileSync(join(K, "kiosk-launch.sh"), "utf8");
+  const wait = launch.indexOf("pactl list short sinks");
+  assert.ok(wait > 0 && wait < launch.indexOf("exec /usr/bin/chromium"));
+  assert.match(launch, /for _ in \$\(seq 1 20\)/);
+});
+
 test("pi-setup.sh never writes through a symlink planted in a user's home", (t) => {
   if (!have("python3")) return t.skip("python3 not available");
   const env = { ...process.env, SUDO_USER: "alex" };
@@ -217,7 +275,8 @@ test("pi-setup.sh refuses bad arguments before touching anything", (t) => {
       ["--crow-url", ORIGIN, "--admin-user", "kiosk"], ["--crow-url", ORIGIN, "--reboot-time", "4am"], ["--nope"],
       ["--crow-url", ORIGIN, "--bt-sink", "00:11:22:33:44:55", "--keep-admin-audio"],
       ["--crow-url", ORIGIN, "--wake-model-url", "https://crow.example.ts.net/x/..", "--wake-model-sha256", "a".repeat(64)],
-      ["--crow-url", ORIGIN, "--mic-target", "x;reboot"], ["--crow-url", ORIGIN, "--repair-speaker"]]) {
+      ["--crow-url", ORIGIN, "--mic-target", "x;reboot"], ["--crow-url", ORIGIN, "--repair-speaker"],
+      ["--crow-url", ORIGIN, "--wake-threads", "8"], ["--crow-url", ORIGIN, "--wake-step", "0"]]) {
       const r = spawnSync("bash", [join(K, "pi-setup.sh"), ...bad, "--dry-run", join(dir, "x")], { encoding: "utf8" });
       assert.equal(r.status, 2, `${bad.join(" ")}: ${r.stdout}${r.stderr}`);
       assert.ok(!existsSync(join(dir, "x", "etc")), "nothing written");

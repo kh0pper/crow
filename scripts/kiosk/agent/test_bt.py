@@ -91,6 +91,8 @@ class Clock:
 class BtTests(unittest.IsolatedAsyncioTestCase):
     def mk(self, ctl, sink_works=True, **kw):
         self.pushed = []
+        self.recovery_requests = []
+        self.recovery_outcome = ""
 
         async def on_state(s):
             self.pushed.append(dict(s))
@@ -102,6 +104,8 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
             sink_present=Sink(ctl, sink_works),
             clock=self.clock,
             on_state=on_state,
+            request_recovery=lambda: self.recovery_requests.append(self.clock()),
+            recovery_state=lambda: self.recovery_outcome,
             **kw,
         )
 
@@ -284,6 +288,66 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(ctl.connects(), 1, "the window is fresh when the helper starts")
         first = self.pushed[0]
         self.assertEqual((first["connected"], first["retry_window"]), (False, True))
+
+    async def test_hung_controller_asks_for_recovery_once_per_10_minutes(self):
+        ctl = FakeCtl()
+        ctl.hang_info = True
+        sp = self.mk(ctl)
+        for t in range(0, 900, 30):
+            self.clock.t = t
+            await sp.tick()
+        self.assertEqual(self.recovery_requests, [60, 660], "after 3 unanswered checks, then at most every 600 s")
+        ctl.hang_info = False
+        self.clock.t = 930
+        await sp.tick()
+        self.assertEqual(sp.unanswered, 0)
+        self.assertTrue(all(c[0] in ("info", "connect") for c in ctl.calls), "recovery never removes or pairs")
+
+    async def test_needs_restart_is_reported_as_hw_fault_and_cleared_by_a_working_speaker(self):
+        ctl = FakeCtl(connect_works=False)
+        sp = self.mk(ctl)
+        self.recovery_outcome = "needs_restart"
+        self.clock.t = 5000
+        await sp.tick()
+        self.assertTrue(sp.hw_fault)
+        self.assertTrue(self.pushed[-1]["hw_fault"])
+        self.recovery_outcome = "ok"
+        ctl.connected = True
+        self.clock.t = 5030
+        await sp.tick()
+        self.assertFalse(sp.hw_fault)
+
+    async def test_on_connected_runs_when_the_speaker_comes_back(self):
+        ctl = FakeCtl(connect_works=False)
+        routed = []
+
+        async def on_connected(mac):
+            routed.append(mac)
+        sp = self.mk(ctl, on_connected=on_connected)
+        self.clock.t = 7000
+        await sp.tick()
+        ctl.connected = True
+        self.clock.t = 7030
+        await sp.tick()
+        await sp.tick()
+        self.assertEqual(routed, [MAC], "once, on the transition")
+
+    def test_chromium_stream_and_sink_name_parsing(self):
+        inputs = """Sink Input #41
+	Driver: protocol-pulse
+	Sink: 66
+	Properties:
+		application.name = "Chromium"
+		application.process.binary = "chromium"
+Sink Input #42
+	Properties:
+		application.name = "pw-play"
+"""
+        self.assertEqual(bt.chromium_sink_inputs(inputs), ["41"])
+        self.assertEqual(bt.chromium_sink_inputs(None), [])
+        sinks = "66\talsa_output.platform-3f00b840.mailbox.stereo-fallback\tPipeWire\n85\tbluez_output.00_11_22_AA_BB_CC.1\tPipeWire\n"
+        self.assertEqual(bt.sink_name(sinks, MAC), "bluez_output.00_11_22_AA_BB_CC.1")
+        self.assertIsNone(bt.sink_name(sinks, "00:11:22:AA:BB:CD"))
 
     def test_sink_parsing_and_name(self):
         out = (

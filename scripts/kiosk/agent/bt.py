@@ -18,6 +18,13 @@
   arrives before either gives up (a test checks this ordering).
 - Only `bluetoothctl info|connect <the MAC from agent.json>`; nothing scans, pairs, trusts or removes. The
   MAC never leaves the Pi: bt_state carries the speaker's name only.
+- Automatic recovery NEVER removes or re-pairs the speaker: the speaker keeps its key, and a Pi-side
+  remove + pair is refused ("br-connection-refused") until the operator clears the speaker's own list.
+- Hung controller: after 3 unanswered checks in a row (bluetoothctl timing out, about 90 s) the agent asks
+  the root helper (crow-kiosk-bt-recover, via a request file) to reset the controller; the helper acts only
+  if the kernel log shows hci0 errors. Its outcome file says whether the hardware needs a restart, which
+  bt_state reports as `hw_fault`.
+- When the speaker (re)connects, `on_connected(mac)` runs so the agent can move Chromium's audio there.
 `run(*args, timeout)`, `sink_present(mac)` and `clock()` are injected so the logic is tested without
 bluetoothctl or PipeWire.
 """
@@ -34,6 +41,10 @@ SINK_TIMEOUT_S = 2
 ATTEMPT_DEADLINE_S = (
     25  # < the page's btReconnect timeout (30 s) < the server relay (35 s)
 )
+RECOVERY_REQUEST = "/run/crow-kiosk/bt-recover.request"
+RECOVERY_STATE = "/run/crow-kiosk/bt-recover.state"
+UNANSWERED_BEFORE_RECOVERY = 3
+RECOVERY_MIN_INTERVAL_S = 600
 RESULTS = ("ok", "failed", "busy", "rate_limited", "not_paired", "not_configured")
 
 
@@ -74,10 +85,56 @@ def sink_listed(pactl_short_sinks, mac):
     )
 
 
+def sink_name(pactl_short_sinks, mac):
+    prefix = sink_name_prefix(mac)
+    for cols in (line.split("\t") for line in (pactl_short_sinks or "").splitlines()):
+        if len(cols) > 1 and cols[1].startswith(prefix):
+            return cols[1]
+    return None
+
+
 async def pipewire_sink_present(mac):
-    return sink_listed(
-        await _run(["pactl", "list", "short", "sinks"], SINK_TIMEOUT_S), mac
-    )
+    return sink_listed(await _run(["pactl", "list", "short", "sinks"], SINK_TIMEOUT_S) or "", mac)
+
+
+def chromium_sink_inputs(pactl_sink_inputs):
+    """Ids of sink inputs (playback streams) that belong to Chromium, from `pactl list sink-inputs`."""
+    ids, cur = [], None
+    for line in (pactl_sink_inputs or "").splitlines():
+        m = re.match(r"^Sink Input #(\d+)", line)
+        if m:
+            cur = m.group(1)
+            continue
+        if cur and re.search(r'application\.(process\.binary|name) = "(chromium|Chromium)', line):
+            if cur not in ids:
+                ids.append(cur)
+    return ids
+
+
+async def route_chromium_to(mac):
+    """Make the speaker the default sink and move Chromium's playing streams onto it. Returns the sink name."""
+    name = sink_name(await _run(["pactl", "list", "short", "sinks"], SINK_TIMEOUT_S), mac)
+    if not name:
+        return None
+    await _run(["pactl", "set-default-sink", name], SINK_TIMEOUT_S)
+    for sid in chromium_sink_inputs(await _run(["pactl", "list", "sink-inputs"], SINK_TIMEOUT_S)):
+        await _run(["pactl", "move-sink-input", sid, name], SINK_TIMEOUT_S)
+    return name
+
+
+def request_recovery_file(path=RECOVERY_REQUEST):
+    """Touch the pre-created request file (root-owned dir; the kiosk group may write this one file)."""
+    import time as _t
+    with open(path, "a") as f:
+        f.write(f"{int(_t.time())}\n")
+
+
+def read_recovery_state(path=RECOVERY_STATE):
+    try:
+        with open(path) as f:
+            return (f.read().split() or [""])[0]
+    except OSError:
+        return ""
 
 
 class BtSpeaker:
@@ -93,6 +150,9 @@ class BtSpeaker:
         retry_window_s=600,
         retry_gaps_s=(30, 60, 120, 240),
         deadline_s=ATTEMPT_DEADLINE_S,
+        on_connected=None,
+        request_recovery=request_recovery_file,
+        recovery_state=read_recovery_state,
     ):
         if mac is not None and not valid_mac(mac):
             raise ValueError("bad MAC")
@@ -115,6 +175,12 @@ class BtSpeaker:
         self.retry_step = 0
         self.next_connect_at = None
         self.connect_calls = 0
+        self.on_connected = on_connected
+        self.request_recovery = request_recovery
+        self.recovery_state = recovery_state
+        self.unanswered = 0
+        self.last_recovery_request = None
+        self.hw_fault = False
 
     # ---- state -----------------------------------------------------------------------------------
     def state(self, result=None):
@@ -122,6 +188,7 @@ class BtSpeaker:
             "type": "bt_state",
             "configured": self.mac is not None,
             "connected": self.connected,
+            "hw_fault": self.hw_fault,
             "link": self.link,
             "name": self.name,
             "reconnecting": self.lock.locked(),
@@ -167,6 +234,11 @@ class BtSpeaker:
             )  # a drop: retry for the next 10 minutes
         if was != self.connected:
             await self._publish()
+        if self.connected and not was and self.on_connected:
+            try:
+                await self.on_connected(self.mac)
+            except Exception:  # noqa: BLE001 - routing is best effort; captions cover a silent sink
+                pass
 
     async def _attempt(self, connect=True):
         info, sink = await self._observe()
@@ -222,6 +294,7 @@ class BtSpeaker:
         )
         async with self.lock:
             info = await self._bounded(connect=want)
+        await self._check_hardware(info, now)
         if info is None:
             return          # bluetoothctl did not answer: keep the schedule; the next tick tries again
         if want and not self.connected:
@@ -234,6 +307,22 @@ class BtSpeaker:
                 )
         if not info["paired"]:
             self.next_connect_at = None       # a real "Paired: no" / "not available"
+
+    async def _check_hardware(self, info, now):
+        self.unanswered = 0 if info is not None else self.unanswered + 1
+        if (self.unanswered >= UNANSWERED_BEFORE_RECOVERY and self.request_recovery
+                and (self.last_recovery_request is None or now - self.last_recovery_request >= RECOVERY_MIN_INTERVAL_S)):
+            self.last_recovery_request = now
+            try:
+                self.request_recovery()
+            except OSError:
+                pass
+        fault = (self.recovery_state() if self.recovery_state else "") == "needs_restart"
+        if info is not None and info.get("connected"):
+            fault = False
+        if fault != self.hw_fault:
+            self.hw_fault = fault
+            await self._publish()
 
     async def loop(self, stopping=lambda: False):
         if self.mac is None:
