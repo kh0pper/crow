@@ -216,8 +216,19 @@ public class MainActivity extends AppCompatActivity {
                     return false;
                 }
                 lastScrollProbeMs = now;
+                // First the scroll containers under the finger, wherever they are on the page (the
+                // side menu is outside .content-body: a downward swipe in a scrolled menu used to
+                // pull to refresh instead of scrolling it back up). Touch coordinates are device
+                // pixels; elementFromPoint takes CSS pixels.
                 webView.evaluateJavascript(
-                    "(function() {" +
+                    "(function(x, y) {" +
+                    "  var d = window.devicePixelRatio || 1;" +
+                    "  for (var el = document.elementFromPoint(x / d, y / d); el && el !== document.documentElement; el = el.parentElement) {" +
+                    "    if (el.scrollHeight > el.clientHeight && el.scrollTop > 5) {" +
+                    "      var oy = window.getComputedStyle(el).overflowY;" +
+                    "      if (oy === 'auto' || oy === 'scroll') return el.scrollTop;" +
+                    "    }" +
+                    "  }" +
                     "  var all = document.querySelectorAll('.content-body, .content-body *');" +
                     "  for (var i = 0; i < all.length; i++) {" +
                     "    var el = all[i];" +
@@ -230,7 +241,7 @@ public class MainActivity extends AppCompatActivity {
                     "    }" +
                     "  }" +
                     "  return window.scrollY || document.documentElement.scrollTop || 0;" +
-                    "})()",
+                    "})(" + event.getX() + ", " + event.getY() + ")",
                     value -> {
                         try {
                             double scrollTop = Double.parseDouble(value);
