@@ -59,13 +59,14 @@ const pct = (n, d) => `${n}/${d}`;
 /** rows of ONE model → its figures. */
 export function summarize(rows) {
   const out = { main: { four: { correct: 0, total: 0 }, single: { correct: 0, total: 0 } }, held: { four: { correct: 0, total: 0 }, single: { correct: 0, total: 0 } },
-    held_ids: new Set(), held_offered: new Set(), untruthful: [], plain_window: { total: 0, changed: 0 }, forced: { total: 0, first_call: 0 }, backstop: { total: 0, done: 0, corrected: 0, could_not: 0 }, must_cases: new Set(), wrong: [], trials: 0 };
+    held_ids: new Set(), held_offered: new Set(), untruthful: [], plain_window: { total: 0, changed: 0 }, skipped: 0, forced: { total: 0, first_call: 0 }, backstop: { total: 0, done: 0, corrected: 0, could_not: 0 }, must_cases: new Set(), wrong: [], trials: 0 };
   for (const r of rows) {
     const set = r.set === "held" ? "held" : "main";
     const cell = out[set][r.arm];
     cell.total += 1;
     if (r.ok) cell.correct += 1; else out.wrong.push(`${r.id}/${r.arm}/t${r.trial}: ${r.offered_expected ? (r.tools.join(" → ") || "no call") : "expected tool not offered"}${r.failed ? ` (${r.failed})` : ""}`);
     out.trials = Math.max(out.trials, r.trial + 1);
+    if (r.ran === false) out.skipped += 1;
     if (r.arm === "four" && r.plain && r.window_open) { out.plain_window.total += 1; if (r.changed) out.plain_window.changed += 1; }
     if (set === "held") { out.held_ids.add(r.id); if (r.offered_expected) out.held_offered.add(r.id); }
     // Only a turn that RAN can have ended on a claim or been done: a row where the product never offered the
@@ -127,6 +128,7 @@ function main() {
     console.log(`\n${rep.label} (${rep.engine || "?"}), ${s.trials} trial(s)${rep.label === "shipped" ? " — informational" : ""}${rep.run ? `, run ${rep.run}` : ""}${rep.head ? `, head ${String(rep.head).slice(0, 12)}` : ""}`);
     console.log(`  the 40:    four ${pct(s.main.four.correct, s.main.four.total)}   single ${pct(s.main.single.correct, s.main.single.total)}`);
     console.log(`  held out:  four ${pct(s.held.four.correct, s.held.four.total)}   single ${pct(s.held.single.correct, s.held.single.total)}   right tool offered on ${s.held_offered.size} of ${s.held_ids.size}`);
+    console.log(`  rows where no turn ran (the expected tool was not offered, or a no-model path answered): ${s.skipped}`);
     console.log(`  plain questions with a window open that changed the screen anyway: ${s.plain_window.changed} of ${s.plain_window.total} (four-tool arm; gate: 0)`);
     console.log(`  must-run:  ${s.must_cases.size} utterances; forced ${pct(s.forced.first_call, s.forced.total)} first-request calls; unforced ${pct(s.backstop.done, s.backstop.total)} done, ${s.backstop.could_not} could-not lines`);
     for (const w of s.wrong.slice(0, 60)) console.log(`    wrong  ${w}`);

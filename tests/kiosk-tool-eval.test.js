@@ -399,7 +399,7 @@ test("rev 7 INVARIANT: must ⊆ offered — on every utterance of the 40, every 
 test("rev 7 scorer: a row where the product never offered the expected tool (no turn ran) is wrong, but never counts as a turn that ended on a claim or an undone must-run turn", () => {
   const notRun = { set: "held", arm: "four", trial: 0, id: "hx", ok: false, ran: false, offered_expected: false, must: true, must_done: false, failed: null, tool_choice: null, requests: 0, corrected: false, tools: [] };
   const s = summarize([notRun]);
-  assert.deepEqual([s.untruthful.length, s.backstop.total, s.held.four.total, s.held.four.correct], [0, 0, 1, 0]);
+  assert.deepEqual([s.untruthful.length, s.backstop.total, s.held.four.total, s.held.four.correct, s.skipped], [0, 0, 1, 0, 1]);
   const ran = { ...notRun, ran: true, offered_expected: true, requests: 2 };
   assert.equal(summarize([ran]).untruthful.length, 1, "a turn that ran and ended on nothing is still caught");
 });
