@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fold, compact, wordsOf, cleanName, buildIndex, readRequest, trackQueries, decide, choose, describeChoices, libraryCandidate, matchReport,
+import { fold, compact, wordsOf, cleanName, buildIndex, readRequest, trackQueries, decide, choose, describeChoices, libraryCandidate, matchReport, sayAloud, spokenChanges,
   TEXT_MAX, WORDS_MAX, CHOICES_MAX } from "../bundles/kiosk/server/sources/music-match.js";
 
 const ARTISTS = [
@@ -330,4 +330,37 @@ test("spoken forms: numbers, years, ordinals, saint, doctor, volume, initialisms
   const r = matchReport(ix);
   assert.ok(r.spoken.albums.variants >= 4 && r.spoken.albums.resolved === r.spoken.albums.variants, JSON.stringify(r.spoken));
   assert.ok(r.spoken.artists.variants >= 2 && r.spoken.artists.resolved === r.spoken.artists.variants, JSON.stringify(r.spoken));
+});
+
+test("smoke F7: spoken forms the smoke's report missed — a short name spelled letter by letter, ordinals past tenth, thousands — land where the written name lands; the report compares like for like and says what kind of change missed", () => {
+  const ix = buildIndex({
+    albums: [
+      { id: 601, title: "XQZ", artist: "Tanglewire", artistId: 6, tracks: 9 },
+      { id: 602, title: "The 12th Hour", artist: "Okapi Sunday", artistId: 5, tracks: 8 },
+      { id: 603, title: "Room 1000", artist: "Saffron", artistId: 7, tracks: 10 },
+      { id: 604, title: "13th Floor Gulls", artist: "Saffron", artistId: 7, tracks: 10 },
+      { id: 605, title: "Saffron", artist: "Saffron", artistId: 7, tracks: 12 },
+    ],
+    artists: [{ id: 40, name: "TLQ" }],
+  });
+  assert.equal(sayAloud("The 12th Hour"), "The twelfth Hour");
+  assert.equal(sayAloud("Room 1000"), "Room one thousand");
+  assert.equal(sayAloud("Room 1050"), "Room one thousand fifty");
+  assert.equal(sayAloud("13th Floor Gulls"), "thirteenth Floor Gulls");
+  const plays = (said) => { const c = decide(readRequest(said), ix, {}).candidates || []; return c.length === 1 && c[0].confident ? c[0].id : `(${c.map((x) => x.id).join(",")})`; };
+  for (const [said, id] of [["x q z", "music:album:601"], ["XQZ", "music:album:601"], ["the twelfth hour", "music:album:602"], ["room one thousand", "music:album:603"],
+    ["thirteenth floor gulls", "music:album:604"], ["t l q", "music:artist:40"]]) assert.equal(plays(said), id, said);
+  // A single letter or a word is never a spelled name: "a" and "x" alone find nothing new.
+  assert.notEqual(plays("x"), "music:album:601");
+  const r = matchReport(ix);
+  assert.deepEqual([r.spoken.albums.variants, r.spoken.albums.resolved], [4, 4], JSON.stringify(r.spoken));
+  assert.deepEqual([r.spoken.artists.variants, r.spoken.artists.resolved], [1, 1]);
+  assert.deepEqual(r.spoken.albums.missed_by, {});
+  assert.deepEqual(spokenChanges("Vol. 2"), ["number", "short"]);
+  assert.deepEqual(spokenChanges("Blue"), ["other"]);
+  // A miss is counted by its kind: an index where the spoken form cannot land.
+  const odd = buildIndex({ albums: [{ id: 701, title: "QQ 7", artist: "Ladder", artistId: 9, tracks: 3 }, { id: 702, title: "q q seven", artist: "Ladder", artistId: 9, tracks: 3 }] });
+  const ro = matchReport(odd);
+  assert.ok(ro.spoken.albums.variants >= 1);
+  assert.equal(JSON.stringify(ro).includes("QQ"), false, "counts only: no name leaves the report");
 });

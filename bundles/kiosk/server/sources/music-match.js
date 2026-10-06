@@ -173,9 +173,10 @@ export function buildIndex({ albums = [], artists = [], genres = [], playlists =
     put(ix.exact, e.f, e);
     const fa = dropArticle(e.w).join(" ");
     if (fa !== e.f) put(ix.exact, fa, e);
-    // Spaces aside ("ac dq", "a c d q" and "AC/DQ" meet): only for names of four letters or more.
+    // Spaces aside ("ac dq", "a c d q" and "AC/DQ" meet). Looked up for four letters or more, or for a name
+    // SPELLED letter by letter ("x q z" for XQZ: F7, revision 6), so every name of two or more is kept.
     const j = e.w.join("");
-    if (j.length >= 4) put(ix.joined, j, e);
+    if (j.length >= 2) put(ix.joined, j, e);
   };
   const named = (kind, id, name) => {
     const w = wordsOf(name);
@@ -222,7 +223,8 @@ function exact(ix, w, kinds) {
   const out = new Set();
   const bare = dropArticle(w);
   for (const key of new Set([w.join(" "), bare.join(" ")])) for (const e of ix.exact.get(key) || []) if (kinds.includes(e.kind)) out.add(e);
-  if (!out.size && w.join("").length >= 4) for (const e of ix.joined?.get(w.join("")) || []) if (kinds.includes(e.kind)) out.add(e);
+  const spelled = w.length >= 2 && w.every((x) => x.length === 1);
+  if (!out.size && (w.join("").length >= 4 || spelled)) for (const e of ix.joined?.get(w.join("")) || []) if (kinds.includes(e.kind)) out.add(e);
   if (kinds.includes("genre")) for (const key of new Set([w.join(""), bare.join("")])) for (const e of ix.genre.get(key) || []) out.add(e);
   return [...out];
 }
@@ -558,13 +560,16 @@ function spokenGenre(name) {
 
 const ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
 const TENS_W = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
-const ORD_W = ["", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+// Every ordinal word up to twentieth, from the same table the matcher reads (F7: "12th" is "twelfth", not "twelveth").
+const ORD_W = ["", ...Object.keys(ORD_WORDS).sort((a, b) => ORD_WORDS[a] - ORD_WORDS[b])];
 const two = (n) => (n < 20 ? ONES[n] : `${TENS_W[Math.floor(n / 10)]}${n % 10 ? ` ${ONES[n % 10]}` : ""}`);
 /** A number as a person reads it: years in pairs ("nineteen ninety nine"), 2000-2009 as "two thousand five", else plainly. */
 function sayNumber(n) {
   if (n < 100) return two(n);
   if (n >= 1100 && n < 2000 || n >= 2010 && n < 2100) return `${two(Math.floor(n / 100))} ${n % 100 === 0 ? "hundred" : n % 100 < 10 ? `oh ${ONES[n % 100]}` : two(n % 100)}`;
   if (n >= 2000 && n < 2010) return `two thousand${n % 10 ? ` ${ONES[n % 10]}` : ""}`;
+  // "1000" is "one thousand", "1050" "one thousand fifty", "3000" "three thousand" (F7: never digit by digit).
+  if (n >= 1000 && (n < 1100 || n % 1000 === 0)) return `${ONES[Math.floor(n / 1000)]} thousand${n % 1000 ? ` ${n % 1000 < 100 ? two(n % 1000) : sayNumber(n % 1000)}` : ""}`;
   if (n < 1000) return `${ONES[Math.floor(n / 100)]} hundred${n % 100 ? ` ${two(n % 100)}` : ""}`;
   return String(n).split("").map((d) => ONES[Number(d)]).join(" ");
 }
@@ -576,11 +581,21 @@ function sayNumber(n) {
 export function sayAloud(name) {
   const said = text(name).slice(0, TEXT_MAX)
     .replace(/\bSt\.?(?=\s)/g, "saint").replace(/\bDr\.?(?=\s)/g, "doctor").replace(/\bVol\.?(?=\s)/gi, "volume").replace(/\bMr\.?(?=\s)/g, "mister")
-    .replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, (m, d) => { const n = Number(d); return n <= 10 ? ORD_W[n] : n < 20 ? `${ONES[n]}th` : n % 10 && n % 10 <= 3 ? `${TENS_W[Math.floor(n / 10)]} ${ORD_W[n % 10]}` : m; })
+    .replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, (m, d) => { const n = Number(d); return n >= 1 && n <= 20 ? ORD_W[n] : n % 10 ? `${TENS_W[Math.floor(n / 10)]} ${ORD_W[n % 10]}` : m; })
     .replace(/\b\d{1,4}\b/g, (d) => sayNumber(Number(d)))
     .replace(/\b[A-Z]{2,5}\b/g, (w) => w.toLowerCase().split("").join(" "))
     .replace(/\b([A-Z]{1,3})\/([A-Z]{1,3})\b/g, (m, a, b) => `${a} ${b}`.toLowerCase().split("").filter((c) => c !== " ").join(" "));
   return fold(said) === fold(name) && said.toLowerCase() === text(name).toLowerCase() ? "" : said;
+}
+
+/** Which kinds of change sayAloud() makes to a name: letters, ordinal, number, short. */
+export function spokenChanges(name) {
+  const t = text(name).slice(0, TEXT_MAX), out = [];
+  if (/\b[A-Z]{2,5}\b/.test(t) || /\b[A-Z]{1,3}\/[A-Z]{1,3}\b/.test(t)) out.push("letters");
+  if (/\b\d{1,2}(st|nd|rd|th)\b/i.test(t)) out.push("ordinal");
+  if (/\b\d{1,4}\b/.test(t)) out.push("number");
+  if (/\b(St|Dr|Vol|Mr)\.?\s/i.test(t)) out.push("short");
+  return out.length ? out : ["other"];
 }
 
 /**
@@ -634,15 +649,20 @@ export function matchReport(ix) {
     if (forms.every((f) => hit(run(`some ${f}`)))) genres.resolved += 1;
     if (forms.every((f) => hit(run(f)))) genres.resolved_without_cue += 1;
   }
-  // How the names are HEARD: each name that speech would write differently, said that way.
-  const spoken = { albums: { variants: 0, resolved: 0 }, artists: { variants: 0, resolved: 0 } };
+  // How the names are HEARD: each name that speech would write differently, said that way. Revision 6 (F7): a
+  // spoken form counts as resolved when it lands where the WRITTEN name lands (an album titled like its artist
+  // plays the artist, by design, both ways), so the two rates compare like for like; `missed_by` counts the
+  // misses by the kind of change speech made (a name can count under several). Counts only.
+  const sure = (c) => (c.length === 1 && c[0].confident ? c[0].id : null);
+  const spoken = { albums: { variants: 0, resolved: 0, missed_by: {} }, artists: { variants: 0, resolved: 0, missed_by: {} } };
+  const miss = (box, name) => { for (const k of spokenChanges(name)) box.missed_by[k] = (box.missed_by[k] || 0) + 1; };
   for (const group of titles.values()) {
     if (group.length !== 1) continue;
     const said = sayAloud(group[0].name);
     if (!said) continue;
     spoken.albums.variants += 1;
-    const c = run(said);
-    if (c.length === 1 && c[0].id === `music:album:${group[0].id}`) spoken.albums.resolved += 1;
+    const want = sure(run(group[0].f));
+    if (want && sure(run(said)) === want) spoken.albums.resolved += 1; else miss(spoken.albums, group[0].name);
   }
   for (const a of ix.artists) {
     const said = sayAloud(a.name);
@@ -650,6 +670,7 @@ export function matchReport(ix) {
     spoken.artists.variants += 1;
     const c = run(said);
     if (c.length === 1 && c[0].kind === "artist" && (c[0].id === `music:artist:${a.id}` || c[0].group?.includes(a.id))) spoken.artists.resolved += 1;
+    else miss(spoken.artists, a.name);
   }
   return { albums, artists, genres, spoken };
 }
