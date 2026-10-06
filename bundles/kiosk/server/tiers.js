@@ -10,6 +10,8 @@ import { matchT1, compound } from "./patterns.js";
 import { executeIntent } from "./executor.js";
 
 export async function matchSpoken(transcript, ctx) {
+  // A one-time question ("Did you mean …?") lives for the next utterance only (re-review R3).
+  try { ctx.noteUtterance?.(ctx.deviceId); } catch { /* never blocks a turn */ }
   if (compound(transcript)) return null;
   const strict = { ...ctx, strict: true };
   const t0 = matchT0(transcript);

@@ -210,8 +210,12 @@ test("F1: the STT prompt bias is the station names and aliases as written, each 
   assert.equal(stationNamesHint(null), "");
 });
 
-test("review L2: a station name that is itself a command is refused, and a spoken name that is one is dropped (a prompt echoed on silence must never act)", () => {
-  assert.deepEqual(normalizeStations([{ name: "Stop", url: "https://stream.example.invalid/a" }, { name: "Louder", url: "https://stream.example.invalid/b" }]), []);
-  const [st] = normalizeStations([{ name: "Morning Mix", aliases: ["Louder", "the mix", "Pause", "HD two", "next song"], url: "https://stream.example.invalid/m" }]);
-  assert.deepEqual(st.aliases, ["the mix", "HD two"]);
+test("review L2 / re-review L-a: a station name that is itself a command is refused at the SAVE (runtime test); one already saved keeps loading, and is left out of the STT prompt", async () => {
+  const { isCommand, commandNames } = await import("../bundles/kiosk/server/sources/stations.js");
+  for (const n of ["Stop", "Louder", "Pause", "Next Radio", "next song"]) assert.equal(isCommand(n), true, n);
+  for (const n of ["Morning Mix", "the mix", "HD two", "KTPF HD1"]) assert.equal(isCommand(n), false, n);
+  const loaded = parseStations(JSON.stringify([{ name: "Next Radio", aliases: ["Louder", "news radio"], url: "https://stream.example.invalid/n" }, { name: "Morning Mix", aliases: ["Pause", "the mix"], url: "https://stream.example.invalid/m" }]));
+  assert.deepEqual(loaded.map((s) => s.name), ["Next Radio", "Morning Mix"], "already saved: still there after a deploy");
+  assert.deepEqual(commandNames(loaded), ["Next Radio", "Louder", "Pause"]);
+  assert.equal(stationNamesHint(loaded), "news radio, Morning Mix, the mix", "commands never reach the STT prompt");
 });

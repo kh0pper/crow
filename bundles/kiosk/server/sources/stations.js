@@ -17,7 +17,7 @@ import { transportWords } from "../patterns.js";
 import { isIP } from "node:net";
 import { publicHop, localHop, isPrivateAddress, isLocalStreamAddress, normAddress } from "../relay.js";
 import { SOURCE_CONTRACT } from "./index.js";
-import { soundKeys, bestDistance, consonants } from "./sound-key.js";
+import { soundKeys, bestDistance, consonants, wordSound } from "./sound-key.js";
 
 export const STATIONS_SETTING = "kiosk_stations";
 export const MAX_STATIONS = 50;
@@ -72,8 +72,15 @@ const compact = (key) => key.split(" ").join("");
 const text = (v, n) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 const slug = (s) => (spokenWords(s.slice(0, 80)) || []).join("_").slice(0, 32) || "station";
 
-/** Is this name a control phrase or a playback word on its own? */
-const isCommand = (n) => matchT0(n) !== null || transportWords(n) !== null;
+/**
+ * Is this name a control phrase or a playback word on its own ("Stop", "Pause", "Next Radio")? Review L2 / re-review
+ * L-a: such a name could act through T0 if speech-to-text echoes the prompt on near-silence. The SAVE refuses it
+ * (runtime.js); a station already saved under one keeps loading, its name is left out of the STT prompt, and the
+ * panel warns.
+ */
+export const isCommand = (n) => matchT0(String(n ?? "")) !== null || transportWords(String(n ?? "")) !== null;
+/** The command-word names and spoken names of a list (for the save's refusal and the panel's warning). */
+export const commandNames = (list) => (Array.isArray(list) ? list : []).flatMap((s) => [s?.name, ...(Array.isArray(s?.aliases) ? s.aliases : [])]).map((n) => text(n, 60)).filter((n) => n && isCommand(n));
 
 /** Operator input → the stored list. Anything invalid is dropped, never repaired into something else. */
 export function normalizeStations(raw) {
@@ -84,9 +91,7 @@ export function normalizeStations(raw) {
     let u = null;
     try { u = new URL(text(s?.url, 500)); } catch { u = null; }
     // http(s), no credentials in the address, a host the relay could ever fetch (so not a private address written out).
-    // Review L2: a name or spoken name that is itself a command ("Stop", "Pause", "Louder") could act through T0 if
-    // speech-to-text echoes the prompt on near-silence: such a name is refused, such a spoken name dropped.
-    if (!name || isCommand(name) || !u || !publicHop(u.href).origin) continue;
+    if (!name || !u || !publicHop(u.href).origin) continue;
     const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
     const local = s?.local === true;
     // A private address written out is a station only with the tick, and only in the home-network/tailnet ranges.
@@ -96,7 +101,7 @@ export function normalizeStations(raw) {
     ids.add(id);
     // The recorded address set: the literal itself, or what the save-time check resolved (runtime.js). Up to 16 addresses.
     const addrs = !local ? [] : isIP(host) ? [normAddress(host)] : (Array.isArray(s.addrs) ? s.addrs : []).map((a) => normAddress(String(a).slice(0, 64))).filter((a) => isIP(a)).slice(0, 16);
-    out.push({ id, name, aliases: (Array.isArray(s.aliases) ? s.aliases : []).map((a) => text(a, 40)).filter((a) => a && !isCommand(a)).slice(0, 5), url: u.href, ...(local ? { local: true, addrs } : {}) });
+    out.push({ id, name, aliases: (Array.isArray(s.aliases) ? s.aliases : []).map((a) => text(a, 40)).filter(Boolean).slice(0, 5), url: u.href, ...(local ? { local: true, addrs } : {}) });
   }
   return out;
 }
@@ -153,14 +158,16 @@ export function soundSearch(stations, q, { explicit = false } = {}) {
 const LETTER_NAMES = new Set(["kay", "cue", "pee", "bee", "dee", "tee", "gee", "jay", "eff", "ef", "el", "em", "en", "ar", "ess", "vee", "ex", "zee", "aitch", "why", "double"]);
 /**
  * Does a station key look like a call sign as STT writes one: a word with no vowel ("kdbf", "pf"), a letter's
- * name ("kay"), or one short word ("capefti")? "hd" and digits are left out of the judgement.
+ * name ("kay"), or one short word with four consonant sounds or more ("capefti")? "hd" and digits are left out.
  */
 export function callSignShaped(key) {
   const w = String(key || "").split(" ").filter((x) => x && x !== "hd" && !/^\d+$/.test(x));
   if (!w.length) return false;
   if (w.some((x) => x.length >= 2 && /^[a-z]+$/.test(x) && !/[aeiouy]/.test(x))) return true;
   if (w.some((x) => LETTER_NAMES.has(x))) return true;
-  return w.length === 1 && w[0].length <= 7;
+  // One word with vowels counts only when it carries four consonant sounds or more ("capefti" → K P F T), never a
+  // short ordinary word ("cats" → K T S): re-review R2.
+  return w.length === 1 && w[0].length <= 7 && consonants(wordSound(w[0])) >= 4;
 }
 
 /** list(): Station[] — the instance's presets as they are now (the runtime keeps them in memory). */
@@ -223,7 +230,7 @@ export function stationNamesHint(stations) {
   const seen = new Set(), out = [];
   for (const s of Array.isArray(stations) ? stations : []) for (const n of [s?.name, ...(Array.isArray(s?.aliases) ? s.aliases : [])]) {
     const t = text(n, 60);
-    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+    if (t && !isCommand(t) && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
   }
   return out.join(", ");
 }

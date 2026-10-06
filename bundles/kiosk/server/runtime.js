@@ -25,7 +25,7 @@ import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
 import { createMediaStore } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
-import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, STATIONS_SETTING } from "./sources/stations.js";
+import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, commandNames, STATIONS_SETTING } from "./sources/stations.js";
 import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
 
 export const PAGE_CSP = [
@@ -628,11 +628,14 @@ export function createKioskRuntime(deps) {
     r.get("/api/kiosk/admin/stations", wrap(async (req, res) => {
       await stationsReady;
       res.setHeader("Cache-Control", "no-store");
-      res.json({ stations, max: 50 });
+      res.json({ stations, max: 50, command_names: commandNames(stations) });
     }));
     r.post("/api/kiosk/admin/stations", json, wrap(async (req, res) => {
       const raw = Array.isArray(req.body?.stations) ? req.body.stations.slice(0, 60) : null;
       if (!raw) return res.status(400).json({ error: "stations_required" });
+      // A name or spoken name that is itself a command ("Stop", "Next Radio") is refused here, at the save, with the word.
+      const cmd = commandNames(raw.map((r) => ({ name: r?.name, aliases: Array.isArray(r?.aliases) ? r.aliases : [] })));
+      if (cmd.length) return res.status(400).json({ error: "command_name", word: cmd[0] });
       // A ticked (home-network) row is checked HERE, on the server, before anything is stored: every address
       // its host resolves to must pass the home-network rule, and that set is what a play may later resolve to.
       // A client-supplied address set is never trusted.

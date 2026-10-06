@@ -37,6 +37,9 @@ export function splitSource(what) {
 }
 
 const DOWN_ORDER = ["unauthorized", "unreachable", "timeout"];
+const NO_RUNS = [["no"], ["nope"], ["nah"], ["no", "thanks"], ["no", "thank", "you"], ["no", "gracias"], ["no", "no"]];
+/** "No.", "No thanks.", "No, gracias.": declines a pending question. */
+const declines = (text) => { const w = spokenWords(String(text ?? "").slice(0, 40)) || []; return NO_RUNS.some((r) => r.length === w.length && r.every((x, i) => w[i] === x)); };
 const YES_WORDS = new Set(["yes", "yeah", "yep", "yup", "sure", "please", "si", "claro", "correct", "exactly", "ok", "okay"]);
 
 /**
@@ -94,7 +97,8 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       // Review M1: a lone candidate the source wants ASKED about ("Did you mean KTPF HD1?") is offered as a one-name
       // choice — with or without a model — and remembered like any "Which one?".
       if (loose.length === 1 && loose[0].c.ask === true) {
-        if (deviceId) asked.set(deviceId, { at: now(), items: loose.slice(0, 1) });
+        // Re-review R3: answered only by the very next utterance (`once`; see note()).
+        if (deviceId) asked.set(deviceId, { at: now(), items: loose.slice(0, 1), once: true, fresh: true });
         return { outcome: "choices", names: [cleanTitle(loose[0].c.title).slice(0, 30)] };
       }
       if (loose.length === 1 && (!strict || loose[0].c.near === true)) { const list = await playables(loose[0].s, loose[0].c, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(loose[0].s, loose[0].c, list); } }
@@ -121,13 +125,18 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
         try { c = s.choose(a.items.filter((x) => x.s === s).map((x) => x.c), String(utterance ?? "").slice(0, 120)); } catch { c = null; }
         if (c) picks.push({ c, s });
       }
-      if (picks.length !== 1) return null;
+      if (picks.length !== 1) { if (a.once) asked.delete(deviceId); return null; }   // "Did you mean …?" not taken: it is over
       const list = await playables(picks[0].s, picks[0].c, []);
       if (!list.length) return null;
       asked.delete(deviceId);
       return playing(picks[0].s, picks[0].c, list);
     },
     forget: (deviceId) => { asked.delete(deviceId); },
+    /**
+     * Every utterance on this display, before anything else reads it (tiers.js). A "Did you mean …?" may be
+     * answered by the next utterance only: the one after it finds it gone, even if a model turn ran between.
+     */
+    note(deviceId) { const a = asked.get(deviceId); if (!a?.once) return; if (a.fresh) a.fresh = false; else asked.delete(deviceId); },
   };
 }
 
@@ -186,7 +195,11 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     const id = ctx.deviceId;
     const what = flat(i.what).slice(0, 120);
     // "Which one?" was just asked: these words may be its answer (a bare name with no model, or the model's call with that name).
-    if (resolver.pending(id)) { const picked = await resolver.choose(id, what); if (picked) return start(picked, ctx, S); }
+    if (resolver.pending(id)) {
+      // Re-review R3: "No." clears the question and is answered at once.
+      if (declines(what)) { resolver.forget(id); return result(true, "done", S.say_okay, { effect: false }); }
+      const picked = await resolver.choose(id, what); if (picked) return start(picked, ctx, S);
+    }
     if (i.choice === true) return null;                                    // a bare sentence that named none of them: the model gets it
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
     const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id });
@@ -233,5 +246,5 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       default: return nothing(ctx, S);
     }
   }
-  return { resolvePlay, openItem, mediaVerb, pendingChoices: (deviceId) => resolver.pending(deviceId) };
+  return { resolvePlay, openItem, mediaVerb, pendingChoices: (deviceId) => resolver.pending(deviceId), noteUtterance: (deviceId) => resolver.note?.(deviceId) };
 }

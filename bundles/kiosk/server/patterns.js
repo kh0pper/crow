@@ -448,7 +448,18 @@ const COMPLETE_RUNS = runs(["turn it up", "turn it down", "turn the radio up", "
   "turn the volume up", "turn the volume down", "turn the sound up", "turn the sound down", "volume up", "volume down", "go back a song", "back a song", "next song", "next track",
   "previous song", "previous track", "sube el volumen", "baja el volumen", "subes el volumen", "bajas el volumen", "sube la radio", "baja la radio", "sube la musica", "baja la musica", "otra cancion"]);
 // These need their object checked: "turn up the volume" yes, "turn up the heat" no.
-const OPEN_RUNS_T = runs(["turn up", "turn down", "subele", "bajale", "mas alto", "mas bajo"]);
+const OPEN_RUNS_T = runs(["turn up", "turn down", "subele", "bajale"]);
+// Spanish comparatives come AFTER what they act on ("pon la música más alta", "ponla más fuerte"): what stands
+// before them must be the music, a verb with the music as its clitic, or nothing (re-review R1).
+const ES_LEVEL_RUNS = runs(["mas alto", "mas alta", "mas bajo", "mas baja", "mas fuerte", "mas suave", "mas bajito", "mas bajita"]);
+const ES_LEVEL_VERBS = new Set(["pon", "ponla", "ponlo", "ponle", "ponme", "deja", "dejala", "dejalo", "sube", "subela", "subelo", "subele", "baja", "bajala", "bajalo", "bajale", "esta", "suena"]);
+const ES_ARTICLES = new Set(["la", "el", "lo", "los", "las", "un", "una", "esa", "ese", "esta"]);
+function esLevelHere(w, i) {
+  let k = i - 1;
+  while (k >= 0 && ES_ARTICLES.has(w[k])) k -= 1;
+  const x = w[k];
+  return x === undefined || MUSIC_NOUNS.has(x) || ES_LEVEL_VERBS.has(x) || CLAUSE_T.has(x);
+}
 const NEGATIONS = new Set(["dont", "do", "not", "never", "no", "nunca"]);
 const SPEECH = new Set(["speak", "talk", "voice", "yourself", "say", "habla", "hablar", "hablas", "hablame", "voz"]);
 const LEVEL_WORDS = new Set(["louder", "quieter", "softer", "mute", "unmute", "pause", "unpause", "resume", "pausa", "silencia", "reanuda"]);
@@ -484,6 +495,7 @@ export function asksTransport(transcript) {
     if (before(i)) return false;
     if (COMPLETE_RUNS.some((r) => sameAt(w, i, r))) return true;
     for (const r of OPEN_RUNS_T) if (sameAt(w, i, r) && musicObject(w, i + r.length)) return true;
+    for (const r of ES_LEVEL_RUNS) if (sameAt(w, i, r) && esLevelHere(w, i) && musicObject(w, i + r.length)) return true;
     if ((LEVEL_WORDS.has(w[i]) || MOVE_WORDS.has(w[i])) && musicObject(w, i + 1)) return true;
   }
   return false;

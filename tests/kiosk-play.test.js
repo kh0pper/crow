@@ -564,9 +564,10 @@ test("smoke F4: the no-model path says which verb it acted on, so the log tells 
 test("review H1: a playback word acts on the music only — another object or the voice is never the playback (no fast path, no must-run), idle and over music", async () => {
   const NOT = ["Turn down the lights.", "Turn up the heat.", "Turn up the thermostat a little", "turn down the AC please", "Pause the timer.", "Resume the timer.", "Mute the TV.",
     "Mute notifications", "Pause the video", "Resume the recipe", "Speak louder please.", "Can you speak louder?", "Pause for a second, let me think", "Habla más alto", "mute the timer",
-    "Skip the small talk.", "Stop being silly.", "Talk quieter."];
+    "Skip the small talk.", "Stop being silly.", "Talk quieter.", "Pon la tele más alta.", "Pon la calefacción más alta.", "Bájale a las luces."];
   const YES = ["Turn it up a bit.", "Could you turn the radio up a little so I can hear it?", "Turn up the volume please", "Mute the radio please", "Pause please", "Pause the music",
-    "Turn it down a little so we can talk", "Me subes el volumen de la radio un poquito porfa", "Next song"];
+    "Turn it down a little so we can talk", "Me subes el volumen de la radio un poquito porfa", "Next song",
+    "Pon la música más alta.", "Pon la radio más baja.", "Ponla más fuerte.", "Ponla más suave por favor", "Más bajito."];
   for (const q of NOT) assert.equal(asksTransport(q), false, q);
   for (const q of YES) assert.equal(asksTransport(q), true, q);
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two"] }])] });
@@ -579,7 +580,7 @@ test("review H1: a playback word acts on the music only — another object or th
 test("review M1: ordinary words that only SOUND like a call sign never start the radio with no model — they are asked about ('Did you mean …?'), and a yes takes it; a call-sign shape still plays", async () => {
   // Made-up stations that sound like the reviewer's examples ("Keep the Faith" / "cup of tea" ≈ K-P-F-T, "cats you" ≈ K-T-S).
   const calls = normalizeStations([{ name: "KBVD HD1", aliases: ["KBVD"], url: "https://stream.example.invalid/b1" }, { name: "KDZU", url: "https://stream.example.invalid/dz" }]);
-  for (const q of ["Play Keep the Faith.", "Play cup of tea.", "Play cats you.", "Play keep fit."]) {
+  for (const q of ["Play Keep the Faith.", "Play cup of tea.", "Play cats you.", "Play keep fit.", "Play Cats.", "Play katsu."]) {
     const s = setup({ stations: calls });
     const r = await s.say(q);
     assert.match(r?.say || "", /^Did you mean (KBVD HD1|KDZU)\? Say yes or its name\.$/, q);
@@ -601,4 +602,39 @@ test("review M1: ordinary words that only SOUND like a call sign never start the
     const t = setup({ stations: calls });
     assert.equal((await t.say(q))?.say, "Playing KBVD HD1.", q);
   }
+});
+
+test("re-review R3: 'Did you mean …?' is answered by the next utterance only — 'No.' clears it at once ('Okay.'), and a later 'Okay.' or 'Yes.' never starts the radio", async () => {
+  const calls = normalizeStations([{ name: "KBVD HD1", aliases: ["KBVD"], url: "https://stream.example.invalid/b1" }]);
+  const loads = (s) => s.sent.filter((m) => m.action === "load").length;
+  // "No." → "Okay.", nothing plays; then "Okay." to something else: still nothing.
+  let s = setup({ stations: calls });
+  assert.match((await s.say("Play cup of tea."))?.say || "", /^Did you mean KBVD HD1\?/);
+  assert.deepEqual(await s.say("No."), { say: "Okay.", tier: "t1", events: [] });
+  assert.equal(await s.say("Okay."), null);
+  assert.equal(loads(s), 0);
+  // A different next utterance (a model turn) ends the question: a "Yes." after it plays nothing.
+  s = setup({ stations: calls });
+  await s.say("Play cup of tea.");
+  assert.equal(await s.say("What is the capital of Portugal?"), null);
+  assert.equal(await s.say("Yes."), null);
+  assert.equal(loads(s), 0);
+  // A short utterance that names nothing also ends it.
+  s = setup({ stations: calls });
+  await s.say("Play cup of tea.");
+  assert.equal(await s.say("Maybe later."), null);
+  assert.equal(await s.say("Yes."), null);
+  assert.equal(loads(s), 0);
+  // The very next "Yes." takes it; Spanish "No, gracias." declines.
+  s = setup({ stations: calls });
+  await s.say("Play cup of tea.");
+  assert.equal((await s.say("Yes."))?.say, "Playing KBVD HD1.");
+  s = setup({ stations: calls, lang: "es" });
+  await s.say("Play cup of tea.", s.es);
+  assert.deepEqual(await s.say("No, gracias.", s.es), { say: "Vale.", tier: "t1", events: [] });
+  // A "Which one?" over several names is untouched by this (it keeps its 30 s).
+  const t = setup();
+  assert.match((await t.say("Play WXYZ HD."))?.say || "", /Which one\?/);
+  assert.equal(await t.say("What time is it in Lisbon?"), null);
+  assert.equal((await t.say("WXYZ two."))?.say, "Playing WXYZ HD2.");
 });

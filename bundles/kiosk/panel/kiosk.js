@@ -263,12 +263,15 @@ export const CLIENT_SCRIPT = `
             if (!results[j].ok) { msg.textContent = fill(S.station_local_refused, { name: local[j].name }) + ' ' + (S['station_err_' + results[j].error] || S.station_err_unreachable); return; }
           }
           api('POST', '/api/kiosk/admin/stations', { stations: list }).then(function (k) {
-            msg.textContent = k.ok ? S.saved : k.error === 'local_check_failed' ? fill(S.station_local_refused, { name: k.station || '' }) + ' ' + (S['station_err_' + k.reason] || S.station_err_unreachable) : (S['station_' + k.error] || k.error || '');
+            msg.textContent = k.ok ? S.saved : k.error === 'local_check_failed' ? fill(S.station_local_refused, { name: k.station || '' }) + ' ' + (S['station_err_' + k.reason] || S.station_err_unreachable)
+              : k.error === 'command_name' ? fill(S.station_command_name, { word: k.word || '' }) : (S['station_' + k.error] || k.error || '');
             if (k.ok) renderStations();
           });
         });
       });
       box.appendChild(rows);
+      // A station saved before command words were refused keeps playing; it is left out of the speech hint and named here.
+      if (j.command_names && j.command_names.length) box.appendChild(el('p', 'kk-warn', fill(S.station_command_saved, { words: j.command_names.join(', ') })));
       var bar = el('div', 'kk-bar'); [add, save, msg].forEach(function (n) { bar.appendChild(n); });
       box.appendChild(bar);
     });

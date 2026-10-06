@@ -1235,3 +1235,16 @@ test("review L1 (wired): the station names reach the STT prompt of every display
     assert.equal(es.sttPrompt({ language: "en" }), "Morning Mix, the mix", "a profile that pins the language is safe");
   } finally { await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) }); }
 });
+
+test("re-review L-a (wired): the save refuses a command-word name or spoken name with the word; the listing names the ones already saved", async () => {
+  let r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Stop", url: "https://stream.example.invalid/s" }] }) });
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: "command_name", word: "Stop" });
+  r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["Louder"], url: "https://stream.example.invalid/m" }] }) });
+  assert.deepEqual(await r.json(), { error: "command_name", word: "Louder" });
+  r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/m" }] }) });
+  assert.equal((await r.json()).ok, true);
+  const listing = await (await j("/api/kiosk/admin/stations")).json();
+  assert.deepEqual(listing.command_names, []);
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
+});

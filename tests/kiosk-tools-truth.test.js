@@ -491,3 +491,21 @@ test("review H1: with nothing playing, a playback request is forced only when it
   await d.ask("Turn it up a little so I can hear it.");
   assert.equal(said(d), "Sorry, I couldn't change the playback.", "over music: forced; a claim with no call is never heard");
 });
+
+test("re-review R1: Spanish comparatives ('Pon la música más alta', 'Ponla más fuerte') ask the playback to change — crow_wm is the tool forced over music, never crow_play; 'Pon la tele más alta' is not the music", async () => {
+  for (const q of ["Pon la música más alta.", "Ponla más fuerte.", "Pon la radio más baja, por favor."]) {
+    const radio = await playingRadio();
+    const d = display({ lang: "es", media: radio.build, model: (body, n) => (n === 1 ? { say: "Listo." } : { tool: "crow_wm", args: { do: q.includes("baja") ? "volume_down" : "volume_up" } }) });
+    await radio.start("kiosk-live");
+    await d.ask(q);
+    assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"], `${q}: the playback tool, not crow_play`);
+    assert.equal(radio.media.current("kiosk-live").volume, q.includes("baja") ? 40 : 60, q);
+    assert.doesNotMatch(said(d), /no pude reproducir/, q);
+  }
+  const radio = await playingRadio();
+  const d = display({ lang: "es", media: radio.build, model: () => ({ say: "Vale." }) });
+  await radio.start("kiosk-live");
+  await d.ask("Pon la tele más alta.");
+  assert.equal(d.requests[0].tool_choice, undefined, "the TV: nothing forced");
+  assert.equal(radio.media.current("kiosk-live").volume, 50);
+});
