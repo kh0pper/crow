@@ -1,0 +1,11 @@
+// Crow kiosk: security and stable updates from Debian, plus Raspberry Pi (kernel, Chromium) and Tailscale.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename},label=Debian";
+        "origin=Debian,codename=${distro_codename}-updates";
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Raspberry Pi Foundation,codename=${distro_codename}";
+        "origin=Tailscale";
+};
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Automatic-Reboot "@AUTO_REBOOT@";
+Unattended-Upgrade::Automatic-Reboot-Time "@REBOOT_TIME@";

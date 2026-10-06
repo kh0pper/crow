@@ -1,0 +1,29 @@
+# Crow kiosk: cage (single-app Wayland compositor) running Chromium on tty1 as the kiosk user.
+# The PAM session (pam_systemd) gives kiosk a logind seat session, which starts its user manager
+# (PipeWire, WirePlumber, crow-kiosk-agent) and grants it the seat's display, input and sound devices.
+[Unit]
+Description=Crow kiosk (cage + Chromium on tty1)
+After=systemd-user-sessions.service network-online.target bluetooth.service
+Wants=network-online.target
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+User=kiosk
+PAMName=crow-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+ExecStart=/usr/bin/cage -d -- /usr/local/lib/crow-kiosk/kiosk-launch.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

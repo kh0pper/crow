@@ -1,0 +1,5 @@
+# Python packages for crow-kiosk-agent that Debian cannot provide in a working form.
+# Debian trixie's python3-onnxruntime 1.21 dies with SIGILL on a Raspberry Pi 3 (Cortex-A53 without
+# the dotprod extension); the upstream manylinux wheel runs there. Installed with --no-deps --require-hashes
+# into a venv that also sees Debian's numpy and websockets (--system-site-packages).
+onnxruntime==1.30.0 --hash=sha256:5327cf6aa15a02bad805fac8bd6882a62571e8b72f6f2938a8f37e6bd1966ce9

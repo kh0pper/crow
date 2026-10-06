@@ -1,0 +1,5 @@
+# /etc/pam.d/crow-kiosk — session for crow-kiosk-cage.service (no password: the unit runs as kiosk)
+auth     required pam_unix.so nullok
+account  required pam_unix.so
+session  required pam_unix.so
+session  required pam_systemd.so

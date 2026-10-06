@@ -1,0 +1,2 @@
+// Crow kiosk: restart the kiosk after apt changes the chromium package (see after-dpkg.sh).
+DPkg::Post-Invoke { "[ -x /usr/local/lib/crow-kiosk/after-dpkg.sh ] && /usr/local/lib/crow-kiosk/after-dpkg.sh || true"; };

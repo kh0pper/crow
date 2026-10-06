@@ -1,0 +1,6 @@
+[Unit]
+Description=Crow kiosk memory sample
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/crow-kiosk/mem-sample.sh
