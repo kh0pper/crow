@@ -12,6 +12,7 @@ import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction,
 } from "./turn-helpers.js";
+import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
@@ -381,9 +382,12 @@ export function createVoiceTurnRunner(deps) {
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
       const system = await deps.generateSystemPrompt({ botDef: bot });
       // The system message stays byte-stable turn to turn (vLLM prefix cache, review M6);
-      // live state (e.g. open windows) rides on THIS turn's user message only and is
-      // dropped from the saved conversation.
-      const userMsg = { role: "user", content: opts.turnContext ? `${opts.turnContext}\n\n${transcript}` : transcript };
+      // live state (e.g. open windows) rides on THIS turn's user message only, closed by a note
+      // line, and is dropped from the saved conversation. A small model may still read it back
+      // (live 2026-10-05): echoGuard lists every injected line the echo gate removes from what is
+      // spoken, captioned, saved and put on a card.
+      const userMsg = { role: "user", content: withTurnContext(opts.turnContext, transcript) };
+      const echoGuard = [opts.turnContext ? TURN_CONTEXT_NOTE : null, opts.turnContext, mustX?.mustNote];
       const messages = [
         { role: "system", content: withSuffix(system, opts.promptSuffix) },
         ...history,
@@ -534,6 +538,7 @@ export function createVoiceTurnRunner(deps) {
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
+        const echo = createContextEchoGate(echoGuard);
         let content = "";
         let roundSpoken = 0;
         let calls = [];
@@ -574,7 +579,7 @@ export function createVoiceTurnRunner(deps) {
               if (ev.type === "content_delta" && ev.text) {
                 mark("llm_first_token_ms");
                 content += ev.text;
-                const spoken = think.feed(ev.text);
+                const spoken = echo.feed(think.feed(ev.text));
                 if (spoken && !hold) {
                   if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
                   sink.event({ type: "caption_delta", text: spoken });
@@ -582,7 +587,8 @@ export function createVoiceTurnRunner(deps) {
                 }
               } else if (ev.type === "tool_call") {
                 mark("llm_first_token_ms");
-                calls.push({ id: ev.id, name: ev.name, arguments: ev.arguments });
+                // A display card's text gets the same guard as speech (kept that way in the saved call).
+                calls.push({ id: ev.id, name: ev.name, arguments: extraByName.has(ev.name) ? stripContextEchoDeep(ev.arguments, echoGuard) : ev.arguments });
               } else if (ev.type === "done") break;
             }
           } catch (err) {
@@ -604,6 +610,15 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
+        // Text the echo gate still held (it could have been the start of an echo) is decided now.
+        const tail = echo.flush();
+        if (tail && !hold && !aborted() && !budgetHit) {
+          if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
+          sink.event({ type: "caption_delta", text: tail });
+          await chunker.push(tail);
+        }
+        // What is kept as said is what was heard: an echo saved in the history invites the next one.
+        content = stripContextEcho(content, echoGuard);
         if (aborted()) { result.aborted = true; break; }
         if (budgetHit) break;
         if (finalRound) {
