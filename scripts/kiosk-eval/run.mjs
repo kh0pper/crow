@@ -29,8 +29,9 @@ import { HELD_OUT } from "./held-out.mjs";
 import { HELD_OUT_R1 } from "./held-out-r1.mjs";
 import { HELD_OUT_R2 } from "./held-out-r2.mjs";
 import { HELD_OUT_R3 } from "./held-out-r3.mjs";
+import { HELD_OUT_R4 } from "./held-out-r4.mjs";
 /** Every spent held-out set (each found a defect; none judges a fix). */
-export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2, HELD_OUT_R3]);
+export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2, HELD_OUT_R3, HELD_OUT_R4]);
 import { execFileSync } from "node:child_process";
 import { createProductDisplay } from "./product.mjs";
 
