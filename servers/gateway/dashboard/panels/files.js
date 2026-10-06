@@ -117,7 +117,7 @@ export default {
       ? "color:var(--crow-accent);font-weight:600;text-decoration:none;padding:0.25rem 0.5rem;border-bottom:2px solid var(--crow-accent)"
       : "color:var(--crow-text-muted);text-decoration:none;padding:0.25rem 0.5rem;border-bottom:2px solid transparent";
 
-    const filterTabs = `<div style="display:flex;gap:1rem;margin-bottom:1rem;font-size:0.85rem;border-bottom:1px solid var(--crow-border);padding-bottom:0">
+    const filterTabs = `<div style="display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:1rem;font-size:0.85rem;border-bottom:1px solid var(--crow-border);padding-bottom:0">
       <a href="/dashboard/files" style="${filterStyle(typeFilter === "")}">${t("files.all", lang)}</a>
       <a href="/dashboard/files?type=image" style="${filterStyle(typeFilter === "image")}">${t("files.images", lang)}</a>
       <a href="/dashboard/files?type=document" style="${filterStyle(typeFilter === "document")}">${t("files.documents", lang)}</a>

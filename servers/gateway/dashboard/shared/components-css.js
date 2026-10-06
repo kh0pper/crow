@@ -152,6 +152,39 @@ export function componentsCss() {
   :where(.content-body) :where(select) { max-width: 100%; }
   :where(.content-body) :where(img, video, canvas, iframe, embed, object) { max-width: 100%; }
   :where(.content-body) :where(pre) { max-width: 100%; overflow-x: auto; }
+  /* Link cards in grids (2026-10): a 1fr track is minmax(auto, 1fr), and
+     "auto" is the item's min-content — one long name in one Contacts card (an
+     <a>, which the net above does not cover) widened every column to 1108px,
+     at phone AND desktop widths. Block containers are already netted above;
+     this adds only the <a> children of grid containers. Buttons, badges and
+     icons stay excluded, as the net above intends: they keep their intrinsic
+     size. A few "*-grid" classes are flex-wrap rows (.ag-grid, .cs-grid,
+     .nd-grid); their children are divs, so this is a no-op there. */
+  :where(.content-body) :where(.card-grid, .stat-grid, [class$="-grid"], [class*="-grid "], [style*="display:grid"], [style*="display: grid"]) > :where(a:not(.btn, .badge, [class*="btn-"], [class*="badge"])) { min-width: 0; }
+
+  /* Phone rows (2026-10): a panel's own tab / filter / action row is wider
+     than a phone once it holds a few items, and with no wrap it pans the whole
+     panel sideways (Media's "Feed, For You, Playlists, Briefings…"). On phones
+     such rows wrap, like the shared tabs() row (.tab-list) always does:
+       - an inline-style flex row whose children include two adjacent
+         links/buttons/forms;
+       - a row class named *-tabs, *-tabbar, *-nav, *-chips, *-toolbar,
+         *-filters or *-pills (the same list tests/dashboard-phone-rows.test.js
+         holds the sources to).
+     Zero specificity (:where): a row that declares its own flex-wrap keeps
+     it, and an inline row that scrolls by itself (overflow-x:auto) is left
+     alone. To keep a row on one line, set flex-wrap:nowrap AND
+     overflow-x:auto, so it scrolls itself; the source scan rejects nowrap
+     alone, which still pans the page. Known limits: a row of a title link
+     and a button also matches (on a phone the button drops to a second line
+     instead of the title truncating); and the class rule cannot see a
+     direction set in a class, so a column flex named like a row (say a
+     vertical *-toolbar) must declare flex-wrap:nowrap itself, or a bounded
+     height reflows it into extra columns. */
+  @media (max-width: 768px) {
+    :where(.content-body) :where([style*="display:flex"], [style*="display: flex"], [style*="display:inline-flex"], [style*="display: inline-flex"]):where(:has(> a + a, > button + button, > a + button, > button + a, > form + form)):where(:not([style*="flex-direction:column"], [style*="flex-direction: column"], [style*="overflow-x:auto"], [style*="overflow-x: auto"], [style*="overflow-x:scroll"], [style*="overflow-x: scroll"])) { flex-wrap: wrap; }
+    :where(.content-body) :where([class$="-tabs"], [class*="-tabs "], [class$="-tabbar"], [class*="-tabbar "], [class$="-nav"], [class*="-nav "], [class$="-chips"], [class*="-chips "], [class$="-toolbar"], [class*="-toolbar "], [class$="-filters"], [class*="-filters "], [class$="-pills"], [class*="-pills "]) { flex-wrap: wrap; }
+  }
 
   /* ─── Focus-visible baseline (W3-5a) ─── */
   .btn:focus-visible, .btn-primary:focus-visible, .btn-secondary:focus-visible,
