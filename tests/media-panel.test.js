@@ -182,3 +182,11 @@ test("the page script is plain JavaScript inside a template literal: it parses, 
   assert.doesNotMatch(src.slice(tabStart, tabEnd), /onclick=/, "the Briefings tab has no inline handlers");
   assert.doesNotMatch(src, /process\.env\.HOME \|\| "", "\.crow", "bundles"/, "the panel looks for its own instance's installed copy");
 });
+
+test("the tab row wraps on a narrow screen instead of widening the page", async () => {
+  const { document } = await render({ tab: "briefings" });
+  const nav = document.querySelector(".media-tabs");
+  assert.ok(nav, "the tab row is there");
+  assert.match(nav.getAttribute("style"), /flex-wrap:\s*wrap/);
+  assert.ok(nav.querySelectorAll("a").length >= 7);
+});
