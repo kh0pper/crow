@@ -415,7 +415,7 @@ test("the model's `next` is the playback verb it chose: it never steps a recipe,
   const wm = s.tool("crow_wm");
   assert.deepEqual(await wm({ do: "next" }), { ok: true, outcome: "done", say: "Okay.", final: true });
   assert.deepEqual([s.last().title, s.store.list("d")[0].step], ["Two", 0]);
-  assert.equal((await wm({ do: "next_step" })).say, "Step 2. Cook two minutes a side");
+  assert.equal((await wm({ do: "next_step" }, "Next step.")).say, "Step 2. Cook two minutes a side");
   assert.equal((await wm({ do: "previous" })).say, "Okay.");
   assert.equal(s.last().title, "One");
   s.media.stop("d");

@@ -275,7 +275,7 @@ test("panel: each display has a display-type select with the four profiles; only
 
 test("panel media settings: loudest volume (10-100 %) and pause-while-listening are per display; only a change is posted", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, max_volume: 70 } });
-  const mv = p.card.querySelectorAll("select")[5];
+  const mv = p.card.querySelectorAll("select")[6];
   assert.deepEqual([...mv.querySelectorAll("option")].map((o) => o.value), ["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"]);
   assert.equal(mv.value, "70");
   const pml = [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");

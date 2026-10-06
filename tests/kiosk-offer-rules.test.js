@@ -225,7 +225,7 @@ function liveWm({ windows = [], playing = false } = {}) {
   for (const w of windows) store.open("d", w);
   const media = { active: () => playing };
   const list = makeTools({ store, deviceId: "d", caps: CAPS, lang: "en", sources: ["music", "radio", "news"], items: [], emit: () => {}, media,
-    mediaVerb: () => ({ ok: true, outcome: "done", say: "Okay.", final: true, events: [] }) });
+    mediaVerb: () => (playing ? { ok: true, outcome: "done", say: "Okay.", final: true, events: [] } : { ok: true, outcome: "nothing_playing", say: "Nothing is playing.", final: true, effect: false, events: [] }) });
   const wm = list.find((t) => t.definition.name === "crow_wm");
   return { store, run: async (args, transcript) => JSON.parse(await wm.execute(args, { transcript })) };
 }

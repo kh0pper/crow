@@ -178,15 +178,14 @@ function step(delta, ctx, S) {
 
 /** intent: { verb, kind?, title?, body?, name?, app?, what?, source?, names? }. Never throws for bad input. */
 /** Verbs that change the windows (crow_wm). */
-const WINDOW_VERBS = new Set(["close", "close_all", "next_step", "previous_step", "next"]);
+/** The model's `next` is not here: it is the playback verb and never touches a window (see case "next"). */
+const WINDOW_VERBS = new Set(["close", "close_all", "next_step", "previous_step"]);
 export async function executeIntent(intent, ctx) {
   const S = STRINGS[ctx.lang === "es" ? "es" : "en"];
   // Revision 6: screen-guard parity with show(). On a model turn whose words are not about the windows (a plain
   // question while something is open), a call that would close windows or step a recipe changes nothing.
-  // "next" with something playing is a playback verb, not a window verb.
   const t = ctx.turn?.transcript;
-  const playingNext = intent?.verb === "next" && ctx.media?.active?.(ctx.deviceId) === true;
-  if (!ctx.strict && typeof t === "string" && WINDOW_VERBS.has(intent?.verb) && !playingNext && ctx.store.list(ctx.deviceId).length && !windowIntent(t)) {
+  if (!ctx.strict && typeof t === "string" && WINDOW_VERBS.has(intent?.verb) && ctx.store.list(ctx.deviceId).length && !windowIntent(t)) {
     return result(false, "invalid", INVALID.no_change, { final: false, reason: "no_intent" });
   }
   switch (intent?.verb) {
