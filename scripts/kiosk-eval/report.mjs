@@ -68,7 +68,9 @@ export function summarize(rows) {
     out.trials = Math.max(out.trials, r.trial + 1);
     if (r.arm === "four" && r.plain && r.window_open) { out.plain_window.total += 1; if (r.changed) out.plain_window.changed += 1; }
     if (set === "held") { out.held_ids.add(r.id); if (r.offered_expected) out.held_offered.add(r.id); }
-    if (r.arm !== "four" || !r.must) continue;
+    // Only a turn that RAN can have ended on a claim or been done: a row where the product never offered the
+    // expected tool (ran === false) is a wrong answer and a held-out offer miss, and nothing else.
+    if (r.arm !== "four" || !r.must || r.ran === false) continue;
     out.must_cases.add(r.id);
     // The product's own promise: a turn that had to do something ends with it done, or with the could-not line.
     if (!r.must_done && r.failed === null) out.untruthful.push(`${r.id}/t${r.trial}`);

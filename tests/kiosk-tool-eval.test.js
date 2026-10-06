@@ -373,3 +373,41 @@ test("revision 6: the run-2 set is kept verbatim and spent too — a run refuses
   assert.equal(heldOutSpent([{ say: "A line nobody has written before." }]), false);
   assert.equal(heldOutSpent([{ say: "A line nobody has written before." }, { say: HELD_OUT_R2[3].say.toUpperCase() }]), true, "one shared line is enough; case does not matter");
 });
+
+// ── Revision 7 ───────────────────────────────────────────────────────────────────────────────────
+test("rev 7 INVARIANT: must ⊆ offered — on every utterance of the 40, every held-out set and every rule-test example, a must-run tool is an offered tool", async () => {
+  const { HELD_OUT_R2 } = await import("../scripts/kiosk-eval/held-out-r2.mjs");
+  const { HELD_OUT_R3 } = await import("../scripts/kiosk-eval/held-out-r3.mjs");
+  const rules = readFileSync(new URL("../tests/kiosk-offer-rules.test.js", import.meta.url), "utf8");
+  const quoted = [...rules.matchAll(/"([A-Z¿¡][^"\n]{6,140})"/g)].map((m) => m[1]);
+  const items = [...CASES, ...HELD_OUT_R1, ...HELD_OUT_R2, ...HELD_OUT_R3, ...HELD_OUT].map((c) => [c.say, c.state || {}, c.lang]).concat(quoted.flatMap((q) => [[q, {}, "en"], [q, { windows: [make.card("Groceries")] }, "en"]]));
+  let checked = 0;
+  for (const [say, state, lang] of items) {
+    const d = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING, state, lang });
+    for (const t of d.options.extraTools) {
+      if (typeof t.must === "function" && t.must(say) === true) {
+        assert.equal(typeof t.when !== "function" || t.when(say) === true, true, `${t.definition.name} is must-run but not offered: ${say}`);
+        checked += 1;
+      }
+    }
+    const g = d.gates(say);
+    if (g.must) assert.ok(g.offered.includes(g.must), say);
+  }
+  assert.ok(checked > 40, `${checked} must-run cases checked`);
+});
+
+test("rev 7 scorer: a row where the product never offered the expected tool (no turn ran) is wrong, but never counts as a turn that ended on a claim or an undone must-run turn", () => {
+  const notRun = { set: "held", arm: "four", trial: 0, id: "hx", ok: false, ran: false, offered_expected: false, must: true, must_done: false, failed: null, tool_choice: null, requests: 0, corrected: false, tools: [] };
+  const s = summarize([notRun]);
+  assert.deepEqual([s.untruthful.length, s.backstop.total, s.held.four.total, s.held.four.correct], [0, 0, 1, 0]);
+  const ran = { ...notRun, ran: true, offered_expected: true, requests: 2 };
+  assert.equal(summarize([ran]).untruthful.length, 1, "a turn that ran and ended on nothing is still caught");
+});
+
+test("rev 7: the run-3 set is kept verbatim and spent; a run refuses any line shared with r1, r2 or r3", async () => {
+  const { HELD_OUT_R3 } = await import("../scripts/kiosk-eval/held-out-r3.mjs");
+  assert.equal(HELD_OUT_R3.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R3), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R3[6].say }]), true);
+  assert.equal(heldOutSpent([{ say: "Another line nobody has written before." }]), false);
+});

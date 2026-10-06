@@ -28,8 +28,9 @@ import { WM_VERBS } from "../../bundles/kiosk/server/tools.js";
 import { HELD_OUT } from "./held-out.mjs";
 import { HELD_OUT_R1 } from "./held-out-r1.mjs";
 import { HELD_OUT_R2 } from "./held-out-r2.mjs";
+import { HELD_OUT_R3 } from "./held-out-r3.mjs";
 /** Every spent held-out set (each found a defect; none judges a fix). */
-export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2]);
+export const SPENT_SETS = Object.freeze([HELD_OUT_R1, HELD_OUT_R2, HELD_OUT_R3]);
 import { execFileSync } from "node:child_process";
 import { createProductDisplay } from "./product.mjs";
 
@@ -66,11 +67,12 @@ export async function runTurn(c, arm, make) {
   const offered_expected = want.every((t) => g.offered.includes(t));
   const fast = (await d.fastPaths(c.say)) !== null;
   // The product would never offer the tool this request needs: that is the product's failure, and no model is asked.
-  if (!offered_expected || fast) return { ok: false, offered_expected, fast_path: fast, must: g.must !== null, must_done: false, failed: null, tool_choice: null, corrected: false, requests: 0, tools: [], calls: [], errors: [], ms: 0 };
+  // ran: false — no turn happened, so nothing ended on a claim; this row counts as wrong and in the held-out offer figure only.
+  if (!offered_expected || fast) return { ok: false, ran: false, offered_expected, fast_path: fast, must: g.must !== null, must_done: false, failed: null, tool_choice: null, corrected: false, requests: 0, tools: [], calls: [], errors: [], ms: 0 };
   const r = await d.ask(c.say);
   const done = r.calls.filter((x) => x.result?.ok === true);
   return {
-    ok: r.errors.length === 0 && judge(c, r), offered_expected, fast_path: r.fast_path, must: g.must !== null,
+    ok: r.errors.length === 0 && judge(c, r), offered_expected, fast_path: r.fast_path, must: g.must !== null, ran: true,
     // A plain question asked while a window is open, and whether the turn changed the screen anyway (reported).
     window_open: (c.state?.windows?.length || 0) > 0, plain: c.expect === null, changed: done.some((x) => x.result?.effect !== false),
     must_done: g.must !== null && r.failed === null && done.some((x) => x.tool === g.must),
@@ -118,7 +120,7 @@ async function main() {
   if (!cfg.baseUrl || !cfg.model || !arg.out) { console.error("usage: run.mjs --base-url=<model server /v1> --model=<id> --out=<file.jsonl> [--label=quick|larger] [--trials=3] [--ctx=8192] [--pause-ms=250] [--resume]"); process.exit(2); }
   const og = outGuard(arg.out, arg.resume === "1");
   if (og) { console.error(og); process.exit(2); }
-  if (heldOutSpent()) { console.error("the held-out set shares utterances with a SPENT set (held-out-r1.mjs or held-out-r2.mjs): write a new one first"); process.exit(2); }
+  if (heldOutSpent()) { console.error("the held-out set shares utterances with a SPENT set (held-out-r1/-r2/-r3.mjs): write a new one first"); process.exit(2); }
   const pf = await preflight(cfg);
   if (!pf.ok) { console.error(`model ${cfg.model} is not resident at ${cfg.baseUrl}: nothing was sent and nothing was started`); process.exit(3); }
   const label = arg.label || cfg.model;
