@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toolCategoryOf } from "../servers/gateway/ai/tool-executor.js";
+import { TURN_CONTEXT_NOTE } from "../servers/gateway/voice/context-echo.js";
 import { createVoiceTurnRunner, wasOffered, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
@@ -199,7 +200,7 @@ test("routing ignores in-process display-tool turns; turnContext rides on the re
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "set a timer", sink: h.sink, extraTools: [extra], turnContext: "Open windows: none." });
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, extraTools: [extra], turnContext: "Open windows: timer 'Tea' 1:59 left." });
   assert.ok(!h.calls.routed[1].includes("tool"), "the crow_wm round-trip is invisible to the router");
-  assert.match(h.log.at(-1).messages.at(-1).content, /^Open windows: timer 'Tea' 1:59 left\.\n\ncapital of Portugal\?$/);
+  assert.match(h.log.at(-1).messages.at(-1).content, /^Open windows: timer 'Tea' 1:59 left\.\n\[Note\] [^\n]+\n\ncapital of Portugal\?$/);
   assert.equal(h.log.at(-1).messages[0].content, h.log[0].messages[0].content, "system message byte-stable across turns");
   const saved = h.runner.convo.get("kiosk-a").filter((m) => m.role === "user").map((m) => m.content);
   assert.deepEqual(saved, ["set a timer", "capital of Portugal?"], "saved history has plain transcripts");
@@ -286,7 +287,7 @@ test("smoke 2026-10-04: the router sees the plain transcript — a turnContext c
   assert.deepEqual(seen, ["What is the capital of Portugal?"]);
   assert.equal(r.route, "fast");
   assert.equal(r.escalated, false);
-  assert.match(h.log.at(-1).messages.at(-1).content, /^\[Display\] Open windows: none\.\n\nWhat is the capital of Portugal\?$/, "the model still gets the context");
+  assert.match(h.log.at(-1).messages.at(-1).content, /^\[Display\] Open windows: none\.\n\[Note\] [^\n]+\n\nWhat is the capital of Portugal\?$/, "the model still gets the context");
 });
 
 test("smoke 2026-10-04 lever 3: the FIRST chunk is the first clause, later chunks are whole sentences (opt-out keeps sentences)", async () => {
@@ -1184,4 +1185,51 @@ test("onToolResult contract: { name, tool, result, isError }; tool is the unwrap
   h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "boom", isError: true })), close: async () => {} });
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "list projects", sink: h.sink, onToolResult: async (a) => { seen.push(a); } });
   assert.deepEqual(seen, [{ name: "crow_projects", tool: "crow_list_projects", result: "boom", isError: true }]);
+});
+
+// Live 2026-10-05 (kiosk, quick model): "Okay." was answered with the turn context read back.
+const ECHO_CTX = "[Now] Monday, October 5, 2026, 7:23 PM (time zone America/Chicago)\n[Display] Open windows: none.";
+const ECHO_LIVE = "[Now] Monday, October 5, 2026, 7:23 PM (time zone America/Chicago) [Display] Open windows: none. Got it. Is there anything specific you'd like me to help with?";
+const ECHO_ANSWER = "Got it. Is there anything specific you'd like me to help with?";
+/** The live reply as stream deltas cut at the given positions (inside the tags and the lines). */
+const deltasAt = (s, cuts) => [0, ...cuts, s.length].slice(0, -1).map((a, i, arr) => ({ type: "content_delta", text: s.slice(a, [...cuts, s.length][i]) }));
+
+test("live 2026-10-05: an echoed [Now]/[Display] context is never spoken, captioned or saved — chunks cut inside the tags", async () => {
+  for (const cuts of [[3], [2, 9, 40, 72, 77, 81], [...Array(ECHO_LIVE.length).keys()].slice(1)]) {
+    const h = harness({ rounds: [[...deltasAt(ECHO_LIVE, cuts), { type: "done" }]] });
+    const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Okay.", sink: h.sink, turnContext: ECHO_CTX });
+    assert.equal(r.failed, null);
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    assert.equal(caption, ECHO_ANSWER, `captions, cuts ${cuts.length}`);
+    assert.equal(h.calls.spoken.join(" "), ECHO_ANSWER, `speech, cuts ${cuts.length}`);
+    assert.doesNotMatch(Buffer.concat(h.audio).toString(), /\[(Now|Display)\]|October|Open windows/);
+    const saved = h.runner.convo.get(h.device.id);
+    assert.deepEqual(saved.map((m) => m.content), ["Okay.", ECHO_ANSWER], "the saved exchange has the plain transcript and the clean answer (an echo kept in history invites the next one)");
+  }
+});
+
+test("the turn context reaches the model on the user message, closed by the note line, the user's words last; the system message never carries it", async () => {
+  const h = harness();
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Okay.", sink: h.sink, turnContext: ECHO_CTX, promptSuffix: "KIOSK" });
+  assert.equal(h.log[0].messages.at(-1).content, `${ECHO_CTX}\n${TURN_CONTEXT_NOTE}\n\nOkay.`);
+  assert.equal(h.log[0].messages[0].content, "PERSONA:House\n\nKIOSK", "the system message stays byte-stable (prefix cache)");
+  const plain = harness();
+  await plain.runner.runVoiceTurn({ db: {}, device: plain.device, transcript: "Okay.", sink: plain.sink });
+  assert.equal(plain.log[0].messages.at(-1).content, "Okay.", "no context, no note");
+});
+
+test("an echo of the context inside a display tool's arguments never reaches the card; other brackets do", async () => {
+  const seen = [];
+  const h = harness({ rounds: [
+    [{ type: "tool_call", id: "w1", name: "crow_wm", arguments: { command: "display Fruit | [Display] Open windows: none. Apples [1], pears [2]" } }, { type: "done" }],
+    [{ type: "content_delta", text: "Here is your list. " }, { type: "done" }],
+  ] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "show me a list of fruit", sink: h.sink, extraTools: [displayTool(seen)], turnContext: ECHO_CTX });
+  assert.deepEqual(seen.map((s) => s.args), [{ command: "display Fruit | Apples [1], pears [2]" }]);
+});
+
+test("an answer with ordinary brackets is spoken unchanged when a turn context is present", async () => {
+  const h = harness({ rounds: [[{ type: "content_delta", text: "Press [Enter], then pick [1" }, { type: "content_delta", text: "]. Done." }, { type: "done" }]] });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "how?", sink: h.sink, turnContext: ECHO_CTX });
+  assert.equal(h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Press [Enter], then pick [1]. Done.");
 });
