@@ -510,6 +510,23 @@ test("admin display update pushes a fresh ready (display_config) to the live pag
   ws.close();
 });
 
+// Operator request 2026-10-05: a per-display theme, saved from the panel and pushed to the open page.
+test("display theme: the open page gets auto first, then the saved theme at once; a bad value keeps the saved one", async () => {
+  const { ws, msgs } = await connect("kiosk-live-theme");
+  const readies = () => msgs.filter((m) => m.type === "ready");
+  const waitFor = async (n) => { for (let i = 0; i < 50 && readies().length < n; i++) await new Promise((res) => setTimeout(res, 10)); };
+  assert.equal(readies()[0].display_config.theme, "auto", "default unchanged: auto");
+  const save = async (theme) => (await (await j("/api/kiosk/admin/displays/kiosk-live-theme", { method: "POST", body: JSON.stringify({ kiosk_settings: { theme } }) })).json());
+  assert.equal((await save("dark")).device.kiosk_settings.theme, "dark");
+  await waitFor(2);
+  assert.equal(readies()[1].display_config.theme, "dark", "pushed live");
+  assert.equal((await save("midnight")).device.kiosk_settings.theme, "dark", "rejected value keeps the prior theme");
+  await waitFor(3);
+  assert.equal(readies()[2].display_config.theme, "dark");
+  assert.equal((await store.findDevice(db(), "kiosk-live-theme")).kiosk_settings.theme, "dark", "stored with the display");
+  ws.close();
+});
+
 // Final-review item 4: no "Timer timer is done.", and the display's language.
 test("timerDoneSpeech: unnamed → Time's up.; named → '<name> timer is done.'; Spanish from strings", () => {
   assert.equal(timerDoneSpeech("Timer", "en"), "Time's up.");

@@ -132,6 +132,28 @@ test("smoke 2026-10-04 levers in the panel: end-of-speech wait (300-900 ms) and 
   assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, vad_hangover_ms: 900, stt_model: "tiny.en" } }, "typed value clamped to 900");
 });
 
+test("panel theme: Automatic/Light/Dark per display, default Automatic; only a change is posted (en + es strings)", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
+  const th = [...p.card.querySelectorAll("select")].find((s) => [...s.querySelectorAll("option")].some((o) => o.value === "dark"));
+  assert.ok(th, "theme select rendered");
+  assert.deepEqual([...th.querySelectorAll("option")].map((o) => [o.value, o.textContent]), [["auto", STRINGS.en.theme_auto], ["light", STRINGS.en.theme_light], ["dark", STRINGS.en.theme_dark]]);
+  assert.equal(th.value, "auto", "an unset theme reads as Automatic");
+  assert.equal(th.parentNode.firstChild.textContent, STRINGS.en.theme);
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 0, "untouched: nothing posted");
+  for (const o of th.querySelectorAll("option")) o.selected = o.value === "dark";
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, theme: "dark" } });
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 1, "saved value becomes the baseline");
+  const q = await runPanel({ ...KDEV, kiosk_settings: { ...KDEV.kiosk_settings, theme: "light" } });
+  assert.equal([...q.card.querySelectorAll("select")].find((s) => [...s.querySelectorAll("option")].some((o) => o.value === "dark")).value, "light");
+  for (const k of ["theme", "theme_auto", "theme_light", "theme_dark", "theme_hint"]) assert.ok(STRINGS.en[k] && STRINGS.es[k] && STRINGS.es[k] !== STRINGS.en[k], k);
+});
+
 // Assistant fit: the picker says, BEFORE binding, whether an assistant's prompt fits the quick voice model.
 const FIT_BOTS = [
   { bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full" },

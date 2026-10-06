@@ -157,3 +157,16 @@ test("the meta-glasses shim re-exports the core store, from the repo AND from an
     assert.equal(typeof installed.tokenHash, "function");
   } finally { if (prev === undefined) delete process.env.CROW_APP_ROOT; else process.env.CROW_APP_ROOT = prev; }
 });
+
+test("kiosk theme: auto by default; only auto/light/dark are accepted, anything else keeps the prior value", async () => {
+  const db = await freshDb();
+  await store.pairDevice(db, { id: "kiosk-t", name: "K", device_kind: "kiosk" });
+  assert.equal(store.KIOSK_DEFAULTS.theme, "auto");
+  assert.deepEqual([...store.KIOSK_THEME_CHOICES], ["auto", "light", "dark"]);
+  const set = async (theme) => (await store.updateDeviceProfiles(db, "kiosk-t", { kiosk_settings: { theme } })).kiosk_settings.theme;
+  assert.equal(await set("dark"), "dark");
+  for (const bad of ["Dark", "night", "", null, 1, true, "auto "]) assert.equal(await set(bad), "dark", `rejected: ${JSON.stringify(bad)}`);
+  assert.equal(await set("light"), "light");
+  assert.equal(await set("auto"), "auto");
+  assert.equal(store.normalizeKioskSettings({ theme: "sepia" }, null).theme, "auto", "a bad value on a fresh record falls back to the default");
+});

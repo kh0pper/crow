@@ -35,11 +35,14 @@ export const KIOSK_DEFAULTS = Object.freeze({
   lang: "en",
   vad_hangover_ms: 450,
   stt_model: "default",
+  theme: "auto",
 });
 /** End-of-speech silence wait range (ms), latency lever 1; the panel offers the same range. */
 export const KIOSK_VAD_HANGOVER_RANGE = Object.freeze({ min: 300, max: 900 });
 /** "default" = the STT profile's own model; "tiny.en" = faster, less accurate (bundles/kiosk/server/profiles.js). */
 export const KIOSK_STT_MODEL_CHOICES = Object.freeze(["default", "tiny.en"]);
+/** "auto" = dark during the sleep hours (paired) or by the OS scheme (dashboard); "light"/"dark" pin it. */
+export const KIOSK_THEME_CHOICES = Object.freeze(["auto", "light", "dark"]);
 
 function sha256Hex(s) {
   return createHash("sha256").update(String(s)).digest("hex");
@@ -78,6 +81,7 @@ export function normalizeKioskSettings(input, prior) {
     if (Number.isFinite(n)) out.vad_hangover_ms = Math.min(KIOSK_VAD_HANGOVER_RANGE.max, Math.max(KIOSK_VAD_HANGOVER_RANGE.min, n));   // latency lever 1 (ruling R20)
   }
   if ("stt_model" in src && KIOSK_STT_MODEL_CHOICES.includes(src.stt_model)) out.stt_model = src.stt_model;
+  if ("theme" in src && KIOSK_THEME_CHOICES.includes(src.theme)) out.theme = src.theme;
   for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS)) delete out[k];
   return out;
 }
