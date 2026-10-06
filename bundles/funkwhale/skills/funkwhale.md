@@ -23,6 +23,12 @@ tools:
   - fw_remove_from_playlist
   - fw_delete_playlist
   - fw_now_playing
+  - fw_play
+  - fw_play_album
+  - fw_pause
+  - fw_resume
+  - fw_next_track
+  - fw_stop_playback
   - fw_block_user
   - fw_mute_user
   - fw_block_domain
@@ -80,11 +86,23 @@ Uploads go through Celery for tagging/transcoding — check status via the web U
 ### Search
 
 ```
-fw_search { "q": "radiohead", "type": "artists" }
-fw_search { "q": "no surprises", "type": "tracks" }
+fw_search { "q": "the paper lanterns", "type": "artists" }
+fw_search { "q": "harbor lights", "type": "tracks" }
 ```
 
-Searches hit the local catalog + any federated content your pod has cached. Channel/library searches surface remote actors.
+Searches hit the local catalog + any federated content your pod has cached. Channel/library searches surface remote actors. Every result's `id` is the server's integer id; a track result also has `listen_uuid`.
+
+### Play
+
+```
+fw_search { "q": "harbor lights", "type": "tracks" }
+# → pick a result's integer `id`
+fw_play { "track_id": 1234 }
+fw_search { "q": "harbor lights", "type": "albums" }
+fw_play_album { "album_id": 56 }
+```
+
+`fw_play` and `fw_play_album` return a streaming envelope that the playing surface (glasses, a display) intercepts; say the returned `prose` line. Files are streamed as stored when they are MP3, Ogg, Opus or FLAC; other files are sent as an MP3 copy. An album plays in disc and track order. Control playback with `fw_pause`, `fw_resume`, `fw_next_track`, `fw_stop_playback`.
 
 ### Follow a remote channel
 
@@ -104,7 +122,7 @@ Five tools cover the full lifecycle: `fw_playlists` (list), `fw_create_playlist`
 Canonical create-and-fill sequence:
 
 ```
-1. fw_search { "q": "vashti bunyan", "type": "tracks", "page_size": 5 }
+1. fw_search { "q": "the paper lanterns", "type": "tracks", "page_size": 5 }
    → collect ids from results[].id
 
 2. fw_create_playlist { "name": "Folk Sunday", "privacy_level": "me" }

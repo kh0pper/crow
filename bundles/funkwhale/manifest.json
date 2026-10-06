@@ -1,7 +1,7 @@
 {
   "id": "funkwhale",
   "name": "Funkwhale",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
   "type": "bundle",
   "author": "Crow",
@@ -54,7 +54,6 @@
       { "name": "fw_block_user", "label": "Block user", "subgroup": "Moderation" },
       { "name": "fw_mute_user", "label": "Mute user", "subgroup": "Moderation" },
       { "name": "fw_defederate", "label": "Defederate", "subgroup": "Moderation" },
-      { "name": "fw_import_blocklist", "label": "Import blocklist", "subgroup": "Moderation" },
       { "name": "fw_media_prune", "label": "Prune media", "subgroup": "Moderation" }
     ]
   },
