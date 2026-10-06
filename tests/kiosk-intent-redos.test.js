@@ -11,6 +11,8 @@ import { matchClockFastPath, CLOCK_PHRASES } from "../bundles/kiosk/server/clock
 import { wantsDisplay, wantsNewDisplay, newDisplayKind, parseKioskCommand, matchWmFastPath, createWmStore, isPlaceholderText } from "../bundles/kiosk/server/wm.js";
 import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
 import { INTENT_MAX_CHARS, intentText } from "../bundles/kiosk/server/intent-text.js";
+import { matchT0, spokenWords } from "../bundles/kiosk/server/phrases.js";
+import { parseOpen, parsePlay, lookupItem, mentionsOpen, mentionsPlay, asksOpen, asksPlay, asksCard, mentionsCard, showIntent, followUp, windowIntent, teachTo, mentionsPlayWord, compound, compoundParts } from "../bundles/kiosk/server/patterns.js";
 
 const store = createWmStore({ setTimer: () => ({}), clearTimer: () => {} });
 const MATCHERS = {
@@ -18,12 +20,21 @@ const MATCHERS = {
   wantsDisplay, wantsNewDisplay, newDisplayKind, wantsMemory,
   matchWmFastPath: (s) => matchWmFastPath(s, store, "d", null),
   parseKioskCommand, isPlaceholderText, intentText,
+  matchT0, spokenWords, parseOpen, parsePlay, mentionsPlay, asksPlay, compound,
+  mentionsOpen: (s) => mentionsOpen(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  asksOpen: (s) => asksOpen(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  lookupItem: (s) => lookupItem([{ id: "a", title: "Lab dashboard", aliases: ["lab"] }], s),
+  asksCard: (s) => asksCard(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  compoundParts,
+  mentionsCard: (s) => mentionsCard(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  showIntent: (s) => showIntent(s, [{ id: "a", title: "Lab dashboard", aliases: ["lab"] }]),
+  followUp, mentionsPlayWord, windowIntent, teachTo,
 };
 const BUDGET_MS = 50;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */
 function cpuMs(fn) { const a = process.cpuUsage(); fn(); const d = process.cpuUsage(a); return (d.user + d.system) / 1000; }
 
-const RUNS = [" ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’"];
+const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twenty ", "the 25th of ", "cuantos dias faltan para ", "de ", " ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’"];
 const TAILS = ["", "!", " x", " what time is it", " zzz what time is it now please x", " | <title>"];
 
 test("adversarial input: 50,000-repeat runs, with and without a trailing mismatch — every matcher answers well inside 50 ms of CPU time", () => {

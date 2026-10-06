@@ -235,3 +235,13 @@ test("session mode: 'no assistant' links to the Kiosk panel in the top window; t
   assert.match(css, /\[data-mode="session"\] \.k-banner\s*\{[^}]*right:/, "the banner leaves room for the dashboard's close button");
   assert.match(css, /\[data-mode="session"\] \.k-top\s*\{[^}]*padding-right:/);
 });
+
+test("the page reports caps v2: screen, audio, the kinds this build draws; no kind it cannot draw", () => {
+  const src = read("kiosk.js");
+  const at = src.indexOf("const CAPS");
+  const lit = src.slice(at, src.indexOf("};", at) + 2);
+  assert.match(lit, /v: 2/);
+  assert.match(lit, /kinds: \["card", "timer"\]/);
+  assert.match(lit, /screen: \{ w: screen\.width, h: screen\.height/);
+  assert.doesNotMatch(lit, /"media"|"app"|"camera"/);
+});

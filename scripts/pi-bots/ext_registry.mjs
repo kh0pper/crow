@@ -113,18 +113,20 @@ export function serverBlockFor(serverId, crowHome = resolveCrowHome()) {
 /**
  * Scan repo bundles for a `capabilities` block (A1). Returns the universe of
  * extension-capable bundles, independent of any instance. Each entry:
- *   { id, name, description, capabilities:{mcp_server_id,group,skills[],runtimes{},tools[]} }
+ *   { id, name, description, capabilities:{mcp_server_id,group,skills[],runtimes{},tools[],voice_intent?} }
+ * voice_intent ({ en: [...], es: [...] }, strings only) is the add-on's phrase list for voice displays
+ * (servers/gateway/voice/tool-families.js reads it); absent when the manifest has none.
  */
-export function listCapabilityBundles() {
+export function listCapabilityBundles(bundlesDir = APP_BUNDLES) {
   const out = [];
   let ids;
   try {
-    ids = readdirSync(APP_BUNDLES);
+    ids = readdirSync(bundlesDir);
   } catch {
     return out;
   }
   for (const id of ids) {
-    const mpath = join(APP_BUNDLES, id, "manifest.json");
+    const mpath = join(bundlesDir, id, "manifest.json");
     if (!existsSync(mpath)) continue;
     const m = readJsonSafe(mpath, null);
     if (!m || !m.capabilities || typeof m.capabilities !== "object") continue;
@@ -139,6 +141,7 @@ export function listCapabilityBundles() {
         skills: Array.isArray(cap.skills) ? cap.skills.slice() : [],
         runtimes: cap.runtimes || {},
         tools: Array.isArray(cap.tools) ? cap.tools.slice() : [],
+        ...voiceIntentOf(cap),
       },
     });
   }
@@ -146,10 +149,19 @@ export function listCapabilityBundles() {
   return out;
 }
 
+/** { voice_intent: { en, es } } with string entries only, or {} when the block declares none. */
+function voiceIntentOf(cap) {
+  const v = cap && cap.voice_intent;
+  if (!v || typeof v !== "object") return {};
+  const out = {};
+  for (const lang of ["en", "es"]) if (Array.isArray(v[lang])) out[lang] = v[lang].filter((p) => typeof p === "string");
+  return Object.keys(out).length ? { voice_intent: out } : {};
+}
+
 /** Map: mcp_server_id -> capability bundle (for overlay lookup). */
-function capabilityIndex() {
+function capabilityIndex(bundlesDir = APP_BUNDLES) {
   const idx = new Map();
-  for (const b of listCapabilityBundles()) idx.set(b.capabilities.mcp_server_id, b);
+  for (const b of listCapabilityBundles(bundlesDir)) idx.set(b.capabilities.mcp_server_id, b);
   return idx;
 }
 
@@ -167,10 +179,10 @@ function capabilityIndex() {
  *   name        capability bundle name, else the server id
  *   capabilities the overlay block, or null
  */
-export function listInstalledExtensions(crowHome = resolveCrowHome()) {
+export function listInstalledExtensions(crowHome = resolveCrowHome(), bundlesDir = APP_BUNDLES) {
   const addons = readJsonSafe(mcpAddonsPath(crowHome), {});
   const canonical = readCanonicalSafe().mcpServers || {};
-  const idx = capabilityIndex();
+  const idx = capabilityIndex(bundlesDir);
   const out = [];
   for (const id of Object.keys(addons)) {
     const cap = idx.get(id) || null;

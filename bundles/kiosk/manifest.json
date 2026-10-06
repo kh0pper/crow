@@ -1,7 +1,7 @@
 {
   "id": "kiosk",
   "name": "Kiosk display",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "type": "mcp-server",
   "author": "Crow",
   "category": "hardware",
@@ -17,6 +17,10 @@
     "group": "Kiosk",
     "skills": ["kiosk"],
     "runtimes": { "pi": true },
+    "voice_intent": {
+      "en": ["announce", "announcement", "kiosk", "kiosks", "displays", "other display", "every display", "all displays"],
+      "es": ["anuncia", "anuncio", "kiosco", "kioscos", "pantallas", "otra pantalla", "todas las pantallas"]
+    },
     "tools": [
       { "name": "crow_kiosk_list_displays", "label": "List displays", "subgroup": "Display" },
       { "name": "crow_kiosk_announce", "label": "Announce", "subgroup": "Display" },

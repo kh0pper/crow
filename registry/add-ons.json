@@ -1304,7 +1304,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -1351,6 +1351,43 @@
         "runtimes": {
           "pi": true,
           "glasses": true
+        },
+        "voice_intent": {
+          "en": [
+            "play",
+            "music",
+            "song",
+            "songs",
+            "album",
+            "albums",
+            "artist",
+            "artists",
+            "playlist",
+            "playlists",
+            "track",
+            "tracks",
+            "listen",
+            "pause",
+            "resume",
+            "skip",
+            "next track",
+            "whats playing"
+          ],
+          "es": [
+            "reproduce",
+            "musica",
+            "cancion",
+            "canciones",
+            "album",
+            "albumes",
+            "artista",
+            "artistas",
+            "lista de reproduccion",
+            "escuchar",
+            "pausa",
+            "siguiente cancion",
+            "que suena"
+          ]
         },
         "tools": [
           {
@@ -2096,7 +2133,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -2133,6 +2170,27 @@
         ],
         "runtimes": {
           "pi": true
+        },
+        "voice_intent": {
+          "en": [
+            "announce",
+            "announcement",
+            "kiosk",
+            "kiosks",
+            "displays",
+            "other display",
+            "every display",
+            "all displays"
+          ],
+          "es": [
+            "anuncia",
+            "anuncio",
+            "kiosco",
+            "kioscos",
+            "pantallas",
+            "otra pantalla",
+            "todas las pantallas"
+          ]
         },
         "tools": [
           {
@@ -3252,7 +3310,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -3290,6 +3348,43 @@
         "runtimes": {
           "pi": true,
           "glasses": true
+        },
+        "voice_intent": {
+          "en": [
+            "news",
+            "headline",
+            "headlines",
+            "briefing",
+            "briefings",
+            "article",
+            "articles",
+            "feed",
+            "feeds",
+            "podcast",
+            "podcasts",
+            "digest",
+            "digests",
+            "rss",
+            "subscribe",
+            "subscription",
+            "subscriptions"
+          ],
+          "es": [
+            "noticia",
+            "noticias",
+            "titular",
+            "titulares",
+            "resumen",
+            "articulo",
+            "articulos",
+            "podcast",
+            "podcasts",
+            "boletin",
+            "suscribir",
+            "suscribe",
+            "suscripcion",
+            "suscripciones"
+          ]
         },
         "tools": [
           {

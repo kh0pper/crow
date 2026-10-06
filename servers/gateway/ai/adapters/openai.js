@@ -16,7 +16,7 @@ const DEFAULT_BASE_URL = "https://api.openai.com/v1";
  * (which could reject an unknown body field). `stream_options.include_usage`
  * is OpenAI-standard and is sent to everyone.
  */
-function isLocalBase(baseUrl) {
+export function isLocalBase(baseUrl) {
   try {
     const host = new URL(baseUrl).hostname;
     if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;

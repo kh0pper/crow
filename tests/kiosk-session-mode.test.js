@@ -601,20 +601,24 @@ test("a session display gets the same turn rules as a paired one: display tool o
     await c.ask();
     const call = calls.at(-1);
     assert.match(call.device.id, /^dash-/);
-    const wmTool = call.extraTools[0];
-    assert.equal(wmTool.definition.name, "crow_wm");
-    assert.equal(wmTool.when("Tell me a joke"), false);
-    assert.equal(wmTool.when("What time is it?"), false);
-    assert.equal(wmTool.when("show me the shopping list"), true);
-    assert.match(call.turnContext, /^\[Now\] .* \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
+    const showTool = call.extraTools.find((x) => x.definition.name === "crow_show");
+    const wmTool = call.extraTools.find((x) => x.definition.name === "crow_wm");
+    assert.ok(showTool && wmTool);
+    assert.equal(showTool.when("Tell me a joke"), false);
+    assert.equal(showTool.when("What time is it?"), false);
+    assert.equal(showTool.when("show me the shopping list"), true);
+    assert.match(call.turnContext("Tell me a joke"), /^\[Now\] .* \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
     assert.match((await call.fastPaths("What time is it?")).say, /^It's \d{1,2}:\d\d [AP]M\.$/);
     assert.equal(call.tooLargeText.length > 20, true);
     // Display-card rules: placeholders refused, one content card at a time.
-    const run = async (command, transcript) => JSON.parse(await wmTool.execute({ command }, { transcript }));
-    assert.equal((await run("display <title> | <text>", "show me something")).action, "error");
-    assert.equal((await run("display Info | a joke", "Tell me a joke")).action, "error");
-    assert.equal((await run("display List | milk", "show me the list")).ok, true);
-    assert.equal((await run("display Weather | sunny", "show me the weather")).ok, true);
+    const run = async (title, body, transcript) => JSON.parse(await showTool.execute({ kind: "text", title, body }, { transcript }));
+    assert.equal((await run("<title>", "<text>", "show me something")).reason, "placeholder");
+    assert.equal((await run("Info", "a joke", "Tell me a joke")).reason, "no_intent");
+    assert.equal((await run("List", "milk", "show me the list")).ok, true);
+    assert.equal((await run("Weather", "sunny", "show me the weather")).ok, true);
+    // The K1 command form is still accepted where no card has to be shown.
+    assert.equal(JSON.parse(await wmTool.execute({ command: "timer 5 minutes eggs" }, {})).action, "open");
+    assert.equal(JSON.parse(await wmTool.execute({ command: "stop timer eggs" }, { transcript: "stop the eggs timer" })).ok, true);
     assert.deepEqual(f.k.wm.list(call.device.id).map((w) => w.title), ["Weather"]);
     c.ws.close();
   } finally { f.close(); }

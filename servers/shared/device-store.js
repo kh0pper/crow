@@ -43,6 +43,16 @@ export const KIOSK_VAD_HANGOVER_RANGE = Object.freeze({ min: 300, max: 900 });
 export const KIOSK_STT_MODEL_CHOICES = Object.freeze(["default", "tiny.en"]);
 /** "auto" = dark during the sleep hours (paired) or by the OS scheme (dashboard); "light"/"dark" pin it. */
 export const KIOSK_THEME_CHOICES = Object.freeze(["auto", "light", "dark"]);
+/**
+ * What kind of display this is (bundles/kiosk/server/caps.js PROFILES). NOT a default: the key is absent
+ * until the operator picks one or the pairing guess sets it, so "nobody chose" stays distinguishable
+ * from "someone chose pi3". A display with no profile is read as the audio-first one (caps.js).
+ * profile_source says who set it: "operator" (the panel) or "guessed" (from what the page reported).
+ */
+export const KIOSK_PROFILE_CHOICES = Object.freeze(["pi3", "phone", "tablet", "desktop"]);
+export const KIOSK_PROFILE_SOURCES = Object.freeze(["operator", "guessed"]);
+/** Optional keys: kept when present, never filled in by a default. */
+const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source"]);
 
 function sha256Hex(s) {
   return createHash("sha256").update(String(s)).digest("hex");
@@ -82,7 +92,14 @@ export function normalizeKioskSettings(input, prior) {
   }
   if ("stt_model" in src && KIOSK_STT_MODEL_CHOICES.includes(src.stt_model)) out.stt_model = src.stt_model;
   if ("theme" in src && KIOSK_THEME_CHOICES.includes(src.theme)) out.theme = src.theme;
-  for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS)) delete out[k];
+  if ("profile" in src) {
+    if (KIOSK_PROFILE_CHOICES.includes(src.profile)) {
+      out.profile = src.profile;
+      out.profile_source = KIOSK_PROFILE_SOURCES.includes(src.profile_source) ? src.profile_source : "operator";
+    } else if (src.profile === null || src.profile === "") { delete out.profile; delete out.profile_source; }   // back to "not set"
+  }
+  if (!KIOSK_PROFILE_CHOICES.includes(out.profile)) { delete out.profile; delete out.profile_source; }
+  for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS) && !KIOSK_OPTIONAL_KEYS.has(k)) delete out[k];
   return out;
 }
 

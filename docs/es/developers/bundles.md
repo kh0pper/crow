@@ -38,6 +38,19 @@ Una superficie se "declara" por la presencia de su clave. Cada superficie declar
 
 Se permiten campos desconocidos (el esquema es permisivo) — los extras específicos de cada bundle como `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pasan sin tocarse. La forma canónica es `registry/manifest.schema.json`.
 
+## Listas de frases para pantallas de voz (`capabilities.voice_intent`)
+
+Un complemento cuyas herramientas puede usar un asistente por voz puede decir qué palabras significan "esta petición es para mí":
+
+```json
+"capabilities": {
+  "tools": [{ "name": "mb_play" }],
+  "voice_intent": { "en": ["music", "song", "songs", "next track"], "es": ["musica", "cancion", "canciones"] }
+}
+```
+
+Cada entrada es una frase simple de una a cuatro palabras (letras y dígitos; se ignoran acentos y mayúsculas), como máximo 40 por idioma, en `en` y `es`. La coincidencia es por palabras completas, así que incluye el singular y el plural. Una pantalla de voz ofrece las herramientas del complemento a su modelo rápido solo en un turno que contiene una de estas frases, o en el turno inmediatamente posterior a uno que las usó. Un complemento sin lista solo se usa en los turnos enviados al modelo grande, y la lista de Diagnóstico de la pantalla lo muestra como no ofrecido. No se aceptan patrones: todo lo que no sea una frase corta y simple se ignora.
+
 ## Borrador / sin publicar
 
 - `"draft": true` excluye un bundle del registro generado.
