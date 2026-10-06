@@ -1409,7 +1409,7 @@ test("turnContext may be a function of the plain transcript; the router still ne
   const seen = [];
   await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "capital of Portugal?", sink: h.sink, turnContext: (t) => { seen.push(t); return "[Display] Open windows: none."; } });
   assert.deepEqual(seen, ["capital of Portugal?"]);
-  assert.equal(h.log[0].messages.at(-1).content, "[Display] Open windows: none.\n\ncapital of Portugal?");
+  assert.equal(h.log[0].messages.at(-1).content, `[Display] Open windows: none.\n${TURN_CONTEXT_NOTE}\n\ncapital of Portugal?`, "the function's string is wrapped and closed by the note line, like a string context");
   assert.equal(h.runner.convo.get(h.device.id).at(-2).content, "capital of Portugal?", "the context is dropped from saved history");
 });
 

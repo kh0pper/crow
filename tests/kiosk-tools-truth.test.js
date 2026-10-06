@@ -156,7 +156,7 @@ test("titles: the same title updates that card; a new subject on a new-content t
   assert.equal(d.spoken.at(-1), "I updated Fruits.");
   assert.deepEqual(d.cards(), ["content:Fruits"]);
   await d.ask("Now show me a list of vegetables.");
-  assert.match(d.requests[2].messages.at(-1).content, /\[Display\] Open windows: 1 card\.\n\nNow show me/);
+  assert.match(d.requests[2].messages.at(-1).content, /\[Display\] Open windows: 1 card\.\n\[Note\] [^\n]*\n\nNow show me/);
   assert.doesNotMatch(d.requests[2].messages.at(-1).content, /Fruits/);
   assert.deepEqual(d.cards(), ["content:Vegetables"]);
 });

@@ -106,7 +106,7 @@ test("the request is a real assistant's: persona, saved history, the memory tool
   await runTurn(c27, "four", display(c27, "four", a));
   assert.ok(a.seen[0].system.startsWith(PERSONA) && /shared home display/.test(a.seen[0].system));
   assert.equal(a.seen[0].messages, 1 + HISTORY.length + 1);
-  assert.match(a.seen[0].last, /^\[Now\] .*\n\[Display\] Open windows: 1 card\.\n\nNow show me a list of three vegetables\.$/, "new content: counts only, no title to copy");
+  assert.match(a.seen[0].last, /^\[Now\] .*\n\[Display\] Open windows: 1 card\.\n\[Note\] [^\n]*\n\nNow show me a list of three vegetables\.$/, "new content: counts only, no title to copy");
   const b = perfect(c29, "four");
   await runTurn(c29, "four", display(c29, "four", b));
   assert.match(b.seen[0].last, /The card "Fruits" now says: one; two\./);
