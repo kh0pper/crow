@@ -31,6 +31,11 @@ export function isNight(date, start = "22:30", end = "06:30") {
   const s = mins(start), e = mins(end);
   return s <= e ? m >= s && m < e : m >= s || m < e;
 }
+/** The page theme: a pinned "light"/"dark" wins; "auto" (or anything else) keeps the default rule. */
+export function themeFor(pref, { session = false, osDark = false, night = false } = {}) {
+  if (pref === "light" || pref === "dark") return pref;
+  return (session ? osDark : night) ? "dark" : "light";
+}
 export function msToNextMinute(date) { return 60_000 - (date.getSeconds() * 1000 + date.getMilliseconds()); }
 
 /*

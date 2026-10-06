@@ -13,6 +13,7 @@ A paired browser — a phone today, a Raspberry Pi 3 with a 7" touchscreen next 
 - The device token is accepted only in the session's first `hello` frame — never in a URL, never by any other route.
 - MCP tools reach live sessions through loopback-only `/api/kiosk/internal/*` with `$CROW_HOME/kiosk-announce-token`.
 
+- Theme: each paired display has a **Theme** setting in the Kiosk panel (`kiosk_settings.theme`: `auto` | `light` | `dark`, default `auto`). Automatic turns the page dark during the display's sleep hours (default 22:30–06:30); Light or Dark holds all day. A save reaches an open page at once. The dashboard overlay has no stored settings and follows the OS color scheme.
 - The page is served at `/display`, not `/kiosk`, because the installed maker-lab bundle owns `/kiosk/*`. The API stays under `/api/kiosk/*` and the dashboard panel at `/dashboard/kiosk`.
 
 ## Talk to Crow in the dashboard (session mode)

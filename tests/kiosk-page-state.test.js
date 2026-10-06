@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
+  closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
 } from "../bundles/kiosk/public/state.js";
 import { createPlayer } from "../bundles/kiosk/public/audio.js";
@@ -306,4 +307,19 @@ test("toolsLine: the turn's tool outcomes as one debug line — rounds joined by
   assert.equal(toolsLine({ tools: ["crow_wm:ok<script>", 7, null] }), "crow_wm:ok_script_");
   assert.equal(toolsLine({}), "");
   assert.equal(toolsLine(null), "");
+});
+
+test("theme setting: light/dark pin the page for paired and dashboard displays; auto keeps sleep hours (paired) and the OS scheme (dashboard)", () => {
+  for (const session of [false, true]) for (const osDark of [false, true]) for (const night of [false, true]) {
+    assert.equal(themeFor("dark", { session, osDark, night }), "dark");
+    assert.equal(themeFor("light", { session, osDark, night }), "light");
+    const auto = (session ? osDark : night) ? "dark" : "light";
+    for (const pref of ["auto", undefined, "bogus"]) assert.equal(themeFor(pref, { session, osDark, night }), auto, `${pref} session=${session} osDark=${osDark} night=${night}`);
+  }
+});
+
+test("applyTheme reads the theme setting, and a pushed config applies it without waiting for the clock", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  assert.match(src, /function applyTheme\(\) \{[^\n]*themeFor\(config\.theme,/);
+  assert.match(src, /if \(!clockTimer\) tickClock\(\); else applyTheme\(\);/);
 });

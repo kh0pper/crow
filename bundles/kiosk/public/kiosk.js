@@ -6,7 +6,7 @@
  */
 import { STRINGS } from "./strings.js";
 import {
-  closeDecision, backoffMs, micDecision, isNight, msToNextMinute,
+  closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
 } from "./state.js";
@@ -65,8 +65,8 @@ function setBird(s) {
 }
 /** The server's state, held in "speaking" while local audio still plays (ruling F3). */
 const renderBird = () => setBird(displayedBird(serverBird, !!player?.playing));
-/** A display dims by its sleep hours; inside the dashboard the page follows the dashboard (the OS scheme). */
-function applyTheme() { document.documentElement.dataset.theme = (SESSION ? matchMedia("(prefers-color-scheme: dark)").matches : isNight(new Date(), config.sleep_start, config.sleep_end)) ? "dark" : "light"; }
+/** The display's theme setting pins light/dark; on "auto" a display dims by its sleep hours and the dashboard follows the OS scheme. */
+function applyTheme() { document.documentElement.dataset.theme = themeFor(config.theme, { session: SESSION, osDark: SESSION && matchMedia("(prefers-color-scheme: dark)").matches, night: !SESSION && isNight(new Date(), config.sleep_start, config.sleep_end) }); }
 function tickClock() {
   const d = new Date();
   $("clock").textContent = d.toLocaleTimeString(lang, { hour: "numeric", minute: "2-digit" });
@@ -203,7 +203,7 @@ function mountUi() {
       onCloseAll: () => send({ type: "wm_event", kind: "close_all" }),
     });
   }
-  if (!clockTimer) tickClock();
+  if (!clockTimer) tickClock(); else applyTheme();   // a pushed theme setting applies now, not at the next minute
   if (!$("cap-bot").textContent) caption(t("tap_hint"), "tap_hint");
 }
 
