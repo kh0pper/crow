@@ -1,7 +1,7 @@
 {
   "id": "funkwhale",
   "name": "Funkwhale",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
   "type": "bundle",
   "author": "Crow",
@@ -26,6 +26,10 @@
     "group": "Music",
     "skills": ["funkwhale"],
     "runtimes": { "pi": true, "glasses": true },
+    "voice_intent": {
+      "en": ["play", "music", "song", "songs", "album", "albums", "artist", "artists", "playlist", "playlists", "track", "tracks", "listen", "pause", "resume", "skip", "next track", "whats playing"],
+      "es": ["reproduce", "musica", "cancion", "canciones", "album", "albumes", "artista", "artistas", "lista de reproduccion", "escuchar", "pausa", "siguiente cancion", "que suena"]
+    },
     "tools": [
       { "name": "fw_play", "label": "Play", "subgroup": "Playback" },
       { "name": "fw_play_album", "label": "Play album", "subgroup": "Playback" },

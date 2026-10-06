@@ -494,3 +494,21 @@ test("a retry in the right form replaces the card; a card with the same title is
   assert.deepEqual(s.emitted.map((e) => [e.action, e.id || e.window?.id]), [["close", "content-2"], ["open", "content-3"]], "same title: still a fresh window");
   assert.deepEqual(s.store.list("k").map((w) => [w.title, w.blocks.at(-1).text]), [["Fruits", "apples, bananas, cherries, dates"]]);
 });
+
+test("store.put: the same title in the same kind replaces that card or recipe (updated); a new title opens; a timer is never replaced", () => {
+  const armed = [];
+  const store = W.createWmStore({ now: () => 0, setTimer: (fn, ms) => { armed.push(ms); return {}; }, clearTimer: () => {} });
+  const a = store.put("k", { kind: "recipe", title: "Lasagna", ingredients: [], steps: ["a"], step: 0 });
+  assert.deepEqual([a.updated, a.evicted.length], [false, 0]);
+  const b = store.put("k", { kind: "recipe", title: "lasagna", ingredients: [], steps: ["b"], step: 0 });
+  assert.deepEqual([b.updated, b.evicted.map((e) => e.id)], [true, [a.window.id]]);
+  assert.equal(store.list("k").length, 1);
+  store.put("k", { kind: "timer", name: "Rice", title: "Rice", seconds: 60 });
+  const t2 = store.put("k", { kind: "timer", name: "Rice", title: "Rice", seconds: 120 });
+  assert.deepEqual([t2.updated, t2.evicted.length], [false, 0], "setting a timer never cancels one that is running");
+  assert.deepEqual(armed, [60000, 120000]);
+  assert.equal(store.list("k").filter((w) => w.kind === "timer").length, 2);
+  const c1 = store.put("k", { kind: "content", title: "Fruits", blocks: [] });
+  const c2 = store.put("k", { kind: "content", title: "Vegetables", blocks: [] });
+  assert.deepEqual([c2.updated, c2.evicted.map((e) => e.id)], [false, [c1.window.id]], "one content card per display still holds: a new subject replaces, and is not an update");
+});

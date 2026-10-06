@@ -248,3 +248,27 @@ test("the memories switch says how memories are used: when asked to remember or 
   assert.match(STRINGS.es.memory_hint, /recordar/);
   assert.match(STRINGS.es.memory_hint, /no en cada pregunta/);
 });
+
+test("panel: each display has a display-type select with the four profiles; only a change is posted, as kiosk_settings.profile", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "pi3" } });
+  const pf = p.card.querySelectorAll("select")[4];
+  assert.deepEqual([...pf.querySelectorAll("option")].map((o) => o.value), ["", "pi3", "phone", "tablet", "desktop"]);
+  assert.equal(pf.value, "pi3");
+  assert.ok(p.card.textContent.includes(STRINGS.en.profile_hint));
+  assert.deepEqual([p.bot.value, p.stt.value, p.sm.value, p.tts.value], ["household", "stt-a", "default", "tts-a"], "the four selects before it are where they were");
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 0, "untouched: nothing posted");
+  p.choose(pf, "tablet");
+  p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
+  await p.flush();
+  assert.equal(p.posts.length, 1, "a profile change alone is a change");
+  assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, profile: "tablet" } });
+  const unset = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
+  assert.equal(unset.card.querySelectorAll("select")[4].value, "", "a display with no profile shows Not set (read as the audio-first one), never a stored choice");
+  assert.ok(!unset.card.textContent.includes(STRINGS.en.profile_guessed));
+  const guessed = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone", profile_source: "guessed" } });
+  assert.equal(guessed.card.querySelectorAll("select")[4].value, "phone");
+  assert.ok(guessed.card.textContent.includes(STRINGS.en.profile_guessed), "a guessed type says so");
+  for (const L of ["en", "es"]) for (const k of ["profile", "profile_unset", "profile_guessed", "profile_pi3", "profile_phone", "profile_tablet", "profile_desktop", "profile_hint"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
+});

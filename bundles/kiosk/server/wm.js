@@ -120,8 +120,10 @@ const DISPLAY_INTENT = [
   /^(please |can you |could you )?(close|dismiss|hide)\b/,
   /\bclear (the )?(screen|display)\b/,
   // Spanish (a leading \b cannot sit before an accented letter, so those use a space/start anchor).
-  /\bmu[eé]stra(me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(me|nos)\b/,
+  /\bmu[eé]stra(s|me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(s|me|nos)\b/,
   /\ben (la |mi |tu )?pantalla\b/,
+  // A request for steps ("give me the steps for…", "steps to make…"), not "the next steps for the project".
+  /\b(the|me|us) steps (for|to)\b|\bsteps to make\b|\b(los|me|nos) pasos (para|de)\b/,
   /\b(temporizador(es)?|cron[oó]metro|cuenta atr[aá]s|cuenta regresiva|alarmas?)\b/,
   /\brecetas?\b/,
   /(^| )(siguiente|anterior|pr[oó]ximo|[uú]ltimo|primer|este|ese) paso\b|\b(lee|leer|repite|repetir) (el |ese )?paso\b/,
@@ -152,7 +154,7 @@ const NEW_DISPLAY = {
     /\bdisplay (a|an|the|my|our|me|us|some|this|that|it)\b/,
     /\bput\b.{0,40}?\b(up|on (the |my |your )?(screen|display))\b/,
     /\b(pull|bring) up\b/,
-    /\bmu[eé]stra(me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(me|nos)\b/,
+    /\bmu[eé]stra(s|me|nos|lo|la)?\b|\bmostrar\b|\bens[eé][ñn]a(s|me|nos)\b/,
     /\ben (la |mi |tu )?pantalla\b/,
   ],
 };
@@ -279,10 +281,7 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
     w.done = true;
     try { onTimerDone(id, copy(w)); } catch (err) { console.error("[kiosk wm] onTimerDone failed:", err?.message || err); }
   }
-  return {
-    list: (id) => dev(id).windows.map(copy),
-    focused: (id) => copy(dev(id).windows.at(-1)),
-    open(id, spec) {
+  function open(id, spec) {
       const d = dev(id);
       const t = now();
       const evicted = [];
@@ -299,6 +298,25 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
       d.windows.push(w);
       if (w.kind === "timer") timers.set(`${id}:${w.id}`, setTimer(() => fire(id, w.id), Math.max(0, w.ends_at - t)));
       return { window: copy(w), evicted: evicted.filter(Boolean).map(copy) };
+  }
+  return {
+    list: (id) => dev(id).windows.map(copy),
+    focused: (id) => copy(dev(id).windows.at(-1)),
+    open,
+    /**
+     * Open a card or recipe, replacing the one of the same kind with the same title (case-insensitive):
+     * the same title never produces a second card. A TIMER is never replaced — two timers may share a
+     * name, and setting one must not cancel another. → { window, evicted, updated }.
+     */
+    put(id, spec, { replaceTimer = false } = {}) {
+      const title = String(spec.title || "").toLowerCase();
+      // A timer gets a window of its own, unless replaceTimer (a follow-up "make it twenty minutes instead"):
+      // then it replaces the RUNNING timer of the same name.
+      const same = spec.kind === "timer" && !replaceTimer ? null
+        : dev(id).windows.find((w) => w.kind === spec.kind && !(w.kind === "timer" && w.done) && String(w.title || "").toLowerCase() === title);
+      const gone = same ? [copy(remove(id, same.id))] : [];
+      const r = open(id, spec);
+      return { window: r.window, evicted: [...gone, ...r.evicted], updated: !!same };
     },
     close: (id, winId) => copy(remove(id, winId)),
     closeKind(id, kind, name) {

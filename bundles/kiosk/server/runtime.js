@@ -10,7 +10,11 @@ import { randomBytes } from "node:crypto";
 import { createPairingStore } from "./pairing.js";
 import { createSessionHub } from "./session.js";
 import { createMetricsStore } from "./metrics.js";
-import { createWmStore, createWmTool, matchWmFastPath, kioskPromptSuffix, kioskTurnContext, contentBlocks } from "./wm.js";
+import { createWmStore, matchWmFastPath, contentBlocks, wantsNewDisplay } from "./wm.js";
+import { createDisplayTools, cardUpdate } from "./display-tools.js";
+import { matchSpoken } from "./tiers.js";
+import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
+import { effectiveCaps } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
@@ -76,6 +80,44 @@ export function kioskTooLargeText(lang) {
 /** Spoken + captioned when a turn that asked for something on the screen ends with nothing put there. */
 export function kioskDisplayMissedText(lang) {
   return STRINGS[lang === "es" ? "es" : "en"].display_missed_say;
+}
+
+/**
+ * Everything a display turn passes to the voice turn besides the audio, from the display's executor
+ * context (display-tools.js). Pure, and the ONE place these options are built: the real turn, the
+ * post-deploy turn check and the evaluation harness all call it, so they cannot drift apart.
+ *   ctx  { store, deviceId, caps (effective), lang, sources, items, emit, media?, … }
+ *   o    { now() → ms, tz, settings (the display's kiosk_settings, or a function returning them: the STT
+ *          model is read when the turn transcribes), mediaLine() → "Playing: …" | "",
+ *          wrapTools(tools) → tools (the evaluation records calls through it),
+ *          onToolResult({ name, tool, result, isError }) → string | undefined: passed through unchanged to
+ *          the voice turn (turn.js), which may replace a remote tool's result with it; the display tools
+ *          are never wrapped by it }
+ */
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null } = {}) {
+  const tools = createDisplayTools(ctx);
+  const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
+  const lang = cfg().lang;
+  return {
+    extraTools: typeof wrapTools === "function" ? wrapTools(tools) : tools,
+    // T0 and T1 (the tier framework), then the K1 fast path and the clock, unchanged, behind them.
+    fastPaths: async (t) => (await matchSpoken(t, ctx)) || matchWmFastPath(t, ctx.store, ctx.deviceId, ctx.caps) || matchClockFastPath(t, { now: now(), tz }),
+    // Built from the tools this display really has: a display with nothing to play is never told it can play.
+    promptSuffix: displayPromptSuffix(ctx.caps, tools.map((x) => x.definition.name)),
+    // A turn that asks for NEW content sees kinds and counts only (no open card's title to copy); a turn
+    // that asks to CHANGE the open card sees its words.
+    turnContext: (t) => `${kioskNowContext(now(), tz)}\n${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
+    familiesOnIntent: true,
+    denyTools: KIOSK_DENY_TOOLS,
+    sttModel: (p) => kioskSttModel(p, cfg()),
+    maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
+    firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
+    fallbackText: kioskFallbackText(lang),
+    tooLargeText: kioskTooLargeText(lang),
+    displayMissedText: kioskDisplayMissedText(lang),
+    memoryWhen: wantsMemory,
+    ...(typeof onToolResult === "function" ? { onToolResult } : {}),
+  };
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -151,6 +193,16 @@ function directLoopback(req) {
   return !Object.keys(req.headers).some((h) => h.startsWith("tailscale-") || h === "x-forwarded-for" || h === "forwarded" || h === "x-forwarded-host");
 }
 
+/** The turn check's three sentences: the clock (no model), a plain question (no tools offered), a card (the display tool must run). */
+export const TURN_CHECK = Object.freeze({
+  en: Object.freeze(["What time is it?", "What is the capital of Portugal?", "Show me a list of three fruits."]),
+  es: Object.freeze(["¿Qué hora es?", "¿Cuál es la capital de Portugal?", "Muéstrame una lista de tres frutas."]),
+});
+/** The turn check's display id (fixed: one entry, overwritten) and how many times the card sentence is tried. */
+export const TURN_CHECK_DEVICE = "turn-check";
+export const TURN_CHECK_CARD_TRIES = 3;
+const KIOSK_VERSION = (() => { try { return JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8")).version; } catch { return null; } })();
+
 export function createKioskRuntime(deps) {
   const now = deps.now || Date.now;
   const log = deps.log || ((m) => console.log(m));
@@ -165,32 +217,27 @@ export function createKioskRuntime(deps) {
     },
   });
   const withDb = async (fn) => { const db = deps.openDb(); try { return await fn(db); } finally { try { db.close?.(); } catch {} } };
-  // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (crow_wm on, the deny list, the suffix).
+  /** The executor's context for one display turn (display-tools.js, tiers.js, executor.js). Sources and launcher items arrive with the media session. */
+  const displayCtx = (device, caps, emit) => ({ store: wm, deviceId: device.id, caps, lang: device.kiosk_settings?.lang === "es" ? "es" : "en", sources: [], items: [], emit });
+  /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation). */
+  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings });
+  // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
     assess: async (db, botId, memoryOn) => (deps.voice.assessBot ? deps.voice.assessBot({
-      db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS, promptSuffix: kioskPromptSuffix(),
-      extraTools: [createWmTool({ store: wm, deviceId: "", caps: null, emit: () => {} })],
+      db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS, promptSuffix: displayPromptSuffix(null, ["crow_show", "crow_wm"]),
+      extraTools: createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {})),
     }) : null),
   });
 
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
+    // The pairing guess for a display with no type set (session.js); a later panel choice replaces it.
+    storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
     displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
     runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
       db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
-      extraTools: [createWmTool({ store: wm, deviceId: device.id, caps, emit: (ev) => sink.event(ev) })],
-      fastPaths: async (t) => matchWmFastPath(t, wm, device.id, caps) || matchClockFastPath(t, { now: now(), tz }),
-      promptSuffix: kioskPromptSuffix(),
-      turnContext: `${kioskNowContext(now(), tz)}\n${kioskTurnContext(wm, device.id)}`,
-      denyTools: KIOSK_DENY_TOOLS,
-      sttModel: (p) => kioskSttModel(p, device.kiosk_settings),
-      maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
-      firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
-      fallbackText: kioskFallbackText(device.kiosk_settings?.lang),
-      tooLargeText: kioskTooLargeText(device.kiosk_settings?.lang),
-      displayMissedText: kioskDisplayMissedText(device.kiosk_settings?.lang),
-      memoryWhen: wantsMemory,
+      ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
@@ -500,6 +547,39 @@ export function createKioskRuntime(deps) {
       const text = String(req.body?.text || "").trim().slice(0, 500);
       if (!text) return res.status(400).json({ error: "text_required" });
       res.json(await announce(req.body?.display, { text, speak: req.body?.speak !== false }));
+    }));
+    // A post-deploy check that the display turn itself works, not only that the gateway answers:
+    // fixed sentences through the same turn options a display uses, on a display that does not exist
+    // (a fixed id, so its window store entry and conversation are overwritten, never piled up; nothing
+    // is sent to any screen; no audio is kept). noEscalate: the check never asks the router, so it can
+    // never start a model and its result does not depend on which model is resident. It passes only
+    // when the card is really up (the card sentence is tried up to three times).
+    r.post("/api/kiosk/internal/turn-check", json, wrap(async (req, res) => {
+      const botId = String(req.body?.bot_id || "").slice(0, 80);
+      if (!botId) return res.status(400).json({ error: "bot_id_required" });
+      const lang = req.body?.lang === "es" ? "es" : "en";
+      const device = { id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: botId, kiosk_settings: { lang, memory_integration: false } };
+      const caps = effectiveCaps(null, null);
+      const out = [];
+      const once = async (transcript) => {
+        const events = [];
+        const sink = { event: (e) => events.push(e), audio: () => {} };
+        const r = await withDb((db) => deps.voice.runVoiceTurn({ db, device, sink, transcript, ...turnOptions(device, caps, null, (ev) => sink.event(ev)), noEscalate: true }));
+        const row = { transcript, failed: r.failed ?? null, fast_path: r.fastPath === true, route: r.route ?? null, tools_offered: r.timings?.tools_offered ?? null, tools: r.timings?.tools || [], tool_choice: r.timings?.tool_choice ?? null,
+          final: r.timings?.final ?? null, said: events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("").slice(0, 200), windows: wm.list(device.id).map((w) => w.kind) };
+        out.push(row);
+        return row;
+      };
+      wm.closeAll(device.id);
+      deps.voice.convo?.save?.(device.id, []);
+      let clock, plain, show;
+      try {
+        const [c, p, s] = TURN_CHECK[lang];
+        clock = await once(c);
+        plain = await once(p);
+        for (let i = 0; i < TURN_CHECK_CARD_TRIES && !show?.windows.includes("content"); i += 1) show = await once(s);
+      } finally { wm.closeAll(device.id); deps.voice.convo?.save?.(device.id, []); }
+      res.json({ ok: clock.fast_path === true && plain.failed === null && plain.tools_offered === 0 && show.failed === null && show.windows.includes("content"), version: KIOSK_VERSION, card_tries: out.length - 2, turns: out });
     }));
     r.post("/api/kiosk/internal/show", json, wrap(async (req, res) => {
       const title = String(req.body?.title || "").trim().slice(0, 80);

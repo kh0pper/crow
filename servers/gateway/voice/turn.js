@@ -10,7 +10,7 @@
  */
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
-  negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction,
+  negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
@@ -38,6 +38,13 @@ export const DISPLAY_MISSED_TEXT = "Sorry, I couldn't put that on the screen.";
 const MUST_RUN_NOTE = "Nothing has been done yet: the required tool has not run successfully in this turn. Call it now with the real content, or say plainly that you could not.";
 const outcomeCode = (v, fallback) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(v) ? v : fallback);
 const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || "_";
+// opts.familiesOnIntent: a tool whose family is not on offer this turn is never run; a forced call gets this.
+const FAMILY_NOT_OFFERED = "That tool is not on offer for this question: nothing was done. Answer the user aloud now from what you know, in one or two short sentences. Do not call another tool.";
+// Without deps.toolForcing (tests, other callers) the 0.1.8 behaviour stands: named, then required, then none.
+const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "legacy" });
+const WEAKER = { named: 2, required: 1, none: 0 };
+// A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
+const LEARNED_TTL_MS = 10 * 60 * 1000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 
 /**
@@ -74,8 +81,13 @@ export function createVoiceTurnRunner(deps) {
   // refused/looping crow_discover escalated the next three plain questions).
   const routeNeutral = new WeakSet();
   const fitLogged = new Set();
-  // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none").
+  // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none"), with when it was learned.
   const toolChoiceMode = new Map();
+  // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
+  // "no intent list" notes were already logged.
+  const lastFamilies = new Map();
+  const famLogged = new Set();
+  const NO_FAMILIES = new Set();
 
   /** The tool list a turn advertises (also what the bind-time fit check counts). */
   function turnTools(bot, { memoryOn, extra, deny }) {
@@ -287,6 +299,7 @@ export function createVoiceTurnRunner(deps) {
     let say = null;
     let history = null;
     let executor = null;
+    let usedFamilies = null;
     /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
     const speakFallback = async (why, spokenBefore, fallbackText = defaultFallbackText) => {
       result.failed = why;
@@ -334,10 +347,13 @@ export function createVoiceTurnRunner(deps) {
         const fp = await opts.fastPaths(transcript);
         if (fp) {
           result.fastPath = true;
+          if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
           for (const ev of fp.events || []) sink.event(ev);
           if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
           say.end();
-          convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say || "" }]);
+          // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
+          // assistant message would only confuse the next turn's chat template.
+          if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
           return result;
         }
       }
@@ -373,7 +389,34 @@ export function createVoiceTurnRunner(deps) {
       // Memories on: the memory tool is offered only when the question asks to remember or recall
       // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
       const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
-      const tools = allTools.filter((t) => (!extraByName.has(t.name) || offered.has(t.name)) && (memoryOffered || t.name !== "crow_memory"));
+      const baseTools = allTools.filter((t) => (!extraByName.has(t.name) || offered.has(t.name)) && (memoryOffered || t.name !== "crow_memory"));
+      // Tool families on intent: the quick model is offered a family only when the plain transcript
+      // asks for it, or the previous turn used it (one follow-up). Extra (display) tools and memory
+      // keep their own gates above. A plain question therefore goes out with no tools at all.
+      const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
+      const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
+      const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
+      // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
+      const famOf = (t) => (fam && !extraByName.has(t.name) && !deps.isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
+      const quickTools = !fam ? baseTools : baseTools.filter((t) => {
+        const id = famOf(t);
+        if (id === undefined) return true;
+        if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
+        return id !== "other" && famWanted(id);
+      });
+      // Families with no intent list never reach the quick model; they keep the router's view of
+      // "this assistant has tools", so a turn the router escalates can still use them.
+      const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
+      const unlisted = famIds.filter((id) => !fam.hasList(id));
+      let tools = quickTools;
+      let famAll = false;   // an escalated turn is offered every family
+      if (fam) usedFamilies = new Set();
+      // The family a call belongs to: the ADVERTISED tool's family first (a category call's expanded
+      // name can also be an add-on's tool name), then the expanded name's.
+      const callFamily = (tc, names) => {
+        const ids = [fam.familyOf(tc.name), ...names.map((n) => fam.familyOf(n))].filter(Boolean);
+        return ids.find((id) => id !== "addons") || ids[0] || "other";
+      };
       // A must-run tool (kiosk: crow_wm on "show me …"): see the opts doc above.
       const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
       const mustName = mustX?.definition.name;
@@ -385,9 +428,11 @@ export function createVoiceTurnRunner(deps) {
       // live state (e.g. open windows) rides on THIS turn's user message only, closed by a note
       // line, and is dropped from the saved conversation. A small model may still read it back
       // (live 2026-10-05): echoGuard lists every injected line the echo gate removes from what is
-      // spoken, captioned, saved and put on a card.
-      const userMsg = { role: "user", content: withTurnContext(opts.turnContext, transcript) };
-      const echoGuard = [opts.turnContext ? TURN_CONTEXT_NOTE : null, opts.turnContext, mustX?.mustNote];
+      // spoken, captioned, saved and put on a card. opts.turnContext may be a function of the plain
+      // transcript: the context STRING is computed first, then wrapped and guarded.
+      const ctxLine = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      const userMsg = { role: "user", content: withTurnContext(ctxLine, transcript) };
+      const echoGuard = [ctxLine ? TURN_CONTEXT_NOTE : null, ctxLine, mustX?.mustNote];
       const messages = [
         { role: "system", content: withSuffix(system, opts.promptSuffix) },
         ...history,
@@ -406,7 +451,13 @@ export function createVoiceTurnRunner(deps) {
       // The router sees the PLAIN transcript, never the turnContext prefix: "[Display] Open windows: …"
       // matched TOOL_INTENT_RE ("open") and escalated every kiosk turn to the 35B (smoke 2026-10-04).
       const routeView = messages.filter((m) => !isExtraCall(m)).map((m) => (m === userMsg ? { ...m, content: transcript } : m));
-      const decision = deps.chooseVoiceRoute(routeView, { hasTools: tools.length > 0 });
+      // A must-run tool that needs only a few words and an enumeration (play, open) is forced on the
+      // quick model instead of being escalated: mustRoute "fast".
+      // opts.noEscalate (the kiosk's post-deploy turn check): never the router, never an escalation, so the
+      // turn can never start a model and its result does not depend on which model is resident.
+      const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
+        ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
+        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -429,6 +480,16 @@ export function createVoiceTurnRunner(deps) {
       }
       if (aborted()) { result.aborted = true; return result; }
       if (budgetHit) { await speakFallback("budget", false); return result; }
+      // A turn the router escalated (or that fell back from an escalation) is offered every family.
+      if (fam && (result.escalated || result.degraded)) { tools = baseTools; famAll = true; }
+      if (fam) {
+        const on = new Set(tools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"));
+        timings.families = { offered: [...on].sort(), withheld: famIds.filter((id) => !on.has(id)).sort() };
+      }
+      if (unlisted.length) {
+        const once = `${bot.bot_id}|${unlisted.join(",")}`;
+        if (!famLogged.has(once)) { famLogged.add(once); log(`[voice-turn] ${device.id} bot ${bot.bot_id}: tool families with no voice intent list are offered only on escalated turns: ${unlisted.join(", ")}`); }
+      }
 
       // 4b. Prompt fit, against the model this turn really uses. A bound bot's skills are inlined
       // in the system message; a general assistant with many skills was ~41k tokens against the
@@ -471,7 +532,8 @@ export function createVoiceTurnRunner(deps) {
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
       const refuse = (code, message, neutral = false) => ({ code, message, neutral });
-      const offeredNames = new Set(tools.map((t) => t.name));
+      // What was sent with THIS round's request (set again each round below: a narrowed first round sends one tool).
+      let offeredNames = new Set(tools.map((t) => t.name));
       const offeredCheck = {
         categoryOf: typeof deps.toolCategory === "function" ? deps.toolCategory : () => null,
         selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
@@ -488,7 +550,14 @@ export function createVoiceTurnRunner(deps) {
           if (!memoryOn) return refuse("refused_policy", MEMORY_OFF, true);
           if (!memoryOffered) return refuse("not_offered", MEMORY_NOT_ASKED, true);
         }
-        // Never run a tool this turn did not offer (an endpoint's extra tools have their own not-offered path below).
+        // A family that is not on offer this turn is never run, whatever the model calls (saved history
+        // holds earlier calls, and a small model repeats them).
+        if (fam && !extraByName.has(tc.name) && !names.some((n) => deps.isMemoryTool(n))) {
+          const id = callFamily(tc, names);
+          const on = famAll || (id === "addons" || id === "other" ? tools.some((t) => t.name === tc.name) : famWanted(id));
+          if (!on) return refuse("not_offered", FAMILY_NOT_OFFERED, true);
+        }
+        // Never run a tool this round did not offer (an endpoint's extra tools have their own not-offered path below).
         if (!extraByName.has(tc.name) && !wasOffered(tc, offeredNames, offeredCheck)) {
           return refuse("not_offered", `"${shortName(eff)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
         }
@@ -535,6 +604,28 @@ export function createVoiceTurnRunner(deps) {
       let mustDone = !mustX;         // the must-run tool has succeeded this turn (true when there is none)
       let corrected = false;
       const toolLog = [];
+      // On a must-run turn the first (and the corrective) round offers only the must-run tool, so a
+      // forced call can be used where the engine honours one — unless another tool family is on
+      // offer this turn (the model may need to fetch before it shows).
+      // Which forced-call forms this model's engine honours (never "required" where it is not known to).
+      let forcing = LEGACY_FORCING;
+      if (mustX && typeof deps.toolForcing === "function") { try { forcing = (await deps.toolForcing(modelKey, db)) || LEGACY_FORCING; } catch { forcing = { named: true, required: false, engine: "unknown" }; } }
+      const firstMode = forcing.named ? "named" : forcing.required ? "required" : "none";
+      const narrow = !!mustX && (typeof mustX.narrow !== "function" || mustX.narrow(transcript) !== false)
+        && (mustX.mustRoute === "fast" || tools.every((t) => extraByName.has(t.name)));
+      // On a turn whose words ask a display tool for something (holdText), a round's text is DEFERRED:
+      // not captioned and not spoken until that round's calls are known. No display call → the text is
+      // released. A display call → the text is dropped, and the tool's result says what really happened.
+      const holdIntent = extra.some((x) => offered.has(x.definition.name) && typeof x.holdText === "function" && x.holdText(transcript) === true);
+      // holdToEnd (a compound request, "close the timer and then show me a list"): nothing the model says is
+      // heard until the turn is over. The turn then ends on the server's own lines for the display calls
+      // that did something; the model's closing sentence could claim the half that never happened. With
+      // no such call, the model's last text is released at the end (a plain answer, only later).
+      const holdEnd = extra.some((x) => offered.has(x.definition.name) && typeof x.holdToEnd === "function" && x.holdToEnd(transcript) === true);
+      const endLines = [];
+      let heldLast = "";
+      let endedFinal = false;
+      timings.tools_offered = tools.length;
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
@@ -544,17 +635,24 @@ export function createVoiceTurnRunner(deps) {
         let calls = [];
         // Until the must-run tool has succeeded, nothing the model says is captioned or spoken:
         // "I've displayed the list" is only true after the call.
-        const hold = !mustDone;
+        const hold = !mustDone || holdEnd;
+        const defer = !hold && holdIntent && !finalRound;
+        let deferred = "";
+        let heldRound = "";
+        const roundTools = narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
+        offeredNames = new Set(roundTools.map((t) => t.name));   // the offered-tools guard checks what this request really carried
+        let roundText = "";
+        let finalRes = null;
         const roundMax = nextMax;
         nextMax = 600;
         // Keep prompt + completion inside the model's context (review M6: the 4B is 8192;
         // tool schemas alone are ~5k tokens). ~3.2 chars/token is a deliberate over-estimate.
-        let estPrompt = estimatePromptTokens(messages, tools);
+        let estPrompt = estimatePromptTokens(messages, roundTools);
         // Never send a request that cannot fit (every round: history and tool results grow). Saved
         // history goes first, oldest exchange first; the system message and this turn stay.
         for (let n; !requestFits(estPrompt, ctx) && (n = dropOldestExchange(messages, userMsg)) > 0;) {
           timings.history_dropped = (timings.history_dropped || 0) + n;
-          estPrompt = estimatePromptTokens(messages, tools);
+          estPrompt = estimatePromptTokens(messages, roundTools);
         }
         timings.est_prompt_tokens = estPrompt;
         if (!requestFits(estPrompt, ctx)) {
@@ -567,20 +665,28 @@ export function createVoiceTurnRunner(deps) {
         // tool_choice requires the must-run tool while it is the ONLY tool offered (with others the
         // model may need to fetch first; the backstop below still applies). Backends differ: a vLLM
         // server honours a named choice; the llama.cpp builds in use accept and ignore it.
-        let choiceMode = !mustDone && !finalRound && tools.length === 1 ? (toolChoiceMode.get(modelKey) || "named") : "none";
+        const seen = toolChoiceMode.get(modelKey);
+        const learned = seen && now() - seen.at < LEARNED_TTL_MS ? seen.mode : null;
+        // A learned "required" is used only while the engine is still known to honour it (the model key may
+        // now be served by another engine).
+        const usable = learned && WEAKER[learned] < WEAKER[firstMode] && (learned !== "required" || forcing.required === true);
+        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (usable ? learned : firstMode) : "none";
         let steppedDown = false;
         for (;;) {
           const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
           let started = false;
           try {
-            for await (const ev of chat.chatStream(messages, tools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
+            for await (const ev of chat.chatStream(messages, roundTools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
               started = true;
               if (aborted() || budgetHit) break;
               if (ev.type === "content_delta" && ev.text) {
                 mark("llm_first_token_ms");
                 content += ev.text;
                 const spoken = echo.feed(think.feed(ev.text));
-                if (spoken && !hold) {
+                if (spoken && defer) deferred += spoken;
+                else if (spoken && holdEnd) heldRound += spoken;
+                else if (spoken && !hold) {
+                  roundText += spoken;
                   if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
                   sink.event({ type: "caption_delta", text: spoken });
                   await chunker.push(spoken);
@@ -597,7 +703,7 @@ export function createVoiceTurnRunner(deps) {
             // step down and send the same round again. The step is remembered for this model only
             // once the weaker request goes through — that is what shows tool_choice was the cause.
             if (toolChoice && !started && !aborted() && err?.code === "provider_error" && (err.status === 400 || err.status === 422)) {
-              const next = choiceMode === "named" ? "required" : "none";
+              const next = choiceMode === "named" && forcing.required ? "required" : "none";
               log(`[voice-turn] ${device.id} ${modelKey} refused a request with tool_choice ${choiceMode} (HTTP ${err.status}); trying ${next}`);
               choiceMode = next;
               steppedDown = true;
@@ -606,7 +712,7 @@ export function createVoiceTurnRunner(deps) {
             }
             throw err;
           }
-          if (steppedDown) toolChoiceMode.set(modelKey, choiceMode);
+          if (steppedDown) toolChoiceMode.set(modelKey, { mode: choiceMode, at: now() });
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
@@ -621,6 +727,15 @@ export function createVoiceTurnRunner(deps) {
         content = stripContextEcho(content, echoGuard);
         if (aborted()) { result.aborted = true; break; }
         if (budgetHit) break;
+        if (holdEnd) heldLast = heldRound;
+        const displayCall = calls.some((c) => extraByName.has(c.name));
+        if (defer && deferred && !displayCall) {
+          // No display call came with it: the deferred text is the answer after all.
+          roundText += deferred;
+          if (deferred.trim()) { roundSpoken += deferred.trim().length; spokenChars += deferred.trim().length; }
+          sink.event({ type: "caption_delta", text: deferred });
+          await chunker.push(deferred);
+        }
         if (finalRound) {
           // The forced answer: its text is kept, any call it still makes is ignored (never executed,
           // never saved — an unanswered tool call would break the next turn's template).
@@ -630,7 +745,7 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         let assistantMsg = null;
-        const kept = hold ? "" : content;   // held text was never heard: it is not kept as something said
+        const kept = hold || (defer && displayCall) ? "" : content;   // held or dropped text was never heard: it is not kept as something said
         if (kept || calls.length) {
           assistantMsg = { role: "assistant", content: kept };
           if (calls.length) assistantMsg.tool_calls = JSON.stringify(calls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
@@ -667,6 +782,7 @@ export function createVoiceTurnRunner(deps) {
         // the "yes" that follows a confirmation must keep its escalation (review I3).
         let neutralCalls = 0;
         for (const tc of calls) {
+          if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
             if (gate.neutral) neutralCalls++;
@@ -683,9 +799,15 @@ export function createVoiceTurnRunner(deps) {
             let res = null;
             try { res = JSON.parse(out); } catch {}
             const ok = res?.ok === true;
-            outcome.set(tc, ok ? "ok" : outcomeCode(res?.code, "error"));
+            // The log code: why (reason), else what happened (outcome), else the 0.1.8 rule.
+            const code = outcomeCode(res?.reason, null) || outcomeCode(res?.outcome, null) || (ok ? "ok" : outcomeCode(res?.code, "error"));
+            outcome.set(tc, code);
+            // effect: the call changed something (a no-op success such as "nothing is open" sets effect: false).
+            finalRes = tc === calls.at(-1) && offered.has(tc.name) && res && res.final === true && typeof res.say === "string" && res.say.trim()
+              ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
             // A display tool that changed the screen is user-visible progress.
             if (ok) roundDisplay = true;
+            if (holdEnd && ok && res.effect !== false && typeof res.say === "string" && res.say.trim()) endLines.push(res.say.trim());
             if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
@@ -696,9 +818,21 @@ export function createVoiceTurnRunner(deps) {
         let remoteResults = [];
         try { if (remote.length) remoteResults = await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]); }
         catch (err) { noteRound(); throw err; }   // the round is still in the log when a tool run throws
-        (remoteResults || []).forEach((r, i) => { if (remote[i]) outcome.set(remote[i], r?.isError ? "error" : "ok"); });
+        (remoteResults || []).forEach((r, i) => {
+          if (!remote[i]) return;
+          outcome.set(remote[i], r?.isError ? "error" : "ok");
+          if (usedFamilies && !r?.isError) {
+            const eff = deps.effectiveToolName(remote[i]);
+            const id = callFamily(remote[i], eff ? [eff] : []);
+            if (id !== "addons" && id !== "other") usedFamilies.add(id);
+          }
+        });
         noteRound();
-        if (budgetHit || remoteResults == null) break;
+        // A final result ends the turn only when no must-run tool is still owed, or when it comes from the
+        // must-run tool itself. A final result from ANOTHER tool on a must-run turn is just a result: the
+        // model gets it back, and the turn still has to end with the must-run call or the could-not line.
+        const endsFinal = !!finalRes && (mustDone || finalRes.name === mustName);
+        if ((budgetHit || remoteResults == null) && !endsFinal) break;
         if (roundDisplay) displayProgress = true;
         if (roundSpoken > 0 && (toolRounds > 1 || roundSpoken >= 40)) answeredChars += roundSpoken;
         // A text-free assistant turn whose every call was refused/in-process is neutral too.
@@ -724,6 +858,26 @@ export function createVoiceTurnRunner(deps) {
           lastToolMsg = toolMsg;
           if (typeof content === "string" && content.length > 500) nextMax = 4000;
         }
+        if (endsFinal) {
+          // The turn ends on the server's own line: no further model round. What the display hears:
+          //  - nothing was spoken in this round (the usual case: text was held or deferred) → the server's line;
+          //  - the model had already spoken a full sentence AND the call had an effect → that sentence stands;
+          //  - the model had already spoken and the call did nothing or failed → the server's line as well,
+          //    because what was said is not what happened.
+          // The line is short and already known, so it is spoken even when the first-audio budget has run out.
+          timings.final = `${logName(finalRes.name)}:${finalRes.code}`;
+          if (budgetTimer) { (deps.clearTimeout || clearTimeout)(budgetTimer); budgetTimer = null; }
+          const spokeSentence = roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
+          if (!(spokeSentence && finalRes.effect)) {
+            await chunker.flush();
+            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${finalRes.say}` : finalRes.say });
+            await (budgetHit ? say.force(finalRes.say) : say(finalRes.say));
+            spokenChars += finalRes.say.length;
+          }
+          messages.push({ role: "assistant", content: finalRes.say });
+          endedFinal = true;
+          break;
+        }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
         const progress = roundSpoken > 0 || roundDisplay;
         if (!progress && roundSig === lastStuckSig) cut = "tool_repeat";
@@ -741,19 +895,30 @@ export function createVoiceTurnRunner(deps) {
       for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
-      } else if (budgetHit) {
+      } else if (budgetHit && !endedFinal) {
         await speakFallback("budget", spokenChars > 0);
         return result;
       } else {
+        if (holdEnd && !overflow && !endedFinal) {
+          // The end of a held compound turn: what the display really did, in the server's words; else the
+          // model's last text when no display call did anything and nothing was owed.
+          const line = endLines.join(" ") || (mustDone ? heldLast.trim() : "");
+          if (line) {
+            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${line}` : line });
+            await say(line);
+            spokenChars += line.length;
+            messages.push({ role: "assistant", content: line });
+          }
+        }
         await chunker.flush();
         if (aborted()) result.aborted = true;
         // The budget can fire while the last chunk is still synthesizing (the stream already ended).
-        else if (budgetHit && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
+        else if (budgetHit && !endedFinal && !say.answered()) { await speakFallback("budget", spokenChars > 0); return result; }
         else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
-        else if (!mustDone) {
+        else if (!mustDone && !endedFinal) {
           // Never end on a claim that something is on the screen when nothing was put there.
           timings.display_missed = true;
-          await speakFallback("display_missed", spokenChars > 0, String(opts.displayMissedText || DISPLAY_MISSED_TEXT));
+          await speakFallback("display_missed", spokenChars > 0, String(mustX?.missedText || opts.displayMissedText || DISPLAY_MISSED_TEXT));
           return result;
         }
         else if (cut && finalSpoken === 0 && answeredChars === 0 && !displayProgress) { await speakFallback(cut, spokenChars > 0); return result; }
@@ -775,6 +940,9 @@ export function createVoiceTurnRunner(deps) {
       return result;
     } finally {
       if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
+      if (opts.familiesOnIntent === true && device?.id && result.transcript) {
+        if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
+      }
       timings.total_ms = now() - t0;
       if (executor) { try { await executor.close(); } catch {} }
     }
@@ -803,6 +971,10 @@ export async function defaultVoiceDeps() {
   const router = await import("../routes/llm-router.js");
   const orch = await import("../gpu-orchestrator.js");
   const { TOOL_MANIFESTS } = await import("../tool-manifests.js");
+  const { createToolForcing } = await import("./tool-forcing.js");
+  const { createToolFamilies } = await import("./tool-families.js");
+  const ext = await import("../../../scripts/pi-bots/ext_registry.mjs");
+  const proxy = await import("../proxy.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
   const byId = (list, id) => list.find((p) => p.id === id) || null;
   return {
@@ -824,6 +996,18 @@ export async function defaultVoiceDeps() {
       return (await provider.createAdapterFromProfile({ provider_id, model_id }, null, db)).adapter;
     },
     resolveKey: router.resolveVoiceKey,
+    toolFamilies: createToolFamilies({ manifests: TOOL_MANIFESTS, listExtensions: () => ext.listInstalledExtensions(), connected: () => proxy.connectedServers || new Map() }),
+    toolForcing: createToolForcing({
+      resolveKey: router.resolveVoiceKey,
+      modelEntry: async (key, db) => {
+        try {
+          const i = String(key).indexOf("/");
+          const row = (await db.execute({ sql: "SELECT models FROM providers WHERE id = ?", args: [i >= 0 ? key.slice(0, i) : key] })).rows[0];
+          return JSON.parse(row?.models || "[]").find((x) => x && (x.id === key.slice(i + 1) || i < 0)) || null;
+        } catch { return null; }
+      },
+      log: (m) => console.warn(m),
+    }),
     probeReady: router.probeVoiceReady,
     acquire: (providerId) => orch.maybeAcquireLocalProvider(providerId, { requester: "kiosk" }),
     chooseVoiceRoute: router.chooseVoiceRoute,

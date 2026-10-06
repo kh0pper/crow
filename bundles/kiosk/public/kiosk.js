@@ -18,7 +18,12 @@ import { createWindowView } from "./wm-view.js";
 const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
 const SESSION = document.documentElement.dataset.mode === "session";
-const CAPS = { windows: ["timer", "recipe", "content"], iframe: false, max_windows: 4, agent: false };
+/**
+ * Caps v2: what THIS page build can draw and this browser has. The server takes the lesser of this and the display's profile.
+ * mobile / pointer / platform only feed the server's guess of the display type for a display nobody has typed yet.
+ */
+const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer"],
+  mobile: navigator.userAgentData ? navigator.userAgentData.mobile === true : /Mobi|Android/i.test(navigator.userAgent), pointer: matchMedia("(pointer: coarse)").matches ? "coarse" : "fine", platform: String(navigator.platform || "").slice(0, 40) };
 /** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
 const $ = (id) => document.getElementById(id);

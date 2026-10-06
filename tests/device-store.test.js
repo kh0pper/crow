@@ -170,3 +170,21 @@ test("kiosk theme: auto by default; only auto/light/dark are accepted, anything 
   assert.equal(await set("auto"), "auto");
   assert.equal(store.normalizeKioskSettings({ theme: "sepia" }, null).theme, "auto", "a bad value on a fresh record falls back to the default");
 });
+
+test("kiosk_settings.profile: one of pi3/phone/tablet/desktop, with who set it; NEVER a stored default; anything else keeps the prior value", () => {
+  assert.equal("profile" in store.KIOSK_DEFAULTS, false, "no default is materialised");
+  assert.deepEqual(store.KIOSK_PROFILE_CHOICES, ["pi3", "phone", "tablet", "desktop"]);
+  assert.deepEqual(store.normalizeKioskSettings({ profile: "phone" }, null), { ...store.KIOSK_DEFAULTS, profile: "phone", profile_source: "operator" });
+  assert.equal(store.normalizeKioskSettings({ profile: "pi3", profile_source: "guessed" }, null).profile_source, "guessed");
+  assert.equal(store.normalizeKioskSettings({ profile: "tv" }, { profile: "tablet", profile_source: "operator" }).profile, "tablet");
+  assert.equal("profile" in store.normalizeKioskSettings({}, null), false);
+  const cleared = store.normalizeKioskSettings({ profile: "" }, { profile: "phone", profile_source: "guessed" });
+  assert.deepEqual(["profile" in cleared, "profile_source" in cleared], [false, false], "the panel's Not set clears it");
+});
+
+test("an already-paired 0.1.8 display keeps NO profile through an unrelated save (nothing decides its type for it)", () => {
+  const v018 = { follow_up: true, follow_up_s: 6, memory_integration: true, animation: true, sleep_start: "22:30", sleep_end: "06:30", lang: "en", vad_hangover_ms: 450, stt_model: "default", theme: "auto" };
+  const saved = store.normalizeKioskSettings({ follow_up: false, memory_integration: true }, v018);
+  assert.deepEqual(Object.keys(saved).sort(), Object.keys(v018).sort());
+  assert.equal(saved.follow_up, false);
+});
