@@ -18,6 +18,8 @@ DEFAULTS = {
     "media_threshold": 0.7,
     "speaking_tail_ms": 800,
     "refractory_ms": 2000,
+    "wake_threads": 2,      # onnxruntime intra-op threads (the Pi 3 has 4 cores; Chromium needs the rest)
+    "wake_step": 1,         # chunks per inference pass: 2 halves the call overhead, adds <= 80 ms delay
     "backlight": None,  # None = first /sys/class/backlight/* entry
     "touch_name": "ft5x06",
     "bt_sink_mac": None,  # optional; the agent keeps it connected
@@ -69,6 +71,10 @@ def load_config(path=None, overrides=None):
         isinstance(a, str) for a in cfg["mic_cmd"]
     ):
         raise ValueError("mic_cmd must be a list of strings")
+    if cfg["wake_threads"] not in (1, 2, 3, 4):
+        raise ValueError("wake_threads must be 1..4")
+    if cfg["wake_step"] not in (1, 2, 3):
+        raise ValueError("wake_step must be 1, 2 or 3")
     t = cfg["mic_target"]
     if t is not None and not (isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", t)):
         raise ValueError("mic_target must be a PipeWire node name")

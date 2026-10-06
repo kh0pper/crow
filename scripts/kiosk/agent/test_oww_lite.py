@@ -30,7 +30,9 @@ class FakeMel:
         assert x.dtype == np.float32 and x.ndim == 2
         self.calls.append(x.shape[1])
         frames = int(np.ceil(x.shape[1] / 160 - 3))
-        return [np.full((1, 1, frames, 32), float(x[0, -1]) * 10, dtype=np.float32)]
+        # framewise like the real model: frame j depends only on samples 160*j .. 160*j+400
+        vals = [float(x[0, 160 * j + 399]) * 10 for j in range(frames)]
+        return [np.array(vals, dtype=np.float32).reshape(1, 1, frames, 1).repeat(32, axis=3)]
 
 
 class FakeEmb:
@@ -43,7 +45,7 @@ class FakeEmb:
     def run(self, _out, feeds):
         x = feeds["input_1"]
         self.shapes.append(x.shape)
-        return [np.full((1, 1, 1, 96), x[0, -1, 0, 0], dtype=np.float32)]
+        return [np.repeat(x[:, -1, 0, 0].reshape(-1, 1, 1, 1), 96, axis=3).astype(np.float32)]
 
 
 class FakeWake:
@@ -107,11 +109,27 @@ class OwwLiteTests(unittest.TestCase):
         self.assertLessEqual(self.det.features.shape[0], 120)
         self.assertEqual(self.det.raw.shape[0], CHUNK + MEL_CONTEXT)
 
+    def test_process_many_matches_one_chunk_at_a_time(self):
+        a = WakeDetector(FakeMel(), FakeEmb(), FakeWake())
+        b_mel, b_emb = FakeMel(), FakeEmb()
+        b = WakeDetector(b_mel, b_emb, FakeWake())
+        vals = [(i * 37) % 100 for i in range(40)]
+        sa = [a.process(chunk(v)) for v in vals]
+        sb = []
+        for i in range(0, 40, 2):
+            sb += b.process_many([chunk(vals[i]), chunk(vals[i + 1])])
+        self.assertEqual(sa, sb)
+        self.assertTrue(np.array_equal(a.features, b.features))
+        self.assertIn(2 * CHUNK + MEL_CONTEXT, b_mel.calls, "one mel run over both chunks")
+        self.assertIn((2, 76, 32, 1), b_emb.shapes, "one batched embedding run")
+
     def test_rejects_wrong_chunks(self):
         with self.assertRaises(ValueError):
             self.det.process(np.zeros(CHUNK, dtype=np.float32))
         with self.assertRaises(ValueError):
             self.det.process(np.zeros(640, dtype=np.int16))
+        with self.assertRaises(ValueError):
+            self.det.process_many([])
 
 
 if __name__ == "__main__":
