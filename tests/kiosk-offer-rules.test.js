@@ -374,3 +374,40 @@ test("6b-3: stepping phrases — back one step, back a step, what's the next one
   }
   assert.equal(windowIntent("Cancel one of my meetings tomorrow."), false, "'one' is an object only for next/previous");
 });
+
+// ── Revision 7 ───────────────────────────────────────────────────────────────────────────────────
+import { teachTo } from "../bundles/kiosk/server/patterns.js";
+
+function liveEs(items) {
+  const store = createWmStore({ now: () => 0, setTimer: () => ({}), clearTimer: () => {} });
+  const list = makeTools({ store, deviceId: "d", caps: CAPS, lang: "es", sources: ["music", "radio", "news"], items, emit: () => {} });
+  const by = Object.fromEntries(list.map((t) => [t.definition.name, t]));
+  return { by, offered: (t) => list.filter((x) => x.when(t) === true).map((x) => x.definition.name), must: (t) => list.find((x) => typeof x.must === "function" && x.must(t) === true)?.definition.name || null };
+}
+const ES_ITEMS = [{ id: "recetario", title: "Recetario familiar", aliases: ["recetario"] }, { id: "garden", title: "Garden planner", aliases: ["plan del jardín"] }];
+
+test("rev 7: Spanish 'show me' verbs open one of the display's items — open is offered and must-run, never shadowed by a card", () => {
+  const t = liveEs(ES_ITEMS);
+  for (const say of ["Enséñame el recetario familiar.", "¿Me enseñas el plan del jardín?", "Muéstrame el recetario, porfa.", "¿Me muestras el plan del jardín un momento?"]) {
+    assert.ok(t.offered(say).includes("crow_open"), `${say}: offered`);
+    assert.equal(t.must(say), "crow_open", `${say}: open is the must-run tool`);
+  }
+  assert.equal(t.must("Muéstrame una lista de tres frutas."), "crow_show", "no item named: a card, as before");
+});
+
+test("rev 7: 'me enseñas a …' is 'teach me to' — no display tool, nothing required; questions about teaching too", () => {
+  const t = liveEs(ES_ITEMS);
+  for (const say of ["¿Me enseñas a hacer tortillas?", "Enséñame a contar en francés.", "¿Quién te enseñó a cocinar?", "Mi abuela me enseñó a coser."]) {
+    assert.deepEqual(t.offered(say), [], say);
+    assert.equal(t.must(say), null, say);
+  }
+  assert.equal(teachTo("¿Me enseñas a bailar salsa?"), true);
+  assert.equal(teachTo("¿Me enseñas la receta?"), false);
+});
+
+test("rev 7 INVARIANT in code: for every tool and every sentence, must(t) implies when(t)", () => {
+  const t = liveEs(ES_ITEMS);
+  for (const say of ["Enséñame el recetario familiar.", "Play some jazz.", "Show me a list of chores.", "¿Me enseñas a hacer tortillas?", "What time is it?", "Put on the radio.", "Abre el recetario."]) {
+    for (const x of Object.values(t.by)) if (typeof x.must === "function" && x.must(say)) assert.equal(x.when(say), true, `${x.definition.name}: ${say}`);
+  }
+});

@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, compound, compoundParts } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -58,7 +58,7 @@ export function createDisplayTools(ctx) {
   // A must-run test reads each request of a compound sentence on its own: "close the timer and then show
   // me a list" has to end with the list, though the sentence starts with a close.
   const anyPart = (t, test) => compoundParts(t).some(test);
-  const newCard = (t) => anyPart(t, (p) => { const k = newDisplayKind(p) || asksCard(p, items); return !!k && (win.includes(k) || (k === "recipe" && win.includes("content"))); });
+  const newCard = (t) => !teachTo(t) && anyPart(t, (p) => { const k = newDisplayKind(p) || asksCard(p, items); return !!k && (win.includes(k) || (k === "recipe" && win.includes("content"))); });
   const single = (t) => !compound(t);
   // A compound request is held to the end of the turn and ends on the server's lines for what was done (the
   // results are non-final, so the model also gets each one; its own closing sentence is never heard).
@@ -76,7 +76,7 @@ export function createDisplayTools(ctx) {
   // Offered on showIntent (the executor's own test, so offered ⇒ executable) or a change to the open card.
   const showWhen = (t) => showIntent(t, items) || updates(t) !== null;
   // Text is HELD only on the narrower pre-revision-4 tests: a wider offer never delays the spoken answer.
-  const showHold = (t) => wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null;
+  const showHold = (t) => !teachTo(t) && (wantsDisplay(t) || updates(t) !== null || asksCard(t, items) !== null);
   const playHold = (t) => mentionsPlayWord(t) || asksPlay(t);
   const rules = {
     crow_play: {
@@ -103,7 +103,7 @@ export function createDisplayTools(ctx) {
       execute: (a, turn) => run({ verb: "show", kind: str(a?.kind, 16), title: str(a?.title, 200), body: str(a?.body, 4000) }, { ...turn, update: typeof turn?.transcript === "string" ? updates(turn.transcript) : null }),
     },
     crow_wm: {
-      when: (t) => wantsDisplay(t) || openWindow() || mediaOn(),
+      when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn(),
       holdText: wantsDisplay,
       holdToEnd: toEnd(wantsDisplay),
       execute: (a, turn) => {
@@ -124,5 +124,13 @@ export function createDisplayTools(ctx) {
       },
     },
   };
-  return defs.map((definition) => ({ definition, ...rules[definition.name] }));
+  // Revision 7, the INVARIANT, in one place: a tool can only be must-run on a turn where it is offered
+  // (must ⊆ when). The voice turn then always offers — and, where the engine honours it, forces — the tool
+  // it must run; a must-run test can never fire for a tool the model was not given.
+  return defs.map((definition) => {
+    const r = rules[definition.name];
+    if (typeof r.must !== "function") return { definition, ...r };
+    const raw = r.must;
+    return { definition, ...r, must: (t) => (typeof r.when !== "function" || r.when(t) === true) && raw(t) === true };
+  });
 }

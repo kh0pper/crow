@@ -18,7 +18,10 @@ import { spokenWords, stripPolite, sameAt, KIND_NOUNS } from "./phrases.js";
 import { wantsDisplay } from "./wm.js";
 
 const ARTICLES = new Set(["the", "my", "our", "a", "an", "some", "el", "la", "los", "las", "mi", "mis", "un", "una", "algo", "de"]);
-const OPEN_VERBS = [["open", "up"], ["open"], ["launch"], ["go", "to"], ["abre"], ["abreme"], ["abrir"], ["lanza"], ["ve", "a"]];
+// Revision 7: Spanish "show me" verbs open an item when what follows is one of this display's items
+// ("enséñame el panel del laboratorio"); anything else stays a card request.
+const OPEN_VERBS = [["open", "up"], ["open"], ["launch"], ["go", "to"], ["abre"], ["abreme"], ["abrir"], ["lanza"], ["ve", "a"],
+  ["ensename"], ["me", "ensenas"], ["me", "ensena"], ["muestrame"], ["me", "muestras"], ["me", "muestra"]];
 const PULL_VERBS = [["pull", "up"], ["bring", "up"]];   // looked up at T1 only; at the model these stay card verbs, as in 0.1.8
 const PLAY_VERBS = [["play"], ["put", "on"], ["listen", "to"], ["reproduce"], ["reproducir"], ["toca"], ["quiero", "escuchar"], ["escuchar"], ["ponme"]];
 // Spanish "pon" also sets timers and shows cards: it plays only with a media noun close behind it.
@@ -266,8 +269,17 @@ const endsWithRun = (w, list) => list.some((p) => p.length <= w.length && sameAt
 // only at the start, which the open-at-start rule above never sees as a card noun).
 const NOT_CARD_READ = new Set(["read", "close", "remove", "delete", "clear", "hide", "dismiss", "cancel", "lee", "leeme", "cierra", "quita", "borra", "oculta", "cancela"]);
 
+// Revision 7: "¿me enseñas a …?" / "enséñame a …" is "teach me to …": no display request at all.
+const TEACH_VERBS = new Set(["ensename", "ensenas", "ensena", "ensenanos", "ensenarme"]);
+export function teachTo(transcript) {
+  const w = plain(transcript);
+  if (!w) return false;
+  for (let i = 0; i < w.length - 1; i += 1) if (TEACH_VERBS.has(w[i]) && w[i + 1] === "a") return true;
+  return false;
+}
 /** Revision 5: the display-intent test BOTH the offer (crow_show.when) and the executor (show's echo guard) use. */
 export function showIntent(transcript, items = []) {
+  if (teachTo(transcript)) return false;
   return wantsDisplay(transcript) || asksCard(transcript, items) !== null || mentionsCard(transcript, items);
 }
 
