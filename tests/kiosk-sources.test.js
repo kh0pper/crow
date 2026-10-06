@@ -209,3 +209,9 @@ test("F1: the STT prompt bias is the station names and aliases as written, each 
   assert.equal(stationNamesHint([]), "");
   assert.equal(stationNamesHint(null), "");
 });
+
+test("review L2: a station name that is itself a command is refused, and a spoken name that is one is dropped (a prompt echoed on silence must never act)", () => {
+  assert.deepEqual(normalizeStations([{ name: "Stop", url: "https://stream.example.invalid/a" }, { name: "Louder", url: "https://stream.example.invalid/b" }]), []);
+  const [st] = normalizeStations([{ name: "Morning Mix", aliases: ["Louder", "the mix", "Pause", "HD two", "next song"], url: "https://stream.example.invalid/m" }]);
+  assert.deepEqual(st.aliases, ["the mix", "HD two"]);
+});

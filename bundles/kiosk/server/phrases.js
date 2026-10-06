@@ -77,7 +77,8 @@ export const T0_PHRASES = Object.freeze({
     es: ["para", "paralo", "detente", "para la musica", "para la cancion", "para la radio", "deten la musica", "apaga la musica", "apaga la radio", "quita la musica"],
   },
   next_track: {
-    en: ["next song", "next track", "the next song", "skip this song", "skip the song", "skip this track", "skip song", "skip track", "play the next song"],
+    // "skip this one": a skip while something plays; with nothing playing it is conversation (the executor's rule).
+    en: ["next song", "next track", "the next song", "skip this song", "skip the song", "skip this track", "skip song", "skip track", "play the next song", "skip this one", "skip that one"],
     es: ["siguiente cancion", "la siguiente cancion", "pasa la cancion", "salta la cancion", "salta esta cancion", "cambia de cancion", "otra cancion"],
   },
   previous_track: {
@@ -141,6 +142,8 @@ export function matchT0(transcript) {
   const w = stripPolite(all);
   if (!w.length || w.length > T0_MAX_WORDS) return null;
   const verb = PHRASE_VERB.get(w.join(" "));
+  // The bare word "stop": with nothing playing it is answered at once ("Nothing is playing.").
+  if (verb === "stop" && w.length === 1 && w[0] === "stop") return { verb, bare: true };
   if (verb) return { verb };
   for (const p of VOLUME_PREFIXES) if (w.length > p.length && sameAt(w, 0, p)) { const value = volumeValue(w.slice(p.length)); if (value !== null) return { verb: "volume", value }; }
   const fits = (p) => w.length > p.length && w.length - p.length <= SLOT_MAX_WORDS && sameAt(w, 0, p);

@@ -24,9 +24,11 @@ test("spokenWords: a short phrase as plain words; too long to be a control phras
 });
 
 test("T0 table: every listed phrase maps to its verb, bare and with a lead-in and a tail (en + es)", () => {
+  // The bare word "stop" carries `bare` (answered at once when nothing plays).
+  const want = (verb, p) => (p === "stop" ? { verb, bare: true } : { verb });
   for (const [verb, lists] of Object.entries(T0_PHRASES)) for (const p of [...lists.en, ...lists.es]) {
-    assert.deepEqual(matchT0(p), { verb }, p);
-    assert.deepEqual(matchT0(`Hey Crow, ${p}, please.`), { verb }, `polite: ${p}`);
+    assert.deepEqual(matchT0(p), want(verb, p), p);
+    assert.deepEqual(matchT0(`Hey Crow, ${p}, please.`), want(verb, p), `polite: ${p}`);
   }
   assert.deepEqual(matchT0("Close the rice timer."), { verb: "close", name: "rice timer" });
   assert.deepEqual(matchT0("Cierra la lista"), { verb: "close", name: "lista" });

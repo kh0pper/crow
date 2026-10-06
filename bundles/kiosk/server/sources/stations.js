@@ -12,7 +12,8 @@
  * Names are compared in ONE canonical form (stationKey), because speech-to-text writes a station
  * like "WXYZ HD2" many ways: "w x y z h d two", "WXYZ HD 2", "wxyz hd too".
  */
-import { spokenWords } from "../phrases.js";
+import { spokenWords, matchT0 } from "../phrases.js";
+import { transportWords } from "../patterns.js";
 import { isIP } from "node:net";
 import { publicHop, localHop, isPrivateAddress, isLocalStreamAddress, normAddress } from "../relay.js";
 import { SOURCE_CONTRACT } from "./index.js";
@@ -71,6 +72,9 @@ const compact = (key) => key.split(" ").join("");
 const text = (v, n) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 const slug = (s) => (spokenWords(s.slice(0, 80)) || []).join("_").slice(0, 32) || "station";
 
+/** Is this name a control phrase or a playback word on its own? */
+const isCommand = (n) => matchT0(n) !== null || transportWords(n) !== null;
+
 /** Operator input → the stored list. Anything invalid is dropped, never repaired into something else. */
 export function normalizeStations(raw) {
   const out = [], ids = new Set();
@@ -80,7 +84,9 @@ export function normalizeStations(raw) {
     let u = null;
     try { u = new URL(text(s?.url, 500)); } catch { u = null; }
     // http(s), no credentials in the address, a host the relay could ever fetch (so not a private address written out).
-    if (!name || !u || !publicHop(u.href).origin) continue;
+    // Review L2: a name or spoken name that is itself a command ("Stop", "Pause", "Louder") could act through T0 if
+    // speech-to-text echoes the prompt on near-silence: such a name is refused, such a spoken name dropped.
+    if (!name || isCommand(name) || !u || !publicHop(u.href).origin) continue;
     const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
     const local = s?.local === true;
     // A private address written out is a station only with the tick, and only in the home-network/tailnet ranges.
@@ -90,7 +96,7 @@ export function normalizeStations(raw) {
     ids.add(id);
     // The recorded address set: the literal itself, or what the save-time check resolved (runtime.js). Up to 16 addresses.
     const addrs = !local ? [] : isIP(host) ? [normAddress(host)] : (Array.isArray(s.addrs) ? s.addrs : []).map((a) => normAddress(String(a).slice(0, 64))).filter((a) => isIP(a)).slice(0, 16);
-    out.push({ id, name, aliases: (Array.isArray(s.aliases) ? s.aliases : []).map((a) => text(a, 40)).filter(Boolean).slice(0, 5), url: u.href, ...(local ? { local: true, addrs } : {}) });
+    out.push({ id, name, aliases: (Array.isArray(s.aliases) ? s.aliases : []).map((a) => text(a, 40)).filter((a) => a && !isCommand(a)).slice(0, 5), url: u.href, ...(local ? { local: true, addrs } : {}) });
   }
   return out;
 }
@@ -115,7 +121,7 @@ function soundsOf(key) {
   return v;
 }
 /**
- * Stations by sound (F1). → [{ s, near }], at most 4:
+ * Stations by sound (F1). → [{ s, near?, ask? }], at most 4 (`ask`: one station, to be asked about — "Did you mean …?"):
  *   one station whose name, alias or a word-start of one SOUNDS the same → [{ s, near: true }];
  *   two to four that sound the same → all of them (the resolver asks "Which one?");
  *   none the same, and the request named the radio ("… on the radio"): one a single sound away (four
@@ -131,13 +137,30 @@ export function soundSearch(stations, q, { explicit = false } = {}) {
     const whole = ks.flatMap((k) => k.whole), pre = ks.flatMap((k) => k.pre);
     return { s, exact: bestDistance(qs, whole, 2), pre: bestDistance(qs, pre, 0) };
   });
-  const pick = (list, near) => (list.length >= 1 && list.length <= 4 ? list.map((x) => ({ s: x.s, near: near && list.length === 1 })) : []);
+  // Review M1: one station that sounds the same plays with no model only when the words look like a call sign;
+  // ordinary words that happen to sound like one ("Keep the Faith", "cup of tea") are asked about instead.
+  const shaped = callSignShaped(q);
+  const pick = (list, same) => (list.length >= 1 && list.length <= 4
+    ? list.map((x) => (list.length === 1 ? (same && shaped ? { s: x.s, near: true } : { s: x.s, ask: true }) : { s: x.s })) : []);
   const same = scored.filter((x) => x.exact === 0);
   if (same.length) return pick(same, true);
   const samePre = scored.filter((x) => x.pre === 0);
   if (samePre.length) return pick(samePre, true);
   if (!explicit || Math.max(...qs.map(consonants)) < 4) return [];
   return pick(scored.filter((x) => x.exact === 1), false);
+}
+/** A letter's name as speech-to-text writes it ("kay pee eff tee"). */
+const LETTER_NAMES = new Set(["kay", "cue", "pee", "bee", "dee", "tee", "gee", "jay", "eff", "ef", "el", "em", "en", "ar", "ess", "vee", "ex", "zee", "aitch", "why", "double"]);
+/**
+ * Does a station key look like a call sign as STT writes one: a word with no vowel ("kdbf", "pf"), a letter's
+ * name ("kay"), or one short word ("capefti")? "hd" and digits are left out of the judgement.
+ */
+export function callSignShaped(key) {
+  const w = String(key || "").split(" ").filter((x) => x && x !== "hd" && !/^\d+$/.test(x));
+  if (!w.length) return false;
+  if (w.some((x) => x.length >= 2 && /^[a-z]+$/.test(x) && !/[aeiouy]/.test(x))) return true;
+  if (w.some((x) => LETTER_NAMES.has(x))) return true;
+  return w.length === 1 && w[0].length <= 7;
 }
 
 /** list(): Station[] — the instance's presets as they are now (the runtime keeps them in memory). */
@@ -172,7 +195,7 @@ export function createStationsSource({ list }) {
       // Nothing by its written form: how it SOUNDS (smoke 2026-10-06 F1). Never confident by itself:
       // a lone same-sound hit is `near` (the resolver may play it with no model only when no source has
       // anything else); two stations that sound alike are offered, never guessed between.
-      return soundSearch(stations, q, { explicit }).map(({ s, near }) => ({ ...cand(s, false), ...(near ? { near: true } : {}) }));
+      return soundSearch(stations, q, { explicit }).map(({ s, near, ask }) => ({ ...cand(s, false), ...(near ? { near: true } : {}), ...(ask ? { ask: true } : {}) }));
     },
     resolve: (c) => playable(find(c)),
     queue: (c) => [playable(find(c))],

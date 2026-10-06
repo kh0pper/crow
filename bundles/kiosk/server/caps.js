@@ -82,5 +82,9 @@ export function audioPolicy(kioskSettings, rawCaps) {
   const ks = kioskSettings && typeof kioskSettings === "object" ? kioskSettings : {};
   const profile = Object.hasOwn(PROFILES, ks.profile || "") ? ks.profile : guessProfile(rawCaps);
   const handheld = HANDHELD_PROFILES.includes(profile);
-  return { pause_media_on_listen: typeof ks.pause_media_on_listen === "boolean" ? ks.pause_media_on_listen : handheld, mic_per_turn: handheld };
+  // Review M4: the mic is let go per turn only where the call-mode problem was seen and the reopen is known to be
+  // silent — Android (its browser reports a Linux platform). iOS Safari is unverified (a re-prompt, an <audio>
+  // interruption): it keeps the open mic until an iPhone row of the smoke passes.
+  const android = /^linux/i.test(String(rawCaps?.platform || "").slice(0, 40));
+  return { pause_media_on_listen: typeof ks.pause_media_on_listen === "boolean" ? ks.pause_media_on_listen : handheld, mic_per_turn: handheld && android };
 }

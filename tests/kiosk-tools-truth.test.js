@@ -29,7 +29,7 @@ const call = (name, args, say = "") => [...(say ? [{ choices: [{ index: 0, delta
 const FRUITS = { kind: "list", title: "Fruits", body: "apples\nbananas\ncherries" };
 
 /** model(body, n) → { say } | { tool, args } | { say, tool, args } (text, then the call, in one round). forcing: what the engine honours ("named" = a vLLM-like server that obeys a named choice). */
-function display({ model, forcing = "none", memories = false, lang = "en", botTools = [], media = null }) {
+function display({ model, forcing = "none", memories = false, lang = "en", botTools = [], media = null, families = {} }) {
   const requests = [], spoken = [], events = [], logs = [], executed = [];
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
@@ -56,7 +56,7 @@ function display({ model, forcing = "none", memories = false, lang = "en", botTo
     effectiveToolName: (tc) => tc.name, isExternalSendTool: () => false, isConnectedAddonTool: () => false, botVoiceScope: () => null,
     generateSystemPrompt: async ({ botDef }) => botDef.system_prompt, isMemoryTool: (n) => n === "crow_memory",
     toolForcing: async () => ({ named: forcing === "named", required: forcing === "named", engine: forcing === "named" ? "vllm" : "llamacpp" }),
-    toolFamilies: createToolFamilies({ manifests: { memory: { tools: {} }, projects: { tools: {}, voiceIntent: { en: ["project", "projects"] } }, sharing: { tools: {}, voiceIntent: { en: ["message", "messages"] } } } }),
+    toolFamilies: createToolFamilies({ manifests: { memory: { tools: {} }, projects: { tools: {}, voiceIntent: { en: ["project", "projects"] } }, sharing: { tools: {}, voiceIntent: { en: ["message", "messages"] } }, ...families } }),
   });
   const device = { id: "kiosk-live", bound_bot_id: "house", kiosk_settings: { memory_integration: memories, lang } };
   const sink = { event: (e) => events.push(e), audio: () => {} };
@@ -444,4 +444,50 @@ test("smoke F2: with nothing playing, the call's own answer is the truth ('Nothi
   assert.equal(said(d), "Lisbon.");
   assert.equal(r.failed, null);
   assert.equal(d.requests[0].tool_choice, undefined);
+});
+
+// ── Review H1 (rev 6): the playback must-run never takes a request that is not about the music. A household bot with
+// a home-control family must still reach its own tool on "Turn down the lights.", idle or over music; timers, the
+// TV, notifications and the voice itself are not the playback. Nothing is forced, no could-not line.
+const HOME = { home: { tools: {}, voiceIntent: { en: ["lights", "light", "heat", "thermostat", "tv"] } } };
+const NOT_PLAYBACK = ["Turn down the lights.", "Turn up the heat.", "Turn up the thermostat a little", "turn down the AC please", "Pause the timer.", "Resume the timer.", "Mute the TV.",
+  "Mute notifications", "Pause the video", "Resume the recipe", "Speak louder please.", "Can you speak louder?", "Pause for a second, let me think", "Habla más alto", "mute the timer", "Skip the small talk."];
+
+test("review H1: sentences that are not about the music are never forced onto crow_wm — idle and over music; a home-control tool is still offered", async () => {
+  for (const playing of [false, true]) {
+    for (const q of NOT_PLAYBACK) {
+      const radio = await playingRadio();
+      const d = display({ media: radio.build, botTools: ["crow_home"], families: HOME, model: () => ({ say: "Okay." }) });
+      if (playing) await radio.start("kiosk-live");
+      const r = await d.ask(q);
+      const where = `${playing ? "playing" : "idle"}: ${q}`;
+      assert.equal(said(d), "Okay.", `the model's own answer, never the could-not line — ${where}`);
+      assert.notEqual(r.failed, "display_missed", where);
+      assert.equal(d.requests[0].tool_choice, undefined, `nothing forced — ${where}`);
+      if (playing) assert.equal(radio.media.current("kiosk-live").volume, 50, `the music is untouched — ${where}`);
+    }
+    // The bot's own tool reaches the model for the lights.
+    const radio = await playingRadio();
+    const d = display({ media: radio.build, botTools: ["crow_home"], families: HOME, model: () => ({ say: "Okay." }) });
+    if (playing) await radio.start("kiosk-live");
+    await d.ask("Turn down the lights.");
+    assert.ok(toolNames(d.requests[0]).includes("crow_home"), `${playing ? "playing" : "idle"}: the home tool is offered (${toolNames(d.requests[0])})`);
+  }
+});
+
+test("review H1: with nothing playing, a playback request is forced only when it names the music; over music, a bare playback request is forced", async () => {
+  let radio = await playingRadio();
+  let d = display({ media: radio.build, model: () => ({ say: "Turned it up!" }) });
+  await d.ask("Turn it up a little so I can hear it.");
+  assert.equal(d.requests[0].tool_choice, undefined, "idle, no music named: offered at most, never forced");
+  assert.notEqual(said(d), "Sorry, I couldn't change the playback.");
+  radio = await playingRadio();
+  d = display({ media: radio.build, model: () => ({ say: "Turned it up!" }) });
+  await d.ask("Turn the radio up a little so I can hear it.");
+  assert.equal(said(d), "Sorry, I couldn't change the playback.", "idle but the radio is named: forced; the claim is never heard");
+  radio = await playingRadio();
+  d = display({ media: radio.build, model: () => ({ say: "Turned it up!" }) });
+  await radio.start("kiosk-live");
+  await d.ask("Turn it up a little so I can hear it.");
+  assert.equal(said(d), "Sorry, I couldn't change the playback.", "over music: forced; a claim with no call is never heard");
 });

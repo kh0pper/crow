@@ -347,7 +347,11 @@ test("smoke 2026-10-06 F1: opts.sttPrompt reaches the STT as its prompt (turn an
   await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => "" });
   await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
   await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttPrompt: "WXYZ HD1" });
-  assert.deepEqual(seen, ["WXYZ HD1, WXYZ HD2, Classic Country", "(none)", "(none)", "(none)", "WXYZ HD1"]);
+  // A function source is handed the STT profile (review L1: the kiosk leaves the prompt out on a Spanish display that detects its language).
+  const got = [];
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: (p) => { got.push(p?.language); return ""; } });
+  assert.deepEqual(got, ["en"]);
+  assert.deepEqual(seen, ["WXYZ HD1, WXYZ HD2, Classic Country", "(none)", "(none)", "(none)", "WXYZ HD1", "(none)"]);
   // Bounded at a comma, control characters gone, nothing but strings.
   const long = Array.from({ length: 40 }, (_, i) => `Station number ${i}`).join(", ");
   const cut = sttPromptText(long);

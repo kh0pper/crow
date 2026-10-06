@@ -438,32 +438,58 @@ export function transportWords(transcript) {
   }
   return verb;
 }
-// What asks the playback to change, more widely: the must-run test for crow_wm (F2b). A playback word or
-// phrase, never in a question, an information request or a statement ("the song was louder", "why did it stop?").
-const TRANSPORT_RUNS = runs(["turn it up", "turn it down", "turn up", "turn down", "turn the radio up", "turn the radio down", "turn the music up", "turn the music down",
+// What asks the playback to change, more widely: the must-run test for crow_wm (F2b; narrowed after the rev 6
+// review, H1). A playback word or phrase counts only when what it acts on is the music: nothing after it, a
+// pronoun, or a music word ("turn it up", "mute the radio", "pause please"). Any other object is somebody
+// else's ("turn down the lights", "pause the timer", "mute the TV", "mute notifications"), and speech is the
+// voice's ("speak louder", "habla más alto"). Never in a question, an information request, a statement or a
+// negation ("the song was louder", "why did it stop?", "don't stop").
+const COMPLETE_RUNS = runs(["turn it up", "turn it down", "turn the radio up", "turn the radio down", "turn the music up", "turn the music down",
   "turn the volume up", "turn the volume down", "turn the sound up", "turn the sound down", "volume up", "volume down", "go back a song", "back a song", "next song", "next track",
-  "previous song", "previous track", "sube el volumen", "baja el volumen", "subes el volumen", "bajas el volumen", "sube la radio", "baja la radio", "sube la musica", "baja la musica", "subele", "bajale", "mas alto", "mas bajo", "otra cancion"]);
+  "previous song", "previous track", "sube el volumen", "baja el volumen", "subes el volumen", "bajas el volumen", "sube la radio", "baja la radio", "sube la musica", "baja la musica", "otra cancion"]);
+// These need their object checked: "turn up the volume" yes, "turn up the heat" no.
+const OPEN_RUNS_T = runs(["turn up", "turn down", "subele", "bajale", "mas alto", "mas bajo"]);
 const NEGATIONS = new Set(["dont", "do", "not", "never", "no", "nunca"]);
+const SPEECH = new Set(["speak", "talk", "voice", "yourself", "say", "habla", "hablar", "hablas", "hablame", "voz"]);
 const LEVEL_WORDS = new Set(["louder", "quieter", "softer", "mute", "unmute", "pause", "unpause", "resume", "pausa", "silencia", "reanuda"]);
 const MOVE_WORDS = new Set(["stop", "skip", "next", "siguiente"]);
-const TRANSPORT_OBJECTS = new Set(["it", "that", "this", "music", "song", "track", "radio", "station", "please", "now", "musica", "cancion"]);
+/** The words that name the music itself. */
+export const MUSIC_NOUNS = new Set(["music", "song", "songs", "track", "radio", "station", "volume", "sound", "musica", "cancion", "emisora", "volumen", "sonido"]);
+const PRONOUNS_T = new Set(["it", "that", "this", "eso", "esto"]);
+// Skipped while looking for the object: articles and amounts. A clause word ends the search (no object given).
+const OBJECT_SKIP = new Set(["the", "a", "an", "my", "el", "la", "los", "las", "un", "una", "bit", "little", "lot", "more", "much", "please", "now", "just", "some", "again",
+  "already", "for", "me", "poco", "mas", "ahora", "por", "favor", "up", "down"]);
+const CLAUSE_T = new Set(["so", "and", "because", "cause", "then", "while", "i", "we", "porque", "que", "y"]);
+/** After a playback word ending at index j: is what it acts on the music (or nothing)? */
+function musicObject(w, j) {
+  let k = j;
+  // "this one", "that one" are a choice ("Skip this one." stays conversation), never the music.
+  if (PRONOUNS_T.has(w[k] || "") && w[k + 1] === "one") return false;
+  if (PRONOUNS_T.has(w[k] || "")) return true;
+  while (k < w.length && OBJECT_SKIP.has(w[k])) k += 1;
+  const x = w[k];
+  return x === undefined || MUSIC_NOUNS.has(x) || CLAUSE_T.has(x) || PRONOUNS_T.has(x) && w[k + 1] !== "one";
+}
 export function asksTransport(transcript) {
   const w = plain(transcript);
   if (!w || w.length > PLAY_MAX_WORDS || teachTo(transcript)) return false;
   if (transportWords(transcript)) return true;
+  // Speech is the voice's when it comes BEFORE the playback word ("speak louder"); "turn it down so we can talk" is the music.
+  const speech = w.findIndex((x) => SPEECH.has(x));
+  const before = (i) => speech >= 0 && speech < i;
   const core = stripPolite(w);
   if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p)) || hasAnyRun(w, INFO_RUNS)) return false;
   if (hasAny(w, STATEMENT_VERBS) || hasAny(w, NEGATIONS)) return false;
-  if (hasAnyRun(w, TRANSPORT_RUNS) || w.some((x) => LEVEL_WORDS.has(x))) return true;
-  // "stop", "skip", "next" mean the playback only with nothing after them or the music as their object:
-  // "stop it", "skip this song"; never "stop being silly", "skip the small talk", "next week".
   for (let i = 0; i < w.length; i += 1) {
-    if (!MOVE_WORDS.has(w[i])) continue;
-    const a = w[i + 1], b = w[i + 2];
-    if (a === undefined || TRANSPORT_OBJECTS.has(a) || ((a === "the" || a === "this" || a === "that") && TRANSPORT_OBJECTS.has(b || ""))) return true;
+    if (before(i)) return false;
+    if (COMPLETE_RUNS.some((r) => sameAt(w, i, r))) return true;
+    for (const r of OPEN_RUNS_T) if (sameAt(w, i, r) && musicObject(w, i + r.length)) return true;
+    if ((LEVEL_WORDS.has(w[i]) || MOVE_WORDS.has(w[i])) && musicObject(w, i + 1)) return true;
   }
   return false;
 }
+/** Does the sentence name the music, the radio or the volume outright? */
+export const namesMusic = (transcript) => { const w = plain(transcript); return !!w && hasAny(w, MUSIC_NOUNS); };
 
 /** items: [{ id, title, aliases? }]. Exact name or alias, else a unique prefix. → { match } | { many } | null. */
 export function lookupItem(items, name) {

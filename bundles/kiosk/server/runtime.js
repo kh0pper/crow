@@ -71,6 +71,8 @@ export const KIOSK_DENY_TOOLS = Object.freeze([
  * says the fallback line instead of going silent.
  */
 export const KIOSK_MAX_TOOL_ROUNDS = 3;
+/** A display socket that misses a ping is dropped at the next one: a silent network loss is seen within 2 × this. */
+export const KIOSK_PING_MS = 15_000;
 export const KIOSK_FIRST_AUDIO_BUDGET_MS = 12_000;
 
 /** The fallback line in the display's language. */
@@ -230,7 +232,7 @@ export function createKioskRuntime(deps) {
     onFailed: (id, item) => { const S = STRINGS[langOf(id)]; hub?.speak(id, (item.started ? S.say_play_lost : S.say_play_failed).replace("{title}", item.title || "")); },
     onEnded: closeNowPlaying,
     // F8: a display with a screen shows what is playing as soon as it starts (rules in play.js autoNowPlaying).
-    onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title, now: now() })) hub?.sendTo(id, ev); },
+    onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title })) hub?.sendTo(id, ev); },
   });
   // Station presets: this instance's local setting, held in memory, reloaded when the panel saves them.
   let stations = [];
@@ -271,9 +273,13 @@ export function createKioskRuntime(deps) {
     };
   };
   /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation), with this display's media line. */
-  /** F1: the STT prompt bias — this instance's station names and aliases. */
-  const sttPrompt = () => stationNamesHint(stations);
-  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt });
+  /**
+   * F1: the STT prompt bias — this instance's station names and aliases. Review L1: never on a Spanish display whose
+   * STT profile leaves the language to detection (an English name list could tilt it); a profile that pins the
+   * language (the kiosk profile pins "en") is safe. A cloud STT profile receives these names with the audio.
+   */
+  const sttPromptFor = (device) => (profile) => (device?.kiosk_settings?.lang === "es" && !profile?.language ? "" : stationNamesHint(stations));
+  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device) });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -295,7 +301,7 @@ export function createKioskRuntime(deps) {
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
-      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt }))
+      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device) }))
       : null,
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
     wm, metrics, media,
@@ -718,7 +724,7 @@ export function createKioskRuntime(deps) {
     const accept = (req, socket, head, attachOpts) => wss.handleUpgrade(req, socket, head, (ws) => {
       let alive = true;
       ws.on("pong", () => { alive = true; });
-      const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, 15_000);
+      const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, KIOSK_PING_MS);
       ws.on("close", () => clearInterval(ping));
       hub.attach(ws, attachOpts);
     });

@@ -17,8 +17,8 @@ export const RESTORE_MS = 300;
 export const RESTORE_STEP_MS = 30;
 export const START_MS = 10_000;
 export const STALL_MS = 15_000;
-/** F9: offline, the chip dims and controls are off; after this the element stops (= media.js SESSION_GRACE_MS). */
-export const OFFLINE_CLEAR_MS = 30_000;
+/** F9: offline, the chip dims and controls are off; after this the element stops: ≥ the server's grace + 2 pings (review M3). */
+export const OFFLINE_CLEAR_MS = 60_000;
 
 const level = (v, muted) => (muted ? 0 : Math.max(0, Math.min(1, (Number(v) || 0) / 100)));
 
@@ -84,11 +84,12 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     try { p = audio.play(); } catch (err) { p = Promise.reject(err); }
     Promise.resolve(p).catch((err) => {
       if (!cur || cur.id !== id || err?.name === "AbortError") return;
-      if (cur.playing || !audio.paused) return;
+      if (!audio.paused) return;
       if (err?.name === "NotAllowedError") { clearTimer(startDog); startDog = null; cur.blocked = true; report("blocked"); render(); }
     });
   }
-  function quietPause() { if (!audio.paused) { quiet = true; audio.pause(); } }
+  // The page's own pause: no longer playing (so the start watchdog can still judge a refused resume: review H2).
+  function quietPause() { if (cur) cur.playing = false; if (!audio.paused) { quiet = true; audio.pause(); } }
 
   audio.addEventListener("playing", () => {
     if (!cur) return;

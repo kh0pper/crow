@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic } from "./patterns.js";
 import { spokenWords, KIND_NOUNS } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -111,7 +111,9 @@ export function createDisplayTools(ctx) {
       when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn() || asksTransport(t),
       holdText: (t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t),
       holdToEnd: toEnd((t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t)),
-      must: (t) => anyPart(t, asksTransport), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_wm, missedText: S.playback_missed_say,
+      // Review H1: forced only while something plays on this display, or when the sentence names the music outright.
+      // (Bare "Stop." with nothing playing is answered at T0 and never reaches here.)
+      must: (t) => anyPart(t, (p) => asksTransport(p) && (mediaOn() || namesMusic(p))), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_wm, missedText: S.playback_missed_say,
       mustDone: (r) => r?.ok === true && (r.outcome === "done" || r.outcome === "nothing_playing"),
       execute: (a, turn) => {
         // The K1 form — one `command` string — is still accepted (not advertised) and parsed by the K1 grammar,

@@ -37,6 +37,7 @@ export function splitSource(what) {
 }
 
 const DOWN_ORDER = ["unauthorized", "unreachable", "timeout"];
+const YES_WORDS = new Set(["yes", "yeah", "yep", "yup", "sure", "please", "si", "claro", "correct", "exactly", "ok", "okay"]);
 
 /**
  * registry: createSourceRegistry([...]) — the sources in "auto" order.
@@ -90,6 +91,12 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       }
       // A lone loose candidate plays for the model's call; with no model only when it is a same-sound
       // station name and nothing else was found anywhere (F1: "Play KDBF" for the only KTPF).
+      // Review M1: a lone candidate the source wants ASKED about ("Did you mean KTPF HD1?") is offered as a one-name
+      // choice — with or without a model — and remembered like any "Which one?".
+      if (loose.length === 1 && loose[0].c.ask === true) {
+        if (deviceId) asked.set(deviceId, { at: now(), items: loose.slice(0, 1) });
+        return { outcome: "choices", names: [cleanTitle(loose[0].c.title).slice(0, 30)] };
+      }
       if (loose.length === 1 && (!strict || loose[0].c.near === true)) { const list = await playables(loose[0].s, loose[0].c, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(loose[0].s, loose[0].c, list); } }
       if (loose.length >= 2 && loose.length <= 4) {
         const items = loose.slice(0, MAX_CHOICES);
@@ -106,7 +113,10 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       const a = live(deviceId);
       if (!a) return null;
       const picks = [];
-      for (const s of new Set(a.items.map((x) => x.s))) {
+      // "Did you mean …?" (one name offered): a plain yes takes it.
+      const w = spokenWords(String(utterance ?? "").slice(0, 40)) || [];
+      if (a.items.length === 1 && w.length && w.length <= 3 && w.every((x) => YES_WORDS.has(x))) picks.push(a.items[0]);
+      if (!picks.length) for (const s of new Set(a.items.map((x) => x.s))) {
         let c = null;
         try { c = s.choose(a.items.filter((x) => x.s === s).map((x) => x.c), String(utterance ?? "").slice(0, 120)); } catch { c = null; }
         if (c) picks.push({ c, s });
@@ -123,24 +133,21 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
 
 /**
  * F8 (smoke 2026-10-06): when playback starts, a display with a screen opens its now-playing window by itself.
- * Rules, in order:
+ * Rules, in order (the front only on an empty screen):
  *   - only a display that draws the window (caps.kinds has "nowplaying") and reports a screen (caps.screen.w > 0);
  *     an audio-first display keeps the chip only;
  *   - one window, reused: if it is open it is left where it is (never a second one, never pulled to the front);
  *   - it never pushes another window out: with the display's windows full, it does not open (the chip is there);
- *   - it never takes the front from a card the person just asked for: if the window in front is not a
- *     now-playing window and was opened or touched in the last NOWPLAYING_DEFER_MS, or is a timer that has
- *     gone off, the now-playing window opens just BEHIND it (its tab is in the rail).
+ *   - it comes to the FRONT only when nothing else is open; otherwise it opens just BEHIND the window in front
+ *     (a recipe being cooked from, a card, a timer stay where they are; its tab is in the rail, the chip brings it forward).
  * → wm events for the page ([] when nothing changes).
  */
-export const NOWPLAYING_DEFER_MS = 60_000;
-export function autoNowPlaying({ store, deviceId, caps, title, now }) {
+export function autoNowPlaying({ store, deviceId, caps, title }) {
   if (!Array.isArray(caps?.kinds) || !caps.kinds.includes("nowplaying") || !(Number(caps?.screen?.w) > 0)) return [];
   const open = store.list(deviceId);
   if (open.some((w) => w.kind === "nowplaying")) return [];
   if (open.length >= Math.max(1, Number(caps.max_windows) || 4)) return [];
-  const front = open.at(-1);
-  const behind = !!front && ((front.kind === "timer" && front.done) || now - (front.touched_at ?? front.opened_at ?? 0) < NOWPLAYING_DEFER_MS);
+  const behind = open.length > 0;
   const { window, evicted } = store.put(deviceId, { kind: "nowplaying", title }, { behind });
   return [...evicted.map((e) => ({ type: "wm", action: "close", id: e.id })), { type: "wm", action: "open", window, ...(behind ? { behind: true } : {}) }];
 }
@@ -184,7 +191,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
     const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id });
     if (r.outcome === "playing") return start(r, ctx, S);
-    if (r.outcome === "choices") return result(true, "choices", fill(S.say_choices, { names: joinNames(r.names, S) }), { names: r.names, effect: false });
+    if (r.outcome === "choices") return result(true, "choices", fill(r.names.length === 1 ? S.say_did_you_mean : S.say_choices, { names: joinNames(r.names, S) }), { names: r.names, effect: false });
     // A source that could not look is a real answer, with or without a model: the model can do no better with it.
     if (r.outcome === "unavailable" && r.code !== "none") return result(false, "unavailable", fill(S[`say_play_${r.code}`] || S.say_play_unreachable, { source: S[`source_${r.source}`] || S.source_music }), { reason: r.code });
     if (ctx.strict) return null;                                           // no model, not sure: the model gets the turn

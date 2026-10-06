@@ -24,13 +24,13 @@ export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again."
 /**
  * The STT prompt bias (opts.sttPrompt): one line of names the speaker is likely to say. Whisper reads
  * at most ~224 prompt tokens and a long prompt can be "heard" in silence, so it is cut to
- * STT_PROMPT_MAX characters at a comma; control characters go. A function is called once per turn;
- * one that throws, or anything that is not a string, gives no prompt.
+ * STT_PROMPT_MAX characters at a comma; control characters go. A function is called once per turn with
+ * the STT profile; one that throws, or anything that is not a string, gives no prompt.
  */
 export const STT_PROMPT_MAX = 200;
-export function sttPromptText(p) {
+export function sttPromptText(p, profile = null) {
   let v = p;
-  if (typeof v === "function") { try { v = v(); } catch { v = null; } }
+  if (typeof v === "function") { try { v = v(profile); } catch { v = null; } }
   if (typeof v !== "string") return "";
   let t = "";
   for (const ch of v.slice(0, 1000)) { const c = ch.codePointAt(0); t += c < 32 || (c >= 127 && c < 160) ? " " : ch; }
@@ -260,7 +260,7 @@ export function createVoiceTurnRunner(deps) {
     if (!sttProfile) throw Object.assign(new Error("no STT profile"), { code: "no_stt_profile" });
     const stt = await deps.createSttAdapter(sttProfile);
     const model = typeof sttModel === "function" ? sttModel(sttProfile) : null;
-    const prompt = sttPromptText(sttPrompt);
+    const prompt = sttPromptText(sttPrompt, sttProfile);
     const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
     return { text: String(r?.text || "").trim() };
   }
@@ -351,7 +351,7 @@ export function createVoiceTurnRunner(deps) {
         const model = typeof opts.sttModel === "function" ? opts.sttModel(sttProfile) : null;
         // opts.sttPrompt: words this endpoint expects to hear (a display's station names), as the STT's
         // prompt bias. A string or a function returning one; bounded by sttPromptText.
-        const prompt = sttPromptText(opts.sttPrompt);
+        const prompt = sttPromptText(opts.sttPrompt, sttProfile);
         const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");

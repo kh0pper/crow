@@ -4,9 +4,12 @@ import { readFileSync } from "node:fs";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
-  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
 } from "../bundles/kiosk/public/state.js";
-import { createPlayer, openMic } from "../bundles/kiosk/public/audio.js";
+import { OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
+import { SESSION_GRACE_MS } from "../bundles/kiosk/server/media.js";
+import { KIOSK_PING_MS } from "../bundles/kiosk/server/runtime.js";
+import { createPlayer, openMic, createMicGate } from "../bundles/kiosk/public/audio.js";
 import { sanitizeClientMetrics } from "../bundles/kiosk/server/metrics.js";
 
 test("4401 unauthorized/unpaired clears the token; 4401 hello_timeout keeps it and reconnects", () => {
@@ -27,7 +30,7 @@ test("4000 superseded → halt (no auto reconnect ping-pong)", () => {
 });
 
 test("reconnect backoff 1 s → 30 s cap", () => {
-  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map(backoffMs), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map((n) => backoffMs(n)), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
 });
 
 test("mic denied → mic_blocked; no device → no_mic; suspended context → needs_gesture", () => {
@@ -393,6 +396,12 @@ test("report waits for a pending load's playing event (up to 6 s), unless forced
 test("smoke F6: a phone or tablet releases the mic after each turn (display_config.mic_per_turn); anything else keeps it; the reopen cost is reported and kept apart from e2e", () => {
   assert.equal(micAfterTurn({ mic_per_turn: true }), "release");
   for (const c of [{ mic_per_turn: false }, {}, null, undefined, { mic_per_turn: "yes" }]) assert.equal(micAfterTurn(c), "keep");
+  // Review M4: with follow-up on, the first turn keeps the mic for the follow-up; it goes when the conversation settles.
+  const fu = { mic_per_turn: true, follow_up: true };
+  assert.equal(micAfterTurn(fu, { phase: "end", source: "tap" }), "keep");
+  assert.equal(micAfterTurn(fu, { phase: "end", source: "follow_up" }), "release");
+  assert.equal(micAfterTurn(fu, { phase: "settled" }), "release");
+  assert.equal(micAfterTurn(fu, { phase: "closed", source: "tap" }), "release");
   const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1000, playAt: 2500, effectAt: null, endedAt: 1000, barged: false, micOpenMs: 184.4 }, {});
   assert.equal(m.mic_open_ms, 184);
   assert.equal(m.e2e_ms, 1500, "e2e is still end of speech to first audio: the reopen is before speech");
@@ -428,9 +437,59 @@ test("smoke F6: the mic can be opened again on the same audio context — the ca
 test("smoke F6 (source): the page lets the mic go right after it sends turn_end, on turn_over and on a closed socket — and only through micAfterTurn", () => {
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
   const end = src.slice(src.indexOf("function endTurn("), src.indexOf("function releaseMicAfterTurn("));
-  assert.ok(end.indexOf('type: "turn_end"') < end.indexOf("releaseMicAfterTurn()"), "after turn_end");
+  assert.ok(end.indexOf('type: "turn_end"') < end.indexOf('releaseMicAfterTurn("end"'), "after turn_end");
   const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
-  assert.match(rel, /micAfterTurn\(config\) !== "release"/);
-  assert.match(rel, /mic\.close\(\)/);
-  assert.equal((src.match(/(?<!function )releaseMicAfterTurn\(\)/g) || []).length, 3, "endTurn, turn_over, socket close");
+  assert.match(rel, /micAfterTurn\(config, \{ phase, source \}\) !== "release"/);
+  assert.match(rel, /micGate\.release\(\)/);
+  const calls = [...src.matchAll(/(?<!function )releaseMicAfterTurn\(("[a-z]+")?/g)].map((m) => m[1]);
+  assert.deepEqual(calls.sort(), ['"closed"', '"closed"', '"closed"', '"end"', '"settled"'], "socket close, turn_over, barge, endTurn, settle");
+});
+
+test("review H3: a double tap during a slow mic open leaves exactly ONE open stream; an open released meanwhile is closed when it lands; the second tap is ignored", async () => {
+  const opened = [], closed = [];
+  let finish = null;
+  const slowOpen = () => new Promise((res) => { const m = { n: opened.length + 1, close: () => closed.push(m.n) }; opened.push(m); finish = () => res(m); });
+  const gate = createMicGate(slowOpen, () => 0);
+  const a = gate.acquire(), b = gate.acquire();           // two taps 100 ms apart, while getUserMedia is still pending
+  await new Promise((r) => setImmediate(r));
+  assert.equal(opened.length, 1, "one getUserMedia, not two");
+  finish();
+  const [ma, mb] = await Promise.all([a, b]);
+  assert.equal(ma, mb, "both callers share the one stream");
+  assert.equal(gate.current, ma);
+  gate.release();
+  assert.deepEqual(closed, [1]);
+  // Released while opening (the socket closed): the stream is closed as soon as it arrives, never left open.
+  const c = gate.acquire();
+  await new Promise((r) => setImmediate(r));
+  gate.release();
+  finish();
+  assert.equal(await c, null);
+  assert.deepEqual(closed, [1, 2]);
+  assert.equal(gate.current, null);
+  // The page ignores a tap while the mic is still opening for the last one.
+  assert.equal(tapDecision({ halted: false, playing: false, birdState: "idle", turnOpen: false, starting: true }), "ignore");
+  assert.equal(tapDecision({ halted: false, playing: false, birdState: "idle", turnOpen: false, starting: false }), "start");
+});
+
+test("review H3 (source): startTurn holds `starting` from the tap until the mic is open, shows it on the bird, and the tap reads it", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const st = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
+  assert.match(st, /starting = true;/);
+  assert.match(st, /classList\.add\("is-starting"\)/);
+  assert.match(st, /finally \{ starting = false;/);
+  assert.match(src, /tapDecision\(\{ halted,[^\n]*, starting \}\)\)/);
+  assert.match(src, /micGate\.acquire\(\)/);
+  assert.doesNotMatch(src, /await openMic\(/, "the mic is opened only through the gate");
+});
+
+test("review M3: the page's offline clear outlasts the server's view of a silent drop (grace + two pings), and while audio is live the page tries again within the clear many times", () => {
+  assert.ok(OFFLINE_CLEAR_MS >= SESSION_GRACE_MS + 2 * KIOSK_PING_MS, `${OFFLINE_CLEAR_MS} < ${SESSION_GRACE_MS} + 2 × ${KIOSK_PING_MS}`);
+  for (let n = 0; n < 12; n++) assert.ok(backoffMs(n, MEDIA_RECONNECT_CAP_MS) <= MEDIA_RECONNECT_CAP_MS);
+  // A 20 s outage: with audio live the page is back within 5 s of the network, long before either side ends the session.
+  let t = 0, n = 0; while (t < 20_000) t += backoffMs(n++, MEDIA_RECONNECT_CAP_MS);
+  assert.ok(t - 20_000 <= MEDIA_RECONNECT_CAP_MS && t < OFFLINE_CLEAR_MS && t < SESSION_GRACE_MS + KIOSK_PING_MS);
+  assert.equal(backoffMs(9), 30_000, "with nothing playing, the usual backoff");
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  assert.match(src, /backoffMs\(attempt\+\+, mediaView\?\.current\(\) \? MEDIA_RECONNECT_CAP_MS : undefined\)/);
 });

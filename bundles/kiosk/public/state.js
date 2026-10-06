@@ -18,7 +18,9 @@ export function closeDecision(code, reason, mode) {
   if (code === 4000 && reason === "superseded") return { action: "halt", banner: "opened_elsewhere" };
   return { action: "reconnect" };
 }
-export function backoffMs(attempt) { return Math.min(30_000, 1000 * 2 ** Math.min(Math.max(0, attempt), 5)); }
+export function backoffMs(attempt, cap = 30_000) { return Math.min(cap, 1000 * 2 ** Math.min(Math.max(0, attempt), 5)); }
+/** Review M3: while audio is live, reconnect at least this often, so the page is back before its offline clear (and the server's grace) runs out. */
+export const MEDIA_RECONNECT_CAP_MS = 5_000;
 export function micDecision(err, ctxState) {
   if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) return "mic_blocked";
   if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError")) return "no_mic";
@@ -46,8 +48,9 @@ export function msToNextMinute(date) { return 60_000 - (date.getSeconds() * 1000
 export function displayedBird(serverBird, localPlaying) {
   return localPlaying && serverBird === "idle" ? "speaking" : serverBird;
 }
-export function tapDecision({ halted, playing, birdState, turnOpen }) {
+export function tapDecision({ halted, playing, birdState, turnOpen, starting = false }) {
   if (halted) return "resume";
+  if (starting) return "ignore";                 // review H3: the mic is still opening for the last tap
   if (playing || birdState === "speaking") return "barge";
   if (turnOpen) return "stop";
   if (birdState === "thinking") return "ignore";
@@ -93,9 +96,16 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
  * F6 (smoke 2026-10-06): after a turn's speech has ended, does the page let the microphone go? On a phone or
  * a tablet (display_config.mic_per_turn, decided on the server from the display type) yes: an open
  * echo-cancelled capture keeps Android in voice-call audio mode and every sound plays through the call path.
- * The next tap (or a follow-up turn) opens it again; the permission is kept, so nothing is asked again.
+ * The next tap opens it again; the permission is kept, so nothing is asked again. phase: "end" (the speech is in),
+ * "settled" (the answer is over and no follow-up started), "closed" (turn_over, socket closed, barge).
  */
-export const micAfterTurn = (config) => (config?.mic_per_turn === true ? "release" : "keep");
+export function micAfterTurn(config, { phase = "end", source = "tap" } = {}) {
+  if (config?.mic_per_turn !== true) return "keep";
+  // Review M4: with follow-up on, a follow-up turn may open right after the answer: the mic is kept through it
+  // (one switch into call mode per conversation, not two) and let go when the conversation settles.
+  if (phase === "end" && config.follow_up === true && source !== "follow_up") return "keep";
+  return "release";
+}
 
 /*
  * Ducking (review C1). The music is turned down (or paused) while a turn is OPEN: the mic is open,

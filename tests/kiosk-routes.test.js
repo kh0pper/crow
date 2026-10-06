@@ -1178,7 +1178,10 @@ test("smoke F3/F6 (wired): a phone's display_config says pause while listening a
     assert.equal(Object.hasOwn(row.kiosk_settings, "pause_media_on_listen"), false, "the default is never written");
   } finally { phone.ws.close(); bare.ws.close(); }
   const { audioPolicy } = await import("../bundles/kiosk/server/caps.js");
-  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, null), { pause_media_on_listen: false, mic_per_turn: true });
+  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: true });
+  // Review M4: an iPhone keeps the open mic until an iPhone smoke row passes (pause-while-listening still applies).
+  assert.deepEqual(audioPolicy({ profile: "phone" }, { ...PHONE_CAPS, platform: "iPhone" }), { pause_media_on_listen: true, mic_per_turn: false });
+  assert.deepEqual(audioPolicy({ profile: "phone" }, null), { pause_media_on_listen: true, mic_per_turn: false }, "no platform reported: the mic stays open");
   assert.deepEqual(audioPolicy({ profile: "pi3" }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: false }, "a stored type wins over the page's guess");
   assert.deepEqual(audioPolicy({}, PHONE_CAPS), { pause_media_on_listen: true, mic_per_turn: true }, "no stored type (a session display): the page's guess");
   assert.deepEqual(audioPolicy({ profile: "desktop", pause_media_on_listen: true }, null), { pause_media_on_listen: true, mic_per_turn: false });
@@ -1202,4 +1205,33 @@ test("smoke F8 (wired): playback starting opens the now-playing window on a disp
     assert.ok(await waitFor(() => phone.msgs.some((x) => x.type === "wm" && x.action === "focus")), "the chip's tap brings it forward");
     assert.equal(bare.msgs.some((x) => x.type === "wm" && x.action === "open"), false, "an audio-first display: the chip only");
   } finally { rt.media.closeDevice("kiosk-f8-phone"); rt.media.closeDevice("kiosk-f8-bare"); phone.ws.close(); bare.ws.close(); }
+});
+
+test("review L1 (wired): the station names reach the STT prompt of every display turn — except on a Spanish display whose STT profile leaves the language to detection", async () => {
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }] }) });
+  const turn = async (id, settings) => {
+    const { token } = await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), id, { bound_bot_id: "household", ...(settings ? { kiosk_settings: settings } : {}) });
+    const ws = new WebSocket(wsUrl(base));
+    const msgs = [];
+    await new Promise((r) => ws.on("open", r));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    const before = turnCalls.length;
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: `${id}-t` }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    ws.close();
+    return turnCalls.at(-1);
+  };
+  try {
+    const en = await turn("kiosk-l1-en");
+    assert.equal(en.sttPrompt({ language: null }), "Morning Mix, the mix");
+    const es = await turn("kiosk-l1-es", { lang: "es" });
+    assert.equal(es.device.kiosk_settings.lang, "es");
+    assert.equal(es.sttPrompt({ language: null }), "", "a Spanish display, language left to detection: no English prompt");
+    assert.equal(es.sttPrompt({ language: "en" }), "Morning Mix, the mix", "a profile that pins the language is safe");
+  } finally { await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) }); }
 });

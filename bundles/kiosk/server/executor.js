@@ -211,6 +211,8 @@ export async function executeIntent(intent, ctx) {
       // A ringing timer takes "stop" before the music does.
       const ringing = ctx.store.list(ctx.deviceId).filter((w) => w.kind === "timer" && w.done).at(-1);
       if (ringing) { ctx.store.close(ctx.deviceId, ringing.id); return result(true, "done", S.say_timer_stopped, { events: [{ type: "wm", action: "close", id: ringing.id }] }); }
+      // The bare word with nothing playing is answered at once, never left to the model.
+      if (ctx.strict && intent.bare === true && ctx.media?.active?.(ctx.deviceId) !== true) return result(true, "nothing_playing", S.say_nothing_playing, { effect: false });
       return playback(intent, ctx, S);
     }
     // Spoken forms that have no entry of their own in the model's verb list.

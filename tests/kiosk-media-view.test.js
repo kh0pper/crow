@@ -346,3 +346,22 @@ test("F9: with the server gone the chip says so (dimmed, '…'), taps do nothing
   assert.equal(s.audio.src, "");
   assert.equal(s.view.info(), null);
 });
+
+test("review H2: a resume after pause-while-listening that the browser refuses is reported (`blocked`, chip ▶) — never a silent ⏸", async () => {
+  const s = setup();
+  s.load("m1"); s.audio.fire("playing");
+  s.view.hold(true, true);                     // the tap: the page pauses the element itself
+  s.audio.block = true;
+  s.view.hold(false, true);                    // the turn ends; play() is refused (no gesture)
+  await flush();
+  s.tm.advance(START_MS + STALL_MS);
+  assert.deepEqual(s.events(), ["m1:playing", "m1:blocked"]);
+  assert.equal(s.chip.textContent, "▶ Title m1");
+  // And a play() that never answers after a hold is caught by the start watchdog.
+  const t = setup();
+  t.load("m2"); t.audio.fire("playing");
+  t.view.hold(true, true);
+  t.view.hold(false, true);                    // play() stays pending (the fake waits for `playing`)
+  t.tm.advance(START_MS + 1);
+  assert.deepEqual(t.events(), ["m2:playing", "m2:error:stalled"]);
+});

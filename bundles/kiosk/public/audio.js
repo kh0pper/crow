@@ -22,6 +22,31 @@ export async function openMic(ctx, onFrame) {
 }
 
 /**
+ * One microphone at a time (review H3): every caller of acquire() during an open waits for the SAME open, so a
+ * second tap can never start a second stream. release() during an open closes what that open returns. open() →
+ * Promise<mic with close()>; now() → ms (the open time is kept for the turn's metrics).
+ */
+export function createMicGate(open, now = () => performance.now()) {
+  let mic = null, pending = null, dropped = false, lastMs = null;
+  return {
+    get current() { return mic; },
+    opening: () => pending !== null,
+    acquire() {
+      if (mic) return Promise.resolve(mic);
+      if (pending) { dropped = false; return pending; }
+      dropped = false;
+      const t0 = now();
+      pending = Promise.resolve().then(open).then(
+        (m) => { pending = null; if (dropped) { try { m.close(); } catch {} return null; } mic = m; lastMs = now() - t0; return m; },
+        (err) => { pending = null; throw err; });
+      return pending;
+    },
+    release() { if (pending) dropped = true; if (mic) { const m = mic; mic = null; try { m.close(); } catch {} } },
+    takeOpenMs() { const v = lastMs; lastMs = null; return v; },
+  };
+}
+
+/**
  * Sequential playback of the server's sentence buffers. `playing` covers buffers still
  * being decoded (the server's idle can arrive before an mp3 decode finishes, ruling F3).
  * onDrained fires once when the last source ends naturally; flush() (a barge) never fires it,

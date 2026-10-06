@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createPlayResolver, createMediaVerbs, splitSource, CHOICE_TTL_MS, autoNowPlaying, showNowPlaying, NOWPLAYING_DEFER_MS } from "../bundles/kiosk/server/play.js";
+import { createPlayResolver, createMediaVerbs, splitSource, CHOICE_TTL_MS, autoNowPlaying, showNowPlaying } from "../bundles/kiosk/server/play.js";
 import { createMediaStore } from "../bundles/kiosk/server/media.js";
 import { createTicketStore } from "../bundles/kiosk/server/tickets.js";
 import { createWmStore } from "../bundles/kiosk/server/wm.js";
@@ -13,7 +13,7 @@ import { createStationsSource, normalizeStations } from "../bundles/kiosk/server
 import { publicHop } from "../bundles/kiosk/server/relay.js";
 import { matchSpoken } from "../bundles/kiosk/server/tiers.js";
 import { matchT0, T0_PHRASES } from "../bundles/kiosk/server/phrases.js";
-import { matchT1 } from "../bundles/kiosk/server/patterns.js";
+import { matchT1, asksTransport } from "../bundles/kiosk/server/patterns.js";
 import { executeIntent } from "../bundles/kiosk/server/executor.js";
 import { createDisplayTools } from "../bundles/kiosk/server/display-tools.js";
 import { displayTurnContext } from "../bundles/kiosk/server/prompt.js";
@@ -265,7 +265,10 @@ test("'play the radio' with one station plays it; with several, they are offered
 
 test("T0 transport phrases fire only while something plays, act at once and say nothing (en + es)", async () => {
   const idle = setup();
-  for (const q of ["pause", "stop", "louder", "next song", "mute", "what's playing", "play", "para", "más alto", "volume four", "keep going", "pause the music", "stop the song"]) assert.equal(await idle.say(q), null, `nothing playing: ${q}`);
+  for (const q of ["pause", "louder", "next song", "mute", "what's playing", "play", "para", "más alto", "volume four", "keep going", "pause the music", "stop the song", "skip this one"]) assert.equal(await idle.say(q), null, `nothing playing: ${q}`);
+  // The bare word "Stop." with nothing playing is answered at once, with no model.
+  assert.deepEqual(await idle.say("Stop."), { say: "Nothing is playing.", tier: "t0", events: [] });
+  assert.deepEqual(await idle.say("Stop.", idle.es), { say: "No hay nada sonando.", tier: "t0", events: [] });
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three"] }])] });
   await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
   const act = async (q, c = s.ctx) => { const r = await s.say(q, c); assert.deepEqual(r && [r.say, r.tier], ["", "t0"], q); return s.last(); };
@@ -327,7 +330,8 @@ test("words people also say to an assistant are never playback phrases on their 
   // Revision 6 (smoke F2): "Skip." and "Skip it." left this list — over music they are playback words (the
   // bare-word rule, next test). They are still not T0 phrases.
   for (const q of ["Skip.", "Skip it."]) assert.equal(matchT0(q), null, q);
-  const AMBIGUOUS = ["Go on.", "Continue.", "Carry on.", "Sigue.", "Continúa.", "What's this?", "Who's this?", "Silence.", "Silencio.", "Otra.", "Skip this one.", "Basta.", "That's enough.", "Previous.", "Anterior.", "La anterior.", "Turn it off.", "The one before."];
+  // "Skip this one." skips at once while something plays (next test); it left this list.
+  const AMBIGUOUS = ["Go on.", "Continue.", "Carry on.", "Sigue.", "Continúa.", "What's this?", "Who's this?", "Silence.", "Silencio.", "Otra.", "Basta.", "That's enough.", "Previous.", "Anterior.", "La anterior.", "Turn it off.", "The one before."];
   for (const q of AMBIGUOUS) assert.equal(matchT0(q), null, q);
   const table = Object.entries(T0_PHRASES);
   const all = table.flatMap(([, l]) => [...l.en, ...l.es]);
@@ -472,19 +476,19 @@ test("the turn's context line carries what is playing, as text that cannot pass 
 });
 
 test("smoke F2: a playback word with filler acts at once while something plays on this display — and only then; ordinary sentences never do", async () => {
-  const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three"] }])] });
+  const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three", "Four", "Five"] }])] });
   // Nothing playing: none of them is a fast path (the model gets the sentence).
   for (const q of ["Louder louder.", "Skip it.", "A lot louder please.", "Lauder."]) assert.equal(await s.say(q), null, `idle: ${q}`);
   await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
-  const cases = [["Louder louder.", "volume"], ["A lot louder please.", "volume"], ["Much quieter.", "volume"], ["Lauder.", "volume"], ["Skip it.", "load"], ["Skip.", "load"], ["Stop it already.", "stop"]];
+  const cases = [["Louder louder.", "volume"], ["A lot louder please.", "volume"], ["Much quieter.", "volume"], ["Lauder.", "volume"], ["Skip it.", "load"], ["Skip.", "load"], ["Skip this one.", "load"], ["Stop it already.", "stop"]];
   for (const [q, action] of cases) {
     const r = await s.say(q);
-    assert.equal(r?.tier, "t1", q);
+    assert.equal(r?.tier, q === "Skip this one." ? "t0" : "t1", q);   // a T0 phrase
     assert.equal(r.say, "", `${q}: nothing said — the change is the answer`);
     assert.equal(s.last().action, action, q);
   }
   await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
-  for (const q of ["Don't stop.", "Skip the small talk.", "Is it louder?", "Stop being silly.", "Skip this one.", "Louder than what?", "The neighbours are louder.", "Paws and claws."]) {
+  for (const q of ["Don't stop.", "Skip the small talk.", "Is it louder?", "Stop being silly.", "Louder than what?", "The neighbours are louder.", "Paws and claws."]) {
     assert.equal(await s.say(q), null, `never a playback word: ${q}`);
   }
   assert.equal(s.sent.length, 0, "nothing reached the page");
@@ -507,36 +511,28 @@ test("smoke F1: 'Play KDBF.' (what STT wrote for KTPF) plays the only station th
   assert.equal(t.sent.filter((m) => m.action === "load").length, 0);
 });
 
-test("smoke F8: the now-playing window opens by itself only on a display with a screen that draws it; one, reused; never pushes a window out; never takes the front from a card just asked for", () => {
+test("smoke F8 + review M2: the now-playing window opens by itself only on a display with a screen that draws it; in front only on an empty screen, else behind whatever is open (a recipe in use stays in front); one, reused; never pushes a window out", () => {
   const clock = { t: 1_000_000 };
   const store = createWmStore({ now: () => clock.t, setTimer: () => ({}), clearTimer: () => {} });
   const SCREEN = { kinds: ["card", "timer", "nowplaying"], screen: { w: 800, h: 480 }, max_windows: 4 };
-  const auto = (caps = SCREEN) => autoNowPlaying({ store, deviceId: "d", caps, title: "Now playing", now: clock.t });
+  const auto = (caps = SCREEN) => autoNowPlaying({ store, deviceId: "d", caps, title: "Now playing" });
   assert.deepEqual(auto({ ...SCREEN, screen: { w: 0, h: 0 } }), [], "no screen: the chip only");
   assert.deepEqual(auto({ ...SCREEN, kinds: ["card", "timer"] }), [], "a page that cannot draw it");
   const first = auto();
-  assert.equal(first.length, 1); assert.equal(first[0].window.kind, "nowplaying"); assert.equal(first[0].behind, undefined, "nothing else open: in front");
+  assert.equal(first.length, 1); assert.equal(first[0].window.kind, "nowplaying"); assert.equal(first[0].behind, undefined, "an empty screen: in front");
   assert.deepEqual(auto(), [], "already open: reused, not moved");
-  // A card asked for a moment ago stays in front; the now-playing window goes behind it.
+  // A recipe someone has been cooking from for ten minutes, untouched: it keeps the front.
   store.closeAll("d");
-  store.put("d", { kind: "content", title: "Fruits", blocks: [] });
-  clock.t += 5_000;
+  store.put("d", { kind: "recipe", title: "Pancakes", ingredients: [], steps: ["Mix", "Cook"], step: 0 });
+  clock.t += 10 * 60_000;
   const behind = auto();
   assert.equal(behind[0].behind, true);
-  assert.deepEqual(store.list("d").map((w) => w.kind), ["nowplaying", "content"], "the card keeps the front");
-  // A card that has sat there a while: the music comes to the front.
+  assert.deepEqual(store.list("d").map((w) => w.kind), ["nowplaying", "recipe"], "the recipe keeps the front");
+  // A card just asked for: behind it too.
   store.closeAll("d");
   store.put("d", { kind: "content", title: "Fruits", blocks: [] });
-  clock.t += NOWPLAYING_DEFER_MS + 1;
-  assert.equal(auto()[0].behind, undefined);
-  assert.equal(store.focused("d").kind, "nowplaying");
-  // A timer that has gone off keeps the front whatever its age.
-  // (the store marks a timer done when it fires; the rule reads that flag, so a listing with one is enough here)
-  store.closeAll("d");
-  const { window: tw } = store.put("d", { kind: "timer", name: "Eggs", title: "Eggs", seconds: 1 });
-  clock.t += NOWPLAYING_DEFER_MS * 2;
-  const rang = autoNowPlaying({ store: { list: () => [{ ...tw, done: true }], put: store.put }, deviceId: "d", caps: SCREEN, title: "Now playing", now: clock.t });
-  assert.equal(rang.at(-1).behind, true);
+  assert.equal(auto()[0].behind, true);
+  assert.equal(store.focused("d").kind, "content");
   // Full: nothing is pushed out.
   store.closeAll("d");
   for (const t of ["A", "B", "C", "D"]) store.put("d", { kind: "timer", name: t, title: t, seconds: 600 });
@@ -563,4 +559,46 @@ test("smoke F4: the no-model path says which verb it acted on, so the log tells 
   assert.equal(await verb("Pause."), "pause");
   assert.equal(await verb("Play."), "resume");
   assert.equal(await verb("Louder louder."), "volume_up");
+});
+
+test("review H1: a playback word acts on the music only — another object or the voice is never the playback (no fast path, no must-run), idle and over music", async () => {
+  const NOT = ["Turn down the lights.", "Turn up the heat.", "Turn up the thermostat a little", "turn down the AC please", "Pause the timer.", "Resume the timer.", "Mute the TV.",
+    "Mute notifications", "Pause the video", "Resume the recipe", "Speak louder please.", "Can you speak louder?", "Pause for a second, let me think", "Habla más alto", "mute the timer",
+    "Skip the small talk.", "Stop being silly.", "Talk quieter."];
+  const YES = ["Turn it up a bit.", "Could you turn the radio up a little so I can hear it?", "Turn up the volume please", "Mute the radio please", "Pause please", "Pause the music",
+    "Turn it down a little so we can talk", "Me subes el volumen de la radio un poquito porfa", "Next song"];
+  for (const q of NOT) assert.equal(asksTransport(q), false, q);
+  for (const q of YES) assert.equal(asksTransport(q), true, q);
+  const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two"] }])] });
+  for (const q of NOT) assert.equal(await s.say(q), null, `idle: ${q}`);
+  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  for (const q of NOT) assert.equal(await s.say(q), null, `over music: ${q}`);
+  assert.equal(s.sent.length, 0, "the music was never touched");
+});
+
+test("review M1: ordinary words that only SOUND like a call sign never start the radio with no model — they are asked about ('Did you mean …?'), and a yes takes it; a call-sign shape still plays", async () => {
+  // Made-up stations that sound like the reviewer's examples ("Keep the Faith" / "cup of tea" ≈ K-P-F-T, "cats you" ≈ K-T-S).
+  const calls = normalizeStations([{ name: "KBVD HD1", aliases: ["KBVD"], url: "https://stream.example.invalid/b1" }, { name: "KDZU", url: "https://stream.example.invalid/dz" }]);
+  for (const q of ["Play Keep the Faith.", "Play cup of tea.", "Play cats you.", "Play keep fit."]) {
+    const s = setup({ stations: calls });
+    const r = await s.say(q);
+    assert.match(r?.say || "", /^Did you mean (KBVD HD1|KDZU)\? Say yes or its name\.$/, q);
+    assert.equal(s.sent.filter((m) => m.action === "load").length, 0, `nothing plays: ${q}`);
+    if (q === "Play cup of tea.") { const y = await s.say("Yes."); assert.equal(y?.say, "Playing KBVD HD1.", "a yes takes it"); }
+  }
+  // The model's own call gets the same question — never a guessed station.
+  const s = setup({ stations: calls });
+  const r = await s.tool("crow_play")({ what: "Keep the Faith", source: "auto" }, "Play Keep the Faith.");
+  assert.equal(r.outcome, "choices");
+  assert.equal(s.sent.filter((m) => m.action === "load").length, 0);
+  // A one-sound-off hit with the radio named is asked about too, even on the model's call.
+  const one = await s.tool("crow_play")({ what: "KBVG", source: "radio" }, "Play KBVG on the radio.");
+  assert.equal(one.outcome, "choices", JSON.stringify(one));
+  assert.match(one.say, /^Did you mean KBVD HD1\?/);
+  assert.equal(s.sent.filter((m) => m.action === "load").length, 0);
+  // Call-sign shapes still play at once.
+  for (const q of ["Play KPVD.", "Play kay bee vee dee.", "Play Cub VD."]) {
+    const t = setup({ stations: calls });
+    assert.equal((await t.say(q))?.say, "Playing KBVD HD1.", q);
+  }
 });

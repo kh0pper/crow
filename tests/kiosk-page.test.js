@@ -278,7 +278,7 @@ test("session mode: the dashboard can stop the mic, audio and socket at once; Es
   for (const needle of ["halted = true", "clearTimeout(reconnectTimer)", "releaseAudio()", "ctx?.close()", "s?.close(1000"]) assert.ok(rel.includes(needle), needle);
   assert.match(block, /e\.key === "Escape" && window\.parent !== window\) window\.parent\.postMessage\("crow-talk-close", location\.origin\)/, "posted to this origin only, never '*'");
   const release = src.slice(src.indexOf("function releaseAudio()"), src.indexOf("function setBird("));
-  for (const needle of ["mic?.close()", "player?.flush()", "ctx?.suspend()"]) assert.ok(release.includes(needle), needle);
+  for (const needle of ["micGate.release()", "player?.flush()", "ctx?.suspend()"]) assert.ok(release.includes(needle), needle);   // the mic goes through the one gate (review H3)
   assert.doesNotMatch(src, /postMessage\([^)]*["']\*["']\)/);
 });
 
