@@ -9,22 +9,29 @@
  * up to RADIO_RETRIES times with a growing wait before anything is said; a stream that then plays
  * steadily for RADIO_STEADY_MS has its count set back, so an evening of listening survives hiccups.
  */
-/** r8 P2: the page gain is 10 dB per step of 10 (media-view levelOf): 90 is −10 dB, one step below full. */
-export const DEFAULT_VOLUME = 90;
-export const VOLUME_STEP = 10;
-/** The scale this build's volume caps are on (10 dB per step of 10). */
-export const VOLUME_SCALE = "db10";
 /**
- * The operator ruling (rev 7b, M2), re-derived for rev 8's 10 dB steps: a stored "Loudest volume" cap moves to the
- * loudest step on the 10 dB curve that is NOT louder than it was. Unmarked caps were a LINEAR gain (50 = −6 dB → 90 =
- * −10 dB); caps marked "db5" (rev 7, 5 dB per step: 80 = −10 dB → 90). A cap already on "db10", absent, or not a
- * number → undefined (nothing to move).
+ * Operator ruling (rev 8b): 0–100 is −50…0 dB on the page (media-view levelOf: 5 dB per 10; 0 = mute). One Louder/Quieter
+ * moves VOLUME_MOVE (20 = 10 dB, clearly heard); Quieter stops at VOLUME_FLOOR (10 = −45 dB, still heard) — only an
+ * explicit zero or "mute" silences. A spoken level ("volume 50") is that point on the scale (≈ −25 dB). The default is
+ * one Louder below full (80 = −10 dB). Levels are stored in steps of VOLUME_STEP.
+ */
+export const DEFAULT_VOLUME = 80;
+export const VOLUME_STEP = 10;
+export const VOLUME_MOVE = 20;
+export const VOLUME_FLOOR = 10;
+/** The scale this build's volume caps are on: −50…0 dB, 5 dB per 10 (the same curve rev 7 marked "db5"). */
+export const VOLUME_SCALE = "db5";
+/**
+ * The operator ruling (rev 7b, M2), re-derived for rev 8b: a stored "Loudest volume" cap moves to the loudest level on
+ * this scale that is NOT louder than it was. Unmarked caps were a LINEAR gain (50 = −6 dB → 80 = −10 dB); caps marked
+ * "db10" (rev 8, 10 dB per 10: 90 = −10 dB → 80). A cap already on "db5", absent, or not a number → undefined. Below the
+ * scale (a db10 cap of 50 or less, scratch only) → 10, the lowest cap the panel stores.
  */
 export function migrateMaxVolume(v, scale) {
   const n = Number(v);
   if (v == null || !Number.isFinite(n) || n <= 0 || scale === VOLUME_SCALE) return undefined;
-  const db = scale === "db5" ? (Math.min(100, n) - 100) / 2 : 20 * Math.log10(Math.min(100, n) / 100);
-  return Math.min(100, Math.max(10, Math.floor((100 + db) / 10 + 1e-9) * 10));
+  const db = scale === "db10" ? Math.min(100, n) - 100 : 20 * Math.log10(Math.min(100, n) / 100);
+  return Math.min(100, Math.max(10, Math.floor((100 + 2 * db) / 10 + 1e-9) * 10));
 }
 export const MAX_QUEUE = 50;
 export const TITLE_MAX = 80;
@@ -60,6 +67,8 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
   const devs = new Map();
   const dev = (id) => { let d = devs.get(id); if (!d) { d = { queue: [], index: -1, item: null, state: "idle", volume: DEFAULT_VOLUME, muted: false, seq: 0, lost: null, origin: null, retries: 0, retry: null }; devs.set(id, d); } return d; };
   const live = (id) => { const d = devs.get(id); return d && d.item ? d : null; };
+  /** One Quieter from v: VOLUME_MOVE down, never below VOLUME_FLOOR (a level already at or under it stays). */
+  const quieter = (v) => { const cur = Number(v) || 0; return cur <= VOLUME_FLOOR ? cur : Math.max(VOLUME_FLOOR, cur - VOLUME_MOVE); };
   const step = (v, max = 100) => Math.max(0, Math.min(Math.min(100, Math.max(VOLUME_STEP, max)), Math.round(v / VOLUME_STEP) * VOLUME_STEP));
   const loadMsg = (d, extra = {}) => ({ type: "media", action: "load", id: d.item.id, form: "audio", url: d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, volume: d.volume, muted: d.muted, ...extra });
   const isRadio = (d) => d.item.source === "radio";
@@ -149,6 +158,8 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
     stop(id) { const d = live(id); if (!d) return null; end(id, d); return "stopped"; },
     next(id) { const d = live(id); if (!d) return null; if (d.index + 1 >= d.queue.length) return "end"; load(id, d, d.index + 1); return "playing"; },
     previous(id) { const d = live(id); if (!d) return null; if (d.index < 1) return "end"; load(id, d, d.index - 1); return "playing"; },
+    /** The level one Quieter gives from the current one (play.js uses the same rule). */
+    quieterLevel: (id) => quieter(live(id)?.volume),
     /** → the new volume, or null with no session. Changing the level un-mutes. */
     volume(id, { delta, set }, maxVolume = 100) {
       const d = live(id); if (!d) return null;
@@ -188,8 +199,8 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       const verb = msg && typeof msg.do === "string" ? msg.do : "";
       if (!TOUCH_VERBS.includes(verb)) return;
       const max = Number(device?.kiosk_settings?.max_volume) || 100;
-      if (verb === "volume_up") api.volume(id, { delta: VOLUME_STEP }, max);
-      else if (verb === "volume_down") api.volume(id, { delta: -VOLUME_STEP }, max);
+      if (verb === "volume_up") api.volume(id, { delta: VOLUME_MOVE }, max);
+      else if (verb === "volume_down") api.volume(id, { set: quieter(live(id)?.volume) }, max);
       else if (verb === "mute") api.mute(id, true);
       else if (verb === "unmute") api.mute(id, false);
       else api[verb](id);

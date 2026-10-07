@@ -61,7 +61,7 @@ test("T1 play: a station by its name plays with no model; the reply names it and
   const r = await s.say("Play Morning Mix.");
   assert.deepEqual(r, { say: "Playing Morning Mix.", tier: "t1", events: [] });
   const m = s.last();
-  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 90, false], "r8 P2: the default level is 90 (−10 dB)");
+  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 80, false], "r8b: the default level is 80 (−10 dB)");
   assert.match(m.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
   assert.ok(!JSON.stringify(s.sent).includes("example.invalid"), "no stream address reaches the page");
   for (const q of ["Put on Morning Mix, please.", "Listen to the mix", "Pon la radio Morning Mix", "Hey Crow, play WXYZ two", "Play w x y z too", "Play Morning Mix on the radio", "Quiero escuchar Morning Mix"]) {
@@ -136,7 +136,7 @@ test("an explicit play is heard: mute is cleared and a volume of zero comes back
   assert.deepEqual([s.last().title, s.last().volume, s.last().muted], ["WXYZ HD2", 30, false]);
   await s.say("Volume zero.");
   await s.say("Play Morning Mix.");
-  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 90], "back to the default level (r8 P2: 90)");
+  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 80], "back to the default level (r8b: 80)");
 });
 
 test("two to four candidates are spoken as a question, and nothing plays", async () => {
@@ -284,9 +284,10 @@ test("T0 transport phrases fire only while something plays, act at once and say 
   assert.equal((await act("Keep going.")).action, "play");
   assert.equal((await act("Pause the music, please.")).action, "pause");
   assert.equal((await act("Play.")).action, "play");
-  assert.equal((await act("Louder.")).volume, 60);
-  assert.equal((await act("Turn it up.")).volume, 70);
-  assert.equal((await act("Turn it down.")).volume, 60);
+  // r8b: each request moves 20 (10 dB).
+  assert.equal((await act("Louder.")).volume, 70);
+  assert.equal((await act("Turn it up.")).volume, 90);
+  assert.equal((await act("Turn it down.")).volume, 70);
   assert.equal((await act("That's too loud.")).volume, 50);
   assert.deepEqual([(await act("Volume four.")).volume, (await act("Set the volume to 60 percent.")).volume, (await act("Volume 7")).volume], [40, 60, 70]);
   assert.equal((await act("Mute.")).muted, true);
@@ -298,7 +299,7 @@ test("T0 transport phrases fire only while something plays, act at once and say 
   await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
   assert.equal((await act("Pausa.", s.es)).action, "pause");
   assert.equal((await act("Sigue con la música.", s.es)).action, "play");
-  assert.equal((await act("Más alto.", s.es)).volume, 80);
+  assert.equal((await act("Más alto.", s.es)).volume, 90);
   assert.equal((await act("Bájale.", s.es)).volume, 70);
   assert.equal((await act("Volumen a cinco.", s.es)).volume, 50);
   assert.equal((await act("Siguiente canción.", s.es)).title, "Two");
@@ -456,7 +457,7 @@ test("crow_wm through the model: playback verbs are in its list only while this 
   await playMix(s);
   assert.deepEqual(await wm({ do: "pause" }), { ok: true, outcome: "done", say: "Okay.", final: true });
   assert.equal(s.last().action, "pause");
-  for (const [verb, check] of [["resume", (m) => m.action === "load"], ["volume_down", (m) => m.volume === 40], ["volume_up", (m) => m.volume === 50], ["mute", (m) => m.muted === true], ["unmute", (m) => m.muted === false], ["stop", (m) => m.action === "stop"]]) {
+  for (const [verb, check] of [["resume", (m) => m.action === "load"], ["volume_down", (m) => m.volume === 30], ["volume_up", (m) => m.volume === 50], ["mute", (m) => m.muted === true], ["unmute", (m) => m.muted === false], ["stop", (m) => m.action === "stop"]]) {
     assert.equal((await wm({ do: verb })).ok, true, verb);
     assert.ok(check(s.last()), `${verb}: ${JSON.stringify(s.last())}`);
   }
@@ -753,7 +754,7 @@ test("r8 P1: with the item already PAUSED, every pause-family form ('Pause.', 'P
 });
 
 test("r8 P3: STT forms of the short commands seen in probes act like the words ('Louders.', 'Louderth', 'Quiter.', 'Louder. Thank you.'), only while something plays", async () => {
-  for (const [q, v] of [["Louders.", 60], ["Louderth", 60], ["Quiter.", 40], ["Louder. Thank you.", 60], ["Quieter, thanks.", 40]]) {
+  for (const [q, v] of [["Louders.", 70], ["Louderth", 70], ["Quiter.", 30], ["Louder. Thank you.", 70], ["Quieter, thanks.", 30]]) {
     const s = setup();
     await playMix(s);
     const r = await s.say(q);
@@ -779,9 +780,26 @@ test("r8 P1 (b): a model's playback call can never invert the request — 'Pause
   await s.say("Play.");
   const v0 = s.media.current("d").volume;
   await wm({ do: "volume_down" }, "Louder.");
-  assert.equal(s.media.current("d").volume, v0 + 10, "the sentence's own verb ran");
+  assert.equal(s.media.current("d").volume, v0 + 20, "the sentence's own verb ran");
   await wm({ do: "volume_down" }, "Could you make it a bit softer?");
   assert.equal(s.media.current("d").volume, v0, "no fast-path reading of the sentence: the model's verb runs");
   await wm({ do: "pause" }, "What's playing right now?");
   assert.deepEqual(seen, ["resume->pause", "volume_down->volume_up", "volume_down", "pause"]);
+});
+
+
+test("r8b (operator ruling): each Louder/Quieter moves 20 on 0–100 (10 dB); Quieter stops at 10 (−45 dB, still heard), never at mute; 'Volume five.' and 'Set the volume to 50.' are 50 (−25 dB); 'Volume zero.' mutes", async () => {
+  const s = setup();
+  await s.say("Play Morning Mix."); s.audible();
+  assert.equal(s.media.current("d").volume, 80, "the default");
+  const levels = [];
+  for (let i = 0; i < 5; i++) { await s.say("Quieter."); levels.push(s.media.current("d").volume); }
+  assert.deepEqual(levels, [60, 40, 20, 10, 10], "four Quieters from the default reach the floor; a fifth stays there");
+  for (const q of ["Volume five.", "Set the volume to 50.", "Volume 50 percent."]) { await s.say(q); assert.equal(s.media.current("d").volume, 50, q); }
+  await s.say("Louder."); assert.equal(s.media.current("d").volume, 70);
+  await s.say("Louder."); await s.say("Louder."); assert.equal(s.media.current("d").volume, 100, "clamped at full");
+  await s.say("Volume zero."); assert.equal(s.media.current("d").volume, 0, "an explicit zero is silence");
+  // The window's buttons move the same 10 dB.
+  s.media.command("d", { do: "volume_up" }, { kiosk_settings: {} });
+  assert.equal(s.media.current("d").volume, 20);
 });

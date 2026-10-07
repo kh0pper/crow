@@ -346,23 +346,25 @@ test("r7 G9: pause/resume in the state already re-send it to the page (the page 
   assert.equal(s.media.stateOf("d"), "blocked");
 });
 
-test("r8 P2 (operator ruling M2, re-derived for 10 dB steps): a stored cap becomes the loudest step on the 10 dB curve that is not louder than it was — from the old linear scale (unmarked) or from rev 7's 5 dB scale ('db5'); a cap already on the 10 dB scale is not moved", async () => {
-  const { migrateMaxVolume } = await import("../bundles/kiosk/server/media.js");
+test("r8b (operator rulings M2 + volume range): a stored cap moves to the loudest level on the −50…0 dB scale ('db5') that is not louder than it was — from the old linear scale (unmarked) or rev 8's 10 dB scale ('db10'); a 'db5' cap is already on this scale", async () => {
+  const { migrateMaxVolume, VOLUME_SCALE } = await import("../bundles/kiosk/server/media.js");
   const { levelOf } = await import("../bundles/kiosk/public/media-view.js");
-  const linear = { 100: 100, 90: 90, 80: 90, 70: 90, 60: 90, 50: 90, 40: 90, 30: 80, 20: 80, 10: 80 };
+  assert.equal(VOLUME_SCALE, "db5");
+  const linear = { 100: 100, 90: 90, 80: 90, 70: 90, 60: 90, 50: 80, 40: 80, 30: 70, 20: 70, 10: 60 };
   for (const [old, want] of Object.entries(linear)) {
     const v = migrateMaxVolume(Number(old));
     assert.equal(v, want, `linear ${old}`);
-    assert.ok(levelOf(v, false) <= Number(old) / 100 + 1e-12, `never louder than before (linear ${old})`);
-    assert.ok(v === 100 || levelOf(v + 10, false) > Number(old) / 100, `the loudest step that is not louder (linear ${old})`);
+    assert.ok(levelOf(v, false) <= Number(old) / 100 + 1e-12, `never louder (linear ${old})`);
+    assert.ok(v === 100 || levelOf(v + 10, false) > Number(old) / 100, `the loudest level not louder (linear ${old})`);
   }
-  const db5 = { 100: 100, 90: 90, 80: 90, 70: 80, 60: 80, 50: 70, 10: 50 };
-  for (const [old, want] of Object.entries(db5)) {
-    const v = migrateMaxVolume(Number(old), "db5");
-    assert.equal(v, want, `db5 ${old}`);
-    assert.ok(levelOf(v, false) <= 10 ** ((Number(old) - 100) / 40) + 1e-12, `never louder (db5 ${old})`);
+  const db10 = { 100: 100, 90: 80, 80: 60, 70: 40, 60: 20 };
+  for (const [old, want] of Object.entries(db10)) {
+    const v = migrateMaxVolume(Number(old), "db10");
+    assert.equal(v, want, `db10 ${old}`);
+    assert.ok(levelOf(v, false) <= 10 ** ((Number(old) - 100) / 20) + 1e-12, `never louder (db10 ${old})`);
   }
-  assert.equal(migrateMaxVolume(70, "db10"), undefined, "already on this scale: nothing to move");
-  assert.equal(migrateMaxVolume(undefined), undefined, "absent stays absent (no cap)");
+  assert.equal(migrateMaxVolume(50, "db10"), 10, "below the scale's floor: the lowest cap the panel stores (rev 8 scratch only)");
+  assert.equal(migrateMaxVolume(70, "db5"), undefined, "already on this scale");
+  assert.equal(migrateMaxVolume(undefined), undefined);
   assert.equal(migrateMaxVolume("x"), undefined);
 });

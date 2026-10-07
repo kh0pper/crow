@@ -104,9 +104,9 @@ export function normalizeKioskSettings(input, prior) {
     } else if (src.profile === null || src.profile === "") { delete out.profile; delete out.profile_source; }   // back to "not set"
   }
   if (!KIOSK_PROFILE_CHOICES.includes(out.profile)) { delete out.profile; delete out.profile_source; }
-  // Kiosk rev 8 (P2): a cap saved by this build is on the 10 dB-per-step scale ("db10"); a rev 7 cap keeps its "db5" mark
-  // until the one-time migration moves it. Unknown marks are dropped; a mark is never set from input on its own.
-  if ("max_volume" in src) { const n = Number.parseInt(src.max_volume, 10); if (Number.isFinite(n)) { out.max_volume = Math.min(100, Math.max(10, Math.round(n / 10) * 10)); out.max_volume_scale = "db10"; } }
+  // Kiosk rev 8b: a cap saved by this build is on the −50…0 dB scale ("db5"); a rev 8 cap keeps its "db10" mark until the
+  // one-time migration moves it. Unknown marks are dropped; a mark is never set from input on its own.
+  if ("max_volume" in src) { const n = Number.parseInt(src.max_volume, 10); if (Number.isFinite(n)) { out.max_volume = Math.min(100, Math.max(10, Math.round(n / 10) * 10)); out.max_volume_scale = "db5"; } }
   if (out.max_volume_scale !== undefined && (!["db5", "db10"].includes(out.max_volume_scale) || !("max_volume" in out))) delete out.max_volume_scale;
   for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS) && !KIOSK_OPTIONAL_KEYS.has(k)) delete out[k];
   return out;

@@ -11,7 +11,7 @@
  */
 import { result, fill, flat, joinNames } from "./executor.js";
 import { spokenWords, sameAt } from "./phrases.js";
-import { cleanTitle, VOLUME_STEP } from "./media.js";
+import { cleanTitle, VOLUME_MOVE } from "./media.js";
 import { SourceUnavailable } from "./sources/index.js";
 
 /** How long "Which one?" waits for its answer. */
@@ -188,7 +188,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       // r7 G10: "already playing" must be true where it is heard: the play is sent to the page again (it may be silent).
       if (cur.state === "paused") { media.resume(id); changed = true; } else media.resume(id);
       if (cur.muted) { media.mute(id, false); changed = true; }
-      if (cur.volume === 0) { media.volume(id, { delta: VOLUME_STEP }, max); changed = true; }
+      if (cur.volume === 0) { media.volume(id, { delta: VOLUME_MOVE }, max); changed = true; }
       return changed ? line : result(true, "playing", fill(S.say_already_playing, { title: r.title }), { title: r.title, effect: false });
     }
     if (!media.play(id, r.playables, { maxVolume: max, origin: { source: r.source, candidateId: r.candidateId } })) return ctx.strict ? null : result(false, "not_found", fill(S.say_play_not_found, { what: r.title.slice(0, 60) }));
@@ -244,8 +244,9 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       // The end of the queue is said aloud even with no model: silence would read as "not heard".
       case "next": case "next_track": return media.next(id) === "end" ? result(true, "done", S.say_no_next, { effect: false }) : quiet(ctx, S);
       case "previous": case "previous_track": return media.previous(id) === "end" ? result(true, "done", S.say_no_previous, { effect: false }) : quiet(ctx, S);
-      case "volume_up": if (!cur.muted && cur.volume >= Math.min(100, max)) return result(true, "done", S.say_volume_max, { effect: false }); media.volume(id, { delta: VOLUME_STEP }, max); return quiet(ctx, S);
-      case "volume_down": media.volume(id, { delta: -VOLUME_STEP }, max); return quiet(ctx, S);
+      case "volume_up": if (!cur.muted && cur.volume >= Math.min(100, max)) return result(true, "done", S.say_volume_max, { effect: false }); media.volume(id, { delta: VOLUME_MOVE }, max); return quiet(ctx, S);
+      // Operator ruling (rev 8b): 10 dB a request; Quieter stops at the floor, never at mute.
+      case "volume_down": media.volume(id, { set: media.quieterLevel(id) }, max); return quiet(ctx, S);
       case "volume": { const v = Number(i.value); if (!Number.isFinite(v)) return noop(ctx, S.say_done); media.volume(id, { set: v }, max); return quiet(ctx, S); }
       case "mute": if (cur.muted) return noop(ctx, S.say_media_muted_already); media.mute(id, true); return quiet(ctx, S);
       case "unmute": if (!cur.muted) return noop(ctx, S.say_media_unmuted_already); media.mute(id, false); return quiet(ctx, S);

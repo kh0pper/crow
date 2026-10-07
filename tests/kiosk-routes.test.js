@@ -1281,25 +1281,24 @@ test("re-review L-a (wired): the save refuses a command-word name or spoken name
   await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
 });
 
-test("r8 P2 (wired): at boot each display's stored cap moves once to the equally-or-less loud step on the 10 dB curve — from the old linear scale or rev 7's 'db5'; a cap saved on this build, and no cap, are left alone; a second run changes nothing", async () => {
+test("r8b (wired): at boot each display's stored cap moves once to the equally-or-less loud level on the −50…0 dB scale — from the old linear scale or rev 8's 'db10'; a cap saved on this build ('db5'), and no cap, are left alone; a second run changes nothing", async () => {
   const KIOSK_DEVICES_KEY = "meta_glasses_devices";   // the device store's own settings key
-  for (const id of ["kiosk-mv-50", "kiosk-mv-10", "kiosk-mv-100", "kiosk-mv-new", "kiosk-mv-none", "kiosk-mv-db5"]) await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
-  await store.updateDeviceProfiles(db(), "kiosk-mv-new", { kiosk_settings: { max_volume: 70 } });        // saved by this build: marked db10
-  // What older builds stored: a linear cap with no mark, and a rev-7 cap marked db5 (written as those builds would have).
+  for (const id of ["kiosk-mv-50", "kiosk-mv-10", "kiosk-mv-100", "kiosk-mv-new", "kiosk-mv-none", "kiosk-mv-db10"]) await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-mv-new", { kiosk_settings: { max_volume: 70 } });        // saved by this build: marked db5
   const rows = (await raw.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [KIOSK_DEVICES_KEY] })).rows;
   const list = JSON.parse(rows[0].value);
-  const old = { "kiosk-mv-50": { max_volume: 50 }, "kiosk-mv-10": { max_volume: 10 }, "kiosk-mv-100": { max_volume: 100 }, "kiosk-mv-db5": { max_volume: 70, max_volume_scale: "db5" } };
+  const old = { "kiosk-mv-50": { max_volume: 50 }, "kiosk-mv-10": { max_volume: 10 }, "kiosk-mv-100": { max_volume: 100 }, "kiosk-mv-db10": { max_volume: 70, max_volume_scale: "db10" } };
   for (const d of list) if (old[d.id]) d.kiosk_settings = { ...d.kiosk_settings, ...old[d.id] };
   await raw.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key = ?", args: [JSON.stringify(list), KIOSK_DEVICES_KEY] });
   const cap = async (id) => (await store.findDevice(db(), id))?.kiosk_settings || {};
   const migrated = await rt.migrateVolumeCaps();
   assert.equal(migrated, 4);
-  assert.deepEqual([(await cap("kiosk-mv-50")).max_volume, (await cap("kiosk-mv-10")).max_volume, (await cap("kiosk-mv-100")).max_volume, (await cap("kiosk-mv-db5")).max_volume, (await cap("kiosk-mv-new")).max_volume], [90, 80, 100, 80, 70]);
-  assert.equal((await cap("kiosk-mv-50")).max_volume_scale, "db10");
-  assert.equal((await cap("kiosk-mv-db5")).max_volume_scale, "db10");
+  assert.deepEqual([(await cap("kiosk-mv-50")).max_volume, (await cap("kiosk-mv-10")).max_volume, (await cap("kiosk-mv-100")).max_volume, (await cap("kiosk-mv-db10")).max_volume, (await cap("kiosk-mv-new")).max_volume], [80, 60, 100, 40, 70]);
+  assert.equal((await cap("kiosk-mv-50")).max_volume_scale, "db5");
+  assert.equal((await cap("kiosk-mv-db10")).max_volume_scale, "db5");
   assert.equal("max_volume" in (await cap("kiosk-mv-none")), false, "no cap: none made up");
   assert.equal(await rt.migrateVolumeCaps(), 0, "never twice");
-  assert.equal((await cap("kiosk-mv-50")).max_volume, 90);
+  assert.equal((await cap("kiosk-mv-50")).max_volume, 80);
 });
 
 test("r8 P1 (wired): a model-routed turn's metrics carry the playback verb the model asked for, and the one that ran when the sentence's own verb was kept (fixed words)", async () => {

@@ -366,16 +366,19 @@ test("review H2: a resume after pause-while-listening that the browser refuses i
   assert.deepEqual(t.events(), ["m2:playing", "m2:error:stalled"]);
 });
 
-test("r8 P2 (was r7 G7): each volume step of 10 is 10 dB on the element (5 dB was still barely heard on a phone), 0 or muted is silence, 100 is full; the default (90) is −10 dB, one step below full", async () => {
+test("r8b (operator ruling): 0–100 is −50…0 dB on the element (5 dB per 10; 0 or muted is silence); the default (80) is −10 dB; a spoken 50 is −25 dB", async () => {
   const { levelOf } = await import("../bundles/kiosk/public/media-view.js");
-  const { DEFAULT_VOLUME, VOLUME_STEP } = await import("../bundles/kiosk/server/media.js");
+  const { DEFAULT_VOLUME, VOLUME_MOVE } = await import("../bundles/kiosk/server/media.js");
   const db = (a) => 20 * Math.log10(a);
   assert.equal(levelOf(100, false), 1);
-  assert.equal(levelOf(0, false), 0);
+  assert.equal(levelOf(0, false), 0, "0 is mute");
   assert.equal(levelOf(70, true), 0);
-  for (let v = 20; v <= 100; v += VOLUME_STEP) assert.ok(Math.abs(db(levelOf(v, false)) - db(levelOf(v - VOLUME_STEP, false)) - 10) < 1e-9, `step at ${v}`);
-  assert.equal(DEFAULT_VOLUME, 90);
-  assert.ok(Math.abs(db(levelOf(DEFAULT_VOLUME, false)) + 10) < 1e-9);
+  for (let v = 20; v <= 100; v += 10) assert.ok(Math.abs(db(levelOf(v, false)) - db(levelOf(v - 10, false)) - 5) < 1e-9, `5 dB per 10 at ${v}`);
+  assert.ok(Math.abs(db(levelOf(10, false)) + 45) < 1e-9, "the lowest non-zero level is −45 dB: quiet, still heard");
+  assert.ok(Math.abs(db(levelOf(50, false)) + 25) < 1e-9, "volume 50 ≈ −25 dB");
+  assert.equal(DEFAULT_VOLUME, 80);
+  assert.ok(Math.abs(db(levelOf(DEFAULT_VOLUME, false)) + 10) < 1e-9, "default: one Louder below full");
+  assert.equal(VOLUME_MOVE, 20, "one Louder/Quieter = 20 = 10 dB");
 });
 
 test("r7b M3: the server's state sent again as the same item fixes a page that disagrees — paused/blocked → it plays, playing → it pauses — and never reloads it; a page that holds another item, or none, gets this one", async () => {
