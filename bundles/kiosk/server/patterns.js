@@ -423,15 +423,17 @@ const TRANSPORT_KEYWORDS = Object.freeze({ louder: "volume_up", quieter: "volume
 // r8 P3: how speech-to-text wrote the short commands in probes and smokes ("Louders.", "Quiter.", "Pons." for "Pause").
 const TRANSPORT_ALONE = Object.freeze({ lauder: "volume_up", louders: "volume_up", louderth: "volume_up", quiter: "volume_down", paws: "pause", pons: "pause" });
 const TRANSPORT_FILLER = new Set(["it", "that", "this", "the", "music", "song", "track", "radio", "station", "a", "bit", "little", "lot", "much", "more", "way", "even", "still",
-  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora",
-  // r8 P3: a "Thank you." speech-to-text adds after a short command ("Pause. Thank you.").
-  "thank", "thanks", "you"]);
+  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora"]);
 export const TRANSPORT_MAX_WORDS = 6;
 /** → a playback verb ("volume_up", "pause", "next", …) or null. The caller acts on it only while something plays. */
 export function transportWords(transcript) {
   const all = plain(transcript);
   if (!all) return null;
-  const w = stripPolite(all);
+  let w = stripPolite(all);
+  // r8 P3 / r8b L1: a TRAILING "thank you" / "thanks" (speech-to-text adds one after a short command) is dropped; anywhere
+  // else ("You stop.", "Thank you, next.") it is part of a sentence.
+  if (w.length > 2 && w[w.length - 2] === "thank" && w[w.length - 1] === "you") w = w.slice(0, -2);
+  else if (w.length > 1 && w[w.length - 1] === "thanks") w = w.slice(0, -1);
   if (!w.length || w.length > TRANSPORT_MAX_WORDS) return null;
   if (w.length === 1 && Object.hasOwn(TRANSPORT_ALONE, w[0])) return TRANSPORT_ALONE[w[0]];
   let verb = null;

@@ -803,3 +803,14 @@ test("r8b (operator ruling): each Louder/Quieter moves 20 on 0–100 (10 dB); Qu
   s.media.command("d", { do: "volume_up" }, { kiosk_settings: {} });
   assert.equal(s.media.current("d").volume, 20);
 });
+
+test("r8b (review L1): only a TRAILING 'thank you' / 'thanks' is filler — 'You stop.', 'Stop you.', 'Thank you, stop.', 'Thanks, next.', 'Skip you.', 'Mute you.' never act with no model; 'Pause. Thank you.' and 'Louder, thanks.' still do", async () => {
+  const s = setup();
+  await playMix(s);
+  for (const q of ["You stop.", "Stop you.", "Thank you, stop.", "Thank you, next.", "Thanks, next.", "Skip you.", "Mute you."]) {
+    s.sent.length = 0;
+    assert.equal(await s.say(q), null, q);
+    assert.equal(s.sent.length, 0, `${q}: nothing changed`);
+  }
+  for (const q of ["Louder, thanks.", "Pause. Thank you."]) assert.ok(["t0", "t1"].includes((await s.say(q))?.tier), q);
+});
