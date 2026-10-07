@@ -208,9 +208,11 @@ export function createVoiceTurnRunner(deps) {
       }
       return tts.neg ? null : Buffer.concat(parts);
     }
+    let chars = 0;
     const speak = async (text, hard) => {
       const t = String(text || "").trim();
       if (!t || off(hard)) return;
+      chars += t.length;
       const mp3 = await collect(t, hard);
       if (mp3 && !off(hard)) { begin(); emit(mp3, hard, true); }
     };
@@ -219,6 +221,8 @@ export function createVoiceTurnRunner(deps) {
     say.force = (text) => speak(text, true);
     /** Whether any answer audio (not the filler) has left the server this turn. */
     say.answered = () => answered;
+    /** Characters handed to TTS this turn (the filler excluded): a reply's length for the metrics line (kiosk r7b H3). */
+    say.chars = () => chars;
     say.filler = async () => {
       if (off(false)) return;
       const key = `${tts.profile.id}|${tts.voice}|${tts.adapter.name}`;
@@ -987,6 +991,7 @@ export function createVoiceTurnRunner(deps) {
         if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
       }
       timings.total_ms = now() - t0;
+      if (say) timings.spoken_chars = say.chars();
       if (executor) { try { await executor.close(); } catch {} }
     }
   }

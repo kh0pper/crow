@@ -495,7 +495,7 @@ test("review M3: the page's offline clear outlasts the server's view of a silent
 // ---- Revision 7 (re-smoke 2026-10-07, G12/G13/G15: the page did not settle after an answer) ----
 
 test("r7 G12: a reply whose sources never end (the audio clock stalled) is drained by the player's own watchdog — bounded, once, reported as a stall", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const { ctx, started } = fakeCtx();                       // its clock never moves and onended never fires by itself
   const ev = { drained: 0, stalls: [] };
   const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: (info) => ev.stalls.push(info) });
@@ -517,7 +517,7 @@ test("r7 G12: a reply whose sources never end (the audio clock stalled) is drain
 });
 
 test("r7 G12: sources that end normally never trip the watchdog; a later sentence re-arms it from its own end", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const { ctx, started } = fakeCtx();
   const ev = { drained: 0, stalls: 0 };
   const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: () => ev.stalls++ });
@@ -534,7 +534,7 @@ test("r7 G12: sources that end normally never trip the watchdog; a later sentenc
 });
 
 test("r7 G12: a decode that never answers cannot hold the queue — the sentence is dropped after DECODE_MAX_MS and the reply still drains", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const { ctx, started } = fakeCtx();
   ctx.decodeAudioData = () => new Promise(() => {});        // never resolves
   const ev = { drained: 0 };
@@ -573,4 +573,99 @@ test("r7 G12: the turn's report says whether its reply stalled and the audio con
   assert.equal(sanitizeClientMetrics({ turn_id: "t", tts_stalled: "yes", ctx_state: "<b>" }).tts_stalled, false);
   assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: "<b>" }).ctx_state, null);
   for (const s of ["running", "suspended", "interrupted", "closed"]) assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: s }).ctx_state, s);
+});
+
+
+// ---- Revision 7b (review of rev 7: H1, H3, M1, L3) ----
+import { settleDecision } from "../bundles/kiosk/public/state.js";
+
+test("r7b M1: a reply whose audio starts late but then runs (a Bluetooth sink waking, a slow route change) is never cut; one that stops advancing is", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx, started } = fakeCtx();
+  const ev = { drained: 0, stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: (i) => ev.stalls.push(i) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(96000)); await tick();             // 2 s of audio
+  t.mock.timers.tick(2000);                                  // the clock has not moved at all for 2 s …
+  ctx.currentTime += 0.5;                                    // … then the sink wakes up and runs
+  t.mock.timers.tick(DRAIN_GRACE_MS + 100);                  // past the first look (scheduled end + grace)
+  assert.equal(ev.stalls.length, 0, "not cut while the clock is still moving");
+  for (let i = 0; i < 4; i++) { t.mock.timers.tick(500); ctx.currentTime += 0.5; }
+  started[0].onended();
+  assert.deepEqual([ev.drained, ev.stalls.length], [1, 0], "it played to its end");
+  // Frozen from the start: cut, and the stall says the clock did not move.
+  p.push(new ArrayBuffer(48000)); await tick();
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.stalls.length, 1);
+  assert.equal(ev.stalls[0].clockMoved, false);
+  assert.equal(ev.drained, 2);
+});
+
+test("r7b M1: a clock that keeps creeping cannot hold a reply forever — the cap is twice its length plus 5 s", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx } = fakeCtx();
+  const ev = { stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained() {}, onStall: (i) => ev.stalls.push(i) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); await tick();             // 1 s of audio; its source never ends
+  for (let ms = 0; ms < 20_000; ms += 250) { t.mock.timers.tick(250); ctx.currentTime += 0.001; }
+  assert.equal(ev.stalls.length, 1, "cut by the cap");
+  assert.equal(ev.stalls[0].clockMoved, true);
+});
+
+test("r7b H3: the player says how much audio a reply scheduled (counts only)", async (t) => {
+  const { ctx, started } = fakeCtx();
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained() {} });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); p.push(new ArrayBuffer(24000)); await tick();
+  assert.equal(p.audioMs, 1500);
+  p.begin("pcm", 24000, 2);
+  assert.equal(p.audioMs, 0, "a new reply starts from zero");
+  for (const s of started) s.onended?.();
+});
+
+test("r7b H1: with the REAL player, a reply that drains between two sentences before turn_done never lets the mic go; it goes once the turn is done and drained — follow-up on or off", async (t) => {
+  for (const config of [{ mic_per_turn: true }, { mic_per_turn: true, follow_up: true }]) {
+    const { ctx, started } = fakeCtx();
+    const log = [];
+    const turn = { id: "t1", ended: true, done: null, barged: false, followedUp: false, playAt: null, reason: "silence", source: "tap" };
+    const settle = () => { const d = settleDecision(turn, { current: turn, playing: p.playing, config }); if (d.followUp) log.push("follow_up"); if (d.release) log.push("release"); };
+    const p = createPlayer(ctx, { onLevel() {}, onFirstPlay: () => { turn.playAt ??= 1; }, onDrained: settle });
+    p.begin("pcm", 24000, 1);
+    p.push(new ArrayBuffer(4800)); await tick();
+    started[0].onended();                                   // the first clause ended; the next sentence is not here yet
+    assert.deepEqual(log, [], `a dry spell mid-reply: nothing (${JSON.stringify(config)})`);
+    p.push(new ArrayBuffer(4800)); await tick();
+    turn.done = { aborted: false, timings: {} }; settle();  // turn_done while the second sentence plays
+    assert.deepEqual(log, [], "turn_done while audio plays: still nothing");
+    started[1].onended();                                   // done and drained
+    assert.deepEqual(log, [config.follow_up ? "follow_up" : "release"], "exactly one: the follow-up keeps the mic (one switch per conversation), or the release");
+    p.flush();
+  }
+  // A follow-up turn that settles lets it go.
+  const fu = { id: "t2", ended: true, done: { aborted: false, timings: {} }, source: "follow_up", playAt: 1 };
+  assert.deepEqual(settleDecision(fu, { current: fu, playing: false, config: { mic_per_turn: true, follow_up: true } }), { followUp: false, release: true });
+  assert.deepEqual(settleDecision(fu, { current: null, playing: false, config: {} }), { followUp: false, release: false }, "not the current turn: nothing");
+});
+
+test("r7b H1/L3 (source): settle() takes settleDecision's answer, and on a drain the mic is let go BEFORE the music is un-held", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const settle = src.slice(src.indexOf("function settle("), src.indexOf("function chime("));
+  assert.match(settle, /settleDecision\(tn, \{ current: turn, playing: !!player\?\.playing, config \}\)/);
+  const drained = /onDrained: \(\) => \{([^}]*)\}/.exec(src)[1];
+  assert.ok(drained.indexOf("settle(turn)") >= 0 && drained.indexOf("settle(turn)") < drained.indexOf("renderBird()"), drained);
+});
+
+test("r7b H3: the turn report carries the reply's scheduled audio, and the stall's own evidence (clock moved, audio state AT the stall)", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, ttsStalled: true, ttsAudioMs: 4321.6, stall: { ctx_state: "running", clock_moved: false } }, {});
+  assert.deepEqual([m.tts_audio_ms, m.stall_ctx_state, m.stall_clock_moved], [4322, "running", false]);
+  const z = turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {});
+  assert.deepEqual([z.tts_audio_ms, z.stall_ctx_state, z.stall_clock_moved], [null, null, null]);
+  const c = sanitizeClientMetrics({ turn_id: "t", tts_audio_ms: 4322, stall_ctx_state: "interrupted", stall_clock_moved: true });
+  assert.deepEqual([c.tts_audio_ms, c.stall_ctx_state, c.stall_clock_moved], [4322, "interrupted", true]);
+  const bad = sanitizeClientMetrics({ turn_id: "t", tts_audio_ms: "x", stall_ctx_state: "<b>", stall_clock_moved: "yes" });
+  assert.deepEqual([bad.tts_audio_ms, bad.stall_ctx_state, bad.stall_clock_moved], [null, null, null]);
 });

@@ -18,6 +18,10 @@ export function sanitizeClientMetrics(m) {
     // r7 G12: the page's player ended a reply whose audio never finished by itself; the AudioContext state at the report.
     tts_stalled: m?.tts_stalled === true,
     ctx_state: CTX_STATES.has(m?.ctx_state) ? m.ctx_state : null,
+    // r7b H3: the reply's scheduled audio, and the stall's own evidence (the audio state at the stall, whether its clock moved).
+    tts_audio_ms: clampMs(m?.tts_audio_ms),
+    stall_ctx_state: CTX_STATES.has(m?.stall_ctx_state) ? m.stall_ctx_state : null,
+    stall_clock_moved: typeof m?.stall_clock_moved === "boolean" ? m.stall_clock_moved : null,
   };
 }
 
@@ -50,7 +54,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state, tts_audio_ms: c.tts_audio_ms, stall_ctx_state: c.stall_ctx_state, stall_clock_moved: c.stall_clock_moved });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

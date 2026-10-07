@@ -63,6 +63,17 @@ export function followUpDecision(turn, config, { playing }) {
   return turn.reason !== "no_speech" && turn.source !== "follow_up";
 }
 
+/**
+ * Review of rev 7 (H1): what the page does when a turn may have settled (turn_done, or a local drain). The mic goes
+ * only when THIS turn is done AND nothing plays — a drained gap between two sentences before turn_done is not the
+ * end; with follow-up on, the follow-up turn keeps the mic (one call-mode switch per conversation, review M4).
+ */
+export function settleDecision(tn, { current, playing, config }) {
+  if (!tn || tn !== current) return { followUp: false, release: false };
+  if (followUpDecision(tn, config, { playing })) return { followUp: true, release: false };
+  return { followUp: false, release: !!(tn.ended && tn.done && !playing) };
+}
+
 /** Ruling F9: how long an audio-expected turn may stay silent after turn_done before it is reported as a failure. */
 export const NO_AUDIO_WAIT_MS = 3000;
 const expectsAudio = (turn) => !turn.done.aborted && (!!turn.tts || turn.done.timings?.tts_first_chunk_ms != null);
@@ -92,6 +103,10 @@ export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null } = {})
     mic_open_ms: Number.isFinite(turn.micOpenMs) ? Math.round(turn.micOpenMs) : null,
     // r7 G12: the player had to end this turn's reply itself (its sources never ended), and the audio context's state.
     tts_stalled: turn.ttsStalled === true, ctx_state: ctxState,
+    // r7b H3: how much audio the reply scheduled, and at a stall: the audio state then and whether its clock had moved.
+    tts_audio_ms: Number.isFinite(turn.ttsAudioMs) ? Math.round(turn.ttsAudioMs) : null,
+    stall_ctx_state: turn.stall ? turn.stall.ctx_state : null,
+    stall_clock_moved: turn.stall ? turn.stall.clock_moved === true : null,
   };
 }
 /**

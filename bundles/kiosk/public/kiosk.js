@@ -8,7 +8,7 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
+  releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
   duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
@@ -274,8 +274,9 @@ async function ensureAudio() {
         if (turn && !turn.barged && turn.ttsSeq === seq && turn.playAt == null) turn.playAt = at;
         renderBird();
       },
-      onDrained: () => { renderBird(); if (turn) settle(turn); },
-      onStall: (info) => { if (turn) turn.ttsStalled = true; note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
+      // r7b L3: the mic (and its call audio mode) goes before the music is un-held.
+      onDrained: () => { if (turn) settle(turn); renderBird(); },
+      onStall: (info) => { if (turn) { turn.ttsStalled = true; turn.stall ??= { ctx_state: info.ctxState, clock_moved: info.clockMoved === true }; } note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
     });
   }
   if (!mic) {
@@ -347,9 +348,12 @@ function report(tn, force = false) {
 }
 /** Called on turn_done and on local drain — whichever comes last opens the follow-up mic. */
 function settle(tn) {
+  if (tn.tts && player) tn.ttsAudioMs = player.audioMs;   // r7b H3: the reply's scheduled audio (counts only)
   report(tn);
-  if (tn === turn && followUpDecision(tn, config, { playing: !!player?.playing })) { tn.followedUp = true; startTurn("follow_up"); }
-  else if (tn === turn && tn.ended && !player?.playing) releaseMicAfterTurn("settled");
+  // Review of rev 7 (H1): never on a dry spell mid-reply — only once this turn is done and nothing plays.
+  const d = settleDecision(tn, { current: turn, playing: !!player?.playing, config });
+  if (d.followUp) { tn.followedUp = true; startTurn("follow_up"); }
+  else if (d.release) releaseMicAfterTurn("settled");
 }
 function chime() {
   if (!ctx) return;

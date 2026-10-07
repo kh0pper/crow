@@ -1831,3 +1831,15 @@ test("r7 G3: tool-call syntax the model writes as text (a call for a tool it was
   await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Compare.", sink: ok.sink });
   assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Three is < four, and 5 > 2.");
 });
+
+test("r7b H3: every turn records how many characters it spoke (counts only) — the model's answer, a fast path's line, the fallback; the filler does not count", async () => {
+  const h = harness({ rounds: [[{ type: "content_delta", text: "Lisbon is the capital. It is on the coast." }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Capital of Portugal?", sink: h.sink });
+  assert.equal(r.timings.spoken_chars, "Lisbon is the capital. It is on the coast.".length - 1);
+  const f = harness();
+  const q = await f.runner.runVoiceTurn({ db: {}, device: f.device, transcript: "Pause.", sink: f.sink, fastPaths: async () => ({ say: "Okay.", events: [], tier: "t0" }) });
+  assert.equal(q.timings.spoken_chars, 5);
+  const s = harness();
+  const z = await s.runner.runVoiceTurn({ db: {}, device: s.device, transcript: "Pause.", sink: s.sink, fastPaths: async () => ({ say: "", events: [], tier: "t0" }) });
+  assert.equal(z.timings.spoken_chars, 0);
+});

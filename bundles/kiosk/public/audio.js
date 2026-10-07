@@ -10,6 +10,9 @@ const worklets = new WeakSet();
  * an mp3 decode that does not answer within DECODE_MAX_MS is dropped.
  */
 export const DRAIN_GRACE_MS = 2000;
+/** Review of rev 7 (M1): a reply is cut only once its audio clock has stopped moving — a late but running sink (a Bluetooth
+ *  speaker waking) re-arms the check — and never held past twice its length plus STALL_CAP_EXTRA_MS. */
+export const STALL_CAP_EXTRA_MS = 5000;
 export const DECODE_MAX_MS = 5000;
 export async function openMic(ctx, onFrame) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
@@ -68,7 +71,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = (
   analyser.connect(ctx.destination);
   const data = new Uint8Array(analyser.fftSize);
   const sources = new Set();
-  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0, muted = false, watch = null;
+  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0, muted = false, watch = null, lastClock = 0, capAt = 0, audioMs = 0;
   const startLevel = () => {
     if (level) return;
     level = setInterval(() => {                     // ~15 Hz beak level, only while audio plays
@@ -79,18 +82,25 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = (
     }, 66);
   };
   const stopLevel = () => { clearInterval(level); level = null; onLevel(0); };
-  const maybeDrained = () => { if (!sources.size && !pending) { clearTimeout(watch); watch = null; stopLevel(); onDrained(); } };
+  const maybeDrained = () => { if (!sources.size && !pending) { clearTimeout(watch); watch = null; capAt = 0; stopLevel(); onDrained(); } };
   const stopAll = () => { for (const s of sources) { s.onended = null; try { s.stop(); } catch {} } sources.clear(); };
-  // Armed from the last scheduled end (wall clock): sources still alive then never ended by themselves.
+  const left = () => Math.max(0, (nextAt - ctx.currentTime) * 1000);
+  // Looked at past the scheduled end + DRAIN_GRACE_MS: a clock that moved since the last look gets another look (M1).
+  const check = () => {
+    watch = null;
+    if (!sources.size) return;
+    const moved = ctx.currentTime > lastClock;
+    lastClock = ctx.currentTime;
+    if (moved && Date.now() < capAt) { watch = setTimeout(check, left() + DRAIN_GRACE_MS); return; }
+    onStall({ left: sources.size, ctxState: String(ctx.state || ""), clockMoved: moved });
+    stopAll(); nextAt = 0;
+    maybeDrained();
+  };
   const arm = () => {
     clearTimeout(watch);
-    watch = setTimeout(() => {
-      watch = null;
-      if (!sources.size) return;
-      onStall({ left: sources.size, ctxState: String(ctx.state || "") });
-      stopAll(); nextAt = 0;
-      maybeDrained();
-    }, Math.max(0, (nextAt - ctx.currentTime) * 1000) + DRAIN_GRACE_MS);
+    lastClock = ctx.currentTime;
+    capAt = Math.max(capAt, Date.now() + 2 * left() + STALL_CAP_EXTRA_MS);
+    watch = setTimeout(check, left() + DRAIN_GRACE_MS);
   };
   const decode = (buf) => new Promise((res, rej) => {
     const cap = setTimeout(() => rej(new Error("decode timeout")), DECODE_MAX_MS);
@@ -113,6 +123,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = (
     const when = Math.max(ctx.currentTime + 0.02, nextAt);
     src.start(when);
     nextAt = when + ab.duration;
+    audioMs += ab.duration * 1000;
     sources.add(src);
     src.onended = () => { sources.delete(src); maybeDrained(); };
     arm();
@@ -124,7 +135,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = (
   }
   return {
     // nextAt is NOT reset: an announcement that follows a turn queues after it instead of overlapping.
-    begin(c, sr, t = null) { codec = c === "mp3" ? "mp3" : "pcm"; rate = sr || 24000; first = true; tag = t; muted = false; },
+    begin(c, sr, t = null) { codec = c === "mp3" ? "mp3" : "pcm"; rate = sr || 24000; first = true; tag = t; muted = false; audioMs = 0; },
     push(buf) {
       if (muted) return;                            // in-flight audio from before a barge (until the next tts_start)
       const g = gen;
@@ -139,10 +150,12 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = (
       gen++;
       muted = true;
       pending = 0;
-      clearTimeout(watch); watch = null;
+      clearTimeout(watch); watch = null; capAt = 0;
       stopAll(); nextAt = 0; chain = Promise.resolve(); stopLevel();
     },
     get playing() { return sources.size > 0 || pending > 0; },
     get sampling() { return level != null; },
+    /** r7b H3: audio scheduled since the last begin() (ms; counts only). */
+    get audioMs() { return Math.round(audioMs); },
   };
 }
