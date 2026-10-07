@@ -319,7 +319,8 @@ test("a transport phrase that would change nothing in this state does not fire: 
   assert.deepEqual(await wm({ do: "unmute" }), { ok: true, outcome: "done", say: "The sound is already on.", final: true, effect: false });
   // paused
   await s.say("Pause.");
-  for (const q of ["Pause the music.", "Pausa la música."]) assert.equal(await s.say(q), null, `paused: ${q}`);
+  // r8 P1: every pause-family form while paused is answered with no model (it was "conversation" before).
+  for (const q of ["Pause the music.", "Pausa la música."]) assert.equal((await s.say(q))?.say, "", `paused: ${q}`);
   for (const q of ["Pause.", "Pausa."]) assert.equal((await s.say(q))?.tier, "t0", `paused, bare (r7 G9): ${q}`);
   assert.equal((await wm({ do: "pause" })).say, "It's already paused.");
   await s.say("Resume.");
@@ -582,7 +583,7 @@ test("r7 G9: a bare 'Pause.' / 'Play.' with something loaded is never left to th
     assert.deepEqual([r?.tier, r?.say], ["t0", ""], q);
     assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", true], `${q}: the current item is sent again, paused (r7b M3)`);
   }
-  assert.equal(await s.say("Pause it."), null, "a longer form in that state stays conversation, as before");
+  assert.equal((await s.say("Pause it."))?.say, "", "r8 P1: a longer pause form in that state is answered too");
   // The server believes it plays (a resume or a load the page never started): "Play." re-sends play — no model, nothing new.
   await s.say("Play."); s.sent.length = 0;
   const r = await s.say("Play.");
@@ -730,4 +731,57 @@ test("r7c N1 (operator ruling): while a choice is pending a bare 'Play.' is an a
   assert.equal((await o.say("Play."))?.say, "KBVD HD1 is already playing.");
   // Nothing pending: the M4 line.
   assert.equal((await setup().say("Play."))?.say, "Nothing is paused. What would you like to hear?");
+});
+
+// ---- Revision 8 (R7-S smoke 2026-10-07: P1 pause while paused, P3 a "Louder." that reached the model) ----
+
+test("r8 P1: with the item already PAUSED, every pause-family form ('Pause.', 'Paws.', 'Pause it.', 'Pause the music.', 'Pause, pause.', 'Pause. Thank you.') is answered with no model — quietly, the paused item sent again; nothing resumes", async () => {
+  for (const q of ["Pause.", "Paws.", "Paws", "Pause it.", "Pause the music.", "Pause, pause.", "Pause. Thank you.", "Pons.", "Pausa.", "Pausa la música."]) {
+    const s = setup();
+    await playMix(s);
+    await s.say("Pause.");
+    s.sent.length = 0;
+    const r = await s.say(q, q.startsWith("Pausa") ? s.es : s.ctx);
+    assert.ok(r && (r.tier === "t0" || r.tier === "t1"), `${q}: no model`);
+    assert.equal(r.say, "", q);
+    assert.equal(s.media.stateOf("d"), "paused", `${q}: still paused`);
+    assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", true], `${q}: the paused item sent again`);
+  }
+  // With nothing loaded they stay conversation.
+  const idle = setup();
+  for (const q of ["Paws.", "Pause it."]) assert.equal(await idle.say(q), null, q);
+});
+
+test("r8 P3: STT forms of the short commands seen in probes act like the words ('Louders.', 'Louderth', 'Quiter.', 'Louder. Thank you.'), only while something plays", async () => {
+  for (const [q, v] of [["Louders.", 60], ["Louderth", 60], ["Quiter.", 40], ["Louder. Thank you.", 60], ["Quieter, thanks.", 40]]) {
+    const s = setup();
+    await playMix(s);
+    const r = await s.say(q);
+    assert.ok(r && r.tier, `${q}: no model`);
+    assert.equal(s.last()?.volume, v, q);
+  }
+  const idle = setup();
+  for (const q of ["Louders.", "Quiter.", "Thank you."]) assert.equal(await idle.say(q), null, q);
+  const s = setup(); await playMix(s);
+  assert.equal(await s.say("Thank you."), null, "thanks alone is conversation");
+});
+
+test("r8 P1 (b): a model's playback call can never invert the request — 'Pause.' + the model's resume keeps it paused (truthfully); 'Louder.' + volume_down turns it UP; the verb the model asked for is reported (a fixed word)", async () => {
+  const seen = [];
+  const s = setup();
+  s.ctx.onModelVerb = (v, kept) => seen.push(kept ? `${v}->${kept}` : v);
+  await playMix(s);
+  await s.say("Pause.");
+  const wm = s.tool("crow_wm");
+  const r = await wm({ do: "resume" }, "Pause.");
+  assert.equal(s.media.stateOf("d"), "paused", "never resumed");
+  assert.equal(r.say, "It's already paused.");
+  await s.say("Play.");
+  const v0 = s.media.current("d").volume;
+  await wm({ do: "volume_down" }, "Louder.");
+  assert.equal(s.media.current("d").volume, v0 + 10, "the sentence's own verb ran");
+  await wm({ do: "volume_down" }, "Could you make it a bit softer?");
+  assert.equal(s.media.current("d").volume, v0, "no fast-path reading of the sentence: the model's verb runs");
+  await wm({ do: "pause" }, "What's playing right now?");
+  assert.deepEqual(seen, ["resume->pause", "volume_down->volume_up", "volume_down", "pause"]);
 });

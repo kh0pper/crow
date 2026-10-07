@@ -236,7 +236,9 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       // r7 G9: in the state already, the state is sent to the page again (it may disagree). With no model only the bare
       // word is answered here (quietly) — "Play." once went to the model, which started the news; longer forms
       // ("keep going", "pause the music") stay conversation in that state, as before.
-      case "pause": if (cur.state === "paused" && ctx.strict && i.bare !== true) return null; return media.pause(id) === "already" && !ctx.strict ? noop(ctx, S.say_media_paused_already) : quiet(ctx, S);
+      // r8 P1: a pause-family request while the item is already paused ("Paws.", "Pause it.") is answered here as well —
+      // quietly, the paused item sent again — never handed to a model that could resume it.
+      case "pause": return media.pause(id) === "already" && !ctx.strict ? noop(ctx, S.say_media_paused_already) : quiet(ctx, S);
       case "resume": if (cur.state !== "paused" && ctx.strict && i.bare !== true) return null; return media.resume(id) === "already" && !ctx.strict ? noop(ctx, S.say_media_playing_already) : quiet(ctx, S);
       case "stop": media.stop(id); return quiet(ctx, S);
       // The end of the queue is said aloud even with no model: silence would read as "not heard".

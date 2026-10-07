@@ -12,8 +12,8 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic } from "./patterns.js";
-import { spokenWords, KIND_NOUNS } from "./phrases.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords } from "./patterns.js";
+import { spokenWords, KIND_NOUNS, matchT0 } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
 
@@ -39,6 +39,13 @@ export function cardUpdate(transcript, store, deviceId) {
   return namesIt ? card.title : null;
 }
 
+/** r8 P1: the one playback verb a sentence asks for when it reads as a no-model command ("Pause.", "Paws.", "Louder."), else null. */
+function playbackVerbOf(transcript) {
+  if (typeof transcript !== "string" || !transcript) return null;
+  const t0 = matchT0(transcript);
+  const v = t0 ? t0.verb : transportWords(transcript);
+  return v && MEDIA_VERBS.includes(v) ? v : null;
+}
 /** Review of rev 7 (L2): words with no vowel that are not call signs. */
 const NOT_CALL_SIGNS = new Set(["hmm", "hmmm", "mmm", "mrs", "shh", "shhh", "psst", "brr", "brrr", "grr", "tsk", "pfft", "nth", "pst", "zzz"]);
 const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
@@ -143,7 +150,13 @@ export function createDisplayTools(ctx) {
           return legacy.execute(a, turn);
         }
         if (!enumOf("crow_wm", "do").includes(a?.do)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "bad_argument", say: "Nothing was done: do must be one of the listed values.", final: false });
-        return run({ verb: a.do, name: str(a?.name, 40) }, turn);
+        // r8 P1 (R7-S smoke: "Pause." on a paused stream, the model's call resumed it): when the sentence itself reads as
+        // one playback verb with no model ("Pause.", "Louder."), a different playback verb from the model never runs —
+        // the sentence's own verb does. The verb the model asked for is reported (a fixed word) for the turn's metrics.
+        const said = playbackVerbOf(turn?.transcript);
+        const kept = said && MEDIA_VERBS.includes(a.do) && a.do !== said ? said : null;
+        try { ctx.onModelVerb?.(a.do, kept); } catch { /* a metrics hook never breaks the call */ }
+        return run({ verb: kept || a.do, name: str(a?.name, 40) }, turn);
       },
     },
   };

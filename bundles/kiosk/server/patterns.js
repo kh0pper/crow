@@ -420,9 +420,12 @@ export function compoundParts(transcript) {
 // ("lauder", "paws") count only as the whole utterance.
 const TRANSPORT_KEYWORDS = Object.freeze({ louder: "volume_up", quieter: "volume_down", softer: "volume_down", pause: "pause", unpause: "resume", resume: "resume",
   stop: "stop", skip: "next", next: "next", mute: "mute", unmute: "unmute", pausa: "pause", siguiente: "next", silencia: "mute", reanuda: "resume" });
-const TRANSPORT_ALONE = Object.freeze({ lauder: "volume_up", paws: "pause" });
+// r8 P3: how speech-to-text wrote the short commands in probes and smokes ("Louders.", "Quiter.", "Pons." for "Pause").
+const TRANSPORT_ALONE = Object.freeze({ lauder: "volume_up", louders: "volume_up", louderth: "volume_up", quiter: "volume_down", paws: "pause", pons: "pause" });
 const TRANSPORT_FILLER = new Set(["it", "that", "this", "the", "music", "song", "track", "radio", "station", "a", "bit", "little", "lot", "much", "more", "way", "even", "still",
-  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora"]);
+  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora",
+  // r8 P3: a "Thank you." speech-to-text adds after a short command ("Pause. Thank you.").
+  "thank", "thanks", "you"]);
 export const TRANSPORT_MAX_WORDS = 6;
 /** → a playback verb ("volume_up", "pause", "next", …) or null. The caller acts on it only while something plays. */
 export function transportWords(transcript) {

@@ -288,7 +288,7 @@ export function createKioskRuntime(deps) {
    * sources this instance has right now, what crow_open may open (now playing, once a source exists),
    * the media session and its verbs, and this display's volume cap.
    */
-  const displayCtx = (device, caps, emit) => {
+  const displayCtx = (device, caps, emit, hooks = {}) => {
     const lang = device.kiosk_settings?.lang === "es" ? "es" : "en";
     const sources = registry.kinds();
     return {
@@ -296,6 +296,7 @@ export function createKioskRuntime(deps) {
       items: sources.length ? [{ id: "now_playing", title: STRINGS[lang].now_playing_title, aliases: lang === "es" ? ["lo que suena"] : ["whats playing"] }] : [],
       media, maxVolume: Number(device.kiosk_settings?.max_volume) || 100,
       ...verbs,
+      ...(typeof hooks.onModelVerb === "function" ? { onModelVerb: hooks.onModelVerb } : {}),
     };
   };
   /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation), with this display's media line. */
@@ -306,7 +307,7 @@ export function createKioskRuntime(deps) {
    */
   const sttPromptFor = (device) => (profile) => stationSttPrompt(device, profile, stations);
   const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
-  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
+  const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -325,11 +326,13 @@ export function createKioskRuntime(deps) {
     runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
       // r7 G9 evidence: the server's media state before and after every display turn (fixed words, on the metrics line).
       const mediaBefore = media.stateOf(device.id);
+      // r8 P1: the playback verbs the model asked crow_wm for, and the sentence's own verb where that one ran instead (fixed words).
+      const asked = [], kept = [];
       const r = await deps.voice.runVoiceTurn({
         db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
-        ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
+        ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }),
       });
-      if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id) };
+      if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id), ...(asked.length ? { model_verbs: asked } : {}), ...(kept.length ? { model_verbs_kept: kept } : {}) };
       return r;
     }),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.

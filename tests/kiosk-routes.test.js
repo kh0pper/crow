@@ -919,7 +919,7 @@ test("turn check: ok only when the clock took the no-model path, the plain quest
 
 test("one set of turn options: the runtime's display turn (and so the turn check) is built by displayTurnOptions, the function the evaluation runs", () => {
   const rt = readFileSync(new URL("../bundles/kiosk/server/runtime.js", import.meta.url), "utf8");
-  assert.match(rt, /const turnOptions = \(device, caps, tz, emit\) => displayTurnOptions\(/);
+  assert.match(rt, /const turnOptions = \(device, caps, tz, emit, hooks\) => displayTurnOptions\(/);
   assert.equal((rt.match(/createDisplayTools\(/g) || []).length, 2, "one in displayTurnOptions, one for the bind-time fit");
 });
 
@@ -1298,4 +1298,38 @@ test("r7b M2 (wired, operator ruling): at boot each display's old linear 'Loudes
   assert.equal("max_volume" in (await cap("kiosk-mv-none")), false, "no cap: none made up");
   assert.equal(await rt.migrateVolumeCaps(), 0, "never twice");
   assert.equal((await cap("kiosk-mv-50")).max_volume, 80);
+});
+
+test("r8 P1 (wired): a model-routed turn's metrics carry the playback verb the model asked for, and the one that ran when the sentence's own verb was kept (fixed words)", async () => {
+  const r = createKioskRuntime(runtimeDeps({
+    voice: {
+      runVoiceTurn: async (o) => {
+        const wm = o.extraTools.find((x) => x.definition.name === "crow_wm");
+        await wm.execute({ do: "resume" }, { transcript: "Pause." });
+        return { route: "fast", timings: {} };
+      },
+      speakText: async () => true,
+    },
+  }));
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  let ws = null;
+  try {
+    const { token } = await store.pairDevice(db(), { id: "kiosk-r8-mv", name: "MV", device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), "kiosk-r8-mv", { bound_bot_id: "household" });
+    ws = new WebSocket(b.replace("http", "ws") + "/api/kiosk/session");
+    const msgs = [];
+    await new Promise((res) => ws.on("open", res));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-r8-mv", token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((res) => setTimeout(res, 10));
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "mv" }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((res) => setTimeout(res, 10));
+    const done = msgs.find((m) => m.type === "turn_done");
+    assert.deepEqual(done.timings.model_verbs, ["resume"]);
+    assert.deepEqual(done.timings.model_verbs_kept, ["pause"]);
+  } finally { ws?.terminate(); r.stop(); s.close(); }
 });
