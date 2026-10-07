@@ -366,15 +366,15 @@ test("review H2: a resume after pause-while-listening that the browser refuses i
   assert.deepEqual(t.events(), ["m2:playing", "m2:error:stalled"]);
 });
 
-test("r7 G7: the display volume is perceptual — each step of 10 is 5 dB on the element (it was +1.6 dB at the default), 0 or muted is silence, 100 is full; the server's default (80) is −10 dB, two audible steps below full", async () => {
+test("r8 P2 (was r7 G7): each volume step of 10 is 10 dB on the element (5 dB was still barely heard on a phone), 0 or muted is silence, 100 is full; the default (90) is −10 dB, one step below full", async () => {
   const { levelOf } = await import("../bundles/kiosk/public/media-view.js");
   const { DEFAULT_VOLUME, VOLUME_STEP } = await import("../bundles/kiosk/server/media.js");
   const db = (a) => 20 * Math.log10(a);
   assert.equal(levelOf(100, false), 1);
   assert.equal(levelOf(0, false), 0);
   assert.equal(levelOf(70, true), 0);
-  for (let v = 20; v <= 100; v += VOLUME_STEP) assert.ok(Math.abs(db(levelOf(v, false)) - db(levelOf(v - VOLUME_STEP, false)) - 5) < 1e-9, `step at ${v}`);
-  assert.equal(DEFAULT_VOLUME, 80);
+  for (let v = 20; v <= 100; v += VOLUME_STEP) assert.ok(Math.abs(db(levelOf(v, false)) - db(levelOf(v - VOLUME_STEP, false)) - 10) < 1e-9, `step at ${v}`);
+  assert.equal(DEFAULT_VOLUME, 90);
   assert.ok(Math.abs(db(levelOf(DEFAULT_VOLUME, false)) + 10) < 1e-9);
 });
 

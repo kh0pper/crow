@@ -429,8 +429,8 @@ export function createKioskRuntime(deps) {
   }
 
   /**
-   * the rev 7b operator ruling (M2): once, at boot, each display's "Loudest volume" cap stored on the old linear scale (no
-   * `max_volume_scale` mark) moves to the equally loud step of the 5 dB curve, never louder; the save marks it, so it
+   * The operator ruling (rev 7b, M2; rev 8 re-derived): once, at boot, each display's "Loudest volume" cap stored on an older
+   * scale (no mark = linear, or rev 7's "db5") moves to the equally-or-less loud step of the 10 dB curve; the save marks it "db10", so it
    * never runs twice. → how many moved (counts only). Never throws.
    */
   async function migrateVolumeCaps() {
@@ -438,13 +438,13 @@ export function createKioskRuntime(deps) {
     try {
       for (const d of await withDb(kioskDevices)) {
         const ks = d.kiosk_settings || {};
-        if (!("max_volume" in ks) || ks.max_volume_scale === "db5") continue;
-        const v = migrateMaxVolume(ks.max_volume);
+        if (!("max_volume" in ks)) continue;
+        const v = migrateMaxVolume(ks.max_volume, ks.max_volume_scale);   // undefined when already on this build's scale
         if (v === undefined) continue;
         await withDb((db) => deps.deviceStore.updateDeviceProfiles(db, d.id, { kiosk_settings: { max_volume: v } }));
         moved++;
       }
-      if (moved) log(`[kiosk] loudest-volume caps moved to the 5 dB scale: ${moved}`);
+      if (moved) log(`[kiosk] loudest-volume caps moved to the 10 dB scale: ${moved}`);
     } catch (err) { log(`[kiosk] loudest-volume cap migration: ${err.message}`); }
     return moved;
   }

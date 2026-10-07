@@ -61,7 +61,7 @@ test("T1 play: a station by its name plays with no model; the reply names it and
   const r = await s.say("Play Morning Mix.");
   assert.deepEqual(r, { say: "Playing Morning Mix.", tier: "t1", events: [] });
   const m = s.last();
-  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 80, false], "r7 G7: the default level is 80");
+  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 90, false], "r8 P2: the default level is 90 (−10 dB)");
   assert.match(m.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
   assert.ok(!JSON.stringify(s.sent).includes("example.invalid"), "no stream address reaches the page");
   for (const q of ["Put on Morning Mix, please.", "Listen to the mix", "Pon la radio Morning Mix", "Hey Crow, play WXYZ two", "Play w x y z too", "Play Morning Mix on the radio", "Quiero escuchar Morning Mix"]) {
@@ -136,7 +136,7 @@ test("an explicit play is heard: mute is cleared and a volume of zero comes back
   assert.deepEqual([s.last().title, s.last().volume, s.last().muted], ["WXYZ HD2", 30, false]);
   await s.say("Volume zero.");
   await s.say("Play Morning Mix.");
-  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 80], "back to the default level (r7 G7: 80)");
+  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 90], "back to the default level (r8 P2: 90)");
 });
 
 test("two to four candidates are spoken as a question, and nothing plays", async () => {

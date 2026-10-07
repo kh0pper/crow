@@ -18,8 +18,8 @@ export const STALL_MS = 15_000;
 /** F9: offline the chip dims; after this the element stops (≥ server grace + 2 pings). */
 export const OFFLINE_CLEAR_MS = 60_000;
 
-/** r7 G7: 0–100 → element gain, 5 dB per 10 (linear steps were inaudible); 0 or muted is silence. */
-export const levelOf = (v, muted) => (muted || !(v > 0) ? 0 : Math.min(1, 10 ** ((Math.min(100, v) - 100) / 40)));
+/** r8 P2: 0–100 → element gain, 10 dB per step of 10 (5 dB was barely heard); 0 or muted is silence. */
+export const levelOf = (v, muted) => (muted || !(v > 0) ? 0 : Math.min(1, 10 ** ((Math.min(100, v) - 100) / 20)));
 const level = levelOf;
 
 /** Ducks to DUCK_FACTOR at once; restores RESTORE_DELAY_MS after release, over RESTORE_MS. */

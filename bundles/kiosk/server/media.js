@@ -9,18 +9,22 @@
  * up to RADIO_RETRIES times with a growing wait before anything is said; a stream that then plays
  * steadily for RADIO_STEADY_MS has its count set back, so an evening of listening survives hiccups.
  */
-/** r7 G7: the page gain is 5 dB per 10 (media-view levelOf): 80 is −10 dB, two audible steps below full. */
-export const DEFAULT_VOLUME = 80;
+/** r8 P2: the page gain is 10 dB per step of 10 (media-view levelOf): 90 is −10 dB, one step below full. */
+export const DEFAULT_VOLUME = 90;
 export const VOLUME_STEP = 10;
+/** The scale this build's volume caps are on (10 dB per step of 10). */
+export const VOLUME_SCALE = "db10";
 /**
- * the rev 7b operator ruling (M2): a "Loudest volume" cap stored before the 5 dB curve was a LINEAR gain (50 = −6 dB). It
- * becomes the loudest step on the new curve that is not louder than it was (50 → 80 = −10 dB; 10 → 60 = −20 dB;
- * 100 stays). Absent or not a number → undefined (no cap).
+ * The operator ruling (rev 7b, M2), re-derived for rev 8's 10 dB steps: a stored "Loudest volume" cap moves to the
+ * loudest step on the 10 dB curve that is NOT louder than it was. Unmarked caps were a LINEAR gain (50 = −6 dB → 90 =
+ * −10 dB); caps marked "db5" (rev 7, 5 dB per step: 80 = −10 dB → 90). A cap already on "db10", absent, or not a
+ * number → undefined (nothing to move).
  */
-export function migrateMaxVolume(v) {
+export function migrateMaxVolume(v, scale) {
   const n = Number(v);
-  if (v == null || !Number.isFinite(n) || n <= 0) return undefined;
-  return Math.min(100, Math.max(10, Math.floor((100 + 40 * Math.log10(Math.min(100, n) / 100)) / 10 + 1e-9) * 10));
+  if (v == null || !Number.isFinite(n) || n <= 0 || scale === VOLUME_SCALE) return undefined;
+  const db = scale === "db5" ? (Math.min(100, n) - 100) / 2 : 20 * Math.log10(Math.min(100, n) / 100);
+  return Math.min(100, Math.max(10, Math.floor((100 + db) / 10 + 1e-9) * 10));
 }
 export const MAX_QUEUE = 50;
 export const TITLE_MAX = 80;
