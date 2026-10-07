@@ -429,3 +429,11 @@ test("the run-5 set is kept verbatim and spent; a run refuses any line shared wi
   assert.equal(heldOutSpent([{ say: HELD_OUT_R5[0].say }]), true);
   assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
 });
+
+test("the run-6 set is kept verbatim and spent; a run refuses any line shared with r1 to r6", async () => {
+  const { HELD_OUT_R6 } = await import("../scripts/kiosk-eval/held-out-r6.mjs");
+  assert.equal(HELD_OUT_R6.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R6), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R6[0].say }]), true);
+  assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
+});
