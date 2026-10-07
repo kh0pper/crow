@@ -1843,3 +1843,35 @@ test("r7b H3: every turn records how many characters it spoke (counts only) — 
   const z = await s.runner.runVoiceTurn({ db: {}, device: s.device, transcript: "Pause.", sink: s.sink, fastPaths: async () => ({ say: "", events: [], tier: "t0" }) });
   assert.equal(z.timings.spoken_chars, 0);
 });
+
+
+test("r7b M5: the loop filter never drops real repeated speech — Spanish, laughter, emphasis, a title, long numbers — and still catches the smoke's loops", async () => {
+  const { degenerateTranscript } = await import("../servers/gateway/voice/turn-helpers.js");
+  const speech = ["No, no, no, no, no, no!", "Sí, sí, sí, sí, sí, sí.", "Ay ay ay ay ay ay", "Bye bye bye bye bye bye.", "Very very very very very very good",
+    "Play 'Rain Rain Rain Rain Rain Rain'", "What is 100000000 divided by two?", "Play 1111111111.", "Hahahahahahaha", "No, no, no, no, no, no, no.", "Más, más, más, más, más, más, más alto",
+    "Call 0000000000", "Play the song Na Na Na Na Na Na Na"];
+  for (const t of speech) assert.equal(degenerateTranscript(t), false, t);
+  const loops = ["K-" + "P-".repeat(27) + "P", "K-P-F-T-F-T-L-" + "A-".repeat(14) + "A", "Louder, louder, louder, louder, louder, louder, louder, and louder.",
+    "Play K" + "P".repeat(28), "the the the the the the the the", "Pausa pausa pausa pausa pausa pausa pausa pausa pausa"];
+  for (const t of loops) assert.equal(degenerateTranscript(t), true, t);
+});
+
+test("r7b L1: tool syntax in the other common formats is never heard either — [TOOL_CALLS], <|python_tag|>, <function_call>, upper-case tags, a bare JSON call — split across deltas too", async () => {
+  const leaks = [
+    'Sure. [TOOL_CALLS] [{"name": "crow_play", "arguments": {"what": "KDEB"}}]',
+    'Sure. <|python_tag|>{"name": "crow_play", "parameters": {"what": "KDEB"}}',
+    'Sure. <function_call>{"name": "crow_play"}</function_call>',
+    'Sure. <TOOL_CALL>{"name": "crow_play"}</TOOL_CALL>',
+    'Sure. {"name": "crow_play", "arguments": {"what": "KDEB"}}',
+  ];
+  for (const leak of leaks) for (const cuts of [[], [7, 9, 12]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KDEB.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    assert.equal(caption.trim(), "Sure.", `${leak} (cuts ${cuts})`);
+    assert.ok(!h.calls.spoken.join(" ").includes("crow_play"), leak);
+  }
+  const ok = harness({ rounds: [[{ type: "content_delta", text: "Use [brackets] and {braces} as you like; 3 < 4." }, { type: "done" }]] });
+  await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
+  assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Use [brackets] and {braces} as you like; 3 < 4.");
+});

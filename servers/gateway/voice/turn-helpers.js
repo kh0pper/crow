@@ -39,8 +39,10 @@ export function createThinkGate() {
  * for a tool it was not offered). Everything from the first marker on is dropped for the rest of the round; a
  * trailing "<…" that could still become a marker is held until the next delta. `cut` says whether it happened.
  */
-const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<parameter=", "<|tool_call"];
-export const TOOL_SYNTAX = /<\/?tool_call|<\/?function[=>]|<parameter=|<\|tool_call/;
+// Review of rev 7 (L1): Qwen/Hermes XML tags, Mistral's [TOOL_CALLS], Llama's <|python_tag|>, <function_call>, any case,
+// and a bare JSON call object. Lower case; the gate compares case-insensitively.
+const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<function_call", "<parameter=", "<|tool_call", "<|python_tag|>", "[tool_calls]", '{"name"', '{ "name"'];
+export const TOOL_SYNTAX = /<\/?tool_call|<\/?function(?:_call)?[=>]|<parameter=|<\|tool_call|<\|python_tag\|>|\[TOOL_CALLS\]|\{\s*"name"\s*:/i;
 export function stripToolSyntax(text) { const s = String(text ?? ""); const m = TOOL_SYNTAX.exec(s); return m ? s.slice(0, m.index).trimEnd() : s; }
 export function createToolSyntaxGate() {
   let buf = "", cut = false;
@@ -51,8 +53,9 @@ export function createToolSyntaxGate() {
       buf += text;
       const m = TOOL_SYNTAX.exec(buf);
       if (m) { cut = true; const out = buf.slice(0, m.index); buf = ""; return out; }
-      const lt = buf.lastIndexOf("<");
-      if (lt >= 0 && TOOL_MARKERS.some((k) => k.startsWith(buf.slice(lt)) && buf.length - lt < k.length)) { const out = buf.slice(0, lt); buf = buf.slice(lt); return out; }
+      const lt = Math.max(buf.lastIndexOf("<"), buf.lastIndexOf("["), buf.lastIndexOf("{"));
+      const tail = buf.slice(lt).toLowerCase();
+      if (lt >= 0 && TOOL_MARKERS.some((k) => k.startsWith(tail) && tail.length < k.length)) { const out = buf.slice(0, lt); buf = buf.slice(lt); return out; }
       const out = buf; buf = ""; return out;
     },
     flush() { const out = cut ? "" : buf; buf = ""; return out; },
@@ -203,14 +206,19 @@ export function createConvoStore({ maxMessages = 24, idleMs = 15 * 60 * 1000, no
 
 /**
  * Is this transcript an STT repetition loop rather than speech (kiosk re-smoke 2026-10-07 G4: "K-P-P-P-P…",
- * "louder, louder, … and louder")? The same word or letter six times running, or a 1–3 character unit
- * repeated eight times inside one word. Ordinary repeats ("No, no, no, no.", "Ha ha ha ha") are speech.
+ * "louder, louder, … and louder")? Review of rev 7 (M5): real speech repeats too ("No, no, no, no, no, no!", "Sí, sí…",
+ * "very very … good", a title, "100000000"), so only: the same word eight times running; or six times running when
+ * that run is most of the transcript (≥ 60 % of its words) AND at least 40 characters long; or, inside one word that is
+ * not a number, a 1–3 character unit repeated twelve times or more.
  */
 export function degenerateTranscript(text) {
   const words = String(text || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   let run = 1;
-  for (let i = 1; i < words.length; i++) { run = words[i] === words[i - 1] ? run + 1 : 1; if (run >= 6) return true; }
-  return words.some((w) => w.length >= 8 && /(.{1,3})\1{7,}/u.test(w));
+  for (let i = 1; i < words.length; i++) {
+    run = words[i] === words[i - 1] ? run + 1 : 1;
+    if (run >= 8 || (run >= 6 && run / words.length >= 0.6 && run * (words[i].length + 1) >= 40)) return true;
+  }
+  return words.some((w) => w.length >= 12 && !/^\d+$/.test(w) && /(.{1,3})\1{11,}/u.test(w));
 }
 
 export function negotiatePcm(adapterName) {
