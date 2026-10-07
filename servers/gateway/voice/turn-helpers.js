@@ -35,6 +35,31 @@ export function createThinkGate() {
 }
 
 /**
+ * Tool-call syntax written as TEXT (kiosk re-smoke 2026-10-07 G3: the quick model wrote "<tool_call><function=crow_play>…"
+ * for a tool it was not offered). Everything from the first marker on is dropped for the rest of the round; a
+ * trailing "<…" that could still become a marker is held until the next delta. `cut` says whether it happened.
+ */
+const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<parameter=", "<|tool_call"];
+export const TOOL_SYNTAX = /<\/?tool_call|<\/?function[=>]|<parameter=|<\|tool_call/;
+export function stripToolSyntax(text) { const s = String(text ?? ""); const m = TOOL_SYNTAX.exec(s); return m ? s.slice(0, m.index).trimEnd() : s; }
+export function createToolSyntaxGate() {
+  let buf = "", cut = false;
+  return {
+    get cut() { return cut; },
+    feed(text) {
+      if (cut) return "";
+      buf += text;
+      const m = TOOL_SYNTAX.exec(buf);
+      if (m) { cut = true; const out = buf.slice(0, m.index); buf = ""; return out; }
+      const lt = buf.lastIndexOf("<");
+      if (lt >= 0 && TOOL_MARKERS.some((k) => k.startsWith(buf.slice(lt)) && buf.length - lt < k.length)) { const out = buf.slice(0, lt); buf = buf.slice(lt); return out; }
+      const out = buf; buf = ""; return out;
+    },
+    flush() { const out = cut ? "" : buf; buf = ""; return out; },
+  };
+}
+
+/**
  * Clause break for the FIRST chunk only (kiosk latency lever 3): , ; : or a dash
  * followed by whitespace (so "1,000" and "3:30" never split). Only taken when the
  * clause already holds FIRST_CLAUSE_MIN_WORDS words, so "Sure," or "Well," is not

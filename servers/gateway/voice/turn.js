@@ -9,7 +9,7 @@
  * NO AUDIO IS STORED: `opts.audio` is handed to the STT adapter and dropped.
  */
 import {
-  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript,
+  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
@@ -669,6 +669,7 @@ export function createVoiceTurnRunner(deps) {
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
+        const toolText = createToolSyntaxGate();   // r7 G3: tool-call syntax written as text is never heard
         const echo = createContextEchoGate(echoGuard);
         let content = "";
         let roundSpoken = 0;
@@ -722,7 +723,7 @@ export function createVoiceTurnRunner(deps) {
               if (ev.type === "content_delta" && ev.text) {
                 mark("llm_first_token_ms");
                 content += ev.text;
-                const spoken = echo.feed(think.feed(ev.text));
+                const spoken = echo.feed(toolText.feed(think.feed(ev.text)));
                 if (spoken && defer) deferred += spoken;
                 else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
@@ -756,8 +757,10 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
-        // Text the echo gate still held (it could have been the start of an echo) is decided now.
-        const tail = echo.flush();
+        // Text the gates still held (it could have been the start of tool syntax or of an echo) is decided now.
+        const held = toolText.flush();
+        if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
+        const tail = (held ? echo.feed(held) : "") + echo.flush();
         if (tail && !hold && !aborted() && !budgetHit) {
           if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
           sink.event({ type: "caption_delta", text: tail });

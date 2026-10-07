@@ -111,6 +111,10 @@ test("asking again for what is already on does not restart it (known by what was
   assert.deepEqual(await play({ what: "Blue Hour" }), { ok: true, outcome: "playing", say: "Blue Hour is already playing.", final: true, effect: false, title: "Blue Hour" });
   assert.equal(loads(), n, "on its second track, still that album: nothing reloads");
   assert.equal((await s.say("Play Blue Hour.")).say, "Blue Hour is already playing.", "the same at T1");
+  // r7 G10: "already playing" is only true if the page plays it: the play is sent to the page again (never a reload).
+  const before = s.sent.length;
+  await play({ what: "Blue Hour" });
+  assert.deepEqual(s.sent.slice(before).map((m) => m.action), ["play"], "re-sent, nothing reloaded");
   s.media.pause("d");
   assert.deepEqual([(await play({ what: "Blue Hour" })).say, s.last().action, loads()], ["Playing Blue Hour.", "play", n]);
   s.media.mute("d", true);
@@ -236,7 +240,8 @@ test("auto order: a sure hit in an earlier source wins; a station that only STAR
   await play({ what: "morning mix", source: "music" });
   assert.equal(s.last().title, "Not the station");
   await play({ what: "Morning Mix from my library" });
-  assert.equal(s.last().title, "Not the station", "the tail picks the source and is not searched for");
+  // (r7 G10: asking again for what is on re-sends "play", so the last LOAD is what was chosen.)
+  assert.equal(s.sent.filter((m) => m.action === "load").at(-1).title, "Not the station", "the tail picks the source and is not searched for");
   assert.equal(lib.calls.at(-1).what, "morning mix");
   // With no library, the tail is only words: there is nowhere else to look.
   const only = setup();

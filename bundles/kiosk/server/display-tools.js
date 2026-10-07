@@ -39,6 +39,8 @@ export function cardUpdate(transcript, store, deviceId) {
   return namesIt ? card.title : null;
 }
 
+const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
+
 /**
  * ctx = { store, deviceId, caps (effective: .windows, .max_windows), lang, sources, items, emit,
  * media?, resolvePlay?, openItem?, mediaVerb? } — see executor.js. → the voice turn's extraTools, in
@@ -71,7 +73,17 @@ export function createDisplayTools(ctx) {
     if (res.final === true && compound(turn?.transcript)) res.final = false;
     return JSON.stringify(res);
   };
-  const playWhen = (t) => mentionsPlay(t) || asksPlay(t);
+  // r7 G3: with radio presets, a station asked for in words STT mangled ("Playing, KDEB.", "Like, APFT.", "KTPF please")
+  // still OFFERS crow_play (never must-run): a play-word form or a call-sign-shaped word, outside a question.
+  const radioAsk = (t) => {
+    if (!(ctx.sources || []).includes("radio") || /\?\s*$/.test(String(t || ""))) return false;
+    const w = spokenWords(t) || [];
+    if (!w.length || QUESTION_WORDS.has(w[0])) return false;
+    // A call sign as STT writes one: a word with no vowel, or an all-capitals word of 3–6 letters with three consonants or more.
+    const caps = (String(t).match(/\b[A-Z]{3,6}\b/g) || []).some((x) => (x.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).length >= 3);
+    return caps || w.some((x) => /^play(s|ed|ing)?$/.test(x) || /^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x));
+  };
+  const playWhen = (t) => mentionsPlay(t) || asksPlay(t) || radioAsk(t);
   const openWhen = (t) => mentionsOpen(t, items);
   // Offered on showIntent (the executor's own test, so offered ⇒ executable) or a change to the open card.
   const showWhen = (t) => showIntent(t, items) || updates(t) !== null;

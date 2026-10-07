@@ -1811,3 +1811,23 @@ test("r7 (STT probe 2026-10-07): opts.sttHotwords reaches the STT as `hotwords` 
   assert.equal(forms[0].get("hotwords"), "WXYZ");
   assert.equal(forms[1].get("hotwords"), null);
 });
+
+test("r7 G3: tool-call syntax the model writes as text (a call for a tool it was not offered) is never captioned, spoken or kept — even split across deltas", async () => {
+  const leak = "Playing, KDEB. <tool_call>\n<function=crow_play>\n<parameter=what>\nKDEB\n</parameter>\n</function>\n</tool_call>";
+  for (const cuts of [[], [16, 20, 27], [17, 22, 40, 60]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KTPF.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    const spoken = h.calls.spoken.join(" ");
+    for (const bad of ["<", "tool_call", "function=", "parameter"]) {
+      assert.ok(!caption.includes(bad), `caption ${JSON.stringify(caption)} (cuts ${cuts})`);
+      assert.ok(!spoken.includes(bad), `spoken ${JSON.stringify(spoken)} (cuts ${cuts})`);
+    }
+    assert.match(caption, /^Playing, KDEB\.\s*$/);
+    assert.equal(r.timings.tool_text, true);
+  }
+  // Ordinary text with a "<" is untouched.
+  const ok = harness({ rounds: [[{ type: "content_delta", text: "Three is < four, and 5 > 2." }, { type: "done" }]] });
+  await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Compare.", sink: ok.sink });
+  assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Three is < four, and 5 > 2.");
+});

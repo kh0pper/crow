@@ -183,7 +183,8 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       // Asked for what is already on: nothing restarts. If it was paused or silent, it is brought back.
       const cur = media.current(id);
       let changed = false;
-      if (cur.state === "paused") { media.resume(id); changed = true; }
+      // r7 G10: "already playing" must be true where it is heard: the play is sent to the page again (it may be silent).
+      if (cur.state === "paused") { media.resume(id); changed = true; } else media.resume(id);
       if (cur.muted) { media.mute(id, false); changed = true; }
       if (cur.volume === 0) { media.volume(id, { delta: VOLUME_STEP }, max); changed = true; }
       return changed ? line : result(true, "playing", fill(S.say_already_playing, { title: r.title }), { title: r.title, effect: false });

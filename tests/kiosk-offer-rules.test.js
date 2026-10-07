@@ -427,3 +427,13 @@ test("R7-1: with a window open, 'teach me to …' never closes or steps it, and 
   const t = liveEs(ES_ITEMS);
   assert.equal(t.by.crow_wm.holdText("¿Me enseñas a usar el temporizador?"), false);
 });
+
+test("r7 G3: with radio presets, a sentence that asks to play a station is offered crow_play even when STT mangled it ('Playing, KDEB.', 'KTPF please', 'Like, APFT.'); questions and other displays are not", () => {
+  const t = tools();
+  for (const say of ["Playing, KDEB.", "KTPF please.", "Like, APFT.", "Lake APFD HD1.", "Plays KDBV.", "Played KTPF."]) assert.ok(t.offered(say).includes("crow_play"), say);
+  for (const say of ["What's playing?", "Who played the lead in that film?", "Is the TV on?", "What is the capital of Portugal?", "Tell me a short joke."]) assert.ok(!t.offered(say).includes("crow_play"), say);
+  const noRadio = tools({ sources: ["music"] });
+  for (const say of ["KTPF please.", "Like, APFT."]) assert.ok(!noRadio.offered(say).includes("crow_play"), `no radio presets: ${say}`);
+  // Offered only: nothing becomes must-run by it.
+  assert.equal(t.by.crow_play.must("Playing, KDEB."), false);
+});
