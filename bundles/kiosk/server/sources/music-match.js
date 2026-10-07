@@ -92,7 +92,9 @@ function spelledRuns(words) {
   for (let i = 0; i < words.length;) {
     let j = i;
     while (j < words.length && /^[a-z]$/.test(words[j])) j += 1;
-    if (j - i >= 3 && !(j - i === 3 && words[i] === "r" && words[i + 1] === "n" && words[i + 2] === "b")) for (let k = i; k < j; k += 1) keep[k] = true;
+    // r7b L5: "r n b" / "r b" after an article ("a r n b mix") is the genre, not a spelled name.
+    const core = words.slice(words[i] === "a" || words[i] === "i" ? i + 1 : i, j).join(" ");
+    if (j - i >= 3 && core !== "r n b" && core !== "r b") for (let k = i; k < j; k += 1) keep[k] = true;
     i = j > i ? j : i + 1;
   }
   return keep;

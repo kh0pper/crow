@@ -390,3 +390,9 @@ test("r7 (re-smoke R6-12): spelled initialisms with an n or an r b inside, thous
   assert.deepEqual(run("some r and b"), ["music:genre:rnb"]);
   assert.deepEqual(run("a n r tapes"), ["music:album:704"]);
 });
+
+test("r7b L5: a request with an article before 'r n b' / 'r b' still asks for the genre ('play a r n b mix', 'some a r b'); a spelled name stays a name", () => {
+  for (const g of ["a r n b", "a r b", "an r and b"]) assert.ok(compact(g).endsWith("rnb"), `${g} → ${compact(g)}`);
+  assert.equal(fold("d n q sessions"), "d n q sessions");
+  assert.equal(fold("a n r tapes"), "a n r tapes", "a spelled name that starts with A keeps its letters");
+});
