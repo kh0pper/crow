@@ -828,7 +828,7 @@ test("turn check (wired): loopback and the announce token only; fixed sentences 
   const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: "household" }) });
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.equal(j.version, "0.2.1");
+  assert.equal(j.version, JSON.parse(readFileSync(new URL("../bundles/kiosk/manifest.json", import.meta.url), "utf8")).version, "the bundle version from its manifest");
   assert.deepEqual(j.turns.map((t) => t.transcript), [TURN_CHECK.en[0], TURN_CHECK.en[1], TURN_CHECK.en[2], TURN_CHECK.en[2], TURN_CHECK.en[2]]);
   assert.deepEqual([j.ok, j.card_tries], [false, 3], "the stub never puts a card up: not ok, after three tries");
   const calls = turnCalls.slice(before);
