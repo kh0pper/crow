@@ -230,8 +230,11 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     if (!cur) return nothing(ctx, S);
     const max = maxVolume(ctx);
     switch (i.verb) {
-      case "pause": if (cur.state === "paused") return noop(ctx, S.say_media_paused_already); media.pause(id); return quiet(ctx, S);
-      case "resume": if (cur.state !== "paused") return noop(ctx, S.say_media_playing_already); media.resume(id); return quiet(ctx, S);
+      // r7 G9: in the state already, the state is sent to the page again (it may disagree). With no model only the bare
+      // word is answered here (quietly) — "Play." once went to the model, which started the news; longer forms
+      // ("keep going", "pause the music") stay conversation in that state, as before.
+      case "pause": if (cur.state === "paused" && ctx.strict && i.bare !== true) return null; return media.pause(id) === "already" && !ctx.strict ? noop(ctx, S.say_media_paused_already) : quiet(ctx, S);
+      case "resume": if (cur.state !== "paused" && ctx.strict && i.bare !== true) return null; return media.resume(id) === "already" && !ctx.strict ? noop(ctx, S.say_media_playing_already) : quiet(ctx, S);
       case "stop": media.stop(id); return quiet(ctx, S);
       // The end of the queue is said aloud even with no model: silence would read as "not heard".
       case "next": case "next_track": return media.next(id) === "end" ? result(true, "done", S.say_no_next, { effect: false }) : quiet(ctx, S);

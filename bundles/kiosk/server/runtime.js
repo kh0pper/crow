@@ -318,10 +318,16 @@ export function createKioskRuntime(deps) {
     storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
     // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
     displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
-      db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
-      ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
-    })),
+    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+      // r7 G9 evidence: the server's media state before and after every display turn (fixed words, on the metrics line).
+      const mediaBefore = media.stateOf(device.id);
+      const r = await deps.voice.runVoiceTurn({
+        db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
+        ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
+      });
+      if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id) };
+      return r;
+    }),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
       ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) }))

@@ -274,6 +274,18 @@ test("ruling C: KIOSK_DENY_TOOLS denies cross-bot escapes, and every voice turn 
   ws.close();
 });
 
+test("r7 G9 (wired): every display turn records the server's media state before and after it (a fixed word, counts-only evidence)", async () => {
+  const { ws, msgs } = await connect("kiosk-g9");
+  ws.send(JSON.stringify({ type: "turn_start", turn_id: "g9" }));
+  ws.send(Buffer.alloc(8000));
+  ws.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((r) => setTimeout(r, 10));
+  const done = msgs.find((m) => m.type === "turn_done");
+  assert.equal(done.timings.media_before, "none");
+  assert.equal(done.timings.media_after, "none");
+  ws.close();
+});
+
 test("stall fix (wired): every kiosk voice turn carries the 3-round cap, the 12 s first-audio budget and the fallback in the display's language", async () => {
   assert.equal(KIOSK_MAX_TOOL_ROUNDS, 3);
   assert.equal(KIOSK_FIRST_AUDIO_BUDGET_MS, 12_000);

@@ -144,6 +144,9 @@ export function matchT0(transcript) {
   const verb = PHRASE_VERB.get(w.join(" "));
   // The bare word "stop": with nothing playing it is answered at once ("Nothing is playing.").
   if (verb === "stop" && w.length === 1 && w[0] === "stop") return { verb, bare: true };
+  // r7 G9: the single word "pause" / "play" / "resume" (and "pausa") is marked bare: with something loaded it is
+  // answered here even when nothing would change — the state is sent to the page again — never left to the model.
+  if ((verb === "pause" || verb === "resume") && w.length === 1) return { verb, bare: true };
   if (verb) return { verb };
   for (const p of VOLUME_PREFIXES) if (w.length > p.length && sameAt(w, 0, p)) { const value = volumeValue(w.slice(p.length)); if (value !== null) return { verb: "volume", value }; }
   const fits = (p) => w.length > p.length && w.length - p.length <= SLOT_MAX_WORDS && sameAt(w, 0, p);

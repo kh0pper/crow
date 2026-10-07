@@ -323,3 +323,21 @@ test("closeDevice (unpair, an ended login): everything of that device goes, anot
   s.media.closeDevice("never-seen");
   assert.deepEqual(s.ended, ["a"]);
 });
+
+test("r7 G9: pause/resume in the state already re-send it to the page (the page may disagree); stateOf names the session's state in one fixed word", () => {
+  const s = setup();
+  assert.equal(s.media.stateOf("d"), "none");
+  s.media.play("d", [track("One")]);
+  assert.equal(s.media.stateOf("d"), "loading");
+  playing(s);
+  assert.equal(s.media.stateOf("d"), "playing");
+  const n = s.sent.length;
+  assert.equal(s.media.resume("d"), "already");
+  assert.deepEqual([s.sent.length, last(s).action, last(s).id], [n + 1, "play", s.sent[0].id], "play sent again for the current item");
+  assert.equal(s.media.pause("d"), "paused");
+  assert.equal(s.media.stateOf("d"), "paused");
+  assert.equal(s.media.pause("d"), "already");
+  assert.equal(last(s).action, "pause", "pause sent again");
+  s.media.onEvent("d", { id: s.sent[0].id, state: "blocked" });
+  assert.equal(s.media.stateOf("d"), "blocked");
+});

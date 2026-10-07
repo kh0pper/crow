@@ -303,13 +303,16 @@ test("a transport phrase that would change nothing in this state does not fire: 
   await playMix(s);
   const wm = s.tool("crow_wm");
   // playing, not muted
-  for (const q of ["Resume.", "Keep going.", "Play.", "Unmute.", "Continue the music.", "Sigue tocando.", "Activa el sonido."]) assert.equal(await s.say(q), null, `playing: ${q}`);
+  for (const q of ["Keep going.", "Resume the music.", "Unmute.", "Continue the music.", "Sigue tocando.", "Activa el sonido."]) assert.equal(await s.say(q), null, `playing: ${q}`);
   assert.equal(s.sent.length, 0, "and nothing was sent to the page");
+  // r7 G9: the bare word is the exception — answered quietly at T0, the state sent to the page again.
+  for (const q of ["Resume.", "Play."]) { assert.deepEqual([(await s.say(q))?.tier, s.last()?.action], ["t0", "play"], q); s.sent.length = 0; }
   assert.deepEqual(await wm({ do: "resume" }), { ok: true, outcome: "done", say: "It's already playing.", final: true, effect: false });
   assert.deepEqual(await wm({ do: "unmute" }), { ok: true, outcome: "done", say: "The sound is already on.", final: true, effect: false });
   // paused
   await s.say("Pause.");
-  for (const q of ["Pause.", "Pause the music.", "Pausa."]) assert.equal(await s.say(q), null, `paused: ${q}`);
+  for (const q of ["Pause the music.", "Pausa la música."]) assert.equal(await s.say(q), null, `paused: ${q}`);
+  for (const q of ["Pause.", "Pausa."]) assert.equal((await s.say(q))?.tier, "t0", `paused, bare (r7 G9): ${q}`);
   assert.equal((await wm({ do: "pause" })).say, "It's already paused.");
   await s.say("Resume.");
   // muted
@@ -559,6 +562,34 @@ test("smoke F4: the no-model path says which verb it acted on, so the log tells 
   assert.equal(await verb("Pause."), "pause");
   assert.equal(await verb("Play."), "resume");
   assert.equal(await verb("Louder louder."), "volume_up");
+});
+
+test("r7 G9: a bare 'Pause.' / 'Play.' with something loaded is never left to the model — it re-sends the server's state to the page (quietly), so a page that disagrees is put right, and 'Play.' never starts something new", async () => {
+  const s = setup();
+  await playMix(s);
+  // Paused on the server; the page may show anything. "Pause." again: T0, the pause is sent again, nothing said.
+  await s.say("Pause."); s.sent.length = 0;
+  for (const q of ["Pause.", "Pausa."]) {
+    const r = await s.say(q);
+    assert.deepEqual([r?.tier, r?.say], ["t0", ""], q);
+    assert.equal(s.last()?.action, "pause", `${q}: the pause is sent again`);
+  }
+  assert.equal(await s.say("Pause it."), null, "a longer form in that state stays conversation, as before");
+  // The server believes it plays (a resume or a load the page never started): "Play." re-sends play — no model, nothing new.
+  await s.say("Play."); s.sent.length = 0;
+  const r = await s.say("Play.");
+  assert.deepEqual([r?.tier, r?.say], ["t0", ""]);
+  assert.equal(s.last()?.action, "play", "play is sent again for the current item");
+  assert.equal(s.sent.filter((m) => m.action === "load").length, 0, "no new item, and never something else");
+  // With nothing loaded both words stay conversation, as before.
+  const idle = setup();
+  assert.equal(await idle.say("Pause."), null);
+  assert.equal(await idle.say("Play."), null);
+  // The model's call over a paused item says so truthfully, and the state is sent again too.
+  await s.say("Pause."); s.sent.length = 0;
+  const m = await s.tool("crow_wm")({ do: "pause" }, "Pause.");
+  assert.equal(m.say, "It's already paused.");
+  assert.equal(s.last()?.action, "pause");
 });
 
 test("review H1: a playback word acts on the music only — another object or the voice is never the playback (no fast path, no must-run), idle and over music", async () => {

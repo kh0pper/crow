@@ -112,15 +112,19 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       return item;
     },
     active: (id) => !!live(id),
+    /** r7 G9 evidence: the session's state as one fixed word ("none" | "loading" | "playing" | "paused" | "blocked"). */
+    stateOf: (id) => { const d = live(id); return !d ? "none" : d.item.blocked ? "blocked" : d.state === "paused" ? "paused" : d.state === "loading" ? "loading" : "playing"; },
     current: (id) => { const d = live(id); return d ? { title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, state: d.state === "paused" ? "paused" : "playing", volume: d.volume, muted: d.muted } : null; },
     /** Is this exactly what was asked for last time, and is it still going? */
     isCurrent: (id, origin) => { const d = live(id); return !!d && !!d.origin && !!origin && d.origin.source === String(origin.source) && d.origin.candidateId === String(origin.candidateId); },
     queueLength: (id) => devs.get(id)?.queue.length || 0,
-    pause(id) { const d = live(id); if (!d) return null; if (d.state === "paused") return "already"; d.state = "paused"; send(id, { type: "media", action: "pause", id: d.item.id }); return "paused"; },
+    // r7 G9: "already" re-sends the state to the page — a page that disagrees (▶ while the server thought it played,
+    // or the reverse) is put right by the same words, instead of the request going to the model.
+    pause(id) { const d = live(id); if (!d) return null; const was = d.state === "paused"; d.state = "paused"; send(id, { type: "media", action: "pause", id: d.item.id }); return was ? "already" : "paused"; },
     resume(id) {
       const d = live(id);
       if (!d) return null;
-      if (d.state !== "paused") return "already";
+      if (d.state !== "paused") { send(id, { type: "media", action: "play", id: d.item.id }); return "already"; }
       // A station is live: resuming means now, not where the buffer stopped. (An autoplay that was only blocked just starts.)
       if (isRadio(d) && !d.item.blocked) { load(id, d, d.index, { again: true }); return "playing"; }
       d.state = "playing"; d.item.blocked = false;
