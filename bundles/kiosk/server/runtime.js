@@ -115,12 +115,16 @@ export function stationSttPrompt(device, profile, stations, on = STT_STATION_PRO
   return stationNamesHint(stations);
 }
 /**
- * r7: what replaces it — the call-sign-shaped words only, as faster-whisper's `hotwords` (see callSignHotwords). One
- * line to switch off if the attended smoke shows a loop or a misheard short command with it (Task R7-S).
+ * r7b (review of rev 7, H2): faster-whisper `hotwords` from the operator's call signs — a SWITCH, OFF by default
+ * (`CROW_KIOSK_STT_HOTWORDS=1` on the gateway turns it on; read at each turn). The reviewer's placebo showed the gain on
+ * synthetic speech came from ANY short hotword (a nonsense word did as well as the call sign), so it is not evidence
+ * that the call sign itself helps; and on Spanish speech it emptied "Pausa.". Sent only when both the display and the
+ * STT profile are English. The attended smoke decides it with and without, on a real voice (Task R7-S row R7-1).
  */
-export const STT_CALLSIGN_HOTWORDS = true;
-export function stationSttHotwords(device, profile, stations, on = STT_CALLSIGN_HOTWORDS) {
-  if (!on || (device?.kiosk_settings?.lang === "es" && !profile?.language)) return "";
+export const sttHotwordsOn = (env = process.env) => env?.CROW_KIOSK_STT_HOTWORDS === "1";
+export function stationSttHotwords(device, profile, stations, on = sttHotwordsOn()) {
+  const lang = device?.kiosk_settings?.lang;
+  if (!on || (lang && lang !== "en") || profile?.language !== "en") return "";
   return callSignHotwords(stations);
 }
 export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null } = {}) {

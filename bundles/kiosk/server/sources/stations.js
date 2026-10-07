@@ -239,16 +239,15 @@ export function stationNamesHint(stations) {
 }
 
 /**
- * r7 (STT probe 2026-10-07): the short STT hotwords — only the call-sign-shaped words of the names and aliases
- * (3–6 letters, no a/e/i/o/u), upper case, each once, at most five ("KTPF HD1" → "KTPF"). A full name list as the
- * prompt made faster-whisper spell letters and loop; this one word kept short commands right (121/126 vs 120/126
- * with none) and raised the call sign's no-model plays (24/36 vs 13/36) on the probe's synthetic voices.
+ * The STT hotwords (used only when the runtime's switch is on, see runtime.js): the operator's own ALL-CAPS words of
+ * 3–6 letters in the names and aliases as entered ("KTPF HD1" → "KTPF"; "KQEB" too, a vowel does not matter), each
+ * once, at most five. An ordinary word ("Rhythm Radio") never counts. Review of rev 7, L2.
  */
 export function callSignHotwords(stations) {
   const out = [];
   for (const s of Array.isArray(stations) ? stations : []) for (const n of [s?.name, ...(Array.isArray(s?.aliases) ? s.aliases : [])]) {
-    for (const w of String(n ?? "").toUpperCase().split(/[^A-Z]+/)) {
-      if (w.length >= 3 && w.length <= 6 && !/[AEIOU]/.test(w) && !out.includes(w) && out.length < 5) out.push(w);
+    for (const w of String(n ?? "").split(/[^A-Za-z]+/)) {
+      if (w.length >= 3 && w.length <= 6 && w === w.toUpperCase() && !out.includes(w) && out.length < 5) out.push(w);
     }
   }
   return out.join(" ");

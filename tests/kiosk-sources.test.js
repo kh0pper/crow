@@ -225,15 +225,17 @@ test("review L2 / re-review L-a: a station name that is itself a command is refu
   assert.equal(stationNamesHint(loaded), "news radio, Morning Mix, the mix", "commands never reach the STT prompt");
 });
 
-test("r7: the STT hotwords are the call-sign-shaped words of the names and aliases only (no vowel, 3–6 letters), upper case, each once, at most five", async () => {
+test("r7b (review L2): the STT hotwords are the operator's own ALL-CAPS words of 3–6 letters in the names and aliases, each once, at most five — a vowel does not matter, an ordinary word never counts", async () => {
   const { callSignHotwords } = await import("../bundles/kiosk/server/sources/stations.js");
   assert.equal(callSignHotwords(CALL), "KTPF");
   const more = normalizeStations([
     { name: "KTPF HD1", aliases: ["ktpf", "ninety point one"], url: "https://stream.example.invalid/1" },
     { name: "WXYZ", aliases: ["Morning Mix"], url: "https://stream.example.invalid/2" },
     { name: "Classic Country", aliases: ["HD two", "KDBV-FM"], url: "https://stream.example.invalid/3" },
+    { name: "KQEB", url: "https://stream.example.invalid/4" },
+    { name: "Rhythm Radio", url: "https://stream.example.invalid/5" },
   ]);
-  assert.equal(callSignHotwords(more), "KTPF WXYZ KDBV");
+  assert.equal(callSignHotwords(more), "KTPF WXYZ KDBV KQEB");
   assert.equal(callSignHotwords([]), "");
   assert.equal(callSignHotwords(null), "");
 });

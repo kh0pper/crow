@@ -1247,14 +1247,19 @@ test("review L1 (wired), r7: the station-name STT prompt is switched off (it mad
     const es = await turn("kiosk-l1-es", { lang: "es" });
     assert.equal(es.device.kiosk_settings.lang, "es");
     assert.equal(es.sttPrompt({ language: "en" }), "");
-    // The short call-sign hotwords replace it (none here: "Morning Mix" is not a call sign).
-    const { STT_CALLSIGN_HOTWORDS, stationSttHotwords } = await import("../bundles/kiosk/server/runtime.js");
-    assert.equal(STT_CALLSIGN_HOTWORDS, true);
-    assert.equal(en.sttHotwords({ language: "en" }), "");
+    // r7b (review H2): the hotwords are a switch, OFF by default (CROW_KIOSK_STT_HOTWORDS=1 turns it on), and only ever sent
+    // when the display AND the STT profile are English — a Spanish "Pausa." came back empty with them.
+    const { sttHotwordsOn, stationSttHotwords } = await import("../bundles/kiosk/server/runtime.js");
+    assert.equal(sttHotwordsOn({}), false, "off by default");
+    assert.equal(sttHotwordsOn({ CROW_KIOSK_STT_HOTWORDS: "1" }), true);
+    assert.equal(en.sttHotwords({ language: "en" }), "", "off: nothing sent");
     const cs = [{ name: "KTPF HD1", aliases: ["KTPF"] }];
-    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs), "KTPF");
-    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "es" } }, { language: null }, cs), "", "review L1's rule applies to the hotwords too");
-    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, false), "", "the switch");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, true), "KTPF");
+    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "en" } }, { language: "en" }, cs, true), "KTPF");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: null }, cs, true), "", "a profile that leaves the language to detection: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "es" } }, { language: "en" }, cs, true), "", "a Spanish display, even with a pinned English profile: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "es" }, cs, true), "", "a Spanish profile: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, false), "", "the switch off");
     // Review L1's rule is kept for the day the switch is turned back on.
     const st = [{ name: "Morning Mix", aliases: ["the mix"] }];
     assert.equal(stationSttPrompt({ kiosk_settings: {} }, { language: null }, st, true), "Morning Mix, the mix");
