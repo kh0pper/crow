@@ -1,15 +1,13 @@
 /**
- * The display's one <audio> element. The server holds the media session (media.js) and says what to do
- * (`media`); the page reports what the element did (`media_event`). Text via textContent only; the URL
- * is always a same-origin ticket path. Rules (reviews C1/H1/H7/H8/N3, smoke F4/F8/F9):
- *  - play() rejecting with AbortError, for an item no longer current, or after the element plays anyway
- *    is not a failure; NotAllowedError is a blocked autoplay (chip ▶, a tap starts it). A failure comes
- *    only from the element's `error` event or the watchdog (no `playing` START_MS after asking; `waiting`/
- *    `stalled` for STALL_MS → one `error` "stalled").
- *  - The same item again (a reconnect's snapshot) never reassigns src. A pause the page or server asked
- *    for, one fired while a new src is set, or a stale one (the element plays again) is never the user's.
- *  - A report the socket could not carry is kept (latest per item) and sent by flush() after `ready`; a
- *    snapshot naming a failed item gets the failure again, so the chip never shows playing over silence.
+ * The display's one <audio> element. The server holds the session (media.js) and says what to do (`media`); the page
+ * reports what the element did (`media_event`). textContent only; URLs are same-origin ticket paths. Rules:
+ *  - play() rejecting with AbortError, for an old item, or after the element plays anyway is no failure; NotAllowedError
+ *    is a blocked autoplay (chip ▶, a tap starts it). Failures: the `error` event, or no `playing` START_MS after
+ *    asking, or `waiting`/`stalled` for STALL_MS (one `error` "stalled").
+ *  - The same item again never reassigns src; it applies paused/playing (r7b M3). A pause the page or server asked
+ *    for, one during a src change, or a stale one is never the user's.
+ *  - An unsent report is kept (latest per item) and flushed after `ready`; a snapshot naming a failed item gets the
+ *    failure again.
  */
 export const DUCK_FACTOR = 0.15;
 export const RESTORE_DELAY_MS = 400;
@@ -17,14 +15,14 @@ export const RESTORE_MS = 300;
 export const RESTORE_STEP_MS = 30;
 export const START_MS = 10_000;
 export const STALL_MS = 15_000;
-/** F9: offline, the chip dims and controls are off; after this the element stops: ≥ the server's grace + 2 pings (review M3). */
+/** F9: offline the chip dims; after this the element stops (≥ server grace + 2 pings). */
 export const OFFLINE_CLEAR_MS = 60_000;
 
 /** r7 G7: 0–100 → element gain, 5 dB per 10 (linear steps were inaudible); 0 or muted is silence. */
 export const levelOf = (v, muted) => (muted || !(v > 0) ? 0 : Math.min(1, 10 ** ((Math.min(100, v) - 100) / 40)));
 const level = levelOf;
 
-/** Ducks to DUCK_FACTOR of the set level at once; restores RESTORE_DELAY_MS after release, over RESTORE_MS in RESTORE_STEP_MS steps. */
+/** Ducks to DUCK_FACTOR at once; restores RESTORE_DELAY_MS after release, over RESTORE_MS. */
 export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let target = 0.5, ducked = false, timer = null;
   const stop = () => { clearTimer(timer); timer = null; };
@@ -135,7 +133,7 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
             // The server still thinks this item plays: it never heard that it failed. Tell it again.
             if (cur.failed) { if (unsent && unsent.id === cur.id) unsent = null; report("error", cur.failed); render(); return; }
             if (m.paused && !cur.paused) { cur.paused = true; clearDogs(); quietPause(); }
-            else if (!m.paused && cur.paused) { cur.paused = false; if (!held) start(); }
+            else if (!m.paused && (cur.paused || cur.blocked || !cur.playing)) { cur.paused = cur.blocked = false; if (!held) start(); }
             render();
             return;
           }
@@ -184,6 +182,8 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     flush() { const ev = unsent; unsent = null; if (ev && cur && ev.id === cur.id && send(ev) === false) unsent = ev; },
     info: () => (cur ? { title: cur.title, subtitle: cur.subtitle, source: cur.source, paused: cur.paused || cur.blocked, muted: cur.muted, offline } : null),
     current: () => cur?.id || null,
+    /** r7b M3: one fixed word for the turn's metrics. */
+    state: () => (!cur ? "none" : offline ? "offline" : cur.blocked ? "blocked" : cur.paused ? "paused" : cur.playing ? "playing" : "loading"),
     ducked: () => ducker.ducked(),
   };
 }

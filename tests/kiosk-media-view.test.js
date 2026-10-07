@@ -377,3 +377,38 @@ test("r7 G7: the display volume is perceptual — each step of 10 is 5 dB on the
   assert.equal(DEFAULT_VOLUME, 80);
   assert.ok(Math.abs(db(levelOf(DEFAULT_VOLUME, false)) + 10) < 1e-9);
 });
+
+test("r7b M3: the server's state sent again as the same item fixes a page that disagrees — paused/blocked → it plays, playing → it pauses — and never reloads it; a page that holds another item, or none, gets this one", async () => {
+  const s = setup();
+  s.load("m1"); s.audio.fire("playing");
+  const srcSets = s.audio.srcSets;
+  s.load("m1", { paused: true });
+  assert.equal(s.audio.paused, true, "playing → paused");
+  s.load("m1");
+  assert.equal(s.audio.plays >= 2, true, "paused → plays again");
+  assert.equal(s.audio.srcSets, srcSets, "never reloaded");
+  // A blocked page (▶ chip, the server thinks it plays): the same item again asks the element to play.
+  const b = setup();
+  b.audio.block = true; b.load("m1"); await new Promise((r) => setImmediate(r));
+  assert.equal(b.view.info().paused, true, "blocked: ▶");
+  b.audio.block = false; const plays = b.audio.plays;
+  b.load("m1");
+  assert.ok(b.audio.plays > plays, "the same item again asks to play");
+  // Another item on the page: replaced by the server's.
+  const o = setup();
+  o.load("m7"); o.load("m1");
+  assert.equal(o.view.current(), "m1");
+});
+
+test("r7b M3: the page names its own media state in one fixed word (for the turn's metrics)", async () => {
+  const s = setup();
+  assert.equal(s.view.state(), "none");
+  s.load("m1");
+  assert.equal(s.view.state(), "loading");
+  s.audio.fire("playing");
+  assert.equal(s.view.state(), "playing");
+  s.view.apply({ type: "media", action: "pause", id: "m1" });
+  assert.equal(s.view.state(), "paused");
+  s.view.offline(true);
+  assert.equal(s.view.state(), "offline");
+});

@@ -669,3 +669,15 @@ test("r7b H3: the turn report carries the reply's scheduled audio, and the stall
   const bad = sanitizeClientMetrics({ turn_id: "t", tts_audio_ms: "x", stall_ctx_state: "<b>", stall_clock_moved: "yes" });
   assert.deepEqual([bad.tts_audio_ms, bad.stall_ctx_state, bad.stall_clock_moved], [null, null, null]);
 });
+
+test("r7b M3: the turn report carries the page's own media state at the tap and at the report (fixed words), so a page/server disagreement is in the log", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, pageMediaStart: "blocked" }, { pageMedia: "playing" });
+  assert.deepEqual([m.page_media_start, m.page_media_end], ["blocked", "playing"]);
+  const c = sanitizeClientMetrics({ turn_id: "t", page_media_start: "paused", page_media_end: "offline" });
+  assert.deepEqual([c.page_media_start, c.page_media_end], ["paused", "offline"]);
+  const bad = sanitizeClientMetrics({ turn_id: "t", page_media_start: "Play KTPF", page_media_end: 3 });
+  assert.deepEqual([bad.page_media_start, bad.page_media_end], [null, null]);
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  assert.match(src, /pageMediaStart = mediaView\?\.state\(\) \?\? null/);
+  assert.match(src, /pageMedia: mediaView\?\.state\(\) \?\? null/);
+});

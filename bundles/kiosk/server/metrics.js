@@ -1,6 +1,7 @@
 /** Per-device latency ring buffer (spec §9; ruling R8 decides which turns count toward the gate). */
 const REASONS = new Set(["silence", "max", "no_speech", "manual"]);
 const CTX_STATES = new Set(["running", "suspended", "interrupted", "closed"]);
+const PAGE_MEDIA = new Set(["none", "loading", "playing", "paused", "blocked", "offline"]);
 const clampMs = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Math.max(0, Math.min(120_000, Math.round(Number(v)))) : null);
 
 export function sanitizeClientMetrics(m) {
@@ -22,6 +23,9 @@ export function sanitizeClientMetrics(m) {
     tts_audio_ms: clampMs(m?.tts_audio_ms),
     stall_ctx_state: CTX_STATES.has(m?.stall_ctx_state) ? m.stall_ctx_state : null,
     stall_clock_moved: typeof m?.stall_clock_moved === "boolean" ? m.stall_clock_moved : null,
+    // r7b M3: the page's own media state at the tap and at the report.
+    page_media_start: PAGE_MEDIA.has(m?.page_media_start) ? m.page_media_start : null,
+    page_media_end: PAGE_MEDIA.has(m?.page_media_end) ? m.page_media_end : null,
   };
 }
 
@@ -54,7 +58,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state, tts_audio_ms: c.tts_audio_ms, stall_ctx_state: c.stall_ctx_state, stall_clock_moved: c.stall_clock_moved });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state, tts_audio_ms: c.tts_audio_ms, stall_ctx_state: c.stall_ctx_state, stall_clock_moved: c.stall_clock_moved, page_media_start: c.page_media_start, page_media_end: c.page_media_end });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

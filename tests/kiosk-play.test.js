@@ -107,7 +107,8 @@ test("asking again for what is already on does not restart it (known by what was
   await play({ what: "Blue Hour" });
   s.audible();
   s.media.next("d");
-  const loads = () => s.sent.filter((m) => m.action === "load").length;
+  // r7b M3: the current item sent again is a "load" with the SAME id (the page never reloads it): count new ids only.
+  const loads = () => new Set(s.sent.filter((m) => m.action === "load").map((m) => m.id)).size;
   const n = loads();
   assert.deepEqual(await play({ what: "Blue Hour" }), { ok: true, outcome: "playing", say: "Blue Hour is already playing.", final: true, effect: false, title: "Blue Hour" });
   assert.equal(loads(), n, "on its second track, still that album: nothing reloads");
@@ -115,7 +116,7 @@ test("asking again for what is already on does not restart it (known by what was
   // r7 G10: "already playing" is only true if the page plays it: the play is sent to the page again (never a reload).
   const before = s.sent.length;
   await play({ what: "Blue Hour" });
-  assert.deepEqual(s.sent.slice(before).map((m) => m.action), ["play"], "re-sent, nothing reloaded");
+  assert.deepEqual(s.sent.slice(before).map((m) => [m.action, m.id]), [["load", s.media.snapshot("d").id]], "the current item re-sent (same id: the page never reloads it)");
   s.media.pause("d");
   assert.deepEqual([(await play({ what: "Blue Hour" })).say, s.last().action, loads()], ["Playing Blue Hour.", "play", n]);
   s.media.mute("d", true);
@@ -312,7 +313,7 @@ test("a transport phrase that would change nothing in this state does not fire: 
   for (const q of ["Keep going.", "Resume the music.", "Unmute.", "Continue the music.", "Sigue tocando.", "Activa el sonido."]) assert.equal(await s.say(q), null, `playing: ${q}`);
   assert.equal(s.sent.length, 0, "and nothing was sent to the page");
   // r7 G9: the bare word is the exception — answered quietly at T0, the state sent to the page again.
-  for (const q of ["Resume.", "Play."]) { assert.deepEqual([(await s.say(q))?.tier, s.last()?.action], ["t0", "play"], q); s.sent.length = 0; }
+  for (const q of ["Resume.", "Play."]) { assert.deepEqual([(await s.say(q))?.tier, s.last()?.action], ["t0", "load"], q); s.sent.length = 0; }
   assert.deepEqual(await wm({ do: "resume" }), { ok: true, outcome: "done", say: "It's already playing.", final: true, effect: false });
   assert.deepEqual(await wm({ do: "unmute" }), { ok: true, outcome: "done", say: "The sound is already on.", final: true, effect: false });
   // paused
@@ -578,15 +579,15 @@ test("r7 G9: a bare 'Pause.' / 'Play.' with something loaded is never left to th
   for (const q of ["Pause.", "Pausa."]) {
     const r = await s.say(q);
     assert.deepEqual([r?.tier, r?.say], ["t0", ""], q);
-    assert.equal(s.last()?.action, "pause", `${q}: the pause is sent again`);
+    assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", true], `${q}: the current item is sent again, paused (r7b M3)`);
   }
   assert.equal(await s.say("Pause it."), null, "a longer form in that state stays conversation, as before");
   // The server believes it plays (a resume or a load the page never started): "Play." re-sends play — no model, nothing new.
   await s.say("Play."); s.sent.length = 0;
   const r = await s.say("Play.");
   assert.deepEqual([r?.tier, r?.say], ["t0", ""]);
-  assert.equal(s.last()?.action, "play", "play is sent again for the current item");
-  assert.equal(s.sent.filter((m) => m.action === "load").length, 0, "no new item, and never something else");
+  assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", undefined], "the current item is sent again, playing (r7b M3)");
+  assert.deepEqual(s.sent.filter((m) => m.action === "load").map((m) => m.id), [s.media.snapshot("d").id], "only the current item, never something else");
   // With nothing loaded both words stay conversation, as before.
   const idle = setup();
   assert.equal(await idle.say("Pause."), null);
@@ -595,7 +596,7 @@ test("r7 G9: a bare 'Pause.' / 'Play.' with something loaded is never left to th
   await s.say("Pause."); s.sent.length = 0;
   const m = await s.tool("crow_wm")({ do: "pause" }, "Pause.");
   assert.equal(m.say, "It's already paused.");
-  assert.equal(s.last()?.action, "pause");
+  assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", true]);
 });
 
 test("review H1: a playback word acts on the music only — another object or the voice is never the playback (no fast path, no must-run), idle and over music", async () => {

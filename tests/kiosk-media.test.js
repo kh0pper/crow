@@ -335,11 +335,13 @@ test("r7 G9: pause/resume in the state already re-send it to the page (the page 
   assert.equal(s.media.stateOf("d"), "playing");
   const n = s.sent.length;
   assert.equal(s.media.resume("d"), "already");
-  assert.deepEqual([s.sent.length, last(s).action, last(s).id], [n + 1, "play", s.sent[0].id], "play sent again for the current item");
+  // r7b (review M3): the WHOLE current item is sent again (the page applies a same-item load without restarting, and a
+  // page that holds another item or none gets this one) — not a bare play by id, which such a page ignores.
+  assert.deepEqual([s.sent.length, last(s).action, last(s).id, last(s).paused, last(s).url], [n + 1, "load", s.sent[0].id, undefined, s.sent[0].url]);
   assert.equal(s.media.pause("d"), "paused");
   assert.equal(s.media.stateOf("d"), "paused");
   assert.equal(s.media.pause("d"), "already");
-  assert.equal(last(s).action, "pause", "pause sent again");
+  assert.deepEqual([last(s).action, last(s).paused], ["load", true], "the current item sent again, paused");
   s.media.onEvent("d", { id: s.sent[0].id, state: "blocked" });
   assert.equal(s.media.stateOf("d"), "blocked");
 });

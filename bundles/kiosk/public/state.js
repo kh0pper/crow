@@ -93,7 +93,7 @@ export function reportDecision(turn, { playing, now, force = false }) {
   }
   return playing ? { report: false } : { report: true };
 }
-export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null } = {}) {
+export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null, pageMedia = null } = {}) {
   return {
     type: "turn_metrics", turn_id: turn.id, source: turn.source, vad_reason: turn.reason,
     e2e_ms: e2eMs({ speechEndAt: turn.speechEndAt, playAt: turn.playAt }),
@@ -107,6 +107,8 @@ export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null } = {})
     tts_audio_ms: Number.isFinite(turn.ttsAudioMs) ? Math.round(turn.ttsAudioMs) : null,
     stall_ctx_state: turn.stall ? turn.stall.ctx_state : null,
     stall_clock_moved: turn.stall ? turn.stall.clock_moved === true : null,
+    // r7b M3: the page's own media state at the tap and at the report (the server logs its own beside it).
+    page_media_start: turn.pageMediaStart ?? null, page_media_end: pageMedia,
   };
 }
 /**

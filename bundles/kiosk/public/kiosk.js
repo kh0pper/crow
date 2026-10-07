@@ -314,6 +314,7 @@ async function startTurn(source) {
   turn = { id: `t${Date.now()}`, effectAt: null, effectLoad: null, endedAt: null, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null, sentBytes: 0, voicedBytes: 0 };
   const tn = turn;
   tn.micOpenMs = micOpenMs; micOpenMs = null;     // F6: the reopen cost at this tap (null: it was open)
+  tn.pageMediaStart = mediaView?.state() ?? null;   // r7b M3: the page's own media state at the tap
   tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
   duckOverride = false;
   syncDuck();                                     // at the tap, before the server answers (spec §9.6)
@@ -344,7 +345,7 @@ function report(tn, force = false) {
   if (d.retryInMs != null) { tn.retry = setTimeout(() => report(tn), d.retryInMs); return; }
   if (!d.report) return;
   tn.reported = true;
-  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000), ctxState: ctx ? String(ctx.state) : null }));
+  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000), ctxState: ctx ? String(ctx.state) : null, pageMedia: mediaView?.state() ?? null }));
 }
 /** Called on turn_done and on local drain — whichever comes last opens the follow-up mic. */
 function settle(tn) {
