@@ -1894,3 +1894,18 @@ test("r7c N3: every turn records whether STT hotwords were sent (true/false, nev
   const early2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sttEarly: { used: true, ms: 5 }, sink: h.sink });
   assert.equal(early2.timings.stt_hotwords, false);
 });
+
+test("r7c (review re-check, L1 residuals): a pretty-printed JSON call split right after its brace, and a fenced json block, are never heard; ordinary braces and code fences still are", async () => {
+  const leaks = ['Sure. {\n  "name": "crow_play",\n  "arguments": {"what": "KDEB"}\n}', 'Sure. ```json\n{"tool": "crow_play", "what": "KDEB"}\n```'];
+  for (const leak of leaks) for (const cuts of [[], [7, 8, 9, 10], [6, 9, 12]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KDEB.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    assert.equal(caption.trim(), "Sure.", `${JSON.stringify(leak)} (cuts ${cuts})`);
+  }
+  for (const text of ["Use {braces}, a {\n  block } and `code` freely.", "A ```text fence``` is fine too.", "Set {x: 1} and {\"a\": 2}."]) {
+    const ok = harness({ rounds: [deltasAt(text, [5, 6, 7]).concat([{ type: "done" }])] });
+    await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
+    assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), text, text);
+  }
+});

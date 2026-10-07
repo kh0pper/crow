@@ -41,8 +41,10 @@ export function createThinkGate() {
  */
 // Review of rev 7 (L1): Qwen/Hermes XML tags, Mistral's [TOOL_CALLS], Llama's <|python_tag|>, <function_call>, any case,
 // and a bare JSON call object. Lower case; the gate compares case-insensitively.
-const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<function_call", "<parameter=", "<|tool_call", "<|python_tag|>", "[tool_calls]", '{"name"', '{ "name"'];
-export const TOOL_SYNTAX = /<\/?tool_call|<\/?function(?:_call)?[=>]|<parameter=|<\|tool_call|<\|python_tag\|>|\[TOOL_CALLS\]|\{\s*"name"\s*:/i;
+// r7c: also a pretty-printed call ("{" then a newline, then "name") and a fenced json block. Markers are compared with
+// whitespace removed, so a delta that ends right after "{\n" is held too.
+const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<function_call", "<parameter=", "<|tool_call", "<|python_tag|>", "[tool_calls]", '{"name"', "```json{"];
+export const TOOL_SYNTAX = /<\/?tool_call|<\/?function(?:_call)?[=>]|<parameter=|<\|tool_call|<\|python_tag\|>|\[TOOL_CALLS\]|\{\s*"name"\s*:|```json\s*\{/i;
 export function stripToolSyntax(text) { const s = String(text ?? ""); const m = TOOL_SYNTAX.exec(s); return m ? s.slice(0, m.index).trimEnd() : s; }
 export function createToolSyntaxGate() {
   let buf = "", cut = false;
@@ -53,9 +55,9 @@ export function createToolSyntaxGate() {
       buf += text;
       const m = TOOL_SYNTAX.exec(buf);
       if (m) { cut = true; const out = buf.slice(0, m.index); buf = ""; return out; }
-      const lt = Math.max(buf.lastIndexOf("<"), buf.lastIndexOf("["), buf.lastIndexOf("{"));
-      const tail = buf.slice(lt).toLowerCase();
-      if (lt >= 0 && TOOL_MARKERS.some((k) => k.startsWith(tail) && tail.length < k.length)) { const out = buf.slice(0, lt); buf = buf.slice(lt); return out; }
+      const could = (at) => { const t = buf.slice(at).toLowerCase().replace(/\s+/g, ""); return TOOL_MARKERS.some((k) => k.startsWith(t) && t.length < k.length); };
+      const at = [buf.search(/`+[a-z]*\s*$/i), buf.lastIndexOf("<"), buf.lastIndexOf("["), buf.lastIndexOf("{")].filter((i) => i >= 0 && could(i)).sort((a, b) => a - b)[0];
+      if (at !== undefined) { const out = buf.slice(0, at); buf = buf.slice(at); return out; }
       const out = buf; buf = ""; return out;
     },
     flush() { const out = cut ? "" : buf; buf = ""; return out; },
