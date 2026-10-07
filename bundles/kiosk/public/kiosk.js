@@ -275,6 +275,7 @@ async function ensureAudio() {
         renderBird();
       },
       onDrained: () => { renderBird(); if (turn) settle(turn); },
+      onStall: (info) => { if (turn) turn.ttsStalled = true; note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
     });
   }
   if (!mic) {
@@ -327,11 +328,10 @@ function endTurn(reason, speechEndAt) {
   mic?.stop();
   syncDuck();
   send({ type: "turn_end", vad_reason: reason, voiced_bytes: turn.voicedBytes });
-  releaseMicAfterTurn("end", turn.source);
 }
-/** F6: a phone lets the microphone go once the speech is in (Android leaves voice-call audio mode); with follow-up on, once the conversation settles (M4). */
-function releaseMicAfterTurn(phase, source) {
-  if (micAfterTurn(config, { phase, source }) !== "release" || (!mic && !micGate.opening())) return;
+/** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
+function releaseMicAfterTurn(phase) {
+  if (micAfterTurn(config, { phase }) !== "release" || (!mic && !micGate.opening())) return;
   micGate.release();
   mic = null;
   note("mic", "released");
@@ -343,7 +343,7 @@ function report(tn, force = false) {
   if (d.retryInMs != null) { tn.retry = setTimeout(() => report(tn), d.retryInMs); return; }
   if (!d.report) return;
   tn.reported = true;
-  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000) }));
+  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000), ctxState: ctx ? String(ctx.state) : null }));
 }
 /** Called on turn_done and on local drain — whichever comes last opens the follow-up mic. */
 function settle(tn) {

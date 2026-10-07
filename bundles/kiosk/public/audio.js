@@ -3,6 +3,14 @@ import { playStartPerfTime } from "./metrics.js";
 
 /** The capture worklet is added to an AudioContext once: a phone opens the mic again at every tap (F6). */
 const worklets = new WeakSet();
+/**
+ * Re-smoke 2026-10-07 (G12): on a phone the reply's sources sometimes never ended (the output clock stalled
+ * while Android switched audio mode), so the page held the music and the bird until Stop. The player now
+ * bounds every reply: past the scheduled end + DRAIN_GRACE_MS it stops what is left and drains (onStall says so);
+ * an mp3 decode that does not answer within DECODE_MAX_MS is dropped.
+ */
+export const DRAIN_GRACE_MS = 2000;
+export const DECODE_MAX_MS = 5000;
 export async function openMic(ctx, onFrame) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
   if (!worklets.has(ctx)) {
@@ -54,13 +62,13 @@ export function createMicGate(open, now = () => performance.now()) {
  * frames still in flight are dropped until the next begin() (tts_start). onFirstPlay(at, tag) carries the
  * tag given to begin() so the page attributes the play time to the right turn.
  */
-export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
+export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained, onStall = () => {} }) {
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 256;
   analyser.connect(ctx.destination);
   const data = new Uint8Array(analyser.fftSize);
   const sources = new Set();
-  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0, muted = false;
+  let codec = "pcm", rate = 24000, nextAt = 0, first = true, tag = null, level = null, chain = Promise.resolve(), gen = 0, pending = 0, muted = false, watch = null;
   const startLevel = () => {
     if (level) return;
     level = setInterval(() => {                     // ~15 Hz beak level, only while audio plays
@@ -71,7 +79,23 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
     }, 66);
   };
   const stopLevel = () => { clearInterval(level); level = null; onLevel(0); };
-  const maybeDrained = () => { if (!sources.size && !pending) { stopLevel(); onDrained(); } };
+  const maybeDrained = () => { if (!sources.size && !pending) { clearTimeout(watch); watch = null; stopLevel(); onDrained(); } };
+  const stopAll = () => { for (const s of sources) { s.onended = null; try { s.stop(); } catch {} } sources.clear(); };
+  // Armed from the last scheduled end (wall clock): sources still alive then never ended by themselves.
+  const arm = () => {
+    clearTimeout(watch);
+    watch = setTimeout(() => {
+      watch = null;
+      if (!sources.size) return;
+      onStall({ left: sources.size, ctxState: String(ctx.state || "") });
+      stopAll(); nextAt = 0;
+      maybeDrained();
+    }, Math.max(0, (nextAt - ctx.currentTime) * 1000) + DRAIN_GRACE_MS);
+  };
+  const decode = (buf) => new Promise((res, rej) => {
+    const cap = setTimeout(() => rej(new Error("decode timeout")), DECODE_MAX_MS);
+    ctx.decodeAudioData(buf.slice(0)).then((ab) => { clearTimeout(cap); res(ab); }, (err) => { clearTimeout(cap); rej(err); });
+  });
   async function play(buf, g) {
     let ab;
     if (codec === "pcm") {
@@ -80,7 +104,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
       const ch = ab.getChannelData(0);
       for (let i = 0; i < i16.length; i++) ch[i] = i16[i] / 32768;
     } else {
-      ab = await ctx.decodeAudioData(buf.slice(0));
+      ab = await decode(buf);
     }
     if (g !== gen) return;
     const src = ctx.createBufferSource();
@@ -91,6 +115,7 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
     nextAt = when + ab.duration;
     sources.add(src);
     src.onended = () => { sources.delete(src); maybeDrained(); };
+    arm();
     startLevel();                                   // every start: a drained inter-sentence gap stopped it
     if (first) {
       first = false;
@@ -114,8 +139,8 @@ export function createPlayer(ctx, { onLevel, onFirstPlay, onDrained }) {
       gen++;
       muted = true;
       pending = 0;
-      for (const s of sources) { s.onended = null; try { s.stop(); } catch {} }
-      sources.clear(); nextAt = 0; chain = Promise.resolve(); stopLevel();
+      clearTimeout(watch); watch = null;
+      stopAll(); nextAt = 0; chain = Promise.resolve(); stopLevel();
     },
     get playing() { return sources.size > 0 || pending > 0; },
     get sampling() { return level != null; },

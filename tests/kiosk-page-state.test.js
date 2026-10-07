@@ -9,7 +9,7 @@ import {
 import { OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
 import { SESSION_GRACE_MS } from "../bundles/kiosk/server/media.js";
 import { KIOSK_PING_MS } from "../bundles/kiosk/server/runtime.js";
-import { createPlayer, openMic, createMicGate } from "../bundles/kiosk/public/audio.js";
+import { createPlayer, openMic, createMicGate, DRAIN_GRACE_MS, DECODE_MAX_MS } from "../bundles/kiosk/public/audio.js";
 import { sanitizeClientMetrics } from "../bundles/kiosk/server/metrics.js";
 
 test("4401 unauthorized/unpaired clears the token; 4401 hello_timeout keeps it and reconnects", () => {
@@ -394,12 +394,12 @@ test("report waits for a pending load's playing event (up to 6 s), unless forced
 });
 
 test("smoke F6: a phone or tablet releases the mic after each turn (display_config.mic_per_turn); anything else keeps it; the reopen cost is reported and kept apart from e2e", () => {
-  assert.equal(micAfterTurn({ mic_per_turn: true }), "release");
+  assert.equal(micAfterTurn({ mic_per_turn: true }, { phase: "settled" }), "release");
   for (const c of [{ mic_per_turn: false }, {}, null, undefined, { mic_per_turn: "yes" }]) assert.equal(micAfterTurn(c), "keep");
   // Review M4: with follow-up on, the first turn keeps the mic for the follow-up; it goes when the conversation settles.
   const fu = { mic_per_turn: true, follow_up: true };
   assert.equal(micAfterTurn(fu, { phase: "end", source: "tap" }), "keep");
-  assert.equal(micAfterTurn(fu, { phase: "end", source: "follow_up" }), "release");
+  assert.equal(micAfterTurn(fu, { phase: "end", source: "follow_up" }), "keep", "r7 G12: never at the end of speech");
   assert.equal(micAfterTurn(fu, { phase: "settled" }), "release");
   assert.equal(micAfterTurn(fu, { phase: "closed", source: "tap" }), "release");
   const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1000, playAt: 2500, effectAt: null, endedAt: 1000, barged: false, micOpenMs: 184.4 }, {});
@@ -434,15 +434,13 @@ test("smoke F6: the mic can be opened again on the same audio context — the ca
   }
 });
 
-test("smoke F6 (source): the page lets the mic go right after it sends turn_end, on turn_over and on a closed socket — and only through micAfterTurn", () => {
+test("smoke F6 (source), r7 G12: the page lets the mic go when the turn settles, on turn_over, on a closed socket and on a barge — never at turn_end — and only through micAfterTurn", () => {
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
-  const end = src.slice(src.indexOf("function endTurn("), src.indexOf("function releaseMicAfterTurn("));
-  assert.ok(end.indexOf('type: "turn_end"') < end.indexOf('releaseMicAfterTurn("end"'), "after turn_end");
   const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
-  assert.match(rel, /micAfterTurn\(config, \{ phase, source \}\) !== "release"/);
+  assert.match(rel, /micAfterTurn\(config, \{ phase \}\) !== "release"/);
   assert.match(rel, /micGate\.release\(\)/);
   const calls = [...src.matchAll(/(?<!function )releaseMicAfterTurn\(("[a-z]+")?/g)].map((m) => m[1]);
-  assert.deepEqual(calls.sort(), ['"closed"', '"closed"', '"closed"', '"end"', '"settled"'], "socket close, turn_over, barge, endTurn, settle");
+  assert.deepEqual(calls.sort(), ['"closed"', '"closed"', '"closed"', '"settled"'], "socket close, turn_over, barge, settle");
 });
 
 test("review H3: a double tap during a slow mic open leaves exactly ONE open stream; an open released meanwhile is closed when it lands; the second tap is ignored", async () => {
@@ -492,4 +490,87 @@ test("review M3: the page's offline clear outlasts the server's view of a silent
   assert.equal(backoffMs(9), 30_000, "with nothing playing, the usual backoff");
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
   assert.match(src, /backoffMs\(attempt\+\+, mediaView\?\.current\(\) \? MEDIA_RECONNECT_CAP_MS : undefined\)/);
+});
+
+// ---- Revision 7 (re-smoke 2026-10-07, G12/G13/G15: the page did not settle after an answer) ----
+
+test("r7 G12: a reply whose sources never end (the audio clock stalled) is drained by the player's own watchdog — bounded, once, reported as a stall", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { ctx, started } = fakeCtx();                       // its clock never moves and onended never fires by itself
+  const ev = { drained: 0, stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: (info) => ev.stalls.push(info) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); p.push(new ArrayBuffer(48000));   // 2 × 1 s of audio
+  await tick();
+  assert.equal(started.length, 2);
+  assert.equal(p.playing, true);
+  t.mock.timers.tick(2000);                                  // the audio's own length: still waiting for it
+  assert.equal(ev.drained, 0);
+  t.mock.timers.tick(DRAIN_GRACE_MS + 50);                   // past its length + the grace: the clock has not moved
+  assert.equal(ev.drained, 1, "the turn settles");
+  assert.equal(p.playing, false);
+  assert.equal(ev.stalls.length, 1);
+  assert.ok(started.every((s) => s.stopped), "every stuck source is stopped");
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.drained, 1, "drained once");
+});
+
+test("r7 G12: sources that end normally never trip the watchdog; a later sentence re-arms it from its own end", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { ctx, started } = fakeCtx();
+  const ev = { drained: 0, stalls: 0 };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: () => ev.stalls++ });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); await tick();
+  t.mock.timers.tick(900);
+  p.push(new ArrayBuffer(48000)); await tick();              // scheduled after the first: ends at 2 s on the audio clock
+  ctx.currentTime += 2; started[0].onended(); started[1].onended();
+  assert.equal(ev.drained, 1);
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.stalls, 0, "no stall reported for audio that played");
+  assert.equal(ev.drained, 1);
+});
+
+test("r7 G12: a decode that never answers cannot hold the queue — the sentence is dropped after DECODE_MAX_MS and the reply still drains", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { ctx, started } = fakeCtx();
+  ctx.decodeAudioData = () => new Promise(() => {});        // never resolves
+  const ev = { drained: 0 };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++ });
+  t.after(() => p.flush());
+  p.begin("mp3", 24000, 1);
+  p.push(new ArrayBuffer(100));
+  await tick();
+  assert.equal(p.playing, true);
+  t.mock.timers.tick(DECODE_MAX_MS + 10);
+  await tick(); await tick();
+  assert.equal(p.playing, false);
+  assert.equal(ev.drained, 1);
+  assert.equal(started.length, 0);
+});
+
+test("r7 G12: a phone keeps the mic through the spoken answer and lets it go when the turn settles — never between turn_end and the reply (the audio-mode switch stalled the reply's clock)", () => {
+  for (const c of [{ mic_per_turn: true }, { mic_per_turn: true, follow_up: true }]) {
+    assert.equal(micAfterTurn(c, { phase: "end", source: "tap" }), "keep");
+    assert.equal(micAfterTurn(c, { phase: "end", source: "follow_up" }), "keep");
+    assert.equal(micAfterTurn(c, { phase: "settled" }), "release");
+    assert.equal(micAfterTurn(c, { phase: "closed" }), "release");
+  }
+  assert.equal(micAfterTurn({ mic_per_turn: false }, { phase: "settled" }), "keep");
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const end = src.slice(src.indexOf("function endTurn("), src.indexOf("function releaseMicAfterTurn("));
+  assert.doesNotMatch(end, /releaseMicAfterTurn\(/, "endTurn no longer lets the mic go");
+});
+
+test("r7 G12: the turn's report says whether its reply stalled and the audio context's state (counts-only evidence)", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, ttsStalled: true }, { ctxState: "running" });
+  assert.equal(m.tts_stalled, true);
+  assert.equal(m.ctx_state, "running");
+  assert.equal(turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {}).tts_stalled, false);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", tts_stalled: true, ctx_state: "interrupted" }).tts_stalled, true);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", tts_stalled: "yes", ctx_state: "<b>" }).tts_stalled, false);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: "<b>" }).ctx_state, null);
+  for (const s of ["running", "suspended", "interrupted", "closed"]) assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: s }).ctx_state, s);
 });

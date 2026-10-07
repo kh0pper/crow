@@ -1,5 +1,6 @@
 /** Per-device latency ring buffer (spec §9; ruling R8 decides which turns count toward the gate). */
 const REASONS = new Set(["silence", "max", "no_speech", "manual"]);
+const CTX_STATES = new Set(["running", "suspended", "interrupted", "closed"]);
 const clampMs = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Math.max(0, Math.min(120_000, Math.round(Number(v)))) : null);
 
 export function sanitizeClientMetrics(m) {
@@ -14,6 +15,9 @@ export function sanitizeClientMetrics(m) {
     source: m?.source === "wake" || m?.source === "tap" || m?.source === "follow_up" ? m.source : null,
     // F6: opening the microphone at the tap (a phone releases it after every turn). Not part of e2e: it is before speech.
     mic_open_ms: clampMs(m?.mic_open_ms),
+    // r7 G12: the page's player ended a reply whose audio never finished by itself; the AudioContext state at the report.
+    tts_stalled: m?.tts_stalled === true,
+    ctx_state: CTX_STATES.has(m?.ctx_state) ? m.ctx_state : null,
   };
 }
 
@@ -46,7 +50,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

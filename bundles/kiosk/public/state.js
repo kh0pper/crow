@@ -82,7 +82,7 @@ export function reportDecision(turn, { playing, now, force = false }) {
   }
   return playing ? { report: false } : { report: true };
 }
-export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
+export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null } = {}) {
   return {
     type: "turn_metrics", turn_id: turn.id, source: turn.source, vad_reason: turn.reason,
     e2e_ms: e2eMs({ speechEndAt: turn.speechEndAt, playAt: turn.playAt }),
@@ -90,6 +90,8 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
     barged: !!turn.barged, output_latency_ms: outputLatencyMs,
     // F6: how long opening the microphone took at this turn's tap (null when it was already open).
     mic_open_ms: Number.isFinite(turn.micOpenMs) ? Math.round(turn.micOpenMs) : null,
+    // r7 G12: the player had to end this turn's reply itself (its sources never ended), and the audio context's state.
+    tts_stalled: turn.ttsStalled === true, ctx_state: ctxState,
   };
 }
 /**
@@ -97,14 +99,14 @@ export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
  * a tablet (display_config.mic_per_turn, decided on the server from the display type) yes: an open
  * echo-cancelled capture keeps Android in voice-call audio mode and every sound plays through the call path.
  * The next tap opens it again; the permission is kept, so nothing is asked again. phase: "end" (the speech is in),
- * "settled" (the answer is over and no follow-up started), "closed" (turn_over, socket closed, barge).
+ * "settled" (the answer is over and no follow-up started), "closed" (turn_over, socket closed, barge). "end" keeps it (r7 G12).
  */
-export function micAfterTurn(config, { phase = "end", source = "tap" } = {}) {
+export function micAfterTurn(config, { phase = "end" } = {}) {
   if (config?.mic_per_turn !== true) return "keep";
-  // Review M4: with follow-up on, a follow-up turn may open right after the answer: the mic is kept through it
-  // (one switch into call mode per conversation, not two) and let go when the conversation settles.
-  if (phase === "end" && config.follow_up === true && source !== "follow_up") return "keep";
-  return "release";
+  // Re-smoke 2026-10-07 (G12): letting the mic go at "end" switched Android's audio mode while the reply was
+  // starting; the reply stuttered and its clock could stall. The mic now goes when the turn has settled (the reply
+  // has drained, or no follow-up started — review M4's one switch per conversation still holds), or on "closed".
+  return phase === "end" ? "keep" : "release";
 }
 
 /*
