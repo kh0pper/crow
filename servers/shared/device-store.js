@@ -56,7 +56,7 @@ export const KIOSK_PROFILE_SOURCES = Object.freeze(["operator", "guessed"]);
  * Media (WM1b): the loudest this display may play (10..100, steps of ten; absent = 100), and whether
  * music is paused, rather than turned down, while the display listens (absent = turned down).
  */
-export const KIOSK_MEDIA_KEYS = Object.freeze(["max_volume", "pause_media_on_listen"]);
+export const KIOSK_MEDIA_KEYS = Object.freeze(["max_volume", "pause_media_on_listen", "max_volume_scale"]);
 const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source", ...KIOSK_MEDIA_KEYS]);
 
 function sha256Hex(s) {
@@ -104,7 +104,10 @@ export function normalizeKioskSettings(input, prior) {
     } else if (src.profile === null || src.profile === "") { delete out.profile; delete out.profile_source; }   // back to "not set"
   }
   if (!KIOSK_PROFILE_CHOICES.includes(out.profile)) { delete out.profile; delete out.profile_source; }
-  if ("max_volume" in src) { const n = Number.parseInt(src.max_volume, 10); if (Number.isFinite(n)) out.max_volume = Math.min(100, Math.max(10, Math.round(n / 10) * 10)); }
+  // Kiosk rev 7b (M2): a cap saved by this build is on the display's 5 dB-per-step scale; the mark stops the one-time
+  // migration of older (linear) caps from ever running on it. Never set from input on its own.
+  if ("max_volume" in src) { const n = Number.parseInt(src.max_volume, 10); if (Number.isFinite(n)) { out.max_volume = Math.min(100, Math.max(10, Math.round(n / 10) * 10)); out.max_volume_scale = "db5"; } }
+  if (out.max_volume_scale !== undefined && (out.max_volume_scale !== "db5" || !("max_volume" in out))) delete out.max_volume_scale;
   for (const k of Object.keys(out)) if (!(k in KIOSK_DEFAULTS) && !KIOSK_OPTIONAL_KEYS.has(k)) delete out[k];
   return out;
 }

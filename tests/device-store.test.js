@@ -202,3 +202,11 @@ test("kiosk_settings: max_volume is 10..100 in steps of ten; pause_media_on_list
   assert.equal(n({ pause_media_on_listen: false }, { pause_media_on_listen: true }).pause_media_on_listen, false);
   assert.equal(n({}, { max_volume: 30, pause_media_on_listen: true }).max_volume, 30, "an untouched save keeps both");
 });
+
+test("r7b M2 (operator ruling): every save of max_volume on this build marks it as on the new 5 dB scale (max_volume_scale 'db5'), so the one-time migration can never run twice on it", () => {
+  const n = (input, prior) => store.normalizeKioskSettings(input, prior);
+  assert.equal(n({ max_volume: 70 }).max_volume_scale, "db5");
+  assert.equal(n({ follow_up: true }, { max_volume: 50 }).max_volume_scale, undefined, "an old stored cap stays unmarked until it is migrated or saved again");
+  assert.equal(n({ follow_up: true }, { max_volume: 80, max_volume_scale: "db5" }).max_volume_scale, "db5", "kept");
+  assert.equal(n({ max_volume_scale: "db5" }).max_volume_scale, undefined, "never set on its own from input");
+});

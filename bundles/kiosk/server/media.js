@@ -12,6 +12,16 @@
 /** r7 G7: the page gain is 5 dB per 10 (media-view levelOf): 80 is −10 dB, two audible steps below full. */
 export const DEFAULT_VOLUME = 80;
 export const VOLUME_STEP = 10;
+/**
+ * the rev 7b operator ruling (M2): a "Loudest volume" cap stored before the 5 dB curve was a LINEAR gain (50 = −6 dB). It
+ * becomes the loudest step on the new curve that is not louder than it was (50 → 80 = −10 dB; 10 → 60 = −20 dB;
+ * 100 stays). Absent or not a number → undefined (no cap).
+ */
+export function migrateMaxVolume(v) {
+  const n = Number(v);
+  if (v == null || !Number.isFinite(n) || n <= 0) return undefined;
+  return Math.min(100, Math.max(10, Math.floor((100 + 40 * Math.log10(Math.min(100, n) / 100)) / 10 + 1e-9) * 10));
+}
 export const MAX_QUEUE = 50;
 export const TITLE_MAX = 80;
 export const SESSION_GRACE_MS = 30_000;

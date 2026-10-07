@@ -23,7 +23,7 @@ import { kioskNowContext, matchClockFastPath } from "./clock.js";
 import { wantsMemory } from "./memory-intent.js";
 import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
-import { createMediaStore } from "./media.js";
+import { createMediaStore, migrateMaxVolume } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
 import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, callSignHotwords, commandNames, STATIONS_SETTING } from "./sources/stations.js";
 import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
@@ -426,6 +426,27 @@ export function createKioskRuntime(deps) {
   }
 
   /**
+   * the rev 7b operator ruling (M2): once, at boot, each display's "Loudest volume" cap stored on the old linear scale (no
+   * `max_volume_scale` mark) moves to the equally loud step of the 5 dB curve, never louder; the save marks it, so it
+   * never runs twice. → how many moved (counts only). Never throws.
+   */
+  async function migrateVolumeCaps() {
+    let moved = 0;
+    try {
+      for (const d of await withDb(kioskDevices)) {
+        const ks = d.kiosk_settings || {};
+        if (!("max_volume" in ks) || ks.max_volume_scale === "db5") continue;
+        const v = migrateMaxVolume(ks.max_volume);
+        if (v === undefined) continue;
+        await withDb((db) => deps.deviceStore.updateDeviceProfiles(db, d.id, { kiosk_settings: { max_volume: v } }));
+        moved++;
+      }
+      if (moved) log(`[kiosk] loudest-volume caps moved to the 5 dB scale: ${moved}`);
+    } catch (err) { log(`[kiosk] loudest-volume cap migration: ${err.message}`); }
+    return moved;
+  }
+
+  /**
    * Gateway boot: warm every paired display's STT once whisper answers. Retried
    * every `everyMs` (whisper may still be starting) up to `tries` times; stops at
    * the first round where no warm-up failed. Never throws.
@@ -791,5 +812,5 @@ export function createKioskRuntime(deps) {
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, announce, show, bootWarmup, expireSessionDisplays, stop: () => clearInterval(sweep) };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => clearInterval(sweep) };
 }

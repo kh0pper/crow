@@ -1280,3 +1280,22 @@ test("re-review L-a (wired): the save refuses a command-word name or spoken name
   assert.deepEqual(listing.command_names, []);
   await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
 });
+
+test("r7b M2 (wired, operator ruling): at boot each display's old linear 'Loudest volume' cap moves once to the equally loud step on the 5 dB curve; a cap already saved on the new scale, and no cap, are left alone; a second run changes nothing", async () => {
+  const KIOSK_DEVICES_KEY = "meta_glasses_devices";   // the device store's own settings key
+  for (const id of ["kiosk-mv-50", "kiosk-mv-10", "kiosk-mv-100", "kiosk-mv-new", "kiosk-mv-none"]) await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-mv-new", { kiosk_settings: { max_volume: 70 } });        // saved by this build: marked
+  // What an older build stored: a linear cap with no mark (written as that build would have).
+  const rows = (await raw.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [KIOSK_DEVICES_KEY] })).rows;
+  const list = JSON.parse(rows[0].value);
+  for (const d of list) if (d.id === "kiosk-mv-50") d.kiosk_settings = { ...d.kiosk_settings, max_volume: 50 }; else if (d.id === "kiosk-mv-10") d.kiosk_settings = { ...d.kiosk_settings, max_volume: 10 }; else if (d.id === "kiosk-mv-100") d.kiosk_settings = { ...d.kiosk_settings, max_volume: 100 };
+  await raw.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key = ?", args: [JSON.stringify(list), KIOSK_DEVICES_KEY] });
+  const cap = async (id) => (await store.findDevice(db(), id))?.kiosk_settings || {};
+  const migrated = await rt.migrateVolumeCaps();
+  assert.equal(migrated, 3);
+  assert.deepEqual([(await cap("kiosk-mv-50")).max_volume, (await cap("kiosk-mv-10")).max_volume, (await cap("kiosk-mv-100")).max_volume, (await cap("kiosk-mv-new")).max_volume], [80, 60, 100, 70]);
+  assert.equal((await cap("kiosk-mv-50")).max_volume_scale, "db5");
+  assert.equal("max_volume" in (await cap("kiosk-mv-none")), false, "no cap: none made up");
+  assert.equal(await rt.migrateVolumeCaps(), 0, "never twice");
+  assert.equal((await cap("kiosk-mv-50")).max_volume, 80);
+});

@@ -345,3 +345,17 @@ test("r7 G9: pause/resume in the state already re-send it to the page (the page 
   s.media.onEvent("d", { id: s.sent[0].id, state: "blocked" });
   assert.equal(s.media.stateOf("d"), "blocked");
 });
+
+test("r7b M2 (operator ruling): an old linear 'Loudest volume' cap becomes the step on the 5 dB curve that is as loud as it was, never louder", async () => {
+  const { migrateMaxVolume } = await import("../bundles/kiosk/server/media.js");
+  const { levelOf } = await import("../bundles/kiosk/public/media-view.js");
+  const table = { 100: 100, 90: 90, 80: 90, 70: 90, 60: 90, 50: 80, 40: 80, 30: 70, 20: 70, 10: 60 };
+  for (const [old, want] of Object.entries(table)) {
+    const v = migrateMaxVolume(Number(old));
+    assert.equal(v, want, `old ${old}`);
+    assert.ok(levelOf(v, false) <= Number(old) / 100 + 1e-12, `never louder than before (old ${old})`);
+    assert.ok(v === 100 || levelOf(v + 10, false) > Number(old) / 100, `the loudest step that is not louder (old ${old})`);
+  }
+  assert.equal(migrateMaxVolume(undefined), undefined, "absent stays absent (no cap)");
+  assert.equal(migrateMaxVolume("x"), undefined);
+});
