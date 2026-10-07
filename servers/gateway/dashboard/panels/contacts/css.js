@@ -196,6 +196,14 @@ export function contactsCss() {
     object-fit: cover;
   }
 
+  /* A long name must not widen the header: in the phone layout below the
+     header is a centered column, where an item is sized to fit its content.
+     The inherited overflow-wrap:break-word then breaks the name instead. */
+  .profile-info {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .profile-info h2 {
     margin: 0 0 0.25rem;
     font-family: var(--crow-body-font);

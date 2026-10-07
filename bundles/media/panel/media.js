@@ -594,7 +594,7 @@ export default {
         <select name="source_id"><option value="">All sources</option>${sourceOptions}</select>
         <button type="submit" class="btn btn-sm btn-primary">Filter</button>
       </form>
-      <div style="display:flex;gap:0.35rem;margin-bottom:1rem">
+      <div style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-bottom:1rem">
         <a href="/dashboard/media?tab=${tab}" class="filter-btn ${!filterUnread && !filterStarred ? "active" : ""}">All</a>
         <a href="/dashboard/media${buildQs(currentParams, { unread_only: filterUnread ? "" : "true", starred_only: "" })}" class="filter-btn ${filterUnread ? "active" : ""}">Unread</a>
         <a href="/dashboard/media${buildQs(currentParams, { starred_only: filterStarred ? "" : "true", unread_only: "" })}" class="filter-btn ${filterStarred ? "active" : ""}">Starred</a>

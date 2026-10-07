@@ -21,8 +21,13 @@
  * No binary → null, and the caller skips exactly as it did with no :9223.
  *
  * Under GITHUB_ACTIONS the system Chrome on the runner image is ignored unless
- * CROW_TEST_CHROME names it: these tests never ran in CI before this change,
- * and turning them on there is a separate decision, not a side effect.
+ * CROW_TEST_CHROME names it. CI provides a pinned Chrome Headless Shell via
+ * `npx playwright@<pinned> install chromium-headless-shell` (step 2 above), so
+ * the runner's image Chrome never decides what the layout tests see.
+ *
+ * CROW_REQUIRE_TEST_CHROME=1 (set in CI): no browser, or one that fails to
+ * start, THROWS instead of returning null, so the live tests fail loudly
+ * rather than skipping.
  *
  * CROW_CDP_URL is still honoured as an explicit operator opt-in to an external
  * endpoint (e.g. a Dockerised browser); nothing defaults to 9223 any more.
@@ -105,7 +110,15 @@ export function reapStaleChromes() {
   return reaped;
 }
 
-export async function startHeadlessChrome({ timeoutMs = 20000 } = {}) {
+export async function startHeadlessChrome(opts = {}) {
+  const chrome = await startHeadlessChromeOrNull(opts);
+  if (!chrome && process.env.CROW_REQUIRE_TEST_CHROME === "1") {
+    throw new Error("CROW_REQUIRE_TEST_CHROME=1 but no headless Chrome could be started (see tests/fixtures/headless-chrome.mjs)");
+  }
+  return chrome;
+}
+
+async function startHeadlessChromeOrNull({ timeoutMs = 20000 } = {}) {
   if (process.env.CROW_CDP_URL) {
     const cdp = process.env.CROW_CDP_URL;
     try {

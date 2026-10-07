@@ -229,7 +229,7 @@ async function renderListView(db, query, layout, lang) {
       return `<a href="/dashboard/projects?view=${p.id}" class="project-card" style="animation:fadeInUp 0.3s ease-out ${delay}ms both">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:0.5rem">
           <div style="font-weight:600;font-size:0.95rem">${escapeHtml(p.name)}</div>
-          <div>${statusBadge}${typeBadge}</div>
+          <div style="flex-shrink:0">${statusBadge}${typeBadge}</div>
         </div>
         ${p.description ? `<div style="font-size:0.8rem;color:var(--crow-text-secondary);margin-top:0.25rem">${escapeHtml(p.description.substring(0, 120))}${p.description.length > 120 ? "..." : ""}</div>` : ""}
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem">

@@ -14,6 +14,15 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
+// The bot engine is READY in this fixture: the scripted perch-api serves live
+// sessions, which only a running engine produces. The panel handler asks the
+// real engineStatus(), and without a pin that answer comes from the host —
+// a machine with pi installed globally renders no banner, a clean CI runner
+// renders the "engine not installed" banner above the chat, and every
+// height-dependent assertion below then measures a different page. The env
+// rung (pi_resolver.mjs) is the resolver's own seam; nothing here spawns pi.
+process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
+
 // A PRIVATE headless Chrome per file (tests/fixtures/headless-chrome.mjs) —
 // never the live crow-browser on :9223. Set in before().
 let CDP = "(no headless Chrome)", BIND_HOST = "127.0.0.1", chrome = null;
