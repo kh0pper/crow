@@ -105,6 +105,9 @@ function canon(words) {
   for (let i = 0; i < words.length; i += 1) {
     const x = words[i];
     if (spelled[i]) { out.push(x); continue; }
+    // r8 P4: "to" between two numbers is a range ("nineteen seventy to two thousand two", "1970 to 2002"): it folds away,
+    // as the written "1970-2002" has no word there.
+    if (x === "to" && /^\d+$/.test(out[out.length - 1] || "") && i + 1 < words.length && (isNum(words[i + 1]) || /^\d+$/.test(words[i + 1]))) continue;
     if (x === "rb") { out.push("rnb"); continue; }
     // "r and b", "r n b", "r b" → rnb; "rock n roll" → rock and roll.
     if (x === "r" && (words[i + 1] === "and" || words[i + 1] === "n") && words[i + 2] === "b") { out.push("rnb"); i += 2; continue; }
@@ -201,7 +204,8 @@ export function buildIndex({ albums = [], artists = [], genres = [], playlists =
   };
   const named = (kind, id, name) => {
     const w = wordsOf(name);
-    return id && w.length ? { kind, id, name: cleanName(name), w, f: w.join(" ") } : null;
+    // `full`: the title as stored (TEXT_MAX), for the report's spoken reading; `name` is the 80-character display form.
+    return id && w.length ? { kind, id, name: cleanName(name), full: text(name).slice(0, TEXT_MAX), w, f: w.join(" ") } : null;
   };
   const seenArtist = new Set();
   const addArtist = (id, name) => {
@@ -604,6 +608,8 @@ function sayNumber(n) {
  */
 export function sayAloud(name) {
   const said = text(name).slice(0, TEXT_MAX)
+    // r8 P4: a range of numbers is read "N to M" ("1970-2002" → "nineteen seventy to two thousand two").
+    .replace(/\b(\d{1,4})\s*[-–—]\s*(\d{1,4})\b/g, "$1 to $2")
     .replace(/\bSt\.?(?=\s)/g, "saint").replace(/\bDr\.?(?=\s)/g, "doctor").replace(/\bVol\.?(?=\s)/gi, "volume").replace(/\bMr\.?(?=\s)/g, "mister")
     .replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, (m, d) => { const n = Number(d); return n >= 1 && n <= 20 ? ORD_W[n] : n % 10 ? `${TENS_W[Math.floor(n / 10)]} ${ORD_W[n % 10]}` : m; })
     // r7: a number with a thousands separator is one number; leading zeros are read digit by digit ("007").
@@ -685,19 +691,20 @@ export function matchReport(ix) {
   const miss = (box, name) => { for (const k of spokenChanges(name)) box.missed_by[k] = (box.missed_by[k] || 0) + 1; };
   for (const group of titles.values()) {
     if (group.length !== 1) continue;
-    const said = sayAloud(group[0].name);
+    // r8 P4: the whole stored title is read, not the 80-character display name (a long title was cut mid-word).
+    const said = sayAloud(group[0].full ?? group[0].name);
     if (!said) continue;
     spoken.albums.variants += 1;
     const want = sure(run(group[0].f));
-    if (want && sure(run(said)) === want) spoken.albums.resolved += 1; else miss(spoken.albums, group[0].name);
+    if (want && sure(run(said)) === want) spoken.albums.resolved += 1; else miss(spoken.albums, group[0].full ?? group[0].name);
   }
   for (const a of ix.artists) {
-    const said = sayAloud(a.name);
+    const said = sayAloud(a.full ?? a.name);
     if (!said) continue;
     spoken.artists.variants += 1;
     const c = run(said);
     if (c.length === 1 && c[0].kind === "artist" && (c[0].id === `music:artist:${a.id}` || c[0].group?.includes(a.id))) spoken.artists.resolved += 1;
-    else miss(spoken.artists, a.name);
+    else miss(spoken.artists, a.full ?? a.name);
   }
   return { albums, artists, genres, spoken };
 }

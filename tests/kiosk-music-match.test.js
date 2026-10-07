@@ -396,3 +396,18 @@ test("r7b L5: a request with an article before 'r n b' / 'r b' still asks for th
   assert.equal(fold("d n q sessions"), "d n q sessions");
   assert.equal(fold("a n r tapes"), "a n r tapes", "a spelled name that starts with A keeps its letters");
 });
+
+test("r8 P4: spoken album numbers — a long title is read whole (the report no longer reads the 80-character display name), a year or catalog range is read 'N to M', and 'to' between two numbers folds away on both sides; written matches unchanged", () => {
+  const titles = ["Symphony No. 9 in D Minor, Op. 125 'Choral' (Live at the Royal Festival Hall, London, 1999)", "Cello Suites, BWV 1007-1012", "Greatest Moths 1970-2002 (Disc 1 of 2)", "Kites (1999–2003)", "Heron Songs 1-12", "2 to 1 Moths"];
+  const albums = titles.map((t, i) => ({ id: 800 + i, title: t, artistId: 850 + (i % 2), artist: ["Quiet Heron", "Moth Engine"][i % 2], tracks: 9, year: 2001 }));
+  const ix = buildIndex({ albums, artists: [{ id: 850, name: "Quiet Heron" }, { id: 851, name: "Moth Engine" }], genres: [], playlists: [] });
+  const r = matchReport(ix);
+  assert.equal(r.albums.unique_resolved, titles.length, "written unchanged");
+  assert.equal(r.spoken.albums.resolved, r.spoken.albums.variants, JSON.stringify(r.spoken));
+  assert.equal(sayAloud("Greatest Moths 1970-2002"), "Greatest Moths nineteen seventy to two thousand two");
+  assert.equal(fold("greatest moths nineteen seventy to two thousand two"), "greatest moths 1970 2002");
+  assert.equal(fold("1970 to 2002"), "1970 2002", "STT writing digits with 'to' meets the written range too");
+  assert.equal(fold("from me to you"), "from me to you", "'to' between words stays");
+  const run = (s) => decide(readRequest(s), ix, { tracks: [], artistAlbums: new Set() }).candidates.map((c) => c.id);
+  assert.deepEqual(run("cello suites b w v one thousand seven to one thousand twelve"), ["music:album:801"]);
+});
