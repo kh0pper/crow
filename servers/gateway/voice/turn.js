@@ -276,7 +276,7 @@ export function createVoiceTurnRunner(deps) {
     const prompt = sttPromptText(sttPrompt, sttProfile);
     const hotwords = sttHotwordsText(sttHotwords, sttProfile);
     const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
-    return { text: String(r?.text || "").trim() };
+    return { text: String(r?.text || "").trim(), hotwords: !!hotwords };   // r7c N3: whether hotwords went (never the words)
   }
 
   /**
@@ -356,6 +356,8 @@ export function createVoiceTurnRunner(deps) {
         if (opts.sttEarly.discards) { timings.stt_early_discards = opts.sttEarly.discards; timings.stt_early_discard_ms = opts.sttEarly.discard_ms || 0; }
         if (opts.sttEarly.used && Number.isFinite(opts.sttEarly.ms)) timings.stt_early_ms = opts.sttEarly.ms;
       }
+      // r7c N3 (counts only): whether STT hotwords were sent for the transcript this turn uses.
+      timings.stt_hotwords = opts.sttEarly?.used === true && opts.sttEarly.hotwords === true;
       if (transcript != null && opts.sttEarly?.used) mark("stt_ms");   // = how long the turn waited for the early transcript
       if (transcript == null) {
         const sttProfile = await deps.getSttProfile(db, device);
@@ -368,6 +370,7 @@ export function createVoiceTurnRunner(deps) {
         const prompt = sttPromptText(opts.sttPrompt, sttProfile);
         // opts.sttHotwords: a few words (call signs) as faster-whisper's `hotwords`; other adapters ignore it.
         const hotwords = sttHotwordsText(opts.sttHotwords, sttProfile);
+        timings.stt_hotwords = !!hotwords;
         const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");

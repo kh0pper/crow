@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { createSessionHub, HELLO_TIMEOUT_MS, MAX_TURN_BYTES, EARLY_STT_WAIT_MS } from "../bundles/kiosk/server/session.js";
 import { createMetricsStore } from "../bundles/kiosk/server/metrics.js";
 import { createWmStore } from "../bundles/kiosk/server/wm.js";
@@ -388,7 +389,7 @@ test("lever D: speech_pause starts STT on the audio so far; a turn_end with no l
   await tick(); await tick();
   assert.equal(turns.length, 1);
   assert.equal(turns[0].transcript, "What is the capital of Portugal?");
-  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 0, discard_ms: 0 });
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, hotwords: false, discards: 0, discard_ms: 0 });
   assert.equal(typeof turns[0].startedAt, "number");
   assert.equal(stt[0].signal.aborted, false);
 });
@@ -427,7 +428,7 @@ test("lever D: one early STT at a time — a newer pause while one runs waits, t
   stt[1].d.resolve({ text: "What is the time?" });
   await tick(); await tick(); await tick();
   assert.equal(turns[0].transcript, "What is the time?");
-  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, discards: 1, discard_ms: 0 });
+  assert.deepEqual({ ...turns[0].sttEarly, ms: undefined }, { used: true, ms: undefined, hotwords: false, discards: 1, discard_ms: 0 });
 });
 
 test("lever D: a failed early STT falls back to transcribing; no_speech and close abort it; without speech_pause nothing changes", async () => {
@@ -816,4 +817,10 @@ test("turn_metrics carries effect_ms, clamped like the other client numbers", as
   const line = (id) => JSON.parse(logs.find((l) => l.startsWith("[kiosk-metrics]") && l.includes(`"${id}"`)).slice("[kiosk-metrics] ".length));
   assert.deepEqual([line("f1").effect_ms, line("f2").effect_ms, line("f3").effect_ms], [640, null, 120000]);
   assert.equal(metrics.list("kiosk-a").find((r) => r.turn_id === "f1").effect_ms, 640);
+});
+
+test("r7c N3 (source): the early transcript carries its hotwords flag into the turn's sttEarly", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/server/session.js", import.meta.url), "utf8");
+  assert.match(src, /hotwords: r\?\.hotwords === true/);
+  assert.match(src, /sttEarly = \{ used: true, ms: er\.ms, hotwords: er\.hotwords === true,/);
 });

@@ -74,7 +74,7 @@ export function createSessionHub(deps) {
       const audio = deps.wrapPcmAsWav(Buffer.concat(frames.slice(0, snap.n)), 16000);
       e.promise = Promise.resolve()
         .then(() => deps.transcribe({ device, audio, signal: e.ctrl.signal }))
-        .then((r) => ({ text: String(r?.text || "").trim(), ms: nowMs() - e.startedAt }), (err) => ({ error: err, ms: nowMs() - e.startedAt }))
+        .then((r) => ({ text: String(r?.text || "").trim(), hotwords: r?.hotwords === true, ms: nowMs() - e.startedAt }), (err) => ({ error: err, ms: nowMs() - e.startedAt }))
         .then((r) => { e.done = true; e.ms = r.ms; if (early === e && earlyWant && inTurn) startEarly(earlyWant); return r; });
       early = e;
     }
@@ -219,7 +219,7 @@ export function createSessionHub(deps) {
           clearT2(cap);
           if (er.capped) usable.ctrl.abort();
           // An empty early transcript is not trusted (a mid-word snapshot): the full audio is transcribed.
-          if (!er.error && er.text && !my.signal.aborted) sttEarly = { used: true, ms: er.ms, discards, discard_ms: discardMs };
+          if (!er.error && er.text && !my.signal.aborted) sttEarly = { used: true, ms: er.ms, hotwords: er.hotwords === true, discards, discard_ms: discardMs };
           if (sttEarly) transcript = er.text;
           else if (er.error && !my.signal.aborted) deps.log?.(`[kiosk] early STT unusable, transcribing again: ${er.error.message}`);
         }

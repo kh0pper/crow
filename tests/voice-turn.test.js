@@ -414,7 +414,7 @@ test("lever D: an early transcript skips STT; timings count from the real turn s
   const seen = [];
   h.deps.getSttProfile = async () => ({ id: "k", provider: "fasterwhisper", language: "en" });
   h.deps.createSttAdapter = async () => ({ transcribe: async (a, o) => { seen.push(o.model ?? null); return { text: "  hi  " }; } });
-  assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi" });
+  assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi", hotwords: false });
   assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en"]);
 });
 
@@ -1874,4 +1874,23 @@ test("r7b L1: tool syntax in the other common formats is never heard either — 
   const ok = harness({ rounds: [[{ type: "content_delta", text: "Use [brackets] and {braces} as you like; 3 < 4." }, { type: "done" }]] });
   await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
   assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Use [brackets] and {braces} as you like; 3 < 4.");
+});
+
+test("r7c N3: every turn records whether STT hotwords were sent (true/false, never the words) — on its own STT and on an early transcript", async () => {
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async () => ({ text: "hi" }) });
+  const on = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => "WXYZ" });
+  assert.equal(on.timings.stt_hotwords, true);
+  const off = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => "" });
+  assert.equal(off.timings.stt_hotwords, false);
+  const none = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  assert.equal(none.timings.stt_hotwords, false);
+  assert.ok(!JSON.stringify(on.timings).includes("WXYZ"), "never the words");
+  const t = await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttHotwords: "WXYZ" });
+  assert.equal(t.hotwords, true);
+  const early = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sttEarly: { used: true, ms: 5, hotwords: true }, sink: h.sink });
+  assert.equal(early.timings.stt_hotwords, true, "the early transcript says what it was sent with");
+  const early2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sttEarly: { used: true, ms: 5 }, sink: h.sink });
+  assert.equal(early2.timings.stt_hotwords, false);
 });
