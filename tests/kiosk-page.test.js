@@ -106,6 +106,64 @@ test("window view: one visible window + tab rail; text only (no markup injection
   assert.equal(root.hidden, true);
 });
 
+test("a finished timer: one tap anywhere on the card dismisses it (once, through onDismiss), it says so, and the page tint follows it", (t) => {
+  const { document, window } = parseHTML("<html><body><div id=w></div></body></html>");
+  const root = document.getElementById("w");
+  const dismissed = [];
+  const v = createWindowView(root, { t: (k) => ({ timer_done: "Time's up", timer_tap_dismiss: "Tap to dismiss" })[k] || k, onDismiss: (id) => dismissed.push(id), now: () => 0 });
+  t.after(() => v.apply({ action: "close_all" }));
+  v.apply({ action: "open", window: { id: "timer-1", kind: "timer", title: "Tea", name: "Tea", ends_at: 60_000, done: false } });
+  assert.equal(document.documentElement.classList.contains("k-ringing"), false, "a running timer does not tint the page");
+  root.querySelector("article").dispatchEvent(new window.Event("click"));
+  assert.deepEqual(dismissed, [], "a tap on a RUNNING timer does not dismiss it");
+  assert.equal(root.querySelector(".k-tap-dismiss"), null);
+  v.apply({ action: "timer_done", id: "timer-1" });
+  const card = root.querySelector("article.is-done");
+  assert.equal(card.querySelector(".k-tap-dismiss").textContent, "Tap to dismiss");
+  assert.equal(card.getAttribute("role"), "button");
+  assert.equal(document.documentElement.classList.contains("k-ringing"), true);
+  card.querySelector(".k-timer").dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.deepEqual(dismissed, ["timer-1"], "a tap on the text inside the card dismisses it");
+  assert.equal(root.querySelectorAll("article").length, 0);
+  assert.equal(root.hidden, true);
+  assert.equal(document.documentElement.classList.contains("k-ringing"), false, "the tint goes with it");
+  card.dispatchEvent(new window.Event("click"));
+  assert.deepEqual(dismissed, ["timer-1"], "a second event from the same gesture is not a second dismiss");
+});
+
+test("a finished timer's close button and a tap on its card are one dismiss, not two", (t) => {
+  const { document, window } = parseHTML("<html><body><div id=w></div></body></html>");
+  const root = document.getElementById("w");
+  const dismissed = [];
+  const v = createWindowView(root, { t: (k) => k, onDismiss: (id) => dismissed.push(id), now: () => 0 });
+  t.after(() => v.apply({ action: "close_all" }));
+  v.apply({ action: "snapshot", windows: [
+    { id: "recipe-2", kind: "recipe", title: "Soup", ingredients: [], steps: ["Boil"], step: 0 },
+    { id: "timer-1", kind: "timer", title: "Tea", name: "Tea", ends_at: 0, done: true },
+  ] });
+  assert.equal(document.documentElement.classList.contains("k-ringing"), true, "a snapshot with a finished timer tints the page (a reopened overlay)");
+  root.querySelector(".k-win-close").dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.deepEqual(dismissed, ["timer-1"]);
+  assert.equal(root.querySelector("article").dataset.id, "recipe-2", "the next window shows");
+  root.querySelector("article").dispatchEvent(new window.Event("click"));
+  assert.deepEqual(dismissed, ["timer-1"], "a tap on an ordinary window does not dismiss it");
+  assert.equal(document.documentElement.classList.contains("k-ringing"), false);
+});
+
+test("CSS: a finished timer is never a full-screen layer; the talk button sits above windows; in session mode a window's close button is top-LEFT", () => {
+  const css = read("kiosk.css");
+  const rule = (sel) => { const i = css.indexOf(sel + " {"); assert.ok(i >= 0, sel); return css.slice(i, css.indexOf("}", i)); };
+  const done = rule(".k-win-timer.is-done");
+  assert.doesNotMatch(done, /position:\s*fixed|inset:/, "the finished card stays in its pane, so the bird and the talk button are not covered");
+  assert.match(done, /cursor:\s*pointer/);
+  assert.match(rule(".k-mic"), /z-index:\s*\d/);
+  assert.match(css, /html\.k-ringing, html\.k-ringing body \{[^}]*background/);
+  const sClose = rule('[data-mode="session"] .k-win-close');
+  assert.match(sClose, /left:\s*4px/);
+  assert.match(sClose, /right:\s*auto/);
+  assert.match(rule('[data-mode="session"] .k-win'), /padding:\s*16px 20px 16px 64px/, "the title makes room on the left");
+});
+
 test("Task 8 carry: every model-supplied string (title, name, blocks, ingredients, steps, tab labels) renders as TEXT", (t) => {
   const { document } = parseHTML("<div id=w></div>");
   const root = document.getElementById("w");

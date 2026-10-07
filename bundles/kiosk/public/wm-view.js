@@ -1,4 +1,8 @@
-/** Window stack for small screens (spec §8.5): one visible window, a tab rail, swipe to dismiss. Text only. */
+/**
+ * Window stack for small screens (spec §8.5): one visible window, a tab rail, swipe to dismiss. Text only.
+ * A finished timer stays in its pane (never a full-screen layer over the bird and the talk button), tints
+ * the page (html.k-ringing) and is dismissed by one tap anywhere on it, like its close button.
+ */
 export function classifySwipe({ dx, dy, dt }) {
   if (Math.abs(dy) > Math.abs(dx)) return null;
   if (Math.abs(dx) >= 80 || (dt > 0 && Math.abs(dx) / dt > 0.5)) return dx < 0 ? "left" : "right";
@@ -16,7 +20,8 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
   const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; };
   const toTop = (id) => { const w = wins.find((x) => x.id === id); if (w) wins = [...wins.filter((x) => x !== w), w]; };
 
-  function dismiss(id) { wins = wins.filter((w) => w.id !== id); onDismiss(id); render(); }
+  /** Idempotent: a swipe, the close button and a tap on a finished timer can all land on one gesture. */
+  function dismiss(id) { if (!wins.some((w) => w.id === id)) return; wins = wins.filter((w) => w.id !== id); onDismiss(id); render(); }
   function swipe(node, id) {
     let x0 = null, y0 = 0, t0 = 0, hold = null;
     const cancelHold = () => { clearTimeout(hold); hold = null; };
@@ -40,6 +45,12 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
     card.append(el("h2", "k-win-title", w.title));
     if (w.kind === "timer") {
       card.append(el("p", "k-timer", w.done ? t("timer_done") : formatRemaining(w.ends_at - now())));
+      if (w.done) {
+        card.append(el("p", "k-tap-dismiss", t("timer_tap_dismiss")));
+        card.setAttribute("role", "button");
+        card.setAttribute("aria-label", `${t("timer_done")}. ${t("timer_tap_dismiss")}`);
+        card.addEventListener("click", () => dismiss(w.id));
+      }
     } else if (w.kind === "recipe") {
       if (w.ingredients?.length) {
         card.append(el("h3", "k-sub", t("ingredients")));
@@ -62,7 +73,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
     const close = el("button", "k-win-close", "×");
     close.type = "button";
     close.setAttribute("aria-label", t("windows_close"));
-    close.addEventListener("click", () => dismiss(w.id));
+    close.addEventListener("click", (e) => { e.stopPropagation(); dismiss(w.id); });
     card.append(close);
     swipe(card, w.id);
     return card;
@@ -71,6 +82,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
     clearInterval(tick);
     tick = null;
     root.replaceChildren();
+    doc.documentElement?.classList.toggle("k-ringing", wins.some((w) => w.done));
     const top = wins[wins.length - 1];
     if (!top) { root.hidden = true; return; }
     root.hidden = false;
@@ -102,6 +114,7 @@ export function createWindowView(root, { t = (k) => k, onDismiss = () => {}, onT
         default: return;
       }
       render();
+      if (m.action === "timer_done") root.querySelector("article")?.scrollIntoView?.({ block: "nearest" });   // a phone may be scrolled past the pane
     },
     list: () => wins.slice(),
     pause(p) { if (p) { clearInterval(tick); tick = null; } else render(); },
