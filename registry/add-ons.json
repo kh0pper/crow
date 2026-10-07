@@ -1008,7 +1008,7 @@
     {
       "id": "data-dashboard",
       "name": "Data Dashboard",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
       "type": "bundle",
       "author": "Crow",
@@ -3207,7 +3207,7 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "author": "Crow",
@@ -3310,7 +3310,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -6597,7 +6597,7 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
       "type": "bundle",
       "author": "Crow",

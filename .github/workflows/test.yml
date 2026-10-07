@@ -56,9 +56,19 @@ jobs:
           else
             echo "::warning::pi sandbox unavailable on this runner; tests/pi-sandbox.test.js integration cases will skip"
           fi
+      # Live layout tests (phone-width checks, Perch @412x730 …) drive a private
+      # headless Chrome (tests/fixtures/headless-chrome.mjs), found under
+      # ~/.cache/ms-playwright. Pinned: playwright 1.63.0 = Chrome Headless
+      # Shell 153.0.8010.12 (build 1243). --with-deps installs its system libs.
+      - name: Headless Chrome for the live layout tests
+        run: npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
       # host-bound tests self-skip via in-file capability guards instead.
+      # CROW_REQUIRE_TEST_CHROME: a browser that fails to start fails the live
+      # tests instead of letting them skip silently.
       - run: npm test
+        env:
+          CROW_REQUIRE_TEST_CHROME: "1"
 
   static-checks:
     runs-on: ubuntu-latest

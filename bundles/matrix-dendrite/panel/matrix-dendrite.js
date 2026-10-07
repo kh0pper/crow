@@ -153,8 +153,9 @@ function styles() {
                      letter-spacing: 0.05em; margin: 0 0 0.7rem; }
     .mx-card { background: var(--crow-bg-elevated); border: 1px solid var(--crow-border);
                border-radius: 10px; padding: 1rem; }
-    .mx-row { display: flex; justify-content: space-between; padding: .25rem 0; font-size: .9rem; color: var(--crow-text-primary); }
+    .mx-row { display: flex; flex-wrap: wrap; column-gap: .75rem; justify-content: space-between; padding: .25rem 0; font-size: .9rem; color: var(--crow-text-primary); }
     .mx-row b { color: var(--crow-text-muted); font-weight: 500; min-width: 160px; }
+    .mx-row span { min-width: 0; overflow-wrap: anywhere; }
     .mx-fed-badge { display: inline-block; font-size: .8rem; font-weight: 600; padding: .3rem .6rem;
                     border-radius: 6px; letter-spacing: .05em; margin-bottom: .7rem; }
     .mx-fed-ok { background: rgba(34,197,94,.15); color: #22c55e; }

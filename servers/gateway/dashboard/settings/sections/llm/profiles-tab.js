@@ -94,7 +94,7 @@ export default {
 
     return `
       ${banner}
-      <nav style="display:flex;gap:0.25rem;border-bottom:1px solid var(--crow-border);margin-bottom:1rem;padding-left:0.25rem">
+      <nav style="display:flex;flex-wrap:wrap;gap:0.25rem;border-bottom:1px solid var(--crow-border);margin-bottom:1rem;padding-left:0.25rem">
         ${tabs}
       </nav>
       <div class="llm-profiles-body">${innerBody}</div>
