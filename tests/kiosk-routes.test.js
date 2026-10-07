@@ -49,9 +49,16 @@ function runtimeDeps(over = {}) {
   };
 }
 
+// Review of rev 8 (M2): a wired test that fails before its ws.close() left an open socket, so srv.close() in after() never
+// finished and the red run hung instead of failing. The server's own sockets (upgraded ones included) are tracked and
+// destroyed on close.
 async function listen(app, runtime) {
   const s = http.createServer(app);
   runtime?.attachUpgrade(s);
+  const conns = new Set();
+  s.on("connection", (c) => { conns.add(c); c.on("close", () => conns.delete(c)); });
+  const close = s.close.bind(s);
+  s.close = (cb) => { for (const c of conns) c.destroy(); return close(cb); };
   await new Promise((r) => s.listen(0, "127.0.0.1", r));
   return { s, base: `http://127.0.0.1:${s.address().port}` };
 }
@@ -1333,4 +1340,19 @@ test("r8 P1 (wired): a model-routed turn's metrics carry the playback verb the m
     assert.deepEqual(done.timings.model_verbs, ["resume"]);
     assert.deepEqual(done.timings.model_verbs_kept, ["pause"]);
   } finally { ws?.terminate(); r.stop(); s.close(); }
+});
+
+
+test("r8b (review M2): a server from listen() closes at once even while a wired test's WebSocket is still open (a red test cannot hang the run)", async () => {
+  const r = createKioskRuntime(runtimeDeps());
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  const ws = new WebSocket(b.replace("http", "ws") + "/api/kiosk/session");
+  await new Promise((res) => ws.on("open", res));
+  r.stop();
+  const t0 = Date.now();
+  await new Promise((res) => s.close(res));          // never ws.close(): what a failing test leaves behind
+  assert.ok(Date.now() - t0 < 1000, `closed in ${Date.now() - t0} ms`);
+  await new Promise((res) => (ws.readyState === 3 ? res() : ws.on("close", res)));
 });
