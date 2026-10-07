@@ -197,7 +197,12 @@ test("F1 by sound, never a guess between two: same-sound stations are all offere
   const t = (what, opts) => createStationsSource({ list: () => twins }).search(what, opts).map((c) => `${c.id}${c.confident ? "!" : c.near ? "~" : "?"}`);
   assert.deepEqual(t("KDPF"), ["st_ktpf?", "st_kdbv?"], "two stations that sound the same: offered, neither `near`");
   // One sound away: not offered in an auto search ("Play Candy Puff" is not KTPF) …
-  for (const said of ["candy puff", "BTPF", "KTBJT2"]) assert.deepEqual(callIds(said), [], said);
+  assert.deepEqual(callIds("candy puff"), [], "ordinary words one sound off: never");
+  // r7: a call-sign shape one sound off is ASKED about in an auto search (the STT prompt is off; "Play BTPF" for KTPF).
+  const asked = (what, opts) => createStationsSource({ list: () => CALL }).search(what, opts).map((c) => `${c.id}${c.ask ? "?ask" : c.near ? "~" : c.confident ? "!" : "?"}`);
+  assert.deepEqual(asked("BTPF"), ["st_ktpf_hd1?ask"]);
+  assert.deepEqual(asked("KTBJT2"), ["st_ktpf_hd2?ask"]);
+  for (const said of ["cup of tea", "Pet TF", "DTPD"]) assert.deepEqual(callIds(said), [], said);
   // … offered when the request named the radio.
   assert.deepEqual(callIds("BTPF", { explicit: true }), ["st_ktpf_hd1?"]);
   assert.deepEqual(soundSearch(twins, stationKey("TPF"), { explicit: true }), [], "three consonant sounds is too little to be one sound off");
@@ -218,4 +223,17 @@ test("review L2 / re-review L-a: a station name that is itself a command is refu
   assert.deepEqual(loaded.map((s) => s.name), ["Next Radio", "Morning Mix"], "already saved: still there after a deploy");
   assert.deepEqual(commandNames(loaded), ["Next Radio", "Louder", "Pause"]);
   assert.equal(stationNamesHint(loaded), "news radio, Morning Mix, the mix", "commands never reach the STT prompt");
+});
+
+test("r7: the STT hotwords are the call-sign-shaped words of the names and aliases only (no vowel, 3–6 letters), upper case, each once, at most five", async () => {
+  const { callSignHotwords } = await import("../bundles/kiosk/server/sources/stations.js");
+  assert.equal(callSignHotwords(CALL), "KTPF");
+  const more = normalizeStations([
+    { name: "KTPF HD1", aliases: ["ktpf", "ninety point one"], url: "https://stream.example.invalid/1" },
+    { name: "WXYZ", aliases: ["Morning Mix"], url: "https://stream.example.invalid/2" },
+    { name: "Classic Country", aliases: ["HD two", "KDBV-FM"], url: "https://stream.example.invalid/3" },
+  ]);
+  assert.equal(callSignHotwords(more), "KTPF WXYZ KDBV");
+  assert.equal(callSignHotwords([]), "");
+  assert.equal(callSignHotwords(null), "");
 });

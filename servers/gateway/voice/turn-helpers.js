@@ -176,6 +176,18 @@ export function createConvoStore({ maxMessages = 24, idleMs = 15 * 60 * 1000, no
   };
 }
 
+/**
+ * Is this transcript an STT repetition loop rather than speech (kiosk re-smoke 2026-10-07 G4: "K-P-P-P-P…",
+ * "louder, louder, … and louder")? The same word or letter six times running, or a 1–3 character unit
+ * repeated eight times inside one word. Ordinary repeats ("No, no, no, no.", "Ha ha ha ha") are speech.
+ */
+export function degenerateTranscript(text) {
+  const words = String(text || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  let run = 1;
+  for (let i = 1; i < words.length; i++) { run = words[i] === words[i - 1] ? run + 1 : 1; if (run >= 6) return true; }
+  return words.some((w) => w.length >= 8 && /(.{1,3})\1{7,}/u.test(w));
+}
+
 export function negotiatePcm(adapterName) {
   switch (adapterName) {
     case "openai-tts":

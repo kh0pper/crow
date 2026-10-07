@@ -1207,7 +1207,7 @@ test("smoke F8 (wired): playback starting opens the now-playing window on a disp
   } finally { rt.media.closeDevice("kiosk-f8-phone"); rt.media.closeDevice("kiosk-f8-bare"); phone.ws.close(); bare.ws.close(); }
 });
 
-test("review L1 (wired): the station names reach the STT prompt of every display turn — except on a Spanish display whose STT profile leaves the language to detection", async () => {
+test("review L1 (wired), r7: the station-name STT prompt is switched off (it made Whisper loop and mishear short words); its language rule is kept behind the switch", async () => {
   await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }] }) });
   const turn = async (id, settings) => {
     const { token } = await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
@@ -1227,12 +1227,27 @@ test("review L1 (wired): the station names reach the STT prompt of every display
     return turnCalls.at(-1);
   };
   try {
+    // r7 (re-smoke 2026-10-07 G1/G6/G8): the station-name prompt is OFF — no display turn sends one.
+    const { STT_STATION_PROMPT, stationSttPrompt } = await import("../bundles/kiosk/server/runtime.js");
+    assert.equal(STT_STATION_PROMPT, false);
     const en = await turn("kiosk-l1-en");
-    assert.equal(en.sttPrompt({ language: null }), "Morning Mix, the mix");
+    assert.equal(en.sttPrompt({ language: null }), "", "off: no prompt on an English display");
     const es = await turn("kiosk-l1-es", { lang: "es" });
     assert.equal(es.device.kiosk_settings.lang, "es");
-    assert.equal(es.sttPrompt({ language: null }), "", "a Spanish display, language left to detection: no English prompt");
-    assert.equal(es.sttPrompt({ language: "en" }), "Morning Mix, the mix", "a profile that pins the language is safe");
+    assert.equal(es.sttPrompt({ language: "en" }), "");
+    // The short call-sign hotwords replace it (none here: "Morning Mix" is not a call sign).
+    const { STT_CALLSIGN_HOTWORDS, stationSttHotwords } = await import("../bundles/kiosk/server/runtime.js");
+    assert.equal(STT_CALLSIGN_HOTWORDS, true);
+    assert.equal(en.sttHotwords({ language: "en" }), "");
+    const cs = [{ name: "KTPF HD1", aliases: ["KTPF"] }];
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs), "KTPF");
+    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "es" } }, { language: null }, cs), "", "review L1's rule applies to the hotwords too");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, false), "", "the switch");
+    // Review L1's rule is kept for the day the switch is turned back on.
+    const st = [{ name: "Morning Mix", aliases: ["the mix"] }];
+    assert.equal(stationSttPrompt({ kiosk_settings: {} }, { language: null }, st, true), "Morning Mix, the mix");
+    assert.equal(stationSttPrompt({ kiosk_settings: { lang: "es" } }, { language: null }, st, true), "", "a Spanish display, language left to detection: no English prompt");
+    assert.equal(stationSttPrompt({ kiosk_settings: { lang: "es" } }, { language: "en" }, st, true), "Morning Mix, the mix", "a profile that pins the language is safe");
   } finally { await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) }); }
 });
 

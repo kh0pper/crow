@@ -9,7 +9,7 @@
  * NO AUDIO IS STORED: `opts.audio` is handed to the STT adapter and dropped.
  */
 import {
-  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
+  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
@@ -38,6 +38,15 @@ export function sttPromptText(p, profile = null) {
   if (t.length <= STT_PROMPT_MAX) return t;
   const cut = t.lastIndexOf(",", STT_PROMPT_MAX);
   return (cut > 0 ? t.slice(0, cut) : t.slice(0, STT_PROMPT_MAX)).trim();
+}
+
+/** opts.sttHotwords → faster-whisper's `hotwords` (a few call-sign words; kiosk r7): control characters gone, six words at most. */
+export const STT_HOTWORDS_MAX_WORDS = 6;
+export function sttHotwordsText(p, profile = null) {
+  let v = p;
+  if (typeof v === "function") { try { v = v(profile); } catch { v = null; } }
+  if (typeof v !== "string") return "";
+  return v.slice(0, 200).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").split(/\s+/).filter(Boolean).slice(0, STT_HOTWORDS_MAX_WORDS).join(" ");
 }
 
 /** Spoken + captioned INSTEAD of a model call when the bound bot's prompt cannot fit the model even without its skills; callers pass a localized one. */
@@ -255,13 +264,14 @@ export function createVoiceTurnRunner(deps) {
   }
 
   /** STT only (the kiosk's early transcription, lever D). The WAV is handed to the adapter and dropped. */
-  async function transcribe({ db, device, audio, signal, sttModel, sttPrompt }) {
+  async function transcribe({ db, device, audio, signal, sttModel, sttPrompt, sttHotwords }) {
     const sttProfile = await deps.getSttProfile(db, device);
     if (!sttProfile) throw Object.assign(new Error("no STT profile"), { code: "no_stt_profile" });
     const stt = await deps.createSttAdapter(sttProfile);
     const model = typeof sttModel === "function" ? sttModel(sttProfile) : null;
     const prompt = sttPromptText(sttPrompt, sttProfile);
-    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
+    const hotwords = sttHotwordsText(sttHotwords, sttProfile);
+    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
     return { text: String(r?.text || "").trim() };
   }
 
@@ -352,7 +362,9 @@ export function createVoiceTurnRunner(deps) {
         // opts.sttPrompt: words this endpoint expects to hear (a display's station names), as the STT's
         // prompt bias. A string or a function returning one; bounded by sttPromptText.
         const prompt = sttPromptText(opts.sttPrompt, sttProfile);
-        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}) });
+        // opts.sttHotwords: a few words (call signs) as faster-whisper's `hotwords`; other adapters ignore it.
+        const hotwords = sttHotwordsText(opts.sttHotwords, sttProfile);
+        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");
       }
@@ -360,6 +372,8 @@ export function createVoiceTurnRunner(deps) {
       sink.event({ type: "transcript_final", text: transcript });
       if (aborted()) { result.aborted = true; return result; }
       if (!transcript) { fail("empty_transcript"); return result; }
+      // An STT repetition loop is a failed transcription, not a question: no fast path, no model (r7 G4).
+      if (degenerateTranscript(transcript)) { timings.stt_degenerate = true; fail("empty_transcript"); return result; }
 
       const tts = await openTts(db, device);
       if (!tts) { fail("no_tts_profile", false); return result; }

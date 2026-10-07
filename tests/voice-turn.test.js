@@ -1758,3 +1758,56 @@ test("offered-tools guard composes with narrowing: on a narrowed first round onl
   assert.deepEqual(h.calls.executed, [], "the projects call was never run");
   assert.equal(r.timings.tools[0], "crow_projects:not_offered");
 });
+
+test("r7 G4 (re-smoke 2026-10-07): a degenerate transcript (an STT repetition loop) is an STT failure — no fast path, no model, no escalation; ordinary repeats are not", async () => {
+  const { degenerateTranscript } = await import("../servers/gateway/voice/turn-helpers.js");
+  const loops = [
+    "K-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P",
+    "K-P-F-T-F-T-L-A-A-A-A-A-A-A-A-A-A-A-A-A-A",
+    "Louder, louder, louder, louder, louder, louder, louder, and louder.",
+    "Play KPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+    "the the the the the the the the",
+  ];
+  for (const t of loops) assert.equal(degenerateTranscript(t), true, t);
+  const fine = ["Louder louder.", "No, no, no, no.", "Play K P F T.", "Play-K-P-F-D-H-D-1.", "What is 100 minus 37?", "Ha ha ha ha!", "Play the Beatles' 1967 album.", "Play 1111.", "", "Bye bye bye."];
+  for (const t of fine) assert.equal(degenerateTranscript(t), false, t);
+  // In a turn: the junk is captioned as heard, then the turn ends as an empty transcript would — no model was called.
+  const h = harness();
+  h.deps.createSttAdapter = async () => ({ transcribe: async () => ({ text: loops[0] }) });
+  let fast = 0;
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, fastPaths: async () => { fast++; return null; } });
+  assert.deepEqual(h.calls.chatKeys, [], "no model");
+  assert.equal(fast, 0, "no fast path");
+  assert.ok(h.events.some((e) => e.type === "error" && e.code === "empty_transcript"));
+  assert.equal(r.timings.stt_degenerate, true);
+  // The early transcript path is judged the same way.
+  const e = harness();
+  await e.runner.runVoiceTurn({ db: {}, device: e.device, transcript: loops[2], sink: e.sink });
+  assert.deepEqual(e.calls.chatKeys, []);
+});
+
+test("r7 (STT probe 2026-10-07): opts.sttHotwords reaches the STT as `hotwords` (turn and early transcription), bounded to a few words; the faster-whisper adapter sends it as its form field", async () => {
+  const { sttHotwordsText } = await import("../servers/gateway/voice/turn.js");
+  const seen = [];
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (audio, o) => { seen.push([o.hotwords ?? "(none)", o.prompt ?? "(none)"]); return { text: "hi" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: (p) => (p?.language === "en" ? "WXYZ" : "") });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => { throw new Error("boom"); } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttHotwords: "WXYZ KDBV" });
+  assert.deepEqual(seen, [["WXYZ", "(none)"], ["(none)", "(none)"], ["(none)", "(none)"], ["WXYZ KDBV", "(none)"]]);
+  assert.equal(sttHotwordsText("A B C D E F G H"), "A B C D E F", "six words at most");
+  assert.equal(sttHotwordsText("WXYZ\u0000KDBV"), "WXYZ KDBV");
+  for (const bad of [null, 42, {}]) assert.equal(sttHotwordsText(bad), "");
+  const { default: createFasterWhisperAdapter } = await import("../servers/gateway/ai/stt/adapters/fasterwhisper.js");
+  const real = globalThis.fetch, forms = [];
+  globalThis.fetch = async (url, init) => { forms.push(init.body); return new Response(JSON.stringify({ text: "ok" }), { status: 200 }); };
+  try {
+    const a = createFasterWhisperAdapter({ baseUrl: "http://203.0.113.1:9/v1" });
+    await a.transcribe(Buffer.alloc(4), { hotwords: "WXYZ" });
+    await a.transcribe(Buffer.alloc(4), {});
+  } finally { globalThis.fetch = real; }
+  assert.equal(forms[0].get("hotwords"), "WXYZ");
+  assert.equal(forms[1].get("hotwords"), null);
+});

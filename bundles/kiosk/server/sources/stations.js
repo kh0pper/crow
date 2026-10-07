@@ -130,8 +130,9 @@ function soundsOf(key) {
  *   one station whose name, alias or a word-start of one SOUNDS the same → [{ s, near: true }];
  *   two to four that sound the same → all of them (the resolver asks "Which one?");
  *   none the same, and the request named the radio ("… on the radio"): one a single sound away (four
- *   consonant sounds or more said) → [{ s, near: false }]; two to four → all of them; anything else → [].
- *   (Without the radio named, a single sound away is not offered: "Play Candy Puff" is not KTPF.)
+ *   consonant sounds or more said) → [{ s, ask: true }]; two to four → all of them; anything else → [].
+ *   Without the radio named, a single sound away is offered only for call-sign-shaped words (r7: "DPFD"), and only
+ *   as a question: "Play Candy Puff" is not KTPF.
  * A name with fewer than three consonant sounds is never matched this way (too little to go on).
  */
 export function soundSearch(stations, q, { explicit = false } = {}) {
@@ -151,7 +152,9 @@ export function soundSearch(stations, q, { explicit = false } = {}) {
   if (same.length) return pick(same, true);
   const samePre = scored.filter((x) => x.pre === 0);
   if (samePre.length) return pick(samePre, true);
-  if (!explicit || Math.max(...qs.map(consonants)) < 4) return [];
+  // r7 (STT prompt off): a call-sign-shaped request one sound away ("Play DPFD", "NPFD HD1") is asked about too, even
+  // in an auto search — never played; ordinary words one sound away still are not ("Play Candy Puff").
+  if ((!explicit && !shaped) || Math.max(...qs.map(consonants)) < 4) return [];
   return pick(scored.filter((x) => x.exact === 1), false);
 }
 /** A letter's name as speech-to-text writes it ("kay pee eff tee"). */
@@ -233,6 +236,22 @@ export function stationNamesHint(stations) {
     if (t && !isCommand(t) && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
   }
   return out.join(", ");
+}
+
+/**
+ * r7 (STT probe 2026-10-07): the short STT hotwords — only the call-sign-shaped words of the names and aliases
+ * (3–6 letters, no a/e/i/o/u), upper case, each once, at most five ("KTPF HD1" → "KTPF"). A full name list as the
+ * prompt made faster-whisper spell letters and loop; this one word kept short commands right (121/126 vs 120/126
+ * with none) and raised the call sign's no-model plays (24/36 vs 13/36) on the probe's synthetic voices.
+ */
+export function callSignHotwords(stations) {
+  const out = [];
+  for (const s of Array.isArray(stations) ? stations : []) for (const n of [s?.name, ...(Array.isArray(s?.aliases) ? s.aliases : [])]) {
+    for (const w of String(n ?? "").toUpperCase().split(/[^A-Z]+/)) {
+      if (w.length >= 3 && w.length <= 6 && !/[AEIOU]/.test(w) && !out.includes(w) && out.length < 5) out.push(w);
+    }
+  }
+  return out.join(" ");
 }
 
 /** The panel's "Test": does this address answer with an audio stream? relay: createRelay() (it reads the response headers only). */

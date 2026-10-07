@@ -604,6 +604,20 @@ test("review M1: ordinary words that only SOUND like a call sign never start the
   }
 });
 
+test("r7 (STT prompt off): 'Play DPFD.' / 'Play NPFD HD1.' — a call sign one sound off — is asked about with no model, never played; a yes plays it", async () => {
+  const calls = normalizeStations([{ name: "KTPF HD1", aliases: ["KTPF"], url: "https://stream.example.invalid/k1" }, { name: "KTPF HD2", aliases: ["KTPF two"], url: "https://stream.example.invalid/k2" }]);
+  for (const q of ["Play BTPF.", "Play NTPF HD1."]) {
+    const s = setup({ stations: calls });
+    const r = await s.say(q);
+    assert.equal(r?.say, "Did you mean KTPF HD1? Say yes or its name.", q);
+    assert.equal(r.tier, "t1", q);
+    assert.equal(s.sent.filter((m) => m.action === "load").length, 0, q);
+    assert.equal((await s.say("Yes."))?.say, "Playing KTPF HD1.", q);
+  }
+  const s = setup({ stations: calls });
+  assert.equal(await s.say("Play candy puff."), null, "ordinary words: the model, as before");
+});
+
 test("re-review R3: 'Did you mean …?' is answered by the next utterance only — 'No.' clears it at once ('Okay.'), and a later 'Okay.' or 'Yes.' never starts the radio", async () => {
   const calls = normalizeStations([{ name: "KBVD HD1", aliases: ["KBVD"], url: "https://stream.example.invalid/b1" }]);
   const loads = (s) => s.sent.filter((m) => m.action === "load").length;

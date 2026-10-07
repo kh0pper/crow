@@ -25,7 +25,7 @@ import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
 import { createMediaStore } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
-import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, commandNames, STATIONS_SETTING } from "./sources/stations.js";
+import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, callSignHotwords, commandNames, STATIONS_SETTING } from "./sources/stations.js";
 import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
 
 export const PAGE_CSP = [
@@ -102,7 +102,28 @@ export function kioskDisplayMissedText(lang) {
  *          the voice turn (turn.js), which may replace a remote tool's result with it; the display tools
  *          are never wrapped by it }
  */
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null } = {}) {
+/**
+ * r7 (re-smoke 2026-10-07, G1/G6/G8): the station-name STT prompt is OFF. With it, faster-whisper wrote call signs
+ * letter by letter and looped ("K-P-P-P…", "louder, louder, …") and misheard short commands on clean audio
+ * ("Pause" → "Pons"); a read-only probe of the same server reproduced "Pons" and the hyphen-spelled mode only with
+ * the prompt, and short commands went from 120/126 to 106/126 correct with it. The sound-alike matcher stays.
+ */
+export const STT_STATION_PROMPT = false;
+/** The prompt a display's turn sends (review L1: never on a Spanish display whose STT profile leaves the language to detection). */
+export function stationSttPrompt(device, profile, stations, on = STT_STATION_PROMPT) {
+  if (!on || (device?.kiosk_settings?.lang === "es" && !profile?.language)) return "";
+  return stationNamesHint(stations);
+}
+/**
+ * r7: what replaces it — the call-sign-shaped words only, as faster-whisper's `hotwords` (see callSignHotwords). One
+ * line to switch off if the attended smoke shows a loop or a misheard short command with it (Task R7-S).
+ */
+export const STT_CALLSIGN_HOTWORDS = true;
+export function stationSttHotwords(device, profile, stations, on = STT_CALLSIGN_HOTWORDS) {
+  if (!on || (device?.kiosk_settings?.lang === "es" && !profile?.language)) return "";
+  return callSignHotwords(stations);
+}
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
@@ -127,6 +148,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     ...(typeof onToolResult === "function" ? { onToolResult } : {}),
     // F1: the names this display's sources answer to, as the STT's prompt bias (bounded in turn.js).
     ...(typeof sttPrompt === "function" ? { sttPrompt } : {}),
+    ...(typeof sttHotwords === "function" ? { sttHotwords } : {}),
   };
 }
 
@@ -278,8 +300,9 @@ export function createKioskRuntime(deps) {
    * STT profile leaves the language to detection (an English name list could tilt it); a profile that pins the
    * language (the kiosk profile pins "en") is safe. A cloud STT profile receives these names with the audio.
    */
-  const sttPromptFor = (device) => (profile) => (device?.kiosk_settings?.lang === "es" && !profile?.language ? "" : stationNamesHint(stations));
-  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device) });
+  const sttPromptFor = (device) => (profile) => stationSttPrompt(device, profile, stations);
+  const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
+  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -301,7 +324,7 @@ export function createKioskRuntime(deps) {
     })),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
-      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device) }))
+      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) }))
       : null,
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
     wm, metrics, media,

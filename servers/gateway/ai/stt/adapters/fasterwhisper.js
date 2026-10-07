@@ -28,6 +28,8 @@ export default function createFasterWhisperAdapter(config) {
       if (options.language) form.append("language", options.language);
       // The OpenAI `prompt` field (faster-whisper-server 0.5.0 accepts it): a bias toward names the speaker uses.
       if (options.prompt) form.append("prompt", options.prompt);
+      // faster-whisper-server's `hotwords` (0.5.0's form has it): a few words to bias toward (kiosk call signs).
+      if (options.hotwords) form.append("hotwords", options.hotwords);
       form.append("response_format", "verbose_json");
 
       const res = await fetch(`${baseUrl}/audio/transcriptions`, {
