@@ -112,6 +112,8 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
     },
     /** Was "Which one?" asked on this display a moment ago? */
     pending: (deviceId) => !!live(deviceId),
+    /** The names offered then (r7c N1: asked again on a bare "Play."). */
+    pendingNames: (deviceId) => (live(deviceId)?.items || []).map((x) => cleanTitle(x.c.title).slice(0, 30)),
     /** The answer to "Which one?": the one offered candidate these words name (each source judges its own). → a "playing" resolution, or null. */
     async choose(deviceId, utterance) {
       const a = live(deviceId);
@@ -250,5 +252,16 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
       default: return nothing(ctx, S);
     }
   }
-  return { resolvePlay, openItem, mediaVerb, pendingChoices: (deviceId) => resolver.pending(deviceId), noteUtterance: (deviceId) => resolver.note?.(deviceId) };
+  /**
+   * the rev 7c operator ruling (N1): while a choice is pending, a bare "Play." is its answer — one suggested station
+   * ("Did you mean …?") is a yes and plays at once; several are asked again by name.
+   */
+  async function answerPending(ctx, S) {
+    const id = ctx.deviceId;
+    const names = resolver.pendingNames(id);
+    if (names.length === 1) { const picked = await resolver.choose(id, "yes"); if (picked) return start(picked, ctx, S); return null; }
+    if (names.length > 1) return result(true, "choices", fill(S.say_choices, { names: joinNames(names, S) }), { names, effect: false });
+    return null;
+  }
+  return { resolvePlay, openItem, mediaVerb, answerPending, pendingChoices: (deviceId) => resolver.pending(deviceId), noteUtterance: (deviceId) => resolver.note?.(deviceId) };
 }

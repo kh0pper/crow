@@ -704,3 +704,30 @@ test("r7b M4 (operator ruling): a bare 'Play.' / 'Resume.' with nothing loaded i
   assert.ok(s.store.list("d").some((w) => w.kind === "timer" && w.done), "the timer has gone off");
   assert.equal(await s.say("Play."), null, "a ringing timer: not this answer");
 });
+
+test("r7c N1 (operator ruling): while a choice is pending a bare 'Play.' is an answer — one suggested station ('Did you mean …?') plays at once with no model; several are asked again by name (en/es); with nothing pending it is the 'Nothing is paused' line", async () => {
+  const calls = normalizeStations([{ name: "KBVD HD1", aliases: ["KBVD"], url: "https://stream.example.invalid/b1" }]);
+  for (const [lang, q, played] of [["en", "Play.", "Playing KBVD HD1."], ["es", "Play.", "Reproduciendo KBVD HD1."], ["es", "Reanuda.", "Reproduciendo KBVD HD1."]]) {
+    const s = setup({ stations: calls, lang });
+    assert.match((await s.say("Play cup of tea."))?.say || "", /KBVD HD1/, "the question was asked");
+    const r = await s.say(q);
+    assert.deepEqual([r?.say, r?.tier], [played, "t0"], `${lang} ${q}`);
+    assert.equal(s.last()?.action, "load");
+  }
+  const m = setup();
+  await m.say("Play WXYZ HD.");
+  const again = await m.say("Play.");
+  assert.deepEqual([again?.say, again?.tier], ["I found WXYZ HD1, WXYZ HD2 and WXYZ HD3. Which one? Say its name.", "t0"]);
+  assert.equal(m.sent.length, 0, "nothing plays");
+  assert.equal((await m.say("WXYZ HD2."))?.say, "Playing WXYZ HD2.", "the choice is still open after the re-ask");
+  const es = setup({ lang: "es" });
+  await es.say("Pon la radio WXYZ HD");
+  assert.equal((await es.say("Play."))?.say, "Encontré WXYZ HD1, WXYZ HD2 y WXYZ HD3. ¿Cuál? Di su nombre.");
+  // Over music, with a choice pending: still the answer (not the M3 re-send).
+  const o = setup({ stations: calls });
+  await o.say("Play KBVD HD1."); o.audible(); o.sent.length = 0;
+  await o.say("Play cup of tea.");
+  assert.equal((await o.say("Play."))?.say, "KBVD HD1 is already playing.");
+  // Nothing pending: the M4 line.
+  assert.equal((await setup().say("Play."))?.say, "Nothing is paused. What would you like to hear?");
+});

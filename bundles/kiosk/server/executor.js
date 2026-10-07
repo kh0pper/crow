@@ -216,6 +216,11 @@ export async function executeIntent(intent, ctx) {
       return playback(intent, ctx, S);
     }
     case "resume": {
+      // operator ruling (rev 7c, N1): with a choice pending, the bare word answers it (one suggestion: yes; several: asked again).
+      if (ctx.strict && intent.bare === true && ctx.pendingChoices?.(ctx.deviceId) && typeof ctx.answerPending === "function") {
+        const r = await ctx.answerPending(ctx, S);
+        if (r) return r;
+      }
       // operator ruling (rev 7b, M4): the bare word with nothing loaded is answered at once — never left to a model that
       // starts something new (the 10-07 smoke's "Play." started the news). A timer that has gone off: as before.
       const ringing = ctx.store.list(ctx.deviceId).some((w) => w.kind === "timer" && w.done);
