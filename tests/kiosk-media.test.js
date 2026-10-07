@@ -86,6 +86,8 @@ test("queue: ended moves to the next item with a NEW ticket; next and previous w
 test("volume: steps of ten, clamped to 0..max_volume; changing the level un-mutes; mute says when it changed nothing", () => {
   const s = setup();
   s.media.play("d", [track("One")], { maxVolume: 70 });
+  assert.equal(s.media.current("d").volume, 70, "the default (80, r7 G7) is capped by max_volume");
+  s.media.volume("d", { set: 50 }, 70);
   assert.equal(s.media.volume("d", { delta: 10 }, 70), 60);
   assert.equal(s.media.volume("d", { delta: 10 }, 70), 70);
   assert.equal(s.media.volume("d", { delta: 10 }, 70), 70, "capped");

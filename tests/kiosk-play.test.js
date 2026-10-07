@@ -52,7 +52,8 @@ function setup({ stations = PRESETS, extra = [], first = [], lang = "en", kinds 
   return { ctx, store, media, sent, events, failed, clock, fire, tickets, resolver, last, audible, say, tool, es: { ...ctx, lang: "es" } };
 }
 const RECIPE = { kind: "recipe", title: "Pancakes", ingredients: ["flour"], steps: ["Mix the batter", "Cook two minutes a side", "Serve"], step: 0 };
-const playMix = async (s) => { await s.say("Play Morning Mix."); s.audible(); s.sent.length = 0; };
+// r7 G7: the default level is 80 now; the transport tests count their steps from 50.
+const playMix = async (s) => { await s.say("Play Morning Mix."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0; };
 
 test("T1 play: a station by its name plays with no model; the reply names it and the page is told to load a ticket path", async () => {
   const s = setup();
@@ -60,7 +61,7 @@ test("T1 play: a station by its name plays with no model; the reply names it and
   const r = await s.say("Play Morning Mix.");
   assert.deepEqual(r, { say: "Playing Morning Mix.", tier: "t1", events: [] });
   const m = s.last();
-  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 50, false]);
+  assert.deepEqual([m.type, m.action, m.title, m.source, m.volume, m.muted], ["media", "load", "Morning Mix", "radio", 80, false], "r7 G7: the default level is 80");
   assert.match(m.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
   assert.ok(!JSON.stringify(s.sent).includes("example.invalid"), "no stream address reaches the page");
   for (const q of ["Put on Morning Mix, please.", "Listen to the mix", "Pon la radio Morning Mix", "Hey Crow, play WXYZ two", "Play w x y z too", "Play Morning Mix on the radio", "Quiero escuchar Morning Mix"]) {
@@ -134,7 +135,7 @@ test("an explicit play is heard: mute is cleared and a volume of zero comes back
   assert.deepEqual([s.last().title, s.last().volume, s.last().muted], ["WXYZ HD2", 30, false]);
   await s.say("Volume zero.");
   await s.say("Play Morning Mix.");
-  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 50]);
+  assert.deepEqual([s.last().title, s.last().volume], ["Morning Mix", 80], "back to the default level (r7 G7: 80)");
 });
 
 test("two to four candidates are spoken as a question, and nothing plays", async () => {
@@ -275,7 +276,7 @@ test("T0 transport phrases fire only while something plays, act at once and say 
   assert.deepEqual(await idle.say("Stop."), { say: "Nothing is playing.", tier: "t0", events: [] });
   assert.deepEqual(await idle.say("Stop.", idle.es), { say: "No hay nada sonando.", tier: "t0", events: [] });
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three"] }])] });
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   const act = async (q, c = s.ctx) => { const r = await s.say(q, c); assert.deepEqual(r && [r.say, r.tier], ["", "t0"], q); return s.last(); };
   assert.equal((await act("Pause.")).action, "pause");
   assert.equal((await act("Keep going.")).action, "play");
@@ -346,7 +347,7 @@ test("words people also say to an assistant are never playback phrases on their 
   assert.equal(new Set(all).size, all.length, "no phrase stands for two verbs");
   // Playing, then paused, then muted: none of them ever acts.
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two"] }])] });
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   for (const state of ["playing", "paused", "muted"]) {
     if (state === "paused") s.media.pause("d");
     if (state === "muted") { s.media.resume("d"); s.media.mute("d", true); }
@@ -393,14 +394,14 @@ test("what's playing: spoken, and the now-playing window opens on a display that
 
 test("precedence: a ringing timer takes 'stop' before the music; the bare word 'next' means the recipe in front, else the music; close everything stops the music too", async () => {
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three"] }])] });
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   s.store.open("d", { kind: "timer", name: "Rice", title: "Rice", seconds: 1 });
   s.fire.at(-1)();                                           // the timer rings
   assert.deepEqual(await s.say("Stop."), { say: "Timer stopped.", tier: "t0", events: ["wm:close"] });
   assert.equal(s.media.active("d"), true, "the music was not what was stopped");
   assert.deepEqual((await s.say("Stop.")).say, "");
   assert.equal(s.media.active("d"), false);
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   // a timer that is only running is not ringing
   s.store.open("d", { kind: "timer", name: "Tea", title: "Tea", seconds: 600 });
   // a recipe in front takes the bare word
@@ -425,7 +426,7 @@ test("precedence: a ringing timer takes 'stop' before the music; the bare word '
 
 test("the model's `next` is the playback verb it chose: it never steps a recipe, even one in front (next_step is the recipe's own verb)", async () => {
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two"] }])] });
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   s.store.open("d", RECIPE);
   const wm = s.tool("crow_wm");
   assert.deepEqual(await wm({ do: "next" }), { ok: true, outcome: "done", say: "Okay.", final: true });
@@ -487,7 +488,7 @@ test("smoke F2: a playback word with filler acts at once while something plays o
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two", "Three", "Four", "Five"] }])] });
   // Nothing playing: none of them is a fast path (the model gets the sentence).
   for (const q of ["Louder louder.", "Skip it.", "A lot louder please.", "Lauder."]) assert.equal(await s.say(q), null, `idle: ${q}`);
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   const cases = [["Louder louder.", "volume"], ["A lot louder please.", "volume"], ["Much quieter.", "volume"], ["Lauder.", "volume"], ["Skip it.", "load"], ["Skip.", "load"], ["Skip this one.", "load"], ["Stop it already.", "stop"]];
   for (const [q, action] of cases) {
     const r = await s.say(q);
@@ -495,7 +496,7 @@ test("smoke F2: a playback word with filler acts at once while something plays o
     assert.equal(r.say, "", `${q}: nothing said — the change is the answer`);
     assert.equal(s.last().action, action, q);
   }
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   for (const q of ["Don't stop.", "Skip the small talk.", "Is it louder?", "Stop being silly.", "Louder than what?", "The neighbours are louder.", "Paws and claws."]) {
     assert.equal(await s.say(q), null, `never a playback word: ${q}`);
   }
@@ -608,7 +609,7 @@ test("review H1: a playback word acts on the music only — another object or th
   for (const q of YES) assert.equal(asksTransport(q), true, q);
   const s = setup({ extra: [library([{ id: "album:1", title: "Blue Hour", tracks: ["One", "Two"] }])] });
   for (const q of NOT) assert.equal(await s.say(q), null, `idle: ${q}`);
-  await s.say("Play Blue Hour."); s.audible(); s.sent.length = 0;
+  await s.say("Play Blue Hour."); s.audible(); s.media.volume("d", { set: 50 }); s.sent.length = 0;
   for (const q of NOT) assert.equal(await s.say(q), null, `over music: ${q}`);
   assert.equal(s.sent.length, 0, "the music was never touched");
 });

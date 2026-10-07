@@ -9,7 +9,8 @@
  * up to RADIO_RETRIES times with a growing wait before anything is said; a stream that then plays
  * steadily for RADIO_STEADY_MS has its count set back, so an evening of listening survives hiccups.
  */
-export const DEFAULT_VOLUME = 50;
+/** r7 G7: the page gain is 5 dB per 10 (media-view levelOf): 80 is −10 dB, two audible steps below full. */
+export const DEFAULT_VOLUME = 80;
 export const VOLUME_STEP = 10;
 export const MAX_QUEUE = 50;
 export const TITLE_MAX = 80;

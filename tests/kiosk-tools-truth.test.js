@@ -5,6 +5,7 @@
  * and TTS are scripted.
  */
 import { test, afterEach } from "node:test";
+import { DEFAULT_VOLUME } from "../bundles/kiosk/server/media.js";
 import assert from "node:assert/strict";
 import { createVoiceTurnRunner } from "../servers/gateway/voice/turn.js";
 import createOpenAIAdapter from "../servers/gateway/ai/adapters/openai.js";
@@ -414,7 +415,7 @@ test("smoke F2: a volume claim with no call is never heard — the corrective ro
   assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"], "only the must-run tool is offered");
   assert.match(d.requests[1].messages.at(-1).content, /Call crow_wm now/);
   assert.doesNotMatch(said(d), /turned/, "the claim is never spoken");
-  assert.equal(radio.media.current("kiosk-live").volume, 60);
+  assert.equal(radio.media.current("kiosk-live").volume, DEFAULT_VOLUME + 10);
   assert.equal(r.failed, null);
   // The model claims twice and never calls: the truthful line, the volume untouched.
   radio = await playingRadio();
@@ -423,7 +424,7 @@ test("smoke F2: a volume claim with no call is never heard — the corrective ro
   r = await d.ask(SAID);
   assert.equal(said(d), "Sorry, I couldn't change the playback.");
   assert.equal(captions(d), "Sorry, I couldn't change the playback.");
-  assert.equal(radio.media.current("kiosk-live").volume, 50);
+  assert.equal(radio.media.current("kiosk-live").volume, DEFAULT_VOLUME);
   assert.equal(r.failed, "display_missed");
   // Spanish display, same shape.
   radio = await playingRadio();
@@ -464,7 +465,7 @@ test("review H1: sentences that are not about the music are never forced onto cr
       assert.equal(said(d), "Okay.", `the model's own answer, never the could-not line — ${where}`);
       assert.notEqual(r.failed, "display_missed", where);
       assert.equal(d.requests[0].tool_choice, undefined, `nothing forced — ${where}`);
-      if (playing) assert.equal(radio.media.current("kiosk-live").volume, 50, `the music is untouched — ${where}`);
+      if (playing) assert.equal(radio.media.current("kiosk-live").volume, DEFAULT_VOLUME, `the music is untouched — ${where}`);
     }
     // The bot's own tool reaches the model for the lights.
     const radio = await playingRadio();
@@ -499,7 +500,7 @@ test("re-review R1: Spanish comparatives ('Pon la música más alta', 'Ponla má
     await radio.start("kiosk-live");
     await d.ask(q);
     assert.deepEqual(toolNames(d.requests[0]), ["crow_wm"], `${q}: the playback tool, not crow_play`);
-    assert.equal(radio.media.current("kiosk-live").volume, q.includes("baja") ? 40 : 60, q);
+    assert.equal(radio.media.current("kiosk-live").volume, q.includes("baja") ? DEFAULT_VOLUME - 10 : DEFAULT_VOLUME + 10, q);
     assert.doesNotMatch(said(d), /no pude reproducir/, q);
   }
   const radio = await playingRadio();
@@ -507,5 +508,5 @@ test("re-review R1: Spanish comparatives ('Pon la música más alta', 'Ponla má
   await radio.start("kiosk-live");
   await d.ask("Pon la tele más alta.");
   assert.equal(d.requests[0].tool_choice, undefined, "the TV: nothing forced");
-  assert.equal(radio.media.current("kiosk-live").volume, 50);
+  assert.equal(radio.media.current("kiosk-live").volume, DEFAULT_VOLUME);
 });

@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createMediaView, createDucker, DUCK_FACTOR, START_MS, STALL_MS, RESTORE_DELAY_MS, RESTORE_MS, OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
+import { createMediaView, createDucker, levelOf, DUCK_FACTOR, START_MS, STALL_MS, RESTORE_DELAY_MS, RESTORE_MS, OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
 import { createMediaStore } from "../bundles/kiosk/server/media.js";
 import { createTicketStore } from "../bundles/kiosk/server/tickets.js";
 
@@ -125,9 +125,9 @@ test("reconnect: the same item again never reassigns src (no restart from 0:00);
   const s = setup();
   s.load("m1"); s.audio.fire("playing");
   assert.equal(s.audio.srcSets, 1);
-  s.load("m1", { volume: 70 });
+  s.load("m1", { volume: 70 });   // r7 G7: 70 → −15 dB
   assert.equal(s.audio.srcSets, 1);
-  assert.equal(s.audio.volume, 0.7);
+  assert.equal(s.audio.volume, levelOf(70, false));
   s.load("m1", { paused: true });
   assert.equal(s.audio.paused, true);
   assert.deepEqual(s.events(), ["m1:playing"], "a snapshot's paused state is not echoed as a user pause");
@@ -190,7 +190,7 @@ test("muted or a volume of zero is silence; the pause-on-listen lever pauses and
   s.load("m1", { muted: true });
   assert.equal(s.audio.volume, 0);
   s.view.apply({ action: "volume", volume: 40, muted: false });
-  assert.equal(s.audio.volume, 0.4);
+  assert.equal(s.audio.volume, levelOf(40, false));
   s.audio.fire("playing");
   s.view.hold(true, true);
   assert.equal(s.audio.paused, true);
@@ -364,4 +364,16 @@ test("review H2: a resume after pause-while-listening that the browser refuses i
   t.view.hold(false, true);                    // play() stays pending (the fake waits for `playing`)
   t.tm.advance(START_MS + 1);
   assert.deepEqual(t.events(), ["m2:playing", "m2:error:stalled"]);
+});
+
+test("r7 G7: the display volume is perceptual — each step of 10 is 5 dB on the element (it was +1.6 dB at the default), 0 or muted is silence, 100 is full; the server's default (80) is −10 dB, two audible steps below full", async () => {
+  const { levelOf } = await import("../bundles/kiosk/public/media-view.js");
+  const { DEFAULT_VOLUME, VOLUME_STEP } = await import("../bundles/kiosk/server/media.js");
+  const db = (a) => 20 * Math.log10(a);
+  assert.equal(levelOf(100, false), 1);
+  assert.equal(levelOf(0, false), 0);
+  assert.equal(levelOf(70, true), 0);
+  for (let v = 20; v <= 100; v += VOLUME_STEP) assert.ok(Math.abs(db(levelOf(v, false)) - db(levelOf(v - VOLUME_STEP, false)) - 5) < 1e-9, `step at ${v}`);
+  assert.equal(DEFAULT_VOLUME, 80);
+  assert.ok(Math.abs(db(levelOf(DEFAULT_VOLUME, false)) + 10) < 1e-9);
 });

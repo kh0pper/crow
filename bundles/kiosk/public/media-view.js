@@ -20,7 +20,9 @@ export const STALL_MS = 15_000;
 /** F9: offline, the chip dims and controls are off; after this the element stops: ≥ the server's grace + 2 pings (review M3). */
 export const OFFLINE_CLEAR_MS = 60_000;
 
-const level = (v, muted) => (muted ? 0 : Math.max(0, Math.min(1, (Number(v) || 0) / 100)));
+/** r7 G7: 0–100 → element gain, 5 dB per 10 (linear steps were inaudible); 0 or muted is silence. */
+export const levelOf = (v, muted) => (muted || !(v > 0) ? 0 : Math.min(1, 10 ** ((Math.min(100, v) - 100) / 40)));
+const level = levelOf;
 
 /** Ducks to DUCK_FACTOR of the set level at once; restores RESTORE_DELAY_MS after release, over RESTORE_MS in RESTORE_STEP_MS steps. */
 export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
