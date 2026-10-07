@@ -364,3 +364,29 @@ test("smoke F7: spoken forms the smoke's report missed — a short name spelled 
   assert.ok(ro.spoken.albums.variants >= 1);
   assert.equal(JSON.stringify(ro).includes("QQ"), false, "counts only: no name leaves the report");
 });
+
+test("r7 (re-smoke R6-12): spelled initialisms with an n or an r b inside, thousands with a comma and numbers with leading zeros meet the written names; 'r and b' still means the genre; written matches are unchanged", () => {
+  // Made-up names shaped like the report's misses (letters: 23 albums / 9 artists; numbers: 63 albums).
+  const titles = ["DNQ Sessions", "SRB Live", "QNRX Live", "BNR Live", "ANR Tapes", "RB Kites", "RNR Heron", "ENQ Heron", "10,000 Nights", "30,000 Feet", "1,000,000 Reasons", "007 Heron", "0042 Signal"];
+  const albums = titles.map((t, i) => ({ id: 700 + i, title: t, artistId: 800 + (i % 3), artist: ["Quiet Heron", "Moth Engine", "Lantern Kite"][i % 3], tracks: 9, year: 2001 }));
+  const artists = [{ id: 900, name: "DNQ Heron" }, { id: 901, name: "SRB" }, { id: 902, name: "QNRX" }, { id: 903, name: "ANR" }, { id: 904, name: "10,000 Moths" },
+    { id: 800, name: "Quiet Heron" }, { id: 801, name: "Moth Engine" }, { id: 802, name: "Lantern Kite" }];
+  const ix = buildIndex({ albums, artists, genres: [{ name: "R&B" }, { name: "Rock" }], playlists: [] });
+  const r = matchReport(ix);
+  assert.equal(r.spoken.albums.resolved, r.spoken.albums.variants, JSON.stringify(r.spoken));
+  assert.equal(r.spoken.artists.resolved, r.spoken.artists.variants, JSON.stringify(r.spoken));
+  assert.ok(r.spoken.albums.variants >= 12 && r.spoken.artists.variants >= 5, JSON.stringify(r.spoken));
+  // The written names still resolve to themselves.
+  assert.equal(r.albums.unique_resolved, titles.length, JSON.stringify(r.albums));
+  assert.equal(r.artists.resolved, artists.length);
+  // Readings and foldings.
+  assert.equal(sayAloud("10,000 Nights"), "ten thousand Nights");
+  assert.equal(sayAloud("007 Heron"), "zero zero seven Heron");
+  assert.equal(fold("d n q sessions"), "d n q sessions", "a spelled run keeps its n");
+  assert.equal(fold("10,000 nights"), "10000 nights");
+  assert.equal(fold("ten thousand nights"), "10000 nights");
+  for (const g of ["r and b", "r n b", "r b", "R&B", "RnB"]) assert.equal(compact(g), "rnb", g);
+  const run = (s) => decide(readRequest(s), ix, { tracks: [], artistAlbums: new Set() }).candidates.map((c) => c.id);
+  assert.deepEqual(run("some r and b"), ["music:genre:rnb"]);
+  assert.deepEqual(run("a n r tapes"), ["music:album:704"]);
+});

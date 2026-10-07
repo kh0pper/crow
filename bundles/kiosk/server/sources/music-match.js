@@ -52,18 +52,19 @@ const ORD_WORDS = Object.freeze({ first: 1, second: 2, third: 3, fourth: 4, fift
   thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20 });
 /** One spelling for the short forms that names use either way. */
 const SHORT = Object.freeze({ saint: "st", doctor: "dr", volume: "vol", mister: "mr", versus: "vs", mount: "mt" });
-const isNum = (x) => Object.hasOwn(UNITS, x) || Object.hasOwn(TEENS, x) || Object.hasOwn(TENS, x) || Object.hasOwn(ORD_WORDS, x) || x === "hundred" || x === "thousand";
+const isNum = (x) => Object.hasOwn(UNITS, x) || Object.hasOwn(TEENS, x) || Object.hasOwn(TENS, x) || Object.hasOwn(ORD_WORDS, x) || x === "hundred" || x === "thousand" || x === "million";
 /**
  * A run of number words → digits. "nineteen ninety nine" → 1999 (a year read in pairs), "twenty
  * twenty" → 2020, "two thousand and five" → 2005, "twenty first" → 21, "seven" → 7. Bounded: the
  * caller hands at most WORDS_MAX words.
  */
 function numberRun(run) {
-  if (run.some((x) => x === "hundred" || x === "thousand")) {
+  if (run.some((x) => x === "hundred" || x === "thousand" || x === "million")) {
     let total = 0, part = 0;
     for (const x of run) {
       if (x === "and") continue;
       if (x === "hundred") part = (part || 1) * 100;
+      else if (x === "million") { total = (total + (part || 1)) * 1_000_000; part = 0; }
       else if (x === "thousand") { total += (part || 1) * 1000; part = 0; }
       else part += UNITS[x] ?? TEENS[x] ?? TENS[x] ?? ORD_WORDS[x] ?? 0;
     }
@@ -82,10 +83,27 @@ function numberRun(run) {
   // Two or more groups whose first is ten or more read as a year or a code: "19" "99" → 1999.
   return groups.map((g, i) => (typeof g === "string" ? g : i > 0 && groups[0] >= 10 && g < 10 ? `0${g}` : String(g))).join("");
 }
+/**
+ * r7 (re-smoke R6-12): a run of three or more single letters is a name spelled out ("d n q", "a n r"): its letters are kept
+ * as they are (an "n" in it is not "and", an "r b" in it is not the genre) — "r n b" alone is still R&B.
+ */
+function spelledRuns(words) {
+  const keep = new Array(words.length).fill(false);
+  for (let i = 0; i < words.length;) {
+    let j = i;
+    while (j < words.length && /^[a-z]$/.test(words[j])) j += 1;
+    if (j - i >= 3 && !(j - i === 3 && words[i] === "r" && words[i + 1] === "n" && words[i + 2] === "b")) for (let k = i; k < j; k += 1) keep[k] = true;
+    i = j > i ? j : i + 1;
+  }
+  return keep;
+}
 function canon(words) {
   const out = [];
+  const spelled = spelledRuns(words);
   for (let i = 0; i < words.length; i += 1) {
     const x = words[i];
+    if (spelled[i]) { out.push(x); continue; }
+    if (x === "rb") { out.push("rnb"); continue; }
     // "r and b", "r n b", "r b" → rnb; "rock n roll" → rock and roll.
     if (x === "r" && (words[i + 1] === "and" || words[i + 1] === "n") && words[i + 2] === "b") { out.push("rnb"); i += 2; continue; }
     if (x === "r" && words[i + 1] === "b") { out.push("rnb"); i += 1; continue; }
@@ -93,12 +111,12 @@ function canon(words) {
     if (Object.hasOwn(SHORT, x)) { out.push(SHORT[x]); continue; }
     const ord = /^(\d{1,4})(st|nd|rd|th)$/.exec(x);
     if (ord) { out.push(ord[1]); continue; }
-    if (isNum(x) && x !== "hundred" && x !== "thousand") {
+    if (isNum(x) && x !== "hundred" && x !== "thousand" && x !== "million") {
       let j = i;
       // An ordinal ends a run ("the first one" is 1 then 1, never 11).
       // "oh" is a digit only inside a run, before a unit ("nineteen oh five"); "Oh Darling" keeps its word.
       const ohDigit = (k) => words[k] === "oh" && k > i && Object.hasOwn(UNITS, words[k + 1] ?? "");
-      while (j < words.length && !(j > i && Object.hasOwn(ORD_WORDS, words[j - 1])) && (isNum(words[j]) || ohDigit(j) || (words[j] === "and" && j + 1 < words.length && isNum(words[j + 1]) && words.slice(i, j).some((y) => y === "hundred" || y === "thousand")))) j += 1;
+      while (j < words.length && !(j > i && Object.hasOwn(ORD_WORDS, words[j - 1])) && (isNum(words[j]) || ohDigit(j) || (words[j] === "and" && j + 1 < words.length && isNum(words[j + 1]) && words.slice(i, j).some((y) => y === "hundred" || y === "thousand" || y === "million")))) j += 1;
       out.push(numberRun(words.slice(i, j)));
       i = j - 1;
       continue;
@@ -115,7 +133,8 @@ function canon(words) {
  * Applied to BOTH sides of every comparison.
  */
 export function fold(s) {
-  const f = text(s).slice(0, TEXT_MAX).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+  // r7: a thousands separator joins its digits ("10,000" is 10000, as "ten thousand" folds).
+  const f = text(s).slice(0, TEXT_MAX).replace(/(\d),(?=\d{3}(?!\d))/g, "$1").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
     .replace(/[øßæœđðłþı]/g, (ch) => LETTERS[ch]).replace(/&/g, " and ").replace(/['’‘`´ʼ]/g, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   return f ? canon(f.split(" ")).join(" ") : "";
@@ -565,6 +584,9 @@ const ORD_W = ["", ...Object.keys(ORD_WORDS).sort((a, b) => ORD_WORDS[a] - ORD_W
 const two = (n) => (n < 20 ? ONES[n] : `${TENS_W[Math.floor(n / 10)]}${n % 10 ? ` ${ONES[n % 10]}` : ""}`);
 /** A number as a person reads it: years in pairs ("nineteen ninety nine"), 2000-2009 as "two thousand five", else plainly. */
 function sayNumber(n) {
+  // r7: past 9999 in thousands and millions ("10,000" is "ten thousand").
+  if (n >= 1_000_000) return `${sayNumber(Math.floor(n / 1_000_000))} million${n % 1_000_000 ? ` ${sayNumber(n % 1_000_000)}` : ""}`;
+  if (n >= 10_000) return `${sayNumber(Math.floor(n / 1000))} thousand${n % 1000 ? ` ${sayNumber(n % 1000)}` : ""}`;
   if (n < 100) return two(n);
   if (n >= 1100 && n < 2000 || n >= 2010 && n < 2100) return `${two(Math.floor(n / 100))} ${n % 100 === 0 ? "hundred" : n % 100 < 10 ? `oh ${ONES[n % 100]}` : two(n % 100)}`;
   if (n >= 2000 && n < 2010) return `two thousand${n % 10 ? ` ${ONES[n % 10]}` : ""}`;
@@ -582,6 +604,9 @@ export function sayAloud(name) {
   const said = text(name).slice(0, TEXT_MAX)
     .replace(/\bSt\.?(?=\s)/g, "saint").replace(/\bDr\.?(?=\s)/g, "doctor").replace(/\bVol\.?(?=\s)/gi, "volume").replace(/\bMr\.?(?=\s)/g, "mister")
     .replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, (m, d) => { const n = Number(d); return n >= 1 && n <= 20 ? ORD_W[n] : n % 10 ? `${TENS_W[Math.floor(n / 10)]} ${ORD_W[n % 10]}` : m; })
+    // r7: a number with a thousands separator is one number; leading zeros are read digit by digit ("007").
+    .replace(/\b\d{1,3},\d{3}(?:,\d{3})?\b/g, (d) => sayNumber(Number(d.replace(/,/g, ""))))
+    .replace(/\b0\d{1,3}\b/g, (d) => d.split("").map((c) => ONES[Number(c)]).join(" "))
     .replace(/\b\d{1,4}\b/g, (d) => sayNumber(Number(d)))
     .replace(/\b[A-Z]{2,5}\b/g, (w) => w.toLowerCase().split("").join(" "))
     .replace(/\b([A-Z]{1,3})\/([A-Z]{1,3})\b/g, (m, a, b) => `${a} ${b}`.toLowerCase().split("").filter((c) => c !== " ").join(" "));
