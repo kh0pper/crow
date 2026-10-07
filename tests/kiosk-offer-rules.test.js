@@ -437,3 +437,9 @@ test("r7 G3: with radio presets, a sentence that asks to play a station is offer
   // Offered only: nothing becomes must-run by it.
   assert.equal(t.by.crow_play.must("Playing, KDEB."), false);
 });
+
+test("r7b L2: interjections and titles without a vowel are not call signs — 'Hmm, tell me a joke.', 'Mrs Kite called.', 'Shh, it's late.' offer no crow_play", () => {
+  const t = tools();
+  for (const say of ["Hmm, tell me a joke.", "Mrs Kite called.", "Shh, it's late.", "Psst, what time is it", "Brr, it's cold today."]) assert.ok(!t.offered(say).includes("crow_play"), say);
+  assert.ok(t.offered("Ktpf please.").includes("crow_play"), "a lower-case call sign still counts");
+});

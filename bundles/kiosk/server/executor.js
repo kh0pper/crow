@@ -215,6 +215,13 @@ export async function executeIntent(intent, ctx) {
       if (ctx.strict && intent.bare === true && ctx.media?.active?.(ctx.deviceId) !== true) return result(true, "nothing_playing", S.say_nothing_playing, { effect: false });
       return playback(intent, ctx, S);
     }
+    case "resume": {
+      // operator ruling (rev 7b, M4): the bare word with nothing loaded is answered at once — never left to a model that
+      // starts something new (the 10-07 smoke's "Play." started the news). A timer that has gone off: as before.
+      const ringing = ctx.store.list(ctx.deviceId).some((w) => w.kind === "timer" && w.done);
+      if (ctx.strict && intent.bare === true && !ringing && ctx.media?.active?.(ctx.deviceId) !== true) return result(true, "nothing_playing", S.say_nothing_paused, { effect: false });
+      return playback(intent, ctx, S);
+    }
     // Spoken forms that have no entry of their own in the model's verb list.
     case "next_track": case "previous_track": case "volume": case "now_playing": return playback(intent, ctx, S);
     case "previous_step": return step(-1, ctx, S);

@@ -75,7 +75,7 @@ test("T1 play: a station by its name plays with no model; the reply names it and
 
 test("T1 play never guesses: no hit, a loose hit or no source goes on to the model; nothing loads", async () => {
   const s = setup();
-  for (const q of ["Play zzzz.", "Play some jazz.", "Put on something relaxing for dinner.", "Play classic.", "Play", "Who plays the lead in that show?", "Play https://stream.example.invalid/mix"]) assert.equal(await s.say(q), null, q);
+  for (const q of ["Play zzzz.", "Play some jazz.", "Put on something relaxing for dinner.", "Play classic.", "Who plays the lead in that show?", "Play https://stream.example.invalid/mix"]) assert.equal(await s.say(q), null, q);
   assert.equal(s.sent.length, 0);
   const none = setup({ stations: [] });
   assert.deepEqual([none.ctx.sources, matchT1("Play Morning Mix.", none.ctx), await none.say("Play Morning Mix.")], [[], null, null]);
@@ -272,7 +272,8 @@ test("'play the radio' with one station plays it; with several, they are offered
 
 test("T0 transport phrases fire only while something plays, act at once and say nothing (en + es)", async () => {
   const idle = setup();
-  for (const q of ["pause", "louder", "next song", "mute", "what's playing", "play", "para", "más alto", "volume four", "keep going", "pause the music", "stop the song", "skip this one"]) assert.equal(await idle.say(q), null, `nothing playing: ${q}`);
+  // ("play" alone with nothing loaded is answered at once since the rev 7b operator ruling: the M4 test.)
+  for (const q of ["pause", "louder", "next song", "mute", "what's playing", "para", "más alto", "volume four", "keep going", "pause the music", "stop the song", "skip this one"]) assert.equal(await idle.say(q), null, `nothing playing: ${q}`);
   // The bare word "Stop." with nothing playing is answered at once, with no model.
   assert.deepEqual(await idle.say("Stop."), { say: "Nothing is playing.", tier: "t0", events: [] });
   assert.deepEqual(await idle.say("Stop.", idle.es), { say: "No hay nada sonando.", tier: "t0", events: [] });
@@ -588,10 +589,10 @@ test("r7 G9: a bare 'Pause.' / 'Play.' with something loaded is never left to th
   assert.deepEqual([r?.tier, r?.say], ["t0", ""]);
   assert.deepEqual([s.last()?.action, s.last()?.paused], ["load", undefined], "the current item is sent again, playing (r7b M3)");
   assert.deepEqual(s.sent.filter((m) => m.action === "load").map((m) => m.id), [s.media.snapshot("d").id], "only the current item, never something else");
-  // With nothing loaded both words stay conversation, as before.
+  // With nothing loaded "Pause." stays conversation; "Play." is answered at once (the rev 7b operator ruling, M4).
   const idle = setup();
   assert.equal(await idle.say("Pause."), null);
-  assert.equal(await idle.say("Play."), null);
+  assert.equal((await idle.say("Play."))?.say, "Nothing is paused. What would you like to hear?");
   // The model's call over a paused item says so truthfully, and the state is sent again too.
   await s.say("Pause."); s.sent.length = 0;
   const m = await s.tool("crow_wm")({ do: "pause" }, "Pause.");
@@ -689,4 +690,17 @@ test("re-review R3: 'Did you mean …?' is answered by the next utterance only �
   assert.match((await t.say("Play WXYZ HD."))?.say || "", /Which one\?/);
   assert.equal(await t.say("What time is it in Lisbon?"), null);
   assert.equal((await t.say("WXYZ two."))?.say, "Playing WXYZ HD2.");
+});
+
+test("r7b M4 (operator ruling): a bare 'Play.' / 'Resume.' with nothing loaded is answered at once with no model — never a new play by the model; a ringing timer still goes first; longer forms stay conversation", async () => {
+  const s = setup();
+  for (const q of ["Play.", "Resume.", "play"]) assert.deepEqual(await s.say(q), { say: "Nothing is paused. What would you like to hear?", tier: "t0", events: [] }, q);
+  for (const q of ["Reanuda."]) assert.deepEqual(await s.say(q, s.es), { say: "No hay nada en pausa. ¿Qué te gustaría escuchar?", tier: "t0", events: [] }, q);
+  assert.equal(s.sent.length, 0, "nothing loads");
+  for (const q of ["Keep going.", "Continue the music.", "Play some jazz."]) assert.notEqual((await s.say(q))?.say, "Nothing is paused. What would you like to hear?", q);
+  // A timer that has gone off: as before (the words are not answered here).
+  s.store.put("d", { kind: "timer", name: "Rice", title: "Rice", seconds: 1 });
+  for (const fn of s.fire.splice(0)) fn();
+  assert.ok(s.store.list("d").some((w) => w.kind === "timer" && w.done), "the timer has gone off");
+  assert.equal(await s.say("Play."), null, "a ringing timer: not this answer");
 });

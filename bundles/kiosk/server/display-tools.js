@@ -39,6 +39,8 @@ export function cardUpdate(transcript, store, deviceId) {
   return namesIt ? card.title : null;
 }
 
+/** Review of rev 7 (L2): words with no vowel that are not call signs. */
+const NOT_CALL_SIGNS = new Set(["hmm", "hmmm", "mmm", "mrs", "shh", "shhh", "psst", "brr", "brrr", "grr", "tsk", "pfft", "nth", "pst", "zzz"]);
 const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
 
 /**
@@ -81,7 +83,7 @@ export function createDisplayTools(ctx) {
     if (!w.length || QUESTION_WORDS.has(w[0])) return false;
     // A call sign as STT writes one: a word with no vowel, or an all-capitals word of 3–6 letters with three consonants or more.
     const caps = (String(t).match(/\b[A-Z]{3,6}\b/g) || []).some((x) => (x.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).length >= 3);
-    return caps || w.some((x) => /^play(s|ed|ing)?$/.test(x) || /^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x));
+    return caps || w.some((x) => /^play(s|ed|ing)?$/.test(x) || (/^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x) && !NOT_CALL_SIGNS.has(x)));
   };
   const playWhen = (t) => mentionsPlay(t) || asksPlay(t) || radioAsk(t);
   const openWhen = (t) => mentionsOpen(t, items);
