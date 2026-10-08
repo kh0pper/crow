@@ -27,6 +27,23 @@ import { createMediaStore, migrateMaxVolume } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
 import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, callSignHotwords, commandNames, STATIONS_SETTING } from "./sources/stations.js";
 import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
+import { createNewsSource, createMediaReader } from "./sources/news.js";
+import { createMusicSource, checkStorage, originOf } from "./sources/funkwhale.js";
+import { createEnvelopeHandler } from "./envelope.js";
+
+/** The music library's local setting: { api_origin, storage_origin } (both operator-entered; never synced). */
+export const MUSIC_SETTING = "kiosk_music";
+/**
+ * The library's settings for the adapter. The credential is the Funkwhale add-on's own. Both the
+ * library address (where the credential is sent) and the storage origin (the one redirect) are
+ * ENTERED by the operator and never guessed: without either, the library is not offered.
+ */
+export function kioskMusicConfig(env, settings = {}) {
+  if (!env || typeof env.FUNKWHALE_ACCESS_TOKEN !== "string" || !env.FUNKWHALE_ACCESS_TOKEN) return null;
+  const base = originOf(settings?.api_origin), storageOrigin = originOf(settings?.storage_origin);
+  if (!base || !storageOrigin) return null;
+  return { base, token: env.FUNKWHALE_ACCESS_TOKEN, storageOrigin, publicOrigin: originOf(env.FUNKWHALE_URL) };
+}
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -262,7 +279,14 @@ export function createKioskRuntime(deps) {
   });
   // Station presets: this instance's local setting, held in memory, reloaded when the panel saves them.
   let stations = [];
-  const registry = createSourceRegistry([createStationsSource({ list: () => stations }), ...(Array.isArray(deps.playSources) ? deps.playSources : [])], { log });
+  // The music library (the Funkwhale add-on, read-only) and the news briefing, when this instance has them.
+  let musicSettings = {};
+  const musicEnv = () => { try { return typeof deps.addonEnv === "function" ? deps.addonEnv("funkwhale") : null; } catch { return null; } };
+  const musicConfig = () => kioskMusicConfig(musicEnv(), musicSettings);
+  const music = typeof deps.addonEnv === "function" ? createMusicSource({ config: musicConfig, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) }) : null;
+  const news = typeof deps.dataDir === "string" && deps.dataDir ? createNewsSource({ reader: createMediaReader(deps.openDb), dataDir: deps.dataDir, now }) : null;
+  // "auto" order: a station by exact name, the news when the words ask for it, the library, then a station by a unique prefix (the stations source keeps that last part loose).
+  const registry = createSourceRegistry([createStationsSource({ list: () => stations }), news, music, ...(Array.isArray(deps.playSources) ? deps.playSources : [])].filter(Boolean), { log });
   const resolver = createPlayResolver({ registry, now });
   const verbs = createMediaVerbs({ media, resolver, maxVolume: (ctx) => ctx.maxVolume });
   const wm = createWmStore({
@@ -283,6 +307,11 @@ export function createKioskRuntime(deps) {
   const loadStations = () => withDb(async (db) => { stations = parseStations(await deps.settings.readSetting(db, STATIONS_SETTING)); return stations; });
   /** Read once at start; the panel's save replaces the list in memory as well. A failed read leaves "no stations". */
   const stationsReady = loadStations().catch((err) => { log(`[kiosk] station presets not read: ${err.message}`); return []; });
+  const readMusicSettings = (raw) => { try { const o = JSON.parse(String(raw || "{}")); return { storage_origin: originOf(o?.storage_origin) || "", api_origin: originOf(o?.api_origin) || "" }; } catch { return {}; } };
+  /** The library's index is built in the background once its settings are read (and again every six hours inside the adapter). */
+  const musicReady = music ? withDb(async (db) => { musicSettings = readMusicSettings(await deps.settings.readSetting(db, MUSIC_SETTING)); })
+    .then(() => { if (deps.musicAutoStart !== false && music.available()) music.start(); })
+    .catch((err) => log(`[kiosk] music settings not read: ${err.message}`)) : Promise.resolve();
   /**
    * The executor's context for one display turn (display-tools.js, tiers.js, executor.js): the play
    * sources this instance has right now, what crow_open may open (now playing, once a source exists),
@@ -307,7 +336,10 @@ export function createKioskRuntime(deps) {
    */
   const sttPromptFor = (device) => (profile) => stationSttPrompt(device, profile, stations);
   const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
-  const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
+  /** A display turn's options: this display's media line, the STT hints, and the library's stream envelopes read through
+   *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
+  const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
+    onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -714,6 +746,25 @@ export function createKioskRuntime(deps) {
     r.post("/api/kiosk/admin/stations/test", json, wrap(async (req, res) => {
       res.json(await probeStation({ url: String(req.body?.url || "").slice(0, 500), local: req.body?.local === true }, relay));
     }));
+    // The music library: where its storage answers from (never guessed), and an optional first-hop origin.
+    const musicStatus = () => { const env = musicEnv(); return { installed: !!env, credential: !!(env && env.FUNKWHALE_ACCESS_TOKEN), settings: musicSettings, available: music ? music.available() : false, index: music ? music.indexState() : null }; };
+    r.get("/api/kiosk/admin/music", wrap(async (req, res) => { await musicReady; res.setHeader("Cache-Control", "no-store"); res.json(musicStatus()); }));
+    r.post("/api/kiosk/admin/music", json, wrap(async (req, res) => {
+      const next = {};
+      for (const k of ["storage_origin", "api_origin"]) {
+        const v = String(req.body?.[k] ?? "").trim().slice(0, 300);
+        if (v && !originOf(v)) return res.status(400).json({ error: "bad_origin", field: k });
+        next[k] = v ? originOf(v) : "";
+      }
+      await withDb((db) => deps.settings.writeSetting(db, MUSIC_SETTING, JSON.stringify(next)));
+      musicSettings = next;
+      if (music) { music.stop(); if (music.available()) music.start(); }
+      res.json({ ok: true, ...musicStatus() });
+    }));
+    // Is the storage origin the one the server really redirects to? One listen request without following the redirect (the server counts it as a download).
+    r.post("/api/kiosk/admin/music/check", wrap(async (req, res) => {
+      res.json(await checkStorage(musicConfig(), deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}));
+    }));
     r.get("/api/kiosk/admin/displays/:id/metrics", (req, res) => res.json({ turns: metrics.list(req.params.id), summary: metrics.summary(req.params.id) }));
 
     r.get("/api/kiosk/internal/displays", wrap(async (req, res) => {
@@ -815,5 +866,5 @@ export function createKioskRuntime(deps) {
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => clearInterval(sweep) };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => { clearInterval(sweep); music?.stop(); } };
 }

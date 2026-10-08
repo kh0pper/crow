@@ -6,7 +6,7 @@
  */
 import express, { Router } from "express";
 import { WebSocketServer } from "ws";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,7 +22,7 @@ if (!BUNDLE_DIR) throw new Error("kiosk: bundle directory not found");
 const bImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 
 const { APP_ROOT, appImport } = await bImport("server/app-root.js");
-const { createDbClient } = await appImport("servers/db.js");
+const { createDbClient, resolveDataDir } = await appImport("servers/db.js");
 // sessionFromRequest / verifySession / csrfTokenAccepted are the gateway's own dashboard-session
 // checks; the runtime turns session mode (the dashboard's Talk to Crow) off when any is missing.
 const { isAllowedNetwork, sessionFromRequest, verifySession } = await appImport("servers/gateway/dashboard/auth.js");
@@ -36,6 +36,12 @@ const { PERCH_TOKENS } = await appImport("servers/gateway/dashboard/shared/desig
 const { readPortrait } = await appImport("servers/sharing/profile-avatar.js");
 const { createKioskRuntime, createSttWarmup, kioskThemeCss } = await bImport("server/runtime.js");
 const { resolveDisplayBird } = await bImport("server/bird.js");
+
+/** An installed add-on's environment, read at the moment it is needed (a token change applies without a restart). Never logged. */
+const ADDONS_FILE = join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json");
+function addonEnv(id) {
+  try { const env = JSON.parse(readFileSync(ADDONS_FILE, "utf8"))?.[id]?.env; return env && typeof env === "object" ? env : null; } catch { return null; }
+}
 
 const vdeps = await defaultVoiceDeps();
 const voice = createVoiceTurnRunner(vdeps);
@@ -58,6 +64,7 @@ const runtime = createKioskRuntime({
   themeCss: () => kioskThemeCss(PERCH_TOKENS),
   files: { publicDir: join(BUNDLE_DIR, "public"), birdSvgPath: join(APP_ROOT, "bundles", "ramble", "server", "bird-svg.cjs") },
   announceToken: { validate: validateKioskAnnounceToken },
+  addonEnv, dataDir: resolveDataDir(),
 });
 
 {

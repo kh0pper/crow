@@ -378,9 +378,11 @@ test("revision 6: the run-2 set is kept verbatim and spent too — a run refuses
 test("rev 7 INVARIANT: must ⊆ offered — on every utterance of the 40, every held-out set and every rule-test example, a must-run tool is an offered tool", async () => {
   const { HELD_OUT_R2 } = await import("../scripts/kiosk-eval/held-out-r2.mjs");
   const { HELD_OUT_R3 } = await import("../scripts/kiosk-eval/held-out-r3.mjs");
+  const { HELD_OUT_R4 } = await import("../scripts/kiosk-eval/held-out-r4.mjs");
+  const { HELD_OUT_R5 } = await import("../scripts/kiosk-eval/held-out-r5.mjs");
   const rules = readFileSync(new URL("../tests/kiosk-offer-rules.test.js", import.meta.url), "utf8");
   const quoted = [...rules.matchAll(/"([A-Z¿¡][^"\n]{6,140})"/g)].map((m) => m[1]);
-  const items = [...CASES, ...HELD_OUT_R1, ...HELD_OUT_R2, ...HELD_OUT_R3, ...HELD_OUT].map((c) => [c.say, c.state || {}, c.lang]).concat(quoted.flatMap((q) => [[q, {}, "en"], [q, { windows: [make.card("Groceries")] }, "en"]]));
+  const items = [...CASES, ...HELD_OUT_R1, ...HELD_OUT_R2, ...HELD_OUT_R3, ...HELD_OUT_R4, ...HELD_OUT_R5, ...HELD_OUT].map((c) => [c.say, c.state || {}, c.lang]).concat(quoted.flatMap((q) => [[q, {}, "en"], [q, { windows: [make.card("Groceries")] }, "en"]]));
   let checked = 0;
   for (const [say, state, lang] of items) {
     const d = createProductDisplay({ surface: "four", chat: scripted(() => "x"), forcing: NOTHING, state, lang });
@@ -410,4 +412,36 @@ test("rev 7: the run-3 set is kept verbatim and spent; a run refuses any line sh
   assert.equal(heldOutSpent(HELD_OUT_R3), true);
   assert.equal(heldOutSpent([{ say: HELD_OUT_R3[6].say }]), true);
   assert.equal(heldOutSpent([{ say: "Another line nobody has written before." }]), false);
+});
+
+test("the run-4 set is kept verbatim and spent; a run refuses any line shared with r1 to r4", async () => {
+  const { HELD_OUT_R4 } = await import("../scripts/kiosk-eval/held-out-r4.mjs");
+  assert.equal(HELD_OUT_R4.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R4), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R4[0].say }]), true);
+  assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
+});
+
+test("the run-5 set is kept verbatim and spent; a run refuses any line shared with r1 to r5", async () => {
+  const { HELD_OUT_R5 } = await import("../scripts/kiosk-eval/held-out-r5.mjs");
+  assert.equal(HELD_OUT_R5.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R5), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R5[0].say }]), true);
+  assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
+});
+
+test("the run-6 set is kept verbatim and spent; a run refuses any line shared with r1 to r6", async () => {
+  const { HELD_OUT_R6 } = await import("../scripts/kiosk-eval/held-out-r6.mjs");
+  assert.equal(HELD_OUT_R6.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R6), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R6[0].say }]), true);
+  assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
+});
+
+test("the run-7 set is kept verbatim and spent; a run refuses any line shared with r1 to r7", async () => {
+  const { HELD_OUT_R7 } = await import("../scripts/kiosk-eval/held-out-r7.mjs");
+  assert.equal(HELD_OUT_R7.length, 20);
+  assert.equal(heldOutSpent(HELD_OUT_R7), true);
+  assert.equal(heldOutSpent([{ say: HELD_OUT_R7[0].say }]), true);
+  assert.equal(heldOutSpent(), false, "the current set shares no line with any spent set");
 });

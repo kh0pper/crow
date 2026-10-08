@@ -71,6 +71,7 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
      *   | { outcome: "choices", names }                      2 to 4 loose candidates: the first three are offered and remembered
      *   | { outcome: "unavailable", code, source? }          code "none": this instance has nothing to play from;
      *                                                        "unreachable" | "unauthorized" | "timeout": a source could not look
+     *   | { outcome: "refused", say, vars, source }           a source knows what was meant and cannot play it (its own line)
      *   | { outcome: "not_found" }
      * strict: never play a guess (a single loose candidate plays only for the model's call).
      */
@@ -89,6 +90,8 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
         try { found = await within(Promise.resolve().then(() => s.search(text, { explicit: !!want, lang }))); } catch (err) { note(down, s, err); continue; }
         found = (Array.isArray(found) ? found : []).filter((c) => c && c.id != null && typeof c.title === "string");
         const sure = found.find((c) => c.confident === true);
+        // "I know what you mean and cannot play it" (the news with no recent briefing): an answer, not a miss.
+        if (sure?.refuse && typeof sure.refuse.say === "string") { if (deviceId) asked.delete(deviceId); return { outcome: "refused", say: sure.refuse.say, vars: sure.refuse.vars && typeof sure.refuse.vars === "object" ? sure.refuse.vars : {}, source: s.kind }; }
         if (sure) { const list = await playables(s, sure, down); if (list.length) { if (deviceId) asked.delete(deviceId); return playing(s, sure, list); } }
         loose.push(...found.filter((c) => c.confident !== true).map((c) => ({ c, s })));
       }
@@ -207,6 +210,8 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
     const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id });
     if (r.outcome === "playing") return start(r, ctx, S);
+    // A source's own refusal is a real answer, with or without a model; its line is always spoken.
+    if (r.outcome === "refused") return result(false, "unavailable", fill(S[r.say] || S.say_play_unavailable, r.vars), { reason: "refused", effect: false });
     if (r.outcome === "choices") return result(true, "choices", fill(r.names.length === 1 ? S.say_did_you_mean : S.say_choices, { names: joinNames(r.names, S) }), { names: r.names, effect: false });
     // A source that could not look is a real answer, with or without a model: the model can do no better with it.
     if (r.outcome === "unavailable" && r.code !== "none") return result(false, "unavailable", fill(S[`say_play_${r.code}`] || S.say_play_unreachable, { source: S[`source_${r.source}`] || S.source_music }), { reason: r.code });

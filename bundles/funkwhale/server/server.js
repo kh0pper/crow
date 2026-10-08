@@ -24,7 +24,7 @@
  * Rate limiting: per the shared wrapper. Content-producing and moderation
  * verbs are wrapped; read-only status/list/search are uncapped.
  *
- * Queued moderation: fw_block_domain + fw_defederate + fw_import_blocklist
+ * Queued moderation: fw_block_domain + fw_defederate
  * INSERT into moderation_actions and raise a notification; the actual
  * federation change lands when the operator confirms in the Nest panel.
  */
@@ -67,39 +67,38 @@ async function loadSharedDeps() {
 
 // --- HTTP helper ---
 
-/**
- * Resolve either a numeric track id or a listen-URL UUID to the full
- * track metadata object. Funkwhale's /api/v1/tracks/<id>/ endpoint only
- * accepts the NUMERIC id; passing the UUID yields a silent 404.
- * Returns null if the track can't be found after a bounded scan.
- */
-async function resolveTrackMeta(trackUuidOrId) {
-  const raw = String(trackUuidOrId || "");
-  if (!raw) return null;
-  // Numeric fast path.
-  if (/^\d+$/.test(raw)) {
-    try { return await fwFetch(`/api/v1/tracks/${encodeURIComponent(raw)}/`); }
-    catch { return null; }
-  }
-  // UUID path — scan the track list looking for a matching listen_url.
-  // Libraries with thousands of tracks should move to a search-by-name
-  // strategy; for now bound the scan at 50 pages of 100 (5000 tracks).
-  const MAX_PAGES = 50;
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    let list;
-    try { list = await fwFetch("/api/v1/tracks/", { query: { page, page_size: 100 } }); }
-    catch { return null; }
-    for (const item of list?.results || []) {
-      const m = (item.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
-      if (m?.[1] === raw) {
-        try { return await fwFetch(`/api/v1/tracks/${item.id}/`); }
-        catch { return null; }
-      }
-    }
-    if (!list?.next) break;
-  }
-  return null;
+/** A track's listen id, from the listen PATH the API gives (`/api/v1/listen/<uuid>/`). */
+const LISTEN_UUID = /\/listen\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function listenUuidOf(track) {
+  const m = LISTEN_UUID.exec(String(track?.listen_url || ""));
+  return m ? m[1].toLowerCase() : null;
 }
+
+/**
+ * Files sent as stored. Decided by the upload's FILE EXTENSION, never by the MIME type the server
+ * reports (on a library imported from files most of those are wrong, and asking for an MP3 copy of
+ * an MP3 makes the server re-encode it).
+ */
+export const DIRECT_EXTENSIONS = Object.freeze(["mp3", "ogg", "opus", "flac"]);
+/**
+ * → { to, codec }: `to` is the copy to ask for (null = the file as stored). An explicit `format`
+ * is always honoured; otherwise a copy is asked for only when some stored file of the track has an
+ * extension outside DIRECT_EXTENSIONS (or nothing is known about its files).
+ */
+export function streamFormat(track, format) {
+  if (format) return { to: format, codec: format };
+  const uploads = Array.isArray(track?.uploads) ? track.uploads : [];
+  const exts = uploads.map((u) => String(u?.extension || "").toLowerCase());
+  if (exts.length && exts.every((e) => DIRECT_EXTENSIONS.includes(e))) return { to: null, codec: exts[0] };
+  return { to: "mp3", codec: "mp3" };
+}
+function listenUrl(uuid, to) {
+  return `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(uuid)}/${to ? `?to=${to}` : ""}`;
+}
+/** The most tracks fw_play_album queues (pages of 50, followed by page NUMBER). */
+export const ALBUM_TRACK_CAP = 500;
+const ALBUM_PAGE = 50;
 
 async function fwFetch(path, { method = "GET", body, query, noAuth, timeoutMs = 20_000, rawForm } = {}) {
   const qs = query
@@ -318,14 +317,10 @@ export async function createFunkwhaleServer(options = {}) {
         const t = type || "tracks";
         const out = await fwFetch(`/api/v1/${t}/`, { query: { q, page_size: page_size || 20 } });
         const simplified = (out.results || []).map((item) => ({
-          // For tracks specifically, the listen endpoint needs the UUID, but
-          // Funkwhale's track API returns no top-level `uuid` field — only
-          // `id` (integer) and the UUID embedded in `listen_url`. Extract
-          // it so fw_play can build a working listen URL. For artists/
-          // albums/channels, the integer id is the canonical identifier.
-          id: t === "tracks"
-            ? (item.listen_url?.match(/\/listen\/([0-9a-f-]+)\//)?.[1] || item.id)
-            : (item.uuid || item.id),
+          // `id` is the server's own id for every kind: for tracks the integer that fw_play,
+          // fw_add_to_playlist and tracks/<id>/ take. A track also carries its listen id.
+          id: t === "channels" ? (item.uuid || item.id) : item.id,
+          ...(t === "tracks" ? { listen_uuid: listenUuidOf(item) } : {}),
           fid: item.fid || null,
           name: item.title || item.name || item.artist?.name,
           artist: item.artist?.name,
@@ -599,67 +594,63 @@ export async function createFunkwhaleServer(options = {}) {
   // --- fw_play ---
   //
   // Resolves a track to a streamable listen URL + codec and returns an
-  // `_audio_stream` envelope. The meta-glasses voice-turn interceptor
-  // detects the envelope, invokes pushAudioStream on the paired device's
-  // WebSocket, and replaces the tool result with a short prose summary so
-  // the LLM doesn't see (and parrot) the raw URL/credentials.
+  // `_audio_stream` envelope. The surface that plays it (the glasses voice
+  // loop, a kiosk display) detects the envelope, streams it server-side and
+  // replaces the tool result with the prose line, so the model never sees
+  // (or parrots) the address.
   //
-  // Funkwhale listen endpoint: /api/v1/listen/{track_uuid}/?to=<format>.
-  // We pass codec="mp3" for maximum Android MediaCodec compatibility; the
-  // server transcodes on the fly if the upload is a different format.
+  // The track is fetched by its numeric id (tracks/<id>/): one call, for any
+  // track in the library. The file is sent as stored unless its extension
+  // needs a copy (streamFormat).
   //
-  // `auth: "funkwhale"` is a sentinel for pushAudioStream to inject the
-  // FUNKWHALE_ACCESS_TOKEN bearer header server-side — the token is never
-  // serialized into the tool result.
+  // `auth: "funkwhale"` is a sentinel for the playing surface to inject the
+  // bearer server-side — the token is never serialized into the tool result.
   server.tool(
     "fw_play",
-    "Play a Funkwhale track on the paired glasses / phone speaker. Takes a track UUID from fw_search. Returns a streaming envelope that the meta-glasses voice loop intercepts; the LLM should summarize verbally (e.g. 'Playing <title> by <artist>').",
+    "Play a Funkwhale track on the user's speaker (glasses, phone or a display). Takes the track's integer `id` from fw_search (type 'tracks'). Returns a streaming envelope that the playing surface intercepts; summarize verbally (e.g. 'Playing <title> by <artist>').",
     {
-      track_uuid: z.string().min(1).max(128).describe("Track UUID from fw_search results (the `id` field)."),
-      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Transcode format; default mp3."),
+      track_id: z.union([z.number().int().positive(), z.string().regex(/^\d{1,12}$/)]).optional().describe("The track's integer id from fw_search results (the `id` field)."),
+      track_uuid: z.string().min(1).max(128).optional().describe("Older callers: the track's listen id (`listen_uuid` from fw_search). Prefer track_id."),
+      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Ask for a copy in this format. Default: the file as stored when it plays everywhere, else mp3."),
     },
-    async ({ track_uuid, format }) => {
+    async ({ track_id, track_uuid, format }) => {
       try {
         const authErr = requireAuth(); if (authErr) return authErr;
-        // fw_search emits the UUID in `id` (so the listen endpoint works),
-        // but Funkwhale's /api/v1/tracks/<id>/ metadata endpoint only
-        // accepts the NUMERIC track id — a UUID gives 404. Prior code
-        // silently swallowed the 404 with .catch(() => null) and fell
-        // through to the literal string "unknown track", which the shade
-        // + media notification then rendered as "Unknown Track / Unknown
-        // Artist." Resolve UUID -> numeric id first, then fetch metadata.
-        const meta = await resolveTrackMeta(track_uuid);
-        if (!meta) {
-          return errResponse(new Error(`Could not resolve track ${track_uuid} — not found in the local Funkwhale catalog. Try fw_search again.`));
+        // A numeric value in track_uuid is an id (older prompts passed ids there).
+        const rawId = track_id != null ? String(track_id) : /^\d{1,12}$/.test(String(track_uuid || "")) ? String(track_uuid) : null;
+        let meta = null, uuid = null;
+        if (rawId) {
+          try { meta = await fwFetch(`/api/v1/tracks/${encodeURIComponent(rawId)}/`); } catch { meta = null; }
+          uuid = listenUuidOf(meta);
+          if (!meta || !uuid) return errResponse(new Error(`Could not find track ${rawId} in the Funkwhale library. Try fw_search again and pass its id.`));
+        } else if (track_uuid && UUID.test(track_uuid)) {
+          // A listen id alone: no metadata lookup is possible without scanning the library, so the
+          // track plays untitled, as an mp3 copy (its file type is unknown), and no listen is recorded.
+          uuid = track_uuid.toLowerCase();
+        } else {
+          return errResponse(new Error("Pass track_id: the integer id from fw_search."));
         }
-        const title = meta.title || "Unknown track";
-        const artist = meta.artist?.name || "Unknown artist";
-        const artworkUrl = meta.album?.cover?.urls?.medium_square_crop
-                        || meta.album?.cover?.urls?.original
+        const title = meta?.title || "this track";
+        const artist = meta?.artist?.name || null;
+        const artworkUrl = meta?.album?.cover?.urls?.medium_square_crop
+                        || meta?.album?.cover?.urls?.original
                         || null;
-        const codec = format || "mp3";
-        // The listen endpoint wants the UUID. If the caller passed a
-        // numeric id, extract the UUID from the resolved listen_url.
-        let listenId = track_uuid;
-        if (/^\d+$/.test(String(track_uuid))) {
-          const m = (meta.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
-          if (m?.[1]) listenId = m[1];
-        }
-        const url = `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(listenId)}/?to=${codec}`;
+        const { to, codec } = streamFormat(meta, format);
+        const url = listenUrl(uuid, to);
         // Fire-and-forget listen record — glasses stream the audio directly
         // from Funkwhale, bypassing the panel's stream proxy that would
         // otherwise post here. Without this, fw_now_playing always returns 0.
-        if (meta.id) {
+        if (meta?.id) {
           fwFetch("/api/v1/history/listenings/", { method: "POST", body: { track: meta.id } })
             .catch(() => { /* best-effort */ });
         }
         return textResponse({
           ok: true,
           title,
-          artist,
+          artist: artist || "Unknown artist",
           artwork_url: artworkUrl,
           _audio_stream: { url, codec, auth: "funkwhale" },
-          prose: `Playing ${title} by ${artist}.`,
+          prose: artist ? `Playing ${title} by ${artist}.` : `Playing ${title}.`,
         });
       } catch (err) {
         return errResponse(err);
@@ -673,12 +664,11 @@ export async function createFunkwhaleServer(options = {}) {
     "Play every track of an album sequentially through the paired glasses speaker. Takes the album's integer id from fw_search results (where type='albums') or fw_list_library. Returns an _audio_stream envelope with a queue array that the meta-glasses voice loop plays back-to-back.",
     {
       album_id: z.union([z.string(), z.number()]).describe("Album id (integer) from fw_search results."),
-      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Transcode format; default mp3."),
+      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Ask for copies in this format. Default: each file as stored when it plays everywhere, else mp3."),
     },
     async ({ album_id, format }) => {
       try {
         const authErr = requireAuth(); if (authErr) return authErr;
-        const codec = format || "mp3";
         const meta = await fwFetch(`/api/v1/albums/${encodeURIComponent(album_id)}/`).catch(() => null);
         const albumTitle = meta?.title || `album ${album_id}`;
         const artist = meta?.artist?.name || "unknown artist";
@@ -686,20 +676,28 @@ export async function createFunkwhaleServer(options = {}) {
                         || meta?.cover?.urls?.original
                         || null;
         // Funkwhale doesn't inline tracks on the album endpoint — use the
-        // tracks list with album filter, ordered by position.
-        const list = await fwFetch(`/api/v1/tracks/`, {
-          query: { album: album_id, page_size: 100, ordering: "position" },
-        });
-        const tracks = (list?.results || []).filter((t) => t.is_playable !== false);
+        // tracks list with album filter, in disc then track order, following
+        // pages by page NUMBER (the `next` address is never fetched: the
+        // server writes it with its public name) up to ALBUM_TRACK_CAP.
+        const all = [];
+        for (let page = 1; all.length < ALBUM_TRACK_CAP; page++) {
+          const list = await fwFetch(`/api/v1/tracks/`, {
+            query: { album: album_id, page_size: ALBUM_PAGE, page, ordering: "disc_number,position" },
+          });
+          const rows = list?.results || [];
+          all.push(...rows);
+          if (!list?.next || !rows.length) break;
+        }
+        const tracks = all.slice(0, ALBUM_TRACK_CAP).filter((t) => t.is_playable !== false);
         if (tracks.length === 0) {
           return textResponse({ ok: false, prose: `${albumTitle} has no playable tracks.` });
         }
         const streams = tracks.map((t) => {
-          const m = (t.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
-          const trackUuid = m?.[1];
+          const trackUuid = listenUuidOf(t);
           if (!trackUuid) return null;
+          const { to, codec } = streamFormat(t, format);
           return {
-            url: `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(trackUuid)}/?to=${codec}`,
+            url: listenUrl(trackUuid, to),
             codec,
             auth: "funkwhale",
             title: t.title,
