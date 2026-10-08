@@ -1,7 +1,7 @@
 {
   "id": "nominatim",
   "name": "Nominatim GIS",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
   "type": "bundle",
   "author": "Crow",

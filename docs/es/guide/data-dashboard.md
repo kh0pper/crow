@@ -107,12 +107,9 @@ La IA convierte el estudio de caso en una entrada de blog, incrustando los gráf
 
 ## Modelo de Seguridad
 
-El Panel de Datos aplica límites de seguridad estrictos:
-
-- **Solo lectura por defecto** — Solo se permiten consultas `SELECT`. Las sentencias `INSERT`, `UPDATE`, `DELETE` y DDL se bloquean a menos que habilites explícitamente el modo de escritura para una base de datos específica.
-- **Restricciones de rutas** — Las bases de datos SQLite deben estar dentro de directorios permitidos (`~/.crow/data/`, rutas de backends registrados). Sin acceso a bases de datos del sistema ni a archivos fuera del sandbox.
-- **Tiempos límite de consulta** — Las consultas se cancelan después de 30 segundos para prevenir operaciones desbocadas.
-- **Sin ejecución remota** — Las consultas se ejecutan localmente contra los backends registrados. Las consultas de federación pasan por el proxy del gateway con las mismas verificaciones de seguridad del lado remoto.
+- **Solo lectura** — Los conjuntos de datos se abren en solo lectura: una sentencia por consulta (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`), y el propio SQLite rechaza cualquier cambio. Crow no escribe en los conjuntos de datos; `crow_data_write` está desactivada mientras el Data Dashboard se retira. Carga los datos con tus propias herramientas.
+- **Restricción de rutas** — Un conjunto de datos debe estar en la carpeta `datasets/` de la carpeta de datos o en la carpeta `databases/` de un proyecto. Las bases de datos propias de Crow (`crow.db`, `tasks.db`) se rechazan, también mediante enlaces simbólicos o duros.
+- **Límite de filas** — Una consulta devuelve como máximo 5.000 filas, contadas a medida que se leen.
 
 ## Próximos Pasos
 

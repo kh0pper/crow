@@ -19,19 +19,24 @@ Data backends are useful when:
 
 ## Registering a Backend
 
-Use the `crow_register_backend` tool to connect an MCP server as a data backend:
+There are two kinds of backend, chosen with `backend_type` on `crow_register_backend`:
 
-> "Register my Postgres MCP server at `http://localhost:5433/mcp` as a data backend called 'course-database'"
+| Kind | What it is | `connection_ref` |
+|---|---|---|
+| `mcp_server` (default) | An MCP server Crow starts as a local command | `{"command":"npx","args":["-y","mcp-server-postgres"],"envVars":["POSTGRES_URL"]}` |
+| `sqlite` | A SQLite file Crow reads, read-only | `{"path":"/home/alex/.crow/data/datasets/enrollment.db"}` |
 
-This stores the backend's name, URL, and description in the `data_backends` table. You can then associate it with a `data_connector` type project.
+> "Register the Postgres MCP server as a data backend called 'course-database'"
 
-### Required Information
+### An `mcp_server` backend waits for your approval
 
-| Field | Description |
-|---|---|
-| `name` | A short name for the backend (e.g., "course-database", "student-records") |
-| `server_url` | The MCP server URL (Streamable HTTP endpoint) |
-| `description` | What data this backend provides (helps the AI know when to use it) |
+An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**: the exact command, its arguments and the environment variable names are shown, with **Approve and run this command**. Approval covers that exact command — if the registration is changed later it goes back to waiting. **Stop running it** withdraws the approval.
+
+`envVars` lists variable **names** only; put the values in your `.env`.
+
+### A `sqlite` backend is a dataset
+
+The file must live in your data folder's `datasets/` folder (for example `~/.crow/data/datasets/`) or in a project's `databases/` folder (where the Data Dashboard creates databases). Crow opens it read-only and never writes to it. Crow's own databases (`crow.db`, `tasks.db`) can never be registered, including through a link.
 
 ## Managing Backends
 
@@ -79,7 +84,9 @@ Suppose you have a Postgres MCP server running locally that exposes `query` and 
 
 **1. Register it:**
 
-> "Register a data backend called 'enrollment-db' at `http://localhost:5433/mcp` -- it has student enrollment data"
+> "Register the Postgres MCP server as a data backend called 'enrollment-db' -- it has student enrollment data"
+
+Then approve it in Crow's Nest › Projects (see above); until then it does not run.
 
 **2. Create a project:**
 
@@ -93,7 +100,8 @@ The AI queries the backend, formats the results, and stores them as a source wit
 
 ## Security Considerations
 
-- Backend URLs are stored in Crow's local database -- they are not shared with peers or exposed through the gateway
-- Authentication to the backend MCP server is handled by the server itself (bearer tokens, OAuth, etc.)
-- Crow does not cache backend data unless you explicitly capture it as a source or note
+- Registering an `mcp_server` backend never runs anything: only the owner, signed in to Crow's Nest, can approve a command, and an approval stops applying the moment the command changes
+- Backends are never copied from peers: a shared project carries a description of its backends, not a runnable registration
+- `sqlite` datasets are opened read-only, one statement per query, with a row cap
+- Credentials stay in `.env`; the database stores environment variable names only
 - Removing a backend does not delete any sources or notes that were captured from it

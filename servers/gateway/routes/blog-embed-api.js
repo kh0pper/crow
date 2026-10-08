@@ -27,6 +27,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import { createDbClient } from "../../db.js";
+import { runReadOnlyQuery } from "../../shared/sqlite-datasets.js";
 import { getObject } from "../../storage/s3-client.js";
 
 // Tailscale Serve only exposes /blog/* to the funnel (per the April
@@ -51,7 +52,6 @@ const TEA_MAPS_DIR = existsSync(TEA_MAPS_INSTALLED)
   : TEA_MAPS_REPO;
 
 const MAX_ROWS = 5000;
-const QUERY_TIMEOUT_MS = 10_000;
 const FIGURES_BUCKET = "capstone-research";
 const GATEWAY_INTERNAL_URL =
   process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";
@@ -79,22 +79,6 @@ const embedLimiter = tieredRateLimit({
   ],
   message: { error: "Too many requests" },
 });
-
-function isReadOnlySql(sql) {
-  const trimmed = String(sql || "")
-    .replace(/^(--.*)$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .trim();
-  if (!trimmed) return false;
-  const head = trimmed.split(/\s+/)[0]?.toUpperCase();
-  return head === "SELECT" || head === "WITH" || head === "EXPLAIN" || head === "PRAGMA";
-}
-
-function isPathSafe(dbPath) {
-  const crowData = resolve(homedir(), ".crow", "data");
-  const resolved = resolve(dbPath);
-  return resolved.startsWith(crowData) && !resolved.includes("..");
-}
 
 async function loadPublishedSection(db, sectionId) {
   const { rows } = await db.execute({
@@ -127,24 +111,12 @@ async function resolveBackendPath(db, backendId) {
   }
 }
 
+// Section SQL runs through the shared dataset helper: the backend path must
+// be a dataset (never one of Crow's own databases), the connection is
+// read-only, one statement, and the row cap is enforced by stepping rows.
 async function runSectionSql(dbPath, sql) {
-  if (!isReadOnlySql(sql)) throw new Error("Section SQL is not read-only");
-  if (!isPathSafe(dbPath)) throw new Error("Backend path outside allowed directory");
-  if (!existsSync(dbPath)) throw new Error("Backend database not found");
-  const userDb = createDbClient(dbPath);
-  try {
-    let safeSql = sql.trim();
-    if (!/\bLIMIT\b/i.test(safeSql)) safeSql = `${safeSql} LIMIT ${MAX_ROWS}`;
-    const result = await Promise.race([
-      userDb.execute(safeSql),
-      new Promise((_, rej) =>
-        setTimeout(() => rej(new Error(`Query timeout (${QUERY_TIMEOUT_MS / 1000}s)`)), QUERY_TIMEOUT_MS),
-      ),
-    ]);
-    return { columns: result.columns || [], rows: result.rows || [] };
-  } finally {
-    userDb.close();
-  }
+  const { columns, rows } = runReadOnlyQuery(dbPath, sql, { maxRows: MAX_ROWS });
+  return { columns, rows };
 }
 
 function parseConfig(configStr) {

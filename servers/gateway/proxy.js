@@ -19,6 +19,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
+import { isApproved, verifyBackendLaunch, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -409,6 +410,16 @@ async function loadAddonServers() {
   }
 }
 
+/** Close a running data backend (its owner approval was withdrawn). */
+export function disconnectDynamicBackend(backendId) {
+  const key = `backend-${backendId}`;
+  const entry = connectedServers.get(key);
+  if (!entry) return false;
+  connectedServers.delete(key);
+  try { entry.client?.close?.(); } catch {}
+  return true;
+}
+
 /**
  * Load data backends from the database and connect them as integrations.
  * Called on startup and can be called again to reload without full restart.
@@ -444,6 +455,27 @@ export async function loadDynamicBackends() {
         continue;
       }
 
+      // Owner approval gate: a registered command runs only after the
+      // dashboard owner approved this exact connection_ref (an edit voids it).
+      if (!isApproved(row)) {
+        if (row.status !== PENDING_STATUS) {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [PENDING_STATUS, "Waiting for the owner to approve it on the Projects page", row.id],
+          });
+        }
+        console.warn(`  [proxy] Backend #${row.id} "${row.name}": not approved by the owner — not started`);
+        continue;
+      }
+      const launch = verifyBackendLaunch(connRef);
+      if (!launch.ok) {
+        await db.execute({
+          sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [launch.reason, row.id],
+        });
+        continue;
+      }
+
       // Check that required env vars are set
       const missingVars = (connRef.envVars || []).filter((v) => !process.env[v]);
       if (missingVars.length > 0) {
@@ -459,8 +491,8 @@ export async function loadDynamicBackends() {
       const integration = {
         id: backendKey,
         name: row.name,
-        command: connRef.command,
-        args: connRef.args || [],
+        command: launch.command,
+        args: launch.args,
         envVars: connRef.envVars || [],
       };
 

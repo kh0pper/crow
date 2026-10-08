@@ -130,6 +130,7 @@ await initTable("data_backends table", `
     last_connected_at TEXT,
     last_error TEXT,
     tags TEXT,
+    approved_ref_sha256 TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE CASCADE
@@ -155,6 +156,11 @@ async function addColumnIfMissing(table, column, definition) {
 }
 
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
+// Owner approval of an mcp_server backend: SHA-256 of the connection_ref the
+// owner approved (servers/shared/data-backend-approval.js). Additive, no
+// generation bump; scripts/migrations/0008-data-backend-approval.mjs is the
+// other rail.
+await addColumnIfMissing("data_backends", "approved_ref_sha256", "TEXT");
 
 // --- Project Space redesign Phase 1, M0 (2026-05-26) ---
 // Stable opaque identifiers + origin tracking for every project-scoped row.
@@ -870,9 +876,10 @@ async function rebuildMainFKsToProjectSpaces() {
     updated_at TEXT DEFAULT (datetime('now')),
     uuid TEXT,
     origin_instance_id TEXT,
+    approved_ref_sha256 TEXT,
     FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE CASCADE
   )`,
-      knownExtras: ["uuid", "origin_instance_id"],
+      knownExtras: ["uuid", "origin_instance_id", "approved_ref_sha256"],
       canonicalColumns: [
         "id", "project_id", "name", "backend_type", "connection_ref",
         "schema_info", "status", "last_connected_at", "last_error", "tags",

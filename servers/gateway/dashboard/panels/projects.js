@@ -18,6 +18,7 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
+import { approveBackend, revokeBackendApproval, isApproved, refHash } from "../../../shared/data-backend-approval.js";
 
 const PAGE_SIZE = 20;
 
@@ -53,6 +54,26 @@ export default {
           tags: tags?.trim() || null,
         });
         return res.redirectAfterPost("/dashboard/projects");
+      }
+
+      // Owner approval of an mcp_server data backend — a command the gateway
+      // will run. Only reachable through this session-authed, CSRF-checked
+      // dashboard POST; the MCP tool can only create pending rows.
+      if (action === "approve_backend" || action === "revoke_backend") {
+        const projectId = Number(req.body.id);
+        const backendId = Number(req.body.backend_id);
+        const back = Number.isInteger(projectId) && projectId > 0 ? `/dashboard/projects?view=${projectId}` : "/dashboard/projects";
+        const sep = back.includes("?") ? "&" : "?";
+        if (!Number.isInteger(backendId) || backendId <= 0) return res.redirectAfterPost(`${back}${sep}error=backend_not_found`);
+        if (action === "approve_backend") {
+          const ok = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""));
+          if (!ok) return res.redirectAfterPost(`${back}${sep}error=backend_changed_review_again`);
+          import("../../proxy.js").then((m) => m.loadDynamicBackends()).catch(() => {});
+        } else {
+          await revokeBackendApproval(db, backendId);
+          import("../../proxy.js").then((m) => m.disconnectDynamicBackend(backendId)).catch(() => {});
+        }
+        return res.redirectAfterPost(back);
       }
 
       if (action === "update_status") {
@@ -322,7 +343,7 @@ async function renderDetailView(db, projectId, layout, lang) {
   const [sourcesResult, notesResult, backendsResult, membersResult, contactsResult, auditResult] = await Promise.all([
     db.execute({ sql: "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
-    db.execute({ sql: "SELECT id, name, backend_type, status FROM data_backends WHERE project_id = ?", args: [projectId] }),
+    db.execute({ sql: "SELECT * FROM data_backends WHERE project_id = ?", args: [projectId] }),
     db.execute({
       sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode, pm.granted_at, pm.revoked_at,
                    c.display_name, c.crow_id
@@ -413,8 +434,9 @@ async function renderDetailView(db, projectId, layout, lang) {
       escapeHtml(b.name),
       badge(b.backend_type, "info"),
       badge(b.status, b.status === "connected" ? "connected" : "draft"),
+      renderBackendApproval(project.id, b),
     ]);
-    backendsHtml = section(`Data Backends (${backends.length})`, dataTable(["Name", "Type", "Status"], rows), { delay: 300 });
+    backendsHtml = section(`Data Backends (${backends.length})`, dataTable(["Name", "Type", "Status", "Runs"], rows, { stack: true }), { delay: 300 });
   }
 
   // M2c: Members section. Shows active members with role + resolved capabilities,
@@ -541,4 +563,31 @@ async function renderDetailView(db, projectId, layout, lang) {
   `;
 
   return layout({ title: project.name, content });
+}
+
+/**
+ * The approval cell for one data backend. An mcp_server backend is a command
+ * the gateway runs: show the exact command, args and env-var names, and let
+ * the owner approve that exact text (its hash rides the form, so a command
+ * changed after the page loaded is not approved) or withdraw an approval.
+ */
+export function renderBackendApproval(projectId, b) {
+  if (b.backend_type !== "mcp_server") {
+    return `<span style="font-size:0.75rem;color:var(--crow-text-muted)">read-only dataset</span>`;
+  }
+  let ref = {};
+  try { ref = JSON.parse(b.connection_ref || "{}") || {}; } catch {}
+  const cmd = [ref.command, ...(Array.isArray(ref.args) ? ref.args : [])].map((x) => String(x ?? "")).join(" ");
+  const env = Array.isArray(ref.envVars) && ref.envVars.length ? ref.envVars.map(String).join(", ") : "none";
+  const approved = isApproved(b);
+  const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
+  const form = approved
+    ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="revoke_backend"><input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}"><button type="submit" style="${btn};background:var(--crow-bg-elevated);color:var(--crow-text-secondary)">Stop running it</button></form>`
+    : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="approve_backend"><input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}"><input type="hidden" name="ref_sha256" value="${refHash(b.connection_ref)}"><button type="submit" style="${btn};background:var(--crow-accent);color:var(--crow-bg)">Approve and run this command</button></form>`;
+  return `<div style="font-size:0.75rem">
+    <div>${approved ? "Approved — runs:" : "Waiting for your approval. It would run:"}</div>
+    <code style="display:block;white-space:pre-wrap;word-break:break-all;margin:0.25rem 0">${escapeHtml(cmd)}</code>
+    <div style="color:var(--crow-text-muted)">Env var names: ${escapeHtml(env)}</div>
+    <div style="margin-top:0.25rem">${form}</div>
+  </div>`;
 }
