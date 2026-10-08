@@ -97,7 +97,7 @@ Cada proyecto obtiene un directorio en `~/.crow/data/projects/<slug>/workspace/`
 
 - Donde los bots asignados al proyecto escriben artefactos (`<workspace>/bots/<bot_id>/`)
 - La entrada `write_paths` predeterminada para los bots del proyecto
-- Legible por todos los bots del proyecto: Crow la añade automáticamente a sus carpetas de lectura. Los bots fuera del proyecto no pueden leerla a menos que la añadas en **Permisos › Carpetas que este bot puede leer**.
+- Legible por todos los bots del proyecto: Crow la añade automáticamente a sus carpetas de lectura. Los bots fuera del proyecto no pueden leerla a menos que la añadas en **Seguridad › Carpetas que este bot puede leer**.
 - Disponible para los agentes vía la herramienta MCP `crow_workspace_dir`
 
 El directorio persiste cuando el proyecto se archiva (solo se elimina con el borrado definitivo).
@@ -138,7 +138,7 @@ El **proyecto** de un bot se define en la columna `pi_bot_defs.project_id`. Cuan
 4. Cada turno agrega una entrada de auditoría `bot.invoke` (o `bot.error` ante un fallo)
 5. La lista de permitidos de entrada de Gmail es la unión de las direcciones estáticas del operador + el correo de cada miembro del proyecto con `invoke_bot=true`
 
-Edita el proyecto de un bot vía la pestaña **Project / Kanban** del panel Bot Builder.
+Edita el proyecto de un bot en la sección **Avanzado › Tablero y proyecto** del Bot Builder.
 
 ## Registro de auditoría
 

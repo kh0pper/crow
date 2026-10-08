@@ -42,7 +42,7 @@ Elige de la lista el modelo que impulsará a tu bot. La lista muestra exactament
 
 Si la lista está vacía, el asistente muestra un enlace a los ajustes de proveedores. Añade un proveedor allí y vuelve a iniciar el asistente: son solo dos pantallas rápidas hasta este punto, y no queda ningún bot a medias (nada se crea hasta el paso final).
 
-Puedes cambiar el modelo en cualquier momento en la pestaña **IA** del bot.
+Puedes cambiar el modelo en cualquier momento en la pestaña **Lo básico** del bot.
 
 ## Paso 5 — Conecta un canal
 
@@ -50,7 +50,7 @@ Un **canal** es donde la gente habla con tu bot. La plantilla elige uno razonabl
 
 - **Crow Messages** (el predeterminado del Asistente personal) viene integrado en Crow: sin cuentas, sin credenciales. Después de crear el bot puedes compartir un enlace o código QR para que tu familia o equipo le escriban.
 - **Gmail / Discord / Telegram / Slack** necesitan credenciales de esos servicios — mira las [guías de canales](#guías-de-canales) más abajo. También puedes elegir el canal ahora, saltarte las credenciales y terminar después.
-- **Sin canal por ahora** siempre es una opción. El bot funciona igual — puedes hablar con él desde su pestaña Sesiones — y puedes añadir un canal cuando quieras.
+- **Sin canal por ahora** siempre es una opción. El bot funciona igual — puedes hablar con él desde su pestaña Actividad — y puedes añadir un canal cuando quieras.
 
 ## Paso 6 — Revisa y crea
 
@@ -58,7 +58,7 @@ La última pantalla muestra lo que elegiste: plantilla, nombre, id interno, mode
 
 ## Paso 7 — La lista de verificación
 
-Aterrizas en la pestaña **Revisar** de tu nuevo bot, que muestra una lista de verificación:
+Aterrizas en la pestaña **Actividad** de tu nuevo bot, que muestra una lista de verificación:
 
 - Las filas con ✓ están listas.
 - Las filas con ⚠ te dicen qué falta, en lenguaje claro, con un enlace **Cambiar** que te lleva directo a la pestaña donde se arregla.
@@ -69,11 +69,11 @@ Todo lo técnico (la definición sin procesar, los diagnósticos) está guardado
 
 ## Paso 8 — Habla con tu bot
 
-Para un bot de Crow Messages: abre la pestaña **Gateways** del bot, pulsa **Compartir acceso** y obtendrás un enlace + código QR. Abre el enlace (o abre **Mensajes** en la barra lateral) y salúdalo. Para otros canales, escríbele donde vive: mándale un correo, menciónalo en Discord, etcétera.
+Para un bot de Crow Messages: abre la pestaña **Lo básico** del bot, pulsa **Compartir acceso** y obtendrás un enlace + código QR. Abre el enlace (o abre **Mensajes** en la barra lateral) y salúdalo. Para otros canales, escríbele donde vive: mándale un correo, menciónalo en Discord, etcétera.
 
 ## Limpieza
 
-¿Creaste un bot de prueba que no quieres? Ábrelo, despliega **Avanzado** en la pestaña Revisar (o usa el enlace **Eliminar este bot…** en la lista de bots) y confirma. La página de confirmación muestra exactamente qué se eliminará — incluido tu historial de conversación con ese bot — antes de que lo apruebes. La eliminación no se puede deshacer.
+¿Creaste un bot de prueba que no quieres? Ábrelo, abre **Avanzado** y elige **Eliminar este bot** (o usa el enlace **Eliminar este bot…** en la lista de bots) y confirma. La página de confirmación muestra exactamente qué se eliminará — incluido tu historial de conversación con ese bot — antes de que lo apruebes. La eliminación no se puede deshacer.
 
 ## Guías de canales
 
@@ -106,6 +106,6 @@ Para un bot de Crow Messages: abre la pestaña **Gateways** del bot, pulsa **Com
 
 ## Adónde ir después
 
-- La [referencia del Bot Builder](/es/guide/bot-builder) explica cada pestaña en profundidad: herramientas, habilidades, permisos, disparadores y canales de voz.
-- Dale a tu bot **habilidades** (instrucciones reutilizables para un flujo de trabajo) en su pestaña Habilidades.
+- La [referencia del Bot Builder](/es/guide/bot-builder) explica cada pestaña en profundidad: lo básico, capacidades, seguridad, actividad y la vista Avanzado.
+- Dale a tu bot **habilidades** (instrucciones reutilizables para un flujo de trabajo) en su pestaña Capacidades.
 - Configura sus **permisos**: los bots nuevos empiezan seguros, sin acceso a la terminal, solo borradores de correo y sin autoaprendizaje.

@@ -14,7 +14,7 @@ Puedes llevar esto más lejos **vinculando los lentes a un agente del
 ese agente dirige el turno de voz: su persona, sus skills, sus herramientas delimitadas
 y su política de permisos, hablados a través de las voces del dispositivo. Un dispositivo
 sin vincular recurre a un perfil de IA simple, descrito más abajo. La vinculación es la
-ruta más rica y se configura desde la pestaña Gateways del Bot Builder.
+ruta más rica y se configura desde la pestaña Lo básico (Canal) del Bot Builder.
 
 Sin jailbreak de firmware. Sin ingeniería inversa. La integración usa el
 [**Wearables Device Access Toolkit**](https://wearables.developer.meta.com/docs)
@@ -148,9 +148,9 @@ cerca de los 1.5 s.
 ### Vincular los lentes a un agente
 
 Abre el [Bot Builder](/es/guide/bot-builder), elige o crea un agente y, en su
-pestaña **Gateways**, elige el gateway de **Lentes Meta** y selecciona tu dispositivo
-emparejado. Elige el modelo de voz rápido del agente y sus perfiles de habla, texto a
-voz y visión, y guarda. El dispositivo queda vinculado a ese agente.
+pestaña **Lo básico**, elige el canal **Gafas Meta** y selecciona tu dispositivo
+emparejado. Elige sus perfiles de habla, texto a voz y visión (el modelo de voz del
+agente se configura una sola vez, en Modelo de la misma pestaña) y guarda. El dispositivo queda vinculado a ese agente.
 
 A partir de entonces, un turno de voz en esos lentes lo dirige el agente:
 

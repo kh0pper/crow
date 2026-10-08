@@ -21,15 +21,13 @@ kitchen-tablet → "Chef"  (avatar A · voz A · social desactivado)
 studio-display → "Aide"  (avatar B · voz B · social activado)
 ```
 
-Vincula un dispositivo en la pestaña **Gateways** del bot → tipo **Compañero de IA**:
+Vincula un dispositivo en la pestaña **Lo básico** del bot → canal **Compañero de IA (quiosco)**:
 
 1. **Dispositivo emparejado** — elige el dispositivo kiosco, o simplemente **escribe un nombre** en el campo "…o empareja un quiosco nuevo" y pulsa Guardar: Crow crea y conecta el dispositivo por ti en un solo paso (sin necesidad del bundle de Lentes Meta). Los dispositivos emparejados en el panel de Lentes Meta también aparecen aquí; los kioscos reutilizan ese almacén, etiquetados con `device_kind:"companion"`.
 2. **Avatar** — el modelo Live2D que se renderiza para este kiosco.
-3. **Estilo de escucha** — pulsar para hablar, palabra de activación o escucha permanente.
-4. **Tiempo de inactividad de voz** — segundos de silencio antes de la animación de mascota/inactividad.
-5. **Funciones** — activa o desactiva la animación del avatar/sincronización labial, el modo mascota/inactivo, las funciones sociales (sala de chat y DM) y la integración automática de memoria.
+3. **Funciones del quiosco** — activa o desactiva la animación del avatar/sincronización labial, el modo mascota/inactivo, las funciones sociales (sala de chat y DM) y la integración automática de memoria.
 
-Al guardar se establece el `bound_bot_id` del dispositivo y los toggles se almacenan como `companion_features`. La persona y el avatar surten efecto en la siguiente sesión del kiosco. Los toggles de funciones se aplican en capas distintas: las funciones de configuración de dispositivo (`social_chat`, `face_tracking`) se obtienen y aplican en cada carga de página del kiosco; el estilo de escucha y el tiempo de inactividad de voz se obtienen y se exponen al kiosco a través de la misma plomería de device-config, pero todavía no existe un consumidor del lado cliente para ellos, así que en realidad no se aplican en el cliente; las funciones de generación de config (`avatar_model`, `memory_integration`) se incorporan a la config generada del compañero y solo surten efecto tras regenerar la config y reiniciar el contenedor. Consulta la [tabla de semántica de `companion_features`](/es/architecture/companion) para el desglose completo.
+Al guardar se establece el `bound_bot_id` del dispositivo y los toggles se almacenan como `companion_features`. La persona y el avatar surten efecto en la siguiente sesión del kiosco. Los toggles de funciones se aplican en capas distintas: las funciones de configuración de dispositivo (`social_chat`, `face_tracking`) se obtienen y aplican en cada carga de página del kiosco; el estilo de escucha y el tiempo de inactividad de voz de un editor anterior se conservan en el dispositivo pero nunca se aplicaron, así que el editor ya no los muestra; las funciones de generación de config (`avatar_model`, `memory_integration`) se incorporan a la config generada del compañero y solo surten efecto tras regenerar la config y reiniciar el contenedor. Consulta la [tabla de semántica de `companion_features`](/es/architecture/companion) para el desglose completo.
 
 ### Qué es por dispositivo y qué no
 
@@ -44,7 +42,7 @@ El par de modelos se comparte porque un contenedor de compañero tiene un único
 
 ## Funciones sociales / de chat
 
-La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo. Actívalo o desactívalo en la pestaña Gateways.
+La sala de chat y los DM del compañero están controlados por el toggle por dispositivo `social_chat`, de modo que un kiosco de cara al público puede funcionar solo con el avatar (sin UI social) mientras una pantalla personal conserva el chat completo. Actívalo o desactívalo en la pestaña Lo básico del bot.
 
 ## Relacionado
 

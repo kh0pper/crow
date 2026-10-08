@@ -14,7 +14,7 @@ agent**. When a device is bound to an agent, that agent drives the voice turn:
 its persona, its skills, its scoped tools, and its permission policy, spoken
 through the device's voices. An unbound device falls back to a plain AI profile,
 described below. Binding is the richer path and is set from the Bot Builder's
-Gateways tab.
+Basics tab (Channel).
 
 No firmware jailbreak. No reverse engineering. The integration uses Meta's
 official [**Wearables Device Access Toolkit**](https://wearables.developer.meta.com/docs)
@@ -147,9 +147,9 @@ near 1.5 s.
 ### Bind the glasses to an agent
 
 Open the [Bot Builder](/guide/bot-builder), pick or create an agent, and on its
-**Gateways** tab choose the **Meta Glasses** gateway and select your paired
-device. Pick the agent's fast voice model and its speech, text-to-speech, and
-vision profiles, then save. The device is now bound to that agent.
+**Basics** tab choose the **Meta Glasses** channel and select your paired
+device. Pick its speech, text-to-speech, and vision profiles (the agent's voice
+model is set once, under Model on the same tab), then save. The device is now bound to that agent.
 
 From then on, a voice turn on those glasses is driven by the agent:
 

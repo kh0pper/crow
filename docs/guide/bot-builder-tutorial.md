@@ -42,7 +42,7 @@ Pick the model that powers your bot from the list. The list shows exactly what's
 
 If the list is empty, the wizard shows a link to the provider settings. Add a provider there, then start the wizard again — it's only two quick screens back to this point, and no half-made bot is left behind (nothing is created until the final step).
 
-You can change the model any time later on the bot's **AI** tab.
+You can change the model any time later on the bot's **Basics** tab.
 
 ## Step 5 — Connect a channel
 
@@ -50,7 +50,7 @@ A **channel** is where people talk to your bot. The template picks a sensible on
 
 - **Crow Messages** (the Personal assistant default) is built into Crow — no accounts, no credentials. After the bot is created you can share a link or QR code so family or teammates can message it.
 - **Gmail / Discord / Telegram / Slack** need credentials from those services — see the [channel guides](#channel-guides) below. You can also pick the channel now, skip the credentials, and finish later.
-- **No channel yet** is always an option. The bot still works — you can talk to it from its Sessions tab — and you can add a channel any time.
+- **No channel yet** is always an option. The bot still works — you can talk to it from its Activity tab — and you can add a channel any time.
 
 The first time you attach a Gmail, Discord, Telegram, Slack, or Perch channel, Crow may prompt you to install the **bot engine** — a small one-time download that powers those channels. It's a normal add-on install (no restart needed), and it only happens once per Crow instance. See the [Bot Engine reference](/developers/bot-engine) if you want the details.
 
@@ -60,7 +60,7 @@ The last screen shows what you chose: template, name, internal id, model, channe
 
 ## Step 7 — The readiness checklist
 
-You land on your new bot's **Review** tab, which shows a checklist:
+You land on your new bot's **Activity** tab, which shows a checklist:
 
 - ✓ rows are ready.
 - ⚠ rows tell you what's missing in plain language — with a **Change** link that takes you straight to the tab that fixes it.
@@ -71,11 +71,11 @@ Everything technical (the raw definition, diagnostics) is tucked under **Advance
 
 ## Step 8 — Talk to your bot
 
-For a Crow Messages bot: open the bot's **Gateways** tab, click **Share access**, and you get a link + QR code. Open the link (or open **Messages** in the sidebar) and say hello. For other channels, message it where it lives — email it, mention it on Discord, and so on.
+For a Crow Messages bot: open the bot's **Basics** tab, click **Share access**, and you get a link + QR code. Open the link (or open **Messages** in the sidebar) and say hello. For other channels, message it where it lives — email it, mention it on Discord, and so on.
 
 ## Cleaning up
 
-Made a test bot you don't want? Open it, expand **Advanced** on the Review tab (or use the **Delete this bot…** link on the bot list) and confirm. The confirmation page lists exactly what will be removed — including your conversation history with that bot — before you commit. Deleting cannot be undone.
+Made a test bot you don't want? Open it, open **Advanced** and choose **Delete this bot** (or use the **Delete this bot…** link on the bot list) and confirm. The confirmation page lists exactly what will be removed — including your conversation history with that bot — before you commit. Deleting cannot be undone.
 
 ## Channel guides
 
@@ -108,6 +108,6 @@ Made a test bot you don't want? Open it, expand **Advanced** on the Review tab (
 
 ## Where to go next
 
-- The [Bot Builder reference](/guide/bot-builder) explains every tab in depth — tools, skills, permissions, triggers, and voice channels.
-- Give your bot **skills** (reusable instructions for a workflow) on its Skills tab.
+- The [Bot Builder reference](/guide/bot-builder) explains every tab in depth — Basics, Abilities, Safety, Activity and the Advanced view.
+- Give your bot **skills** (reusable instructions for a workflow) on its Abilities tab.
 - Set its **permissions** — new bots start safe: no shell access, email drafts only, no self-learning.
