@@ -1226,6 +1226,72 @@ test("smoke F8 (wired): playback starting opens the now-playing window on a disp
   } finally { rt.media.closeDevice("kiosk-f8-phone"); rt.media.closeDevice("kiosk-f8-bare"); phone.ws.close(); bare.ws.close(); }
 });
 
+test("music + news (wired): the library is offered only with the add-on's credential AND a storage origin; the settings are local and validated; the news line answers with no model; the envelope hook rides on every display turn", async () => {
+  const { mkdtempSync: mk, mkdirSync: md } = await import("node:fs");
+  const dataDir = mk(join(tmpdir(), "kiosk-wired-"));
+  md(join(dataDir, "media", "audio"), { recursive: true });
+  await raw.execute("CREATE TABLE IF NOT EXISTS media_briefings (id INTEGER PRIMARY KEY, title TEXT, audio_path TEXT, created_at TEXT)");
+  let env = { FUNKWHALE_URL: "https://music.example.invalid:8446", FUNKWHALE_ACCESS_TOKEN: "tok-not-real" };
+  const asked = [];
+  const fetchImpl = async (url, opts) => { asked.push({ url: String(url), auth: opts?.headers?.Authorization || null }); return new Response(JSON.stringify({ count: 0, next: null, results: [] }), { status: 200, headers: { "content-type": "application/json" } }); };
+  const logs = [];
+  const m = createKioskRuntime(runtimeDeps({ addonEnv: (id) => (id === "funkwhale" ? env : null), dataDir, fetchImpl, musicAutoStart: false, log: (l) => logs.push(l) }));
+  const app = express();
+  app.use(m.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, m);
+  const jj = (path, opt = {}) => fetch(b + path, { ...opt, headers: { "Content-Type": "application/json" } });
+  try {
+    await m.musicReady;
+    let st = await (await jj("/api/kiosk/admin/music")).json();
+    assert.deepEqual([st.installed, st.credential, st.available], [true, true, false], "no addresses: the library is not offered");
+    assert.ok(!JSON.stringify(st).includes("tok-not-real"), "the credential never leaves the server");
+    for (const bad of ["http://host:9000/path", "ftp://host", "http://u:p@host:9000", "not a url"]) {
+      assert.equal((await jj("/api/kiosk/admin/music", { method: "POST", body: JSON.stringify({ storage_origin: bad }) })).status, 400, bad);
+      assert.equal((await jj("/api/kiosk/admin/music", { method: "POST", body: JSON.stringify({ api_origin: bad }) })).status, 400, bad);
+    }
+    // A storage origin alone is not enough: where the credential goes is never guessed (no loopback default, no FUNKWHALE_URL fallback).
+    st = await (await jj("/api/kiosk/admin/music", { method: "POST", body: JSON.stringify({ storage_origin: "http://203.0.113.9:9000" }) })).json();
+    assert.equal(st.available, false);
+    st = await (await jj("/api/kiosk/admin/music", { method: "POST", body: JSON.stringify({ api_origin: "http://127.0.0.1:8600", storage_origin: "http://203.0.113.9:9000" }) })).json();
+    assert.equal(st.available, true);
+    assert.deepEqual(JSON.parse(settings.get("kiosk_music")), { storage_origin: "http://203.0.113.9:9000", api_origin: "http://127.0.0.1:8600" });
+    const { kioskMusicConfig } = await import("../bundles/kiosk/server/runtime.js");
+    const both = { api_origin: "http://127.0.0.1:8600", storage_origin: "http://203.0.113.9:9000" };
+    assert.equal(kioskMusicConfig(env, both).base, "http://127.0.0.1:8600");
+    assert.equal(kioskMusicConfig(env, { storage_origin: both.storage_origin }), null, "no library address: refused, not guessed");
+    assert.equal(kioskMusicConfig({ ...env, FUNKWHALE_NGINX_BIND_PORT: "8601" }, { storage_origin: both.storage_origin }), null, "bind keys do not stand in for the address");
+    assert.equal(kioskMusicConfig(env, { api_origin: both.api_origin }), null, "no storage origin: refused");
+    assert.equal(kioskMusicConfig({ FUNKWHALE_URL: "x" }, both), null, "no credential, no library");
+    // A display turn: crow_play lists radio? no — news and music; "play the news" with no briefing is answered with no model.
+    const before = turnCalls.length;
+    const { token } = await store.pairDevice(db(), { id: "kiosk-mu1", name: "MU", device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), "kiosk-mu1", { bound_bot_id: "household" });
+    const ws = new WebSocket(b.replace("http", "ws") + "/api/kiosk/session");
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-mu1", token, caps: {} }));
+    await new Promise((r) => setTimeout(r, 100));
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "t-mu" }));
+    ws.send(Buffer.alloc(16000));
+    ws.send(JSON.stringify({ type: "turn_end", turn_id: "t-mu" }));
+    for (let i = 0; i < 100 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    const o = turnCalls.at(-1);
+    ws.close();
+    const play = o.extraTools.find((t) => t.definition.name === "crow_play");
+    assert.match(JSON.stringify(play.definition), /"music"/);
+    assert.match(JSON.stringify(play.definition), /"news"/);
+    assert.equal(typeof o.onToolResult, "function", "the envelope hook is on the turn");
+    // It is the envelope handler, through the voice turn's one hook: another tool's result is left alone; it never wraps the display tools.
+    assert.equal(await o.onToolResult({ name: "crow_projects", tool: "crow_projects", result: JSON.stringify({ _audio_stream: { url: "https://x.example.invalid/a.mp3" } }), isError: false }), undefined);
+    assert.ok(o.extraTools.every((t) => !String(t.execute).includes("onToolResult")), "display tools are not wrapped by the hook");
+    const fast = await o.fastPaths("Play the news.");
+    assert.equal(fast?.say ?? fast?.text, "There's no news briefing with audio yet.");
+    // Taking the credential away takes the library away, at once.
+    env = null;
+    assert.equal((await (await jj("/api/kiosk/admin/music")).json()).available, false);
+    assert.ok(!logs.join("\n").includes("tok-not-real"));
+  } finally { m.stop(); s.close(); }
+});
+
 test("review L1 (wired), r7: the station-name STT prompt is switched off (it made Whisper loop and mishear short words); its language rule is kept behind the switch", async () => {
   await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }] }) });
   const turn = async (id, settings) => {

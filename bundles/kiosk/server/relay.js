@@ -36,6 +36,8 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, BlockList } from "node:net";
+import { createReadStream, realpathSync, statSync } from "node:fs";
+import { sep } from "node:path";
 
 export const MAX_REDIRECTS = 3;
 export const HEADERS_TIMEOUT_MS = 10_000;
@@ -262,11 +264,51 @@ export function createRelay({ lookup = dnsLookup, connect = null, isPrivate = is
   }
 
   /**
+   * A stored file (upstream = { file, root }): served only when its REAL path (links followed) is
+   * still inside the real `root`, it is a regular .mp3, and only as audio/mpeg — checked again at
+   * every request, so a file swapped for a link after the ticket was made is not followed out.
+   * One byte range per request. → the same codes as toResponse.
+   */
+  function fileResponse(upstream, req, res, signal) {
+    let real = null, size = 0;
+    try {
+      const root = realpathSync(String(upstream.root)) + sep;
+      real = realpathSync(String(upstream.file));
+      const st = statSync(real);
+      if (!real.startsWith(root) || !real.toLowerCase().endsWith(".mp3") || !st.isFile()) real = null;
+      else size = st.size;
+    } catch { real = null; }
+    if (!real) { refuse(res, 404, "Not found"); return "file_refused"; }
+    const asked = typeof req.headers?.range === "string" ? req.headers.range.slice(0, 64) : "";
+    let start = 0, end = size - 1, partial = false;
+    if (RANGE.test(asked)) {
+      const [a, b] = asked.slice(6).split("-");
+      if (a === "" && b !== "") { start = Math.max(0, size - Number(b)); }
+      else { start = Number(a || 0); if (b !== "") end = Math.min(end, Number(b)); }
+      if (!(start <= end && start < size)) { res.setHeader("Content-Range", `bytes */${size}`); refuse(res, 416, "Range not satisfiable"); return "range"; }
+      partial = true;
+    }
+    res.statusCode = partial ? 206 : 200;
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Length", String(end - start + 1));
+    if (partial) res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+    const body = createReadStream(real, { start, end });
+    const stop = () => body.destroy();
+    res.on("close", stop);
+    if (signal) { if (signal.aborted) stop(); else signal.addEventListener("abort", () => { stop(); if (!res.writableEnded) res.destroy(); }, { once: true }); }
+    body.on("error", () => { if (!res.writableEnded) res.destroy(); });
+    body.pipe(res);
+    return "ok";
+  }
+
+  /**
    * Pipe one upstream to one page request. → the code of what happened ("ok" once the stream is flowing;
    * otherwise why not), for the caller's log. Never throws.
    */
   async function toResponse(upstream, req, res, { signal } = {}) {
     if (req.method !== "GET") { res.setHeader("Allow", "GET"); refuse(res, 405, "Method not allowed"); return "method"; }
+    if (upstream && typeof upstream.file === "string") return typeof upstream.root === "string" ? fileResponse(upstream, req, res, signal) : (refuse(res, 404, "Not found"), "file_refused");
     const asked = typeof req.headers?.range === "string" ? req.headers.range.slice(0, 64) : "";
     const ctl = new AbortController();
     const stop = () => ctl.abort();
