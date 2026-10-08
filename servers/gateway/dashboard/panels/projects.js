@@ -18,7 +18,7 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, isApproved, refHash, parseStoredSpec, visibleText } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, isApproved, refHash, parseStoredSpec, visibleText, verifyBackendLaunch } from "../../../shared/data-backend-approval.js";
 
 const PAGE_SIZE = 20;
 
@@ -585,7 +585,7 @@ export function renderBackendApproval(projectId, b) {
   const label = `<div style="color:var(--crow-text-muted)">Name given by whoever registered it (unverified, not part of the command): ${escapeHtml(String(b.name ?? ""))}</div>`;
   const parsed = parseStoredSpec(b.connection_ref);
   if (!parsed.ok) {
-    return `<div style="font-size:0.75rem">${label}<div style="color:var(--crow-error)">Cannot be approved: ${escapeHtml(parsed.reason)}. Remove it and register it again.</div></div>`;
+    return `<div style="font-size:0.75rem">${label}<div style="color:var(--crow-error)">Cannot be approved: ${escapeHtml(visibleText(parsed.reason, { keepSpaces: true }))}. Remove it and register it again.</div></div>`;
   }
   const { command, args, envVars } = parsed.spec;
   const approved = isApproved(b);
@@ -602,6 +602,8 @@ export function renderBackendApproval(projectId, b) {
     <div style="margin-top:0.25rem">${approved ? "Approved. It runs:" : "Waiting for your approval. It would run:"}</div>
     <div>Command:</div><code style="${code}">${show(command)}</code>
     <div>Arguments (${args.length}), each passed exactly as shown:</div>${argsHtml}
+    ${parsed.spec.command_sha256 ? `<div>Pinned launcher SHA-256: <code>${show(parsed.spec.command_sha256)}</code></div>` : ""}
+    <div>Launcher check now: ${(() => { const v = verifyBackendLaunch(parsed.spec); return v.ok ? `runs <code>${show(v.command)}</code>` : `<span style="color:var(--crow-error)">refused — ${escapeHtml(visibleText(v.reason, { keepSpaces: true }))}</span>`; })()}</div>
     <div>Working directory: the gateway's own (not settable)</div>
     <div>Environment variables passed from your .env (names): ${envVars.length ? envVars.map((v) => `<code>${show(v)}</code>`).join(", ") : "none"}</div>
     <div style="color:var(--crow-text-muted)">␣ is a space; \\u{…} is a character that is invisible or not plain ASCII.</div>

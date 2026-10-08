@@ -22,7 +22,7 @@ import {
 } from "../shared/project-acl.js";
 import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
-import { verifyBackendLaunch, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { parseLaunchSpec, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 
 const SOURCE_TYPES = [
@@ -707,7 +707,8 @@ export function createProjectServer(dbPath, options = {}) {
       let status;
       let storedRef;
       if (backend_type === "mcp_server") {
-        const launch = verifyBackendLaunch(connRef);
+        // Shape only here; the launcher itself is verified at every spawn.
+        const launch = parseLaunchSpec(connRef);
         if (!launch.ok) return fail(`Error: ${launch.reason}.`);
         status = PENDING_STATUS;
         storedRef = connection_ref;

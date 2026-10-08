@@ -22,7 +22,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -88,7 +88,7 @@ const { loadDynamicBackends } = await import("../servers/gateway/proxy.js");
 
 function markerRef(marker) {
   return JSON.stringify({
-    command: process.execPath,
+    command: "node",
     args: ["-e", `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
   });
 }
@@ -369,4 +369,41 @@ test("registration refuses connection_ref keys that are never spawned", async ()
   const client = await connect(createProjectServer(CORE));
   const r = await client.callTool({ name: "crow_register_backend", arguments: { name: "c", connection_ref: JSON.stringify({ command: "node", args: [], cwd: "/" }) } });
   assert.ok(r.isError, text(r));
+});
+
+// ------------------------------------------- launcher verification (#455 rules)
+
+test("an approved backend whose launcher is user-owned and unpinned is refused; a matching pin runs it", async () => {
+  const { approveBackend } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const { chmodSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
+  const marker = join(HOME, "script-ran");
+  const script = join(HOME, "launcher.sh");
+  writeFileSync(script, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
+  chmodSync(script, 0o755);
+  const db = createDbClient(CORE);
+
+  const id = pendingRow(JSON.stringify({ command: script, args: [] }));
+  assert.equal(await approveBackend(db, id), true);
+  await loadDynamicBackends();
+  assert.equal(existsSync(marker), false, "an unpinned user-owned launcher ran");
+  const d = raw();
+  const row = d.prepare("SELECT status, last_error FROM data_backends WHERE id=?").get(id);
+  d.close();
+  assert.equal(row.status, "error");
+  assert.match(row.last_error, /command_sha256|root/);
+
+  const pin = createHash("sha256").update(readFileSync(script)).digest("hex");
+  const id2 = pendingRow(JSON.stringify({ command: script, args: [], command_sha256: pin }));
+  await approveBackend(db, id2);
+  await loadDynamicBackends();
+  assert.equal(existsSync(marker), true, "positive control: a pinned launcher runs");
+});
+
+test("display: the approval view says what the launcher check would do", async () => {
+  const html = await cell({ command: join(HOME, "nope.sh"), args: [] });
+  assert.match(html, /refused/);
+  const ok = await cell({ command: "node", args: ["-v"] });
+  assert.match(ok, /Launcher check now: runs/);
 });

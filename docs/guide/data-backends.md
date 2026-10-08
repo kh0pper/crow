@@ -34,6 +34,8 @@ An `mcp_server` backend is a command your Crow will run, so registering one is n
 
 `envVars` lists variable **names** only; put the values in your `.env`.
 
+The launcher is checked again every time it starts, with the same rules as add-ons: `node`, `npm` and `npx` are the gateway's own; any other bare name (such as `uvx`) must be found in a root-owned system directory; a launcher anywhere else must be given as an absolute path with its SHA-256 in `command_sha256`; a `uv`/`uvx` `--from git+…` source must name a full commit SHA. The approval page shows what the check says right now.
+
 ### A `sqlite` backend is a dataset
 
 The file must live in your data folder's `datasets/` folder (for example `~/.crow/data/datasets/`) or in a project's `databases/` folder (where the Data Dashboard creates databases). Crow opens it read-only and never writes to it. Crow's own databases (`crow.db`, `tasks.db`) can never be registered, including through a link.

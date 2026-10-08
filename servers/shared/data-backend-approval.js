@@ -14,6 +14,7 @@
  *   inserting them.
  */
 import { createHash } from "node:crypto";
+import { resolveAddonCommand, checkLauncherArgs } from "./resolve-command.js";
 
 export const PENDING_STATUS = "pending_approval";
 
@@ -32,7 +33,7 @@ export function isApproved(row) {
 // cwd, no env values), so any other key is refused rather than shown-but-
 // ignored or ignored-but-hashed. Limits keep the approval view complete: a
 // spec too long to show in full is refused, never truncated.
-export const SPEC_KEYS = Object.freeze(["command", "args", "envVars"]);
+export const SPEC_KEYS = Object.freeze(["command", "args", "envVars", "command_sha256"]);
 export const MAX_COMMAND_LEN = 512;
 export const MAX_ARG_LEN = 1024;
 export const MAX_ARGS = 64;
@@ -59,7 +60,11 @@ export function parseLaunchSpec(connRef) {
     return { ok: false, reason: "envVars must be a list of environment variable NAMES" };
   }
   if (envVars.length > MAX_ENV_VARS) return { ok: false, reason: `more than ${MAX_ENV_VARS} envVars` };
-  return { ok: true, spec: { command, args, envVars } };
+  const pin = connRef.command_sha256;
+  if (pin !== undefined && !(typeof pin === "string" && /^[0-9a-f]{64}$/.test(pin))) {
+    return { ok: false, reason: "command_sha256 must be 64 lowercase hex characters" };
+  }
+  return { ok: true, spec: { command, args, envVars, ...(pin ? { command_sha256: pin } : {}) } };
 }
 
 /** parseLaunchSpec on the stored connection_ref text. */
@@ -73,14 +78,15 @@ export function parseStoredSpec(connectionRef) {
  * Every character visible: printable ASCII stays as is (backslash doubled),
  * a space shows as "␣", and anything else — control characters, zero-width
  * and bidi marks, any non-ASCII letter that could pass for an ASCII one — is
- * shown as \u{hex}. Returns plain text; HTML-escape it before rendering.
+ * shown as \u{hex}. keepSpaces leaves spaces alone (prose that quotes the
+ * command, such as an error reason). Returns plain text; HTML-escape it.
  */
-export function visibleText(str) {
+export function visibleText(str, { keepSpaces = false } = {}) {
   let out = "";
   for (const ch of String(str)) {
     const cp = ch.codePointAt(0);
     if (ch === "\\") out += "\\\\";
-    else if (cp === 0x20) out += "\u2423";
+    else if (cp === 0x20) out += keepSpaces ? " " : "\u2423";
     else if (cp > 0x20 && cp < 0x7f) out += ch;
     else out += `\\u{${cp.toString(16)}}`;
   }
@@ -88,16 +94,23 @@ export function visibleText(str) {
 }
 
 /**
- * Launch-command verification hook. Every approved backend passes through
- * here right before it is spawned. Today it checks the spec's shape; when
- * the add-on launcher verification (servers/shared/resolve-command.js)
- * lands, call its resolver here so backends get the same root-owned /
- * pinned launcher rules as add-ons.
+ * Launch verification, run right before every spawn (never cached): the
+ * spec's shape, then the add-on launcher rules (servers/shared/resolve-
+ * command.js) — `node`/`npm`/`npx` are the gateway's own; any other bare
+ * name only from root-owned system directories; an absolute launcher must
+ * be root-owned or match the spec's `command_sha256`; relative launchers
+ * and floating uv/uvx git sources are refused. The verified real path is
+ * what gets executed.
  * @returns {{ ok: true, command: string, args: string[], envVars: string[] } | { ok: false, reason: string }}
  */
-export function verifyBackendLaunch(connRef) {
+export function verifyBackendLaunch(connRef, opts = {}) {
   const r = parseLaunchSpec(connRef);
-  return r.ok ? { ok: true, ...r.spec } : r;
+  if (!r.ok) return r;
+  const rc = resolveAddonCommand(r.spec.command, { ...opts, sha256: r.spec.command_sha256 });
+  if (rc.missing || typeof rc.command !== "string") return { ok: false, reason: rc.reason || "launcher could not be verified" };
+  const argProblem = checkLauncherArgs(rc.command, r.spec.args);
+  if (argProblem) return { ok: false, reason: argProblem };
+  return { ok: true, command: rc.command, args: r.spec.args, envVars: r.spec.envVars };
 }
 
 /**
