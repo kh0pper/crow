@@ -94,7 +94,7 @@ test("save: an empty field clears the explicit folders", async () => {
 test("render: the field shows the stored folders and the auto-added project folder read-only (en + es)", async () => {
   const html = await render("proj-bot");
   assert.match(html, /Folders this bot can read/);
-  assert.match(html, /<textarea name="pp_read_paths"[^>]*>\/home\/u\/notes\n\/data\/shared<\/textarea>/);
+  assert.match(html, /<textarea[^>]*name="pp_read_paths"[^>]*>\/home\/u\/notes\n\/data\/shared<\/textarea>/);
   assert.match(html, /data-testid="read-paths-project">Added automatically[^<]*<code>\/srv\/projects\/alpha<\/code>/);
   const es = await render("proj-bot", "es");
   assert.match(es, /Carpetas que este bot puede leer/);

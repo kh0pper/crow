@@ -2,12 +2,13 @@
  * Bot Builder — engine-attach gate client script (C4 Task 8).
  *
  * Two independent behaviors, one shared modal:
- *   1. Gateways-tab submit intercept (primary path): when the server
- *      rendered `#btb-gateways-form` with `data-engine-gate="1"` (engine
- *      absent for the CURRENT gwType, per isEngineAbsent() at render time),
- *      mirror Task 7's server-side completeness predicate client-side
- *      against the live DOM (data-engine-channels + data-engine-required-
- *      fields) and, on a complete record, preventDefault() the submit and
+ *   1. Basics-tab submit intercept (primary path): when the server
+ *      rendered `#btb-basics-form` with `data-engine-gate="1"` (engine
+ *      absent, per isEngineAbsent() at render time), mirror the server-side
+ *      completeness predicate client-side against the live DOM
+ *      (data-engine-channels + data-engine-required-fields-json, keyed by
+ *      the LIVE channel type) and, on a complete record that differs from
+ *      the rendered one, preventDefault() the submit and
  *      open the install modal BEFORE the POST — so the operator's typed
  *      credentials never leave the DOM. On a successful install, the SAME
  *      still-populated form is resubmitted via requestSubmit() (never the
@@ -202,39 +203,49 @@ export function engineGateClientJS(lang) {
           openEngineGateModal(onInstalled);
         };
 
-        // --- 1. Gateways-tab submit intercept (primary path) ---
-        var gwForm = document.getElementById("btb-gateways-form");
+        // --- 1. Basics-tab submit intercept (primary path) ---
+        // The channel picker swaps fieldsets client-side (no auto-submit), so
+        // the LIVE type decides which required fields apply. The intercept
+        // fires only when the channel record changed from what was rendered
+        // (the attach moment) - saving a renamed bot whose saved channel is
+        // already complete never pops the install dialog.
+        var gwForm = document.getElementById("btb-basics-form");
         if (gwForm && gwForm.getAttribute("data-engine-gate") === "1") {
           var channels = (gwForm.getAttribute("data-engine-channels") || "").split(",").filter(function (s) { return s; });
-          var requiredFields = (gwForm.getAttribute("data-engine-required-fields") || "").split(",").filter(function (s) { return s; });
-          var fieldsType = gwForm.getAttribute("data-engine-fields-type") || "";
+          var reqMap = {};
+          try { reqMap = JSON.parse(gwForm.getAttribute("data-engine-required-fields-json") || "{}") || {}; } catch (e) { reqMap = {}; }
           var bypassGate = false;
 
-          var fieldNonEmpty = function (name) {
-            var els = gwForm.querySelectorAll("[name='" + name + "']");
-            if (!els.length) return false;
-            var v = els[0].value;
-            return typeof v === "string" && v.trim().length > 0;
+          var liveType = function () {
+            var typeEl = gwForm.querySelector("[name='gw_type']");
+            return typeEl ? typeEl.value : "";
           };
+          // Enabled inputs only: a disabled fieldset belongs to another channel.
+          var fieldValue = function (name) {
+            var els = gwForm.querySelectorAll("[name='" + name + "']");
+            for (var i = 0; i < els.length; i++) {
+              if (!els[i].disabled && !(els[i].closest && els[i].closest("fieldset[disabled]"))) {
+                var v = els[i].value;
+                return typeof v === "string" ? v.trim() : "";
+              }
+            }
+            return "";
+          };
+          var snapshot = function () {
+            var type = liveType();
+            var parts = [type];
+            var fields = reqMap[type] || [];
+            for (var i = 0; i < fields.length; i++) parts.push(fieldValue(fields[i]));
+            return JSON.stringify(parts);
+          };
+          var initial = snapshot();
 
           var recordIsComplete = function () {
-            var typeEl = gwForm.querySelector("[name='gw_type']");
-            var curType = typeEl ? typeEl.value : "";
-            // requiredFields/channels were computed server-side for
-            // fieldsType, not necessarily the LIVE select value: the type
-            // <select>'s onchange re-submits the form to re-render fields
-            // for whichever type the operator just picked, and that
-            // re-submit passes through this SAME listener before the
-            // re-render lands. If the live value has already moved on
-            // from fieldsType, this stale list can't say anything
-            // meaningful about the new type's completeness - bail so the
-            // re-render always gets through, instead of the old type's
-            // now-irrelevant leftover fields hijacking a harmless type
-            // switch into opening the install modal.
-            if (curType !== fieldsType) return false;
+            var curType = liveType();
             if (channels.indexOf(curType) === -1) return false;
-            for (var i = 0; i < requiredFields.length; i++) {
-              if (!fieldNonEmpty(requiredFields[i])) return false;
+            var fields = reqMap[curType] || [];
+            for (var i = 0; i < fields.length; i++) {
+              if (!fieldValue(fields[i])) return false;
             }
             return true;
           };
@@ -242,6 +253,7 @@ export function engineGateClientJS(lang) {
           gwForm.addEventListener("submit", function (e) {
             if (bypassGate) { bypassGate = false; return; }
             if (!recordIsComplete()) return;
+            if (snapshot() === initial) return;
             e.preventDefault();
             openEngineGateModal(function () {
               bypassGate = true;
