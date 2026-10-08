@@ -31,7 +31,7 @@ export async function handlePeerEdit(req, res, { db, layout }) {
     if (typeof b.display_name === "string") patch["display_name"] = b.display_name;
     if (typeof b.system_prompt === "string") patch["system_prompt"] = b.system_prompt;
     if (typeof b.model === "string" && b.model) patch["models.default"] = b.model;
-    if (typeof b.skills === "string") patch["tools.skills"] = lines(b.skills);
+    if (typeof b.skills === "string") patch["skills"] = lines(b.skills);
     const r = await patchPeerBot({ db, sourceInstanceId: getOrCreateLocalInstanceId(), instanceId: peerId, botId, patch, actor: "dashboard" });
     const msg = r.ok ? "saved" : ((r.body && r.body.error) || r.error || "failed");
     res.redirectAfterPost(`/dashboard/bot-builder?peer=${encodeURIComponent(peerId)}&bot=${encodeURIComponent(botId)}&status=${encodeURIComponent(msg)}`);
@@ -69,7 +69,7 @@ export async function handlePeerEdit(req, res, { db, layout }) {
       <label>Display name<br><input type="text" name="display_name" value="${escapeHtml(def.display_name || "")}" style="width:100%"></label>
       <label style="display:block;margin-top:1rem">Model<br><select name="model" style="width:100%"><option value="">(unchanged)</option>${modelOpts}</select></label>
       <label style="display:block;margin-top:1rem">System prompt<br><textarea name="system_prompt" rows="8" style="width:100%">${escapeHtml(def.system_prompt || "")}</textarea></label>
-      <label style="display:block;margin-top:1rem">Skills (one per line)<br><textarea name="skills" rows="4" style="width:100%">${escapeHtml(((def.tools && def.tools.skills) || []).join("\n"))}</textarea></label>
+      <label style="display:block;margin-top:1rem">Skills (one per line)<br><textarea name="skills" rows="4" style="width:100%">${escapeHtml((Array.isArray(def.skills) ? def.skills : ((def.tools && def.tools.skills) || [])).join("\n"))}</textarea></label>
       <div style="margin-top:1rem">${credLines.length ? "<strong>Gateway credentials (managed on owner):</strong>" + credLines.join("") : ""}</div>
       <div style="margin-top:1.5rem"><button type="submit" class="btn btn-primary">Save to peer</button>
         <a href="/dashboard/bot-board" class="btn btn-secondary">Cancel</a></div>

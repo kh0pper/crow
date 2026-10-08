@@ -152,7 +152,6 @@ export function applyTemplate(def, tpl, { availableMcp, availableSkills }) {
   const addSkills = (tpl.skills || []).filter((s) => skillSet.has(s));
   if (addSkills.length) {
     def.skills = [...new Set([...(def.skills || []), ...addSkills])];
-    def.tools.skills = def.skills;
   }
   // tracker: "kanban"/"none" set explicitly; undefined leaves the def alone.
   if (tpl.tracker) {

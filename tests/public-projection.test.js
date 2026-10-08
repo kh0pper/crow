@@ -27,6 +27,13 @@ test("toPublicBot exposes only whitelisted fields, never the raw definition", ()
   }
 });
 
+test("toPublicBot reports the tracker type the editor actually stores (tracker_config.type)", () => {
+  const mk = (def) => toPublicBot({ bot_id: "b", display_name: "B", enabled: 1, project_id: null, definition: JSON.stringify(def) });
+  assert.equal(mk({ tracker_config: { type: "kanban" } }).tracker_type, "kanban");
+  assert.equal(mk({ triggers: { tracker_type: "custom" } }).tracker_type, "custom", "legacy spelling still read");
+  assert.equal(mk({}).tracker_type, "none");
+});
+
 test("toPublicTool drops env/keys/command/args", () => {
   const pub = toPublicTool({
     canonicalId: "texas-gov-data", category: "tools", name: "texas-gov-data", bundleId: "texas-gov-data", toolCount: 5,
