@@ -248,3 +248,30 @@ test("probe surface offers the phone http server when the phone token exists (Bo
   assert.equal(surface.phone.url, "http://127.0.0.1:3999/phone/mcp");
   assert.equal(surface.phone.headers.Authorization, "Bearer ptok");
 });
+
+test("catalog: a bare user-dir launcher is refused (no PATH/user-dir trust); a pinned absolute one and node are kept", async () => {
+  const { chmodSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
+  const dir = mkdtempSync(join(tmpdir(), "instCmd-"));
+  const home = join(dir, ".crow-c");
+  for (const id of ["gw", "pinned", "ghost", "nd"]) mkdirSync(join(home, "bundles", id), { recursive: true });
+  mkdirSync(join(home, "data"), { recursive: true });
+  mkdirSync(join(dir, "user", ".local", "bin"), { recursive: true });
+  const uvx = join(dir, "user", ".local", "bin", "uvx");
+  writeFileSync(uvx, "#!/bin/sh\n");
+  chmodSync(uvx, 0o755);
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    gw: { command: "uvx", args: ["--from", "x"] },
+    pinned: { command: uvx, command_sha256: createHash("sha256").update("#!/bin/sh\n").digest("hex"), args: [] },
+    ghost: { command: uvx, args: [] },
+    nd: { command: "node", args: ["server/index.js"] },
+  }));
+  const { servers, unconfigured } = crowServerCatalog(home, { binding: BINDING_B(home) });
+  assert.equal(servers.gw, undefined);
+  assert.match(unconfigured.gw, /not usable: uvx not found in \/usr\/local\/bin/);
+  assert.equal(servers.pinned.command, uvx);
+  assert.match(servers.pinned.command_sha256, /^[0-9a-f]{64}$/, "the pin rides along for the spawn-time re-check");
+  assert.equal(servers.ghost, undefined);
+  assert.match(unconfigured.ghost, /command_sha256/);
+  assert.equal(servers.nd.command, process.execPath);
+});

@@ -9,6 +9,7 @@
  *   (incl. every gateway credential) throws. Enforced regardless of what the
  *   remote UI sends.
  */
+import { guardPolicyForPeer } from "./dashboard/panels/bot-builder/policy-guard.js";
 import { isValidReadPath, parseReadPathsInput } from "../../scripts/pi-bots/bot-read-paths.mjs";
 
 const REDACT = (v) => ({ __redacted: true, set: v != null && v !== "" });
@@ -125,6 +126,14 @@ export function applyPeerPatch(currentDef, patch) {
       throw new Error("permission_policy.read_paths must be an array of absolute paths without '..' (send [] to clear)");
     }
     out.permission_policy.read_paths = parseReadPathsInput(rp.join("\n")).paths;
+  }
+  // permission_policy (security scan 2026-10-08): the same validator the Bot
+  // Builder save uses, unknown and engine-only keys refused, and a peer may
+  // only TIGHTEN — never widen — what the owner set (bash only to deny,
+  // path lists only shrink, confirm only grows, flags only turn off, …).
+  if (Object.keys(patch || {}).some((k) => k.startsWith("permission_policy."))) {
+    const bad = guardPolicyForPeer(out.permission_policy, (currentDef && currentDef.permission_policy) || {}, out);
+    if (bad) throw new Error(bad);
   }
   return out;
 }

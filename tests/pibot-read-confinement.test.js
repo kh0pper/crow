@@ -224,8 +224,8 @@ test("mcpConfigDelivery: explicit fd/file win; auto follows the pi-lab check", (
   assert.equal(MCP_CONFIG_FD, 4);
 });
 
-test("pi-lab compat: declares c8bbb02; finds pi-lab via settings.json packages[]; feature markers decide without git", () => {
-  assert.equal(MIN_PI_LAB_REV, "c8bbb02");
+test("pi-lab compat: declares c3aed09 (bash ask/auto); finds pi-lab via settings.json packages[]; feature markers decide without git", () => {
+  assert.equal(MIN_PI_LAB_REV, "c3aed09");
   const root = mkdtempSync(join(dir, "pilab-"));
   const agent = join(root, "agent");
   const lab = join(root, "pi-lab");
@@ -238,9 +238,14 @@ test("pi-lab compat: declares c8bbb02; finds pi-lab via settings.json packages[]
   assert.equal(findPiLabDir({ env }), lab);
   const old = checkPiLabCompat({ env });
   assert.equal(old.ok, false);
-  assert.match(old.reason, /predates c8bbb02/);
+  assert.match(old.reason, /predates c3aed09/);
   writeFileSync(join(lab, "extensions", "mcp-client.ts"), 'export const BOT_MCP_CONFIG_FD_ENV = "PI_BOT_MCP_CONFIG_FD";\n');
   writeFileSync(join(lab, "extensions", "permission-gating.ts"), "read_paths?: string[];\n");
+  assert.equal(checkPiLabCompat({ env }).ok, false, "read confinement alone is not enough any more");
+  mkdirSync(join(lab, "extensions", "shared"), { recursive: true });
+  writeFileSync(join(lab, "extensions", "shared", "bot-bash-auto.ts"), "export const CUT_MARKER_RE = /x/;\n");
+  assert.equal(checkPiLabCompat({ env }).ok, false, "the spawn-time launcher check is required too");
+  writeFileSync(join(lab, "extensions", "shared", "launcher-pin.ts"), "export function releaseLauncher() {}\n");
   assert.deepEqual(checkPiLabCompat({ env }), { ok: true, dir: lab, how: "markers", reason: null });
   const none = checkPiLabCompat({ env: { PI_CODING_AGENT_DIR: join(root, "nope"), HOME: root } });
   assert.equal(none.ok, false);
@@ -410,7 +415,10 @@ test("same-project siblings: the shared workspace is readable to both (by design
 });
 
 test("federation PATCH validates permission_policy.read_paths like the Bot Builder save", () => {
-  assert.deepEqual(applyPeerPatch({}, { "permission_policy.read_paths": ["/a/", "/a", "/b"] }).permission_policy.read_paths, ["/a", "/b"]);
+  // A peer may only narrow read folders (2026-10-08: peers only tighten).
+  const owned = { permission_policy: { read_paths: ["/a", "/b", "/c"] } };
+  assert.deepEqual(applyPeerPatch(owned, { "permission_policy.read_paths": ["/a/", "/a", "/b"] }).permission_policy.read_paths, ["/a", "/b"]);
+  assert.throws(() => applyPeerPatch({}, { "permission_policy.read_paths": ["/a"] }), /only be tightened/);
   for (const bad of [["rel"], ["/x/../y"], "/a", [7]]) {
     assert.throws(() => applyPeerPatch({}, { "permission_policy.read_paths": bad }), /absolute paths/);
   }

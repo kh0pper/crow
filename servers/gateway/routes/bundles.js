@@ -16,6 +16,7 @@
  * GET  /bundles/api/jobs/:id  — Poll install job progress
  */
 
+import { launcherPin } from "../../shared/resolve-command.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import bus from "../../shared/event-bus.js";
@@ -902,9 +903,19 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
       return { oldVersion, newVersion: oldVersion, touched: [...touched, "mcp-addons.json unreadable — will retry"] };
     }
     if (!addons[id]) {
-      addons[id] = mcpAddonEntryFor(repoManifest, null);
+      addons[id] = mcpAddonEntryFor(repoManifest, null, { bundleDir: destDir });
       writeJsonSafe(MCP_ADDONS_PATH, addons);
       touched.push("mcp-addons entry (restart to load)");
+    } else if (typeof addons[id].command === "string" && !addons[id].command.startsWith("/") && addons[id].command.includes("/")) {
+      // The update just replaced the bundle's own launcher (./run.sh): re-pin
+      // it, since this flow owns that entry (an operator-pinned absolute
+      // launcher is left alone — re-pin it with scripts/ops/pin-addon-command.mjs).
+      const pin = launcherPin(addons[id].command, destDir);
+      if (pin && pin !== addons[id].command_sha256) {
+        addons[id] = { ...addons[id], command_sha256: pin };
+        writeJsonSafe(MCP_ADDONS_PATH, addons);
+        touched.push("mcp-addons launcher re-pinned");
+      }
     }
   }
 
@@ -1212,11 +1223,16 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  * install (either branch) and the version refresh write. envKeys values come only from an
  * install request; every truthy env_vars default rides along (unchanged install behaviour).
  */
-export function mcpAddonEntryFor(manifest, reqEnv = null) {
+export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null } = {}) {
   const env = {};
   for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
   for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
-  return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}) };
+  // A launcher outside the root-owned system dirs (a ./run.sh in the bundle)
+  // is started only when pinned; the operator's install/update click is the
+  // consent for in-bundle code, so the flow that writes the entry pins it.
+  const pin = bundleDir ? launcherPin(manifest.server.command, bundleDir) : null;
+  return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}),
+    ...(pin ? { command_sha256: pin } : {}) };
 }
 
 /**
@@ -2322,7 +2338,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2359,7 +2375,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv);
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -2690,6 +2706,24 @@ export function planInstallSet(collection) {
 /**
  * @returns {Router}
  */
+/**
+ * POST /bundles/api/repin — the owner's one-click re-pin of an add-on launcher
+ * (Extensions "Needs re-pin"). Owner session only: a signed cross-host (peer)
+ * request is refused — a peer must never be able to bless a launcher here.
+ */
+export async function handleRepinRequest(req, res, { crowHome = CROW_HOME } = {}) {
+  if (req.crossHostAuth) return res.status(403).json({ error: "re-pin is an owner action on this instance" });
+  const id = req.body && req.body.bundle_id;
+  if (!id || !isValidBundleId(id)) return res.status(400).json({ error: "Invalid bundle ID" });
+  try {
+    const { repinAddon } = await import("../../../scripts/ops/pin-addon-command.mjs");
+    const r = repinAddon({ crowHome, id });
+    return res.json({ ok: true, message: `Re-pinned ${id}. Restart the gateway to start it.`, sha256: r.sha256 });
+  } catch (e) {
+    return res.status(400).json({ error: String((e && e.message) || e) });
+  }
+}
+
 export default function bundlesRouter() {
   const router = Router();
 
@@ -3314,6 +3348,8 @@ export default function bundlesRouter() {
   }
 
   // POST /bundles/api/start — Start bundle containers (local or peer)
+  router.post("/bundles/api/repin", (req, res) => handleRepinRequest(req, res));
+
   router.post("/bundles/api/start", async (req, res) => {
     const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {

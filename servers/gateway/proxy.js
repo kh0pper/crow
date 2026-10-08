@@ -6,6 +6,7 @@
  * register proxy tools on a combined McpServer that the gateway serves over HTTP.
  */
 
+import { resolveAddonCommand, checkLauncherArgs } from "../shared/resolve-command.js";
 import { spawn } from "node:child_process";
 import { resolveCrowHome as resolveSharedCrowHome } from "../shared/crow-home.js";
 import { execFileSync } from "node:child_process";
@@ -187,8 +188,16 @@ async function connectAddonServer(id, config) {
       // stdio (default, backward-compatible)
       const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
       const env = addonStdioEnv(config);
+      // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
+      // then the per-user install dirs systemd's PATH lacks.
+      const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256, cwd });
+      const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, config.args);
+      if (argProblem) throw new Error(`command '${config.command}' not usable: ${argProblem}`);
+      if (rc.missing) {
+        throw new Error(`command '${config.command}' not usable: ${rc.reason || "not found"} (searched the gateway PATH, ~/.local/bin, ~/.cargo/bin, ~/bin, /usr/local/bin)`);
+      }
       transport = new StdioClientTransport({
-        command: config.command,
+        command: rc.command,
         args: config.args || [],
         env,
         cwd,

@@ -33,6 +33,7 @@
  * contains a `pattern`/regex anywhere (drives the Phase-2.3 SOFT-WARN; S4
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
+import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -111,7 +112,19 @@ function readAddons(crowHome) {
  * sessionDir and MODULE_NOT_FOUND). Returns a shallow copy with cwd filled.
  */
 function addonSpawnBlock(serverId, block, crowHome) {
-  return { ...block, cwd: block.cwd || join(crowHome, "bundles", serverId) };
+  // The launcher is resolved and verified (servers/shared/resolve-command.js);
+  // one that fails is OMITTED — never passed on for a PATH lookup.
+  const cwd = block.cwd || join(crowHome, "bundles", serverId);
+  const rc = resolveAddonCommand(block.command, { sha256: block.command_sha256, cwd });
+  const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, block.args);
+  if (rc.missing || argProblem) {
+    console.warn(`[pi-bots] add-on '${serverId}' omitted: ${rc.reason || argProblem}`);
+    return null;
+  }
+  const { command_sha256: _pin, ...rest } = block;
+  // The pin rides along so pi-lab re-verifies it at spawn time.
+  return { ...rest, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
+    cwd };
 }
 
 /**
@@ -136,7 +149,8 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
     if (canonical.mcpServers[name]) continue;
     const addon = addons[name];
     if (!addon) continue; // absent from both -> buildBotMcp warns
-    servers[name] = addonSpawnBlock(name, addon, crowHome);
+    const blk = addonSpawnBlock(name, addon, crowHome);
+    if (blk) servers[name] = blk;
   }
   return servers;
 }

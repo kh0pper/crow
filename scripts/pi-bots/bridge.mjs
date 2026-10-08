@@ -28,10 +28,14 @@
  * board token, minted per-bot into .mcp.json by mcp_writer.mjs's catalog
  * entry), never a direct DB write from here.
  */
+import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-permission-policy.js";
+import { createStderrDiag } from "./pi-stderr-diag.mjs";
+import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
+import { buildBotBaseEnv, botEnvScrubbed } from "../../servers/shared/bot-env.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
@@ -279,6 +283,32 @@ export class PiRpc {
     // including absence, already falls through unblocked, so there is no
     // "allow" value in the real vocabulary to set; deleting the key is the
     // correct permissive representation.
+    // bash policy "auto": hand pi-lab the resolved classifier ({url, model,
+    // timeout_ms} — never a key: the bot can read its own env once it has a
+    // shell). No usable classifier => no block => pi-lab fails closed.
+    // Any classifier key a def carried is dropped: only the bridge sets it.
+    delete piPolicy.classifier;
+    // Stored values read the way the Bot Builder shows them: the retired
+    // "sandbox" runs as auto (Kevin ruling 2026-10-08), unknown as deny.
+    // No shell at all while the env scrub is switched off.
+    // ONE accessor for the stored mode and the Perch-only rule (shared with
+    // the save and peer guards): sandbox/unknown run as deny; ask/auto run
+    // only in a live Perch chat of a bot with no other channel.
+    const storedMode = normalizeStoredBashPolicy(piPolicy.bash).value;
+    piPolicy.bash = effectiveShellMode({ ...def, permission_policy: { ...piPolicy, bash: storedMode } },
+      { interactive: !!(opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") });
+    if (piPolicy.bash !== storedMode) {
+      console.error("[pi-bots] bash policy " + storedMode + " is for live Perch chats only (" +
+        (nonPerchChannels(def).join(",") || "not a live Perch chat") + ") — running as deny");
+    }
+    if (!botEnvScrubbed(process.env) && piPolicy.bash !== "deny") {
+      console.error("[pi-bots] CROW_BOT_ENV_PASSTHROUGH=1: bot shell disabled (bash policy clamped to deny)");
+      piPolicy.bash = "deny";
+    }
+    if (piPolicy.bash === "auto") {
+      const block = classifierPolicyBlock(opts.botClassifier);
+      if (block) piPolicy.classifier = block;
+    }
     if (opts.permissionMode === "ask") {
       piPolicy.interactive_ask = true;
     } else if (opts.permissionMode === "bypass") {
@@ -323,7 +353,9 @@ export class PiRpc {
     if (strippedSpawnEnv.length) {
       console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }
-    const env = Object.assign({}, process.env,
+    // Kevin ruling 2026-10-08: an explicit env allowlist — the gateway's .env
+    // secrets never reach a bot process (servers/shared/bot-env.js).
+    const env = Object.assign({}, buildBotBaseEnv(process.env),
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
         PIBOT_SUBAGENT_DEPTH: "0",
@@ -442,7 +474,11 @@ export class PiRpc {
         for (const w of this._w.slice()) if (w.p(m)) { this._w.splice(this._w.indexOf(w), 1); w.r(m); }
       }
     });
-    this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); });
+    // [pi-lab/...] diagnostics (MCP start failures, auto-bash decisions)
+    // reach the gateway log; the full stderr is still kept for error text.
+    const diag = (opts.stderrDiag === false) ? null
+      : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: opts.diagLog || ((l) => console.error(l)) });
+    this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
       this._exitCode = c == null ? -1 : c;
       // Fail any pending waiters NOW with the real cause instead of leaving

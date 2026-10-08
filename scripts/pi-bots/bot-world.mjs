@@ -35,6 +35,8 @@
  * loadBridge()). Everything taken from bridge is part of its public export
  * surface — which job_runner.mjs also consumes, so those names are stable.
  */
+import { normalizeStoredBashPolicy, resolveClassifierEndpoint } from "../../servers/shared/bot-bash-policy.js";
+import { readBotClassifierSync } from "./bot-classifier.mjs";
 import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -140,10 +142,24 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // ⇒ live bots are byte-identical to today. Reads never throw.
   const _conn = B.db(B.CROW_DB);
   let remoteEnabled = false, peerGatewayUrls = {};
+  // bash policy "auto": the safety classifier pi-lab will call, resolved
+  // here (setting, else an installed local candidate). null for every other
+  // policy — the spawn policy is then byte-identical to before.
+  let botClassifier = null;
   try {
     remoteEnabled = B.readRemoteInvocationEnabled(_conn);
     if (remoteEnabled) peerGatewayUrls = B.readPeerGatewayUrls(_conn);
+    if (def.permission_policy && normalizeStoredBashPolicy(def.permission_policy.bash).value === "auto") {
+      botClassifier = readBotClassifierSync(_conn);
+      if (!botClassifier.ok) log("bash=auto but no usable safety classifier (" + botClassifier.reason + ") — every command will be asked (interactive) or refused (unattended)");
+    }
   } finally { _conn.close(); }
+  // Pin an operator-named *.ts.net endpoint to its tailnet IP (refused when it
+  // resolves anywhere else); IP endpoints pass through.
+  if (botClassifier && botClassifier.ok) {
+    botClassifier = await resolveClassifierEndpoint(botClassifier);
+    if (!botClassifier.ok) log("bash=auto: safety classifier endpoint refused (" + botClassifier.reason + ") — commands will be asked (interactive) or refused (unattended)");
+  }
   // S6-CROW: fd delivery (mcp-delivery.mjs) builds the same config but keeps
   // it in memory — PiRpc pipes it to pi on an inherited fd — and removes any
   // stale on-disk copy. file delivery is the pre-S6 write, unchanged.
@@ -199,7 +215,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // mcpDelivery: "fd" | "file" (S6-CROW).
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
-    mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
+    mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session, botClassifier,
     narrowedTools, gatewayType };
 }
 
@@ -282,6 +298,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       resolved,
       selfAuthoringDir,
       remoteEnabled: world.remoteEnabled,
+      botClassifier: world.botClassifier || null,
       narrowedTools: world.narrowedTools,
       appendSystemPromptFile: sysFile,
       // S6-CROW: the bot's project workspace joins its read roots (PiRpc,
