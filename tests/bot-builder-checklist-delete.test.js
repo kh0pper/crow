@@ -102,7 +102,8 @@ test("configured model present in providers: Model row is ready", async () => {
 test("gmail with empty allowlist: Channel row is NOT-ready (deaf-bot guard, round-2 MAJOR-B)", async () => {
   const bot = mkBot({ gateways: [{ type: "gmail", address: "me+bot@x.com", allowlist: [] }] });
   const html = await renderReadiness(db, bot, defOf(bot), "en");
-  assert.ok(html.includes("allowlist"), "names the missing field");
+  assert.ok(html.includes("who may message it"), "names the missing field in plain words");
+  assert.ok(!html.includes("(allowlist)"), "never the raw field name");
   assert.match(html, /setup incomplete/, "incomplete state copy");
 });
 
@@ -121,7 +122,7 @@ test("no gateway: Channel row warns but does not error", async () => {
 
 test("companion without a device: NOT-ready; discord with only a token: ready (fail-open)", async () => {
   const kiosk = mkBot({ gateways: [{ type: "companion" }] });
-  assert.match(await renderReadiness(db, kiosk, defOf(kiosk), "en"), /setup incomplete \(device_id\)/);
+  assert.match(await renderReadiness(db, kiosk, defOf(kiosk), "en"), /setup incomplete \(paired device\)/);
   const dc = mkBot({ gateways: [{ type: "discord", token: "t", allowlist: [], channel_ids: [] }] });
   const html = await renderReadiness(db, dc, defOf(dc), "en");
   assert.ok(!html.includes("setup incomplete"), "discord token-only must not false-red");

@@ -47,7 +47,7 @@ Cada fila en `pi_bot_defs` es una definición JSON con estas partes:
 - **permission_policy**: los conjuntos de confirmación / denegación, el modo `external_send` y el interruptor `self_authoring`
 - **model** y un `fast_voice_model` opcional
 
-El editor fusiona los campos de una pestaña a la vez, de modo que los guardados no son destructivos entre pestañas. En cualquier instancia de Crow que no tenga la tabla `pi_bot_defs`, el panel renderiza un aviso amigable en lugar de fallar.
+El editor tiene cuatro pestañas (Lo básico, Capacidades, Seguridad, Actividad) y una vista Avanzado. Es una proyección de la definición guardada: cada guardado fusiona solo los campos de su pestaña, y dentro de ella solo los controles que el operador cambió, así que volver a guardar una pestaña sin tocarla deja la definición idéntica byte a byte y los valores que el editor simplificado ya no muestra (por ejemplo, el estilo de escucha de un quiosco) se conservan. Cada formulario lleva una revisión de la definición guardada; un guardado desde una página desactualizada (una habilidad aprobada mientras tanto, una edición de un par) se rechaza. Las habilidades se guardan una sola vez, en `skills`. En cualquier instancia de Crow que no tenga la tabla `pi_bot_defs`, el panel renderiza un aviso amigable en lugar de fallar.
 
 ## Las extensiones aportan herramientas y skills
 

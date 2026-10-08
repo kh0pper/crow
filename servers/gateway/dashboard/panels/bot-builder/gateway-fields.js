@@ -66,7 +66,7 @@ export function renderGatewayFields(gwType, gw, lang) {
       fields:
         `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenDiscord", lang)}</label>` +
         `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
-        formField("Guild ID (optional)", "gw_guild_id", { value: gw.guild_id || "" }) +
+        formField(t("botbuilder.gwLabelGuildId", lang), "gw_guild_id", { value: gw.guild_id || "" }) +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelChannelIds", lang)}</label>` +
         `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>` +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistDiscord", lang)}</label>` +
@@ -111,8 +111,8 @@ export function renderGatewayFields(gwType, gw, lang) {
   if (gwType === "gmail") {
     return {
       fields:
-        formField("Gmail address (+alias)", "gw_address", { value: gw.address || "" }) +
-        `<div class="btb-group"><label>Allowlist (one address per line)</label>` +
+        formField(t("botbuilder.gwLabelGmailAddress", lang), "gw_address", { value: gw.address || "" }) +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistGmail", lang)}</label>` +
         `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`,
       hint: `<p class="btb-hint">${t("botbuilder.gwHintGmail", lang)}</p>`,
     };

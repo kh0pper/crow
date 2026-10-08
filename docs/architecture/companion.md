@@ -49,11 +49,11 @@ The companion resolves models through `servers/gateway/ai/resolve-profile.js` (`
 
 ## Binding a bot (the companion channel)
 
-A companion **device** (a kiosk tablet / room display) binds to a Bot Builder agent exactly like a Meta Glasses device: the device record (`device-store.js`, tagged `device_kind:"companion"`) carries `bound_bot_id`, and the kiosk shows that bot's persona/avatar plus the per-device `companion_features` toggles. Configure it in the bot's **Gateways** tab (type *AI Companion*). The model pair is global (the gateway's `/llm/v1` router); per-device variation is persona/avatar/voice/features only. See [kiosk mode](/guide/kiosk-mode).
+A companion **device** (a kiosk tablet / room display) binds to a Bot Builder agent exactly like a Meta Glasses device: the device record (`device-store.js`, tagged `device_kind:"companion"`) carries `bound_bot_id`, and the kiosk shows that bot's persona/avatar plus the per-device `companion_features` toggles. Configure it on the bot's **Basics** tab (channel *AI Companion*). The model pair is global (the gateway's `/llm/v1` router); per-device variation is persona/avatar/voice/features only. See [kiosk mode](/guide/kiosk-mode).
 
 ### `companion_features` semantics
 
-The Gateways tab's *AI Companion* checkboxes/fields aren't uniform — each is wired at a different layer:
+The *AI Companion* channel's checkboxes/fields (Bot Builder → Basics) aren't uniform — each is wired at a different layer:
 
 | Feature | Layer | Default | Effect |
 |---------|-------|---------|--------|
@@ -61,7 +61,7 @@ The Gateways tab's *AI Companion* checkboxes/fields aren't uniform — each is w
 | `avatar_model` | config-gen | bot's configured avatar, else the default | `generate-config.py` picks the Live2D model for the bot's character preset. |
 | `memory_integration` | config-gen | **off — per-bot opt-in** | `true` adds the `crow` router bridge (memory/projects/blog/sharing category tools) to that bot's `mcp_enabled_servers` (`bot_mcp_servers()` in `generate-config.py`). Off by default: a shared kiosk's default character must not search the owner's memory store unless deliberately enabled. Household mode (below) flips the global default to include `crow`, but a bot preset whose `memory_integration` is `false` or absent still gets a deep-merge override that strips `crow` back out — per-bot non-opt-in wins even in household mode. |
 | `face_tracking` | runtime | **on** (only `=== false` disables) | An availability gate, not an opt-in: `false` hides the `#crow-face-tracking-toggle` button, blocks `toggle()` from opening the camera, and — because features load via an async fetch that a click can beat — tears down an already-running camera/tracking loop the moment the `false` flag arrives (`crow-face-tracking.js` + `crow-device-config.js`). |
-| `hearing_style` / `voice_idle_timeout` | device-config plumbing | `push_to_talk` / 30s | Set in the bot's Gateways tab (`gw_hearing_style`, `gw_voice_idle_timeout`), stored on the gateway row, passed through to the device config. |
+| `hearing_style` / `voice_idle_timeout` | device-config plumbing (no consumer) | `push_to_talk` / 30s | No longer shown in the editor (nothing ever applied them). A value saved by an older editor is kept: the companion save merges into the stored features instead of replacing them. |
 | `pet_mode` / `avatar_animation` | stored | pet off / animation on | `crow-device-config.js` reflects both as `data-crow-pet` / `data-crow-anim` attributes; the values are stored and applied as attributes today, but the kiosk-side pet-mode behavior they're meant to drive hasn't been verified end-to-end on a real kiosk yet. |
 
 `proactive_speak_prompt` was considered but removed — no trigger ever fired it, so it shipped as dead config.
@@ -100,4 +100,4 @@ The privacy rationale is the same in both cases: a shared kiosk's default charac
 | `bundles/companion/scripts/crow-face-tracking.js` | camera-driven face tracking + the `face_tracking` availability gate |
 | `bundles/companion/settings-section.js` | dashboard Settings → Companion, including Household profile slots |
 | `servers/gateway/dashboard/panels/bot-builder.js` | the *AI Companion* gateway tab |
-| `servers/gateway/dashboard/panels/bot-builder/editor.js` | the Gateways-tab UI for `companion_features` (memory integration, face tracking, hearing style, etc.) |
+| `servers/gateway/dashboard/panels/bot-builder/tab-basics.js` | the Basics-tab channel UI for `companion_features` (memory integration, face tracking, etc.) |

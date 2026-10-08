@@ -49,8 +49,6 @@ const IDENTICAL_OK = new Set([
   "files.blogBadge",
   "files.docCategory", // "Doc"
   "extensions.categorySocial",
-  "botbuilder.labelBash",
-  "botbuilder.labelExternalSend", // raw tool id, deliberately untranslated
   "botbuilder.thId", // "ID"
   "botbuilder.skillsGroupGeneral",
   "botbuilder.wizGw_gmail", // channel product names

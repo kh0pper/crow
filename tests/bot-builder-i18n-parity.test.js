@@ -24,8 +24,6 @@ const SAME_OK = new Set([
   "botbuilder.wizGw_discord",   // proper noun
   "botbuilder.wizGw_telegram",  // proper noun
   "botbuilder.wizGw_slack",     // proper noun
-  "botbuilder.labelBash",       // literal policy field name ("bash")
-  "botbuilder.labelExternalSend", // literal policy field name ("external_send")
   "botbuilder.thId",            // "ID" is identical in Spanish
   "botbuilder.skillsGroupGeneral", // "General" is identical in Spanish
   "botbuilder.monThId",         // "id" — identical technical abbreviation
@@ -73,7 +71,8 @@ function stripComments(src) {
 }
 
 const PANEL = "servers/gateway/dashboard/panels/bot-builder";
-const FILES = ["editor.js", "html.js", "wizard.js", "checklist.js", "delete-bot.js", "gateway-fields.js"];
+const FILES = ["editor.js", "html.js", "wizard.js", "checklist.js", "delete-bot.js", "gateway-fields.js",
+  "tab-basics.js", "tab-abilities.js", "tab-safety.js", "tab-activity.js", "tab-advanced.js"];
 
 // Internal references that must never reach user copy (spec §D6). Raw table
 // names are allowed ONLY inside the review tab's Advanced disclosure, which

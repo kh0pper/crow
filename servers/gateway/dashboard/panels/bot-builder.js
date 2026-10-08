@@ -7,7 +7,7 @@
 import { botBuilderStyles } from "./bot-builder/css.js";
 import { tableMissing } from "./bot-builder/data-queries.js";
 import { escapeHtml, section } from "../shared/components.js";
-import { t } from "../shared/i18n.js";
+import { t, fill } from "../shared/i18n.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { handlePeerEdit } from "./bot-builder/peer-edit.js";
 import { handleBotBuilderPost } from "./bot-builder/api-handlers.js";
@@ -82,14 +82,13 @@ export default {
 
     const runtimeActive = await botRuntimeActive(db);
     const runtimeBanner = runtimeActive ? "" :
-      `<p class="btb-notice-warn">Bot definitions are stored on this instance. ` +
-      `The bot runtime (Gmail/Telegram/Discord gateways) is enabled per-instance and is not active here yet.</p>`;
+      `<p class="btb-notice-warn">${escapeHtml(t("botbuilder.noticeRuntimeInactive", lang))}</p>`;
 
     const q = req.query || {};
     // ?created= renders as the review tab's callout (editor.js), not here —
     // both messages stacked read as a double banner (PR #191 review m2).
-    const baseNotice = q.saved ? `<p class="btb-notice-ok">Saved.</p>`
-      : q.deleted ? `<p class="btb-notice-ok">Deleted <code>${escapeHtml(String(q.deleted))}</code>.</p>`
+    const baseNotice = q.saved ? `<p class="btb-notice-ok" role="status">${escapeHtml(t("botbuilder.noticeSaved", lang))}</p>`
+      : q.deleted ? `<p class="btb-notice-ok" role="status">${escapeHtml(fill(t("botbuilder.noticeDeleted", lang), { id: String(q.deleted) }))}</p>`
       : q.error === "engine_required" ? engineRequiredBanner(lang)
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).

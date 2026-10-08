@@ -92,8 +92,23 @@ function setByPath(obj, path, value) {
  */
 export function applyPeerPatch(currentDef, patch) {
   const out = JSON.parse(JSON.stringify(currentDef || {}));
-  for (const [path, value] of Object.entries(patch || {})) {
+  for (let [path, value] of Object.entries(patch || {})) {
     if (path === "enabled") continue; // routed to the column by the caller
+    // def.skills is the one skills store (the runtime reads only it). An
+    // older peer's editor still patches the retired tools.skills mirror, and
+    // echoes it unchanged on every save — so apply it as a DIFF against the
+    // stored mirror (adds and removes), never as a replacement of skills.
+    if (path === "tools.skills") {
+      if (!Array.isArray(value)) throw new Error("tools.skills must be a list");
+      const mirror = Array.isArray(out.tools && out.tools.skills) ? out.tools.skills : [];
+      const cur = Array.isArray(out.skills) ? out.skills.slice() : mirror.slice();
+      const added = value.filter((x) => typeof x === "string" && !mirror.includes(x));
+      const removed = mirror.filter((x) => !value.includes(x));
+      const next = cur.filter((x) => !removed.includes(x));
+      for (const x of added) if (!next.includes(x)) next.push(x);
+      if (JSON.stringify(next) !== JSON.stringify(out.skills)) out.skills = next;
+      continue;
+    }
     if (!isPatchable(path)) {
       throw new Error(`field not patchable from a peer: ${path}`);
     }

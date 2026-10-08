@@ -3,7 +3,7 @@
  * Crow Bot Builder — shared skill promotion (self-learning, plan §B4).
  *
  * ONE code path that writes a skill file into ~/.crow/skills and attaches its
- * name to the bot's def (def.skills + def.tools.skills), used by BOTH:
+ * name to the bot's def (def.skills, the one skills store), used by BOTH:
  *   - the operator approve handler (bot-board-api.js) — mode:"operator"
  *   - the auto-mode review pass (skill_review.mjs)     — mode:"auto"
  *
@@ -50,7 +50,7 @@ const REPO_SKILLS = join(HOME, "crow", "skills");         // protected (shipped)
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
 
 // Transactional read-modify-write of pi_bot_defs.definition: add `name` to
-// def.skills + def.tools.skills. BEGIN IMMEDIATE so a concurrent SSR save can't
+// def.skills (the one skills store). BEGIN IMMEDIATE so a concurrent SSR save can't
 // interleave between our read and write. Returns {ok} / {ok:false,message}.
 function attachSkillToDef(bot_id, name) {
   const c = db();
@@ -61,9 +61,6 @@ function attachSkillToDef(bot_id, name) {
       let def; try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
       def.skills = Array.isArray(def.skills) ? def.skills : [];
       if (!def.skills.includes(name)) def.skills.push(name);
-      def.tools = def.tools || {};
-      def.tools.skills = Array.isArray(def.tools.skills) ? def.tools.skills : [];
-      if (!def.tools.skills.includes(name)) def.tools.skills.push(name);
       c.prepare("UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=?")
         .run(JSON.stringify(def), bot_id);
     });

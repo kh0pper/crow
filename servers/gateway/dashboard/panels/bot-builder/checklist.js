@@ -22,6 +22,8 @@ import { missingGatewayFields } from "./gateway-fields.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "./engine-gate.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
+import { storedToBashUi } from "./bash-mode.js";
+import { learningMode } from "./def-adapter.js";
 
 const OK = `<span class="btb-ok" aria-hidden="true">&#10003;</span>`;
 const WARN = `<span class="btb-status-warn" aria-hidden="true">&#9888;</span>`;
@@ -60,7 +62,7 @@ async function renderEngineRow(db, def, lang, tabHref, fixLabel) {
   const status = resolveEngineStatus();
 
   if (status.state === "installing") {
-    return row(WARN, label, t("botbuilder.checkEngineInstalling", lang), tabHref("gateways"), fixLabel);
+    return row(WARN, label, t("botbuilder.checkEngineInstalling", lang), tabHref("basics"), fixLabel);
   }
 
   if (status.state === "absent") {
@@ -75,7 +77,7 @@ async function renderEngineRow(db, def, lang, tabHref, fixLabel) {
       error: escapeHtml(status.error || t("botbuilder.engineGateUnknownError", lang)),
       retryAt: escapeHtml(status.retryAt || "—"),
     });
-    return row(ERR, label, detail, tabHref("gateways"), fixLabel);
+    return row(ERR, label, detail, tabHref("basics"), fixLabel);
   }
 
   // status.state === "ready" — split disarmed vs plain ready per the
@@ -99,7 +101,7 @@ async function renderEngineRow(db, def, lang, tabHref, fixLabel) {
   if (runtime.mode === "external") {
     detail += ` · ${t("botbuilder.checkEngineExternalNote", lang)}`;
   }
-  return row(OK, label, detail, tabHref("gateways"), fixLabel);
+  return row(OK, label, detail, tabHref("basics"), fixLabel);
 }
 
 /**
@@ -131,20 +133,20 @@ export async function renderReadiness(db, bot, def, lang) {
       : (configured
           ? fill(t("botbuilder.checkModelUnavailable", lang), { key: escapeHtml(configured) })
           : t("botbuilder.checkModelNone", lang)),
-    tabHref("ai"), fixLabel));
+    tabHref("basics"), fixLabel));
 
   // ---- Channel (spec round-2 MAJOR-B: per-type required fields) ----
   const gw = (def.gateways || []).find((g) => g && g.type) || null;
   if (!gw) {
     rows.push(row(WARN, t("botbuilder.checkChannel", lang),
-      t("botbuilder.checkChannelNone", lang), tabHref("gateways"), fixLabel));
+      t("botbuilder.checkChannelNone", lang), tabHref("basics"), fixLabel));
   } else {
     const missing = missingGatewayFields(gw);
     if (missing.length) {
       rows.push(row(WARN, t("botbuilder.checkChannel", lang),
         `${escapeHtml(gw.type)} — ` +
-        fill(t("botbuilder.checkChannelIncomplete", lang), { fields: escapeHtml(missing.join(", ")) }),
-        tabHref("gateways"), fixLabel));
+        fill(t("botbuilder.checkChannelIncomplete", lang), { fields: escapeHtml(missing.map((f) => t("botbuilder.fld_" + f, lang)).join(", ")) }),
+        tabHref("basics"), fixLabel));
     } else {
       let detail = escapeHtml(gw.type);
       if (gw.type === "gmail") {
@@ -153,7 +155,7 @@ export async function renderReadiness(db, bot, def, lang) {
       } else if (gw.device_id) {
         detail += ` — ${fill(t("botbuilder.checkChannelDevice", lang), { id: escapeHtml(String(gw.device_id)) })}`;
       }
-      rows.push(row(OK, t("botbuilder.checkChannel", lang), detail, tabHref("gateways"), fixLabel));
+      rows.push(row(OK, t("botbuilder.checkChannel", lang), detail, tabHref("basics"), fixLabel));
     }
   }
 
@@ -167,7 +169,7 @@ export async function renderReadiness(db, bot, def, lang) {
   const nBuiltin = (tools.pi_builtin || []).length;
   rows.push(row(OK, t("botbuilder.checkTools", lang),
     fill(t("botbuilder.checkToolsDetail", lang), { mcp: nMcp, builtin: nBuiltin }),
-    tabHref("tools"), fixLabel));
+    tabHref("abilities"), fixLabel));
 
   // ---- Skills & prompt ----
   const nSkills = (def.skills || []).length;
@@ -175,15 +177,17 @@ export async function renderReadiness(db, bot, def, lang) {
   rows.push(row(hasPrompt ? OK : WARN, t("botbuilder.checkSkills", lang),
     fill(t("botbuilder.checkSkillsDetail", lang), { n: nSkills }) +
     (hasPrompt ? ` · ${t("botbuilder.checkPromptSet", lang)}` : ` · ${t("botbuilder.checkPromptMissing", lang)}`),
-    tabHref("skills"), fixLabel));
+    tabHref(hasPrompt ? "abilities" : "basics"), fixLabel));
 
-  // ---- Permissions ----
+  // ---- Safety (plain words; the raw values live in Advanced → raw settings) ----
   const pp = def.permission_policy || {};
+  const cmd = storedToBashUi(pp);
+  const learn = learningMode(pp);
   rows.push(row(OK, t("botbuilder.checkPermissions", lang),
-    `bash: <code>${escapeHtml(pp.bash || "deny")}</code> · ` +
-    `${t("botbuilder.checkPermSend", lang)}: <code>${escapeHtml(pp.external_send || "draft_only")}</code> · ` +
-    `${t("botbuilder.checkPermLearning", lang)}: <code>${escapeHtml(pp.skill_learning || "off")}</code>`,
-    tabHref("permissions"), fixLabel));
+    `${escapeHtml(t("botbuilder.checkPermCommands", lang))}: ${escapeHtml(t("botbuilder.cmdState_" + cmd, lang))} · ` +
+    `${escapeHtml(t("botbuilder.checkPermEmail", lang))}: ${escapeHtml(t(pp.external_send === "allow" ? "botbuilder.checkEmailSend" : "botbuilder.checkEmailDraft", lang))} · ` +
+    `${escapeHtml(t("botbuilder.checkPermLearning", lang))}: ${escapeHtml(t("botbuilder.learnState_" + learn, lang))}`,
+    tabHref("safety"), fixLabel));
 
   // ---- Status (with the toggle, spec §D4) ----
   const statusDetail = bot.enabled

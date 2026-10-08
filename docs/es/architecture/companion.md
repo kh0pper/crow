@@ -49,11 +49,11 @@ El companion resuelve los modelos a través de `servers/gateway/ai/resolve-profi
 
 ## Vincular un bot (el canal companion)
 
-Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Gateways** del bot (tipo *AI Companion*). El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
+Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Lo básico** del bot (canal *AI Companion*). El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
 
 ### Semántica de `companion_features`
 
-Las casillas/campos de *AI Companion* en la pestaña Gateways no son uniformes — cada una está conectada en una capa distinta:
+Las casillas/campos del canal *AI Companion* (Bot Builder → Lo básico) no son uniformes — cada una está conectada en una capa distinta:
 
 | Función | Capa | Predeterminado | Efecto |
 |---------|------|-----------------|--------|
@@ -61,7 +61,7 @@ Las casillas/campos de *AI Companion* en la pestaña Gateways no son uniformes �
 | `avatar_model` | generación de config | avatar configurado del bot, o el predeterminado | `generate-config.py` elige el modelo Live2D para el preset de personaje del bot. |
 | `memory_integration` | generación de config | **apagado — opt-in por bot** | `true` añade el puente `crow` del router (herramientas de categoría memoria/proyectos/blog/compartir) a `mcp_enabled_servers` de ese bot (`bot_mcp_servers()` en `generate-config.py`). Apagado por defecto: el personaje predeterminado de un kiosko compartido no debe buscar en la memoria del propietario a menos que se habilite deliberadamente. El modo hogar (más abajo) cambia el valor global predeterminado para incluir `crow`, pero un preset de bot cuyo `memory_integration` sea `false` o esté ausente sigue recibiendo una anulación por fusión profunda que quita `crow` de nuevo — el no-opt-in de cada bot prevalece incluso en modo hogar. |
 | `face_tracking` | runtime | **encendido** (solo `=== false` lo deshabilita) | Es una compuerta de disponibilidad, no un opt-in: `false` oculta el botón `#crow-face-tracking-toggle`, bloquea que `toggle()` abra la cámara y — como las funciones se cargan mediante un fetch asíncrono que un clic puede adelantar — desmonta de inmediato una cámara/seguimiento ya en marcha en cuanto llega la bandera `false` (`crow-face-tracking.js` + `crow-device-config.js`). |
-| `hearing_style` / `voice_idle_timeout` | plomería de device-config | `push_to_talk` / 30s | Se configuran en la pestaña Gateways del bot (`gw_hearing_style`, `gw_voice_idle_timeout`), se guardan en la fila del gateway y se transmiten a la config del dispositivo. |
+| `hearing_style` / `voice_idle_timeout` | plomería de device-config (sin consumidor) | `push_to_talk` / 30s | Ya no se muestran en el editor (nada los aplicaba). Un valor guardado por un editor anterior se conserva: el guardado del compañero fusiona en las funciones guardadas en lugar de reemplazarlas. |
 | `pet_mode` / `avatar_animation` | almacenado | mascota apagada / animación encendida | `crow-device-config.js` refleja ambos como atributos `data-crow-pet` / `data-crow-anim`; los valores se guardan y se aplican como atributos hoy, pero el comportamiento de modo mascota en el kiosko que deberían impulsar aún no se ha verificado de extremo a extremo en un kiosko real. |
 
 `proactive_speak_prompt` se consideró pero se eliminó — nunca existió un disparador que lo activara, así que quedaba como config muerta.
@@ -99,4 +99,4 @@ La razón de privacidad es la misma en ambos casos: el personaje predeterminado 
 | `bundles/companion/scripts/crow-face-tracking.js` | seguimiento facial por cámara + la compuerta de disponibilidad `face_tracking` |
 | `bundles/companion/settings-section.js` | Ajustes → Companion del dashboard, incluidos los slots de perfiles del hogar |
 | `servers/gateway/dashboard/panels/bot-builder.js` | la pestaña de gateway *AI Companion* |
-| `servers/gateway/dashboard/panels/bot-builder/editor.js` | la UI de la pestaña Gateways para `companion_features` (integración de memoria, seguimiento facial, estilo de escucha, etc.) |
+| `servers/gateway/dashboard/panels/bot-builder/tab-basics.js` | la UI del canal en la pestaña Lo básico para `companion_features` (integración de memoria, seguimiento facial, etc.) |

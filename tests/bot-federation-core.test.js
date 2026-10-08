@@ -64,9 +64,24 @@ test("applyPeerPatch: merges allowlisted non-secret fields by dotted path", () =
   });
   assert.equal(merged.system_prompt, "new prompt");
   assert.equal(merged.models.default, "crow-local/other");
-  assert.deepEqual(merged.tools.skills, ["research"]);
+  assert.deepEqual(merged.skills, ["research"], "an older peer's tools.skills patch lands on def.skills, the one store the runtime reads");
+  assert.deepEqual(merged.tools.skills, [], "the retired mirror is left as it was");
   assert.deepEqual(merged.tools.crow_mcp, ["crow-tasks/tasks_list"]);
   assert.equal(merged.gateways[0].token, "SECRET-DISCORD");
+});
+
+test("applyPeerPatch: an older peer echoing the stale tools.skills mirror never drops a skill approved since", () => {
+  const def = { ...sampleDef(), skills: ["a", "approved-later"], tools: { ...sampleDef().tools, skills: ["a"] } };
+  // the old peer editor re-sends the unchanged mirror while changing only the model
+  const merged = applyPeerPatch(def, { "models.default": "m2", "tools.skills": ["a"] });
+  assert.deepEqual(merged.skills, ["a", "approved-later"]);
+  // a real edit through the old editor: removes "a", adds "b" — applied as a diff
+  const merged2 = applyPeerPatch(def, { "tools.skills": ["b"] });
+  assert.deepEqual(merged2.skills, ["approved-later", "b"]);
+  // a def that only has the old mirror (no skills yet) starts from the mirror
+  const old = { ...sampleDef(), tools: { ...sampleDef().tools, skills: ["x"] } };
+  delete old.skills;
+  assert.deepEqual(applyPeerPatch(old, { "tools.skills": ["x", "y"] }).skills, ["x", "y"]);
 });
 
 test("applyPeerPatch: rejects a non-allowlisted path", () => {

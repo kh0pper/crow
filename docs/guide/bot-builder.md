@@ -12,29 +12,29 @@ The Bot Builder is the agentic spine of Crow. The same agent you build here can 
 
 ## What an agent is
 
-An agent is a definition with a few parts, each on its own tab in the editor:
+An agent is a definition with a few parts. The editor groups them into four tabs, plus an Advanced view for settings most agents never need:
 
-| Part | What it controls |
+| Tab | What it controls |
 |---|---|
-| **AI / Models** | The chat model the agent uses, plus an optional fast voice model for glasses and the speech and vision profiles it speaks through. |
-| **Tools & Extensions** | Exactly which tools the agent may call: Crow's own memory, projects, blog, and storage tools, plus the tools contributed by any installed extension. |
-| **Skills & Prompt** | The agent's persona (system prompt) and the skills attached to it. Skills are behavioral prompts that teach a workflow. |
-| **Gateways** | The channels the agent runs on: Gmail, Discord, or Meta glasses. |
-| **Permissions / Safety** | What the agent may do on its own, what needs confirmation, and what is denied. Also the opt-in self-authoring switch. |
-| **Project / Kanban** | An optional project the agent works against. |
-| **Review / Deploy** | A summary of the definition before you save and deploy it. |
+| **Basics** | The agent's name, its persona and instructions, its model (plus an optional stronger model for hard questions and a fast voice model for glasses, kiosk and companion), and the one channel people reach it on: Gmail, Discord, Telegram, Slack, Meta glasses, an AI Companion kiosk, Crow Messages or Perch. Only the chosen channel's settings are shown. |
+| **Abilities** | What it can do: read or edit files in its folders, run commands, use memory, and which connected services it may use. Each service is one row with **Off / Read-only / All / Custom**; Custom opens a searchable list of that service's tools, each marked "reads" or "changes things". Skills are chosen here too. |
+| **Safety** | Whether email it writes is saved as a draft for you or sent directly, which folders it can look at and change, and the actions it must always ask you about first. |
+| **Activity** | A readiness checklist, the Enable / Disable switch, skills waiting for your review, and its recent conversations. |
+| **Advanced** | Learning new skills, helper agents, a list of allowed commands, the board and project it works on, sharing with your other Crows, a tool-connection check, the raw settings, and Delete. |
 
-Saving one tab merges only that tab's fields into the definition, so a save never clobbers the other tabs.
+Each tab saves only its own settings, and only the controls you changed: saving a tab without touching anything leaves the agent exactly as it was. If the agent was changed somewhere else while the page was open (for example a skill was approved), the save is refused and you are asked to reload.
 
 ## Tools and extensions
 
-Each agent only sees the tools you grant it. The Tools tab lists Crow's built-in tool categories alongside the tools contributed by every installed extension, grouped by extension with an install-state badge.
+Each agent only sees the tools you grant it. The Abilities tab lists every connected service (Crow's own servers and every installed extension) as one row. **Read-only** grants just the tools that look things up; **All** adds the ones that change things. Tools a service adds later are never switched on by themselves: an agent set to All then shows Custom until you choose again. Crow judges each tool by its name, and anything it cannot recognise counts as "changes things"; a tool whose name sounds like a lookup but that shows, shares or clicks something (a kiosk display, a download link, a browser that navigates) counts as changing things too. A service can mark more of its tools as changing things, never fewer.
+
+When one service is connected more than once (two Google accounts, say), each row shows its account. Set the label with an optional `"account"` entry on that server in `~/.pi/agent/mcp.json` or `mcp-addons.json` (for example `"account": "alex@example.com"`); without one, the row shows the server name.
 
 When you select an extension's tools, the Bot Builder wires that extension into the agent automatically. You do not edit MCP server entries by hand. If an extension provides a tool that the agent's channel cannot reach (for example a tool with no voice equivalent on the glasses path), the editor warns you rather than dropping it silently.
 
 ## Skills
 
-Skills are behavioral prompts (Markdown files with a small front-matter header) that teach an agent a specific workflow. Attach them on the Skills tab, grouped by the extension that provides them. A featured "Skill authoring" card lets you attach Crow's skill-writing guide to an agent in one click.
+Skills are behavioral prompts (Markdown files with a small front-matter header) that teach an agent a specific workflow. Choose them on the Abilities tab, grouped by the extension that provides them.
 
 Skills are portable across agents and across channels. Language variants (English, Spanish, and so on) are just different skill files that call the same underlying tools.
 
@@ -58,7 +58,7 @@ Nothing about it is exposed to the internet. It runs as part of the gateway, lis
 
 ### 1. Attach the Perch channel to an agent
 
-Open the agent in Bot Builder, go to the **Gateways** tab, choose **Perch (dashboard chat)**, and save. There are no fields to fill in. You can also pick Perch as the channel while creating an agent in the wizard.
+Open the agent in Bot Builder, and on the **Basics** tab choose **Perch (dashboard chat)** as the channel and save. There are no fields to fill in. You can also pick Perch as the channel while creating an agent in the wizard.
 
 Perch turns run on the same bot engine that Gmail and Discord use, so if the engine is not installed yet Crow will offer to install it before letting you save.
 
@@ -125,7 +125,7 @@ These rules are enforced on the underlying action, not just the surface tool nam
 
 ## Opt-in self-authoring
 
-An agent can help write its own skills, but only if you turn it on. Self-authoring is **off by default**.
+An agent can help write its own skills, but only if you turn it on under **Advanced → Learning new skills**. It is **off by default**; you can let it suggest skills for your approval, or learn on its own with guardrails (an agent that can send email or run commands only ever suggests).
 
 When you enable it for an agent:
 
@@ -133,7 +133,7 @@ When you enable it for an agent:
 2. The drafted skill appears in the Bot Builder for review. You can read it, edit the text, and either approve or reject it. Phrasing that could weaken a guardrail is flagged for your attention.
 3. On approval, Crow promotes the skill into your skills library and attaches it to the agent. Only then does it load.
 
-A self-authored skill is prompt text only. Approving one cannot grant the agent new tools and cannot change its permission policy, because those come from the Tools and Permissions tabs, not from a skill. The operator-approval gate is the boundary.
+A self-authored skill is prompt text only. Approving one cannot grant the agent new tools and cannot change its permission policy, because those come from the Abilities and Safety tabs, not from a skill. The operator-approval gate is the boundary.
 
 This is the core of Crow's stance versus auto-authoring bot platforms: an agent can propose, but a human approves before anything an agent wrote for itself becomes real.
 
@@ -143,7 +143,7 @@ For tasks that take longer than a single turn, an agent can hand work to Crow's 
 
 ## Deploy and monitor
 
-The Review / Deploy tab summarizes the agent before you commit it. Once deployed, an agent runs against the same Crow database as every other connection, so its memories, projects, files, and messages are visible everywhere else in Crow.
+The Activity tab shows whether the agent is ready to run and lets you switch it on or off. Once deployed, an agent runs against the same Crow database as every other connection, so its memories, projects, files, and messages are visible everywhere else in Crow.
 
 ## Related
 

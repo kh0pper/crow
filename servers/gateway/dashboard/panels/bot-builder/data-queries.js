@@ -41,18 +41,6 @@ export const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "gre
 // the bridge REFUSES anything else (no Bot Builder code ever runs `pi install`).
 export { PI_EXT_ALLOWLIST };
 
-export const TABS = [
-  ["ai", "AI / Models"],
-  ["tools", "Tools & Extensions"],
-  ["gateways", "Gateways"],
-  ["tracker", "Project / Tracker"],
-  ["skills", "Skills & Prompt"],
-  ["permissions", "Permissions / Safety"],
-  ["triggers", "Triggers"],
-  ["sessions", "Sessions"],
-  ["review", "Review / Deploy"],
-];
-
 // in-process probe cache (per gateway process), 5-min TTL — probing spawns
 // every MCP server, so we don't redo it on every tools-tab render. Keyed on
 // crowHome: probeAll() takes an instance argument now, and an unkeyed cache
