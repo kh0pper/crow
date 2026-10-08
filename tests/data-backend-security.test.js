@@ -269,7 +269,8 @@ test("dashboard: approving needs the hash of the command the owner was shown", a
 test("dashboard: the approval cell shows the exact command, escaped", async () => {
   const { renderBackendApproval } = await import("../servers/gateway/dashboard/panels/projects.js");
   const html = renderBackendApproval(1, { id: 3, backend_type: "mcp_server", connection_ref: JSON.stringify({ command: "npx", args: ["<script>x</script>"], envVars: ["PG_URL"] }), approved_ref_sha256: null });
-  assert.match(html, /npx &lt;script&gt;x&lt;\/script&gt;/);
+  assert.match(html, />npx</);
+  assert.match(html, /&lt;script&gt;x&lt;\/script&gt;/);
   assert.match(html, /PG_URL/);
   assert.match(html, /name="action" value="approve_backend"/);
   assert.doesNotMatch(html, /<script>/);
@@ -323,4 +324,49 @@ test("migration 0008 adds the approval column once and is idempotent", async () 
   const e = join(HOME, "empty.db");
   new Database(e).close();
   assert.deepEqual(run({ dbPath: e }).results, ["absent"]);
+});
+
+// ------------------------------------- approval display shows the exact spec
+
+const cell = async (ref, extra = {}) => {
+  const { renderBackendApproval } = await import("../servers/gateway/dashboard/panels/projects.js");
+  return renderBackendApproval(1, { id: 9, name: "label", backend_type: "mcp_server", connection_ref: typeof ref === "string" ? ref : JSON.stringify(ref), approved_ref_sha256: null, ...extra });
+};
+
+test("display: args are shown one by one, so ['a b'] and ['a','b'] differ", async () => {
+  const one = await cell({ command: "node", args: ["a b"] });
+  const two = await cell({ command: "node", args: ["a", "b"] });
+  assert.notEqual(one.replace(/value="[0-9a-f]{64}"/, ""), two.replace(/value="[0-9a-f]{64}"/, ""));
+});
+
+test("display: invisible and look-alike characters are shown as escapes", async () => {
+  const zw = await cell({ command: "np​x", args: ["‮evil", "x\u0007", "а"] });
+  for (const ch of ["​", "‮", "\u0007", "а"]) assert.equal(zw.includes(ch), false, `raw U+${ch.codePointAt(0).toString(16)} rendered`);
+  assert.match(zw, /\\u\{200b\}/);
+  assert.match(zw, /\\u\{202e\}/);
+  assert.match(zw, /\\u\{430\}/);
+});
+
+test("display: a spec with keys that are not spawned, or too long, cannot be approved", async () => {
+  const extra = await cell({ command: "node", args: [], cwd: "/tmp", env: { A: "1" } });
+  assert.doesNotMatch(extra, /value="approve_backend"/);
+  const long = await cell({ command: "node", args: ["x".repeat(3000)] });
+  assert.doesNotMatch(long, /value="approve_backend"/);
+  assert.doesNotMatch(long, /\.\.\.|…/);
+  const { approveBackend } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const id = pendingRow(JSON.stringify({ command: "node", args: [], cwd: "/tmp" }));
+  assert.equal(await approveBackend(createDbClient(CORE), id), false);
+  assert.equal(approvedHash(id), null);
+});
+
+test("display: the requester's name is marked unverified and kept apart from the command", async () => {
+  const html = await cell({ command: "node", args: ["s.js"] }, { name: "npx -y official-postgres" });
+  assert.match(html, /unverified/i);
+});
+
+test("registration refuses connection_ref keys that are never spawned", async () => {
+  const client = await connect(createProjectServer(CORE));
+  const r = await client.callTool({ name: "crow_register_backend", arguments: { name: "c", connection_ref: JSON.stringify({ command: "node", args: [], cwd: "/" }) } });
+  assert.ok(r.isError, text(r));
 });

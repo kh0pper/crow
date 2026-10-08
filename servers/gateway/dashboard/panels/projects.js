@@ -18,7 +18,7 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, isApproved, refHash } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, isApproved, refHash, parseStoredSpec, visibleText } from "../../../shared/data-backend-approval.js";
 
 const PAGE_SIZE = 20;
 
@@ -567,27 +567,44 @@ async function renderDetailView(db, projectId, layout, lang) {
 
 /**
  * The approval cell for one data backend. An mcp_server backend is a command
- * the gateway runs: show the exact command, args and env-var names, and let
- * the owner approve that exact text (its hash rides the form, so a command
- * changed after the page loaded is not approved) or withdraw an approval.
+ * the gateway runs, so the owner sees the EXACT launch spec that is stored,
+ * hashed and spawned: the command, every arg on its own line, the env-var
+ * names, each with every character visible (visibleText: spaces as ␣,
+ * control, zero-width, bidi and non-ASCII characters as \u{hex}), never
+ * truncated. A spec that is malformed, carries keys that are never spawned,
+ * or is too long to show in full cannot be approved. The requester's name
+ * for it is shown apart and marked unverified. The approval form carries the
+ * hash of the stored text the owner saw; the spawn path re-checks it.
  */
 export function renderBackendApproval(projectId, b) {
   if (b.backend_type !== "mcp_server") {
     return `<span style="font-size:0.75rem;color:var(--crow-text-muted)">read-only dataset</span>`;
   }
-  let ref = {};
-  try { ref = JSON.parse(b.connection_ref || "{}") || {}; } catch {}
-  const cmd = [ref.command, ...(Array.isArray(ref.args) ? ref.args : [])].map((x) => String(x ?? "")).join(" ");
-  const env = Array.isArray(ref.envVars) && ref.envVars.length ? ref.envVars.map(String).join(", ") : "none";
+  const show = (v) => escapeHtml(visibleText(v));
+  const code = "display:block;white-space:pre-wrap;word-break:break-all;margin:0.1rem 0;padding:0.1rem 0.3rem;background:var(--crow-bg-elevated);border-radius:4px";
+  const label = `<div style="color:var(--crow-text-muted)">Name given by whoever registered it (unverified, not part of the command): ${escapeHtml(String(b.name ?? ""))}</div>`;
+  const parsed = parseStoredSpec(b.connection_ref);
+  if (!parsed.ok) {
+    return `<div style="font-size:0.75rem">${label}<div style="color:var(--crow-error)">Cannot be approved: ${escapeHtml(parsed.reason)}. Remove it and register it again.</div></div>`;
+  }
+  const { command, args, envVars } = parsed.spec;
   const approved = isApproved(b);
   const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
+  const hidden = `<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;
   const form = approved
-    ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="revoke_backend"><input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}"><button type="submit" style="${btn};background:var(--crow-bg-elevated);color:var(--crow-text-secondary)">Stop running it</button></form>`
-    : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="approve_backend"><input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}"><input type="hidden" name="ref_sha256" value="${refHash(b.connection_ref)}"><button type="submit" style="${btn};background:var(--crow-accent);color:var(--crow-bg)">Approve and run this command</button></form>`;
+    ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="revoke_backend">${hidden}<button type="submit" style="${btn};background:var(--crow-bg-elevated);color:var(--crow-text-secondary)">Stop running it</button></form>`
+    : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="approve_backend">${hidden}<input type="hidden" name="ref_sha256" value="${refHash(b.connection_ref)}"><button type="submit" style="${btn};background:var(--crow-accent);color:var(--crow-bg)">Approve and run exactly this</button></form>`;
+  const argsHtml = args.length
+    ? `<ol start="1" style="margin:0.1rem 0;padding-left:1.5rem">${args.map((a) => `<li><code style="${code}">${show(a)}</code></li>`).join("")}</ol>`
+    : `<div style="color:var(--crow-text-muted)">(no arguments)</div>`;
   return `<div style="font-size:0.75rem">
-    <div>${approved ? "Approved — runs:" : "Waiting for your approval. It would run:"}</div>
-    <code style="display:block;white-space:pre-wrap;word-break:break-all;margin:0.25rem 0">${escapeHtml(cmd)}</code>
-    <div style="color:var(--crow-text-muted)">Env var names: ${escapeHtml(env)}</div>
+    ${label}
+    <div style="margin-top:0.25rem">${approved ? "Approved. It runs:" : "Waiting for your approval. It would run:"}</div>
+    <div>Command:</div><code style="${code}">${show(command)}</code>
+    <div>Arguments (${args.length}), each passed exactly as shown:</div>${argsHtml}
+    <div>Working directory: the gateway's own (not settable)</div>
+    <div>Environment variables passed from your .env (names): ${envVars.length ? envVars.map((v) => `<code>${show(v)}</code>`).join(", ") : "none"}</div>
+    <div style="color:var(--crow-text-muted)">␣ is a space; \\u{…} is a character that is invisible or not plain ASCII.</div>
     <div style="margin-top:0.25rem">${form}</div>
   </div>`;
 }

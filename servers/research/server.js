@@ -708,10 +708,7 @@ export function createProjectServer(dbPath, options = {}) {
       let storedRef;
       if (backend_type === "mcp_server") {
         const launch = verifyBackendLaunch(connRef);
-        if (!launch.ok) return fail(`Error: ${launch.reason} (e.g., 'npx', 'uvx', 'node').`);
-        if (connRef.envVars !== undefined && !(Array.isArray(connRef.envVars) && connRef.envVars.every((v) => typeof v === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(v)))) {
-          return fail("Error: envVars must be a list of environment variable NAMES.");
-        }
+        if (!launch.ok) return fail(`Error: ${launch.reason}.`);
         status = PENDING_STATUS;
         storedRef = connection_ref;
       } else {

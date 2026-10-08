@@ -30,7 +30,7 @@ There are two kinds of backend, chosen with `backend_type` on `crow_register_bac
 
 ### An `mcp_server` backend waits for your approval
 
-An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**: the exact command, its arguments and the environment variable names are shown, with **Approve and run this command**. Approval covers that exact command — if the registration is changed later it goes back to waiting. **Stop running it** withdraws the approval.
+An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**: the exact command, its arguments and the environment variable names are shown, with **Approve and run exactly this**. Every argument is shown on its own line and invisible or non-ASCII characters are shown as `\u{…}` codes; a registration with anything besides `command`, `args` and `envVars`, or too long to show in full, cannot be approved. Approval covers that exact command — if the registration is changed later it goes back to waiting. **Stop running it** withdraws the approval.
 
 `envVars` lists variable **names** only; put the values in your `.env`.
 

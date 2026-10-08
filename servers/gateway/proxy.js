@@ -477,7 +477,7 @@ export async function loadDynamicBackends() {
       }
 
       // Check that required env vars are set
-      const missingVars = (connRef.envVars || []).filter((v) => !process.env[v]);
+      const missingVars = launch.envVars.filter((v) => !process.env[v]);
       if (missingVars.length > 0) {
         console.warn(`  [proxy] Backend #${row.id} "${row.name}": missing env vars: ${missingVars.join(", ")}`);
         await db.execute({
@@ -493,7 +493,7 @@ export async function loadDynamicBackends() {
         name: row.name,
         command: launch.command,
         args: launch.args,
-        envVars: connRef.envVars || [],
+        envVars: launch.envVars,
       };
 
       try {
