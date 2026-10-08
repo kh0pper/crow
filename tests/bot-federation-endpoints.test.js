@@ -135,3 +135,60 @@ test("setEnabled success is audited as federation.bot.enabled", async () => {
   assert.ok(row);
   assert.equal(row.httpStatus, 200);
 });
+
+// --- permission_policy parity on the federation path (security scan 2026-10-08):
+// a trusted peer may only TIGHTEN a bot's permissions, never widen them, and
+// every value goes through the same validator the Bot Builder save uses.
+const ppDef = () => ({ ...sampleDef(), permission_policy: {
+  bash: "deny", bash_allow: ["ls"], write_paths: ["/w"], read_paths: ["/r"], external_send: "draft_only",
+  confirm: ["gmail_send"], multi_agent: false, self_authoring: false, skill_learning: "off" } });
+async function peerPatch(patch) {
+  const db = makeDb({ manageable: ["scout"], def: ppDef() });
+  const h = makeBotFederationHandlers({ db, regenerateBotMcp: async () => ({}) });
+  const res = makeRes();
+  await h.patch({ params: { botId: "scout" }, headers: { "x-crow-source": "peerX" }, body: { patch } }, res);
+  return { res, def: JSON.parse(db._store.definition) };
+}
+for (const [name, patch] of [
+  ["bash deny→auto", { "permission_policy.bash": "auto" }],
+  ["bash deny→allowlist", { "permission_policy.bash": "allowlist" }],
+  ["bash_allow grows", { "permission_policy.bash_allow": ["ls", "curl"] }],
+  ["write_paths grows to /", { "permission_policy.write_paths": ["/"] }],
+  ["write_paths element", { "permission_policy.write_paths.1": "/etc" }],
+  ["read_paths grows", { "permission_policy.read_paths": ["/r", "/home"] }],
+  ["external_send → allow", { "permission_policy.external_send": "allow" }],
+  ["external_send removed", { "permission_policy.external_send": null }],
+  ["confirm shrinks", { "permission_policy.confirm": [] }],
+  ["multi_agent on", { "permission_policy.multi_agent": true }],
+  ["self_authoring on", { "permission_policy.self_authoring": true }],
+  ["skill_learning → auto", { "permission_policy.skill_learning": "auto" }],
+  ["classifier set", { "permission_policy.classifier": { url: "http://100.64.20.9/v1", model: "m" } }],
+  ["unknown policy key", { "permission_policy.interactive_ask": true }],
+  ["relative write path", { "permission_policy.write_paths": ["w"] }],
+]) {
+  test(`peer patch refused (400, no write): ${name}`, async () => {
+    const { res, def } = await peerPatch(patch);
+    assert.equal(res._status, 400, JSON.stringify(res._json));
+    assert.deepEqual(def.permission_policy, ppDef().permission_policy);
+  });
+}
+for (const [name, patch, check] of [
+  ["bash stays deny", { "permission_policy.bash": "deny" }, (d) => d.permission_policy.bash === "deny"],
+  ["write_paths shrink", { "permission_policy.write_paths": [] }, (d) => d.permission_policy.write_paths.length === 0],
+  ["confirm grows", { "permission_policy.confirm": ["gmail_send", "x"] }, (d) => d.permission_policy.confirm.length === 2],
+  ["bash_allow shrinks", { "permission_policy.bash_allow": [] }, (d) => d.permission_policy.bash_allow.length === 0],
+]) {
+  test(`peer patch allowed (tightening): ${name}`, async () => {
+    const { res, def } = await peerPatch(patch);
+    assert.equal(res._status, 200, JSON.stringify(res._json));
+    assert.ok(check(def));
+  });
+}
+
+test("peer patch goes through the shared permission guard (its own message reaches the 400)", async () => {
+  const { res } = await peerPatch({ "permission_policy.interactive_ask": true });
+  assert.equal(res._status, 400);
+  assert.match(JSON.stringify(res._json), /set by the bot engine/);
+  const { res: r2 } = await peerPatch({ "permission_policy.mystery": 1 });
+  assert.match(JSON.stringify(r2._json), /unknown permission key mystery/);
+});

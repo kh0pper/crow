@@ -19,6 +19,25 @@ import { loadSources, MEMORY_SOURCE, sourceDisplay } from "./sources.js";
 import { sourceMode } from "./tool-access.js";
 import { filesMode } from "./def-adapter.js";
 import { storedToBashUi, BASH_MODES_LIVE } from "./bash-mode.js";
+import { nonPerchChannels } from "../../../../shared/bot-permission-policy.js";
+import { classifierStatusHtml } from "./classifier-status.js";
+import { csrfInput } from "../../shared/csrf.js";
+
+/**
+ * A stored "sandbox" (never implemented; runs as Off): a one-click offer to
+ * switch to Auto, owner-only (confirm_sandbox_auto, through the save guard).
+ * Its own form — the Abilities form cannot nest it.
+ */
+function sandboxOfferForm({ def, req, bot, botId, lang }) {
+  const pp = (def && def.permission_policy) || {};
+  if (pp.bash !== "sandbox" || nonPerchChannels(def).length) return "";
+  const name = (bot && bot.display_name) || botId;
+  return `<form method="POST" class="btb-form" data-testid="bash-sandbox-offer">` +
+    `<input type="hidden" name="action" value="confirm_sandbox_auto">` +
+    `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` + (req ? csrfInput(req) : "") +
+    `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.bashSandboxOffer", lang), { bot: name }))}</p>` +
+    `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.bashSandboxSwitch", lang))}</button></form>`;
+}
 import { segGroup, card } from "./ui.js";
 
 function sourceRow(src, selected, lang, { memory = false } = {}) {
@@ -73,7 +92,7 @@ function sourceRow(src, selected, lang, { memory = false } = {}) {
 }
 
 export async function renderAbilities(ctx) {
-  const { def, lang, hidden } = ctx;
+  const { def, lang, hidden, db, req, bot, botId } = ctx;
   const tools = def.tools || {};
   const selected = Array.isArray(tools.crow_mcp) ? tools.crow_mcp.filter((x) => typeof x === "string") : [];
   const builtin = Array.isArray(tools.pi_builtin) ? tools.pi_builtin : [];
@@ -90,17 +109,24 @@ export async function renderAbilities(ctx) {
     hint: t("botbuilder.abFilesHint", lang),
   });
   const cMode = storedToBashUi(pp);
+  // Ask me / Auto are Perch-only (Kevin's ruling 2026-10-08): a bot that also
+  // answers on Gmail, Discord, … cannot pick them, and the page says why.
+  const otherChannels = nonPerchChannels(def);
+  const perchOnly = (v) => (v === "ask" || v === "auto") && otherChannels.length > 0;
   const cmdOpts = [
     { value: "off", label: t("botbuilder.abCmdOff", lang) },
     { value: "ask", label: t("botbuilder.abCmdAsk", lang) },
     { value: "auto", label: t("botbuilder.abCmdAuto", lang) },
-  ].map((o) => (BASH_MODES_LIVE.has(o.value) || o.value === cMode)
-    ? o : { ...o, disabled: true, note: t("botbuilder.abSoon", lang) });
+  ].map((o) => (BASH_MODES_LIVE.has(o.value) && !perchOnly(o.value)) || o.value === cMode
+    ? o : { ...o, disabled: true, note: t(perchOnly(o.value) ? "botbuilder.abCmdPerchOnlyShort" : "botbuilder.abSoon", lang) });
   if (cMode === "list") cmdOpts.push({ value: "list", label: t("botbuilder.abCmdList", lang) });
+  let cmdHint = escapeHtml(t(cMode === "list" ? "botbuilder.abCmdHintList" : "botbuilder.abCmdHint", lang));
+  if (otherChannels.length) {
+    cmdHint += `<br><span data-testid="cmd-perch-only">${escapeHtml(fill(t("botbuilder.abCmdPerchOnly", lang), { channel: otherChannels.join(", ") }))}</span>`;
+  }
   const cmdCtl = segGroup({
-    name: "cmd_mode", legend: t("botbuilder.abCmd", lang), current: cMode, options: cmdOpts,
-    hint: t(cMode === "list" ? "botbuilder.abCmdHintList" : "botbuilder.abCmdHint", lang),
-  });
+    name: "cmd_mode", legend: t("botbuilder.abCmd", lang), current: cMode, options: cmdOpts, hintHtml: cmdHint,
+  }) + (cMode === "auto" ? await classifierStatusHtml(db, lang) : "");
 
   const { error: probeErr, sources } = await loadSources();
   const memSrc = sources.find((s) => s.server === MEMORY_SOURCE);
@@ -145,7 +171,7 @@ export async function renderAbilities(ctx) {
   return `<form method="POST" class="btb-form" id="btb-abilities-form">${hidden("abilities")}` +
     computer + services + skills +
     actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.abSave", lang))}</button>`) +
-    `</form>` + abilitiesScript();
+    `</form>` + sandboxOfferForm({ def, req, bot, botId, lang }) + abilitiesScript();
 }
 
 function abilitiesScript() {

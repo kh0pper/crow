@@ -17,6 +17,7 @@
  * Imports are deliberately limited to server-registry.js and instance-paths.mjs
  * so neither ext_registry.mjs nor mcp_writer.mjs can form a cycle through here.
  */
+import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -305,6 +306,22 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // would trip touchesCrowDb() and apply the journal guard to bundles that
       // never open crow.db.
       r.block.env = { ...(r.block.env || {}), CROW_HOME: crowHome };
+      // A bare command (uvx, uv, npx) is resolved to an absolute path here:
+      // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
+      // pi child failed with ENOENT and the server silently dropped.
+      if (typeof r.block.command === "string") {
+        const rc = resolveAddonCommand(r.block.command, { sha256: r.block.command_sha256, cwd: r.block.cwd || cwd });
+        const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, r.block.args);
+        if (argProblem) { unconfigured[id] = `command '${r.block.command}' not usable: ${argProblem}`; continue; }
+        if (rc.missing) {
+          unconfigured[id] = `command '${r.block.command}' not usable: ${rc.reason || "not found"} (searched the gateway PATH, ~/.local/bin, ~/.cargo/bin, ~/bin, /usr/local/bin)`;
+          continue;
+        }
+        r.block.command = rc.command;
+        // A pinned launcher keeps its pin: pi-lab's mcp-client re-hashes it
+        // right before it spawns the server (verification at spawn time).
+        if (rc.sha256) r.block.command_sha256 = rc.sha256; else delete r.block.command_sha256;
+      }
       servers[id] = r.block;
     }
   }

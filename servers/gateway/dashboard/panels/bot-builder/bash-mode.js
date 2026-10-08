@@ -8,31 +8,28 @@
  *   auto      "auto"          a safety check decides per command
  *   list      "allowlist"     only commands starting with a bash_allow entry
  *
- * The command-safety work that implements "ask" and "auto" owns flipping
- * BASH_MODES_LIVE (and, if it settles on different stored strings, the map
- * below). Until then those two modes render disabled and a save that picks
- * one fresh is refused: the pi-lab gate treats every value except
- * "allowlist" as fully blocked, so offering them would promise something the
- * runtime does not do. A value already stored is always kept as it is.
+ * "ask" and "auto" are enforced by pi-lab's permission gate (bash policies
+ * ask/auto; auto judges each command with the local safety classifier).
+ * They are for bots you chat with in Perch only (Kevin's ruling,
+ * 2026-10-08): the save guard refuses them for a bot that also answers on
+ * another channel, and the bridge runs them as deny there.
  *
- * A stored "sandbox" (an option that never had an implementation — the gate
- * blocks it like "deny") or any unknown value shows as Off and is kept
- * exactly as stored until the operator picks a mode.
+ * A stored "sandbox" (an option that never had an implementation — it runs
+ * as deny) or any unknown value shows as Off and is kept exactly as stored
+ * until the operator picks a mode; a stored "sandbox" also gets a one-click
+ * "switch to Auto?" offer (confirm_sandbox_auto).
  */
+
+import { BASH_POLICIES, isValidBashPolicy } from "../../../../shared/bot-bash-policy.js";
 
 export const BASH_UI_TO_STORED = Object.freeze({ off: "deny", ask: "ask", auto: "auto", list: "allowlist" });
 
-// The stored vocabulary. The command-safety work introduces the shared
-// validator servers/shared/bot-bash-policy.js (BASH_POLICIES /
-// isValidBashPolicy) that every definition write must pass; once it is on
-// main this module imports it instead of this copy, and
-// tests/bot-builder-def-adapter.test.js already pins the two lists equal
-// whenever that module is present.
-export const BASH_STORED_VALUES = Object.freeze(["deny", "ask", "auto", "allowlist"]);
-export function isValidStoredBash(v) { return typeof v === "string" && BASH_STORED_VALUES.includes(v); }
+// The stored vocabulary is the shared one every definition write must pass.
+export const BASH_STORED_VALUES = BASH_POLICIES;
+export function isValidStoredBash(v) { return isValidBashPolicy(v); }
 
-/** Modes the runtime enforces today. */
-export const BASH_MODES_LIVE = new Set(["off", "list"]);
+/** Modes the runtime enforces. */
+export const BASH_MODES_LIVE = new Set(["off", "ask", "auto", "list"]);
 
 /** UI modes in display order (list is shown only where its editor lives). */
 export const BASH_MODES = Object.freeze(["off", "ask", "auto", "list"]);

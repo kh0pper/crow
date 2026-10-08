@@ -8,7 +8,7 @@
 
 import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
-  loadModelOptions, remoteInvocationOn, defaultDefinition, lines,
+  loadModelOptions, remoteInvocationOn, defaultDefinition,
 } from "./data-queries.js";
 import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
@@ -16,7 +16,6 @@ import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
-import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-paths.mjs";
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
@@ -117,6 +116,34 @@ export async function handleBotBuilderPost(req, res, { db }) {
     return handleDeleteConfirm(req, res, { db });
   }
 
+  // Legacy "sandbox" (never implemented; reads as deny): the owner's one-click
+  // switch to Auto. Owner save path only (CSRF-checked like every POST here,
+  // never reachable by a peer patch), only from "sandbox", and through the
+  // same guard as every other save — so it is refused while the bot env
+  // scrub is off or when the bot answers on a channel other than Perch.
+  if (action === "confirm_sandbox_auto") {
+    const id = String(b.bot_id || "");
+    const lang = reqLang(req);
+    const back = (q) => res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(id)}&tab=abilities&${q}`);
+    let row = null;
+    try { row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [id] })).rows[0]; } catch {}
+    if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
+    let def; try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
+    const pp = def.permission_policy || {};
+    if (pp.bash !== "sandbox") return back("error=" + encodeURIComponent(t("botbuilder.bashSandboxNotLegacy", lang)));
+    const next = { ...pp, bash: "auto" };
+    const builtin = def.tools && Array.isArray(def.tools.pi_builtin) ? def.tools.pi_builtin : [];
+    const nextDef = { ...def, permission_policy: next, tools: { ...(def.tools || {}), pi_builtin: builtin.includes("bash") ? builtin : [...builtin, "bash"] } };
+    const bad = guardPolicyForSave(next, pp, nextDef);
+    if (bad) return back("error=" + encodeURIComponent(fill(t("botbuilder.policyInvalid", lang), { reason: bad })));
+    // Compare-and-swap on the definition read above (a concurrent writer wins).
+    const r = await db.execute({ sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND definition=?",
+      args: [JSON.stringify(nextDef), id, row.definition] });
+    if (!r.rowsAffected) return back("error=" + encodeURIComponent(t("botbuilder.staleForm", lang)));
+    emitBotDefsChanged(id);
+    return back("saved=1");
+  }
+
   if (action === "toggle") {
     let toggled = true;
     try {
@@ -176,6 +203,12 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } catch { row = null; }
     if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
     const tab = action.slice(5);
+    // The old Permissions form is retired (its fields live on Abilities and
+    // Safety); a stale post is refused rather than silently doing nothing.
+    if (tab === "permissions") {
+      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=safety&error=` +
+        encodeURIComponent(t("botbuilder.staleForm", reqLang(req))));
+    }
     const lang = reqLang(req);
     // A redirect target the form may ask for (the board form lives in Advanced).
     const backTab = ["basics", "abilities", "safety", "activity", "advanced"].includes(b.return_tab) ? b.return_tab : tab;
@@ -429,37 +462,6 @@ export async function handleBotBuilderPost(req, res, { db }) {
       }
       def.tools.skills = def.skills;
       def.system_prompt = (b.system_prompt || "").trim();
-    } else if (tab === "permissions") {
-      def.permission_policy.bash = b.pp_bash || "deny";
-      def.permission_policy.bash_allow = lines(b.pp_bash_allow);
-      def.permission_policy.write_paths = lines(b.pp_write_paths);
-      // S6-CROW: "Folders this bot can read". Validated (absolute, no "..");
-      // an invalid entry refuses the whole save rather than silently dropping
-      // a folder the operator meant to grant. The project folder is NOT
-      // stored here — the bridge adds it per spawn (bot-read-paths.mjs).
-      const rp = parseReadPathsInput(b.pp_read_paths);
-      if (rp.invalid.length) {
-        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions&error=` +
-          encodeURIComponent(fill(t("botbuilder.readPathsInvalid", reqLang(req)), { paths: rp.invalid.join(", ") })));
-      }
-      def.permission_policy.read_paths = rp.paths;
-      def.permission_policy.external_send = b.pp_external_send || "draft_only";
-      def.permission_policy.confirm = lines(b.pp_confirm);
-      // R13 (Phase 3.2): multi-agent opt-in. The pi-lab gate (Phase 3.1)
-      // only ALLOWS the `subagent` tool when policy.multi_agent===true AND
-      // the resolved model is MULTI_AGENT_CAPABLE; default false.
-      def.permission_policy.multi_agent = !!b.pp_multi_agent;
-      // Slice C: opt-in self-authoring. When true, the bridge lets the bot
-      // DRAFT skill proposals into its confined staging dir (inert until an
-      // operator approves them on the Skills tab). Default false.
-      def.permission_policy.self_authoring = !!b.pp_self_authoring;
-      // Plan §B2: post-turn self-learning. off (default) | propose | auto.
-      //   propose = auto-trigger the operator-gated staging flow.
-      //   auto    = write/patch directly, behind the §B2 guardrails (guardrail
-      //             phrases hard-block to a draft; high-blast-radius bots degrade
-      //             to propose; patch only this bot's own auto-authored skills).
-      const sl = (b.pp_skill_learning || "off").trim();
-      def.permission_policy.skill_learning = ["off", "propose", "auto"].includes(sl) ? sl : "off";
     } else if (tab === "triggers") {
       def.triggers.gateway = !!b.tr_gateway;
       def.triggers.cron = (b.tr_cron || "").trim();
@@ -502,7 +504,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     {
       let storedPolicy;
       try { storedPolicy = (JSON.parse(row.definition || "{}") || {}).permission_policy; } catch { storedPolicy = undefined; }
-      const bad = guardPolicyForSave(def.permission_policy, storedPolicy);
+      const bad = guardPolicyForSave(def.permission_policy, storedPolicy, def);
       if (bad) {
         return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` +
           encodeURIComponent(fill(t("botbuilder.policyInvalid", lang), { reason: bad })));

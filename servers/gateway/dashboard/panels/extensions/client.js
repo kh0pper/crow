@@ -92,7 +92,7 @@ export function extensionsClientJS(lang) {
           btn.addEventListener("click", function() {
             var action = this.dataset.action;
             var id = this.dataset.id;
-            showStatus(id, action === "start" ? '${tJs("extensions.starting", lang)}' : '${tJs("extensions.stopping", lang)}', "info");
+            showStatus(id, action === "start" ? '${tJs("extensions.starting", lang)}' : action === "repin" ? '${tJs("extensions.repinning", lang)}' : '${tJs("extensions.stopping", lang)}', "info");
             apiCall(action, { bundle_id: id }).then(function(res) {
               if (res.ok) {
                 showStatus(id, res.data.message || '${tJs("extensions.done", lang)}', "info");

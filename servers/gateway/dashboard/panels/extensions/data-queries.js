@@ -5,6 +5,7 @@
  * for the extensions/add-ons store panel.
  */
 
+import { addonLauncherStatus } from "../../../../shared/resolve-command.js";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { execFile, execFileSync } from "child_process";
 import { join, dirname } from "path";
@@ -268,4 +269,23 @@ export function fetchBundleStatus(installed) {
   }
 
   return { bundleStatus };
+}
+
+/**
+ * id → reason, for installed MCP add-ons whose launcher is refused but a
+ * re-pin would fix it (an updated uv, an edited run.sh). Read-only.
+ */
+export function addonsNeedingRepin(ids, { crowHome } = {}) {
+  const out = {};
+  try {
+    const home = crowHome || CROW_DIR;
+    const addons = JSON.parse(readFileSync(join(home, "mcp-addons.json"), "utf8")) || {};
+    for (const id of ids) {
+      const entry = addons[id];
+      if (!entry) continue;
+      const st = addonLauncherStatus(entry, entry.cwd || join(home, "bundles", id));
+      if (!st.ok && st.needsRepin) out[id] = st.reason;
+    }
+  } catch { /* no badge rather than no page */ }
+  return out;
 }

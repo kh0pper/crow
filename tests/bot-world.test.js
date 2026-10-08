@@ -265,15 +265,8 @@ const GOLDENS = {
       "__OSTMP__/pibot-XXXXXX/sys.md"
     ],
     "env": {
-      "PIBOT_JOB_TIMEOUT_MS": "5000",
-      "PIBOT_MAX_PI": "99",
-      "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
-      "PIBOT_PROMPT_ACK_TIMEOUT_MS": "8000",
       "PIBOT_SUBAGENT_DEPTH": "0",
       "PIBOT_TEST_CAPTURE": "__TMP__/capture-gmail-fresh.json",
-      "PIBOT_TURN_TIMEOUT_MS": "5000",
-      "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
-      "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
@@ -302,15 +295,8 @@ const GOLDENS = {
       "golden-uuid"
     ],
     "env": {
-      "PIBOT_JOB_TIMEOUT_MS": "5000",
-      "PIBOT_MAX_PI": "99",
-      "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
-      "PIBOT_PROMPT_ACK_TIMEOUT_MS": "8000",
       "PIBOT_SUBAGENT_DEPTH": "0",
       "PIBOT_TEST_CAPTURE": "__TMP__/capture-gmail-resume.json",
-      "PIBOT_TURN_TIMEOUT_MS": "5000",
-      "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
-      "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
@@ -337,15 +323,8 @@ const GOLDENS = {
       "__OSTMP__/pibot-XXXXXX/sys.md"
     ],
     "env": {
-      "PIBOT_JOB_TIMEOUT_MS": "5000",
-      "PIBOT_MAX_PI": "99",
-      "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
-      "PIBOT_PROMPT_ACK_TIMEOUT_MS": "8000",
       "PIBOT_SUBAGENT_DEPTH": "0",
       "PIBOT_TEST_CAPTURE": "__TMP__/capture-discord.json",
-      "PIBOT_TURN_TIMEOUT_MS": "5000",
-      "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
-      "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
@@ -372,15 +351,8 @@ const GOLDENS = {
       "__OSTMP__/pibot-job-XXXXXX/job-sys.md"
     ],
     "env": {
-      "PIBOT_JOB_TIMEOUT_MS": "5000",
-      "PIBOT_MAX_PI": "99",
-      "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
-      "PIBOT_PROMPT_ACK_TIMEOUT_MS": "8000",
       "PIBOT_SUBAGENT_DEPTH": "0",
       "PIBOT_TEST_CAPTURE": "__TMP__/capture-runjob.json",
-      "PIBOT_TURN_TIMEOUT_MS": "5000",
-      "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
-      "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_MCP_CONFIG": "__OSTMP__/pibot-job-XXXXXX/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
