@@ -14,13 +14,19 @@ import { createWmStore, matchWmFastPath, contentBlocks, wantsNewDisplay } from "
 import { createDisplayTools, cardUpdate } from "./display-tools.js";
 import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
-import { effectiveCaps } from "./caps.js";
+import { effectiveCaps, audioPolicy } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
 import { createBotFit } from "./fit.js";
 import { kioskNowContext, matchClockFastPath } from "./clock.js";
 import { wantsMemory } from "./memory-intent.js";
+import { createRelay } from "./relay.js";
+import { createTicketStore } from "./tickets.js";
+import { createMediaStore, migrateMaxVolume } from "./media.js";
+import { createSourceRegistry } from "./sources/index.js";
+import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, callSignHotwords, commandNames, STATIONS_SETTING } from "./sources/stations.js";
+import { createPlayResolver, createMediaVerbs, autoNowPlaying, showNowPlaying } from "./play.js";
 
 export const PAGE_CSP = [
   "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
@@ -40,7 +46,7 @@ export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
 export const ASSETS = {
   "kiosk.js": "text/javascript", "state.js": "text/javascript", "audio.js": "text/javascript",
   "resample.js": "text/javascript", "pcm-worklet.js": "text/javascript", "vad.js": "text/javascript",
-  "wm-view.js": "text/javascript", "bird-view.js": "text/javascript", "metrics.js": "text/javascript",
+  "wm-view.js": "text/javascript", "bird-view.js": "text/javascript", "metrics.js": "text/javascript", "media-view.js": "text/javascript",
   "kiosk.css": "text/css",
 };
 
@@ -65,6 +71,8 @@ export const KIOSK_DENY_TOOLS = Object.freeze([
  * says the fallback line instead of going silent.
  */
 export const KIOSK_MAX_TOOL_ROUNDS = 3;
+/** A display socket that misses a ping is dropped at the next one: a silent network loss is seen within 2 × this. */
+export const KIOSK_PING_MS = 15_000;
 export const KIOSK_FIRST_AUDIO_BUDGET_MS = 12_000;
 
 /** The fallback line in the display's language. */
@@ -94,7 +102,32 @@ export function kioskDisplayMissedText(lang) {
  *          the voice turn (turn.js), which may replace a remote tool's result with it; the display tools
  *          are never wrapped by it }
  */
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null } = {}) {
+/**
+ * r7 (re-smoke 2026-10-07, G1/G6/G8): the station-name STT prompt is OFF. With it, faster-whisper wrote call signs
+ * letter by letter and looped ("K-P-P-P…", "louder, louder, …") and misheard short commands on clean audio
+ * ("Pause" → "Pons"); a read-only probe of the same server reproduced "Pons" and the hyphen-spelled mode only with
+ * the prompt, and short commands went from 120/126 to 106/126 correct with it. The sound-alike matcher stays.
+ */
+export const STT_STATION_PROMPT = false;
+/** The prompt a display's turn sends (review L1: never on a Spanish display whose STT profile leaves the language to detection). */
+export function stationSttPrompt(device, profile, stations, on = STT_STATION_PROMPT) {
+  if (!on || (device?.kiosk_settings?.lang === "es" && !profile?.language)) return "";
+  return stationNamesHint(stations);
+}
+/**
+ * r7b (review of rev 7, H2): faster-whisper `hotwords` from the operator's call signs — a SWITCH, OFF by default
+ * (`CROW_KIOSK_STT_HOTWORDS=1` on the gateway turns it on; read at each turn). The reviewer's placebo showed the gain on
+ * synthetic speech came from ANY short hotword (a nonsense word did as well as the call sign), so it is not evidence
+ * that the call sign itself helps; and on Spanish speech it emptied "Pausa.". Sent only when both the display and the
+ * STT profile are English. The attended smoke decides it with and without, on a real voice (Task R7-S row R7-1).
+ */
+export const sttHotwordsOn = (env = process.env) => env?.CROW_KIOSK_STT_HOTWORDS === "1";
+export function stationSttHotwords(device, profile, stations, on = sttHotwordsOn()) {
+  const lang = device?.kiosk_settings?.lang;
+  if (!on || (lang && lang !== "en") || profile?.language !== "en") return "";
+  return callSignHotwords(stations);
+}
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
@@ -117,6 +150,9 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     displayMissedText: kioskDisplayMissedText(lang),
     memoryWhen: wantsMemory,
     ...(typeof onToolResult === "function" ? { onToolResult } : {}),
+    // F1: the names this display's sources answer to, as the STT's prompt bias (bounded in turn.js).
+    ...(typeof sttPrompt === "function" ? { sttPrompt } : {}),
+    ...(typeof sttHotwords === "function" ? { sttHotwords } : {}),
   };
 }
 
@@ -208,7 +244,27 @@ export function createKioskRuntime(deps) {
   const log = deps.log || ((m) => console.log(m));
   const pairing = createPairingStore({ now });
   const metrics = createMetricsStore();
+  // Display tickets and the relay behind them. deps.relay exists for tests; the gateway never passes one.
+  const tickets = createTicketStore({ now });
+  const relay = deps.relay || createRelay();
   let hub = null;
+  const langOf = (id) => (hub?.deviceOf?.(id)?.kiosk_settings?.lang === "es" ? "es" : "en");
+  /** Close this display's now-playing window (the session it showed is over). */
+  const closeNowPlaying = (id) => { for (const w of wm.list(id).filter((x) => x.kind === "nowplaying")) { wm.close(id, w.id); hub?.sendTo(id, { type: "wm", action: "close", id: w.id }); } };
+  // The media session (one per display, memory only). Its tickets are display tickets; its failures get one spoken line.
+  const media = createMediaStore({
+    now, tickets,
+    send: (id, msg) => hub?.sendTo(id, msg) === true,
+    onFailed: (id, item) => { const S = STRINGS[langOf(id)]; hub?.speak(id, (item.started ? S.say_play_lost : S.say_play_failed).replace("{title}", item.title || "")); },
+    onEnded: closeNowPlaying,
+    // F8: a display with a screen shows what is playing as soon as it starts (rules in play.js autoNowPlaying).
+    onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title })) hub?.sendTo(id, ev); },
+  });
+  // Station presets: this instance's local setting, held in memory, reloaded when the panel saves them.
+  let stations = [];
+  const registry = createSourceRegistry([createStationsSource({ list: () => stations }), ...(Array.isArray(deps.playSources) ? deps.playSources : [])], { log });
+  const resolver = createPlayResolver({ registry, now });
+  const verbs = createMediaVerbs({ media, resolver, maxVolume: (ctx) => ctx.maxVolume });
   const wm = createWmStore({
     now,
     onTimerDone: (id, w) => {
@@ -217,10 +273,41 @@ export function createKioskRuntime(deps) {
     },
   });
   const withDb = async (fn) => { const db = deps.openDb(); try { return await fn(db); } finally { try { db.close?.(); } catch {} } };
-  /** The executor's context for one display turn (display-tools.js, tiers.js, executor.js). Sources and launcher items arrive with the media session. */
-  const displayCtx = (device, caps, emit) => ({ store: wm, deviceId: device.id, caps, lang: device.kiosk_settings?.lang === "es" ? "es" : "en", sources: [], items: [], emit });
-  /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation). */
-  const turnOptions = (device, caps, tz, emit) => displayTurnOptions(displayCtx(device, caps, emit), { now, tz, settings: () => device.kiosk_settings });
+  /** The turn check's play sentence: the first station by name, else (with a library) "some music", else none. */
+  const playCheckSentence = (lang) => {
+    const kinds = registry.kinds();
+    if (kinds.includes("radio") && stations[0]) return lang === "es" ? `Pon ${stations[0].name}.` : `Play ${stations[0].name}.`;
+    if (kinds.includes("music")) return lang === "es" ? "Pon algo de música." : "Play some music.";
+    return null;
+  };
+  const loadStations = () => withDb(async (db) => { stations = parseStations(await deps.settings.readSetting(db, STATIONS_SETTING)); return stations; });
+  /** Read once at start; the panel's save replaces the list in memory as well. A failed read leaves "no stations". */
+  const stationsReady = loadStations().catch((err) => { log(`[kiosk] station presets not read: ${err.message}`); return []; });
+  /**
+   * The executor's context for one display turn (display-tools.js, tiers.js, executor.js): the play
+   * sources this instance has right now, what crow_open may open (now playing, once a source exists),
+   * the media session and its verbs, and this display's volume cap.
+   */
+  const displayCtx = (device, caps, emit, hooks = {}) => {
+    const lang = device.kiosk_settings?.lang === "es" ? "es" : "en";
+    const sources = registry.kinds();
+    return {
+      store: wm, deviceId: device.id, caps, lang, emit, sources,
+      items: sources.length ? [{ id: "now_playing", title: STRINGS[lang].now_playing_title, aliases: lang === "es" ? ["lo que suena"] : ["whats playing"] }] : [],
+      media, maxVolume: Number(device.kiosk_settings?.max_volume) || 100,
+      ...verbs,
+      ...(typeof hooks.onModelVerb === "function" ? { onModelVerb: hooks.onModelVerb } : {}),
+    };
+  };
+  /** A display turn's options (displayTurnOptions, shared with the turn check and the evaluation), with this display's media line. */
+  /**
+   * F1: the STT prompt bias — this instance's station names and aliases. Review L1: never on a Spanish display whose
+   * STT profile leaves the language to detection (an English name list could tilt it); a profile that pins the
+   * language (the kiosk profile pins "en") is safe. A cloud STT profile receives these names with the audio.
+   */
+  const sttPromptFor = (device) => (profile) => stationSttPrompt(device, profile, stations);
+  const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
+  const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
@@ -234,17 +321,34 @@ export function createKioskRuntime(deps) {
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
     // The pairing guess for a display with no type set (session.js); a later panel choice replaces it.
     storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
-    displayConfig: (d) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb((db) => deps.voice.runVoiceTurn({
-      db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
-      ...turnOptions(device, caps, tz, (ev) => sink.event(ev)),
-    })),
+    // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
+    displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
+    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+      // r7 G9 evidence: the server's media state before and after every display turn (fixed words, on the metrics line).
+      const mediaBefore = media.stateOf(device.id);
+      // r8 P1: the playback verbs the model asked crow_wm for, and the sentence's own verb where that one ran instead (fixed words).
+      const asked = [], kept = [];
+      const r = await deps.voice.runVoiceTurn({
+        db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
+        ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }),
+      });
+      if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id), ...(asked.length ? { model_verbs: asked } : {}), ...(kept.length ? { model_verbs_kept: kept } : {}) };
+      return r;
+    }),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
-      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings) }))
+      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) }))
       : null,
     speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
-    wm, metrics,
+    wm, metrics, media,
+    // F8: the chip opens the now-playing window; a display that cannot draw it toggles the playback as before.
+    openNowPlaying: (id, caps) => {
+      if (!media.active(id)) return [];
+      const evs = showNowPlaying({ store: wm, deviceId: id, caps, title: STRINGS[langOf(id)].now_playing_title });
+      if (evs) return evs;
+      media.command(id, { do: media.current(id)?.state === "paused" ? "resume" : "pause" }, hub?.deviceOf?.(id));
+      return [];
+    },
     wrapPcmAsWav: deps.wrapPcmAsWav,
     warmup: (d) => deps.sttWarmup(d),
     helloTimeoutMs: deps.helloTimeoutMs,
@@ -285,6 +389,7 @@ export function createKioskRuntime(deps) {
       if (at - closedAt < SESSION_DISPLAY_GRACE_MS) continue;
       closedSessionDisplays.delete(id);
       wm.closeAll(id);
+      media.closeDevice(id);
       try { deps.voice.convo?.clear?.(id); } catch {}
       sweepWarmAt.delete(id);
     }
@@ -321,6 +426,27 @@ export function createKioskRuntime(deps) {
       if (!botId) return { close: { code: 4403, reason: "no_bot" } };
       return { device: await sessionDevice(db, sessionToken, botId) };
     });
+  }
+
+  /**
+   * The operator ruling (rev 7b, M2; re-derived in rev 8b): once, at boot, each display's "Loudest volume" cap stored on an
+   * older scale (no mark = linear, or rev 8's "db10") moves to the equally-or-less loud level of the −50…0 dB scale; the save marks it "db5", so it
+   * never runs twice. → how many moved (counts only). Never throws.
+   */
+  async function migrateVolumeCaps() {
+    let moved = 0;
+    try {
+      for (const d of await withDb(kioskDevices)) {
+        const ks = d.kiosk_settings || {};
+        if (!("max_volume" in ks)) continue;
+        const v = migrateMaxVolume(ks.max_volume, ks.max_volume_scale);   // undefined when already on this build's scale
+        if (v === undefined) continue;
+        await withDb((db) => deps.deviceStore.updateDeviceProfiles(db, d.id, { kiosk_settings: { max_volume: v } }));
+        moved++;
+      }
+      if (moved) log(`[kiosk] loudest-volume caps moved to the -50..0 dB scale: ${moved}`);
+    } catch (err) { log(`[kiosk] loudest-volume cap migration: ${err.message}`); }
+    return moved;
   }
 
   /**
@@ -392,7 +518,9 @@ export function createKioskRuntime(deps) {
       if (!ok) return res.status(401).json({ error: "unauthorized" });
       next();
     };
-    const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => { log(`[kiosk] ${req.method} ${req.path}: ${err.message}`); if (!res.headersSent) res.status(500).json({ error: "internal" }); });
+    // A ticket is a credential in a path: it never reaches the log.
+    const logPath = (p) => (String(p).startsWith("/display/t/") ? `/display/t/…/${String(p).split("/").slice(4).join("/")}` : p);
+    const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => { log(`[kiosk] ${req.method} ${logPath(req.path)}: ${err.message}`); if (!res.headersSent) res.status(500).json({ error: "internal" }); });
 
     // The page lives at /display (ruling F1): the installed maker-lab bundle owns /kiosk/*.
     r.use("/display", gate);
@@ -428,6 +556,21 @@ export function createKioskRuntime(deps) {
       if (!p.startsWith(resolve(deps.files.publicDir)) || !existsSync(p)) return res.status(404).type("text/plain").send("Not found");
       res.type(ASSETS[f]).send(readFileSync(p, "utf8"));
     });
+
+    // A display ticket: one stream for one display. The network gate above has already run; no token,
+    // cookie or query string is read here, and only GET is answered (anything else holds no upstream).
+    r.all("/display/t/:ticket/stream", wrap(async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      if (req.method !== "GET") { res.setHeader("Allow", "GET"); return res.status(405).type("text/plain").send("Method not allowed"); }
+      const t = tickets.get(String(req.params.ticket || ""));
+      if (!t || t.kind !== "stream") return res.status(404).type("text/plain").send("Not found");
+      if (!tickets.enter(t)) return res.status(429).type("text/plain").send("Too many requests");
+      res.on("close", () => tickets.leave(t));
+      const code = await relay.toResponse(t.resource, req, res, { signal: t.abort.signal });
+      // The reason is logged by code only: never the upstream address, never the ticket.
+      if (code !== "ok" && code !== "aborted") log(`[kiosk] stream for ${t.deviceId} not relayed: ${code}`);
+    }));
 
     r.post("/api/kiosk/pair/start", json, (req, res) => {
       const { ip, login } = pairRequester(req);
@@ -538,6 +681,39 @@ export function createKioskRuntime(deps) {
         res.json({ ok: true });
       });
     }));
+    // Station presets (this instance only; never synced). The address is shown to the operator, never to a display.
+    r.get("/api/kiosk/admin/stations", wrap(async (req, res) => {
+      await stationsReady;
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ stations, max: 50, command_names: commandNames(stations) });
+    }));
+    r.post("/api/kiosk/admin/stations", json, wrap(async (req, res) => {
+      const raw = Array.isArray(req.body?.stations) ? req.body.stations.slice(0, 60) : null;
+      if (!raw) return res.status(400).json({ error: "stations_required" });
+      // A name or spoken name that is itself a command ("Stop", "Next Radio") is refused here, at the save, with the word.
+      const cmd = commandNames(raw.map((r) => ({ name: r?.name, aliases: Array.isArray(r?.aliases) ? r.aliases : [] })));
+      if (cmd.length) return res.status(400).json({ error: "command_name", word: cmd[0] });
+      // A ticked (home-network) row is checked HERE, on the server, before anything is stored: every address
+      // its host resolves to must pass the home-network rule, and that set is what a play may later resolve to.
+      // A client-supplied address set is never trusted.
+      const rows = [];
+      for (const r of raw) {
+        if (!r || typeof r !== "object" || r.local !== true) { rows.push(r && typeof r === "object" ? { ...r, addrs: undefined } : r); continue; }
+        const c = await relay.checkLocal(String(r.url || "").slice(0, 500));
+        if (!c.ok) return res.status(400).json({ error: "local_check_failed", station: String(r.name || "").slice(0, 60), reason: c.error });
+        rows.push({ ...r, addrs: c.addrs });
+      }
+      const list = normalizeStations(rows);
+      // Every row the operator sent must survive the check: nothing is silently dropped or repaired.
+      if (list.length !== raw.length) return res.status(400).json({ error: "invalid_station", kept: list.length, sent: raw.length });
+      await withDb((db) => deps.settings.writeSetting(db, STATIONS_SETTING, JSON.stringify(list.map((x) => ({ name: x.name, aliases: x.aliases, url: x.url, ...(x.local ? { local: true, addrs: x.addrs } : {}) })))));
+      stations = list;
+      res.json({ ok: true, stations });
+    }));
+    // "Test": does this address answer with audio? Response headers only; the station's own policy (public, or the home-network rule when ticked).
+    r.post("/api/kiosk/admin/stations/test", json, wrap(async (req, res) => {
+      res.json(await probeStation({ url: String(req.body?.url || "").slice(0, 500), local: req.body?.local === true }, relay));
+    }));
     r.get("/api/kiosk/admin/displays/:id/metrics", (req, res) => res.json({ turns: metrics.list(req.params.id), summary: metrics.summary(req.params.id) }));
 
     r.get("/api/kiosk/internal/displays", wrap(async (req, res) => {
@@ -576,14 +752,22 @@ export function createKioskRuntime(deps) {
       };
       wm.closeAll(device.id);
       deps.voice.convo?.save?.(device.id, []);
-      let clock, plain, show;
+      let clock, plain, show, play = null;
       try {
         const [c, p, s] = TURN_CHECK[lang];
         clock = await once(c);
         plain = await once(p);
         for (let i = 0; i < TURN_CHECK_CARD_TRIES && !show?.windows.includes("content"); i += 1) show = await once(s);
-      } finally { wm.closeAll(device.id); deps.voice.convo?.save?.(device.id, []); }
-      res.json({ ok: clock.fast_path === true && plain.failed === null && plain.tools_offered === 0 && show.failed === null && show.windows.includes("content"), version: KIOSK_VERSION, card_tries: out.length - 2, tts_profile_id: device.tts_profile_id, turns: out });
+        // WM1b: with something to play, a fourth sentence must start it (as settled in the private engineering notes). The
+        // display does not exist, so nothing is fetched: a ticket is minted and dropped with the session below.
+        const sentence = playCheckSentence(lang);
+        if (sentence) {
+          play = await once(sentence);
+          play.playing = media.active(device.id);
+        }
+      } finally { media.closeDevice(device.id); wm.closeAll(device.id); deps.voice.convo?.save?.(device.id, []); }
+      const playOk = !play || (play.playing === true && play.failed === null && (play.fast_path || /^crow_play:(playing|audio_instead)/.test(String(play.final || ""))));
+      res.json({ ok: clock.fast_path === true && plain.failed === null && plain.tools_offered === 0 && show.failed === null && show.windows.includes("content") && playOk, version: KIOSK_VERSION, card_tries: out.length - 2 - (play ? 1 : 0), tts_profile_id: device.tts_profile_id, turns: out });
     }));
     r.post("/api/kiosk/internal/show", json, wrap(async (req, res) => {
       const title = String(req.body?.title || "").trim().slice(0, 80);
@@ -600,7 +784,7 @@ export function createKioskRuntime(deps) {
     const accept = (req, socket, head, attachOpts) => wss.handleUpgrade(req, socket, head, (ws) => {
       let alive = true;
       ws.on("pong", () => { alive = true; });
-      const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, 15_000);
+      const ping = setInterval(() => { if (!alive) { ws.terminate(); return; } alive = false; try { ws.ping(); } catch {} }, KIOSK_PING_MS);
       ws.on("close", () => clearInterval(ping));
       hub.attach(ws, attachOpts);
     });
@@ -631,5 +815,5 @@ export function createKioskRuntime(deps) {
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, announce, show, bootWarmup, expireSessionDisplays, stop: () => clearInterval(sweep) };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => clearInterval(sweep) };
 }

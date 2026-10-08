@@ -272,3 +272,120 @@ test("panel: each display has a display-type select with the four profiles; only
   assert.ok(guessed.card.textContent.includes(STRINGS.en.profile_guessed), "a guessed type says so");
   for (const L of ["en", "es"]) for (const k of ["profile", "profile_unset", "profile_guessed", "profile_pi3", "profile_phone", "profile_tablet", "profile_desktop", "profile_hint"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
 });
+
+test("panel media settings: loudest volume (10-100 %) and pause-while-listening are per display; only a change is posted", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, max_volume: 70 } });
+  const mv = p.card.querySelectorAll("select")[6];
+  assert.deepEqual([...mv.querySelectorAll("option")].map((o) => o.value), ["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"]);
+  assert.equal(mv.value, "70");
+  const pml = [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");
+  assert.equal(pml.checked, false);
+  p.choose(mv, "40");
+  pml.checked = true;
+  pml.dispatchEvent(new p.window.Event("change"));
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, max_volume: 40, pause_media_on_listen: true } });
+});
+
+test("smoke F3: pause-while-listening shows ON for a phone or tablet with nothing stored, and the default is never written; ticking it off stores false; the box follows the type chosen until it is touched", async () => {
+  const label = (p) => [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");
+  let p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone" } });
+  assert.equal(label(p).checked, true, "a phone: on by default");
+  p.choose(p.card.querySelectorAll("select")[6], "40");
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(Object.hasOwn(p.posts[0].body.kiosk_settings, "pause_media_on_listen"), false, "the default is not written by another save");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "tablet" } });
+  const box = label(p);
+  box.checked = false; box.dispatchEvent(new p.window.Event("change"));
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.equal(p.posts[0].body.kiosk_settings.pause_media_on_listen, false, "the operator's choice is stored");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "pi3" } });
+  assert.equal(label(p).checked, false, "a Pi: off by default");
+  p.choose(p.card.querySelectorAll("select")[4], "phone");
+  assert.equal(label(p).checked, true, "untouched, it follows the type chosen");
+  p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone", pause_media_on_listen: false } });
+  assert.equal(label(p).checked, false, "a stored choice wins over the default");
+});
+
+test("panel stations: rows render with textContent, Test posts only the address, Save posts the whole list and shows a refusal in words", async () => {
+  const { parseHTML } = await import("linkedom");
+  const vm = await import("node:vm");
+  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-devices"></div><div id="kk-stations"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
+  const posts = [];
+  let reply = { ok: false, error: "invalid_station" };
+  const listing = { devices: [], pending: [], bots: [], stt_profiles: [], tts_profiles: [] };
+  const fetch = async (path, opts = {}) => {
+    if (opts.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
+    const body = path === "/api/kiosk/admin/stations" && opts.method !== "POST" ? { stations: [{ name: "<b>Morning</b> Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }], max: 50 }
+      : path === "/api/kiosk/admin/stations/test" ? { ok: false, error: "private_address" } : path === "/api/kiosk/admin/stations" ? reply : listing;
+    return { status: 200, json: async () => body };
+  };
+  const ctx = vm.createContext({ document, window, fetch, JSON, String, setInterval: () => 0, clearInterval: () => {}, encodeURIComponent, Date });
+  vm.runInContext(CLIENT_SCRIPT, ctx);
+  const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r)); };
+  await flush();
+  const box = document.getElementById("kk-stations");
+  const inputs = box.querySelectorAll(".kk-station input:not([type=checkbox])");
+  assert.deepEqual([...inputs].map((i) => i.value), ["<b>Morning</b> Mix", "the mix", "https://stream.example.invalid/mix"]);
+  assert.equal(box.querySelectorAll("b").length, 0, "a name is text, never markup");
+  const btn = (t) => [...box.querySelectorAll("button")].find((b) => b.textContent === t);
+  btn(STRINGS.en.station_test).dispatchEvent(new window.Event("click"));
+  await flush();
+  assert.deepEqual(posts.at(-1), { path: "/api/kiosk/admin/stations/test", body: { url: "https://stream.example.invalid/mix", local: false } });
+  assert.ok(box.textContent.includes(STRINGS.en.station_err_private_address));
+  btn(STRINGS.en.station_add).dispatchEvent(new window.Event("click"));
+  const rows = box.querySelectorAll(".kk-station");
+  assert.equal(rows.length, 2);
+  rows[1].querySelectorAll("input")[0].value = "WXYZ HD2";
+  rows[1].querySelectorAll("input")[1].value = "HD two, w x y z two";
+  rows[1].querySelectorAll("input")[2].value = "https://stream.example.invalid/hd2";
+  btn(STRINGS.en.save).dispatchEvent(new window.Event("click"));
+  await flush();
+  assert.deepEqual(posts.at(-1), { path: "/api/kiosk/admin/stations", body: { stations: [
+    { name: "<b>Morning</b> Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" },
+    { name: "WXYZ HD2", aliases: ["HD two", "w x y z two"], url: "https://stream.example.invalid/hd2" },
+  ] } });
+  assert.ok(box.textContent.includes(STRINGS.en.station_invalid_station), "the refusal is explained");
+  reply = { ok: true };
+});
+
+test("panel stations: the Home network tick is off by default and explained in one line; Save checks every ticked row first and saves nothing if one fails", async () => {
+  const { parseHTML } = await import("linkedom");
+  const vm = await import("node:vm");
+  const { document, window } = parseHTML(`<html><body><div id="kk-root"><div id="kk-pair"></div><div id="kk-devices"></div><div id="kk-stations"></div></div><script type="application/json" id="kk-strings">${JSON.stringify(STRINGS.en)}</script></body></html>`);
+  const posts = [];
+  let testReply = { ok: false, error: "own_address" };
+  const fetch = async (path, opts = {}) => {
+    if (opts.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
+    const body = path === "/api/kiosk/admin/stations" && opts.method !== "POST" ? { stations: [{ name: "Morning Mix", aliases: [], url: "https://stream.example.invalid/mix" }], max: 50 }
+      : path === "/api/kiosk/admin/stations/test" ? testReply : path === "/api/kiosk/admin/stations" ? { ok: true } : { devices: [], pending: [], bots: [], stt_profiles: [], tts_profiles: [] };
+    return { status: 200, json: async () => body };
+  };
+  const ctx = vm.createContext({ document, window, fetch, JSON, String, Promise, setInterval: () => 0, clearInterval: () => {}, encodeURIComponent, Date });
+  vm.runInContext(CLIENT_SCRIPT, ctx);
+  const flush = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  await flush();
+  const box = document.getElementById("kk-stations");
+  const tick = box.querySelector(".kk-station input[type=checkbox]");
+  assert.equal(tick.checked, false, "off by default");
+  assert.equal(tick.title, STRINGS.en.station_local_hint);
+  assert.ok(box.textContent.includes(STRINGS.en.station_local));
+  const btn = (t) => [...box.querySelectorAll("button")].find((b) => b.textContent === t);
+  btn(STRINGS.en.station_add).dispatchEvent(new window.Event("click"));
+  const row = box.querySelectorAll(".kk-station")[1];
+  row.querySelectorAll("input")[0].value = "Shed";
+  row.querySelectorAll("input")[2].value = "http://192.168.1.20:8000/live";
+  row.querySelector("input[type=checkbox]").checked = true;
+  btn(STRINGS.en.save).dispatchEvent(new window.Event("click"));
+  await flush();
+  assert.deepEqual(posts.map((p) => p.path), ["/api/kiosk/admin/stations/test"], "the ticked row was checked; nothing saved");
+  assert.deepEqual(posts[0].body, { url: "http://192.168.1.20:8000/live", local: true });
+  assert.ok(box.textContent.includes(STRINGS.en.station_err_own_address));
+  testReply = { ok: true, content_type: "audio/mpeg" };
+  btn(STRINGS.en.save).dispatchEvent(new window.Event("click"));
+  await flush();
+  assert.deepEqual(posts.at(-1), { path: "/api/kiosk/admin/stations", body: { stations: [{ name: "Morning Mix", aliases: [], url: "https://stream.example.invalid/mix" }, { name: "Shed", aliases: [], url: "http://192.168.1.20:8000/live", local: true }] } });
+});

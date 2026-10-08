@@ -60,7 +60,7 @@ test("OUTCOMES names every outcome a tool may return (they are the log codes)", 
   assert.deepEqual(Object.keys(OUTCOMES), ["crow_play", "crow_open", "crow_show", "crow_wm"]);
   for (const list of Object.values(OUTCOMES)) for (const o of list) assert.match(o, /^[a-z][a-z0-9_]{0,31}$/);
   assert.deepEqual(OUTCOMES.crow_show, ["shown", "updated", "invalid"]);
-  assert.deepEqual(Object.keys(MUST_NOTES), ["crow_show", "crow_play", "crow_open"]);
+  assert.deepEqual(Object.keys(MUST_NOTES), ["crow_show", "crow_play", "crow_wm", "crow_open"]);
   for (const [name, note] of Object.entries(MUST_NOTES)) { assert.match(note, /^\[Display\] /); assert.ok(note.includes(name), name); assert.match(note, /never say/); }
 });
 

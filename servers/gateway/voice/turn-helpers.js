@@ -35,6 +35,36 @@ export function createThinkGate() {
 }
 
 /**
+ * Tool-call syntax written as TEXT (kiosk re-smoke 2026-10-07 G3: the quick model wrote "<tool_call><function=crow_play>…"
+ * for a tool it was not offered). Everything from the first marker on is dropped for the rest of the round; a
+ * trailing "<…" that could still become a marker is held until the next delta. `cut` says whether it happened.
+ */
+// Review of rev 7 (L1): Qwen/Hermes XML tags, Mistral's [TOOL_CALLS], Llama's <|python_tag|>, <function_call>, any case,
+// and a bare JSON call object. Lower case; the gate compares case-insensitively.
+// r7c: also a pretty-printed call ("{" then a newline, then "name") and a fenced json block. Markers are compared with
+// whitespace removed, so a delta that ends right after "{\n" is held too.
+const TOOL_MARKERS = ["<tool_call", "</tool_call", "<function=", "<function>", "</function", "<function_call", "<parameter=", "<|tool_call", "<|python_tag|>", "[tool_calls]", '{"name"', "```json{"];
+export const TOOL_SYNTAX = /<\/?tool_call|<\/?function(?:_call)?[=>]|<parameter=|<\|tool_call|<\|python_tag\|>|\[TOOL_CALLS\]|\{\s*"name"\s*:|```json\s*\{/i;
+export function stripToolSyntax(text) { const s = String(text ?? ""); const m = TOOL_SYNTAX.exec(s); return m ? s.slice(0, m.index).trimEnd() : s; }
+export function createToolSyntaxGate() {
+  let buf = "", cut = false;
+  return {
+    get cut() { return cut; },
+    feed(text) {
+      if (cut) return "";
+      buf += text;
+      const m = TOOL_SYNTAX.exec(buf);
+      if (m) { cut = true; const out = buf.slice(0, m.index); buf = ""; return out; }
+      const could = (at) => { const t = buf.slice(at).toLowerCase().replace(/\s+/g, ""); return TOOL_MARKERS.some((k) => k.startsWith(t) && t.length < k.length); };
+      const at = [buf.search(/`+[a-z]*\s*$/i), buf.lastIndexOf("<"), buf.lastIndexOf("["), buf.lastIndexOf("{")].filter((i) => i >= 0 && could(i)).sort((a, b) => a - b)[0];
+      if (at !== undefined) { const out = buf.slice(0, at); buf = buf.slice(at); return out; }
+      const out = buf; buf = ""; return out;
+    },
+    flush() { const out = cut ? "" : buf; buf = ""; return out; },
+  };
+}
+
+/**
  * Clause break for the FIRST chunk only (kiosk latency lever 3): , ; : or a dash
  * followed by whitespace (so "1,000" and "3:30" never split). Only taken when the
  * clause already holds FIRST_CLAUSE_MIN_WORDS words, so "Sure," or "Well," is not
@@ -174,6 +204,23 @@ export function createConvoStore({ maxMessages = 24, idleMs = 15 * 60 * 1000, no
     },
     clear(id) { store.delete(id); },
   };
+}
+
+/**
+ * Is this transcript an STT repetition loop rather than speech (kiosk re-smoke 2026-10-07 G4: "K-P-P-P-P…",
+ * "louder, louder, … and louder")? Review of rev 7 (M5): real speech repeats too ("No, no, no, no, no, no!", "Sí, sí…",
+ * "very very … good", a title, "100000000"), so only: the same word eight times running; or six times running when
+ * that run is most of the transcript (≥ 60 % of its words) AND at least 40 characters long; or, inside one word that is
+ * not a number, a 1–3 character unit repeated twelve times or more.
+ */
+export function degenerateTranscript(text) {
+  const words = String(text || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  let run = 1;
+  for (let i = 1; i < words.length; i++) {
+    run = words[i] === words[i - 1] ? run + 1 : 1;
+    if (run >= 8 || (run >= 6 && run / words.length >= 0.6 && run * (words[i].length + 1) >= 40)) return true;
+  }
+  return words.some((w) => w.length >= 12 && !/^\d+$/.test(w) && /(.{1,3})\1{11,}/u.test(w));
 }
 
 export function negotiatePcm(adapterName) {

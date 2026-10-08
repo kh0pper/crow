@@ -10,6 +10,16 @@
  *   revalidate() → boolean   asked at every turn_start and by revalidateSessions();
  *       false closes 4401 (the login ended); a throw at a turn closes 1011 (retry).
  *   onClose(device)          the socket closed and was not replaced by a newer one.
+ *
+ * How a turn ends, as the page sees it: every turn_start is answered by exactly ONE closing frame for
+ * that turn_id — `turn_done` when the turn ran (also when it failed or was interrupted), or
+ * `turn_over { turn_id, reason: "empty" | "too_long" | "busy" }` when it never ran. The page ends
+ * its own turn state on either (what it ducked or paused for the turn comes back). An older page
+ * ignores turn_over, as it ignores any frame it does not know.
+ *
+ * Media (deps.media, the media session store): on every hello the page is told the media state —
+ * the current item, or an explicit stop when there is none — so a page that kept an element from
+ * before a restart never shows a stream the server no longer has.
  */
 import { effectiveCaps, guessProfile, PROFILES } from "./caps.js";
 import { validTimeZone } from "./clock.js";
@@ -64,13 +74,15 @@ export function createSessionHub(deps) {
       const audio = deps.wrapPcmAsWav(Buffer.concat(frames.slice(0, snap.n)), 16000);
       e.promise = Promise.resolve()
         .then(() => deps.transcribe({ device, audio, signal: e.ctrl.signal }))
-        .then((r) => ({ text: String(r?.text || "").trim(), ms: nowMs() - e.startedAt }), (err) => ({ error: err, ms: nowMs() - e.startedAt }))
+        .then((r) => ({ text: String(r?.text || "").trim(), hotwords: r?.hotwords === true, ms: nowMs() - e.startedAt }), (err) => ({ error: err, ms: nowMs() - e.startedAt }))
         .then((r) => { e.done = true; e.ms = r.ms; if (early === e && earlyWant && inTurn) startEarly(earlyWant); return r; });
       early = e;
     }
     const helloTimer = setT(() => { if (!device) ws.close(4401, "hello_timeout"); }, deps.helloTimeoutMs || HELLO_TIMEOUT_MS);
     const state = (bird) => sendJson(ws, { type: "state", bird });
-    const self = { ws, get device() { return device; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
+    /** The closing frame of a turn that never ran (see the header). */
+    const turnOver = (id, reason) => sendJson(ws, { type: "turn_over", turn_id: id, reason });
+    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
 
     /**
      * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
@@ -86,7 +98,8 @@ export function createSessionHub(deps) {
         if (forTurn) { gone = true; ws.close(1011, "server_error"); }
         return false;
       }
-      if (!ok) { gone = true; ws.close(4401, "unauthorized"); }
+      // The login ended: what was playing for it ends now, not after the reconnect grace.
+      if (!ok) { gone = true; if (device) deps.media?.closeDevice(device.id); ws.close(4401, "unauthorized"); }
       return ok;
     }
     if (opts.revalidate) self.revalidate = () => stillAuthorized(false);
@@ -110,7 +123,7 @@ export function createSessionHub(deps) {
 
     /** `ready` carries display_config; re-sent after a panel save (the page tolerates repeats). */
     async function sendReady() {
-      const cfg = await deps.displayConfig(device);
+      const cfg = await deps.displayConfig(device, rawCaps);
       sendJson(ws, { type: "ready", server_now: (deps.now || Date.now)(), display_config: cfg });
     }
     self.pushReady = sendReady;
@@ -148,6 +161,7 @@ export function createSessionHub(deps) {
       try {
         await sendReady();
         sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
+        if (deps.media) { sendJson(ws, deps.media.snapshot(d.id) || { type: "media", action: "stop" }); deps.media.sessionBack(d.id); }
       } catch (err) { deps.log?.(`[kiosk] hello setup failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       state("idle");
       Promise.resolve().then(() => deps.warmup(d)).catch(() => {});
@@ -169,7 +183,7 @@ export function createSessionHub(deps) {
       frames = []; bytes = 0;
       // Nothing said (the page's no-speech timeout): never send room noise to STT —
       // whisper turns it into "Thank you." and a ghost reply. Same path as < 200 ms.
-      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); state("idle"); drainSpeech(); return; }
+      if (msg?.vad_reason === "no_speech" || pcm.length < MIN_TURN_BYTES) { deps.log?.(`[kiosk] empty turn on ${device.id} (${msg?.vad_reason === "no_speech" ? "no speech" : `${pcm.length} bytes`}): caption only`); sendJson(ws, { type: "error", code: "empty_transcript", recoverable: true }); turnOver(turnId, "empty"); state("idle"); drainSpeech(); return; }
       busy = true;
       if (authCheck) {
         // The login was re-checked when this turn started; nothing runs for a session that ended.
@@ -205,7 +219,7 @@ export function createSessionHub(deps) {
           clearT2(cap);
           if (er.capped) usable.ctrl.abort();
           // An empty early transcript is not trusted (a mid-word snapshot): the full audio is transcribed.
-          if (!er.error && er.text && !my.signal.aborted) sttEarly = { used: true, ms: er.ms, discards, discard_ms: discardMs };
+          if (!er.error && er.text && !my.signal.aborted) sttEarly = { used: true, ms: er.ms, hotwords: er.hotwords === true, discards, discard_ms: discardMs };
           if (sttEarly) transcript = er.text;
           else if (er.error && !my.signal.aborted) deps.log?.(`[kiosk] early STT unusable, transcribing again: ${er.error.message}`);
         }
@@ -246,6 +260,7 @@ export function createSessionHub(deps) {
           dropEarly();
           inTurn = false; frames = []; bytes = 0;
           sendJson(ws, { type: "error", code: "audio_too_long", recoverable: true });
+          turnOver(turnId, "too_long");
           state("idle");
           drainSpeech();   // speech queued while the mic was open must not be stranded
           return;
@@ -257,7 +272,7 @@ export function createSessionHub(deps) {
       try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
       switch (msg?.type) {
         case "turn_start":
-          if (busy) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); return; }
+          if (busy) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); turnOver(String(msg.turn_id || "").slice(0, 64), "busy"); return; }
           if (speechAbort) speechAbort.abort();
           dropEarly(); earlyDiscards = 0;
           inTurn = true; frames = []; bytes = 0;
@@ -282,8 +297,11 @@ export function createSessionHub(deps) {
           if (msg.kind === "dismissed") { const w = deps.wm.close(device.id, id); if (w) sendJson(ws, { type: "wm", action: "close", id: w.id }); }
           else if (msg.kind === "tapped") deps.wm.focus(device.id, id);
           else if (msg.kind === "close_all") { deps.wm.closeAll(device.id); sendJson(ws, { type: "wm", action: "close_all" }); }   // long-press (spec §8.5)
+          else if (msg.kind === "nowplaying") { for (const ev of deps.openNowPlaying?.(device.id, caps) || []) sendJson(ws, ev); }   // F8: the chip was tapped
           return;
         }
+        case "media_event": deps.media?.onEvent(device.id, msg); return;
+        case "media_cmd": deps.media?.command(device.id, msg, sessions.get(device.id)?.device || device); return;
         case "turn_metrics": {
           const merged = deps.metrics.clientTurn(device.id, msg);
           // One greppable line per timed turn: the smoke computes the gate from these (Task 13).
@@ -300,6 +318,7 @@ export function createSessionHub(deps) {
       if (speechAbort) speechAbort.abort();
       if (device && sessions.get(device.id) === self) {
         sessions.delete(device.id);
+        deps.media?.sessionLost(device.id);          // the stream outlives a network blip; the grace period decides
         try { opts.onClose?.(device); } catch (err) { deps.log?.(`[kiosk] close hook failed: ${err?.message}`); }
       }
     });
@@ -311,7 +330,7 @@ export function createSessionHub(deps) {
     closeDevice(id, code = 4401, reason = "unpaired") {
       // Unpair also drops the device's server-held windows/timers; supersede and network
       // reconnects never reach here, so they keep them (the snapshot restores the timer).
-      if (reason === "unpaired") deps.wm.closeAll(id);
+      if (reason === "unpaired") { deps.wm.closeAll(id); deps.media?.closeDevice(id); }
       const s = sessions.get(id);
       if (!s) return false;
       sessions.delete(id);
@@ -339,6 +358,8 @@ export function createSessionHub(deps) {
     },
     /** The live session's device row (or null when the display is offline). */
     deviceOf: (id) => sessions.get(id)?.device || null,
+    /** The live session's effective caps (or null when the display is offline). */
+    capsOf: (id) => sessions.get(id)?.caps || null,
     isConnected: (id) => sessions.has(id),
     /** A turn or speech is running on this display (the STT keep-warm skips it). */
     isBusy: (id) => !!sessions.get(id)?.busy,   // turn running, speech playing, or the mic open

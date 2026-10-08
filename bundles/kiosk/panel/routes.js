@@ -71,6 +71,7 @@ const runtime = createKioskRuntime({
 // Smoke 2026-10-04: the first inference after a whisper start took 8.2 s even with the
 // model preloaded, so warm every paired display's STT now (retried until whisper answers).
 runtime.bootWarmup().catch(() => {});
+runtime.migrateVolumeCaps().catch(() => {});   // rev 7b (M2): old linear caps → the 5 dB scale, once
 
 export default function kioskRouter(dashboardAuth) { return runtime.router(dashboardAuth); }
 export function setupWebSocket(server) { return runtime.attachUpgrade(server); }

@@ -225,7 +225,7 @@ function liveWm({ windows = [], playing = false } = {}) {
   for (const w of windows) store.open("d", w);
   const media = { active: () => playing };
   const list = makeTools({ store, deviceId: "d", caps: CAPS, lang: "en", sources: ["music", "radio", "news"], items: [], emit: () => {}, media,
-    mediaVerb: () => ({ ok: true, outcome: "done", say: "Okay.", final: true, events: [] }) });
+    mediaVerb: () => (playing ? { ok: true, outcome: "done", say: "Okay.", final: true, events: [] } : { ok: true, outcome: "nothing_playing", say: "Nothing is playing.", final: true, effect: false, events: [] }) });
   const wm = list.find((t) => t.definition.name === "crow_wm");
   return { store, run: async (args, transcript) => JSON.parse(await wm.execute(args, { transcript })) };
 }
@@ -426,4 +426,20 @@ test("R7-1: with a window open, 'teach me to …' never closes or steps it, and 
   }
   const t = liveEs(ES_ITEMS);
   assert.equal(t.by.crow_wm.holdText("¿Me enseñas a usar el temporizador?"), false);
+});
+
+test("r7 G3: with radio presets, a sentence that asks to play a station is offered crow_play even when STT mangled it ('Playing, KDEB.', 'KTPF please', 'Like, APFT.'); questions and other displays are not", () => {
+  const t = tools();
+  for (const say of ["Playing, KDEB.", "KTPF please.", "Like, APFT.", "Lake APFD HD1.", "Plays KDBV.", "Played KTPF."]) assert.ok(t.offered(say).includes("crow_play"), say);
+  for (const say of ["What's playing?", "Who played the lead in that film?", "Is the TV on?", "What is the capital of Portugal?", "Tell me a short joke."]) assert.ok(!t.offered(say).includes("crow_play"), say);
+  const noRadio = tools({ sources: ["music"] });
+  for (const say of ["KTPF please.", "Like, APFT."]) assert.ok(!noRadio.offered(say).includes("crow_play"), `no radio presets: ${say}`);
+  // Offered only: nothing becomes must-run by it.
+  assert.equal(t.by.crow_play.must("Playing, KDEB."), false);
+});
+
+test("r7b L2: interjections and titles without a vowel are not call signs — 'Hmm, tell me a joke.', 'Mrs Kite called.', 'Shh, it's late.' offer no crow_play", () => {
+  const t = tools();
+  for (const say of ["Hmm, tell me a joke.", "Mrs Kite called.", "Shh, it's late.", "Psst, what time is it", "Brr, it's cold today."]) assert.ok(!t.offered(say).includes("crow_play"), say);
+  assert.ok(t.offered("Ktpf please.").includes("crow_play"), "a lower-case call sign still counts");
 });

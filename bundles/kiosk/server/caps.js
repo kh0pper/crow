@@ -63,3 +63,28 @@ export function effectiveCaps(raw, profileName) {
     kinds, windows, iframe: false,
   };
 }
+
+/**
+ * How the page treats its microphone and the music on this display (smoke 2026-10-06 F3, F6). A phone or a
+ * tablet (its profile, or — with none stored, as on a dashboard session display — the pairing guess from
+ * this page's own hello):
+ *   pause_media_on_listen  the music PAUSES while the display listens (ducking is not enough on a phone
+ *                          speaker); an explicit operator setting, true or false, always wins and is never
+ *                          written by this default.
+ *   mic_per_turn           the page releases the microphone at the end of each turn and opens it again at the
+ *                          next tap: on Android an open echo-cancelled capture keeps the device in voice-call
+ *                          audio mode, which plays all music through the call path. A Linux display (the Pi)
+ *                          keeps it open.
+ * → { pause_media_on_listen: boolean, mic_per_turn: boolean }
+ */
+export const HANDHELD_PROFILES = Object.freeze(["phone", "tablet"]);
+export function audioPolicy(kioskSettings, rawCaps) {
+  const ks = kioskSettings && typeof kioskSettings === "object" ? kioskSettings : {};
+  const profile = Object.hasOwn(PROFILES, ks.profile || "") ? ks.profile : guessProfile(rawCaps);
+  const handheld = HANDHELD_PROFILES.includes(profile);
+  // Review M4: the mic is let go per turn only where the call-mode problem was seen and the reopen is known to be
+  // silent — Android (its browser reports a Linux platform). iOS Safari is unverified (a re-prompt, an <audio>
+  // interruption): it keeps the open mic until an iPhone row of the smoke passes.
+  const android = /^linux/i.test(String(rawCaps?.platform || "").slice(0, 40));
+  return { pause_media_on_listen: typeof ks.pause_media_on_listen === "boolean" ? ks.pause_media_on_listen : handheld, mic_per_turn: handheld && android };
+}

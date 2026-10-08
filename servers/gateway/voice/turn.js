@@ -9,7 +9,7 @@
  * NO AUDIO IS STORED: `opts.audio` is handed to the STT adapter and dropped.
  */
 import {
-  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore,
+  createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
@@ -21,6 +21,34 @@ export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
 /** Spoken + captioned when a turn ends with no answer (tool loop, empty reply, budget); callers pass a localized one. */
 export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again.";
+/**
+ * The STT prompt bias (opts.sttPrompt): one line of names the speaker is likely to say. Whisper reads
+ * at most ~224 prompt tokens and a long prompt can be "heard" in silence, so it is cut to
+ * STT_PROMPT_MAX characters at a comma; control characters go. A function is called once per turn with
+ * the STT profile; one that throws, or anything that is not a string, gives no prompt.
+ */
+export const STT_PROMPT_MAX = 200;
+export function sttPromptText(p, profile = null) {
+  let v = p;
+  if (typeof v === "function") { try { v = v(profile); } catch { v = null; } }
+  if (typeof v !== "string") return "";
+  let t = "";
+  for (const ch of v.slice(0, 1000)) { const c = ch.codePointAt(0); t += c < 32 || (c >= 127 && c < 160) ? " " : ch; }
+  t = t.replace(/\s+/g, " ").trim();
+  if (t.length <= STT_PROMPT_MAX) return t;
+  const cut = t.lastIndexOf(",", STT_PROMPT_MAX);
+  return (cut > 0 ? t.slice(0, cut) : t.slice(0, STT_PROMPT_MAX)).trim();
+}
+
+/** opts.sttHotwords → faster-whisper's `hotwords` (a few call-sign words; kiosk r7): control characters gone, six words at most. */
+export const STT_HOTWORDS_MAX_WORDS = 6;
+export function sttHotwordsText(p, profile = null) {
+  let v = p;
+  if (typeof v === "function") { try { v = v(profile); } catch { v = null; } }
+  if (typeof v !== "string") return "";
+  return v.slice(0, 200).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").split(/\s+/).filter(Boolean).slice(0, STT_HOTWORDS_MAX_WORDS).join(" ");
+}
+
 /** Spoken + captioned INSTEAD of a model call when the bound bot's prompt cannot fit the model even without its skills; callers pass a localized one. */
 export const BOT_TOO_LARGE_TEXT = "This assistant is too large for the quick voice model. Choose another assistant for this display in the Kiosk settings.";
 /** Rides on the last tool result before the forced final round (kept off the saved conversation). */
@@ -180,9 +208,11 @@ export function createVoiceTurnRunner(deps) {
       }
       return tts.neg ? null : Buffer.concat(parts);
     }
+    let chars = 0;
     const speak = async (text, hard) => {
       const t = String(text || "").trim();
       if (!t || off(hard)) return;
+      chars += t.length;
       const mp3 = await collect(t, hard);
       if (mp3 && !off(hard)) { begin(); emit(mp3, hard, true); }
     };
@@ -191,6 +221,8 @@ export function createVoiceTurnRunner(deps) {
     say.force = (text) => speak(text, true);
     /** Whether any answer audio (not the filler) has left the server this turn. */
     say.answered = () => answered;
+    /** Characters handed to TTS this turn (the filler excluded): a reply's length for the metrics line (kiosk r7b H3). */
+    say.chars = () => chars;
     say.filler = async () => {
       if (off(false)) return;
       const key = `${tts.profile.id}|${tts.voice}|${tts.adapter.name}`;
@@ -236,13 +268,15 @@ export function createVoiceTurnRunner(deps) {
   }
 
   /** STT only (the kiosk's early transcription, lever D). The WAV is handed to the adapter and dropped. */
-  async function transcribe({ db, device, audio, signal, sttModel }) {
+  async function transcribe({ db, device, audio, signal, sttModel, sttPrompt, sttHotwords }) {
     const sttProfile = await deps.getSttProfile(db, device);
     if (!sttProfile) throw Object.assign(new Error("no STT profile"), { code: "no_stt_profile" });
     const stt = await deps.createSttAdapter(sttProfile);
     const model = typeof sttModel === "function" ? sttModel(sttProfile) : null;
-    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
-    return { text: String(r?.text || "").trim() };
+    const prompt = sttPromptText(sttPrompt, sttProfile);
+    const hotwords = sttHotwordsText(sttHotwords, sttProfile);
+    const r = await stt.transcribe(audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
+    return { text: String(r?.text || "").trim(), hotwords: !!hotwords };   // r7c N3: whether hotwords went (never the words)
   }
 
   /**
@@ -322,6 +356,8 @@ export function createVoiceTurnRunner(deps) {
         if (opts.sttEarly.discards) { timings.stt_early_discards = opts.sttEarly.discards; timings.stt_early_discard_ms = opts.sttEarly.discard_ms || 0; }
         if (opts.sttEarly.used && Number.isFinite(opts.sttEarly.ms)) timings.stt_early_ms = opts.sttEarly.ms;
       }
+      // r7c N3 (counts only): whether STT hotwords were sent for the transcript this turn uses.
+      timings.stt_hotwords = opts.sttEarly?.used === true && opts.sttEarly.hotwords === true;
       if (transcript != null && opts.sttEarly?.used) mark("stt_ms");   // = how long the turn waited for the early transcript
       if (transcript == null) {
         const sttProfile = await deps.getSttProfile(db, device);
@@ -329,7 +365,13 @@ export function createVoiceTurnRunner(deps) {
         const stt = await deps.createSttAdapter(sttProfile);
         // opts.sttModel(profile): a per-display model override (kiosk: tiny.en), or null for the profile's own.
         const model = typeof opts.sttModel === "function" ? opts.sttModel(sttProfile) : null;
-        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}) });
+        // opts.sttPrompt: words this endpoint expects to hear (a display's station names), as the STT's
+        // prompt bias. A string or a function returning one; bounded by sttPromptText.
+        const prompt = sttPromptText(opts.sttPrompt, sttProfile);
+        // opts.sttHotwords: a few words (call signs) as faster-whisper's `hotwords`; other adapters ignore it.
+        const hotwords = sttHotwordsText(opts.sttHotwords, sttProfile);
+        timings.stt_hotwords = !!hotwords;
+        const r = await stt.transcribe(opts.audio, { filename: "turn.wav", contentType: "audio/wav", language: sttProfile.language || undefined, signal, ...(model ? { model } : {}), ...(prompt ? { prompt } : {}), ...(hotwords ? { hotwords } : {}) });
         transcript = String(r?.text || "").trim();
         mark("stt_ms");
       }
@@ -337,6 +379,8 @@ export function createVoiceTurnRunner(deps) {
       sink.event({ type: "transcript_final", text: transcript });
       if (aborted()) { result.aborted = true; return result; }
       if (!transcript) { fail("empty_transcript"); return result; }
+      // An STT repetition loop is a failed transcription, not a question: no fast path, no model (r7 G4).
+      if (degenerateTranscript(transcript)) { timings.stt_degenerate = true; fail("empty_transcript"); return result; }
 
       const tts = await openTts(db, device);
       if (!tts) { fail("no_tts_profile", false); return result; }
@@ -348,6 +392,9 @@ export function createVoiceTurnRunner(deps) {
         if (fp) {
           result.fastPath = true;
           if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
+          // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
+          // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
+          if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
           for (const ev of fp.events || []) sink.event(ev);
           if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
           say.end();
@@ -629,6 +676,7 @@ export function createVoiceTurnRunner(deps) {
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
+        const toolText = createToolSyntaxGate();   // r7 G3: tool-call syntax written as text is never heard
         const echo = createContextEchoGate(echoGuard);
         let content = "";
         let roundSpoken = 0;
@@ -682,7 +730,7 @@ export function createVoiceTurnRunner(deps) {
               if (ev.type === "content_delta" && ev.text) {
                 mark("llm_first_token_ms");
                 content += ev.text;
-                const spoken = echo.feed(think.feed(ev.text));
+                const spoken = echo.feed(toolText.feed(think.feed(ev.text)));
                 if (spoken && defer) deferred += spoken;
                 else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
@@ -716,8 +764,10 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
-        // Text the echo gate still held (it could have been the start of an echo) is decided now.
-        const tail = echo.flush();
+        // Text the gates still held (it could have been the start of tool syntax or of an echo) is decided now.
+        const held = toolText.flush();
+        if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
+        const tail = (held ? echo.feed(held) : "") + echo.flush();
         if (tail && !hold && !aborted() && !budgetHit) {
           if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
           sink.event({ type: "caption_delta", text: tail });
@@ -944,6 +994,7 @@ export function createVoiceTurnRunner(deps) {
         if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
       }
       timings.total_ms = now() - t0;
+      if (say) timings.spoken_chars = say.chars();
       if (executor) { try { await executor.close(); } catch {} }
     }
   }

@@ -24,6 +24,8 @@ const clamp = (s) => { const t = flat(s); return t.length <= SAY_MAX ? t : `${t.
 const fill = (s, o) => String(s).replace(/\{(\w+)\}/g, (m, k) => (o && o[k] != null ? String(o[k]) : m));
 const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
+export { flat, fill, joinNames };
+
 export function result(ok, outcome, say, { final = true, effect, reason, title, names, events = [], long = false } = {}) {
   const text = !final ? flat(say).slice(0, MODEL_MAX) : long ? flat(say).slice(0, LONG_MAX) : clamp(say);
   return { ok, outcome, say: text, final, ...(effect === false ? { effect: false } : {}), ...(reason ? { reason } : {}), ...(title ? { title } : {}), ...(names ? { names } : {}), events };
@@ -176,32 +178,57 @@ function step(delta, ctx, S) {
 
 /** intent: { verb, kind?, title?, body?, name?, app?, what?, source?, names? }. Never throws for bad input. */
 /** Verbs that change the windows (crow_wm). */
-const WINDOW_VERBS = new Set(["close", "close_all", "next_step", "previous_step", "next"]);
+/** The model's `next` is not here: it is the playback verb and never touches a window (see case "next"). */
+const WINDOW_VERBS = new Set(["close", "close_all", "next_step", "previous_step"]);
 export async function executeIntent(intent, ctx) {
   const S = STRINGS[ctx.lang === "es" ? "es" : "en"];
   // Revision 6: screen-guard parity with show(). On a model turn whose words are not about the windows (a plain
   // question while something is open), a call that would close windows or step a recipe changes nothing.
-  // "next" with something playing is a playback verb, not a window verb.
   const t = ctx.turn?.transcript;
-  const playingNext = intent?.verb === "next" && ctx.media?.active?.(ctx.deviceId) === true;
-  if (!ctx.strict && typeof t === "string" && WINDOW_VERBS.has(intent?.verb) && !playingNext && ctx.store.list(ctx.deviceId).length && !windowIntent(t)) {
+  if (!ctx.strict && typeof t === "string" && WINDOW_VERBS.has(intent?.verb) && ctx.store.list(ctx.deviceId).length && !windowIntent(t)) {
     return result(false, "invalid", INVALID.no_change, { final: false, reason: "no_intent" });
   }
   switch (intent?.verb) {
     case "show": return show(intent, ctx, S);
     case "close": return close(intent, ctx, S);
     case "close_all": {
+      // "Close everything" clears the display: the windows, and what is playing.
       const closed = ctx.store.closeAll(ctx.deviceId);
-      if (!closed.length) return ctx.strict ? null : result(true, "nothing_open", S.say_nothing_open, { effect: false });
-      return result(true, "done", S.say_all_clear, { events: [{ type: "wm", action: "close_all" }] });
+      const stopped = ctx.media?.active?.(ctx.deviceId) === true && ctx.media.stop?.(ctx.deviceId) === "stopped";
+      if (!closed.length && !stopped) return ctx.strict ? null : result(true, "nothing_open", S.say_nothing_open, { effect: false });
+      return result(true, "done", S.say_all_clear, { events: closed.length ? [{ type: "wm", action: "close_all" }] : [] });
     }
     case "next_step": return step(1, ctx, S);
     case "next": {
-      // The bare word: the recipe if it is the window in front, else what is playing, else a recipe anywhere.
+      // The model's `next` is the playback verb it chose (next_step is its own verb): it never steps a recipe.
+      if (!ctx.strict) return playback(intent, ctx, S);
+      // The bare WORD, spoken with no model: the recipe if it is the window in front, else what is playing, else a recipe anywhere.
       if (ctx.store.focused(ctx.deviceId)?.kind === "recipe") return step(1, ctx, S);
       if (ctx.media?.active?.(ctx.deviceId) === true && typeof ctx.mediaVerb === "function") return ctx.mediaVerb(intent, ctx, S);
       return step(1, ctx, S);
     }
+    case "stop": {
+      // A ringing timer takes "stop" before the music does.
+      const ringing = ctx.store.list(ctx.deviceId).filter((w) => w.kind === "timer" && w.done).at(-1);
+      if (ringing) { ctx.store.close(ctx.deviceId, ringing.id); return result(true, "done", S.say_timer_stopped, { events: [{ type: "wm", action: "close", id: ringing.id }] }); }
+      // The bare word with nothing playing is answered at once, never left to the model.
+      if (ctx.strict && intent.bare === true && ctx.media?.active?.(ctx.deviceId) !== true) return result(true, "nothing_playing", S.say_nothing_playing, { effect: false });
+      return playback(intent, ctx, S);
+    }
+    case "resume": {
+      // operator ruling (rev 7c, N1): with a choice pending, the bare word answers it (one suggestion: yes; several: asked again).
+      if (ctx.strict && intent.bare === true && ctx.pendingChoices?.(ctx.deviceId) && typeof ctx.answerPending === "function") {
+        const r = await ctx.answerPending(ctx, S);
+        if (r) return r;
+      }
+      // operator ruling (rev 7b, M4): the bare word with nothing loaded is answered at once — never left to a model that
+      // starts something new (the 10-07 smoke's "Play." started the news). A timer that has gone off: as before.
+      const ringing = ctx.store.list(ctx.deviceId).some((w) => w.kind === "timer" && w.done);
+      if (ctx.strict && intent.bare === true && !ringing && ctx.media?.active?.(ctx.deviceId) !== true) return result(true, "nothing_playing", S.say_nothing_paused, { effect: false });
+      return playback(intent, ctx, S);
+    }
+    // Spoken forms that have no entry of their own in the model's verb list.
+    case "next_track": case "previous_track": case "volume": case "now_playing": return playback(intent, ctx, S);
     case "previous_step": return step(-1, ctx, S);
     case "read_step": return step(0, ctx, S);
     case "choices": { const names = (intent.names || []).map((n) => flat(n).slice(0, 30)).filter(Boolean).slice(0, 3); return result(true, "choices", fill(S.say_choices, { names: joinNames(names, S) }), { names, effect: false }); }
@@ -209,8 +236,11 @@ export async function executeIntent(intent, ctx) {
     case "open": return typeof ctx.openItem === "function" ? ctx.openItem(intent, ctx, S) : (ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable));
     case "play": return typeof ctx.resolvePlay === "function" ? ctx.resolvePlay(intent, ctx, S) : (ctx.strict ? null : result(false, "unavailable", S.say_play_unavailable));
     default:
-      // Playback verbs belong to the media session (ctx.mediaVerb). Without one, nothing is playing.
-      if (MEDIA_VERBS.includes(intent?.verb)) return typeof ctx.mediaVerb === "function" ? ctx.mediaVerb(intent, ctx, S) : (ctx.strict ? null : result(true, "nothing_playing", S.say_nothing_playing, { effect: false }));
+      if (MEDIA_VERBS.includes(intent?.verb)) return playback(intent, ctx, S);
       return ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable, { reason: "unknown_verb" });
   }
+}
+/** Playback verbs belong to the media session (ctx.mediaVerb). Without one, nothing is playing. */
+function playback(intent, ctx, S) {
+  return typeof ctx.mediaVerb === "function" ? ctx.mediaVerb(intent, ctx, S) : (ctx.strict ? null : result(true, "nothing_playing", S.say_nothing_playing, { effect: false }));
 }
