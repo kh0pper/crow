@@ -6,9 +6,12 @@
  * from a known pi-lab revision on, so the minimum is declared here, in one
  * place, and checked once per process:
  *
- *   MIN_PI_LAB_REV = c8bbb02 (2026-10-02) — bot read confinement
- *   (`permission_policy.read_paths`, `.mcp.json` structurally unreadable) and
- *   MCP config delivery over an inherited fd (`PI_BOT_MCP_CONFIG_FD`).
+ *   MIN_PI_LAB_REV = c3aed09 (2026-10-08) — bash policies ask/auto (the local
+ *   safety classifier); it contains c8bbb02 (2026-10-02): bot read
+ *   confinement (`permission_policy.read_paths`, `.mcp.json` structurally
+ *   unreadable) and MCP config delivery over an inherited fd
+ *   (`PI_BOT_MCP_CONFIG_FD`). It also re-verifies pinned add-on launchers
+ *   (command_sha256) at spawn. An older pi-lab blocks ask/auto like deny.
  *
  * How pi-lab is found: pi loads packages from `<agentDir>/settings.json`
  * `packages[]` (paths relative to the agent dir; agentDir =
@@ -31,11 +34,13 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 
-export const MIN_PI_LAB_REV = "c8bbb02";
+export const MIN_PI_LAB_REV = "c3aed09";
 
 const MARKERS = [
   { file: join("extensions", "mcp-client.ts"), needle: "PI_BOT_MCP_CONFIG_FD" },
   { file: join("extensions", "permission-gating.ts"), needle: "read_paths" },
+  { file: join("extensions", "shared", "bot-bash-auto.ts"), needle: "CUT_MARKER_RE" },
+  { file: join("extensions", "shared", "launcher-pin.ts"), needle: "releaseLauncher" },
 ];
 
 /** The pi agent dir pi itself would use. */
@@ -85,7 +90,7 @@ export function checkPiLabCompat({ env = process.env, dir: dirOverride } = {}) {
   if (existsSync(join(dir, ".git")) && gitAncestor(dir, MIN_PI_LAB_REV)) return { ok: true, dir, how: "git", reason: null };
   if (markersPresent(dir)) return { ok: true, dir, how: "markers", reason: null };
   return { ok: false, dir, how: null,
-    reason: "pi-lab at " + dir + " predates " + MIN_PI_LAB_REV + " (no bot read confinement, no PI_BOT_MCP_CONFIG_FD)" };
+    reason: "pi-lab at " + dir + " predates " + MIN_PI_LAB_REV + " (no bash ask/auto; before c8bbb02 also no bot read confinement, no PI_BOT_MCP_CONFIG_FD)" };
 }
 
 let _cached = null;

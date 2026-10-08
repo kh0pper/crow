@@ -126,7 +126,7 @@ export function isHighBlastRadius(pp) {
   if (!pp) return false;
   const es = pp.external_send;
   if (es && es !== "draft_only" && es !== "deny") return true; // e.g. "allow"
-  if (pp.bash && pp.bash !== "deny") return true;              // allowlist/sandbox/open
+  if (pp.bash && pp.bash !== "deny") return true;              // ask/auto/allowlist (or a legacy value)
   if (pp.multi_agent === true) return true;
   return false;
 }

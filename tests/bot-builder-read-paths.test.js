@@ -56,8 +56,8 @@ async function readDef(botId) {
 const save = async (botId, readPaths) => {
   const res = mkRes();
   await handleBotBuilderPost({ body: {
-    action: "save_permissions", bot_id: botId, pp_bash: "deny", pp_write_paths: "",
-    pp_external_send: "draft_only", pp_confirm: "", pp_read_paths: readPaths,
+    // The Safety tab owns the folders (the old Permissions form is retired).
+    action: "save_safety", bot_id: botId, pp_read_paths: readPaths,
   }, headers: {}, cookies: {} }, res, { db });
   return res;
 };
@@ -77,7 +77,7 @@ test("save: read folders are stored normalized and de-duplicated; the project fo
 
 test("save: an invalid line refuses the whole save with a translated error and keeps the old value", async () => {
   const res = await save("proj-bot", "/ok/path\nDocuments\n/x/../etc");
-  assert.match(res.redirected, /tab=permissions&error=/);
+  assert.match(res.redirected, /tab=safety&error=/);
   const msg = decodeURIComponent(res.redirected.split("error=")[1]);
   assert.match(msg, /absolute paths/);
   assert.match(msg, /Documents, \/x\/\.\.\/etc/);
@@ -86,6 +86,7 @@ test("save: an invalid line refuses the whole save with a translated error and k
 });
 
 test("save: an empty field clears the explicit folders", async () => {
+  assert.match((await save("solo-bot", "/tmp/x")).redirected, /saved=1/);
   const res = await save("solo-bot", "");
   assert.match(res.redirected, /saved=1/);
   assert.deepEqual((await readDef("solo-bot")).permission_policy.read_paths, []);
