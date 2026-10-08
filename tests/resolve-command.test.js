@@ -121,3 +121,55 @@ test("checkLauncherArgs: uv/uvx --from git+… must name a commit SHA", async ()
   assert.equal(checkLauncherArgs("/h/.local/bin/uv", ["run", "--quiet", "kb-mcp"]), null, "a local project run has no ref to pin");
   assert.equal(checkLauncherArgs("/usr/bin/node", ["git+https://x"]), null, "only uv/uvx are judged");
 });
+
+// --- R2 (re-check 2026-10-08): shipped bundles must keep working ---
+test("R2: npm/npx next to the gateway's own Node are trusted exactly like node", async () => {
+  const { dirname } = await import("node:path");
+  const { existsSync } = await import("node:fs");
+  const npx = join(dirname(process.execPath), "npx");
+  const r = resolveAddonCommand("npx");
+  if (existsSync(npx)) {
+    assert.equal(r.missing, false, r.reason);
+    assert.equal(r.command, realpathSync(npx));
+  }
+  // a fake node dir: npx there is trusted only because node there is the gateway's
+  const d = mkdtempSync(join(tmpdir(), "nodedir-"));
+  writeFileSync(join(d, "node"), "#!/bin/sh\n"); chmodSync(join(d, "node"), 0o755);
+  writeFileSync(join(d, "npm"), "#!/bin/sh\n"); chmodSync(join(d, "npm"), 0o755);
+  assert.equal(resolveAddonCommand("npm", { execPath: join(d, "node") }).command, join(d, "npm"));
+  assert.equal(resolveAddonCommand("npx", { execPath: join(d, "node") }).missing, true, "no npx there");
+});
+
+test("R2: a relative launcher resolves inside the add-on's own folder (pinned), never outside it", async () => {
+  const { home } = userBin();
+  const bdir = join(home, "bundles", "rookery");
+  mkdirSync(bdir, { recursive: true });
+  writeFileSync(join(bdir, "run.sh"), "#!/bin/bash\necho rookery\n"); chmodSync(join(bdir, "run.sh"), 0o755);
+  const pin = sha("#!/bin/bash\necho rookery\n");
+  assert.match(resolveAddonCommand("./run.sh", { cwd: bdir }).reason || "", /command_sha256/, "unpinned → refused with the re-pin hint");
+  const ok = resolveAddonCommand("./run.sh", { cwd: bdir, sha256: pin });
+  assert.equal(ok.missing, false, ok.reason);
+  assert.equal(ok.command, realpathSync(join(bdir, "run.sh")));
+  assert.equal(resolveAddonCommand("run.sh", { cwd: bdir, sha256: pin }).missing, true, "a bare name is never looked up in the bundle");
+  writeFileSync(join(home, "outside.sh"), "#!/bin/bash\n"); chmodSync(join(home, "outside.sh"), 0o755);
+  assert.equal(resolveAddonCommand("../../outside.sh", { cwd: bdir, sha256: sha("#!/bin/bash\n") }).missing, true, "no escape via ..");
+  symlinkSync(join(home, "outside.sh"), join(bdir, "link.sh"));
+  const esc = resolveAddonCommand("./link.sh", { cwd: bdir, sha256: sha("#!/bin/bash\n") });
+  assert.equal(esc.missing, true, "no escape via a symlink");
+  assert.match(esc.reason, /outside/);
+  assert.equal(resolveAddonCommand("./run.sh", { sha256: pin }).missing, true, "no folder given → refused");
+});
+
+test("R2: launcherPin pins a relative bundle launcher and an absolute user launcher; not node/npm/npx/system ones", async () => {
+  const { launcherPin } = await import("../servers/shared/resolve-command.js");
+  const { home, uvx } = userBin();
+  const bdir = join(home, "bundles", "b");
+  mkdirSync(bdir, { recursive: true });
+  writeFileSync(join(bdir, "run.sh"), "#!/bin/bash\n"); chmodSync(join(bdir, "run.sh"), 0o755);
+  assert.equal(launcherPin("./run.sh", bdir), sha("#!/bin/bash\n"));
+  assert.equal(launcherPin(uvx, bdir), sha("#!/bin/sh\necho uvx\n"));
+  assert.equal(launcherPin("node", bdir), null);
+  assert.equal(launcherPin("npx", bdir), null);
+  assert.equal(launcherPin("/bin/sh", bdir), null, "root-owned needs no pin");
+  assert.equal(launcherPin("uvx", bdir), null, "a bare name cannot be pinned (give an absolute path)");
+});

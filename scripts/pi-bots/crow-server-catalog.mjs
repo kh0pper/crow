@@ -310,7 +310,7 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // the gateway's systemd PATH usually lacks ~/.local/bin, so the bot's
       // pi child failed with ENOENT and the server silently dropped.
       if (typeof r.block.command === "string") {
-        const rc = resolveAddonCommand(r.block.command, { sha256: r.block.command_sha256 });
+        const rc = resolveAddonCommand(r.block.command, { sha256: r.block.command_sha256, cwd: r.block.cwd || cwd });
         const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, r.block.args);
         if (argProblem) { unconfigured[id] = `command '${r.block.command}' not usable: ${argProblem}`; continue; }
         if (rc.missing) {

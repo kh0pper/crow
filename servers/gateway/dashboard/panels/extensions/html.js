@@ -166,6 +166,7 @@ export function buildExtensionsHTML({
   communityStores,
   bundleStatus,
   needsConfig = {},
+  needsRepin = {},
   dockerOk = true,
   keychainPending = [],
   vaultSecure = false,
@@ -357,14 +358,23 @@ export function buildExtensionsHTML({
         ? `<span class="ext-installed__needsconfig">${badge(t("extensions.needsSetup", lang), "draft")}</span>`
         : "";
 
+      // A launcher that a re-pin would fix (computed in panels/extensions.js).
+      const repinReason = needsRepin[id];
+      const needsRepinBadge = repinReason
+        ? `<span class="ext-installed__needsconfig" data-testid="needs-repin" title="${escapeHtml(String(repinReason).slice(0, 300))}">${badge(t("extensions.needsRepin", lang), "draft")}</span>`
+        : "";
+
       let actions = "";
+      if (repinReason) {
+        actions += `<button class="btn btn-sm btn-primary bundle-action" data-action="repin" data-id="${escapeHtml(id)}" title="${escapeHtml(t("extensions.repinHint", lang))}">${t("extensions.repin", lang)}</button>`;
+      }
       if (isDocker) {
         if (isRunning) {
-          actions = `
+          actions += `
               <button class="btn btn-sm btn-secondary bundle-action" data-action="stop" data-id="${escapeHtml(id)}">${t("extensions.stop", lang)}</button>
               <button class="btn btn-sm btn-secondary bundle-action" data-action="start" data-id="${escapeHtml(id)}" title="${t("extensions.restart", lang)}">${t("extensions.restart", lang)}</button>`;
         } else {
-          actions = `<button class="btn btn-sm btn-primary bundle-action" data-action="start" data-id="${escapeHtml(id)}">${t("extensions.start", lang)}</button>`;
+          actions += `<button class="btn btn-sm btn-primary bundle-action" data-action="start" data-id="${escapeHtml(id)}">${t("extensions.start", lang)}</button>`;
         }
       }
       if (missingKeys.length > 0) {
@@ -378,6 +388,7 @@ export function buildExtensionsHTML({
             <span class="ext-installed__name">${escapeHtml(name)}</span>
             ${statusBadge}
             ${needsSetupBadge}
+            ${needsRepinBadge}
             <span class="ext-installed__meta">v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}</span>
           </div>
           <div class="ext-installed__actions">${actions}</div>

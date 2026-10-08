@@ -190,7 +190,7 @@ async function connectAddonServer(id, config) {
       const env = addonStdioEnv(config);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
       // then the per-user install dirs systemd's PATH lacks.
-      const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256 });
+      const rc = resolveAddonCommand(config.command, { sha256: config.command_sha256, cwd });
       const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, config.args);
       if (argProblem) throw new Error(`command '${config.command}' not usable: ${argProblem}`);
       if (rc.missing) {

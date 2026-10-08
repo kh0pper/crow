@@ -8,8 +8,13 @@
  * a launcher found there cannot be trusted on its location alone.
  *
  * Rules (checked at EVERY call — no trust carried over from an earlier call):
- *   - `node` is the gateway's own Node binary (process.execPath): the
- *     gateway already runs it, so trusting it adds nothing.
+ *   - `node` is the gateway's own Node binary (process.execPath), and `npm` /
+ *     `npx` are the ones next to it: the gateway already runs that directory,
+ *     so trusting them adds nothing.
+ *   - A relative launcher (`./run.sh`) resolves against the add-on's own
+ *     installed folder (opts.cwd); its real path must stay inside that folder,
+ *     and it must be pinned like any other user-owned launcher (the Extensions
+ *     install and update write that pin — the install click is the consent).
  *   - Any other bare name is looked up ONLY in a fixed list of system
  *     directories (TRUSTED_DIRS), never the PATH and never a user directory.
  *     The hit must be root-owned, and so must every directory on its
@@ -37,7 +42,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 export const TRUSTED_DIRS = Object.freeze(["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"]);
 
@@ -70,11 +75,41 @@ function sha256File(p) {
  * @param {{ sha256?: string, execPath?: string, trustedDirs?: string[] }} [opts]
  * @returns {{command: any, resolved: boolean, missing: boolean, reason?: string}}
  */
+const NODE_SIBLINGS = new Set(["npm", "npx"]);
+
+function isRelativeLauncher(c) { return !isAbsolute(c) && c.includes("/"); }
+
+/** The real path of a relative launcher inside `cwd`, or a refusal reason. */
+function inBundle(command, cwd) {
+  if (typeof cwd !== "string" || !isAbsolute(cwd)) return { reason: `${command}: a relative launcher needs the add-on folder` };
+  let root, real;
+  try { root = realpathSync(cwd); } catch { return { reason: `${command}: add-on folder ${cwd} not found` }; }
+  try { real = realpathSync(resolvePath(cwd, command)); } catch { return { reason: `${command}: not found in ${cwd}` }; }
+  if (!real.startsWith(root + sep)) return { reason: `${command}: resolves outside the add-on folder` };
+  return { real };
+}
+
 export function resolveAddonCommand(command, opts = {}) {
   if (typeof command !== "string" || command === "") return { command, resolved: false, missing: false };
   const refuse = (reason) => ({ command, resolved: false, missing: true, reason });
   const pin = typeof opts.sha256 === "string" && /^[0-9a-f]{64}$/i.test(opts.sha256) ? opts.sha256.toLowerCase() : null;
-  if (command === "node") return { command: opts.execPath || process.execPath, resolved: true, missing: false };
+  const execPath = opts.execPath || process.execPath;
+  if (command === "node") return { command: execPath, resolved: true, missing: false };
+  if (NODE_SIBLINGS.has(command)) {
+    const p = join(dirname(execPath), command);
+    try {
+      if (statSync(p).isFile()) return { command: realpathSync(p), resolved: true, missing: false };
+    } catch { /* not there */ }
+    return refuse(`${command} not found next to the gateway's node (${dirname(execPath)})`);
+  }
+  if (isRelativeLauncher(command)) {
+    const b = inBundle(command, opts.cwd);
+    if (!b.real) return refuse(b.reason);
+    if (!pin) return refuse(`${command}: pin it with command_sha256 in the add-on entry (re-pin the add-on)`);
+    const h = sha256File(b.real);
+    if (h !== pin) return refuse(`${command}: SHA-256 does not match the pinned command_sha256 (re-pin the add-on)`);
+    return { command: b.real, resolved: true, missing: false, sha256: pin };
+  }
   if (!command.includes("/")) {
     for (const d of opts.trustedDirs || TRUSTED_DIRS) {
       const p = join(d, command);
@@ -118,4 +153,42 @@ export function checkLauncherArgs(command, args) {
     if (!/@[0-9a-f]{40}$/i.test(src)) return `${base} fetches a floating git ref (${src.slice(0, 120)}); pin --from to a full commit SHA (…@<40 hex>)`;
   }
   return null;
+}
+
+/**
+ * The pin an install / update / re-pin should write for a launcher, or null
+ * when it needs none (node/npm/npx, root-owned) or cannot have one (a bare
+ * name outside the system directories — give the entry an absolute path).
+ */
+export function launcherPin(command, cwd) {
+  if (typeof command !== "string" || !command || command === "node" || NODE_SIBLINGS.has(command)) return null;
+  let real;
+  if (isRelativeLauncher(command)) {
+    const b = inBundle(command, cwd);
+    if (!b.real) return null;
+    real = b.real;
+  } else if (isAbsolute(command)) {
+    if (command.split(sep).includes("..")) return null;
+    if (rootOwnedChain(command).ok) return null;
+    try { real = realpathSync(command); } catch { return null; }
+  } else {
+    return null;
+  }
+  return sha256File(real);
+}
+
+/**
+ * Launcher health of one mcp-addons.json entry (read-only): ok, or the reason
+ * it would be refused, and whether a re-pin (install-owned or operator) fixes it.
+ */
+export function addonLauncherStatus(entry, cwd, opts = {}) {
+  if (!entry || typeof entry !== "object" || entry.url || typeof entry.command !== "string") return { ok: true, skipped: true };
+  const rc = resolveAddonCommand(entry.command, { ...opts, sha256: entry.command_sha256, cwd });
+  if (rc.missing) {
+    const repinnable = /command_sha256|re-pin/.test(rc.reason || "") && launcherPin(entry.command, cwd) !== null;
+    return { ok: false, reason: rc.reason, needsRepin: repinnable };
+  }
+  const argProblem = checkLauncherArgs(rc.command, entry.args);
+  if (argProblem) return { ok: false, reason: argProblem, needsRepin: false };
+  return { ok: true };
 }

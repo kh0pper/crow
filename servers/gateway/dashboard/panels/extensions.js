@@ -52,8 +52,15 @@ export default {
       } catch { vaultSecure = false; }
     }
 
+    // Add-on launchers that a re-pin would fix (an updated uv, an edited run.sh).
+    let needsRepin = {};
+    try {
+      const { addonsNeedingRepin } = await import("./extensions/data-queries.js");
+      needsRepin = addonsNeedingRepin(Object.keys(installed));
+    } catch { needsRepin = {}; }
+
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, dockerOk, keychainPending, vaultSecure, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, dockerOk, keychainPending, vaultSecure, lang,
     });
 
     // ─── Modal + client-side JavaScript ───

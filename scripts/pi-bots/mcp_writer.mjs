@@ -114,7 +114,8 @@ function readAddons(crowHome) {
 function addonSpawnBlock(serverId, block, crowHome) {
   // The launcher is resolved and verified (servers/shared/resolve-command.js);
   // one that fails is OMITTED — never passed on for a PATH lookup.
-  const rc = resolveAddonCommand(block.command, { sha256: block.command_sha256 });
+  const cwd = block.cwd || join(crowHome, "bundles", serverId);
+  const rc = resolveAddonCommand(block.command, { sha256: block.command_sha256, cwd });
   const argProblem = rc.missing ? null : checkLauncherArgs(rc.command, block.args);
   if (rc.missing || argProblem) {
     console.warn(`[pi-bots] add-on '${serverId}' omitted: ${rc.reason || argProblem}`);
@@ -123,7 +124,7 @@ function addonSpawnBlock(serverId, block, crowHome) {
   const { command_sha256: _pin, ...rest } = block;
   // The pin rides along so pi-lab re-verifies it at spawn time.
   return { ...rest, ...(rc.resolved ? { command: rc.command } : {}), ...(rc.sha256 ? { command_sha256: rc.sha256 } : {}),
-    cwd: block.cwd || join(crowHome, "bundles", serverId) };
+    cwd };
 }
 
 /**
