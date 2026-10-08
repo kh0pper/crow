@@ -4,8 +4,13 @@ import { readFileSync } from "node:fs";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
 } from "../bundles/kiosk/public/state.js";
-import { createPlayer } from "../bundles/kiosk/public/audio.js";
+import { OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
+import { SESSION_GRACE_MS } from "../bundles/kiosk/server/media.js";
+import { KIOSK_PING_MS } from "../bundles/kiosk/server/runtime.js";
+import { createPlayer, openMic, createMicGate, DRAIN_GRACE_MS, DECODE_MAX_MS } from "../bundles/kiosk/public/audio.js";
+import { sanitizeClientMetrics } from "../bundles/kiosk/server/metrics.js";
 
 test("4401 unauthorized/unpaired clears the token; 4401 hello_timeout keeps it and reconnects", () => {
   assert.equal(closeDecision(4401, "unauthorized").action, "forget_token");
@@ -25,7 +30,7 @@ test("4000 superseded → halt (no auto reconnect ping-pong)", () => {
 });
 
 test("reconnect backoff 1 s → 30 s cap", () => {
-  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map(backoffMs), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map((n) => backoffMs(n)), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
 });
 
 test("mic denied → mic_blocked; no device → no_mic; suspended context → needs_gesture", () => {
@@ -322,4 +327,357 @@ test("applyTheme reads the theme setting, and a pushed config applies it without
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
   assert.match(src, /function applyTheme\(\) \{[^\n]*themeFor\(config\.theme,/);
   assert.match(src, /if \(!clockTimer\) tickClock\(\); else applyTheme\(\);/);
+});
+
+// ── ducking (review C1): what the page knows after each way a turn can end ─────────────────────
+test("duck rule: open while the mic is open, the server's bird is not idle, or TTS plays — never keyed on turn_done", () => {
+  const duck = (turn, serverBird, playing = false) => duckDecision({ turnOpen: !!(turn && !turn.ended), serverBird, playing });
+  // A tap: the mic opens before the server has said anything.
+  assert.equal(duck({ ended: false, done: null }, "idle"), true, "ducked at the tap");
+  // Empty turn: the page ended the mic (no speech), the server sends turn_over + state idle and no turn_done.
+  assert.equal(duck({ ended: true, done: null }, "idle"), false, "an empty turn restores the music");
+  // turn_busy: the server answers turn_over (busy); the page ends its turn; the bird is whatever the server says.
+  assert.equal(duck({ ended: true, done: { aborted: true, over: "busy" } }, "idle"), false);
+  // Socket closed mid-turn: onclose marks the turn ended and the bird idle.
+  assert.equal(duck({ ended: true, done: null }, "idle"), false, "a dropped socket restores the music");
+  // Thinking and speaking keep it ducked; the page's own TTS still draining keeps it ducked after the server said idle.
+  assert.equal(duck({ ended: true, done: null }, "thinking"), true);
+  assert.equal(duck({ ended: true, done: {} }, "idle", true), true);
+  // Barge: TTS flushed, the server's speaking turned to idle on the page.
+  assert.equal(duck({ ended: true, done: {}, barged: true }, "idle", false), false);
+  // Follow-up with nothing said: the follow-up mic opens (ducked), the VAD ends it, the server says idle.
+  assert.equal(duck({ ended: false, done: null, source: "follow_up" }, "listening"), true);
+  assert.equal(duck({ ended: true, done: null, source: "follow_up" }, "idle"), false);
+  assert.equal(duck(null, "idle"), false);
+});
+
+test("duck backstop: 30 s ducked with the bird idle and no TTS brings the music back; never while the bird is busy or TTS plays", () => {
+  assert.equal(DUCK_BACKSTOP_MS, 30_000);
+  assert.equal(duckBackstop({ duckedFor: 30_000, serverBird: "idle", playing: false }), true);
+  assert.equal(duckBackstop({ duckedFor: 29_999, serverBird: "idle", playing: false }), false);
+  assert.equal(duckBackstop({ duckedFor: 60_000, serverBird: "thinking", playing: false }), false);
+  assert.equal(duckBackstop({ duckedFor: 60_000, serverBird: "idle", playing: true }), false);
+});
+
+test("effect time: the first wm/media change between turn_end and the turn's close; a load counts when it is heard (≤ 6 s)", () => {
+  const t1 = { ended: false, done: null, effectAt: null, effectLoad: null, speechEndAt: 1000 };
+  assert.equal(noteEffect(t1, { kind: "wm", at: 900 }), false, "before turn_end: not this turn's effect");
+  t1.ended = true;
+  assert.equal(noteEffect(t1, { kind: "wm", at: 1400 }), true);
+  assert.equal(noteEffect(t1, { kind: "wm", at: 1500 }), false, "only the first");
+  assert.equal(turnMetrics(t1).effect_ms, 400);
+  // A load waits for its playing event.
+  const t2 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: 1000 };
+  assert.equal(noteEffect(t2, { kind: "load", id: "m1", at: 1200 }), false);
+  assert.equal(noteEffect(t2, { kind: "wm", at: 1300 }), false, "a window opened after the load does not count instead of the audio");
+  t2.done = {};
+  assert.equal(noteEffect(t2, { kind: "playing", id: "m2", at: 1500 }), false, "another item");
+  assert.equal(noteEffect(t2, { kind: "playing", id: "m1", at: 2600 }), true, "after turn_done too: the audio is the effect");
+  assert.equal(turnMetrics(t2).effect_ms, 1600);
+  const t3 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: 0 };
+  noteEffect(t3, { kind: "load", id: "m1", at: 100 });
+  assert.equal(noteEffect(t3, { kind: "playing", id: "m1", at: 100 + EFFECT_WAIT_MS + 1 }), false, "past the wait: no effect time");
+  assert.equal(turnMetrics(t3).effect_ms, null);
+  // A turn whose speech end is unknown (manual stop) is timed from turn_end.
+  const t4 = { ended: true, done: null, effectAt: null, effectLoad: null, speechEndAt: null, endedAt: 50 };
+  noteEffect(t4, { kind: "media", at: 80 });
+  assert.equal(turnMetrics(t4).effect_ms, 30);
+});
+
+test("report waits for a pending load's playing event (up to 6 s), unless forced", () => {
+  const t = { done: { timings: {} }, doneAt: 0, reported: false, tts: false, playAt: null, ended: true, effectAt: null, effectLoad: { id: "m1", at: 0 } };
+  assert.deepEqual(reportDecision(t, { playing: false, now: 1000 }), { report: false, retryInMs: EFFECT_WAIT_MS - 1000 });
+  assert.equal(reportDecision(t, { playing: false, now: EFFECT_WAIT_MS }).report, true);
+  assert.equal(reportDecision(t, { playing: false, now: 10, force: true }).report, true);
+  t.effectAt = 900;
+  assert.equal(reportDecision(t, { playing: false, now: 1000 }).report, true);
+});
+
+test("smoke F6: a phone or tablet releases the mic after each turn (display_config.mic_per_turn); anything else keeps it; the reopen cost is reported and kept apart from e2e", () => {
+  assert.equal(micAfterTurn({ mic_per_turn: true }, { phase: "settled" }), "release");
+  for (const c of [{ mic_per_turn: false }, {}, null, undefined, { mic_per_turn: "yes" }]) assert.equal(micAfterTurn(c), "keep");
+  // Review M4: with follow-up on, the first turn keeps the mic for the follow-up; it goes when the conversation settles.
+  const fu = { mic_per_turn: true, follow_up: true };
+  assert.equal(micAfterTurn(fu, { phase: "end", source: "tap" }), "keep");
+  assert.equal(micAfterTurn(fu, { phase: "end", source: "follow_up" }), "keep", "r7 G12: never at the end of speech");
+  assert.equal(micAfterTurn(fu, { phase: "settled" }), "release");
+  assert.equal(micAfterTurn(fu, { phase: "closed", source: "tap" }), "release");
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1000, playAt: 2500, effectAt: null, endedAt: 1000, barged: false, micOpenMs: 184.4 }, {});
+  assert.equal(m.mic_open_ms, 184);
+  assert.equal(m.e2e_ms, 1500, "e2e is still end of speech to first audio: the reopen is before speech");
+  assert.equal(turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {}).mic_open_ms, null);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", mic_open_ms: 300 }).mic_open_ms, 300);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", mic_open_ms: "x" }).mic_open_ms, null);
+});
+
+test("smoke F6: the mic can be opened again on the same audio context — the capture worklet is added once; close() stops every track", async () => {
+  const added = [], stopped = [];
+  const g = globalThis;
+  const saved = { navigator: Object.getOwnPropertyDescriptor(g, "navigator"), AudioWorkletNode: g.AudioWorkletNode };
+  Object.defineProperty(g, "navigator", { configurable: true, value: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop: () => stopped.push(1) }] }) } } });
+  g.AudioWorkletNode = class { constructor() { this.port = { postMessage: () => {}, onmessage: null }; } disconnect() {} };
+  try {
+    const ctx = { audioWorklet: { addModule: async (u) => { added.push(u); } }, createMediaStreamSource: () => ({ connect: () => {}, disconnect: () => {} }) };
+    const a = await openMic(ctx, () => {});
+    a.close();
+    const b = await openMic(ctx, () => {});
+    b.close();
+    assert.deepEqual(added, ["/display/assets/pcm-worklet.js"], "added once per context");
+    assert.equal(stopped.length, 2, "each close() let the microphone go");
+    // A failing worklet does not leave the microphone open.
+    const bad = { audioWorklet: { addModule: async () => { throw new Error("no worklet"); } }, createMediaStreamSource: () => ({}) };
+    await assert.rejects(openMic(bad, () => {}), /no worklet/);
+    assert.equal(stopped.length, 3);
+  } finally {
+    if (saved.navigator) Object.defineProperty(g, "navigator", saved.navigator); else delete g.navigator;
+    g.AudioWorkletNode = saved.AudioWorkletNode;
+  }
+});
+
+test("smoke F6 (source), r7 G12: the page lets the mic go when the turn settles, on turn_over, on a closed socket and on a barge — never at turn_end — and only through micAfterTurn", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
+  assert.match(rel, /micAfterTurn\(config, \{ phase \}\) !== "release"/);
+  assert.match(rel, /micGate\.release\(\)/);
+  const calls = [...src.matchAll(/(?<!function )releaseMicAfterTurn\(("[a-z]+")?/g)].map((m) => m[1]);
+  assert.deepEqual(calls.sort(), ['"closed"', '"closed"', '"closed"', '"settled"'], "socket close, turn_over, barge, settle");
+});
+
+test("review H3: a double tap during a slow mic open leaves exactly ONE open stream; an open released meanwhile is closed when it lands; the second tap is ignored", async () => {
+  const opened = [], closed = [];
+  let finish = null;
+  const slowOpen = () => new Promise((res) => { const m = { n: opened.length + 1, close: () => closed.push(m.n) }; opened.push(m); finish = () => res(m); });
+  const gate = createMicGate(slowOpen, () => 0);
+  const a = gate.acquire(), b = gate.acquire();           // two taps 100 ms apart, while getUserMedia is still pending
+  await new Promise((r) => setImmediate(r));
+  assert.equal(opened.length, 1, "one getUserMedia, not two");
+  finish();
+  const [ma, mb] = await Promise.all([a, b]);
+  assert.equal(ma, mb, "both callers share the one stream");
+  assert.equal(gate.current, ma);
+  gate.release();
+  assert.deepEqual(closed, [1]);
+  // Released while opening (the socket closed): the stream is closed as soon as it arrives, never left open.
+  const c = gate.acquire();
+  await new Promise((r) => setImmediate(r));
+  gate.release();
+  finish();
+  assert.equal(await c, null);
+  assert.deepEqual(closed, [1, 2]);
+  assert.equal(gate.current, null);
+  // The page ignores a tap while the mic is still opening for the last one.
+  assert.equal(tapDecision({ halted: false, playing: false, birdState: "idle", turnOpen: false, starting: true }), "ignore");
+  assert.equal(tapDecision({ halted: false, playing: false, birdState: "idle", turnOpen: false, starting: false }), "start");
+});
+
+test("review H3 (source): startTurn holds `starting` from the tap until the mic is open, shows it on the bird, and the tap reads it", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const st = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
+  assert.match(st, /starting = true;/);
+  assert.match(st, /classList\.add\("is-starting"\)/);
+  assert.match(st, /finally \{ starting = false;/);
+  assert.match(src, /tapDecision\(\{ halted,[^\n]*, starting \}\)\)/);
+  assert.match(src, /micGate\.acquire\(\)/);
+  assert.doesNotMatch(src, /await openMic\(/, "the mic is opened only through the gate");
+});
+
+test("review M3: the page's offline clear outlasts the server's view of a silent drop (grace + two pings), and while audio is live the page tries again within the clear many times", () => {
+  assert.ok(OFFLINE_CLEAR_MS >= SESSION_GRACE_MS + 2 * KIOSK_PING_MS, `${OFFLINE_CLEAR_MS} < ${SESSION_GRACE_MS} + 2 × ${KIOSK_PING_MS}`);
+  for (let n = 0; n < 12; n++) assert.ok(backoffMs(n, MEDIA_RECONNECT_CAP_MS) <= MEDIA_RECONNECT_CAP_MS);
+  // A 20 s outage: with audio live the page is back within 5 s of the network, long before either side ends the session.
+  let t = 0, n = 0; while (t < 20_000) t += backoffMs(n++, MEDIA_RECONNECT_CAP_MS);
+  assert.ok(t - 20_000 <= MEDIA_RECONNECT_CAP_MS && t < OFFLINE_CLEAR_MS && t < SESSION_GRACE_MS + KIOSK_PING_MS);
+  assert.equal(backoffMs(9), 30_000, "with nothing playing, the usual backoff");
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  assert.match(src, /backoffMs\(attempt\+\+, mediaView\?\.current\(\) \? MEDIA_RECONNECT_CAP_MS : undefined\)/);
+});
+
+// ---- Revision 7 (re-smoke 2026-10-07, G12/G13/G15: the page did not settle after an answer) ----
+
+test("r7 G12: a reply whose sources never end (the audio clock stalled) is drained by the player's own watchdog — bounded, once, reported as a stall", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx, started } = fakeCtx();                       // its clock never moves and onended never fires by itself
+  const ev = { drained: 0, stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: (info) => ev.stalls.push(info) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); p.push(new ArrayBuffer(48000));   // 2 × 1 s of audio
+  await tick();
+  assert.equal(started.length, 2);
+  assert.equal(p.playing, true);
+  t.mock.timers.tick(2000);                                  // the audio's own length: still waiting for it
+  assert.equal(ev.drained, 0);
+  t.mock.timers.tick(DRAIN_GRACE_MS + 50);                   // past its length + the grace: the clock has not moved
+  assert.equal(ev.drained, 1, "the turn settles");
+  assert.equal(p.playing, false);
+  assert.equal(ev.stalls.length, 1);
+  assert.ok(started.every((s) => s.stopped), "every stuck source is stopped");
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.drained, 1, "drained once");
+});
+
+test("r7 G12: sources that end normally never trip the watchdog; a later sentence re-arms it from its own end", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx, started } = fakeCtx();
+  const ev = { drained: 0, stalls: 0 };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: () => ev.stalls++ });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); await tick();
+  t.mock.timers.tick(900);
+  p.push(new ArrayBuffer(48000)); await tick();              // scheduled after the first: ends at 2 s on the audio clock
+  ctx.currentTime += 2; started[0].onended(); started[1].onended();
+  assert.equal(ev.drained, 1);
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.stalls, 0, "no stall reported for audio that played");
+  assert.equal(ev.drained, 1);
+});
+
+test("r7 G12: a decode that never answers cannot hold the queue — the sentence is dropped after DECODE_MAX_MS and the reply still drains", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx, started } = fakeCtx();
+  ctx.decodeAudioData = () => new Promise(() => {});        // never resolves
+  const ev = { drained: 0 };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++ });
+  t.after(() => p.flush());
+  p.begin("mp3", 24000, 1);
+  p.push(new ArrayBuffer(100));
+  await tick();
+  assert.equal(p.playing, true);
+  t.mock.timers.tick(DECODE_MAX_MS + 10);
+  await tick(); await tick();
+  assert.equal(p.playing, false);
+  assert.equal(ev.drained, 1);
+  assert.equal(started.length, 0);
+});
+
+test("r7 G12: a phone keeps the mic through the spoken answer and lets it go when the turn settles — never between turn_end and the reply (the audio-mode switch stalled the reply's clock)", () => {
+  for (const c of [{ mic_per_turn: true }, { mic_per_turn: true, follow_up: true }]) {
+    assert.equal(micAfterTurn(c, { phase: "end", source: "tap" }), "keep");
+    assert.equal(micAfterTurn(c, { phase: "end", source: "follow_up" }), "keep");
+    assert.equal(micAfterTurn(c, { phase: "settled" }), "release");
+    assert.equal(micAfterTurn(c, { phase: "closed" }), "release");
+  }
+  assert.equal(micAfterTurn({ mic_per_turn: false }, { phase: "settled" }), "keep");
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const end = src.slice(src.indexOf("function endTurn("), src.indexOf("function releaseMicAfterTurn("));
+  assert.doesNotMatch(end, /releaseMicAfterTurn\(/, "endTurn no longer lets the mic go");
+});
+
+test("r7 G12: the turn's report says whether its reply stalled and the audio context's state (counts-only evidence)", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, ttsStalled: true }, { ctxState: "running" });
+  assert.equal(m.tts_stalled, true);
+  assert.equal(m.ctx_state, "running");
+  assert.equal(turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {}).tts_stalled, false);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", tts_stalled: true, ctx_state: "interrupted" }).tts_stalled, true);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", tts_stalled: "yes", ctx_state: "<b>" }).tts_stalled, false);
+  assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: "<b>" }).ctx_state, null);
+  for (const s of ["running", "suspended", "interrupted", "closed"]) assert.equal(sanitizeClientMetrics({ turn_id: "t", ctx_state: s }).ctx_state, s);
+});
+
+
+// ---- Revision 7b (review of rev 7: H1, H3, M1, L3) ----
+import { settleDecision } from "../bundles/kiosk/public/state.js";
+
+test("r7b M1: a reply whose audio starts late but then runs (a Bluetooth sink waking, a slow route change) is never cut; one that stops advancing is", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx, started } = fakeCtx();
+  const ev = { drained: 0, stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained: () => ev.drained++, onStall: (i) => ev.stalls.push(i) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(96000)); await tick();             // 2 s of audio
+  t.mock.timers.tick(2000);                                  // the clock has not moved at all for 2 s …
+  ctx.currentTime += 0.5;                                    // … then the sink wakes up and runs
+  t.mock.timers.tick(DRAIN_GRACE_MS + 100);                  // past the first look (scheduled end + grace)
+  assert.equal(ev.stalls.length, 0, "not cut while the clock is still moving");
+  for (let i = 0; i < 4; i++) { t.mock.timers.tick(500); ctx.currentTime += 0.5; }
+  started[0].onended();
+  assert.deepEqual([ev.drained, ev.stalls.length], [1, 0], "it played to its end");
+  // Frozen from the start: cut, and the stall says the clock did not move.
+  p.push(new ArrayBuffer(48000)); await tick();
+  t.mock.timers.tick(60_000);
+  assert.equal(ev.stalls.length, 1);
+  assert.equal(ev.stalls[0].clockMoved, false);
+  assert.equal(ev.drained, 2);
+});
+
+test("r7b M1: a clock that keeps creeping cannot hold a reply forever — the cap is twice its length plus 5 s", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const { ctx } = fakeCtx();
+  const ev = { stalls: [] };
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained() {}, onStall: (i) => ev.stalls.push(i) });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); await tick();             // 1 s of audio; its source never ends
+  for (let ms = 0; ms < 20_000; ms += 250) { t.mock.timers.tick(250); ctx.currentTime += 0.001; }
+  assert.equal(ev.stalls.length, 1, "cut by the cap");
+  assert.equal(ev.stalls[0].clockMoved, true);
+});
+
+test("r7b H3: the player says how much audio a reply scheduled (counts only)", async (t) => {
+  const { ctx, started } = fakeCtx();
+  const p = createPlayer(ctx, { onLevel() {}, onFirstPlay() {}, onDrained() {} });
+  t.after(() => p.flush());
+  p.begin("pcm", 24000, 1);
+  p.push(new ArrayBuffer(48000)); p.push(new ArrayBuffer(24000)); await tick();
+  assert.equal(p.audioMs, 1500);
+  p.begin("pcm", 24000, 2);
+  assert.equal(p.audioMs, 0, "a new reply starts from zero");
+  for (const s of started) s.onended?.();
+});
+
+test("r7b H1: with the REAL player, a reply that drains between two sentences before turn_done never lets the mic go; it goes once the turn is done and drained — follow-up on or off", async (t) => {
+  for (const config of [{ mic_per_turn: true }, { mic_per_turn: true, follow_up: true }]) {
+    const { ctx, started } = fakeCtx();
+    const log = [];
+    const turn = { id: "t1", ended: true, done: null, barged: false, followedUp: false, playAt: null, reason: "silence", source: "tap" };
+    const settle = () => { const d = settleDecision(turn, { current: turn, playing: p.playing, config }); if (d.followUp) log.push("follow_up"); if (d.release) log.push("release"); };
+    const p = createPlayer(ctx, { onLevel() {}, onFirstPlay: () => { turn.playAt ??= 1; }, onDrained: settle });
+    p.begin("pcm", 24000, 1);
+    p.push(new ArrayBuffer(4800)); await tick();
+    started[0].onended();                                   // the first clause ended; the next sentence is not here yet
+    assert.deepEqual(log, [], `a dry spell mid-reply: nothing (${JSON.stringify(config)})`);
+    p.push(new ArrayBuffer(4800)); await tick();
+    turn.done = { aborted: false, timings: {} }; settle();  // turn_done while the second sentence plays
+    assert.deepEqual(log, [], "turn_done while audio plays: still nothing");
+    started[1].onended();                                   // done and drained
+    assert.deepEqual(log, [config.follow_up ? "follow_up" : "release"], "exactly one: the follow-up keeps the mic (one switch per conversation), or the release");
+    p.flush();
+  }
+  // A follow-up turn that settles lets it go.
+  const fu = { id: "t2", ended: true, done: { aborted: false, timings: {} }, source: "follow_up", playAt: 1 };
+  assert.deepEqual(settleDecision(fu, { current: fu, playing: false, config: { mic_per_turn: true, follow_up: true } }), { followUp: false, release: true });
+  assert.deepEqual(settleDecision(fu, { current: null, playing: false, config: {} }), { followUp: false, release: false }, "not the current turn: nothing");
+});
+
+test("r7b H1/L3 (source): settle() takes settleDecision's answer, and on a drain the mic is let go BEFORE the music is un-held", () => {
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  const settle = src.slice(src.indexOf("function settle("), src.indexOf("function chime("));
+  assert.match(settle, /settleDecision\(tn, \{ current: turn, playing: !!player\?\.playing, config \}\)/);
+  const drained = /onDrained: \(\) => \{([^}]*)\}/.exec(src)[1];
+  assert.ok(drained.indexOf("settle(turn)") >= 0 && drained.indexOf("settle(turn)") < drained.indexOf("renderBird()"), drained);
+});
+
+test("r7b H3: the turn report carries the reply's scheduled audio, and the stall's own evidence (clock moved, audio state AT the stall)", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, ttsStalled: true, ttsAudioMs: 4321.6, stall: { ctx_state: "running", clock_moved: false } }, {});
+  assert.deepEqual([m.tts_audio_ms, m.stall_ctx_state, m.stall_clock_moved], [4322, "running", false]);
+  const z = turnMetrics({ id: "t2", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1 }, {});
+  assert.deepEqual([z.tts_audio_ms, z.stall_ctx_state, z.stall_clock_moved], [null, null, null]);
+  const c = sanitizeClientMetrics({ turn_id: "t", tts_audio_ms: 4322, stall_ctx_state: "interrupted", stall_clock_moved: true });
+  assert.deepEqual([c.tts_audio_ms, c.stall_ctx_state, c.stall_clock_moved], [4322, "interrupted", true]);
+  const bad = sanitizeClientMetrics({ turn_id: "t", tts_audio_ms: "x", stall_ctx_state: "<b>", stall_clock_moved: "yes" });
+  assert.deepEqual([bad.tts_audio_ms, bad.stall_ctx_state, bad.stall_clock_moved], [null, null, null]);
+});
+
+test("r7b M3: the turn report carries the page's own media state at the tap and at the report (fixed words), so a page/server disagreement is in the log", () => {
+  const m = turnMetrics({ id: "t1", source: "tap", reason: "silence", speechEndAt: 1, playAt: 2, endedAt: 1, pageMediaStart: "blocked" }, { pageMedia: "playing" });
+  assert.deepEqual([m.page_media_start, m.page_media_end], ["blocked", "playing"]);
+  const c = sanitizeClientMetrics({ turn_id: "t", page_media_start: "paused", page_media_end: "offline" });
+  assert.deepEqual([c.page_media_start, c.page_media_end], ["paused", "offline"]);
+  const bad = sanitizeClientMetrics({ turn_id: "t", page_media_start: "Play KTPF", page_media_end: 3 });
+  assert.deepEqual([bad.page_media_start, bad.page_media_end], [null, null]);
+  const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
+  assert.match(src, /pageMediaStart = mediaView\?\.state\(\) \?\? null/);
+  assert.match(src, /pageMedia: mediaView\?\.state\(\) \?\? null/);
 });

@@ -8,12 +8,14 @@ import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
-  releasesMic, ttsStartDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
+  releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
-import { openMic, createPlayer } from "./audio.js";
+import { openMic, createPlayer, createMicGate } from "./audio.js";
 import { mountBird } from "./bird-view.js";
 import { createWindowView } from "./wm-view.js";
+import { createMediaView } from "./media-view.js";
 
 const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
@@ -22,7 +24,7 @@ const SESSION = document.documentElement.dataset.mode === "session";
  * Caps v2: what THIS page build can draw and this browser has. The server takes the lesser of this and the display's profile.
  * mobile / pointer / platform only feed the server's guess of the display type for a display nobody has typed yet.
  */
-const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer"],
+const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "nowplaying"],
   mobile: navigator.userAgentData ? navigator.userAgentData.mobile === true : /Mobi|Android/i.test(navigator.userAgent), pointer: matchMedia("(pointer: coarse)").matches ? "coarse" : "fine", platform: String(navigator.platform || "").slice(0, 40) };
 /** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
@@ -38,6 +40,8 @@ const t = (k) => STRINGS[lang]?.[k] || STRINGS.en?.[k] || "";
 let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null, reconnectTimer = null;
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
+let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null, starting = false;
+const micGate = createMicGate(() => openMic(ctx, onFrame));
 
 /*
  * Debug ring (smoke 2026-10-04: an unidentified message flashed after silent taps).
@@ -57,7 +61,8 @@ const cookie = (name) => { for (const c of document.cookie.split(";")) { const [
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
 function releaseAudio() {
   if (turn && !turn.ended) endTurn("manual", null);
-  try { mic?.close(); } catch {}
+  mediaView?.apply({ action: "stop" });             // the server's media state comes back with the next hello
+  micGate.release();
   mic = null;
   player?.flush();
   try { ctx?.suspend(); } catch {}
@@ -69,7 +74,30 @@ function setBird(s) {
   $("mic").textContent = t(s === "listening" ? "mic_stop" : s === "speaking" ? "mic_interrupt" : "mic_talk");
 }
 /** The server's state, held in "speaking" while local audio still plays (ruling F3). */
-const renderBird = () => setBird(displayedBird(serverBird, !!player?.playing));
+const renderBird = () => { setBird(displayedBird(serverBird, !!player?.playing)); syncDuck(); };
+/**
+ * Music is turned down (or paused, with the display's pause_media_on_listen) while a turn is open:
+ * the mic, the server's bird, this page's TTS (review C1: never keyed on turn_done). A backstop
+ * brings it back after DUCK_BACKSTOP_MS with the bird idle and no TTS, whatever the page thinks.
+ */
+function syncDuck() {
+  if (!mediaView) return;
+  const playing = !!player?.playing;
+  let on = duckDecision({ turnOpen: !!(turn && !turn.ended), serverBird, playing });
+  if (!on) duckOverride = false;
+  else if (duckOverride) on = false;
+  if (!on) { duckSince = null; clearTimeout(duckTimer); duckTimer = null; }
+  else if (duckSince == null) {
+    duckSince = performance.now();
+    duckTimer = setTimeout(() => {
+      duckTimer = null;
+      if (duckSince == null) return;
+      if (duckBackstop({ duckedFor: performance.now() - duckSince, serverBird, playing: !!player?.playing })) { duckOverride = true; note("media", "duck backstop"); syncDuck(); }
+      else { duckSince = null; syncDuck(); }           // still busy (a long turn): check again in another DUCK_BACKSTOP_MS (re-review N8)
+    }, DUCK_BACKSTOP_MS);
+  }
+  mediaView.hold(on, config.pause_media_on_listen === true);
+}
 /** The display's theme setting pins light/dark; on "auto" a display dims by its sleep hours and the dashboard follows the OS scheme. */
 function applyTheme() { document.documentElement.dataset.theme = themeFor(config.theme, { session: SESSION, osDark: SESSION && matchMedia("(prefers-color-scheme: dark)").matches, night: !SESSION && isNight(new Date(), config.sleep_start, config.sleep_end) }); }
 function tickClock() {
@@ -133,6 +161,8 @@ function connect() {
     if (ws !== sock) return;
     ws = null;
     if (turn && !turn.ended) { turn.ended = true; mic?.stop(); }
+    releaseMicAfterTurn("closed");
+    mediaView?.offline(true);                       // F9: what plays is shown as not connected
     player?.flush();
     serverBird = "idle";
     renderBird();
@@ -149,10 +179,11 @@ function connect() {
         clearTimeout(reconnectTimer); reconnectTimer = null; halted = true; releaseAudio(); banner("session_expired");
       }).catch(() => {});
     }
-    scheduleReconnect(backoffMs(attempt++));   // incl. 1011 server_error: the token is kept
+    scheduleReconnect(backoffMs(attempt++, mediaView?.current() ? MEDIA_RECONNECT_CAP_MS : undefined));   // incl. 1011 server_error: the token is kept; audio live: every ≤ 5 s (review M3)
   };
 }
-const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+/** → whether the frame left (false while the socket is down: the media view keeps what it could not send). */
+const send = (o) => { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; } return false; };
 
 function onText(m) {
   switch (m.type) {
@@ -162,6 +193,8 @@ function onText(m) {
       if (config.lang === "en" || config.lang === "es") lang = config.lang;
       serverOffset = (m.server_now || Date.now()) - Date.now();
       mountUi();
+      mediaView?.offline(false);                      // F9: the server is back; its snapshot follows
+      mediaView?.flush();                             // a media report the socket could not carry (re-review N3)
       break;
     case "state":
       serverBird = m.bird;
@@ -178,8 +211,24 @@ function onText(m) {
       player?.begin(m.codec, m.sample_rate, ttsSeq);
       break;
     }
-    case "wm": note("wm", `${m.action}${m.id ? " " + m.id : ""}${m.windows ? " (" + m.windows.length + ")" : ""}`); wmView?.apply(m); if (m.action === "timer_done") chime(); break;
+    case "wm": noteEffect(turn, { kind: "wm", at: performance.now() }); note("wm", `${m.action}${m.id ? " " + m.id : ""}${m.windows ? " (" + m.windows.length + ")" : ""}`); wmView?.apply(m); if (m.action === "timer_done") chime(); break;
     case "announce": $("cap-user").textContent = ""; $("cap-bot").textContent = m.text || ""; note("caption:announce", `${(m.text || "").length} chars`); break;
+    case "media":
+      noteEffect(turn, { kind: m.action === "load" && !m.paused ? "load" : "media", id: m.id, at: performance.now() });
+      note("media", `${m.action}${m.id ? " " + m.id : ""}`);
+      mediaView?.apply(m);
+      break;
+    // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
+    case "turn_over":
+      if (turn && turn.id === m.turn_id) {
+        if (!turn.ended) { turn.ended = true; clearTimeout(turn.guard); turn.guard = null; mic?.stop(); releaseMicAfterTurn("closed"); }
+        turn.reported = true;
+        turn.done = { turn_id: m.turn_id, aborted: true, over: String(m.reason || "") };
+        turn.doneAt = performance.now();
+      }
+      note("turn", `over ${String(m.reason || "").slice(0, 16)}`);
+      syncDuck();
+      break;
     case "turn_done":
       if (m.timings?.tools || m.timings?.tool_choice) note("tools", toolsLine(m.timings));
       if (turn && turn.id === m.turn_id) { turn.done = m; turn.doneAt = performance.now(); settle(turn); }
@@ -187,6 +236,7 @@ function onText(m) {
     case "error":
       note("error", `${m.code}${m.recoverable ? "" : " (fatal)"}`);
       { const d = errorDecision(m.code, m.recoverable, SESSION ? "session" : "paired"); if (d.banner) banner(d.banner); else caption(t(d.caption), m.code); }
+      syncDuck();
       break;
     default:
   }
@@ -206,6 +256,8 @@ function mountUi() {
       onDismiss: (id) => send({ type: "wm_event", id, kind: "dismissed" }),
       onTap: (id) => send({ type: "wm_event", id, kind: "tapped" }),
       onCloseAll: () => send({ type: "wm_event", kind: "close_all" }),
+      nowPlaying: () => mediaView?.info() || null,
+      onMedia: (verb) => send({ type: "media_cmd", do: verb }),
     });
   }
   if (!clockTimer) tickClock(); else applyTheme();   // a pushed theme setting applies now, not at the next minute
@@ -222,11 +274,16 @@ async function ensureAudio() {
         if (turn && !turn.barged && turn.ttsSeq === seq && turn.playAt == null) turn.playAt = at;
         renderBird();
       },
-      onDrained: () => { renderBird(); if (turn) settle(turn); },
+      // r7b L3: the mic (and its call audio mode) goes before the music is un-held.
+      onDrained: () => { if (turn) settle(turn); renderBird(); },
+      onStall: (info) => { if (turn) { turn.ttsStalled = true; turn.stall ??= { ctx_state: info.ctxState, clock_moved: info.clockMoved === true }; } note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
     });
   }
   if (!mic) {
-    try { mic = await openMic(ctx, onFrame); } catch (err) { banner(micDecision(err, ctx.state)); return false; }
+    // One open at a time, shared by every caller (review H3); an open released meanwhile gives null.
+    try { mic = await micGate.acquire(); } catch (err) { banner(micDecision(err, ctx.state)); return false; }
+    if (!mic) return false;
+    micOpenMs = micGate.takeOpenMs();
   }
   const d = micDecision(null, ctx.state);
   if (d !== "ok") { banner(d); return false; }
@@ -244,14 +301,23 @@ function onFrame(pcm, rms, at) {
 }
 
 async function startTurn(source) {
-  if (!ws || ws.readyState !== 1) return;
-  if (!(await ensureAudio())) return;
+  if (!ws || ws.readyState !== 1 || starting) return;
+  // Review H3: from the tap until the turn exists, a second tap is ignored and the bird shows it heard the first.
+  starting = true;
+  $("bird").classList.add("is-starting");
+  let ok = false;
+  try { ok = await ensureAudio(); } finally { starting = false; $("bird").classList.remove("is-starting"); }
+  if (!ok) return;
   if (turn) report(turn, true);                  // a pending no-audio wait is cut short: still reported (F9)
   const noSpeechMs = source === "follow_up" ? (config.follow_up_s || 6) * 1000 : 8000;
   const hangoverMs = Number(config.vad_hangover_ms) || VAD_DEFAULTS.hangoverMs;   // latency lever 1 (ruling R20; default 450 ms)
-  turn = { id: `t${Date.now()}`, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null, sentBytes: 0, voicedBytes: 0 };
+  turn = { id: `t${Date.now()}`, effectAt: null, effectLoad: null, endedAt: null, source, vad: createVad({ noSpeechMs, hangoverMs }), speechEndAt: null, playAt: null, done: null, doneAt: null, reason: null, ended: false, reported: false, tts: false, ttsSeq: null, barged: false, followedUp: false, retry: null, guard: null, sentBytes: 0, voicedBytes: 0 };
   const tn = turn;
+  tn.micOpenMs = micOpenMs; micOpenMs = null;     // F6: the reopen cost at this tap (null: it was open)
+  tn.pageMediaStart = mediaView?.state() ?? null;   // r7b M3: the page's own media state at the tap
   tn.guard = setTimeout(() => { if (turn === tn) endTurn("max", null); }, TURN_GUARD_MS);   // frames stopped (phone locked, track ended)
+  duckOverride = false;
+  syncDuck();                                     // at the tap, before the server answers (spec §9.6)
   send({ type: "turn_start", source: source === "wake" ? "wake" : "tap", turn_id: turn.id });
   mic.start(source === "wake");                   // 1.0 s pre-roll only for a wake word (spec §7.3)
   $("cap-user").textContent = "";
@@ -259,10 +325,18 @@ async function startTurn(source) {
 }
 function endTurn(reason, speechEndAt) {
   if (!turn || turn.ended) return;
-  turn.ended = true; turn.reason = reason; turn.speechEndAt = speechEndAt;
+  turn.ended = true; turn.reason = reason; turn.speechEndAt = speechEndAt; turn.endedAt = performance.now();
   clearTimeout(turn.guard); turn.guard = null;
   mic?.stop();
+  syncDuck();
   send({ type: "turn_end", vad_reason: reason, voiced_bytes: turn.voicedBytes });
+}
+/** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
+function releaseMicAfterTurn(phase) {
+  if (micAfterTurn(config, { phase }) !== "release" || (!mic && !micGate.opening())) return;
+  micGate.release();
+  mic = null;
+  note("mic", "released");
 }
 /** turn_metrics, once per turn, when playback settles (F3) or the no-audio wait runs out (F9). */
 function report(tn, force = false) {
@@ -271,12 +345,16 @@ function report(tn, force = false) {
   if (d.retryInMs != null) { tn.retry = setTimeout(() => report(tn), d.retryInMs); return; }
   if (!d.report) return;
   tn.reported = true;
-  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000) }));
+  send(turnMetrics(tn, { outputLatencyMs: Math.round(((ctx && (ctx.outputLatency || ctx.baseLatency)) || 0) * 1000), ctxState: ctx ? String(ctx.state) : null, pageMedia: mediaView?.state() ?? null }));
 }
 /** Called on turn_done and on local drain — whichever comes last opens the follow-up mic. */
 function settle(tn) {
+  if (tn.tts && player) tn.ttsAudioMs = player.audioMs;   // r7b H3: the reply's scheduled audio (counts only)
   report(tn);
-  if (tn === turn && followUpDecision(tn, config, { playing: !!player?.playing })) { tn.followedUp = true; startTurn("follow_up"); }
+  // Review of rev 7 (H1): never on a dry spell mid-reply — only once this turn is done and nothing plays.
+  const d = settleDecision(tn, { current: turn, playing: !!player?.playing, config });
+  if (d.followUp) { tn.followedUp = true; startTurn("follow_up"); }
+  else if (d.release) releaseMicAfterTurn("settled");
 }
 function chime() {
   if (!ctx) return;
@@ -287,11 +365,12 @@ function chime() {
 }
 
 async function onTap() {
-  switch (tapDecision({ halted, playing: !!player?.playing, birdState, turnOpen: !!(turn && !turn.ended) })) {
+  switch (tapDecision({ halted, playing: !!player?.playing, birdState, turnOpen: !!(turn && !turn.ended), starting })) {
     case "resume": halted = false; banner(null); connect(); return;
     case "barge":
       send({ type: "barge_in" });
       if (turn && !turn.reported) turn.barged = true;   // after turn_done too: the server already said idle (F3)
+      releaseMicAfterTurn("closed");                    // a barge ends the conversation: no follow-up comes
       player?.flush();
       if (serverBird === "speaking") serverBird = "idle";
       renderBird();
@@ -329,5 +408,11 @@ if (SESSION) {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && window.parent !== window) window.parent.postMessage("crow-talk-close", location.origin); });
 }
 
+mediaView = createMediaView({
+  audio: $("media"), chip: $("np-chip"), send, t,
+  onState: (id, state) => { if (state === "playing") noteEffect(turn, { kind: "playing", id, at: performance.now() }); },
+  onChange: () => wmView?.refresh(),
+  onChipTap: () => send({ type: "wm_event", kind: "nowplaying" }),   // F8: the server opens (or brings forward) the window
+});
 $("mic").textContent = t("mic_talk");
 connect();

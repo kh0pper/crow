@@ -1,5 +1,7 @@
 /** Per-device latency ring buffer (spec §9; ruling R8 decides which turns count toward the gate). */
 const REASONS = new Set(["silence", "max", "no_speech", "manual"]);
+const CTX_STATES = new Set(["running", "suspended", "interrupted", "closed"]);
+const PAGE_MEDIA = new Set(["none", "loading", "playing", "paused", "blocked", "offline"]);
 const clampMs = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Math.max(0, Math.min(120_000, Math.round(Number(v)))) : null);
 
 export function sanitizeClientMetrics(m) {
@@ -9,7 +11,21 @@ export function sanitizeClientMetrics(m) {
     output_latency_ms: clampMs(m?.output_latency_ms),
     vad_reason: REASONS.has(m?.vad_reason) ? m.vad_reason : null,
     barged: m?.barged === true,
+    // End of speech to the moment the thing happened (a window changed, audio became audible). Fast-path turns are judged on it.
+    effect_ms: clampMs(m?.effect_ms),
     source: m?.source === "wake" || m?.source === "tap" || m?.source === "follow_up" ? m.source : null,
+    // F6: opening the microphone at the tap (a phone releases it after every turn). Not part of e2e: it is before speech.
+    mic_open_ms: clampMs(m?.mic_open_ms),
+    // r7 G12: the page's player ended a reply whose audio never finished by itself; the AudioContext state at the report.
+    tts_stalled: m?.tts_stalled === true,
+    ctx_state: CTX_STATES.has(m?.ctx_state) ? m.ctx_state : null,
+    // r7b H3: the reply's scheduled audio, and the stall's own evidence (the audio state at the stall, whether its clock moved).
+    tts_audio_ms: clampMs(m?.tts_audio_ms),
+    stall_ctx_state: CTX_STATES.has(m?.stall_ctx_state) ? m.stall_ctx_state : null,
+    stall_clock_moved: typeof m?.stall_clock_moved === "boolean" ? m.stall_clock_moved : null,
+    // r7b M3: the page's own media state at the tap and at the report.
+    page_media_start: PAGE_MEDIA.has(m?.page_media_start) ? m.page_media_start : null,
+    page_media_end: PAGE_MEDIA.has(m?.page_media_end) ? m.page_media_end : null,
   };
 }
 
@@ -42,7 +58,7 @@ export function createMetricsStore({ max = 100 } = {}) {
     clientTurn(dev, m) {
       const c = sanitizeClientMetrics(m);
       if (!c.turn_id) return null;
-      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source });
+      return Object.assign(rec(dev, c.turn_id), { e2e_ms: c.e2e_ms, output_latency_ms: c.output_latency_ms, barged: c.barged, vad_reason: c.vad_reason, source: c.source, effect_ms: c.effect_ms, mic_open_ms: c.mic_open_ms, tts_stalled: c.tts_stalled, ctx_state: c.ctx_state, tts_audio_ms: c.tts_audio_ms, stall_ctx_state: c.stall_ctx_state, stall_clock_moved: c.stall_clock_moved, page_media_start: c.page_media_start, page_media_end: c.page_media_end });
     },
     list(dev) { return [...(devs.get(dev)?.values() || [])].reverse(); },
     /**

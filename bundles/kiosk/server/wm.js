@@ -281,7 +281,8 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
     w.done = true;
     try { onTimerDone(id, copy(w)); } catch (err) { console.error("[kiosk wm] onTimerDone failed:", err?.message || err); }
   }
-  function open(id, spec) {
+  /** behind: put the new window just under the one in front instead of in front of it (F8: a now-playing window that opens by itself). */
+  function open(id, spec, { behind = false } = {}) {
       const d = dev(id);
       const t = now();
       const evicted = [];
@@ -295,7 +296,7 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
       const { seconds, ...rest } = spec;
       const w = { ...rest, id: `${spec.kind}-${++d.seq}`, opened_at: t, touched_at: t };
       if (spec.kind === "timer") { w.ends_at = t + seconds * 1000; w.done = false; }
-      d.windows.push(w);
+      if (behind && d.windows.length) d.windows.splice(d.windows.length - 1, 0, w); else d.windows.push(w);
       if (w.kind === "timer") timers.set(`${id}:${w.id}`, setTimer(() => fire(id, w.id), Math.max(0, w.ends_at - t)));
       return { window: copy(w), evicted: evicted.filter(Boolean).map(copy) };
   }
@@ -308,14 +309,14 @@ export function createWmStore({ now = Date.now, setTimer = setTimeout, clearTime
      * the same title never produces a second card. A TIMER is never replaced — two timers may share a
      * name, and setting one must not cancel another. → { window, evicted, updated }.
      */
-    put(id, spec, { replaceTimer = false } = {}) {
+    put(id, spec, { replaceTimer = false, behind = false } = {}) {
       const title = String(spec.title || "").toLowerCase();
       // A timer gets a window of its own, unless replaceTimer (a follow-up "make it twenty minutes instead"):
       // then it replaces the RUNNING timer of the same name.
       const same = spec.kind === "timer" && !replaceTimer ? null
         : dev(id).windows.find((w) => w.kind === spec.kind && !(w.kind === "timer" && w.done) && String(w.title || "").toLowerCase() === title);
       const gone = same ? [copy(remove(id, same.id))] : [];
-      const r = open(id, spec);
+      const r = open(id, spec, { behind });
       return { window: r.window, evicted: [...gone, ...r.evicted], updated: !!same };
     },
     close: (id, winId) => copy(remove(id, winId)),

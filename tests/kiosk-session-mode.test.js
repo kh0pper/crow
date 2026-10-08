@@ -39,6 +39,7 @@ const WS_PATH = "/api/kiosk/session/dashboard";
 
 let auth, csrf, store, registry, createDbClient, kiosk, wrapPcmAsWav;
 let rt, srv, base, sessionToken;
+const conns = new Set();
 const turnCalls = [];
 const logs = [];
 
@@ -90,12 +91,16 @@ before(async () => {
   app.use(rt.router(auth.dashboardAuth));
   srv = http.createServer(app);
   rt.attachUpgrade(srv);
+  // Review of rev 8 (M2): the server's sockets (upgraded ones included) are destroyed in after(), so a test that fails
+  // before closing its WebSocket ends the run instead of hanging it.
+  srv.on("connection", (c) => { conns.add(c); c.on("close", () => conns.delete(c)); });
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
 
 after(() => {
   rt?.stop();
+  for (const c of conns) c.destroy();
   srv?.close();
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 });

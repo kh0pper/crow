@@ -11,3 +11,5 @@ Use these tools when the user wants something on the home display ("tell the kit
 - `crow_kiosk_show { title, body, display? }` — a content window. `||` starts a paragraph; lines starting `- ` become a list.
 
 The display is a shared household screen: never put private messages, credentials or personal memories on it.
+
+On a display itself, "play <station>" and the transport words (pause, louder, stop, what's playing) are handled by the display. Station presets are set in the Kiosk panel; never invent a stream address.

@@ -188,3 +188,28 @@ test("an already-paired 0.1.8 display keeps NO profile through an unrelated save
   assert.deepEqual(Object.keys(saved).sort(), Object.keys(v018).sort());
   assert.equal(saved.follow_up, false);
 });
+
+test("kiosk_settings: max_volume is 10..100 in steps of ten; pause_media_on_listen is a boolean; both are optional (never filled in by a default)", async () => {
+  assert.deepEqual([store.KIOSK_DEFAULTS.max_volume, store.KIOSK_DEFAULTS.pause_media_on_listen], [undefined, undefined]);
+  assert.deepEqual(Object.keys(store.normalizeKioskSettings({ follow_up: true }, null)).filter((k) => store.KIOSK_MEDIA_KEYS.includes(k)), [], "an unrelated save materialises neither");
+  const n = (input, prior) => store.normalizeKioskSettings(input, prior);
+  assert.equal(n({ max_volume: 64 }).max_volume, 60);
+  assert.equal(n({ max_volume: 5 }).max_volume, 10);
+  assert.equal(n({ max_volume: 900 }).max_volume, 100);
+  assert.equal(n({ max_volume: "70" }).max_volume, 70);
+  assert.equal(n({ max_volume: "loud" }, { max_volume: 40 }).max_volume, 40, "not a number keeps the prior");
+  assert.equal(n({ pause_media_on_listen: "on" }).pause_media_on_listen, true);
+  assert.equal(n({ pause_media_on_listen: false }, { pause_media_on_listen: true }).pause_media_on_listen, false);
+  assert.equal(n({}, { max_volume: 30, pause_media_on_listen: true }).max_volume, 30, "an untouched save keeps both");
+});
+
+test("r8b: every save of max_volume on this build marks it as on the −50…0 dB scale ('db5'); rev 8's 'db10' mark is kept until the cap is moved or saved; a mark is never set from input on its own", () => {
+  const n = (input, prior) => store.normalizeKioskSettings(input, prior);
+  assert.equal(n({ max_volume: 70 }).max_volume_scale, "db5");
+  assert.equal(n({ max_volume: 70 }, { max_volume: 50, max_volume_scale: "db10" }).max_volume_scale, "db5", "a save puts it on this build's scale");
+  assert.equal(n({ follow_up: true }, { max_volume: 50 }).max_volume_scale, undefined, "an old stored cap stays unmarked until it is migrated or saved again");
+  assert.equal(n({ follow_up: true }, { max_volume: 80, max_volume_scale: "db10" }).max_volume_scale, "db10", "kept for the migration");
+  assert.equal(n({ follow_up: true }, { max_volume: 80, max_volume_scale: "db5" }).max_volume_scale, "db5", "kept");
+  assert.equal(n({ max_volume_scale: "db5" }).max_volume_scale, undefined, "never set on its own from input");
+  assert.equal(n({ follow_up: true }, { max_volume: 80, max_volume_scale: "loud" }).max_volume_scale, undefined, "an unknown mark is dropped");
+});

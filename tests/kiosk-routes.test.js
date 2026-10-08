@@ -49,9 +49,16 @@ function runtimeDeps(over = {}) {
   };
 }
 
+// Review of rev 8 (M2): a wired test that fails before its ws.close() left an open socket, so srv.close() in after() never
+// finished and the red run hung instead of failing. The server's own sockets (upgraded ones included) are tracked and
+// destroyed on close.
 async function listen(app, runtime) {
   const s = http.createServer(app);
   runtime?.attachUpgrade(s);
+  const conns = new Set();
+  s.on("connection", (c) => { conns.add(c); c.on("close", () => conns.delete(c)); });
+  const close = s.close.bind(s);
+  s.close = (cb) => { for (const c of conns) c.destroy(); return close(cb); };
   await new Promise((r) => s.listen(0, "127.0.0.1", r));
   return { s, base: `http://127.0.0.1:${s.address().port}` };
 }
@@ -75,14 +82,14 @@ const j = (path, opt = {}) => fetch(base + path, { ...opt, headers: { "Content-T
 const wsUrl = (b) => b.replace("http", "ws") + "/api/kiosk/session";
 
 /** Pair a kiosk device directly and open a hello'd session. */
-async function connect(id) {
+async function connect(id, caps = {}) {
   const { token } = await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
   await store.updateDeviceProfiles(db(), id, { bound_bot_id: "household" });
   const ws = new WebSocket(wsUrl(base));
   const msgs = [];
   await new Promise((r) => ws.on("open", r));
   ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
-  ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps: {} }));
+  ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps }));
   for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(msgs[0]?.type, "ready");
   return { ws, msgs };
@@ -271,6 +278,18 @@ test("ruling C: KIOSK_DENY_TOOLS denies cross-bot escapes, and every voice turn 
   call.device.kiosk_settings = { stt_model: "tiny.en" };
   assert.equal(call.sttModel({ provider: "fasterwhisper" }), "Systran/faster-whisper-tiny.en");
   assert.equal(call.sttModel({ provider: "openai" }), null, "never forced onto another provider");
+  ws.close();
+});
+
+test("r7 G9 (wired): every display turn records the server's media state before and after it (a fixed word, counts-only evidence)", async () => {
+  const { ws, msgs } = await connect("kiosk-g9");
+  ws.send(JSON.stringify({ type: "turn_start", turn_id: "g9" }));
+  ws.send(Buffer.alloc(8000));
+  ws.send(JSON.stringify({ type: "turn_end" }));
+  for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((r) => setTimeout(r, 10));
+  const done = msgs.find((m) => m.type === "turn_done");
+  assert.equal(done.timings.media_before, "none");
+  assert.equal(done.timings.media_after, "none");
   ws.close();
 });
 
@@ -907,6 +926,433 @@ test("turn check: ok only when the clock took the no-model path, the plain quest
 
 test("one set of turn options: the runtime's display turn (and so the turn check) is built by displayTurnOptions, the function the evaluation runs", () => {
   const rt = readFileSync(new URL("../bundles/kiosk/server/runtime.js", import.meta.url), "utf8");
-  assert.match(rt, /const turnOptions = \(device, caps, tz, emit\) => displayTurnOptions\(/);
+  assert.match(rt, /const turnOptions = \(device, caps, tz, emit, hooks\) => displayTurnOptions\(/);
   assert.equal((rt.match(/createDisplayTools\(/g) || []).length, 2, "one in displayTurnOptions, one for the bind-time fit");
+});
+
+// ── Display tickets (the stream mount) ───────────────────────────────────────────────────────────
+/** A local audio upstream, reached through the real relay the only way a private address can be: as a configured service at exactly this origin. */
+async function audioUpstream(handler = (req, res) => { res.writeHead(200, { "content-type": "audio/mpeg", "set-cookie": "x=1" }); res.end("0123456789"); }) {
+  const { serviceHop } = await import("../bundles/kiosk/server/relay.js");
+  const seen = [], sockets = new Set();
+  const s = http.createServer((req, res) => { seen.push({ method: req.method, headers: req.headers }); handler(req, res); });
+  s.on("connection", (c) => { sockets.add(c); c.on("close", () => sockets.delete(c)); });
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const origin = `http://127.0.0.1:${s.address().port}`;
+  return { resource: { url: `${origin}/live`, hop: serviceHop({ origin, path: /^\/live$/ }) }, seen, open: () => sockets.size, close: () => { s.closeAllConnections?.(); s.close(); } };
+}
+const mintStream = (runtime, resource, deviceId = "kiosk-tk") => runtime.tickets.mint({ deviceId, kind: "stream", resource, ttlMs: 60_000 });
+
+test("ticket mount: Funnel and off-tailnet are refused before the ticket is looked at; an unknown or malformed ticket is 404; a live one streams; a revoked one is 404", async () => {
+  const up = await audioUpstream();
+  try {
+    const t = mintStream(rt, up.resource);
+    tailnet = false;
+    try { const r = await fetch(base + t.path); assert.deepEqual([r.status, (await r.json()).error], [403, "network_refused"], "a VALID ticket off the tailnet"); } finally { tailnet = true; }
+    const fun = await fetch(base + t.path, { headers: { "Tailscale-Funnel-Request": "?1" } });
+    assert.deepEqual([fun.status, (await fun.json()).error], [403, "funnel_refused"]);
+    assert.equal(up.seen.length, 0, "nothing was fetched for a refused request");
+    for (const bad of ["nope", "AAAAAAAAAAAAAAAAAAAAAA", t.id.slice(0, 21), `${t.id}A`, "..%2F..%2Fapi"]) assert.equal((await fetch(`${base}/display/t/${bad}/stream`)).status, 404, bad);
+    const ok = await fetch(base + t.path, { headers: { Range: "bytes=0-" } });
+    assert.deepEqual([ok.status, ok.headers.get("content-type"), ok.headers.get("cache-control"), ok.headers.get("referrer-policy"), ok.headers.get("set-cookie"), await ok.text()], [200, "audio/mpeg", "no-store", "no-referrer", null, "0123456789"]);
+    assert.equal(up.seen[0].headers.range, "bytes=0-");
+    assert.equal((await fetch(`${base}/display/t/${t.id}/other`)).status, 404, "a stream ticket is a stream, nothing else");
+    rt.tickets.revoke(t.id);
+    assert.equal((await fetch(base + t.path)).status, 404);
+  } finally { up.close(); }
+});
+
+test("ticket mount: only GET — HEAD and the rest are 405 and hold no upstream and no ticket slot; a third request at once on one ticket is 429", async () => {
+  let release = [];
+  const up = await audioUpstream((req, res) => { res.writeHead(200, { "content-type": "audio/mpeg" }); res.write("x"); release.push(() => res.end()); });
+  try {
+    const t = mintStream(rt, up.resource);
+    for (const method of ["HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
+      const r = await fetch(base + t.path, { method });
+      assert.deepEqual([r.status, r.headers.get("allow")], [405, "GET"], method);
+    }
+    assert.equal((await fetch(`${base}/display/t/nope/stream`, { method: "HEAD" })).status, 405, "whether or not the ticket exists");
+    assert.deepEqual([up.seen.length, rt.tickets.get(t.id).open], [0, 0]);
+    const a = await fetch(base + t.path), b = await fetch(base + t.path);
+    assert.deepEqual([a.status, b.status, rt.tickets.get(t.id).open], [200, 200, 2]);
+    assert.equal((await fetch(base + t.path)).status, 429);
+    for (const fn of release) fn();
+    await a.text(); await b.text();
+    for (let i = 0; i < 100 && rt.tickets.get(t.id).open; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(rt.tickets.get(t.id).open, 0, "a finished request gives its slot back");
+    // Revoking the ticket cuts a request that is still open, and frees the upstream.
+    release = [];
+    const c = await fetch(base + t.path);
+    const reader = c.body.getReader();
+    await reader.read();
+    rt.tickets.revoke(t.id);
+    await assert.rejects((async () => { for (;;) { const { done } = await reader.read(); if (done) throw new Error("ended"); } })());
+    for (let i = 0; i < 100 && up.open(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(up.open(), 0);
+  } finally { up.close(); }
+});
+
+test("ticket mount: a kiosk device token or a dashboard session adds nothing, and the ticket works on no other route", async () => {
+  const up = await audioUpstream();
+  try {
+    const { token } = await store.pairDevice(db(), { id: "kiosk-tk2", name: "TK", device_kind: "kiosk" });
+    assert.equal((await fetch(`${base}/display/t/${token.slice(0, 22)}/stream`, { headers: { Authorization: `Bearer ${token}` } })).status, 404, "a device token is not a ticket");
+    assert.equal((await fetch(`${base}/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream`, { headers: { Authorization: `Bearer ${token}`, Cookie: "crow_session=anything" } })).status, 404);
+    const t = mintStream(rt, up.resource);
+    session = false;
+    try {
+      assert.equal((await fetch(`${base}/api/kiosk/admin/displays?ticket=${t.id}`)).status, 401);
+      assert.equal((await fetch(`${base}/api/kiosk/admin/displays`, { headers: { Authorization: `Bearer ${t.id}` } })).status, 401);
+    } finally { session = true; }
+    assert.equal((await fetch(`${base}/api/kiosk/internal/displays`, { headers: { Authorization: `Bearer ${t.id}` } })).status, 401);
+    // And the ticket needs neither: a request with no credentials at all streams (the path is the credential, behind the network gate).
+    assert.equal((await fetch(base + t.path)).status, 200);
+  } finally { up.close(); }
+});
+
+test("ticket mount: a refused upstream is a 502 with the reason in the log by code only; a request that throws never writes the ticket to the log", async () => {
+  const logs = [];
+  const boom = createKioskRuntime(runtimeDeps({ log: (l) => logs.push(l), relay: { toResponse: async () => { throw new Error("relay blew up"); } } }));
+  const app = express();
+  app.use(boom.router((req, res, next) => next()));
+  const { s, base: b2 } = await listen(app, boom);
+  try {
+    const t = mintStream(boom, { url: "https://stream.example.invalid/live", hop: {} });
+    const r = await fetch(b2 + t.path);
+    assert.equal(r.status, 500);
+    assert.deepEqual(logs.filter((l) => l.includes("/display/t/")), ["[kiosk] GET /display/t/…/stream: relay blew up"]);
+    assert.ok(!logs.join("\n").includes(t.id), "the ticket id is in no log line");
+  } finally { boom.stop(); s.close(); }
+  // The real relay, an upstream whose policy does not allow it: 502, one log line with a code, no address in it.
+  const logs2 = [];
+  const real = createKioskRuntime(runtimeDeps({ log: (l) => logs2.push(l) }));
+  const app2 = express();
+  app2.use(real.router((req, res, next) => next()));
+  const { s: s2, base: b3 } = await listen(app2, real);
+  try {
+    const { publicHop } = await import("../bundles/kiosk/server/relay.js");
+    const url = "http://127.0.0.1:9/live";
+    const t = mintStream(real, { url, hop: publicHop(url) });
+    const r = await fetch(b3 + t.path);
+    assert.deepEqual([r.status, await r.text()], [502, "Upstream unavailable"]);
+    // 127.0.0.1 is also one of this host's own addresses, which is said first.
+    assert.ok(["[kiosk] stream for kiosk-tk not relayed: private_address", "[kiosk] stream for kiosk-tk not relayed: own_address"].includes(logs2.filter((l) => l.includes("not relayed")).join("|")));
+    assert.ok(!logs2.join("\n").includes(t.id) && !logs2.join("\n").includes("127.0.0.1"));
+  } finally { real.stop(); s2.close(); }
+});
+
+test("the gateway builds the kiosk runtime without a relay of its own: the production relay has no test socket", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../bundles/kiosk/panel/routes.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /relay|createConnection|connect:/, "panel/routes.js passes no relay and no socket override to the runtime");
+  const rtSrc = readFileSync(new URL("../bundles/kiosk/server/runtime.js", import.meta.url), "utf8");
+  assert.match(rtSrc, /const relay = deps\.relay \|\| createRelay\(\);/, "the default relay is built with no options");
+});
+
+test("stations (wired): the panel saves presets behind the dashboard session; an invalid row refuses the whole save; the list is local and reaches the play source at once", async () => {
+  session = false;
+  try { assert.equal((await j("/api/kiosk/admin/stations")).status, 401); } finally { session = true; }
+  assert.deepEqual((await (await j("/api/kiosk/admin/stations")).json()).stations, []);
+  const bad = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", url: "https://stream.example.invalid/mix" }, { name: "Inside", url: "http://192.168.1.20:8000/live" }] }) });
+  assert.deepEqual([bad.status, (await bad.json()).error], [400, "invalid_station"], "a private address is never a station");
+  assert.equal(settings.get("kiosk_stations"), undefined, "nothing was written");
+  for (const url of ["https://user:pw@stream.example.invalid/x", "ftp://stream.example.invalid/x", "http://127.0.0.1/x", "http://[::1]/x", "not a url"]) {
+    assert.equal((await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "X", url }] }) })).status, 400, url);
+  }
+  const ok = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }] }) });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(JSON.parse(settings.get("kiosk_stations")), [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }]);
+  assert.deepEqual((await (await j("/api/kiosk/admin/stations")).json()).stations.map((s) => s.name), ["Morning Mix"]);
+  // The source reads the new list now: the play tool is offered on the next turn.
+  const before = turnCalls.length;
+  const { ws, msgs } = await connect("kiosk-st1");
+  try {
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "t-st" }));
+    ws.send(Buffer.alloc(16000));
+    ws.send(JSON.stringify({ type: "turn_end", turn_id: "t-st" }));
+    for (let i = 0; i < 100 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    const o = turnCalls.at(-1);
+    assert.ok(o.extraTools.some((t) => t.definition.name === "crow_play"), "crow_play is offered once a station exists");
+    const play = o.extraTools.find((t) => t.definition.name === "crow_play");
+    assert.match(JSON.stringify(play.definition), /"radio"/);
+    // The model's call plays the station: the page is told to load a ticket path, never the address.
+    const r = JSON.parse(await play.execute({ what: "the mix" }, { transcript: "play the mix" }));
+    assert.deepEqual([r.ok, r.outcome, r.say], [true, "playing", "Playing Morning Mix."]);
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "media" && m.action === "load"); i++) await new Promise((r2) => setTimeout(r2, 10));
+    const load = msgs.find((m) => m.type === "media" && m.action === "load");
+    assert.match(load.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
+    assert.ok(!JSON.stringify(msgs).includes("example.invalid"));
+    assert.match(o.turnContext("what is this"), /Playing: Morning Mix \(radio\)\./);
+  } finally { ws.close(); }
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
+});
+
+test("stations (wired): Test probes response headers only and refuses a private address before any request", async () => {
+  const r = await j("/api/kiosk/admin/stations/test", { method: "POST", body: JSON.stringify({ url: "http://127.0.0.1:9/live" }) });
+  assert.deepEqual(await r.json(), { ok: false, error: "private_address" });
+  assert.deepEqual(await (await j("/api/kiosk/admin/stations/test", { method: "POST", body: JSON.stringify({ url: "javascript:alert(1)" }) })).json(), { ok: false, error: "bad_url" });
+});
+
+test("media (wired): unpairing a display ends its stream and revokes its tickets; a failed stream is said once in the display's language", async () => {
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", url: "https://stream.example.invalid/mix" }] }) });
+  const { ws, msgs } = await connect("kiosk-st2");
+  try {
+    const before = speakCalls.length;
+    const item = rt.media.play("kiosk-st2", [{ title: "Morning Mix", source: "radio", upstream: { url: "https://stream.example.invalid/mix", hop: {} } }]);
+    assert.ok(item && rt.tickets.size() >= 1);
+    rt.media.onEvent("kiosk-st2", { id: item.id, state: "error", code: "load_failed" });
+    for (let i = 0; i < 50 && speakCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(speakCalls.at(-1).text, "I couldn't play Morning Mix.");
+    assert.equal(rt.media.active("kiosk-st2"), false);
+    const again = rt.media.play("kiosk-st2", [{ title: "Morning Mix", source: "radio", upstream: { url: "https://stream.example.invalid/mix", hop: {} } }]);
+    const loads = () => msgs.filter((m) => m.type === "media" && m.action === "load");
+    for (let i = 0; i < 50 && loads().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    const path = loads().at(-1).url;
+    assert.equal((await j("/api/kiosk/admin/displays/kiosk-st2", { method: "DELETE" })).status, 200);
+    assert.equal(rt.media.active("kiosk-st2"), false);
+    assert.equal((await fetch(base + path)).status, 404, "the ticket died with the display");
+    assert.ok(again);
+  } finally { ws.close(); }
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
+});
+
+test("turn check with something to play (WM1b): a fourth sentence names the first station and must start it with no model; the session is gone after the check; a play that does not start fails the check", async () => {
+  const st = JSON.stringify([{ name: "Morning Mix", aliases: [], url: "https://stream.example.invalid/mix" }]);
+  for (const [starts, ok] of [[true, true], [false, false]]) {
+    const local = new Map(settings);
+    local.set("kiosk_stations", st);
+    const seen = [];
+    const voice = {
+      convo: { save: () => {} },
+      runVoiceTurn: async (o) => {
+        seen.push(o.transcript);
+        if (o.transcript === TURN_CHECK.en[0]) return { route: "fast", fastPath: true, timings: {} };
+        if (o.transcript === TURN_CHECK.en[1]) return { route: "fast", failed: null, timings: { tools_offered: 0 } };
+        if (o.transcript === TURN_CHECK.en[2]) { await o.extraTools.find((x) => x.definition.name === "crow_show").execute({ kind: "list", title: "Fruits", body: "apples\nbananas" }, { transcript: o.transcript }); return { route: "fast", failed: null, timings: { tools: ["crow_show:shown"] } }; }
+        // The play sentence: the real fast paths (T1 against the station source), as the voice turn would run them.
+        const fp = starts ? await o.fastPaths(o.transcript) : null;
+        return { route: "fast", fastPath: !!fp, failed: null, timings: {} };
+      },
+      speakText: async () => true,
+    };
+    const r = createKioskRuntime(runtimeDeps({ voice, settings: { readSetting: async (d, k) => local.get(k) ?? null, writeSetting: async (d, k, v) => { local.set(k, v); } } }));
+    await r.stationsReady;
+    const app = express(); app.use(r.router((req, res, next) => next()));
+    const { s, base: b } = await listen(app, r);
+    try {
+      const j = await (await fetch(b + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: JSON.stringify({ bot_id: "household" }) })).json();
+      assert.equal(seen.at(-1), "Play Morning Mix.");
+      assert.deepEqual([j.ok, j.turns.length, j.card_tries], [ok, 4, 1]);
+      assert.equal(r.media.active(TURN_CHECK_DEVICE), false, "the check leaves no media session");
+      assert.equal(r.tickets.size(), 0, "and no ticket");
+    } finally { r.stop(); s.close(); }
+  }
+});
+
+test("stations (wired): a home-network station needs the operator's tick (dashboard session + CSRF route); the server checks it before storing and records the address set; loopback, link-local, containers and this host are refused even with it", async () => {
+  const { createRelay, readHostNetwork } = await import("../bundles/kiosk/server/relay.js");
+  // An injected host: eth0 (the default route) is 192.168.1.0/24, docker0 is a bridge.
+  const network = () => readHostNetwork({ interfaces: () => ({ eth0: [{ address: "192.168.1.2", cidr: "192.168.1.2/24" }], docker0: [{ address: "172.17.0.1", cidr: "172.17.0.1/16" }] }), defaults: () => new Set(["eth0"]) });
+  const names = { "radio.lan.example.invalid": "192.168.1.30", "box.example.invalid": "172.17.0.5" };
+  const relay = createRelay({ network, lookup: async (h) => { if (!names[h]) throw new Error("ENOTFOUND"); return [{ address: names[h], family: 4 }]; } });
+  const local = new Map(settings);
+  const r = createKioskRuntime(runtimeDeps({ relay, settings: { readSetting: async (d, k) => local.get(k) ?? null, writeSetting: async (d, k, v) => { local.set(k, v); } } }));
+  let authed = true;
+  const app = express(); app.use(r.router((req, res, next) => (authed ? next() : res.status(401).json({ error: "login" }))));
+  const { s: srv, base: b } = await listen(app, r);
+  const post = (path, body) => fetch(b + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    authed = false;
+    assert.equal((await post("/api/kiosk/admin/stations", { stations: [{ name: "Shed", url: "http://192.168.1.20:8000/live", local: true }] })).status, 401);
+    authed = true;
+    assert.equal((await post("/api/kiosk/admin/stations", { stations: [{ name: "Shed", url: "http://192.168.1.20:8000/live" }] })).status, 400, "no tick: refused");
+    for (const [url, reason] of [["http://127.0.0.1:8000/live", "own_address"], ["http://169.254.169.254/latest/", "private_address"], ["http://[fe80::1]/live", "private_address"],
+      ["http://172.17.0.5:9000/live", "private_address"], ["http://box.example.invalid/live", "private_address"], ["http://192.168.1.2:3001/live", "own_address"], ["http://10.9.9.9/live", "private_address"]]) {
+      const res = await post("/api/kiosk/admin/stations", { stations: [{ name: "X", url, local: true }] });
+      assert.equal(res.status, 400, url);
+      const j = await res.json();
+      assert.deepEqual([j.error, j.station], ["local_check_failed", "X"], url);
+      assert.ok([reason, "own_address", "private_address"].includes(j.reason), `${url}: ${j.reason}`);
+    }
+    // A client-sent address set is never trusted: the server records what IT resolved.
+    const ok = await post("/api/kiosk/admin/stations", { stations: [{ name: "Shed", url: "http://192.168.1.20:8000/live", local: true, addrs: ["10.9.9.9"] }, { name: "Den", url: "http://radio.lan.example.invalid:8000/live", local: true }, { name: "Peer", url: "http://100.64.20.7:8000/live", local: true }] });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(JSON.parse(local.get("kiosk_stations")).map((x) => [x.name, x.local, x.addrs]), [["Shed", true, ["192.168.1.20"]], ["Den", true, ["192.168.1.30"]], ["Peer", true, ["100.64.20.7"]]]);
+    // Test with the tick runs the same check before any request.
+    assert.deepEqual(await (await post("/api/kiosk/admin/stations/test", { url: "http://172.17.0.5:9000/live", local: true })).json(), { ok: false, error: "private_address" });
+  } finally { r.stop(); srv.close(); }
+});
+
+const PHONE_CAPS = { v: 2, screen: { w: 412, h: 915, touch: true }, audio: { out: true, in: true }, max_windows: 4, kinds: ["card", "timer", "nowplaying"], mobile: true, pointer: "coarse", platform: "Linux armv81" };
+const waitFor = async (pred) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 10)); return pred(); };
+
+test("smoke F3/F6 (wired): a phone's display_config says pause while listening and release the mic after each turn; an audio-first display neither; an operator's stored choice wins", async () => {
+  const phone = await connect("kiosk-f3-phone", PHONE_CAPS);
+  const bare = await connect("kiosk-f3-bare", {});
+  try {
+    const cfg = (m) => m.msgs.find((x) => x.type === "ready").display_config;
+    assert.deepEqual([cfg(phone).pause_media_on_listen, cfg(phone).mic_per_turn], [true, true]);
+    assert.deepEqual([cfg(bare).pause_media_on_listen, cfg(bare).mic_per_turn], [false, false]);
+    const row = await store.findDevice(db(), "kiosk-f3-phone");
+    assert.equal(Object.hasOwn(row.kiosk_settings, "pause_media_on_listen"), false, "the default is never written");
+  } finally { phone.ws.close(); bare.ws.close(); }
+  const { audioPolicy } = await import("../bundles/kiosk/server/caps.js");
+  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: true });
+  // Review M4: an iPhone keeps the open mic until an iPhone smoke row passes (pause-while-listening still applies).
+  assert.deepEqual(audioPolicy({ profile: "phone" }, { ...PHONE_CAPS, platform: "iPhone" }), { pause_media_on_listen: true, mic_per_turn: false });
+  assert.deepEqual(audioPolicy({ profile: "phone" }, null), { pause_media_on_listen: true, mic_per_turn: false }, "no platform reported: the mic stays open");
+  assert.deepEqual(audioPolicy({ profile: "pi3" }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: false }, "a stored type wins over the page's guess");
+  assert.deepEqual(audioPolicy({}, PHONE_CAPS), { pause_media_on_listen: true, mic_per_turn: true }, "no stored type (a session display): the page's guess");
+  assert.deepEqual(audioPolicy({ profile: "desktop", pause_media_on_listen: true }, null), { pause_media_on_listen: true, mic_per_turn: false });
+});
+
+test("smoke F8 (wired): playback starting opens the now-playing window on a display with a screen (after the load), once; the chip's tap brings it forward; an audio-first display gets none", async () => {
+  const phone = await connect("kiosk-f8-phone", PHONE_CAPS);
+  const bare = await connect("kiosk-f8-bare", {});
+  const item = (t) => [{ title: t, source: "radio", upstream: { url: "https://stream.example.invalid/mix", hop: {} } }];
+  try {
+    rt.media.play("kiosk-f8-phone", item("Morning Mix"));
+    rt.media.play("kiosk-f8-bare", item("Morning Mix"));
+    const npOpen = (m) => m.msgs.findIndex((x) => x.type === "wm" && x.action === "open" && x.window?.kind === "nowplaying");
+    assert.ok(await waitFor(() => npOpen(phone) >= 0), "the window opened");
+    const load = phone.msgs.findIndex((x) => x.type === "media" && x.action === "load");
+    assert.ok(load >= 0 && load < npOpen(phone), "the load comes first (the effect time is the audio, not the window)");
+    rt.media.play("kiosk-f8-phone", item("Evening Mix"));
+    await waitFor(() => phone.msgs.filter((x) => x.type === "media" && x.action === "load").length >= 2);
+    assert.equal(phone.msgs.filter((x) => x.type === "wm" && x.action === "open").length, 1, "one window, reused");
+    phone.ws.send(JSON.stringify({ type: "wm_event", kind: "nowplaying" }));
+    assert.ok(await waitFor(() => phone.msgs.some((x) => x.type === "wm" && x.action === "focus")), "the chip's tap brings it forward");
+    assert.equal(bare.msgs.some((x) => x.type === "wm" && x.action === "open"), false, "an audio-first display: the chip only");
+  } finally { rt.media.closeDevice("kiosk-f8-phone"); rt.media.closeDevice("kiosk-f8-bare"); phone.ws.close(); bare.ws.close(); }
+});
+
+test("review L1 (wired), r7: the station-name STT prompt is switched off (it made Whisper loop and mishear short words); its language rule is kept behind the switch", async () => {
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/mix" }] }) });
+  const turn = async (id, settings) => {
+    const { token } = await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), id, { bound_bot_id: "household", ...(settings ? { kiosk_settings: settings } : {}) });
+    const ws = new WebSocket(wsUrl(base));
+    const msgs = [];
+    await new Promise((r) => ws.on("open", r));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    const before = turnCalls.length;
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: `${id}-t` }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 50 && turnCalls.length === before; i++) await new Promise((r) => setTimeout(r, 10));
+    ws.close();
+    return turnCalls.at(-1);
+  };
+  try {
+    // r7 (re-smoke 2026-10-07 G1/G6/G8): the station-name prompt is OFF — no display turn sends one.
+    const { STT_STATION_PROMPT, stationSttPrompt } = await import("../bundles/kiosk/server/runtime.js");
+    assert.equal(STT_STATION_PROMPT, false);
+    const en = await turn("kiosk-l1-en");
+    assert.equal(en.sttPrompt({ language: null }), "", "off: no prompt on an English display");
+    const es = await turn("kiosk-l1-es", { lang: "es" });
+    assert.equal(es.device.kiosk_settings.lang, "es");
+    assert.equal(es.sttPrompt({ language: "en" }), "");
+    // r7b (review H2): the hotwords are a switch, OFF by default (CROW_KIOSK_STT_HOTWORDS=1 turns it on), and only ever sent
+    // when the display AND the STT profile are English — a Spanish "Pausa." came back empty with them.
+    const { sttHotwordsOn, stationSttHotwords } = await import("../bundles/kiosk/server/runtime.js");
+    assert.equal(sttHotwordsOn({}), false, "off by default");
+    assert.equal(sttHotwordsOn({ CROW_KIOSK_STT_HOTWORDS: "1" }), true);
+    assert.equal(en.sttHotwords({ language: "en" }), "", "off: nothing sent");
+    const cs = [{ name: "KTPF HD1", aliases: ["KTPF"] }];
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, true), "KTPF");
+    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "en" } }, { language: "en" }, cs, true), "KTPF");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: null }, cs, true), "", "a profile that leaves the language to detection: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: { lang: "es" } }, { language: "en" }, cs, true), "", "a Spanish display, even with a pinned English profile: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "es" }, cs, true), "", "a Spanish profile: never");
+    assert.equal(stationSttHotwords({ kiosk_settings: {} }, { language: "en" }, cs, false), "", "the switch off");
+    // Review L1's rule is kept for the day the switch is turned back on.
+    const st = [{ name: "Morning Mix", aliases: ["the mix"] }];
+    assert.equal(stationSttPrompt({ kiosk_settings: {} }, { language: null }, st, true), "Morning Mix, the mix");
+    assert.equal(stationSttPrompt({ kiosk_settings: { lang: "es" } }, { language: null }, st, true), "", "a Spanish display, language left to detection: no English prompt");
+    assert.equal(stationSttPrompt({ kiosk_settings: { lang: "es" } }, { language: "en" }, st, true), "Morning Mix, the mix", "a profile that pins the language is safe");
+  } finally { await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) }); }
+});
+
+test("re-review L-a (wired): the save refuses a command-word name or spoken name with the word; the listing names the ones already saved", async () => {
+  let r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Stop", url: "https://stream.example.invalid/s" }] }) });
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: "command_name", word: "Stop" });
+  r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["Louder"], url: "https://stream.example.invalid/m" }] }) });
+  assert.deepEqual(await r.json(), { error: "command_name", word: "Louder" });
+  r = await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [{ name: "Morning Mix", aliases: ["the mix"], url: "https://stream.example.invalid/m" }] }) });
+  assert.equal((await r.json()).ok, true);
+  const listing = await (await j("/api/kiosk/admin/stations")).json();
+  assert.deepEqual(listing.command_names, []);
+  await j("/api/kiosk/admin/stations", { method: "POST", body: JSON.stringify({ stations: [] }) });
+});
+
+test("r8b (wired): at boot each display's stored cap moves once to the equally-or-less loud level on the −50…0 dB scale — from the old linear scale or rev 8's 'db10'; a cap saved on this build ('db5'), and no cap, are left alone; a second run changes nothing", async () => {
+  const KIOSK_DEVICES_KEY = "meta_glasses_devices";   // the device store's own settings key
+  for (const id of ["kiosk-mv-50", "kiosk-mv-10", "kiosk-mv-100", "kiosk-mv-new", "kiosk-mv-none", "kiosk-mv-db10"]) await store.pairDevice(db(), { id, name: id, device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-mv-new", { kiosk_settings: { max_volume: 70 } });        // saved by this build: marked db5
+  const rows = (await raw.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [KIOSK_DEVICES_KEY] })).rows;
+  const list = JSON.parse(rows[0].value);
+  const old = { "kiosk-mv-50": { max_volume: 50 }, "kiosk-mv-10": { max_volume: 10 }, "kiosk-mv-100": { max_volume: 100 }, "kiosk-mv-db10": { max_volume: 70, max_volume_scale: "db10" } };
+  for (const d of list) if (old[d.id]) d.kiosk_settings = { ...d.kiosk_settings, ...old[d.id] };
+  await raw.execute({ sql: "UPDATE dashboard_settings SET value = ? WHERE key = ?", args: [JSON.stringify(list), KIOSK_DEVICES_KEY] });
+  const cap = async (id) => (await store.findDevice(db(), id))?.kiosk_settings || {};
+  const migrated = await rt.migrateVolumeCaps();
+  assert.equal(migrated, 4);
+  assert.deepEqual([(await cap("kiosk-mv-50")).max_volume, (await cap("kiosk-mv-10")).max_volume, (await cap("kiosk-mv-100")).max_volume, (await cap("kiosk-mv-db10")).max_volume, (await cap("kiosk-mv-new")).max_volume], [80, 60, 100, 40, 70]);
+  assert.equal((await cap("kiosk-mv-50")).max_volume_scale, "db5");
+  assert.equal((await cap("kiosk-mv-db10")).max_volume_scale, "db5");
+  assert.equal("max_volume" in (await cap("kiosk-mv-none")), false, "no cap: none made up");
+  assert.equal(await rt.migrateVolumeCaps(), 0, "never twice");
+  assert.equal((await cap("kiosk-mv-50")).max_volume, 80);
+});
+
+test("r8 P1 (wired): a model-routed turn's metrics carry the playback verb the model asked for, and the one that ran when the sentence's own verb was kept (fixed words)", async () => {
+  const r = createKioskRuntime(runtimeDeps({
+    voice: {
+      runVoiceTurn: async (o) => {
+        const wm = o.extraTools.find((x) => x.definition.name === "crow_wm");
+        await wm.execute({ do: "resume" }, { transcript: "Pause." });
+        return { route: "fast", timings: {} };
+      },
+      speakText: async () => true,
+    },
+  }));
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  let ws = null;
+  try {
+    const { token } = await store.pairDevice(db(), { id: "kiosk-r8-mv", name: "MV", device_kind: "kiosk" });
+    await store.updateDeviceProfiles(db(), "kiosk-r8-mv", { bound_bot_id: "household" });
+    ws = new WebSocket(b.replace("http", "ws") + "/api/kiosk/session");
+    const msgs = [];
+    await new Promise((res) => ws.on("open", res));
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-r8-mv", token, caps: {} }));
+    for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((res) => setTimeout(res, 10));
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "mv" }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end" }));
+    for (let i = 0; i < 100 && !msgs.some((m) => m.type === "turn_done"); i++) await new Promise((res) => setTimeout(res, 10));
+    const done = msgs.find((m) => m.type === "turn_done");
+    assert.deepEqual(done.timings.model_verbs, ["resume"]);
+    assert.deepEqual(done.timings.model_verbs_kept, ["pause"]);
+  } finally { ws?.terminate(); r.stop(); s.close(); }
+});
+
+
+test("r8b (review M2): a server from listen() closes at once even while a wired test's WebSocket is still open (a red test cannot hang the run)", async () => {
+  const r = createKioskRuntime(runtimeDeps());
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  const ws = new WebSocket(b.replace("http", "ws") + "/api/kiosk/session");
+  await new Promise((res) => ws.on("open", res));
+  r.stop();
+  const t0 = Date.now();
+  await new Promise((res) => s.close(res));          // never ws.close(): what a failing test leaves behind
+  assert.ok(Date.now() - t0 < 1000, `closed in ${Date.now() - t0} ms`);
+  await new Promise((res) => (ws.readyState === 3 ? res() : ws.on("close", res)));
 });

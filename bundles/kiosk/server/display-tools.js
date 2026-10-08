@@ -12,8 +12,8 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts } from "./patterns.js";
-import { spokenWords, KIND_NOUNS } from "./phrases.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords } from "./patterns.js";
+import { spokenWords, KIND_NOUNS, matchT0 } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
 
@@ -38,6 +38,17 @@ export function cardUpdate(transcript, store, deviceId) {
   const namesIt = title.some((x) => w.includes(x)) || w.some((x) => KIND_NOUNS[x] === "content" && Object.hasOwn(KIND_NOUNS, x));
   return namesIt ? card.title : null;
 }
+
+/** r8 P1: the one playback verb a sentence asks for when it reads as a no-model command ("Pause.", "Paws.", "Louder."), else null. */
+function playbackVerbOf(transcript) {
+  if (typeof transcript !== "string" || !transcript) return null;
+  const t0 = matchT0(transcript);
+  const v = t0 ? t0.verb : transportWords(transcript);
+  return v && MEDIA_VERBS.includes(v) ? v : null;
+}
+/** Review of rev 7 (L2): words with no vowel that are not call signs. */
+const NOT_CALL_SIGNS = new Set(["hmm", "hmmm", "mmm", "mrs", "shh", "shhh", "psst", "brr", "brrr", "grr", "tsk", "pfft", "nth", "pst", "zzz"]);
+const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
 
 /**
  * ctx = { store, deviceId, caps (effective: .windows, .max_windows), lang, sources, items, emit,
@@ -71,7 +82,17 @@ export function createDisplayTools(ctx) {
     if (res.final === true && compound(turn?.transcript)) res.final = false;
     return JSON.stringify(res);
   };
-  const playWhen = (t) => mentionsPlay(t) || asksPlay(t);
+  // r7 G3: with radio presets, a station asked for in words STT mangled ("Playing, KDEB.", "Like, APFT.", "KTPF please")
+  // still OFFERS crow_play (never must-run): a play-word form or a call-sign-shaped word, outside a question.
+  const radioAsk = (t) => {
+    if (!(ctx.sources || []).includes("radio") || /\?\s*$/.test(String(t || ""))) return false;
+    const w = spokenWords(t) || [];
+    if (!w.length || QUESTION_WORDS.has(w[0])) return false;
+    // A call sign as STT writes one: a word with no vowel, or an all-capitals word of 3–6 letters with three consonants or more.
+    const caps = (String(t).match(/\b[A-Z]{3,6}\b/g) || []).some((x) => (x.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).length >= 3);
+    return caps || w.some((x) => /^play(s|ed|ing)?$/.test(x) || (/^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x) && !NOT_CALL_SIGNS.has(x)));
+  };
+  const playWhen = (t) => mentionsPlay(t) || asksPlay(t) || radioAsk(t);
   const openWhen = (t) => mentionsOpen(t, items);
   // Offered on showIntent (the executor's own test, so offered ⇒ executable) or a change to the open card.
   const showWhen = (t) => showIntent(t, items) || updates(t) !== null;
@@ -80,7 +101,8 @@ export function createDisplayTools(ctx) {
   const playHold = (t) => mentionsPlayWord(t) || asksPlay(t);
   const rules = {
     crow_play: {
-      when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, asksPlay), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
+      // "Turn the radio up" names the radio and asks, but it asks the playback to CHANGE: crow_wm must run, not this (F2).
+      when: playWhen, holdText: playHold, holdToEnd: toEnd(playWhen), must: (t) => anyPart(t, (p) => asksPlay(p) && !asksTransport(p)), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_play, missedText: S.play_missed_say,
       mustDone: (r) => r?.ok === true && ["playing", "audio_instead", "handed_off"].includes(r.outcome),
       // An argument outside its enumeration is never passed on as given.
       execute: (a, turn) => run({ verb: "play", what: str(a?.what, 120), source: enumOf("crow_play", "source").includes(a?.source) ? a.source : "auto" }, turn),
@@ -103,9 +125,17 @@ export function createDisplayTools(ctx) {
       execute: (a, turn) => run({ verb: "show", kind: str(a?.kind, 16), title: str(a?.title, 200), body: str(a?.body, 4000) }, { ...turn, update: typeof turn?.transcript === "string" ? updates(turn.transcript) : null }),
     },
     crow_wm: {
-      when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn(),
-      holdText: (t) => wantsDisplay(t) && !teachTo(t),
-      holdToEnd: toEnd((t) => wantsDisplay(t) && !teachTo(t)),
+      // F2 (smoke 2026-10-06): a turn that asks the playback to change ("turn the radio up a little") is offered
+      // crow_wm and MUST end with a successful call, as crow_show does for a card: the model's "I turned it up"
+      // is held until the call is known, and with no call the turn ends on the truthful could-not line. With
+      // nothing playing the call's own answer ("Nothing is playing.") counts: it is the truth.
+      when: (t) => (wantsDisplay(t) && !teachTo(t)) || openWindow() || mediaOn() || asksTransport(t),
+      holdText: (t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t),
+      holdToEnd: toEnd((t) => (wantsDisplay(t) && !teachTo(t)) || asksTransport(t)),
+      // Review H1: forced only while something plays on this display, or when the sentence names the music outright.
+      // (Bare "Stop." with nothing playing is answered at T0 and never reaches here.)
+      must: (t) => anyPart(t, (p) => asksTransport(p) && (mediaOn() || namesMusic(p))), narrow: single, mustRoute: "fast", mustNote: MUST_NOTES.crow_wm, missedText: S.playback_missed_say,
+      mustDone: (r) => r?.ok === true && (r.outcome === "done" || r.outcome === "nothing_playing"),
       execute: (a, turn) => {
         // The K1 form — one `command` string — is still accepted (not advertised) and parsed by the K1 grammar,
         // except on a turn that has to end with a card: there a card put up through it would not count, and the
@@ -120,7 +150,13 @@ export function createDisplayTools(ctx) {
           return legacy.execute(a, turn);
         }
         if (!enumOf("crow_wm", "do").includes(a?.do)) return JSON.stringify({ ok: false, outcome: "invalid", reason: "bad_argument", say: "Nothing was done: do must be one of the listed values.", final: false });
-        return run({ verb: a.do, name: str(a?.name, 40) }, turn);
+        // r8 P1 (R7-S smoke: "Pause." on a paused stream, the model's call resumed it): when the sentence itself reads as
+        // one playback verb with no model ("Pause.", "Louder."), a different playback verb from the model never runs —
+        // the sentence's own verb does. The verb the model asked for is reported (a fixed word) for the turn's metrics.
+        const said = playbackVerbOf(turn?.transcript);
+        const kept = said && MEDIA_VERBS.includes(a.do) && a.do !== said ? said : null;
+        try { ctx.onModelVerb?.(a.do, kept); } catch { /* a metrics hook never breaks the call */ }
+        return run({ verb: kept || a.do, name: str(a?.name, 40) }, turn);
       },
     },
   };

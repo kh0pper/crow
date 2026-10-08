@@ -336,6 +336,51 @@ test("smoke 2026-10-04 lever 2: opts.sttModel(profile) picks the transcription m
   assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en", null, null]);
 });
 
+test("smoke 2026-10-06 F1: opts.sttPrompt reaches the STT as its prompt (turn and early transcription), bounded, never from a throwing or non-string source", async () => {
+  const { sttPromptText, STT_PROMPT_MAX } = await import("../servers/gateway/voice/turn.js");
+  const seen = [];
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (audio, o) => { seen.push(Object.hasOwn(o, "prompt") ? o.prompt : "(none)"); return { text: "hi" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => "WXYZ HD1, WXYZ HD2, Classic Country" });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => { throw new Error("boom"); } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: () => "" });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttPrompt: "WXYZ HD1" });
+  // A function source is handed the STT profile (review L1: the kiosk leaves the prompt out on a Spanish display that detects its language).
+  const got = [];
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttPrompt: (p) => { got.push(p?.language); return ""; } });
+  assert.deepEqual(got, ["en"]);
+  assert.deepEqual(seen, ["WXYZ HD1, WXYZ HD2, Classic Country", "(none)", "(none)", "(none)", "WXYZ HD1", "(none)"]);
+  // Bounded at a comma, control characters gone, nothing but strings.
+  const long = Array.from({ length: 40 }, (_, i) => `Station number ${i}`).join(", ");
+  const cut = sttPromptText(long);
+  assert.ok(cut.length <= STT_PROMPT_MAX && cut.endsWith(String(cut.split(", ").length - 1)), cut);
+  assert.equal(sttPromptText("A\u0000B\nC"), "A B C");
+  for (const bad of [null, 42, {}, ["x"]]) assert.equal(sttPromptText(bad), "");
+});
+
+test("smoke 2026-10-06 F4: a no-model turn records the verb it acted on (a fixed word), never anything else from the path", async () => {
+  const h = harness();
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Pause.", sink: h.sink, fastPaths: async () => ({ say: "", events: [], tier: "t0", verb: "pause" }) });
+  assert.deepEqual([r.timings.tier, r.timings.verb], ["t0", "pause"]);
+  const odd = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "x", sink: h.sink, fastPaths: async () => ({ say: "", events: [], tier: "t1", verb: "Pause the music NOW" }) });
+  assert.equal(odd.timings.verb, undefined, "only a plain verb word is kept");
+});
+
+test("the faster-whisper adapter sends the prompt as the OpenAI `prompt` form field, and none when there is none", async () => {
+  const { default: createFasterWhisperAdapter } = await import("../servers/gateway/ai/stt/adapters/fasterwhisper.js");
+  const real = globalThis.fetch, forms = [];
+  globalThis.fetch = async (url, init) => { forms.push(init.body); return new Response(JSON.stringify({ text: "ok" }), { status: 200 }); };
+  try {
+    const a = createFasterWhisperAdapter({ baseUrl: "http://203.0.113.1:9/v1" });
+    await a.transcribe(Buffer.alloc(4), { prompt: "WXYZ HD1" });
+    await a.transcribe(Buffer.alloc(4), {});
+  } finally { globalThis.fetch = real; }
+  assert.equal(forms[0].get("prompt"), "WXYZ HD1");
+  assert.equal(forms[1].get("prompt"), null);
+});
+
 test("review I3: a confirmation refusal still counts as tool context — the 'yes' that follows keeps its route", async () => {
   const h = harness({ rounds: [[{ type: "tool_call", id: "c1", name: "crow_delete_post", arguments: { id: 7 } }, { type: "done" }], [{ type: "content_delta", text: "Are you sure?" }, { type: "done" }], [{ type: "content_delta", text: "Done." }, { type: "done" }]],
     chatTools: ["crow_delete_post"] });
@@ -369,7 +414,7 @@ test("lever D: an early transcript skips STT; timings count from the real turn s
   const seen = [];
   h.deps.getSttProfile = async () => ({ id: "k", provider: "fasterwhisper", language: "en" });
   h.deps.createSttAdapter = async () => ({ transcribe: async (a, o) => { seen.push(o.model ?? null); return { text: "  hi  " }; } });
-  assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi" });
+  assert.deepEqual(await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttModel: () => "Systran/faster-whisper-tiny.en" }), { text: "hi", hotwords: false });
   assert.deepEqual(seen, ["Systran/faster-whisper-tiny.en"]);
 });
 
@@ -1712,4 +1757,155 @@ test("offered-tools guard composes with narrowing: on a narrowed first round onl
   assert.deepEqual(h.log[0].tools, ["crow_show"], "the first request carried only the must-run tool");
   assert.deepEqual(h.calls.executed, [], "the projects call was never run");
   assert.equal(r.timings.tools[0], "crow_projects:not_offered");
+});
+
+test("r7 G4 (re-smoke 2026-10-07): a degenerate transcript (an STT repetition loop) is an STT failure — no fast path, no model, no escalation; ordinary repeats are not", async () => {
+  const { degenerateTranscript } = await import("../servers/gateway/voice/turn-helpers.js");
+  const loops = [
+    "K-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P-P",
+    "K-P-F-T-F-T-L-A-A-A-A-A-A-A-A-A-A-A-A-A-A",
+    "Louder, louder, louder, louder, louder, louder, louder, and louder.",
+    "Play KPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+    "the the the the the the the the",
+  ];
+  for (const t of loops) assert.equal(degenerateTranscript(t), true, t);
+  const fine = ["Louder louder.", "No, no, no, no.", "Play K P F T.", "Play-K-P-F-D-H-D-1.", "What is 100 minus 37?", "Ha ha ha ha!", "Play the Beatles' 1967 album.", "Play 1111.", "", "Bye bye bye."];
+  for (const t of fine) assert.equal(degenerateTranscript(t), false, t);
+  // In a turn: the junk is captioned as heard, then the turn ends as an empty transcript would — no model was called.
+  const h = harness();
+  h.deps.createSttAdapter = async () => ({ transcribe: async () => ({ text: loops[0] }) });
+  let fast = 0;
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, fastPaths: async () => { fast++; return null; } });
+  assert.deepEqual(h.calls.chatKeys, [], "no model");
+  assert.equal(fast, 0, "no fast path");
+  assert.ok(h.events.some((e) => e.type === "error" && e.code === "empty_transcript"));
+  assert.equal(r.timings.stt_degenerate, true);
+  // The early transcript path is judged the same way.
+  const e = harness();
+  await e.runner.runVoiceTurn({ db: {}, device: e.device, transcript: loops[2], sink: e.sink });
+  assert.deepEqual(e.calls.chatKeys, []);
+});
+
+test("r7 (STT probe 2026-10-07): opts.sttHotwords reaches the STT as `hotwords` (turn and early transcription), bounded to a few words; the faster-whisper adapter sends it as its form field", async () => {
+  const { sttHotwordsText } = await import("../servers/gateway/voice/turn.js");
+  const seen = [];
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async (audio, o) => { seen.push([o.hotwords ?? "(none)", o.prompt ?? "(none)"]); return { text: "hi" }; } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: (p) => (p?.language === "en" ? "WXYZ" : "") });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => { throw new Error("boom"); } });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttHotwords: "WXYZ KDBV" });
+  assert.deepEqual(seen, [["WXYZ", "(none)"], ["(none)", "(none)"], ["(none)", "(none)"], ["WXYZ KDBV", "(none)"]]);
+  assert.equal(sttHotwordsText("A B C D E F G H"), "A B C D E F", "six words at most");
+  assert.equal(sttHotwordsText("WXYZ\u0000KDBV"), "WXYZ KDBV");
+  for (const bad of [null, 42, {}]) assert.equal(sttHotwordsText(bad), "");
+  const { default: createFasterWhisperAdapter } = await import("../servers/gateway/ai/stt/adapters/fasterwhisper.js");
+  const real = globalThis.fetch, forms = [];
+  globalThis.fetch = async (url, init) => { forms.push(init.body); return new Response(JSON.stringify({ text: "ok" }), { status: 200 }); };
+  try {
+    const a = createFasterWhisperAdapter({ baseUrl: "http://203.0.113.1:9/v1" });
+    await a.transcribe(Buffer.alloc(4), { hotwords: "WXYZ" });
+    await a.transcribe(Buffer.alloc(4), {});
+  } finally { globalThis.fetch = real; }
+  assert.equal(forms[0].get("hotwords"), "WXYZ");
+  assert.equal(forms[1].get("hotwords"), null);
+});
+
+test("r7 G3: tool-call syntax the model writes as text (a call for a tool it was not offered) is never captioned, spoken or kept — even split across deltas", async () => {
+  const leak = "Playing, KDEB. <tool_call>\n<function=crow_play>\n<parameter=what>\nKDEB\n</parameter>\n</function>\n</tool_call>";
+  for (const cuts of [[], [16, 20, 27], [17, 22, 40, 60]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KTPF.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    const spoken = h.calls.spoken.join(" ");
+    for (const bad of ["<", "tool_call", "function=", "parameter"]) {
+      assert.ok(!caption.includes(bad), `caption ${JSON.stringify(caption)} (cuts ${cuts})`);
+      assert.ok(!spoken.includes(bad), `spoken ${JSON.stringify(spoken)} (cuts ${cuts})`);
+    }
+    assert.match(caption, /^Playing, KDEB\.\s*$/);
+    assert.equal(r.timings.tool_text, true);
+  }
+  // Ordinary text with a "<" is untouched.
+  const ok = harness({ rounds: [[{ type: "content_delta", text: "Three is < four, and 5 > 2." }, { type: "done" }]] });
+  await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Compare.", sink: ok.sink });
+  assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Three is < four, and 5 > 2.");
+});
+
+test("r7b H3: every turn records how many characters it spoke (counts only) — the model's answer, a fast path's line, the fallback; the filler does not count", async () => {
+  const h = harness({ rounds: [[{ type: "content_delta", text: "Lisbon is the capital. It is on the coast." }, { type: "done" }]] });
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Capital of Portugal?", sink: h.sink });
+  assert.equal(r.timings.spoken_chars, "Lisbon is the capital. It is on the coast.".length - 1);
+  const f = harness();
+  const q = await f.runner.runVoiceTurn({ db: {}, device: f.device, transcript: "Pause.", sink: f.sink, fastPaths: async () => ({ say: "Okay.", events: [], tier: "t0" }) });
+  assert.equal(q.timings.spoken_chars, 5);
+  const s = harness();
+  const z = await s.runner.runVoiceTurn({ db: {}, device: s.device, transcript: "Pause.", sink: s.sink, fastPaths: async () => ({ say: "", events: [], tier: "t0" }) });
+  assert.equal(z.timings.spoken_chars, 0);
+});
+
+
+test("r7b M5: the loop filter never drops real repeated speech — Spanish, laughter, emphasis, a title, long numbers — and still catches the smoke's loops", async () => {
+  const { degenerateTranscript } = await import("../servers/gateway/voice/turn-helpers.js");
+  const speech = ["No, no, no, no, no, no!", "Sí, sí, sí, sí, sí, sí.", "Ay ay ay ay ay ay", "Bye bye bye bye bye bye.", "Very very very very very very good",
+    "Play 'Rain Rain Rain Rain Rain Rain'", "What is 100000000 divided by two?", "Play 1111111111.", "Hahahahahahaha", "No, no, no, no, no, no, no.", "Más, más, más, más, más, más, más alto",
+    "Call 0000000000", "Play the song Na Na Na Na Na Na Na"];
+  for (const t of speech) assert.equal(degenerateTranscript(t), false, t);
+  const loops = ["K-" + "P-".repeat(27) + "P", "K-P-F-T-F-T-L-" + "A-".repeat(14) + "A", "Louder, louder, louder, louder, louder, louder, louder, and louder.",
+    "Play K" + "P".repeat(28), "the the the the the the the the", "Pausa pausa pausa pausa pausa pausa pausa pausa pausa"];
+  for (const t of loops) assert.equal(degenerateTranscript(t), true, t);
+});
+
+test("r7b L1: tool syntax in the other common formats is never heard either — [TOOL_CALLS], <|python_tag|>, <function_call>, upper-case tags, a bare JSON call — split across deltas too", async () => {
+  const leaks = [
+    'Sure. [TOOL_CALLS] [{"name": "crow_play", "arguments": {"what": "KDEB"}}]',
+    'Sure. <|python_tag|>{"name": "crow_play", "parameters": {"what": "KDEB"}}',
+    'Sure. <function_call>{"name": "crow_play"}</function_call>',
+    'Sure. <TOOL_CALL>{"name": "crow_play"}</TOOL_CALL>',
+    'Sure. {"name": "crow_play", "arguments": {"what": "KDEB"}}',
+  ];
+  for (const leak of leaks) for (const cuts of [[], [7, 9, 12]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KDEB.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    assert.equal(caption.trim(), "Sure.", `${leak} (cuts ${cuts})`);
+    assert.ok(!h.calls.spoken.join(" ").includes("crow_play"), leak);
+  }
+  const ok = harness({ rounds: [[{ type: "content_delta", text: "Use [brackets] and {braces} as you like; 3 < 4." }, { type: "done" }]] });
+  await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
+  assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), "Use [brackets] and {braces} as you like; 3 < 4.");
+});
+
+test("r7c N3: every turn records whether STT hotwords were sent (true/false, never the words) — on its own STT and on an early transcript", async () => {
+  const h = harness();
+  h.deps.getSttProfile = async () => ({ id: "kiosk-stt", provider: "fasterwhisper", language: "en" });
+  h.deps.createSttAdapter = async () => ({ transcribe: async () => ({ text: "hi" }) });
+  const on = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => "WXYZ" });
+  assert.equal(on.timings.stt_hotwords, true);
+  const off = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink, sttHotwords: () => "" });
+  assert.equal(off.timings.stt_hotwords, false);
+  const none = await h.runner.runVoiceTurn({ db: {}, device: h.device, audio: Buffer.alloc(10), sink: h.sink });
+  assert.equal(none.timings.stt_hotwords, false);
+  assert.ok(!JSON.stringify(on.timings).includes("WXYZ"), "never the words");
+  const t = await h.runner.transcribe({ db: {}, device: h.device, audio: Buffer.alloc(4), sttHotwords: "WXYZ" });
+  assert.equal(t.hotwords, true);
+  const early = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sttEarly: { used: true, ms: 5, hotwords: true }, sink: h.sink });
+  assert.equal(early.timings.stt_hotwords, true, "the early transcript says what it was sent with");
+  const early2 = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "hi", sttEarly: { used: true, ms: 5 }, sink: h.sink });
+  assert.equal(early2.timings.stt_hotwords, false);
+});
+
+test("r7c (review re-check, L1 residuals): a pretty-printed JSON call split right after its brace, and a fenced json block, are never heard; ordinary braces and code fences still are", async () => {
+  const leaks = ['Sure. {\n  "name": "crow_play",\n  "arguments": {"what": "KDEB"}\n}', 'Sure. ```json\n{"tool": "crow_play", "what": "KDEB"}\n```'];
+  for (const leak of leaks) for (const cuts of [[], [7, 8, 9, 10], [6, 9, 12]]) {
+    const h = harness({ rounds: [deltasAt(leak, cuts).concat([{ type: "done" }])] });
+    await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "Play KDEB.", sink: h.sink });
+    const caption = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+    assert.equal(caption.trim(), "Sure.", `${JSON.stringify(leak)} (cuts ${cuts})`);
+  }
+  for (const text of ["Use {braces}, a {\n  block } and `code` freely.", "A ```text fence``` is fine too.", "Set {x: 1} and {\"a\": 2}."]) {
+    const ok = harness({ rounds: [deltasAt(text, [5, 6, 7]).concat([{ type: "done" }])] });
+    await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
+    assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), text, text);
+  }
 });

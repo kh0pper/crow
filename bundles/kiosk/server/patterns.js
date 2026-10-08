@@ -412,6 +412,102 @@ export function compoundParts(transcript) {
   return parts.filter(Boolean);
 }
 
+// ── playback words over music (smoke 2026-10-06 F2) ─────────────────────────────────────────────────
+// While something plays on THIS display, a short request made of one playback word and filler acts with
+// no model: "louder louder", "much quieter", "skip it", "stop it already", "pause please". Anything else in
+// the sentence (a name, a question word, a negation, a verb) keeps it away from here: "don't stop", "skip
+// the small talk", "is it louder?" go to the model. Words STT writes for a short command over music
+// ("lauder", "paws") count only as the whole utterance.
+const TRANSPORT_KEYWORDS = Object.freeze({ louder: "volume_up", quieter: "volume_down", softer: "volume_down", pause: "pause", unpause: "resume", resume: "resume",
+  stop: "stop", skip: "next", next: "next", mute: "mute", unmute: "unmute", pausa: "pause", siguiente: "next", silencia: "mute", reanuda: "resume" });
+// r8 P3: how speech-to-text wrote the short commands in probes and smokes ("Louders.", "Quiter.", "Pons." for "Pause").
+const TRANSPORT_ALONE = Object.freeze({ lauder: "volume_up", louders: "volume_up", louderth: "volume_up", quiter: "volume_down", paws: "pause", pons: "pause" });
+const TRANSPORT_FILLER = new Set(["it", "that", "this", "the", "music", "song", "track", "radio", "station", "a", "bit", "little", "lot", "much", "more", "way", "even", "still",
+  "again", "just", "already", "please", "now", "okay", "ok", "crow", "hey", "so", "too", "some", "la", "el", "musica", "cancion", "un", "poco", "mas", "ahora"]);
+export const TRANSPORT_MAX_WORDS = 6;
+/** → a playback verb ("volume_up", "pause", "next", …) or null. The caller acts on it only while something plays. */
+export function transportWords(transcript) {
+  const all = plain(transcript);
+  if (!all) return null;
+  let w = stripPolite(all);
+  // r8 P3 / r8b L1: a TRAILING "thank you" / "thanks" (speech-to-text adds one after a short command) is dropped; anywhere
+  // else ("You stop.", "Thank you, next.") it is part of a sentence.
+  if (w.length > 2 && w[w.length - 2] === "thank" && w[w.length - 1] === "you") w = w.slice(0, -2);
+  else if (w.length > 1 && w[w.length - 1] === "thanks") w = w.slice(0, -1);
+  if (!w.length || w.length > TRANSPORT_MAX_WORDS) return null;
+  if (w.length === 1 && Object.hasOwn(TRANSPORT_ALONE, w[0])) return TRANSPORT_ALONE[w[0]];
+  let verb = null;
+  for (const x of w) {
+    if (Object.hasOwn(TRANSPORT_KEYWORDS, x)) { if (verb && verb !== TRANSPORT_KEYWORDS[x]) return null; verb = TRANSPORT_KEYWORDS[x]; }
+    else if (!TRANSPORT_FILLER.has(x)) return null;
+  }
+  return verb;
+}
+// What asks the playback to change, more widely: the must-run test for crow_wm (F2b; narrowed after the rev 6
+// review, H1). A playback word or phrase counts only when what it acts on is the music: nothing after it, a
+// pronoun, or a music word ("turn it up", "mute the radio", "pause please"). Any other object is somebody
+// else's ("turn down the lights", "pause the timer", "mute the TV", "mute notifications"), and speech is the
+// voice's ("speak louder", "habla más alto"). Never in a question, an information request, a statement or a
+// negation ("the song was louder", "why did it stop?", "don't stop").
+const COMPLETE_RUNS = runs(["turn it up", "turn it down", "turn the radio up", "turn the radio down", "turn the music up", "turn the music down",
+  "turn the volume up", "turn the volume down", "turn the sound up", "turn the sound down", "volume up", "volume down", "go back a song", "back a song", "next song", "next track",
+  "previous song", "previous track", "sube el volumen", "baja el volumen", "subes el volumen", "bajas el volumen", "sube la radio", "baja la radio", "sube la musica", "baja la musica", "otra cancion"]);
+// These need their object checked: "turn up the volume" yes, "turn up the heat" no.
+const OPEN_RUNS_T = runs(["turn up", "turn down", "subele", "bajale"]);
+// Spanish comparatives come AFTER what they act on ("pon la música más alta", "ponla más fuerte"): what stands
+// before them must be the music, a verb with the music as its clitic, or nothing (re-review R1).
+const ES_LEVEL_RUNS = runs(["mas alto", "mas alta", "mas bajo", "mas baja", "mas fuerte", "mas suave", "mas bajito", "mas bajita"]);
+const ES_LEVEL_VERBS = new Set(["pon", "ponla", "ponlo", "ponle", "ponme", "deja", "dejala", "dejalo", "sube", "subela", "subelo", "subele", "baja", "bajala", "bajalo", "bajale", "esta", "suena"]);
+const ES_ARTICLES = new Set(["la", "el", "lo", "los", "las", "un", "una", "esa", "ese", "esta"]);
+function esLevelHere(w, i) {
+  let k = i - 1;
+  while (k >= 0 && ES_ARTICLES.has(w[k])) k -= 1;
+  const x = w[k];
+  return x === undefined || MUSIC_NOUNS.has(x) || ES_LEVEL_VERBS.has(x) || CLAUSE_T.has(x);
+}
+const NEGATIONS = new Set(["dont", "do", "not", "never", "no", "nunca"]);
+const SPEECH = new Set(["speak", "talk", "voice", "yourself", "say", "habla", "hablar", "hablas", "hablame", "voz"]);
+const LEVEL_WORDS = new Set(["louder", "quieter", "softer", "mute", "unmute", "pause", "unpause", "resume", "pausa", "silencia", "reanuda"]);
+const MOVE_WORDS = new Set(["stop", "skip", "next", "siguiente"]);
+/** The words that name the music itself. */
+export const MUSIC_NOUNS = new Set(["music", "song", "songs", "track", "radio", "station", "volume", "sound", "musica", "cancion", "emisora", "volumen", "sonido"]);
+const PRONOUNS_T = new Set(["it", "that", "this", "eso", "esto"]);
+// Skipped while looking for the object: articles and amounts. A clause word ends the search (no object given).
+const OBJECT_SKIP = new Set(["the", "a", "an", "my", "el", "la", "los", "las", "un", "una", "bit", "little", "lot", "more", "much", "please", "now", "just", "some", "again",
+  "already", "for", "me", "poco", "mas", "ahora", "por", "favor", "up", "down"]);
+const CLAUSE_T = new Set(["so", "and", "because", "cause", "then", "while", "i", "we", "porque", "que", "y"]);
+/** After a playback word ending at index j: is what it acts on the music (or nothing)? */
+function musicObject(w, j) {
+  let k = j;
+  // "this one", "that one" are a choice ("Skip this one." stays conversation), never the music.
+  if (PRONOUNS_T.has(w[k] || "") && w[k + 1] === "one") return false;
+  if (PRONOUNS_T.has(w[k] || "")) return true;
+  while (k < w.length && OBJECT_SKIP.has(w[k])) k += 1;
+  const x = w[k];
+  return x === undefined || MUSIC_NOUNS.has(x) || CLAUSE_T.has(x) || PRONOUNS_T.has(x) && w[k + 1] !== "one";
+}
+export function asksTransport(transcript) {
+  const w = plain(transcript);
+  if (!w || w.length > PLAY_MAX_WORDS || teachTo(transcript)) return false;
+  if (transportWords(transcript)) return true;
+  // Speech is the voice's when it comes BEFORE the playback word ("speak louder"); "turn it down so we can talk" is the music.
+  const speech = w.findIndex((x) => SPEECH.has(x));
+  const before = (i) => speech >= 0 && speech < i;
+  const core = stripPolite(w);
+  if (QUESTION_STARTS.some((p) => sameAt(core, 0, p)) || INFO_STARTS.some((p) => sameAt(core, 0, p)) || hasAnyRun(w, INFO_RUNS)) return false;
+  if (hasAny(w, STATEMENT_VERBS) || hasAny(w, NEGATIONS)) return false;
+  for (let i = 0; i < w.length; i += 1) {
+    if (before(i)) return false;
+    if (COMPLETE_RUNS.some((r) => sameAt(w, i, r))) return true;
+    for (const r of OPEN_RUNS_T) if (sameAt(w, i, r) && musicObject(w, i + r.length)) return true;
+    for (const r of ES_LEVEL_RUNS) if (sameAt(w, i, r) && esLevelHere(w, i) && musicObject(w, i + r.length)) return true;
+    if ((LEVEL_WORDS.has(w[i]) || MOVE_WORDS.has(w[i])) && musicObject(w, i + 1)) return true;
+  }
+  return false;
+}
+/** Does the sentence name the music, the radio or the volume outright? */
+export const namesMusic = (transcript) => { const w = plain(transcript); return !!w && hasAny(w, MUSIC_NOUNS); };
+
 /** items: [{ id, title, aliases? }]. Exact name or alias, else a unique prefix. → { match } | { many } | null. */
 export function lookupItem(items, name) {
   const q = norm(name);
@@ -424,13 +520,31 @@ export function lookupItem(items, name) {
   return pre.length >= 2 && pre.length <= 4 ? { many: pre } : null;
 }
 
-/** → an intent for the executor, or null. ctx.items = what this display may open. (T1 play is added with the media session.) */
+/** A bare answer to "Which one?" is a few words: longer than this, it is a new sentence for the model. */
+export const CHOICE_MAX_WORDS = 8;
+
+/**
+ * → an intent for the executor, or null. ctx.items = what this display may open; ctx.sources = the
+ * play sources it has; ctx.pendingChoices(deviceId) = "Which one?" was just asked about something to play.
+ * The executor resolves a play intent strictly: it plays only what a source is sure of, and returns
+ * nothing (the model gets the turn) otherwise.
+ */
 export function matchT1(transcript, ctx) {
+  // F2: a playback word and filler, while something plays on this display.
+  if (ctx.media?.active?.(ctx.deviceId) === true) { const verb = transportWords(transcript); if (verb) return { verb }; }
   const o = parseOpen(transcript);
   if (o) {
     const hit = lookupItem(ctx.items || [], o.name);
     if (hit?.match) return { verb: "open", app: hit.match.id };
     if (hit?.many) return { verb: "choices", names: hit.many.map((i) => i.title) };
+  }
+  if (!(ctx.sources || []).length) return null;
+  const p = parsePlay(transcript);
+  if (p) return { verb: "play", what: p.what, source: "auto" };
+  // "Which one? Say its name." → the next utterance may be just the name ("WXYZ two", "the second album's title").
+  if (typeof ctx.pendingChoices === "function" && ctx.pendingChoices(ctx.deviceId) === true) {
+    const w = words(transcript, CHOICE_MAX_WORDS);
+    if (w) return { verb: "play", what: w.join(" "), source: "auto", choice: true };
   }
   return null;
 }

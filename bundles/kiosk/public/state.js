@@ -18,7 +18,9 @@ export function closeDecision(code, reason, mode) {
   if (code === 4000 && reason === "superseded") return { action: "halt", banner: "opened_elsewhere" };
   return { action: "reconnect" };
 }
-export function backoffMs(attempt) { return Math.min(30_000, 1000 * 2 ** Math.min(Math.max(0, attempt), 5)); }
+export function backoffMs(attempt, cap = 30_000) { return Math.min(cap, 1000 * 2 ** Math.min(Math.max(0, attempt), 5)); }
+/** Review M3: while audio is live, reconnect at least this often, so the page is back before its offline clear (and the server's grace) runs out. */
+export const MEDIA_RECONNECT_CAP_MS = 5_000;
 export function micDecision(err, ctxState) {
   if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) return "mic_blocked";
   if (err && (err.name === "NotFoundError" || err.name === "OverconstrainedError")) return "no_mic";
@@ -46,8 +48,9 @@ export function msToNextMinute(date) { return 60_000 - (date.getSeconds() * 1000
 export function displayedBird(serverBird, localPlaying) {
   return localPlaying && serverBird === "idle" ? "speaking" : serverBird;
 }
-export function tapDecision({ halted, playing, birdState, turnOpen }) {
+export function tapDecision({ halted, playing, birdState, turnOpen, starting = false }) {
   if (halted) return "resume";
+  if (starting) return "ignore";                 // review H3: the mic is still opening for the last tap
   if (playing || birdState === "speaking") return "barge";
   if (turnOpen) return "stop";
   if (birdState === "thinking") return "ignore";
@@ -58,6 +61,17 @@ export function followUpDecision(turn, config, { playing }) {
   if (!config?.follow_up || !turn || !turn.done || playing) return false;
   if (turn.done.aborted || turn.barged || turn.followedUp || turn.playAt == null) return false;
   return turn.reason !== "no_speech" && turn.source !== "follow_up";
+}
+
+/**
+ * Review of rev 7 (H1): what the page does when a turn may have settled (turn_done, or a local drain). The mic goes
+ * only when THIS turn is done AND nothing plays — a drained gap between two sentences before turn_done is not the
+ * end; with follow-up on, the follow-up turn keeps the mic (one call-mode switch per conversation, review M4).
+ */
+export function settleDecision(tn, { current, playing, config }) {
+  if (!tn || tn !== current) return { followUp: false, release: false };
+  if (followUpDecision(tn, config, { playing })) return { followUp: true, release: false };
+  return { followUp: false, release: !!(tn.ended && tn.done && !playing) };
 }
 
 /** Ruling F9: how long an audio-expected turn may stay silent after turn_done before it is reported as a failure. */
@@ -71,6 +85,7 @@ const expectsAudio = (turn) => !turn.done.aborted && (!!turn.tts || turn.done.ti
  */
 export function reportDecision(turn, { playing, now, force = false }) {
   if (!turn || turn.reported || !turn.done) return { report: false };
+  if (!force) { const w = effectWaitMs(turn, now); if (w > 0) return { report: false, retryInMs: w }; }
   if (force || turn.barged || !expectsAudio(turn)) return { report: true };
   if (turn.playAt == null) {
     const waited = now - turn.doneAt;
@@ -78,12 +93,79 @@ export function reportDecision(turn, { playing, now, force = false }) {
   }
   return playing ? { report: false } : { report: true };
 }
-export function turnMetrics(turn, { outputLatencyMs = 0 } = {}) {
+export function turnMetrics(turn, { outputLatencyMs = 0, ctxState = null, pageMedia = null } = {}) {
   return {
     type: "turn_metrics", turn_id: turn.id, source: turn.source, vad_reason: turn.reason,
     e2e_ms: e2eMs({ speechEndAt: turn.speechEndAt, playAt: turn.playAt }),
+    effect_ms: turn.effectAt == null ? null : e2eMs({ speechEndAt: turn.speechEndAt ?? turn.endedAt, playAt: turn.effectAt }),
     barged: !!turn.barged, output_latency_ms: outputLatencyMs,
+    // F6: how long opening the microphone took at this turn's tap (null when it was already open).
+    mic_open_ms: Number.isFinite(turn.micOpenMs) ? Math.round(turn.micOpenMs) : null,
+    // r7 G12: the player had to end this turn's reply itself (its sources never ended), and the audio context's state.
+    tts_stalled: turn.ttsStalled === true, ctx_state: ctxState,
+    // r7b H3: how much audio the reply scheduled, and at a stall: the audio state then and whether its clock had moved.
+    tts_audio_ms: Number.isFinite(turn.ttsAudioMs) ? Math.round(turn.ttsAudioMs) : null,
+    stall_ctx_state: turn.stall ? turn.stall.ctx_state : null,
+    stall_clock_moved: turn.stall ? turn.stall.clock_moved === true : null,
+    // r7b M3: the page's own media state at the tap and at the report (the server logs its own beside it).
+    page_media_start: turn.pageMediaStart ?? null, page_media_end: pageMedia,
   };
+}
+/**
+ * F6 (smoke 2026-10-06): after a turn's speech has ended, does the page let the microphone go? On a phone or
+ * a tablet (display_config.mic_per_turn, decided on the server from the display type) yes: an open
+ * echo-cancelled capture keeps Android in voice-call audio mode and every sound plays through the call path.
+ * The next tap opens it again; the permission is kept, so nothing is asked again. phase: "end" (the speech is in),
+ * "settled" (the answer is over and no follow-up started), "closed" (turn_over, socket closed, barge). "end" keeps it (r7 G12).
+ */
+export function micAfterTurn(config, { phase = "end" } = {}) {
+  if (config?.mic_per_turn !== true) return "keep";
+  // Re-smoke 2026-10-07 (G12): letting the mic go at "end" switched Android's audio mode while the reply was
+  // starting; the reply stuttered and its clock could stall. The mic now goes when the turn has settled (the reply
+  // has drained, or no follow-up started — review M4's one switch per conversation still holds), or on "closed".
+  return phase === "end" ? "keep" : "release";
+}
+
+/*
+ * Ducking (review C1). The music is turned down (or paused) while a turn is OPEN: the mic is open,
+ * the server's bird is not idle (listening, thinking, speaking), or this page's TTS is playing.
+ * "Open" never depends on turn_done: a turn that never ran (empty, too long, busy) or a socket
+ * that closed mid-turn ends with the server's idle state, the mic closed, or the socket's own close.
+ */
+export function duckDecision({ turnOpen, serverBird, playing }) {
+  return !!turnOpen || (typeof serverBird === "string" && serverBird !== "idle") || !!playing;
+}
+/** Backstop: ducked this long with the bird idle and no TTS playing, the music comes back whatever the page thinks. */
+export const DUCK_BACKSTOP_MS = 30_000;
+export function duckBackstop({ duckedFor, serverBird, playing }) {
+  return duckedFor >= DUCK_BACKSTOP_MS && serverBird === "idle" && !playing;
+}
+
+/*
+ * Effect time (ruling S12): end of speech to the moment the thing happened. The first `wm` or `media`
+ * change that arrives after turn_end and before the turn's closing frame is stamped; a media `load`
+ * is stamped when the element reports `playing` for that item, if within EFFECT_WAIT_MS of the load.
+ * ev = { kind: "wm" | "media" | "load" | "playing", id?, at } (performance.now() ms). Mutates turn.
+ */
+export const EFFECT_WAIT_MS = 6000;
+export function noteEffect(turn, ev) {
+  if (!turn || !turn.ended || turn.effectAt != null || !ev) return false;
+  if (ev.kind === "playing") {
+    const l = turn.effectLoad;
+    if (!l || l.id !== ev.id || ev.at - l.at > EFFECT_WAIT_MS) return false;
+    turn.effectAt = ev.at;
+    return true;
+  }
+  if (turn.done || turn.effectLoad) return false;
+  if (ev.kind === "load") { turn.effectLoad = { id: ev.id, at: ev.at }; return false; }
+  turn.effectAt = ev.at;
+  return true;
+}
+/** A load still waiting for its `playing` holds the turn's report (up to EFFECT_WAIT_MS). → ms to wait, or 0. */
+export function effectWaitMs(turn, now) {
+  const l = turn?.effectLoad;
+  if (!l || turn.effectAt != null) return 0;
+  return Math.max(0, EFFECT_WAIT_MS - (now - l.at));
 }
 
 /** A dead token or a halt leaves the display idle for a long time: release the mic so the phone's indicator goes off. */
