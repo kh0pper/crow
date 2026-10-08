@@ -12,29 +12,29 @@ El Bot Builder es la columna vertebral agéntica de Crow. El mismo agente que co
 
 ## Qué es un agente
 
-Un agente es una definición con varias partes, cada una en su propia pestaña del editor:
+Un agente es una definición con varias partes. El editor las agrupa en cuatro pestañas, más una vista Avanzado para los ajustes que la mayoría de los agentes nunca necesitan:
 
-| Parte | Qué controla |
+| Pestaña | Qué controla |
 |---|---|
-| **AI / Modelos** | El modelo de chat que usa el agente, más un modelo de voz rápido opcional para los lentes y los perfiles de habla y visión con los que se expresa. |
-| **Herramientas y Extensiones** | Exactamente qué herramientas puede llamar el agente: las propias herramientas de memoria, proyectos, blog y almacenamiento de Crow, más las herramientas aportadas por cualquier extensión instalada. |
-| **Skills y Prompt** | La persona del agente (system prompt) y los skills adjuntos a él. Los skills son prompts conductuales que enseñan un flujo de trabajo. |
-| **Gateways** | Los canales en los que corre el agente: Gmail, Discord o lentes Meta. |
-| **Permisos / Seguridad** | Lo que el agente puede hacer por su cuenta, lo que necesita confirmación y lo que se le niega. También el interruptor opt-in de autoescritura. |
-| **Proyecto / Kanban** | Un proyecto opcional sobre el que trabaja el agente. |
-| **Revisar / Desplegar** | Un resumen de la definición antes de guardarla y desplegarla. |
+| **Lo básico** | El nombre del agente, su personalidad e instrucciones, su modelo (más un modelo más potente opcional para preguntas difíciles y un modelo de voz rápido para gafas, quiosco y compañero) y el único canal por el que la gente lo contacta: Gmail, Discord, Telegram, Slack, gafas Meta, un quiosco de Compañero de IA, Mensajes de Crow o Perch. Solo se muestran los ajustes del canal elegido. |
+| **Capacidades** | Lo que puede hacer: leer o editar archivos en sus carpetas, ejecutar comandos, usar la memoria y qué servicios conectados puede usar. Cada servicio es una fila con **Apagado / Solo lectura / Todo / Personalizado**; Personalizado abre una lista con buscador de las herramientas de ese servicio, cada una marcada como "lee" o "hace cambios". Aquí también se eligen las habilidades. |
+| **Seguridad** | Si el correo que escribe se guarda como borrador para ti o se envía directamente, qué carpetas puede ver y modificar, y las acciones sobre las que siempre debe preguntarte antes. |
+| **Actividad** | Una lista de verificación, el interruptor Activar / Desactivar, las habilidades que esperan tu revisión y sus conversaciones recientes. |
+| **Avanzado** | Aprender habilidades nuevas, agentes auxiliares, una lista de comandos permitidos, el tablero y proyecto en que trabaja, compartir con tus otros Crows, una revisión de conexiones de herramientas, los ajustes en bruto y Eliminar. |
 
-Guardar una pestaña fusiona solo los campos de esa pestaña en la definición, así que un guardado nunca pisa las demás pestañas.
+Cada pestaña guarda solo sus propios ajustes, y solo los controles que cambiaste: guardar una pestaña sin tocar nada deja el agente exactamente como estaba. Si el agente se modificó en otro lugar mientras la página estaba abierta (por ejemplo, se aprobó una habilidad), el guardado se rechaza y se te pide recargar.
 
 ## Herramientas y extensiones
 
-Cada agente solo ve las herramientas que le otorgas. La pestaña de Herramientas lista las categorías de herramientas integradas de Crow junto a las herramientas aportadas por cada extensión instalada, agrupadas por extensión con una insignia de estado de instalación.
+Cada agente solo ve las herramientas que le otorgas. La pestaña Capacidades muestra cada servicio conectado (los servidores propios de Crow y cada extensión instalada) como una fila. **Solo lectura** otorga solo las herramientas que consultan; **Todo** añade las que hacen cambios. Las herramientas que un servicio añada más adelante nunca se activan solas: un agente en Todo pasa a mostrar Personalizado hasta que vuelvas a elegir. Crow decide por el nombre de cada herramienta, y lo que no reconoce cuenta como "hace cambios"; una herramienta cuyo nombre parece una consulta pero que muestra, comparte o pulsa algo (una pantalla de quiosco, un enlace de descarga, un navegador que navega) también cuenta como que hace cambios. Un servicio puede marcar más herramientas como que hacen cambios, nunca menos.
+
+Cuando un servicio está conectado más de una vez (dos cuentas de Google, por ejemplo), cada fila muestra su cuenta. Define la etiqueta con una entrada opcional `"account"` en ese servidor dentro de `~/.pi/agent/mcp.json` o `mcp-addons.json` (por ejemplo `"account": "alex@example.com"`); sin ella, la fila muestra el nombre del servidor.
 
 Cuando seleccionas las herramientas de una extensión, el Bot Builder conecta esa extensión al agente automáticamente. No editas entradas de servidores MCP a mano. Si una extensión provee una herramienta que el canal del agente no puede alcanzar (por ejemplo, una herramienta sin equivalente de voz en la ruta de los lentes), el editor te advierte en lugar de descartarla en silencio.
 
 ## Skills
 
-Los skills son prompts conductuales (archivos Markdown con un pequeño encabezado de front-matter) que le enseñan a un agente un flujo de trabajo específico. Adjúntalos en la pestaña de Skills, agrupados por la extensión que los provee. Una tarjeta destacada de "Skill authoring" te permite adjuntar la guía de escritura de skills de Crow a un agente con un clic.
+Los skills son prompts conductuales (archivos Markdown con un pequeño encabezado de front-matter) que le enseñan a un agente un flujo de trabajo específico. Elígelos en la pestaña Capacidades, agrupados por la extensión que los provee.
 
 Los skills son portables entre agentes y entre canales. Las variantes de idioma (inglés, español, etcétera) son simplemente archivos de skill distintos que llaman a las mismas herramientas subyacentes.
 
@@ -58,7 +58,7 @@ Nada de esto queda expuesto a internet. Corre como parte de la puerta de enlace,
 
 ### 1. Adjunta el canal Perch a un agente
 
-Abre el agente en el Bot Builder, ve a la pestaña **Gateways**, elige **Perch (chat del panel)** y guarda. No hay campos que llenar. También puedes elegir Perch como canal mientras creas un agente en el asistente.
+Abre el agente en el Bot Builder, en la pestaña **Lo básico** elige **Perch (chat del panel)** como canal y guarda. No hay campos que llenar. También puedes elegir Perch como canal mientras creas un agente en el asistente.
 
 Los turnos de Perch corren sobre el mismo motor de bots que usan Gmail y Discord, así que si el motor todavía no está instalado, Crow te ofrecerá instalarlo antes de dejarte guardar.
 
@@ -125,7 +125,7 @@ Estas reglas se aplican sobre la acción subyacente, no solo sobre el nombre sup
 
 ## Autoescritura opt-in
 
-Un agente puede ayudar a escribir sus propios skills, pero solo si tú lo activas. La autoescritura está **desactivada por defecto**.
+Un agente puede ayudar a escribir sus propios skills, pero solo si lo activas en **Avanzado → Aprender habilidades nuevas**. Está **desactivado por defecto**; puedes dejar que sugiera habilidades para tu aprobación o que aprenda por su cuenta con salvaguardas (un agente que puede enviar correo o ejecutar comandos solo sugiere).
 
 Cuando la habilitas para un agente:
 
@@ -133,7 +133,7 @@ Cuando la habilitas para un agente:
 2. El skill redactado aparece en el Bot Builder para revisión. Puedes leerlo, editar el texto y aprobarlo o rechazarlo. Cualquier redacción que pudiera debilitar una salvaguarda se marca para tu atención.
 3. Al aprobarlo, Crow promueve el skill a tu biblioteca de skills y lo adjunta al agente. Solo entonces se carga.
 
-Un skill autoescrito es solamente texto de prompt. Aprobar uno no puede otorgarle al agente nuevas herramientas ni cambiar su política de permisos, porque esas vienen de las pestañas de Herramientas y Permisos, no de un skill. La compuerta de aprobación del operador es el límite.
+Un skill autoescrito es solamente texto de prompt. Aprobar uno no puede otorgarle al agente nuevas herramientas ni cambiar su política de permisos, porque esas vienen de las pestañas Capacidades y Seguridad, no de un skill. La compuerta de aprobación del operador es el límite.
 
 Este es el núcleo de la postura de Crow frente a las plataformas de bots con autoescritura automática: un agente puede proponer, pero un humano aprueba antes de que cualquier cosa que un agente escribió para sí mismo se vuelva real.
 
@@ -143,7 +143,7 @@ Para tareas que toman más de un turno, un agente puede pasarle trabajo al orque
 
 ## Desplegar y monitorear
 
-La pestaña Revisar / Desplegar resume el agente antes de que lo confirmes. Una vez desplegado, un agente corre contra la misma base de datos de Crow que cualquier otra conexión, así que sus memorias, proyectos, archivos y mensajes son visibles en todas las demás partes de Crow.
+La pestaña Actividad muestra si el agente está listo para funcionar y te deja activarlo o desactivarlo. Una vez desplegado, un agente corre contra la misma base de datos de Crow que cualquier otra conexión, así que sus memorias, proyectos, archivos y mensajes son visibles en todas las demás partes de Crow.
 
 ## Relacionado
 

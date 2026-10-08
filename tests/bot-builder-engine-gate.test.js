@@ -500,14 +500,18 @@ function mkSendRes() {
   return res;
 }
 
-test("gateways tab render: complete gmail record + engine absent → form armed with channels + required-fields data attributes", async () => {
+test("basics tab render (legacy ?tab=gateways): complete gmail record + engine absent → form armed with channels + per-type required-fields map", async () => {
   _setEngineStatusForTest({ state: "absent" });
   const res = mkSendRes();
   const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
   await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
-  assert.match(res.html, /id="btb-gateways-form"[^>]*data-engine-gate="1"/, "form must carry the gate attribute");
+  assert.match(res.html, /id="btb-basics-form"[^>]*data-engine-gate="1"/, "form must carry the gate attribute");
   assert.match(res.html, /data-engine-channels="gmail,discord,telegram,slack,perch"/, "channels list must mirror ENGINE_CHANNELS");
-  assert.match(res.html, /data-engine-required-fields="gw_address,gw_allowlist"/, "required DOM field names for gmail");
+  const m = res.html.match(/data-engine-required-fields-json="([^"]*)"/);
+  assert.ok(m, "per-type required-field map present (the picker switches type client-side)");
+  const map = JSON.parse(m[1].replace(/&quot;/g, '"'));
+  assert.deepEqual(map.gmail, ["gw_address", "gw_allowlist"], "required DOM field names for gmail");
+  assert.deepEqual(map.discord, ["gw_token"]);
   assert.match(res.html, /window\.__crowEngineGateOpen/, "stable hook for the Task 9 readiness row must be present");
   assert.match(res.html, /id="engine-gate-modal-overlay"/, "modal overlay markup must ship on the page");
 });
@@ -524,7 +528,7 @@ test("gateways tab render: engine ready → NOT armed (no data-engine-gate attri
   assert.match(res.html, /window\.__crowEngineGateOpen/);
 });
 
-test("gateways tab render: engine absent but gwType is crow-messages (not an ENGINE_CHANNELS type) → NOT armed", async () => {
+test("basics tab render: engine absent + saved crow-messages → armed for a switch, but crow-messages itself is never a gated type", async () => {
   await db.execute({
     sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='gate-bot'",
     args: [JSON.stringify({ gateways: [{ type: "crow-messages", allow_paired_instances: true }], tools: {}, models: {} })],
@@ -533,10 +537,15 @@ test("gateways tab render: engine absent but gwType is crow-messages (not an ENG
   const res = mkSendRes();
   const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
   await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
-  assert.ok(!/data-engine-gate="1"/.test(res.html), "crow-messages is never a gated channel type");
+  // The picker can switch to an engine channel without a re-render, so the
+  // form is armed whenever the engine is absent; the client gates only the
+  // LIVE type, and crow-messages is not in the channel list.
+  assert.match(res.html, /id="btb-basics-form"[^>]*data-engine-gate="1"/);
+  const ch = res.html.match(/data-engine-channels="([^"]*)"/)[1].split(",");
+  assert.ok(!ch.includes("crow-messages"), "crow-messages is never a gated channel type");
 });
 
-test("gateways tab render: perch selected + engine absent → armed with an EMPTY required-fields list", async () => {
+test("basics tab render: perch selected + engine absent → armed with an EMPTY required-fields list for perch", async () => {
   await db.execute({
     sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='gate-bot'",
     args: [JSON.stringify({ gateways: [{ type: "perch" }], tools: {}, models: {} })],
@@ -545,9 +554,9 @@ test("gateways tab render: perch selected + engine absent → armed with an EMPT
   const res = mkSendRes();
   const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
   await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
-  assert.match(res.html, /id="btb-gateways-form"[^>]*data-engine-gate="1"/, "perch must arm the client gate");
-  assert.match(res.html, /data-engine-fields-type="perch"/);
-  assert.match(res.html, /data-engine-required-fields=""/,
+  assert.match(res.html, /id="btb-basics-form"[^>]*data-engine-gate="1"/, "perch must arm the client gate");
+  const map = JSON.parse(res.html.match(/data-engine-required-fields-json="([^"]*)"/)[1].replace(/&quot;/g, '"'));
+  assert.deepEqual(map.perch, [],
     "no required fields ⇒ the client-side completeness mirror (engine-gate-client.js recordIsComplete) passes on type alone");
 });
 

@@ -196,7 +196,7 @@ test("gw_share mints an active invite; gw_newlink rotates it", async () => {
   const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
   let res = mkRes();
   await handleBotBuilderPost({ body: { action: "gw_share", bot_id: "draft-bot" } }, res, { db });
-  assert.match(res.redirected, /tab=gateways/, "redirects to gateways tab");
+  assert.match(res.redirected, /tab=basics/, "redirects to the Basics tab (where the channel lives)");
   const first = await admin.getActiveInvite(db, "draft-bot");
   assert.ok(first && first.token, "an active invite exists after share");
 

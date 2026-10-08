@@ -118,8 +118,8 @@ async function boot() {
 
   const { window, document } = parseHTML(`<html><body>${res.html}</body></html>`);
 
-  const form = document.getElementById("btb-gateways-form");
-  assert.ok(form, "precondition: the gateways form must be present");
+  const form = document.getElementById("btb-basics-form");
+  assert.ok(form, "precondition: the Basics form must be present");
 
   // linkedom's HTMLFormElement implements neither requestSubmit() nor
   // submit() (verified against node_modules/linkedom/worker.js) — a real
@@ -164,10 +164,9 @@ async function boot() {
     setInterval: () => 0,
   });
 
-  const CLIENT_HTML_START = res.html.indexOf("<script>");
-  const CLIENT_HTML_END = res.html.lastIndexOf("</script>");
-  const CLIENT_JS = res.html.slice(CLIENT_HTML_START + "<script>".length, CLIENT_HTML_END);
-  vm.runInContext(CLIENT_JS, ctx);
+  // Every inline script on the page, in order (the channel picker's and the
+  // engine gate's), exactly as a browser runs them.
+  for (const m of res.html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(m[1], ctx);
 
   const $ = (sel) => document.querySelector(sel);
   const click = (el) => el.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -186,29 +185,36 @@ async function boot() {
   const overlay = document.getElementById("engine-gate-modal-overlay");
   const modalOpen = () => overlay.style.display === "flex";
 
-  return { window, document, $, form, click, change, fireSubmit, settle, flushTimers, setFetchImpl, calls, requestSubmitCalls, overlay, modalOpen };
+  /** Edit the live gmail record (the attach moment the gate guards). */
+  const editAddress = (v = "new-bot@x.com") => {
+    const el = form.querySelector("fieldset[data-channel='gmail'] [name='gw_address']");
+    el.value = v;
+  };
+  return { window, document, $, form, click, change, fireSubmit, settle, flushTimers, setFetchImpl, calls, requestSubmitCalls, overlay, modalOpen, editAddress };
 }
 
 // ─── Bug 1 regression: a type switch away from a complete old-type record must NOT be intercepted ───
 
 test("BEHAVIOR: switching gw_type on a stale-complete OLD-type record fires the re-render submit through, unintercepted (bug 1)", async () => {
-  const { form, fireSubmit, requestSubmitCalls, modalOpen, change } = await boot();
-
-  assert.equal(form.getAttribute("data-engine-fields-type"), "gmail", "precondition: fields-type attribute pins the type the required-fields list was computed for");
-  assert.equal(form.getAttribute("data-engine-required-fields"), "gw_address,gw_allowlist");
+  const { form, fireSubmit, requestSubmitCalls, modalOpen, change, editAddress } = await boot();
+  editAddress(); // the old gmail record is complete AND edited
 
   const typeSel = form.querySelector("[name='gw_type']");
   assert.ok(typeSel, "precondition: the gw_type select must be present");
   const discordOpt = [...typeSel.options].find((o) => o.value === "discord");
   assert.ok(discordOpt, "precondition: discord must be a selectable option");
 
-  // Simulate the onchange handler's mid-flight state: the operator picked
-  // "discord" in the dropdown, but the DOM still holds gmail's fields
-  // (gw_address/gw_allowlist), still non-empty, because the server hasn't
-  // re-rendered yet. This is exactly what this.form.requestSubmit() fires
-  // in a real browser.
-  for (const opt of typeSel.options) opt.selected = (opt.value === "discord");
+  // The operator picks "discord": the picker swaps fieldsets client-side
+  // (gmail's complete fields are disabled, discord's empty ones enabled) and
+  // nothing auto-submits. Saving now must judge the LIVE type (an incomplete
+  // discord draft), never gmail's leftover fields.
+  for (const opt of typeSel.options) {
+    if (opt.value === "discord") opt.setAttribute("selected", ""); else opt.removeAttribute("selected");
+  }
+  assert.equal(typeSel.value, "discord", "precondition: the live select reads discord");
   change(typeSel);
+  assert.equal(form.querySelector("fieldset[data-channel='gmail']").disabled, true, "gmail's fields are switched off");
+  assert.equal(form.querySelector("fieldset[data-channel='discord']").disabled, false, "discord's fields are switched on");
 
   const ev = fireSubmit();
 
@@ -220,9 +226,8 @@ test("BEHAVIOR: switching gw_type on a stale-complete OLD-type record fires the 
 // ─── Complete-record submit IS intercepted and opens the modal ───
 
 test("BEHAVIOR: a complete gmail record with the engine absent (no type switch) IS intercepted and opens the install modal", async () => {
-  const { form, fireSubmit, modalOpen, $ } = await boot();
-
-  assert.equal(form.getAttribute("data-engine-fields-type"), "gmail");
+  const { fireSubmit, modalOpen, $, editAddress } = await boot();
+  editAddress();
 
   const ev = fireSubmit();
 
@@ -231,10 +236,21 @@ test("BEHAVIOR: a complete gmail record with the engine absent (no type switch) 
   assert.ok($("#engine-gate-modal-content button.btn-primary"), "the modal renders an Install button");
 });
 
+// ─── An untouched complete record is not intercepted (renaming a bot never pops the dialog) ───
+
+test("BEHAVIOR: saving Basics with the saved, complete channel untouched is NOT intercepted", async () => {
+  const { form, fireSubmit, modalOpen } = await boot();
+  form.querySelector("[name='system_prompt']").value = "a new persona";
+  const ev = fireSubmit();
+  assert.equal(ev.defaultPrevented, false, "only a changed channel record is an attach moment");
+  assert.equal(modalOpen(), false);
+});
+
 // ─── Bug 2 regression: cancel must make a completing job inert ───
 
 test("BEHAVIOR: cancelling the install dialog makes a job that completes afterward inert — no auto-resubmit (bug 2)", async () => {
-  const { form, fireSubmit, click, settle, flushTimers, setFetchImpl, calls, requestSubmitCalls, overlay, modalOpen, $ } = await boot();
+  const { fireSubmit, click, settle, flushTimers, setFetchImpl, calls, requestSubmitCalls, modalOpen, $, editAddress } = await boot();
+  editAddress();
 
   fireSubmit(); // opens the modal
   assert.equal(modalOpen(), true);
@@ -287,7 +303,8 @@ test("BEHAVIOR: cancelling the install dialog makes a job that completes afterwa
 // ─── Successful (uncancelled) install path resubmits exactly once ───
 
 test("BEHAVIOR: a successful install (never cancelled) hides the modal and resubmits the form exactly once", async () => {
-  const { fireSubmit, click, settle, flushTimers, setFetchImpl, requestSubmitCalls, modalOpen, $ } = await boot();
+  const { fireSubmit, click, settle, flushTimers, setFetchImpl, requestSubmitCalls, modalOpen, $, editAddress } = await boot();
+  editAddress();
 
   fireSubmit();
   assert.equal(modalOpen(), true);

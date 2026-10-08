@@ -44,7 +44,9 @@ export function toPublicBot(row, managedSet) {
     display_name: row.display_name,
     enabled: !!Number(row.enabled),
     project_id: row.project_id != null && Number.isFinite(Number(row.project_id)) ? Number(row.project_id) : null,
-    tracker_type: (def.triggers && def.triggers.tracker_type) || "none",
+    // The tracker type lives in tracker_config (what the editor writes);
+    // triggers.tracker_type is a legacy spelling nothing writes any more.
+    tracker_type: (def.tracker_config && def.tracker_config.type) || (def.triggers && def.triggers.tracker_type) || "none",
     model: (def.models && def.models.default) || null,
     tool_count: crowMcp.length,
     peer_manageable: managedSet instanceof Set ? managedSet.has(row.bot_id) : false,

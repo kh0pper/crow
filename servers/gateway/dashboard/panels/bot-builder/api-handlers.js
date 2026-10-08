@@ -20,6 +20,10 @@ import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-pat
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { rowRev } from "./def-adapter.js";
+import { changeTracker } from "./ui.js";
+import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
+import { guardPolicyForSave } from "./policy-guard.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import {
@@ -121,7 +125,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     if (toggled) emitBotDefsChanged(b.bot_id);
     // Back to the review tab (the toggle lives under the Status checklist
     // row there) so the user sees the updated row — PR #191 review m3.
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(b.bot_id || "")}&tab=review`);
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(b.bot_id || "")}&tab=activity`);
   }
 
   if (action === "toggle_peer_managed") {
@@ -133,7 +137,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     const set = new Set(list.filter((x) => typeof x === "string" && x));
     if (b.managed === "on") set.add(botId); else set.delete(botId);
     await writeSetting(db, "remote_managed_bots", JSON.stringify([...set]), { scope: "local" });
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions`);
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=advanced#peers`);
   }
 
   // ---- Crow Messages gateway management actions (Plan 2) ----
@@ -155,9 +159,9 @@ export async function handleBotBuilderPost(req, res, { db }) {
         if (pk) await admin.addManualAcl(db, botId, pk, null, (b.display_name || "").trim() || null);
       }
     } catch (e) {
-      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways&warn=${encodeURIComponent(e.message)}`);
+      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=basics&warn=${encodeURIComponent(e.message)}`);
     }
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways`);
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=basics`);
   }
 
   // tab saves — merge only that tab's fields into the existing definition
@@ -168,24 +172,68 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // M3b: also fetch project_id column (authoritative). After parsing
       // the JSON we set def.project_id from the column so the rest of
       // this handler can keep reading `def.project_id` transparently.
-      row = (await db.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+      row = (await db.execute({ sql: "SELECT definition, project_id, display_name FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
     } catch { row = null; }
     if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
+    const tab = action.slice(5);
+    const lang = reqLang(req);
+    // A redirect target the form may ask for (the board form lives in Advanced).
+    const backTab = ["basics", "abilities", "safety", "activity", "advanced"].includes(b.return_tab) ? b.return_tab : tab;
+    // Stale-form guard: a page rendered before another writer changed this
+    // definition (an approved skill, a peer edit, another tab) is refused
+    // instead of overwriting. Posts without def_rev keep the old behaviour.
+    if (typeof b.def_rev === "string" && b.def_rev && b.def_rev !== rowRev(row)) {
+      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` +
+        encodeURIComponent(t("botbuilder.staleForm", lang)));
+    }
     let def;
     try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
-    def.tools = def.tools || {};
-    def.permission_policy = def.permission_policy || {};
-    def.triggers = def.triggers || {};
+    const NEW_TABS = ["basics", "abilities", "safety", "advanced"];
+    const isNew = NEW_TABS.includes(tab);
+    // The new saves only add keys they actually change (byte-identical
+    // round trip); the legacy tab saves keep their old normalisation.
+    if (!isNew) {
+      def.tools = def.tools || {};
+      def.permission_policy = def.permission_policy || {};
+      def.triggers = def.triggers || {};
+    }
     // M3b: column wins over JSON. Stale JSON copies of project_id will
     // never be re-baked because we don't read them anywhere downstream.
     def.project_id = row.project_id == null ? null : Number(row.project_id);
-    let columnProjectIdUpdate = null;  // set when the project tab is saved
-    const tab = action.slice(5);
+    let columnProjectIdUpdate;  // set (number or null) when the project is saved
+    let columnNameUpdate = null;       // set when Basics renames the bot
+    let afterWrite = null, afterLabel = ""; // device effects, run only once the write succeeded
+    let channelChanged = tab === "gateways";
     // Extra query suffix carried into the post-save redirect (e.g. a soft
     // validation warning for the AI tab). Never blocks the save.
     let extraQ = "";
 
-    if (tab === "ai") {
+    if (isNew) {
+      // project_id is column-owned; it rides in def only for readers above.
+      let origDef = {};
+      try { origDef = JSON.parse(row.definition || "{}") || {}; } catch { origDef = {}; }
+      const hadProjectKey = Object.prototype.hasOwnProperty.call(origDef, "project_id");
+      const sctx = { db, lang, botId, row, remoteInvocationOn, changed: changeTracker(b) };
+      let r;
+      if (tab === "basics") r = await saveBasics(def, b, sctx);
+      else if (tab === "abilities") r = saveAbilities(def, b, sctx);
+      else if (tab === "safety") r = saveSafety(def, b, sctx);
+      else r = await saveAdvanced(def, b, sctx);
+      if (r.error) {
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(r.error));
+      }
+      if (!hadProjectKey) delete def.project_id; else def.project_id = origDef.project_id;
+      // containers a save created but left empty were not there before: drop them
+      for (const k of ["tools", "permission_policy", "models"]) {
+        if (!Object.prototype.hasOwnProperty.call(origDef, k) && def[k] && typeof def[k] === "object" && !Object.keys(def[k]).length) delete def[k];
+      }
+      for (const w of r.warn || []) extraQ += "&warn=" + encodeURIComponent(w);
+      if (r.column && r.column.display_name) columnNameUpdate = r.column.display_name;
+      if (r.column && Object.prototype.hasOwnProperty.call(r.column, "project_id")) columnProjectIdUpdate = r.column.project_id;
+      channelChanged = !!r.channelChanged;
+      afterWrite = r.after || null;
+      afterLabel = r.afterLabel || "";
+    } else if (tab === "ai") {
       def.models = def.models || {};
       def.models.default = (b.model_default || def.models.default || "").trim();
       const esc = (b.model_escalation || "").trim();
@@ -426,14 +474,14 @@ export async function handleBotBuilderPost(req, res, { db }) {
     // until it's complete) and must keep saving exactly as before this gate
     // existed. Voice/device gateways (glasses/companion) and crow-messages
     // are never in ENGINE_CHANNELS, so they're never gated here (C4-3).
-    if (tab === "gateways") {
+    if (channelChanged) {
       const savedGw = (def.gateways || [])[0];
       if (savedGw && ENGINE_CHANNELS.includes(savedGw.type) && missingGatewayFields(savedGw).length === 0) {
         if (engineRequiredFor(savedGw)) {
           // Form state is accepted as lost on this path — the fix is
           // installing the engine, not reposting the same form.
           return res.redirectAfterPost(
-            `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways&error=engine_required`
+            `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab === "gateways" ? "gateways" : backTab}&error=engine_required`
           );
         }
         // Runtime-disarmed surfacing (r1 critical #2): the engine exists,
@@ -450,26 +498,55 @@ export async function handleBotBuilderPost(req, res, { db }) {
       }
     }
 
-    try {
-      // M3b: when the project tab is saved, the project_id column gets
-      // updated alongside definition JSON — column is authoritative for
-      // every downstream reader (bridge.mjs, bot-board, bot-board-api).
-      if (columnProjectIdUpdate !== null) {
-        await db.execute({
-          sql: "UPDATE pi_bot_defs SET definition=?, project_id=?, updated_at=datetime('now') WHERE bot_id=?",
-          args: [JSON.stringify(def), columnProjectIdUpdate, botId],
-        });
-      } else {
-        await db.execute({
-          sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=?",
-          args: [JSON.stringify(def), botId],
-        });
+    // One guard for every dashboard write of permission_policy (see policy-guard.js).
+    {
+      let storedPolicy;
+      try { storedPolicy = (JSON.parse(row.definition || "{}") || {}).permission_policy; } catch { storedPolicy = undefined; }
+      const bad = guardPolicyForSave(def.permission_policy, storedPolicy);
+      if (bad) {
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` +
+          encodeURIComponent(fill(t("botbuilder.policyInvalid", lang), { reason: bad })));
       }
+    }
+    try {
+      const newText = JSON.stringify(def);
+      // Compare values, not text: a stored definition that is pretty-printed
+      // (an import, a hand edit) is not rewritten by a save that changed nothing.
+      let storedCanon = null;
+      try { storedCanon = JSON.stringify(JSON.parse(row.definition || "{}")); } catch { storedCanon = null; }
+      const defChanged = !isNew || newText !== storedCanon;
+      const runAfter = async () => {
+        if (!afterWrite) return;
+        try { await afterWrite(); } catch (err) { extraQ += "&warn=" + encodeURIComponent(afterLabel + err.message); }
+      };
+      if (!defChanged && columnNameUpdate === null && columnProjectIdUpdate === undefined) {
+        // the definition did not change (a device voice profile may have)
+        await runAfter();
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&saved=1${extraQ}`);
+      }
+      // One compare-and-swap write: it lands only if the row still holds what
+      // this save read (a skill approved, a peer edit or another tab in the
+      // meantime makes it refuse instead of silently overwriting).
+      // M3b: the project_id column is authoritative for every reader.
+      const sets = [], args = [];
+      if (defChanged) { sets.push("definition=?"); args.push(newText); }
+      if (columnNameUpdate !== null) { sets.push("display_name=?"); args.push(columnNameUpdate); }
+      if (columnProjectIdUpdate !== undefined) { sets.push("project_id=?"); args.push(columnProjectIdUpdate); }
+      sets.push("updated_at=datetime('now')");
+      const r = await db.execute({
+        sql: `UPDATE pi_bot_defs SET ${sets.join(", ")} WHERE bot_id=? AND definition IS ? AND display_name IS ? AND project_id IS ?`,
+        args: [...args, botId, row.definition ?? null, row.display_name ?? null, row.project_id ?? null],
+      });
+      if (Number(r && r.rowsAffected) === 0) {
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` +
+          encodeURIComponent(t("botbuilder.staleForm", lang)));
+      }
+      await runAfter();
     } catch (e) {
-      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&error=` + encodeURIComponent(String(e.message || e)));
+      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(String(e.message || e)));
     }
     emitBotDefsChanged(botId);
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&saved=1${extraQ}`);
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&saved=1${extraQ}`);
   }
 
   if (action === "regen_mcp") {
@@ -487,6 +564,6 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } catch (e) {
       msg = "ERROR: " + String(e.message || e);
     }
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&mcp=` + encodeURIComponent(msg));
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=advanced&mcp=` + encodeURIComponent(msg) + "#check");
   }
 }

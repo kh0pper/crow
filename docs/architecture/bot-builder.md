@@ -46,7 +46,7 @@ Each row in `pi_bot_defs` is a JSON definition with these parts:
 - **permission_policy**: confirm / deny sets, `external_send` mode, and the `self_authoring` switch
 - **model** and an optional `fast_voice_model`
 
-The editor merges one tab's fields at a time, so saves are non-destructive across tabs. On any Crow instance that does not have the `pi_bot_defs` table, the panel renders a friendly notice instead of failing.
+The editor has four tabs (Basics, Abilities, Safety, Activity) and an Advanced view. It is a projection of the stored definition: each save merges only its own tab's fields, and within a tab only the controls the operator changed, so re-saving an untouched tab leaves the definition byte-identical and values the simplified editor no longer shows (for example a kiosk's hearing style) survive. Every form carries a revision of the stored definition; a save from a page that went stale (a skill approved meanwhile, a peer edit) is refused. Skills are stored once, in `skills`. On any Crow instance that does not have the `pi_bot_defs` table, the panel renders a friendly notice instead of failing.
 
 ## Extensions contribute tools and skills
 

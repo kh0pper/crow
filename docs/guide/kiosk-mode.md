@@ -21,15 +21,13 @@ kitchen-tablet → "Chef"  (avatar A · voice A · social off)
 studio-display → "Aide"  (avatar B · voice B · social on)
 ```
 
-Bind a device in the bot's **Gateways** tab → type **AI Companion**:
+Bind a device on the bot's **Basics** tab → channel **AI Companion (kiosk)**:
 
 1. **Paired device** — pick the kiosk device, or simply **type a name** in the "…or pair a new kiosk" field and press Save: Crow creates and connects the device for you in one step (no Meta Glasses bundle required). Devices paired in the Meta Glasses panel also appear here; kiosks reuse that store, tagged `device_kind:"companion"`.
 2. **Avatar** — the Live2D model that renders for this kiosk.
-3. **Hearing style** — push-to-talk, wake word, or always listening.
-4. **Voice idle timeout** — seconds of silence before the pet/idle animation.
-5. **Features** — toggle avatar animation/lip-sync, pet/idle mode, social (chatroom & DM) features, and automatic memory integration.
+3. **Kiosk features** — toggle avatar animation/lip-sync, pet/idle mode, social (chatroom & DM) features, and automatic memory integration.
 
-Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at different layers: device-config features (`social_chat`, `face_tracking`) are fetched and applied on each kiosk page load; hearing style and voice idle timeout are fetched and exposed to the kiosk via the same device-config plumbing, but there's no client-side consumer for them yet, so they aren't actually applied client-side; config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
+Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at different layers: device-config features (`social_chat`, `face_tracking`) are fetched and applied on each kiosk page load; an older editor's hearing style and voice idle timeout are kept on the device but were never applied, so the editor no longer shows them; config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
 
 ### What is and isn't per device
 
@@ -44,7 +42,7 @@ The model pair is shared because one companion container has a single LLM `base_
 
 ## Social / chat features
 
-The companion's chatroom and DM features are gated by the per-device `social_chat` toggle, so a public-facing kiosk can run avatar-only (no social UI) while a personal display keeps full chat. Toggle it in the Gateways tab.
+The companion's chatroom and DM features are gated by the per-device `social_chat` toggle, so a public-facing kiosk can run avatar-only (no social UI) while a personal display keeps full chat. Toggle it on the bot's Basics tab.
 
 ## Related
 

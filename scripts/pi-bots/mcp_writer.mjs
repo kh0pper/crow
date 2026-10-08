@@ -369,6 +369,19 @@ function deepHasPattern(schema, depth = 0) {
 }
 
 /**
+ * MCP tool annotations the Bot Builder uses to sort a source's tools into
+ * "only looks" / "changes things" (Read-only mode). Only boolean hints are
+ * carried; anything else is left out so the name heuristic decides.
+ */
+function toolHints(t) {
+  const a = (t && t.annotations) || {};
+  const out = {};
+  if (typeof a.readOnlyHint === "boolean") out.readOnlyHint = a.readOnlyHint;
+  if (typeof a.destructiveHint === "boolean") out.destructiveHint = a.destructiveHint;
+  return out;
+}
+
+/**
  * Live `tools/list` for a URL-based (streamable HTTP) MCP server block.
  * Mirrors the stdio probe's return shape. Never throws.
  */
@@ -396,6 +409,7 @@ async function probeHttpServerTools(block, timeoutMs) {
       name: t.name,
       description: (t.description || "").slice(0, 240),
       hasPattern: deepHasPattern(t.inputSchema),
+      ...toolHints(t),
     }));
     return { ok: true, serverName: block.url, tools };
   } catch (e) {
@@ -510,6 +524,7 @@ export function probeServerTools(block, opts = {}) {
           name: t.name,
           description: (t.description || "").slice(0, 240),
           hasPattern: deepHasPattern(t.inputSchema),
+          ...toolHints(t),
         }));
         finish({
           ok: true,

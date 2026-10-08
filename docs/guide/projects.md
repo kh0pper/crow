@@ -97,7 +97,7 @@ Every project gets a directory at `~/.crow/data/projects/<slug>/workspace/`. Thi
 
 - Where bots assigned to the project write artifacts (`<workspace>/bots/<bot_id>/`)
 - The default `write_paths` entry for bots in the project
-- Readable by every bot in the project: Crow adds it to the bot's read folders automatically. Bots outside the project cannot read it unless you list it under **Permissions › Folders this bot can read**.
+- Readable by every bot in the project: Crow adds it to the bot's read folders automatically. Bots outside the project cannot read it unless you list it under **Safety › Folders this bot can read**.
 - Available to agents via the `crow_workspace_dir` MCP tool
 
 The directory persists across project archive (it's only deleted on hard delete).
@@ -138,7 +138,7 @@ A bot's **project** is set on the `pi_bot_defs.project_id` column. When the brid
 4. Every turn appends a `bot.invoke` audit entry (or `bot.error` on failure)
 5. The Gmail inbound allowlist is the union of the static operator addresses + every project member's email with `invoke_bot=true`
 
-Edit a bot's project via the Bot Builder panel's **Project / Kanban** tab.
+Edit a bot's project via the Bot Builder's **Advanced › Board and project** section.
 
 ## Audit log
 
