@@ -150,7 +150,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
