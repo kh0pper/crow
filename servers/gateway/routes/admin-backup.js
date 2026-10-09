@@ -16,6 +16,12 @@
  * Auth: localhost-only. Optionally also requires a bearer token set via
  * CROW_BACKUP_TOKEN, for defence-in-depth if the gateway ever gets reverse-
  * proxied in a way that lets remote clients look like 127.0.0.1.
+ *
+ * Scope note (Crow Artifacts): this endpoint backs up the DATABASE only.
+ * Artifact content blobs live in <dataDir>/artifacts/ (local store) or the
+ * <prefix>-artifacts MinIO bucket (shared storage) and are backed up by
+ * scripts/backup.sh / the storage system itself — a restore needs the DB dump
+ * AND the blob store (rows reference blobs by sha256 key).
  */
 
 import { Router } from "express";

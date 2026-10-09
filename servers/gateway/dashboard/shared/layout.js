@@ -142,7 +142,7 @@ function turboDiagScript() {
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
  * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. Only the nest handler passes this; every other page renders an empty, CSS-hidden strip (body.unified-off).
  */
-export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
+export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head }) {
   // Unified-off class gates the tabs strip visibility via CSS. The strip
   // is re-rendered on every page (it must NOT be data-turbo-permanent:
   // Turbo would pin the first-rendered — usually empty — strip across
@@ -234,6 +234,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   ${FONT_LINKS}
   ${dashboardCss()}
   ${turboHead()}
+  ${head || ""}
 </head>
 <body class="${bodyClass}">
   <script>

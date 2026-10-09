@@ -148,6 +148,46 @@
       "official": true
     },
     {
+      "id": "artifacts",
+      "name": "Artifacts",
+      "version": "0.1.0",
+      "description": "Pages, documents and diagrams your bots make, shown in a sealed frame that cannot see your Crow. Versions shaped by outside text run script-free until you approve them. Commenting and feedback rounds arrive in the next release.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "artifacts",
+        "documents",
+        "mockups",
+        "feedback",
+        "comments"
+      ],
+      "icon": "layers",
+      "panel": "panel/artifacts.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/artifacts.md"
+      ],
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 2200
+      },
+      "env_vars": [
+        {
+          "name": "CROW_ARTIFACT_ORIGIN_PORT",
+          "description": "Loopback port of this instance's artifact origin (see docs/developers/port-allocation.md). Empty: artifact viewing is off.",
+          "required": false
+        },
+        {
+          "name": "CROW_ARTIFACT_ORIGIN_URL",
+          "description": "The origin browsers use for artifact content, on its OWN hostname (e.g. https://<artifacts-host>). Empty: the local-only fallback on this machine's loopback port, with weaker isolation.",
+          "required": false
+        }
+      ],
+      "notes": "Artifacts are shown on a separate origin with no access to your Crow. Scripts in pages run sandboxed with no network; a page that tries to leave its frame is closed and flagged.",
+      "official": true
+    },
+    {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
       "version": "1.0.0",

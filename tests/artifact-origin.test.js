@@ -338,6 +338,19 @@ test("runtime: start-from-env listens on loopback; isolation is shared-host on t
   } finally { rt._resetForTest(); }
 });
 
+test("runtime: a second start-from-env returns the running server instead of orphaning it (review L6)", async () => {
+  const rt = await import("../servers/gateway/artifact-origin/runtime.js");
+  rt._resetForTest();
+  const p = await freePort();
+  const a = await rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: String(p) });
+  try {
+    assert.ok(a);
+    const b = await rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: String(p) });
+    assert.equal(a, b, "the same server object; no orphaned listener");
+    assert.equal(b.address().port, p);
+  } finally { rt._resetForTest(); }
+});
+
 test("viewerCsp: frame-src is only the artifact origin's /v/ path; anything that is not a bare origin frames nothing", async () => {
   const { viewerCsp } = await import("../servers/gateway/artifact-origin/policy.js");
   const frameSrc = (csp) => /(?:^|; )frame-src ([^;]*)/.exec(csp)?.[1];
