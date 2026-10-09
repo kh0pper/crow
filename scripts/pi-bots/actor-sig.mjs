@@ -122,6 +122,22 @@ export function verifyBoardActorSig({ botId, jobId, sig } = {}) {
   return verifyActorSig({ kind: "board", botId, threadId: jobId, gatewayType: null, sig });
 }
 
+// ---- artifacts actor headers (Crow Artifacts, spec §7.1 / H6) ----
+//
+// /artifacts/mcp attributes a call to (bot, thread, gateway). Same key and
+// MAC; kind "artifacts", so neither a phone ("bot") nor a board signature can
+// be replayed here, nor an artifacts signature there.
+
+/** Signature for the artifacts actor headers, or null without a key / bot id. */
+export function signArtifactsActor({ botId, threadId, gatewayType } = {}) {
+  return signActor({ kind: "artifacts", botId, threadId, gatewayType });
+}
+
+/** Constant-time check of a presented artifacts signature. False without a key. */
+export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = {}) {
+  return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
+}
+
 /** Child side of the handoff: read the hex key the gateway wrote on stdin.
  *  Resolves false (never throws) when stdin is empty or closed. */
 export async function readActorKeyFromStdin(stream = process.stdin, timeoutMs = 2000) {

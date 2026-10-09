@@ -49,6 +49,10 @@ export function isolationFor(dashboardHost) {
 }
 
 export async function startArtifactOriginFromEnv(env = process.env) {
+  // Idempotent (PR A review L6): a second call returns the running server
+  // instead of orphaning its reference. Restart = _resetForTest (tests) or a
+  // process restart.
+  if (server) return server;
   const raw = env.CROW_ARTIFACT_ORIGIN_PORT;
   if (raw == null || String(raw).trim() === "") return null;
   // Digits only (review R1): Number() would accept "0x0BF2" (3058), "1e3"

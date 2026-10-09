@@ -21,8 +21,8 @@ import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
-import { ensureBoardToken, ensurePhoneToken, ensureModelsToken } from "../local-token.js";
-import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken } from "../local-token.js";
+import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -319,6 +319,53 @@ export async function mountMcpServers(app, deps) {
   } catch (err) {
     console.warn(`[gateway] phone mount skipped: ${err.message}`);
   }
+  // Crow Artifacts (spec §3, §7.1): core-mounted like /phone, only when the
+  // bundle is installed; the artifact ORIGIN (a separate node:http listener,
+  // artifact-origin/server.js) starts only when CROW_ARTIFACT_ORIGIN_PORT is
+  // set. Neither failure ever blocks boot.
+  try {
+    const artDir = join(resolveCrowHome(), "bundles", "artifacts", "server");
+    if (existsSync(join(artDir, "mcp.js"))) {
+      const imp = (f) => import(pathToFileURL(join(artDir, f)).href);
+      const [{ createArtifactsMcpServer }, { initArtifactsTables }, { createBlobStore }, artStore] = await Promise.all(["mcp.js", "init-tables.js", "blob-store-minio.js", "store.js"].map(imp));
+      const { resolveDataDir } = await import("../../db.js");
+      const { markdownBlocks } = await import("../../blog/renderer.js");
+      const artDb = createDbClient();
+      await initArtifactsTables(artDb);
+      const { minted } = await ensureArtifactsToken(artDb);
+      if (minted) console.log("[gateway] artifacts token minted");
+      // MinIO when shared storage is available, else local disk (spec §11).
+      const blobs = await createBlobStore(artDb, resolveDataDir());
+      initGatewayActorKey();
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks } }), sessionManager, authMiddleware, peerExposureGate);
+      // R2-M2: reconcile crash leftovers (unrecorded objects, stale temps)
+      // once at mount start, off the boot path (it may wait on the write
+      // lock). The periodic reconcile arrives with the step-3 sweep.
+      setImmediate(async () => {
+        try { await artStore.reconcileBlobs(artDb, blobs); }
+        catch (e) { console.warn(`[gateway] artifacts reconcile: ${e.message}`); }
+      });
+      const { networkFsKind } = await imp("blob-store.js");
+      try {
+        const kind = await networkFsKind(join(resolveDataDir(), "artifacts"));
+        if (kind) { console.warn(`[gateway] artifacts store is on ${kind}: cross-process locking is unreliable there`); createNotification(artDb, { title: "Artifact storage is on a network filesystem", body: `${kind}: keep the Crow data directory on a local disk.`, type: "attention", source: "artifacts" }).catch(() => {}); }
+      } catch { /* best effort */ }
+      console.log("[gateway] artifacts MCP mounted at /artifacts/mcp");
+      // The origin listener has its OWN catch (PR A review L6): a typo in
+      // CROW_ARTIFACT_ORIGIN_PORT/URL disables artifact viewing with a named
+      // warning — it must never take down the MCP mount or the gateway.
+      try {
+        const origin = await import("../artifact-origin/runtime.js");
+        origin.setContentResolver(artStore.contentResolver(artDb, blobs));
+        const srv = await origin.startArtifactOriginFromEnv(process.env);
+        if (srv) console.log(`[gateway] artifact origin listening on ${process.env.CROW_ARTIFACT_ORIGIN_BIND || "127.0.0.1"}:${process.env.CROW_ARTIFACT_ORIGIN_PORT}`);
+      } catch (err) {
+        console.warn(`[gateway] artifact origin NOT started: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[gateway] artifacts mount skipped: ${err.message}`);
+  }
   mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
   const projectServerFactory = () => createProjectServer(undefined, { instructions });
   mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
@@ -332,7 +379,7 @@ export async function mountMcpServers(app, deps) {
   // for admin / diagnostic use.
   const CLIENT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
   const CLIENT_NAME_RESERVED = new Set([
-    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm", "board", "phone",
+    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm", "board", "phone", "artifacts",
   ]);
   try {
     const clientsPath = join(resolveCrowHome(), "clients.json");

@@ -41,6 +41,16 @@ function phoneTokenPath() {
   return join(crowHome(), "phone-token");
 }
 
+// Artifacts token (Crow Artifacts, spec §7.1): same shape, PATH-SCOPED to
+// /artifacts/(mcp|sse|messages). A caller with only this token and no valid
+// signed actor is UNATTRIBUTED there and sees nothing (fail closed).
+const ARTIFACTS_HASH_KEY = "mcp_artifacts_token_hash";
+const ARTIFACTS_CREATED_KEY = "mcp_artifacts_token_created";
+const ARTIFACTS_PATH_RE = /^\/artifacts\/(?:mcp|sse|messages)$/;
+function artifactsTokenPath() {
+  return join(crowHome(), "artifacts-token");
+}
+
 // Not importing resolveCrowHome from ./proxy.js — proxy.js pulls in the
 // McpServer/Client/StdioClientTransport machinery. The shared resolver is
 // dependency-free.
@@ -197,6 +207,34 @@ export async function ensurePhoneToken(db) {
 
 export const PHONE_TOKEN_KEYS = { PHONE_HASH_KEY, PHONE_CREATED_KEY };
 
+export async function generateArtifactsToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, ARTIFACTS_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, ARTIFACTS_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = artifactsTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validateArtifactsToken(db, token) {
+  if (!token) return false;
+  const stored = await readSetting(db, ARTIFACTS_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+export async function ensureArtifactsToken(db) {
+  const hash = await readSetting(db, ARTIFACTS_HASH_KEY);
+  if (hash && existsSync(artifactsTokenPath())) return { minted: false };
+  await generateArtifactsToken(db);
+  return { minted: true };
+}
+
 // Kiosk announce token (kiosk spec §4.1): lets the kiosk bundle's stdio MCP
 // server reach the gateway's live display sessions through loopback-only
 // /api/kiosk/internal/*. Same shape as the board/phone tokens (hash in a
@@ -323,6 +361,9 @@ export function localTokenAuthMiddleware(db) {
       }
       if (!req.localTokenAuth && PHONE_PATH_RE.test(req.path) && await validatePhoneToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp", scope: "phone" };
+      }
+      if (!req.localTokenAuth && ARTIFACTS_PATH_RE.test(req.path) && await validateArtifactsToken(db, token)) {
+        req.localTokenAuth = { token: "local-mcp", scope: "artifacts" };
       }
     } catch (err) {
       // Treat a DB/read error as non-fatal: log and fall through to the other
