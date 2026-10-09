@@ -129,7 +129,7 @@ test("the store refuses a missing storeId or s3 client, and the bucket name is d
   assert.throws(() => artifactsBucket({ defaultBucket: () => "" }), /bucket prefix/);
 });
 
-test("createBlobStore picks MinIO when the shared storage is available and local disk otherwise (spec §11)", async (t) => {
+test("createBlobStore pins ONE backend per dataDir (spec §11 + store_kind pinning): fresh+available → MinIO, otherwise local, and a later availability change never flips it", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "artifacts-choice-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const { createDbClient } = await import("../servers/db.js");
@@ -140,8 +140,8 @@ test("createBlobStore picks MinIO when the shared storage is available and local
   await initArtifactsTables(db);
   const storeId = (await db.execute({ sql: "SELECT value FROM artifact_store_meta WHERE key='store_id'", args: [] })).rows[0].value;
 
-  // Available shared storage → the MinIO backend on <prefix>-artifacts, keys
-  // under this database's store_id, lock on local disk.
+  // Fresh + available shared storage → the MinIO backend on <prefix>-artifacts,
+  // keys under this database's store_id, lock on local disk, kind pinned.
   const up = fakeS3();
   up.isAvailable = async () => true;
   up.defaultBucket = () => "crow-files";
@@ -151,18 +151,40 @@ test("createBlobStore picks MinIO when the shared storage is available and local
   assert.ok(up.calls.some((c) => c[0] === "ensureBucket" && c[1] === "crow-artifacts"));
   const k = await m.put(Buffer.from("via factory"));
   assert.equal(up.objects.has(`${storeId}/${k}`), true);
+  const sk = (await db.execute({ sql: "SELECT value FROM artifact_store_meta WHERE key='store_kind'", args: [] })).rows[0];
+  assert.equal(sk.value, "minio", "the MinIO decision is pinned in store_kind");
 
-  // Unavailable (or absent) shared storage → local disk under <dataDir>/artifacts.
+  // A later MinIO outage returns the SAME pinned store — never a silent
+  // fallback to local (that flip is the split-brain this design forbids).
   const down = fakeS3();
   down.isAvailable = async () => false;
-  const l = await createBlobStore(db, dir, { s3: down });
+  const still = await createBlobStore(db, dir, { s3: down });
+  assert.equal(still.kind, "minio");
+  assert.strictEqual(still, m, "memoized: one decision per process per dataDir");
+
+  // A different instance with shared storage down and nothing provisioned →
+  // local, pinned; MinIO becoming reachable later must NOT flip it.
+  const dir2 = mkdtempSync(join(tmpdir(), "artifacts-choice2-"));
+  t.after(() => rmSync(dir2, { recursive: true, force: true }));
+  const db2 = createDbClient(join(dir2, "crow.db"));
+  t.after(() => { try { db2.close(); } catch {} });
+  await initArtifactsTables(db2);
+  const l = await createBlobStore(db2, dir2, { s3: down });
   assert.equal(l.kind, "local");
-  assert.equal(l.lockPath, join(dir, "artifacts", "write-lock.db"));
+  assert.equal(l.lockPath, join(dir2, "artifacts", "write-lock.db"));
+  const sk2 = (await db2.execute({ sql: "SELECT value FROM artifact_store_meta WHERE key='store_kind'", args: [] })).rows[0];
+  assert.equal(sk2.value, "local", "the local decision is pinned in store_kind");
+  const up2 = fakeS3();
+  up2.isAvailable = async () => true;
+  up2.defaultBucket = () => "crow-files";
+  const still2 = await createBlobStore(db2, dir2, { s3: up2 });
+  assert.equal(still2.kind, "local", "a pinned local store never flips to MinIO silently");
+  assert.strictEqual(still2, l);
 
   // MinIO reachable but the DB has no store_id: fail loudly, never silently local.
   const { createDbClient: cdc } = await import("../servers/db.js");
   const bare = cdc(join(dir, "bare.db"));
   t.after(() => { try { bare.close(); } catch {} });
   await bare.executeMultiple(`CREATE TABLE artifact_store_meta (key TEXT PRIMARY KEY, value TEXT)`);
-  await assert.rejects(createBlobStore(bare, dir, { s3: up }), /store_id/);
+  await assert.rejects(createBlobStore(bare, join(dir, "bare-data"), { s3: up }), /store_id/);
 });
