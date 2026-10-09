@@ -94,3 +94,23 @@ export function baseHeaders(csp) {
     "x-robots-tag": "noindex",
   };
 }
+
+/**
+ * The trusted viewer page's CSP (the dashboard-origin page that frames
+ * artifacts). `frame-src` is ONLY the artifact origin's token path: Chromium
+ * checks the PARENT's frame-src on every navigation of a child frame,
+ * including ones the child starts itself, BEFORE the request is sent. So a
+ * link click or a script navigation inside an artifact cannot reach another
+ * site (verified on Chromium; Firefox and Safari unverified, so the viewer's
+ * navigation tripwire stays as defence in depth). No 'self', no scheme
+ * source. Anything that is not a bare scheme://host[:port] origin gives
+ * frame-src 'none' (nothing can be framed).
+ *
+ * Lives in core so the live isolation test and the bundle's panel page use
+ * one definition.
+ */
+export function viewerCsp(artifactOrigin) {
+  const ok = typeof artifactOrigin === "string" && /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(artifactOrigin);
+  return "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+    "connect-src 'self'; frame-src " + (ok ? artifactOrigin + "/v/" : "'none'") + "; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
+}

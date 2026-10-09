@@ -263,3 +263,17 @@ test("runtime: start-from-env listens on loopback; isolation is shared-host on t
     assert.equal(rt.isolationFor("ART.example"), "shared-host", "same hostname, any case or port, is shared");
   } finally { rt._resetForTest(); }
 });
+
+test("viewerCsp: frame-src is only the artifact origin's /v/ path; anything that is not a bare origin frames nothing", async () => {
+  const { viewerCsp } = await import("../servers/gateway/artifact-origin/policy.js");
+  const frameSrc = (csp) => /(?:^|; )frame-src ([^;]*)/.exec(csp)?.[1];
+  assert.equal(frameSrc(viewerCsp("https://art.example")), "https://art.example/v/");
+  assert.equal(frameSrc(viewerCsp("http://localhost:3090")), "http://localhost:3090/v/");
+  for (const bad of [null, "", "https://art.example/x", "https://art.example; frame-src *", "https://*.example", "javascript:x", "https://a.example:3090 https:"]) {
+    assert.equal(frameSrc(viewerCsp(bad)), "'none'", `refused: ${String(bad)}`);
+  }
+  const csp = viewerCsp("https://art.example");
+  assert.doesNotMatch(frameSrc(csp), /'self'|https:(?!\/\/)/, "no 'self', no scheme source");
+  assert.match(csp, /frame-ancestors 'self'/);
+  assert.doesNotMatch(csp, /unsafe-eval/);
+});
