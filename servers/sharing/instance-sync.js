@@ -3040,10 +3040,12 @@ export class InstanceSyncManager {
           try { await this.onContactDeleted(localRow); } catch { /* never throw into apply */ }
         }
         // D19 (Artifacts spec §4.3): the contact's artifact comments go with
-        // the contact — awaited before the row delete. The helper never
-        // throws (a missing artifacts table is a no-op), so it cannot wedge
-        // the apply loop.
-        await deleteContactArtifactComments(this.db, crowId);
+        // the contact — awaited before the row delete. A missing artifacts
+        // table is a no-op; any other failure is LOGGED and the delete still
+        // applies (a hook must never wedge the sync feed — same contract as
+        // onContactDeleted above).
+        try { await deleteContactArtifactComments(this.db, crowId); }
+        catch (e) { console.warn(`[instance-sync] artifact comment cleanup failed for ${crowId}:`, e?.message); }
         await this.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
         // (Rule (a) above already cleared any tombstone coexisting with a local row, so
         // `tombFloor` is 0 on this branch today. Kept in the same shape as the branch

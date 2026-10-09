@@ -233,11 +233,13 @@ export async function deleteContactLocal(db, managers, row) {
   await unwireContact(managers, row);
   // D19 (Artifacts spec §4.3): the contact's artifact comments go with the
   // contact. Lazy import keeps this module dependency-free at load (header
-  // contract); the helper itself never throws (a missing table is a no-op).
+  // contract). A missing artifacts table is a no-op; a REAL failure is logged
+  // but never wedges the user's delete (the comments stay soft-deletable on
+  // the next path that touches them).
   try {
     const { deleteContactArtifactComments } = await import("../shared/artifact-comment-delete.js");
     await deleteContactArtifactComments(db, row.crow_id);
-  } catch { /* cleanup must never wedge the delete */ }
+  } catch (e) { console.warn(`[contact-delete] artifact comment cleanup failed for ${row.crow_id}:`, e?.message); }
   await db.execute({ sql: `DELETE FROM contacts WHERE id = ?`, args: [row.id] });
   const sync = await loadSyncMod();
   await sync.emitContactDelete(db, row.crow_id, row.lamport_ts);

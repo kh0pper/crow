@@ -133,6 +133,15 @@ test("missing artifact tables (bundle not installed): every path is a no-op, nev
   } finally { rmSync(dir2, { recursive: true, force: true }); }
 });
 
+test("the helper distinguishes a missing table (no-op) from a real error (propagates to the caller's policy)", async () => {
+  const noTable = { execute: async () => { throw new Error("no such table: artifact_comments"); } };
+  assert.equal(await deleteContactArtifactComments(noTable, "crow:x"), 0);
+  const broken = { execute: async () => { throw new Error("disk I/O error"); } };
+  await assert.rejects(deleteContactArtifactComments(broken, "crow:x"), /disk I\/O error/);
+  assert.equal(await deleteContactArtifactComments(null, "crow:x"), 0);
+  assert.equal(await deleteContactArtifactComments(db, ""), 0);
+});
+
 test("the core helper and the bundle's deleteContactComments agree (no drift)", async () => {
   const { deleteContactComments } = await import("../bundles/artifacts/server/comments.js");
   await seedComments("crow:d19-drift");

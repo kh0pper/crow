@@ -8,9 +8,10 @@
  *
  * Soft delete, matching the bundle's rule: the text is blanked and stamped,
  * the row stays for thread integrity (a thread must not lose its anchor
- * comment silently). Never throws into a contact-delete path — a missing
- * table (bundle not installed) is a no-op, and any other failure must not
- * wedge the delete it rides along with.
+ * comment silently). A MISSING table (bundle not installed) is a no-op; any
+ * other error propagates to the caller, which decides per path: the user
+ * delete and the prune treat it as a failed delete (retryable / rewire), the
+ * sync apply loop logs and proceeds (a hook must never wedge the feed).
  */
 export async function deleteContactArtifactComments(db, crowId) {
   if (!db || !crowId) return 0;
@@ -20,7 +21,8 @@ export async function deleteContactArtifactComments(db, crowId) {
       args: [String(crowId)],
     });
     return Number(r.rowsAffected || 0);
-  } catch {
-    return 0;   // no such table (bundle not installed) or a DB hiccup: the contact delete proceeds
+  } catch (e) {
+    if (/no such table/i.test(String(e && e.message))) return 0;   // bundle not installed
+    throw e;
   }
 }
