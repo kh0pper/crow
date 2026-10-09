@@ -6,9 +6,9 @@
  *   - which files a `sqlite` backend may open (the data dir's datasets/ or
  *     projects/<id>/databases/, never one of Crow's own databases, checked
  *     by realpath and inode);
- *   - read queries run on a read-only connection with `query_only`, one
- *     statement, SQLite's own read-only verdict, and a row cap enforced by
- *     stepping the statement.
+ *   - read queries run in a short-lived child process with a time limit, on
+ *     a read-only connection with `query_only`, one statement, SQLite's own
+ *     read-only verdict, and row and byte caps enforced by stepping rows.
  *
  * There is no write path: crow_data_write is disabled while the Data
  * Dashboard is being retired. Import data with your own tools into the
@@ -37,8 +37,10 @@ export function isPathSafe(dbPath) {
  * Run one read-only statement on a dataset.
  * @returns {Promise<{columns: string[], rows: object[], rowCount: number, truncated: boolean, executionMs: number}>}
  */
-export async function executeReadQuery(dbPath, sql, limit = MAX_ROWS) {
-  return ds.runReadOnlyQuery(dbPath, sql, { maxRows: limit });
+export async function executeReadQuery(dbPath, sql, limit = MAX_ROWS, opts = {}) {
+  // In a child process with a wall-clock limit and row + byte caps
+  // (opts: { timeoutMs, maxBytes }).
+  return ds.runReadOnlyQueryAsync(dbPath, sql, { maxRows: limit, ...opts });
 }
 
 /** Tables, columns, row counts and indexes of a dataset. */

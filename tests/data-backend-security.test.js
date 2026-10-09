@@ -21,7 +21,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, symlinkSync, linkSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -258,7 +258,7 @@ test("dashboard: approving needs the hash of the command the owner was shown", a
   const ref = markerRef(join(HOME, "never"));
   const id = pendingRow(ref);
   const u1 = await panelPost({ action: "approve_backend", id: String(projectId()), backend_id: String(id), ref_sha256: refHash("something else") });
-  assert.match(u1, /error=backend_changed/);
+  assert.match(u1, /error=backend_not_approved/);
   assert.equal(approvedHash(id), null);
   await panelPost({ action: "approve_backend", id: String(projectId()), backend_id: String(id), ref_sha256: refHash(ref) });
   assert.equal(approvedHash(id), refHash(ref));
@@ -356,7 +356,7 @@ test("display: a spec with keys that are not spawned, or too long, cannot be app
   const { approveBackend } = await import("../servers/shared/data-backend-approval.js");
   const { createDbClient } = await import("../servers/db.js");
   const id = pendingRow(JSON.stringify({ command: "node", args: [], cwd: "/tmp" }));
-  assert.equal(await approveBackend(createDbClient(CORE), id), false);
+  assert.equal((await approveBackend(createDbClient(CORE), id)).ok, false);
   assert.equal(approvedHash(id), null);
 });
 
@@ -385,25 +385,155 @@ test("an approved backend whose launcher is user-owned and unpinned is refused; 
   const db = createDbClient(CORE);
 
   const id = pendingRow(JSON.stringify({ command: script, args: [] }));
-  assert.equal(await approveBackend(db, id), true);
+  const res = await approveBackend(db, id);
+  assert.equal(res.ok, false, "an unpinned user-owned launcher was approved");
+  assert.match(res.reason, /command_sha256|root/);
   await loadDynamicBackends();
   assert.equal(existsSync(marker), false, "an unpinned user-owned launcher ran");
   const d = raw();
-  const row = d.prepare("SELECT status, last_error FROM data_backends WHERE id=?").get(id);
+  const row = d.prepare("SELECT status, last_error, approved_ref_sha256 FROM data_backends WHERE id=?").get(id);
   d.close();
-  assert.equal(row.status, "error");
+  assert.equal(row.approved_ref_sha256, null);
   assert.match(row.last_error, /command_sha256|root/);
 
   const pin = createHash("sha256").update(readFileSync(script)).digest("hex");
   const id2 = pendingRow(JSON.stringify({ command: script, args: [], command_sha256: pin }));
-  await approveBackend(db, id2);
+  assert.equal((await approveBackend(db, id2)).ok, true);
   await loadDynamicBackends();
   assert.equal(existsSync(marker), true, "positive control: a pinned launcher runs");
 });
 
-test("display: the approval view says what the launcher check would do", async () => {
-  const html = await cell({ command: join(HOME, "nope.sh"), args: [] });
-  assert.match(html, /refused/);
-  const ok = await cell({ command: "node", args: ["-v"] });
-  assert.match(ok, /Launcher check now: runs/);
+test("display: a user-owned launcher is flagged (stat only)", async () => {
+  const f = join(HOME, "owned.sh");
+  writeFileSync(f, "#!/bin/sh\n");
+  const html = await cell({ command: f, args: [] });
+  if (process.getuid && process.getuid() !== 0) assert.match(html, /not owned by root/);
+  const missing = await cell({ command: join(HOME, "nope.sh"), args: [] });
+  assert.match(missing, /does not exist/);
+});
+
+// ============================================ review round (PR #456 review)
+
+
+// Run `code` (an ES module body) in a child with a wall-clock cap, so a hang
+// or a runaway read fails the test instead of the runner.
+function childRun(code, timeoutMs = 8000) {
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    cwd: ROOT, env: process.env, timeout: timeoutMs, encoding: "utf8", killSignal: "SIGKILL",
+  });
+  return { timedOut: r.error?.code === "ETIMEDOUT" || r.signal === "SIGKILL", stdout: r.stdout, stderr: r.stderr, status: r.status };
+}
+
+test("R1: a pinned launcher that is a FIFO or device is refused without reading it", () => {
+  const fifo = join(HOME, "fifo");
+  execFileSync("mkfifo", [fifo]);
+  const r = childRun(`
+    const { resolveAddonCommand } = await import(${JSON.stringify(join(ROOT, "servers/shared/resolve-command.js"))});
+    for (const p of [${JSON.stringify(fifo)}, "/dev/zero"]) {
+      const rc = resolveAddonCommand(p, { sha256: "a".repeat(64) });
+      if (!rc.missing) throw new Error("accepted " + p);
+    }
+    console.log("ok");`);
+  assert.equal(r.timedOut, false, "hashing a FIFO/device hung");
+  assert.match(r.stdout, /ok/, r.stderr);
+});
+
+test("R1: a launcher larger than the hash cap is refused by size, not read", async () => {
+  const { resolveAddonCommand, MAX_HASH_BYTES } = await import("../servers/shared/resolve-command.js");
+  const big = join(HOME, "big-launcher");
+  execFileSync("truncate", ["-s", String(MAX_HASH_BYTES + 1), big]);
+  execFileSync("chmod", ["755", big]);
+  const t = Date.now();
+  const rc = resolveAddonCommand(big, { sha256: "a".repeat(64) });
+  assert.equal(rc.missing, true);
+  assert.ok(Date.now() - t < 2000, "the oversized file was read");
+});
+
+test("R1 (reviewer repro): opening the project page with a /dev/zero backend renders promptly", () => {
+  const r = childRun(`
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { createProjectServer } = await import("./servers/research/server.js");
+    const CORE = process.env.CROW_DB_PATH;
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createProjectServer(CORE).connect(st);
+    const client = new Client({ name: "ai", version: "0" }); await client.connect(ct);
+    const r = await client.callTool({ name: "crow_register_backend", arguments: { name: "Postgres (official)", connection_ref: JSON.stringify({ command: "/dev/zero", args: [], command_sha256: "a".repeat(64) }) } });
+    const pid = Number(/project: #(\\d+)/.exec(r.content[0].text)[1]);
+    const { default: panel } = await import("./servers/gateway/dashboard/panels/projects.js");
+    const { createDbClient } = await import("./servers/db.js");
+    const out = await panel.handler({ method: "GET", query: { view: String(pid) }, body: {} }, { redirectAfterPost: (u) => u }, { db: createDbClient(CORE), layout: (x) => x.content || x, lang: "en" });
+    console.log(String(out).includes("/dev/zero") ? "rendered" : "missing");`, 15000);
+  assert.equal(r.timedOut, false, "the page hung (launcher hashed at render)");
+  assert.match(r.stdout, /rendered/, r.stderr);
+});
+
+test("R2: an approved backend starts from an allowlisted env plus its declared vars, never the gateway's secrets", async () => {
+  const { approveBackend } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  process.env.CROW_PLANTED_API_KEY = "planted-secret-1";
+  process.env.SOME_UNLISTED_SETTING = "planted-2";
+  process.env.DECLARED_DB_URL = "declared-ok";
+  const out = join(HOME, "env-dump.json");
+  const id = pendingRow(JSON.stringify({
+    command: "node",
+    args: ["-e", `require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env))`],
+    envVars: ["DECLARED_DB_URL"],
+  }));
+  await approveBackend(createDbClient(CORE), id);
+  await loadDynamicBackends();
+  const env = JSON.parse(readFileSync(out, "utf8"));
+  assert.equal(env.CROW_PLANTED_API_KEY, undefined, "a gateway secret reached the backend");
+  assert.equal(env.SOME_UNLISTED_SETTING, undefined, "an unlisted variable reached the backend");
+  assert.equal(env.DECLARED_DB_URL, "declared-ok");
+  assert.ok(env.PATH, "basics are passed");
+});
+
+test("R2: the approval page lists exactly the variable names the backend gets", async () => {
+  const { backendEnvNames } = await import("../servers/shared/data-backend-approval.js");
+  process.env.DECLARED_DB_URL = "x";
+  const names = backendEnvNames(["DECLARED_DB_URL"]);
+  assert.ok(names.includes("PATH") && names.includes("DECLARED_DB_URL"));
+  assert.equal(names.includes("CROW_PLANTED_API_KEY"), false);
+  const html = await cell({ command: "node", args: ["s.js"], envVars: ["DECLARED_DB_URL"] });
+  for (const n of names) assert.ok(html.includes(n), `page omits ${n}`);
+});
+
+test("S1: approval covers the user-owned script the command runs; editing it voids the approval", async () => {
+  const { approveBackend } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const script = join(HOME, "server.js");
+  const m1 = join(HOME, "s1-original"), m2 = join(HOME, "s1-edited");
+  writeFileSync(script, `require("fs").writeFileSync(${JSON.stringify(m1)}, "x")`);
+  const id = pendingRow(JSON.stringify({ command: "node", args: [script] }));
+  const db = createDbClient(CORE);
+  await approveBackend(db, id);
+  await loadDynamicBackends();
+  assert.equal(existsSync(m1), true, "positive control");
+  const { disconnectDynamicBackend } = await import("../servers/gateway/proxy.js");
+  disconnectDynamicBackend(id);
+  writeFileSync(script, `require("fs").writeFileSync(${JSON.stringify(m2)}, "x")`);
+  const d = raw(); d.prepare("UPDATE data_backends SET status='disconnected' WHERE id=?").run(id); d.close();
+  await loadDynamicBackends();
+  assert.equal(existsSync(m2), false, "an edited script ran under the old approval");
+});
+
+test("S2: a dataset query has a wall-clock limit and a byte cap", async () => {
+  const p = makeDataset(join(DATA, "datasets", "heavy.db"), 2000);
+  const t = Date.now();
+  await assert.rejects(
+    qe.executeReadQuery(p, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c", 10, { timeoutMs: 1500 }),
+    /time/i,
+  );
+  assert.ok(Date.now() - t < 6000, "the timeout did not fire");
+  const r = await qe.executeReadQuery(p, "SELECT id, printf('%.2000c', 'x') AS big FROM t", 5000, { maxBytes: 100_000 });
+  assert.ok(r.rows.length < 2000 && r.truncated, "byte cap not applied");
+});
+
+test("lows: approval form carries the CSRF field; the free-text name comes after the command; a registrant pin is flagged", async () => {
+  const { renderBackendApproval } = await import("../servers/gateway/dashboard/panels/projects.js");
+  const html = renderBackendApproval(1, { id: 4, name: "NAME-MARK", backend_type: "mcp_server", connection_ref: JSON.stringify({ command: "/opt/x/run", args: [], command_sha256: "b".repeat(64) }), approved_ref_sha256: null }, { csrfToken: "tok123" });
+  assert.match(html, /name="_csrf" value="tok123"/);
+  assert.ok(html.indexOf("NAME-MARK") > html.indexOf("/opt/x/run"), "the name renders before the command");
+  assert.match(html, /supplied by whoever registered it/i);
 });

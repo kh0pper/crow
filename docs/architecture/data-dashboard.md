@@ -44,9 +44,11 @@ A dataset is opened with better-sqlite3 `readonly` plus `PRAGMA query_only`, so 
 
 The realpath of a dataset must sit under the instance data dir's `datasets/` or `projects/<id>/databases/` (compared segment by segment, not as a string prefix). Core databases — `crow.db`, `tasks.db`, `CROW_DB_PATH`, any `*.db` directly in the data dir — are refused by realpath and by device and inode, so links do not get around it.
 
-### Row cap
+### Row, size and time caps
 
-Rows are read by stepping the statement and stop at the cap (5,000), whatever the SQL text says. Statements run synchronously and cannot be interrupted, so the cap bounds output, not CPU time.
+Rows are read by stepping the statement and stop at the cap (5,000 rows, 8 MB serialized), whatever the SQL text says. Each query runs in a short-lived child process that is killed at its time limit (10 s by default); at most four run at once, and further queries are refused as busy. Schema reads (`getSchema`) still run in-process.
+
+The file is opened with `O_NOFOLLOW` while SQLite opens it, and the path must still resolve to the same inode afterwards.
 
 ### No write path
 

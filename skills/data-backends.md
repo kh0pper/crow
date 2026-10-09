@@ -30,6 +30,7 @@ There are two kinds of backend (`backend_type`):
 3. **Tell the user an `mcp_server` backend needs their approval**
    - It is registered as *pending approval* and does not run until the owner approves the exact command in Crow's Nest › Projects › the project › Data Backends
    - You cannot approve it; never claim it is running before the user has approved it
+   - It gets only basic environment variables plus the ones named in `envVars` — never the gateway's secrets. Approval also pins the files it runs (launcher, script arguments); editing one needs a new approval
    - The user adds the credential values to `.env`
 
 4. **Verify connection**

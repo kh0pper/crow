@@ -27,7 +27,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import { createDbClient } from "../../db.js";
-import { runReadOnlyQuery } from "../../shared/sqlite-datasets.js";
+import { runReadOnlyQueryAsync } from "../../shared/sqlite-datasets.js";
 import { getObject } from "../../storage/s3-client.js";
 
 // Tailscale Serve only exposes /blog/* to the funnel (per the April
@@ -113,9 +113,10 @@ async function resolveBackendPath(db, backendId) {
 
 // Section SQL runs through the shared dataset helper: the backend path must
 // be a dataset (never one of Crow's own databases), the connection is
-// read-only, one statement, and the row cap is enforced by stepping rows.
+// read-only, one statement, row and byte caps, in a child process with a
+// time limit — this endpoint is public, so it must never block the gateway.
 async function runSectionSql(dbPath, sql) {
-  const { columns, rows } = runReadOnlyQuery(dbPath, sql, { maxRows: MAX_ROWS });
+  const { columns, rows } = await runReadOnlyQueryAsync(dbPath, sql, { maxRows: MAX_ROWS });
   return { columns, rows };
 }
 

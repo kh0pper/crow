@@ -19,7 +19,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
-import { isApproved, verifyBackendLaunch, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -76,8 +76,10 @@ export function resolveCrowHome() {
  */
 async function connectToServer(integration) {
   const spawnEnv = getSpawnEnv(integration);
+  // A data backend brings its own allowlisted base env (never the gateway's
+  // whole environment); built-in integrations keep the old behaviour.
   const env = {
-    ...process.env,
+    ...(integration.baseEnv || process.env),
     ...spawnEnv,
   };
 
@@ -105,7 +107,7 @@ async function connectToServer(integration) {
     await Promise.race([
       client.connect(transport),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS).unref()
       ),
     ]);
 
@@ -213,7 +215,7 @@ async function connectAddonServer(id, config) {
     await Promise.race([
       client.connect(transport),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS).unref()
       ),
     ]);
 
@@ -457,11 +459,16 @@ export async function loadDynamicBackends() {
 
       // Owner approval gate: a registered command runs only after the
       // dashboard owner approved this exact connection_ref (an edit voids it).
+      // The check covers the stored text and the contents of the files it runs.
       if (!isApproved(row)) {
-        if (row.status !== PENDING_STATUS) {
+        const why = hasApproval(row)
+          ? "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page"
+          : "Waiting for the owner to approve it on the Projects page";
+        // Keep an approval-refusal reason the owner has not acted on yet.
+        if (row.status !== PENDING_STATUS || (hasApproval(row) && row.last_error !== why)) {
           await db.execute({
             sql: "UPDATE data_backends SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
-            args: [PENDING_STATUS, "Waiting for the owner to approve it on the Projects page", row.id],
+            args: [PENDING_STATUS, why, row.id],
           });
         }
         console.warn(`  [proxy] Backend #${row.id} "${row.name}": not approved by the owner — not started`);
@@ -494,6 +501,7 @@ export async function loadDynamicBackends() {
         command: launch.command,
         args: launch.args,
         envVars: launch.envVars,
+        baseEnv: backendEnv([]),
       };
 
       try {

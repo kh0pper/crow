@@ -18,7 +18,9 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, isApproved, refHash, parseStoredSpec, visibleText, verifyBackendLaunch } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
+import { csrfInput } from "../shared/csrf.js";
+import { statSync } from "node:fs";
 
 const PAGE_SIZE = 20;
 
@@ -66,8 +68,8 @@ export default {
         const sep = back.includes("?") ? "&" : "?";
         if (!Number.isInteger(backendId) || backendId <= 0) return res.redirectAfterPost(`${back}${sep}error=backend_not_found`);
         if (action === "approve_backend") {
-          const ok = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""));
-          if (!ok) return res.redirectAfterPost(`${back}${sep}error=backend_changed_review_again`);
+          const r = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""));
+          if (!r.ok) return res.redirectAfterPost(`${back}${sep}error=backend_not_approved`);
           import("../../proxy.js").then((m) => m.loadDynamicBackends()).catch(() => {});
         } else {
           await revokeBackendApproval(db, backendId);
@@ -164,7 +166,7 @@ export default {
     // --- Detail View ---
     const viewId = req.query.view;
     if (viewId) {
-      return await renderDetailView(db, viewId, layout, lang);
+      return await renderDetailView(db, viewId, layout, lang, req);
     }
 
     // --- List View ---
@@ -323,7 +325,7 @@ async function renderListView(db, query, layout, lang) {
   return layout({ title: `Projects (${totalCount})`, content });
 }
 
-async function renderDetailView(db, projectId, layout, lang) {
+async function renderDetailView(db, projectId, layout, lang, req = {}) {
   // Read from project_spaces; archived_at IS NULL ensures trigger-archived rows
   // are treated as Not Found exactly as a missing rp row was.
   const { rows: projRows } = await db.execute({
@@ -434,7 +436,7 @@ async function renderDetailView(db, projectId, layout, lang) {
       escapeHtml(b.name),
       badge(b.backend_type, "info"),
       badge(b.status, b.status === "connected" ? "connected" : "draft"),
-      renderBackendApproval(project.id, b),
+      renderBackendApproval(project.id, b, req),
     ]);
     backendsHtml = section(`Data Backends (${backends.length})`, dataTable(["Name", "Type", "Status", "Runs"], rows, { stack: true }), { delay: 300 });
   }
@@ -568,45 +570,74 @@ async function renderDetailView(db, projectId, layout, lang) {
 /**
  * The approval cell for one data backend. An mcp_server backend is a command
  * the gateway runs, so the owner sees the EXACT launch spec that is stored,
- * hashed and spawned: the command, every arg on its own line, the env-var
- * names, each with every character visible (visibleText: spaces as ␣,
- * control, zero-width, bidi and non-ASCII characters as \u{hex}), never
- * truncated. A spec that is malformed, carries keys that are never spawned,
- * or is too long to show in full cannot be approved. The requester's name
- * for it is shown apart and marked unverified. The approval form carries the
- * hash of the stored text the owner saw; the spawn path re-checks it.
+ * hashed and spawned: the command, every arg on its own line, the exact
+ * environment variable names it gets, each with every character visible
+ * (visibleText: spaces as ␣, control, zero-width, bidi and non-ASCII
+ * characters as \u{hex}), never truncated. A spec that is malformed, carries
+ * keys that are never spawned, or is too long to show in full cannot be
+ * approved.
+ *
+ * Rendering reads no file contents (stat only): the launcher check and the
+ * file pins run when the owner presses Approve and again at every start.
+ * The requester's free-text name comes last, in a distinct box, marked
+ * unverified. The approval form carries the hash of the stored text the
+ * owner saw and the CSRF token.
  */
-export function renderBackendApproval(projectId, b) {
+export function renderBackendApproval(projectId, b, req = {}) {
   if (b.backend_type !== "mcp_server") {
     return `<span style="font-size:0.75rem;color:var(--crow-text-muted)">read-only dataset</span>`;
   }
   const show = (v) => escapeHtml(visibleText(v));
-  const code = "display:block;white-space:pre-wrap;word-break:break-all;margin:0.1rem 0;padding:0.1rem 0.3rem;background:var(--crow-bg-elevated);border-radius:4px";
-  const label = `<div style="color:var(--crow-text-muted)">Name given by whoever registered it (unverified, not part of the command): ${escapeHtml(String(b.name ?? ""))}</div>`;
+  const prose = (v) => escapeHtml(visibleText(v, { keepSpaces: true }));
+  const code = "display:block;white-space:pre-wrap;word-break:break-all;margin:0.1rem 0;padding:0.1rem 0.3rem;background:var(--crow-bg-elevated);border-radius:4px;font-family:monospace";
+  const warn = "color:var(--crow-error)";
+  const label = `<div style="margin-top:0.4rem;padding:0.2rem 0.4rem;border:1px dashed var(--crow-border);border-radius:4px;color:var(--crow-text-muted);font-style:italic">Name typed by whoever registered it — unverified, not part of what runs: ${escapeHtml(String(b.name ?? ""))}</div>`;
   const parsed = parseStoredSpec(b.connection_ref);
   if (!parsed.ok) {
-    return `<div style="font-size:0.75rem">${label}<div style="color:var(--crow-error)">Cannot be approved: ${escapeHtml(visibleText(parsed.reason, { keepSpaces: true }))}. Remove it and register it again.</div></div>`;
+    return `<div style="font-size:0.75rem"><div style="${warn}">Cannot be approved: ${prose(parsed.reason)}. Remove it and register it again.</div>${label}</div>`;
   }
   const { command, args, envVars } = parsed.spec;
-  const approved = isApproved(b);
+  const approved = hasApproval(b);
+  const csrf = csrfInput(req);
   const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
-  const hidden = `<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;
+  const hidden = `${csrf}<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;
   const form = approved
     ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="revoke_backend">${hidden}<button type="submit" style="${btn};background:var(--crow-bg-elevated);color:var(--crow-text-secondary)">Stop running it</button></form>`
     : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="approve_backend">${hidden}<input type="hidden" name="ref_sha256" value="${refHash(b.connection_ref)}"><button type="submit" style="${btn};background:var(--crow-accent);color:var(--crow-bg)">Approve and run exactly this</button></form>`;
   const argsHtml = args.length
     ? `<ol start="1" style="margin:0.1rem 0;padding-left:1.5rem">${args.map((a) => `<li><code style="${code}">${show(a)}</code></li>`).join("")}</ol>`
     : `<div style="color:var(--crow-text-muted)">(no arguments)</div>`;
+
+  // Launcher notes from stat only (never a read).
+  const notes = [];
+  if (command.includes("/")) {
+    let owner = null;
+    try { owner = statSync(command).uid; } catch {}
+    if (owner === null) notes.push(`The launcher file does not exist right now.`);
+    else if (owner !== 0) notes.push(`The launcher file is not owned by root (owner uid ${owner}): anyone with that account can change it.`);
+  }
+  if (parsed.spec.command_sha256) {
+    notes.push(`The launcher SHA-256 <code>${show(parsed.spec.command_sha256)}</code> was supplied by whoever registered it, not computed by Crow. It only proves the file has not changed since that hash was taken, not that the file is what its name says.`);
+  }
+  const pins = pinnedFiles(parsed.spec);
+  const pinsHtml = pins.length
+    ? `<div>Approval also pins the current contents of these files; editing one stops it from starting until you approve again:</div><ul style="margin:0.1rem 0;padding-left:1.5rem">${pins.map((f) => `<li><code>${show(f.real)}</code></li>`).join("")}</ul>`
+    : "";
+  const envNames = backendEnvNames(envVars);
+  const declared = new Set(envVars);
+
   return `<div style="font-size:0.75rem">
-    ${label}
-    <div style="margin-top:0.25rem">${approved ? "Approved. It runs:" : "Waiting for your approval. It would run:"}</div>
+    <div>${approved ? "Approved (checked again every time it starts). It runs:" : "Waiting for your approval. It would run:"}</div>
     <div>Command:</div><code style="${code}">${show(command)}</code>
     <div>Arguments (${args.length}), each passed exactly as shown:</div>${argsHtml}
-    ${parsed.spec.command_sha256 ? `<div>Pinned launcher SHA-256: <code>${show(parsed.spec.command_sha256)}</code></div>` : ""}
-    <div>Launcher check now: ${(() => { const v = verifyBackendLaunch(parsed.spec); return v.ok ? `runs <code>${show(v.command)}</code>` : `<span style="color:var(--crow-error)">refused — ${escapeHtml(visibleText(v.reason, { keepSpaces: true }))}</span>`; })()}</div>
+    ${notes.map((n) => `<div style="${warn}">${n}</div>`).join("")}
+    ${pinsHtml}
     <div>Working directory: the gateway's own (not settable)</div>
-    <div>Environment variables passed from your .env (names): ${envVars.length ? envVars.map((v) => `<code>${show(v)}</code>`).join(", ") : "none"}</div>
+    <div>Environment it gets — exactly these names, values from the gateway: ${envNames.map((v) => `<code>${show(v)}</code>${declared.has(v) ? " (declared by the registration)" : ""}`).join(", ")}</div>
+    <div style="color:var(--crow-text-muted)">Approval covers this command line and the pinned files. It does not cover code the command downloads when it starts (for example npx or uvx packages) or other files a script opens on its own.</div>
     <div style="color:var(--crow-text-muted)">␣ is a space; \\u{…} is a character that is invisible or not plain ASCII.</div>
+    ${b.last_error ? `<div style="${warn}">Last check: ${prose(b.last_error)}</div>` : ""}
     <div style="margin-top:0.25rem">${form}</div>
+    ${label}
   </div>`;
 }

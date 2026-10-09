@@ -684,7 +684,7 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_register_backend",
-    "Register a data backend for a project. Two kinds: 'mcp_server' (an external MCP server Crow will start: connection_ref {\"command\",\"args\",\"envVars\"}) — it stays PENDING and is never started until the dashboard owner approves it on the Projects page; 'sqlite' (a SQLite dataset Crow reads read-only: connection_ref {\"path\"}, an absolute path inside the data folder's datasets/ or a project's databases/ folder, never one of Crow's own databases). Creates a data_connector project if project_id is not provided. Credentials are never stored — only env var names.",
+    "Register a data backend for a project. Two kinds: 'mcp_server' (an external MCP server Crow will start: connection_ref {\"command\",\"args\",\"envVars\"} and optionally \"command_sha256\"; nothing else) — it stays PENDING and is never started until the dashboard owner approves it on the Projects page; 'sqlite' (a SQLite dataset Crow reads read-only: connection_ref {\"path\"}, an absolute path inside the data folder's datasets/ or a project's databases/ folder, never one of Crow's own databases). Creates a data_connector project if project_id is not provided. Credentials are never stored — only env var names.",
     {
       name: z.string().max(500).describe("Display name for this backend (e.g., 'Production Postgres')"),
       backend_type: z.enum(["mcp_server", "sqlite"]).default("mcp_server").describe("'mcp_server' (needs owner approval before it runs) or 'sqlite' (read-only dataset file)"),

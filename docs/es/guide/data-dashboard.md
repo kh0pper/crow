@@ -109,7 +109,7 @@ La IA convierte el estudio de caso en una entrada de blog, incrustando los gráf
 
 - **Solo lectura** — Los conjuntos de datos se abren en solo lectura: una sentencia por consulta (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`), y el propio SQLite rechaza cualquier cambio. Crow no escribe en los conjuntos de datos; `crow_data_write` está desactivada mientras el Data Dashboard se retira. Carga los datos con tus propias herramientas.
 - **Restricción de rutas** — Un conjunto de datos debe estar en la carpeta `datasets/` de la carpeta de datos o en la carpeta `databases/` de un proyecto. Las bases de datos propias de Crow (`crow.db`, `tasks.db`) se rechazan, también mediante enlaces simbólicos o duros.
-- **Límite de filas** — Una consulta devuelve como máximo 5.000 filas, contadas a medida que se leen.
+- **Límites de filas, tamaño y tiempo** — Una consulta devuelve como máximo 5.000 filas (8 MB), contadas a medida que se leen, y se detiene a los 10 segundos.
 
 ## Próximos Pasos
 

@@ -111,7 +111,7 @@ The Data Dashboard enforces strict safety boundaries:
 
 - **Read-only** — Datasets are opened read-only: one statement per query (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`), and SQLite itself refuses any change. Crow does not write to datasets; `crow_data_write` is disabled while the Data Dashboard is being retired. Load data with your own tools.
 - **Path restrictions** — A dataset must live in the data folder's `datasets/` folder or a project's `databases/` folder. Crow's own databases (`crow.db`, `tasks.db`) are refused, including through symbolic or hard links.
-- **Row cap** — At most 5,000 rows come back from a query, counted as rows are read.
+- **Row, size and time caps** — At most 5,000 rows (8 MB) come back from a query, counted as rows are read, and a query is stopped after 10 seconds.
 
 ## Next Steps
 

@@ -30,11 +30,19 @@ There are two kinds of backend, chosen with `backend_type` on `crow_register_bac
 
 ### An `mcp_server` backend waits for your approval
 
-An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**: the exact command, its arguments and the environment variable names are shown, with **Approve and run exactly this**. Every argument is shown on its own line and invisible or non-ASCII characters are shown as `\u{…}` codes; a registration with anything besides `command`, `args` and `envVars`, or too long to show in full, cannot be approved. Approval covers that exact command — if the registration is changed later it goes back to waiting. **Stop running it** withdraws the approval.
+An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**. The page shows exactly what would run: the command, every argument on its own line (invisible or non-ASCII characters appear as `\u{…}` codes), and the exact names of the environment variables it gets. Press **Approve and run exactly this** to approve it; **Stop running it** withdraws the approval.
 
-`envVars` lists variable **names** only; put the values in your `.env`.
+`connection_ref` may contain only `command`, `args`, `envVars` and `command_sha256`. A registration with any other key, or too long to show in full, cannot be approved.
 
-The launcher is checked again every time it starts, with the same rules as add-ons: `node`, `npm` and `npx` are the gateway's own; any other bare name (such as `uvx`) must be found in a root-owned system directory; a launcher anywhere else must be given as an absolute path with its SHA-256 in `command_sha256`; a `uv`/`uvx` `--from git+…` source must name a full commit SHA. The approval page shows what the check says right now.
+What an approval covers:
+
+- **The command line.** Any later change to the registration sends it back to waiting.
+- **The files it runs.** Approval pins the current contents of the launcher (when it is a file path) and of every argument that names an existing file, such as the script an interpreter runs, except root-owned system files. Editing one of those files stops it from starting until you approve it again.
+- **Not** code the command downloads when it starts (for example `npx` or `uvx` packages), and not other files a script opens by itself.
+
+The launcher is checked when you approve and again every time it starts, with the same rules as add-ons: `node`, `npm` and `npx` are the gateway's own; any other bare name (such as `uvx`) must be found in a root-owned system directory; a launcher anywhere else must be an absolute path with its SHA-256 in `command_sha256`; a `uv`/`uvx` `--from git+…` source must name a full commit SHA. A `command_sha256` in the registration was supplied by whoever registered it — the page says so, and says when the launcher is not owned by root.
+
+**Environment.** The backend does not inherit the gateway's environment. It gets the same basic allowlist bots get (such as `PATH`, `HOME`, locale and proxy settings; nothing that looks like a credential) plus only the variables named in `envVars`, with their values from your `.env`. The page lists every name it will get.
 
 ### A `sqlite` backend is a dataset
 
@@ -102,8 +110,9 @@ The AI queries the backend, formats the results, and stores them as a source wit
 
 ## Security Considerations
 
-- Registering an `mcp_server` backend never runs anything: only the owner, signed in to Crow's Nest, can approve a command, and an approval stops applying the moment the command changes
+- Registering an `mcp_server` backend never runs anything: only the owner, signed in to Crow's Nest, can approve a command, and an approval stops applying the moment the command or a file it runs changes
+- An approved backend gets an allowlisted environment plus its declared variables, never the gateway's whole environment
 - Backends are never copied from peers: a shared project carries a description of its backends, not a runnable registration
-- `sqlite` datasets are opened read-only, one statement per query, with a row cap
+- `sqlite` datasets are opened read-only, one statement per query, with a row cap, a size cap and a time limit (a query runs in a separate process that is stopped at the limit)
 - Credentials stay in `.env`; the database stores environment variable names only
 - Removing a backend does not delete any sources or notes that were captured from it

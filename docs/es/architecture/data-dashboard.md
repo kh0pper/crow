@@ -44,9 +44,11 @@ Un conjunto de datos se abre con better-sqlite3 `readonly` más `PRAGMA query_on
 
 La ruta real de un conjunto de datos debe estar bajo `datasets/` o `projects/<id>/databases/` del directorio de datos de la instancia (comparada segmento a segmento, no como prefijo de texto). Las bases de datos del núcleo — `crow.db`, `tasks.db`, `CROW_DB_PATH`, cualquier `*.db` directamente en el directorio de datos — se rechazan por ruta real y por dispositivo e inodo, así que los enlaces no sirven para eludirlo.
 
-### Límite de filas
+### Límites de filas, tamaño y tiempo
 
-Las filas se leen paso a paso y se detienen en el límite (5.000), diga lo que diga el texto SQL. Las sentencias se ejecutan de forma síncrona y no se pueden interrumpir: el límite acota la salida, no el tiempo de CPU.
+Las filas se leen paso a paso y se detienen en el límite (5.000 filas, 8 MB serializados), diga lo que diga el texto SQL. Cada consulta corre en un proceso hijo de corta vida que se mata al llegar a su límite de tiempo (10 s por defecto); como máximo cuatro a la vez, y las demás se rechazan como ocupadas. Las lecturas de esquema (`getSchema`) siguen en el proceso.
+
+El archivo se abre con `O_NOFOLLOW` mientras SQLite lo abre, y después la ruta debe seguir resolviendo al mismo inodo.
 
 ### Sin escritura
 

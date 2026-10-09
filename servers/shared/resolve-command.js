@@ -41,7 +41,7 @@
  * approving every command the safety check does not clear.
  */
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 export const TRUSTED_DIRS = Object.freeze(["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"]);
@@ -66,8 +66,42 @@ function rootOwnedChain(p) {
   return { ok: true, real };
 }
 
-function sha256File(p) {
-  try { return createHash("sha256").update(readFileSync(p)).digest("hex"); } catch { return null; }
+/** Largest file the launcher pin will hash. Bigger files are refused unread. */
+export const MAX_HASH_BYTES = 512 * 1024 * 1024;
+
+/**
+ * SHA-256 of a REGULAR file, streamed in chunks and capped: a FIFO, device
+ * (/dev/zero), socket or directory is refused without a read, a file over
+ * MAX_HASH_BYTES is refused by size, and a file that grows past the cap
+ * while being read is refused. The fd is opened O_NOFOLLOW and fstat'ed, so
+ * what is checked is what is read. Returns the hex digest or null.
+ */
+export function sha256File(p, { maxBytes = MAX_HASH_BYTES } = {}) {
+  let fd;
+  try {
+    let real;
+    try { real = realpathSync(p); } catch { return null; }
+    const pre = statSync(real);
+    if (!pre.isFile() || pre.size > maxBytes) return null;
+    fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes || st.ino !== pre.ino || st.dev !== pre.dev) return null;
+    const h = createHash("sha256");
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > maxBytes) return null;
+      h.update(buf.subarray(0, n));
+    }
+    return h.digest("hex");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+  }
 }
 
 /**

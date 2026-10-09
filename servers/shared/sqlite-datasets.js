@@ -24,12 +24,20 @@
  * can still hold the process for its duration. The row cap bounds output,
  * not CPU time.
  */
-import { existsSync, mkdirSync, realpathSync, statSync, readdirSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, realpathSync, statSync, readdirSync } from "node:fs";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 
 export const DEFAULT_MAX_ROWS = 5000;
+/** Result size cap (serialized rows). */
+export const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+/** Wall-clock cap for one dataset query run off-thread. */
+export const DEFAULT_TIMEOUT_MS = 10_000;
+/** Dataset query processes alive at once. */
+export const MAX_QUERY_WORKERS = 4;
 const READ_KEYWORDS = new Set(["SELECT", "WITH", "EXPLAIN", "PRAGMA", "VALUES"]);
 
 /** The instance data dir (CROW_DATA_DIR, else ~/.crow/data). */
@@ -120,12 +128,39 @@ function assertDataset(p, opts) {
   return res.path;
 }
 
-/** Open a dataset read-only. Caller closes. */
+/**
+ * Open a dataset read-only. Caller closes.
+ *
+ * The checked real path is held open with O_NOFOLLOW while SQLite opens it,
+ * and afterwards the path must still resolve to itself and to the same
+ * inode, so a symlink swapped in between the check and the open is caught
+ * (SQLite opens by name; it takes no fd). Residual window: a swap-and-restore
+ * that completes entirely inside SQLite's open, which needs write access to
+ * the datasets folder and still yields only a read-only connection.
+ */
 export function openDatasetReadOnly(p) {
   const path = assertDataset(p);
-  const db = new Database(path, { readonly: true, fileMustExist: true });
-  db.pragma("query_only = ON");
-  return db;
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch {
+    throw new Error("dataset file could not be opened safely");
+  }
+  try {
+    const held = fstatSync(fd);
+    if (!held.isFile()) throw new Error("dataset path is not a file");
+    const db = new Database(path, { readonly: true, fileMustExist: true });
+    let after;
+    try { after = { real: realpathSync(path), st: statSync(path) }; } catch { after = null; }
+    if (!after || after.real !== path || after.st.ino !== held.ino || after.st.dev !== held.dev) {
+      db.close();
+      throw new Error("dataset file changed while it was being opened");
+    }
+    db.pragma("query_only = ON");
+    return db;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Open a bundle-created database for a fixed-shape writer. Caller closes. */
@@ -148,7 +183,7 @@ function firstKeyword(sql) {
  * Run one read-only statement on a dataset.
  * @returns {{ columns: string[], rows: object[], rowCount: number, truncated: boolean, executionMs: number }}
  */
-export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS } = {}) {
+export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes = DEFAULT_MAX_BYTES } = {}) {
   if (!READ_KEYWORDS.has(firstKeyword(sql))) {
     throw new Error("Only read-only queries (SELECT, WITH, EXPLAIN, PRAGMA, VALUES) are allowed.");
   }
@@ -168,8 +203,12 @@ export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS } = {}) {
     const columns = stmt.columns().map((c) => c.name);
     const rows = [];
     let truncated = false;
+    let bytes = 0;
+    const byteCap = Math.max(1024, Math.min(Number(maxBytes) || DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES));
     for (const row of stmt.iterate()) {
       if (rows.length >= cap) { truncated = true; break; }
+      bytes += Buffer.byteLength(JSON.stringify(row) || "", "utf8");
+      if (bytes > byteCap) { truncated = true; break; }
       rows.push(row);
     }
     return { columns, rows, rowCount: rows.length, truncated, executionMs: Date.now() - start };
@@ -215,4 +254,49 @@ export function createManagedDatabase(projectId, name) {
   if (existsSync(path)) throw new Error(`Database already exists: ${path}`);
   new Database(path).close();
   return path;
+}
+
+// ----------------------------------------------------------- off-process
+
+const CHILD_PATH = fileURLToPath(new URL("./sqlite-dataset-child.js", import.meta.url));
+let liveQueries = 0;
+
+/**
+ * runReadOnlyQuery in a short-lived child process with a wall-clock limit,
+ * so a heavy query (reachable from the public blog chart endpoint) never
+ * blocks the gateway and never outlives its limit: at the limit the child
+ * is SIGKILLed (a worker thread could not be stopped inside a long SQLite
+ * step). At most MAX_QUERY_WORKERS run at once; beyond that a query is
+ * refused as busy rather than queued.
+ */
+export function runReadOnlyQueryAsync(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes = DEFAULT_MAX_BYTES, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  if (liveQueries >= MAX_QUERY_WORKERS) {
+    return Promise.reject(new Error("Too many dataset queries are running; try again shortly."));
+  }
+  const limit = Math.max(100, Math.min(Number(timeoutMs) || DEFAULT_TIMEOUT_MS, 60_000));
+  return new Promise((resolveP, rejectP) => {
+    liveQueries++;
+    let settled = false;
+    const env = { CROW_DATA_DIR: dataDir(), PATH: process.env.PATH || "" };
+    if (process.env.CROW_DB_PATH) env.CROW_DB_PATH = process.env.CROW_DB_PATH;
+    const child = fork(CHILD_PATH, [], {
+      env, execArgv: ["--max-old-space-size=256"], stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    child.stderr.resume();
+    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      finish(rejectP, new Error(`Query timed out (${Math.round(limit / 1000)}s limit)`));
+    }, limit);
+    child.once("message", (m) => {
+      if (m && m.ok) finish(resolveP, m.result);
+      else finish(rejectP, new Error((m && m.error) || "query failed"));
+    });
+    child.once("error", (err) => finish(rejectP, err));
+    child.once("exit", () => {
+      liveQueries--;
+      finish(rejectP, new Error("query process stopped"));
+    });
+    child.send({ path: p, sql: String(sql), maxRows, maxBytes });
+  });
 }
