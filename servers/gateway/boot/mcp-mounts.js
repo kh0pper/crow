@@ -337,14 +337,29 @@ export async function mountMcpServers(app, deps) {
       // MinIO when shared storage is available, else local disk (spec §11).
       const blobs = await createBlobStore(artDb, resolveDataDir());
       initGatewayActorKey();
-      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks } }), sessionManager, authMiddleware, peerExposureGate);
-      // R2-M2: reconcile crash leftovers (unrecorded objects, stale temps)
-      // once at mount start, off the boot path (it may wait on the write
-      // lock). The periodic reconcile arrives with the step-3 sweep.
-      setImmediate(async () => {
-        try { await artStore.reconcileBlobs(artDb, blobs); }
-        catch (e) { console.warn(`[gateway] artifacts reconcile: ${e.message}`); }
-      });
+      // R-M3 / Task 3.6: a finished round stops its locked session at once
+      // and tells the owner the new version is ready; the sweep below catches
+      // timeouts, queued retries and anything missed.
+      const { runSweep, roundDoneEffects } = await imp("sweep.js");
+      const engineOrNull = async () => { try { return (await import("../perch-interactive.js")).getInteractiveEngine({ createIfMissing: false }); } catch { return null; } };
+      const notifyOwner = (n) => createNotification(artDb, n);
+      const onRoundDone = async (r) => {
+        try { await roundDoneEffects(artDb, r, { engine: await engineOrNull(), notify: notifyOwner }); }
+        catch (e) { console.warn(`[gateway] artifacts round-done effects: ${e.message}`); }
+      };
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone }), sessionManager, authMiddleware, peerExposureGate);
+      const { readReservation } = await import("../box-reservation.js");
+      const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
+      // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists
+      // (timeouts and reconciliation need none), once at mount start (off the
+      // boot path — it may wait on the write lock, R3-L7), then every 60 s.
+      const sweepOnce = async () => {
+        try { await runSweep(artDb, { engine: await engineOrNull(), blobs, notify: notifyOwner, reserved: () => readReservation() !== null, botDefOf }); }
+        catch (e) { console.warn(`[gateway] artifacts sweep: ${e.message}`); }
+      };
+      setImmediate(sweepOnce);
+      const sweepTimer = setInterval(sweepOnce, 60000);
+      sweepTimer.unref?.();
       const { networkFsKind } = await imp("blob-store.js");
       try {
         const kind = await networkFsKind(join(resolveDataDir(), "artifacts"));
