@@ -582,7 +582,9 @@ test("caps: caller limits can only lower them", async () => {
   assert.ok(r.truncated && r.rows.length < 5000, `rows ${r.rows.length}`);
 });
 
-test("caps: one huge value fails inside the query process, quickly", async () => {
+test("caps: one huge value fails inside the query process, quickly", async (t0) => {
+  const { CHILD_MEMORY_CAPPED } = await import("../servers/shared/sqlite-datasets.js");
+  if (!CHILD_MEMORY_CAPPED) return t0.skip("no root-owned prlimit on this host");
   const p = makeDataset(join(DATA, "datasets", "blob.db"), 1);
   const t = Date.now();
   let res = null, err = null;

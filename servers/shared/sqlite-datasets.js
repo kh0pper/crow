@@ -206,7 +206,7 @@ export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes 
     let bytes = 0;
     for (const row of stmt.iterate()) {
       if (rows.length >= cap) { truncated = true; break; }
-      bytes += Buffer.byteLength(JSON.stringify(row) || "", "utf8");
+      bytes += rowBytes(row);
       if (bytes > byteCap) { truncated = true; break; }
       rows.push(row);
     }
@@ -214,6 +214,21 @@ export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes 
   } finally {
     db.close();
   }
+}
+
+/**
+ * A cheap upper estimate of a row's serialized size, without serializing it
+ * (JSON.stringify of a big blob is itself the slow, memory-hungry step).
+ */
+function rowBytes(row) {
+  let n = 2;
+  for (const [k, v] of Object.entries(row)) {
+    n += k.length + 4;
+    if (typeof v === "string") n += Buffer.byteLength(v, "utf8") * 2;
+    else if (Buffer.isBuffer(v) || v instanceof Uint8Array) n += v.length * 4 + 32;
+    else n += 24;
+  }
+  return n;
 }
 
 const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
@@ -272,8 +287,16 @@ export function effectiveLimits({ maxRows, maxBytes, timeoutMs } = {}) {
   };
 }
 
-/** SQLite's own heap ceiling inside the query process (PRAGMA hard_heap_limit). */
-export const CHILD_SQLITE_HEAP_BYTES = 128 * 1024 * 1024;
+/**
+ * Data-segment ceiling for the query process (RLIMIT_DATA via prlimit, Linux).
+ * SQLite's own heap limit is a no-op in the bundled build (memory accounting
+ * is compiled out), so the OS caps it: a query that materializes a huge
+ * value fails inside the child (which may abort) instead of growing it.
+ */
+export const CHILD_DATA_LIMIT_BYTES = 1024 * 1024 * 1024;
+const PRLIMIT = ["/usr/bin/prlimit", "/bin/prlimit"].find((p) => { try { return statSync(p).isFile() && statSync(p).uid === 0; } catch { return false; } }) || null;
+/** Whether the query process runs under the data-segment cap on this host. */
+export const CHILD_MEMORY_CAPPED = process.platform === "linux" && !!PRLIMIT;
 
 const CHILD_PATH = fileURLToPath(new URL("./sqlite-dataset-child.js", import.meta.url));
 let liveQueries = 0;
@@ -283,8 +306,9 @@ let liveQueries = 0;
  * process with a wall-clock limit, so a heavy query (the public blog chart
  * endpoint reaches this) never blocks the gateway and never outlives its
  * limit: at the limit the child is SIGKILLed (a worker thread cannot be
- * stopped inside a long SQLite step). The child caps its V8 heap and
- * SQLite's heap, so one huge value fails inside the child. At most
+ * stopped inside a long SQLite step). The child caps its V8 heap and, on
+ * Linux, runs under a data-segment limit, so one huge value fails inside
+ * the child. At most
  * MAX_QUERY_WORKERS run at once; beyond that a job is refused as busy.
  */
 function runInChild(job, timeoutMs) {
@@ -296,11 +320,16 @@ function runInChild(job, timeoutMs) {
     let settled = false;
     let timer = null;
     const finish = (fn, v) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); fn(v); } };
-    const env = { CROW_DATA_DIR: dataDir(), PATH: process.env.PATH || "", CROW_DATASET_CHILD_HEAP: String(CHILD_SQLITE_HEAP_BYTES) };
+    const env = { CROW_DATA_DIR: dataDir(), PATH: process.env.PATH || "" };
     if (process.env.CROW_DB_PATH) env.CROW_DB_PATH = process.env.CROW_DB_PATH;
+    const nodeArgs = ["--max-old-space-size=256"];
+    // prlimit execs node with the IPC channel fd and env intact.
+    const forkOpts = CHILD_MEMORY_CAPPED
+      ? { execPath: PRLIMIT, execArgv: [`--data=${CHILD_DATA_LIMIT_BYTES}`, "--", process.execPath, ...nodeArgs] }
+      : { execArgv: nodeArgs };
     let child;
     try {
-      child = fork(CHILD_PATH, [], { env, execArgv: ["--max-old-space-size=256"], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      child = fork(CHILD_PATH, [], { env, ...forkOpts, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     } catch (err) {
       rejectP(err);
       return;

@@ -6,15 +6,11 @@
  * over IPC. A separate process, not a worker thread, because a single long
  * SQLite step never returns to JavaScript and a thread cannot be stopped
  * mid-step; the parent SIGKILLs this process at its wall-clock limit.
- * SQLite's heap here is capped (PRAGMA hard_heap_limit), so one huge value
- * fails as out-of-memory inside this process instead of growing it.
+ * On Linux the parent starts this process under a data-segment limit
+ * (prlimit), so one huge value fails here (possibly aborting this process)
+ * instead of growing it.
  */
-import Database from "better-sqlite3";
 import { runReadOnlyQuery, readDatasetSchema } from "./sqlite-datasets.js";
-
-const heap = Number(process.env.CROW_DATASET_CHILD_HEAP) || 128 * 1024 * 1024;
-// hard_heap_limit is process-wide: setting it on any connection caps them all.
-{ const d = new Database(":memory:"); d.pragma(`hard_heap_limit = ${Math.floor(heap)}`); d.close(); }
 
 process.once("message", (job) => {
   let reply;
