@@ -1,9 +1,8 @@
 {
   "id": "artifacts",
-  "draft": true,
   "name": "Artifacts",
   "version": "0.1.0",
-  "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
+  "description": "Pages, documents and diagrams your bots make, shown in a sealed frame that cannot see your Crow. Versions shaped by outside text run script-free until you approve them. Commenting and feedback rounds arrive in the next release.",
   "type": "bundle",
   "author": "Crow",
   "category": "productivity",
@@ -15,6 +14,11 @@
     "comments"
   ],
   "icon": "layers",
+  "panel": "panel/artifacts.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": [
+    "skills/artifacts.md"
+  ],
   "requires": {
     "min_ram_mb": 128,
     "min_disk_mb": 2200
@@ -31,5 +35,5 @@
       "required": false
     }
   ],
-  "notes": "Artifacts are shown on a separate origin with no access to your Crow. Scripts in pages run sandboxed with no network; a page that tries to leave its frame is closed and flagged. Contacts' comments reach a bot only when you include them, and then only in a session limited to Artifacts."
+  "notes": "Artifacts are shown on a separate origin with no access to your Crow. Scripts in pages run sandboxed with no network; a page that tries to leave its frame is closed and flagged."
 }

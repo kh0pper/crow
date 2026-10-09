@@ -99,7 +99,7 @@ for (const { id, dir } of bundles) {
 // installed copy (servers/gateway/boot/mcp-mounts.js, panel routes). No npm
 // install runs for them, so they must import NO bare packages at all — app
 // code comes via app-root.js and the MCP SDK/zod are injected by the gateway.
-const CORE_MOUNTED = ["phone"];
+const CORE_MOUNTED = ["phone", "artifacts"];
 
 for (const id of CORE_MOUNTED) {
   test(`core-mounted bundle ${id}: server code imports no bare packages`, () => {
