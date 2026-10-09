@@ -84,6 +84,15 @@ test("tripwire report: flags the version, revokes live tokens, notifies; the fla
   assert.equal(audit.length, 1);
 });
 
+test("static allow-list: the three exact names serve; prototype keys, traversal and unknown names are 404 (review L1)", async () => {
+  for (const f of ["viewer.js", "panel-client.js", "panel.css"]) {
+    assert.equal((await req("GET", `/artifacts/static/${f}`)).status, 200, f);
+  }
+  for (const f of ["__proto__", "constructor", "toString", "nope.js", "..%2fmanifest.json", "..%2f..%2fpackage.json", "viewer.js%00.png"]) {
+    assert.equal((await req("GET", `/artifacts/static/${f}`)).status, 404, f);
+  }
+});
+
 test("D20: a tainted page version mints script-free until the owner approves it", async () => {
   const v = await store.addVersion(s.db, s.blobs, { artifactId: s.art.id, source: { html: "<p>shaped by a contact</p>" }, actor: { kind: "session" }, untrusted: true }, {});
   const off = await req("POST", `/api/artifacts/${s.art.id}/versions/${v.n}/view`);

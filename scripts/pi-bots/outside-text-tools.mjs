@@ -1,5 +1,5 @@
 /**
- * D22 (Kevin, 2026-10-08): a session that reads OUTSIDE text through its own
+ * D22 (owner decision, 2026-10-08): a session that reads OUTSIDE text through its own
  * tools is untrusted from then on (its Artifacts versions render with scripts
  * off until the owner approves them). Outside text = web fetch, browser, mail,
  * inbox/messages, RSS, research fetch, and any tool whose output can carry

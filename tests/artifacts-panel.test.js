@@ -46,6 +46,17 @@ test("ARTIFACTS_STRINGS: {placeholder} sets match between en and es", () => {
   assert.ok(ARTIFACTS_STRINGS.en.fallback_remote && ARTIFACTS_STRINGS.es.fallback_remote, "O11 string exists in both languages");
 });
 
+// ─── static: the client's XSS invariant (review R1) ─────────────────────
+
+test("panel-client places every authored text via textContent — pinned at the source (review R1)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../bundles/artifacts/panel/static/panel-client.js", import.meta.url), "utf8");
+  // The mutation that survived: el()'s text branch flipped to innerHTML.
+  // No sink, anywhere, and the text branch must be a textContent assignment.
+  assert.doesNotMatch(src, /\.innerHTML\s*=|insertAdjacentHTML|document\.write|outerHTML\s*=/, "no HTML sink in the panel client");
+  assert.match(src, /if \(k === "text"\) n\.textContent = attrs\[k\]/, "el()'s text branch assigns textContent");
+});
+
 // ─── static: the page handler ───────────────────────────────────────────────
 
 function fakeRes() {

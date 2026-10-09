@@ -97,6 +97,9 @@ fi
 # a restore needs BOTH the dump and this directory. On installs using MinIO
 # for shared storage the blobs live in the <prefix>-artifacts bucket instead
 # (backed up with MinIO itself) and this directory holds only the lock file.
+# The rsync runs without coordination with live writers: blobs are
+# content-addressed and immutable, and an in-flight temp object that sneaks
+# into the copy is reclaimed by reconcileBlobs on the restored boot.
 
 ARTIFACTS_DIR="$(dirname "$DB_PATH")/artifacts"
 if [[ -d "$ARTIFACTS_DIR" ]]; then

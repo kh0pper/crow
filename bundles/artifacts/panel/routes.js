@@ -66,8 +66,11 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   router.use("/artifacts/static", dashboardAuth);
 
   router.get("/artifacts/static/:file", (req, res) => {
+    // Own properties only: a prototype key (__proto__, constructor, …) must
+    // 404 like any other unknown name, not reach setHeader/readFileSync
+    // (review L1).
+    if (!Object.hasOwn(STATIC, req.params.file)) return res.status(404).end();
     const type = STATIC[req.params.file];
-    if (!type) return res.status(404).end();
     res.setHeader("content-type", type);
     res.setHeader("cache-control", "no-store");
     res.end(readFileSync(join(BUNDLE_DIR, "panel", "static", req.params.file)));

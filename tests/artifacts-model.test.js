@@ -248,6 +248,25 @@ test("quota is real bytes and atomic on BOTH backends: concurrent writes cannot 
   }
 });
 
+test("inertLinks also neutralises non-contract href forms (review L2)", () => {
+  // The pipeline only feeds sanitize-html output (double-quoted attrs), but
+  // the function is exported: a single-quoted or unquoted href must never
+  // pass through LIVE.
+  for (const a of [
+    "<a href='https://evil.example/x'>x</a>",
+    "<a href=https://evil.example/x>x</a>",
+    "<a HREF='https://e.example'>y</a>",
+    "<a\thref='https://e.example'>z</a>",
+  ]) {
+    const out = inertLinks(a);
+    assert.doesNotMatch(out, /\s[Hh][Rr][Ee][Ff]=/, `no live href survives: ${out}`);
+    assert.match(out.toLowerCase(), /data-inert-href=/, `inert marker present: ${out}`);
+  }
+  // The contract forms keep working: double-quoted external inert, # kept.
+  assert.match(inertLinks('<a href="https://e.example/x">x</a>'), /data-inert-href="https:\/\/e\.example\/x"/);
+  assert.match(inertLinks('<a href="#sec">x</a>'), /href="#sec"/);
+});
+
 test("ReDoS: adversarial inputs to every scanner finish inside a time budget", () => {
   const budget = (label, fn) => { const t0 = process.hrtime.bigint(); fn(); const ms = Number(process.hrtime.bigint() - t0) / 1e6; assert.ok(ms < 1500, `${label} took ${ms.toFixed(0)} ms`); };
   const big = 200000;

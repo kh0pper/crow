@@ -66,6 +66,13 @@ export function inertLinks(html) {
       const q = tag.indexOf('"', h + 7);
       const href = q >= 0 ? tag.slice(h + 7, q) : "";
       if (q >= 0 && !href.startsWith("#")) tag = tag.slice(0, h) + ` data-inert-href="${href}" title="${href}"` + tag.slice(q + 1);
+    } else {
+      // Outside the sanitize-html contract (single-quoted or unquoted href):
+      // neutralise the attribute anyway, so no future caller can feed raw
+      // HTML and get a live external link (review L2). Linear: one indexOf.
+      const hl = tag.toLowerCase();
+      const ht = hl.indexOf("href=");
+      if (ht > 0 && /\s/.test(tag.charAt(ht - 1))) tag = tag.slice(0, ht) + "data-inert-href=" + tag.slice(ht + 5);
     }
     out += html.slice(i, a) + tag;
     i = end;
