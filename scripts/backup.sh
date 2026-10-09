@@ -91,6 +91,26 @@ else
   echo "  [dry-run] Would create: $DB_FILE"
 fi
 
+# --- Step 2b: Artifacts blob store (Crow Artifacts) ---
+# <dataDir>/artifacts/ holds the content-addressed blob objects and the
+# cross-process write lock. Artifact DB rows reference blobs by sha256 key, so
+# a restore needs BOTH the dump and this directory. On installs using MinIO
+# for shared storage the blobs live in the <prefix>-artifacts bucket instead
+# (backed up with MinIO itself) and this directory holds only the lock file.
+
+ARTIFACTS_DIR="$(dirname "$DB_PATH")/artifacts"
+if [[ -d "$ARTIFACTS_DIR" ]]; then
+  echo "Copying artifacts store..."
+  if [[ "$DRY_RUN" == false ]]; then
+    mkdir -p "$BACKUP_DIR/artifacts"
+    # --no-links: a symlink planted into the store is never followed or copied.
+    rsync -a --no-links --delete "$ARTIFACTS_DIR/" "$BACKUP_DIR/artifacts/"
+    echo "  Artifacts: $BACKUP_DIR/artifacts ($(du -sh "$BACKUP_DIR/artifacts" | cut -f1))"
+  else
+    echo "  [dry-run] Would rsync $ARTIFACTS_DIR/ to $BACKUP_DIR/artifacts/"
+  fi
+fi
+
 # --- Step 3: S3/MinIO upload (if configured) ---
 
 if [[ -n "${MINIO_ENDPOINT:-}" && -n "${MINIO_ACCESS_KEY:-}" && -n "${MINIO_SECRET_KEY:-}" ]]; then
