@@ -201,3 +201,65 @@ test("scripts-off (D20) renditions are served byte-for-byte: safety comes from t
     assert.doesNotMatch(r.headers["content-security-policy"], /script-src/);
   } finally { FILES["index.html"] = { body: "<!doctype html><html><head><title>x</title></head><body>hi</body></html>", contentType: "text/html; charset=utf-8" }; }
 });
+
+// ---- Task 1.2: runtime singletons and start-from-env ----
+
+async function freePort() {
+  const s = http.createServer();
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const p = s.address().port;
+  await new Promise((r) => s.close(r));
+  return p;
+}
+
+test("runtime: parseOriginUrl accepts scheme://host[:port] only", async () => {
+  const { parseOriginUrl } = await import("../servers/gateway/artifact-origin/runtime.js");
+  assert.equal(parseOriginUrl("https://a.example"), "https://a.example");
+  assert.equal(parseOriginUrl("https://a.example/"), "https://a.example");
+  assert.equal(parseOriginUrl("http://localhost:3090"), "http://localhost:3090");
+  for (const bad of ["https://a.example/x", "https://a.example/?q=1", "https://a.example/#f", "https://u:p@a.example", "https://u@a.example", "ftp://a.example", "javascript:alert(1)", "not a url", "", null, undefined]) {
+    assert.equal(parseOriginUrl(bad), null, `refused: ${String(bad)}`);
+  }
+});
+
+test("runtime: nothing starts without a port; a bad port or origin URL is refused", async () => {
+  const rt = await import("../servers/gateway/artifact-origin/runtime.js");
+  rt._resetForTest();
+  assert.equal(await rt.startArtifactOriginFromEnv({}), null);
+  assert.equal(rt.artifactOriginInfo(), null);
+  assert.equal(rt.isolationFor("localhost:3001"), "unavailable");
+  for (const p of ["abc", "-1", "0.5", "70000"]) {
+    await assert.rejects(rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: p }), /CROW_ARTIFACT_ORIGIN_PORT/, `port ${p}`);
+  }
+  await assert.rejects(rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: "3999", CROW_ARTIFACT_ORIGIN_URL: "https://a.example/path" }), /CROW_ARTIFACT_ORIGIN_URL/);
+  assert.equal(rt.artifactOriginInfo(), null, "a refused start leaves no info behind");
+});
+
+test("runtime: start-from-env listens on loopback; isolation is shared-host on the fallback and own-host on its own hostname", async () => {
+  const rt = await import("../servers/gateway/artifact-origin/runtime.js");
+  rt._resetForTest();
+  const p = await freePort();
+  const srv = await rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: String(p) });
+  try {
+    assert.ok(srv);
+    assert.equal(srv.address().address, "127.0.0.1");
+    assert.equal(srv.address().port, p);
+    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: `http://localhost:${p}`, port: p, configured: false });
+    assert.equal(rt.isolationFor("localhost:3001"), "shared-host");
+    // No resolver registered yet: a live token still gets a sandboxed 404.
+    const { token } = rt.viewTokens().mint({ artifactId: "a", versionN: 1, type: "page" });
+    const r = await new Promise((resolve, reject) => {
+      http.get({ host: "127.0.0.1", port: p, path: `/v/${token}/` }, (res) => { res.resume(); res.on("end", () => resolve(res)); }).on("error", reject);
+    });
+    assert.equal(r.statusCode, 404);
+    assert.match(r.headers["content-security-policy"], /sandbox/);
+  } finally { rt._resetForTest(); }
+
+  const p2 = await freePort();
+  await rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: String(p2), CROW_ARTIFACT_ORIGIN_URL: "https://art.example" });
+  try {
+    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: "https://art.example", port: p2, configured: true });
+    assert.equal(rt.isolationFor("crow.example:8444"), "own-host");
+    assert.equal(rt.isolationFor("ART.example"), "shared-host", "same hostname, any case or port, is shared");
+  } finally { rt._resetForTest(); }
+});
