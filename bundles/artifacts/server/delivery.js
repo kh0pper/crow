@@ -35,11 +35,14 @@ export function botHasArtifactsTools(def) {
 
 /** Live sessions a TRUSTED round may reuse: never a locked one (plan review
  *  R-M2) — its context holds untrusted text, so trust is per session. A
- *  session whose lock state cannot be read is excluded too (fail closed). */
+ *  session whose lock state cannot be read is excluded too (fail closed).
+ *  Task 3.4b: most-recently-active first (snapshot()'s lastEventAt; a session
+ *  without a stamp sorts last, and the sort is stable). */
 async function liveSessionsOf(db, engine, botId) {
   const all = (await engine.list()).filter((s) => s.botId === botId && !["stopped"].includes(s.state) && !s.archived);
   const out = [];
   for (const s of all) if (await sessionIsClean(db, botId, s.threadId)) out.push(s);   // trust.js: unknown = untrusted
+  out.sort((a, b) => (b.lastEventAt || 0) - (a.lastEventAt || 0));
   return out;
 }
 
@@ -123,8 +126,8 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "auto", orig
     }
     // auto
     const live = await liveSessionsOf(db, engine, round.bot_id);
-    // Fallback: the first live session in engine.list() order (not verified to
-    // be most-recent; the build task adds an explicit last-activity sort).
+    // The origin session when it is live and clean, else the most recently
+    // active one (Task 3.4b's sort in liveSessionsOf).
     const pick = live.find((s) => s.threadId === originThread) || live[0];
     if (!pick) return { status: round.status, needsChoice: true, offerBoard: typeof createBoardCard === "function" };
     // A trusted round to an existing clean session: send first, bind after (a

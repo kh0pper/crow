@@ -703,6 +703,10 @@ export function createInteractiveEngine({
       uptimeSeconds: s.childSince ? Math.max(0, Math.round((Date.now() - s.childSince) / 1000)) : null,
       memoryMB: childMemoryMB(s),
       toolCount: s.toolCount == null ? null : s.toolCount,
+      // Artifacts Task 3.4b: the trusted-round session fallback sorts by last
+      // activity; engine.list() had no timestamp, so the eviction-recency
+      // stamp is exposed here (delivery.js liveSessionsOf).
+      lastEventAt: s.lastEventAt || null,
       // I3 (final review): neither stateEvent() nor snapshot() used to
       // expose whether a turn is actually in flight, and drawer.js's
       // bd.turnInFlight was set only by the SENDING tab — so on the primary

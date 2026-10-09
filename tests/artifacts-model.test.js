@@ -294,6 +294,32 @@ test("local blob store: absent reads null, but unreadable objects and failed del
   assert.ok(keys.includes(k));
 });
 
+test("3.4b: the trusted auto fallback picks the MOST RECENTLY ACTIVE clean session, not the first listed", async () => {
+  const { deliverRound } = await import("../bundles/artifacts/server/delivery.js");
+  const sent = [];
+  const engine = {
+    // Listed oldest-first: without the lastEventAt sort the WRONG session wins.
+    sessions: [
+      { sessionId: "s-old", botId: "bobby", threadId: "perchlive-34b-old", state: "idle", lastEventAt: 100 },
+      { sessionId: "s-new", botId: "bobby", threadId: "perchlive-34b-new", state: "idle", lastEventAt: 200 },
+    ],
+    async list() { return this.sessions; },
+    async spawn() { throw new Error("should not spawn"); },
+    async message(id, text) { sent.push({ id, text }); },
+  };
+  for (const t of ["perchlive-34b-old", "perchlive-34b-new"]) {
+    await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [t] });
+  }
+  const a = await store.createArtifact(s.db, s.blobs, { title: "34b", type: "document", source: doc("x"), actor: OWNER }, deps);
+  await s.db.execute({ sql: "UPDATE artifacts SET created_by_bot='bobby' WHERE id=?", args: [a.id] });
+  const t = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "owner words", author: { kind: "owner" } });
+  const r = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t.threadId] });
+  const out = await deliverRound(s.db, r, { engine, botDef: { tools: { crow_mcp: ["artifacts"] } } });
+  assert.equal(out.threadId, "perchlive-34b-new", `most recent activity wins: ${JSON.stringify(out)}`);
+  assert.equal(sent[0].id, "s-new");
+  await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "x" });
+});
+
 test("ReDoS: adversarial inputs to every scanner finish inside a time budget", () => {
   const budget = (label, fn) => { const t0 = process.hrtime.bigint(); fn(); const ms = Number(process.hrtime.bigint() - t0) / 1e6; assert.ok(ms < 1500, `${label} took ${ms.toFixed(0)} ms`); };
   const big = 200000;
