@@ -58,6 +58,10 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3070 | 127.0.0.1 | workspace (Crow Workspace: Nextcloud web; tailnet via Serve :8456) | W1 2026-10 |
 | 3071 | 127.0.0.1 | workspace (Crow Workspace: ONLYOFFICE Docs; tailnet via Serve :8457) | W1 2026-10 |
 | 3080 | 127.0.0.1 | romm (existing) | existing |
+| 3090 | 127.0.0.1 | Crow Artifacts: main instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3090`). A gateway-internal listener, not a compose port; reached through its own sidecar Tailscale node's Serve (443 on its own hostname), never Funnel | Artifacts step 1 |
+| 3091 | 127.0.0.1 | Crow Artifacts: second co-hosted instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3091`). A gateway-internal listener, not a compose port | Artifacts step 1 |
+| 3092 | 127.0.0.1 (container publish) | Crow Artifacts: household container instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3092`); behind the same DOCKER-USER fence rule as that container's other published ports. A gateway-internal listener, not a compose port | Artifacts step 1 |
+| 3093 | 127.0.0.1 | Crow Artifacts: main instance public-link listener (later step; the only artifacts port ever mapped to Funnel, through the sidecar node's own 8443). A gateway-internal listener, not a compose port | reserved (Artifacts step 6) |
 | 3456 | 127.0.0.1 | vikunja (existing) | existing |
 | 4533 | 127.0.0.1 | navidrome (existing) | existing |
 | 5000 | 127.0.0.1 | kavita (existing) | existing |

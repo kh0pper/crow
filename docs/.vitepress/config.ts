@@ -311,6 +311,7 @@ export default defineConfig({
           { text: "Crow's Nest", link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
           { text: 'Box Reservation', link: '/architecture/box-reservation' },
+          { text: 'Artifacts', link: '/architecture/artifacts' },
           { text: 'Models', link: '/architecture/models' },
           { text: 'Crow OS', link: '/architecture/crow-os' },
           { text: 'Portable Identity', link: '/architecture/portable-identity' },
