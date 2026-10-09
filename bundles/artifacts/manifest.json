@@ -1,0 +1,35 @@
+{
+  "id": "artifacts",
+  "draft": true,
+  "name": "Artifacts",
+  "version": "0.1.0",
+  "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": [
+    "artifacts",
+    "documents",
+    "mockups",
+    "feedback",
+    "comments"
+  ],
+  "icon": "layers",
+  "requires": {
+    "min_ram_mb": 128,
+    "min_disk_mb": 2200
+  },
+  "env_vars": [
+    {
+      "name": "CROW_ARTIFACT_ORIGIN_PORT",
+      "description": "Loopback port of this instance's artifact origin (see docs/developers/port-allocation.md). Empty: artifact viewing is off.",
+      "required": false
+    },
+    {
+      "name": "CROW_ARTIFACT_ORIGIN_URL",
+      "description": "The origin browsers use for artifact content, on its OWN hostname (e.g. https://<artifacts-host>). Empty: the local-only fallback on this machine's loopback port, with weaker isolation.",
+      "required": false
+    }
+  ],
+  "notes": "Artifacts are shown on a separate origin with no access to your Crow. Scripts in pages run sandboxed with no network; a page that tries to leave its frame is closed and flagged. Contacts' comments reach a bot only when you include them, and then only in a session limited to Artifacts."
+}

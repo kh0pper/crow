@@ -22,6 +22,12 @@
  *   reservation — box reservation held (info; no card when the box is free).
  *               Box-reservation scope §3.5: "Box reserved by <owner> until
  *               <time>" for as long as the file exists.
+ *   artifact-node — the Crow Artifacts sidecar Tailscale node (only when
+ *               CROW_ARTIFACT_SIDECAR_SOCKET is set): logged out, key expiring
+ *               within 14 days, Funnel on, or an unexpected Serve mapping →
+ *               one warn issue per problem ("artifact-node:<code>"), so each
+ *               distinct problem is pushed by the health monitor. An origin
+ *               URL configured WITHOUT the socket warns "unmonitored".
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -48,6 +54,7 @@ import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 import { readReservation } from "../../../box-reservation.js";
 import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
+import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-health.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -407,6 +414,52 @@ function reservationSignal(lang, nowFn) {
     value: t("signals.reservation.value", lang),
     issueLabel: r.reason ? `${base} (${r.reason})` : base,
   };
+}
+
+// ─── Artifact sidecar node ───────────────────────────────────────────────────
+// The reader caches for 5 minutes and returns null when no sidecar is
+// configured (no card then).
+let _artifactNodeReader = createSidecarHealthReader();
+/** Test seam: replace the sidecar health reader; null restores the real one. */
+export function _setArtifactNodeReader(fn) {
+  _artifactNodeReader = fn || createSidecarHealthReader();
+}
+
+const ARTIFACT_NODE_PROBLEMS = ["logged-out", "key-expiring", "funnel-on", "unexpected-mapping", "unreachable"];
+const ARTIFACT_NODE_KEYS = {
+  "logged-out": "signals.artifactNode.loggedOut",
+  "key-expiring": "signals.artifactNode.keyExpiring",
+  "funnel-on": "signals.artifactNode.funnelOn",
+  "unexpected-mapping": "signals.artifactNode.unexpectedMapping",
+  "unreachable": "signals.artifactNode.unreachable",
+};
+
+async function artifactNodeSignal(lang) {
+  const h = await _artifactNodeReader();
+  const label = t("signals.artifactNode.label", lang);
+  if (!h) {
+    // Own-host mode with no sidecar socket means NOTHING is being watched
+    // (review L5): warn instead of passing silently, because a logged-out or
+    // expired node would break every artifact frame with no signal anywhere.
+    if (process.env.CROW_ARTIFACT_ORIGIN_URL && !process.env.CROW_ARTIFACT_SIDECAR_SOCKET) {
+      return {
+        id: "artifact-node:unmonitored", severity: "warn", state: "warn", issueOnly: true, label,
+        issueLabel: t("signals.artifactNode.unmonitored", lang),
+      };
+    }
+    return null;
+  }
+  if (h.ok) return { id: "artifact-node", severity: null, state: "ok", label, value: t("signals.artifactNode.ok", lang) };
+  const problems = (h.problems || []).filter((p) => ARTIFACT_NODE_PROBLEMS.includes(p));
+  if (problems.length === 0) problems.push("unreachable");   // not ok without a known problem: fail closed
+  const date = typeof h.keyExpiry === "string" ? h.keyExpiry.slice(0, 10) : "?";
+  return [
+    { id: "artifact-node", severity: "warn", state: "warn", cardOnly: true, label, value: t("signals.artifactNode.problem", lang) },
+    ...problems.map((p) => ({
+      id: `artifact-node:${p}`, severity: "warn", state: "warn", issueOnly: true, label,
+      issueLabel: fill(t(ARTIFACT_NODE_KEYS[p], lang), { date }),
+    })),
+  ];
 }
 
 async function updatesSignal(db) {
@@ -1026,6 +1079,7 @@ export async function collectHealthSignals(db, opts = {}) {
     // Deferred so a throwing reader lands in the per-signal catch below
     // instead of escaping the array literal (review M8).
     Promise.resolve().then(() => reservationSignal(lang, nowFn)),
+    artifactNodeSignal(lang),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,

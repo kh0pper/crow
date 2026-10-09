@@ -31,6 +31,7 @@
  *
  * CROW_CDP_URL is still honoured as an explicit operator opt-in to an external
  * endpoint (e.g. a Dockerised browser); nothing defaults to 9223 any more.
+ * A caller passing `extraArgs` (launch flags) always gets a private Chrome.
  */
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, readdirSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
@@ -118,8 +119,10 @@ export async function startHeadlessChrome(opts = {}) {
   return chrome;
 }
 
-async function startHeadlessChromeOrNull({ timeoutMs = 20000 } = {}) {
-  if (process.env.CROW_CDP_URL) {
+async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [] } = {}) {
+  // An external endpoint cannot take launch flags, so a caller that needs
+  // extraArgs (e.g. --host-resolver-rules) always gets a private Chrome.
+  if (process.env.CROW_CDP_URL && extraArgs.length === 0) {
     const cdp = process.env.CROW_CDP_URL;
     try {
       const r = await fetch(cdp + "/json/version", { signal: AbortSignal.timeout(2000) });
@@ -151,6 +154,10 @@ async function startHeadlessChromeOrNull({ timeoutMs = 20000 } = {}) {
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+    // extraArgs: e.g. --host-resolver-rules for tests that need distinct fake
+    // hostnames on loopback (the artifact isolation test). Only plain
+    // "--flag" / "--flag=value" strings are accepted.
+    ...extraArgs.filter((a) => typeof a === "string" && /^--[a-z0-9-]+(=.*)?$/.test(a)),
     "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"], detached: true });
 
