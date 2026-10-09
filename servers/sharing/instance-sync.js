@@ -27,6 +27,7 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
+import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 
 /**
  * Build the canonical wire row for a crow_context DB row.
@@ -3038,6 +3039,11 @@ export class InstanceSyncManager {
         if (typeof this.onContactDeleted === "function") {
           try { await this.onContactDeleted(localRow); } catch { /* never throw into apply */ }
         }
+        // D19 (Artifacts spec §4.3): the contact's artifact comments go with
+        // the contact — awaited before the row delete. The helper never
+        // throws (a missing artifacts table is a no-op), so it cannot wedge
+        // the apply loop.
+        await deleteContactArtifactComments(this.db, crowId);
         await this.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
         // (Rule (a) above already cleared any tombstone coexisting with a local row, so
         // `tombFloor` is 0 on this branch today. Kept in the same shape as the branch

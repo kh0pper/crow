@@ -231,6 +231,13 @@ export async function deleteContactLocal(db, managers, row) {
   if (!row || row.id == null) return { ok: false, reason: "no-row" };
   if (row.origin === "local-bot") return { ok: false, reason: "local-bot" };
   await unwireContact(managers, row);
+  // D19 (Artifacts spec §4.3): the contact's artifact comments go with the
+  // contact. Lazy import keeps this module dependency-free at load (header
+  // contract); the helper itself never throws (a missing table is a no-op).
+  try {
+    const { deleteContactArtifactComments } = await import("../shared/artifact-comment-delete.js");
+    await deleteContactArtifactComments(db, row.crow_id);
+  } catch { /* cleanup must never wedge the delete */ }
   await db.execute({ sql: `DELETE FROM contacts WHERE id = ?`, args: [row.id] });
   const sync = await loadSyncMod();
   await sync.emitContactDelete(db, row.crow_id, row.lamport_ts);
