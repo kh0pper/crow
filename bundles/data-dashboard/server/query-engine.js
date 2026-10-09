@@ -45,7 +45,8 @@ export async function executeReadQuery(dbPath, sql, limit = MAX_ROWS, opts = {})
 
 /** Tables, columns, row counts and indexes of a dataset. */
 export async function getSchema(dbPath) {
-  return ds.readDatasetSchema(dbPath);
+  // Off-process too: the panel renders this inside the gateway.
+  return ds.readDatasetSchemaAsync(dbPath);
 }
 
 /** Create an empty database in the project's managed folder; returns its path. */

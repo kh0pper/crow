@@ -32,7 +32,7 @@ There are two kinds of backend, chosen with `backend_type` on `crow_register_bac
 
 An `mcp_server` backend is a command your Crow will run, so registering one is never enough to run it. The AI (or a bot) can only create it in **pending approval**. To start it, open **Crow's Nest › Projects**, open the backend's project, and look under **Data Backends**. The page shows exactly what would run: the command, every argument on its own line (invisible or non-ASCII characters appear as `\u{…}` codes), and the exact names of the environment variables it gets. Press **Approve and run exactly this** to approve it; **Stop running it** withdraws the approval.
 
-`connection_ref` may contain only `command`, `args`, `envVars` and `command_sha256`. A registration with any other key, or too long to show in full, cannot be approved.
+`connection_ref` may contain only `command`, `args`, `envVars` and `command_sha256`. Crow stores it in one canonical form, and the page, the approval and the start all read that same text; a registration with any other key, duplicate keys, or too long to show in full, cannot be approved. Pinned files are started by their real path, re-checked immediately before the start.
 
 What an approval covers:
 

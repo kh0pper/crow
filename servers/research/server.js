@@ -22,7 +22,7 @@ import {
 } from "../shared/project-acl.js";
 import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
-import { parseLaunchSpec, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 
 const SOURCE_TYPES = [
@@ -711,7 +711,8 @@ export function createProjectServer(dbPath, options = {}) {
         const launch = parseLaunchSpec(connRef);
         if (!launch.ok) return fail(`Error: ${launch.reason}.`);
         status = PENDING_STATUS;
-        storedRef = connection_ref;
+        // Store the one canonical text every reader parses (see canonicalSpecText).
+        storedRef = canonicalSpecText(connRef);
       } else {
         const check = resolveDatasetPath(connRef.path);
         if (!check.ok) return fail(`Error: ${check.reason}.`);

@@ -46,7 +46,7 @@ La ruta real de un conjunto de datos debe estar bajo `datasets/` o `projects/<id
 
 ### Límites de filas, tamaño y tiempo
 
-Las filas se leen paso a paso y se detienen en el límite (5.000 filas, 8 MB serializados), diga lo que diga el texto SQL. Cada consulta corre en un proceso hijo de corta vida que se mata al llegar a su límite de tiempo (10 s por defecto); como máximo cuatro a la vez, y las demás se rechazan como ocupadas. Las lecturas de esquema (`getSchema`) siguen en el proceso.
+Las filas se leen paso a paso y se detienen en el límite (5.000 filas, 8 MB serializados), diga lo que diga el texto SQL. Cada consulta y lectura de esquema corre en un proceso hijo de corta vida que se mata al llegar a su límite de tiempo (10 s); como máximo cuatro a la vez, y las demás se rechazan como ocupadas. El hijo limita su memoria V8 y la de SQLite (`PRAGMA hard_heap_limit`, 128 MB), así que un valor enorme falla allí. Los límites que pasa quien llama solo pueden bajarlos.
 
 El archivo se abre con `O_NOFOLLOW` mientras SQLite lo abre, y después la ruta debe seguir resolviendo al mismo inodo.
 

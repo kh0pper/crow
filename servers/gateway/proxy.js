@@ -19,7 +19,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
-import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -84,16 +84,29 @@ async function connectToServer(integration) {
   };
 
   // Support argsTransform for servers that need env values in args (e.g., Render bearer token)
-  const args = integration.argsTransform
+  let command = integration.command;
+  let args = integration.argsTransform
     ? integration.argsTransform(spawnEnv)
     : integration.args;
+
+  // Data backends: the last check runs here, synchronously, with no await
+  // between it and the spawn inside client.connect() below.
+  if (integration.preSpawn) {
+    const ready = integration.preSpawn();
+    if (!ready || !ready.ok) {
+      console.warn(`  [proxy] ${integration.name}: not started — ${ready ? ready.reason : "pre-spawn check failed"}`);
+      return null;
+    }
+    command = ready.command;
+    args = ready.args;
+  }
 
   // Timeout: npx/uvx may need to download packages on first run
   const CONNECT_TIMEOUT_MS = 60_000;
 
   try {
     const transport = new StdioClientTransport({
-      command: integration.command,
+      command,
       args,
       env,
     });
@@ -445,14 +458,13 @@ export async function loadDynamicBackends() {
       const existing = connectedServers.get(backendKey);
       if (existing && existing.status === "connected") continue;
 
-      let connRef;
-      try {
-        connRef = JSON.parse(row.connection_ref);
-      } catch {
-        console.error(`  [proxy] Backend #${row.id} "${row.name}": invalid connection_ref JSON`);
+      // The one parser every reader uses (approval page, hash, spawner).
+      const parsed = parseStoredSpec(row.connection_ref);
+      if (!parsed.ok) {
+        console.error(`  [proxy] Backend #${row.id} "${row.name}": ${parsed.reason}`);
         await db.execute({
           sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
-          args: ["Invalid connection_ref JSON", row.id],
+          args: [parsed.reason, row.id],
         });
         continue;
       }
@@ -474,7 +486,7 @@ export async function loadDynamicBackends() {
         console.warn(`  [proxy] Backend #${row.id} "${row.name}": not approved by the owner — not started`);
         continue;
       }
-      const launch = verifyBackendLaunch(connRef);
+      const launch = verifyBackendLaunch(parsed.spec);
       if (!launch.ok) {
         await db.execute({
           sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
@@ -494,7 +506,11 @@ export async function loadDynamicBackends() {
         continue;
       }
 
-      // Build integration-shaped object for connectToServer
+      // Re-read the row right before starting it, and let connectToServer run
+      // the final synchronous check (prepareSpawn) in the same tick as the
+      // spawn: the hash, files and launcher it verifies are the ones executed.
+      const fresh = (await db.execute({ sql: "SELECT * FROM data_backends WHERE id = ? AND backend_type = 'mcp_server'", args: [row.id] })).rows[0];
+      if (!fresh || fresh.connection_ref !== row.connection_ref || fresh.approved_ref_sha256 !== row.approved_ref_sha256) continue;
       const integration = {
         id: backendKey,
         name: row.name,
@@ -502,6 +518,7 @@ export async function loadDynamicBackends() {
         args: launch.args,
         envVars: launch.envVars,
         baseEnv: backendEnv([]),
+        preSpawn: () => prepareSpawn(fresh),
       };
 
       try {

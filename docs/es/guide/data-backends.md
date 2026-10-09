@@ -30,7 +30,7 @@ Hay dos tipos de backend, elegidos con `backend_type` en `crow_register_backend`
 
 Un backend `mcp_server` es un comando que tu Crow ejecutará, así que registrarlo nunca basta para ejecutarlo. La IA (o un bot) solo puede crearlo **pendiente de aprobación**. Para iniciarlo, abre **Crow's Nest › Proyectos**, abre el proyecto del backend y busca **Data Backends**. La página muestra exactamente lo que se ejecutaría: el comando, cada argumento en su propia línea (los caracteres invisibles o no ASCII aparecen como códigos `\u{…}`) y los nombres exactos de las variables de entorno que recibe.
 
-`connection_ref` solo puede contener `command`, `args`, `envVars` y `command_sha256`. Un registro con cualquier otra clave, o demasiado largo para mostrarse completo, no se puede aprobar.
+`connection_ref` solo puede contener `command`, `args`, `envVars` y `command_sha256`. Crow lo guarda en una única forma canónica, y la página, la aprobación y el inicio leen ese mismo texto; un registro con cualquier otra clave, claves duplicadas, o demasiado largo para mostrarse completo, no se puede aprobar. Los archivos fijados se inician por su ruta real, comprobada justo antes del inicio.
 
 La aprobación cubre la línea de comando y el contenido actual de los archivos que ejecuta (el lanzador, si es una ruta, y cada argumento que nombra un archivo existente, como el script que ejecuta un intérprete), salvo archivos del sistema propiedad de root. Si se edita uno de esos archivos, deja de iniciarse hasta que lo apruebes de nuevo. **No** cubre el código que el comando descarga al iniciarse (por ejemplo paquetes de `npx` o `uvx`) ni otros archivos que un script abra por su cuenta.
 

@@ -537,3 +537,78 @@ test("lows: approval form carries the CSRF field; the free-text name comes after
   assert.ok(html.indexOf("NAME-MARK") > html.indexOf("/opt/x/run"), "the name renders before the command");
   assert.match(html, /supplied by whoever registered it/i);
 });
+
+// ============================== review round 2 (commit security review)
+
+test("one parser: a stored spec with duplicate keys, reordered keys or extra spaces is refused everywhere", async () => {
+  const { approveBackend, parseStoredSpec } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const marker = join(HOME, "dup-ran");
+  const evil = `{"command":"node","args":["-v"],"command":"node","args":["-e","require('fs').writeFileSync(${JSON.stringify(marker).replace(/"/g, "'")}, 'x')"]}`;
+  for (const text of [evil, `{"args":["-v"],"command":"node"}`, `{ "command": "node", "args": ["-v"] }`]) {
+    assert.equal(parseStoredSpec(text).ok, false, text);
+    const html = await cell(text);
+    assert.doesNotMatch(html, /value="approve_backend"/, text);
+    const id = pendingRow(text);
+    assert.equal((await approveBackend(createDbClient(CORE), id)).ok, false, text);
+  }
+  // even a row whose approval hash was forged in the DB is not started
+  const { approvalHash } = await import("../servers/shared/data-backend-approval.js");
+  const id = pendingRow(evil);
+  const d = raw(); d.prepare("UPDATE data_backends SET approved_ref_sha256 = ? WHERE id = ?").run("f".repeat(64), id); d.close();
+  void approvalHash;
+  await loadDynamicBackends();
+  assert.equal(existsSync(marker), false);
+  assert.equal(parseStoredSpec(`{"command":"node","args":["-v"]}`).ok, true);
+});
+
+test("registration stores the canonical text", async () => {
+  const client = await connect(createProjectServer(CORE));
+  const r = await client.callTool({ name: "crow_register_backend", arguments: { name: "canon", connection_ref: `{ "args": ["-v"], "command": "node" }` } });
+  assert.ok(!r.isError, text(r));
+  const d = raw();
+  const row = d.prepare("SELECT connection_ref FROM data_backends WHERE name='canon'").get();
+  d.close();
+  assert.equal(row.connection_ref, `{"command":"node","args":["-v"]}`);
+});
+
+test("caps: caller limits can only lower them", async () => {
+  const { effectiveLimits, DEFAULT_MAX_ROWS, DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_MS } = await import("../servers/shared/sqlite-datasets.js");
+  assert.deepEqual(effectiveLimits({ maxRows: 1e9, maxBytes: 1e12, timeoutMs: 1e9 }), { maxRows: DEFAULT_MAX_ROWS, maxBytes: DEFAULT_MAX_BYTES, timeoutMs: DEFAULT_TIMEOUT_MS });
+  assert.deepEqual(effectiveLimits({ maxRows: -5, maxBytes: "x", timeoutMs: NaN }), { maxRows: DEFAULT_MAX_ROWS, maxBytes: DEFAULT_MAX_BYTES, timeoutMs: DEFAULT_TIMEOUT_MS });
+  assert.equal(effectiveLimits({ maxRows: 10 }).maxRows, 10);
+  const p = makeDataset(join(DATA, "datasets", "bytes.db"), 6000);
+  const r = await qe.executeReadQuery(p, "SELECT id, printf('%.2000c', 'x') AS big FROM t", 1e9, { maxBytes: 1e12 });
+  assert.ok(r.truncated && r.rows.length < 5000, `rows ${r.rows.length}`);
+});
+
+test("caps: one huge value fails inside the query process, quickly", async () => {
+  const p = makeDataset(join(DATA, "datasets", "blob.db"), 1);
+  const t = Date.now();
+  let res = null, err = null;
+  try { res = await qe.executeReadQuery(p, "SELECT randomblob(500000000) AS b"); } catch (e) { err = e; }
+  assert.ok(Date.now() - t < 9000, "took too long");
+  if (res) assert.equal(res.rows.length, 0, "a 500 MB value came back");
+  else assert.match(err.message, /memory|too big|stopped|timed out/i);
+});
+
+test("spawn runs the real path of a pinned script, re-checked at the spawn itself", async () => {
+  const { approveBackend, prepareSpawn } = await import("../servers/shared/data-backend-approval.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const { realpathSync } = await import("node:fs");
+  const dir = join(HOME, "realdir"); mkdirSync(dir, { recursive: true });
+  const script = join(dir, "srv.js");
+  const out = join(HOME, "argv1");
+  writeFileSync(script, `require("fs").writeFileSync(${JSON.stringify(out)}, process.argv[1])`);
+  const link = join(HOME, "srv-link.js");
+  symlinkSync(script, link);
+  const id = pendingRow(JSON.stringify({ command: "node", args: [link] }));
+  const db = createDbClient(CORE);
+  assert.equal((await approveBackend(db, id)).ok, true);
+  await loadDynamicBackends();
+  assert.equal(readFileSync(out, "utf8"), realpathSync(script));
+  const d = raw(); const row = d.prepare("SELECT * FROM data_backends WHERE id=?").get(id); d.close();
+  assert.equal(prepareSpawn(row).ok, true);
+  writeFileSync(script, "// edited");
+  assert.equal(prepareSpawn(row).ok, false, "the final pre-spawn check missed an edit");
+});

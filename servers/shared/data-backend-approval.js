@@ -160,11 +160,35 @@ export function parseLaunchSpec(connRef) {
   return { ok: true, spec: { command, args, envVars, ...(pin ? { command_sha256: pin } : {}) } };
 }
 
-/** parseLaunchSpec on the stored connection_ref text. */
+/**
+ * The one canonical text of a launch spec: the keys that are present, in
+ * SPEC_KEYS order, serialized by JSON.stringify. Registration stores exactly
+ * this, and every reader (approval page, approval hash, spawner) goes
+ * through parseStoredSpec, which refuses any stored text that is not already
+ * canonical — so duplicate keys, reordered keys, extra whitespace or
+ * alternative escapes can never make two readers see different specs.
+ */
+export function canonicalSpecText(ref) {
+  const o = {};
+  for (const k of SPEC_KEYS) if (Object.prototype.hasOwnProperty.call(ref, k)) o[k] = ref[k];
+  return JSON.stringify(o);
+}
+
+/**
+ * The single parser for a stored connection_ref, used by the approval page,
+ * the approval hash and the spawner alike.
+ * @returns {{ ok: true, spec: object, text: string } | { ok: false, reason: string }}
+ */
 export function parseStoredSpec(connectionRef) {
+  const text = String(connectionRef ?? "");
   let ref;
-  try { ref = JSON.parse(String(connectionRef ?? "")); } catch { return { ok: false, reason: "connection_ref is not valid JSON" }; }
-  return parseLaunchSpec(ref);
+  try { ref = JSON.parse(text); } catch { return { ok: false, reason: "connection_ref is not valid JSON" }; }
+  const r = parseLaunchSpec(ref);
+  if (!r.ok) return r;
+  if (canonicalSpecText(ref) !== text) {
+    return { ok: false, reason: "connection_ref is not in canonical form (duplicate or reordered keys, extra spaces, or unusual escapes); register it again" };
+  }
+  return { ok: true, spec: r.spec, text };
 }
 
 /**
@@ -239,6 +263,28 @@ export async function approveBackend(db, id, expectedHash) {
     args: [pin, id],
   });
   return { ok: true };
+}
+
+/**
+ * The last check before a spawn, synchronous so nothing can run between it
+ * and the spawn that follows in the same tick: parse the freshly read row's
+ * stored text with the one parser, recompute the approval hash (re-reading
+ * the pinned files), run the launcher check (re-hashing a pinned launcher),
+ * and hand back what to execute — the verified real launcher path, and the
+ * real path of every pinned file argument in place of the name it was given,
+ * so a symlink re-pointed after the check cannot redirect what runs.
+ * Residual window (same as add-ons): a same-uid process rewriting a file in
+ * the instant between this check and exec.
+ * @returns {{ ok: true, command: string, args: string[], envVars: string[] } | { ok: false, reason: string }}
+ */
+export function prepareSpawn(row, cwd = process.cwd()) {
+  const parsed = parseStoredSpec(row && row.connection_ref);
+  if (!parsed.ok) return parsed;
+  if (!isApproved(row)) return { ok: false, reason: "not approved as it stands (its command or a file it runs changed)" };
+  const launch = verifyBackendLaunch(parsed.spec);
+  if (!launch.ok) return launch;
+  const real = new Map(pinnedFiles(parsed.spec, cwd).map((f) => [f.path, f.real]));
+  return { ok: true, command: launch.command, args: parsed.spec.args.map((a) => real.get(a) ?? a), envVars: launch.envVars };
 }
 
 /** Owner action: withdraw an approval (the row stays, it is no longer started). */

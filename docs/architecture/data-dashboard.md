@@ -46,7 +46,7 @@ The realpath of a dataset must sit under the instance data dir's `datasets/` or 
 
 ### Row, size and time caps
 
-Rows are read by stepping the statement and stop at the cap (5,000 rows, 8 MB serialized), whatever the SQL text says. Each query runs in a short-lived child process that is killed at its time limit (10 s by default); at most four run at once, and further queries are refused as busy. Schema reads (`getSchema`) still run in-process.
+Rows are read by stepping the statement and stop at the cap (5,000 rows, 8 MB serialized), whatever the SQL text says. Each query and schema read runs in a short-lived child process that is killed at its time limit (10 s); at most four run at once, and further queries are refused as busy. The child caps its V8 heap and SQLite's heap (`PRAGMA hard_heap_limit`, 128 MB), so one huge value fails there. Caller-supplied limits can only lower the caps.
 
 The file is opened with `O_NOFOLLOW` while SQLite opens it, and the path must still resolve to the same inode afterwards.
 

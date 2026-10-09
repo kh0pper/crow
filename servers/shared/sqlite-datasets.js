@@ -187,7 +187,7 @@ export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes 
   if (!READ_KEYWORDS.has(firstKeyword(sql))) {
     throw new Error("Only read-only queries (SELECT, WITH, EXPLAIN, PRAGMA, VALUES) are allowed.");
   }
-  const cap = Math.max(1, Math.min(Number(maxRows) || DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS));
+  const { maxRows: cap, maxBytes: byteCap } = effectiveLimits({ maxRows, maxBytes });
   const db = openDatasetReadOnly(p);
   const start = Date.now();
   try {
@@ -204,7 +204,6 @@ export function runReadOnlyQuery(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes 
     const rows = [];
     let truncated = false;
     let bytes = 0;
-    const byteCap = Math.max(1024, Math.min(Number(maxBytes) || DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES));
     for (const row of stmt.iterate()) {
       if (rows.length >= cap) { truncated = true; break; }
       bytes += Buffer.byteLength(JSON.stringify(row) || "", "utf8");
@@ -258,45 +257,82 @@ export function createManagedDatabase(projectId, name) {
 
 // ----------------------------------------------------------- off-process
 
+/**
+ * Caller-supplied limits can only LOWER the caps, never raise them: rows
+ * ≤ DEFAULT_MAX_ROWS, bytes ≤ DEFAULT_MAX_BYTES (counted per row, serialized,
+ * before the row is kept — one huge value ends the read with that row
+ * dropped), time ≤ DEFAULT_TIMEOUT_MS.
+ */
+export function effectiveLimits({ maxRows, maxBytes, timeoutMs } = {}) {
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : hi, hi));
+  return {
+    maxRows: Math.floor(clamp(maxRows, 1, DEFAULT_MAX_ROWS)),
+    maxBytes: Math.floor(clamp(maxBytes, 1024, DEFAULT_MAX_BYTES)),
+    timeoutMs: Math.floor(clamp(timeoutMs, 100, DEFAULT_TIMEOUT_MS)),
+  };
+}
+
+/** SQLite's own heap ceiling inside the query process (PRAGMA hard_heap_limit). */
+export const CHILD_SQLITE_HEAP_BYTES = 128 * 1024 * 1024;
+
 const CHILD_PATH = fileURLToPath(new URL("./sqlite-dataset-child.js", import.meta.url));
 let liveQueries = 0;
 
 /**
- * runReadOnlyQuery in a short-lived child process with a wall-clock limit,
- * so a heavy query (reachable from the public blog chart endpoint) never
- * blocks the gateway and never outlives its limit: at the limit the child
- * is SIGKILLed (a worker thread could not be stopped inside a long SQLite
- * step). At most MAX_QUERY_WORKERS run at once; beyond that a query is
- * refused as busy rather than queued.
+ * Run one job ({ op: "query" | "schema", ... }) in a short-lived child
+ * process with a wall-clock limit, so a heavy query (the public blog chart
+ * endpoint reaches this) never blocks the gateway and never outlives its
+ * limit: at the limit the child is SIGKILLed (a worker thread cannot be
+ * stopped inside a long SQLite step). The child caps its V8 heap and
+ * SQLite's heap, so one huge value fails inside the child. At most
+ * MAX_QUERY_WORKERS run at once; beyond that a job is refused as busy.
  */
-export function runReadOnlyQueryAsync(p, sql, { maxRows = DEFAULT_MAX_ROWS, maxBytes = DEFAULT_MAX_BYTES, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function runInChild(job, timeoutMs) {
   if (liveQueries >= MAX_QUERY_WORKERS) {
     return Promise.reject(new Error("Too many dataset queries are running; try again shortly."));
   }
-  const limit = Math.max(100, Math.min(Number(timeoutMs) || DEFAULT_TIMEOUT_MS, 60_000));
+  const limit = effectiveLimits({ timeoutMs }).timeoutMs;
   return new Promise((resolveP, rejectP) => {
-    liveQueries++;
     let settled = false;
-    const env = { CROW_DATA_DIR: dataDir(), PATH: process.env.PATH || "" };
+    let timer = null;
+    const finish = (fn, v) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); fn(v); } };
+    const env = { CROW_DATA_DIR: dataDir(), PATH: process.env.PATH || "", CROW_DATASET_CHILD_HEAP: String(CHILD_SQLITE_HEAP_BYTES) };
     if (process.env.CROW_DB_PATH) env.CROW_DB_PATH = process.env.CROW_DB_PATH;
-    const child = fork(CHILD_PATH, [], {
-      env, execArgv: ["--max-old-space-size=256"], stdio: ["ignore", "ignore", "pipe", "ipc"],
-    });
+    let child;
+    try {
+      child = fork(CHILD_PATH, [], { env, execArgv: ["--max-old-space-size=256"], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    } catch (err) {
+      rejectP(err);
+      return;
+    }
+    liveQueries++;
     child.stderr.resume();
-    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch {}
       finish(rejectP, new Error(`Query timed out (${Math.round(limit / 1000)}s limit)`));
     }, limit);
     child.once("message", (m) => {
       if (m && m.ok) finish(resolveP, m.result);
       else finish(rejectP, new Error((m && m.error) || "query failed"));
+      // A child that answered but lingers is not left running.
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000).unref();
     });
     child.once("error", (err) => finish(rejectP, err));
     child.once("exit", () => {
       liveQueries--;
       finish(rejectP, new Error("query process stopped"));
     });
-    child.send({ path: p, sql: String(sql), maxRows, maxBytes });
+    try { child.send(job); } catch (err) { try { child.kill("SIGKILL"); } catch {} finish(rejectP, err); }
   });
+}
+
+/** runReadOnlyQuery off-process; see runInChild. */
+export function runReadOnlyQueryAsync(p, sql, opts = {}) {
+  const { maxRows, maxBytes, timeoutMs } = effectiveLimits(opts);
+  return runInChild({ op: "query", path: p, sql: String(sql), maxRows, maxBytes }, timeoutMs);
+}
+
+/** readDatasetSchema off-process (COUNT(*) on a large table can be slow). */
+export function readDatasetSchemaAsync(p, { timeoutMs } = {}) {
+  return runInChild({ op: "schema", path: p }, timeoutMs);
 }
