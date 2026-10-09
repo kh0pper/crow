@@ -2172,6 +2172,50 @@ test("locked narrowing survives a restart: a lock read back from the row is re-a
   await engine.stopAll?.();
 });
 
+test("spawn({narrowedTools}): when the lock seed does NOT land on the row, spawn throws narrowing_not_persisted and the session is stopped (review C1-R1)", async () => {
+  const { engine, state } = makeEngine();
+  // The seed insert silently lands WITHOUT the narrowing (a future insert
+  // path change, a thread-id collision, a trigger): RAISE(IGNORE) drops it.
+  const c = raw();
+  c.exec("CREATE TRIGGER IF NOT EXISTS zz_noseed BEFORE INSERT ON bot_sessions WHEN new.narrowed_tools IS NOT NULL BEGIN SELECT RAISE(IGNORE); END;");
+  c.close();
+  const liveOf = async () => (await engine.list()).filter((x) => x.state !== "stopped").length;
+  const liveBefore = await liveOf();
+  try {
+    await assert.rejects(
+      engine.spawn({ botId: "botty", narrowedTools: ["crow:only:mcp__artifacts__"] }),
+      (e) => /narrowing_not_persisted/.test(e.code || e.message),
+    );
+    await tick();
+    assert.ok((await liveOf()) <= liveBefore, "the session was stopped — never left running UNLOCKED");
+  } finally {
+    const c2 = raw(); c2.exec("DROP TRIGGER IF EXISTS zz_noseed"); c2.close();
+    await engine.stopAll?.();
+  }
+});
+
+test("restart re-adoption is load-bearing: a row-sourced lock whose seed did not persist is REFUSED too (review C1-L1)", async () => {
+  // Same shape as "survives a restart" (the row is the only source), but the
+  // row seed lands empty. WITHOUT startChild's re-adoption line the engine
+  // would never learn the lock from the row, would skip the persist-verify,
+  // and this spawn would wrongly succeed.
+  const stored = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  const { engine } = makeEngine({ bridgeOpts: { narrowedTools: stored } });
+  const c = raw();
+  c.exec("CREATE TRIGGER IF NOT EXISTS zz_noseed2 BEFORE INSERT ON bot_sessions WHEN new.narrowed_tools IS NOT NULL BEGIN SELECT RAISE(IGNORE); END;");
+  c.close();
+  const liveOf = async () => (await engine.list()).filter((x) => x.state !== "stopped").length;
+  const liveBefore = await liveOf();
+  try {
+    await assert.rejects(engine.spawn({ botId: "botty" }), (e) => /narrowing_not_persisted/.test(e.code || e.message));
+    await tick();
+    assert.ok((await liveOf()) <= liveBefore, "refused and stopped, not running on a phantom lock");
+  } finally {
+    const c2 = raw(); c2.exec("DROP TRIGGER IF EXISTS zz_noseed2"); c2.close();
+    await engine.stopAll?.();
+  }
+});
+
 test("locked narrowing fails CLOSED: an unreadable stored value that claims a lock refuses to start", async () => {
   const { engine, state } = makeEngine({ bridgeOpts: { narrowedTools: '["crow:locked", "crow:only:mcp__art' } });
   await assert.rejects(engine.spawn({ botId: "botty" }), (e) => /narrowing_invalid/.test(e.code || e.message));

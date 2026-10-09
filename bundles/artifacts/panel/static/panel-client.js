@@ -117,7 +117,7 @@
         var on = toggle.getAttribute("aria-pressed") !== "true";
         toggle.setAttribute("aria-pressed", on ? "true" : "false");
         viewer.setCommentMode(on);
-        // Script-free types: region anchors from a transparent overlay (diagram, image).
+        // Script-free types: region anchors from a transparent overlay (diagrams).
         if (art.type === "diagram") { if (on) overlay.removeAttribute("hidden"); else overlay.setAttribute("hidden", ""); }
       });
       overlay.addEventListener("click", function (e) {
@@ -138,7 +138,7 @@
       j.threads.forEach(function (t) {
         var box = el("section", { class: "ca-thread ca-" + t.status });
         box.appendChild(el("div", { class: "ca-anchor", text: (t.anchor.text || t.anchor.quote || t.anchor.selector || t.anchor.kind) + (t.status === "resolved" ? " · " + T.resolved : t.status === "anchor-moved" ? " · " + T.moved : "") }));
-        t.comments.forEach(function (c) { box.appendChild(el("p", { class: "ca-c ca-" + c.author_kind }, [el("b", { text: (c.author_kind === "owner" ? "you" : c.author_id || c.author_kind) + ": " }), el("span", { text: c.text })])); });
+        t.comments.forEach(function (c) { box.appendChild(el("p", { class: "ca-c ca-" + c.author_kind }, [el("b", { text: (c.author_kind === "owner" ? T.you : c.author_id || c.author_kind) + ": " }), el("span", { text: c.text })])); });
         if (t.author_kind === "owner" && t.status !== "resolved") box.appendChild(el("button", { type: "button", text: T.ask_now, onclick: function () { startRound([t.id], "ask"); } }));
         rail.appendChild(box);
       });
@@ -151,6 +151,7 @@
           b.appendChild(el("button", { type: "button", text: T.new_session, onclick: function () { go("new-session"); } }));
           if (d.offerBoard) b.appendChild(el("button", { type: "button", text: T.board_card, onclick: function () { go("board-card"); } }));
         } else if (d.status === "queued") banner(T.queued, "info");
+        else if (d.error || d.status === "failed") banner(fmt(T.delivery_failed, { e: d.error || d.status }), "warn");   // never a false "revising" (review C3-L1)
         else banner(fmt(T.revising, { bot: art.created_by_bot, n: r.round.id }), "info");
       }
       function startRound(include, kind) {
@@ -167,7 +168,7 @@
             var cb = el("input", { type: "checkbox", value: String(t.id) });
             cb.checked = !!t.includedByDefault;
             var row = el("label", { class: t.untrusted ? "ca-untrusted" : "" }, [cb, el("span", { text: " " + T.include })]);
-            var body = el("div", {}, t.comments.map(function (c) { return el("p", { text: (c.author_kind === "owner" ? "you" : c.author_id || c.author_kind) + ": " + c.text }); }));
+            var body = el("div", {}, t.comments.map(function (c) { return el("p", { text: (c.author_kind === "owner" ? T.you : c.author_id || c.author_kind) + ": " + c.text }); }));
             if (t.untrusted) body.prepend(el("em", { text: T.contact_thread }));
             dlg.appendChild(el("div", { class: "ca-pv" }, [row, body]));
           });

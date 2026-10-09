@@ -177,11 +177,19 @@ test("rounds: owner-only, one active round, contacts' threads make it UNTRUSTED,
 
 test("delivery: an untrusted round always gets a NEW session LOCKED to the Artifacts tools; trusted rounds reuse the origin session; capacity queues", async () => {
   const calls = [];
+  let taintAtSend = null;   // review C2-R2: the DB state AS OF the moment the text is sent
   const engine = {
     sessions: [{ sessionId: "s-live", botId: "bobby", threadId: "perchlive-origin", state: "idle" }],
     async list() { return this.sessions; },
     async spawn(o) { calls.push(["spawn", o]); if (this.full) throw Object.assign(new Error("interactive_capacity"), { code: "interactive_capacity" }); return { sessionId: "s-new", threadId: "perchlive-new" }; },
-    async message(id, text) { calls.push(["message", id, text.slice(0, 40)]); },
+    async message(id, text) {
+      calls.push(["message", id, text.slice(0, 40)]);
+      if (id === "s-new" && taintAtSend === null) {
+        // The ARTIFACT_SESSION_TAINT ROW itself (sessionIsClean would read
+        // false here anyway — a brand-new thread has no bot_sessions row).
+        taintAtSend = (await s.db.execute({ sql: "SELECT 1 FROM artifact_session_taint WHERE bot_id='bobby' AND thread_id='perchlive-new'", args: [] })).rows.length > 0;
+      }
+    },
   };
   const def = { tools: { crow_mcp: ["artifacts/artifact_update", "gmail/send"] } };
   assert.equal(botHasArtifactsTools({ tools: { crow_mcp: ["gmail/send"] } }), false);
@@ -193,6 +201,7 @@ test("delivery: an untrusted round always gets a NEW session LOCKED to the Artif
   const out = await deliverRound(s.db, r, { engine, botDef: def, originThread: "perchlive-origin" });
   assert.equal(out.threadId, "perchlive-new");
   assert.deepEqual(calls[0], ["spawn", { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] }], "never the live origin session");
+  assert.equal(taintAtSend, true, "the taint record exists BEFORE the round text is sent (review C2-R2)");
   assert.equal((await rounds.getRound(s.db, r.id)).session_id, "perchlive-new");
   await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "ok" });
   const t2 = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "mine", author: { kind: "owner" } });
@@ -326,6 +335,33 @@ test("3.4b: the trusted auto fallback picks the MOST RECENTLY ACTIVE clean sessi
   assert.equal(out.threadId, "perchlive-34b-new", `most recent activity wins: ${JSON.stringify(out)}`);
   assert.equal(sent[0].id, "s-new");
   await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "x" });
+});
+
+test("local blob store: absent reads null, but unreadable objects and failed deletes are ERRORS (review 1b-L2/L3); keys() filters junk (1b-N1)", async (t) => {
+  const { createLocalBlobStore } = await import("../bundles/artifacts/server/blob-store.js");
+  const { mkdirSync, writeFileSync, chmodSync } = await import("node:fs");
+  const root = join(s.dir, "errstore");
+  const b = createLocalBlobStore(root);
+  const k = await b.put(Buffer.from("payload"));
+  assert.equal((await b.get(k)).toString(), "payload");
+  assert.equal(await b.get("sha256/" + "0".repeat(64)), null, "absent → null");
+  // An unreadable "object" (a directory planted at the key path) must throw,
+  // never read as a silent miss.
+  const k2 = "sha256/" + "a".repeat(64);
+  mkdirSync(join(root, k2), { recursive: true });
+  await assert.rejects(b.get(k2), /EISDIR/);
+  // A failed delete surfaces (GC must not count bytes it did not free).
+  chmodSync(join(root, "sha256"), 0o500);
+  t.after(() => { try { chmodSync(join(root, "sha256"), 0o700); } catch {} });
+  await assert.rejects(b.del(k), (e) => e.code === "EACCES" || e.code === "EPERM");
+  chmodSync(join(root, "sha256"), 0o700);
+  // keys() only reports content-shaped names: planted junk with an invalid
+  // name is invisible to GC. (A DIRECTORY at a valid key path still lists —
+  // it reads as an orphan candidate and fails closed downstream.)
+  writeFileSync(join(root, "sha256", "junk.txt"), "x");
+  const keys = await b.keys();
+  assert.ok(!keys.includes("sha256/junk.txt"), `junk filtered: ${keys}`);
+  assert.ok(keys.includes(k));
 });
 
 test("ReDoS: adversarial inputs to every scanner finish inside a time budget", () => {

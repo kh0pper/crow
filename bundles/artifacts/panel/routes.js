@@ -164,7 +164,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved });
     const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
     const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
-    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice: req.body?.choice || "auto", originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    // Same whitelist as the deliver route (review C3-N2): an unknown choice is auto.
+    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
+    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
     res.status(201).json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
   }));
 

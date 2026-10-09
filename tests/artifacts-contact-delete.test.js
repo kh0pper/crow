@@ -133,6 +133,30 @@ test("missing artifact tables (bundle not installed): every path is a no-op, nev
   } finally { rmSync(dir2, { recursive: true, force: true }); }
 });
 
+test("prune: the blanking rides the SAME transaction — a failed batch leaves the rewired contact's words intact (review C3-L2)", async () => {
+  const row = await seedContact("crow:d19-atomic");
+  await seedComments("crow:d19-atomic");
+  // A db whose batch fails AFTER the pre-checks: with the blanking inside the
+  // batch nothing was written; the contact is rewired and alive with its words.
+  const flaky = {
+    execute: (q) => db.execute(q),
+    batch: async () => { throw new Error("batch boom"); },
+  };
+  const out = await pruneAdvertisedContact(flaky, {}, row);
+  assert.equal(out.ok, false);
+  const s = await commentStates();
+  assert.equal(s.contact.text, "CONTACT-SECRET-WORDS", "no blanking ahead of the failed transaction");
+  assert.equal(s.contact.deleted_at, null);
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:d19-atomic'" })).rows[0].c, 1, "the contact survived (rewired)");
+  // And the healthy path still blanks inside the transaction:
+  const ok = await pruneAdvertisedContact(db, {}, row);
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  const s2 = await commentStates();
+  assert.equal(s2.contact.text, "");
+  assert.ok(s2.contact.deleted_at);
+  await clearComments();
+});
+
 test("the helper distinguishes a missing table (no-op) from a real error (propagates to the caller's policy)", async () => {
   const noTable = { execute: async () => { throw new Error("no such table: artifact_comments"); } };
   assert.equal(await deleteContactArtifactComments(noTable, "crow:x"), 0);

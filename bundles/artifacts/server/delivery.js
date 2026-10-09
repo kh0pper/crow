@@ -47,12 +47,18 @@ async function liveSessionsOf(db, engine, botId) {
 }
 
 /** R-M3: stop a locked round session when its round ends. Returns true when
- *  nothing of it is left running. */
+ *  nothing of it is left running. A transient engine fault (list/stop
+ *  throwing) reads as "not stopped" so one bad leg can never abort a whole
+ *  sweep tick before the queued retries (review C2-L1); the next tick retries
+ *  (the row keeps session_stopped_at NULL). */
 export async function stopRoundSession(engine, threadId) {
   if (!threadId) return true;
-  const s = (await engine.list()).find((x) => x.threadId === threadId);
-  if (!s || s.state === "stopped") return true;
-  try { await engine.stop(s.sessionId); return true; } catch { return false; }
+  try {
+    const s = (await engine.list()).find((x) => x.threadId === threadId);
+    if (!s || s.state === "stopped") return true;
+    await engine.stop(s.sessionId);
+    return true;
+  } catch { return false; }
 }
 
 /**

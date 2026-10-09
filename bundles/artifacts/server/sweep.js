@@ -43,10 +43,15 @@ async function sweepOnce(db, { engine = null, blobs = null, now = Date.now(), no
   if (!engine) return out;   // stopping and retrying need the engine; timeouts did not
   const ended = (await db.execute({ sql: "SELECT id, session_id FROM artifact_rounds WHERE untrusted_input=1 AND status IN ('done','failed','timed-out') AND session_id IS NOT NULL AND session_stopped_at IS NULL", args: [] })).rows;
   for (const r of ended) {
-    if (await stopRoundSession(engine, r.session_id)) {
-      await db.execute({ sql: "UPDATE artifact_rounds SET session_stopped_at=datetime('now') WHERE id=?", args: [r.id] });
-      out.stopped.push(Number(r.id));
-    }
+    // Guarded per row (review C2-L1): a transient engine fault on ONE stop
+    // must not skip the queued retries below; the row stays unstamped and
+    // the next tick retries it.
+    try {
+      if (await stopRoundSession(engine, r.session_id)) {
+        await db.execute({ sql: "UPDATE artifact_rounds SET session_stopped_at=datetime('now') WHERE id=?", args: [r.id] });
+        out.stopped.push(Number(r.id));
+      }
+    } catch (e) { out.problem = out.problem || `stop failed: ${e.message}`; }
   }
   if (!reserved()) {
     const queued = (await db.execute({ sql: "SELECT id, artifact_id FROM artifact_rounds WHERE status='queued' ORDER BY id", args: [] })).rows;

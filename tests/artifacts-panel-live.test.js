@@ -47,7 +47,7 @@ before(async () => {
   const dashboardAuth = (req, res, next) => (/crow_session=good/.test(req.headers.cookie || "") ? next() : res.status(401).end());
   const app = express();
   app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; HttpOnly; Path=/", "crow_csrf=tok; Path=/"]); res.end("ok"); });
-  app.use(artifactsRouter(dashboardAuth, { db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine, loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts/artifact_update"] } }) }));
+  app.use(artifactsRouter(dashboardAuth, { db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine, loadBotDef: async (botId) => (botId === "notools" ? { tools: { crow_mcp: ["gmail/send"] } } : { tools: { crow_mcp: ["artifacts/artifact_update"] } }) }));
   app.get("/dashboard/artifacts", dashboardAuth, (req, res) => panel.handler(req, res, { lang: "en", layout: ({ content }) => `<!doctype html><html><head><meta charset="utf-8"></head><body>${content}</body></html>` }));
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
@@ -207,8 +207,29 @@ test("a contact thread included in the round makes a LOCKED new session; its wor
     const round = (await s.db.execute({ sql: "SELECT untrusted_input, session_id FROM artifact_rounds WHERE artifact_id=? ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0];
     assert.equal(Number(round.untrusted_input), 1, "the round row is untrusted");
     assert.equal(round.session_id, "perchlive-live");
-    // The locked session's taint record exists BEFORE the text was sent.
+    // The locked session's taint record exists (the BEFORE-send ordering itself is pinned in the model suite, review C2-R2).
     const taint = (await s.db.execute({ sql: "SELECT reason FROM artifact_session_taint WHERE thread_id='perchlive-live'" })).rows;
     assert.ok(taint.length >= 1 && taint[0].reason === "untrusted-round");
+  } finally { await t.close(); }
+});
+
+test("a bot without the Artifacts tools: the owner sees the delivery failure, never a false 'revising' (review C3-L1)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const comments = await import("../bundles/artifacts/server/comments.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "No tools bot", type: "document", source: { markdown: "draft" }, actor: { kind: "bot", id: "notools" } }, { markdownBlocks });
+  await comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "owner note", author: { kind: "owner" } });
+  const spawnsBefore = s.spawns.length, messagesBefore = s.messages.length;
+  const t = await tab();
+  try {
+    await t.send("Page.navigate", { url: `http://dash.test:${s.port}/login` }); await sleep(300);
+    await t.send("Page.navigate", { url: `http://dash.test:${s.port}/dashboard/artifacts?id=${art.id}` });
+    assert.ok(await waitFor(() => t.evalIn("!!document.querySelector('.ca-send')")));
+    await t.evalIn("document.querySelector('.ca-send').click()");
+    assert.ok(await waitFor(() => t.evalIn("!!document.querySelector('dialog.ca-preview[open]')")));
+    await t.evalIn("document.querySelector('dialog.ca-preview button').click()");
+    assert.ok(await waitFor(() => t.evalIn("document.body.textContent.includes('bot_lacks_artifacts')")), "the failure reason is shown");
+    assert.equal(await t.evalIn("document.body.textContent.includes('is revising')"), false, "never a false 'revising' banner");
+    assert.equal(s.spawns.length, spawnsBefore, "nothing spawned");
+    assert.equal(s.messages.length, messagesBefore, "nothing sent");
   } finally { await t.close(); }
 });

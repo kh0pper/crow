@@ -96,3 +96,30 @@ test("a failing notification or a missing engine never throws into the MCP call"
   assert.equal(out.stopped, false, "no engine → nothing stopped (the sweep retries)");
   assert.equal(await roundDoneEffects(s.db, null, {}).then((o) => o.stopped), false);
 });
+
+test("a transient engine fault on the stop leg never aborts the tick: queued rounds are still retried (review C2-L1)", async () => {
+  const { runSweep } = await import("../bundles/artifacts/server/sweep.js");
+  // An ended untrusted round with an unstamped session + a queued trusted round.
+  const stuck = await makeRound({ untrusted: true });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done', session_id='perchlive-gone' WHERE id=?", args: [stuck.round.id] });
+  const queued = await makeRound({ untrusted: false });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='queued', session_id=NULL WHERE id=?", args: [queued.round.id] });
+  await s.db.execute({ sql: "UPDATE artifacts SET created_by_bot='bobby' WHERE id=?", args: [queued.artifact.id] });
+  await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby','perchlive-clean2',NULL)", args: [] });
+  const sent = [];
+  let listCalls = 0;
+  const engine = {
+    // The stop leg runs first and faults; the queued retry (which also lists)
+    // must still go through.
+    async list() { listCalls++; if (listCalls === 1) throw new Error("engine wedged"); return [{ sessionId: "s-clean2", botId: "bobby", threadId: "perchlive-clean2", state: "idle" }]; },
+    async spawn(o) { return { sessionId: "s-q", threadId: "perchlive-q" }; },
+    async message(id, text) { sent.push(text); },
+  };
+  const out = await runSweep(s.db, { engine, botDefOf: async () => ({ tools: { crow_mcp: ["artifacts"] } }), notify: async () => {} });
+  assert.ok(!out.skipped);
+  assert.deepEqual(out.stopped, [], "the faulting stop stamped nothing");
+  const unstamped = (await s.db.execute({ sql: "SELECT session_stopped_at FROM artifact_rounds WHERE id=?", args: [stuck.round.id] })).rows[0];
+  assert.equal(unstamped.session_stopped_at, null, "the unstamped row stays for the next tick");
+  assert.ok(sent.length >= 1, "the queued round was still delivered despite the stop-leg fault");
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [queued.round.id] });
+});
