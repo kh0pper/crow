@@ -422,3 +422,22 @@ export function generateExcerpt(markdown, maxLength = 200) {
   if (plain.length <= maxLength) return plain;
   return plain.slice(0, maxLength).replace(/\s\S*$/, "") + "…";
 }
+
+/**
+ * Top-level Markdown blocks, each rendered and sanitized on its own (Crow
+ * Artifacts, the `document` type: every block becomes an addressable anchor
+ * `b<n>` for comments). Same parser and sanitizer as renderMarkdown; blank
+ * `space` tokens are skipped. Callers bound the input size first (marked has
+ * a cliff on long escape-dense input, see BOT_MD_MAX_INPUT above).
+ * @returns {{ type: string, text: string, html: string }[]}
+ */
+export function markdownBlocks(markdown) {
+  if (!markdown) return [];
+  return marked.lexer(String(markdown))
+    .filter((t) => t.type !== "space")
+    .map((t) => ({
+      type: t.type,
+      text: String(t.text || t.raw || "").replace(/\s+/g, " ").trim().slice(0, 400),
+      html: sanitizeRendered(marked.parser([t])),
+    }));
+}
