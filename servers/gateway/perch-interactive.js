@@ -138,6 +138,11 @@
  * cross-process bridge-tick race is pre-existing and explicitly out of scope
  * (spec §9).
  */
+import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../../scripts/pi-bots/narrowing-lock.mjs";
+import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
+import { markTaintUnrecorded } from "./session-taint-memory.js";
+import Database from "better-sqlite3";
+import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -698,6 +703,10 @@ export function createInteractiveEngine({
       uptimeSeconds: s.childSince ? Math.max(0, Math.round((Date.now() - s.childSince) / 1000)) : null,
       memoryMB: childMemoryMB(s),
       toolCount: s.toolCount == null ? null : s.toolCount,
+      // Artifacts Task 3.4b: the trusted-round session fallback sorts by last
+      // activity; engine.list() had no timestamp, so the eviction-recency
+      // stamp is exposed here (delivery.js liveSessionsOf).
+      lastEventAt: s.lastEventAt || null,
       // I3 (final review): neither stateEvent() nor snapshot() used to
       // expose whether a turn is actually in flight, and drawer.js's
       // bd.turnInFlight was set only by the SENDING tab — so on the primary
@@ -945,16 +954,19 @@ export function createInteractiveEngine({
           // or control({cwd}) stamped. writeCwd() is the targeted single-column
           // writer for a control() change (no status restamp), exactly as
           // writeModel() is for the model column.
+          // narrowed_tools is NEVER restamped here: the INSERT below seeds a
+          // forced (locked) narrowing once; after that the narrow route is its
+          // only writer, so extra narrowing the owner adds is never erased.
           args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
         },
         {
           sql:
-            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model,cwd) " +
-            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,?,? " +
+            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model,cwd,narrowed_tools) " +
+            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
           // A row this INSERT mints is brand new and cannot have a name yet;
           // label defaults to NULL and writeLabel() owns it from there.
-          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.forcedNarrowing || null, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -1461,6 +1473,15 @@ export function createInteractiveEngine({
 
   // ---- child construction --------------------------------------------------
 
+  /** Union of two narrowed_tools JSON arrays (disable lists). A malformed
+   *  side is ignored; the forced side always survives. */
+  function mergeDisabled(a, b) {
+    // b is always the forced (valid) list; a is the stored one, already
+    // checked by the caller.
+    const parse = (j) => { try { const v = JSON.parse(j); return Array.isArray(v) ? v.filter((t) => typeof t === "string") : []; } catch { return []; } };
+    return JSON.stringify([...new Set([...(a ? parse(a) : []), ...parse(b)])]);
+  }
+
   /**
    * Build the world FRESH, warm the model, construct the child, attach the exit
    * handler, and stamp the row. Shared by spawn (piSessionId null) and wake
@@ -1482,6 +1503,23 @@ export function createInteractiveEngine({
     // writeBotMcp minted, so count the active entries off the .mcp.json it
     // just wrote — best-effort, a missing/unreadable file just drops the count.
     slog("world rebuilt" + mintedSummary(world));
+    // Fail closed on a locked narrowing (spec §7.3). After a gateway restart
+    // the in-memory forced list is gone, so a lock on the row is re-adopted
+    // here; a stored value that claims a lock but no longer parses refuses to
+    // start rather than falling back to the bot's full toolset.
+    const stored = world.narrowedTools == null ? null : String(world.narrowedTools);
+    let storedList = null;
+    if (stored != null) { try { const v = JSON.parse(stored); if (Array.isArray(v)) storedList = v; } catch {} }
+    if (stored != null && storedList == null && (mentionsLock(stored) || s.forcedNarrowing)) {
+      slog("refusing to start: locked narrowing on the row is unreadable");
+      throw engineError("narrowing_invalid");
+    }
+    if (!s.forcedNarrowing && storedList && storedList.includes(NARROWING_LOCK)) s.forcedNarrowing = stored;
+    if (s.forcedNarrowing) world.narrowedTools = mergeDisabled(stored, s.forcedNarrowing);
+    // D22 provenance (R3-L1): with any third-party pi extension loaded, a tool
+    // named like a pi builtin may not BE the builtin, so builtin names stop
+    // counting as clean for this session.
+    s.thirdPartyExtensions = ((world.def && world.def.tools && world.def.tools.pi_extensions) || []).length > 0;
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
     // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
@@ -1693,6 +1731,34 @@ export function createInteractiveEngine({
   // ---- child event forwarding (the curation contract) ----------------------
 
   /**
+   * D22: write the session-taint record (CREATE IF NOT EXISTS: the table is the
+   * Artifacts bundle's, but the record must exist whether or not the bundle is
+   * installed yet). If the write fails the session is STOPPED: a session whose
+   * outside reading could not be recorded must not carry on looking clean.
+   */
+  function recordOutsideTaintSync(s, toolName) {
+    let db = null;
+    try {
+      db = new Database(process.env.CROW_DB_PATH || join(resolveDataDir(), "crow.db"));
+      db.pragma("busy_timeout = 1000");
+      db.exec("CREATE TABLE IF NOT EXISTS artifact_session_taint (bot_id TEXT NOT NULL, thread_id TEXT NOT NULL, reason TEXT, ts TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (bot_id, thread_id))");
+      db.prepare("INSERT OR IGNORE INTO artifact_session_taint (bot_id, thread_id, reason) VALUES (?,?,?)").run(s.botId, s.threadId, ("tool:" + String(toolName || "?")).slice(0, 64));
+      return true;
+    } catch (e) {
+      // Fail closed WITHOUT depending on the write that just failed: the
+      // in-memory list makes Artifacts treat this session as untrusted, and
+      // the session is stopped. (The gateway cannot veto a tool pi runs
+      // itself; this is the strongest guarantee available here.)
+      markTaintUnrecorded(s.botId, s.threadId);
+      log(`[perch] D22 taint record failed for ${s.botId}/${s.threadId}: ${e.message}; marked untrusted in memory and stopping the session`);
+      stop(s.sessionId).catch(() => { /* best effort */ });
+      return false;
+    } finally {
+      try { db && db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /**
    * Every parsed stdout message from the child, synchronously.
    *
    * `agent_end` is deliberately NOT turned into a `reply` here: the turn
@@ -1706,6 +1772,19 @@ export function createInteractiveEngine({
     s.lastEventAt = now();                           // Track 3 Task 7: eviction recency
     switch (m.type) {
       case "tool_execution_start":
+        // D22: reading outside text taints this session for Artifacts trust.
+        // Recorded at call START from the engine's own (bot, thread).
+        // Written SYNCHRONOUSLY in this tick (before the gateway handles any
+        // later request, e.g. the model's next /artifacts/mcp save); the flag
+        // is set only after the write succeeded, so a failure retries next time.
+        // `s.taintWriteDone` is only a "row already written" memo to skip a
+        // redundant INSERT; it is never read as trust. Trust is the DB row
+        // (insert-only, never deleted) re-read by trust.js on every save. A
+        // session object recreated on respawn/resume/adoption starts with the
+        // memo unset and simply re-inserts (INSERT OR IGNORE): monotonic.
+        if (!s.taintWriteDone && taintsSession(m.toolName, { thirdPartyExtensions: !!s.thirdPartyExtensions })) {
+          if (recordOutsideTaintSync(s, m.toolName)) s.taintWriteDone = true;
+        }
         // Wave 3: the chat's inline tool chips show what the call CARRIED,
         // not just its name — args ride the start frame, truncated (600
         // chars: enough to recognize a bash command or a file path, not
@@ -2169,8 +2248,24 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null, cwd = null }) {
+  async function spawn({ botId, cardId = null, cwd = null, narrowedTools = null }) {
     if (!botId) throw engineError("bad_request");
+    // Artifacts (untrusted rounds, spec §7.3): a session that must start
+    // NARROWED. A JSON array of tool ids to disable — the same contract as
+    // bot_sessions.narrowed_tools (it can only ever remove tools). It is
+    // applied in startChild BEFORE the first pi spawn, persisted on the row so
+    // a wake or a gateway restart keeps it, and merged (union) with any later
+    // narrowing — it can never be widened back from Perch.
+    // Any forced narrowing is LOCKED (scripts/pi-bots/narrowing-lock.mjs);
+    // the only sentinels a caller may pass are allow entries.
+    let forced = null;
+    if (narrowedTools != null) {
+      let list;
+      try { list = typeof narrowedTools === "string" ? JSON.parse(narrowedTools) : narrowedTools; } catch { list = null; }
+      if (!Array.isArray(list) || list.some((t) => typeof t !== "string" || !t)) throw engineError("bad_request");
+      if (list.some((t) => isSentinel(t) && t !== NARROWING_LOCK && !t.startsWith(ALLOW_ONLY_PREFIX))) throw engineError("bad_request");
+      forced = JSON.stringify([...new Set([...list, NARROWING_LOCK])]);
+    }
     const S = await loadSeams();
     const cid = cardId == null ? null : Number(cardId);
     // Async double-check (Track 3 Task 6): DB-backed, ahead of the
@@ -2185,6 +2280,7 @@ export function createInteractiveEngine({
     // the card claim) ----
     const threadId = "perchlive-" + randomUUID().slice(0, 8);
     const s = newSession(String(botId), threadId);
+    s.forcedNarrowing = forced;
     // Open-anywhere B4: store the operator's chosen working directory before
     // startChild so the world builder resolves it (buildBotWorld validates it
     // hard and throws bad_cwd on a non-directory; the route maps that to 400).
@@ -2229,6 +2325,24 @@ export function createInteractiveEngine({
       if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
       writeLeases();
       throw e;
+    }
+    // A forced narrowing must be on the row before anyone can talk to this
+    // session (a later wake or restart rebuilds from the row). If the seed
+    // did not land — a pre-existing row for this thread, a failed write —
+    // the session is stopped, never left running unlocked.
+    if (s.forcedNarrowing) {
+      let persisted = null;
+      const db = createDbClient();
+      try {
+        const { rows } = await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [s.botId, s.threadId] });
+        persisted = rows[0] ? rows[0].narrowed_tools : null;
+      } catch { persisted = null; } finally { try { db.close(); } catch {} }
+      let ok = false;
+      try { const v = JSON.parse(persisted); ok = Array.isArray(v) && v.includes(NARROWING_LOCK); } catch {}
+      if (!ok) {
+        try { await stop(s.sessionId); } catch {}
+        throw engineError("narrowing_not_persisted");
+      }
     }
     // Track 3 Task 6: dispatch STARTS the work — the brief is stored, not
     // sent. The world context is what startChild just captured on `s`; the

@@ -30,8 +30,7 @@ const STATIC = { "viewer.js": "text/javascript; charset=utf-8", "panel-client.js
 
 /**
  * @param {Function} dashboardAuth
- * @param {object} seams  tests: { db, blobs, csrf, runtime, policy, notify, renderDeps }
- *   (the round/thread routes and their engine seams arrive with step 3)
+ * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard }
  */
 export default function artifactsRouter(dashboardAuth, seams = {}) {
   const router = Router();
@@ -39,17 +38,25 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const S = { ...seams };
 
   async function init() {
-    const [store, comments, tables, blobMinio] = await Promise.all(
-      ["server/store.js", "server/comments.js", "server/init-tables.js", "server/blob-store-minio.js"].map(bundleImport));
+    const [store, comments, rounds, delivery, tables, blobMinio] = await Promise.all(
+      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js"].map(bundleImport));
     if (!S.db) { const { createDbClient } = await appImport("servers/db.js"); S.db = createDbClient(); }
     await tables.initArtifactsTables(S.db);
     if (!S.blobs) { const { resolveDataDir } = await appImport("servers/db.js"); S.blobs = await blobMinio.createBlobStore(S.db, resolveDataDir()); }
     if (!S.runtime) S.runtime = await appImport("servers/gateway/artifact-origin/runtime.js");
+    // D4's "Create a board card": the gateway's factory (tasks.db + card/plan
+    // services). Absent/broken board → null, and deliverRound reports no_board.
+    if (S.createBoardCard === undefined) {
+      try {
+        const ac = await appImport("servers/gateway/board/artifact-card.js");
+        S.createBoardCard = ac.makeArtifactBoardCard({ db: S.db });
+      } catch { S.createBoardCard = null; }
+    }
     if (!S.renderDeps) { const r = await appImport("servers/blog/renderer.js"); S.renderDeps = { markdownBlocks: r.markdownBlocks }; }
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
-    M = { store, comments };
+    M = { store, comments, rounds, delivery };
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
   const OWNER = { kind: "session", id: null };
@@ -125,6 +132,58 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json({ flagged: true });
   }));
 
+  router.post("/api/artifacts/:id/threads", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    res.status(201).json(await M.comments.addThread(S.db, { artifactId: art.id, versionN: Number(req.body?.versionN ?? art.current_version), anchor: req.body?.anchor, text: req.body?.text, author: { kind: "owner" } }));
+  }));
+  router.post("/api/artifacts/:id/threads/:tid/comments", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const t = (await S.db.execute({ sql: "SELECT artifact_id FROM artifact_threads WHERE id=?", args: [Number(req.params.tid)] })).rows[0];
+    if (!t || t.artifact_id !== art.id) throw Object.assign(new Error("no such thread"), { code: "not_found" });
+    res.status(201).json(await M.comments.addComment(S.db, { threadId: Number(req.params.tid), text: req.body?.text, author: { kind: "owner" } }));
+  }));
+  router.post("/api/artifacts/:id/threads/:tid/status", wrap(async (req, res) => {
+    await M.store.requireAccess(S.db, OWNER, req.params.id);
+    await M.comments.setThreadStatus(S.db, { threadId: Number(req.params.tid), status: req.body?.status, artifactId: req.params.id });
+    res.json({ ok: true });
+  }));
+  router.delete("/api/artifacts/:id/comments/:cid", wrap(async (req, res) => {
+    await M.store.requireAccess(S.db, OWNER, req.params.id);
+    res.json(await M.comments.deleteComment(S.db, { commentId: Number(req.params.cid), actor: OWNER }));
+  }));
+
+  router.get("/api/artifacts/:id/round-preview", wrap(async (req, res) => {
+    await M.store.requireAccess(S.db, OWNER, req.params.id);
+    res.json(await M.rounds.previewRound(S.db, req.params.id));
+  }));
+
+  /** Send feedback / Ask now (owner gesture). body: { include: [threadIds], kind, datasetsApproved, choice } */
+  router.post("/api/artifacts/:id/rounds", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    if (!art.created_by_bot) throw Object.assign(new Error("this artifact has no bot"), { code: "bad_request" });
+    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved });
+    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
+    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
+    // Same whitelist as the deliver route (review C3-N2): an unknown choice is auto.
+    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
+    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    res.status(201).json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
+  }));
+
+  /** D4: deliver a round that is still waiting for the owner's choice (or
+   *  queued at capacity). Owner session + CSRF like every route here. */
+  router.post("/api/artifacts/:id/rounds/:rid/deliver", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const round = await M.rounds.getRound(S.db, Number(req.params.rid));
+    if (!round || round.artifact_id !== art.id) throw Object.assign(new Error("no such round"), { code: "not_found" });
+    if (!["pending", "queued"].includes(round.status) || round.session_id || round.card_id) throw Object.assign(new Error("this round was already delivered"), { code: "bad_request" });
+    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
+    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
+    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
+    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    res.json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
+  }));
+
   router.post("/api/artifacts/:id/versions/:n/decide", wrap(async (req, res) => {
     await M.store.requireAccess(S.db, OWNER, req.params.id);
     const out = await M.store.decideProposed(S.db, { artifactId: req.params.id, n: Number(req.params.n), accept: req.body?.accept === true, actor: OWNER, blobs: S.blobs });
@@ -139,4 +198,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   }));
 
   return router;
+}
+
+async function loadBotDef(db, botId) {
+  const r = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+  try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; }
 }

@@ -18,6 +18,7 @@
  * both module-init orders. Keep it lazy anyway.
  */
 import { unwireContact, readTombstone, tombstoneStatement, isReqId } from "./contact-delete.js";
+import { artifactCommentsBlankStatement, artifactCommentsTableExists } from "../shared/artifact-comment-delete.js";
 
 /**
  * Delete one stale advertised contact.
@@ -91,10 +92,15 @@ export async function pruneAdvertisedContact(db, managers, row) {
 
   await unwireContact(managers, row);
 
-  // ONE transaction: the DELETE and the tombstone land together or not at all (see above —
-  // both orderings are unsafe on their own, in opposite directions).
+  // ONE transaction: the D19 comment blanking (Artifacts spec §4.3), the
+  // DELETE and the tombstone land together or not at all (see above — both
+  // orderings are unsafe on their own, in opposite directions; a blanking
+  // ahead of a FAILED batch would leave a rewired, living contact with its
+  // words permanently gone — review C3-L2).
   try {
+    const d19 = (await artifactCommentsTableExists(db)) ? [artifactCommentsBlankStatement(row.crow_id)] : [];
     await db.batch([
+      ...d19,
       { sql: "DELETE FROM contacts WHERE id = ?", args: [row.id] },
       tombstoneStatement(row.crow_id, row.lamport_ts, "prune"),
     ]);
