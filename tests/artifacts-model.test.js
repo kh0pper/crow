@@ -214,26 +214,38 @@ test("laundering: an owner comment that quotes a contact, or a bot reply written
   assert.doesNotMatch(msg, /curl evil/, "only the included thread's text is sent");
 });
 
-test("quota is real bytes and atomic: concurrent writes cannot both pass; dropped and pruned versions free their objects", async (t) => {
-  const used = await store.instanceUsage(s.db, s.blobs);
-  const restore = _overrideLimitsForTest({ instanceBytes: used + 700000 });
-  t.after(restore);
+// R-M5 / atomic quota, parametrised over BOTH backends (plan Task 2.2): the
+// same race runs against the local disk store and the MinIO fake.
+async function bothBackends() {
+  const { createMinioBlobStore } = await import("../bundles/artifacts/server/blob-store-minio.js");
+  const { makeFakeS3 } = await import("./helpers/fake-s3.mjs");
+  const storeId = (await s.db.execute({ sql: "SELECT value FROM artifact_store_meta WHERE key='store_id'", args: [] })).rows[0].value;
+  const minio = createMinioBlobStore({ storeId, s3: makeFakeS3(), bucket: "crow-artifacts", lockPath: s.blobs.lockPath, timeoutMs: 5000 });
+  return [["local", s.blobs], ["minio-fake", minio]];
+}
+
+test("quota is real bytes and atomic on BOTH backends: concurrent writes cannot both pass; dropped and pruned versions free their objects", async (t) => {
   const page = (c) => ({ html: c.repeat(200000) });
-  const results = await Promise.allSettled([
-    store.createArtifact(s.db, s.blobs, { title: "A", type: "page", source: page("a"), actor: OWNER }, deps),
-    store.createArtifact(s.db, s.blobs, { title: "B", type: "page", source: page("b"), actor: OWNER }, deps),
-  ]);
-  assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
-  assert.equal(results.find((r) => r.status === "rejected").reason.code, "quota_full");
-  assert.ok((await store.instanceUsage(s.db, s.blobs)) <= used + 700000, "the refused write left no bytes behind");
-  restore();
-  const a = results.find((r) => r.status === "fulfilled").value;
-  const before = await s.blobs.usage();
-  const p = await store.addVersion(s.db, s.blobs, { artifactId: a.id, source: { html: "z".repeat(100000) }, actor: OWNER, baseVersion: 0 }, deps);
-  assert.equal(p.state, "proposed");
-  assert.ok((await s.blobs.usage()) > before);
-  await store.decideProposed(s.db, { artifactId: a.id, n: p.n, accept: false, actor: OWNER, blobs: s.blobs });
-  assert.equal(await s.blobs.usage(), before, "dropping a proposed version frees its object");
+  for (const [name, blobs] of await bothBackends()) {
+    const used = await store.instanceUsage(s.db, blobs);
+    const restore = _overrideLimitsForTest({ instanceBytes: used + 700000 });
+    t.after(restore);
+    const results = await Promise.allSettled([
+      store.createArtifact(s.db, blobs, { title: `A-${name}`, type: "page", source: page("a"), actor: OWNER }, deps),
+      store.createArtifact(s.db, blobs, { title: `B-${name}`, type: "page", source: page("b"), actor: OWNER }, deps),
+    ]);
+    assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"], name);
+    assert.equal(results.find((r) => r.status === "rejected").reason.code, "quota_full", name);
+    assert.ok((await store.instanceUsage(s.db, blobs)) <= used + 700000, `${name}: the refused write left no bytes behind`);
+    restore();
+    const a = results.find((r) => r.status === "fulfilled").value;
+    const before = await blobs.usage();
+    const p = await store.addVersion(s.db, blobs, { artifactId: a.id, source: { html: "z".repeat(100000) }, actor: OWNER, baseVersion: 0 }, deps);
+    assert.equal(p.state, "proposed", name);
+    assert.ok((await blobs.usage()) > before, name);
+    await store.decideProposed(s.db, { artifactId: a.id, n: p.n, accept: false, actor: OWNER, blobs });
+    assert.equal(await blobs.usage(), before, `${name}: dropping a proposed version frees its object`);
+  }
 });
 
 test("ReDoS: adversarial inputs to every scanner finish inside a time budget", () => {
