@@ -34,40 +34,25 @@ El bundle registra:
 
 El motor de consultas ejecuta SQL contra los [backends de datos](/es/guide/data-backends) registrados. Aplica medidas de seguridad en múltiples niveles.
 
-### Validación del primer token
+Todas las reglas viven en `servers/shared/sqlite-datasets.js`, compartido por el bundle, el bundle GIS y la API pública de incrustación del blog.
 
-Antes de ejecutar cualquier consulta, el motor extrae el primer token SQL y lo verifica contra una lista de permitidos:
+### Conexiones de solo lectura
 
-```
-Permitido (modo solo lectura): SELECT, WITH, EXPLAIN, PRAGMA
-Permitido (modo escritura):    SELECT, WITH, EXPLAIN, PRAGMA, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP
-```
-
-Las consultas que comienzan con cualquier otro token se rechazan. Esto intercepta `ATTACH`, `DETACH`, `.import` y otras operaciones potencialmente peligrosas.
+Un conjunto de datos se abre con better-sqlite3 `readonly` más `PRAGMA query_only`, así que el propio SQLite rechaza cualquier escritura (incluidas asignaciones `PRAGMA` y `WITH … DELETE`). Debe ser una sola sentencia, de solo lectura según SQLite (`stmt.readonly`), que devuelva filas; una lista de palabras iniciales permitidas (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`) se mantiene como defensa adicional y también rechaza `ATTACH`.
 
 ### Restricciones de rutas
 
-Para los backends SQLite, la ruta del archivo de base de datos debe estar dentro de un directorio permitido:
+La ruta real de un conjunto de datos debe estar bajo `datasets/` o `projects/<id>/databases/` del directorio de datos de la instancia (comparada segmento a segmento, no como prefijo de texto). Las bases de datos del núcleo — `crow.db`, `tasks.db`, `CROW_DB_PATH`, cualquier `*.db` directamente en el directorio de datos — se rechazan por ruta real y por dispositivo e inodo, así que los enlaces no sirven para eludirlo.
 
-- `~/.crow/data/`
-- Cualquier ruta registrada explícitamente vía `crow_register_backend`
-- Directorios de datos específicos de cada bundle (`~/.crow/bundles/*/data/`)
+### Límites de filas, tamaño y tiempo
 
-Los symlinks se resuelven antes de la verificación. Las rutas fuera de la lista de permitidos se rechazan.
+Las filas se leen paso a paso y se detienen en el límite (5.000 filas, 8 MB serializados), diga lo que diga el texto SQL. Cada consulta y lectura de esquema corre en un proceso hijo de corta vida que se mata al llegar a su límite de tiempo (10 s); como máximo cuatro a la vez, y las demás se rechazan como ocupadas. El hijo limita su memoria V8 y, en Linux, corre con un límite de segmento de datos de 1 GiB (`prlimit`; el límite de memoria propio de SQLite no está compilado en la versión incluida), así que un valor enorme falla allí. Los límites que pasa quien llama solo pueden bajarlos.
 
-### Timeouts
+El archivo se abre con `O_NOFOLLOW` mientras SQLite lo abre, y después la ruta debe seguir resolviendo al mismo inodo.
 
-Cada consulta se ejecuta con un timeout de 30 segundos. El timeout se aplica a nivel del driver de la base de datos — la conexión se interrumpe si la consulta excede el límite. Esto evita que un `SELECT *` accidental sobre tablas de millones de filas bloquee el sistema.
+### Sin escritura
 
-### Modo escritura
-
-El modo escritura está deshabilitado de forma predeterminada. Los usuarios pueden habilitarlo por base de datos a través del panel de configuración del Nest o pidiéndoselo a la IA:
-
-```
-"Habilita el acceso de escritura en mi base de datos de analítica"
-```
-
-El modo escritura requiere confirmación explícita. La IA advertirá antes de habilitarlo y confirmará la base de datos específica.
+`crow_data_write` está desactivada. El geocodificador por lotes GIS es el único que escribe, y solo en bases de datos creadas por el dashboard (`projects/<id>/databases/`), con identificadores entre comillas.
 
 ## Herramientas MCP
 

@@ -34,40 +34,25 @@ The bundle registers:
 
 The query engine executes SQL against registered [data backends](../guide/data-backends). It enforces safety at multiple levels.
 
-### First-Token Validation
+All rules live in `servers/shared/sqlite-datasets.js`, shared by the bundle, the GIS bundle and the public blog embed API.
 
-Before executing any query, the engine extracts the first SQL token and checks it against an allowlist:
+### Read-only connections
 
-```
-Allowed (read-only mode): SELECT, WITH, EXPLAIN, PRAGMA
-Allowed (write mode):     SELECT, WITH, EXPLAIN, PRAGMA, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP
-```
+A dataset is opened with better-sqlite3 `readonly` plus `PRAGMA query_only`, so SQLite itself refuses any write (including `PRAGMA` assignments and `WITH … DELETE`). The statement must be a single statement, read-only by SQLite's own account (`stmt.readonly`) and return rows; a first-keyword allowlist (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`) stays as defence in depth, which also refuses `ATTACH`.
 
-Queries starting with any other token are rejected. This catches `ATTACH`, `DETACH`, `.import`, and other potentially dangerous operations.
+### Path restrictions
 
-### Path Restrictions
+The realpath of a dataset must sit under the instance data dir's `datasets/` or `projects/<id>/databases/` (compared segment by segment, not as a string prefix). Core databases — `crow.db`, `tasks.db`, `CROW_DB_PATH`, any `*.db` directly in the data dir — are refused by realpath and by device and inode, so links do not get around it.
 
-For SQLite backends, the database file path must be within an allowed directory:
+### Row, size and time caps
 
-- `~/.crow/data/`
-- Any path explicitly registered via `crow_register_backend`
-- Bundle-specific data directories (`~/.crow/bundles/*/data/`)
+Rows are read by stepping the statement and stop at the cap (5,000 rows, 8 MB serialized), whatever the SQL text says. Each query and schema read runs in a short-lived child process that is killed at its time limit (10 s); at most four run at once, and further queries are refused as busy. The child caps its V8 heap and, on Linux, runs under a 1 GiB data-segment limit (`prlimit`; SQLite's own heap limit is compiled out of the bundled build), so one huge value fails there. Caller-supplied limits can only lower the caps.
 
-Symlinks are resolved before checking. Paths outside the allowlist are rejected.
+The file is opened with `O_NOFOLLOW` while SQLite opens it, and the path must still resolve to the same inode afterwards.
 
-### Timeouts
+### No write path
 
-Every query runs with a 30-second timeout. The timeout is enforced at the database driver level — the connection is interrupted if the query exceeds the limit. This prevents accidental `SELECT *` on million-row tables from locking the system.
-
-### Write Mode
-
-Write mode is disabled by default. Users can enable it per-database through the Nest settings panel or by asking the AI:
-
-```
-"Enable write access on my analytics database"
-```
-
-Write mode requires explicit confirmation. The AI will warn before enabling it and confirm the specific database.
+`crow_data_write` is disabled. The GIS batch geocoder is the only writer, and only for databases the dashboard created (`projects/<id>/databases/`), with quoted identifiers.
 
 ## MCP Tools
 

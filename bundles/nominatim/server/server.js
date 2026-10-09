@@ -13,6 +13,7 @@ import { geocode, reverseGeocode, searchPlaces, checkStatus } from "./geocoder.j
 // App code is reached through the app root: from the installed copy
 // (<CROW_HOME>/bundles/nominatim/) a repo-relative path does not exist.
 const { createDbClient } = await appImport("servers/db.js");
+const { openManagedDatasetWritable, quoteIdent } = await appImport("servers/shared/sqlite-datasets.js");
 
 export function createNominatimServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -133,39 +134,43 @@ export function createNominatimServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Backend #${backend_id} not found or not SQLite.` }], isError: true };
       }
 
-      const ref = JSON.parse(backends[0].connection_ref);
-      const { createClient } = await import("@libsql/client");
-      const userDb = createClient({ url: `file:${ref.path}` });
+      let userDb;
+      try {
+        const ref = JSON.parse(backends[0].connection_ref);
+        // Only a database the Data Dashboard created (projects/<id>/databases/),
+        // never one of Crow's own: this tool ALTERs and UPDATEs the table.
+        userDb = openManagedDatasetWritable(ref.path);
+      } catch (err) {
+        return { content: [{ type: "text", text: `Cannot geocode backend #${backend_id}: ${err.message}` }], isError: true };
+      }
+      const T = quoteIdent(table), A = quoteIdent(address_column), LAT = quoteIdent(lat_column), LON = quoteIdent(lon_column);
 
       try {
         // Add lat/lon columns if they don't exist
-        try { await userDb.execute(`ALTER TABLE "${table}" ADD COLUMN "${lat_column}" REAL`); } catch {}
-        try { await userDb.execute(`ALTER TABLE "${table}" ADD COLUMN "${lon_column}" REAL`); } catch {}
+        try { userDb.exec(`ALTER TABLE ${T} ADD COLUMN ${LAT} REAL`); } catch {}
+        try { userDb.exec(`ALTER TABLE ${T} ADD COLUMN ${LON} REAL`); } catch {}
 
         // Get rows needing geocoding
-        const { rows } = await userDb.execute({
-          sql: `SELECT rowid, "${address_column}" FROM "${table}" WHERE "${lat_column}" IS NULL AND "${address_column}" IS NOT NULL LIMIT ?`,
-          args: [limit],
-        });
+        const rows = userDb.prepare(
+          `SELECT rowid AS rowid, ${A} AS addr FROM ${T} WHERE ${LAT} IS NULL AND ${A} IS NOT NULL LIMIT ?`
+        ).all(limit);
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No rows need geocoding (all already have coordinates or no addresses)." }] };
         }
 
+        const update = userDb.prepare(`UPDATE ${T} SET ${LAT} = ?, ${LON} = ? WHERE rowid = ?`);
         let success = 0;
         let failed = 0;
 
         for (const row of rows) {
-          const addr = row[address_column];
+          const addr = row.addr;
           if (!addr) { failed++; continue; }
 
           try {
             const results = await geocode(String(addr), { limit: 1 });
             if (results.length > 0) {
-              await userDb.execute({
-                sql: `UPDATE "${table}" SET "${lat_column}" = ?, "${lon_column}" = ? WHERE rowid = ?`,
-                args: [parseFloat(results[0].lat), parseFloat(results[0].lon), row.rowid],
-              });
+              update.run(parseFloat(results[0].lat), parseFloat(results[0].lon), row.rowid);
               success++;
             } else {
               failed++;

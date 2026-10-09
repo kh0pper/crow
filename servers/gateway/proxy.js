@@ -19,6 +19,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
+import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -75,22 +76,37 @@ export function resolveCrowHome() {
  */
 async function connectToServer(integration) {
   const spawnEnv = getSpawnEnv(integration);
+  // A data backend brings its own allowlisted base env (never the gateway's
+  // whole environment); built-in integrations keep the old behaviour.
   const env = {
-    ...process.env,
+    ...(integration.baseEnv || process.env),
     ...spawnEnv,
   };
 
   // Support argsTransform for servers that need env values in args (e.g., Render bearer token)
-  const args = integration.argsTransform
+  let command = integration.command;
+  let args = integration.argsTransform
     ? integration.argsTransform(spawnEnv)
     : integration.args;
+
+  // Data backends: the last check runs here, synchronously, with no await
+  // between it and the spawn inside client.connect() below.
+  if (integration.preSpawn) {
+    const ready = integration.preSpawn();
+    if (!ready || !ready.ok) {
+      console.warn(`  [proxy] ${integration.name}: not started — ${ready ? ready.reason : "pre-spawn check failed"}`);
+      return null;
+    }
+    command = ready.command;
+    args = ready.args;
+  }
 
   // Timeout: npx/uvx may need to download packages on first run
   const CONNECT_TIMEOUT_MS = 60_000;
 
   try {
     const transport = new StdioClientTransport({
-      command: integration.command,
+      command,
       args,
       env,
     });
@@ -104,7 +120,7 @@ async function connectToServer(integration) {
     await Promise.race([
       client.connect(transport),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS).unref()
       ),
     ]);
 
@@ -212,7 +228,7 @@ async function connectAddonServer(id, config) {
     await Promise.race([
       client.connect(transport),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS).unref()
       ),
     ]);
 
@@ -409,6 +425,16 @@ async function loadAddonServers() {
   }
 }
 
+/** Close a running data backend (its owner approval was withdrawn). */
+export function disconnectDynamicBackend(backendId) {
+  const key = `backend-${backendId}`;
+  const entry = connectedServers.get(key);
+  if (!entry) return false;
+  connectedServers.delete(key);
+  try { entry.client?.close?.(); } catch {}
+  return true;
+}
+
 /**
  * Load data backends from the database and connect them as integrations.
  * Called on startup and can be called again to reload without full restart.
@@ -432,20 +458,45 @@ export async function loadDynamicBackends() {
       const existing = connectedServers.get(backendKey);
       if (existing && existing.status === "connected") continue;
 
-      let connRef;
-      try {
-        connRef = JSON.parse(row.connection_ref);
-      } catch {
-        console.error(`  [proxy] Backend #${row.id} "${row.name}": invalid connection_ref JSON`);
+      // The one parser every reader uses (approval page, hash, spawner).
+      const parsed = parseStoredSpec(row.connection_ref);
+      if (!parsed.ok) {
+        console.error(`  [proxy] Backend #${row.id} "${row.name}": ${parsed.reason}`);
         await db.execute({
           sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
-          args: ["Invalid connection_ref JSON", row.id],
+          args: [parsed.reason, row.id],
+        });
+        continue;
+      }
+
+      // Owner approval gate: a registered command runs only after the
+      // dashboard owner approved this exact connection_ref (an edit voids it).
+      // The check covers the stored text and the contents of the files it runs.
+      if (!isApproved(row)) {
+        const why = hasApproval(row)
+          ? "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page"
+          : "Waiting for the owner to approve it on the Projects page";
+        // Keep an approval-refusal reason the owner has not acted on yet.
+        if (row.status !== PENDING_STATUS || (hasApproval(row) && row.last_error !== why)) {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [PENDING_STATUS, why, row.id],
+          });
+        }
+        console.warn(`  [proxy] Backend #${row.id} "${row.name}": not approved by the owner — not started`);
+        continue;
+      }
+      const launch = verifyBackendLaunch(parsed.spec);
+      if (!launch.ok) {
+        await db.execute({
+          sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [launch.reason, row.id],
         });
         continue;
       }
 
       // Check that required env vars are set
-      const missingVars = (connRef.envVars || []).filter((v) => !process.env[v]);
+      const missingVars = launch.envVars.filter((v) => !process.env[v]);
       if (missingVars.length > 0) {
         console.warn(`  [proxy] Backend #${row.id} "${row.name}": missing env vars: ${missingVars.join(", ")}`);
         await db.execute({
@@ -455,13 +506,19 @@ export async function loadDynamicBackends() {
         continue;
       }
 
-      // Build integration-shaped object for connectToServer
+      // Re-read the row right before starting it, and let connectToServer run
+      // the final synchronous check (prepareSpawn) in the same tick as the
+      // spawn: the hash, files and launcher it verifies are the ones executed.
+      const fresh = (await db.execute({ sql: "SELECT * FROM data_backends WHERE id = ? AND backend_type = 'mcp_server'", args: [row.id] })).rows[0];
+      if (!fresh || fresh.connection_ref !== row.connection_ref || fresh.approved_ref_sha256 !== row.approved_ref_sha256) continue;
       const integration = {
         id: backendKey,
         name: row.name,
-        command: connRef.command,
-        args: connRef.args || [],
-        envVars: connRef.envVars || [],
+        command: launch.command,
+        args: launch.args,
+        envVars: launch.envVars,
+        baseEnv: backendEnv([]),
+        preSpawn: () => prepareSpawn(fresh),
       };
 
       try {

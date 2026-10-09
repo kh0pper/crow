@@ -109,10 +109,9 @@ The AI converts the case study into a blog post, embedding charts as images and 
 
 The Data Dashboard enforces strict safety boundaries:
 
-- **Read-only by default** — Only `SELECT` queries are allowed. `INSERT`, `UPDATE`, `DELETE`, and DDL statements are blocked unless you explicitly enable write mode for a specific database.
-- **Path restrictions** — SQLite databases must be within allowed directories (`~/.crow/data/`, registered backend paths). No access to system databases or files outside the sandbox.
-- **Query timeouts** — Queries are killed after 30 seconds to prevent runaway operations.
-- **No remote execution** — Queries run locally against registered backends. Federation queries go through the gateway proxy with the same safety checks on the remote side.
+- **Read-only** — Datasets are opened read-only: one statement per query (`SELECT`, `WITH`, `EXPLAIN`, `PRAGMA`, `VALUES`), and SQLite itself refuses any change. Crow does not write to datasets; `crow_data_write` is disabled while the Data Dashboard is being retired. Load data with your own tools.
+- **Path restrictions** — A dataset must live in the data folder's `datasets/` folder or a project's `databases/` folder. Crow's own databases (`crow.db`, `tasks.db`) are refused, including through symbolic or hard links.
+- **Row, size and time caps** — At most 5,000 rows (8 MB) come back from a query, counted as rows are read, and a query is stopped after 10 seconds.
 
 ## Next Steps
 

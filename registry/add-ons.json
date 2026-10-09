@@ -1008,7 +1008,7 @@
     {
       "id": "data-dashboard",
       "name": "Data Dashboard",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
       "type": "bundle",
       "author": "Crow",
@@ -4124,7 +4124,7 @@
     {
       "id": "nominatim",
       "name": "Nominatim GIS",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
       "type": "bundle",
       "author": "Crow",

@@ -12,13 +12,9 @@ import { appImport } from "./app-root.js";
 import { initDataDashboardTables } from "./init-tables.js";
 import {
   executeReadQuery,
-  executeWriteQuery,
   getSchema,
-  getProjectDbDir,
-  isPathSafe,
+  createProjectDatabase,
 } from "./query-engine.js";
-import { resolve } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
 
 // App code is reached through the app root, never a repo-relative path: this
 // server runs from its installed copy (<CROW_HOME>/bundles/data-dashboard/),
@@ -186,26 +182,19 @@ export async function createDataDashboardServer(dbPath, options = {}) {
   // --- Tool: crow_data_create_database ---
   server.tool(
     "crow_data_create_database",
-    "Create a new empty SQLite database and register it as a project data backend.",
+    "Create a new empty SQLite database in the project's databases folder and register it as a data backend. Crow does not write to it (crow_data_write is disabled); fill it with your own tools.",
     {
-      project_id: z.number().describe("Project ID to associate with"),
+      project_id: z.number().int().positive().describe("Project ID to associate with"),
       name: z.string().max(200).describe("Database name (e.g., 'survey-results')"),
     },
     async ({ project_id, name }) => {
-      const dir = getProjectDbDir(project_id);
-      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-      const dbPath = resolve(dir, `${safeName}.db`);
-
-      if (existsSync(dbPath)) {
-        return { content: [{ type: "text", text: `Database already exists: ${dbPath}` }], isError: true };
+      let dbPath;
+      try {
+        dbPath = createProjectDatabase(project_id, name);
+      } catch (err) {
+        return { content: [{ type: "text", text: err.message }], isError: true };
       }
 
-      // Create empty database (libsql creates on first connect)
-      const userDb = (await import("./query-engine.js")).openUserDb(dbPath);
-      await userDb.execute("SELECT 1"); // Force creation
-      userDb.close();
-
-      // Register as backend
       const connRef = JSON.stringify({ path: dbPath });
       const result = await db.execute({
         sql: "INSERT INTO data_backends (project_id, name, backend_type, connection_ref, status) VALUES (?, ?, 'sqlite', ?, 'connected')",
@@ -216,31 +205,30 @@ export async function createDataDashboardServer(dbPath, options = {}) {
       return {
         content: [{
           type: "text",
-          text: `Database created and registered.\n\nName: ${name}\nBackend ID: ${backendId}\nPath: ${dbPath}\n\nUse crow_data_write to create tables and insert data.`,
+          text: `Database created and registered.\n\nName: ${name}\nBackend ID: ${backendId}\nPath: ${dbPath}\n\nCrow reads it read-only; load data into it with your own tools (for example the sqlite3 command line).`,
         }],
       };
     }
   );
 
-  // --- Tool: crow_data_write ---
+  // --- Tool: crow_data_write (disabled) ---
+  // Writing through an AI tool reached Crow's own databases (a sqlite backend
+  // could point at crow.db). Disabled while the Data Dashboard is retired;
+  // kept registered so a caller gets a plain answer instead of "unknown tool".
   server.tool(
     "crow_data_write",
-    "Execute a write SQL statement (INSERT, CREATE TABLE, UPDATE, DELETE) on a user-owned database. Separate from read-only queries for safety.",
+    "Disabled. Crow no longer writes to data backends; it only reads them. Load data into a dataset with your own tools.",
     {
       backend_id: z.number().describe("Data backend ID"),
-      sql: z.string().max(50000).describe("SQL statement (INSERT/CREATE/UPDATE/DELETE/ALTER/DROP)"),
+      sql: z.string().max(50000).describe("Ignored"),
     },
-    async ({ backend_id, sql: statement }) => {
-      const dbPath = await resolveDbPath(backend_id);
-      const result = await executeWriteQuery(dbPath, statement);
-
-      return {
-        content: [{
-          type: "text",
-          text: `Write executed (${result.executionMs}ms). Rows affected: ${result.rowsAffected}`,
-        }],
-      };
-    }
+    async () => ({
+      content: [{
+        type: "text",
+        text: "crow_data_write is disabled: Crow only reads data backends now. Put data into a dataset with your own tools (it must live in the data folder's datasets/ or a project's databases/ folder), then query it with crow_data_query.",
+      }],
+      isError: true,
+    })
   );
 
   // --- Tool: crow_data_save_query ---

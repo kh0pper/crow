@@ -22,6 +22,8 @@ import {
 } from "../shared/project-acl.js";
 import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
+import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -682,32 +684,40 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_register_backend",
-    "Register an external MCP server as a data backend. Creates a data_connector project if project_id is not provided. Credentials are never stored — only env var names are saved.",
+    "Register a data backend for a project. Two kinds: 'mcp_server' (an external MCP server Crow will start: connection_ref {\"command\",\"args\",\"envVars\"} and optionally \"command_sha256\"; nothing else) — it stays PENDING and is never started until the dashboard owner approves it on the Projects page; 'sqlite' (a SQLite dataset Crow reads read-only: connection_ref {\"path\"}, an absolute path inside the data folder's datasets/ or a project's databases/ folder, never one of Crow's own databases). Creates a data_connector project if project_id is not provided. Credentials are never stored — only env var names.",
     {
       name: z.string().max(500).describe("Display name for this backend (e.g., 'Production Postgres')"),
-      backend_type: z.string().max(100).default("mcp_server").describe("Backend type (currently only 'mcp_server')"),
+      backend_type: z.enum(["mcp_server", "sqlite"]).default("mcp_server").describe("'mcp_server' (needs owner approval before it runs) or 'sqlite' (read-only dataset file)"),
       project_id: z.number().optional().describe("Existing project to attach to (auto-creates if not provided)"),
-      connection_ref: z.string().max(5000).describe("JSON connection reference: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}"),
+      connection_ref: z.string().max(5000).describe("JSON. mcp_server: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}. sqlite: {\"path\":\"/abs/path/to/data/datasets/survey.db\"}"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ name, backend_type, project_id, connection_ref, tags }) => {
-      // Validate connection_ref is valid JSON
+      const fail = (text) => ({ content: [{ type: "text", text }], isError: true });
       let connRef;
       try {
         connRef = JSON.parse(connection_ref);
       } catch {
-        return {
-          content: [{ type: "text", text: "Error: connection_ref must be valid JSON. Example: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}" }],
-          isError: true,
-        };
+        return fail("Error: connection_ref must be valid JSON. Example: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}");
+      }
+      if (!connRef || typeof connRef !== "object" || Array.isArray(connRef)) {
+        return fail("Error: connection_ref must be a JSON object.");
       }
 
-      // Validate required fields in connection_ref
-      if (!connRef.command) {
-        return {
-          content: [{ type: "text", text: "Error: connection_ref must include a 'command' field (e.g., 'npx', 'uvx', 'node')." }],
-          isError: true,
-        };
+      let status;
+      let storedRef;
+      if (backend_type === "mcp_server") {
+        // Shape only here; the launcher itself is verified at every spawn.
+        const launch = parseLaunchSpec(connRef);
+        if (!launch.ok) return fail(`Error: ${launch.reason}.`);
+        status = PENDING_STATUS;
+        // Store the one canonical text every reader parses (see canonicalSpecText).
+        storedRef = canonicalSpecText(connRef);
+      } else {
+        const check = resolveDatasetPath(connRef.path);
+        if (!check.ok) return fail(`Error: ${check.reason}.`);
+        status = "connected";
+        storedRef = JSON.stringify({ path: check.path });
       }
 
       // Auto-create project if not provided
@@ -723,16 +733,20 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       const result = await db.execute({
-        sql: `INSERT INTO data_backends (project_id, name, backend_type, connection_ref, tags) VALUES (?, ?, ?, ?, ?)`,
-        args: [actualProjectId, name, backend_type, connection_ref, tags ?? null],
+        sql: `INSERT INTO data_backends (project_id, name, backend_type, connection_ref, tags, status) VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [actualProjectId, name, backend_type, storedRef, tags ?? null, status],
       });
 
       const backendId = Number(result.lastInsertRowid);
       let text = `Backend registered: "${name}" (id: ${backendId}, project: #${actualProjectId})\n`;
       text += `Type: ${backend_type}\n`;
-      text += `Status: disconnected (restart gateway or call reload to connect)\n`;
-      if (connRef.envVars && connRef.envVars.length > 0) {
-        text += `\nRequired env vars (must be set in .env): ${connRef.envVars.join(", ")}`;
+      if (backend_type === "mcp_server") {
+        text += `Status: pending approval — it will not run until the owner approves it in Crow's Nest (Projects › this project › Data Backends). Tell the user to review the command there.\n`;
+        if (connRef.envVars && connRef.envVars.length > 0) {
+          text += `\nRequired env vars (must be set in .env): ${connRef.envVars.join(", ")}`;
+        }
+      } else {
+        text += `Status: ready (read-only). Query it with the Data Dashboard tools.\n`;
       }
 
       return { content: [{ type: "text", text }] };
@@ -1210,7 +1224,7 @@ export function createProjectServer(dbPath, options = {}) {
    - Projects organize sources, notes, and data backends under a single topic
 
 2. Data Backends
-   - Use crow_register_backend to connect external MCP servers (Postgres, APIs, etc.)
+   - Use crow_register_backend to connect external MCP servers (Postgres, APIs, etc.) — they stay pending until the user approves them in Crow's Nest — or a read-only SQLite dataset (backend_type "sqlite")
    - Backends store env var NAMES (not secrets) — credentials stay in .env
    - Use crow_list_backends and crow_backend_schema to inspect connected backends
    - Query data through crow_tools (router) or the external server's tools directly

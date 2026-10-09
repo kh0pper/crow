@@ -19,19 +19,28 @@ Los backends de datos son útiles cuando:
 
 ## Registrar un backend
 
-Usa la herramienta `crow_register_backend` para conectar un servidor MCP como backend de datos:
+Hay dos tipos de backend, elegidos con `backend_type` en `crow_register_backend`:
 
-> "Registra mi servidor MCP de Postgres en `http://localhost:5433/mcp` como un backend de datos llamado 'course-database'"
+| Tipo | Qué es | `connection_ref` |
+|---|---|---|
+| `mcp_server` (predeterminado) | Un servidor MCP que Crow inicia como comando local | `{"command":"npx","args":["-y","mcp-server-postgres"],"envVars":["POSTGRES_URL"]}` |
+| `sqlite` | Un archivo SQLite que Crow lee en modo solo lectura | `{"path":"/home/alex/.crow/data/datasets/matricula.db"}` |
 
-Esto almacena el nombre, la URL y la descripción del backend en la tabla `data_backends`. Después puedes asociarlo a un proyecto de tipo `data_connector`.
+### Un backend `mcp_server` espera tu aprobación
 
-### Información requerida
+Un backend `mcp_server` es un comando que tu Crow ejecutará, así que registrarlo nunca basta para ejecutarlo. La IA (o un bot) solo puede crearlo **pendiente de aprobación**. Para iniciarlo, abre **Crow's Nest › Proyectos**, abre el proyecto del backend y busca **Data Backends**. La página muestra exactamente lo que se ejecutaría: el comando, cada argumento en su propia línea (los caracteres invisibles o no ASCII aparecen como códigos `\u{…}`) y los nombres exactos de las variables de entorno que recibe.
 
-| Campo | Descripción |
-|---|---|
-| `name` | Un nombre corto para el backend (p. ej., "course-database", "student-records") |
-| `server_url` | La URL del servidor MCP (endpoint Streamable HTTP) |
-| `description` | Qué datos provee este backend (ayuda a la IA a saber cuándo usarlo) |
+`connection_ref` solo puede contener `command`, `args`, `envVars` y `command_sha256`. Crow lo guarda en una única forma canónica, y la página, la aprobación y el inicio leen ese mismo texto; un registro con cualquier otra clave, claves duplicadas, o demasiado largo para mostrarse completo, no se puede aprobar. Los archivos fijados se inician por su ruta real, comprobada justo antes del inicio.
+
+La aprobación cubre la línea de comando y el contenido actual de los archivos que ejecuta (el lanzador, si es una ruta, y cada argumento que nombra un archivo existente, como el script que ejecuta un intérprete), salvo archivos del sistema propiedad de root. Si se edita uno de esos archivos, deja de iniciarse hasta que lo apruebes de nuevo. **No** cubre el código que el comando descarga al iniciarse (por ejemplo paquetes de `npx` o `uvx`) ni otros archivos que un script abra por su cuenta.
+
+El lanzador se comprueba al aprobar y cada vez que se inicia, con las mismas reglas que los complementos; un `command_sha256` incluido en el registro lo aportó quien lo registró, y la página lo indica.
+
+**Entorno.** El backend no hereda el entorno del gateway: recibe la misma lista básica permitida que los bots (como `PATH`, `HOME`, idioma y proxy; nada que parezca una credencial) más solo las variables nombradas en `envVars`, con sus valores de tu `.env`. La página lista todos los nombres que recibirá.
+
+### Un backend `sqlite` es un conjunto de datos
+
+El archivo debe estar en la carpeta `datasets/` de tu carpeta de datos (por ejemplo `~/.crow/data/datasets/`) o en la carpeta `databases/` de un proyecto. Crow lo abre en solo lectura y nunca escribe en él. Las bases de datos propias de Crow (`crow.db`, `tasks.db`) nunca se pueden registrar, ni siquiera mediante un enlace.
 
 ## Gestionar backends
 
@@ -93,7 +102,9 @@ La IA consulta el backend, formatea los resultados y los almacena como una fuent
 
 ## Consideraciones de seguridad
 
-- Las URLs de los backends se almacenan en la base de datos local de Crow -- no se comparten con peers ni se exponen a través del gateway
-- La autenticación ante el servidor MCP del backend la maneja el propio servidor (tokens bearer, OAuth, etc.)
-- Crow no cachea los datos del backend a menos que los captures explícitamente como fuente o nota
-- Eliminar un backend no borra las fuentes ni las notas que se capturaron de él
+- Registrar un backend `mcp_server` nunca ejecuta nada: solo el propietario, con sesión iniciada en Crow's Nest, puede aprobar un comando, y la aprobación deja de valer en cuanto el comando cambia
+- Los backends nunca se copian desde otras instancias: un proyecto compartido lleva una descripción de sus backends, no un registro ejecutable
+- Los conjuntos de datos `sqlite` se abren en solo lectura, una sentencia por consulta, con límites de filas, de tamaño y de tiempo (cada consulta corre en un proceso aparte que se detiene al llegar al límite)
+- Un backend aprobado recibe un entorno con lista permitida más sus variables declaradas, nunca todo el entorno del gateway
+- Las credenciales quedan en `.env`; la base de datos solo guarda nombres de variables
+- Eliminar un backend no borra las fuentes ni las notas capturadas de él
