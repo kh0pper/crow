@@ -26,7 +26,8 @@
  *               CROW_ARTIFACT_SIDECAR_SOCKET is set): logged out, key expiring
  *               within 14 days, Funnel on, or an unexpected Serve mapping →
  *               one warn issue per problem ("artifact-node:<code>"), so each
- *               distinct problem is pushed by the health monitor.
+ *               distinct problem is pushed by the health monitor. An origin
+ *               URL configured WITHOUT the socket warns "unmonitored".
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -435,8 +436,19 @@ const ARTIFACT_NODE_KEYS = {
 
 async function artifactNodeSignal(lang) {
   const h = await _artifactNodeReader();
-  if (!h) return null;
   const label = t("signals.artifactNode.label", lang);
+  if (!h) {
+    // Own-host mode with no sidecar socket means NOTHING is being watched
+    // (review L5): warn instead of passing silently, because a logged-out or
+    // expired node would break every artifact frame with no signal anywhere.
+    if (process.env.CROW_ARTIFACT_ORIGIN_URL && !process.env.CROW_ARTIFACT_SIDECAR_SOCKET) {
+      return {
+        id: "artifact-node:unmonitored", severity: "warn", state: "warn", issueOnly: true, label,
+        issueLabel: t("signals.artifactNode.unmonitored", lang),
+      };
+    }
+    return null;
+  }
   if (h.ok) return { id: "artifact-node", severity: null, state: "ok", label, value: t("signals.artifactNode.ok", lang) };
   const problems = (h.problems || []).filter((p) => ARTIFACT_NODE_PROBLEMS.includes(p));
   if (problems.length === 0) problems.push("unreachable");   // not ok without a known problem: fail closed

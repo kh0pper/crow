@@ -200,6 +200,7 @@ export const translations = {
   "signals.artifactNode.funnelOn": { en: "The artifact view's network node is shared to the internet (Funnel). It should be private.", es: "El nodo de red de la vista de artefactos está compartido en internet (Funnel). Debería ser privado." },
   "signals.artifactNode.unexpectedMapping": { en: "The artifact view's network node serves something other than the artifact view. Check its serve settings.", es: "El nodo de red de la vista de artefactos sirve algo distinto de la vista de artefactos. Revisa su configuración de serve." },
   "signals.artifactNode.unreachable": { en: "Crow can't check the artifact view's network node.", es: "Crow no puede revisar el nodo de red de la vista de artefactos." },
+  "signals.artifactNode.unmonitored": { en: "The artifact view is configured, but its network node isn't monitored, so a logout or key expiry would go unnoticed. Add the sidecar socket setting.", es: "La vista de artefactos está configurada, pero su nodo de red no está monitoreado, así que un cierre de sesión o el vencimiento de la clave pasaría desapercibido. Añade la configuración del socket del sidecar." },
   "signals.exposure.label": { en: "Privacy", es: "Privacidad" },
   "signals.exposure.private": { en: "private", es: "privado" },
   "signals.exposure.open": { en: "check needed", es: "necesita revisión" },

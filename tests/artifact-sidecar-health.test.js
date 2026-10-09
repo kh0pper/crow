@@ -69,7 +69,7 @@ test("Funnel on for the artifact node is a problem (public links are not built y
 test("any mapping other than the one 443 -> http://127.0.0.1:<origin port> proxy is unexpected", () => {
   const cases = {
     "wrong port": serve(`http://127.0.0.1:${PORT + 1}`),
-    "not loopback": serve(`http://10.0.0.5:${PORT}`),
+    "not loopback": serve(`http://192.0.2.5:${PORT}`),
     "localhost name": serve(`http://localhost:${PORT}`),
     "https backend": serve(`https://127.0.0.1:${PORT}`),
     "trailing path": serve(`http://127.0.0.1:${PORT}/x`),
@@ -118,6 +118,41 @@ test("the shipped serve.json.tmpl, rendered for the main instance, passes the au
   assert.equal(sidecarHealth({ statusJson: status(), serveConfig: wrong, originPort: 3090, now: NOW }).ok, false);
   assert.throws(() => renderServeConfig(tmpl, { originPort: "3090; x" }), /port/);
   assert.throws(() => renderServeConfig(tmpl, { originPort: 0 }), /port/);
+});
+
+test("Nest health signal: own-host mode without a sidecar socket warns 'unmonitored' (review L5)", async () => {
+  const hs = await import("../servers/gateway/dashboard/panels/nest/health-signals.js");
+  hs._setTailscaleReader(() => "{}");
+  hs._setDiskReader(() => "Avail Size\n500000M 1000000M\n");
+  const savedUrl = process.env.CROW_ARTIFACT_ORIGIN_URL;
+  const savedSocket = process.env.CROW_ARTIFACT_SIDECAR_SOCKET;
+  try {
+    hs._setArtifactNodeReader(async () => null);
+    process.env.CROW_ARTIFACT_ORIGIN_URL = "https://art.example";
+    delete process.env.CROW_ARTIFACT_SIDECAR_SOCKET;
+    for (const lang of ["en", "es"]) {
+      hs.invalidateHealthCache();
+      const r = await hs.collectHealthSignals(null, { now: () => NOW, lang });
+      const i = r.issues.find((x) => x.id === "artifact-node:unmonitored");
+      assert.ok(i, `${lang}: unmonitored warn issue exists`);
+      assert.equal(i.severity, "warn", "warn → pushed by the health monitor");
+      assert.ok(i.label && !/signals\.artifactNode/.test(i.label), `${lang}: translated label`);
+      assert.equal(r.details.find((d) => d.id === "artifact-node"), undefined, "issue only, no card");
+      assert.equal(r.ok, false);
+    }
+    // With the socket configured the unmonitored warn goes away (the real
+    // reader would then audit the node itself).
+    process.env.CROW_ARTIFACT_SIDECAR_SOCKET = "/run/crow-artifacts/tailscaled.sock";
+    hs.invalidateHealthCache();
+    const r2 = await hs.collectHealthSignals(null, { now: () => NOW });
+    assert.equal(r2.issues.find((x) => x.id === "artifact-node:unmonitored"), undefined);
+  } finally {
+    if (savedUrl === undefined) delete process.env.CROW_ARTIFACT_ORIGIN_URL; else process.env.CROW_ARTIFACT_ORIGIN_URL = savedUrl;
+    if (savedSocket === undefined) delete process.env.CROW_ARTIFACT_SIDECAR_SOCKET; else process.env.CROW_ARTIFACT_SIDECAR_SOCKET = savedSocket;
+    hs._setArtifactNodeReader(null);
+    hs._setDiskReader(null);
+    hs.invalidateHealthCache();
+  }
 });
 
 test("reader: off without a sidecar socket; runs the CLI with --socket and no sudo; caches for 5 minutes; a failing CLI is unreachable", async () => {
@@ -192,6 +227,16 @@ test("Nest health signal: no card when not configured; ok card when healthy; one
       assert.match(k.label, /2026-10-11/, "the expiry date is shown");
       assert.equal(r.ok, false);
     }
+
+    // An unknown problem must fail CLOSED as unreachable (review R4/M13):
+    // never an empty issue list that would read as ok.
+    hs._setArtifactNodeReader(async () => ({ ok: false, problems: ["weird"], keyExpiry: null }));
+    hs.invalidateHealthCache();
+    r = await hs.collectHealthSignals(null, { now: () => NOW });
+    const weird = r.issues.filter((i) => i.id.startsWith("artifact-node:"));
+    assert.deepEqual(weird.map((i) => i.id), ["artifact-node:unreachable"]);
+    assert.equal(weird[0].severity, "warn");
+    assert.equal(r.ok, false);
   } finally {
     hs._setArtifactNodeReader(null);
     // (the tailscale reader seam has no restore; this file runs in its own process)

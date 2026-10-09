@@ -51,8 +51,12 @@ export function isolationFor(dashboardHost) {
 export async function startArtifactOriginFromEnv(env = process.env) {
   const raw = env.CROW_ARTIFACT_ORIGIN_PORT;
   if (raw == null || String(raw).trim() === "") return null;
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("CROW_ARTIFACT_ORIGIN_PORT must be a port number (1-65535)");
+  // Digits only (review R1): Number() would accept "0x0BF2" (3058), "1e3"
+  // (1000) and "0" — none of which is the port an operator meant to write.
+  const digits = String(raw).trim();
+  if (!/^\d{1,5}$/.test(digits)) throw new Error("CROW_ARTIFACT_ORIGIN_PORT must be a port number (1-65535)");
+  const port = Number(digits);
+  if (port < 1 || port > 65535) throw new Error("CROW_ARTIFACT_ORIGIN_PORT must be a port number (1-65535)");
   const configured = parseOriginUrl(env.CROW_ARTIFACT_ORIGIN_URL);
   if (env.CROW_ARTIFACT_ORIGIN_URL && !configured) throw new Error("CROW_ARTIFACT_ORIGIN_URL must be scheme://host[:port] with no path");
   const host = env.CROW_ARTIFACT_ORIGIN_BIND || "127.0.0.1";

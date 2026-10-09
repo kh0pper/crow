@@ -88,8 +88,6 @@ function probesPage() {
 before(async () => {
   tokens = createViewTokenStore();
   const resolveContent = async ({ artifactId, path }) => (CONTENT.get(artifactId) || {})[path] || null;
-  originMain = createArtifactOriginHandler({ tokens, resolveContent, publicBase: null });
-  originFallback = createArtifactOriginHandler({ tokens, resolveContent, publicBase: null });
   const handler = (req, res) => {
     const host = String(req.headers.host || "").split(":")[0];
     if (host === "evil.test") {
@@ -146,10 +144,14 @@ window.__mountWith = (g) => { window.__v = CrowArtifactViewer.mount({ container:
   server = http.createServer(handler);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   P = server.address().port;
+  // Explicit fallback bases (review L3): the origin's CSP source base is fixed,
+  // never derived from the request's Host header.
+  originMain = createArtifactOriginHandler({ tokens, resolveContent, publicBase: null, fallbackBase: `http://art.test:${P}` });
   // Fallback layout: the origin on a second port of the dashboard's host.
   server2 = http.createServer((req, res) => { rawArtCookies.push(req.headers.cookie || null); originFallback(req, res); });
   await new Promise((r) => server2.listen(0, "127.0.0.1", r));
   P2 = server2.address().port;
+  originFallback = createArtifactOriginHandler({ tokens, resolveContent, publicBase: null, fallbackBase: `http://dash.test:${P2}` });
   connServer = net.createServer((sock) => { evil2Connections++; sock.destroy(); });
   await new Promise((r) => connServer.listen(0, "127.0.0.1", r));
   P3 = connServer.address().port;
@@ -236,6 +238,11 @@ test("scripted page: every egress and ambient-authority probe is blocked; self-n
     const st = await t.evalIn("__v.state()");
     assert.equal(st.tripped, false, "an obedient page does not trip the wire");
     assert.equal(st.hello, true);
+    // R3: the mounted frame itself carries the grant's sandbox attribute, plus
+    // no-referrer and an empty permissions allowlist (the CSP header alone must
+    // not be the only frame-side control).
+    const attrs = await t.evalIn(`(() => { const f = document.querySelector('iframe.crow-artifact-frame'); return f && { sandbox: f.getAttribute('sandbox'), rp: f.getAttribute('referrerpolicy'), allow: f.getAttribute('allow') }; })()`);
+    assert.deepEqual(attrs, { sandbox: g.sandbox, rp: "no-referrer", allow: "" }, "iframe sandbox/referrerpolicy/allow (R3)");
   } finally { await t.close(); }
 });
 
@@ -282,6 +289,8 @@ test("script-free document: no script runs, meta refresh and every subresource t
     await harness(t, g);
     await waitFor(() => t.evalIn("__r.ready"));
     await sleep(1500);
+    const attrs = await t.evalIn(`(() => { const f = document.querySelector('iframe.crow-artifact-frame'); return f && { sandbox: f.getAttribute('sandbox'), rp: f.getAttribute('referrerpolicy'), allow: f.getAttribute('allow') }; })()`);
+    assert.deepEqual(attrs, { sandbox: "", rp: "no-referrer", allow: "" }, "script-free frame carries the empty sandbox attribute (R3)");
     assert.equal(await t.evalIn(`__r.raw.some(m => m && m.t === "probe-result")`), false, "no script ran");
     assert.deepEqual(evil.slice(before).map((e) => e.path), [], "nothing reached evil.test");
     const st = await t.evalIn("__v.state()");

@@ -2,6 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import { startArtifactOrigin, cleanRelPath, artifactRequestAllowed } from "../servers/gateway/artifact-origin/server.js";
 import { createViewTokenStore } from "../servers/gateway/artifact-origin/view-tokens.js";
 import { cspFor, iframeSandboxFor, ARTIFACT_TYPES } from "../servers/gateway/artifact-origin/policy.js";
@@ -24,12 +25,25 @@ before(async () => {
 });
 after(() => { server?.closeAllConnections?.(); server?.close(); });
 
-function req(path, { method = "GET", headers = {} } = {}) {
+function reqAt(p, path, { method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const r = http.request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+    const r = http.request({ host: "127.0.0.1", port: p, path, method, headers }, (res) => {
       let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
     });
     r.on("error", reject); r.end();
+  });
+}
+function req(path, opts) { return reqAt(port, path, opts); }
+
+/** Raw socket request → raw response text (for Node-level parse errors). */
+function rawRequest(p, payload, waitMs = 600) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(p, "127.0.0.1", () => sock.write(payload));
+    let buf = "";
+    sock.on("data", (d) => (buf += d));
+    sock.on("close", () => resolve(buf));
+    sock.on("error", reject);
+    setTimeout(() => { sock.destroy(); resolve(buf); }, waitMs);
   });
 }
 
@@ -82,6 +96,42 @@ test("HEAD returns headers and no body", async () => {
   assert.equal(r.body, "");
 });
 
+test("a throwing resolver still gets a 500 with the base headers (review R2)", async () => {
+  const { token } = tokens.mint({ artifactId: "a1", versionN: 1, type: "page", dashboardOrigin: null });
+  const s = await startArtifactOrigin({ port: 0, tokens, resolveContent: async () => { throw new Error("boom"); } });
+  try {
+    const r = await reqAt(s.address().port, `/v/${token}/`);
+    assert.equal(r.status, 500);
+    assertBaseHeaders(r, "resolver-throw 500");
+    const h = await reqAt(s.address().port, `/v/${token}/`, { method: "HEAD" });
+    assert.equal(h.status, 500);
+    assert.equal(h.body, "");
+    assertBaseHeaders(h, "resolver-throw 500 HEAD");
+  } finally { s.closeAllConnections?.(); s.close(); }
+});
+
+test("Node-level parse errors (400/431) carry the base headers too (review L1)", async () => {
+  const malformed = await rawRequest(port, "XYZZY / HTTP/1.1\r\nHost: x\r\n\r\n");
+  assert.match(malformed, /^HTTP\/1\.1 400 Bad Request\r\n/, "malformed method → 400");
+  assert.match(malformed, /content-security-policy: [^\r]*; sandbox\r\n/i, "strict CSP with sandbox");
+  assert.match(malformed, /x-content-type-options: nosniff/i);
+  assert.match(malformed, /content-length: 0\r\nconnection: close/i);
+  assert.doesNotMatch(malformed, /set-cookie/i);
+  const huge = await rawRequest(port, `GET / HTTP/1.1\r\nHost: x\r\nbig: ${"a".repeat(20000)}\r\n\r\n`);
+  assert.match(huge, /^HTTP\/1\.1 431 /, "oversized header → 431");
+  assert.match(huge, /content-security-policy: [^\r]*; sandbox\r\n/i);
+  assert.match(huge, /x-content-type-options: nosniff/i);
+});
+
+test("the fallback CSP base is localhost — a forged Host header cannot widen script-src (review L3)", async () => {
+  const { token } = tokens.mint({ artifactId: "a2", versionN: 1, type: "page", dashboardOrigin: null });
+  const r = await req(`/v/${token}/`, { headers: { host: "evil.test:9" } });
+  assert.equal(r.status, 200);
+  const csp = r.headers["content-security-policy"];
+  assert.ok(csp.includes(`script-src http://localhost:${port}/v/${token}/`), csp);
+  assert.doesNotMatch(csp, /evil\.test/);
+});
+
 test("scripted types get allow-scripts, ACAO on 200s, and the anchor helper injected", async () => {
   const { token, nonce } = tokens.mint({ artifactId: "a2", versionN: 1, type: "page", dashboardOrigin: "https://dash.example" });
   const r = await req(`/v/${token}/`);
@@ -100,14 +150,21 @@ test("the Cookie header never reaches the content resolver, and Funnel traffic i
   const { token } = tokens.mint({ artifactId: "a1", versionN: 1, type: "document", dashboardOrigin: null });
   let sawCookie = false;
   const s2 = await startArtifactOrigin({ port: 0, tokens, resolveContent: async () => null });
-  // Wrap: the handler deletes req.headers.cookie first; prove it via a probe server.
-  const probe = http.createServer((rq, rs) => { s2.emit("request", rq, rs); sawCookie = sawCookie || ("cookie" in rq.headers); });
+  // Wrap: the handler strips the cookie from every header view first; prove it
+  // via a probe server that re-reads headers, rawHeaders and headersDistinct
+  // AFTER the handler ran (review L2).
+  const probe = http.createServer((rq, rs) => {
+    s2.emit("request", rq, rs);
+    sawCookie = sawCookie || ("cookie" in rq.headers)
+      || (Array.isArray(rq.rawHeaders) && rq.rawHeaders.some((h, i) => i % 2 === 0 && String(h).toLowerCase() === "cookie"))
+      || (() => { try { return rq.headersDistinct != null && "cookie" in rq.headersDistinct; } catch { return false; } })();
+  });
   await new Promise((r) => probe.listen(0, "127.0.0.1", r));
   try {
     await new Promise((resolve) => {
       http.get({ host: "127.0.0.1", port: probe.address().port, path: `/v/${token}/`, headers: { cookie: "crow_session=SECRET; crow_csrf=X" } }, (res) => { res.resume(); res.on("end", resolve); });
     });
-    assert.equal(sawCookie, false, "cookie deleted before any later listener could read it");
+    assert.equal(sawCookie, false, "cookie removed from headers, rawHeaders and headersDistinct before any later listener could read it");
   } finally { probe.closeAllConnections?.(); probe.close(); s2.close(); }   // a failure must not hang the file (re-check note)
   const f = await req(`/v/${token}/`, { headers: { "tailscale-funnel-request": "?1" } });
   assert.equal(f.status, 403);
@@ -123,6 +180,7 @@ test("network rule: loopback, tailnet and private peers allowed; public peers an
   assert.equal(artifactRequestAllowed(mk("::ffff:100.64.20.5")), true);
   assert.equal(artifactRequestAllowed(mk("172.18.0.3")), true);
   assert.equal(artifactRequestAllowed(mk("8.8.8.8")), false);
+  assert.equal(artifactRequestAllowed(mk("8.8.8.8", { "tailscale-user-login": "someone@example.com" })), false, "the client-supplied login header is not an access path (review L4)");
   assert.equal(artifactRequestAllowed(mk("127.0.0.1", { "tailscale-funnel-request": "?1" })), false);
 });
 
@@ -146,6 +204,21 @@ test("tokens: expiry, revocation and format", () => {
   s.revokeArtifact("z");
   assert.equal(s.check(b.token), null, "revoked");
   assert.equal(s.check("not a token"), null);
+});
+
+test("mint refuses a dashboardOrigin that is not a bare origin (frame-ancestors interpolation, review R4)", () => {
+  const s = createViewTokenStore();
+  for (const bad of [
+    "https://x; sandbox allow-scripts allow-same-origin",   // would win over the real sandbox (first directive)
+    "https://a.example/x", "https://a.example/?q=1", "javascript:alert(1)", "https://u:p@a.example",
+    "https://*.example", "not a url", "", 42, {},
+  ]) {
+    assert.throws(() => s.mint({ artifactId: "z", versionN: 1, type: "page", dashboardOrigin: bad }), /bad_grant/, `refused: ${JSON.stringify(bad)}`);
+  }
+  assert.ok(s.mint({ artifactId: "z", versionN: 1, type: "page", dashboardOrigin: "https://dash.example" }));
+  assert.ok(s.mint({ artifactId: "z", versionN: 1, type: "page", dashboardOrigin: "http://localhost:3001" }));
+  assert.ok(s.mint({ artifactId: "z", versionN: 1, type: "page", dashboardOrigin: null }));
+  assert.equal(s.mint({ artifactId: "z", versionN: 1, type: "page" }).expiresAt > 0, true);
 });
 
 test("CSP table: every type has a policy, scripted types match the iframe sandbox, none allow eval or connect", () => {
@@ -228,9 +301,10 @@ test("runtime: nothing starts without a port; a bad port or origin URL is refuse
   assert.equal(await rt.startArtifactOriginFromEnv({}), null);
   assert.equal(rt.artifactOriginInfo(), null);
   assert.equal(rt.isolationFor("localhost:3001"), "unavailable");
-  for (const p of ["abc", "-1", "0.5", "70000"]) {
+  for (const p of ["abc", "-1", "0.5", "70000", "0", "0x0BF2", "1e3", "+3090", "3090abc"]) {
     await assert.rejects(rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: p }), /CROW_ARTIFACT_ORIGIN_PORT/, `port ${p}`);
   }
+  assert.equal(rt.artifactOriginInfo(), null, "hex/exponent/zero forms start nothing either (review R1)");
   await assert.rejects(rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: "3999", CROW_ARTIFACT_ORIGIN_URL: "https://a.example/path" }), /CROW_ARTIFACT_ORIGIN_URL/);
   assert.equal(rt.artifactOriginInfo(), null, "a refused start leaves no info behind");
 });

@@ -12,7 +12,8 @@ This page covers that host: the origin, view tokens, the viewer, the sidecar net
 - **Every response, errors included,** carries:
   - a `Content-Security-Policy` that ends in a `sandbox` directive, so even a top-level load runs as an opaque origin;
   - `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store, private` and `X-Robots-Tag: noindex`.
-- **Never** a `Set-Cookie` and never a 3xx. The `Cookie` request header is deleted before anything reads the request, and nothing logs request paths (they carry tokens).
+  - Node's own parse-error responses are covered too: a `clientError` handler answers a malformed request line with 400 and an oversized header with 431, both with the same base headers. A connection that times out is destroyed **without any response** — nothing is served, so there are no bytes to protect.
+- **Never** a `Set-Cookie` and never a 3xx. The `Cookie` request header is removed from every header view (`headers`, the lazily cached `headersDistinct` and `rawHeaders`) before anything reads the request, and nothing logs request paths (they carry tokens).
 - **Funnel traffic is refused.** Any request carrying `Tailscale-Funnel-Request` gets 403, and `CROW_DASHBOARD_PUBLIC` does not override that. Peers must be loopback, a private LAN range or the tailnet.
 - Range requests are not honoured: the full body comes back with 200.
 
@@ -39,7 +40,7 @@ The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-p
 
 - A token grants one artifact version, read-only. It lasts 30 minutes, and the viewer mints a fresh one for every frame load.
 - Only a SHA-256 of each token is held.
-- Each token carries a per-load nonce (the tripwire handshake) and the dashboard origin that minted it. That origin becomes the response's `frame-ancestors`, so no per-instance configuration is needed.
+- Each token carries a per-load nonce (the tripwire handshake) and the dashboard origin that minted it. That origin becomes the response's `frame-ancestors`, so no per-instance configuration is needed. `mint()` accepts only a bare `scheme://host[:port]` origin (or null) and throws `bad_grant` on anything else: the value is interpolated into the CSP **before** the `sandbox` directive, and CSP keeps the first of duplicate directives, so a smuggled `; sandbox …` suffix must be impossible to store.
 - A gateway restart drops every token. Open frames keep their loaded document, and lazy loads fail until the view is reloaded.
 
 ### Configuration
@@ -49,7 +50,7 @@ The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-p
 | `CROW_ARTIFACT_ORIGIN_PORT` | Loopback port of this instance's origin. Unset: nothing listens and artifact viewing is off. |
 | `CROW_ARTIFACT_ORIGIN_URL` | The origin browsers use, on its **own** hostname, e.g. `https://<instance>-artifacts.<tailnet>.ts.net`. Scheme, host and optional port only. Unset: the loopback fallback below. |
 | `CROW_ARTIFACT_ORIGIN_BIND` | Bind address, default `127.0.0.1`. A container instance binds inside its namespace and publishes on host loopback. |
-| `CROW_ARTIFACT_SIDECAR_SOCKET` | The sidecar node's tailscaled socket, for the health check. Unset: no health card. |
+| `CROW_ARTIFACT_SIDECAR_SOCKET` | The sidecar node's tailscaled socket, for the health check. Unset while `CROW_ARTIFACT_ORIGIN_URL` is set: the node is **not monitored** and the Nest raises a warn (`artifact-node:unmonitored`). |
 
 Registered ports (see [port allocation](../developers/port-allocation.md)): `CROW_ARTIFACT_ORIGIN_PORT=3090` for the main instance, `CROW_ARTIFACT_ORIGIN_PORT=3091` for a second co-hosted instance, `CROW_ARTIFACT_ORIGIN_PORT=3092` for a household container instance. 3093 is reserved for the later public-link listener.
 
@@ -80,7 +81,7 @@ Operator notes:
 | `unexpected-mapping` | Anything other than the one 443 → `http://127.0.0.1:<origin port>` proxy. |
 | `unreachable` | The CLI failed or returned something unreadable. This is never treated as healthy. |
 
-Each problem becomes its own warn issue in the Nest health panel (`artifact-node:<problem>`), so the health monitor pushes a notification for each new one.
+Each problem becomes its own warn issue in the Nest health panel (`artifact-node:<problem>`), so the health monitor pushes a notification for each new one. A problem code the panel does not know fails closed as `unreachable`. When `CROW_ARTIFACT_ORIGIN_URL` is set but `CROW_ARTIFACT_SIDECAR_SOCKET` is not, nothing can be checked at all — that raises `artifact-node:unmonitored` (warn) instead of passing silently.
 
 ## The fallback: no second hostname
 
@@ -88,6 +89,7 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 
 - The browser does send the dashboard's cookies to a second port on the same host. The listener deletes them before anything reads them.
 - The sandbox still holds: top-level loads run opaque, and `document.cookie` throws.
+- The CSP source base is pinned to `http://localhost:<port>` — it is **never** derived from the request's `Host` header, so a forged or rebinding `Host` cannot widen `script-src`.
 - `http://localhost:<port>` is reachable only from the machine Crow runs on, so a dashboard opened from another device cannot show artifacts on a fallback install.
 
 ## The trusted viewer
