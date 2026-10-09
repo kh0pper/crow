@@ -1151,6 +1151,11 @@ function dashboardCss() {
     width: 100%;
     transition: border-color 0.15s;
   }
+  /* Checkboxes and radios keep their natural size: at width:100% a checkbox in a flex row
+     takes the whole row and crushes its label to one character per line. */
+  input[type="checkbox"], input[type="radio"] {
+    width: auto;
+  }
   input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) {
     outline: none;
     border-color: var(--crow-accent);
