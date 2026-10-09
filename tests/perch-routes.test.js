@@ -764,3 +764,42 @@ test("perchAttached is imported from the shared module, not redefined locally (T
   assert.doesNotMatch(src, /function perchAttached\(/,
     "perch.js must not define its own local perchAttached — that is the duplication this task removes");
 });
+
+test("POST /narrow: a LOCKED narrowing (untrusted Artifacts round) only grows; the lock survives", async () => {
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,narrowed_tools) " +
+    "VALUES ('chatty','perch','narrow-locked','perch-live','waiting-user','[\"bash\",\"crow:locked\"]')"
+  ).run();
+  c.close();
+  const widen = await postJson("/bots/chatty/sessions/narrow-locked/narrow", { disabled_tools: [] });
+  assert.equal(widen.status, 409);
+  assert.equal(widen.body.error, "narrowing_locked");
+  assert.deepEqual(widen.body.missing, ["bash"]);
+  const grow = await postJson("/bots/chatty/sessions/narrow-locked/narrow", { disabled_tools: ["bash", "read"] });
+  assert.equal(grow.status, 200);
+  const after = raw();
+  const row = after.prepare("SELECT narrowed_tools FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='narrow-locked' ORDER BY id DESC LIMIT 1").get();
+  after.close();
+  assert.deepEqual(JSON.parse(row.narrowed_tools).sort(), ["bash", "crow:locked", "read"]);
+});
+
+test("POST /narrow: the operator can never write or remove sentinels; an unreadable locked row is refused", async () => {
+  const c = raw();
+  c.prepare("INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,narrowed_tools) VALUES ('chatty','perch','narrow-only','perch-live','waiting-user',?)")
+    .run(JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]));
+  c.prepare("INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,narrowed_tools) VALUES ('chatty','perch','narrow-corrupt','perch-live','waiting-user','[\"crow:locked\", \"crow:only:mcp__')").run();
+  c.close();
+  // Unlocked thread: an injected lock / allow entry is dropped, not stored.
+  assert.equal((await postJson("/bots/chatty/sessions/narrow-free/narrow", { disabled_tools: ["bash", "crow:locked", "crow:only:bash"] })).status, 200);
+  // Locked thread: adding works and both sentinels are kept.
+  assert.equal((await postJson("/bots/chatty/sessions/narrow-only/narrow", { disabled_tools: ["bash"] })).status, 200);
+  const r = await postJson("/bots/chatty/sessions/narrow-corrupt/narrow", { disabled_tools: [] });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "narrowing_invalid");
+  const after = raw();
+  const get = (t) => JSON.parse(after.prepare("SELECT narrowed_tools FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(t).narrowed_tools);
+  assert.deepEqual(get("narrow-free"), ["bash"]);
+  assert.deepEqual(get("narrow-only").sort(), ["bash", "crow:locked", "crow:only:mcp__artifacts__"]);
+  after.close();
+});
