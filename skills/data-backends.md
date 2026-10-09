@@ -10,9 +10,14 @@ Guides connecting external data systems (Postgres, APIs, SaaS) through MCP serve
 
 ## Registration Workflow
 
+There are two kinds of backend (`backend_type`):
+
+- **`mcp_server`** (default) — an external MCP server Crow starts as a command. `connection_ref`: `{"command":"npx","args":["-y","mcp-server-postgres"],"envVars":["POSTGRES_URL"]}`.
+- **`sqlite`** — a SQLite dataset Crow reads read-only. `connection_ref`: `{"path":"<absolute path>"}`; the file must be in the data folder's `datasets/` or a project's `databases/` folder, never one of Crow's own databases.
+
 1. **Ask what they want to connect**
-   - Identify the MCP server package (e.g., `mcp-server-postgres`, `mcp-server-mysql`)
-   - Identify required credentials (env var names only — never store secrets)
+   - For `mcp_server`: the MCP server package and the credential env var NAMES (never values)
+   - For `sqlite`: where the file is (it must be moved into `datasets/` first if it is elsewhere)
 
 2. **Register the backend**
    ```
@@ -20,15 +25,17 @@ Guides connecting external data systems (Postgres, APIs, SaaS) through MCP serve
      name: "Production Postgres"
      connection_ref: '{"command":"npx","args":["-y","mcp-server-postgres"],"envVars":["POSTGRES_URL"]}'
    ```
-   This auto-creates a `data_connector` project and stores the registration.
+   This auto-creates a `data_connector` project if no `project_id` is given.
 
-3. **Remind about env vars**
-   - The user must add the actual credential values to `.env`
-   - The gateway must be restarted (or `POST /api/reload-backends` called) to connect
+3. **Tell the user an `mcp_server` backend needs their approval**
+   - It is registered as *pending approval* and does not run until the owner approves the exact command in Crow's Nest › Projects › the project › Data Backends
+   - You cannot approve it; never claim it is running before the user has approved it
+   - It gets only basic environment variables plus the ones named in `envVars` — never the gateway's secrets. Approval also pins the files it runs (launcher, script arguments); editing one needs a new approval
+   - The user adds the credential values to `.env`
 
 4. **Verify connection**
-   - Use `crow_list_backends` to check status
-   - Use `crow_backend_schema` to see discovered tools
+   - Use `crow_list_backends` to check status (`pending_approval` → waiting for the user)
+   - Use `crow_backend_schema` to see discovered tools once it is connected
 
 ## Knowledge Capture Protocol
 
@@ -75,4 +82,5 @@ When querying data through an external backend:
 
 - Credentials live in `.env` only — never in the database
 - `connection_ref` stores env var **names** (e.g., `"envVars": ["POSTGRES_URL"]"`), not values
-- The database may be shared via P2P — no secrets in DB rows
+- Backend registrations are never copied from peers; a shared project carries only a description
+- Registering a command never runs it — only the owner's approval in Crow's Nest does
