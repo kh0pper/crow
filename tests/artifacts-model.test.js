@@ -267,6 +267,33 @@ test("inertLinks also neutralises non-contract href forms (review L2)", () => {
   assert.match(inertLinks('<a href="#sec">x</a>'), /href="#sec"/);
 });
 
+test("local blob store: absent reads null, but unreadable objects and failed deletes are ERRORS (review 1b-L2/L3); keys() filters junk (1b-N1)", async (t) => {
+  const { createLocalBlobStore } = await import("../bundles/artifacts/server/blob-store.js");
+  const { mkdirSync, writeFileSync, chmodSync } = await import("node:fs");
+  const root = join(s.dir, "errstore");
+  const b = createLocalBlobStore(root);
+  const k = await b.put(Buffer.from("payload"));
+  assert.equal((await b.get(k)).toString(), "payload");
+  assert.equal(await b.get("sha256/" + "0".repeat(64)), null, "absent → null");
+  // An unreadable "object" (a directory planted at the key path) must throw,
+  // never read as a silent miss.
+  const k2 = "sha256/" + "a".repeat(64);
+  mkdirSync(join(root, k2), { recursive: true });
+  await assert.rejects(b.get(k2), /EISDIR/);
+  // A failed delete surfaces (GC must not count bytes it did not free).
+  chmodSync(join(root, "sha256"), 0o500);
+  t.after(() => { try { chmodSync(join(root, "sha256"), 0o700); } catch {} });
+  await assert.rejects(b.del(k), (e) => e.code === "EACCES" || e.code === "EPERM");
+  chmodSync(join(root, "sha256"), 0o700);
+  // keys() only reports content-shaped names: planted junk with an invalid
+  // name is invisible to GC. (A DIRECTORY at a valid key path still lists —
+  // it reads as an orphan candidate and fails closed downstream.)
+  writeFileSync(join(root, "sha256", "junk.txt"), "x");
+  const keys = await b.keys();
+  assert.ok(!keys.includes("sha256/junk.txt"), `junk filtered: ${keys}`);
+  assert.ok(keys.includes(k));
+});
+
 test("ReDoS: adversarial inputs to every scanner finish inside a time budget", () => {
   const budget = (label, fn) => { const t0 = process.hrtime.bigint(); fn(); const ms = Number(process.hrtime.bigint() - t0) / 1e6; assert.ok(ms < 1500, `${label} took ${ms.toFixed(0)} ms`); };
   const big = 200000;

@@ -7,7 +7,9 @@ import * as comments from "./comments.js";
 import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
 
-function header(h, k) { const v = h?.[k]; const s = Array.isArray(v) ? v[0] : v; return s == null ? null : String(s); }
+// Header values are TRIMMED so the attributed id always equals the id the
+// signature was made over (the MAC trims on both sides; review 1a-L2).
+function header(h, k) { const v = h?.[k]; const s = Array.isArray(v) ? v[0] : v; return s == null ? null : String(s).trim() || null; }
 
 export const UNATTRIBUTED = Object.freeze({ kind: "unattributed", id: null, thread: null, gateway: null });
 
@@ -73,6 +75,10 @@ export const TOOL_CLASSES = Object.freeze({
   artifact_create: "writes", artifact_update: "writes", artifact_get: "reads-untrusted", artifact_list: "reads-owner-metadata",
   artifact_comments: "reads-untrusted", artifact_reply: "writes", artifact_resolve: "writes", artifact_round_done: "writes",
 });
+// CONTRACT: error text reaches the wire UNGATED, so every message thrown at a
+// caller must be a static string — never interpolate a title, change note,
+// comment or any other authored value into an Error message here (review
+// 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
 
 export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {} } = {}) {
@@ -101,6 +107,9 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
     } catch {
       throw Object.assign(new Error("session state unavailable"), { code: "forbidden" });
     }
+    // No status filter, intentionally: the scope OUTLIVES its round's
+    // completion so a still-locked session can never regain the unrestricted
+    // surface (restrictive direction; pinned by the mcp scope tests).
     const round = (await db.execute({ sql: "SELECT id, artifact_id, untrusted_input FROM artifact_rounds WHERE session_id=? AND bot_id=? ORDER BY id DESC LIMIT 1", args: [actor.thread, actor.id] })).rows[0];
     if (locked && !round) throw Object.assign(new Error("this locked session has no round"), { code: "forbidden" });
     if (locked || (round && store.flagUntrusted(round.untrusted_input))) return { roundId: Number(round.id), artifactId: round.artifact_id };

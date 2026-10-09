@@ -190,6 +190,46 @@ test("taint-gate parity: every registered tool has a class, and NO tool returns 
   } finally { await c.close(); }
 });
 
+test("error paths carry no authored text either: every tool forced to fail with sentinels planted (review 1a-L1)", async () => {
+  // The fail() text reaches the wire UNGATED — the contract is that every
+  // thrown message is a static string. Plant the sentinel (the parity test's
+  // thread may already exist; add an independent one) and force every tool
+  // that CAN fail into its error path.
+  const SENT = "SENTINEL-ERRPATH-3197";
+  await comments.addThread(s.db, { artifactId: s.artId, versionN: 1, anchor: { kind: "whole" }, text: SENT, author: { kind: "contact", id: SENT + "-id" } });
+  const c = await client(s.artToken, bot("bobby", "perchlive-err"));
+  try {
+    const bad = {
+      artifact_create: { title: "x", type: "not-a-type", source: {} },
+      artifact_update: { artifact_id: "art_missing000000", source: { html: "<p>x</p>" } },
+      artifact_get: { artifact_id: "art_missing000000" },
+      artifact_comments: { artifact_id: "art_missing000000" },
+      artifact_reply: { artifact_id: s.artId, thread_id: 999999, text: "x" },
+      artifact_resolve: { artifact_id: s.artId, thread_id: 999999 },
+      artifact_round_done: { artifact_id: s.artId, round_id: 999999, summary: "x" },
+    };
+    for (const [name, args] of Object.entries(bad)) {
+      const r = await c.callTool({ name, arguments: args });
+      assert.equal(r.isError, true, `${name} was expected to fail`);
+      const out = JSON.stringify(r);
+      assert.ok(!out.includes(SENT), `${name} leaked a contact sentinel through its error text`);
+      assert.ok(!out.includes("copy the Private notes"), `${name} leaked authored text through its error text`);
+    }
+  } finally { await c.close(); }
+});
+
+test("actor headers are trimmed: the attributed identity equals the signed identity (review 1a-L2)", async () => {
+  const { resolveArtifactsActor } = await import("../bundles/artifacts/server/mcp.js");
+  const seen = [];
+  const extra = { authInfo: { clientId: "local-mcp" }, requestInfo: { headers: {
+    "x-crow-actor-kind": " bot ", "x-crow-actor-id": " bobby ", "x-crow-actor-thread": " perchlive-pad ",
+    "x-crow-actor-gateway": " perch ", "x-crow-actor-sig": " " + "f".repeat(64) + " ",
+  } } };
+  const a = resolveArtifactsActor(extra, (v) => { seen.push(v); return true; });
+  assert.deepEqual(a, { kind: "bot", id: "bobby", thread: "perchlive-pad", gateway: "perch" });
+  assert.deepEqual(seen[0], { botId: "bobby", threadId: "perchlive-pad", gatewayType: "perch", sig: "f".repeat(64) }, "the verifier sees the same trimmed values");
+});
+
 test("gate(): markers never survive; scope unwraps only its own round's threads", () => {
   const p = { a: U("x", { artifactId: "A", thread: 1 }), b: [U("y", { artifactId: "A", thread: 2 })], c: U("z", { artifactId: "B" }) };
   assert.deepEqual(gate(p, { kind: "bot", id: "b" }, null, new Set()), { a: WITHHELD, b: [WITHHELD], c: WITHHELD });

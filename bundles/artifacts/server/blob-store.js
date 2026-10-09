@@ -65,7 +65,9 @@ export function createLocalBlobStore(root) {
     async get(key) {
       const p = pathOf(key);
       let fh;
-      try { fh = await open(p, FS.O_RDONLY | FS.O_NOFOLLOW); } catch { return null; }
+      // Absent reads null; an UNREADABLE object is an error, never a silent
+      // miss (review 1b-L2 — parity with the MinIO backend).
+      try { fh = await open(p, FS.O_RDONLY | FS.O_NOFOLLOW); } catch (e) { if (e && e.code === "ENOENT") return null; throw e; }
       try { return await fh.readFile(); } finally { await fh.close(); }
     },
     async has(key) { return existsSync(pathOf(key)); },
@@ -76,7 +78,9 @@ export function createLocalBlobStore(root) {
       const fh = await open(join(root, "store-id"), FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o600);
       try { await fh.writeFile(String(id)); } finally { await fh.close(); }
     },
-    async del(key) { try { await unlink(pathOf(key)); } catch {} },
-    async keys() { return (await readdir(join(root, "sha256"))).map((f) => "sha256/" + f); },
+    // A failed delete is an error, not a no-op: GC counts what it deleted and
+    // the quota must not disagree with usage() silently (review 1b-L3).
+    async del(key) { try { await unlink(pathOf(key)); } catch (e) { if (e && e.code !== "ENOENT") throw e; } },
+    async keys() { return (await readdir(join(root, "sha256"))).map((f) => "sha256/" + f).filter((k) => KEY_RE.test(k)); },
   };
 }
