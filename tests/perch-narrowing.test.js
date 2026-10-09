@@ -295,3 +295,43 @@ test("a turn from a caller with no kind opt never rewrites an existing row's kin
   await turn({ gateway_thread_id: "perch-4", gateway_type: "perch" }); // no kind
   assert.equal(sessionRow("perch-4").kind, "perch", "the default must not clobber a real kind");
 });
+
+test("locked narrowing (Artifacts untrusted rounds): an ALLOW list keeps only its prefixes, fails closed", () => {
+  const csv = "read,bash,subagent,mcp__artifacts__artifact_get,mcp__artifacts__artifact_update,mcp__gmail__send";
+  const only = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  assert.equal(applySessionNarrowing(csv, only), "mcp__artifacts__artifact_get,mcp__artifacts__artifact_update");
+  // A tool granted to the bot AFTER the round started is not on any disable
+  // list — the allow list still keeps it out.
+  assert.equal(applySessionNarrowing(csv + ",mcp__newly__granted", only), "mcp__artifacts__artifact_get,mcp__artifacts__artifact_update");
+  // A disable entry still removes inside the allow list.
+  assert.equal(applySessionNarrowing(csv, JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__", "mcp__artifacts__artifact_update"])), "mcp__artifacts__artifact_get");
+  // A lock with no allow entry keeps nothing; an unreadable lock keeps nothing.
+  assert.equal(applySessionNarrowing(csv, '["crow:locked"]'), "");
+  assert.equal(applySessionNarrowing(csv, '["crow:locked", "crow:only:mcp'), "");
+  assert.equal(applySessionNarrowing(csv, '{"crow:locked":1}'), "");
+  // Ordinary narrowing is unchanged (historical fail-open to the def).
+  assert.equal(applySessionNarrowing(csv, "[bash"), csv);
+  assert.equal(applySessionNarrowing(csv, '["bash"]'), "read,subagent,mcp__artifacts__artifact_get,mcp__artifacts__artifact_update,mcp__gmail__send");
+});
+
+test("R-M6: one allow matcher — a whole-server grant and per-tool grants both survive the lock; a look-alike server never does", async () => {
+  const { allowEntryMatches } = await import("../scripts/pi-bots/narrowing-lock.mjs");
+  assert.equal(allowEntryMatches("mcp__artifacts", "mcp__artifacts__"), true);
+  assert.equal(allowEntryMatches("mcp__artifacts__artifact_get", "mcp__artifacts__"), true);
+  assert.equal(allowEntryMatches("mcp__artifactsx__y", "mcp__artifacts__"), false);
+  assert.equal(allowEntryMatches("mcp__artifactsx", "mcp__artifacts__"), false);
+  const lock = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  assert.equal(applySessionNarrowing("bash,mcp__artifacts,mcp__artifactsx", lock), "mcp__artifacts");
+});
+
+test("R2-L2: grant shapes — the bundle's grantsServer and the bridge path (toolAllowlist + the lock) agree on every shape", async () => {
+  const { grantsServer } = await import("../bundles/artifacts/server/delivery.js");
+  const { toolAllowlist } = await import("../scripts/pi-bots/bridge.mjs");
+  const lock = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  const shapes = ["artifacts", "artifacts/artifact_get", "artifacts__artifact_get", "artifactsx", "artifactsx/y", "artifacts_x/y", "Artifacts", "", "board/board_list"];
+  for (const shape of shapes) {
+    const bundle = grantsServer(shape, "artifacts");
+    const bridge = applySessionNarrowing(toolAllowlist({ tools: { crow_mcp: shape ? [shape] : [] } }), lock) !== "";
+    assert.equal(bundle, bridge, `shape ${JSON.stringify(shape)}: bundle ${bundle} vs bridge ${bridge}`);
+  }
+});

@@ -3,10 +3,9 @@
  * COPIED ALONE to $CROW_HOME/panels/artifacts.js: no relative imports; app
  * modules are imported by absolute file:// URL (phone/ramble pattern).
  *
- * The page is a shell; panel-client.js draws the list and the viewer frame
- * (via viewer.js). The comment rail and the round preview arrive with step 3.
- * All user- and contact-authored text is set with textContent on the client —
- * never HTML.
+ * The page is a shell; panel-client.js draws the list, the viewer frame (via
+ * viewer.js), the comment rail and the round preview. All user- and
+ * contact-authored text is set with textContent on the client — never HTML.
  *
  * CSP: the gateway's global policy allows `frame-src 'self' https:`. The
  * artifact origin on its own https hostname fits that. The loopback fallback
@@ -35,6 +34,7 @@ export const ARTIFACTS_STRINGS = {
     never_password: "Crow never asks for your password inside an artifact.", resolved: "resolved", moved: "anchor moved",
     scripts_off: "This version was shaped by someone outside your Crow, so its scripts are off.", run_scripts: "Run this version's scripts",
     csp_missing: "This page isn't protected yet. Reload it to view artifacts.",
+    delivery_failed: "The bot couldn't get your feedback ({e}).", you: "you",
   },
   es: {
     title: "Artefactos", empty: "Aún no hay artefactos. Pídele a un bot que haga una página, un documento o un diagrama.",
@@ -53,6 +53,7 @@ export const ARTIFACTS_STRINGS = {
     never_password: "Crow nunca te pide la contraseña dentro de un artefacto.", resolved: "resuelto", moved: "ancla movida",
     scripts_off: "Esta versión la influyó alguien fuera de tu Crow, así que sus scripts están desactivados.", run_scripts: "Ejecutar los scripts de esta versión",
     csp_missing: "Esta página aún no está protegida. Recárgala para ver artefactos.",
+    delivery_failed: "El bot no pudo recibir tus comentarios ({e}).", you: "tú",
   },
 };
 

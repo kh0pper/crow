@@ -28,6 +28,7 @@
  * board token, minted per-bot into .mcp.json by mcp_writer.mjs's catalog
  * entry), never a direct DB write from here.
  */
+import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, mentionsLock, allowEntryMatches } from "./narrowing-lock.mjs";
 import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-permission-policy.js";
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
@@ -114,9 +115,17 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
 export function applySessionNarrowing(allowlistCsv, narrowedJson) {
   if (!narrowedJson) return allowlistCsv;
   let disabled;
-  try { disabled = JSON.parse(narrowedJson); } catch { return allowlistCsv; }
-  if (!Array.isArray(disabled) || !disabled.length) return allowlistCsv;
-  const keep = String(allowlistCsv || "").split(",").filter((t) => t && !disabled.includes(t));
+  // A LOCKED narrowing that no longer parses fails CLOSED (no tools); an
+  // ordinary one keeps the historical fail-open-to-the-def behaviour.
+  try { disabled = JSON.parse(narrowedJson); } catch { return mentionsLock(narrowedJson) ? "" : allowlistCsv; }
+  if (!Array.isArray(disabled)) return mentionsLock(narrowedJson) ? "" : allowlistCsv;
+  if (!disabled.length) return allowlistCsv;
+  let keep = String(allowlistCsv || "").split(",").filter((t) => t && !disabled.includes(t));
+  // Locked narrowing (narrowing-lock.mjs): an ALLOW list, so a tool granted
+  // to the bot after the round started can never appear in it.
+  const only = disabled.filter((t) => typeof t === "string" && t.startsWith(ALLOW_ONLY_PREFIX)).map((t) => t.slice(ALLOW_ONLY_PREFIX.length)).filter(Boolean);
+  if (only.length) keep = keep.filter((t) => only.some((p) => allowEntryMatches(t, p)));
+  else if (disabled.includes(NARROWING_LOCK)) keep = [];
   return keep.join(",");
 }
 

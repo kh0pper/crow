@@ -52,6 +52,7 @@
  * The bridge is imported LAZILY (via `loadBridge()`, used by the tool
  * envelope) so gateway boot stays light.
  */
+import { NARROWING_LOCK, isSentinel, mentionsLock } from "../../../scripts/pi-bots/narrowing-lock.mjs";
 import { Router } from "express";
 import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -764,15 +765,35 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
       // from inside Perch, invisibly to Bot Builder, which is the single writer
       // of the envelope. Cross-channel narrowing is a Phase-2 question: it
       // needs a Bot Builder surface that shows the narrowing first.
-      const foreign = foreignChannel(await latestSession(db, botId, threadId));
+      const prev = await latestSession(db, botId, threadId);
+      const foreign = foreignChannel(prev);
       if (foreign) return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
+      // A LOCKED narrowing (an engine spawn({narrowedTools}) for an untrusted
+      // Artifacts round, spec §7.3) only grows: every id it disables stays
+      // disabled, so the operator cannot re-open bash or email mid-round.
+      // Sentinels (scripts/pi-bots/narrowing-lock.mjs) are the engine's to
+      // write, never the operator's: any "crow:" entry sent here is dropped.
+      const prevRaw = prev?.narrowed_tools == null ? null : String(prev.narrowed_tools);
+      let prevList = [];
+      if (prevRaw != null) {
+        let v = null;
+        try { v = JSON.parse(prevRaw); } catch {}
+        if (Array.isArray(v)) prevList = v;
+        else if (mentionsLock(prevRaw)) return jsonError(res, 409, "narrowing_invalid");   // fail closed
+      }
+      const locked = prevList.includes(NARROWING_LOCK);
+      const wanted = list.filter((t) => !isSentinel(t));
+      if (locked) {
+        const missing = prevList.filter((t) => !isSentinel(t) && !wanted.includes(t));
+        if (missing.length) return jsonError(res, 409, "narrowing_locked", { missing });
+      }
       const envelope = await buildEnvelope(db, parseDef(row));
       const allowed = new Set(envelope.tools.map((t) => t.id));
       // Perch narrows; Bot Builder widens. Anything outside the def's own grant
       // — unknown id, or one the def denies — is a widening attempt.
-      const offending = [...new Set(list.filter((id) => !allowed.has(id)))];
+      const offending = [...new Set(wanted.filter((id) => !allowed.has(id)))];
       if (offending.length) return jsonError(res, 400, "widening_rejected", { offending });
-      await saveNarrowing(db, botId, threadId, JSON.stringify([...new Set(list)]));
+      await saveNarrowing(db, botId, threadId, JSON.stringify([...new Set([...wanted, ...(locked ? prevList.filter(isSentinel) : [])])]));
       res.json({ ok: true });
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));

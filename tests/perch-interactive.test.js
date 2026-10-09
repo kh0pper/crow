@@ -2136,3 +2136,179 @@ test("notifyCardToResident: no engine in the process -> no_engine, and it never 
   assert.deepEqual(r, { delivered: false, botId: null, reason: "no_engine" });
   assert.equal(getInteractiveEngine({ createIfMissing: false }), null, "the helper never mints an engine");
 });
+
+test("spawn({narrowedTools}) applies a LOCKED narrowing to the FIRST pi spawn and seeds it on the row (Artifacts untrusted rounds)", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: "botty", narrowedTools: ["crow:only:mcp__artifacts__"] });
+  await tick();
+  const w = state.preps.at(-1).world;
+  assert.deepEqual(JSON.parse(w.narrowedTools).sort(), ["crow:locked", "crow:only:mcp__artifacts__"], "the engine always adds the lock");
+  assert.equal(state.instances.at(-1).opts.narrowedTools, w.narrowedTools, "PiRpc is constructed with it");
+  assert.deepEqual(JSON.parse(rowFor(r.threadId).narrowed_tools).sort(), ["crow:locked", "crow:only:mcp__artifacts__"]);
+  for (const bad of ["not json", [1], [""], ["crow:unlock"], ["crow:anything"]]) {
+    await assert.rejects(engine.spawn({ botId: "botty", narrowedTools: bad }), (e) => /bad_request/.test(e.code || e.message), JSON.stringify(bad));
+  }
+  await engine.stopAll?.();
+});
+
+test("locked narrowing: later row writes never erase extra narrowing the owner added", async () => {
+  const { engine } = makeEngine();
+  const r = await engine.spawn({ botId: "botty", narrowedTools: ["crow:only:mcp__artifacts__"] });
+  await tick();
+  const c = raw();
+  c.prepare("UPDATE bot_sessions SET narrowed_tools=? WHERE gateway_thread_id=?").run(JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__", "mcp__artifacts__artifact_update"]), r.threadId);
+  c.close();
+  await engine.stop(r.sessionId);
+  await tick();
+  assert.ok(JSON.parse(rowFor(r.threadId).narrowed_tools).includes("mcp__artifacts__artifact_update"), "stop()'s row write left narrowed_tools alone");
+});
+
+test("locked narrowing survives a restart: a lock read back from the row is re-adopted and merged", async () => {
+  const stored = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  const { engine, state } = makeEngine({ bridgeOpts: { narrowedTools: stored } });
+  await engine.spawn({ botId: "botty" });   // no forced list in memory: the row is the only source
+  await tick();
+  assert.deepEqual(JSON.parse(state.instances.at(-1).opts.narrowedTools).sort(), ["crow:locked", "crow:only:mcp__artifacts__"]);
+  await engine.stopAll?.();
+});
+
+test("spawn({narrowedTools}): when the lock seed does NOT land on the row, spawn throws narrowing_not_persisted and the session is stopped (review C1-R1)", async () => {
+  const { engine, state } = makeEngine();
+  // The seed insert silently lands WITHOUT the narrowing (a future insert
+  // path change, a thread-id collision, a trigger): RAISE(IGNORE) drops it.
+  const c = raw();
+  c.exec("CREATE TRIGGER IF NOT EXISTS zz_noseed BEFORE INSERT ON bot_sessions WHEN new.narrowed_tools IS NOT NULL BEGIN SELECT RAISE(IGNORE); END;");
+  c.close();
+  const liveOf = async () => (await engine.list()).filter((x) => x.state !== "stopped").length;
+  const liveBefore = await liveOf();
+  try {
+    await assert.rejects(
+      engine.spawn({ botId: "botty", narrowedTools: ["crow:only:mcp__artifacts__"] }),
+      (e) => /narrowing_not_persisted/.test(e.code || e.message),
+    );
+    await tick();
+    assert.ok((await liveOf()) <= liveBefore, "the session was stopped — never left running UNLOCKED");
+  } finally {
+    const c2 = raw(); c2.exec("DROP TRIGGER IF EXISTS zz_noseed"); c2.close();
+    await engine.stopAll?.();
+  }
+});
+
+test("restart re-adoption is load-bearing: a row-sourced lock whose seed did not persist is REFUSED too (review C1-L1)", async () => {
+  // Same shape as "survives a restart" (the row is the only source), but the
+  // row seed lands empty. WITHOUT startChild's re-adoption line the engine
+  // would never learn the lock from the row, would skip the persist-verify,
+  // and this spawn would wrongly succeed.
+  const stored = JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"]);
+  const { engine } = makeEngine({ bridgeOpts: { narrowedTools: stored } });
+  const c = raw();
+  c.exec("CREATE TRIGGER IF NOT EXISTS zz_noseed2 BEFORE INSERT ON bot_sessions WHEN new.narrowed_tools IS NOT NULL BEGIN SELECT RAISE(IGNORE); END;");
+  c.close();
+  const liveOf = async () => (await engine.list()).filter((x) => x.state !== "stopped").length;
+  const liveBefore = await liveOf();
+  try {
+    await assert.rejects(engine.spawn({ botId: "botty" }), (e) => /narrowing_not_persisted/.test(e.code || e.message));
+    await tick();
+    assert.ok((await liveOf()) <= liveBefore, "refused and stopped, not running on a phantom lock");
+  } finally {
+    const c2 = raw(); c2.exec("DROP TRIGGER IF EXISTS zz_noseed2"); c2.close();
+    await engine.stopAll?.();
+  }
+});
+
+test("locked narrowing fails CLOSED: an unreadable stored value that claims a lock refuses to start", async () => {
+  const { engine, state } = makeEngine({ bridgeOpts: { narrowedTools: '["crow:locked", "crow:only:mcp__art' } });
+  await assert.rejects(engine.spawn({ botId: "botty" }), (e) => /narrowing_invalid/.test(e.code || e.message));
+  assert.equal(state.instances.length, 0, "no pi child was constructed");
+  // An ordinary (unlocked) malformed value keeps the historical behaviour.
+  const ok = makeEngine({ bridgeOpts: { narrowedTools: "[bash" } });
+  await ok.engine.spawn({ botId: "botty" });
+  await ok.engine.stopAll?.();
+});
+
+test("D22: a tool that can return outside text taints the session at call start (web/mail read, an unknown add-on); an allowlisted tool does not", async () => {
+  const { engine, state } = makeEngine();
+  const taintOf = (thread) => { const c = raw(); try { return c.prepare("SELECT reason FROM artifact_session_taint WHERE thread_id=?").get(thread) || null; } catch { return null; } finally { c.close(); } };
+  const clean = await spawned(engine);
+  const piClean = state.instances.at(-1);
+  piClean.emit({ type: "tool_execution_start", toolName: "write", toolCallId: "t1", args: {} });
+  piClean.emit({ type: "tool_execution_start", toolName: "mcp__artifacts__artifact_get", toolCallId: "t2", args: {} });
+  await tick(12);
+  assert.equal(taintOf(clean.threadId), null, "allowlisted tools leave the session clean");
+  for (const tool of ["mcp__gmail__read_message", "mcp__crow-browser__browser_navigate", "mcp__some-new-addon__do_thing", "bash", "read"]) {
+    const r = await spawned(engine);
+    state.instances.at(-1).emit({ type: "tool_execution_start", toolName: tool, toolCallId: "x", args: {} });
+    await tick(12);
+    const row = taintOf(r.threadId);
+    assert.ok(row, `${tool} taints`);
+    assert.equal(row.reason, "tool:" + tool);
+  }
+  await engine.stopAll?.();
+});
+
+test("D22 (R3-M1): the taint record is committed in the same tick; a failed write marks the session untrusted in memory, stops it, and the flag stays unset so the next tool retries", async () => {
+  const { isTaintUnrecorded } = await import("../servers/gateway/session-taint-memory.js");
+  const { taintsSession } = await import("../scripts/pi-bots/outside-text-tools.mjs");
+  const { engine, state } = makeEngine();
+  const ok = await spawned(engine);
+  state.instances.at(-1).emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "x", args: {} });
+  // No tick: the row must already be there.
+  const c0 = raw(); const row = c0.prepare("SELECT reason FROM artifact_session_taint WHERE thread_id=?").get(ok.threadId); c0.close();
+  assert.equal(row && row.reason, "tool:bash", "committed synchronously, before the gateway handles anything else");
+  // Make the write fail: a trigger aborts every insert.
+  const c = raw(); c.exec("CREATE TRIGGER IF NOT EXISTS zz_fail BEFORE INSERT ON artifact_session_taint BEGIN SELECT RAISE(ABORT, 'disk says no'); END;"); c.close();
+  try {
+    const bad = await spawned(engine);
+    state.instances.at(-1).emit({ type: "tool_execution_start", toolName: "mcp__gmail__read", toolCallId: "y", args: {} });
+    assert.equal(isTaintUnrecorded("botty", bad.threadId), true, "untrusted in memory at once");
+    await tick(12);
+    const st = (await engine.list()).find((x) => x.threadId === bad.threadId);
+    assert.ok(!st || st.state === "stopped", "the session was stopped");
+  } finally { const c2 = raw(); c2.exec("DROP TRIGGER IF EXISTS zz_fail"); c2.close(); }
+  // Provenance: builtin names stop being clean once a third-party extension is loaded; MCP names match exactly.
+  assert.equal(taintsSession("write"), false);
+  assert.equal(taintsSession("write", { thirdPartyExtensions: true }), true);
+  assert.equal(taintsSession("mcp__artifacts__artifact_get"), false);
+  assert.equal(taintsSession("mcp__artifacts__x__fetch"), true);
+  assert.equal(taintsSession("mcp__artifacts__unknown_tool"), true);
+  await engine.stopAll?.();
+});
+
+test("D22 monotonic taint (security review): racing tool starts, eviction, a recreated session object, re-init and an unreadable record never make a tainted session read clean", async () => {
+  const mem = await import("../servers/gateway/session-taint-memory.js");
+  assert.equal("_resetForTest" in mem, false, "no code path can clear the in-memory list");
+  const { engine, state } = makeEngine();
+  const r = await spawned(engine);
+  const pi = state.instances.at(-1);
+  // Concurrent tool calls racing the first write: three starts in one tick.
+  pi.emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "a", args: {} });
+  pi.emit({ type: "tool_execution_start", toolName: "mcp__gmail__read", toolCallId: "b", args: {} });
+  pi.emit({ type: "tool_execution_start", toolName: "read", toolCallId: "c", args: {} });
+  const c = raw();
+  const rows = c.prepare("SELECT reason FROM artifact_session_taint WHERE thread_id=?").all(r.threadId);
+  c.close();
+  assert.deepEqual(rows.map((x) => x.reason), ["tool:bash"], "exactly one record, written by the first start, before the others");
+  // A recreated session object (respawn / resume / adoption) starts with the
+  // memo unset: it re-inserts idempotently and never deletes.
+  const s2 = (await engine.list()).find((x) => x.threadId === r.threadId);
+  assert.ok(s2);
+  // trust.js reads the DB record, not any per-object state:
+  const { sessionIsClean } = await import("../bundles/artifacts/server/trust.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient(DB_FILE);
+  try {
+    await db.execute({ sql: "UPDATE bot_sessions SET narrowed_tools=NULL WHERE gateway_thread_id=?", args: [r.threadId] });
+    assert.equal(await sessionIsClean(db, "botty", r.threadId), false, "tainted by the DB record");
+    const { initArtifactsTables } = await import("../bundles/artifacts/server/init-tables.js");
+    await initArtifactsTables(db);
+    assert.equal(await sessionIsClean(db, "botty", r.threadId), false, "re-init never clears it");
+    await db.execute({ sql: "ALTER TABLE artifact_session_taint RENAME TO ast_hidden", args: [] });
+    try { assert.equal(await sessionIsClean(db, "botty", r.threadId), false, "an unreadable record is untrusted"); }
+    finally { await db.execute({ sql: "ALTER TABLE ast_hidden RENAME TO artifact_session_taint", args: [] }); }
+  } finally { db.close(); }
+  // Eviction: the in-memory list has none — 20,000 later entries keep the first.
+  mem.markTaintUnrecorded("evict-bot", "evict-first");
+  for (let i = 0; i < 20000; i++) mem.markTaintUnrecorded("evict-bot", "t" + i);
+  assert.equal(mem.isTaintUnrecorded("evict-bot", "evict-first"), true);
+  await engine.stopAll?.();
+});
