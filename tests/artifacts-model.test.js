@@ -175,6 +175,51 @@ test("rounds: owner-only, one active round, contacts' threads make it UNTRUSTED,
   assert.equal((await rounds.previewRound(s.db, a.id)).threads.some((t) => t.id === theirs.threadId), true, "a timed-out round's threads stay open for the next round");
 });
 
+test("F7(3): a round message CLOSES with the round_done instruction (survives truncation); an ask message never carries it", async () => {
+  const a = await store.createArtifact(s.db, s.blobs, { title: "Close line", type: "document", source: doc("# A\n\nB"), actor: BOT }, deps);
+  const t = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "owner feedback", author: { kind: "owner" } });
+  const r = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t.threadId] });
+  const msg = await rounds.roundMessage(s.db, r);
+  assert.ok(msg.endsWith(`When finished, call artifact_round_done(round_id=${r.id}).`), "the reinforcement is the LAST line");
+  const restore = _overrideLimitsForTest({ roundMessageChars: 40 });
+  try {
+    const capped = await rounds.roundMessage(s.db, r);
+    assert.match(capped, /\[truncated\]/);
+    assert.ok(capped.endsWith(`When finished, call artifact_round_done(round_id=${r.id}).`), "a long round cannot truncate the closing line away");
+  } finally { restore(); }
+  await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "x" });
+  const t2 = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "a question", author: { kind: "owner" } });
+  const ask = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, kind: "ask", include: [t2.threadId] });
+  const askMsg = await rounds.roundMessage(s.db, ask);
+  assert.doesNotMatch(askMsg, /artifact_round_done/);
+  assert.match(askMsg, /Do NOT make a new version/);
+});
+
+test("F7(2): allThreadsReplied reads the SNAPSHOT — an older reply never completes a round", async () => {
+  const a = await store.createArtifact(s.db, s.blobs, { title: "Snap", type: "document", source: doc("# A\n\nB"), actor: BOT }, deps);
+  const t1 = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "one", author: { kind: "owner" } });
+  const t2 = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "two", author: { kind: "owner" } });
+  // A bot reply that PREDATES the round (an earlier conversation) must not count.
+  await comments.addComment(s.db, { threadId: t1.threadId, text: "stale bot reply", author: { kind: "bot", id: "bobby" }, tainted: false });
+  const r = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t1.threadId, t2.threadId] });
+  assert.equal(await rounds.allThreadsReplied(s.db, r), false, "neither thread has a reply since the snapshot");
+  await comments.addComment(s.db, { threadId: t1.threadId, text: "fresh reply", author: { kind: "bot", id: "bobby" }, tainted: false });
+  assert.equal(await rounds.allThreadsReplied(s.db, r), false, "t2 is still unanswered");
+  const del = await comments.addComment(s.db, { threadId: t2.threadId, text: "deleted reply", author: { kind: "bot", id: "bobby" }, tainted: false });
+  await comments.deleteComment(s.db, { commentId: del.commentId, actor: OWNER });
+  assert.equal(await rounds.allThreadsReplied(s.db, r), false, "a deleted reply does not count");
+  await comments.addComment(s.db, { threadId: t2.threadId, text: "real reply", author: { kind: "bot", id: "bobby" }, tainted: false });
+  assert.equal(await rounds.allThreadsReplied(s.db, r), true);
+  // Owner and contact comments are not bot replies.
+  const r2 = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, kind: "ask", include: [t1.threadId] });
+  assert.equal(await rounds.allThreadsReplied(s.db, r2), false, "the pre-round bot reply is behind r2's snapshot too");
+  await comments.addComment(s.db, { threadId: t1.threadId, text: "owner adds more", author: { kind: "owner" } });
+  assert.equal(await rounds.allThreadsReplied(s.db, r2), false);
+  // A thread-less round can never complete by replies (fail closed).
+  assert.equal(await rounds.allThreadsReplied(s.db, { ...r2, thread_ids: [] }), false);
+  assert.equal(await rounds.allThreadsReplied(s.db, null), false);
+});
+
 test("delivery: an untrusted round always gets a NEW session LOCKED to the Artifacts tools; trusted rounds reuse the origin session; capacity queues", async () => {
   const calls = [];
   let taintAtSend = null;   // review C2-R2: the DB state AS OF the moment the text is sent

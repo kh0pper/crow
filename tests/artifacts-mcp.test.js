@@ -27,7 +27,7 @@ import { initGatewayActorKey, signArtifactsActor, signActor, verifyArtifactsActo
 
 initGatewayActorKey();
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
-const s = {};
+const s = { frames: [], emitFail: false, roundsDone: [] };
 
 before(async () => {
   s.home = mkdtempSync(join(tmpdir(), "artifacts-mcp-"));
@@ -51,7 +51,12 @@ before(async () => {
   app.use(localTokenAuthMiddleware(s.db));
   const noAuth = (req, res) => res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "unauthorized" } });
   const sm = new SessionManager();
-  mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: s.db, blobs: s.blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks } }), sm, noAuth);
+  // PR-1 seams: the chat-first fan-out recorder (emitExternal) and an
+  // onRoundDone recorder — the F7 auto-close/auto-complete paths must run the
+  // same effects hook the manual round_done does.
+  mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: s.db, blobs: s.blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks },
+    onRoundDone: async (r) => { s.roundsDone.push(Number(r.id)); },
+    emitExternal: async (tid, frame, opts) => { if (s.emitFail) throw new Error("engine down"); s.frames.push({ tid, frame, opts }); return { delivered: true }; } }), sm, noAuth);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
 });
@@ -325,4 +330,139 @@ test("R3-H1: the reviewer's chain — a D22-tainted session's reply is untrusted
 test("R3-L1 parity: the D22 clean MCP list equals the artifacts server's TOOL_CLASSES", async () => {
   const { CLEAN_MCP_TOOLS } = await import("../scripts/pi-bots/outside-text-tools.mjs");
   assert.deepEqual([...CLEAN_MCP_TOOLS].sort(), Object.keys(TOOL_CLASSES).map((n) => "mcp__artifacts__" + n).sort());
+});
+
+// ---------------------------------------------------------------------------
+// PR-1 (chat-first): the hub fan-out + F7 round/ask compliance
+// ---------------------------------------------------------------------------
+
+const freshSession = (botId, thread) => s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status) VALUES (?,?,?,'perch-live','active')", args: [botId, "perch", thread] });
+
+test("fan-out: every successful write pushes a POINTER frame to the origin chat only; a failing emit never breaks the write", async () => {
+  s.frames.length = 0;
+  await freshSession("bobby", "perchlive-f1");
+  const c = await client(s.artToken, bot("bobby", "perchlive-f1"));
+  try {
+    const id = (await call(c, "artifact_create", { title: "Fanout <b>page</b>", type: "page", source: { html: "<p>a</p>" } })).data.id;
+    assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.frame.artifactId, f.opts.botId]), [["perchlive-f1", "create", id, "bobby"]]);
+    assert.equal(s.frames[0].frame.type, "artifact");
+    assert.equal(s.frames[0].frame.n, 1);
+    assert.deepEqual(Object.keys(s.frames[0].frame).sort(), ["artifactId", "event", "n", "type"], "no bot-authored text rides the frame");
+    // Writes on ANOTHER bot's artifact never reach this chat, and writes by
+    // this bot on another artifact never reach an unlinked thread.
+    s.frames.length = 0;
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { html: "<p>b</p>" } })).err, null);
+    assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.frame.n]), [["perchlive-f1", "update", 2]]);
+    s.frames.length = 0;
+    const th = await comments.addThread(s.db, { artifactId: id, versionN: 2, anchor: { kind: "whole" }, text: "nice", author: { kind: "owner" } });
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: th.threadId, text: "thanks" })).err, null);
+    assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.frame.n]), [["perchlive-f1", "reply", null]]);
+    // A broken engine seam is non-fatal: the write succeeds, the card is simply missed.
+    s.frames.length = 0; s.emitFail = true;
+    const up2 = await call(c, "artifact_update", { artifact_id: id, source: { html: "<p>c</p>" } });
+    assert.equal(up2.err, null);
+    assert.equal(up2.data.version, 3);
+    s.emitFail = false;
+    // An operator-made artifact has no origin chat: nothing fans out.
+    s.frames.length = 0;
+    const op = await client(s.fullToken);
+    try { assert.equal((await call(op, "artifact_create", { title: "Owner doc", type: "document", source: { markdown: "x" } })).err, null); } finally { await op.close(); }
+    assert.deepEqual(s.frames, []);
+  } finally { await c.close(); }
+});
+
+test("F7(1): an ask auto-closes on the first reply in its own thread; the summary is the reply's head; effects run", async () => {
+  s.frames.length = 0; s.roundsDone.length = 0;
+  await freshSession("bobby", "perchlive-f2");
+  const c = await client(s.artToken, bot("bobby", "perchlive-f2"));
+  try {
+    const id = (await call(c, "artifact_create", { title: "Ask doc", type: "document", source: { markdown: "# hi" } })).data.id;
+    const th = await comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "why blue?", author: { kind: "owner" } });
+    const other = await comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "unrelated owner thread", author: { kind: "owner" } });
+    const ask = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, kind: "ask", include: [th.threadId] });
+    await rounds.setDelivery(s.db, ask.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-f2" });
+    // A reply in a thread the ask does NOT include leaves it open.
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: other.threadId, text: "hmm" })).err, null);
+    assert.equal((await rounds.getRound(s.db, ask.id)).status, "working");
+    // The first reply in the ask's own thread closes it.
+    const answer = "Because the owner asked for calm colors. ".repeat(20);
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: th.threadId, text: answer })).err, null);
+    const r = await rounds.getRound(s.db, ask.id);
+    assert.equal(r.status, "done");
+    assert.equal(r.summary, answer.slice(0, 200));
+    assert.deepEqual(s.roundsDone, [ask.id], "the effects hook ran exactly once");
+    assert.ok(s.frames.some((f) => f.frame.event === "round-done" && f.tid === "perchlive-f2"), "the card hears the close");
+    // A second reply is a plain reply: the closed ask stays closed, no re-run.
+    s.roundsDone.length = 0;
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: th.threadId, text: "more" })).err, null);
+    assert.deepEqual(s.roundsDone, []);
+  } finally { await c.close(); }
+});
+
+test("F7(2)+(4): round-less updates mid-round are refused; an update under the round id auto-completes once every thread has a reply; round_done stays idempotent", async () => {
+  s.frames.length = 0; s.roundsDone.length = 0;
+  await freshSession("bobby", "perchlive-f3");
+  const c = await client(s.artToken, bot("bobby", "perchlive-f3"));
+  try {
+    const id = (await call(c, "artifact_create", { title: "Round page", type: "page", source: { html: "<p>1</p>" } })).data.id;
+    const t1 = await comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "bigger title", author: { kind: "owner" } });
+    const t2 = await comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "darker bg", author: { kind: "owner" } });
+    const r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t1.threadId, t2.threadId] });
+    await rounds.setDelivery(s.db, r.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-f3" });
+    // The smoke's miss: an update with NO round_id while this chat's round is active.
+    const bad = await call(c, "artifact_update", { artifact_id: id, source: { html: "<p>2</p>" } });
+    assert.match(bad.err, /update_needs_round_id/);
+    // One thread answered, update under the round: version lands, NO auto-complete yet.
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: t1.threadId, text: "enlarged" })).err, null);
+    const up1 = await call(c, "artifact_update", { artifact_id: id, source: { html: "<p>2</p>" }, round_id: r.id, base_version: 1 });
+    assert.equal(up1.err, null);
+    assert.equal(up1.data.round_done, undefined);
+    let row = await rounds.getRound(s.db, r.id);
+    assert.equal(row.status, "working");
+    assert.equal(Number(row.result_version), 2, "the result version is stamped as soon as a current one lands");
+    assert.deepEqual(s.roundsDone, []);
+    // Second thread answered, update again: the round closes itself.
+    assert.equal((await call(c, "artifact_reply", { artifact_id: id, thread_id: t2.threadId, text: "darkened" })).err, null);
+    const up2 = await call(c, "artifact_update", { artifact_id: id, source: { html: "<p>3</p>" }, round_id: r.id, base_version: 2, change_note: "both done" });
+    assert.equal(up2.err, null);
+    assert.equal(up2.data.round_done, true);
+    row = await rounds.getRound(s.db, r.id);
+    assert.equal(row.status, "done");
+    assert.equal(row.summary, "both done", "the change note is the summary fallback");
+    assert.equal(Number(row.result_version), 3);
+    assert.deepEqual(s.roundsDone, [r.id]);
+    assert.ok(s.frames.some((f) => f.frame.event === "round-done"));
+    // A later manual round_done is a no-op success, never a re-run.
+    s.roundsDone.length = 0;
+    const rd = await call(c, "artifact_round_done", { artifact_id: id, round_id: r.id, summary: "late but fine" });
+    assert.equal(rd.err, null);
+    assert.equal(rd.data.idempotent, true);
+    assert.deepEqual(s.roundsDone, [r.id], "effects run once more on the manual close, and the round stays done");
+    assert.equal((await rounds.getRound(s.db, r.id)).summary, "both done", "an idempotent close does not rewrite the summary");
+  } finally { await c.close(); }
+});
+
+test("F7(4) boundaries: another chat of the same bot and the operator are never blocked; an ask blocks updates until answered", async () => {
+  await freshSession("bobby", "perchlive-f4");
+  await freshSession("bobby", "perchlive-f5");
+  const c4 = await client(s.artToken, bot("bobby", "perchlive-f4"));
+  const c5 = await client(s.artToken, bot("bobby", "perchlive-f5"));
+  const op = await client(s.fullToken);
+  try {
+    const id = (await call(c4, "artifact_create", { title: "Boundary doc", type: "document", source: { markdown: "# t" } })).data.id;
+    const th = await comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "a question", author: { kind: "owner" } });
+    const ask = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, kind: "ask", include: [th.threadId] });
+    await rounds.setDelivery(s.db, ask.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-f4" });
+    // The ask's own chat: a round-less update is refused (answer first)…
+    assert.match((await call(c4, "artifact_update", { artifact_id: id, source: { markdown: "# sneaky" } })).err, /update_needs_round_id/);
+    // …passing the ask's id is refused too (asks never revise)…
+    assert.match((await call(c4, "artifact_update", { artifact_id: id, source: { markdown: "# sneaky" }, round_id: ask.id })).err, /ask_rounds_do_not_revise/);
+    // …while ANOTHER chat of the same bot and the operator are unaffected.
+    assert.equal((await call(c5, "artifact_update", { artifact_id: id, source: { markdown: "# from f5" } })).err, null);
+    assert.equal((await call(op, "artifact_update", { artifact_id: id, source: { markdown: "# from owner" } })).err, null);
+    // Answering the ask unblocks the chat.
+    assert.equal((await call(c4, "artifact_reply", { artifact_id: id, thread_id: th.threadId, text: "answered" })).err, null);
+    assert.equal((await rounds.getRound(s.db, ask.id)).status, "done");
+    assert.equal((await call(c4, "artifact_update", { artifact_id: id, source: { markdown: "# after answer" } })).err, null);
+  } finally { await c4.close(); await c5.close(); await op.close(); }
 });
