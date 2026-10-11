@@ -45,7 +45,7 @@ const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const LEASE_PATH = join(CROW_HOME, "perch-interactive-leases.json");
 
-let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident;
+let createInteractiveEngine, getInteractiveEngine, _resetInteractiveEngineForTest, _setInteractiveEngineForTest, notifyCardToResident, emitExternalToResident;
 
 function raw() {
   return new Database(DB_FILE);
@@ -294,6 +294,7 @@ before(async () => {
   _resetInteractiveEngineForTest = mod._resetInteractiveEngineForTest;
   _setInteractiveEngineForTest = mod._setInteractiveEngineForTest;
   notifyCardToResident = mod.notifyCardToResident;
+  emitExternalToResident = mod.emitExternalToResident;
 });
 
 beforeEach(() => {
@@ -2062,6 +2063,93 @@ test("_setInteractiveEngineForTest installs the process singleton (test-only)", 
   assert.equal(getInteractiveEngine({ createIfMissing: false }), engine);
   _resetInteractiveEngineForTest();
   assert.equal(getInteractiveEngine({ createIfMissing: false }), null);
+});
+
+// ---------------------------------------------------------------------------
+// emitExternal — the artifacts chat-first pointer frame (spec v1.6 D25, PR-1)
+// ---------------------------------------------------------------------------
+
+const ART = { type: "artifact", artifactId: "art_x1", n: 2, event: "update" };
+
+test("emitExternal: a pointer frame reaches the thread's subscribers, exact shape, never replayed", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  assert.deepEqual(engine.emitExternal(s.threadId, { ...ART, title: "<b>Coffee</b>", html: { evil: 1 } }, { botId: "hank" }), { delivered: true, botId: "hank" });
+  assert.deepEqual(sink.ofType("artifact"), [ART], "unlisted keys (incl. a bot-authored title) are dropped; only the pointer rides");
+  const late = await collect(engine, s.sessionId);
+  assert.equal(late.ofType("artifact").length, 0, "frames are not persisted or replayed");
+});
+
+test("emitExternal: wrong bot, missing bot, or a non-artifact frame type delivers nothing", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  assert.deepEqual(engine.emitExternal(s.threadId, ART, { botId: "mallory" }), { delivered: false, botId: "hank", reason: "bot_mismatch" });
+  assert.equal(engine.emitExternal(s.threadId, ART, {}).reason, "bot_required");
+  assert.equal(engine.emitExternal(s.threadId, ART).reason, "bot_required");
+  for (const type of ["text", "reply", "ask_user", "state", "file", "error", "phone_call"]) {
+    assert.equal(engine.emitExternal(s.threadId, { ...ART, type }, { botId: "hank" }).reason, "bad_frame", type);
+  }
+  assert.equal(engine.emitExternal(s.threadId, null, { botId: "hank" }).reason, "bad_frame");
+  assert.equal(sink.events.filter((e) => [...INJECTED, "phone_call", "artifact"].includes(e.type)).length, 0);
+});
+
+test("emitExternal: frozen event enum, positive-integer n (or null), non-empty artifactId", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  for (const event of ["create", "update", "reply", "round-done", "link-ask", "link-decided"]) {
+    assert.equal(engine.emitExternal(s.threadId, { ...ART, event, n: null }, { botId: "hank" }).delivered, true, event);
+  }
+  for (const event of ["text", "", "CREATE", "done", undefined, 7]) {
+    assert.equal(engine.emitExternal(s.threadId, { ...ART, event }, { botId: "hank" }).reason, "bad_frame", String(event));
+  }
+  for (const n of [0, -1, 1.5, NaN, Infinity, "2", {}]) {
+    assert.equal(engine.emitExternal(s.threadId, { ...ART, n }, { botId: "hank" }).reason, "bad_frame", JSON.stringify(n));
+  }
+  for (const artifactId of ["", null, 42, {}]) {
+    assert.equal(engine.emitExternal(s.threadId, { ...ART, artifactId }, { botId: "hank" }).reason, "bad_frame", JSON.stringify(artifactId));
+  }
+  assert.equal(sink.ofType("artifact").length, 6, "only the six enum events emitted");
+});
+
+test("emitExternal: never adopts or wakes — a non-resident thread gets nothing", async () => {
+  const a = makeEngine();
+  const s = await spawned(a.engine, "hank");           // writes the bot_sessions row
+  await a.engine.stopAll();                             // its child must not leak into later tests
+  _resetInteractiveEngineForTest();
+  const b = makeEngine();                               // a fresh process: the row exists, the session is not resident
+  assert.deepEqual(b.engine.emitExternal(s.threadId, ART, { botId: "hank" }), { delivered: false, botId: null, reason: "no_session" });
+  assert.equal(b.engine._sessionRecordForTest(s.threadId), null, "not adopted");
+  assert.equal(b.state.instances.length, 0, "no child spawned");
+});
+
+test("emitExternal: a hibernating resident session gets the card without waking", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+  const before = state.instances.length;
+  assert.equal(engine.emitExternal(s.threadId, ART, { botId: "hank" }).delivered, true);
+  await tick();
+  assert.equal(state.instances.length, before, "no new child");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+  assert.equal(sink.ofType("artifact").length, 1);
+});
+
+test("emitExternalToResident: no engine in the process drops as no_engine; the installed singleton delivers", async () => {
+  _resetInteractiveEngineForTest();
+  assert.deepEqual(await emitExternalToResident("perchlive-zz", ART, { botId: "hank" }), { delivered: false, botId: null, reason: "no_engine" });
+  const { engine } = makeEngine();
+  const s = await spawned(engine, "hank");
+  const sink = await collect(engine, s.sessionId);
+  _setInteractiveEngineForTest(engine);
+  assert.deepEqual(await emitExternalToResident(s.threadId, ART, { botId: "hank" }), { delivered: true, botId: "hank" });
+  assert.deepEqual(sink.ofType("artifact"), [ART]);
+  _resetInteractiveEngineForTest();
 });
 
 // ---------------------------------------------------------------------------
