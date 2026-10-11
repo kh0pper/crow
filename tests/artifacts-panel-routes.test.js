@@ -169,4 +169,13 @@ test("the card row: GET :id carries the active round and the server-derived scri
   assert.equal(after.body.activeRound, null);
   const doc = await store.createArtifact(s.db, s.blobs, { title: "Plain doc", type: "document", source: { markdown: "# d" }, actor: { kind: "session" } }, { markdownBlocks });
   assert.equal((await req("GET", `/api/artifacts/${doc.id}`)).body.scripted, false);
+  // scriptsOff is the D20 expression, server-side: a tainted scripted CURRENT
+  // version flips it on; the owner's approve flips it off; a tainted PROPOSED
+  // version (not current) does not.
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, false, "a clean v1 runs scripts");
+  const tainted = await store.addVersion(s.db, s.blobs, { artifactId: page.id, source: { html: "<p>shaped outside</p>" }, actor: { kind: "session" }, untrusted: true }, {});
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, true, "tainted current page: scripts off");
+  await store.approveVersion(s.db, { artifactId: page.id, n: tainted.n, actor: { kind: "session" } });
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, false, "the approve clears it (same rail as the view mint)");
+  assert.equal((await req("GET", `/api/artifacts/${doc.id}`)).body.scriptsOff, false, "a document is never scripts-off");
 });
