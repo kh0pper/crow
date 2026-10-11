@@ -245,6 +245,10 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       // no session record (channel / job) → untrusted text.
       const tainted = !!scope || (actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread)));
       const out = await comments.addComment(db, { threadId: a.thread_id, text: a.text, author, tainted });
+      // The by-thread history route (chat-first replay) derives its events
+      // from the audit log, so a reply is an audited store event like any
+      // other write. The text itself is never duplicated into the audit row.
+      await store.audit(db, { artifactId: a.artifact_id, actor, action: "reply", target: String(a.thread_id) });
       // F7(1): the first reply by the round's bot inside an ask round's own
       // thread closes the ask (the smoke's ask stayed 'working' after the
       // answer landed). Summary = the reply's head; roundDoneEffects stays
