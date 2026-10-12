@@ -74,6 +74,16 @@ async function sweepOnce(db, { engine = null, blobs = null, now = Date.now(), no
  *     left holding a Perch slot or its untrusted context);
  *   - the owner hears "Version N is ready" when the round produced one.
  * Exported for tests; never throws into the MCP call.
+ *
+ * Chat-first R1 (plan review 2026-10-11): the notification fires ONLY on a
+ * REAL transition to done. completeRound marks its return {idempotent} (the
+ * round was already done — since F7(2) the standard path: the update
+ * auto-completed, then the instructed round_done arrives) or {late} (the
+ * round had already timed out or failed — the sweep told the owner already).
+ * Without this guard every auto-completed round notified twice and a
+ * timed-out round notified "ready" after "timed out". The locked-session
+ * stop stays idempotent (guarded by session_stopped_at), so effects remain
+ * safe to call on any completion shape.
  */
 export async function roundDoneEffects(db, round, { engine = null, notify = async () => {} } = {}) {
   const out = { stopped: false, notified: false };
@@ -84,7 +94,7 @@ export async function roundDoneEffects(db, round, { engine = null, notify = asyn
       await db.execute({ sql: "UPDATE artifact_rounds SET session_stopped_at=datetime('now') WHERE id=?", args: [round.id] });
     }
   }
-  if (round.result_version) {
+  if (round.result_version && !round.idempotent && !round.late) {
     try {
       const art = (await db.execute({ sql: "SELECT title FROM artifacts WHERE id=?", args: [round.artifact_id] })).rows[0];
       await notify({

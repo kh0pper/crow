@@ -6,6 +6,7 @@ import * as store from "./store.js";
 import * as comments from "./comments.js";
 import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
+import { notifyHub } from "./notify-hub.js";
 
 // Header values are TRIMMED so the attributed id always equals the id the
 // signature was made over (the MAC trims on both sides; review 1a-L2).
@@ -81,11 +82,16 @@ export const TOOL_CLASSES = Object.freeze({
 // 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
 
-export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {} } = {}) {
+export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
   if (!McpServer || !z) throw new Error("createArtifactsMcpServer needs the gateway's McpServer and z");
   const server = new McpServer({ name: "crow-artifacts", version: "0.1.0" });
+  // Chat-first fan-out (spec v1.6 D25): every successful write pushes a
+  // pointer frame to the artifact's linked chats. notifyHub never throws and
+  // a missing engine seam is a silent no-op — the store stays the system of
+  // record and the by-thread route replays missed cards on the next open.
+  const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
   /**
    * C2 scope, FAIL CLOSED (self-review). A session is held to one round's
@@ -139,12 +145,26 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       scopedOut(scope);
       // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
       const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
-      return store.createArtifact(db, blobs, { title: a.title, type: a.type, source: a.source, actor, changeNote: a.change_note, untrusted }, renderDeps);
+      const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: a.source, actor, changeNote: a.change_note, untrusted }, renderDeps);
+      await hub(out.id, 1, "create");
+      return out;
     });
 
   tool("artifact_update", "Make a new version. During a feedback round pass round_id and base_version.",
     { artifact_id: z.string(), source: z.record(z.any()), change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
     async (a, actor, scope) => {
+      // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
+      // its update to the round — the smoke's v2 landed with round_id NULL
+      // against the ask-round instructions, so BOTH kinds block: an ask's
+      // contract is "answer, don't revise", and the reply that answers it
+      // auto-closes the ask (F7(1)), after which updates flow again. Only
+      // rounds bound to THIS session count; other chats of the same bot are
+      // unaffected. Static message (the fail() contract: error text reaches
+      // the wire ungated).
+      if (a.round_id == null && !scope && actor.kind === "bot" && actor.thread) {
+        const bound = (await db.execute({ sql: `SELECT id, kind FROM artifact_rounds WHERE artifact_id=? AND bot_id=? AND session_id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`, args: [a.artifact_id, actor.id, actor.thread, ...rounds.ACTIVE] })).rows[0];
+        if (bound) throw Object.assign(new Error(bound.kind === "ask" ? "this chat has an active question round for this artifact: answer it with artifact_reply first" : "this chat has an active feedback round for this artifact: pass its round_id"), { code: "update_needs_round_id" });
+      }
       let round = null;
       if (scope && a.round_id !== scope.roundId) throw Object.assign(new Error("use this round's id"), { code: "forbidden" });
       if (a.round_id != null) round = await rounds.requireRoundForBot(db, a.round_id, actor, a.artifact_id);
@@ -159,6 +179,31 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       const clean = actor.kind === "session" || (await sessionIsClean(db, actor.id, actor.thread));
       const v = await store.addVersion(db, blobs, { artifactId: a.artifact_id, source: a.source, actor, baseVersion: base, roundId: round?.id ?? null, changeNote: a.change_note, untrusted: !!pol.untrusted || !!scope || !clean, proposedReason: pol.proposedReason }, renderDeps);
       await onVersion({ artifactId: a.artifact_id, n: v.n, state: v.state, anchorMap: v.anchorMap, onlyThreads: scope ? scope.roundThreads : null });
+      if (round && v.state === "current") {
+        // The round's result version (drives "Version N is ready" through
+        // roundDoneEffects; a manual round_done keeps it via COALESCE). Only a
+        // CURRENT version is a result — a proposed one is the owner's call —
+        // and only while the round is STILL active: the sweep can time the
+        // round out during the addVersion/onVersion awaits (review R2), and a
+        // timed-out round must not grow a result its owner was never told
+        // about ("ready" after "timed out").
+        await db.execute({ sql: `UPDATE artifact_rounds SET result_version=? WHERE id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")})`, args: [v.n, round.id, ...rounds.ACTIVE] });
+        // F7(2): auto-complete — the bot updated under the round and every
+        // included thread already has one of its replies (the smoke's bots
+        // replied, revised, and then forgot artifact_round_done). Idempotent:
+        // a later round_done is a no-op success. completeRound RE-READS the
+        // row, so a sweep that timed the round out mid-update wins the race:
+        // it returns {late}, round_done stays false, and R1's guard in
+        // roundDoneEffects keeps the "ready" notification off.
+        if (round.kind === "round" && !pol.proposedReason && await rounds.allThreadsReplied(db, round)) {
+          const r = await rounds.completeRound(db, { roundId: round.id, artifactId: a.artifact_id, actor, summary: String(a.change_note || "").slice(0, 200) || "The round's update landed.", resultVersion: v.n });
+          await onRoundDone(r);
+          await hub(a.artifact_id, v.n, "update");
+          await hub(a.artifact_id, v.n, "round-done");
+          return { version: v.n, state: v.state, round_done: !r.late && !r.idempotent };
+        }
+      }
+      await hub(a.artifact_id, v.n, "update");
       return { version: v.n, state: v.state };
     });
 
@@ -206,7 +251,26 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       // written in a locked round, by a D22-tainted session, or by a turn with
       // no session record (channel / job) → untrusted text.
       const tainted = !!scope || (actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread)));
-      return comments.addComment(db, { threadId: a.thread_id, text: a.text, author, tainted });
+      const out = await comments.addComment(db, { threadId: a.thread_id, text: a.text, author, tainted });
+      // The by-thread history route (chat-first replay) derives its events
+      // from the audit log, so a reply is an audited store event like any
+      // other write. The text itself is never duplicated into the audit row.
+      await store.audit(db, { artifactId: a.artifact_id, actor, action: "reply", target: String(a.thread_id) });
+      // F7(1): the first reply by the round's bot inside an ask round's own
+      // thread closes the ask (the smoke's ask stayed 'working' after the
+      // answer landed). Summary = the reply's head; roundDoneEffects stays
+      // quiet for asks (no result_version) but still stops a locked session.
+      if (actor.kind === "bot" && actor.thread) {
+        const asks = (await db.execute({ sql: `SELECT id, thread_ids_json FROM artifact_rounds WHERE artifact_id=? AND kind='ask' AND bot_id=? AND session_id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC`, args: [a.artifact_id, actor.id, actor.thread, ...rounds.ACTIVE] })).rows;
+        const ask = asks.find((r) => { try { return JSON.parse(r.thread_ids_json || "[]").map(Number).includes(Number(a.thread_id)); } catch { return false; } });
+        if (ask) {
+          const r = await rounds.completeRound(db, { roundId: Number(ask.id), artifactId: a.artifact_id, actor, summary: String(a.text).slice(0, 200) });
+          await onRoundDone(r);
+          await hub(a.artifact_id, null, "round-done");
+        }
+      }
+      await hub(a.artifact_id, null, "reply");
+      return out;
     });
 
   tool("artifact_resolve", "Mark a thread resolved.", { artifact_id: z.string(), thread_id: z.number().int() },
@@ -227,6 +291,7 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       if (scope && a.round_id !== scope.roundId) throw Object.assign(new Error("use this round's id"), { code: "forbidden" });
       const r = await rounds.completeRound(db, { roundId: a.round_id, artifactId: a.artifact_id, actor, summary: a.summary });
       await onRoundDone(r);
+      await hub(a.artifact_id, r.result_version == null ? null : Number(r.result_version), "round-done");
       return { round: r.id, status: r.status, late: !!r.late, idempotent: !!r.idempotent };
     });
 

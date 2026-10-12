@@ -618,6 +618,31 @@ white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 /* Last in the block: [hidden] must beat every display rule above (same
    specificity, later source order). */
 #perch-hub-root .phonecard [hidden]{display:none}
+/* --- Crow Artifacts chat card (spec v1.6, chat-first PR-1) ---------------
+   One node per artifact, upserted in the transcript (the phone-card look:
+   head with a status pill, text rows, actions last). Everything the bot
+   authored lands through textContent; nothing here trusts the frame. */
+#perch-hub-root .artcard{flex-direction:column;gap:6px;align-self:stretch;width:100%;min-width:0;max-width:100%;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
+#perch-hub-root .artcard>*{min-width:0;max-width:100%}
+#perch-hub-root .artcard .art-head{display:flex;align-items:center;gap:8px}
+#perch-hub-root .artcard .art-eyebrow{font:11px/1.2 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+#perch-hub-root .artcard .art-type{font-size:12px;color:var(--dim)}
+#perch-hub-root .artcard .art-pill{flex:none;margin-left:auto;display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;
+font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;font-variant-numeric:tabular-nums}
+#perch-hub-root .artcard .art-pill-ok{background:var(--ok-soft);color:var(--ok)}
+#perch-hub-root .artcard .art-pill-warn,#perch-hub-root .artcard .art-pill-wait{background:var(--warn-soft);color:var(--warn)}
+#perch-hub-root .artcard .art-pill-err{background:var(--err-soft);color:var(--err)}
+#perch-hub-root .artcard .art-title{font-weight:600;font-size:15px;color:var(--ink);word-break:break-word}
+#perch-hub-root .artcard .art-meta{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums}
+#perch-hub-root .artcard .art-badges{font-size:13px;color:var(--dim)}
+#perch-hub-root .artcard .art-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .artcard button{min-height:44px}
+#perch-hub-root .artcard button.art-open{background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600;font-size:14px;padding:10px 16px}
+#perch-hub-root .artcard button.art-run{background:none;border:1px solid var(--line);color:var(--teal);font-size:13.5px;padding:10px 14px}
+#perch-hub-root .artcard .art-err{color:var(--err);font-size:13px}
+#perch-hub-root .artcard .art-gone{font-size:13px;color:var(--dim)}
+#perch-hub-root .artcard [hidden]{display:none}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

@@ -209,7 +209,10 @@ test("async continuations are guarded — a fast back button must not cross sess
   // 24 as of the Perch phone card (spec 2026-10-01): phoneRefetch,
   // loadPhoneCards (whoami continuation + list continuation), upsertPhoneCard,
   // phoneAct and the live-card poll tick.
-  assert.equal(guards, 24, "expected exactly 24 identity guards, found " + guards);
+  // 28 as of the Artifacts chat card (spec v1.6, chat-first PR-1):
+  // artifactRefetch, loadArtifactCards (list continuation + the buffered-frame
+  // continuation) and the Run-scripts action continuation.
+  assert.equal(guards, 28, "expected exactly 28 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -1254,6 +1257,65 @@ test("I2: an ask_user frame actually renders the card — the listener is live",
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(hub.els["perch-ask"].children.length, 1, "renderAsk must have written a card");
   assert.equal(hub.els["perch-ask"].children[0].className, "ask-card");
+});
+
+// ---------------------------------------------------------------------------
+// Artifacts chat card (spec v1.6, chat-first PR-1): the live listener and the
+// reload replay, driven through the REAL client arms in the full harness.
+// ---------------------------------------------------------------------------
+
+const ART_ROW = {
+  artifact: { id: "art_live1", title: "Coffee <b>guide</b>", type: "document", current_version: 2 },
+  versions: [{ n: 2, state: "current", flagged_reason: null }, { n: 1, state: "past", flagged_reason: null }],
+  threads: [{ id: 5, status: "open", author_kind: "owner", author_id: null }],
+  activeRound: null, scripted: false, scriptsOff: false,
+};
+function artFetch(items = []) {
+  return stdFetch({
+    "/api/artifacts/by-thread/": () => makeResponse(200, { items }),
+    "/api/artifacts/art_live1": () => makeResponse(200, ART_ROW),
+  });
+}
+function artCardsOf(hub) {
+  return hub.els["perch-transcript"].children.filter((c) => String(c.className || "").includes("artcard"));
+}
+function flatTexts(node) {
+  const out = [];
+  (function walk(n) { if (n.textContent) out.push(n.textContent); (n.children || []).forEach(walk); })(node);
+  return out;
+}
+
+test("spec v1.6: an artifact SSE frame draws the chat card from the refetched row, never from the frame", async () => {
+  const hub = await mountHub({ fetchImpl: artFetch() });
+  await openChatSession(hub);
+  assert.equal(artCardsOf(hub).length, 0, "an empty by-thread batch draws nothing");
+  const es = FakeEventSource.instances[0];
+  // The frame lies about the title; the card must show the ROW's.
+  es._serverFrame("artifact", { type: "artifact", artifactId: "art_live1", n: 2, event: "update", title: "<script>x</script>" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const cards = artCardsOf(hub);
+  assert.equal(cards.length, 1, "the frame drew exactly one card");
+  const texts = flatTexts(cards[0]);
+  assert.ok(texts.includes("Coffee <b>guide</b>"), "the row's title, as text");
+  assert.ok(!texts.some((t) => t.includes("<script>")), "frame payload is never rendered");
+  assert.ok(texts.includes("v2"));
+  // A second frame for the same artifact upserts — still one node.
+  es._serverFrame("artifact", { type: "artifact", artifactId: "art_live1", n: 2, event: "reply" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(artCardsOf(hub).length, 1, "one node per artifact");
+});
+
+test("spec v1.6: a reloaded transcript replays its artifact cards from the by-thread batch", async () => {
+  const hub = await mountHub({ fetchImpl: artFetch([{ artifactId: "art_live1", event: "create", n: 1, ts: "2026-10-11 10:00:00" }]) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const cards = artCardsOf(hub);
+  assert.equal(cards.length, 1, "the batch redrew the card without any live frame");
+  assert.ok(flatTexts(cards[0]).includes("Coffee <b>guide</b>"));
+  assert.ok(hub.fetchCalls.some((f) => String(f.path).includes("/api/artifacts/by-thread/perchlive-aaaaaaaa")), "replay reads the by-thread route with THIS chat's id");
 });
 
 test("I2: the attach button opens the file picker", async () => {

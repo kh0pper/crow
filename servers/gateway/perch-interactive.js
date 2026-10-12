@@ -3284,6 +3284,54 @@ export function createInteractiveEngine({
     return { delivered: true, botId: s.botId };
   }
 
+  /**
+   * Artifacts chat-first hook (spec v1.6 D25/D27; plan PR-1 Task 1.1).
+   * An `artifact` frame is a gateway-built POINTER
+   * ({type:"artifact", artifactId, n, event}); the hub client refetches the
+   * store row itself and never renders frame payload — the phone-card I2/I6
+   * pattern. Same rules as notifyCard:
+   *  - RESIDENT sessions only — sessions.get, never resolveSession: a card
+   *    update must never adopt a row or wake a hibernating child (cards
+   *    replay from the bundle's by-thread route when the chat is opened);
+   *  - the caller names the bot the artifact belongs to and the frame goes
+   *    out only when this session is that bot's (a forged
+   *    X-Crow-Actor-Thread cannot inject a card into another bot's chat);
+   *  - allowlisted type + frozen key set + frozen event enum, primitive
+   *    fields only: this hook can never inject a chat text/reply/ask_user
+   *    frame, a nested payload, or bot-authored strings (titles ride the
+   *    store row, not the frame);
+   *  - NOT persisted and not reachable from any HTTP route or MCP transport:
+   *    in-process only, on the engine singleton.
+   * Unlike notifyCard this does not throw on a bad call — it answers with a
+   * named reason, so a bundle fan-out can never break an MCP write result.
+   */
+  const ARTIFACT_FRAME_KEYS = new Set(["type", "artifactId", "n", "event"]);
+  const ARTIFACT_FRAME_EVENTS = new Set(["create", "update", "reply", "round-done", "link-ask", "link-decided"]);
+  function emitExternal(threadId, frame, opts) {
+    const s = sessions.get(String(threadId));
+    if (!s) return { delivered: false, botId: null, reason: "no_session" };
+    const want = opts && opts.botId != null ? String(opts.botId) : null;
+    if (!want) return { delivered: false, botId: s.botId, reason: "bot_required" };
+    if (want !== s.botId) return { delivered: false, botId: s.botId, reason: "bot_mismatch" };
+    if (!frame || typeof frame !== "object" || frame.type !== "artifact") return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    const out = {};
+    for (const [k, v] of Object.entries(frame)) {
+      if (!ARTIFACT_FRAME_KEYS.has(k)) continue;
+      if (typeof v === "number" && !Number.isFinite(v)) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+      if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+    }
+    if (typeof out.artifactId !== "string" || !out.artifactId) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    if (!ARTIFACT_FRAME_EVENTS.has(out.event)) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    // n is validated on the RAW frame: a non-primitive (dropped by the copy
+    // above) must reject, not silently deliver a frame without its version.
+    if ("n" in frame && frame.n !== null && frame.n !== undefined) {
+      if (typeof frame.n !== "number" || !Number.isInteger(frame.n) || frame.n < 1) return { delivered: false, botId: s.botId, reason: "bad_frame" };
+    }
+    out.type = "artifact";
+    emit(s, out);
+    return { delivered: true, botId: s.botId };
+  }
+
   return {
     spawn,
     message,
@@ -3303,6 +3351,9 @@ export function createInteractiveEngine({
     stopAll,
     /** Phone card pointer frames (spec 2026-10-01 §4.1) — resident sessions only, bot-checked. */
     notifyCard,
+    /** Artifacts chat-first pointer frames (spec v1.6 D25) — resident sessions
+     * only, bot-checked, allowlisted `artifact` type. See its own doc. */
+    emitExternal,
     /** Track 3 Task 6: exported so the dispatch ROUTE can 409 a card BEFORE
      * ever reaching spawn() — see the module header. */
     checkCardFree,
@@ -3368,6 +3419,17 @@ export async function notifyCardToResident(sid, frame, opts) {
   const eng = getInteractiveEngine({ createIfMissing: false });
   if (!eng || typeof eng.notifyCard !== "function") return { delivered: false, botId: null, reason: "no_engine" };
   return eng.notifyCard(sid, frame, opts);
+}
+
+/** The one default emitExternal hook for callers outside the engine (the
+ * artifacts MCP mount's fan-out; spec v1.6 D25). Same lookup discipline as
+ * notifyCardToResident: never creates an engine — with no engine in this
+ * process the frame is dropped as `no_engine` (the card replays from the
+ * by-thread route when the chat is opened). */
+export async function emitExternalToResident(threadId, frame, opts) {
+  const eng = getInteractiveEngine({ createIfMissing: false });
+  if (!eng || typeof eng.emitExternal !== "function") return { delivered: false, botId: null, reason: "no_engine" };
+  return eng.emitExternal(threadId, frame, opts);
 }
 
 /** Test-only: drop the singleton so one test can never leak an engine (or a
