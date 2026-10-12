@@ -87,10 +87,45 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json({ artifacts: await M.store.listArtifacts(S.db, OWNER), origin: S.runtime.artifactOriginInfo() ? { isolation: S.runtime.isolationFor(_req.headers.host) } : { isolation: "unavailable" } });
   }));
 
+  /**
+   * Chat-first replay (spec v1.6 D25; plan PR-1 Task 1.3): the artifact
+   * events of ONE Perch thread, so a reloaded transcript redraws its cards —
+   * the file-card history contract. Derived from the audit log (the store is
+   * the system of record); capped at 200 rows, newest last. Owner-only like
+   * every route here. PR-1's thread link is origin_session; PR-3 swaps to
+   * artifact_links (the same single-point swap as server/links.js).
+   */
+  const THREAD_EVENT_FOR = { create: "create", version: "update", "version-proposed": "update", reply: "reply", "round-done": "round-done", "ask-done": "round-done" };
+  router.get("/api/artifacts/by-thread/:thread", wrap(async (req, res) => {
+    const actions = Object.keys(THREAD_EVENT_FOR);
+    const rows = (await S.db.execute({
+      sql: `SELECT au.artifact_id, au.action, au.target, au.ts FROM artifact_audit au
+            JOIN artifacts a ON a.id=au.artifact_id
+            WHERE a.origin_session=? AND a.deleted_at IS NULL AND au.action IN (${actions.map(() => "?").join(",")})
+            ORDER BY au.id DESC LIMIT 200`,
+      args: [String(req.params.thread), ...actions],
+    })).rows;
+    rows.reverse();   // the cap keeps the NEWEST 200; the client replays oldest-first
+    res.json({
+      items: rows.map((r) => {
+        const v = /^v(\d+)$/.exec(String(r.target || ""));
+        return { artifactId: r.artifact_id, event: THREAD_EVENT_FOR[r.action], n: v ? Number(v[1]) : null, ts: r.ts };
+      }),
+    });
+  }));
+
   router.get("/api/artifacts/:id", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
-    const versions = (await S.db.execute({ sql: "SELECT n, state, made_by, made_by_bot, round_id, untrusted_input, change_note, proposed_reason, flagged_reason, created_at, anchor_map_json FROM artifact_versions WHERE artifact_id=? ORDER BY n DESC", args: [art.id] })).rows;
-    res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id) });
+    const versions = (await S.db.execute({ sql: "SELECT n, state, made_by, made_by_bot, round_id, untrusted_input, trust_cleared_at, change_note, proposed_reason, flagged_reason, created_at, anchor_map_json FROM artifact_versions WHERE artifact_id=? ORDER BY n DESC", args: [art.id] })).rows;
+    // Chat-first card (plan PR-1 Task 1.4): the card's state chip reads the
+    // active round and the scripted-type flag from THIS row — the client
+    // never re-derives policy (one definition, server-side). scriptsOff is
+    // the SAME expression the view-mint route uses (D20).
+    const activeRound = (await S.db.execute({ sql: "SELECT id, kind, status FROM artifact_rounds WHERE artifact_id=? AND status IN ('queued','pending','delivering','working') ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0] || null;
+    const cur = versions.find((v) => Number(v.n) === Number(art.current_version)) || null;
+    const scripted = S.policy.isScriptedType(art.type);
+    res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id),
+      activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)) });
   }));
 
   /**

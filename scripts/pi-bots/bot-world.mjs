@@ -53,6 +53,35 @@ import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 function loadBridge() { return import("./bridge.mjs"); }
 
 /**
+ * Does this def's crow_mcp selection grant `server` — whole (`artifacts`),
+ * per tool (`artifacts/artifact_create`) or in the bridge's toolAllowlist
+ * spelling (`artifacts__artifact_create`)? This is a COPY of the artifacts
+ * bundle's grantsServer() (bundles/artifacts/server/delivery.js): core must
+ * not import a bundle, and tests/bot-world-artifacts-skill.test.js pins the
+ * two against each other so they cannot drift.
+ */
+export function botGrantsServer(def, server) {
+  const list = (def && def.tools && def.tools.crow_mcp) || [];
+  return list.some((e) => typeof e === "string" && (e === server || e.startsWith(server + "/") || e.startsWith(server + "__")));
+}
+
+/**
+ * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
+ * a bot whose tools grant the Artifacts server ran WITHOUT the protocol skill
+ * unless the operator had attached it by hand — it tried to `read` the skill
+ * file itself, the sandbox refused, and the model improvised (write +
+ * send_user_file instead of artifact_create). The skill text is inlined HERE,
+ * gateway-side (the child never reads the file), so the grant itself now
+ * attaches the skill: an explicit def selection wins, a missing skill file
+ * (bundle not installed on this instance) adds nothing and stays quiet.
+ */
+export function skillNamesFor(def, { crowHome } = {}) {
+  const names = [...(def.skills || [])];
+  if (!names.includes("artifacts") && botGrantsServer(def, "artifacts") && resolveSkill("artifacts", { crowHome })) names.push("artifacts");
+  return names;
+}
+
+/**
  * Phase A — identity. The exact sequence handleInbound ran inline before C-11.
  *
  * @param {{botId: string, threadId: string, gatewayType?: string,
@@ -240,7 +269,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // without them. A3: resolved per-instance via skill_resolver — first match
   // across <crowHome>/skills, ~/.crow/skills, ~/crow/skills wins.
   const { sections: skillSections, missing: missingSkills } =
-    resolveSkills(def.skills || [], { crowHome });
+    resolveSkills(skillNamesFor(def, { crowHome }), { crowHome });
   for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
   for (const name of missingSkills) {
     log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));

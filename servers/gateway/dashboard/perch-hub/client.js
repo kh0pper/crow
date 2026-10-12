@@ -1,6 +1,7 @@
 import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
+import { perchArtifactCardJs } from "./artifact-card.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
@@ -1168,6 +1169,7 @@ export function perchHubJs(lang = "en") {
     toolChips={};                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
+    resetArtifactCards();
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
@@ -1411,6 +1413,12 @@ export function perchHubJs(lang = "en") {
       if(!histSettled){ phoneBuf.push(d); return; }   /* replayed by loadPhoneCards once the history lands */
       phoneFrame(d,sid);
     });
+    /* Spec v1.6 (chat-first PR-1): an artifact frame is a pointer —
+       artifact-card.js refetches the store row. */
+    on('artifact',function(d){
+      if(!histSettled){ artBuf.push(d); return; }     /* replayed by loadArtifactCards once the history lands */
+      artifactFrame(d,sid);
+    });
     on('error',function(d){
       appendActivity(d.text||'error');
       /* The child DIED (pi exited at spawn — an unknown provider, a missing
@@ -1549,6 +1557,7 @@ export function perchHubJs(lang = "en") {
     toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
+    resetArtifactCards();
     histSettled=false; histBuf=[];
     loadHistory(botId,sid);
   }
@@ -1675,6 +1684,7 @@ export function perchHubJs(lang = "en") {
     });
     if(current.sid) replayUnsent(current.sid);
     loadPhoneCards(current.sid);   /* spec 2026-10-01: this chat's call cards, after the transcript and unsent notes */
+    loadArtifactCards(current.sid);   /* spec v1.6: this chat's artifact cards, same discipline */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -1907,6 +1917,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
+    resetArtifactCards();
     resetFacts();
   }
 
@@ -2867,6 +2878,8 @@ export function perchHubJs(lang = "en") {
   }
 
 ${perchPhoneCardJs(lang)}
+
+${perchArtifactCardJs(lang)}
 
   /* ---- Wave 3: the slash-command menu ------------------------------------
      Fed by pi's OWN get_commands registry through the engine (never a

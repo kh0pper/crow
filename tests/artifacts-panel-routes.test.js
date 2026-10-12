@@ -124,3 +124,65 @@ test("D20: a tainted page version mints script-free until the owner approves it"
   const on = await req("POST", `/api/artifacts/${s.art.id}/versions/${v.n}/view`);
   assert.deepEqual([on.body.sandbox, on.body.scripted, on.body.scriptsOff], ["allow-scripts", true, false]);
 });
+
+// ---------------------------------------------------------------------------
+// PR-1 (chat-first): the by-thread replay route + the card's extra row facts
+// ---------------------------------------------------------------------------
+
+test("by-thread: audit-derived events for ONE thread, mapped, oldest first, capped at the newest 200", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Threaded", type: "document", source: { markdown: "# t" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1" } }, { markdownBlocks });
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Elsewhere", type: "document", source: { markdown: "# o" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t2" } }, { markdownBlocks });
+  const v = await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { markdown: "# t2" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1" } }, { markdownBlocks });
+  await store.audit(s.db, { artifactId: art.id, actor: { kind: "bot", id: "bobby" }, action: "reply", target: "7" });
+  await store.audit(s.db, { artifactId: art.id, actor: { kind: "bot", id: "bobby" }, action: "round-done", target: "3" });
+  await store.audit(s.db, { artifactId: art.id, actor: { kind: "system" }, action: "round-timeout", target: "2" });   // not a card event
+  const r = await req("GET", "/api/artifacts/by-thread/perchlive-t1");
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.items.map((x) => [x.artifactId, x.event, x.n]), [
+    [art.id, "create", 1], [art.id, "update", v.n], [art.id, "reply", null], [art.id, "round-done", null],
+  ], "mapped from the audit log, oldest first; a non-card action is not an item");
+  assert.ok(!r.body.items.some((x) => x.artifactId === other.id), "another thread's artifact never appears");
+  assert.ok(r.body.items.every((x) => typeof x.ts === "string" && x.ts), "every item carries its stamp");
+  // The cap keeps the NEWEST 200, replayed oldest-first.
+  for (let i = 0; i < 205; i++) await store.audit(s.db, { artifactId: art.id, actor: { kind: "bot", id: "bobby" }, action: "reply", target: String(i) });
+  const capped = await req("GET", "/api/artifacts/by-thread/perchlive-t1");
+  assert.equal(capped.body.items.length, 200);
+  assert.equal(capped.body.items.filter((x) => x.event === "create").length, 0, "the oldest rows are what the cap drops");
+  assert.ok(capped.body.items.every((x) => x.event === "reply"), "the newest 200 are all the late replies");
+  // Auth like every route here.
+  assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t1", { cookie: null })).status, 401);
+  // An unknown thread is an empty list, not an error.
+  assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-nope")).body.items, []);
+});
+
+test("the card row: GET :id carries the active round and the server-derived scripted flag", async () => {
+  // A fresh artifact: the Send-feedback test above deliberately leaves an
+  // active round on s.art, and H5 allows only one per artifact.
+  const page = await store.createArtifact(s.db, s.blobs, { title: "Card row", type: "page", source: { html: "<p>x</p>" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t9" } }, {});
+  await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,status,deadline) VALUES (?,'round',1,'[]',0,'bobby','working',?)", args: [page.id, Date.now() + 60000] });
+  const r = await req("GET", `/api/artifacts/${page.id}`);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.activeRound && [r.body.activeRound.kind, r.body.activeRound.status], ["round", "working"]);
+  assert.equal(r.body.scripted, true, "a page is a scripted type (policy-derived, never client-guessed)");
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE artifact_id=?", args: [page.id] });
+  const after = await req("GET", `/api/artifacts/${page.id}`);
+  assert.equal(after.body.activeRound, null);
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Plain doc", type: "document", source: { markdown: "# d" }, actor: { kind: "session" } }, { markdownBlocks });
+  assert.equal((await req("GET", `/api/artifacts/${doc.id}`)).body.scripted, false);
+  // scriptsOff is the D20 expression, server-side: a tainted scripted CURRENT
+  // version flips it on; the owner's approve flips it off; a tainted PROPOSED
+  // version (not current) does not.
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, false, "a clean v1 runs scripts");
+  const tainted = await store.addVersion(s.db, s.blobs, { artifactId: page.id, source: { html: "<p>shaped outside</p>" }, actor: { kind: "session" }, untrusted: true }, {});
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, true, "tainted current page: scripts off");
+  await store.approveVersion(s.db, { artifactId: page.id, n: tainted.n, actor: { kind: "session" } });
+  assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, false, "the approve clears it (same rail as the view mint)");
+  assert.equal((await req("GET", `/api/artifacts/${doc.id}`)).body.scriptsOff, false, "a document is never scripts-off");
+});
+
+test("by-thread: a deleted artifact's events drop off the replay (review L3/M11)", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Doomed doc", type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t8" } }, { markdownBlocks });
+  assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items.length, 1);
+  await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [art.id] });
+  assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items, [], "a deleted artifact replays no cards");
+});

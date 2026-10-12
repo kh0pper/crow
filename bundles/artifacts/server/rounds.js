@@ -10,7 +10,8 @@ import { audit, flagUntrusted } from "./store.js";
 import { anchorTaintMap, anchorTainted } from "./comments.js";
 
 const err = (code, message, extra) => Object.assign(new Error(message || code), { code }, extra || {});
-const ACTIVE = ["queued", "pending", "delivering", "working"];
+/** Round statuses that are still in flight (exported for mcp.js's F7 guards). */
+export const ACTIVE = ["queued", "pending", "delivering", "working"];
 
 /** Tools an untrusted round's session keeps (bridge allow-list, narrowing-lock.mjs). */
 export const UNTRUSTED_ALLOW = ["crow:only:mcp__artifacts__"];
@@ -193,7 +194,12 @@ export async function roundMessage(db, round) {
     for (const c of t.comments) lines.push(`  <<${who(c)}>> ${JSON.stringify(c.text)}`);
   }
   const msg = lines.filter((l) => l !== null).join("\n");
-  return msg.length > LIMITS.roundMessageChars ? msg.slice(0, LIMITS.roundMessageChars) + "\n[truncated]" : msg;
+  const capped = msg.length > LIMITS.roundMessageChars ? msg.slice(0, LIMITS.roundMessageChars) + "\n[truncated]" : msg;
+  // F7(3) reinforcement: the closing instruction is appended AFTER the cap so
+  // a long round can never truncate away the one line the smoke showed bots
+  // forgetting. Ask messages are unchanged (D26: answer, don't revise).
+  if (round.kind === "ask") return capped;
+  return capped + `\nWhen finished, call artifact_round_done(round_id=${round.id}).`;
 }
 
 /** Bot side: only the round's own bot, on an active round. */
@@ -202,6 +208,29 @@ export async function requireRoundForBot(db, roundId, actor, artifactId) {
   if (!r || r.artifact_id !== artifactId) throw err("not_found", "no such round");
   if (actor?.kind !== "session" && !(actor?.kind === "bot" && actor.id === r.bot_id)) throw err("forbidden", "not your round");
   return r;
+}
+
+/**
+ * F7(2): has the round's bot replied in EVERY included thread since the
+ * snapshot? The auto-complete gate for an artifact_update carrying the round
+ * id — a reply that predates the Send (an earlier round's) never counts, so
+ * the check reads the frozen snapshot exactly like roundMessage does. A
+ * round with no threads can never complete by replies (fail closed).
+ */
+export async function allThreadsReplied(db, round) {
+  const ids = Array.isArray(round?.thread_ids) ? round.thread_ids.map(Number) : [];
+  if (!ids.length) return false;
+  // L1 (plan review 2026-10-11): the round's OWN bot must have replied — once
+  // PR-3 shares bot access, another bot's reply is not this round's answer.
+  // A round without a bot can never complete by replies (fail closed).
+  const botId = round && round.bot_id != null ? String(round.bot_id) : null;
+  if (!botId) return false;
+  const snap = (round && round.snapshot) || {};
+  for (const tid of ids) {
+    const r = (await db.execute({ sql: "SELECT 1 FROM artifact_comments WHERE thread_id=? AND author_kind='bot' AND author_id=? AND deleted_at IS NULL AND id>? LIMIT 1", args: [tid, botId, Number(snap[tid] ?? 0)] })).rows[0];
+    if (!r) return false;
+  }
+  return true;
 }
 
 /** §7.4: idempotent; a late call after a timeout is recorded, never revives the round. */
@@ -213,7 +242,17 @@ export async function completeRound(db, { roundId, artifactId, actor, summary, r
     await audit(db, { artifactId, actor, action: "round-late-done", target: String(roundId) });
     return { ...r, late: true };
   }
-  await db.execute({ sql: "UPDATE artifact_rounds SET status='done', summary=?, result_version=COALESCE(?, result_version), updated_at=datetime('now') WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [s, resultVersion, roundId] });
+  const upd = await db.execute({ sql: "UPDATE artifact_rounds SET status='done', summary=?, result_version=COALESCE(?, result_version), updated_at=datetime('now') WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [s, resultVersion, roundId] });
+  // Review R2's race sibling: the sweep can time the round out (or a concurrent
+  // closer finish it) BETWEEN the status read above and this guarded write. A
+  // 0-row update must report the row as it ACTUALLY is — never a fresh done
+  // (done-effects like "Version N is ready" key off that distinction).
+  if (Number(upd.rowsAffected) !== 1) {
+    const fresh = await getRound(db, roundId);
+    if (fresh && fresh.status === "done") return { ...fresh, idempotent: true };
+    await audit(db, { artifactId, actor, action: "round-late-done", target: String(roundId) });
+    return { ...(fresh || r), late: true };
+  }
   await audit(db, { artifactId, actor, action: r.kind === "ask" ? "ask-done" : "round-done", target: String(roundId) });
   return getRound(db, roundId);
 }
