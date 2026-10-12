@@ -179,3 +179,10 @@ test("the card row: GET :id carries the active round and the server-derived scri
   assert.equal((await req("GET", `/api/artifacts/${page.id}`)).body.scriptsOff, false, "the approve clears it (same rail as the view mint)");
   assert.equal((await req("GET", `/api/artifacts/${doc.id}`)).body.scriptsOff, false, "a document is never scripts-off");
 });
+
+test("by-thread: a deleted artifact's events drop off the replay (review L3/M11)", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Doomed doc", type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t8" } }, { markdownBlocks });
+  assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items.length, 1);
+  await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [art.id] });
+  assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items, [], "a deleted artifact replays no cards");
+});

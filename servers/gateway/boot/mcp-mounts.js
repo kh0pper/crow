@@ -352,9 +352,15 @@ export async function mountMcpServers(app, deps) {
       // discipline as the phone card's notifyCard: never creates an engine,
       // never wakes a session — with no engine the frame is dropped and the
       // by-thread history route replays the card on the next open.
+      let emitExternalWarned = false;
       const emitExternal = async (threadId, frame, opts) => {
         try { return (await import("../perch-interactive.js")).emitExternalToResident(threadId, frame, opts); }
-        catch { return { delivered: false, botId: null, reason: "no_engine" }; }
+        catch (e) {
+          // L2 (plan review): an import/syntax failure here must not be silent
+          // — log it once per process, then degrade to no_engine.
+          if (!emitExternalWarned) { emitExternalWarned = true; console.warn(`[gateway] artifacts hub fan-out unavailable: ${(e && e.message) || e}`); }
+          return { delivered: false, botId: null, reason: "no_engine" };
+        }
       };
       mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal }), sessionManager, authMiddleware, peerExposureGate);
       const { readReservation } = await import("../box-reservation.js");

@@ -12,7 +12,7 @@
 // next time the chat is opened.
 import { linkedThreads } from "./links.js";
 
-let warned = false;
+let warned = new Set();
 
 /** Fire-and-forget card fan-out. `emitExternal` is the thunk the MCP mount
  *  injects (servers/gateway/boot/mcp-mounts.js → the engine's resident-only
@@ -28,8 +28,11 @@ export async function notifyHub({ db, artifactId, n = null, event, emitExternal 
     }
     return { fanned };
   } catch (e) {
-    // Warn once per process: a broken engine seam must not spam every write.
-    if (!warned) { warned = true; console.warn(`[artifacts] hub fan-out failed (non-fatal): ${(e && e.message) || e}`); }
+    // L2 (plan review): keyed by error class, not one global flag — a DB error
+    // after an engine error still gets its single warning. Bounded: classes
+    // are few; a flood of distinct messages falls back to one memo each.
+    const key = String((e && (e.code || e.name)) || "error").slice(0, 64);
+    if (!warned.has(key)) { warned.add(key); console.warn(`[artifacts] hub fan-out failed (non-fatal): ${(e && e.message) || e}`); }
     return { fanned: 0 };
   }
 }

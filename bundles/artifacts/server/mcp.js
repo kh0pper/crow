@@ -181,19 +181,26 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       await onVersion({ artifactId: a.artifact_id, n: v.n, state: v.state, anchorMap: v.anchorMap, onlyThreads: scope ? scope.roundThreads : null });
       if (round && v.state === "current") {
         // The round's result version (drives "Version N is ready" through
-        // roundDoneEffects, manual round_done keeps it via COALESCE). Only a
-        // CURRENT version is a result — a proposed one is the owner's call.
-        await db.execute({ sql: "UPDATE artifact_rounds SET result_version=? WHERE id=?", args: [v.n, round.id] });
+        // roundDoneEffects; a manual round_done keeps it via COALESCE). Only a
+        // CURRENT version is a result — a proposed one is the owner's call —
+        // and only while the round is STILL active: the sweep can time the
+        // round out during the addVersion/onVersion awaits (review R2), and a
+        // timed-out round must not grow a result its owner was never told
+        // about ("ready" after "timed out").
+        await db.execute({ sql: `UPDATE artifact_rounds SET result_version=? WHERE id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")})`, args: [v.n, round.id, ...rounds.ACTIVE] });
         // F7(2): auto-complete — the bot updated under the round and every
         // included thread already has one of its replies (the smoke's bots
         // replied, revised, and then forgot artifact_round_done). Idempotent:
-        // a later round_done is a no-op success.
-        if (round.kind === "round" && rounds.ACTIVE.includes(round.status) && !pol.proposedReason && await rounds.allThreadsReplied(db, round)) {
+        // a later round_done is a no-op success. completeRound RE-READS the
+        // row, so a sweep that timed the round out mid-update wins the race:
+        // it returns {late}, round_done stays false, and R1's guard in
+        // roundDoneEffects keeps the "ready" notification off.
+        if (round.kind === "round" && !pol.proposedReason && await rounds.allThreadsReplied(db, round)) {
           const r = await rounds.completeRound(db, { roundId: round.id, artifactId: a.artifact_id, actor, summary: String(a.change_note || "").slice(0, 200) || "The round's update landed.", resultVersion: v.n });
           await onRoundDone(r);
           await hub(a.artifact_id, v.n, "update");
           await hub(a.artifact_id, v.n, "round-done");
-          return { version: v.n, state: v.state, round_done: true };
+          return { version: v.n, state: v.state, round_done: !r.late && !r.idempotent };
         }
       }
       await hub(a.artifact_id, v.n, "update");

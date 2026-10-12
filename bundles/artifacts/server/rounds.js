@@ -220,9 +220,14 @@ export async function requireRoundForBot(db, roundId, actor, artifactId) {
 export async function allThreadsReplied(db, round) {
   const ids = Array.isArray(round?.thread_ids) ? round.thread_ids.map(Number) : [];
   if (!ids.length) return false;
+  // L1 (plan review 2026-10-11): the round's OWN bot must have replied — once
+  // PR-3 shares bot access, another bot's reply is not this round's answer.
+  // A round without a bot can never complete by replies (fail closed).
+  const botId = round && round.bot_id != null ? String(round.bot_id) : null;
+  if (!botId) return false;
   const snap = (round && round.snapshot) || {};
   for (const tid of ids) {
-    const r = (await db.execute({ sql: "SELECT 1 FROM artifact_comments WHERE thread_id=? AND author_kind='bot' AND deleted_at IS NULL AND id>? LIMIT 1", args: [tid, Number(snap[tid] ?? 0)] })).rows[0];
+    const r = (await db.execute({ sql: "SELECT 1 FROM artifact_comments WHERE thread_id=? AND author_kind='bot' AND author_id=? AND deleted_at IS NULL AND id>? LIMIT 1", args: [tid, botId, Number(snap[tid] ?? 0)] })).rows[0];
     if (!r) return false;
   }
   return true;
@@ -237,7 +242,17 @@ export async function completeRound(db, { roundId, artifactId, actor, summary, r
     await audit(db, { artifactId, actor, action: "round-late-done", target: String(roundId) });
     return { ...r, late: true };
   }
-  await db.execute({ sql: "UPDATE artifact_rounds SET status='done', summary=?, result_version=COALESCE(?, result_version), updated_at=datetime('now') WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [s, resultVersion, roundId] });
+  const upd = await db.execute({ sql: "UPDATE artifact_rounds SET status='done', summary=?, result_version=COALESCE(?, result_version), updated_at=datetime('now') WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [s, resultVersion, roundId] });
+  // Review R2's race sibling: the sweep can time the round out (or a concurrent
+  // closer finish it) BETWEEN the status read above and this guarded write. A
+  // 0-row update must report the row as it ACTUALLY is — never a fresh done
+  // (done-effects like "Version N is ready" key off that distinction).
+  if (Number(upd.rowsAffected) !== 1) {
+    const fresh = await getRound(db, roundId);
+    if (fresh && fresh.status === "done") return { ...fresh, idempotent: true };
+    await audit(db, { artifactId, actor, action: "round-late-done", target: String(roundId) });
+    return { ...(fresh || r), late: true };
+  }
   await audit(db, { artifactId, actor, action: r.kind === "ask" ? "ask-done" : "round-done", target: String(roundId) });
   return getRound(db, roundId);
 }

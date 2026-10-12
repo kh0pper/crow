@@ -53,6 +53,14 @@ test("actions ride the EXISTING owner routes: Open navigates to the panel page (
   assert.match(js, /artApi\('POST','\/'\+encodeURIComponent\(a\.id\)\+'\/versions\/'\+encodeURIComponent\(String\(st\.curN\)\)\+'\/approve',\{\}\)/);
 });
 
+test("T1 static pin: every async continuation carries the artGen guard (review M8/M8b/M8c survived the count-of-current.sid pin)", () => {
+  const js = perchArtifactCardJs("en");
+  // refetch, by-thread list continuation, buffered-frame continuation, and
+  // the Run-scripts action (L4). If this count moves, a guard moved with it.
+  assert.equal((js.match(/gen!==artGen/g) || []).length, 4, "four artGen guards");
+  assert.equal((js.match(/gen=artGen/g) || []).length, 3, "captured at call/render time in the three functions that await");
+});
+
 test("every card string is a translated key with en AND es", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/artifact-card.js", import.meta.url), "utf8");
@@ -127,6 +135,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     resetArtifactCards: resetArtifactCards,
     cards: function(){ return artCards; },
     noBundle: function(){ return artNoBundle; },
+    pushBufForTest: function(d){ artBuf.push(d); },
   });\n})();`;
   vm.runInContext(src, sandbox);
   return { sandbox, transcript, fetches };
@@ -327,3 +336,62 @@ test("resetArtifactCards drops the index so a new transcript cannot update detac
   api.resetArtifactCards();
   assert.equal(Object.keys(api.cards()).length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// T1 (review): the artGen guards, BEHAVIOURALLY pinned — M8/M8b/M8c survived
+// every static test. A continuation that started before a same-sid transcript
+// reset must draw NOTHING into the fresh transcript.
+// ---------------------------------------------------------------------------
+
+function deferred() { let release; const p = new Promise((r) => { release = r; }); return { p, release }; }
+function gatedRow(id, gate) {
+  return { ok: true, status: 200, json: () => gate.then(() => row({ id, title: "T-" + id })) };
+}
+
+test("T1: a refetch in flight across a transcript reset draws nothing (M8)", async () => {
+  const g = deferred();
+  const hub = mountCard({ fetchImpl: (m, url) => gatedRow(url.split("/").pop(), g.p) });
+  const api = hub.sandbox.__exportedApi;
+  const sid = hub.sandbox.current.sid;
+  const p = api.artifactRefetch("art_stale", sid);
+  api.resetArtifactCards();               // the reload lands while the fetch is in flight
+  g.release();
+  await p; await tick();
+  assert.equal(byClass(hub.transcript, "artcard").length, 0, "the pre-reset fetch drew nothing into the fresh transcript");
+});
+
+test("T1: a by-thread batch resolving after a reset draws nothing (M8b)", async () => {
+  const g = deferred();
+  const hub = mountCard({
+    fetchImpl: (m, url) => url.includes("/by-thread/")
+      ? { ok: true, status: 200, json: () => g.p.then(() => ({ items: [{ artifactId: "art_b1", event: "create", n: 1, ts: "x" }] })) }
+      : json(row({ id: "art_b1" })),
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadArtifactCards(sid0(hub));
+  api.resetArtifactCards();
+  g.release();
+  await tick(); await tick();
+  assert.equal(byClass(hub.transcript, "artcard").length, 0, "the stale batch drew nothing");
+});
+
+test("T1: buffered live frames are dropped when the reset lands between the batch and the replay (M8c)", async () => {
+  const g = deferred();
+  const hub = mountCard({
+    fetchImpl: (m, url) => url.includes("/by-thread/")
+      ? json({ items: [{ artifactId: "art_b1", event: "create", n: 1, ts: "x" }] })   // resolves on a microtask
+      : gatedRow(url.split("/").pop(), g.p),                                          // refetches held open
+  });
+  const api = hub.sandbox.__exportedApi;
+  const sid = sid0(hub);
+  api.pushBufForTest({ type: "artifact", artifactId: "art_b2", n: 1, event: "create" });
+  api.loadArtifactCards(sid);
+  await new Promise((r) => setTimeout(r, 0));   // the list continuation runs; the refetches are in flight
+  api.resetArtifactCards();                     // reset lands before the chain (and its buf replay) settles
+  g.release();
+  await tick(); await tick();
+  assert.equal(byClass(hub.transcript, "artcard").length, 0,
+    "neither the batch's refetches nor the buffered frame drew into the fresh transcript");
+});
+
+const sid0 = (hub) => hub.sandbox.current.sid;

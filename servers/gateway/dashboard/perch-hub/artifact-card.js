@@ -197,8 +197,9 @@ export function perchArtifactCardJs(lang = "en") {
       run.textContent=ART_RUN;
       run.onclick=function(){
         run.disabled=true;
+        var gen=artGen;   /* L4 (plan review): a same-sid reset mid-approve detaches this card */
         artApi('POST','/'+encodeURIComponent(a.id)+'/versions/'+encodeURIComponent(String(st.curN))+'/approve',{}).then(function(r){
-          if(!live()||current.sid!==sid) return;
+          if(!live()||current.sid!==sid||gen!==artGen) return;
           if(r.ok){ artifactRefetch(a.id,sid); }
           else{
             run.disabled=false;

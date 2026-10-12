@@ -218,6 +218,14 @@ test("F7(2): allThreadsReplied reads the SNAPSHOT — an older reply never compl
   // A thread-less round can never complete by replies (fail closed).
   assert.equal(await rounds.allThreadsReplied(s.db, { ...r2, thread_ids: [] }), false);
   assert.equal(await rounds.allThreadsReplied(s.db, null), false);
+  // L1 (plan review): the round's OWN bot must answer — once PR-3 shares bot
+  // access, another bot's reply is not this round's answer.
+  const r3 = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, kind: "ask", include: [t2.threadId] });
+  await comments.addComment(s.db, { threadId: t2.threadId, text: "a different bot chimes in", author: { kind: "bot", id: "mallory" }, tainted: false });
+  assert.equal(await rounds.allThreadsReplied(s.db, r3), false, "another bot's reply does not complete the round");
+  assert.equal(await rounds.allThreadsReplied(s.db, { ...r3, bot_id: null }), false, "a round without a bot never completes by replies");
+  await comments.addComment(s.db, { threadId: t2.threadId, text: "bobby finally answers", author: { kind: "bot", id: "bobby" }, tainted: false });
+  assert.equal(await rounds.allThreadsReplied(s.db, r3), true);
 });
 
 test("delivery: an untrusted round always gets a NEW session LOCKED to the Artifacts tools; trusted rounds reuse the origin session; capacity queues", async () => {
