@@ -493,6 +493,71 @@ test("R-L1: an owner comment carrying 40+ characters of a contact's words is cau
   assert.equal((await rounds.previewRound(s.db, a.id)).threads.find((t) => t.id === q.threadId).untrusted, true);
 });
 
+test("R2 race arms: a round closed or timed out between completeRound's read and its write is reported as it really is, and only a real done says 'ready'", async () => {
+  const { roundDoneEffects } = await import("../bundles/artifacts/server/sweep.js");
+  // A db whose next "mark done" UPDATE first runs `hook` on the real db — the
+  // window between completeRound's status read and its guarded write.
+  let hook = null;
+  const racy = {
+    async execute(q) {
+      if (hook && /^UPDATE artifact_rounds SET status='done'/.test(q.sql)) { const h = hook; hook = null; await h(); }
+      return s.db.execute(q);
+    },
+  };
+  const timeOut = (id) => s.db.execute({ sql: "UPDATE artifact_rounds SET status='timed-out' WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [id] });
+  const auditCount = async (artifactId, action) => Number((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_audit WHERE artifact_id=? AND action=?", args: [artifactId, action] })).rows[0].n);
+  const freshRound = async (title) => {
+    const a = await store.createArtifact(s.db, s.blobs, { title, type: "document", source: doc("# A"), actor: BOT }, deps);
+    const t = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "fb", author: { kind: "owner" } });
+    return { a, r: await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t.threadId] }) };
+  };
+
+  // P3: the sweep times the round out inside the window → late, never a fresh done.
+  {
+    const { a, r } = await freshRound("P3");
+    hook = () => timeOut(r.id);
+    const out = await rounds.completeRound(racy, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "x", resultVersion: 1 });
+    assert.equal(out.late, true);
+    assert.equal(out.status, "timed-out");
+    assert.equal(await auditCount(a.id, "round-late-done"), 1);
+    assert.equal(await auditCount(a.id, "round-done"), 0);
+    const notes = [];
+    await roundDoneEffects(s.db, out, { notify: async (n) => { notes.push(n.title); } });
+    assert.deepEqual(notes, []);
+  }
+
+  // P4: a concurrent closer wins inside the window → the loser is idempotent;
+  // one "ready" in total, the winner's summary kept, one round-done audit row.
+  {
+    const { a, r } = await freshRound("P4");
+    const notes = [];
+    const notify = async (n) => { notes.push(n.title); };
+    hook = async () => { await roundDoneEffects(s.db, await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "w", resultVersion: 1 }), { notify }); };
+    const loser = await rounds.completeRound(racy, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "l", resultVersion: 1 });
+    assert.equal(loser.idempotent, true);
+    assert.notEqual(loser.late, true);
+    await roundDoneEffects(s.db, loser, { notify });
+    assert.deepEqual(notes, ["Version 1 is ready"]);
+    assert.equal((await rounds.getRound(s.db, r.id)).summary, "w");
+    assert.equal(await auditCount(a.id, "round-done"), 1);
+  }
+
+  // P5: the production path — an update under the round stamps result_version
+  // before every thread is answered, the round times out, then the instructed
+  // round_done arrives. Late: no "ready" after "timed out".
+  {
+    const { a, r } = await freshRound("P5");
+    await s.db.execute({ sql: "UPDATE artifact_rounds SET result_version=1 WHERE id=?", args: [r.id] });
+    await timeOut(r.id);
+    const out = await rounds.completeRound(s.db, { roundId: r.id, artifactId: a.id, actor: BOT, summary: "done" });
+    assert.equal(out.late, true);
+    assert.equal(Number(out.result_version), 1, "the stamp survives — only the late guard keeps the notice off");
+    const notes = [];
+    await roundDoneEffects(s.db, out, { notify: async (n) => { notes.push(n.title); } });
+    assert.deepEqual(notes, []);
+  }
+});
+
 test("R-M2/R-M3: trusted rounds never reuse a locked session; the sweep stops ended locked sessions, times out rounds, and holds retries during a box reservation", async () => {
   const { runSweep } = await import("../bundles/artifacts/server/sweep.js");
   const { stopRoundSession, grantsServer } = await import("../bundles/artifacts/server/delivery.js");
