@@ -19,16 +19,25 @@ import { tJs } from "../shared/i18n.js";
  *  - Replay: after the transcript settles, cards redraw from the bundle's
  *    by-thread route, one refetch per artifact, oldest first. One node per
  *    artifact (upsert, key-checked) dedupes replay against live frames.
- *  - Actions use the EXISTING owner routes (dashboard auth + CSRF): Open
- *    navigates to the Artifacts page (PR-2 repoints it to the viewer page and
- *    adds beside-chat/new-window), Run scripts is the D20 approve. The card
- *    grants no new authority.
+ *  - Actions use the EXISTING owner routes (dashboard auth + CSRF): Run
+ *    scripts is the D20 approve. The card grants no new authority.
+ *  - Q2 (plan PR-2 Task 2.4): "Open beside chat" shows the viewer page
+ *    (/dashboard/artifacts/view/:id?thread=<this chat>) in a same-origin
+ *    iframe — docked beside the chat at >=1024px, a full-screen sheet with
+ *    Back below that; "Open in new window" is a target=_blank rel=noopener
+ *    link to the same URL. The hub NEVER frames the artifact origin: the
+ *    viewer page (its own CSP + canary) does. The pane is per-open, never
+ *    persisted, and closing it leaves the chat alone.
  */
 export function perchArtifactCardJs(lang = "en") {
   return `
   /* ---- Crow Artifacts chat card (spec v1.6, chat-first PR-1) ------------ */
   var ART_LABEL='${tJs("perch.artifactLabel", lang)}';
-  var ART_OPEN='${tJs("perch.artifactOpen", lang)}';
+  var ART_OPEN_BESIDE='${tJs("perch.artifactOpenBeside", lang)}';
+  var ART_OPEN_WINDOW='${tJs("perch.artifactOpenWindow", lang)}';
+  var ART_PANE_CLOSE='${tJs("perch.artifactPaneClose", lang)}';
+  var ART_PANE_BACK='${tJs("perch.artifactPaneBack", lang)}';
+  var ART_PANE_TITLE='${tJs("perch.artifactPaneTitle", lang)}';
   var ART_RUN='${tJs("perch.artifactRunScripts", lang)}';
   var ART_ST_READY='${tJs("perch.artifactStateReady", lang)}';
   var ART_ST_REVISING='${tJs("perch.artifactStateRevising", lang)}';
@@ -55,7 +64,51 @@ export function perchArtifactCardJs(lang = "en") {
      stop asking for this document. */
   var artNoBundle=false;
 
-  function resetArtifactCards(){ artCards={}; artBuf=[]; artGen++; }
+  function resetArtifactCards(){ artCards={}; artBuf=[]; artGen++; closeArtifactPane(); }
+
+  /* The viewer page's URL (same origin). The thread rides along only when it
+     is a Perch thread id; the viewer validates it again server-side. */
+  function artViewerUrl(id,sid){
+    var u='/dashboard/artifacts/view/'+encodeURIComponent(String(id));
+    if(typeof sid==='string'&&/^perchlive-[0-9a-f]{8}$/.test(sid)) u+='?thread='+encodeURIComponent(sid);
+    return u;
+  }
+  /* Split pane at >=1024px, full-screen sheet below (the breakpoint the
+     viewer page's own layout uses). Pure, so tests pin it. */
+  function artPaneMode(w){ return Number(w)>=1024?'split':'sheet'; }
+
+  var artPane=null;
+  function closeArtifactPane(){
+    if(!artPane) return;
+    if(artPane.parentNode) artPane.parentNode.removeChild(artPane);
+    artPane=null;
+    document.body.classList.remove('perch-art-split');
+    document.body.classList.remove('perch-art-sheet');
+  }
+  function openArtifactPane(id,sid){
+    closeArtifactPane();
+    var mode=artPaneMode(window.innerWidth);
+    var p=document.createElement('div'); p.id='perch-art-pane'; p.className='art-pane art-pane-'+mode;
+    p.setAttribute('role','dialog'); p.setAttribute('aria-label',ART_PANE_TITLE);
+    var bar=document.createElement('div'); bar.className='art-pane-bar';
+    var back=document.createElement('button'); back.type='button'; back.className='art-pane-close';
+    back.textContent=mode==='split'?ART_PANE_CLOSE:ART_PANE_BACK;
+    back.onclick=closeArtifactPane;
+    bar.appendChild(back);
+    var win=document.createElement('a'); win.className='art-pane-window';
+    win.href=artViewerUrl(id,sid); win.target='_blank'; win.rel='noopener'; win.textContent=ART_OPEN_WINDOW;
+    bar.appendChild(win);
+    p.appendChild(bar);
+    var f=document.createElement('iframe'); f.className='art-pane-frame';
+    f.title=ART_PANE_TITLE; f.src=artViewerUrl(id,sid);
+    f.setAttribute('referrerpolicy','same-origin');
+    p.appendChild(f);
+    (document.getElementById('perch-hub-root')||document.body).appendChild(p);
+    document.body.classList.add(mode==='split'?'perch-art-split':'perch-art-sheet');
+    artPane=p;
+    back.focus();
+  }
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&artPane) closeArtifactPane(); });
 
   function artApi(method,path,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};
@@ -189,9 +242,13 @@ export function perchArtifactCardJs(lang = "en") {
     }
     var acts=document.createElement('div'); acts.className='art-actions';
     var open=document.createElement('button'); open.type='button'; open.className='art-open';
-    open.textContent=ART_OPEN;
-    open.onclick=function(){ location.href='/dashboard/artifacts?id='+encodeURIComponent(a.id); };
+    open.textContent=ART_OPEN_BESIDE;
+    open.onclick=function(){ openArtifactPane(a.id,sid); };
     acts.appendChild(open);
+    var win=document.createElement('a'); win.className='art-window';
+    win.href=artViewerUrl(a.id,sid); win.target='_blank'; win.rel='noopener';
+    win.textContent=ART_OPEN_WINDOW;
+    acts.appendChild(win);
     if(st.showRun){
       var run=document.createElement('button'); run.type='button'; run.className='art-run';
       run.textContent=ART_RUN;
