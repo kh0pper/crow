@@ -328,3 +328,25 @@ test("viewer: while a round is active the page polls; when it ends with a new ve
     assert.ok(await yes(t, "document.querySelector('.cv-version').value === '2' && !!document.querySelector('iframe.crow-artifact-frame')"), "switched to v2");
   } finally { await t.close(); }
 });
+
+test("viewer pins + numbering are scoped to the mounted version; a resolved thread gets no pin (review M1)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const comments = await import("../bundles/artifacts/server/comments.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Versioned", type: "page", source: { html: BUY }, actor: { kind: "bot", id: "bobby" } }, {});
+  await comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "element", selector: "#buy", text: "Buy now" }, text: "v1 note", author: { kind: "owner" } });
+  const done = await comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "element", selector: "#buy", text: "Buy now" }, text: "already fixed", author: { kind: "owner" } });
+  await comments.setThreadStatus(s.db, { threadId: done.threadId, status: "resolved", artifactId: art.id });
+  await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { html: BUY.replace("Buy now", "Buy v2") }, actor: { kind: "bot", id: "bobby" } }, {});
+  const t = await tab();
+  try {
+    await nav(t, `/dashboard/artifacts/view/${art.id}`);
+    assert.ok(await yes(t, "!!document.querySelector('iframe.crow-artifact-frame') && document.querySelector('.cv-version').value === '2'", 15000));
+    await sleep(1500);
+    assert.equal(await t.evalIn("document.querySelectorAll('.cv-pin').length"), 0, "v1's anchors are never pinned on v2");
+    assert.equal(await t.evalIn("document.querySelectorAll('.cv-thread').length"), 0, "v2 lists only v2's threads");
+    await t.evalIn("(() => { const s = document.querySelector('.cv-version'); s.value = '1'; s.dispatchEvent(new Event('change')); })()");
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-thread').length === 2", 15000), "v1 lists its two threads");
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 1", 15000), "one pin: the resolved thread has none");
+    assert.equal(await t.evalIn("document.querySelector('.cv-pin').textContent"), "1");
+  } finally { await t.close(); }
+});

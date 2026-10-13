@@ -123,14 +123,19 @@
     });
     if (S.versions.length < 2) versionSel.setAttribute("hidden", ""); else versionSel.removeAttribute("hidden");
   }
-  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); renderSections(); mountFrame(); });
+  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); renderThreads(); renderSections(); mountFrame(); });
 
   /** The threads the owner would send by default: open, owner-authored. */
   function sendable() { return S.threads.filter(function (t) { return t.author_kind === "owner" && t.status !== "resolved"; }); }
 
+  /** The threads anchored on the MOUNTED version (carry-forward moves open
+   *  threads onto each new version), numbered in that list's order — so a
+   *  pin number always means a thread on the version you are looking at. */
+  function shown() { return S.threads.filter(function (t) { return Number(t.version_n) === Number(S.n); }); }
+
   function renderThreads() {
     threadList.textContent = "";
-    S.threads.forEach(function (t, k) {
+    shown().forEach(function (t, k) {
       var num = k + 1;
       var st = t.status === "resolved" ? " · " + T.resolved : t.status === "anchor-moved" ? " · " + T.moved : "";
       var li = el("li", { class: "cv-thread cv-" + t.status, id: "cv-t" + num, tabindex: "-1" }, [
@@ -141,8 +146,8 @@
       });
       threadList.appendChild(li);
     });
-    if (!S.threads.length) threadList.appendChild(el("li", { class: "cv-empty", text: T.no_comments }));
-    var n = S.threads.length;
+    if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: T.no_comments }));
+    var n = shown().length;
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
     sendBtn.textContent = k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
@@ -175,11 +180,11 @@
     if (S.art.type === "diagram") {
       // Script-free region anchors: the trusted side places these itself.
       var w = frameBox.clientWidth, h = frameBox.clientHeight;
-      drawPins(S.threads.map(function (t, k) { return t.anchor && t.anchor.kind === "region" ? { i: k + 1, x: t.anchor.x * w, y: t.anchor.y * h } : null; }).filter(Boolean));
+      drawPins(shown().map(function (t, k) { return t.status !== "resolved" && t.anchor && t.anchor.kind === "region" ? { i: k + 1, x: t.anchor.x * w, y: t.anchor.y * h } : null; }).filter(Boolean));
     } else if (S.viewer) {
       // Scripted types: the OWNER's element/text anchors only (viewer.js
       // re-validates); the helper reports where they are.
-      S.viewer.setPins(S.threads.map(function (t, k) { return t.author_kind === "owner" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean));
+      S.viewer.setPins(shown().map(function (t, k) { return t.author_kind === "owner" && t.status !== "resolved" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean));
     }
   }
   window.addEventListener("resize", function () { if (S.art && S.art.type === "diagram") pushPins(); });
@@ -193,7 +198,7 @@
     var v = version(S.n);
     if (!v || !v.anchor_map || v.anchor_map.kind !== "blocks") return;
     var byBlock = {};
-    S.threads.forEach(function (t, k) { if (t.anchor && t.anchor.kind === "block") (byBlock[t.anchor.id] = byBlock[t.anchor.id] || []).push(k + 1); });
+    shown().forEach(function (t, k) { if (t.anchor && t.anchor.kind === "block") (byBlock[t.anchor.id] = byBlock[t.anchor.id] || []).push(k + 1); });
     v.anchor_map.blocks.forEach(function (b) {
       var nums = byBlock[b.id] ? " (" + byBlock[b.id].join(", ") + ")" : "";
       sectionList.appendChild(el("li", {}, [button((b.text.slice(0, 80) || b.id) + nums, function () {
@@ -310,7 +315,7 @@
       banner(fmt(T.proposed_note, { n: p.n }) + (p.change_note ? " — " + p.change_note : ""), "info",
         [button(T.accept, decide(true)), button(T.drop, decide(false))]).classList.add("cv-proposed");
     });
-    if (S.commentOn) return;
+    if (S.commentOn) { if (S.activeRound) S.lastRound = S.activeRound; poll(); return; }
     if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
     else status.textContent = "";
     // A round just finished with a new current version: say so, offer it.
@@ -319,7 +324,7 @@
       var cur = Number(S.art.current_version);
       if (cur !== Number(S.n)) {
         clearBanners("cv-ready");
-        banner(fmt(T.ready, { n: cur }), "ok", [button(fmt(T.show_v, { n: cur }), function () { clearBanners("cv-ready"); S.n = cur; renderVersions(); renderSections(); mountFrame(); })]).classList.add("cv-ready");
+        banner(fmt(T.ready, { n: cur }), "ok", [button(fmt(T.show_v, { n: cur }), function () { clearBanners("cv-ready"); S.n = cur; renderVersions(); renderThreads(); renderSections(); mountFrame(); })]).classList.add("cv-ready");
       }
     }
     if (S.activeRound) S.lastRound = S.activeRound;

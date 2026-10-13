@@ -464,3 +464,10 @@ test("Q2 hub CSP: the hub sets no policy of its own; the gateway-wide one keeps 
   const gw = readFileSync(new URL("../servers/gateway/index.js", import.meta.url), "utf8");
   assert.match(gw, /"frame-src 'self' https:"/, "the gateway-wide frame-src still allows same-origin frames");
 });
+
+test("review M2: retiring the hub (a Turbo visit away) closes an open viewer pane, so its keydown listener never outlives the instance", async () => {
+  const { readFileSync } = await import("node:fs");
+  const client = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/client.js", import.meta.url), "utf8");
+  const retire = client.slice(client.indexOf("HUB.retire=function(){"), client.indexOf("};", client.indexOf("HUB.retire=function(){")));
+  assert.match(retire, /closeArtifactPane\(\);/);
+});

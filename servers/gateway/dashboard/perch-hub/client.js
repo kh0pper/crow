@@ -66,6 +66,9 @@ export function perchHubJs(lang = "en") {
   HUB.retire=function(){
     retired=true;
     stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream();
+    /* The artifact viewer pane holds a document keydown listener while open
+       (artifact-card.js): leaving the hub with it open must not strand it. */
+    closeArtifactPane();
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
