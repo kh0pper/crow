@@ -29,10 +29,27 @@
  *  - from a scripted frame: a wrong nonce, an oversized crow-artifact message
  *    or a flood trips the wire (they are never just dropped); proposals before
  *    the hello are ignored.
+ *
+ * D24 (spec v1.6) — "couldn't load — retry" instead of a flag, decided on
+ * SERVER evidence only (opts.loadEvidence → the owner's load-evidence route):
+ * when a scripted frame says no hello in time, the frame is torn down FIRST
+ * (synchronously, exactly like a trip), then the viewer asks whether the
+ * origin served this token's document and its parser-blocking helper. While
+ * the answer is pending the mount refuses load/reload/showBlock; the answer
+ * is bound to the load generation. "flag" trips as before; "retry", an
+ * unknown token, an error or an unreachable route → opts.onRetry (no flag, no
+ * report). Content cannot steer this: browsers fire `load` for a failed
+ * navigation too, so nothing the frame does or withholds is evidence here.
+ * A scripted frame that fires no `load` at all within LOAD_MS (a connection
+ * that died mid-response can hang the frame forever) takes the same path —
+ * with D24 only; the helper's hello normally arrives long before `load`.
+ * Without opts.loadEvidence, a missing hello trips as before D24.
+ * Every load after the first passes the previous grant's tokenId as
+ * `replaces`, so the server revokes the token the gone frame held.
  */
 (function () {
   "use strict";
-  var MAX_MSG = 8192, MAX_ANCHOR = 4096, RATE_N = 20, RATE_MS = 1000, HELLO_MS = 6000;
+  var MAX_MSG = 8192, MAX_ANCHOR = 4096, RATE_N = 20, RATE_MS = 1000, HELLO_MS = 6000, LOAD_MS = 20000;
   var URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/v\/[A-Za-z0-9_-]{43}\/$/;
 
   function validAnchor(a) {
@@ -88,11 +105,31 @@
    * grant: { url, nonce, sandbox, scripted, type }
    */
   function mount(opts) {
-    var state = { iframe: null, loads: 0, hello: false, tripped: false, grant: null, helloTimer: null, stamps: [], commentMode: false, gen: 0 };
+    var state = { iframe: null, loads: 0, hello: false, tripped: false, pending: false, grant: null, helloTimer: null, stamps: [], commentMode: false, gen: 0 };
+    var helloMs = typeof opts.helloMs === "number" && opts.helloMs > 0 ? opts.helloMs : HELLO_MS;
+    var loadMs = typeof opts.loadMs === "number" && opts.loadMs > 0 ? opts.loadMs : LOAD_MS;
+
+    /** D24: no hello in time. Tear down first, then ask the server. */
+    function noHello(g, gen) {
+      if (!opts.loadEvidence) { trip("no-hello"); return; }
+      state.pending = true;
+      clearTimeout(state.helloTimer);
+      if (state.iframe) { state.iframe.remove(); state.iframe = null; }
+      var settle = function (r) {
+        if (gen !== state.gen || state.tripped || !state.pending) return;      // stale, destroyed or tripped meanwhile
+        state.pending = false;
+        if (r && r.decision === "flag") { trip("no-hello"); return; }
+        try { opts.onRetry && opts.onRetry((r && r.reason) || "unreachable"); } catch (x) {}
+      };
+      var p;
+      try { p = Promise.resolve(opts.loadEvidence(g.tokenId || "")); } catch (x) { p = Promise.reject(x); }
+      p.then(settle, function () { settle(null); });
+    }
 
     function trip(reason) {
       if (state.tripped) return;
       state.tripped = true;
+      state.pending = false;
       clearTimeout(state.helloTimer);
       if (state.iframe) { state.iframe.remove(); state.iframe = null; }
       try { opts.onTrip && opts.onTrip(reason); } catch (e) {}
@@ -131,10 +168,12 @@
 
     function load(fragment) {
       if (state.tripped) return Promise.reject(new Error("tripped"));
+      if (state.pending) return Promise.reject(new Error("pending"));
       var gen = ++state.gen;
+      var replaces = state.grant && typeof state.grant.tokenId === "string" ? state.grant.tokenId : null;
       return proveCsp(opts.cspProofMs).then(function (inForce) {
         if (!inForce) { try { opts.onRefuse && opts.onRefuse("csp-not-in-force"); } catch (x) {} throw new Error("csp-not-in-force"); }
-        return opts.mint(fragment || null);
+        return opts.mint(fragment || null, { replaces: replaces });
       }).then(function (g) {
         if (state.tripped || gen !== state.gen) throw new Error("stale");
         if (!validGrant(g)) { trip("bad-grant"); throw new Error("bad-grant"); }
@@ -151,8 +190,9 @@
           if (f !== state.iframe || state.tripped) return;                     // a replaced frame's late event
           state.loads++;
           if (state.loads > 1) { trip("second-load"); return; }
+          clearTimeout(state.helloTimer);                                      // the load timeout, if armed
           if (g.scripted) {
-            state.helloTimer = setTimeout(function () { if (!state.hello) trip("no-hello"); }, HELLO_MS);
+            state.helloTimer = setTimeout(function () { if (!state.hello && f === state.iframe && !state.tripped) noHello(g, gen); }, helloMs);
           } else {
             try { opts.onReady && opts.onReady(); } catch (x) {}
           }
@@ -160,6 +200,9 @@
         f.src = g.url + (fragment && /^b\d{1,6}$/.test(fragment) ? "#" + fragment : "");
         state.iframe = f;
         opts.container.appendChild(f);
+        if (g.scripted && opts.loadEvidence) {
+          state.helloTimer = setTimeout(function () { if (!state.hello && state.loads === 0 && f === state.iframe && !state.tripped) noHello(g, gen); }, loadMs);
+        }
         return g;
       });
     }
@@ -171,10 +214,11 @@
       setCommentMode: function (on) { state.commentMode = !!on; postMode(); },
       /** Script-free types: show a block by mounting a fresh frame at its fragment. */
       showBlock: function (id) {
+        if (state.pending) return Promise.reject(new Error("pending"));
         if (!state.grant || state.grant.scripted || !/^b\d{1,6}$/.test(id)) return Promise.resolve(null);
         return load(id);
       },
-      state: function () { return { loads: state.loads, hello: state.hello, tripped: state.tripped, framed: !!state.iframe }; },
+      state: function () { return { loads: state.loads, hello: state.hello, tripped: state.tripped, pending: state.pending, framed: !!state.iframe }; },
       destroy: function () { window.removeEventListener("message", onMessage); clearTimeout(state.helloTimer); if (state.iframe) state.iframe.remove(); state.iframe = null; state.tripped = true; },
     };
   }

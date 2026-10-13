@@ -20,13 +20,14 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import { createArtifactOriginHandler } from "../servers/gateway/artifact-origin/server.js";
-import { createViewTokenStore } from "../servers/gateway/artifact-origin/view-tokens.js";
+import { createViewTokenStore, loadDecision } from "../servers/gateway/artifact-origin/view-tokens.js";
 import { iframeSandboxFor, isScriptedType, effectiveType, viewerCsp } from "../servers/gateway/artifact-origin/policy.js";
 import net from "node:net";
 
 const VIEWER_JS = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
 
-let chrome, server, server2, P, P2, P3, tokens, originMain, originFallback, connServer;
+let chrome, server, server2, server4, P, P2, P3, P4, P5, tokens, originMain, originFallback, connServer;
+const evidenceAsks = [];   // D24: tokenIds the viewer asked about
 let evil2Connections = 0;
 const CTL_DOCS = [];   // raw TCP connections to evil2.test (preconnect / dns-prefetch probes)
 const evil = [];          // { path, origin }
@@ -115,6 +116,14 @@ before(async () => {
         res.writeHead(200, { "set-cookie": ["crow_session=SECRET; HttpOnly; SameSite=Lax; Path=/", "crow_csrf=CSRFVALUE; SameSite=Lax; Path=/"], "content-type": "text/plain" });
         return res.end("ok");
       }
+      // D24: the owner's load-evidence route, reduced to its decision.
+      if (req.url.startsWith("/evidence?")) {
+        const id = new URL(req.url, "http://x").searchParams.get("tokenId") || "";
+        evidenceAsks.push(id);
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify(loadDecision(tokens.evidence(id))));
+      }
+      if (req.url.startsWith("/evidence500")) { res.writeHead(500); return res.end("x"); }
       if (req.url === "/viewer.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(VIEWER_JS); }
       if (req.url.startsWith("/harness")) {
         // The REAL viewer-page CSP (viewerCsp) unless a test asks for the
@@ -134,7 +143,13 @@ before(async () => {
 <script src="/viewer.js"></script><script>
 window.__r = { trips: [], proposals: [], ready: 0, raw: [], refused: [], minted: 0 };
 addEventListener("message", (e) => window.__r.raw.push(e.data));
-window.__mountWith = (g) => { window.__v = CrowArtifactViewer.mount({ container: c, mint: () => { __r.minted++; return g; },
+window.__r.retries = []; window.__r.mintArgs = [];
+// D24 test seam: swallow the helper's hello before the viewer sees it — the
+// helper WAS served, so the server's record says "parsed".
+addEventListener("message", (e) => { if (window.__dropHello && e.data && e.data.kind === "hello") e.stopImmediatePropagation(); }, true);
+window.__mountWith = (g, o) => { o = o || {}; window.__v = CrowArtifactViewer.mount({ container: c, mint: (f, x) => { __r.minted++; __r.mintArgs.push(x || null); return g; },
+  helloMs: o.helloMs, loadMs: o.loadMs, loadEvidence: o.evidence === "none" ? undefined : (id) => fetch((o.evidence === "500" ? "/evidence500?" : "/evidence?") + "tokenId=" + encodeURIComponent(id)).then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); }),
+  onRetry: (x) => __r.retries.push(x),
   onProposal: (a) => __r.proposals.push(a), onTrip: (x) => __r.trips.push(x), onReady: () => __r.ready++, onRefuse: (x) => __r.refused.push(x) }); return __v.load().then(() => true, (e) => e.message); };
 </script></body>`);
       }
@@ -152,6 +167,17 @@ window.__mountWith = (g) => { window.__v = CrowArtifactViewer.mount({ container:
   await new Promise((r) => server2.listen(0, "127.0.0.1", r));
   P2 = server2.address().port;
   originFallback = createArtifactOriginHandler({ tokens, resolveContent, publicBase: null, fallbackBase: `http://dash.test:${P2}` });
+  // D24: an origin whose connection dies right after the doctype — the
+  // document was served (and the helper injected), but the bytes carrying
+  // the helper tag never reach the parser.
+  server4 = http.createServer((req, res) => originMain(req, {
+    writeHead: (st, h) => res.writeHead(st, { ...h, "content-length": "100000" }),
+    end: (buf) => { if (buf) res.write(Buffer.from(buf).subarray(0, 15)); setTimeout(() => res.socket?.destroy(), 30); },
+  }));
+  await new Promise((r) => server4.listen(0, "127.0.0.1", r));
+  P4 = server4.address().port;
+  // D24: a port with nothing listening (connection refused).
+  { const tmp = net.createServer(); await new Promise((r) => tmp.listen(0, "127.0.0.1", r)); P5 = tmp.address().port; await new Promise((r) => tmp.close(r)); }
   connServer = net.createServer((sock) => { evil2Connections++; sock.destroy(); });
   await new Promise((r) => connServer.listen(0, "127.0.0.1", r));
   P3 = connServer.address().port;
@@ -163,7 +189,7 @@ window.__mountWith = (g) => { window.__v = CrowArtifactViewer.mount({ container:
   ] });
 });
 
-after(async () => { server?.closeAllConnections?.(); server?.close(); server2?.close(); connServer?.close(); if (chrome) await chrome.close(); });
+after(async () => { server?.closeAllConnections?.(); server?.close(); server2?.close(); server4?.closeAllConnections?.(); server4?.close(); connServer?.close(); if (chrome) await chrome.close(); });
 
 async function tab() {
   const t = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
@@ -193,15 +219,16 @@ let seq = 0;
 function grantFor(type, files, { originBase = `http://art.test:${P}`, dashboardOrigin = `http://dash.test:${P}`, scriptsOff = false } = {}) {
   const artifactId = "art-" + (++seq);
   CONTENT.set(artifactId, files);
-  const { token, nonce } = tokens.mint({ artifactId, versionN: 1, type, dashboardOrigin, scriptsOff });
+  const { token, tokenId, nonce } = tokens.mint({ artifactId, versionN: 1, type, dashboardOrigin, scriptsOff });
   const eff = effectiveType(type, scriptsOff);
-  return { url: `${originBase}/v/${token}/`, token, nonce, sandbox: iframeSandboxFor(eff), scripted: isScriptedType(eff), type };
+  return { url: `${originBase}/v/${token}/`, token, tokenId, nonce, sandbox: iframeSandboxFor(eff), scripted: isScriptedType(eff), type };
 }
 
-async function harness(t, g, { mode = "narrow" } = {}) {
+async function harness(t, g, { mode = "narrow", mount = null, before = "" } = {}) {
   await t.nav(`http://dash.test:${P}/login`);
   await t.nav(`http://dash.test:${P}/harness?mode=${mode}&fs=${encodeURIComponent(new URL(g.url).origin)}`);
-  await t.evalIn(`__mountWith(${JSON.stringify(g)})`);
+  if (before) await t.evalIn(before);
+  await t.evalIn(`__mountWith(${JSON.stringify(g)}, ${JSON.stringify(mount || { evidence: "none" })})`);
 }
 
 
@@ -647,5 +674,104 @@ test("R3-L8: a scripts-off version loaded TOP-LEVEL (no frame, no iframe sandbox
       assert.equal(ran, false, `${label}: no script ran at top level`);
       assert.deepEqual(evil.slice(before).map((e) => e.path), [], `${label}: nothing reached evil.test`);
     }
+  } finally { await t.close(); }
+});
+
+// ── D24 (spec v1.6): "couldn't load — retry" vs the no-hello flag ──────────
+const PAGE = () => ({ "index.html": html("<!doctype html><html><body><p>ok</p></body></html>") });
+const D24 = { evidence: "server", helloMs: 900, loadMs: 1500 };
+
+test("D24: a parsed page whose hello never arrives is FLAGGED — the helper was served, so content cannot buy a retry", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE());
+    await harness(t, g, { mount: D24, before: "window.__dropHello = true" });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.trips")).length), "tripped");
+    assert.deepEqual(await t.evalIn("__r.trips"), ["no-hello"]);
+    assert.deepEqual(await t.evalIn("__r.retries"), []);
+    assert.equal(evidenceAsks.at(-1), g.tokenId, "asked by tokenId, never the secret");
+    assert.equal(tokens.evidence(g.tokenId).helperServed, true);
+    assert.equal(await t.evalIn("document.querySelectorAll('iframe').length"), 0);
+  } finally { await t.close(); }
+});
+
+test("D24: a non-HTML scripted document (no helper to say hello) is still FLAGGED", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", { "index.html": { body: "<p>plain</p>", contentType: "text/plain" } });
+    await harness(t, g, { mount: D24 });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.trips")).length));
+    assert.deepEqual(await t.evalIn("__r.trips"), ["no-hello"]);
+  } finally { await t.close(); }
+});
+
+test("D24: connection refused before the document → retry, no flag; the frame is torn down", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE(), { originBase: `http://art.test:${P5}` });
+    await harness(t, g, { mount: D24 });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.retries")).length), "retry offered");
+    assert.deepEqual(await t.evalIn("__r.retries"), ["not-served"]);
+    assert.deepEqual(await t.evalIn("__r.trips"), []);
+    assert.deepEqual(await t.evalIn("__v.state()"), { loads: 1, hello: false, tripped: false, pending: false, framed: false });
+  } finally { await t.close(); }
+});
+
+test("D24: document served but cut off after the doctype (helper never requested; the frame never fires load) → retry", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE(), { originBase: `http://art.test:${P4}` });
+    await harness(t, g, { mount: D24 });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.retries")).length), "retry offered");
+    assert.deepEqual(await t.evalIn("__r.retries"), ["not-parsed"]);
+    assert.deepEqual(await t.evalIn("__r.trips"), []);
+    assert.equal(await t.evalIn("__v.state().loads"), 0, "the load timeout, not a load event, ended it");
+    const ev = tokens.evidence(g.tokenId);
+    assert.equal(ev.docServed && ev.helperInjected && !ev.helperServed, true);
+  } finally { await t.close(); }
+});
+
+test("D24: the gateway no longer knows the token (restart/revoke) → retry; the route failing → retry", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE(), { originBase: `http://art.test:${P5}` });
+    tokens.revokeToken(g.tokenId);
+    await harness(t, g, { mount: D24 });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.retries")).length));
+    assert.deepEqual(await t.evalIn("__r.retries"), ["unknown"]);
+    const g2 = grantFor("page", PAGE(), { originBase: `http://art.test:${P5}` });
+    await harness(t, g2, { mount: { ...D24, evidence: "500" } });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.retries")).length));
+    assert.deepEqual(await t.evalIn("__r.retries"), ["unreachable"]);
+    assert.deepEqual(await t.evalIn("__r.trips"), []);
+  } finally { await t.close(); }
+});
+
+test("D24: while the answer is pending, load/reload/showBlock refuse; a retry passes the old tokenId as `replaces`", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE(), { originBase: `http://art.test:${P5}` });
+    // A slow evidence route: the answer is held until the page releases it.
+    await harness(t, g, { mount: D24, before: `window.__hold = new Promise((r) => { window.__release = r; }); const of = window.fetch; window.fetch = (u, o) => String(u).startsWith("/evidence") ? window.__hold.then(() => of(u, o)) : of(u, o);` });
+    assert.ok(await waitFor(async () => (await t.evalIn("__v.state().pending"))), "pending after the timeout");
+    assert.equal(await t.evalIn("document.querySelectorAll('iframe').length"), 0, "torn down before the answer");
+    assert.equal(await t.evalIn("__v.reload().then(() => 'ok', (e) => e.message)"), "pending");
+    assert.equal(await t.evalIn("__v.load().then(() => 'ok', (e) => e.message)"), "pending");
+    assert.equal(await t.evalIn("__v.showBlock('b1').then(() => 'ok', (e) => e.message)"), "pending");
+    await t.evalIn("__release()");
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.retries")).length));
+    assert.equal(await t.evalIn("__v.state().pending"), false);
+    await t.evalIn("__v.reload()");
+    assert.deepEqual(await t.evalIn("__r.mintArgs"), [{ replaces: null }, { replaces: g.tokenId }]);
+  } finally { await t.close(); }
+});
+
+test("D24: a mount without loadEvidence keeps the pre-D24 behaviour (no hello → flag)", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("page", PAGE(), { originBase: `http://art.test:${P5}` });
+    await harness(t, g, { mount: { evidence: "none", helloMs: 900 } });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.trips")).length));
+    assert.deepEqual(await t.evalIn("__r.trips"), ["no-hello"]);
   } finally { await t.close(); }
 });
