@@ -228,3 +228,31 @@ test("D24: a retry's view call revokes the token it replaces (same artifact only
   await req("POST", `/api/artifacts/${art.id}/versions/1/view`, { body: { replaces: o.body.tokenId } });
   assert.ok(runtime.viewTokens().check(o.body.url.split("/v/")[1].slice(0, 43)), "another artifact's token survives");
 });
+
+function getPage(path, { cookie = "crow_session=good; crow_csrf=tok" } = {}) {
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host: "127.0.0.1", port: s.port, path, method: "GET", headers: cookie ? { cookie } : {} }, (res) => {
+      let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+    });
+    r.on("error", reject); r.end();
+  });
+}
+
+test("viewer page route: owner session only, the exact core viewerCsp, no-store, a bad id 404s, the query is validated", async () => {
+  assert.equal((await getPage(`/dashboard/artifacts/view/${s.art.id}`, { cookie: null })).status, 401);
+  const ok = await getPage(`/dashboard/artifacts/view/${s.art.id}?v=1&thread=perchlive-0123abcd`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers["content-security-policy"], policy.viewerCsp("https://artifacts.example.ts.net"));
+  assert.equal(ok.headers["cache-control"], "no-store");
+  assert.match(ok.body, /data-artifact="[^"]+" data-version="1" data-thread="perchlive-0123abcd"/);
+  assert.match(ok.body, /<html lang="en">/);
+  const junk = await getPage(`/dashboard/artifacts/view/${s.art.id}?v=x&thread=%22%3E%3Cscript%3E`);
+  assert.match(junk.body, /data-version="" data-thread=""/, "junk query values are dropped");
+  assert.doesNotMatch(junk.body, /<script>/);
+  assert.equal((await getPage("/dashboard/artifacts/view/not-an-id")).status, 404);
+  assert.equal((await getPage(`/dashboard/artifacts/view/art_${"x".repeat(41)}`)).status, 404);
+  const es = await getPage(`/dashboard/artifacts/view/${s.art.id}`, { cookie: "crow_session=good; crow_csrf=tok; crow_lang=es" });
+  assert.match(es.body, /<html lang="es">/);
+  assert.equal((await getPage("/artifacts/static/viewer-client.js")).status, 200);
+  assert.equal((await getPage("/artifacts/static/viewer.css")).headers["content-type"], "text/css; charset=utf-8");
+});

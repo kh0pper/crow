@@ -453,3 +453,11 @@ test("T1: buffered live frames are dropped when the reset lands between the batc
 });
 
 const sid0 = (hub) => hub.sandbox.current.sid;
+
+test("Q2 hub CSP: the hub sets no policy of its own; the gateway-wide one keeps frame-src 'self', which is what the viewer pane needs", async () => {
+  const { readFileSync } = await import("node:fs");
+  const hubPanel = readFileSync(new URL("../servers/gateway/dashboard/panels/perch-hub.js", import.meta.url), "utf8");
+  assert.doesNotMatch(hubPanel, /content-security-policy/i, "no hub-specific CSP (a Turbo visit would carry it into other panels)");
+  const gw = readFileSync(new URL("../servers/gateway/index.js", import.meta.url), "utf8");
+  assert.match(gw, /"frame-src 'self' https:"/, "the gateway-wide frame-src still allows same-origin frames");
+});

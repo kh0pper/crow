@@ -32,7 +32,7 @@ The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-p
 
 - Scripted 200 responses also carry `Access-Control-Allow-Origin: *` (never with credentials), because module scripts loaded from an opaque origin are CORS requests.
 - **Scripts off.** A version shaped by text from outside your Crow is served script-free until you approve it: the token carries `scriptsOff`, the script-free row is used, and the bytes are served unchanged. Safety comes from the CSP header, never from rewriting markup; the origin does not parse bot markup at all.
-- **The anchor helper.** For scripted HTML, a small helper script (`anchor-helper.js`) is placed at a fixed spot: after an optional byte-order mark, leading whitespace and a `<!doctype …>`, otherwise at byte 0. Placement grants nothing. If bot markup stops the helper from running, the viewer gets no hello and closes the frame.
+- **The anchor helper.** For scripted HTML, a small helper script (`anchor-helper.js`) is placed at a fixed spot: after an optional byte-order mark, leading whitespace and a `<!doctype …>`, otherwise at byte 0. Placement grants nothing. If the helper does not say hello, the viewer closes the frame and asks the server what happened (see "Couldn't load — retry" below).
 
 ### View tokens
 
@@ -40,6 +40,8 @@ The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-p
 
 - A token grants one artifact version, read-only. It lasts 30 minutes, and the viewer mints a fresh one for every frame load.
 - Only a SHA-256 of each token is held.
+- `mint()` also returns a `tokenId`: the SHA-256 the store is keyed on. It is not a credential (it cannot be turned back into the token, and the origin never accepts it), so the viewer can use it to ask about a load. `revokeToken(tokenId)` drops one token; `revokeArtifact` drops all of an artifact's.
+- **Load evidence (D24).** For each token, the origin records whether it served the token's document (`docServed`), injected the anchor helper into it (`helperInjected`) and served the helper (`helperServed`). Each mark is made only for a GET that answers 2xx, and before the response is written. HEAD requests, errors and other paths mark nothing, and content cannot unmark anything.
 - Each token carries a per-load nonce (the tripwire handshake) and the dashboard origin that minted it. That origin becomes the response's `frame-ancestors`, so no per-instance configuration is needed. `mint()` accepts only a bare `scheme://host[:port]` origin (or null) and throws `bad_grant` on anything else: the value is interpolated into the CSP **before** the `sandbox` directive, and CSP keeps the first of duplicate directives, so a smuggled `; sandbox …` suffix must be impossible to store.
 - A gateway restart drops every token. Open frames keep their loaded document, and lazy loads fail until the view is reloaded.
 
@@ -96,11 +98,30 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 
 `bundles/artifacts/panel/static/viewer.js` runs on the dashboard origin and frames artifact content (`window.CrowArtifactViewer.mount(...)`).
 
+**The viewer page.** `/dashboard/artifacts/view/:id[?v=n&thread=t]` is the only page that frames the artifact origin. It is a standalone document (no dashboard navigation) with the core `viewerCsp` header, which also sends `frame-ancestors 'self'`. It shows:
+- the artifact, with a version switcher and the "Run scripts" button for tainted versions;
+- numbered pins for comments;
+- a threads column on wide screens, or a bottom sheet on phones and in narrow panes;
+- one primary action, "Send N comments to chat".
+
+The Perch hub's artifact card opens this page beside the chat (a same-origin iframe docked at the right from 1024 px, a full-screen sheet below that) or in a new window (`target=_blank`, `rel=noopener`). The hub itself never frames the artifact origin. The Artifacts page in the dashboard (the Library) lists artifacts and frames nothing (`frame-src 'none'`); its old `?id=` links redirect to the viewer page.
+
 - **Viewer page CSP.** `viewerCsp(origin)` in `policy.js` narrows the viewer page's `frame-src` to `<artifact origin>/v/`, with no `'self'` and no scheme source. A value that is not a bare `scheme://host[:port]` gives `frame-src 'none'`. Chromium checks the parent's `frame-src` on every navigation of a child frame, including ones the child starts itself, before the request is sent. So a link click or a script navigation inside an artifact cannot reach another site.
 - **CSP canary, fail closed.** Before minting a token, the viewer frames `https://csp-canary.invalid/` in a hidden frame. That must raise a `securitypolicyviolation`. If it does not, the narrowed CSP is not in force (for example, the page arrived by a Turbo body swap and kept another page's policy), and nothing is minted or shown.
 - **Grant validation.** The sandbox must be exactly `""` or `allow-scripts` and agree with the type. The URL must be `http(s)://host[:port]/v/<token>/` and never the dashboard's own origin. Scripted grants need a nonce of at least 16 characters.
-- **Navigation tripwire.** A second `load`, a missing hello, a wrong nonce, a message from a non-opaque origin, an oversized message, a flood, a malformed message or a script-free frame that speaks all close the frame and report the trip. A trip is terminal for that mount: `load()` and `reload()` refuse afterwards.
-- **Messages are proposals.** Every message from the frame is validated for source, origin, shape, size, rate and nonce. Comment anchors are acted on only through the trusted rail. The viewer posts only `{kind: "comment-mode"}` into the frame.
+- **Navigation tripwire.** A second `load`, a wrong nonce, a message from a non-opaque origin, an oversized message, a flood, a malformed message or a script-free frame that speaks all close the frame and report the trip. A trip is terminal for that mount: `load()` and `reload()` refuse afterwards. A missing hello is decided by the server's evidence (next item).
+- **Couldn't load — retry (D24).** When a scripted frame says no hello in time (or fires no `load` at all within 20 seconds), the viewer removes the frame first. Then it asks the owner-only route `GET /api/artifacts/:id/versions/:n/load-evidence?tokenId=…`:
+
+  | What the origin recorded for that token | Result |
+  |---|---|
+  | the helper was served | flag (the content was parsed and stayed silent) |
+  | the document was served without the helper (not HTML) | flag |
+  | the document was served, the helper never requested | retry (the bytes never reached the parser) |
+  | the document was never served | retry |
+  | nothing known (restart, expiry, revocation, another artifact's token) or the route failed | retry |
+
+  The helper is a parser-blocking script placed before any bot byte, so content cannot stop it from being requested; content can only add evidence, and adding it only moves the answer toward a flag. While the answer is pending, the mount refuses to load anything, and a late answer for an older load is ignored. A retry is offered as a button (never automatically); it mints a fresh token and revokes the old one.
+- **Messages are proposals.** Every message from the frame is validated for source, origin, shape, size, rate and nonce. Comment anchors are acted on only through the trusted threads column. The viewer posts two things into the frame: `{kind: "comment-mode"}` and `{kind: "pins"}`. Pins are the numbered anchors of the owner's own threads: element selectors and text quotes the content itself proposed. Comment text, authors and contacts' anchors are never posted. The helper answers with rectangles (at most four times a second), which the viewer validates, clamps to the frame and uses only to draw pins. A pin only focuses its thread.
 - Jumping to a section of a script-free document mounts a fresh frame (a new token and a first load), so a later real navigation can never hide behind an "expected" load.
 
 ## Verified, and what remains
@@ -116,4 +137,5 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 Known residuals:
 - **WebRTC.** ICE candidate gathering still works under `connect-src 'none'` in scripted types. This is why versions shaped by outside text are served script-free until approved.
 - **Firefox and Safari** have not been verified for the narrowed `frame-src`. There, the tripwire (after the fact) and scripts-off are the defence. A navigation answered with 204, or one that never finishes, fires no `load` event, so the tripwire alone cannot catch it.
-- View tokens live in memory per gateway process. A restart means reloading open views.
+- View tokens live in memory per gateway process. A restart means reloading open views (an open view whose load was in flight is offered a retry, never flagged).
+- **The retry costs one round trip.** A frame whose document was never served or never parsed is offered "couldn't load — retry". A retried load is decided again on fresh evidence, so a page that really stays silent is still flagged on that load.
