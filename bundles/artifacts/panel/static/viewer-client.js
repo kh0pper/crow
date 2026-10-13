@@ -131,7 +131,7 @@
     });
     if (S.versions.length < 2) versionSel.setAttribute("hidden", ""); else versionSel.removeAttribute("hidden");
   }
-  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); renderThreads(); renderSections(); mountFrame(); });
+  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); S.editing = null; renderThreads(); renderSections(); mountFrame(); });
 
   /** The threads the owner would send by default: open, owner-authored. */
   function sendable() { return S.threads.filter(function (t) { return t.author_kind === "owner" && t.status !== "resolved"; }); }
@@ -178,6 +178,8 @@
   function changeFailed(e) { return e && e.code === "comment_locked" ? T.locked_note : (e && e.message) || "error"; }
   function startEdit(p, c) {
     S.editing = Number(c.id);
+    // One edit at a time (review L2): the other comments' actions wait.
+    Array.prototype.forEach.call(threadList.querySelectorAll(".cv-cacts button"), function (b) { b.setAttribute("disabled", ""); });
     var ta = el("textarea", { class: "cv-edit-text", rows: "3", "aria-label": T.edit });
     ta.value = c.text;
     var msg = el("p", { class: "cv-err", role: "alert" });
@@ -191,11 +193,11 @@
   }
   function removeComment(t, c) {
     if (!window.confirm(T.delete_confirm)) return;
-    api("DELETE", BASE + "/comments/" + encodeURIComponent(c.id)).then(function () {
-      // The thread's last comment gone: resolve it, so an empty thread never
-      // lingers as something to send.
-      var rest = (t.comments || []).filter(function (x) { return Number(x.id) !== Number(c.id); });
-      return rest.length ? null : api("POST", BASE + "/threads/" + encodeURIComponent(t.id) + "/status", { status: "resolved" });
+    api("DELETE", BASE + "/comments/" + encodeURIComponent(c.id)).then(function (j) {
+      // The thread's last comment gone (the SERVER's count — a reply that
+      // arrived since the last poll keeps it open): resolve it, so an empty
+      // thread never lingers as something to send.
+      return j && j.remaining === 0 ? api("POST", BASE + "/threads/" + encodeURIComponent(t.id) + "/status", { status: "resolved" }) : null;
     }).then(refresh, function (e) { banner(changeFailed(e), "warn"); });
   }
 

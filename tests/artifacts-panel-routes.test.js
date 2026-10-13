@@ -298,3 +298,55 @@ test("comment edit: the owner edits their OWN comments only, never while a round
   assert.equal((await req("DELETE", path)).status, 200);
   assert.equal((await req("PATCH", path, { body: { text: "back" } })).status, 404);
 });
+
+test("comment lock (review M1–M3): every active status holds the thread, a corrupt active row locks everything, other artifacts are untouched, and the check is atomic with the write", async () => {
+  const { addComment, editComment, lockedThreadIds } = await import("../bundles/artifacts/server/comments.js");
+  const mk = async (title) => {
+    const a = await store.createArtifact(s.db, s.blobs, { title, type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-m1" } }, { markdownBlocks });
+    const t = (await req("POST", `/api/artifacts/${a.id}/threads`, { body: { anchor: { kind: "whole" }, text: "words" } })).body;
+    const cid = (await req("GET", `/api/artifacts/${a.id}`)).body.threads.find((x) => Number(x.id) === Number(t.threadId)).comments[0].id;
+    return { a, tid: Number(t.threadId), cid };
+  };
+  const hold = (aid, json, status, cardId = null) => s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,status,deadline,card_id) VALUES (?,'ask',1,?,0,'bobby',?,?,?)", args: [aid, json, status, Date.now() + 60000, cardId] });
+  const clear = (aid) => s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE artifact_id=?", args: [aid] });
+  const x = await mk("Lock statuses");
+  const bystander = await mk("Bystander");
+  for (const [status, card] of [["queued", null], ["pending", null], ["pending", 7], ["delivering", null], ["working", null]]) {
+    await hold(x.a.id, JSON.stringify([x.tid]), status, card);
+    const e = await req("PATCH", `/api/artifacts/${x.a.id}/comments/${x.cid}`, { body: { text: "changed" } });
+    assert.equal(e.status, 409, `edit locked while ${status}${card ? " (board card)" : ""}`);
+    assert.equal((await req("DELETE", `/api/artifacts/${x.a.id}/comments/${x.cid}`)).status, 409, `delete locked while ${status}`);
+    assert.deepEqual((await req("GET", `/api/artifacts/${x.a.id}`)).body.lockedThreads, [x.tid]);
+    assert.deepEqual((await req("GET", `/api/artifacts/${bystander.a.id}`)).body.lockedThreads, [], "another artifact's round never locks this one");
+    await clear(x.a.id);
+  }
+  // Fail closed: an unreadable active row holds every thread (edit, delete and the list).
+  for (const bad of ["not json", '{"a":1}']) {
+    await hold(x.a.id, bad, "working");
+    assert.equal((await req("PATCH", `/api/artifacts/${x.a.id}/comments/${x.cid}`, { body: { text: "changed" } })).status, 409, `edit fails closed on ${bad}`);
+    assert.equal((await req("DELETE", `/api/artifacts/${x.a.id}/comments/${x.cid}`)).status, 409, `delete fails closed on ${bad}`);
+    assert.deepEqual(await lockedThreadIds(s.db, x.a.id), [x.tid], `list fails closed on ${bad}`);
+    await clear(x.a.id);
+  }
+  // M2: a round that lands between the comment read and the write still wins —
+  // the hold check is inside the UPDATE itself.
+  const realExecute = s.db.execute.bind(s.db);
+  let injected = false;
+  s.db.execute = async (q) => {
+    if (!injected && typeof q === "object" && /^UPDATE artifact_comments SET text=/.test(q.sql)) { injected = true; await hold(x.a.id, JSON.stringify([x.tid]), "pending"); }
+    return realExecute(q);
+  };
+  try {
+    await assert.rejects(editComment(s.db, { commentId: x.cid, artifactId: x.a.id, text: "racing", actor: { kind: "session" } }), (e) => e.code === "comment_locked");
+  } finally { s.db.execute = realExecute; }
+  assert.ok(injected);
+  assert.equal((await s.db.execute({ sql: "SELECT text FROM artifact_comments WHERE id=?", args: [x.cid] })).rows[0].text, "words", "the racing edit never landed");
+  await clear(x.a.id);
+  // M3: delete reports what the SERVER still holds in the thread.
+  await addComment(s.db, { threadId: x.tid, text: "a reply", author: { kind: "bot", id: "bobby" } });
+  const d = await req("DELETE", `/api/artifacts/${x.a.id}/comments/${x.cid}`);
+  assert.equal(d.status, 200);
+  assert.equal(d.body.remaining, 1, "the bot's reply keeps the thread open");
+  const solo = (await req("DELETE", `/api/artifacts/${bystander.a.id}/comments/${bystander.cid}`)).body;
+  assert.equal(solo.remaining, 0);
+});

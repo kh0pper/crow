@@ -81,46 +81,86 @@ export async function addComment(db, { threadId, text, author, tainted = false }
   return { commentId: Number(r.lastInsertRowid), artifactId: t.artifact_id };
 }
 
-/** D19: the owner may delete any comment; a contact only their own; bots none. */
+/** The round statuses that hold a thread (the bot's copy is in flight). Kept
+ *  in step with rounds.js ACTIVE (comments.js cannot import rounds.js: rounds
+ *  imports this module). */
+const ACTIVE_ROUND = ["queued", "pending", "delivering", "working"];
+const IN_ACTIVE = `r.status IN (${ACTIVE_ROUND.map((x) => `'${x}'`).join(",")})`;
+/** SQL: "an active round or ask of artifact ?1 holds thread ?2". FAIL CLOSED:
+ *  an active row whose thread list is unreadable holds every thread. Used
+ *  INSIDE the edit/delete UPDATE, so the check and the write are one
+ *  statement — a Send landing between a separate check and the write could
+ *  otherwise deliver text the owner never approved (review M2). */
+const HELD_SQL = `EXISTS (SELECT 1 FROM artifact_rounds r WHERE r.artifact_id=? AND ${IN_ACTIVE}
+  AND (json_valid(r.thread_ids_json)=0 OR json_type(r.thread_ids_json)<>'array'
+       OR EXISTS (SELECT 1 FROM json_each(r.thread_ids_json) j WHERE CAST(j.value AS INTEGER)=?)))`;
+
+/** The threads an active round or ask holds, for the viewer to hide Edit and
+ *  Delete. Fail closed like HELD_SQL: an unreadable active row locks every
+ *  thread of the artifact. */
+export async function lockedThreadIds(db, artifactId) {
+  const rows = (await db.execute({ sql: `SELECT r.thread_ids_json FROM artifact_rounds r WHERE r.artifact_id=? AND ${IN_ACTIVE}`, args: [artifactId] })).rows;
+  const out = new Set();
+  for (const r of rows) {
+    let ids = null;
+    try { ids = JSON.parse(r.thread_ids_json); } catch { ids = null; }
+    if (!Array.isArray(ids)) {
+      const all = (await db.execute({ sql: "SELECT id FROM artifact_threads WHERE artifact_id=?", args: [artifactId] })).rows;
+      return all.map((t) => Number(t.id)).sort((a, b) => a - b);
+    }
+    for (const id of ids) out.add(Number(id));
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+async function liveCount(db, threadId) {
+  return Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_comments WHERE thread_id=? AND deleted_at IS NULL", args: [threadId] })).rows[0].n);
+}
+
+/** D19: the owner may delete any comment; a contact only their own; bots
+ *  none. The owner's OWN words follow the edit rule (never while a round
+ *  holds the thread); a contact's comment stays deletable at any time (D19
+ *  privacy). Returns `remaining` (live comments left in the thread) so the
+ *  viewer resolves an emptied thread from the server's count, never a stale
+ *  list (review M3). */
 export async function deleteComment(db, { commentId, actor }) {
   const c = (await db.execute({ sql: "SELECT c.*, t.artifact_id FROM artifact_comments c JOIN artifact_threads t ON t.id=c.thread_id WHERE c.id=? AND c.deleted_at IS NULL", args: [commentId] })).rows[0];
   if (!c) throw err("not_found", "no such comment");
   const owner = actor?.kind === "session";
   const self = actor?.kind === "contact" && c.author_kind === "contact" && c.author_id === actor.id;
   if (!owner && !self) throw err("forbidden", "not your comment");
-  // The owner's OWN words follow the edit rule (never while a round holds the
-  // thread); a contact's comment stays deletable at any time (D19 privacy).
-  if (owner && c.author_kind === "owner" && (await lockedThreadIds(db, c.artifact_id)).includes(Number(c.thread_id))) throw err("comment_locked", "this comment is with the bot right now");
-  await db.execute({ sql: "UPDATE artifact_comments SET deleted_at=datetime('now'), text='' WHERE id=?", args: [commentId] });
+  const locks = owner && c.author_kind === "owner";
+  const r = await db.execute({
+    sql: `UPDATE artifact_comments SET deleted_at=datetime('now'), text='' WHERE id=? AND deleted_at IS NULL${locks ? ` AND NOT ${HELD_SQL}` : ""}`,
+    args: locks ? [commentId, c.artifact_id, Number(c.thread_id)] : [commentId],
+  });
+  if (Number(r.rowsAffected) !== 1) throw await gone(db, commentId);
   await audit(db, { artifactId: c.artifact_id, actor, action: "comment-deleted", target: String(commentId) });
-  return { deleted: true };
+  return { deleted: true, remaining: await liveCount(db, c.thread_id) };
 }
 
-/** The threads an ACTIVE round or ask holds (the bot's copy is in flight).
- *  Kept in step with rounds.js ACTIVE (comments.js cannot import rounds.js:
- *  rounds imports this module). */
-const ACTIVE_ROUND = ["queued", "pending", "delivering", "working"];
-export async function lockedThreadIds(db, artifactId) {
-  const rows = (await db.execute({ sql: `SELECT thread_ids_json FROM artifact_rounds WHERE artifact_id=? AND status IN (${ACTIVE_ROUND.map(() => "?").join(",")})`, args: [artifactId, ...ACTIVE_ROUND] })).rows;
-  const out = new Set();
-  for (const r of rows) { try { for (const id of JSON.parse(r.thread_ids_json || "[]")) out.add(Number(id)); } catch { /* unreadable → nothing added; the edit check below re-reads */ } }
-  return [...out].sort((a, b) => a - b);
+/** Why an edit/delete UPDATE matched nothing: the comment went away, or a
+ *  round holds its thread. */
+async function gone(db, commentId) {
+  const still = (await db.execute({ sql: "SELECT 1 FROM artifact_comments WHERE id=? AND deleted_at IS NULL", args: [commentId] })).rows[0];
+  return still ? err("comment_locked", "this comment is with the bot right now") : err("not_found", "no such comment");
 }
 
 /** The owner edits their OWN words only (a contact's or a bot's text is never
  *  rewritten under their name), and never while a round holds the thread:
- *  what the bot was sent must match what the owner sees. Fail closed: an
- *  unreadable round row locks every thread of the artifact. */
+ *  what the bot was sent must match what the owner sees. The hold check is
+ *  part of the UPDATE (HELD_SQL, fail closed). */
 export async function editComment(db, { commentId, artifactId, text, actor }) {
   if (actor?.kind !== "session") throw err("forbidden", "only the owner edits comments");
   const body = cleanText(text);
   const c = (await db.execute({ sql: "SELECT c.*, t.artifact_id FROM artifact_comments c JOIN artifact_threads t ON t.id=c.thread_id WHERE c.id=? AND c.deleted_at IS NULL", args: [commentId] })).rows[0];
   if (!c || c.artifact_id !== artifactId) throw err("not_found", "no such comment");
   if (c.author_kind !== "owner") throw err("forbidden", "only your own comments can be edited");
-  const rows = (await db.execute({ sql: `SELECT thread_ids_json FROM artifact_rounds WHERE artifact_id=? AND status IN (${ACTIVE_ROUND.map(() => "?").join(",")})`, args: [artifactId, ...ACTIVE_ROUND] })).rows;
-  const held = rows.some((r) => { try { return JSON.parse(r.thread_ids_json || "[]").map(Number).includes(Number(c.thread_id)); } catch { return true; } });
-  if (held) throw err("comment_locked", "this comment is with the bot right now");
-  await db.execute({ sql: "UPDATE artifact_comments SET text=?, edited_at=datetime('now') WHERE id=? AND deleted_at IS NULL", args: [body, commentId] });
+  const r = await db.execute({
+    sql: `UPDATE artifact_comments SET text=?, edited_at=datetime('now') WHERE id=? AND deleted_at IS NULL AND author_kind='owner' AND NOT ${HELD_SQL}`,
+    args: [body, commentId, artifactId, Number(c.thread_id)],
+  });
+  if (Number(r.rowsAffected) !== 1) throw await gone(db, commentId);
   await db.execute({ sql: "UPDATE artifact_threads SET updated_at=datetime('now') WHERE id=?", args: [c.thread_id] });
   await audit(db, { artifactId, actor, action: "comment-edited", target: String(commentId) });
   return { edited: true };
