@@ -16,6 +16,9 @@
  *                              http://localhost:<port>, local-only, weaker.
  */
 import { createViewTokenStore } from "./view-tokens.js";
+// D24: the bundle's panel routes reach the decision through the runtime (the
+// one process-wide surface they import), never their own copy of the table.
+export { loadDecision } from "./view-tokens.js";
 import { startArtifactOrigin } from "./server.js";
 
 let tokens = createViewTokenStore();

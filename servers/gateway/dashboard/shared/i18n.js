@@ -2904,7 +2904,11 @@ export const translations = {
   "perch.phoneOutcomeNotAdmissible": { en: "Could not start", es: "No se pudo iniciar" },
   // Crow Artifacts chat card (spec v1.6, chat-first PR-1)
   "perch.artifactLabel": { en: "Artifact", es: "Artefacto" },
-  "perch.artifactOpen": { en: "Open", es: "Abrir" },
+  "perch.artifactOpenBeside": { en: "Open beside chat", es: "Abrir junto al chat" },
+  "perch.artifactOpenWindow": { en: "Open in new window", es: "Abrir en una ventana nueva" },
+  "perch.artifactPaneClose": { en: "Close", es: "Cerrar" },
+  "perch.artifactPaneBack": { en: "Back to chat", es: "Volver al chat" },
+  "perch.artifactPaneTitle": { en: "Artifact viewer", es: "Visor de artefactos" },
   "perch.artifactRunScripts": { en: "Run this version's scripts", es: "Ejecutar los scripts de esta versión" },
   "perch.artifactStateReady": { en: "ready", es: "listo" },
   "perch.artifactStateRevising": { en: "revising… round {n}", es: "revisando… ronda {n}" },

@@ -22,6 +22,11 @@
  * Any request carrying Tailscale-Funnel-Request gets 403 (the origin is never
  * public; CROW_DASHBOARD_PUBLIC does not override this).
  * Range requests are not honoured: the full body is returned with 200.
+ * D24 load evidence: a GET that answers 2xx for the token's document marks
+ * `docServed` (and `helperInjected` when the helper went in), and a 2xx GET
+ * for the helper marks `helperServed` — each BEFORE the response is written,
+ * so a mark always precedes the bytes it describes. HEAD, errors and other
+ * paths mark nothing. Content cannot unmark anything (view-tokens.js).
  * The CSP source base is `publicBase`, else the fixed loopback fallback
  * `http://localhost:<port>` — NEVER derived from the request's Host header
  * (review L3: a forged Host cannot widen script-src).
@@ -88,7 +93,7 @@ export function injectHelper(html, nonce) {
 
 /**
  * @param {object} o
- * @param {{ check(token: string): any }} o.tokens  view-token store
+ * @param {{ check(token: string): any, markServed?(token: string, field: string): void }} o.tokens  view-token store
  * @param {(q: { artifactId: string, versionN: number, path: string }) => Promise<{ body: Buffer|string, contentType: string }|null>} o.resolveContent
  * @param {string|null} o.publicBase  the absolute origin the browser uses
  *   (e.g. https://artifacts.example.ts.net). null → `fallbackBase` is used.
@@ -99,6 +104,7 @@ export function injectHelper(html, nonce) {
 export function createArtifactOriginHandler({ tokens, resolveContent, publicBase = null, fallbackBase = null, onResponse = () => {} }) {
   const strictCsp = cspFor(null);
   const base = publicBase || fallbackBase || "http://localhost";
+  const mark = (token, field) => { try { tokens.markServed?.(token, field); } catch {} };
   function send(res, status, { csp = strictCsp, headers = {}, body = "", head = false } = {}) {
     const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
     res.writeHead(status, { ...baseHeaders(csp), "content-length": String(buf.length), ...headers });
@@ -140,6 +146,7 @@ export function createArtifactOriginHandler({ tokens, resolveContent, publicBase
 
       if (rel === HELPER_PATH) {
         if (!scripted) return send(res, 404, { csp, body: "not found", head });
+        if (!head) mark(m[1], "helperServed");
         return send(res, 200, { csp, headers: { "content-type": "text/javascript; charset=utf-8", ...cors }, body: anchorHelperSource(grant.nonce), head });
       }
       const c = await resolveContent({ artifactId: grant.artifactId, versionN: grant.versionN, path: rel });
@@ -147,7 +154,12 @@ export function createArtifactOriginHandler({ tokens, resolveContent, publicBase
       let body = c.body;
       // Scripts-off (D20) is enforced by the CSP header alone: no markup is
       // rewritten for safety anywhere on this listener.
-      if (scripted && /^text\/html/i.test(c.contentType)) body = injectHelper(Buffer.isBuffer(body) ? body.toString("utf8") : String(body), grant.nonce);
+      const inject = scripted && /^text\/html/i.test(c.contentType);
+      if (inject) body = injectHelper(Buffer.isBuffer(body) ? body.toString("utf8") : String(body), grant.nonce);
+      if (!head && rel === "index.html") {
+        mark(m[1], "docServed");
+        if (inject) mark(m[1], "helperInjected");
+      }
       return send(res, 200, { csp, headers: { "content-type": c.contentType, ...cors }, body, head });
     } catch {
       return send(res, 500, { body: "error", head });

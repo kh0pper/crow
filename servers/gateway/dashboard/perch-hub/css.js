@@ -643,6 +643,21 @@ font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;font-variant-n
 #perch-hub-root .artcard .art-err{color:var(--err);font-size:13px}
 #perch-hub-root .artcard .art-gone{font-size:13px;color:var(--dim)}
 #perch-hub-root .artcard [hidden]{display:none}
+#perch-hub-root .artcard a.art-window{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid var(--line);
+border-radius:10px;color:var(--teal);font-size:13.5px;text-decoration:none}
+/* Q2: the viewer beside the chat (>=1024px: docked right, the hub narrows
+   beside it) or as a full-screen sheet (phone). The pane hosts the SAME-ORIGIN
+   viewer page; the hub itself never frames the artifact origin. */
+#perch-hub-root .art-pane{position:fixed;z-index:60;background:var(--card);display:flex;flex-direction:column;
+border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.14)}
+#perch-hub-root .art-pane-split{top:0;right:0;bottom:0;width:min(48vw,760px)}
+#perch-hub-root .art-pane-sheet{inset:0;border-left:0}
+#perch-hub-root .art-pane-bar{display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--line)}
+#perch-hub-root .art-pane-bar button,#perch-hub-root .art-pane-bar a{min-height:44px;display:inline-flex;align-items:center;padding:8px 14px;
+border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font-size:14px;text-decoration:none}
+#perch-hub-root .art-pane-window{margin-left:auto;color:var(--teal) !important}
+#perch-hub-root .art-pane-frame{flex:1 1 auto;width:100%;border:0;min-height:0}
+body.perch-art-split #perch-hub-root{margin-right:min(48vw,760px)}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

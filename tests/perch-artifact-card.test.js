@@ -45,11 +45,14 @@ test("I2: the card is the store row refetched by id; the frame is only a pointer
   assert.match(js, /'X-Crow-Csrf':csrf\(\)/, "writes carry the CSRF header");
 });
 
-test("actions ride the EXISTING owner routes: Open navigates to the panel page (PR-1 interim), Run scripts is the D20 approve", () => {
+test("actions ride the EXISTING owner routes: Open beside chat / new window go to the viewer page, Run scripts is the D20 approve", () => {
   const js = perchArtifactCardJs("en");
-  // PR-2 repoints Open to the viewer page + beside-chat/new-window; until then
-  // it is the panel deep link, and nothing else navigates.
-  assert.match(js, /location\.href='\/dashboard\/artifacts\?id='\+encodeURIComponent\(a\.id\)/);
+  // Q2 (PR-2): both open the SAME-ORIGIN viewer page; nothing navigates the
+  // hub itself, and the hub never frames the artifact origin.
+  assert.doesNotMatch(js, /location\.href=/, "the hub page is never navigated away");
+  assert.match(js, /'\/dashboard\/artifacts\/view\/'\+encodeURIComponent\(String\(id\)\)/);
+  assert.match(js, /win\.target='_blank'; win\.rel='noopener'/, "new window: target=_blank rel=noopener");
+  assert.doesNotMatch(js, /\/v\/|artifact-origin|artifactOrigin/, "no artifact-origin URL is ever built here");
   assert.match(js, /artApi\('POST','\/'\+encodeURIComponent\(a\.id\)\+'\/versions\/'\+encodeURIComponent\(String\(st\.curN\)\)\+'\/approve',\{\}\)/);
 });
 
@@ -89,6 +92,7 @@ function makeEl(tag) {
     appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
     removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; },
     setAttribute(k, v) { this["attr:" + k] = v; },
+    focus() { this.focused = true; },
     get firstChild() { return this.children[0] || null; },
   };
   // An innerHTML write anywhere in the card is an instant test failure.
@@ -105,12 +109,26 @@ function byClass(node, cls) { const out = []; walk(node, (n) => { if (String(n.c
 
 const tick = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
 
+function classList(set) {
+  return { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c) };
+}
+
 function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
   const transcript = makeEl("div");
+  const hubRoot = makeEl("div");
+  const bodyClasses = new Set();
   const fetches = [];
   const sandbox = {
     console,
-    document: { createElement: (tag) => makeEl(tag) },
+    document: {
+      createElement: (tag) => makeEl(tag),
+      addEventListener(type, fn) { (sandbox.__docListeners[type] ||= []).push(fn); },
+      removeEventListener(type, fn) { const l = sandbox.__docListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
+      getElementById: (id) => (id === "perch-hub-root" ? hubRoot : null),
+      body: { classList: classList(bodyClasses), appendChild: (c) => hubRoot.appendChild(c) },
+    },
+    window: { innerWidth: 1280 },
+    __docListeners: {},
     el: (id) => (id === "perch-transcript" ? transcript : null),
     csrf: () => "tok",
     live: () => true,
@@ -132,13 +150,18 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     artifactRefetch: artifactRefetch,
     artifactFrame: artifactFrame,
     loadArtifactCards: loadArtifactCards,
+    artViewerUrl: artViewerUrl,
+    artPaneMode: artPaneMode,
+    openArtifactPane: openArtifactPane,
+    closeArtifactPane: closeArtifactPane,
+    pane: function(){ return artPane; },
     resetArtifactCards: resetArtifactCards,
     cards: function(){ return artCards; },
     noBundle: function(){ return artNoBundle; },
     pushBufForTest: function(d){ artBuf.push(d); },
   });\n})();`;
   vm.runInContext(src, sandbox);
-  return { sandbox, transcript, fetches };
+  return { sandbox, transcript, fetches, hubRoot, bodyClasses };
 }
 
 // row builder: the exact GET /api/artifacts/:id payload shape the route serves.
@@ -291,7 +314,7 @@ test("no artifacts bundle on this gateway: one 404 probe, then the document stop
   assert.equal(byClass(hub.transcript, "artcard").length, 0);
 });
 
-test("Run scripts POSTs the existing approve route with CSRF and refetches; Open is the panel deep link", async () => {
+test("Run scripts POSTs the existing approve route with CSRF and refetches; Open beside chat opens the pane", async () => {
   const hub = mountCard({
     fetchImpl: (m, url) => {
       if (m === "POST") return json({ approved: true });
@@ -311,7 +334,45 @@ test("Run scripts POSTs the existing approve route with CSRF and refetches; Open
   assert.ok(hub.fetches.filter((f) => f.method === "GET" && f.url === "/api/artifacts/art_run").length >= 1, "the card refetched after the approve");
   const open = byClass(card, "art-open")[0];
   open.onclick();
-  assert.equal(hub.sandbox.location.href, "/dashboard/artifacts?id=art_run");
+  assert.equal(hub.sandbox.location.href, "", "the hub is not navigated");
+  const pane = api.pane();
+  assert.ok(pane, "the pane opened");
+  const frame = byClass(pane, "art-pane-frame")[0];
+  assert.equal(frame.src, "/dashboard/artifacts/view/art_run?thread=" + sid);
+  const win = byClass(card, "art-window")[0];
+  assert.equal(win.href, "/dashboard/artifacts/view/art_run?thread=" + sid);
+  assert.equal(win.target, "_blank");
+  assert.equal(win.rel, "noopener");
+});
+
+test("Q2 pane: the viewer URL, the 1024px breakpoint, split vs sheet, Escape and a transcript reset close it", async () => {
+  const hub = mountCard({ fetchImpl: () => json(row({ id: "art_p" })) });
+  const api = hub.sandbox.__exportedApi;
+  assert.equal(api.artViewerUrl("art_p", "perchlive-0123abcd"), "/dashboard/artifacts/view/art_p?thread=perchlive-0123abcd");
+  assert.equal(api.artViewerUrl("art_p", "not a thread"), "/dashboard/artifacts/view/art_p", "only a Perch thread id rides along");
+  assert.equal(api.artViewerUrl("a/b?c", null), "/dashboard/artifacts/view/a%2Fb%3Fc");
+  assert.equal(api.artPaneMode(1024), "split");
+  assert.equal(api.artPaneMode(1023), "sheet");
+  assert.equal(api.artPaneMode(412), "sheet");
+  hub.sandbox.window.innerWidth = 1280;
+  api.openArtifactPane("art_p", hub.sandbox.current.sid);
+  assert.equal(api.pane().className, "art-pane art-pane-split");
+  assert.ok(hub.bodyClasses.has("perch-art-split"));
+  assert.equal(hub.hubRoot.children.length, 1, "mounted inside the hub root (scoped styles)");
+  hub.sandbox.window.innerWidth = 412;
+  api.openArtifactPane("art_p", hub.sandbox.current.sid);
+  assert.equal(api.pane().className, "art-pane art-pane-sheet", "re-opening replaces the pane");
+  assert.equal(hub.hubRoot.children.length, 1, "never two panes");
+  assert.ok(hub.bodyClasses.has("perch-art-sheet") && !hub.bodyClasses.has("perch-art-split"));
+  assert.equal((hub.sandbox.__docListeners.keydown || []).length, 1, "one Escape listener while open");
+  hub.sandbox.__docListeners.keydown.slice().forEach((f) => f({ key: "Escape" }));
+  assert.equal(hub.sandbox.__docListeners.keydown.length, 0, "and none once closed (no load-time document listener)");
+  assert.equal(api.pane(), null);
+  assert.equal(hub.hubRoot.children.length, 0);
+  assert.equal(hub.bodyClasses.size, 0);
+  api.openArtifactPane("art_p", hub.sandbox.current.sid);
+  api.resetArtifactCards();
+  assert.equal(api.pane(), null, "a transcript reset (another chat) closes the pane");
 });
 
 test("a failed approve says so on the card and re-arms the button", async () => {
@@ -395,3 +456,18 @@ test("T1: buffered live frames are dropped when the reset lands between the batc
 });
 
 const sid0 = (hub) => hub.sandbox.current.sid;
+
+test("Q2 hub CSP: the hub sets no policy of its own; the gateway-wide one keeps frame-src 'self', which is what the viewer pane needs", async () => {
+  const { readFileSync } = await import("node:fs");
+  const hubPanel = readFileSync(new URL("../servers/gateway/dashboard/panels/perch-hub.js", import.meta.url), "utf8");
+  assert.doesNotMatch(hubPanel, /content-security-policy/i, "no hub-specific CSP (a Turbo visit would carry it into other panels)");
+  const gw = readFileSync(new URL("../servers/gateway/index.js", import.meta.url), "utf8");
+  assert.match(gw, /"frame-src 'self' https:"/, "the gateway-wide frame-src still allows same-origin frames");
+});
+
+test("review M2: retiring the hub (a Turbo visit away) closes an open viewer pane, so its keydown listener never outlives the instance", async () => {
+  const { readFileSync } = await import("node:fs");
+  const client = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/client.js", import.meta.url), "utf8");
+  const retire = client.slice(client.indexOf("HUB.retire=function(){"), client.indexOf("};", client.indexOf("HUB.retire=function(){")));
+  assert.match(retire, /closeArtifactPane\(\);/);
+});
