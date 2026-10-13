@@ -14,7 +14,12 @@
  *  - every frame message is an untrusted PROPOSAL: source, origin, shape,
  *    size, rate and nonce checked; nothing acts without a user gesture in the
  *    rail;
- *  - the parent never posts anything sensitive in: only {kind:"comment-mode"}.
+ *  - the parent never posts anything sensitive in: only {kind:"comment-mode"}
+ *    and {kind:"pins"} — the numbered anchors of the OWNER's threads on this
+ *    version (element selectors / text quotes the content itself proposed;
+ *    never comment text, authors, contact anchors or ids). The helper answers
+ *    {kind:"anchor-rect", rects:[{i,x,y,w,h}]}: untrusted, validated and
+ *    clamped to the frame box, used only to draw cosmetic numbered pins.
  *
  * FAIL CLOSED (scratch-run security review, 2026-10-08):
  *  - a trip is TERMINAL for this mount: load()/reload() refuse afterwards; the
@@ -64,6 +69,32 @@
     return null;
   }
 
+  /** Pins posted INTO the frame: owner element/text anchors only (see header). */
+  function pinOut(p) {
+    if (!p || typeof p !== "object" || !(p.i >= 1 && p.i <= 999 && p.i === Math.floor(p.i))) return null;
+    var a = validAnchor(p.anchor);
+    if (!a) return null;
+    if (a.kind === "element") return { i: p.i, anchor: { kind: "element", selector: a.selector } };
+    if (a.kind === "text") return { i: p.i, anchor: { kind: "text", quote: a.quote, prefix: a.prefix, suffix: a.suffix } };
+    return null;
+  }
+
+  /** Rects coming OUT of the frame: shape-checked and clamped to the frame box. */
+  function validRects(list, w, h) {
+    if (!Array.isArray(list) || list.length > 100) return null;
+    var out = [], fin = function (v) { return typeof v === "number" && isFinite(v); };
+    for (var k = 0; k < list.length; k++) {
+      var r = list[k];
+      if (!r || typeof r !== "object" || !(r.i >= 1 && r.i <= 999 && r.i === Math.floor(r.i))) return null;
+      if (!fin(r.x) || !fin(r.y) || !fin(r.w) || !fin(r.h)) return null;
+      var x = Math.max(0, Math.min(w, r.x)), y = Math.max(0, Math.min(h, r.y));
+      // Off-screen anchors (scrolled away) are dropped, not pinned to an edge.
+      if (r.x + Math.max(0, r.w) < 0 || r.y + Math.max(0, r.h) < 0 || r.x > w || r.y > h) continue;
+      out.push({ i: r.i, x: x, y: y, w: Math.max(0, Math.min(w - x, r.w)), h: Math.max(0, Math.min(h - y, r.h)) });
+    }
+    return out;
+  }
+
   /** The only grants the viewer will frame. */
   function validGrant(g) {
     if (!g || typeof g !== "object") return false;
@@ -105,7 +136,7 @@
    * grant: { url, nonce, sandbox, scripted, type }
    */
   function mount(opts) {
-    var state = { iframe: null, loads: 0, hello: false, tripped: false, pending: false, grant: null, helloTimer: null, stamps: [], commentMode: false, gen: 0 };
+    var state = { iframe: null, loads: 0, hello: false, tripped: false, pending: false, grant: null, helloTimer: null, stamps: [], commentMode: false, pins: [], gen: 0 };
     var helloMs = typeof opts.helloMs === "number" && opts.helloMs > 0 ? opts.helloMs : HELLO_MS;
     var loadMs = typeof opts.loadMs === "number" && opts.loadMs > 0 ? opts.loadMs : LOAD_MS;
 
@@ -152,11 +183,24 @@
         state.hello = true; clearTimeout(state.helloTimer);
         try { opts.onReady && opts.onReady(); } catch (x) {}
         if (state.commentMode) postMode();
+        postPins();
+        return;
+      }
+      if (d.kind === "anchor-rect" && state.hello) {
+        var box = state.iframe.getBoundingClientRect();
+        var rects = validRects(d.rects, box.width, box.height);
+        if (rects) try { opts.onRects && opts.onRects(rects); } catch (x) {}
         return;
       }
       if (d.kind === "anchor" && state.hello) {
         var a = validAnchor(d.anchor);
         if (a) try { opts.onProposal && opts.onProposal(a); } catch (x) {}
+      }
+    }
+
+    function postPins() {
+      if (state.iframe && state.grant && state.grant.scripted && state.hello && !state.tripped) {
+        state.iframe.contentWindow.postMessage({ t: "crow-viewer", kind: "pins", pins: state.pins }, "*");
       }
     }
 
@@ -212,6 +256,8 @@
       load: function () { return load(null); },
       reload: function () { return load(null); },          // a refresh is a new token + a new frame load
       setCommentMode: function (on) { state.commentMode = !!on; postMode(); },
+      /** Numbered owner anchors for the cosmetic pins (scripted types). */
+      setPins: function (list) { state.pins = (Array.isArray(list) ? list : []).slice(0, 100).map(pinOut).filter(Boolean); postPins(); },
       /** Script-free types: show a block by mounting a fresh frame at its fragment. */
       showBlock: function (id) {
         if (state.pending) return Promise.reject(new Error("pending"));
@@ -223,5 +269,5 @@
     };
   }
 
-  window.CrowArtifactViewer = { mount: mount, validAnchor: validAnchor, validGrant: validGrant };
+  window.CrowArtifactViewer = { mount: mount, validAnchor: validAnchor, validGrant: validGrant, validRects: validRects, pinOut: pinOut };
 })();

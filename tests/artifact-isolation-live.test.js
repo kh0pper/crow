@@ -147,7 +147,9 @@ window.__r.retries = []; window.__r.mintArgs = [];
 // D24 test seam: swallow the helper's hello before the viewer sees it — the
 // helper WAS served, so the server's record says "parsed".
 addEventListener("message", (e) => { if (window.__dropHello && e.data && e.data.kind === "hello") e.stopImmediatePropagation(); }, true);
+window.__r.rects = [];
 window.__mountWith = (g, o) => { o = o || {}; window.__v = CrowArtifactViewer.mount({ container: c, mint: (f, x) => { __r.minted++; __r.mintArgs.push(x || null); return g; },
+  onRects: (r) => __r.rects.push(r),
   helloMs: o.helloMs, loadMs: o.loadMs, loadEvidence: o.evidence === "none" ? undefined : (id) => fetch((o.evidence === "500" ? "/evidence500?" : "/evidence?") + "tokenId=" + encodeURIComponent(id)).then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); }),
   onRetry: (x) => __r.retries.push(x),
   onProposal: (a) => __r.proposals.push(a), onTrip: (x) => __r.trips.push(x), onReady: () => __r.ready++, onRefuse: (x) => __r.refused.push(x) }); return __v.load().then(() => true, (e) => e.message); };
@@ -773,5 +775,52 @@ test("D24: a mount without loadEvidence keeps the pre-D24 behaviour (no hello �
     await harness(t, g, { mount: { evidence: "none", helloMs: 900 } });
     assert.ok(await waitFor(async () => (await t.evalIn("__r.trips")).length));
     assert.deepEqual(await t.evalIn("__r.trips"), ["no-hello"]);
+  } finally { await t.close(); }
+});
+
+// ── pins (plan PR-2 Task 2.2): the only new parent→frame message ──────────
+test("pins: only owner element/text anchor fields go in; rects come back validated and clamped; a scroll storm never trips the flood guard", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const tall = `<!doctype html><html><head><style>body{margin:0}#a{position:absolute;left:30px;top:40px;width:100px;height:20px;margin:0}#far{position:absolute;left:30px;top:3000px}</style></head><body><p id=a>alpha words</p><p id=far>far away</p></body></html>`;
+    const g = grantFor("page", { "index.html": html(tall) });
+    await harness(t, g, { mount: { evidence: "none" } });
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.ready")) === 1), "hello");
+    // pinOut: what may cross INTO the frame.
+    const out = await t.evalIn(`JSON.stringify([
+      CrowArtifactViewer.pinOut({ i: 1, anchor: { kind: "element", selector: "#a", text: "alpha words" } }),
+      CrowArtifactViewer.pinOut({ i: 2, anchor: { kind: "text", quote: "far away", prefix: "p", suffix: "s" } }),
+      CrowArtifactViewer.pinOut({ i: 3, anchor: { kind: "block", id: "b1", text: "t", quote: "typed words" } }),
+      CrowArtifactViewer.pinOut({ i: 4, anchor: { kind: "region", x: 0.5, y: 0.5 } }),
+      CrowArtifactViewer.pinOut({ i: 0, anchor: { kind: "element", selector: "#a", text: "" } }),
+      CrowArtifactViewer.pinOut({ i: 1.5, anchor: { kind: "element", selector: "#a", text: "" } })
+    ])`);
+    assert.deepEqual(JSON.parse(out), [
+      { i: 1, anchor: { kind: "element", selector: "#a" } },
+      { i: 2, anchor: { kind: "text", quote: "far away", prefix: "p", suffix: "s" } },
+      null, null, null, null,
+    ], "element text, block quotes, regions and bad numbers never cross");
+    // validRects: clamped to the frame box, off-screen dropped, junk refused.
+    const vr = await t.evalIn(`JSON.stringify([
+      CrowArtifactViewer.validRects([{ i: 1, x: -5, y: 10, w: 20, h: 900 }, { i: 2, x: 900, y: 10, w: 5, h: 5 }], 800, 600),
+      CrowArtifactViewer.validRects([{ i: 1, x: "1", y: 1, w: 1, h: 1 }], 800, 600),
+      CrowArtifactViewer.validRects(new Array(101).fill({ i: 1, x: 1, y: 1, w: 1, h: 1 }), 800, 600),
+      CrowArtifactViewer.validRects([{ i: 1, x: Infinity, y: 1, w: 1, h: 1 }], 800, 600)
+    ])`);
+    assert.deepEqual(JSON.parse(vr), [[{ i: 1, x: 0, y: 10, w: 20, h: 590 }], null, null, null]);
+    // The helper round trip: posted pins → rects for the visible one only.
+    await t.evalIn(`__v.setPins([{ i: 1, anchor: { kind: "element", selector: "#a", text: "alpha words" } }, { i: 2, anchor: { kind: "text", quote: "far away", prefix: "", suffix: "" } }])`);
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.rects.length")) >= 1), "rects came back");
+    const last = JSON.parse(await t.evalIn("JSON.stringify(__r.rects.at(-1))"));
+    assert.deepEqual(last.map((r) => r.i), [1], "the far (off-screen) anchor is dropped");
+    assert.ok(Math.abs(last[0].x - 30) <= 1 && Math.abs(last[0].y - 40) <= 1, JSON.stringify(last));
+    // A scroll storm inside the frame: the helper throttles to <=4/s, so the
+    // viewer's flood guard (20/s) never trips.
+    await t.evalIn(`(() => { const f = document.querySelector("iframe"); const r = f.getBoundingClientRect(); window.__fr = { x: r.x + 100, y: r.y + 100 }; })()`);
+    const fr = JSON.parse(await t.evalIn("JSON.stringify(__fr)"));
+    for (let k = 0; k < 40; k++) await t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: fr.x, y: fr.y, deltaX: 0, deltaY: 60 });
+    await sleep(1500);
+    assert.deepEqual(await t.evalIn("__r.trips"), [], "no flood trip");
+    assert.ok((await t.evalIn("__r.rects.length")) >= 2, "rects followed the scroll");
   } finally { await t.close(); }
 });

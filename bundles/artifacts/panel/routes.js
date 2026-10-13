@@ -26,7 +26,10 @@ const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const APP_ROOT = process.env.CROW_APP_ROOT || resolve(BUNDLE_DIR, "..", "..");
 const appImport = (rel) => import(pathToFileURL(join(APP_ROOT, rel)).href);
 
-const STATIC = { "viewer.js": "text/javascript; charset=utf-8", "panel-client.js": "text/javascript; charset=utf-8", "panel.css": "text/css; charset=utf-8" };
+const STATIC = {
+  "viewer.js": "text/javascript; charset=utf-8", "panel-client.js": "text/javascript; charset=utf-8", "panel.css": "text/css; charset=utf-8",
+  "viewer-client.js": "text/javascript; charset=utf-8", "viewer.css": "text/css; charset=utf-8",
+};
 
 /**
  * @param {Function} dashboardAuth
@@ -71,6 +74,27 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
 
   router.use("/api/artifacts", dashboardAuth, json({ limit: "60mb" }), csrfMw);
   router.use("/artifacts/static", dashboardAuth);
+
+  /**
+   * The viewer page (plan PR-2 Task 2.1): the one page that frames the
+   * artifact origin. Mounted at the app root like every route here; the
+   * dashboard router's `/dashboard/:panelId` matches one segment only, so
+   * this 4-segment path reaches us. Path-scoped auth; the core viewerCsp.
+   */
+  router.get("/dashboard/artifacts/view/:id", dashboardAuth, async (req, res) => {
+    try {
+      const page = await bundleImport("panel/viewer-page.js");
+      if (!page.ARTIFACT_ID_RE.test(req.params.id)) return res.status(404).type("text/plain").send("not found");
+      await ensure();
+      const origin = S.runtime.artifactOriginInfo()?.baseUrl || null;
+      for (const [k, v] of Object.entries(page.viewerHeaders(S.policy.viewerCsp, origin))) res.setHeader(k, v);
+      const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
+      const { v, thread } = page.viewerParams(req.query);
+      res.type("html").send(page.renderViewerPage({ lang: m && m[1] === "es" ? "es" : "en", id: req.params.id, v, thread }));
+    } catch {
+      res.status(500).type("text/plain").send("error");
+    }
+  });
 
   router.get("/artifacts/static/:file", (req, res) => {
     // Own properties only: a prototype key (__proto__, constructor, …) must
