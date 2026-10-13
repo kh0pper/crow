@@ -83,6 +83,8 @@ import { mountAdminApi } from "./boot/admin-api.js";
 import { mountPeerPublicApi } from "./boot/peer-public-api.js";
 import { mountLateRoutes } from "./boot/late-mounts.js";
 import { runPostListenSetup } from "./boot/post-listen.js";
+import { frameAncestorsFor, createPeerFrameHosts } from "./frame-ancestors.js";
+import { getTrustedInstances } from "./dashboard/panels/nest/data-queries.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
@@ -321,12 +323,20 @@ async function resolveCspStorageOrigin() {
   return _cspStorageOrigin;
 }
 
+// Trusted peers' hostnames for frame-ancestors (the companion's federation
+// windows frame a peer gateway). Refreshed in the background, never awaited.
+let _frameDb = null;
+const peerFrameHosts = createPeerFrameHosts(async () => {
+  _frameDb ||= createDbClient();
+  return (await getTrustedInstances(_frameDb)).map((i) => i.hostname);
+});
+
 // Security headers
 app.use(async (req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   // Frame embedding: X-Frame-Options is legacy and doesn't support cross-port.
   // Skip for /proxy/ (proxied apps manage own), /blog/ and /dashboard/ (loaded in companion iframe).
-  // CSP frame-ancestors (below) provides the actual protection.
+  // CSP frame-ancestors (below, frame-ancestors.js) provides the actual protection.
   if (!req.path.startsWith("/proxy/") && !req.path.startsWith("/companion") && !req.path.startsWith("/blog") && !req.path.startsWith("/dashboard")) {
     res.setHeader("X-Frame-Options", "SAMEORIGIN");
   }
@@ -348,7 +358,7 @@ app.use(async (req, res, next) => {
     "media-src 'self' https: blob:",
     "connect-src 'self'",
     "frame-src 'self' https:",
-    "frame-ancestors 'self' https:",
+    frameAncestorsFor(req.headers.host, peerFrameHosts.get()),
   ].join("; "));
   if (req.secure || req.headers["x-forwarded-proto"] === "https") {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
