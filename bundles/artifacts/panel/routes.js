@@ -133,6 +133,11 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * frame-ancestors is the dashboard origin the browser itself declared on
    * this same-origin POST (Origin header), checked against Host — so every
    * instance gets its own frame-ancestors with no configuration (M5).
+   *
+   * D24: the reply carries the token's `tokenId` (its SHA-256 — not a
+   * credential) for the load-evidence route. A retry passes the frame's old
+   * tokenId as `replaces`; that token is revoked when it belongs to THIS
+   * artifact (another artifact's id is ignored).
    */
   router.post("/api/artifacts/:id/versions/:n/view", wrap(async (req, res) => {
     const info = S.runtime.artifactOriginInfo();
@@ -148,13 +153,32 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // the owner presses "Run this version's scripts" (= approve, audited).
     const scriptsOff = S.policy.isScriptedType(art.type) && M.store.isTainted(v);
     const eff = S.policy.effectiveType(art.type, scriptsOff);
-    const { token, nonce } = S.runtime.viewTokens().mint({ artifactId: art.id, versionN: Number(v.n), type: art.type, dashboardOrigin: o.origin, scriptsOff });
+    const tokens = S.runtime.viewTokens();
+    const replaces = typeof req.body?.replaces === "string" ? req.body.replaces : null;
+    if (replaces && tokens.evidence(replaces)?.artifactId === art.id) tokens.revokeToken(replaces);
+    const { token, tokenId, nonce } = tokens.mint({ artifactId: art.id, versionN: Number(v.n), type: art.type, dashboardOrigin: o.origin, scriptsOff });
     const fragment = typeof req.body?.fragment === "string" && /^b\d{1,6}$/.test(req.body.fragment) ? req.body.fragment : null;
     res.json({
-      url: `${info.baseUrl}/v/${token}/`, nonce, type: art.type, fragment,
+      url: `${info.baseUrl}/v/${token}/`, tokenId, nonce, type: art.type, fragment,
       sandbox: S.policy.iframeSandboxFor(eff), scripted: S.policy.isScriptedType(eff), scriptsOff,
       isolation: S.runtime.isolationFor(req.headers.host),
     });
+  }));
+
+  /**
+   * D24: a scripted frame said no hello in time — should the viewer flag it or
+   * offer "couldn't load — retry"? Answered from the origin's own per-token
+   * record (view-tokens.js loadDecision), which the frame content cannot
+   * suppress. Read-only (no flag, no audit — the viewer reports a flag through
+   * the tripwire route as before). A tokenId of another artifact or version,
+   * an expired/revoked one or a malformed one answers "unknown" → retry.
+   */
+  router.get("/api/artifacts/:id/versions/:n/load-evidence", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const ev = S.runtime.viewTokens().evidence(String(req.query.tokenId || ""));
+    const mine = ev && ev.artifactId === art.id && ev.versionN === Number(req.params.n);
+    res.setHeader("cache-control", "no-store");
+    res.json(S.runtime.loadDecision(mine ? ev : null));
   }));
 
   // §5.1 tripwire report: flag, revoke every live token for the artifact, audit, notify.

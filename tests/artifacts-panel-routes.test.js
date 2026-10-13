@@ -186,3 +186,45 @@ test("by-thread: a deleted artifact's events drop off the replay (review L3/M11)
   await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [art.id] });
   assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items, [], "a deleted artifact replays no cards");
 });
+
+test("D24: the view route returns a tokenId; load-evidence is owner-only, takes the tokenId, and answers per the decision table", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "D24", type: "page", source: { html: "<p>d</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const v = await req("POST", `/api/artifacts/${art.id}/versions/1/view`);
+  assert.match(v.body.tokenId, /^[0-9a-f]{64}$/);
+  const token = v.body.url.split("/v/")[1].slice(0, 43);
+  const ev = (q, opts) => req("GET", `/api/artifacts/${art.id}/versions/1/load-evidence?tokenId=${q}`, opts);
+  assert.equal((await ev(v.body.tokenId, { cookie: null })).status, 401, "owner session required");
+  assert.deepEqual((await ev(v.body.tokenId)).body, { decision: "retry", reason: "not-served" });
+  runtime.viewTokens().markServed(token, "docServed");
+  runtime.viewTokens().markServed(token, "helperInjected");
+  assert.deepEqual((await ev(v.body.tokenId)).body, { decision: "retry", reason: "not-parsed" });
+  runtime.viewTokens().markServed(token, "helperServed");
+  assert.deepEqual((await ev(v.body.tokenId)).body, { decision: "flag", reason: "parsed-no-hello" });
+  // Never the secret, never a malformed id: both answer unknown → retry.
+  assert.deepEqual((await ev(token)).body, { decision: "retry", reason: "unknown" });
+  assert.deepEqual((await ev("")).body, { decision: "retry", reason: "unknown" });
+  assert.deepEqual((await ev("f".repeat(64))).body, { decision: "retry", reason: "unknown" });
+  // Another artifact's or another version's token answers unknown.
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Other", type: "page", source: { html: "<p>o</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const ov = await req("POST", `/api/artifacts/${other.id}/versions/1/view`);
+  runtime.viewTokens().markServed(ov.body.url.split("/v/")[1].slice(0, 43), "helperServed");
+  assert.deepEqual((await ev(ov.body.tokenId)).body, { decision: "retry", reason: "unknown" }, "id mismatch");
+  assert.deepEqual((await req("GET", `/api/artifacts/${art.id}/versions/2/load-evidence?tokenId=${v.body.tokenId}`)).body, { decision: "retry", reason: "unknown" }, "version mismatch");
+  assert.equal((await req("GET", `/api/artifacts/nope/versions/1/load-evidence?tokenId=${v.body.tokenId}`)).status, 404);
+});
+
+test("D24: a retry's view call revokes the token it replaces (same artifact only)", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "D24b", type: "page", source: { html: "<p>d</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const a = await req("POST", `/api/artifacts/${art.id}/versions/1/view`);
+  const aTok = a.body.url.split("/v/")[1].slice(0, 43);
+  const b = await req("POST", `/api/artifacts/${art.id}/versions/1/view`, { body: { replaces: a.body.tokenId } });
+  assert.equal(b.status, 200);
+  assert.equal(runtime.viewTokens().check(aTok), null, "the old secret no longer serves");
+  assert.deepEqual((await req("GET", `/api/artifacts/${art.id}/versions/1/load-evidence?tokenId=${a.body.tokenId}`)).body, { decision: "retry", reason: "unknown" });
+  assert.ok(runtime.viewTokens().check(b.body.url.split("/v/")[1].slice(0, 43)), "the new token serves");
+  // A replaces id of ANOTHER artifact is ignored, never revoked.
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Other2", type: "page", source: { html: "<p>o</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const o = await req("POST", `/api/artifacts/${other.id}/versions/1/view`);
+  await req("POST", `/api/artifacts/${art.id}/versions/1/view`, { body: { replaces: o.body.tokenId } });
+  assert.ok(runtime.viewTokens().check(o.body.url.split("/v/")[1].slice(0, 43)), "another artifact's token survives");
+});
