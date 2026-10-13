@@ -21,7 +21,7 @@ import { createLocalBlobStore } from "../bundles/artifacts/server/blob-store.js"
 import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js";
 import * as store from "../bundles/artifacts/server/store.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
-import artifactsPanel, { ARTIFACTS_STRINGS, LIBRARY_CSP } from "../bundles/artifacts/panel/artifacts.js";
+import artifactsPanel, { ARTIFACTS_STRINGS } from "../bundles/artifacts/panel/artifacts.js";
 import { VIEWER_STRINGS, viewerHeaders, viewerParams, renderViewerPage, ARTIFACT_ID_RE } from "../bundles/artifacts/panel/viewer-page.js";
 import { renderLayout } from "../servers/gateway/dashboard/shared/layout.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
@@ -98,12 +98,11 @@ const layoutSpy = () => {
   return { layout, get captured() { return captured; } };
 };
 
-test("the Library frames nothing (frame-src 'none'); an old ?id= deep link redirects to the viewer page", async () => {
+test("the Library frames nothing and sends no CSP of its own (a Turbo visit would carry it into the next panel); an old ?id= deep link redirects to the viewer page", async () => {
   const res = fakeRes();
   const spy = layoutSpy();
   await artifactsPanel.handler({ query: {} }, res, { layout: spy.layout, lang: "en" });
-  assert.equal(res.headers["content-security-policy"], LIBRARY_CSP);
-  assert.match(LIBRARY_CSP, /frame-src 'none'/);
+  assert.equal(res.headers["content-security-policy"], undefined, "the gateway-wide policy applies");
   assert.doesNotMatch(spy.captured.content, /viewer\.js/, "the Library loads no viewer");
   assert.match(spy.captured.content, /data-strings="\{&quot;title&quot;:&quot;Artifacts&quot;/, "strings are HTML-escaped into the attribute");
   const resEs = fakeRes();

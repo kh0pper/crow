@@ -4,8 +4,11 @@
  *
  * The Library lists artifacts; opening one goes to the viewer page
  * (`/dashboard/artifacts/view/:id`, served by the bundle's routes), the ONE
- * page that frames the artifact origin. This page frames nothing: its CSP is
- * `frame-src 'none'`. An old deep link (`?id=art_…`, e.g. a notification's
+ * page that frames the artifact origin. This page frames nothing and sends NO
+ * CSP of its own: it is a Turbo page, and Turbo keeps the first document's
+ * policy across visits — a narrowed policy here would ride into the next
+ * panel (e.g. block the Perch hub's same-origin viewer pane). The
+ * gateway-wide policy applies. An old deep link (`?id=art_…`, e.g. a notification's
  * action_url) is redirected to the viewer page. The Library grows in PR-3
  * (linked chats, projects, sharing); every authored string is placed with
  * textContent by panel-client.js.
@@ -27,8 +30,6 @@ export const ARTIFACTS_STRINGS = {
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-// The Library frames nothing (the viewer page does): no frame source at all.
-export const LIBRARY_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
 const ID_RE = /^art_[A-Za-z0-9_-]{6,40}$/;
 
 export default {
@@ -45,7 +46,6 @@ export default {
     if (typeof req.query?.id === "string" && ID_RE.test(req.query.id)) {
       return res.redirect(302, "/dashboard/artifacts/view/" + encodeURIComponent(req.query.id));
     }
-    res.setHeader("content-security-policy", LIBRARY_CSP);
     const content = `
       <link rel="stylesheet" href="/artifacts/static/panel.css">
       <div id="crow-artifacts" data-lang="${L}" data-strings="${esc(JSON.stringify(ARTIFACTS_STRINGS[L]))}"></div>
