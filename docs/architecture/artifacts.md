@@ -102,7 +102,10 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 - the artifact, with a version switcher and the "Run scripts" button for tainted versions;
 - numbered pins for comments;
 - a threads column on wide screens, or a bottom sheet on phones and in narrow panes;
-- one primary action, "Send N comments to chat".
+- one primary action, "Send N comments to chat";
+- when it has the whole tab, links back to the Library and the Crow's Nest (in the hub pane, the pane's own close does that).
+
+The owner can edit or delete their own comments from the threads column (`PATCH`/`DELETE /api/artifacts/:id/comments/:cid`). Never while a round or ask holds the thread: what the bot was sent must match what the owner sees, so the server answers `comment_locked` and the viewer hides the buttons (`GET /api/artifacts/:id` lists `lockedThreads`). A contact's or a bot's words are never edited; a contact's comment stays deletable at any time. Edits are stamped (`edited_at`) and audited.
 
 The Perch hub's artifact card opens this page beside the chat (a same-origin iframe docked at the right from 1024 px, a full-screen sheet below that) or in a new window (`target=_blank`, `rel=noopener`). The hub itself never frames the artifact origin. The Artifacts page in the dashboard (the Library) lists artifacts and frames nothing; it sends no policy of its own, because Turbo would carry a narrowed one into the next panel. Its old `?id=` links redirect to the viewer page.
 

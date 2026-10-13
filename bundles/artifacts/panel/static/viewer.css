@@ -88,3 +88,15 @@ body{background:#eef1f3}
   .cv-comment{bottom:24px;right:372px}
   #crow-artifact-viewer{padding-bottom:24px}
 }
+/* The way out (full-tab viewer only) and the owner's comment actions. */
+.cv-nav{display:flex;flex-wrap:wrap;gap:4px 16px;margin:0 0 8px}
+.cv-nav a{color:var(--teal);text-decoration:none;font-weight:600;min-height:44px;display:inline-flex;align-items:center}
+.cv-nav a:hover,.cv-nav a:focus-visible{text-decoration:underline}
+.cv-edited{color:var(--dim);font-size:12px}
+.cv-cacts{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}
+#crow-artifact-viewer .cv-link{min-height:44px;padding:4px 8px;border-color:transparent;background:transparent;color:var(--teal);font-size:13px}
+.cv-editbox{margin:6px 0 0}
+.cv-editbox textarea{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--sky);color:var(--ink)}
+.cv-editbox .cv-row{display:flex;gap:8px;margin-top:6px}
+.cv-err{color:var(--err);margin:4px 0 0;font-size:13px}
+.cv-err:empty{display:none}
