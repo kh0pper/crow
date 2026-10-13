@@ -148,6 +148,10 @@ async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [] } =
     // sandbox needs; the browser only ever loads this test's loopback server.
     "--no-sandbox",
     "--disable-gpu",
+    // Never consult the desktop keyring: on a box whose Secret Service
+    // keyring is locked, the first cookie-store load waits forever for an
+    // unlock prompt that never comes, and every navigation hangs.
+    "--password-store=basic",
     "--disable-extensions",
     "--disable-background-networking",
     "--disable-background-timer-throttling",
