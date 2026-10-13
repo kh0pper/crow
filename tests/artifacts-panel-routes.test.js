@@ -256,3 +256,45 @@ test("viewer page route: owner session only, the exact core viewerCsp, no-store,
   assert.equal((await getPage("/artifacts/static/viewer-client.js")).status, 200);
   assert.equal((await getPage("/artifacts/static/viewer.css")).headers["content-type"], "text/css; charset=utf-8");
 });
+
+test("comment edit: the owner edits their OWN comments only, never while a round holds the thread; edits are stamped and audited", async () => {
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Edit me", type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-e1" } }, { markdownBlocks });
+  const t = await req("POST", `/api/artifacts/${doc.id}/threads`, { body: { anchor: { kind: "whole" }, text: "first words" } });
+  assert.equal(t.status, 201);
+  const cid = (await req("GET", `/api/artifacts/${doc.id}`)).body.threads[0].comments[0].id;
+  const path = `/api/artifacts/${doc.id}/comments/${cid}`;
+  assert.equal((await req("PATCH", path, { body: { text: "x" }, cookie: null })).status, 401, "owner session only");
+  assert.equal((await req("PATCH", path, { body: { text: "x" }, csrf: null })).status, 403, "CSRF on the edit");
+  const ok = await req("PATCH", path, { body: { text: "  better words  " } });
+  assert.equal(ok.status, 200);
+  const row = (await req("GET", `/api/artifacts/${doc.id}`)).body;
+  assert.equal(row.threads[0].comments[0].text, "better words");
+  assert.ok(row.threads[0].comments[0].edited_at, "edited_at stamped");
+  assert.deepEqual(row.lockedThreads, [], "no active round → nothing locked");
+  const aud = (await s.db.execute({ sql: "SELECT action, target FROM artifact_audit WHERE artifact_id=? AND action='comment-edited'", args: [doc.id] })).rows;
+  assert.deepEqual(aud.map((r) => r.target), [String(cid)]);
+  assert.equal((await req("PATCH", path, { body: { text: "   " } })).status, 400, "empty text refused");
+  // Another artifact's id in the path: not found (no cross-artifact edit).
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Other", type: "document", source: { markdown: "# o" }, actor: { kind: "session" } }, { markdownBlocks });
+  assert.equal((await req("PATCH", `/api/artifacts/${other.id}/comments/${cid}`, { body: { text: "x" } })).status, 404);
+  // A contact's or a bot's words are never rewritten under their name.
+  const { addThread, addComment } = await import("../bundles/artifacts/server/comments.js");
+  const ct = await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: { kind: "whole" }, text: "contact words", author: { kind: "contact", id: "c9" } });
+  const ccid = (await s.db.execute({ sql: "SELECT id FROM artifact_comments WHERE thread_id=?", args: [ct.threadId] })).rows[0].id;
+  assert.equal((await req("PATCH", `/api/artifacts/${doc.id}/comments/${ccid}`, { body: { text: "x" } })).status, 403);
+  const bc = await addComment(s.db, { threadId: t.body.threadId, text: "bot words", author: { kind: "bot", id: "bobby" } });
+  assert.equal((await req("PATCH", `/api/artifacts/${doc.id}/comments/${bc.commentId}`, { body: { text: "x" } })).status, 403);
+  // While a round holds the thread the bot's copy must match what the owner sees: locked.
+  await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,status,deadline) VALUES (?,'ask',1,?,0,'bobby','working',?)", args: [doc.id, JSON.stringify([t.body.threadId]), Date.now() + 60000] });
+  assert.deepEqual((await req("GET", `/api/artifacts/${doc.id}`)).body.lockedThreads, [t.body.threadId]);
+  const locked = await req("PATCH", path, { body: { text: "sneaky" } });
+  assert.equal(locked.status, 409);
+  assert.equal(locked.body.error, "comment_locked");
+  assert.equal((await req("DELETE", path)).status, 409, "the owner's own comment cannot be deleted while held either");
+  assert.equal((await req("DELETE", `/api/artifacts/${doc.id}/comments/${ccid}`)).status, 200, "a contact's comment stays deletable (D19 privacy)");
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE artifact_id=?", args: [doc.id] });
+  assert.equal((await req("PATCH", path, { body: { text: "after the round" } })).status, 200, "unlocked once the round ends");
+  // A deleted comment cannot be edited back to life.
+  assert.equal((await req("DELETE", path)).status, 200);
+  assert.equal((await req("PATCH", path, { body: { text: "back" } })).status, 404);
+});

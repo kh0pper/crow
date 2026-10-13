@@ -46,7 +46,7 @@
   function anchorText(a) { return (a && (a.text || a.quote || a.selector || a.id || a.kind)) || ""; }
   function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
 
-  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null };
+  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null };
 
   // ── skeleton ────────────────────────────────────────────────────────────
   var title = el("h1", { class: "cv-title" });
@@ -70,6 +70,14 @@
   var sectionList = el("ol", { class: "cv-sections", hidden: "", "aria-label": T.pick_section });
   var threadList = el("ol", { class: "cv-threads" });
   var side = el("aside", { class: "cv-side" }, [el("div", { class: "cv-side-head" }, [handle, sendBtn]), el("div", { class: "cv-side-body" }, [composeSlot, sectionList, threadList])]);
+  // A way out when the viewer has the whole tab (opened from the Library or
+  // "Open in new window"). Inside the hub pane the pane has its own close.
+  if (window.top === window) {
+    root.appendChild(el("nav", { class: "cv-nav", "aria-label": T.nav }, [
+      el("a", { href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
+      el("a", { href: "/dashboard/nest", text: T.nest }),
+    ]));
+  }
   root.appendChild(head);
   root.appendChild(banners);
   root.appendChild(trust);
@@ -102,7 +110,7 @@
   // ── data ────────────────────────────────────────────────────────────────
   function refresh() {
     return api("GET", BASE).then(function (j) {
-      S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null;
+      S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
       title.textContent = S.art.title;
@@ -134,6 +142,7 @@
   function shown() { return S.threads.filter(function (t) { return Number(t.version_n) === Number(S.n); }); }
 
   function renderThreads() {
+    if (S.editing != null) return;   // a poll never wipes a half-typed edit; Save/Cancel redraws
     threadList.textContent = "";
     shown().forEach(function (t, k) {
       var num = k + 1;
@@ -141,9 +150,7 @@
       var li = el("li", { class: "cv-thread cv-" + t.status, id: "cv-t" + num, tabindex: "-1" }, [
         el("div", { class: "cv-thread-head" }, [el("span", { class: "cv-num", text: String(num) }), el("span", { class: "cv-anchor", text: anchorText(t.anchor) + st })]),
       ]);
-      (t.comments || []).forEach(function (c) {
-        li.appendChild(el("p", { class: "cv-c cv-" + c.author_kind }, [el("b", { class: "cv-chip", text: authorName(c) }), el("span", { text: " " + c.text })]));
-      });
+      (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
       threadList.appendChild(li);
     });
     if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: T.no_comments }));
@@ -153,6 +160,43 @@
     sendBtn.textContent = k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
+  }
+
+  /** One comment. The owner's OWN comments get Edit/Delete — hidden while a
+   *  round or ask holds the thread (the server refuses then too). */
+  function commentNode(t, c) {
+    var p = el("p", { class: "cv-c cv-" + c.author_kind }, [el("b", { class: "cv-chip", text: authorName(c) }), el("span", { text: " " + c.text }),
+      c.edited_at ? el("span", { class: "cv-edited", text: " \u00b7 " + T.edited }) : null]);
+    if (c.author_kind === "owner" && S.locked.indexOf(Number(t.id)) < 0) {
+      p.appendChild(el("span", { class: "cv-cacts" }, [
+        button(T.edit, function () { startEdit(p, c); }, "cv-link"),
+        button(T.delete, function () { removeComment(t, c); }, "cv-link"),
+      ]));
+    }
+    return p;
+  }
+  function changeFailed(e) { return e && e.code === "comment_locked" ? T.locked_note : (e && e.message) || "error"; }
+  function startEdit(p, c) {
+    S.editing = Number(c.id);
+    var ta = el("textarea", { class: "cv-edit-text", rows: "3", "aria-label": T.edit });
+    ta.value = c.text;
+    var msg = el("p", { class: "cv-err", role: "alert" });
+    var done = function () { S.editing = null; renderThreads(); };
+    var save = function () {
+      api("PATCH", BASE + "/comments/" + encodeURIComponent(c.id), { text: ta.value })
+        .then(function () { S.editing = null; return refresh(); }, function (e) { msg.textContent = changeFailed(e); });
+    };
+    p.replaceWith(el("div", { class: "cv-editbox" }, [ta, msg, el("div", { class: "cv-row" }, [button(T.save, save, "cv-primary"), button(T.cancel, done)])]));
+    ta.focus();
+  }
+  function removeComment(t, c) {
+    if (!window.confirm(T.delete_confirm)) return;
+    api("DELETE", BASE + "/comments/" + encodeURIComponent(c.id)).then(function () {
+      // The thread's last comment gone: resolve it, so an empty thread never
+      // lingers as something to send.
+      var rest = (t.comments || []).filter(function (x) { return Number(x.id) !== Number(c.id); });
+      return rest.length ? null : api("POST", BASE + "/threads/" + encodeURIComponent(t.id) + "/status", { status: "resolved" });
+    }).then(refresh, function (e) { banner(changeFailed(e), "warn"); });
   }
 
   function focusThread(num) {

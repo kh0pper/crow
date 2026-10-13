@@ -88,9 +88,42 @@ export async function deleteComment(db, { commentId, actor }) {
   const owner = actor?.kind === "session";
   const self = actor?.kind === "contact" && c.author_kind === "contact" && c.author_id === actor.id;
   if (!owner && !self) throw err("forbidden", "not your comment");
+  // The owner's OWN words follow the edit rule (never while a round holds the
+  // thread); a contact's comment stays deletable at any time (D19 privacy).
+  if (owner && c.author_kind === "owner" && (await lockedThreadIds(db, c.artifact_id)).includes(Number(c.thread_id))) throw err("comment_locked", "this comment is with the bot right now");
   await db.execute({ sql: "UPDATE artifact_comments SET deleted_at=datetime('now'), text='' WHERE id=?", args: [commentId] });
   await audit(db, { artifactId: c.artifact_id, actor, action: "comment-deleted", target: String(commentId) });
   return { deleted: true };
+}
+
+/** The threads an ACTIVE round or ask holds (the bot's copy is in flight).
+ *  Kept in step with rounds.js ACTIVE (comments.js cannot import rounds.js:
+ *  rounds imports this module). */
+const ACTIVE_ROUND = ["queued", "pending", "delivering", "working"];
+export async function lockedThreadIds(db, artifactId) {
+  const rows = (await db.execute({ sql: `SELECT thread_ids_json FROM artifact_rounds WHERE artifact_id=? AND status IN (${ACTIVE_ROUND.map(() => "?").join(",")})`, args: [artifactId, ...ACTIVE_ROUND] })).rows;
+  const out = new Set();
+  for (const r of rows) { try { for (const id of JSON.parse(r.thread_ids_json || "[]")) out.add(Number(id)); } catch { /* unreadable → nothing added; the edit check below re-reads */ } }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** The owner edits their OWN words only (a contact's or a bot's text is never
+ *  rewritten under their name), and never while a round holds the thread:
+ *  what the bot was sent must match what the owner sees. Fail closed: an
+ *  unreadable round row locks every thread of the artifact. */
+export async function editComment(db, { commentId, artifactId, text, actor }) {
+  if (actor?.kind !== "session") throw err("forbidden", "only the owner edits comments");
+  const body = cleanText(text);
+  const c = (await db.execute({ sql: "SELECT c.*, t.artifact_id FROM artifact_comments c JOIN artifact_threads t ON t.id=c.thread_id WHERE c.id=? AND c.deleted_at IS NULL", args: [commentId] })).rows[0];
+  if (!c || c.artifact_id !== artifactId) throw err("not_found", "no such comment");
+  if (c.author_kind !== "owner") throw err("forbidden", "only your own comments can be edited");
+  const rows = (await db.execute({ sql: `SELECT thread_ids_json FROM artifact_rounds WHERE artifact_id=? AND status IN (${ACTIVE_ROUND.map(() => "?").join(",")})`, args: [artifactId, ...ACTIVE_ROUND] })).rows;
+  const held = rows.some((r) => { try { return JSON.parse(r.thread_ids_json || "[]").map(Number).includes(Number(c.thread_id)); } catch { return true; } });
+  if (held) throw err("comment_locked", "this comment is with the bot right now");
+  await db.execute({ sql: "UPDATE artifact_comments SET text=?, edited_at=datetime('now') WHERE id=? AND deleted_at IS NULL", args: [body, commentId] });
+  await db.execute({ sql: "UPDATE artifact_threads SET updated_at=datetime('now') WHERE id=?", args: [c.thread_id] });
+  await audit(db, { artifactId, actor, action: "comment-edited", target: String(commentId) });
+  return { edited: true };
 }
 
 /** D19: deleting a contact deletes their comments (the contact-deletion flow calls this). */

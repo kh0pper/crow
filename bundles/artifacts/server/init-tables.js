@@ -86,6 +86,7 @@ export async function initArtifactsTables(db) {
       -- 1 when written by a bot inside an UNTRUSTED round's session: such a
       -- reply can carry injected text and never makes a later round trusted.
       tainted INTEGER NOT NULL DEFAULT 1,           -- fail closed: only an explicit 0 is clean
+      edited_at TEXT,
       deleted_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_artifact_comments_thread ON artifact_comments(thread_id);
@@ -162,6 +163,7 @@ export const ADDED_COLUMNS = [
   ["artifact_rounds", "session_stopped_at", "TEXT"],
   ["artifact_rounds", "snapshot_json", "TEXT"],
   ["artifacts", "title_tainted", "INTEGER NOT NULL DEFAULT 1"],
+  ["artifact_comments", "edited_at", "TEXT"],
 ];
 
 export async function addColumnIfMissing(db, table, col, decl) {
