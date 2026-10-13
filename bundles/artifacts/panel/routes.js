@@ -26,7 +26,10 @@ const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const APP_ROOT = process.env.CROW_APP_ROOT || resolve(BUNDLE_DIR, "..", "..");
 const appImport = (rel) => import(pathToFileURL(join(APP_ROOT, rel)).href);
 
-const STATIC = { "viewer.js": "text/javascript; charset=utf-8", "panel-client.js": "text/javascript; charset=utf-8", "panel.css": "text/css; charset=utf-8" };
+const STATIC = {
+  "viewer.js": "text/javascript; charset=utf-8", "panel-client.js": "text/javascript; charset=utf-8", "panel.css": "text/css; charset=utf-8",
+  "viewer-client.js": "text/javascript; charset=utf-8", "viewer.css": "text/css; charset=utf-8",
+};
 
 /**
  * @param {Function} dashboardAuth
@@ -71,6 +74,27 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
 
   router.use("/api/artifacts", dashboardAuth, json({ limit: "60mb" }), csrfMw);
   router.use("/artifacts/static", dashboardAuth);
+
+  /**
+   * The viewer page (plan PR-2 Task 2.1): the one page that frames the
+   * artifact origin. Mounted at the app root like every route here; the
+   * dashboard router's `/dashboard/:panelId` matches one segment only, so
+   * this 4-segment path reaches us. Path-scoped auth; the core viewerCsp.
+   */
+  router.get("/dashboard/artifacts/view/:id", dashboardAuth, async (req, res) => {
+    try {
+      const page = await bundleImport("panel/viewer-page.js");
+      if (!page.ARTIFACT_ID_RE.test(req.params.id)) return res.status(404).type("text/plain").send("not found");
+      await ensure();
+      const origin = S.runtime.artifactOriginInfo()?.baseUrl || null;
+      for (const [k, v] of Object.entries(page.viewerHeaders(S.policy.viewerCsp, origin))) res.setHeader(k, v);
+      const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
+      const { v, thread } = page.viewerParams(req.query);
+      res.type("html").send(page.renderViewerPage({ lang: m && m[1] === "es" ? "es" : "en", id: req.params.id, v, thread }));
+    } catch {
+      res.status(500).type("text/plain").send("error");
+    }
+  });
 
   router.get("/artifacts/static/:file", (req, res) => {
     // Own properties only: a prototype key (__proto__, constructor, …) must
@@ -133,6 +157,11 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * frame-ancestors is the dashboard origin the browser itself declared on
    * this same-origin POST (Origin header), checked against Host — so every
    * instance gets its own frame-ancestors with no configuration (M5).
+   *
+   * D24: the reply carries the token's `tokenId` (its SHA-256 — not a
+   * credential) for the load-evidence route. A retry passes the frame's old
+   * tokenId as `replaces`; that token is revoked when it belongs to THIS
+   * artifact (another artifact's id is ignored).
    */
   router.post("/api/artifacts/:id/versions/:n/view", wrap(async (req, res) => {
     const info = S.runtime.artifactOriginInfo();
@@ -148,13 +177,32 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // the owner presses "Run this version's scripts" (= approve, audited).
     const scriptsOff = S.policy.isScriptedType(art.type) && M.store.isTainted(v);
     const eff = S.policy.effectiveType(art.type, scriptsOff);
-    const { token, nonce } = S.runtime.viewTokens().mint({ artifactId: art.id, versionN: Number(v.n), type: art.type, dashboardOrigin: o.origin, scriptsOff });
+    const tokens = S.runtime.viewTokens();
+    const replaces = typeof req.body?.replaces === "string" ? req.body.replaces : null;
+    if (replaces && tokens.evidence(replaces)?.artifactId === art.id) tokens.revokeToken(replaces);
+    const { token, tokenId, nonce } = tokens.mint({ artifactId: art.id, versionN: Number(v.n), type: art.type, dashboardOrigin: o.origin, scriptsOff });
     const fragment = typeof req.body?.fragment === "string" && /^b\d{1,6}$/.test(req.body.fragment) ? req.body.fragment : null;
     res.json({
-      url: `${info.baseUrl}/v/${token}/`, nonce, type: art.type, fragment,
+      url: `${info.baseUrl}/v/${token}/`, tokenId, nonce, type: art.type, fragment,
       sandbox: S.policy.iframeSandboxFor(eff), scripted: S.policy.isScriptedType(eff), scriptsOff,
       isolation: S.runtime.isolationFor(req.headers.host),
     });
+  }));
+
+  /**
+   * D24: a scripted frame said no hello in time — should the viewer flag it or
+   * offer "couldn't load — retry"? Answered from the origin's own per-token
+   * record (view-tokens.js loadDecision), which the frame content cannot
+   * suppress. Read-only (no flag, no audit — the viewer reports a flag through
+   * the tripwire route as before). A tokenId of another artifact or version,
+   * an expired/revoked one or a malformed one answers "unknown" → retry.
+   */
+  router.get("/api/artifacts/:id/versions/:n/load-evidence", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const ev = S.runtime.viewTokens().evidence(String(req.query.tokenId || ""));
+    const mine = ev && ev.artifactId === art.id && ev.versionN === Number(req.params.n);
+    res.setHeader("cache-control", "no-store");
+    res.json(S.runtime.loadDecision(mine ? ev : null));
   }));
 
   // §5.1 tripwire report: flag, revoke every live token for the artifact, audit, notify.

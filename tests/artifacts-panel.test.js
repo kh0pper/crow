@@ -1,9 +1,10 @@
-// Crow Artifacts — the panel page (plan Task 2.7): en/es string parity, the
-// page handler's CSP header + Turbo meta, and the LIVE check of Review Focus
-// 5 — arriving through a Turbo visit from another panel must full-reload into
-// this page's own CSP so the frame loads on the http://localhost:<port>
-// fallback origin. Plus phone width (412×730): no horizontal page scroll and
-// the rail below the frame (the #452 rules).
+// Crow Artifacts — the Library and the viewer page (plan PR-2 Tasks 2.1/2.5):
+// en/es string parity, the Library's no-frame CSP and its ?id redirect, the
+// viewer page's CSP + Turbo meta, and the LIVE check of Review Focus 5 —
+// arriving through a Turbo visit from another panel must full-reload into the
+// viewer page's own CSP so the frame loads on the http://localhost:<port>
+// fallback origin. Plus phone width (412×730): no horizontal page scroll, the
+// threads sheet docked at the bottom, tappable controls (the #452 rules).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
@@ -21,6 +22,7 @@ import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js"
 import * as store from "../bundles/artifacts/server/store.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 import artifactsPanel, { ARTIFACTS_STRINGS } from "../bundles/artifacts/panel/artifacts.js";
+import { VIEWER_STRINGS, viewerHeaders, viewerParams, renderViewerPage, ARTIFACT_ID_RE } from "../bundles/artifacts/panel/viewer-page.js";
 import { renderLayout } from "../servers/gateway/dashboard/shared/layout.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
@@ -46,25 +48,48 @@ test("ARTIFACTS_STRINGS: {placeholder} sets match between en and es", () => {
   assert.ok(ARTIFACTS_STRINGS.en.fallback_remote && ARTIFACTS_STRINGS.es.fallback_remote, "O11 string exists in both languages");
 });
 
-// ─── static: the client's XSS invariant (review R1) ─────────────────────
+// ─── static: the clients' XSS invariant (review R1) ─────────────────────
 
-test("panel-client places every authored text via textContent — pinned at the source (review R1)", async () => {
-  const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../bundles/artifacts/panel/static/panel-client.js", import.meta.url), "utf8");
-  // The mutation that survived: el()'s text branch flipped to innerHTML.
-  // No sink, anywhere, and the text branch must be a textContent assignment.
-  assert.doesNotMatch(src, /\.innerHTML\s*=|insertAdjacentHTML|document\.write|outerHTML\s*=/, "no HTML sink in the panel client");
-  assert.match(src, /if \(k === "text"\) n\.textContent = attrs\[k\]/, "el()'s text branch assigns textContent");
+for (const file of ["panel-client.js", "viewer-client.js"]) {
+  test(`${file} places every authored text via textContent — pinned at the source (review R1)`, async () => {
+    const src = readFileSync(new URL(`../bundles/artifacts/panel/static/${file}`, import.meta.url), "utf8");
+    // The mutation that survived: el()'s text branch flipped to innerHTML.
+    assert.doesNotMatch(src, /\.innerHTML\s*=|insertAdjacentHTML|document\.write|outerHTML\s*=/, "no HTML sink");
+    assert.match(src, /if \(k === "text"\) n\.textContent = attrs\[k\]/, "el()'s text branch assigns textContent");
+  });
+}
+
+test("D26: no owner-facing Ask-now anywhere — the Library and the viewer page never start an ask round", () => {
+  for (const file of ["panel-client.js", "viewer-client.js"]) {
+    const src = readFileSync(new URL(`../bundles/artifacts/panel/static/${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(src, /ask_now|kind:\s*"ask"|"ask"\)/, `${file}: no ask control`);
+  }
+  for (const L of ["en", "es"]) {
+    assert.equal(ARTIFACTS_STRINGS[L].ask_now, undefined);
+    assert.equal(VIEWER_STRINGS[L].ask_now, undefined);
+  }
 });
 
-// ─── static: the page handler ───────────────────────────────────────────────
+test("VIEWER_STRINGS: en/es parity, translated, same placeholders", () => {
+  const { en, es } = VIEWER_STRINGS;
+  assert.deepEqual(Object.keys(en).sort(), Object.keys(es).sort());
+  const ph = (x) => [...String(x).matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+  const same = new Set(["bot"]);   // a loanword in both languages
+  for (const k of Object.keys(en)) {
+    assert.ok(es[k] && es[k].trim(), `es.${k} non-empty`);
+    if (!same.has(k)) assert.notEqual(es[k], en[k], `es.${k} is translated`);
+    assert.equal(ph(es[k]), ph(en[k]), k);
+  }
+});
+
+// ─── static: the Library handler and the viewer page ──────────────────────
 
 function fakeRes() {
   return {
-    headers: {},
-    html: null,
+    headers: {}, html: null, redirected: null,
     setHeader(k, v) { this.headers[k.toLowerCase()] = v; },
-    send(s) { this.html = s; },
+    send(x) { this.html = x; },
+    redirect(code, url) { this.redirected = [code, url]; },
   };
 }
 const layoutSpy = () => {
@@ -73,44 +98,42 @@ const layoutSpy = () => {
   return { layout, get captured() { return captured; } };
 };
 
-test("the handler sends the core viewerCsp for the configured origin and the Turbo reload meta in head", async (ctx) => {
-  if (!chrome) return ctx.skip("no headless Chrome");
-  const savedInfo = runtime.artifactOriginInfo();
-  runtime._setInfoForTest({ baseUrl: "https://artifacts.example.ts.net", port: 0, configured: true });
-  try {
-    const res = fakeRes();
-    const spy = layoutSpy();
-    await artifactsPanel.handler({ query: {} }, res, { layout: spy.layout, lang: "en" });
-    assert.equal(res.headers["content-security-policy"], policy.viewerCsp("https://artifacts.example.ts.net"));
-    assert.match(res.headers["content-security-policy"], /frame-src https:\/\/artifacts\.example\.ts\.net\/v\//);
-    assert.equal(spy.captured.head, '<meta name="turbo-visit-control" content="reload">');
-    assert.match(spy.captured.content, /id="crow-artifacts"/);
-    assert.match(spy.captured.content, /data-strings="\{&quot;title&quot;:&quot;Artifacts&quot;/, "strings are HTML-escaped into the attribute");
-    // es renders the es strings
-    const resEs = fakeRes();
-    await artifactsPanel.handler({ query: {} }, resEs, { layout: layoutSpy().layout, lang: "es" });
-    assert.match(resEs.html, /Artefactos/);
-  } finally { runtime._setInfoForTest(savedInfo); }
+test("the Library frames nothing and sends no CSP of its own (a Turbo visit would carry it into the next panel); an old ?id= deep link redirects to the viewer page", async () => {
+  const res = fakeRes();
+  const spy = layoutSpy();
+  await artifactsPanel.handler({ query: {} }, res, { layout: spy.layout, lang: "en" });
+  assert.equal(res.headers["content-security-policy"], undefined, "the gateway-wide policy applies");
+  assert.doesNotMatch(spy.captured.content, /viewer\.js/, "the Library loads no viewer");
+  assert.match(spy.captured.content, /data-strings="\{&quot;title&quot;:&quot;Artifacts&quot;/, "strings are HTML-escaped into the attribute");
+  const resEs = fakeRes();
+  await artifactsPanel.handler({ query: {} }, resEs, { layout: layoutSpy().layout, lang: "es" });
+  assert.match(resEs.html, /Artefactos/);
+  const r = fakeRes();
+  await artifactsPanel.handler({ query: { id: "art_abc12345" } }, r, { layout: layoutSpy().layout, lang: "en" });
+  assert.deepEqual(r.redirected, [302, "/dashboard/artifacts/view/art_abc12345"]);
+  const bad = fakeRes();
+  await artifactsPanel.handler({ query: { id: '"><script>alert(1)</script>' } }, bad, { layout: layoutSpy().layout, lang: "en" });
+  assert.equal(bad.redirected, null, "a non-art id never redirects");
+  assert.doesNotMatch(bad.html, /<script>alert/, "and is never re-emitted");
 });
 
-test("the handler frames nothing without a running origin, and never trusts ?id", async (ctx) => {
-  if (!chrome) return ctx.skip("no headless Chrome");
-  const savedInfo = runtime.artifactOriginInfo();
-  runtime._setInfoForTest(null);   // no origin info
-  try {
-    const res = fakeRes();
-    await artifactsPanel.handler({ query: {} }, res, { layout: layoutSpy().layout, lang: "en" });
-    assert.match(res.headers["content-security-policy"], /frame-src 'none'/, "fail closed: nothing can be framed");
-
-    const spy = layoutSpy();
-    const res2 = fakeRes();
-    await artifactsPanel.handler({ query: { id: '"><script>alert(1)</script>' } }, res2, { layout: spy.layout, lang: "en" });
-    assert.match(spy.captured.content, /data-artifact=""/, "a non-art id is dropped");
-    assert.doesNotMatch(res2.html, /<script>alert/, "and never re-emitted");
-    const spy3 = layoutSpy();
-    await artifactsPanel.handler({ query: { id: "art_abc12345" } }, fakeRes(), { layout: spy3.layout, lang: "en" });
-    assert.match(spy3.captured.content, /data-artifact="art_abc12345"/);
-  } finally { runtime._setInfoForTest(savedInfo); }
+test("viewer page: the core viewerCsp (frame-ancestors 'self'), no-store, validated query, escaped attributes", () => {
+  const h = viewerHeaders(policy.viewerCsp, "https://artifacts.example.ts.net");
+  assert.equal(h["content-security-policy"], policy.viewerCsp("https://artifacts.example.ts.net"));
+  assert.match(h["content-security-policy"], /frame-src https:\/\/artifacts\.example\.ts\.net\/v\/; frame-ancestors 'self'/);
+  assert.equal(h["cache-control"], "no-store");
+  assert.match(viewerHeaders(policy.viewerCsp, null)["content-security-policy"], /frame-src 'none'/, "fail closed without an origin");
+  assert.deepEqual(viewerParams({ v: "3", thread: "perchlive-0123abcd" }), { v: 3, thread: "perchlive-0123abcd" });
+  assert.deepEqual(viewerParams({ v: "0", thread: "a b" }), { v: null, thread: null });
+  assert.deepEqual(viewerParams({ v: ["2"], thread: ["x"] }), { v: null, thread: null }, "arrays are not values");
+  assert.deepEqual(viewerParams({ v: "1e3", thread: '"><x' }), { v: null, thread: null });
+  const html = renderViewerPage({ lang: "es", id: "art_abc12345", v: 2, thread: "perchlive-0123abcd" });
+  assert.match(html, /<meta name="turbo-visit-control" content="reload">/);
+  assert.match(html, /data-artifact="art_abc12345" data-version="2" data-thread="perchlive-0123abcd"/);
+  assert.match(html, /<html lang="es">/);
+  assert.match(html, /&quot;comment&quot;:&quot;Comentar&quot;/);
+  assert.match(html, /<script src="\/artifacts\/static\/viewer\.js"><\/script>\s*<script src="\/artifacts\/static\/viewer-client\.js"><\/script>/);
+  assert.ok(ARTIFACT_ID_RE.test("art_abc12345") && !ARTIFACT_ID_RE.test("art_<x>"));
 });
 
 // ─── live: Turbo visit + loopback fallback + phone width ───────────────────
@@ -168,7 +191,7 @@ before(async () => {
   app.get("/dashboard/other", (_req, res) => {
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self' https:; img-src 'self' data:");
     res.setHeader("content-type", "text/html");
-    res.end(layout({ title: "Other", content: `<a id="go" href="/dashboard/artifacts?id=${encodeURIComponent(pageIds.page)}">open artifacts</a>` }));
+    res.end(layout({ title: "Other", content: `<a id="go" href="/dashboard/artifacts/view/${encodeURIComponent(pageIds.page)}">open artifact</a>` }));
   });
   app.get("/dashboard/artifacts", (req, res) => artifactsPanel.handler(req, res, { layout, lang: "en" }));
 
@@ -224,51 +247,55 @@ test("live: a Turbo visit from another panel full-reloads into this page's CSP, 
   const base = `http://${chrome.pageHost}:${port}`;
   try {
     await t.nav(`${base}/dashboard/other`);
-    assert.ok(await waitFor(() => t.evalIn(`!!window.Turbo && document.readyState === "complete"`), 10000), "the other panel loaded with Turbo");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!window.Turbo && document.readyState === "complete"`)) === true, 10000), "the other panel loaded with Turbo");
     await t.evalIn(`window.__fromOther = 1`);
     servedGets = [];
     await t.evalIn(`document.getElementById("go").click()`);
     // Arrival: the artifacts page is the document, and it got there by FULL
     // reload (turbo-visit-control) — a body swap would keep window.__fromOther
     // AND the other page's frame-src, which cannot frame http://localhost.
-    assert.ok(await waitFor(async () => (await t.evalIn(`location.pathname`)) === "/dashboard/artifacts", 10000), "navigated");
+    assert.ok(await waitFor(async () => (await t.evalIn(`location.pathname`)) === "/dashboard/artifacts/view/" + pageIds.page, 10000), "navigated");
     assert.equal(await t.evalIn(`window.__fromOther`), undefined, "full reload, not a Turbo body swap");
     assert.equal(await t.evalIn(`!!document.querySelector('meta[name="turbo-visit-control"][content="reload"]')`), true, "the meta lives in the live document's head");
     // The sealed frame mounted AND the origin actually served its content
     // (index.html of the page version) over the loopback fallback.
-    const mounted = await waitFor(() => t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`), 15000);
+    const mounted = await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000);
     assert.ok(mounted, `frame mounted (page errors: ${JSON.stringify(t.errors)})`);
     assert.ok(await waitFor(() => servedGets.length >= 1, 10000), `the origin served the frame's content (${servedGets.length} gets)`);
-    assert.equal(await t.evalIn(`!!document.querySelector('.ca-danger')`), false, "no tripwire/canary banner: the narrowed CSP was in force");
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-danger, .cv-flagged')`), false, "no tripwire/canary banner: the narrowed CSP was in force");
   } finally { await t.close(); }
 });
 
-test("live @412x730: no horizontal page scroll, the rail sits below the frame, buttons are tappable", async (ctx) => {
+test("live @412x730: no horizontal page scroll, the threads sheet docks at the bottom, controls are tappable, a section jump loads a fresh frame", async (ctx) => {
   if (!chrome || !server) return ctx.skip("no headless Chrome");
   const t = await tab();
   const base = `http://${chrome.pageHost}:${port}`;
   try {
     await t.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 730, deviceScaleFactor: 2, mobile: true });
+    // The old deep link redirects to the viewer page.
     await t.nav(`${base}/dashboard/artifacts?id=${encodeURIComponent(pageIds.doc)}`);
-    const ready = await waitFor(() => t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame') && document.querySelectorAll('.ca-rail .ca-blocks button').length >= 2`), 15000);
-    assert.ok(ready, `frame + section rail rendered (page errors: ${JSON.stringify(t.errors)})`);
+    const ready = await waitFor(async () => (await t.evalIn(`location.pathname.startsWith('/dashboard/artifacts/view/') && !!document.querySelector('iframe.crow-artifact-frame') && document.querySelectorAll('.cv-sections button').length >= 2`)) === true, 15000);
+    assert.ok(ready, `frame + sections rendered (page errors: ${JSON.stringify(t.errors)})`);
     await waitFor(() => servedGets.length >= 1, 10000);
     const m = await t.evalIn(`(() => {
       const de = document.documentElement;
-      const frame = document.querySelector('.ca-frame').getBoundingClientRect();
-      const rail = document.querySelector('.ca-rail').getBoundingClientRect();
-      const btn = document.querySelector('.ca-rail .ca-blocks button').getBoundingClientRect();
-      return JSON.stringify({ innerWidth, scrollWidth: de.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
-        frameBottom: frame.bottom, railTop: rail.top, btnH: btn.height, railBelow: rail.top >= frame.bottom - 2 });
+      const side = document.querySelector('.cv-side').getBoundingClientRect();
+      const c = document.querySelector('.cv-comment').getBoundingClientRect();
+      return JSON.stringify({ innerWidth, innerHeight, scrollWidth: de.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
+        sideBottom: side.bottom, sideH: side.height, commentH: c.height, commentW: c.width });
     })()`);
     const g = JSON.parse(m);
     assert.ok(g.scrollWidth <= g.innerWidth && g.bodyScrollWidth <= g.innerWidth, `no horizontal page scroll: ${m}`);
-    assert.equal(g.railBelow, true, `the rail is below the frame at phone width: ${m}`);
-    assert.ok(g.btnH >= 40, `section buttons are tappable (${g.btnH}px)`);
-    // A section jump mounts a fresh frame at the block (viewing is allowed
-    // pre-comments; the compose box arrives with step 3).
+    assert.ok(Math.abs(g.sideBottom - g.innerHeight) <= 2 && g.sideH <= 80, `collapsed sheet docked at the bottom: ${m}`);
+    assert.ok(g.commentH >= 44 && g.commentW >= 44, `the Comment toggle is tappable: ${m}`);
+    // Comment on a document opens the sections list in the sheet.
+    await t.evalIn(`document.querySelector('.cv-comment').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open') && !document.querySelector('.cv-sections').hidden`)) === true), "the sheet opened on the sections");
+    const btnH = await t.evalIn(`document.querySelector('.cv-sections button').getBoundingClientRect().height`);
+    assert.ok(btnH >= 44, `section buttons are tappable (${btnH}px)`);
     const before = servedGets.length;
-    await t.evalIn(`document.querySelectorAll('.ca-rail .ca-blocks button')[1].click()`);
+    await t.evalIn(`document.querySelectorAll('.cv-sections button')[1].click()`);
     assert.ok(await waitFor(() => servedGets.length > before, 10000), "the section jump loaded the fresh frame's content");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-compose textarea')`)) === true), "and opened the compose box");
   } finally { await t.close(); }
 });
