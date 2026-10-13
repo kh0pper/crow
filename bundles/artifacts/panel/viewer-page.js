@@ -36,6 +36,9 @@ export const VIEWER_STRINGS = {
     unavailable: "The artifact view is not set up on this instance.", weaker: "On this install the artifact view shares the dashboard's host name, so its isolation is weaker.",
     fallback_remote: "Artifacts on this install can only be shown on the machine Crow runs on.",
     never_password: "Crow never asks for your password inside an artifact.", gone: "This artifact is gone.", pin: "Comment {n}",
+    nav: "Leave the artifact", library: "Library", nest: "Crow's Nest",
+    edit: "Edit", delete: "Delete", save: "Save", edited: "edited", delete_confirm: "Delete this comment?",
+    locked_note: "This comment is with the bot right now. You can change it when the bot is done.",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -58,6 +61,9 @@ export const VIEWER_STRINGS = {
     unavailable: "La vista de artefactos no está configurada en esta instancia.", weaker: "En esta instalación la vista comparte el nombre de host del panel, así que su aislamiento es más débil.",
     fallback_remote: "Los artefactos de esta instalación solo pueden verse en la máquina donde corre Crow.",
     never_password: "Crow nunca te pide la contraseña dentro de un artefacto.", gone: "Este artefacto ya no existe.", pin: "Comentario {n}",
+    nav: "Salir del artefacto", library: "Biblioteca", nest: "Nido del Cuervo",
+    edit: "Editar", delete: "Eliminar", save: "Guardar", edited: "editado", delete_confirm: "¿Eliminar este comentario?",
+    locked_note: "Este comentario está con el bot ahora mismo. Podrás cambiarlo cuando el bot termine.",
   },
 };
 

@@ -122,9 +122,9 @@ test("comments: caps for contacts, D19 deletion rules, anchors validated server-
   const cid = Number((await s.db.execute({ sql: "SELECT id FROM artifact_comments WHERE author_kind='contact' LIMIT 1", args: [] })).rows[0].id);
   await assert.rejects(comments.deleteComment(s.db, { commentId: cid, actor: { kind: "contact", id: "someone-else" } }), (e) => e.code === "forbidden");
   await assert.rejects(comments.deleteComment(s.db, { commentId: cid, actor: BOT }), (e) => e.code === "forbidden");
-  assert.deepEqual(await comments.deleteComment(s.db, { commentId: cid, actor: contact }), { deleted: true });
+  assert.equal((await comments.deleteComment(s.db, { commentId: cid, actor: contact })).deleted, true);
   const ownerCid = Number((await s.db.execute({ sql: "SELECT id FROM artifact_comments WHERE author_kind='contact' AND deleted_at IS NULL LIMIT 1", args: [] })).rows[0].id);
-  assert.deepEqual(await comments.deleteComment(s.db, { commentId: ownerCid, actor: OWNER }), { deleted: true }, "the owner may delete a contact's comment");
+  assert.equal((await comments.deleteComment(s.db, { commentId: ownerCid, actor: OWNER })).deleted, true, "the owner may delete a contact's comment");
   assert.ok((await comments.deleteContactComments(s.db, "contact-alex")) > 0, "deleting the contact deletes the rest");
 });
 

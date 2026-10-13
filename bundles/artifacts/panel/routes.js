@@ -66,7 +66,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
     catch (e) {
-      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403 };
+      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -149,7 +149,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const cur = versions.find((v) => Number(v.n) === Number(art.current_version)) || null;
     const scripted = S.policy.isScriptedType(art.type);
     res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id),
-      activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)) });
+      activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
+      // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
+      lockedThreads: await M.comments.lockedThreadIds(S.db, art.id) });
   }));
 
   /**
@@ -229,6 +231,12 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     await M.store.requireAccess(S.db, OWNER, req.params.id);
     await M.comments.setThreadStatus(S.db, { threadId: Number(req.params.tid), status: req.body?.status, artifactId: req.params.id });
     res.json({ ok: true });
+  }));
+  /** The owner edits one of their own comments (comments.js editComment:
+   *  never a contact's or bot's words, never while a round holds the thread). */
+  router.patch("/api/artifacts/:id/comments/:cid", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    res.json(await M.comments.editComment(S.db, { commentId: Number(req.params.cid), artifactId: art.id, text: req.body?.text, actor: OWNER }));
   }));
   router.delete("/api/artifacts/:id/comments/:cid", wrap(async (req, res) => {
     await M.store.requireAccess(S.db, OWNER, req.params.id);

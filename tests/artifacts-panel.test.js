@@ -299,3 +299,35 @@ test("live @412x730: no horizontal page scroll, the threads sheet docks at the b
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-compose textarea')`)) === true), "and opened the compose box");
   } finally { await t.close(); }
 });
+
+test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hub pane does not; the owner edits a comment in place and it locks while a round holds it", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Edit doc", type: "document", source: { markdown: "# One\n\nwords" }, actor: OWNER }, { markdownBlocks });
+  const th = await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: { kind: "whole" }, text: "old words", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const viewUrl = `/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`;
+  try {
+    await t.nav(base + viewUrl);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-cacts')`)) === true, 15000), `comment actions drawn (page errors: ${JSON.stringify(t.errors)})`);
+    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/artifacts", "/dashboard/nest"]));
+    // Edit → Save: the text changes in place and says "edited".
+    await t.evalIn(`document.querySelector('.cv-cacts .cv-link').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-editbox textarea')`)) === true), "the edit box opened");
+    await t.evalIn(`(() => { const ta = document.querySelector('.cv-editbox textarea'); ta.value = 'new words'; document.querySelector('.cv-editbox .cv-primary').click(); })()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!document.querySelector('.cv-editbox') && document.querySelector('.cv-c.cv-owner').textContent.includes('new words') && !!document.querySelector('.cv-edited')`)) === true), "saved and marked edited");
+    const row = (await s.db.execute({ sql: "SELECT text FROM artifact_comments WHERE thread_id=?", args: [th.threadId] })).rows[0];
+    assert.equal(row.text, "new words");
+    // A round holds the thread: no Edit/Delete after the next load.
+    await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,status,deadline) VALUES (?,'ask',1,?,0,'bobby','working',?)", args: [doc.id, JSON.stringify([th.threadId]), Date.now() + 60000] });
+    await t.nav(base + viewUrl);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-c.cv-owner') && !document.querySelector('.cv-cacts')`)) === true, 15000), "locked while the round holds it");
+    // Inside a frame (the hub pane): no nav — the pane has its own close.
+    await t.nav(`${base}/dashboard/other`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.readyState === "complete"`)) === true, 10000));
+    await t.evalIn(`(() => { const f = document.createElement('iframe'); f.id = 'pane'; f.src = ${JSON.stringify(viewUrl)}; document.body.appendChild(f); })()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(() => { const d = document.getElementById('pane').contentDocument; return !!(d && d.querySelector('.cv-head')); })()`)) === true, 15000), "the framed viewer rendered");
+    assert.equal(await t.evalIn(`!!document.getElementById('pane').contentDocument.querySelector('.cv-nav')`), false);
+  } finally { await t.close(); }
+});
