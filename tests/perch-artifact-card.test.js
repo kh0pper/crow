@@ -123,6 +123,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     document: {
       createElement: (tag) => makeEl(tag),
       addEventListener(type, fn) { (sandbox.__docListeners[type] ||= []).push(fn); },
+      removeEventListener(type, fn) { const l = sandbox.__docListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
       getElementById: (id) => (id === "perch-hub-root" ? hubRoot : null),
       body: { classList: classList(bodyClasses), appendChild: (c) => hubRoot.appendChild(c) },
     },
@@ -363,7 +364,9 @@ test("Q2 pane: the viewer URL, the 1024px breakpoint, split vs sheet, Escape and
   assert.equal(api.pane().className, "art-pane art-pane-sheet", "re-opening replaces the pane");
   assert.equal(hub.hubRoot.children.length, 1, "never two panes");
   assert.ok(hub.bodyClasses.has("perch-art-sheet") && !hub.bodyClasses.has("perch-art-split"));
-  hub.sandbox.__docListeners.keydown.forEach((f) => f({ key: "Escape" }));
+  assert.equal((hub.sandbox.__docListeners.keydown || []).length, 1, "one Escape listener while open");
+  hub.sandbox.__docListeners.keydown.slice().forEach((f) => f({ key: "Escape" }));
+  assert.equal(hub.sandbox.__docListeners.keydown.length, 0, "and none once closed (no load-time document listener)");
   assert.equal(api.pane(), null);
   assert.equal(hub.hubRoot.children.length, 0);
   assert.equal(hub.bodyClasses.size, 0);

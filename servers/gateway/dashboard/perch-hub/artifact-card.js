@@ -78,8 +78,13 @@ export function perchArtifactCardJs(lang = "en") {
   function artPaneMode(w){ return Number(w)>=1024?'split':'sheet'; }
 
   var artPane=null;
+  /* Escape closes the pane. Attached only while a pane is open, never at
+     script load: every Turbo visit re-runs this script, and a load-time
+     document listener would pile up one per visit (perch-hub-stream-leak). */
+  function artPaneKey(e){ if(e.key==='Escape'&&artPane) closeArtifactPane(); }
   function closeArtifactPane(){
     if(!artPane) return;
+    document.removeEventListener('keydown',artPaneKey);
     if(artPane.parentNode) artPane.parentNode.removeChild(artPane);
     artPane=null;
     document.body.classList.remove('perch-art-split');
@@ -106,9 +111,9 @@ export function perchArtifactCardJs(lang = "en") {
     (document.getElementById('perch-hub-root')||document.body).appendChild(p);
     document.body.classList.add(mode==='split'?'perch-art-split':'perch-art-sheet');
     artPane=p;
+    document.addEventListener('keydown',artPaneKey);
     back.focus();
   }
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&artPane) closeArtifactPane(); });
 
   function artApi(method,path,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};
