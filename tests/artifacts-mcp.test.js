@@ -527,3 +527,76 @@ test("L3 (review): links never fan out for an operator-made artifact, and a dele
     assert.deepEqual(await linkedThreads(s.db, "art_nope"), [], "an unknown artifact fans out nowhere");
   } finally { await c.close(); }
 });
+
+// ─── PR-3: ask-first linking (Task 3.5) and artifact_find (Task 3.6) ──────
+
+test("artifact_attach: scope-checked first; raises ONE pending request and a link-ask card in the REQUESTING chat only; already linked is a no-op; never writes a link", async () => {
+  await freshSession("bobby", "perchlive-at01");
+  await freshSession("mallory", "perchlive-at02");
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Attach me", type: "document", source: { markdown: "# a" } })).data.id;
+  const links = async () => (await s.db.execute({ sql: "SELECT thread_id FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL ORDER BY id", args: [id] })).rows.map((r) => r.thread_id);
+  // The origin chat is already linked: a no-op success, no request, no card.
+  s.frames.length = 0;
+  assert.deepEqual((await call(maker, "artifact_attach", { artifact_id: id })).data, { linked: true });
+  assert.equal(s.frames.length, 0);
+  // Another bot: the standard scope error, nothing written.
+  const mal = await client(s.artToken, bot("mallory", "perchlive-at02"));
+  assert.match((await call(mal, "artifact_attach", { artifact_id: id })).err, /not_found/);
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=?", args: [id] })).rows[0].n, 0);
+  // A new chat of the same bot asks.
+  const c = await client(s.artToken, bot("bobby", "perchlive-at01"));
+  const r = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(r.err, null, r.err);
+  assert.equal(r.data.requested, true);
+  assert.match(r.data.note, /owner decides/);
+  assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.frame.artifactId, f.opts.botId]), [["perchlive-at01", "link-ask", id, "bobby"]], "the card goes to the requesting chat only");
+  assert.deepEqual(await links(), ["perchlive-1"], "a bot never links: still only the origin link");
+  // A duplicate while pending: the same request, no second card.
+  s.frames.length = 0;
+  const again = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(again.data.request_id, r.data.request_id);
+  assert.equal(s.frames.length, 0);
+  // L8 cap: pending + declined per (artifact, chat) per day.
+  await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='declined', decided_at=datetime('now') WHERE artifact_id=?", args: [id] });
+  for (let i = 0; i < 3; i++) await s.db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id,bot_id,thread_id,status,decided_at) VALUES (?,?,?,'declined',datetime('now'))", args: [id, "bobby", "perchlive-at01"] });
+  const fifth = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(fifth.err, null, "four used: the fifth still asks");
+  await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='declined' WHERE artifact_id=?", args: [id] });
+  const capped = await call(c, "artifact_attach", { artifact_id: id });
+  assert.match(capped.err, /rate_limited/);
+  assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-refused'", args: [id] })).rows.length, "the refusal is audited");
+  await c.close(); await mal.close(); await maker.close();
+});
+
+test("artifact_attach: a channel turn (not a Perch chat) cannot ask — there is no card to show it in", async () => {
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Channel", type: "document", source: { markdown: "# c" } })).data.id;
+  const h = { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "bobby", "X-Crow-Actor-Thread": "gmail-thread-9", "X-Crow-Actor-Gateway": "gmail" };
+  h["X-Crow-Actor-Sig"] = signArtifactsActor({ botId: "bobby", threadId: "gmail-thread-9", gatewayType: "gmail" });
+  const ch = await client(s.artToken, h);
+  assert.match((await call(ch, "artifact_attach", { artifact_id: id })).err, /forbidden/);
+  await ch.close(); await maker.close();
+});
+
+test("artifact_find: id, viewer URL (host ignored, query/fragment ok) and title arms; ambiguity lists candidates; another bot's artifacts are invisible", async () => {
+  const c = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const a = (await call(c, "artifact_create", { title: "Quarterly Garden Plan", type: "document", source: { markdown: "# g" } })).data.id;
+  const b = (await call(c, "artifact_create", { title: "Garden budget", type: "document", source: { markdown: "# b" } })).data.id;
+  const byId = (await call(c, "artifact_find", { ref: a })).data;
+  assert.equal(byId.artifact.id, a);
+  for (const url of [`https://crow.example.ts.net:8444/dashboard/artifacts/view/${a}`, `/dashboard/artifacts/view/${a}?v=1&thread=perchlive-1`, `https://elsewhere.example/dashboard/artifacts/view/${a}#c2`]) {
+    assert.equal((await call(c, "artifact_find", { ref: url })).data.artifact.id, a, url);
+  }
+  assert.equal((await call(c, "artifact_find", { ref: "quarterly garden" })).data.artifact.id, a, "case-insensitive title substring, single match");
+  const amb = (await call(c, "artifact_find", { ref: "garden" })).data;
+  assert.equal(amb.artifact, undefined);
+  assert.deepEqual(amb.candidates.map((x) => x.id).sort(), [a, b].sort());
+  assert.ok(amb.candidates.every((x) => x.title && x.type && x.current_version), "candidate rows carry id, title, type, version");
+  assert.match((await call(c, "artifact_find", { ref: "no such thing here" })).err, /not_found/);
+  const mal = await client(s.artToken, bot("mallory", "perchlive-2"));
+  assert.match((await call(mal, "artifact_find", { ref: a })).err, /not_found/, "another bot's id: invisible");
+  assert.match((await call(mal, "artifact_find", { ref: "garden" })).err, /not_found/, "another bot's titles: invisible");
+  assert.match((await call(mal, "artifact_find", { ref: `/dashboard/artifacts/view/${a}` })).err, /not_found/);
+  await c.close(); await mal.close();
+});

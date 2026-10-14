@@ -7,6 +7,7 @@ import * as comments from "./comments.js";
 import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
 import { notifyHub } from "./notify-hub.js";
+import { activeLink } from "./links.js";
 
 // Header values are TRIMMED so the attributed id always equals the id the
 // signature was made over (the MAC trims on both sides; review 1a-L2).
@@ -106,6 +107,7 @@ export function gate(payload, actor, scope, roundThreads) {
 export const TOOL_CLASSES = Object.freeze({
   artifact_create: "writes", artifact_update: "writes", artifact_get: "reads-untrusted", artifact_list: "reads-owner-metadata",
   artifact_comments: "reads-untrusted", artifact_reply: "writes", artifact_resolve: "writes", artifact_round_done: "writes",
+  artifact_attach: "writes", artifact_find: "reads-owner-metadata",
 });
 // CONTRACT: error text reaches the wire UNGATED, so every message thrown at a
 // caller must be a static string — never interpolate a title, change note,
@@ -297,6 +299,62 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       await onRoundDone(r);
       await hub(a.artifact_id, r.result_version == null ? null : Number(r.result_version), "round-done");
       return { round: r.id, status: r.status, late: !!r.late, idempotent: !!r.idempotent };
+    });
+
+  // ── PR-3 Task 3.5: ask-first linking ────────────────────────────────────
+  // A bot can never link silently. artifact_attach only ASKS: one pending
+  // request per (artifact, chat), an ask card in the REQUESTING chat, and the
+  // owner's Yes (the panel's decide route) is the only thing that links.
+  // Scope-checked first (the standard not_found), Perch chats only (a channel
+  // turn has no card to show), capped per day (review L8).
+  const ATTACH_DAILY_CAP = 5;
+  tool("artifact_attach", "Ask the owner to link one of your artifacts to THIS chat, so its updates and the owner's feedback come here. The owner decides; nothing is linked until they say yes.",
+    { artifact_id: z.string() },
+    async (a, actor, scope) => {
+      scopedOut(scope);
+      if (actor.kind !== "bot" || actor.gateway !== "perch" || !actor.thread) throw Object.assign(new Error("artifact_attach works from a Perch chat"), { code: "forbidden" });
+      const art = await store.requireAccess(db, actor, a.artifact_id);
+      if (await activeLink(db, art.id, actor.thread)) return { linked: true };
+      const pending = (await db.execute({ sql: "SELECT id FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status='pending' ORDER BY id DESC LIMIT 1", args: [art.id, actor.thread] })).rows[0];
+      if (pending) return { requested: true, request_id: Number(pending.id), note: "link requested — the owner decides" };
+      const used = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status IN ('pending','declined') AND requested_at > datetime('now','-1 day')", args: [art.id, actor.thread] })).rows[0].n);
+      if (used >= ATTACH_DAILY_CAP) {
+        await store.audit(db, { artifactId: art.id, actor, action: "link-refused", target: String(actor.thread), detail: { reason: "daily_cap" } });
+        throw Object.assign(new Error("too many link requests for this chat today"), { code: "rate_limited" });
+      }
+      const r = await db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id, bot_id, thread_id) VALUES (?,?,?)", args: [art.id, actor.id, actor.thread] });
+      const rid = Number(r.lastInsertRowid);
+      await store.audit(db, { artifactId: art.id, actor, action: "link-requested", target: String(actor.thread), detail: { request: rid } });
+      // The ask card: the requesting chat ONLY (never the artifact's links).
+      if (typeof emitExternal === "function") {
+        try { await emitExternal(actor.thread, { type: "artifact", artifactId: art.id, n: null, event: "link-ask" }, { botId: actor.id }); } catch { /* the store holds the request; the hub refetches on open */ }
+      }
+      return { requested: true, request_id: rid, note: "link requested — the owner decides" };
+    });
+
+  // ── PR-3 Task 3.6: artifact_find(ref) — a thin wrapper over the scope check.
+  // ref = an id, a viewer URL (path only; any host), or a title fragment. A
+  // bot's title arm matches only titles that are not tainted: a tainted title
+  // is outside text, and substring probing would read it one bit at a time.
+  const VIEW_PATH = /\/dashboard\/artifacts\/view\/(art_[A-Za-z0-9_-]{6,40})\/?$/;
+  tool("artifact_find", "Find one of your artifacts by id, by its viewer link, or by words from its title.",
+    { ref: z.string() },
+    async (a, actor, scope) => {
+      scopedOut(scope);
+      const ref = String(a.ref || "").trim().slice(0, 500);
+      if (!ref) throw Object.assign(new Error("ref required"), { code: "bad_request" });
+      let id = /^art_[A-Za-z0-9_-]{6,40}$/.test(ref) ? ref : null;
+      if (!id) { try { const m = VIEW_PATH.exec(new URL(ref, "http://ref.invalid").pathname); if (m) id = m[1]; } catch { id = null; } }
+      const row = (r) => ({ id: r.id, title: store.flagUntrusted(r.title_tainted) ? U(r.title, { artifactId: r.id }) : r.title, type: r.type, current_version: r.current_version });
+      if (id) return { artifact: row(await store.requireAccess(db, actor, id)) };
+      const like = "%" + ref.toLowerCase().replace(/[\\%_]/g, (c) => "\\" + c) + "%";
+      const visible = actor.kind === "session"
+        ? { sql: "SELECT * FROM artifacts WHERE deleted_at IS NULL AND lower(title) LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 11", args: [like] }
+        : { sql: "SELECT * FROM artifacts WHERE deleted_at IS NULL AND received=0 AND title_tainted=0 AND (created_by_bot=? OR id IN (SELECT artifact_id FROM artifact_bot_access WHERE bot_id=?)) AND lower(title) LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 11", args: [actor.id, actor.id, like] };
+      const hits = (await db.execute(visible)).rows;
+      if (!hits.length) throw Object.assign(new Error("no such artifact"), { code: "not_found" });
+      if (hits.length === 1) return { artifact: row(hits[0]) };
+      return { candidates: hits.slice(0, 10).map(row) };
     });
 
   return server;

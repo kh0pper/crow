@@ -67,7 +67,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     try { await ensure(); await fn(req, res); }
     catch (e) {
       const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409,
-        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400 };
+        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, already_decided: 409 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -138,6 +138,49 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
         return { artifactId: r.artifact_id, event: THREAD_EVENT_FOR[r.action], n: v ? Number(v[1]) : null, ts: r.ts };
       }),
     });
+  }));
+
+  /**
+   * Ask-first linking, the owner's side (plan PR-3 Task 3.5, spec D25). A bot's
+   * artifact_attach left a PENDING request and an ask card in its chat; the
+   * hub lists that chat's pending requests here and the owner decides. Only
+   * Yes writes the link (owner-yes), audited, and the chat hears
+   * "link-decided". One decision wins (the UPDATE is the claim). Registered
+   * before /api/artifacts/:id so "link-requests" is never read as an id.
+   */
+  const emitTo = async (thread, frame, botId) => {
+    try {
+      const emit = S.emitExternal || (await appImport("servers/gateway/perch-interactive.js")).emitExternalToResident;
+      await emit(thread, frame, { botId });
+    } catch { /* the store holds the decision; the hub refetches on open */ }
+  };
+  router.get("/api/artifacts/link-requests", wrap(async (req, res) => {
+    const thread = String(req.query.thread || "");
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(thread)) throw Object.assign(new Error("thread"), { code: "bad_request" });
+    const rows = (await S.db.execute({ sql: "SELECT r.id, r.artifact_id, r.bot_id, r.requested_at, a.title FROM artifact_link_requests r JOIN artifacts a ON a.id=r.artifact_id WHERE r.thread_id=? AND r.status='pending' AND a.deleted_at IS NULL ORDER BY r.id", args: [thread] })).rows;
+    res.setHeader("cache-control", "no-store");
+    res.json({ requests: rows.map((r) => ({ id: Number(r.id), artifactId: r.artifact_id, title: r.title, botId: r.bot_id, requestedAt: r.requested_at })) });
+  }));
+  router.post("/api/artifacts/link-requests/:rid/decide", wrap(async (req, res) => {
+    const rid = Number(req.params.rid);
+    const r = Number.isInteger(rid) ? (await S.db.execute({ sql: "SELECT * FROM artifact_link_requests WHERE id=?", args: [rid] })).rows[0] : null;
+    if (!r) throw Object.assign(new Error("no such request"), { code: "not_found" });
+    const art = await M.store.requireAccess(S.db, OWNER, r.artifact_id);
+    const accept = req.body?.accept === true;
+    const claim = (status) => S.db.execute({ sql: "UPDATE artifact_link_requests SET status=?, decided_at=datetime('now') WHERE id=? AND status='pending'", args: [status, rid] });
+    // A Yes for a bot that can no longer reach the artifact links nothing.
+    if (accept && !(await M.store.canAccess(S.db, { kind: "bot", id: r.bot_id }, art))) {
+      if (Number((await claim("declined")).rowsAffected) === 1) await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "link-declined", target: r.thread_id, detail: { reason: "no_access" } });
+      throw Object.assign(new Error("that bot can't work on this artifact"), { code: "target_no_access" });
+    }
+    if (Number((await claim(accept ? "accepted" : "declined")).rowsAffected) !== 1) throw Object.assign(new Error("already decided"), { code: "already_decided" });
+    if (accept) {
+      try { await S.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, r.bot_id, r.thread_id] }); }
+      catch (e) { if (!/UNIQUE/i.test(String(e.message))) throw e; /* already actively linked */ }
+    }
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: accept ? "link-accepted" : "link-declined", target: r.thread_id, detail: { request: rid } });
+    await emitTo(r.thread_id, { type: "artifact", artifactId: art.id, n: null, event: "link-decided" }, r.bot_id);
+    res.json({ decided: accept ? "accepted" : "declined" });
   }));
 
   router.get("/api/artifacts/:id", wrap(async (req, res) => {

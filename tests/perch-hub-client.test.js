@@ -212,7 +212,9 @@ test("async continuations are guarded — a fast back button must not cross sess
   // 28 as of the Artifacts chat card (spec v1.6, chat-first PR-1):
   // artifactRefetch, loadArtifactCards (list continuation + the buffered-frame
   // continuation) and the Run-scripts action continuation.
-  assert.equal(guards, 28, "expected exactly 28 identity guards, found " + guards);
+  // 30 as of chat-first PR-3 (ask-first linking): loadLinkAsks' list
+  // continuation and the Yes/No decide continuation.
+  assert.equal(guards, 30, "expected exactly 30 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

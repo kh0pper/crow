@@ -102,11 +102,13 @@ test("document: the frame loads from the artifact host, a section comment is add
     assert.deepEqual(JSON.parse(th[0].anchor_json), { kind: "block", id: "b2", text: "The first step.", quote: "" });
     await t.evalIn("document.querySelector('.cv-send').click()");
     assert.ok(await yes(t, "!!document.querySelector('dialog.cv-preview[open]')"));
-    await t.evalIn("document.querySelector('dialog.cv-preview button').click()");
-    assert.ok(await yes(t, "document.body.textContent.includes(\"The bot isn't running\")"), "no live session: D4 choice shown");
+    // PR-3 send sheet: no linked chat here, so the where-step offers only a
+    // new chat (preselected); the owner chooses in the sheet — no banner.
+    assert.equal(await t.evalIn("JSON.stringify([...document.querySelectorAll('dialog.cv-preview .cv-where-opt')].map(l => [l.textContent.trim(), l.querySelector('input').checked]))"), JSON.stringify([["New chat with bobby", true], ["Create a board card", false]]), "this harness has the real board factory, so the board is offered");
     assert.deepEqual(s.spawns, [], "nothing spawned before the owner chooses");
-    await t.evalIn("[...document.querySelectorAll('.cv-banner button')].find(b => b.textContent.includes('Perch')).click()");
+    await t.evalIn("document.querySelector('dialog.cv-preview .cv-primary').click()");
     assert.ok(await waitFor(() => s.messages.length === 1), "the round reached the engine");
+    assert.equal(await t.evalIn("!!document.querySelector('.cv-banner button')"), false, "no D4 banner");
     assert.deepEqual(s.spawns, [{ botId: "bobby" }], "a trusted round: an ordinary new session");
     assert.match(s.messages[0], /Say which step first/);
   } finally { await t.close(); }
@@ -233,8 +235,8 @@ test("a bot without the Artifacts tools: the owner sees the delivery failure, ne
     assert.ok(await yes(t, "!!document.querySelector('.cv-send')"));
     await t.evalIn("document.querySelector('.cv-send').click()");
     assert.ok(await yes(t, "!!document.querySelector('dialog.cv-preview[open]')"));
-    await t.evalIn("document.querySelector('dialog.cv-preview button').click()");
-    assert.ok(await yes(t, "document.body.textContent.includes('bot_lacks_artifacts')"), "the failure reason is shown");
+    await t.evalIn("document.querySelector('dialog.cv-preview .cv-primary').click()");
+    assert.ok(await yes(t, "document.body.textContent.includes('no longer has the Artifacts tools')"), "the failure reason is shown, in words");
     assert.equal(await t.evalIn("document.body.textContent.includes('working on your comments')"), false, "never a false 'revising' banner");
     assert.equal(s.spawns.length, spawnsBefore, "nothing spawned");
     assert.equal(s.messages.length, messagesBefore, "nothing sent");

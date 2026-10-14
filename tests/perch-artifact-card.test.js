@@ -60,8 +60,9 @@ test("T1 static pin: every async continuation carries the artGen guard (review M
   const js = perchArtifactCardJs("en");
   // refetch, by-thread list continuation, buffered-frame continuation, and
   // the Run-scripts action (L4). If this count moves, a guard moved with it.
-  assert.equal((js.match(/gen!==artGen/g) || []).length, 4, "four artGen guards");
-  assert.equal((js.match(/gen=artGen/g) || []).length, 3, "captured at call/render time in the three functions that await");
+  // PR-3 adds the link-ask list continuation and the Yes/No decision.
+  assert.equal((js.match(/gen!==artGen/g) || []).length, 6, "six artGen guards");
+  assert.equal((js.match(/gen=artGen/g) || []).length, 5, "captured at call/render time in the five functions that await");
 });
 
 test("every card string is a translated key with en AND es", async () => {
@@ -159,6 +160,8 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     cards: function(){ return artCards; },
     noBundle: function(){ return artNoBundle; },
     pushBufForTest: function(d){ artBuf.push(d); },
+    loadLinkAsks: loadLinkAsks,
+    asks: function(){ return artAsks; },
   });\n})();`;
   vm.runInContext(src, sandbox);
   return { sandbox, transcript, fetches, hubRoot, bodyClasses };
@@ -296,7 +299,7 @@ test("loadArtifactCards replays the by-thread batch: distinct artifacts, oldest 
   assert.equal(cards.length, 2, "one card per DISTINCT artifact");
   assert.deepEqual(texts(cards[0]).filter((t) => t.startsWith("T-")), ["T-art_a"]);
   assert.deepEqual(texts(cards[1]).filter((t) => t.startsWith("T-")), ["T-art_b"]);
-  const gets = hub.fetches.filter((f) => f.method === "GET" && !f.url.includes("/by-thread/")).map((f) => f.url);
+  const gets = hub.fetches.filter((f) => f.method === "GET" && !f.url.includes("/by-thread/") && !f.url.includes("/link-requests?")).map((f) => f.url);
   assert.deepEqual(gets, ["/api/artifacts/art_a", "/api/artifacts/art_b"],
     "one refetch per distinct artifact, in batch order (the pre-settle buffering arm itself is pinned statically + in the hub harness)");
 });
@@ -470,4 +473,73 @@ test("review M2: retiring the hub (a Turbo visit away) closes an open viewer pan
   const client = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/client.js", import.meta.url), "utf8");
   const retire = client.slice(client.indexOf("HUB.retire=function(){"), client.indexOf("};", client.indexOf("HUB.retire=function(){")));
   assert.match(retire, /closeArtifactPane\(\);/);
+});
+
+// ---------------------------------------------------------------------------
+// PR-3 Task 3.5: the ask-first link card
+// ---------------------------------------------------------------------------
+
+test("link-ask: the frame refetches this chat's pending requests; each draws ONE Yes/No card; the title lands as text", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [{ id: 7, artifactId: "art_lk", title: "<b>Plan</b>", botId: "bobby" }] });
+      return json(row({ id: "art_lk", title: "Plan" }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.artifactFrame({ type: "artifact", artifactId: "art_lk", n: null, event: "link-ask" }, sidX);
+  await tick();
+  assert.ok(hub.fetches.some((f) => f.url === "/api/artifacts/link-requests?thread=" + sidX), "asked the store, not the frame");
+  assert.equal(hub.fetches.filter((f) => f.url === "/api/artifacts/art_lk").length, 0, "no artifact card for an unlinked artifact");
+  const cards = byClass(hub.transcript, "artask");
+  assert.equal(cards.length, 1);
+  assert.ok(texts(cards[0]).some((t) => t.includes("<b>Plan</b>")), "markup stays text");
+  api.artifactFrame({ type: "artifact", artifactId: "art_lk", n: null, event: "link-ask" }, sidX);
+  await tick();
+  assert.equal(byClass(hub.transcript, "artask").length, 1, "the same request never draws twice");
+});
+
+test("link-ask Yes → the decide route with CSRF, the card goes, the artifact card draws; No → declined, no artifact card", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  for (const [btn, accept] of [["art-link-yes", true], ["art-link-no", false]]) {
+    const hub = mountCard({
+      sid: sidX,
+      fetchImpl: (m, url) => {
+        if (m === "POST") return json({ decided: accept ? "accepted" : "declined" });
+        if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [{ id: 9, artifactId: "art_yn", title: "Plan", botId: "bobby" }] });
+        return json(row({ id: "art_yn", title: "Plan" }));
+      },
+    });
+    const api = hub.sandbox.__exportedApi;
+    api.loadLinkAsks(sidX);
+    await tick();
+    byClass(byClass(hub.transcript, "artask")[0], btn)[0].onclick();
+    await tick();
+    const post = hub.fetches.find((f) => f.method === "POST");
+    assert.equal(post.url, "/api/artifacts/link-requests/9/decide");
+    assert.equal(post.opts.headers["X-Crow-Csrf"], "tok");
+    assert.equal(JSON.parse(post.opts.body).accept, accept);
+    assert.equal(byClass(hub.transcript, "artask").length, 0, "the ask card is gone");
+    assert.equal(byClass(hub.transcript, "artcard").length, accept ? 1 : 0, accept ? "Yes draws the artifact card" : "No draws nothing");
+  }
+});
+
+test("reload: loadArtifactCards also redraws this chat's pending link asks; a reset drops them", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/by-thread/")) return json({ items: [] });
+      if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [{ id: 3, artifactId: "art_rl", title: "Plan", botId: "bobby" }] });
+      return json(row({ id: "art_rl" }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadArtifactCards(sidX);
+  await tick();
+  assert.equal(byClass(hub.transcript, "artask").length, 1);
+  api.resetArtifactCards();
+  assert.deepEqual(Object.keys(api.asks()), [], "the index dies with the transcript");
 });

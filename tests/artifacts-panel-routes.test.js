@@ -18,7 +18,7 @@ import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js"
 import * as store from "../bundles/artifacts/server/store.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 
-const s = { notes: [], spawns: [] };
+const s = { notes: [], spawns: [], frames: [] };
 before(async () => {
   s.dir = mkdtempSync(join(tmpdir(), "artifacts-routes-"));
   s.db = createDbClient(join(s.dir, "crow.db"));
@@ -37,6 +37,7 @@ before(async () => {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine,
     loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts/artifact_update"] } }),
     createBoardCard: null,
+    emitExternal: async (tid, frame, o) => { s.frames.push({ tid, frame, o }); return { delivered: true }; },
     notify: async (n) => s.notes.push(n),
   }));
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
@@ -424,4 +425,38 @@ test("send sheet data (PR-3 Task 3.4): GET :id/links lists ACTIVE links most rec
     assert.equal(r.body.offerBoard, false, "this harness has no board factory");
     assert.equal((await req("GET", `/api/artifacts/${art.id}/links`, { cookie: null })).status, 401);
   } finally { s.engineSessions = null; }
+});
+
+test("ask-first linking (PR-3 Task 3.5): the owner lists a chat's pending requests and decides; only Yes links (audited, the chat is told); one decision wins", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Ask to link", type: "document", source: { markdown: "# a" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-k1", gateway: "perch" } }, { markdownBlocks });
+  const ask = async (thread) => Number((await s.db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id,bot_id,thread_id) VALUES (?,?,?)", args: [art.id, "bobby", thread] })).lastInsertRowid);
+  const yes = await ask("perchlive-k2");
+  const no = await ask("perchlive-k3");
+  const list = await req("GET", "/api/artifacts/link-requests?thread=perchlive-k2");
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body.requests.map((r) => [r.id, r.artifactId, r.title, r.botId]), [[yes, art.id, "Ask to link", "bobby"]], "this chat's pending requests only");
+  assert.equal((await req("GET", "/api/artifacts/link-requests?thread=perchlive-k2", { cookie: null })).status, 401);
+  assert.equal((await req("POST", `/api/artifacts/link-requests/${yes}/decide`, { body: { accept: true }, csrf: null })).status, 403, "CSRF on the decision");
+  s.frames.length = 0;
+  const ok = await req("POST", `/api/artifacts/link-requests/${yes}/decide`, { body: { accept: true } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.decided, "accepted");
+  const linked = (await s.db.execute({ sql: "SELECT linked_by FROM artifact_links WHERE artifact_id=? AND thread_id='perchlive-k2' AND unlinked_at IS NULL", args: [art.id] })).rows;
+  assert.deepEqual(linked.map((r) => r.linked_by), ["owner-yes"]);
+  assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.o.botId]), [["perchlive-k2", "link-decided", "bobby"]]);
+  assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-accepted' AND target='perchlive-k2'", args: [art.id] })).rows.length);
+  assert.equal((await req("POST", `/api/artifacts/link-requests/${yes}/decide`, { body: { accept: false } })).status, 409, "already decided: the first decision stands");
+  // Two decisions racing: exactly one wins.
+  const raced = await Promise.all([req("POST", `/api/artifacts/link-requests/${no}/decide`, { body: { accept: false } }), req("POST", `/api/artifacts/link-requests/${no}/decide`, { body: { accept: true } })]);
+  assert.deepEqual(raced.map((r) => r.status).sort(), [200, 409]);
+  const winner = raced.find((r) => r.status === 200).body.decided;
+  const k3 = (await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND thread_id='perchlive-k3' AND unlinked_at IS NULL", args: [art.id] })).rows[0].n;
+  assert.equal(Number(k3), winner === "accepted" ? 1 : 0, "a link exists only if Yes won");
+  assert.deepEqual((await req("GET", "/api/artifacts/link-requests?thread=perchlive-k2")).body.requests, [], "nothing pending after the decision");
+  assert.equal((await req("POST", "/api/artifacts/link-requests/999999/decide", { body: { accept: true } })).status, 404);
+  // A Yes for a bot that lost its access does not link.
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Theirs", type: "document", source: { markdown: "# t" }, actor: { kind: "bot", id: "eve", thread: "perchlive-k4", gateway: "perch" } }, { markdownBlocks });
+  const stale = Number((await s.db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id,bot_id,thread_id) VALUES (?,?,?)", args: [other.id, "bobby", "perchlive-k5"] })).lastInsertRowid);
+  assert.equal((await req("POST", `/api/artifacts/link-requests/${stale}/decide`, { body: { accept: true } })).body.error, "target_no_access");
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND thread_id='perchlive-k5'", args: [other.id] })).rows[0].n, 0);
 });

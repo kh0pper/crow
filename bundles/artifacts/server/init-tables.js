@@ -149,6 +149,18 @@ export async function initArtifactsTables(db) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS uq_artifact_link_active ON artifact_links(artifact_id, thread_id) WHERE unlinked_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_artifact_links_thread ON artifact_links(thread_id);
+    -- D25 ask-first linking: a bot's artifact_attach asks; only the owner's
+    -- Yes (the decide route) writes the link.
+    CREATE TABLE IF NOT EXISTS artifact_link_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artifact_id TEXT NOT NULL,
+      bot_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined')),
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifact_link_requests_thread ON artifact_link_requests(thread_id, status);
     -- Sessions that saw untrusted text (trust.js). Insert-only.
     CREATE TABLE IF NOT EXISTS artifact_session_taint (
       bot_id TEXT NOT NULL,
