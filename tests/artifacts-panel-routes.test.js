@@ -582,3 +582,14 @@ test("review M3 pins: the feedback card shows OWNER comments only (a bot reply i
   assert.equal((await req("POST", `/api/artifacts/link-requests/${rid}/decide`, { body: { accept: "true" } })).body.decided, "declined", "only a literal true accepts");
   assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE thread_id='perchlive-p2'", args: [] })).rows[0].n, 0);
 });
+
+test("D28: the threads route resolves a document block anchor server-side — map text, quote checked against rendered text, else a text anchor", async () => {
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Highlight", type: "document", source: { markdown: "Hello **bold** world.\n\nSecond block." }, actor: { kind: "session" } }, { markdownBlocks });
+  const post = (anchor) => req("POST", `/api/artifacts/${doc.id}/threads`, { body: { versionN: 1, anchor, text: "c" } });
+  const anchorOf = async (r) => JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [r.body.threadId] })).rows[0].anchor_json);
+  const a = await post({ kind: "block", id: "b1", quote: "bold world", text: "FORGED" });
+  assert.equal(a.status, 201);
+  assert.deepEqual(await anchorOf(a), { kind: "block", id: "b1", text: "Hello **bold** world.", quote: "bold world" });
+  assert.deepEqual(await anchorOf(await post({ kind: "block", id: "b1", quote: "Second block" })), { kind: "text", quote: "Second block", prefix: "", suffix: "" });
+  assert.equal((await post({ kind: "block", id: "b77" })).status, 400, "an unknown block with no quote is refused");
+});

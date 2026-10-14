@@ -82,8 +82,15 @@ test("a valid token serves its version; a missing trailing slash is a 404, never
   assert.equal(seen.at(-1).versionN, 3);
   assert.equal(seen.at(-1).path, "index.html");
   assert.match(ok.headers["content-security-policy"], /frame-ancestors https:\/\/dash\.example/);
-  assert.match(ok.headers["content-security-policy"], /; sandbox$/, "document is script-free");
-  assert.equal(ok.headers["access-control-allow-origin"], undefined, "no ACAO on script-free types");
+  // D28: a document speaks (helper-only): allow-scripts, the helper is its only script.
+  assert.match(ok.headers["content-security-policy"], /; sandbox allow-scripts$/, "document is helper-only");
+  assert.match(ok.headers["content-security-policy"], /script-src https?:\/\/[^ ;]+\/v\/[A-Za-z0-9_-]{43}\/__crow\/anchor-helper\.js;/);
+  assert.match(ok.body, /__crow\/anchor-helper\.js\?n=/, "the helper is injected into a document");
+  const dia = tokens.mint({ artifactId: "a1", versionN: 3, type: "diagram", dashboardOrigin: "https://dash.example" });
+  const d = await req(`/v/${dia.token}/`);
+  assert.match(d.headers["content-security-policy"], /; sandbox$/, "a diagram stays sealed");
+  assert.equal(d.headers["access-control-allow-origin"], undefined, "no ACAO on sealed types");
+  assert.doesNotMatch(d.body, /anchor-helper/, "no helper in a sealed frame");
   assert.equal((await req(`/v/${token}`)).status, 404);
   const r = await req(`/v/${token}/`, { headers: { range: "bytes=0-3" } });
   assert.equal(r.status, 200, "range is not honoured: full 200");
@@ -363,4 +370,13 @@ test("viewerCsp: frame-src is only the artifact origin's /v/ path; anything that
   assert.doesNotMatch(frameSrc(csp), /'self'|https:(?!\/\/)/, "no 'self', no scheme source");
   assert.match(csp, /frame-ancestors 'self'/);
   assert.doesNotMatch(csp, /unsafe-eval/);
+});
+
+test("D28 review M7: variants of the helper path never redirect (CSP path-exact matching ignores the path after a redirect)", async () => {
+  const { token } = tokens.mint({ artifactId: "a1", versionN: 3, type: "document", dashboardOrigin: "https://dash.example" });
+  for (const v of ["__crow/anchor-helper.js?n=x", "__crow/Anchor-Helper.js", "__crow/anchor-helper.js/", "__crow//anchor-helper.js", "__crow/anchor%2Dhelper.js", "__crow/anchor-helper.js%3Fx", "__crow/./anchor-helper.js", "__crow/../__crow/anchor-helper.js", "__CROW/anchor-helper.js"]) {
+    const r = await req(`/v/${token}/${v}`);
+    assert.ok(r.status < 300 || r.status >= 400, `${v} → ${r.status} (never 3xx)`);
+    assert.equal(r.headers.location, undefined, `${v}: no Location header`);
+  }
 });

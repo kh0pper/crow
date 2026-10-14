@@ -3,10 +3,18 @@
  *
  * Every response from the artifact origin (and later the public-link listener)
  * carries a CSP whose `sandbox` directive makes even a top-level load run as
- * an opaque origin (review E13/E14). Script-free types get `sandbox` with no
- * flags at all, so no script runs and a <meta http-equiv=refresh> is refused
- * (E16). Scripted types get `sandbox allow-scripts` and never anything else:
- * no allow-same-origin, allow-top-navigation, allow-popups or allow-forms.
+ * an opaque origin (review E13/E14). SEALED types get `sandbox` with no flags
+ * at all, so no script runs and a <meta http-equiv=refresh> is refused (E16):
+ * diagrams, images, docx, and every scripts-off (D20) version of a scripted
+ * type (the "sealed" row). Types whose frame SPEAKS get `sandbox
+ * allow-scripts` and never anything else (no allow-same-origin,
+ * allow-top-navigation, allow-popups or allow-forms):
+ *  - scripted types (their own scripts + the anchor helper);
+ *  - D28 (spec v1.7): documents, which are HELPER-ONLY — script-src is
+ *    exactly the anchor helper's path-exact URL, no inline, no other file.
+ *    A document can therefore follow a <meta http-equiv=refresh>; the
+ *    control is the renderer (sanitize-html never emits meta/base/script),
+ *    then the viewer's parent frame-src and second-load tripwire.
  *
  * The CSP limits egress, not XSS: 'unsafe-inline' for bot-written pages is
  * acceptable inside an opaque sandbox. 'unsafe-eval' is never granted.
@@ -19,8 +27,15 @@ export const ARTIFACT_TYPES = Object.freeze([
 ]);
 
 const SCRIPTED = new Set(["page", "slides", "data", "map", "pdf"]);
+/** D28: frames that run the trusted anchor helper (and so say hello). */
+const SPEAKS = new Set([...SCRIPTED, "document"]);
+/** The helper's path under a version's token path (served by the origin). */
+export const HELPER_PATH = "__crow/anchor-helper.js";
 
+/** Content scripts (D20 applies). Documents are NOT scripted. */
 export function isScriptedType(type) { return SCRIPTED.has(type); }
+/** The frame runs the anchor helper: hello, proposals, the tripwire and D24. */
+export function speaks(type) { return SPEAKS.has(type); }
 
 /**
  * D20 (spec v1.3): a version shaped by non-owner text (tainted) is served
@@ -29,15 +44,30 @@ export function isScriptedType(type) { return SCRIPTED.has(type); }
  * The navigation tripwire stays as defence in depth for the owner's own
  * scripted versions; it is not the control against a deliberate attacker.
  */
-export function effectiveType(type, scriptsOff) { return scriptsOff && SCRIPTED.has(type) ? "document" : type; }
+export function effectiveType(type, scriptsOff) { return scriptsOff && SCRIPTED.has(type) ? "sealed" : type; }
 
 /** The iframe `sandbox` attribute value for a type (matches the CSP sandbox). */
-export function iframeSandboxFor(type) { return SCRIPTED.has(type) ? "allow-scripts" : ""; }
+export function iframeSandboxFor(type) { return SPEAKS.has(type) ? "allow-scripts" : ""; }
+
+/**
+ * THE one decision for a frame (review H2): the served type, the sandbox and
+ * whether the frame speaks. The view-mint route, the origin's helper
+ * injection and the load-evidence table all read it, so a grant's sandbox
+ * and its `scripted` (= speaks) flag can never disagree.
+ */
+export function frameGrantFor(type, scriptsOff) {
+  const eff = effectiveType(type, !!scriptsOff);
+  return { effectiveType: eff, sandbox: iframeSandboxFor(eff), speaks: SPEAKS.has(eff) };
+}
 
 // Per-type source lists, each relative to the version's token path ("P").
 // "P" is replaced by the exact path-scoped source (origin + /v/<token>/).
+// "H" is the anchor helper's path-exact URL (D28: a document's ONLY script).
 const TABLE = {
-  document: { style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
+  // D20: every scripts-off scripted version. Identical to the pre-D28
+  // document row (pinned byte-for-byte by tests/artifact-policy-d28.test.js).
+  sealed:   { style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
+  document: { script: ["H"], style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
   diagram:  { style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
   image:    { img: ["P"] },
   docx:     { img: ["P"] },
@@ -59,7 +89,7 @@ const TABLE = {
  */
 export function cspFor(type, { tokenBase = null, frameAncestors = null } = {}) {
   const row = (type && TABLE[type]) || {};
-  const src = (list) => (list || []).map((s) => (s === "P" ? tokenBase : s)).filter(Boolean);
+  const src = (list) => (list || []).map((s) => (s === "P" ? tokenBase : s === "H" ? tokenBase + HELPER_PATH : s)).filter(Boolean);
   const d = [
     "default-src 'none'",
     "connect-src 'none'",
@@ -79,7 +109,7 @@ export function cspFor(type, { tokenBase = null, frameAncestors = null } = {}) {
     add("font-src", row.font);
   }
   d.push(`frame-ancestors ${frameAncestors || "'none'"}`);
-  d.push(type && SCRIPTED.has(type) ? "sandbox allow-scripts" : "sandbox");
+  d.push(type && SPEAKS.has(type) ? "sandbox allow-scripts" : "sandbox");
   return d.join("; ");
 }
 

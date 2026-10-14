@@ -116,6 +116,25 @@ export function svgElements(svg, max = 500) {
   return out;
 }
 
+/** Rendered text of SANITIZED block HTML, linear (no regex over the input:
+ *  ReDoS review), capped. Entities: the handful sanitize-html emits. */
+const ENT = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&nbsp;": " " };
+export function plainOf(html, cap = 4000) {
+  const s = String(html || "");
+  let out = "", inTag = false;
+  for (let i = 0; i < s.length && out.length < cap * 2; i++) {
+    const c = s[i];
+    if (inTag) { if (c === ">") { inTag = false; out += " "; } continue; }
+    if (c === "<") { inTag = true; continue; }
+    if (c === "&") {
+      const semi = s.indexOf(";", i);
+      if (semi > i && semi - i <= 6 && ENT[s.slice(i, semi + 1)]) { out += ENT[s.slice(i, semi + 1)]; i = semi; continue; }
+    }
+    out += c;
+  }
+  return out.split(/\s+/).filter(Boolean).join(" ").replace(/ ([.,;:!?)])/g, "$1").slice(0, cap);
+}
+
 /** viewBox="minx miny w h" → h/w, by splitting (no regex over the document). */
 export function svgAspect(svg) {
   const open = svg.slice(0, svg.indexOf(">") + 1);
@@ -151,7 +170,10 @@ export async function renderVersion(type, source, { markdownBlocks } = {}) {
     const html = `<!doctype html><html lang="${source.lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escText(title)}</title><style>${DOC_CSS}</style></head><body><main>\n${body}\n</main></body></html>`;
     return {
       files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...assetsFor("document", source.assets)],
-      anchorMap: { kind: "blocks", blocks: blocks.map((b, i) => ({ id: `b${i + 1}`, type: b.type, text: b.text })) },
+      // D28: `plain` is the block's RENDERED text (tags stripped, entities
+      // decoded, whitespace squashed): what a reader can select. `text` stays
+      // the markdown source carry-forward matches on.
+      anchorMap: { kind: "blocks", blocks: blocks.map((b, i) => ({ id: `b${i + 1}`, type: b.type, text: b.text, plain: plainOf(b.html) })) },
     };
   }
   if (type === "diagram") {

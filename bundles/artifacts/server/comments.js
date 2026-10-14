@@ -23,6 +23,27 @@ export function validAnchor(a) {
   return null;
 }
 
+/**
+ * D28 (review M3/M4): resolve a document BLOCK anchor against the version's
+ * stored anchor map, server-side. The client (and the frame behind it) only
+ * names the block id and the quote; the block TEXT always comes from the
+ * map. A quote that does not occur in that block's rendered text (`plain`,
+ * or `text` for versions saved before D28) is not that block's: it becomes
+ * a text anchor instead, so a comment can never be pinned to the wrong
+ * section. Non-block anchors pass through. Returns null when unanchorable.
+ */
+const squashWs = (s) => String(s || "").split(/\s+/).filter(Boolean).join(" ");
+export function resolveBlockAnchor(anchorMap, a) {
+  if (!a || a.kind !== "block") return a;
+  const quote = typeof a.quote === "string" ? a.quote.slice(0, 1000) : "";
+  const asText = () => (quote.trim() ? { kind: "text", quote, prefix: "", suffix: "" } : null);
+  const blocks = anchorMap && anchorMap.kind === "blocks" && Array.isArray(anchorMap.blocks) ? anchorMap.blocks : [];
+  const b = blocks.find((x) => x && x.id === a.id);
+  if (!b) return asText();
+  if (quote.trim() && !squashWs(typeof b.plain === "string" ? b.plain : b.text).includes(squashWs(quote))) return asText();
+  return { kind: "block", id: b.id, text: String(b.text || "").slice(0, 400), quote };
+}
+
 function cleanText(t) {
   const s = String(t == null ? "" : t).replace(/\r\n/g, "\n").trim();
   if (!s) throw err("bad_request", "comment text required");
