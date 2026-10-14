@@ -215,3 +215,30 @@ test("a def that lost its artifacts tools fails the round by name and releases i
   assert.deepEqual([out.status, out.error], ["failed", "bot_lacks_artifacts"]);
   assert.equal(await threadSent(x.threadId), null);
 });
+
+test("review M1: delivery re-reads the round after its claim — a stale copy can never deliver to the chat it USED to target", async () => {
+  const x = await setup();
+  await link(x.art.id, "bobby", x.B);
+  const stale = await startTo(x, x.A);                       // the sweep's earlier read: target A
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET target_thread=? WHERE id=?", args: [x.B, stale.id] });   // the owner re-targets to B
+  const e = engine([live("bobby", x.A), live("bobby", x.B)]);
+  const out = await deliverRound(s.db, stale, { engine: e, botDef: DEF, choice: "chat" });
+  assert.equal(out.threadId, x.B);
+  assert.deepEqual(e.sent, [x.B], "never the stale target A");
+});
+
+test("review M3 pins: a received artifact is never a target; the engine's own bot for the chat is checked; a locked linked chat is not sendable (L4/L10)", async () => {
+  const x = await setup();
+  await s.db.execute({ sql: "UPDATE artifacts SET received=1 WHERE id=?", args: [x.art.id] });
+  assert.equal(await verifyTarget(s.db, { artifactId: x.art.id, botId: "bobby", threadId: x.A, botDef: DEF }), "target_unlinked", "received artifacts have no bot targets");
+  await s.db.execute({ sql: "UPDATE artifacts SET received=0 WHERE id=?", args: [x.art.id] });
+  const r = await startTo(x, x.A);
+  const e = engine([{ sessionId: x.A, botId: "eve", threadId: x.A, state: "idle" }]);
+  const out = await deliverRound(s.db, r, { engine: e, botDef: DEF, choice: "chat" });
+  assert.deepEqual([out.status, out.error], ["failed", "target_not_bots_chat"], "the engine says the chat is another bot's");
+  assert.deepEqual(e.sent, []);
+  const L = tid("l"); await session("bobby", L, JSON.stringify(["crow:locked"])); await link(x.art.id, "bobby", L);
+  assert.equal(await verifyTarget(s.db, { artifactId: x.art.id, botId: "bobby", threadId: L, botDef: DEF }), "target_locked", "a locked chat is never offered or picked");
+  await s.db.execute({ sql: "UPDATE artifact_links SET linked_at=datetime('now','+5 minutes') WHERE thread_id=?", args: [L] });
+  assert.equal((await pickSendTarget(s.db, { artifactId: x.art.id, loadBotDef: async () => DEF })).threadId, x.A, "the Library pick skips the locked chat");
+});

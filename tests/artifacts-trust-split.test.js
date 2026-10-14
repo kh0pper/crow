@@ -84,3 +84,10 @@ test("fail closed: no bot / no thread, and a database that cannot answer, read a
   assert.equal(await isTainted(broken, "bobby", "perchlive-x"), true);
   assert.equal(await sessionIsClean(broken, "bobby", "perchlive-x"), false);
 });
+
+test("review L1: a lock marker anywhere in narrowed_tools locks, even in a shape the array check would miss (as strict as scopeOf's substring test)", async () => {
+  await row("perchlive-tl000001", JSON.stringify([["crow:locked"]]));
+  assert.equal(await isLocked(s.db, "bobby", "perchlive-tl000001"), true);
+  await row("perchlive-tl000002", JSON.stringify(["prefix-crow:locked-suffix"]));
+  assert.equal(await isLocked(s.db, "bobby", "perchlive-tl000002"), true);
+});

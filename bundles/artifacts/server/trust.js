@@ -33,6 +33,9 @@ export async function isLocked(db, botId, threadId) {
   try {
     const r = (await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [botId, threadId] })).rows[0];
     if (!r) return true;
+    // Review L1: the marker ANYWHERE in the stored value locks — as strict as
+    // scopeOf's and the engine's own substring test — before the shape check.
+    if (typeof r.narrowed_tools === "string" && r.narrowed_tools.includes("crow:locked")) return true;
     if (r.narrowed_tools != null) {
       let v; try { v = JSON.parse(r.narrowed_tools); } catch { return true; }
       if (!Array.isArray(v) || v.includes("crow:locked")) return true;

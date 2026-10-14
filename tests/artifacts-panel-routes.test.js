@@ -566,3 +566,19 @@ test("Library (PR-3 Task 3.9): list badges come from store rows; the audit tab s
   assert.equal(await pickSendTarget(s.db, { artifactId: art.id, loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts"] } }) }), null, "an unlinked chat is never a Send target");
   assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-unlinked' AND target='perchlive-y2'", args: [art.id] })).rows.length);
 });
+
+test("review M3 pins: the feedback card shows OWNER comments only (a bot reply inside the snapshot stays off); the decide route links only on accept === true", async () => {
+  const { addThread, addComment } = await import("../bundles/artifacts/server/comments.js");
+  const rounds = await import("../bundles/artifacts/server/rounds.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Pins", type: "document", source: { markdown: "# p" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-p1", gateway: "perch" } }, { markdownBlocks });
+  const t = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "owner words", author: { kind: "owner" } });
+  await addComment(s.db, { threadId: t.threadId, text: "BOT-REPLY-NOT-ON-CARD", author: { kind: "bot", id: "bobby" } });
+  await addComment(s.db, { threadId: t.threadId, text: "owner again", author: { kind: "owner" } });
+  const r = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t.threadId], targetThread: "perchlive-p1" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working', delivery='perch-session', session_id='perchlive-p1' WHERE id=?", args: [r.id] });
+  const card = await req("GET", `/api/artifacts/rounds/${r.id}/card`);
+  assert.deepEqual(card.body.threads[0].comments, ["owner words", "owner again"]);
+  const rid = Number((await s.db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id,bot_id,thread_id) VALUES (?,?,?)", args: [art.id, "bobby", "perchlive-p2"] })).lastInsertRowid);
+  assert.equal((await req("POST", `/api/artifacts/link-requests/${rid}/decide`, { body: { accept: "true" } })).body.decided, "declined", "only a literal true accepts");
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE thread_id='perchlive-p2'", args: [] })).rows[0].n, 0);
+});

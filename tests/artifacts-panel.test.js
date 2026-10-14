@@ -428,3 +428,29 @@ test("live: the Library — badges from the store, search narrows the list, the 
     assert.ok(await t.evalIn(`document.documentElement.scrollWidth <= innerWidth`), "no horizontal scroll at 390px");
   } finally { await t.close(); }
 });
+
+test("live, review M2: opened from a chat that can no longer take it, the sheet preselects NOTHING and says why — it never quietly sends elsewhere", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  const A = "perchlive-5ee0dd01", B = "perchlive-5ee0dd02";
+  for (const t of [A, B]) await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [t] });
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "M2 doc", type: "document", source: { markdown: "# m" }, actor: { kind: "bot", id: "bobby", thread: A, gateway: "perch" } }, { markdownBlocks });
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [doc.id, "bobby", B] });
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND thread_id=?", args: [doc.id, A] });
+  await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: { kind: "whole" }, text: "m2", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const sentBefore = s.engine.sent.length;
+  try {
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}?thread=${A}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled`)) === true, 15000));
+    await t.evalIn(`document.querySelector('.cv-send').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt').length`)) >= 2));
+    assert.equal(await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt input:checked').length`), 0, "nothing preselected");
+    assert.match(await t.evalIn(`document.querySelector('dialog .cv-where .cv-err').textContent`), /isn't linked/);
+    await t.evalIn(`document.querySelector('dialog .cv-primary').click()`);
+    await sleep(400);
+    assert.equal(s.engine.sent.length, sentBefore, "Send with no choice sends nothing");
+    assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_rounds WHERE artifact_id=?", args: [doc.id] })).rows[0].n, 0);
+  } finally { await t.close(); }
+});

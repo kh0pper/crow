@@ -19,7 +19,7 @@
 //    retries the SAME choice (the target, or a new session).
 // The engine is injected (servers/gateway/perch-interactive.js
 // getInteractiveEngine), so this module has no gateway imports.
-import { roundMessage, setDelivery, UNTRUSTED_ALLOW, reclassifyAtDelivery, failRound } from "./rounds.js";
+import { roundMessage, setDelivery, UNTRUSTED_ALLOW, reclassifyAtDelivery, failRound, getRound } from "./rounds.js";
 import { audit } from "./store.js";
 import { isLocked, markSessionTainted } from "./trust.js";
 import { verifyTarget } from "./links.js";
@@ -71,7 +71,12 @@ export async function deliverRound(db, round, opts) {
   const back = round.status === "queued" ? "queued" : "pending";
   const revert = (unbind) => db.execute({ sql: `UPDATE artifact_rounds SET status=?${unbind ? ", session_id=NULL" : ""}, updated_at=datetime('now') WHERE id=? AND status='delivering'`, args: [back, round.id] });
   try {
-    const out = await deliverClaimed(db, { ...round, status: back }, opts);
+    // Review M1: deliver from the row AS CLAIMED, never from the caller's copy
+    // — the owner may have re-targeted the round (target_thread / bot_id)
+    // after the caller read it (e.g. the sweep's earlier read).
+    const fresh = await getRound(db, round.id);
+    if (!fresh) { await revert(true); return { status: "busy", error: "already_delivering_or_delivered" }; }
+    const out = await deliverClaimed(db, { ...fresh, status: back }, opts);
     await revert(false);   // a no-op unless the round is still 'delivering'
     return out;
   } catch (e) {
@@ -134,7 +139,7 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "chat", crea
     if (await isLocked(db, round.bot_id, target)) return fail("target_locked");   // D23
     const seen = (await engine.list()).find((x) => x.threadId === target);
     if (seen && (seen.botId !== round.bot_id)) return fail("target_not_bots_chat");
-    if (seen && (seen.state === "stopped" || seen.archived)) return fail("target_asleep");
+    if (seen && seen.state === "stopped") return fail("target_asleep");
     // Send first, bind after (a busy chat leaves the round unbound and
     // retryable). message() wakes a hibernating chat itself (B8).
     try { await engine.message(seen ? seen.sessionId : target, text); }

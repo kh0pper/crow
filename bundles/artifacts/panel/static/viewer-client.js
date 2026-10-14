@@ -413,7 +413,16 @@
     if (!roundId) (info.links || []).forEach(function (l) { options.push({ choice: "chat", thread: l.threadId, text: chatName(l) + (l.state === "stopped" ? " (" + T.asleep_note + ")" : ""), disabled: !l.sendable }); });
     options.push({ choice: "new-session", text: fmt(T.new_chat, { bot: info.bot || T.bot }) });
     if (info.offerBoard) options.push({ choice: "board-card", text: T.board_card });
-    var pick = options.filter(function (o) { return !o.disabled && o.thread === THREAD && THREAD; })[0] || options.filter(function (o) { return !o.disabled; })[0];
+    // Review M2: opened from a chat, Send means THAT chat — never quietly
+    // another one. If it cannot take the round, nothing is preselected and
+    // the sheet says why; the owner picks. Opened from the Library (no
+    // chat), the first option that can take it is the default.
+    var pick = null;
+    if (THREAD && !roundId) {
+      var mine = (info.links || []).filter(function (l) { return l.threadId === THREAD; })[0];
+      pick = options.filter(function (o) { return !o.disabled && o.thread === THREAD; })[0] || null;
+      if (!pick) box.appendChild(el("p", { class: "cv-err", role: "alert", text: whyText((mine && mine.why) || "target_unlinked") }));
+    } else pick = options.filter(function (o) { return !o.disabled; })[0];
     options.forEach(function (o, i) {
       var rb = el("input", { type: "radio", name: "cv-where", value: String(i) });
       if (o.disabled) rb.setAttribute("disabled", "");

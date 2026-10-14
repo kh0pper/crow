@@ -322,8 +322,14 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
         await store.audit(db, { artifactId: art.id, actor, action: "link-refused", target: String(actor.thread), detail: { reason: "daily_cap" } });
         throw Object.assign(new Error("too many link requests for this chat today"), { code: "rate_limited" });
       }
-      const r = await db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id, bot_id, thread_id) VALUES (?,?,?)", args: [art.id, actor.id, actor.thread] });
-      const rid = Number(r.lastInsertRowid);
+      let rid;
+      try { rid = Number((await db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id, bot_id, thread_id) VALUES (?,?,?)", args: [art.id, actor.id, actor.thread] })).lastInsertRowid); }
+      catch (e) {
+        // Review L3: a concurrent attach from this chat won the one pending slot.
+        if (!/UNIQUE/i.test(String(e.message))) throw e;
+        const won = (await db.execute({ sql: "SELECT id FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status='pending'", args: [art.id, actor.thread] })).rows[0];
+        return { requested: true, request_id: Number(won && won.id), note: "link requested — the owner decides" };
+      }
       await store.audit(db, { artifactId: art.id, actor, action: "link-requested", target: String(actor.thread), detail: { request: rid } });
       // The ask card: the requesting chat ONLY (never the artifact's links).
       if (typeof emitExternal === "function") {

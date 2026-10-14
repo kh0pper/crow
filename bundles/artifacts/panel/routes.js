@@ -67,7 +67,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     try { await ensure(); await fn(req, res); }
     catch (e) {
       const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409,
-        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, already_decided: 409 };
+        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, target_locked: 400, already_decided: 409 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -220,7 +220,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     }
     if (Number((await claim(accept ? "accepted" : "declined")).rowsAffected) !== 1) throw Object.assign(new Error("already decided"), { code: "already_decided" });
     if (accept) {
-      try { await S.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, r.bot_id, r.thread_id] }); }
+      // Review L2: the insert itself re-checks access, so a revoke landing
+      // between the check above and this write links nothing.
+      try { await S.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) SELECT ?,?,?,'owner-yes' WHERE EXISTS (SELECT 1 FROM artifacts WHERE id=? AND created_by_bot=? AND received=0 AND deleted_at IS NULL) OR EXISTS (SELECT 1 FROM artifact_bot_access WHERE artifact_id=? AND bot_id=?)", args: [art.id, r.bot_id, r.thread_id, art.id, r.bot_id, art.id, r.bot_id] }); }
       catch (e) { if (!/UNIQUE/i.test(String(e.message))) throw e; /* already actively linked */ }
     }
     await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: accept ? "link-accepted" : "link-declined", target: r.thread_id, detail: { request: rid } });

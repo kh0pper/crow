@@ -165,7 +165,8 @@ export function perchArtifactCardJs(lang = "en") {
     var tr=el('perch-transcript'); if(!tr) return;
     var node=document.createElement('div'); node.className='entry artfb';
     var k=Number(c.count)||0;
-    var head=(k===1?ART_FB_ONE:ART_FB).replace('{title}',String(c.title||'')).replace('{n}',String(Number(c.version)||0)).replace('{k}',String(k));
+    var ct=String(c.title||'');
+    var head=(k===1?ART_FB_ONE:ART_FB).replace('{n}',String(Number(c.version)||0)).replace('{k}',String(k)).replace('{title}',function(){ return ct; });
     node.appendChild(line('art-eyebrow',ART_LABEL));
     node.appendChild(line('art-title',head));
     var body=document.createElement('div'); body.className='art-fb-body';
@@ -220,8 +221,11 @@ export function perchArtifactCardJs(lang = "en") {
     var tr=el('perch-transcript'); if(!tr) return;
     var node=document.createElement('div'); node.className='entry artask';
     node.appendChild(line('art-eyebrow',ART_LABEL));
-    node.appendChild(line('art-title',ART_LINK_ASK.replace('{title}',String(q.title||''))));
-    node.appendChild(line('art-meta',ART_LINK_WHY.replace('{bot}',String(q.botId||''))));
+    /* Review L6: authored values go in with a function replacer (no $-pattern
+       expansion), and the title last (a title holding {bot} stays literal). */
+    var qt=String(q.title||''), qb=String(q.botId||'');
+    node.appendChild(line('art-title',ART_LINK_ASK.replace('{title}',function(){ return qt; })));
+    node.appendChild(line('art-meta',ART_LINK_WHY.replace('{bot}',function(){ return qb; })));
     var acts=document.createElement('div'); acts.className='art-actions';
     var decide=function(accept){
       return function(){

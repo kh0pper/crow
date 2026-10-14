@@ -584,3 +584,23 @@ test("feedback cards: one per delivered round (keyed by round id, never re-bound
   api.resetArtifactCards();
   assert.deepEqual(Object.keys(api.feedback()), [], "the index dies with the transcript");
 });
+
+test("review L6: authored titles are literal — no $-pattern expansion, no placeholder re-substitution", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  const evil = "$& {bot} {n} $1";
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [{ id: 11, artifactId: "art_ev", title: evil, botId: "bobby" }] });
+      if (url.startsWith("/api/artifacts/rounds-by-thread/")) return json({ cards: [{ roundId: 12, artifactId: "art_ev", title: evil, version: 3, count: 2 }] });
+      return json(row({ id: "art_ev" }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadLinkAsks(sidX); api.loadFeedbackCards(sidX);
+  await tick();
+  const ask = texts(byClass(hub.transcript, "artask")[0]).join("|");
+  const fb = texts(byClass(hub.transcript, "artfb")[0]).join("|");
+  assert.ok(ask.includes(evil), ask);
+  assert.ok(fb.includes(evil) && fb.includes("v3"), fb);
+});

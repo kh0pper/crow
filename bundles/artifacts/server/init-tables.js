@@ -161,6 +161,7 @@ export async function initArtifactsTables(db) {
       decided_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_artifact_link_requests_thread ON artifact_link_requests(thread_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_artifact_link_request_pending ON artifact_link_requests(artifact_id, thread_id) WHERE status='pending';
     -- Sessions that saw untrusted text (trust.js). Insert-only.
     CREATE TABLE IF NOT EXISTS artifact_session_taint (
       bot_id TEXT NOT NULL,

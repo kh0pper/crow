@@ -7,6 +7,7 @@
 // bot the link names.
 
 import { botHasArtifactsTools } from "./delivery.js";
+import { isLocked } from "./trust.js";
 
 /** @returns {Promise<Array<{threadId: string, botId: string, linkedAt: string}>>} active links, most recent first. */
 export async function linkedThreads(db, artifactId) {
@@ -36,7 +37,8 @@ export async function activeLink(db, artifactId, threadId) {
  *   target_other_bot     — the link names a different bot;
  *   target_no_access     — the bot neither made the artifact nor holds a grant;
  *   target_not_bots_chat — the chat's own session row is not this bot's (or is missing);
- *   bot_lacks_artifacts  — the bot's def no longer grants the Artifacts tools.
+ *   bot_lacks_artifacts  — the bot's def no longer grants the Artifacts tools;
+ *   target_locked        — the chat is locked (D23: never a trusted round).
  * Fail closed: a query error reads as unlinked.
  */
 export async function verifyTarget(db, { artifactId, botId, threadId, botDef }) {
@@ -54,6 +56,9 @@ export async function verifyTarget(db, { artifactId, botId, threadId, botDef }) 
     const own = (await db.execute({ sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [String(threadId)] })).rows[0];
     if (!own || String(own.bot_id) !== String(botId)) return "target_not_bots_chat";
     if (!botHasArtifactsTools(botDef)) return "bot_lacks_artifacts";
+    // A LOCKED chat never takes a trusted round (D23): never offered by the
+    // sheet, never picked by the Library, refused by the Send route.
+    if (await isLocked(db, botId, threadId)) return "target_locked";
     return null;
   } catch { return "target_unlinked"; }
 }
