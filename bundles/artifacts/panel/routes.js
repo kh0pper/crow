@@ -41,8 +41,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const S = { ...seams };
 
   async function init() {
-    const [store, comments, rounds, delivery, tables, blobMinio] = await Promise.all(
-      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js"].map(bundleImport));
+    const [store, comments, rounds, delivery, tables, blobMinio, links] = await Promise.all(
+      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js"].map(bundleImport));
     if (!S.db) { const { createDbClient } = await appImport("servers/db.js"); S.db = createDbClient(); }
     await tables.initArtifactsTables(S.db);
     if (!S.blobs) { const { resolveDataDir } = await appImport("servers/db.js"); S.blobs = await blobMinio.createBlobStore(S.db, resolveDataDir()); }
@@ -59,14 +59,15 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
-    M = { store, comments, rounds, delivery };
+    M = { store, comments, rounds, delivery, links };
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
   const OWNER = { kind: "session", id: null };
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
     catch (e) {
-      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409 };
+      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409,
+        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -249,30 +250,61 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json(await M.rounds.previewRound(S.db, req.params.id));
   }));
 
-  /** Send feedback / Ask now (owner gesture). body: { include: [threadIds], kind, datasetsApproved, choice } */
+  const THREAD_RE = /^[A-Za-z0-9_-]{1,80}$/;
+  const CHOICES = ["chat", "new-session", "board-card"];
+  const choiceOf = (c) => (CHOICES.includes(c) ? c : "chat");   // legacy "auto" → chat
+  const engineNow = async () => S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
+  const botDefOf = (botId) => (S.loadBotDef ? S.loadBotDef(botId) : loadBotDef(S.db, botId));
+  const named = (code) => Object.assign(new Error(code), { code });
+
+  /**
+   * The owner names ONE chat (plan PR-3 Task 3.3, review M4/M5c): verified
+   * server-side (active link, the link's bot has access, the chat is that
+   * bot's own, the def still has the Artifacts tools) or refused by name.
+   * Returns { threadId, botId } or throws.
+   */
+  async function namedTarget(art, thread) {
+    if (typeof thread !== "string" || !THREAD_RE.test(thread)) throw named("bad_request");
+    const l = await M.links.activeLink(S.db, art.id, thread);
+    if (!l) throw named("target_unlinked");
+    const why = await M.links.verifyTarget(S.db, { artifactId: art.id, botId: l.botId, threadId: l.threadId, botDef: await botDefOf(l.botId) });
+    if (why) throw named(why);
+    return { threadId: l.threadId, botId: l.botId };
+  }
+
+  /** Send feedback (owner gesture). body: { include: [threadIds], choice: chat|new-session|board-card, thread?, datasetsApproved }
+   *  "chat" (the default) goes ONLY to a verified chat: the viewer's thread=,
+   *  else (the Library) the most recent verified active link, persisted on
+   *  the round as target_thread. No such chat → the round waits for the
+   *  owner's choice (the send sheet). Never "any live chat" (round-2 B7). */
   router.post("/api/artifacts/:id/rounds", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
     if (!art.created_by_bot) throw Object.assign(new Error("this artifact has no bot"), { code: "bad_request" });
-    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved });
-    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
-    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
-    // Same whitelist as the deliver route (review C3-N2): an unknown choice is auto.
-    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
-    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    const choice = choiceOf(req.body?.choice);
+    let target = null;
+    if (choice === "chat") {
+      target = req.body?.thread != null ? await namedTarget(art, req.body.thread) : await M.links.pickSendTarget(S.db, { artifactId: art.id, loadBotDef: botDefOf });
+    }
+    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved, botId: target ? target.botId : art.created_by_bot, targetThread: target ? target.threadId : null });
+    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
     res.status(201).json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
   }));
 
-  /** D4: deliver a round that is still waiting for the owner's choice (or
-   *  queued at capacity). Owner session + CSRF like every route here. */
+  /** The send sheet's second step: deliver a round still waiting for the
+   *  owner's choice (or queued at capacity). "chat" with a thread= names a
+   *  chat, verified like the Send route and persisted before delivery. */
   router.post("/api/artifacts/:id/rounds/:rid/deliver", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
-    const round = await M.rounds.getRound(S.db, Number(req.params.rid));
+    let round = await M.rounds.getRound(S.db, Number(req.params.rid));
     if (!round || round.artifact_id !== art.id) throw Object.assign(new Error("no such round"), { code: "not_found" });
     if (!["pending", "queued"].includes(round.status) || round.session_id || round.card_id) throw Object.assign(new Error("this round was already delivered"), { code: "bad_request" });
-    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
-    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
-    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
-    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    const choice = choiceOf(req.body?.choice);
+    if (choice === "chat" && req.body?.thread != null) {
+      const t = await namedTarget(art, req.body.thread);
+      await S.db.execute({ sql: "UPDATE artifact_rounds SET target_thread=?, bot_id=?, updated_at=datetime('now') WHERE id=? AND status IN ('pending','queued') AND session_id IS NULL AND card_id IS NULL", args: [t.threadId, t.botId, round.id] });
+      round = await M.rounds.getRound(S.db, round.id);
+    }
+    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
     res.json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
   }));
 

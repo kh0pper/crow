@@ -110,6 +110,9 @@ export async function initArtifactsTables(db) {
       session_stopped_at TEXT,
       -- R2-H1: {threadId: max comment id} frozen at Send; delivery sends exactly this.
       snapshot_json TEXT,
+      -- M4/B7 (v1.6 PR-3): the ONE chat a perch-session round may go to, set
+      -- only by the owner's verified Send. No other chat is ever a fallback.
+      target_thread TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -189,6 +192,7 @@ export const ADDED_COLUMNS = [
   ["artifact_rounds", "snapshot_json", "TEXT"],
   ["artifacts", "title_tainted", "INTEGER NOT NULL DEFAULT 1"],
   ["artifact_comments", "edited_at", "TEXT"],
+  ["artifact_rounds", "target_thread", "TEXT"],
 ];
 
 export async function addColumnIfMissing(db, table, col, decl) {

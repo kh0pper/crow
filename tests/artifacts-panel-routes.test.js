@@ -356,3 +356,45 @@ test("comment lock (review M1–M3): every active status holds the thread, a cor
   const solo = (await req("DELETE", `/api/artifacts/${bystander.a.id}/comments/${bystander.cid}`)).body;
   assert.equal(solo.remaining, 0);
 });
+
+test("Send to a chat (PR-3 Task 3.3): thread= is verified server-side and persisted; forged/unlinked chats are refused by name; the Library picks the most recent verified link; none → the owner chooses", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT);`);
+  for (const [b, t] of [["bobby", "perchlive-r1"], ["bobby", "perchlive-r2"], ["eve", "perchlive-r3"]]) await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES (?,?,NULL)", args: [b, t] });
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Sendable", type: "document", source: { markdown: "# s" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-r1", gateway: "perch" } }, { markdownBlocks });
+  const thread = async (text) => (await req("POST", `/api/artifacts/${art.id}/threads`, { body: { anchor: { kind: "whole" }, text } })).body.threadId;
+  const send = (body) => req("POST", `/api/artifacts/${art.id}/rounds`, { body });
+  const t1 = await thread("make it blue");
+  // Refusals happen BEFORE any round exists.
+  assert.deepEqual([(await send({ include: [t1], thread: "perchlive-r2" })).body.error], ["target_unlinked"]);
+  assert.equal((await send({ include: [t1], thread: "perchlive-r2" })).status, 400);
+  assert.equal((await send({ include: [t1], thread: "not a thread!" })).status, 400);
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, "eve", "perchlive-r3"] });
+  assert.equal((await send({ include: [t1], thread: "perchlive-r3" })).body.error, "target_no_access", "a chat linked under a bot without access");
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_rounds WHERE artifact_id=?", args: [art.id] })).rows[0].n, 0, "no round was started by a refused Send");
+  // Happy path: the verified chat is persisted and is where the round goes.
+  const ok = await send({ include: [t1], thread: "perchlive-r1" });
+  assert.equal(ok.status, 201);
+  assert.deepEqual([ok.body.round.target_thread, ok.body.round.session_id, ok.body.round.status], ["perchlive-r1", "perchlive-r1", "working"]);
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [ok.body.round.id] });
+  // The Library (no thread=): the most recent verified active link.
+  const t2 = await thread("and bigger");
+  const lib = await send({ include: [t2] });
+  assert.equal(lib.body.round.target_thread, "perchlive-r1");
+  assert.equal(lib.body.delivery.status, "working");
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [lib.body.round.id] });
+  // No active link: the owner chooses; a chat they name is still verified.
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=?", args: [art.id] });
+  const t3 = await thread("one more");
+  const none = await send({ include: [t3] });
+  assert.equal(none.status, 201);
+  assert.equal(none.body.delivery.needsChoice, true);
+  assert.equal(none.body.round.target_thread, null);
+  const rid = none.body.round.id;
+  const deliver = (body) => req("POST", `/api/artifacts/${art.id}/rounds/${rid}/deliver`, { body });
+  assert.equal((await deliver({ choice: "chat", thread: "perchlive-r1" })).body.error, "target_unlinked");
+  const spawnsBefore = s.spawns.length;
+  const fresh = await deliver({ choice: "new-session" });
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.delivery.status, "working");
+  assert.equal(s.spawns.length, spawnsBefore + 1, "a new chat with the bot");
+});
