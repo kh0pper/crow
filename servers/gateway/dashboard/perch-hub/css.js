@@ -397,7 +397,7 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 @media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){
   body[data-view="chat"] #perch-hub-root > header{display:none}
   body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
-  body[data-view="chat"] #perch-hub-root #perch-back{flex:none;min-height:44px;padding:6px 12px;font-size:13px}
+  body[data-view="chat"] #perch-hub-root #perch-back{flex:none;align-self:center;min-height:44px;padding:6px 12px;font-size:13px}
   body[data-view="chat"] #perch-hub-root #perch-session-meta{display:none}
   body[data-view="chat"] #perch-hub-root .perch-head .title{font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   body[data-view="chat"]:has(#perch-chat) .content-header{padding:6px 12px;padding-top:calc(env(safe-area-inset-top, 0px) + 6px)}

@@ -1475,8 +1475,9 @@ export function perchHubJs(lang = "en") {
        deep-link path learns it from /roost before ever calling this. */
     current.botId=botId;
     el('perch-bot-name').textContent=botName||botId;
-    /* The session id stays here, unchanged and on its own: it is the identity
-       the close confirm and every API path use. */
+    /* The session id is the identity the close confirm and every API path
+       use. It shows in the head on desktop; on phones (queue item 13) the
+       head hides it and the Session tab's #perch-session-id carries it. */
     el('perch-session-meta').textContent=current.sid||'';
     el('perch-session-id').textContent=current.sid||'';
     var known=rowIndex[current.sid];
