@@ -41,8 +41,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const S = { ...seams };
 
   async function init() {
-    const [store, comments, rounds, delivery, tables, blobMinio] = await Promise.all(
-      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js"].map(bundleImport));
+    const [store, comments, rounds, delivery, tables, blobMinio, links] = await Promise.all(
+      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js"].map(bundleImport));
     if (!S.db) { const { createDbClient } = await appImport("servers/db.js"); S.db = createDbClient(); }
     await tables.initArtifactsTables(S.db);
     if (!S.blobs) { const { resolveDataDir } = await appImport("servers/db.js"); S.blobs = await blobMinio.createBlobStore(S.db, resolveDataDir()); }
@@ -59,14 +59,15 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
-    M = { store, comments, rounds, delivery };
+    M = { store, comments, rounds, delivery, links };
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
   const OWNER = { kind: "session", id: null };
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
     catch (e) {
-      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409 };
+      const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409,
+        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, target_locked: 400, already_decided: 409 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -107,8 +108,19 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.end(readFileSync(join(BUNDLE_DIR, "panel", "static", req.params.file)));
   });
 
+  /** The Library list (plan PR-3 Task 3.9): each row carries its badges,
+   *  derived server-side from store rows — scripts-off (the D20 expression on
+   *  the current version), open contact threads, active linked chats. */
   router.get("/api/artifacts", wrap(async (_req, res) => {
-    res.json({ artifacts: await M.store.listArtifacts(S.db, OWNER), origin: S.runtime.artifactOriginInfo() ? { isolation: S.runtime.isolationFor(_req.headers.host) } : { isolation: "unavailable" } });
+    const arts = await M.store.listArtifacts(S.db, OWNER);
+    const out = [];
+    for (const a of arts) {
+      const cur = await M.store.getVersion(S.db, a.id, a.current_version);
+      const contact = Number((await S.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_threads WHERE artifact_id=? AND author_kind='contact' AND status<>'resolved'", args: [a.id] })).rows[0].n);
+      const links = Number((await S.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL", args: [a.id] })).rows[0].n);
+      out.push({ ...a, badges: { scriptsOff: !!(cur && S.policy.isScriptedType(a.type) && M.store.isTainted(cur)), contactComments: contact, links } });
+    }
+    res.json({ artifacts: out, origin: S.runtime.artifactOriginInfo() ? { isolation: S.runtime.isolationFor(_req.headers.host) } : { isolation: "unavailable" } });
   }));
 
   /**
@@ -116,8 +128,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * events of ONE Perch thread, so a reloaded transcript redraws its cards —
    * the file-card history contract. Derived from the audit log (the store is
    * the system of record); capped at 200 rows, newest last. Owner-only like
-   * every route here. PR-1's thread link is origin_session; PR-3 swaps to
-   * artifact_links (the same single-point swap as server/links.js).
+   * every route here. A chat sees the artifacts ACTIVELY linked to it
+   * (artifact_links, D25); an unlinked chat's cards stop replaying.
    */
   const THREAD_EVENT_FOR = { create: "create", version: "update", "version-proposed": "update", reply: "reply", "round-done": "round-done", "ask-done": "round-done" };
   router.get("/api/artifacts/by-thread/:thread", wrap(async (req, res) => {
@@ -125,9 +137,10 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const rows = (await S.db.execute({
       sql: `SELECT au.artifact_id, au.action, au.target, au.ts FROM artifact_audit au
             JOIN artifacts a ON a.id=au.artifact_id
-            WHERE a.origin_session=? AND a.deleted_at IS NULL AND au.action IN (${actions.map(() => "?").join(",")})
+            WHERE a.deleted_at IS NULL AND au.action IN (${actions.map(() => "?").join(",")})
+              AND EXISTS (SELECT 1 FROM artifact_links l WHERE l.artifact_id=a.id AND l.thread_id=? AND l.unlinked_at IS NULL)
             ORDER BY au.id DESC LIMIT 200`,
-      args: [String(req.params.thread), ...actions],
+      args: [...actions, String(req.params.thread)],
     })).rows;
     rows.reverse();   // the cap keeps the NEWEST 200; the client replays oldest-first
     res.json({
@@ -136,6 +149,129 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
         return { artifactId: r.artifact_id, event: THREAD_EVENT_FOR[r.action], n: v ? Number(v[1]) : null, ts: r.ts };
       }),
     });
+  }));
+
+  /**
+   * Feedback cards in chat (plan PR-3 Task 3.8, review N5). Store-derived, no
+   * engine change: a chat lists the rounds DELIVERED to it, one card per
+   * round id. The card shows the round SNAPSHOT's owner comments — what was
+   * actually sent — never a comment added after Send.
+   * Contact text is impossible BY ROUTE: an untrusted round (untrusted_input
+   * not exactly 0) is refused here outright, whatever its delivery says.
+   * Only rounds that reached the chat count (perch-session to this thread,
+   * working / done / timed-out; never failed, queued or pending).
+   */
+  const cardRound = (t) => `${t}kind='round' AND ${t}delivery='perch-session' AND ${t}status IN ('working','done','timed-out') AND ${t}untrusted_input=0`;
+  const anchorLabel = (j) => { let a = null; try { a = JSON.parse(j || "null"); } catch { a = null; } return String((a && (a.text || a.quote || a.selector || a.id || a.kind)) || "").slice(0, 200); };
+  router.get("/api/artifacts/rounds-by-thread/:thread", wrap(async (req, res) => {
+    const rows = (await S.db.execute({ sql: `SELECT r.id, r.artifact_id, r.base_version, r.thread_ids_json, r.status, r.created_at, a.title FROM artifact_rounds r JOIN artifacts a ON a.id=r.artifact_id WHERE r.session_id=? AND a.deleted_at IS NULL AND ${cardRound("r.")} ORDER BY r.id LIMIT 50`, args: [String(req.params.thread)] })).rows;
+    res.setHeader("cache-control", "no-store");
+    res.json({ cards: rows.map((r) => { let n = 0; try { n = JSON.parse(r.thread_ids_json || "[]").length; } catch { n = 0; } return { roundId: Number(r.id), artifactId: r.artifact_id, title: r.title, version: Number(r.base_version), count: n, status: r.status, at: r.created_at }; }) });
+  }));
+  router.get("/api/artifacts/rounds/:rid/card", wrap(async (req, res) => {
+    const rid = Number(req.params.rid);
+    const r = Number.isInteger(rid) ? (await S.db.execute({ sql: `SELECT * FROM artifact_rounds WHERE id=? AND ${cardRound("")}`, args: [rid] })).rows[0] : null;
+    if (!r) throw Object.assign(new Error("no such card"), { code: "not_found" });
+    const art = await M.store.requireAccess(S.db, OWNER, r.artifact_id);
+    let snap = {}; try { snap = JSON.parse(r.snapshot_json || "{}") || {}; } catch { snap = {}; }
+    const threads = [];
+    for (const [tid, maxId] of Object.entries(snap)) {
+      const t = (await S.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=? AND artifact_id=?", args: [Number(tid), art.id] })).rows[0];
+      if (!t) continue;
+      const cs = (await S.db.execute({ sql: "SELECT text FROM artifact_comments WHERE thread_id=? AND id<=? AND author_kind='owner' AND deleted_at IS NULL ORDER BY id", args: [Number(tid), Number(maxId)] })).rows;
+      threads.push({ anchor: anchorLabel(t.anchor_json), comments: cs.map((c) => c.text) });
+    }
+    res.setHeader("cache-control", "no-store");
+    res.json({ roundId: rid, artifactId: art.id, title: art.title, version: Number(r.base_version), threads });
+  }));
+
+  /**
+   * Ask-first linking, the owner's side (plan PR-3 Task 3.5, spec D25). A bot's
+   * artifact_attach left a PENDING request and an ask card in its chat; the
+   * hub lists that chat's pending requests here and the owner decides. Only
+   * Yes writes the link (owner-yes), audited, and the chat hears
+   * "link-decided". One decision wins (the UPDATE is the claim). Registered
+   * before /api/artifacts/:id so "link-requests" is never read as an id.
+   */
+  const emitTo = async (thread, frame, botId) => {
+    try {
+      const emit = S.emitExternal || (await appImport("servers/gateway/perch-interactive.js")).emitExternalToResident;
+      await emit(thread, frame, { botId });
+    } catch { /* the store holds the decision; the hub refetches on open */ }
+  };
+  router.get("/api/artifacts/link-requests", wrap(async (req, res) => {
+    const thread = String(req.query.thread || "");
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(thread)) throw Object.assign(new Error("thread"), { code: "bad_request" });
+    const rows = (await S.db.execute({ sql: "SELECT r.id, r.artifact_id, r.bot_id, r.requested_at, a.title FROM artifact_link_requests r JOIN artifacts a ON a.id=r.artifact_id WHERE r.thread_id=? AND r.status='pending' AND a.deleted_at IS NULL ORDER BY r.id", args: [thread] })).rows;
+    res.setHeader("cache-control", "no-store");
+    res.json({ requests: rows.map((r) => ({ id: Number(r.id), artifactId: r.artifact_id, title: r.title, botId: r.bot_id, requestedAt: r.requested_at })) });
+  }));
+  router.post("/api/artifacts/link-requests/:rid/decide", wrap(async (req, res) => {
+    const rid = Number(req.params.rid);
+    const r = Number.isInteger(rid) ? (await S.db.execute({ sql: "SELECT * FROM artifact_link_requests WHERE id=?", args: [rid] })).rows[0] : null;
+    if (!r) throw Object.assign(new Error("no such request"), { code: "not_found" });
+    const art = await M.store.requireAccess(S.db, OWNER, r.artifact_id);
+    const accept = req.body?.accept === true;
+    const claim = (status) => S.db.execute({ sql: "UPDATE artifact_link_requests SET status=?, decided_at=datetime('now') WHERE id=? AND status='pending'", args: [status, rid] });
+    // A Yes for a bot that can no longer reach the artifact links nothing.
+    if (accept && !(await M.store.canAccess(S.db, { kind: "bot", id: r.bot_id }, art))) {
+      if (Number((await claim("declined")).rowsAffected) === 1) await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "link-declined", target: r.thread_id, detail: { reason: "no_access" } });
+      throw Object.assign(new Error("that bot can't work on this artifact"), { code: "target_no_access" });
+    }
+    if (Number((await claim(accept ? "accepted" : "declined")).rowsAffected) !== 1) throw Object.assign(new Error("already decided"), { code: "already_decided" });
+    if (accept) {
+      // Review L2: the insert itself re-checks access, so a revoke landing
+      // between the check above and this write links nothing.
+      try { await S.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) SELECT ?,?,?,'owner-yes' WHERE EXISTS (SELECT 1 FROM artifacts WHERE id=? AND created_by_bot=? AND received=0 AND deleted_at IS NULL) OR EXISTS (SELECT 1 FROM artifact_bot_access WHERE artifact_id=? AND bot_id=?)", args: [art.id, r.bot_id, r.thread_id, art.id, r.bot_id, art.id, r.bot_id] }); }
+      catch (e) { if (!/UNIQUE/i.test(String(e.message))) throw e; /* already actively linked */ }
+    }
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: accept ? "link-accepted" : "link-declined", target: r.thread_id, detail: { request: rid } });
+    await emitTo(r.thread_id, { type: "artifact", artifactId: art.id, n: null, event: "link-decided" }, r.bot_id);
+    res.json({ decided: accept ? "accepted" : "declined" });
+  }));
+
+  /**
+   * The owner's "Let <bot> work on this" (plan PR-3 Task 3.7). NEVER
+   * bot-callable: dashboard auth + CSRF only, no MCP tool. The picker lists
+   * bots whose def grants the Artifacts tools. A grant opens the artifact to
+   * that bot (get/find/attach/update); a revoke closes it and unlinks that
+   * bot's chats from it (a chat of a bot that can no longer reach the
+   * artifact must not keep receiving its cards). Both audited.
+   * /api/artifacts/bots is registered before /api/artifacts/:id.
+   */
+  async function artifactBots() {
+    let rows = [];
+    try { rows = (await S.db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1 ORDER BY display_name", args: [] })).rows; } catch { rows = []; }
+    const out = [];
+    for (const r of rows) {
+      let def = null; try { def = JSON.parse(r.definition || "{}"); } catch { def = null; }
+      if (M.delivery.botHasArtifactsTools(def)) out.push({ id: String(r.bot_id), name: String(r.display_name || r.bot_id) });
+    }
+    return out;
+  }
+  router.get("/api/artifacts/bots", wrap(async (_req, res) => { res.json({ bots: await artifactBots() }); }));
+  router.get("/api/artifacts/:id/access", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT bot_id, granted_at FROM artifact_bot_access WHERE artifact_id=? ORDER BY granted_at", args: [art.id] })).rows;
+    res.json({ grants: rows.map((r) => ({ botId: r.bot_id, grantedAt: r.granted_at })) });
+  }));
+  router.post("/api/artifacts/:id/access", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const botId = String(req.body?.botId || "");
+    if (!botId || botId === art.created_by_bot) throw Object.assign(new Error("pick another bot"), { code: "bad_request" });
+    if (!(await artifactBots()).some((b) => b.id === botId)) throw Object.assign(new Error("that bot has no Artifacts tools"), { code: "bad_request" });
+    await S.db.execute({ sql: "INSERT OR IGNORE INTO artifact_bot_access (artifact_id, bot_id) VALUES (?,?)", args: [art.id, botId] });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "access-granted", target: botId });
+    res.json({ granted: botId });
+  }));
+  router.delete("/api/artifacts/:id/access/:botId", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const botId = String(req.params.botId);
+    const r = await S.db.execute({ sql: "DELETE FROM artifact_bot_access WHERE artifact_id=? AND bot_id=?", args: [art.id, botId] });
+    if (Number(r.rowsAffected) !== 1) throw Object.assign(new Error("no such grant"), { code: "not_found" });
+    if (botId !== art.created_by_bot) await S.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND bot_id=? AND unlinked_at IS NULL", args: [art.id, botId] });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "access-revoked", target: botId });
+    res.json({ revoked: botId });
   }));
 
   router.get("/api/artifacts/:id", wrap(async (req, res) => {
@@ -152,6 +288,49 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
       // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
       lockedThreads: await M.comments.lockedThreadIds(S.db, art.id) });
+  }));
+
+  /**
+   * The send sheet (plan PR-3 Task 3.4) and the Library's Linked chats tab:
+   * the artifact's ACTIVE links, most recent first, each with its chat's
+   * state (the engine's word, or "unknown" when it is not listed) and whether
+   * a Send can go there — the SAME verification the Send route runs, so the
+   * sheet never offers a chat the server would refuse. Owner-only.
+   */
+  router.get("/api/artifacts/:id/links", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT id, bot_id, thread_id, linked_at, linked_by FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL ORDER BY linked_at DESC, id DESC", args: [art.id] })).rows;
+    let sessions = [];
+    try { sessions = await (await engineNow()).list(); } catch { sessions = []; }
+    const links = [];
+    for (const r of rows) {
+      const seen = sessions.find((x) => x.threadId === r.thread_id) || null;
+      const state = seen ? String(seen.state || "unknown") : "unknown";
+      const why = await M.links.verifyTarget(S.db, { artifactId: art.id, botId: r.bot_id, threadId: r.thread_id, botDef: await botDefOf(r.bot_id) });
+      links.push({ id: Number(r.id), threadId: r.thread_id, botId: r.bot_id, linkedAt: r.linked_at, linkedBy: r.linked_by, state, label: (seen && seen.label) || null, sendable: !why && state !== "stopped", why: why || null });
+    }
+    res.setHeader("cache-control", "no-store");
+    res.json({ links, bot: art.created_by_bot || null, offerBoard: typeof S.createBoardCard === "function" });
+  }));
+
+  /** The Library drawer's Audit tab: the last 50 rows, newest first. */
+  router.get("/api/artifacts/:id/audit", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT id, actor_kind, actor_id, action, target, ts FROM artifact_audit WHERE artifact_id=? ORDER BY id DESC LIMIT 50", args: [art.id] })).rows;
+    res.json({ rows: rows.map((r) => ({ id: Number(r.id), actor: r.actor_kind + (r.actor_id ? ":" + r.actor_id : ""), action: r.action, target: r.target, ts: r.ts })) });
+  }));
+
+  /** The Library drawer's Unlink (spec D25): the chat stops receiving this
+   *  artifact's cards and is no longer a Send target. Owner + CSRF, audited. */
+  router.post("/api/artifacts/:id/links/:lid/unlink", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const lid = Number(req.params.lid);
+    const l = Number.isInteger(lid) ? (await S.db.execute({ sql: "SELECT thread_id FROM artifact_links WHERE id=? AND artifact_id=? AND unlinked_at IS NULL", args: [lid, art.id] })).rows[0] : null;
+    if (!l) throw Object.assign(new Error("no such link"), { code: "not_found" });
+    const r = await S.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE id=? AND artifact_id=? AND unlinked_at IS NULL", args: [lid, art.id] });
+    if (Number(r.rowsAffected) !== 1) throw Object.assign(new Error("no such link"), { code: "not_found" });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "link-unlinked", target: l.thread_id });
+    res.json({ unlinked: true });
   }));
 
   /**
@@ -248,30 +427,61 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json(await M.rounds.previewRound(S.db, req.params.id));
   }));
 
-  /** Send feedback / Ask now (owner gesture). body: { include: [threadIds], kind, datasetsApproved, choice } */
+  const THREAD_RE = /^[A-Za-z0-9_-]{1,80}$/;
+  const CHOICES = ["chat", "new-session", "board-card"];
+  const choiceOf = (c) => (CHOICES.includes(c) ? c : "chat");   // legacy "auto" → chat
+  const engineNow = async () => S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
+  const botDefOf = (botId) => (S.loadBotDef ? S.loadBotDef(botId) : loadBotDef(S.db, botId));
+  const named = (code) => Object.assign(new Error(code), { code });
+
+  /**
+   * The owner names ONE chat (plan PR-3 Task 3.3, review M4/M5c): verified
+   * server-side (active link, the link's bot has access, the chat is that
+   * bot's own, the def still has the Artifacts tools) or refused by name.
+   * Returns { threadId, botId } or throws.
+   */
+  async function namedTarget(art, thread) {
+    if (typeof thread !== "string" || !THREAD_RE.test(thread)) throw named("bad_request");
+    const l = await M.links.activeLink(S.db, art.id, thread);
+    if (!l) throw named("target_unlinked");
+    const why = await M.links.verifyTarget(S.db, { artifactId: art.id, botId: l.botId, threadId: l.threadId, botDef: await botDefOf(l.botId) });
+    if (why) throw named(why);
+    return { threadId: l.threadId, botId: l.botId };
+  }
+
+  /** Send feedback (owner gesture). body: { include: [threadIds], choice: chat|new-session|board-card, thread?, datasetsApproved }
+   *  "chat" (the default) goes ONLY to a verified chat: the viewer's thread=,
+   *  else (the Library) the most recent verified active link, persisted on
+   *  the round as target_thread. No such chat → the round waits for the
+   *  owner's choice (the send sheet). Never "any live chat" (round-2 B7). */
   router.post("/api/artifacts/:id/rounds", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
     if (!art.created_by_bot) throw Object.assign(new Error("this artifact has no bot"), { code: "bad_request" });
-    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved });
-    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
-    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
-    // Same whitelist as the deliver route (review C3-N2): an unknown choice is auto.
-    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
-    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    const choice = choiceOf(req.body?.choice);
+    let target = null;
+    if (choice === "chat") {
+      target = req.body?.thread != null ? await namedTarget(art, req.body.thread) : await M.links.pickSendTarget(S.db, { artifactId: art.id, loadBotDef: botDefOf });
+    }
+    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved, botId: target ? target.botId : art.created_by_bot, targetThread: target ? target.threadId : null });
+    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
     res.status(201).json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
   }));
 
-  /** D4: deliver a round that is still waiting for the owner's choice (or
-   *  queued at capacity). Owner session + CSRF like every route here. */
+  /** The send sheet's second step: deliver a round still waiting for the
+   *  owner's choice (or queued at capacity). "chat" with a thread= names a
+   *  chat, verified like the Send route and persisted before delivery. */
   router.post("/api/artifacts/:id/rounds/:rid/deliver", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
-    const round = await M.rounds.getRound(S.db, Number(req.params.rid));
+    let round = await M.rounds.getRound(S.db, Number(req.params.rid));
     if (!round || round.artifact_id !== art.id) throw Object.assign(new Error("no such round"), { code: "not_found" });
     if (!["pending", "queued"].includes(round.status) || round.session_id || round.card_id) throw Object.assign(new Error("this round was already delivered"), { code: "bad_request" });
-    const choice = ["new-session", "board-card", "auto"].includes(req.body?.choice) ? req.body.choice : "auto";
-    const engine = S.engine || (await appImport("servers/gateway/perch-interactive.js")).getInteractiveEngine();
-    const botDef = S.loadBotDef ? await S.loadBotDef(round.bot_id) : await loadBotDef(S.db, round.bot_id);
-    const out = await M.delivery.deliverRound(S.db, round, { engine, botDef, choice, originThread: art.origin_session, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    const choice = choiceOf(req.body?.choice);
+    if (choice === "chat" && req.body?.thread != null) {
+      const t = await namedTarget(art, req.body.thread);
+      await S.db.execute({ sql: "UPDATE artifact_rounds SET target_thread=?, bot_id=?, updated_at=datetime('now') WHERE id=? AND status IN ('pending','queued') AND session_id IS NULL AND card_id IS NULL", args: [t.threadId, t.botId, round.id] });
+      round = await M.rounds.getRound(S.db, round.id);
+    }
+    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
     res.json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
   }));
 

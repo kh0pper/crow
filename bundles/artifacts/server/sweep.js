@@ -14,6 +14,18 @@ const HEALTH = { lastProblem: null, checkedAt: null };
 const NOTIFIED = new Set();   // a "told the owner" memo, never a trust state
 export function artifactsHealth() { return { ...HEALTH }; }
 
+/** Owner-facing words for a failed delivery (round-2 B8: name the reason). */
+const FAILED_WHY = {
+  target_unlinked: "that chat was unlinked from the artifact",
+  target_asleep: "that chat is asleep — open it and Send again",
+  target_locked: "that chat is limited to one feedback round",
+  target_no_access: "that bot no longer has access to the artifact",
+  target_other_bot: "that chat belongs to another bot",
+  target_not_bots_chat: "that chat belongs to another bot",
+  bot_lacks_artifacts: "the bot no longer has the Artifacts tools",
+};
+export function failedBody(roundId, error) { return `Round ${roundId}: ${FAILED_WHY[error] || error || "it could not be delivered"}. Its comments are open again.`; }
+
 export async function runSweep(db, opts = {}) {
   if (running) return { skipped: true };
   running = true;
@@ -57,10 +69,13 @@ async function sweepOnce(db, { engine = null, blobs = null, now = Date.now(), no
     const queued = (await db.execute({ sql: "SELECT id, artifact_id FROM artifact_rounds WHERE status='queued' ORDER BY id", args: [] })).rows;
     for (const q of queued) {
       const round = await getRound(db, q.id);
-      const art = (await db.execute({ sql: "SELECT origin_session FROM artifacts WHERE id=?", args: [q.artifact_id] })).rows[0];
       try {
-        const res = await deliverRound(db, round, { engine, botDef: await botDefOf(round.bot_id), choice: "auto", originThread: art?.origin_session || null, actor: { kind: "system" } });
+        // B7: the retry repeats the owner's choice — the round's verified
+        // target chat, else the new session it queued for. Never the
+        // artifact's origin chat, never "any live chat".
+        const res = await deliverRound(db, round, { engine, botDef: await botDefOf(round.bot_id), choice: round.target_thread ? "chat" : "new-session", actor: { kind: "system" } });
         if (res.status === "working") out.retried.push(round.id);
+        if (res.status === "failed") { try { await notify({ title: "The bot couldn't get your comments", body: failedBody(round.id, res.error), type: "attention", source: "artifacts" }); } catch {} }
         if (res.downgraded) { try { await notify({ title: "A feedback round ran with Artifacts tools only", body: `Round ${round.id} included outside text, so it ran in a session limited to Artifacts.`, type: "attention", source: "artifacts" }); } catch {} }
       } catch {}
     }

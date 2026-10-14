@@ -7,6 +7,7 @@ import * as comments from "./comments.js";
 import * as rounds from "./rounds.js";
 import { sessionIsClean, markSessionTainted } from "./trust.js";
 import { notifyHub } from "./notify-hub.js";
+import { activeLink } from "./links.js";
 
 // Header values are TRIMMED so the attributed id always equals the id the
 // signature was made over (the MAC trims on both sides; review 1a-L2).
@@ -38,6 +39,37 @@ export function resolveArtifactsActor(extra, verifyActor) {
   }
   // OAuth, peers and anything else: no artifacts access in v1.
   return { ...UNATTRIBUTED };
+}
+
+/**
+ * C2 scope, FAIL CLOSED (self-review). A session is held to one round's
+ * artifact when either
+ *   - its bot_sessions row carries a LOCKED narrowing ("crow:locked"), or
+ *   - an untrusted round is bound to its thread.
+ * A locked session with no bound round, or session state that cannot be
+ * read, is refused outright — never treated as an unrestricted bot.
+ * Returns null only for a bot with no thread (a channel/job turn: it cannot
+ * be a locked Perch session) or a thread that is provably neither.
+ * Exported for the D23 one-way parity test: trust.js isLocked must be at
+ * least this strict (scopeOf scoped ⇒ isLocked).
+ */
+export async function scopeOf(db, actor) {
+  if (actor.kind !== "bot") return null;
+  if (!actor.thread) return null;
+  let locked;
+  try {
+    const r = (await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [actor.id, actor.thread] })).rows[0];
+    locked = !!r && typeof r.narrowed_tools === "string" && r.narrowed_tools.includes("crow:locked");
+  } catch {
+    throw Object.assign(new Error("session state unavailable"), { code: "forbidden" });
+  }
+  // No status filter, intentionally: the scope OUTLIVES its round's
+  // completion so a still-locked session can never regain the unrestricted
+  // surface (restrictive direction; pinned by the mcp scope tests).
+  const round = (await db.execute({ sql: "SELECT id, artifact_id, untrusted_input FROM artifact_rounds WHERE session_id=? AND bot_id=? ORDER BY id DESC LIMIT 1", args: [actor.thread, actor.id] })).rows[0];
+  if (locked && !round) throw Object.assign(new Error("this locked session has no round"), { code: "forbidden" });
+  if (locked || (round && store.flagUntrusted(round.untrusted_input))) return { roundId: Number(round.id), artifactId: round.artifact_id };
+  return null;
 }
 
 const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
@@ -75,6 +107,7 @@ export function gate(payload, actor, scope, roundThreads) {
 export const TOOL_CLASSES = Object.freeze({
   artifact_create: "writes", artifact_update: "writes", artifact_get: "reads-untrusted", artifact_list: "reads-owner-metadata",
   artifact_comments: "reads-untrusted", artifact_reply: "writes", artifact_resolve: "writes", artifact_round_done: "writes",
+  artifact_attach: "writes", artifact_find: "reads-owner-metadata",
 });
 // CONTRACT: error text reaches the wire UNGATED, so every message thrown at a
 // caller must be a static string — never interpolate a title, change note,
@@ -93,41 +126,14 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   // record and the by-thread route replays missed cards on the next open.
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
-  /**
-   * C2 scope, FAIL CLOSED (self-review). A session is held to one round's
-   * artifact when either
-   *   - its bot_sessions row carries a LOCKED narrowing ("crow:locked"), or
-   *   - an untrusted round is bound to its thread.
-   * A locked session with no bound round, or session state that cannot be
-   * read, is refused outright — never treated as an unrestricted bot.
-   * Returns null only for a bot with no thread (a channel/job turn: it cannot
-   * be a locked Perch session) or a thread that is provably neither.
-   */
-  async function scopeOf(actor) {
-    if (actor.kind !== "bot") return null;
-    if (!actor.thread) return null;
-    let locked;
-    try {
-      const r = (await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [actor.id, actor.thread] })).rows[0];
-      locked = !!r && typeof r.narrowed_tools === "string" && r.narrowed_tools.includes("crow:locked");
-    } catch {
-      throw Object.assign(new Error("session state unavailable"), { code: "forbidden" });
-    }
-    // No status filter, intentionally: the scope OUTLIVES its round's
-    // completion so a still-locked session can never regain the unrestricted
-    // surface (restrictive direction; pinned by the mcp scope tests).
-    const round = (await db.execute({ sql: "SELECT id, artifact_id, untrusted_input FROM artifact_rounds WHERE session_id=? AND bot_id=? ORDER BY id DESC LIMIT 1", args: [actor.thread, actor.id] })).rows[0];
-    if (locked && !round) throw Object.assign(new Error("this locked session has no round"), { code: "forbidden" });
-    if (locked || (round && store.flagUntrusted(round.untrusted_input))) return { roundId: Number(round.id), artifactId: round.artifact_id };
-    return null;
-  }
+  const scopeOfActor = (actor) => scopeOf(db, actor);
   const tool = (name, desc, schema, fn) => {
     if (!TOOL_CLASSES[name]) throw new Error(`artifacts tool ${name} has no taint class`);
     return server.tool(name, desc, schema, async (args, extra) => {
       try {
         const actor = resolveArtifactsActor(extra, verifyActor);
         if (actor.kind === "unattributed") throw Object.assign(new Error("unattributed caller"), { code: "forbidden" });
-        const scope = await scopeOf(actor);
+        const scope = await scopeOfActor(actor);
         if (scope && args.artifact_id !== undefined && args.artifact_id !== scope.artifactId) throw Object.assign(new Error("this round is limited to its own artifact"), { code: "forbidden" });
         const roundThreads = new Set(scope ? JSON.parse((await db.execute({ sql: "SELECT thread_ids_json FROM artifact_rounds WHERE id=?", args: [scope.roundId] })).rows[0]?.thread_ids_json || "[]").map(Number) : []);
         if (scope) scope.roundThreads = roundThreads;
@@ -293,6 +299,68 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       await onRoundDone(r);
       await hub(a.artifact_id, r.result_version == null ? null : Number(r.result_version), "round-done");
       return { round: r.id, status: r.status, late: !!r.late, idempotent: !!r.idempotent };
+    });
+
+  // ── PR-3 Task 3.5: ask-first linking ────────────────────────────────────
+  // A bot can never link silently. artifact_attach only ASKS: one pending
+  // request per (artifact, chat), an ask card in the REQUESTING chat, and the
+  // owner's Yes (the panel's decide route) is the only thing that links.
+  // Scope-checked first (the standard not_found), Perch chats only (a channel
+  // turn has no card to show), capped per day (review L8).
+  const ATTACH_DAILY_CAP = 5;
+  tool("artifact_attach", "Ask the owner to link one of your artifacts to THIS chat, so its updates and the owner's feedback come here. The owner decides; nothing is linked until they say yes.",
+    { artifact_id: z.string() },
+    async (a, actor, scope) => {
+      scopedOut(scope);
+      if (actor.kind !== "bot" || actor.gateway !== "perch" || !actor.thread) throw Object.assign(new Error("artifact_attach works from a Perch chat"), { code: "forbidden" });
+      const art = await store.requireAccess(db, actor, a.artifact_id);
+      if (await activeLink(db, art.id, actor.thread)) return { linked: true };
+      const pending = (await db.execute({ sql: "SELECT id FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status='pending' ORDER BY id DESC LIMIT 1", args: [art.id, actor.thread] })).rows[0];
+      if (pending) return { requested: true, request_id: Number(pending.id), note: "link requested — the owner decides" };
+      const used = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status IN ('pending','declined') AND requested_at > datetime('now','-1 day')", args: [art.id, actor.thread] })).rows[0].n);
+      if (used >= ATTACH_DAILY_CAP) {
+        await store.audit(db, { artifactId: art.id, actor, action: "link-refused", target: String(actor.thread), detail: { reason: "daily_cap" } });
+        throw Object.assign(new Error("too many link requests for this chat today"), { code: "rate_limited" });
+      }
+      let rid;
+      try { rid = Number((await db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id, bot_id, thread_id) VALUES (?,?,?)", args: [art.id, actor.id, actor.thread] })).lastInsertRowid); }
+      catch (e) {
+        // Review L3: a concurrent attach from this chat won the one pending slot.
+        if (!/UNIQUE/i.test(String(e.message))) throw e;
+        const won = (await db.execute({ sql: "SELECT id FROM artifact_link_requests WHERE artifact_id=? AND thread_id=? AND status='pending'", args: [art.id, actor.thread] })).rows[0];
+        return { requested: true, request_id: Number(won && won.id), note: "link requested — the owner decides" };
+      }
+      await store.audit(db, { artifactId: art.id, actor, action: "link-requested", target: String(actor.thread), detail: { request: rid } });
+      // The ask card: the requesting chat ONLY (never the artifact's links).
+      if (typeof emitExternal === "function") {
+        try { await emitExternal(actor.thread, { type: "artifact", artifactId: art.id, n: null, event: "link-ask" }, { botId: actor.id }); } catch { /* the store holds the request; the hub refetches on open */ }
+      }
+      return { requested: true, request_id: rid, note: "link requested — the owner decides" };
+    });
+
+  // ── PR-3 Task 3.6: artifact_find(ref) — a thin wrapper over the scope check.
+  // ref = an id, a viewer URL (path only; any host), or a title fragment. A
+  // bot's title arm matches only titles that are not tainted: a tainted title
+  // is outside text, and substring probing would read it one bit at a time.
+  const VIEW_PATH = /\/dashboard\/artifacts\/view\/(art_[A-Za-z0-9_-]{6,40})\/?$/;
+  tool("artifact_find", "Find one of your artifacts by id, by its viewer link, or by words from its title.",
+    { ref: z.string() },
+    async (a, actor, scope) => {
+      scopedOut(scope);
+      const ref = String(a.ref || "").trim().slice(0, 500);
+      if (!ref) throw Object.assign(new Error("ref required"), { code: "bad_request" });
+      let id = /^art_[A-Za-z0-9_-]{6,40}$/.test(ref) ? ref : null;
+      if (!id) { try { const m = VIEW_PATH.exec(new URL(ref, "http://ref.invalid").pathname); if (m) id = m[1]; } catch { id = null; } }
+      const row = (r) => ({ id: r.id, title: store.flagUntrusted(r.title_tainted) ? U(r.title, { artifactId: r.id }) : r.title, type: r.type, current_version: r.current_version });
+      if (id) return { artifact: row(await store.requireAccess(db, actor, id)) };
+      const like = "%" + ref.toLowerCase().replace(/[\\%_]/g, (c) => "\\" + c) + "%";
+      const visible = actor.kind === "session"
+        ? { sql: "SELECT * FROM artifacts WHERE deleted_at IS NULL AND lower(title) LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 11", args: [like] }
+        : { sql: "SELECT * FROM artifacts WHERE deleted_at IS NULL AND received=0 AND title_tainted=0 AND (created_by_bot=? OR id IN (SELECT artifact_id FROM artifact_bot_access WHERE bot_id=?)) AND lower(title) LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 11", args: [actor.id, actor.id, like] };
+      const hits = (await db.execute(visible)).rows;
+      if (!hits.length) throw Object.assign(new Error("no such artifact"), { code: "not_found" });
+      if (hits.length === 1) return { artifact: row(hits[0]) };
+      return { candidates: hits.slice(0, 10).map(row) };
     });
 
   return server;

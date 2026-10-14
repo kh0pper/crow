@@ -177,9 +177,12 @@ before(async () => {
     res.append("set-cookie", "crow_csrf=tok; Path=/");
     next();
   });
+  // A fake Perch engine for the send sheet (never the real one in a test).
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT);`);
+  s.engine = { sent: [], spawned: [], async list() { return []; }, async message(id) { this.sent.push(id); }, async spawn(o) { this.spawned.push(o); return { sessionId: "perchlive-5ee0ff01", threadId: "perchlive-5ee0ff01" }; } };
   app.use(artifactsRouter(dashAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks },
-    notify: async () => {},
+    notify: async () => {}, engine: s.engine, loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts"] } }), createBoardCard: null,
   }));
   app.get("/vendor/turbo-8.0.5.umd.js", (_req, res) => {
     res.setHeader("content-type", "application/javascript");
@@ -329,5 +332,125 @@ test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hu
     await t.evalIn(`(() => { const f = document.createElement('iframe'); f.id = 'pane'; f.src = ${JSON.stringify(viewUrl)}; document.body.appendChild(f); })()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(() => { const d = document.getElementById('pane').contentDocument; return !!(d && d.querySelector('.cv-head')); })()`)) === true, 15000), "the framed viewer rendered");
     assert.equal(await t.evalIn(`!!document.getElementById('pane').contentDocument.querySelector('.cv-nav')`), false);
+  } finally { await t.close(); }
+});
+
+test("live: the send sheet — the opening chat is preselected and is where the round goes; with no linked chat only 'New chat with <bot>' remains; no board without a board", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  const CHAT = "perchlive-5ee0aa01";
+  await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [CHAT] });
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Sheet doc", type: "document", source: { markdown: "# One\n\nwords" }, actor: { kind: "bot", id: "bobby", thread: CHAT, gateway: "perch" } }, { markdownBlocks });
+  const th = await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: { kind: "whole" }, text: "make it blue", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const sheet = `JSON.stringify([...document.querySelectorAll('dialog .cv-where-opt')].map((l) => [l.textContent.trim(), l.querySelector('input').checked, l.querySelector('input').disabled]))`;
+  try {
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}?thread=${CHAT}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled`)) === true, 15000), `Send enabled (page errors: ${JSON.stringify(t.errors)})`);
+    await t.evalIn(`document.querySelector('.cv-send').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt').length`)) === 2), "the where-step rendered");
+    assert.deepEqual(JSON.parse(await t.evalIn(sheet)), [["This chat", true, false], ["New chat with bobby", false, false]], "this chat preselected; no board option without a board");
+    await t.evalIn(`document.querySelector('dialog .cv-primary').click()`);
+    assert.ok(await waitFor(async () => (await s.db.execute({ sql: "SELECT target_thread FROM artifact_rounds WHERE artifact_id=?", args: [doc.id] })).rows[0]?.target_thread === CHAT), "the round targets the opening chat");
+    assert.deepEqual(s.engine.sent, [CHAT]);
+    // No linked chat: only a new chat remains (and it is what Send does).
+    await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE artifact_id=?", args: [doc.id] });
+    await s.db.execute({ sql: "UPDATE artifact_threads SET sent_round_id=NULL WHERE id=?", args: [th.threadId] });
+    await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=?", args: [doc.id] });
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled`)) === true, 15000));
+    await t.evalIn(`document.querySelector('.cv-send').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt').length`)) === 1));
+    assert.deepEqual(JSON.parse(await t.evalIn(sheet)), [["New chat with bobby", true, false]]);
+    await t.evalIn(`document.querySelector('dialog .cv-primary').click()`);
+    assert.ok(await waitFor(() => s.engine.spawned.length === 1), "a new chat with the bot");
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-banner.cv-info')`), false, "no D4 banner anywhere");
+  } finally { await t.close(); }
+});
+
+test("live: '⋯ → Let a bot work on this' lists only bots with the Artifacts tools and a tick grants (a second tick revokes)", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1);`);
+  for (const [id, name, tools] of [["bobby", "Bobby", ["artifacts"]], ["eve", "Eve", ["artifacts"]], ["mailer", "Mailer", ["gmail/send"]]]) {
+    await s.db.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)", args: [id, name, JSON.stringify({ tools: { crow_mcp: tools } })] });
+  }
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Grant doc", type: "document", source: { markdown: "# g" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-5ee0bb01", gateway: "perch" } }, { markdownBlocks });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const grants = async () => (await s.db.execute({ sql: "SELECT bot_id FROM artifact_bot_access WHERE artifact_id=?", args: [doc.id] })).rows.map((r) => r.bot_id);
+  try {
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-grant')`)) === true, 15000), `menu item drawn (page errors: ${JSON.stringify(t.errors)})`);
+    await t.evalIn(`document.querySelector('.cv-grant').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('dialog.cv-grants[open] input')`)) === true), "the grant dialog opened");
+    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('dialog.cv-grants label')].map((l) => l.textContent.trim()))`), JSON.stringify(["Eve"]), "only OTHER bots with the tools");
+    await t.evalIn(`document.querySelector('dialog.cv-grants input').click()`);
+    assert.ok(await waitFor(async () => JSON.stringify(await grants()) === JSON.stringify(["eve"])), "a tick grants");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!document.querySelector('dialog.cv-grants input').disabled`)) === true));
+    await t.evalIn(`document.querySelector('dialog.cv-grants input').click()`);
+    assert.ok(await waitFor(async () => (await grants()).length === 0), "a second tick revokes");
+  } finally { await t.close(); }
+});
+
+test("live: the Library — badges from the store, search narrows the list, the drawer has five tabs with honest stubs, and Unlink drops a chat", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const CHAT = "perchlive-5ee0cc01", CHAT2 = "perchlive-5ee0cc02";
+  const lib = await store.createArtifact(s.db, s.blobs, { title: "Zebra library entry", type: "document", source: { markdown: "# z" }, actor: { kind: "bot", id: "bobby", thread: CHAT, gateway: "perch" } }, { markdownBlocks });
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [lib.id, "bobby", CHAT2] });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const item = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Zebra library entry'))`;
+  try {
+    await t.nav(`${base}/dashboard/artifacts`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!(${item})`)) === true, 15000), `the list rendered (page errors: ${JSON.stringify(t.errors)})`);
+    assert.match(await t.evalIn(`(${item}).querySelector('.ca-badges').textContent`), /Document.*v1.*2 linked chats/);
+    // Search narrows.
+    await t.evalIn(`(() => { const q = document.querySelector('#crow-artifacts .ca-search'); q.value = 'zebra'; q.dispatchEvent(new Event('input')); })()`);
+    assert.equal(await t.evalIn(`document.querySelectorAll('#crow-artifacts .ca-item').length`), 1);
+    // The drawer.
+    await t.evalIn(`(${item}).querySelector('.ca-details').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-tab').length`)) === 5), "five tabs");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-tabpanel').textContent.includes('v1')`)) === true), "Versions lists v1");
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=projects]').click()`);
+    assert.equal(await t.evalIn(`(${item}).querySelector('.ca-soon').textContent`), "Adding artifacts to projects is coming soon.");
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=links]').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 2), "two linked chats");
+    assert.equal(await t.evalIn(`(${item}).querySelector('.ca-openchat').getAttribute('href').startsWith('/dashboard/perch#perchlive-')`), true);
+    await t.evalIn(`(${item}).querySelector('.ca-unlink').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 1), "one left after Unlink");
+    assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL", args: [lib.id] })).rows[0].n, 1);
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=audit]').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-audit') && (${item}).querySelector('.ca-audit').textContent.includes('link-unlinked')`)) === true), "the audit tab shows the unlink");
+    // Phone width: no horizontal page scroll with the drawer open.
+    await t.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 800, deviceScaleFactor: 2, mobile: true });
+    await sleep(200);
+    assert.ok(await t.evalIn(`document.documentElement.scrollWidth <= innerWidth`), "no horizontal scroll at 390px");
+  } finally { await t.close(); }
+});
+
+test("live, review M2: opened from a chat that can no longer take it, the sheet preselects NOTHING and says why — it never quietly sends elsewhere", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  const A = "perchlive-5ee0dd01", B = "perchlive-5ee0dd02";
+  for (const t of [A, B]) await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [t] });
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "M2 doc", type: "document", source: { markdown: "# m" }, actor: { kind: "bot", id: "bobby", thread: A, gateway: "perch" } }, { markdownBlocks });
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [doc.id, "bobby", B] });
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND thread_id=?", args: [doc.id, A] });
+  await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: { kind: "whole" }, text: "m2", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const sentBefore = s.engine.sent.length;
+  try {
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}?thread=${A}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled`)) === true, 15000));
+    await t.evalIn(`document.querySelector('.cv-send').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt').length`)) >= 2));
+    assert.equal(await t.evalIn(`document.querySelectorAll('dialog .cv-where-opt input:checked').length`), 0, "nothing preselected");
+    assert.match(await t.evalIn(`document.querySelector('dialog .cv-where .cv-err').textContent`), /isn't linked/);
+    await t.evalIn(`document.querySelector('dialog .cv-primary').click()`);
+    await sleep(400);
+    assert.equal(s.engine.sent.length, sentBefore, "Send with no choice sends nothing");
+    assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_rounds WHERE artifact_id=?", args: [doc.id] })).rows[0].n, 0);
   } finally { await t.close(); }
 });

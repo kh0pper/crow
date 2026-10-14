@@ -48,6 +48,14 @@ export function perchArtifactCardJs(lang = "en") {
   var ART_CONTACT='${tJs("perch.artifactContactComments", lang)}';
   var ART_FAILED='${tJs("perch.artifactActionFailed", lang)}';
   var ART_GONE='${tJs("perch.artifactGone", lang)}';
+  var ART_LINK_ASK='${tJs("perch.artifactLinkAsk", lang)}';
+  var ART_LINK_WHY='${tJs("perch.artifactLinkAskWhy", lang)}';
+  var ART_LINK_YES='${tJs("perch.artifactLinkYes", lang)}';
+  var ART_LINK_NO='${tJs("perch.artifactLinkNo", lang)}';
+  var ART_FB='${tJs("perch.artifactFeedback", lang)}';
+  var ART_FB_ONE='${tJs("perch.artifactFeedbackOne", lang)}';
+  var ART_FB_SHOW='${tJs("perch.artifactFeedbackShow", lang)}';
+  var ART_FB_HIDE='${tJs("perch.artifactFeedbackHide", lang)}';
   var ART_TYPES={ page:'${tJs("perch.artifactTypePage", lang)}', document:'${tJs("perch.artifactTypeDocument", lang)}', diagram:'${tJs("perch.artifactTypeDiagram", lang)}' };
 
   /* artifactId -> {node,key} for THIS transcript. Dies with the transcript at
@@ -64,7 +72,12 @@ export function perchArtifactCardJs(lang = "en") {
      stop asking for this document. */
   var artNoBundle=false;
 
-  function resetArtifactCards(){ artCards={}; artBuf=[]; artGen++; closeArtifactPane(); }
+  /* requestId -> node: this chat's pending ask-first link cards (PR-3 3.5). */
+  var artAsks={};
+  /* roundId -> node: this chat's feedback cards (PR-3 3.8). */
+  var artFb={};
+
+  function resetArtifactCards(){ artCards={}; artAsks={}; artFb={}; artBuf=[]; artGen++; closeArtifactPane(); }
 
   /* The viewer page's URL (same origin). The thread rides along only when it
      is a Perch thread id; the viewer validates it again server-side. */
@@ -123,10 +136,120 @@ export function perchArtifactCardJs(lang = "en") {
     },function(){ return {ok:false,status:0,j:null}; });
   }
 
-  /* An SSE artifact frame: a pointer only — refetch the row. */
+  /* An SSE artifact frame: a pointer only — refetch the row. A link-ask or
+     link-decided frame refetches this chat's PENDING requests instead: the
+     artifact is not linked here (yet), so it draws no artifact card. */
   function artifactFrame(d,sid){
     if(!d||typeof d.artifactId!=='string'||!d.artifactId) return;
+    if(d.event==='link-ask'||d.event==='link-decided'){ loadLinkAsks(sid); return; }
     artifactRefetch(d.artifactId,sid);
+    /* The bot is acting on this chat's artifact: a round it received may
+       have just landed — pick up any new feedback card. */
+    loadFeedbackCards(sid);
+  }
+
+  /* Feedback cards (spec v1.6 D25, plan PR-3 Task 3.8): one per round
+     DELIVERED to this chat, keyed by round id (two rounds, two cards; never
+     re-bound). Store-derived: the owner-only list route serves trusted
+     rounds only, and the expand shows the round snapshot's owner comments
+     from the card route. Text is placed with textContent. */
+  function loadFeedbackCards(sid){
+    var gen=artGen;
+    return artApi('GET','/rounds-by-thread/'+encodeURIComponent(sid)).then(function(r){
+      if(!live()||current.sid!==sid||gen!==artGen) return;
+      var list=(r.ok&&r.j&&Array.isArray(r.j.cards))?r.j.cards:[];
+      list.forEach(function(c){ if(c&&Number.isInteger(c.roundId)&&!artFb[c.roundId]) drawFeedbackCard(c,sid); });
+    });
+  }
+  function drawFeedbackCard(c,sid){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var node=document.createElement('div'); node.className='entry artfb';
+    var k=Number(c.count)||0;
+    var ct=String(c.title||'');
+    var head=(k===1?ART_FB_ONE:ART_FB).replace('{n}',String(Number(c.version)||0)).replace('{k}',String(k)).replace('{title}',function(){ return ct; });
+    node.appendChild(line('art-eyebrow',ART_LABEL));
+    node.appendChild(line('art-title',head));
+    var body=document.createElement('div'); body.className='art-fb-body';
+    var toggle=document.createElement('button'); toggle.type='button'; toggle.className='art-fb-toggle'; toggle.textContent=ART_FB_SHOW;
+    var shown=false;
+    toggle.onclick=function(){
+      if(shown){ clearEl(body); shown=false; toggle.textContent=ART_FB_SHOW; return; }
+      toggle.disabled=true;
+      var gen=artGen;
+      artApi('GET','/rounds/'+encodeURIComponent(String(c.roundId))+'/card').then(function(r){
+        if(!live()||current.sid!==sid||gen!==artGen) return;
+        toggle.disabled=false;
+        if(!r.ok||!r.j||!Array.isArray(r.j.threads)){ body.appendChild(line('art-err',ART_FAILED)); return; }
+        clearEl(body);
+        r.j.threads.forEach(function(t){
+          body.appendChild(line('art-fb-anchor',String((t&&t.anchor)||'')));
+          ((t&&Array.isArray(t.comments))?t.comments:[]).forEach(function(x){ body.appendChild(line('art-fb-comment',String(x))); });
+        });
+        shown=true; toggle.textContent=ART_FB_HIDE;
+      });
+    };
+    var acts=document.createElement('div'); acts.className='art-actions'; acts.appendChild(toggle);
+    node.appendChild(acts);
+    node.appendChild(body);
+    artFb[c.roundId]=node;
+    tr.appendChild(node); tr.scrollTop=tr.scrollHeight;
+  }
+
+  /* Ask-first linking (spec v1.6 D25, plan PR-3 Task 3.5): a bot asked to
+     link one of its artifacts to this chat. The card is drawn from the
+     owner-only pending list (never from the frame); Yes/No ride the owner's
+     decide route (dashboard auth + CSRF). Only Yes links; then the artifact
+     card draws like any linked artifact's. */
+  function loadLinkAsks(sid){
+    var gen=artGen;
+    return artApi('GET','/link-requests?thread='+encodeURIComponent(sid)).then(function(r){
+      if(!live()||current.sid!==sid||gen!==artGen) return;
+      var list=(r.ok&&r.j&&Array.isArray(r.j.requests))?r.j.requests:[];
+      var still={};
+      list.forEach(function(q){
+        if(!q||!Number.isInteger(q.id)||typeof q.artifactId!=='string') return;
+        still[q.id]=true;
+        if(!artAsks[q.id]) drawLinkAsk(q,sid);
+      });
+      /* Decided elsewhere (another tab, the frame of a decision): drop it. */
+      Object.keys(artAsks).forEach(function(k){
+        if(!still[k]){ var n=artAsks[k]; if(n&&n.parentNode) n.parentNode.removeChild(n); delete artAsks[k]; }
+      });
+    });
+  }
+  function drawLinkAsk(q,sid){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var node=document.createElement('div'); node.className='entry artask';
+    node.appendChild(line('art-eyebrow',ART_LABEL));
+    /* Review L6: authored values go in with a function replacer (no $-pattern
+       expansion), and the title last (a title holding {bot} stays literal). */
+    var qt=String(q.title||''), qb=String(q.botId||'');
+    node.appendChild(line('art-title',ART_LINK_ASK.replace('{title}',function(){ return qt; })));
+    node.appendChild(line('art-meta',ART_LINK_WHY.replace('{bot}',function(){ return qb; })));
+    var acts=document.createElement('div'); acts.className='art-actions';
+    var decide=function(accept){
+      return function(){
+        yes.disabled=true; no.disabled=true;
+        var gen=artGen;
+        artApi('POST','/link-requests/'+encodeURIComponent(String(q.id))+'/decide',{accept:accept}).then(function(r){
+          if(!live()||current.sid!==sid||gen!==artGen) return;
+          if(r.ok||r.status===409){
+            if(node.parentNode) node.parentNode.removeChild(node);
+            delete artAsks[q.id];
+            if(r.ok&&accept) artifactRefetch(q.artifactId,sid);
+          } else {
+            yes.disabled=false; no.disabled=false;
+            node.appendChild(line('art-err',ART_FAILED));
+          }
+        });
+      };
+    };
+    var yes=document.createElement('button'); yes.type='button'; yes.className='art-link-yes'; yes.textContent=ART_LINK_YES; yes.onclick=decide(true);
+    var no=document.createElement('button'); no.type='button'; no.className='art-link-no'; no.textContent=ART_LINK_NO; no.onclick=decide(false);
+    acts.appendChild(yes); acts.appendChild(no);
+    node.appendChild(acts);
+    artAsks[q.id]=node;
+    tr.appendChild(node); tr.scrollTop=tr.scrollHeight;
   }
   function artifactRefetch(id,sid){
     var gen=artGen;
@@ -163,6 +286,8 @@ export function perchArtifactCardJs(lang = "en") {
       chain.then(function(){
         if(!live()||current.sid!==sid||gen!==artGen) return;
         buf.forEach(function(d){ artifactFrame(d,sid); });
+        loadLinkAsks(sid);
+        loadFeedbackCards(sid);
       });
     });
   }
