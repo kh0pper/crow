@@ -157,6 +157,29 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   }));
 
   /**
+   * The send sheet (plan PR-3 Task 3.4) and the Library's Linked chats tab:
+   * the artifact's ACTIVE links, most recent first, each with its chat's
+   * state (the engine's word, or "unknown" when it is not listed) and whether
+   * a Send can go there — the SAME verification the Send route runs, so the
+   * sheet never offers a chat the server would refuse. Owner-only.
+   */
+  router.get("/api/artifacts/:id/links", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT id, bot_id, thread_id, linked_at, linked_by FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL ORDER BY linked_at DESC, id DESC", args: [art.id] })).rows;
+    let sessions = [];
+    try { sessions = await (await engineNow()).list(); } catch { sessions = []; }
+    const links = [];
+    for (const r of rows) {
+      const seen = sessions.find((x) => x.threadId === r.thread_id) || null;
+      const state = seen ? String(seen.state || "unknown") : "unknown";
+      const why = await M.links.verifyTarget(S.db, { artifactId: art.id, botId: r.bot_id, threadId: r.thread_id, botDef: await botDefOf(r.bot_id) });
+      links.push({ id: Number(r.id), threadId: r.thread_id, botId: r.bot_id, linkedAt: r.linked_at, linkedBy: r.linked_by, state, label: (seen && seen.label) || null, sendable: !why && state !== "stopped", why: why || null });
+    }
+    res.setHeader("cache-control", "no-store");
+    res.json({ links, bot: art.created_by_bot || null, offerBoard: typeof S.createBoardCard === "function" });
+  }));
+
+  /**
    * Mint a view token for ONE version and ONE frame load (§5.1). The token's
    * frame-ancestors is the dashboard origin the browser itself declared on
    * this same-origin POST (Origin header), checked against Host — so every

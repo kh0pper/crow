@@ -27,7 +27,7 @@ before(async () => {
   runtime._resetForTest();
   runtime._setInfoForTest({ baseUrl: "https://artifacts.example.ts.net", port: 0, configured: true });
   const engine = {
-    async list() { return []; },
+    async list() { return s.engineSessions || []; },
     async spawn(o) { s.spawns.push(o); return { sessionId: "s1", threadId: "perchlive-x" }; },
     async message() {},
   };
@@ -36,6 +36,7 @@ before(async () => {
   app.use(artifactsRouter(dashboardAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine,
     loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts/artifact_update"] } }),
+    createBoardCard: null,
     notify: async (n) => s.notes.push(n),
   }));
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
@@ -397,4 +398,30 @@ test("Send to a chat (PR-3 Task 3.3): thread= is verified server-side and persis
   assert.equal(fresh.status, 200);
   assert.equal(fresh.body.delivery.status, "working");
   assert.equal(s.spawns.length, spawnsBefore + 1, "a new chat with the bot");
+});
+
+test("send sheet data (PR-3 Task 3.4): GET :id/links lists ACTIVE links most recent first with each chat's state and whether a Send can go there; the board only when a factory exists", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT);`);
+  for (const t of ["perchlive-l1", "perchlive-l2", "perchlive-l3"]) await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [t] });
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Sheet", type: "document", source: { markdown: "# s" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-l1", gateway: "perch" } }, { markdownBlocks });
+  const add = (t, mins) => s.db.execute({ sql: `INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by,linked_at) VALUES (?,?,?,'owner-yes',datetime('now','+${mins} minutes'))`, args: [art.id, "bobby", t] });
+  await add("perchlive-l2", 2); await add("perchlive-l3", 1);
+  await add("perchlive-l9", 3);   // linked, but no session row: shown, never sendable
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE thread_id='perchlive-l9'", args: [] });
+  await add("perchlive-l8", 4);   // active, no session row
+  s.engineSessions = [{ sessionId: "perchlive-l2", botId: "bobby", threadId: "perchlive-l2", state: "idle", label: "Planning" }, { sessionId: "perchlive-l3", botId: "bobby", threadId: "perchlive-l3", state: "stopped", label: null }];
+  try {
+    const r = await req("GET", `/api/artifacts/${art.id}/links`);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.links.map((l) => [l.threadId, l.state, l.sendable]), [
+      ["perchlive-l8", "unknown", false],
+      ["perchlive-l2", "idle", true],
+      ["perchlive-l3", "stopped", false],
+      ["perchlive-l1", "unknown", true],
+    ], "active only, most recent first; a stopped chat or one that fails verification is not sendable");
+    assert.equal(r.body.links.find((l) => l.threadId === "perchlive-l2").label, "Planning");
+    assert.equal(r.body.bot, "bobby");
+    assert.equal(r.body.offerBoard, false, "this harness has no board factory");
+    assert.equal((await req("GET", `/api/artifacts/${art.id}/links`, { cookie: null })).status, 401);
+  } finally { s.engineSessions = null; }
 });

@@ -100,3 +100,8 @@ body{background:#eef1f3}
 .cv-editbox .cv-row{display:flex;gap:8px;margin-top:6px}
 .cv-err{color:var(--err);margin:4px 0 0;font-size:13px}
 .cv-err:empty{display:none}
+/* The send sheet's where-step. */
+.cv-where{border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:8px 12px}
+.cv-where legend{font-weight:600;padding:0 4px}
+.cv-where-opt{display:flex;align-items:center;gap:8px;min-height:44px}
+.cv-where-opt.cv-disabled{color:var(--dim)}
