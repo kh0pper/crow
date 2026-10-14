@@ -23,7 +23,8 @@ This page covers that host: the origin, view tokens, the viewer, the sidecar net
 
 | Types | Sandbox | Scripts |
 |---|---|---|
-| `document`, `diagram`, `image`, `docx` | `sandbox` (no flags) | none |
+| `diagram`, `image`, `docx`, and any scripts-off version (the "sealed" row) | `sandbox` (no flags) | none |
+| `document` | `sandbox allow-scripts` | the anchor helper only (its exact URL; no inline, no other file) |
 | `page`, `slides` | `sandbox allow-scripts` | token path + inline |
 | `data`, `map` | `sandbox allow-scripts` | token path only |
 | `pdf` | `sandbox allow-scripts` | token path only (a fixed viewer file) |
@@ -31,8 +32,9 @@ This page covers that host: the origin, view tokens, the viewer, the sidecar net
 The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-popups` or `allow-forms`. The iframe's `sandbox` attribute always matches the CSP row.
 
 - Scripted 200 responses also carry `Access-Control-Allow-Origin: *` (never with credentials), because module scripts loaded from an opaque origin are CORS requests.
-- **Scripts off.** A version shaped by text from outside your Crow is served script-free until you approve it: the token carries `scriptsOff`, the script-free row is used, and the bytes are served unchanged. Safety comes from the CSP header, never from rewriting markup; the origin does not parse bot markup at all.
-- **The anchor helper.** For scripted HTML, a small helper script (`anchor-helper.js`) is placed at a fixed spot: after an optional byte-order mark, leading whitespace and a `<!doctype …>`, otherwise at byte 0. Placement grants nothing. If the helper does not say hello, the viewer closes the frame and asks the server what happened (see "Couldn't load — retry" below).
+- **Scripts off.** A version shaped by text from outside your Crow is served script-free until you approve it: the token carries `scriptsOff`, the sealed row is used, and the bytes are served unchanged. Safety comes from the CSP header, never from rewriting markup; the origin does not parse bot markup at all.
+- **Documents run only the helper.** A document has no scripts of its own (its HTML is sanitized Markdown), but it runs the anchor helper so you can comment on text you select. Its policy allows exactly one script, the helper's own URL, and that URL never redirects. Unlike a sealed frame, a document could follow a `<meta http-equiv=refresh>`; the renderer never emits one, and the viewer's frame-src and second-load tripwire stand behind it. One function (`frameGrantFor`) decides the sandbox and whether a frame speaks, for the viewer grant, the origin and the load-evidence table alike.
+- **The anchor helper.** For scripted HTML and documents, a small helper script (`anchor-helper.js`) is placed at a fixed spot: after an optional byte-order mark, leading whitespace and a `<!doctype …>`, otherwise at byte 0. Placement grants nothing. If the helper does not say hello, the viewer closes the frame and asks the server what happened (see "Couldn't load — retry" below).
 
 ### View tokens
 
@@ -104,6 +106,8 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 - a threads column on wide screens, or a bottom sheet on phones and in narrow panes;
 - one primary action, "Send N comments to chat";
 - when it has the whole tab, links back to the Library and the Crow's Nest (in the hub pane, the pane's own close does that).
+
+On a document, Comment does not open a list: you select the words you mean, a "Comment on '…'" button appears, and the comment is tied to that block and quote. The block's text comes from the version's stored block map and the quote must be in that block, or the comment is kept as a plain text quote. "Comment on a section" in the ⋯ menu is the keyboard and screen-reader way in.
 
 The owner can edit or delete their own comments from the threads column (`PATCH`/`DELETE /api/artifacts/:id/comments/:cid`). Never while a round or ask holds the thread: what the bot was sent must match what the owner sees, so the server answers `comment_locked` and the viewer hides the buttons (`GET /api/artifacts/:id` lists `lockedThreads`). A contact's or a bot's words are never edited; a contact's comment stays deletable at any time. Edits are stamped (`edited_at`) and audited.
 

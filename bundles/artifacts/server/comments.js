@@ -23,6 +23,34 @@ export function validAnchor(a) {
   return null;
 }
 
+/**
+ * D28 (review M3/M4): resolve a document BLOCK anchor against the version's
+ * stored anchor map, server-side. The client (and the frame behind it) only
+ * names the block id and the quote; the block TEXT always comes from the
+ * map. A quote that does not occur in that block's rendered text (`plain`,
+ * or `text` for versions saved before D28) is not that block's: it becomes
+ * a text anchor instead, so a comment can never be pinned to the wrong
+ * section. Non-block anchors pass through. Returns null when unanchorable.
+ */
+// Compared with ALL whitespace removed (review M-1): rendered text and a
+// browser selection disagree about spaces around inline formatting.
+const noWs = (s) => String(s || "").replace(/\s+/g, "");
+export function resolveBlockAnchor(anchorMap, a) {
+  if (!a || a.kind !== "block") return a;
+  const quote = typeof a.quote === "string" ? a.quote.slice(0, 1000) : "";
+  const ctx = (v) => (typeof v === "string" ? v.slice(0, 200) : "");
+  // Review M-2: keep the selection's context so a repeated phrase stays distinguishable.
+  const asText = () => (quote.trim() ? { kind: "text", quote, prefix: ctx(a.prefix), suffix: ctx(a.suffix) } : null);
+  const blocks = anchorMap && anchorMap.kind === "blocks" && Array.isArray(anchorMap.blocks) ? anchorMap.blocks : [];
+  const b = blocks.find((x) => x && x.id === a.id);
+  if (!b) return asText();
+  // A section the owner picked from the trusted list stays that section even
+  // when the typed "exact words" are not verbatim (review low); its quote is
+  // owner text and never crosses into the frame (pins carry the id only).
+  if (quote.trim() && !a.fromList && !noWs(typeof b.plain === "string" ? b.plain : b.text).includes(noWs(quote))) return asText();
+  return { kind: "block", id: b.id, text: String(b.text || "").slice(0, 400), quote };
+}
+
 function cleanText(t) {
   const s = String(t == null ? "" : t).replace(/\r\n/g, "\n").trim();
   if (!s) throw err("bad_request", "comment text required");

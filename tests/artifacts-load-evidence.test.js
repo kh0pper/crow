@@ -78,13 +78,15 @@ test("a non-HTML document is served without the helper (docServed, no helperInje
   assert.equal(ev.helperInjected, false);
 });
 
-test("a scripts-off (D20) or script-free grant is recorded as not scripted", async () => {
+test("a scripts-off (D20) or sealed grant is recorded as not speaking; a document (D28) speaks", async () => {
   const off = mintPage({ scriptsOff: true });
   await req(`/v/${off.token}/`);
   assert.equal(tokens.evidence(off.tokenId).scripted, false);
   assert.equal(tokens.evidence(off.tokenId).helperInjected, false);
+  const dia = tokens.mint({ artifactId: "a1", versionN: 1, type: "diagram", dashboardOrigin: null });
+  assert.equal(tokens.evidence(dia.tokenId).scripted, false);
   const doc = tokens.mint({ artifactId: "a1", versionN: 1, type: "document", dashboardOrigin: null });
-  assert.equal(tokens.evidence(doc.tokenId).scripted, false);
+  assert.equal(tokens.evidence(doc.tokenId).scripted, true, "D28: the no-helper → flag arm of the D24 table applies to documents too (review M2)");
 });
 
 test("evidence is unknown (null) after revokeToken, revokeArtifact, expiry, or for a bad id", () => {

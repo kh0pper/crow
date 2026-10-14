@@ -92,8 +92,10 @@ test("document: the frame loads from the artifact host, a section comment is add
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/dashboard/artifacts/view/${s.doc.id}` });
     const src = await waitFor(() => t.evalIn("(document.querySelector('iframe.crow-artifact-frame')||{}).src"));
     assert.match(src, new RegExp(`^http://art\\.test:${s.oport}/v/[A-Za-z0-9_-]{43}/$`));
-    assert.equal(await t.evalIn("document.querySelector('iframe.crow-artifact-frame').getAttribute('sandbox')"), "", "document is script-free");
-    assert.ok(await yes(t, "!!document.querySelector('.cv-sections button')"));
+    assert.equal(await t.evalIn("document.querySelector('iframe.crow-artifact-frame').getAttribute('sandbox')"), "allow-scripts", "D28: a document is helper-only");
+    // D28: the section list is the menu's keyboard path (never auto-opened by Comment).
+    await t.evalIn("(() => { document.querySelector('.cv-more').setAttribute('open',''); document.querySelector('.cv-pick-section').click(); })()");
+    assert.ok(await yes(t, "!!document.querySelector('.cv-sections:not([hidden]) button')"));
     await t.evalIn("document.querySelectorAll('.cv-sections button')[1].click()");
     assert.ok(await yes(t, "!!document.querySelector('.cv-compose textarea')"));
     await t.evalIn("document.querySelector('.cv-compose textarea').value = 'Say which step first'; document.querySelector('.cv-compose button').click()");

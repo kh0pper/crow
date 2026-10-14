@@ -43,7 +43,9 @@
     (kids || []).forEach(function (c) { if (c) n.appendChild(c); });
     return n;
   }
-  function anchorText(a) { return (a && (a.text || a.quote || a.selector || a.id || a.kind)) || ""; }
+  // D28 (review M2): a quote is what the owner picked, so it leads.
+  function anchorText(a) { return a && a.quote ? "\u201c" + a.quote + "\u201d" : (a && (a.text || a.selector || a.id || a.kind)) || ""; }
+  function isDoc() { return !!(S.art && S.art.type === "document"); }
   function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
 
   var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null };
@@ -68,6 +70,9 @@
   var sendBtn = el("button", { type: "button", class: "cv-send" });
   var composeSlot = el("div", { class: "cv-compose-slot" });
   var sectionList = el("ol", { class: "cv-sections", hidden: "", "aria-label": T.pick_section });
+  // D28 (review H1): a selection in the frame is only a PROPOSAL; this
+  // trusted button turns it into a comment on the owner's tap.
+  var selBar = el("div", { class: "cv-selbar", hidden: "" });
   var threadList = el("ol", { class: "cv-threads" });
   var side = el("aside", { class: "cv-side" }, [el("div", { class: "cv-side-head" }, [handle, sendBtn]), el("div", { class: "cv-side-body" }, [composeSlot, sectionList, threadList])]);
   // A way out when the viewer has the whole tab (opened from the Library or
@@ -82,6 +87,7 @@
   root.appendChild(banners);
   root.appendChild(trust);
   root.appendChild(el("div", { class: "cv-body" }, [stage, side]));
+  root.appendChild(selBar);
   root.appendChild(commentBtn);
   root.appendChild(el("p", { class: "cv-note", text: T.never_password }));
 
@@ -131,7 +137,7 @@
     });
     if (S.versions.length < 2) versionSel.setAttribute("hidden", ""); else versionSel.removeAttribute("hidden");
   }
-  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); S.editing = null; renderThreads(); renderSections(); mountFrame(); });
+  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); S.editing = null; hideSelBar(); renderThreads(); renderSections(); mountFrame(); });
 
   /** The threads the owner would send by default: open, owner-authored. */
   function sendable() { return S.threads.filter(function (t) { return t.author_kind === "owner" && t.status !== "resolved"; }); }
@@ -244,15 +250,31 @@
     if (S.art && S.art.created_by_bot) moreMenu.appendChild(button(T.let_bot, function () { more.removeAttribute("open"); openGrants(); }, "cv-grant"));
     var v = version(S.n);
     if (!v || !v.anchor_map || v.anchor_map.kind !== "blocks") return;
+    // Review M6: the keyboard / screen-reader way to comment on a section.
+    // Opened on demand from the menu; never auto-opened over the document.
+    moreMenu.appendChild(button(T.pick_section, function () { more.removeAttribute("open"); sectionList.removeAttribute("hidden"); setSheet(true); }, "cv-pick-section"));
     var byBlock = {};
     shown().forEach(function (t, k) { if (t.anchor && t.anchor.kind === "block") (byBlock[t.anchor.id] = byBlock[t.anchor.id] || []).push(k + 1); });
     v.anchor_map.blocks.forEach(function (b) {
       var nums = byBlock[b.id] ? " (" + byBlock[b.id].join(", ") + ")" : "";
-      sectionList.appendChild(el("li", {}, [button((b.text.slice(0, 80) || b.id) + nums, function () {
+      sectionList.appendChild(el("li", {}, [button(((b.plain || b.text).slice(0, 80) || b.id) + nums, function () {
         if (S.viewer) S.viewer.showBlock(b.id).catch(function () {});
-        compose({ kind: "block", id: b.id, text: b.text });
+        compose({ kind: "block", id: b.id, text: b.text, fromList: true });
       })]));
     });
+  }
+
+  // ── selections (D28) ────────────────────────────────────────────────────
+  function hideSelBar() { selBar.textContent = ""; selBar.setAttribute("hidden", ""); }
+  function offerSelection(a) {
+    var q = a.quote.length > 60 ? a.quote.slice(0, 57) + "\u2026" : a.quote;
+    // Documents: name the block; the server resolves it against the stored
+    // anchor map (block text from the map, quote checked) or falls back to a
+    // text anchor. Pages: the text anchor as proposed.
+    var anchor = isDoc() && a.block ? { kind: "block", id: a.block, quote: a.quote, prefix: a.prefix, suffix: a.suffix } : { kind: "text", quote: a.quote, prefix: a.prefix, suffix: a.suffix };
+    selBar.textContent = "";
+    selBar.appendChild(button(fmt(T.comment_selection, { q: q }), function () { hideSelBar(); compose(anchor); }, "cv-primary"));
+    selBar.removeAttribute("hidden");
   }
 
   // ── compose ─────────────────────────────────────────────────────────────
@@ -260,7 +282,7 @@
     S.pending = anchor;
     composeSlot.textContent = "";
     var ta = el("textarea", { maxlength: "4000", rows: "3", "aria-label": T.add_comment });
-    var q = anchor.kind === "block" ? el("input", { type: "text", class: "cv-quote", placeholder: T.quote, maxlength: "1000" }) : null;
+    var q = anchor.kind === "block" && !anchor.quote ? el("input", { type: "text", class: "cv-quote", placeholder: T.quote, maxlength: "1000" }) : null;
     var box = el("div", { class: "cv-compose" }, [el("div", { class: "cv-anchor", text: anchorText(anchor) }), q, ta,
       el("div", { class: "cv-row" }, [
         button(T.add_comment, function () {
@@ -279,12 +301,14 @@
   function setComment(on) {
     S.commentOn = !!on;
     commentBtn.setAttribute("aria-pressed", S.commentOn ? "true" : "false");
-    if (S.viewer) S.viewer.setCommentMode(S.commentOn);
+    if (S.viewer) S.viewer.setCommentMode(S.commentOn, { selectOnly: isDoc() });
+    if (!S.commentOn) hideSelBar();
     var type = S.art && S.art.type;
     if (type === "diagram") { if (S.commentOn) region.removeAttribute("hidden"); else region.setAttribute("hidden", ""); }
     // Script-free documents cannot propose from inside the frame: pick a section.
-    if (sectionList.childNodes.length) { if (S.commentOn) { sectionList.removeAttribute("hidden"); setSheet(true); } else sectionList.setAttribute("hidden", ""); }
-    if (S.commentOn) status.textContent = T.commenting; else renderStatus();
+    // D28: no list, no sheet over the document — select text instead.
+    if (!S.commentOn) sectionList.setAttribute("hidden", "");
+    if (S.commentOn) status.textContent = isDoc() ? T.commenting_doc : T.commenting; else renderStatus();
   }
   commentBtn.addEventListener("click", function () { setComment(!S.commentOn); });
   region.addEventListener("click", function (e) {
@@ -310,6 +334,7 @@
   }
 
   function mountFrame() {
+    hideSelBar();
     if (S.viewer) { S.viewer.destroy(); S.viewer = null; }
     frameBox.textContent = ""; pinLayer.textContent = "";
     runBtn.setAttribute("hidden", "");
@@ -320,7 +345,9 @@
       container: frameBox,
       mint: function (fragment, x) { return api("POST", BASE + "/versions/" + n + "/view", { fragment: fragment || null, replaces: (x && x.replaces) || null }); },
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
-      onProposal: function (a) { compose(a); },
+      // A tap (pages) composes at once; a SELECTION waits for the owner's tap
+      // on the trusted "Comment on …" button (review H1).
+      onProposal: function (a) { if (!S.commentOn) return; if (a.kind === "text") offerSelection(a); else compose(a); },
       onTrip: function (reason) {
         showFlagged();   // F3: replaced at once, before the server answers
         api("POST", BASE + "/versions/" + n + "/tripwire", { reason: reason }).then(refresh, function () {});
@@ -334,7 +361,8 @@
       onReady: function () { pushPins(); },
       onRects: function (rects) { drawPins(rects); },
       // The narrowed CSP is not in force: reload for real; never show content.
-      onRefuse: function () {
+      onRefuse: function (reason) {
+        if (reason === "bad-grant") { showPanel("cv-gone", T.cant_show); return; }   // review H2: local, never a flag
         banner(T.csp_missing, "danger");
         if (!/[?&]reloaded=1/.test(location.search)) location.replace(location.pathname + location.search + (location.search ? "&" : "?") + "reloaded=1");
       },
@@ -343,11 +371,11 @@
       if (!g) return;
       isolationNote(g.isolation);
       if (g.scriptsOff) runBtn.removeAttribute("hidden");   // D20
-      if (S.commentOn) viewer.setCommentMode(true);
+      if (S.commentOn) viewer.setCommentMode(true, { selectOnly: isDoc() });
     }, function (e) {
       if (e.code === "flagged") showFlagged();
       else if (e.code === "origin_unavailable") isolationNote("unavailable");
-      else if (e.message !== "csp-not-in-force" && e.message !== "stale") banner(e.message, "warn");
+      else if (e.message !== "csp-not-in-force" && e.message !== "stale" && e.message !== "bad-grant") banner(e.message, "warn");   // bad-grant: onRefuse already showed the panel
     });
   }
   runBtn.addEventListener("click", function () {   // D20: the owner's press is the approve (audited)
