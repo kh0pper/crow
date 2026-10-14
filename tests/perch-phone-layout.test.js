@@ -105,6 +105,12 @@ before(async () => {
   TRANSCRIPT = [
     { type: "message", message: { role: "user", content: "What can Crow do? Give me the overview, with a table." } },
     { type: "message", message: { role: "assistant", content: MD }, html: renderMarkdown(MD) },
+    // Strand 1: a turn that ended in a model error (the route already
+    // redacted it into errorText). One long unbroken token, the worst case
+    // for a phone column.
+    { type: "message", message: { role: "user", content: "and the tools?" } },
+    { type: "message", message: { role: "assistant", content: [], stopReason: "error" },
+      errorText: "400 invalid_tools: " + "x".repeat(180) + " — 318 tools > 128" },
   ];
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
@@ -258,6 +264,34 @@ test("live @1280x900: the desktop keeps the role gutter", async (t) => {
   assert.equal(m.narrow, false);
   assert.ok(m.whatLeft - m.trLeft >= 64, "the body sits beside the 64px label column: " + JSON.stringify(m));
 });
+
+const ERR_GEOMETRY = `(function(){
+  var tr=document.getElementById('perch-transcript').getBoundingClientRect();
+  var row=document.querySelector('#perch-transcript .entry.turnerr');
+  var who=row.querySelector('.who').getBoundingClientRect(), what=row.querySelector('.what').getBoundingClientRect();
+  var b=row.getBoundingClientRect();
+  return JSON.stringify({ rowLeft:b.left, rowRight:b.right, trLeft:tr.left, trRight:tr.right,
+    whoBottom:who.bottom, whatTop:what.top, whatRight:what.right,
+    whoColor:getComputedStyle(row.querySelector('.who')).color,
+    label:row.querySelector('.who').textContent,
+    emptyBots:[].filter.call(document.querySelectorAll('#perch-transcript .entry.bot .what'),function(w){return !w.textContent.trim();}).length,
+    docScrollX:document.documentElement.scrollWidth-innerWidth });
+})()`;
+const ERR_READY = "!!document.querySelector('#perch-transcript .entry.turnerr')";
+
+for (const [w, h] of [[412, 915], [1280, 900]]) {
+  test(`live @${w}x${h} (strand 1): a failed turn is one danger row inside the column — label above, no empty bot bubble, no sideways scroll`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    const m = await measure(w, h, ERR_GEOMETRY, { ready: ERR_READY });
+    assert.ok(m.rowLeft >= m.trLeft - 1 && m.rowRight <= m.trRight + 1, "the row stays in the column: " + JSON.stringify(m));
+    assert.ok(m.whatRight <= m.trRight + 1, "the long token wraps: " + JSON.stringify(m));
+    assert.ok(m.whatTop >= m.whoBottom - 1, "the label sits above the error: " + JSON.stringify(m));
+    assert.match(m.label, /model call failed/i);
+    assert.notEqual(m.whoColor, "rgb(0, 0, 0)", "the label carries the error color");
+    assert.equal(m.emptyBots, 0, "no empty bot bubble for the errored message");
+    assert.equal(m.docScrollX, 0, "no horizontal page scroll");
+  });
+}
 
 // ─── text size ─────────────────────────────────────────────────────────────
 

@@ -207,6 +207,13 @@ border-radius:0;padding:12px 16px;min-height:44px}
 #perch-hub-root.perch-narrow .copy-msg{order:1}
 #perch-hub-root.perch-narrow .what{flex:1 1 100%;order:2}
 #perch-hub-root.perch-narrow .entry.user{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
+/* Strand 1: a turn that ended in a model error. A plain BLOCK box at every
+   width (the label is longer than the 64px role gutter, and a flex column let
+   a long unbroken provider token push the row sideways at 412px); the error
+   keeps the body ink on the soft tint, so it reads in both themes. */
+#perch-hub-root .entry.turnerr{display:block;background:var(--err-soft);border:1px solid var(--err);border-radius:10px;padding:7px 10px}
+#perch-hub-root .entry.turnerr .who{color:var(--err)}
+#perch-hub-root .entry.turnerr .what{overflow-wrap:anywhere}
 /* Rendered markdown. TWO ids' worth of weight is not needed here (nothing
    competes), but \`white-space:pre-wrap\` from .what above IS: markdown output
    is real block elements, and pre-wrap would double every blank line between

@@ -141,6 +141,7 @@
 import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../../scripts/pi-bots/narrowing-lock.mjs";
 import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
 import { markTaintUnrecorded } from "./session-taint-memory.js";
+import { redactErrorText, lastAssistantError } from "./perch-error-text.js";
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
@@ -863,7 +864,7 @@ export function createInteractiveEngine({
   function onStall(s, turn) {
     if (s.turn !== turn || turn.aborted) return;
     s.lastError = "turn stalled";
-    emit(s, { type: "error", text: "turn stalled" });
+    emit(s, { type: "error", text: "turn stalled", turnId: turn.id });
     // A single tool silent past the window IS aborted — named operator-facing
     // policy (r2 S12).
     abortInFlight(s).catch(() => {});
@@ -1696,6 +1697,7 @@ export function createInteractiveEngine({
   function attachExit(s, pi) {
     pi.exited.then(() => {
       if (s.pi !== pi) return;                       // an expected close
+      const deadTurn = s.turn;                       // strand 1: the frame names it
       s.pi = null;
       s.turn = null;
       clearStall(s);
@@ -1722,7 +1724,7 @@ export function createInteractiveEngine({
       writeLeases();
       // reason "pi_exit": the drawer shows this one IN the chat (the operator's
       // message went nowhere), not only on the Activity rail.
-      emit(s, { type: "error", text: message, reason: "pi_exit" });
+      emit(s, { type: "error", text: message, reason: "pi_exit", turnId: deadTurn ? deadTurn.id : null });
       emit(s, stateEvent(s));
       writeRow(s, { status: "waiting-user" }).catch(() => {});
     }).catch(() => {});
@@ -1808,8 +1810,17 @@ export function createInteractiveEngine({
         // null when the child speaks outside a turn — the client falls back to
         // its transition flag there.
         if (text) emit(s, { type: "text", text, turnId: s.turn ? s.turn.id : null });
+        // Strand 1: an errored message draws NOTHING here. pi emits one
+        // message_end(error) per ATTEMPT, before its auto-retry, so a 503 it
+        // recovers from would leave a red bubble above a good reply. The turn's
+        // error is decided once, in onTurnEnd. aborted (the user asked),
+        // deferred and pending (not an outcome yet) stay silent everywhere.
         return;
       }
+      case "auto_retry_start":
+        // Strand 1: a retry is rail news, not a chat event.
+        emit(s, { type: "log", text: "retrying after an error (" + Number(m.attempt) + "/" + Number(m.maxAttempts) + ")" });
+        return;
       case "extension_ui_request":
         onUiRequest(s, m);
         return;
@@ -2137,6 +2148,12 @@ export function createInteractiveEngine({
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted) {
       const replyText = replyTextOf(end);
+      // Strand 1: the turn ENDED in a model error (retries, if any, are
+      // spent — this is the non-retrying agent_end). One frame per turn, by
+      // construction: stall/abort, onTurnError and pi_exit never reach here.
+      const failed = lastAssistantError(end && end.messages);
+      const errorText = failed ? redactErrorText(failed.errorMessage) : null;
+      if (failed) emit(s, { type: "error", text: errorText, reason: "turn_error", turnId: turn.id });
       // The id of the turn this reply COMPLETES (see the text frame above):
       // without it a reconnected drawer cannot tell "I already rendered this
       // turn" from "I already rendered a different one".
@@ -2150,8 +2167,8 @@ export function createInteractiveEngine({
           pushAttention({
             type: "attention",
             priority: "normal",
-            title: s.botId + " replied",
-            body: replyText.slice(0, 140),
+            title: s.botId + (failed ? "'s turn failed" : " replied"),
+            body: (failed ? errorText : replyText).slice(0, 140),
             action_url: "/dashboard/bot-board#bird=" + s.sessionId,
           });
         }
@@ -2174,7 +2191,7 @@ export function createInteractiveEngine({
     stopTurnClocks(s, turn);
     const message = String((err && err.message) || err);
     s.lastError = message;
-    emit(s, { type: "error", text: message });
+    emit(s, { type: "error", text: message, turnId: turn.id });
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
 
     // A PREFLIGHT refusal never started an agent loop (C-12 (h)): the child is

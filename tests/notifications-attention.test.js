@@ -365,6 +365,26 @@ test("turn end: a turn that ran >= PERCH_NOTIFY_MIN_RUN_S with no live subscribe
   assert.equal(mine[0].body, "all done, boss");
 });
 
+test("turn end (strand 1): an away push for a turn that ENDED in a model error says it failed, with the redacted error", async () => {
+  const { engine, clock, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
+  const s = await spawned(engine, "botty-broke");
+  await engine.message(s.sessionId, "do it");
+  const pi = bridge._state.instances[0];
+
+  clock.advance(35_000);
+  pi.lastTurn().resolve({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "400 invalid_tools Bearer tok123" }],
+  });
+  await tick();
+
+  const mine = notificationRows().filter((r) => r.action_url === "/dashboard/bot-board#bird=" + s.sessionId);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].title, "botty-broke's turn failed");
+  assert.match(mine[0].body, /invalid_tools/);
+  assert.doesNotMatch(mine[0].body, /tok123/);
+});
+
 test("turn end: a turn that ran BELOW PERCH_NOTIFY_MIN_RUN_S pushes nothing", async () => {
   const { engine, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
   const s = await spawned(engine, "botty-quick");

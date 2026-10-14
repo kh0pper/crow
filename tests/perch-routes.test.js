@@ -491,6 +491,32 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
   assert.equal(blank.html, undefined, "and whitespace renders nothing rather than an empty block");
 });
 
+test("GET transcript (strand 1): an errored assistant message carries a server-redacted errorText and NO raw errorMessage", async () => {
+  const sessions = join(dir, "sessions-err");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-eeeeeeeeeeee";
+  writeFileSync(join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "u", message: { role: "user", content: "hi" } }) + "\n" +
+    JSON.stringify({ type: "message", id: "e", message: { role: "assistant", content: [], stopReason: "error",
+      errorMessage: "400 invalid_tools from https://x.example/v1?api_key=SEKRIT99" } }) + "\n" +
+    JSON.stringify({ type: "message", id: "ok", message: { role: "assistant", content: [{ type: "text", text: "fine" }], stopReason: "stop" } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-err',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+
+  const { status, body } = await getJson("/bots/chatty/sessions/t-err/transcript");
+  assert.equal(status, 200);
+  const [, errored, ok] = body.events;
+  assert.match(errored.errorText, /invalid_tools/);
+  assert.doesNotMatch(JSON.stringify(errored), /SEKRIT99/, "the raw provider body never crosses the wire");
+  assert.equal(errored.message.errorMessage, undefined);
+  assert.equal(errored.message.stopReason, "error", "the client still keys on stopReason");
+  assert.equal(ok.errorText, undefined);
+});
+
 test("GET transcript: headings/escapes/math render exactly as the live SSE frame does; a toolResult gets no html", async () => {
   // 2026-10-02 (hank, perchlive-9e2b9bf3): a reload drew a 157k-char
   // extract_article toolResult as a plain bot row — literal "#####", "\\-".
