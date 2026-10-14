@@ -137,7 +137,8 @@ export async function initArtifactsTables(db) {
     -- ACTIVE link; Send targets one. Writers (no MCP path writes a link from
     -- caller-chosen values): the one-time backfill below, createArtifact's
     -- origin link (the signed creating Perch chat), the owner's decide route
-    -- (ask-first linking) and the Library's Unlink (sets unlinked_at).
+    -- (ask-first linking), the owner's "New chat with <bot>" Send (trusted
+    -- rounds only) and the Library's Unlink (sets unlinked_at).
     CREATE TABLE IF NOT EXISTS artifact_links (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       artifact_id TEXT NOT NULL,

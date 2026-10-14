@@ -242,3 +242,22 @@ test("review M3 pins: a received artifact is never a target; the engine's own bo
   await s.db.execute({ sql: "UPDATE artifact_links SET linked_at=datetime('now','+5 minutes') WHERE thread_id=?", args: [L] });
   assert.equal((await pickSendTarget(s.db, { artifactId: x.art.id, loadBotDef: async () => DEF })).threadId, x.A, "the Library pick skips the locked chat");
 });
+
+test("Kevin 2026-10-13: a trusted 'New chat with <bot>' Send links the new chat (owner-yes, audited); an untrusted round's locked chat is NEVER linked", async () => {
+  const x = await setup();
+  const r = await startTo(x, null);
+  const e = engine([]);
+  const out = await deliverRound(s.db, r, { engine: e, botDef: DEF, choice: "new-session" });
+  assert.equal(out.status, "working");
+  const fresh = out.threadId;
+  const l = (await s.db.execute({ sql: "SELECT bot_id, linked_by FROM artifact_links WHERE artifact_id=? AND thread_id=? AND unlinked_at IS NULL", args: [x.art.id, fresh] })).rows;
+  assert.deepEqual(l.map((z) => [z.bot_id, z.linked_by]), [["bobby", "owner-yes"]]);
+  assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-new-chat' AND target=?", args: [x.art.id, fresh] })).rows.length);
+  const y = await setup({ contact: true });
+  const ru = await startTo(y, null);
+  assert.equal(ru.untrusted, true);
+  const eu = engine([]);
+  const ou = await deliverRound(s.db, ru, { engine: eu, botDef: DEF, choice: "new-session" });
+  assert.equal(ou.status, "working");
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE thread_id=?", args: [ou.threadId] })).rows[0].n, 0, "the locked chat is not linked");
+});

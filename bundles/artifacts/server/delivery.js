@@ -129,6 +129,15 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "chat", crea
     }
     if (choice === "new-session") {
       const s = await spawnAndSend(false);
+      // Kevin 2026-10-13 (review L8): the owner's "New chat with <bot>" Send
+      // links that chat, so later versions show there and it can be the next
+      // Send's target. Trusted rounds only (this branch): an untrusted
+      // round's locked chat is never linked. A writer of artifact_links driven
+      // by the OWNER's Send, never by a bot.
+      try {
+        await db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [round.artifact_id, round.bot_id, s.threadId] });
+        await audit(db, { artifactId: round.artifact_id, actor, action: "link-new-chat", target: s.threadId });
+      } catch (e) { if (!/UNIQUE/i.test(String(e.message))) throw e; }
       return { status: "working", delivery: "perch-session", threadId: s.threadId };
     }
     // "chat": the persisted target, and only it.
