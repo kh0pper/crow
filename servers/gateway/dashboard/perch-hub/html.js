@@ -86,7 +86,6 @@ ${engineBanner(engine, lang)}
        scrolling .content-body). Any other panel that reuses this id silently
        inherits that clamp. Rename here and that rule goes dead too. -->
   <div id="perch-chat">
-    <button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>
     <!-- Identity stays in the head: the bot name, the operator's session name
          and the session id are what tell the operator WHICH session any tab
          below is about. Everything OPERATIONAL (state pill, rename, close,
@@ -100,7 +99,10 @@ ${engineBanner(engine, lang)}
          session id, never replacing either: the id stays the identity (the
          close confirmation names it), the name is the convenience. Hidden
          until there is one; rendered with textContent, never markup. -->
-    <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
+    <!-- Queue item 13 (2026-10-14): "← Sessions" shares the head row with the
+         bot name (phones; the split view hides it). On phones the raw
+         session id is hidden here — the Session tab shows it (#perch-session-id). -->
+    <div class="perch-head"><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident"><div class="title" id="perch-bot-name"></div>
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="meta" id="perch-session-meta"></div></div></div>
     <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from
@@ -184,6 +186,8 @@ ${engineBanner(engine, lang)}
         <input type="checkbox" id="perch-plan-mode" aria-labelledby="perch-plan-mode-label"></div>
     </div>
     <div class="field-row">
+      <div class="field"><span class="field-label" id="perch-session-id-label">${escapeHtml(t("perch.sessionIdLabel", lang))}</span>
+        <div class="meta" id="perch-session-id" aria-labelledby="perch-session-id-label"></div></div>
       <div class="field"><span class="field-label" id="perch-cwd-label">${escapeHtml(t("perch.cwdLabel", lang))}</span>
         <div class="meta" id="perch-session-cwd"></div>
         <button type="button" id="perch-change-cwd">${escapeHtml(t("perch.changeDirectory", lang))}</button></div>

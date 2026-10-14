@@ -1478,6 +1478,7 @@ export function perchHubJs(lang = "en") {
     /* The session id stays here, unchanged and on its own: it is the identity
        the close confirm and every API path use. */
     el('perch-session-meta').textContent=current.sid||'';
+    el('perch-session-id').textContent=current.sid||'';
     var known=rowIndex[current.sid];
     showSessionName(known?known.label:null);
   }

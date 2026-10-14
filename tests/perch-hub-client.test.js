@@ -627,7 +627,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   const js = perchHubJs("en");
 
   const IDS = ["perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
-    "perch-session-meta", "perch-state", "perch-model", "perch-thinking", "perch-permission",
+    "perch-session-meta", "perch-session-id", "perch-state", "perch-model", "perch-thinking", "perch-permission",
     "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
     "perch-attach", "perch-file-input", "perch-chat",
     // Task C: the unconditional launcher and the two close controls.
@@ -2553,6 +2553,7 @@ test("the chat header shows the name, and a state frame keeps it current", async
   assert.equal(hub.els["perch-session-name"].hidden, false);
   assert.equal(hub.els["perch-session-meta"].textContent, "perchlive-aaaaaaaa",
     "the id line is untouched — it is the identity");
+  assert.equal(hub.els["perch-session-id"].textContent, "perchlive-aaaaaaaa", "queue item 13: the Session tab carries the id the phone head no longer shows");
 
   // Renamed from somewhere else (another tab, a list row): the engine echoes
   // the label on every state frame.

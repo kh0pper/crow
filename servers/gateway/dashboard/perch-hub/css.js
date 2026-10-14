@@ -388,6 +388,22 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-hub-root .attn-banner{display:flex;align-items:center;gap:8px;background:var(--teal-soft);border:1px solid var(--attn);color:var(--attn);border-radius:10px;padding:9px 12px;font-size:13px;font-weight:500;margin:8px 0 0;flex-shrink:0}
 #perch-hub-root .attn-banner[hidden]{display:none}
 #perch-back{align-self:flex-start}
+#perch-hub-root .perch-ident{min-width:0}
+/* Queue item 13 (plan 2026-10-14 rev 2): on phones and tablets the CHAT view
+   gives the reply room — no Board row (it stays on the sessions list), one
+   head row (back + bot name), no raw session id (the Session tab shows it),
+   and a trimmed title bar that keeps the safe-area inset. The list view and
+   the split view (desktop) are untouched. */
+@media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){
+  body[data-view="chat"] #perch-hub-root > header{display:none}
+  body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
+  body[data-view="chat"] #perch-hub-root #perch-back{flex:none;min-height:44px;padding:6px 12px;font-size:13px}
+  body[data-view="chat"] #perch-hub-root #perch-session-meta{display:none}
+  body[data-view="chat"] #perch-hub-root .perch-head .title{font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  body[data-view="chat"]:has(#perch-chat) .content-header{padding:6px 12px;padding-top:calc(env(safe-area-inset-top, 0px) + 6px)}
+  body[data-view="chat"]:has(#perch-chat) .content-header h2{font-size:1.05rem}
+  body[data-view="chat"]:has(#perch-chat) .content-body{padding-top:6px}
+}
 /* --- Phase D1: the tab surface ------------------------------------------
    ONE strip, two placements. Desktop: a top strip in the right pane (natural
    DOM order). Phone: order:10 makes the SAME element the last flex child of
