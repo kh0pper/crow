@@ -40,6 +40,37 @@ export function resolveArtifactsActor(extra, verifyActor) {
   return { ...UNATTRIBUTED };
 }
 
+/**
+ * C2 scope, FAIL CLOSED (self-review). A session is held to one round's
+ * artifact when either
+ *   - its bot_sessions row carries a LOCKED narrowing ("crow:locked"), or
+ *   - an untrusted round is bound to its thread.
+ * A locked session with no bound round, or session state that cannot be
+ * read, is refused outright — never treated as an unrestricted bot.
+ * Returns null only for a bot with no thread (a channel/job turn: it cannot
+ * be a locked Perch session) or a thread that is provably neither.
+ * Exported for the D23 one-way parity test: trust.js isLocked must be at
+ * least this strict (scopeOf scoped ⇒ isLocked).
+ */
+export async function scopeOf(db, actor) {
+  if (actor.kind !== "bot") return null;
+  if (!actor.thread) return null;
+  let locked;
+  try {
+    const r = (await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [actor.id, actor.thread] })).rows[0];
+    locked = !!r && typeof r.narrowed_tools === "string" && r.narrowed_tools.includes("crow:locked");
+  } catch {
+    throw Object.assign(new Error("session state unavailable"), { code: "forbidden" });
+  }
+  // No status filter, intentionally: the scope OUTLIVES its round's
+  // completion so a still-locked session can never regain the unrestricted
+  // surface (restrictive direction; pinned by the mcp scope tests).
+  const round = (await db.execute({ sql: "SELECT id, artifact_id, untrusted_input FROM artifact_rounds WHERE session_id=? AND bot_id=? ORDER BY id DESC LIMIT 1", args: [actor.thread, actor.id] })).rows[0];
+  if (locked && !round) throw Object.assign(new Error("this locked session has no round"), { code: "forbidden" });
+  if (locked || (round && store.flagUntrusted(round.untrusted_input))) return { roundId: Number(round.id), artifactId: round.artifact_id };
+  return null;
+}
+
 const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
 
 /**
@@ -93,41 +124,14 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   // record and the by-thread route replays missed cards on the next open.
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
-  /**
-   * C2 scope, FAIL CLOSED (self-review). A session is held to one round's
-   * artifact when either
-   *   - its bot_sessions row carries a LOCKED narrowing ("crow:locked"), or
-   *   - an untrusted round is bound to its thread.
-   * A locked session with no bound round, or session state that cannot be
-   * read, is refused outright — never treated as an unrestricted bot.
-   * Returns null only for a bot with no thread (a channel/job turn: it cannot
-   * be a locked Perch session) or a thread that is provably neither.
-   */
-  async function scopeOf(actor) {
-    if (actor.kind !== "bot") return null;
-    if (!actor.thread) return null;
-    let locked;
-    try {
-      const r = (await db.execute({ sql: "SELECT narrowed_tools FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [actor.id, actor.thread] })).rows[0];
-      locked = !!r && typeof r.narrowed_tools === "string" && r.narrowed_tools.includes("crow:locked");
-    } catch {
-      throw Object.assign(new Error("session state unavailable"), { code: "forbidden" });
-    }
-    // No status filter, intentionally: the scope OUTLIVES its round's
-    // completion so a still-locked session can never regain the unrestricted
-    // surface (restrictive direction; pinned by the mcp scope tests).
-    const round = (await db.execute({ sql: "SELECT id, artifact_id, untrusted_input FROM artifact_rounds WHERE session_id=? AND bot_id=? ORDER BY id DESC LIMIT 1", args: [actor.thread, actor.id] })).rows[0];
-    if (locked && !round) throw Object.assign(new Error("this locked session has no round"), { code: "forbidden" });
-    if (locked || (round && store.flagUntrusted(round.untrusted_input))) return { roundId: Number(round.id), artifactId: round.artifact_id };
-    return null;
-  }
+  const scopeOfActor = (actor) => scopeOf(db, actor);
   const tool = (name, desc, schema, fn) => {
     if (!TOOL_CLASSES[name]) throw new Error(`artifacts tool ${name} has no taint class`);
     return server.tool(name, desc, schema, async (args, extra) => {
       try {
         const actor = resolveArtifactsActor(extra, verifyActor);
         if (actor.kind === "unattributed") throw Object.assign(new Error("unattributed caller"), { code: "forbidden" });
-        const scope = await scopeOf(actor);
+        const scope = await scopeOfActor(actor);
         if (scope && args.artifact_id !== undefined && args.artifact_id !== scope.artifactId) throw Object.assign(new Error("this round is limited to its own artifact"), { code: "forbidden" });
         const roundThreads = new Set(scope ? JSON.parse((await db.execute({ sql: "SELECT thread_ids_json FROM artifact_rounds WHERE id=?", args: [scope.roundId] })).rows[0]?.thread_ids_json || "[]").map(Number) : []);
         if (scope) scope.roundThreads = roundThreads;
