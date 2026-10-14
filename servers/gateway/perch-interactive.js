@@ -1724,6 +1724,8 @@ export function createInteractiveEngine({
     pi.exited.then(() => {
       if (s.pi !== pi) return;                       // an expected close
       const deadTurn = s.turn;                       // strand 1: the frame names it
+      s.overflowCompacting = false;                  // review M1: dies with the child
+      s.overflowTurn = null;
       s.pi = null;
       s.turn = null;
       clearStall(s);
@@ -2190,10 +2192,15 @@ export function createInteractiveEngine({
       // (compaction_start{reason:"overflow"} arrives after agent_end, before
       // pi answers the stats call awaited above). Defer: compaction_end
       // decides. If compaction_start lands later than that (unlikely), the
-      // row is drawn now: a visible false failure, never a lost one.
+      // row is drawn now: a visible false failure. NOT surfaced: a failure of
+      // the compacted retry itself — the bridge ends the turn on the overflow
+      // agent_end, so the retry's own agent_end reaches no turn (the bridge
+      // turn-boundary seam, tracked separately in the private engineering notes).
+      let deferred = false;
       if (failed && s.overflowCompacting) {
         s.overflowTurn = { turn, errorText };
         failed = null;
+        deferred = true;
       }
       if (failed) emitTurnError(s, turn, errorText, "turn_error");
       // The id of the turn this reply COMPLETES (see the text frame above):
@@ -2203,7 +2210,7 @@ export function createInteractiveEngine({
       // Track 3 Task 8: an operator watching the drawer live (any live
       // subscriber) already sees the reply — the push is for someone who
       // is AWAY, and only for a turn that actually took a while.
-      if (s.subscribers.size === 0) {
+      if (s.subscribers.size === 0 && !deferred) {
         const ranS = (now() - turn.startedAt) / 1000;
         if (ranS >= notifyMinRunS()) {
           pushAttention({
@@ -2452,10 +2459,11 @@ export function createInteractiveEngine({
     // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
     const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false };
     s.turn = turn;
-    // Review M1: overflow-recovery state belongs to the PREVIOUS turn — a
-    // retry that recovered, or a child that died mid-compaction, leaves it set.
-    s.overflowCompacting = false;
-    s.overflowTurn = null;
+    // Review M1: overflow-recovery state belongs to the PREVIOUS turn. A
+    // retry that recovered leaves it set; a compaction still running (the
+    // operator sent again while it summarizes) keeps it, so its failure still
+    // reaches the turn it belongs to. attachExit clears it with the child.
+    if (!s.overflowCompacting) s.overflowTurn = null;
     // ---------------------------------------------------------------------
     try {
       if (needsWake) {

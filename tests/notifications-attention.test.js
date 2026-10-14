@@ -385,6 +385,20 @@ test("turn end (strand 1): an away push for a turn that ENDED in a model error s
   assert.doesNotMatch(mine[0].body, /tok123/);
 });
 
+test("turn end (strand 1): a turn deferred on overflow compaction pushes no empty 'replied'", async () => {
+  const { engine, clock, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
+  const s = await spawned(engine, "botty-overflow");
+  await engine.message(s.sessionId, "huge");
+  const pi = bridge._state.instances[0];
+  clock.advance(35_000);
+  pi.emit({ type: "compaction_start", reason: "overflow" });
+  pi.lastTurn().resolve({ type: "agent_end", willRetry: false,
+    messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "exceeds the available context size" }] });
+  await tick();
+  const mine = notificationRows().filter((r) => r.action_url === "/dashboard/bot-board#bird=" + s.sessionId);
+  assert.equal(mine.length, 0);
+});
+
 test("turn end: a turn that ran BELOW PERCH_NOTIFY_MIN_RUN_S pushes nothing", async () => {
   const { engine, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
   const s = await spawned(engine, "botty-quick");

@@ -2617,3 +2617,21 @@ test("strand 1 (review L4/L5): refused-turn text is redacted too, and the wider 
   await tick();
   assert.doesNotMatch(sink.ofType("error")[0].text, /abc\.def-ghi/);
 });
+
+test("strand 1 (re-review): sending again while overflow compaction runs does not lose that turn's failure", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  const first = await engine.message(s.sessionId, "huge");
+  const pi = state.instances[0];
+  const overflow = errMsg("exceeds the available context size");
+  pi.emit({ type: "compaction_start", reason: "overflow" });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [overflow], willRetry: false });
+  await tick();
+  await engine.message(s.sessionId, "hello?");          // the composer was free again
+  pi.emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: false, errorMessage: "summarization failed" });
+  await tick();
+  const errs = sink.ofType("error");
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].turnId, first.turnId, "the row belongs to the turn that overflowed");
+});

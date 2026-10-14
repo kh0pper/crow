@@ -17,8 +17,8 @@ const RULES = [
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"],
   [/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [redacted]"],
   [/(\/\/)[^\s/@:]+:[^\s/@]+@/g, "$1[redacted]@"],                        // URL userinfo
-  [/\b((?:x-)?api[_-]?key|access[_-]?token|token|key|secret|password)(["']?\s*[:=]\s*["']?)[^"'\s,&}]+/gi,
-    "$1$2[redacted]"],                                                       // query, header, JSON
+  [/\b((?:x-)?api[_-]?key|access[_-]?token|token|key|secret|password)(["']?\s*[:=]\s*["']?)[^"'\s,&}]{8,}/gi,
+    "$1$2[redacted]"],              // query, header, JSON; 8+ chars so "key: please" survives
   [/\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{20,}|hf_[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,})/g,
     "[redacted]"],                                                           // bare provider keys
 ];
