@@ -21,14 +21,16 @@
  * back into the token and the origin never accepts it.
  */
 import { randomBytes, createHash } from "node:crypto";
-import { isScriptedType, effectiveType } from "./policy.js";
+import { frameGrantFor } from "./policy.js";
 
 export const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 export const TOKEN_ID_RE = /^[0-9a-f]{64}$/;
 export const DEFAULT_VIEW_TOKEN_TTL_MS = 30 * 60 * 1000;
 const MAX_LIVE_TOKENS = 5000;
 
-const isScriptedGrant = (g) => isScriptedType(effectiveType(g.type, g.scriptsOff));
+// D28: "scripted" here means the frame SPEAKS (runs the helper) — the same
+// decision the origin uses to inject it (review M2).
+const isScriptedGrant = (g) => frameGrantFor(g.type, g.scriptsOff).speaks;
 const h = (t) => createHash("sha256").update(t).digest("hex");
 
 /** dashboardOrigin is interpolated into `frame-ancestors` (and CSP keeps the

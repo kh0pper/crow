@@ -357,7 +357,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // D20: a tainted version of a scripted type runs with scripts OFF until
     // the owner presses "Run this version's scripts" (= approve, audited).
     const scriptsOff = S.policy.isScriptedType(art.type) && M.store.isTainted(v);
-    const eff = S.policy.effectiveType(art.type, scriptsOff);
+    // D28/review H2: ONE decision for the sandbox and whether the frame speaks.
+    const fg = S.policy.frameGrantFor(art.type, scriptsOff);
     const tokens = S.runtime.viewTokens();
     const replaces = typeof req.body?.replaces === "string" ? req.body.replaces : null;
     if (replaces && tokens.evidence(replaces)?.artifactId === art.id) tokens.revokeToken(replaces);
@@ -365,7 +366,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const fragment = typeof req.body?.fragment === "string" && /^b\d{1,6}$/.test(req.body.fragment) ? req.body.fragment : null;
     res.json({
       url: `${info.baseUrl}/v/${token}/`, tokenId, nonce, type: art.type, fragment,
-      sandbox: S.policy.iframeSandboxFor(eff), scripted: S.policy.isScriptedType(eff), scriptsOff,
+      sandbox: fg.sandbox, scripted: fg.speaks, scriptsOff,
       isolation: S.runtime.isolationFor(req.headers.host),
     });
   }));
@@ -398,7 +399,16 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
 
   router.post("/api/artifacts/:id/threads", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
-    res.status(201).json(await M.comments.addThread(S.db, { artifactId: art.id, versionN: Number(req.body?.versionN ?? art.current_version), anchor: req.body?.anchor, text: req.body?.text, author: { kind: "owner" } }));
+    const versionN = Number(req.body?.versionN ?? art.current_version);
+    let anchor = req.body?.anchor;
+    // D28: a block anchor is resolved against THIS version's stored anchor
+    // map (block text from the map; the quote must be that block's).
+    if (anchor && anchor.kind === "block") {
+      const v = await M.store.getVersion(S.db, art.id, versionN);
+      let map = null; try { map = v && v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null; } catch { map = null; }
+      anchor = M.comments.resolveBlockAnchor(map, anchor);
+    }
+    res.status(201).json(await M.comments.addThread(S.db, { artifactId: art.id, versionN, anchor, text: req.body?.text, author: { kind: "owner" } }));
   }));
   router.post("/api/artifacts/:id/threads/:tid/comments", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);

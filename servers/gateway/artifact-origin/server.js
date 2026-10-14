@@ -32,12 +32,11 @@
  * (review L3: a forged Host cannot widen script-src).
  */
 import http from "node:http";
-import { cspFor, baseHeaders, isScriptedType, effectiveType } from "./policy.js";
+import { cspFor, baseHeaders, frameGrantFor, HELPER_PATH } from "./policy.js";
 import { TOKEN_RE } from "./view-tokens.js";
 import { anchorHelperSource } from "./anchor-helper.js";
 
 const ROUTE_RE = /^\/v\/([A-Za-z0-9_-]{43})\/([^?#]*)(?:\?[^#]*)?$/;
-const HELPER_PATH = "__crow/anchor-helper.js";
 const MAX_PATH_LEN = 512;
 
 /** Peer classifier — the dashboard's isAllowedNetwork rule without its cookie
@@ -137,11 +136,13 @@ export function createArtifactOriginHandler({ tokens, resolveContent, publicBase
       if (rel == null) return send(res, 404, { body: "not found", head });
 
       const tokenBase = `${base}/v/${m[1]}/`;
-      const type = effectiveType(grant.type, grant.scriptsOff);   // D20
-      const csp = cspFor(type, { tokenBase, frameAncestors: grant.dashboardOrigin });
-      const scripted = isScriptedType(type);
+      // D20 + D28: one decision (policy.frameGrantFor) for the served type and
+      // whether this frame speaks (runs the anchor helper).
+      const fg = frameGrantFor(grant.type, grant.scriptsOff);
+      const csp = cspFor(fg.effectiveType, { tokenBase, frameAncestors: grant.dashboardOrigin });
+      const scripted = fg.speaks;
       // Module scripts from an opaque origin are CORS requests (Origin: null),
-      // so scripted 200s carry ACAO * (never with credentials) — spec §5.2.
+      // so speaking frames' 200s carry ACAO * (never with credentials) — spec §5.2.
       const cors = scripted ? { "access-control-allow-origin": "*" } : {};
 
       if (rel === HELPER_PATH) {
