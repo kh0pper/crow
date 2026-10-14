@@ -327,3 +327,65 @@ test("live @412x760: at the largest text step the ask card's Send answer / Cance
   assert.equal(m.cancelHit, true, JSON.stringify(m));
   assert.equal(m.tabChatOverflow, 0);
 });
+
+// ─── queue item 13: a compact chat header on phones (plan 2026-10-14 rev 2) ──
+const HEAD_GEOMETRY = `(function(){
+  function box(e){ if(!e) return null; var b=e.getBoundingClientRect(); return {top:b.top,bottom:b.bottom,h:b.height,left:b.left}; }
+  function shown(e){ return !!e && getComputedStyle(e).display!=='none' && e.getBoundingClientRect().height>0; }
+  var tr=document.getElementById('perch-transcript');
+  var board=document.querySelector('#perch-hub-root > header');
+  return JSON.stringify({ vh:innerHeight, transcriptTop:tr.getBoundingClientRect().top,
+    boardShown:shown(board), metaShown:shown(document.getElementById('perch-session-meta')),
+    back:box(document.getElementById('perch-back')), backShown:shown(document.getElementById('perch-back')),
+    name:box(document.getElementById('perch-bot-name')),
+    header:box(document.querySelector('.content-header')),
+    menuShown:shown(document.querySelector('.content-header .menu-toggle, .content-header button, .content-header [aria-label]')),
+    docScrollX:document.documentElement.scrollWidth-innerWidth,
+    sessionId:(document.getElementById('perch-session-id')||{}).textContent||null,
+    attnH:shown(document.getElementById('perch-attn'))?document.getElementById('perch-attn').getBoundingClientRect().height:0 });
+})()`;
+
+test("live @412x760: the chat header is compact — no Board row, back + bot name share one row, no thread id, the title bar trimmed; the reply starts in the top ~22%", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(412, 760, HEAD_GEOMETRY, { ready: MSG_READY });
+  // The fixture has a pending question, so the attention banner (content, not
+  // chrome) sits above the transcript too; it is measured apart.
+  const chrome = m.transcriptTop - m.attnH;
+  console.log("[header @412] chrome above the reply", Math.round(chrome), "of", m.vh, "=", (chrome / m.vh * 100).toFixed(1) + "% (was 36.0% with the banner, before the change)");
+  assert.equal(m.boardShown, false, "the Board row is hidden in the chat view: " + JSON.stringify(m));
+  assert.equal(m.metaShown, false, "the raw thread id is hidden on phones");
+  assert.ok(m.backShown && Math.abs(m.back.top + m.back.h / 2 - (m.name.top + m.name.h / 2)) <= 8, "back and the bot name share one row: " + JSON.stringify(m));
+  assert.ok(m.back.h >= 44, "the back button is still a 44px target: " + m.back.h);
+  assert.ok(chrome / m.vh <= 0.16, "the chrome above the reply is " + (chrome / m.vh * 100).toFixed(1) + "% of the screen");
+  assert.equal(m.menuShown, true, "the title bar (menu) is still there");
+  assert.ok(m.docScrollX <= 0, "no horizontal scroll");
+  assert.equal(m.sessionId, SID, "the Session tab carries the thread id");
+});
+
+test("live @820x1000 (tablet, persistent sidebar): the same compact head, nothing overflows", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(820, 1000, HEAD_GEOMETRY, { ready: MSG_READY });
+  assert.equal(m.boardShown, false);
+  assert.ok(Math.abs(m.back.top + m.back.h / 2 - (m.name.top + m.name.h / 2)) <= 8, JSON.stringify(m));
+  assert.ok(m.docScrollX <= 0);
+});
+
+test("live @1280x900: the desktop header is untouched — Board row, thread id, full title bar", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const m = await measure(1280, 900, HEAD_GEOMETRY, { ready: MSG_READY });
+  assert.equal(m.boardShown, true, JSON.stringify(m));
+  assert.equal(m.metaShown, true);
+  assert.equal(m.backShown, false, "the split view needs no back button");
+  assert.ok(m.header.h >= 50, "the desktop title bar keeps its size: " + m.header.h);
+});
+
+
+test("css (queue item 13): the compaction is chat-view-only and keeps the safe-area inset (review: neither is visible to headless Chrome)", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = typeof perchHubCss === "function" ? perchHubCss("en") : String(perchHubCss);
+  const block = css.slice(css.indexOf("Queue item 13"));
+  for (const rule of block.split("\n").filter((l) => /^\s+body/.test(l)).slice(0, 8)) {
+    assert.match(rule, /^\s+body\[data-view="chat"\]/, "every compaction rule is scoped to the chat view: " + rule.trim());
+  }
+  assert.match(block, /\.content-header\{[^}]*padding-top:calc\(env\(safe-area-inset-top, 0px\) \+ 6px\)/, "the trimmed title bar keeps the notch inset");
+});
