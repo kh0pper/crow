@@ -116,8 +116,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * events of ONE Perch thread, so a reloaded transcript redraws its cards —
    * the file-card history contract. Derived from the audit log (the store is
    * the system of record); capped at 200 rows, newest last. Owner-only like
-   * every route here. PR-1's thread link is origin_session; PR-3 swaps to
-   * artifact_links (the same single-point swap as server/links.js).
+   * every route here. A chat sees the artifacts ACTIVELY linked to it
+   * (artifact_links, D25); an unlinked chat's cards stop replaying.
    */
   const THREAD_EVENT_FOR = { create: "create", version: "update", "version-proposed": "update", reply: "reply", "round-done": "round-done", "ask-done": "round-done" };
   router.get("/api/artifacts/by-thread/:thread", wrap(async (req, res) => {
@@ -125,9 +125,10 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const rows = (await S.db.execute({
       sql: `SELECT au.artifact_id, au.action, au.target, au.ts FROM artifact_audit au
             JOIN artifacts a ON a.id=au.artifact_id
-            WHERE a.origin_session=? AND a.deleted_at IS NULL AND au.action IN (${actions.map(() => "?").join(",")})
+            WHERE a.deleted_at IS NULL AND au.action IN (${actions.map(() => "?").join(",")})
+              AND EXISTS (SELECT 1 FROM artifact_links l WHERE l.artifact_id=a.id AND l.thread_id=? AND l.unlinked_at IS NULL)
             ORDER BY au.id DESC LIMIT 200`,
-      args: [String(req.params.thread), ...actions],
+      args: [...actions, String(req.params.thread)],
     })).rows;
     rows.reverse();   // the cap keeps the NEWEST 200; the client replays oldest-first
     res.json({

@@ -513,7 +513,7 @@ test("R2 (review): the sweep timing a round out mid-update wins — no result st
 test("L3 (review): links never fan out for an operator-made artifact, and a deleted artifact drops off the links", async () => {
   const { linkedThreads } = await import("../bundles/artifacts/server/links.js");
   // created_by_bot NULL with an origin_session set (hand-built row; the MCP
-  // rail cannot make one, but PR-3 rewrites this function — pin the arm).
+  // rail cannot make one): no link row exists for it, so no fan-out.
   await s.db.execute({ sql: "INSERT INTO artifacts (id,title,type,owner,created_by_bot,origin_session,received,title_tainted,current_version) VALUES ('art_op1','Op made','document','owner',NULL,'perchlive-op',0,0,1)", args: [] });
   assert.deepEqual(await linkedThreads(s.db, "art_op1"), [], "no bot, no fan-out target (the engine bot-check would refuse anyway — defence in depth)");
   // A soft-deleted artifact's origin chat is not a link either.
@@ -521,7 +521,7 @@ test("L3 (review): links never fan out for an operator-made artifact, and a dele
   const c = await client(s.artToken, bot("bobby", "perchlive-f7"));
   try {
     const id = (await call(c, "artifact_create", { title: "Doomed", type: "document", source: { markdown: "# x" } })).data.id;
-    assert.deepEqual(await linkedThreads(s.db, id), [{ threadId: "perchlive-f7", botId: "bobby" }]);
+    assert.deepEqual((await linkedThreads(s.db, id)).map(({ threadId, botId }) => ({ threadId, botId })), [{ threadId: "perchlive-f7", botId: "bobby" }]);
     await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [id] });
     assert.deepEqual(await linkedThreads(s.db, id), [], "a deleted artifact fans out nowhere");
     assert.deepEqual(await linkedThreads(s.db, "art_nope"), [], "an unknown artifact fans out nowhere");

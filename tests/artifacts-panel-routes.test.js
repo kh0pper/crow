@@ -130,9 +130,9 @@ test("D20: a tainted page version mints script-free until the owner approves it"
 // ---------------------------------------------------------------------------
 
 test("by-thread: audit-derived events for ONE thread, mapped, oldest first, capped at the newest 200", async () => {
-  const art = await store.createArtifact(s.db, s.blobs, { title: "Threaded", type: "document", source: { markdown: "# t" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1" } }, { markdownBlocks });
-  const other = await store.createArtifact(s.db, s.blobs, { title: "Elsewhere", type: "document", source: { markdown: "# o" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t2" } }, { markdownBlocks });
-  const v = await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { markdown: "# t2" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1" } }, { markdownBlocks });
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Threaded", type: "document", source: { markdown: "# t" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1", gateway: "perch" } }, { markdownBlocks });
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Elsewhere", type: "document", source: { markdown: "# o" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t2", gateway: "perch" } }, { markdownBlocks });
+  const v = await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { markdown: "# t2" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t1", gateway: "perch" } }, { markdownBlocks });
   await store.audit(s.db, { artifactId: art.id, actor: { kind: "bot", id: "bobby" }, action: "reply", target: "7" });
   await store.audit(s.db, { artifactId: art.id, actor: { kind: "bot", id: "bobby" }, action: "round-done", target: "3" });
   await store.audit(s.db, { artifactId: art.id, actor: { kind: "system" }, action: "round-timeout", target: "2" });   // not a card event
@@ -153,6 +153,12 @@ test("by-thread: audit-derived events for ONE thread, mapped, oldest first, capp
   assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t1", { cookie: null })).status, 401);
   // An unknown thread is an empty list, not an error.
   assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-nope")).body.items, []);
+  // D25: the replay follows ACTIVE links — a second linked chat sees the
+  // artifact's events; an unlinked chat stops replaying them.
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, "bobby", "perchlive-t3"] });
+  assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t3")).body.items.length, 200);
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND thread_id='perchlive-t1'", args: [art.id] });
+  assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-t1")).body.items, [], "unlinked: no replay");
 });
 
 test("the card row: GET :id carries the active round and the server-derived scripted flag", async () => {
@@ -181,7 +187,7 @@ test("the card row: GET :id carries the active round and the server-derived scri
 });
 
 test("by-thread: a deleted artifact's events drop off the replay (review L3/M11)", async () => {
-  const art = await store.createArtifact(s.db, s.blobs, { title: "Doomed doc", type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t8" } }, { markdownBlocks });
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Doomed doc", type: "document", source: { markdown: "# d" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-t8", gateway: "perch" } }, { markdownBlocks });
   assert.equal((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items.length, 1);
   await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [art.id] });
   assert.deepEqual((await req("GET", "/api/artifacts/by-thread/perchlive-t8")).body.items, [], "a deleted artifact replays no cards");

@@ -130,6 +130,22 @@ export async function initArtifactsTables(db) {
     -- R3-M3: this DB's artifact-store identity (matched against the blob
     -- store's marker before any reclaim deletes anything).
     CREATE TABLE IF NOT EXISTS artifact_store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    -- D25 (v1.6): the chats an artifact is linked to. Cards fan out to every
+    -- ACTIVE link; Send targets one. Writers (no MCP path writes a link from
+    -- caller-chosen values): the one-time backfill below, createArtifact's
+    -- origin link (the signed creating Perch chat), the owner's decide route
+    -- (ask-first linking) and the Library's Unlink (sets unlinked_at).
+    CREATE TABLE IF NOT EXISTS artifact_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artifact_id TEXT NOT NULL,
+      bot_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      linked_at TEXT NOT NULL DEFAULT (datetime('now')),
+      linked_by TEXT NOT NULL CHECK (linked_by IN ('origin','owner-yes')),
+      unlinked_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_artifact_link_active ON artifact_links(artifact_id, thread_id) WHERE unlinked_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_artifact_links_thread ON artifact_links(thread_id);
     -- Sessions that saw untrusted text (trust.js). Insert-only.
     CREATE TABLE IF NOT EXISTS artifact_session_taint (
       bot_id TEXT NOT NULL,
@@ -150,6 +166,15 @@ export async function initArtifactsTables(db) {
   if (!done) {
     try { await db.execute({ sql: "INSERT OR IGNORE INTO artifact_session_taint (bot_id, thread_id, reason) SELECT bot_id, gateway_thread_id, 'pre-d22' FROM bot_sessions WHERE gateway_thread_id IS NOT NULL", args: [] }); } catch { /* no bot_sessions table (tests, a fresh install) */ }
     await db.execute({ sql: "INSERT OR IGNORE INTO artifact_store_meta (key, value) VALUES ('d22_backfill', datetime('now'))", args: [] });
+  }
+  // D25: origin_session becomes the first link, ONCE (a later Unlink must not
+  // be undone by the next init). Perch threads only (round-2 B6: a channel
+  // turn's thread can never receive a card or a Send), live bot-made
+  // artifacts only.
+  const linked = (await db.execute({ sql: "SELECT value FROM artifact_store_meta WHERE key='links_backfill'", args: [] })).rows[0];
+  if (!linked) {
+    await db.execute({ sql: "INSERT INTO artifact_links (artifact_id, bot_id, thread_id, linked_by) SELECT a.id, a.created_by_bot, a.origin_session, 'origin' FROM artifacts a WHERE a.deleted_at IS NULL AND a.created_by_bot IS NOT NULL AND a.origin_session LIKE 'perchlive-%' AND NOT EXISTS (SELECT 1 FROM artifact_links l WHERE l.artifact_id=a.id AND l.thread_id=a.origin_session)", args: [] });
+    await db.execute({ sql: "INSERT OR IGNORE INTO artifact_store_meta (key, value) VALUES ('links_backfill', datetime('now'))", args: [] });
   }
 }
 

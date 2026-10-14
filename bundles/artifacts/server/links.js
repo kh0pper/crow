@@ -1,17 +1,26 @@
 // Crow Artifacts — which chats an artifact's cards fan out to (spec v1.6 D25).
 //
-// ONE function, ONE query: PR-1's interim answer is the origin session (the
-// chat that made the artifact); PR-3 swaps the body to the artifact_links
-// table (many linked chats, ask-first linking) without touching any caller.
-// A link without a bot can never receive a card (the engine hook is
-// bot-checked), so it is not returned.
+// ONE function, ONE query over artifact_links (PR-3; PR-1 read origin_session
+// here). Only ACTIVE links of a live artifact count. A link always names its
+// bot: the engine hook is bot-checked, so a card can only reach a chat of the
+// bot the link names.
 
-/** @returns {Promise<Array<{threadId: string, botId: string}>>} active links, most recent first. */
+/** @returns {Promise<Array<{threadId: string, botId: string, linkedAt: string}>>} active links, most recent first. */
 export async function linkedThreads(db, artifactId) {
-  const r = (await db.execute({
-    sql: "SELECT created_by_bot, origin_session FROM artifacts WHERE id=? AND deleted_at IS NULL",
+  const { rows } = await db.execute({
+    sql: `SELECT l.thread_id, l.bot_id, l.linked_at FROM artifact_links l JOIN artifacts a ON a.id=l.artifact_id
+          WHERE l.artifact_id=? AND l.unlinked_at IS NULL AND a.deleted_at IS NULL
+          ORDER BY l.linked_at DESC, l.id DESC`,
     args: [String(artifactId)],
+  });
+  return rows.map((r) => ({ threadId: String(r.thread_id), botId: String(r.bot_id), linkedAt: String(r.linked_at) }));
+}
+
+/** The active link of ONE chat (null when that chat is not linked). */
+export async function activeLink(db, artifactId, threadId) {
+  const r = (await db.execute({
+    sql: "SELECT l.id, l.bot_id, l.thread_id, l.linked_at FROM artifact_links l JOIN artifacts a ON a.id=l.artifact_id WHERE l.artifact_id=? AND l.thread_id=? AND l.unlinked_at IS NULL AND a.deleted_at IS NULL",
+    args: [String(artifactId), String(threadId)],
   })).rows[0];
-  if (!r || !r.origin_session || !r.created_by_bot) return [];
-  return [{ threadId: String(r.origin_session), botId: String(r.created_by_bot) }];
+  return r ? { id: Number(r.id), botId: String(r.bot_id), threadId: String(r.thread_id), linkedAt: String(r.linked_at) } : null;
 }
