@@ -2,7 +2,7 @@
 name: artifacts
 description: Make pages, documents and diagrams the owner can view and comment on, and revise them from feedback rounds.
 triggers: ["artifact", "mockup", "make a page", "make a document", "diagram", "feedback round"]
-tools: ["artifact_create", "artifact_update", "artifact_get", "artifact_list", "artifact_comments", "artifact_reply", "artifact_resolve", "artifact_round_done"]
+tools: ["artifact_create", "artifact_update", "artifact_get", "artifact_list", "artifact_find", "artifact_attach", "artifact_comments", "artifact_reply", "artifact_resolve", "artifact_round_done"]
 ---
 
 # Artifacts
@@ -12,6 +12,11 @@ Use `artifact_create` to make something the owner can open in Crow's Nest → Ar
 - `page`: `{ html, assets? }` — self-contained HTML/CSS/JS. It runs sandboxed with **no network**: put all data, images and fonts in the page or in `assets` (base64). Never load anything from another site.
 - `document`: `{ markdown, title? }` — each top-level block becomes a section people can comment on.
 - `diagram`: `{ svg }` — one SVG element; no scripts, event handlers or foreignObject. Give important shapes an `id` and a `<title>`.
+
+## Finding an artifact and bringing it into this chat
+
+- When the owner mentions an artifact by name, id or viewer link, use `artifact_find` with what they gave you (an id, the link, or words from the title). Several matches come back as candidates: ask which one they mean.
+- An artifact you made in another chat is not linked to this one. To work on it here, call `artifact_attach`: the owner sees a "Link it to this chat?" card and decides. Tell them you asked; nothing is linked until they say yes. Do not ask again if they said no.
 
 ## Feedback rounds
 
