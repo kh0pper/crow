@@ -286,7 +286,7 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
     assert.ok(m.rowLeft >= m.trLeft - 1 && m.rowRight <= m.trRight + 1, "the row stays in the column: " + JSON.stringify(m));
     assert.ok(m.whatRight <= m.trRight + 1, "the long token wraps: " + JSON.stringify(m));
     assert.ok(m.whatTop >= m.whoBottom - 1, "the label sits above the error: " + JSON.stringify(m));
-    assert.match(m.label, /model call failed/i);
+    assert.match(m.label, /turn failed/i);
     assert.notEqual(m.whoColor, "rgb(0, 0, 0)", "the label carries the error color");
     assert.equal(m.emptyBots, 0, "no empty bot bubble for the errored message");
     assert.equal(m.docScrollX, 0, "no horizontal page scroll");

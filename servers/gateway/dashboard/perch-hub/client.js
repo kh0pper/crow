@@ -1431,7 +1431,9 @@ export function perchHubJs(lang = "en") {
            send-failure note when a send is outstanding (the message went
            nowhere). Never a danger row: the note already says it.
          A frame with no turnId stays rail-only. turn_error does NOT drive
-         showSendFailure: the send reached pi. */
+         showSendFailure: the send reached pi.
+         Only turn_error rows come back on reload (pi persists the errored
+         message); stall and refused-turn rows are live-only. */
     on('error',function(d){
       appendActivity(d.text||'error');
       /* The child DIED (pi exited at spawn — an unknown provider, a missing
@@ -1607,12 +1609,19 @@ export function perchHubJs(lang = "en") {
         var events=r.j.events||[];
         if(!events.length){ appendNote(NO_TRANSCRIPT); flushHistBuf([], pair[1]); return; }
         var batchTexts=[];
-        var batchErrs=[];
+        /* Review M2: the error a buffered live frame may duplicate is only the
+           snapshot's TAIL turn's (an errored message that is the batch's last
+           message). An older turn's same-text error must not swallow a newer
+           turn's frame — "400 invalid_tools" repeats every turn. */
+        var tailErr=null;
         var msgs=events.filter(function(e){ return e&&e.type==='message'; });
         /* Strand 1: pi keeps every errored attempt in the session file and
            its messages carry no turnId. An errored assistant message is the
            TURN's error only when no later assistant message precedes the next
            user message — the live rule (onTurnEnd reads the last one). */
+        /* Known edge: a steer queued during a retry's backoff is injected as a
+           user message before the retried answer, so the first attempt reads
+           as a turn's end here (one extra row on reload). */
         function endsTurn(i){
           for(var j=i+1;j<msgs.length;j++){
             var r=String(((msgs[j]||{}).message||{}).role||'');
@@ -1648,12 +1657,10 @@ export function perchHubJs(lang = "en") {
             if(String(m.role||'?')!=='user') batchTexts.push(txt);
             appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html);
           }
-          if(errored&&endsTurn(i)){
-            batchErrs.push(String(e.errorText||''));
-            drawTurnError(e.errorText, null);
-          }
+          if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
+          if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
-        flushHistBuf(batchTexts, pair[1], batchErrs);
+        flushHistBuf(batchTexts, pair[1], tailErr);
       });
   }
 
@@ -1702,7 +1709,7 @@ export function perchHubJs(lang = "en") {
      collapsed every key to "0|0" and silently dropped the second card of any
      session. */
   function fileKey(d){ return String((d&&d.name)||'')+'|'+String((d&&d.stored)||''); }
-  function flushHistBuf(batchTexts, sentFiles, batchErrs){
+  function flushHistBuf(batchTexts, sentFiles, tailErr){
     histSettled=true;
     /* PR-E: persisted sent-file cards replay first (they are older context —
        the live buffer below can only hold TODAY's frames), deduped by
@@ -1731,7 +1738,7 @@ export function perchHubJs(lang = "en") {
       if(f.turnErr){
         /* Strand 1: the batch already drew this turn's error from the
            transcript (same server-side redaction, so the text is equal). */
-        if((batchErrs||[]).indexOf(String(f.text||''))>=0){ renderedErrTurns[f.turnId]=true; return; }
+        if(tailErr!=null&&tailErr===String(f.text||'')){ tailErr=null; renderedErrTurns[f.turnId]=true; return; }
         drawTurnError(f.text, f.turnId);
         return;
       }

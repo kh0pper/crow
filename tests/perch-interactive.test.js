@@ -2494,7 +2494,7 @@ test("strand 1: the error text is redacted and capped on the server — keys nev
   await engine.message(s.sessionId, "hi");
   const pi = state.instances[0];
   const nasty = "401 from https://x.example/v1?api_key=SEKRIT123 Authorization: Bearer abc.def-ghi " +
-    "key sk-proj-AAAAAAAAAAAAAAAAAAAA <img src=x onerror=alert(1)> " + "z".repeat(5000);
+    "key " + "sk-" + "proj-" + "A".repeat(20) + " <img src=x onerror=alert(1)> " + "z".repeat(5000);
   pi.lastTurn().resolve({ type: "agent_end", messages: [errMsg(nasty)] });
   await tick();
   const t = sink.ofType("error")[0].text;
@@ -2532,4 +2532,88 @@ test("strand 1: stall and turn-error frames name their turn (the hub dedupes per
   await tick();
   const refused = sink.ofType("error").find((e) => /prompt refused/.test(e.text));
   assert.equal(refused.turnId, second.turnId);
+});
+
+test("strand 1 (review M1): a context-overflow error pi is COMPACTING to recover draws nothing; a failed recovery draws one row for that turn", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  const { turnId } = await engine.message(s.sessionId, "huge");
+  const pi = state.instances[0];
+  const overflow = errMsg("the request exceeds the available context size, try increasing it");
+  pi.emit({ type: "message_end", message: overflow });
+  // pi tags this agent_end willRetry:false, then compacts and retries once.
+  pi.emit({ type: "compaction_start", reason: "overflow" });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [overflow], willRetry: false });
+  await tick();
+  assert.equal(sink.ofType("error").length, 0, "recovery is in progress — not a failure yet");
+
+  pi.emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: true, result: { summary: "s" } });
+  await tick();
+  assert.equal(sink.ofType("error").length, 0, "compacted and retrying — still not a failure");
+
+  // The retry overflowed again: pi gives up and says so.
+  pi.emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: false,
+    errorMessage: "Context overflow recovery failed after one compact-and-retry attempt." });
+  await tick();
+  const errs = sink.ofType("error");
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].turnId, turnId);
+  assert.equal(errs[0].reason, "turn_error");
+  assert.match(errs[0].text, /recovery failed/);
+});
+
+test("strand 1 (review M1): pi's 'recovery already attempted' overflow path (no compaction_start) draws exactly one row", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "huge again");
+  const pi = state.instances[0];
+  pi.lastTurn().resolve({ type: "agent_end", messages: [errMsg("exceeds the available context size")], willRetry: false });
+  await tick();
+  pi.emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: false,
+    errorMessage: "Context overflow recovery failed after one compact-and-retry attempt." });
+  await tick();
+  assert.equal(sink.ofType("error").length, 1, "the turn's own error, and no second row from compaction_end");
+});
+
+test("strand 1 (review L3): a stall then a turn error on the SAME turn emits one error frame", async () => {
+  const { engine, clock, state } = makeEngine({ env: { PERCH_TURN_STALL_MS: "60000" } });
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "silent");
+  const pi = state.instances[0];
+  // Hold the abort so the turn is still current when the rejection lands.
+  pi.abortSince = () => new Promise(() => {});
+  clock.advance(60_001);
+  await tick();
+  const err = new Error("timeout:prompt-ack");
+  pi.lastTurn().reject(err);
+  await tick();
+  assert.equal(sink.ofType("error").length, 1);
+});
+
+test("strand 1 (review L4/L5): refused-turn text is redacted too, and the wider credential forms are covered", async () => {
+  const { redactErrorText } = await import("../servers/gateway/perch-error-text.js");
+  const t = redactErrorText([
+    'fetch https://alice:hunter2@llm.example/v1 failed',
+    'Authorization: Basic YWxpY2U6aHVudGVyMg==',
+    '{"api_key": "json-secret-1"}',
+    'x-api-key: header-secret-2',
+    "key " + "AIza" + "B".repeat(30),
+    "hf_" + "C".repeat(24), "gsk_" + "D".repeat(24), "xai-" + "E".repeat(24),
+  ].join(" | "));
+  for (const leak of ["hunter2", "YWxpY2U6aHVudGVyMg", "json-secret-1", "header-secret-2", "AIzaB", "hf_CCC", "gsk_DDD", "xai-EEE"]) {
+    assert.ok(!t.includes(leak), leak + " leaked: " + t);
+  }
+
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "x");
+  const refusal = new Error("prompt refused: 401 Bearer abc.def-ghi");
+  refusal.code = "prompt_refused";
+  state.instances[0].lastTurn().reject(refusal);
+  await tick();
+  assert.doesNotMatch(sink.ofType("error")[0].text, /abc\.def-ghi/);
 });

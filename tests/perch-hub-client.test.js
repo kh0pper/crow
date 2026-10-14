@@ -4779,3 +4779,18 @@ test("strand 1: a turn_error buffered across the history window is not drawn as 
   assert.equal(rows.length, 2, "the batch's copy of t7 once, and t8 (newer than the snapshot) behind it");
   assert.ok(rows[0].includes("400 invalid_tools") && rows[1].includes("429 slow down"));
 });
+
+test("strand 1 (review M2): a buffered error with the SAME text as an older turn's error is not swallowed by it", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  // Turn B fails live with the same text turn A failed with; B's message is not
+  // in the snapshot (the snapshot ends with turn B's user message).
+  es._serverFrame("error", { text: "400 invalid_tools", reason: "turn_error", turnId: "tB" });
+  settleBatch(makeResponse(200, { events: [userMsg("a"), asstErr("400 invalid_tools"), userMsg("b")] }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(turnErrRows(hub).length, 2, "A's row from the batch AND B's live row");
+});
