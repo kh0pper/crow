@@ -2673,6 +2673,7 @@ export const translations = {
   "perch.botStartFailed": { en: "Bot could not start:", es: "El bot no pudo iniciarse:" },
   "perch.sendFailed": { en: "The message did not send.", es: "El mensaje no se envió." },
   "perch.back": { en: "← Sessions", es: "← Sesiones" },
+  "perch.sessionIdLabel": { en: "Session id", es: "Id de la sesión" },
   "perch.composerPlaceholder": { en: "Message your bot…", es: "Escribe a tu bot…" },
   "perch.send": { en: "Send", es: "Enviar" },
   "perch.abort": { en: "Stop", es: "Detener" },
