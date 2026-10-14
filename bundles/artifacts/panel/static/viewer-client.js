@@ -137,7 +137,7 @@
     });
     if (S.versions.length < 2) versionSel.setAttribute("hidden", ""); else versionSel.removeAttribute("hidden");
   }
-  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); S.editing = null; renderThreads(); renderSections(); mountFrame(); });
+  versionSel.addEventListener("change", function () { S.n = Number(versionSel.value); S.editing = null; hideSelBar(); renderThreads(); renderSections(); mountFrame(); });
 
   /** The threads the owner would send by default: open, owner-authored. */
   function sendable() { return S.threads.filter(function (t) { return t.author_kind === "owner" && t.status !== "resolved"; }); }
@@ -259,7 +259,7 @@
       var nums = byBlock[b.id] ? " (" + byBlock[b.id].join(", ") + ")" : "";
       sectionList.appendChild(el("li", {}, [button(((b.plain || b.text).slice(0, 80) || b.id) + nums, function () {
         if (S.viewer) S.viewer.showBlock(b.id).catch(function () {});
-        compose({ kind: "block", id: b.id, text: b.text });
+        compose({ kind: "block", id: b.id, text: b.text, fromList: true });
       })]));
     });
   }
@@ -271,7 +271,7 @@
     // Documents: name the block; the server resolves it against the stored
     // anchor map (block text from the map, quote checked) or falls back to a
     // text anchor. Pages: the text anchor as proposed.
-    var anchor = isDoc() && a.block ? { kind: "block", id: a.block, quote: a.quote } : { kind: "text", quote: a.quote, prefix: a.prefix, suffix: a.suffix };
+    var anchor = isDoc() && a.block ? { kind: "block", id: a.block, quote: a.quote, prefix: a.prefix, suffix: a.suffix } : { kind: "text", quote: a.quote, prefix: a.prefix, suffix: a.suffix };
     selBar.textContent = "";
     selBar.appendChild(button(fmt(T.comment_selection, { q: q }), function () { hideSelBar(); compose(anchor); }, "cv-primary"));
     selBar.removeAttribute("hidden");
@@ -334,6 +334,7 @@
   }
 
   function mountFrame() {
+    hideSelBar();
     if (S.viewer) { S.viewer.destroy(); S.viewer = null; }
     frameBox.textContent = ""; pinLayer.textContent = "";
     runBtn.setAttribute("hidden", "");
@@ -346,7 +347,7 @@
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
       // A tap (pages) composes at once; a SELECTION waits for the owner's tap
       // on the trusted "Comment on …" button (review H1).
-      onProposal: function (a) { if (a.kind === "text") offerSelection(a); else compose(a); },
+      onProposal: function (a) { if (!S.commentOn) return; if (a.kind === "text") offerSelection(a); else compose(a); },
       onTrip: function (reason) {
         showFlagged();   // F3: replaced at once, before the server answers
         api("POST", BASE + "/versions/" + n + "/tripwire", { reason: reason }).then(refresh, function () {});
@@ -374,7 +375,7 @@
     }, function (e) {
       if (e.code === "flagged") showFlagged();
       else if (e.code === "origin_unavailable") isolationNote("unavailable");
-      else if (e.message !== "csp-not-in-force" && e.message !== "stale") banner(e.message, "warn");
+      else if (e.message !== "csp-not-in-force" && e.message !== "stale" && e.message !== "bad-grant") banner(e.message, "warn");   // bad-grant: onRefuse already showed the panel
     });
   }
   runBtn.addEventListener("click", function () {   // D20: the owner's press is the approve (audited)

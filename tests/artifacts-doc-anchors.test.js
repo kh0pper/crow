@@ -55,3 +55,15 @@ test("review M1: the renderer is the meta-refresh control for helper-only docume
     assert.doesNotMatch(body, bad, String(bad));
   }
 });
+
+test("review M-1/M-2 + low: inline formatting never splits words; a cross-format selection keeps its block; the fallback keeps context; a section picked from the list keeps its section", async () => {
+  const { plainOf } = await import("../bundles/artifacts/server/render.js");
+  assert.equal(plainOf("<p>An <strong>un</strong>believable <code>foo()</code>'s day</p>"), "An unbelievable foo()'s day");
+  assert.equal(plainOf("<ul><li>one</li><li>two</li></ul>"), "one two", "block tags still separate");
+  const map = (await renderVersion("document", { markdown: "An **un**believable `foo()`'s day.\n\nOther." }, { markdownBlocks })).anchorMap;
+  assert.equal(resolveBlockAnchor(map, { kind: "block", id: "b1", quote: "unbelievable foo()'s" }).kind, "block");
+  assert.deepEqual(resolveBlockAnchor(map, { kind: "block", id: "b2", quote: "unbelievable", prefix: "An ", suffix: " foo" }),
+    { kind: "text", quote: "unbelievable", prefix: "An ", suffix: " foo" }, "the fallback keeps the selection's context");
+  assert.deepEqual(resolveBlockAnchor(map, { kind: "block", id: "b2", quote: "words I typed", fromList: true }),
+    { kind: "block", id: "b2", text: map.blocks[1].text, quote: "words I typed" }, "the owner's section pick stands");
+});

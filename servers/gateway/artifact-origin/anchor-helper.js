@@ -120,6 +120,8 @@ export function anchorHelperSource(nonce) {
   }
   document.addEventListener("selectionchange", () => {
     if (!on) return;
+    const cur = getSelection && getSelection();
+    if (!cur || cur.isCollapsed) lastQuote = "";   // re-selecting the same words proposes again
     clearTimeout(selTimer);
     selTimer = setTimeout(proposeSelection, 400);
   });

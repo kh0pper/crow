@@ -862,3 +862,40 @@ test("D28: a document is HELPER-ONLY — its own inline script, handlers, javasc
     assert.equal(st.loads, 1);
   } finally { await t.close(); }
 });
+
+test("D28 helper (review M-3): a real drag-select proposes ONCE (debounced — never a flood trip), a tap in select-only mode proposes nothing, and select-then-Comment proposes the current selection", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("document", { "index.html": html(`<!doctype html><html><head><style>body{margin:0}p{font:20px/1 monospace;margin:20px;white-space:nowrap}</style></head><body><div class="blk" id="b1"><p>alpha beta gamma delta epsilon zeta</p></div></body></html>`) });
+    await harness(t, g);
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.ready")) === 1), "hello");
+    const drag = async (x1, x2, steps = 40) => {
+      await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x: x1, y: 30, button: "left", clickCount: 1 });
+      for (let i = 1; i <= steps; i++) await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: x1 + ((x2 - x1) * i) / steps, y: 30, button: "left", buttons: 1 });
+      await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: x2, y: 30, button: "left", clickCount: 1 });
+    };
+    // Phase C: select FIRST (comment mode off → nothing), then press Comment → one proposal.
+    await drag(22, 200);
+    await sleep(700);
+    assert.equal((await t.evalIn("__r.proposals.length")), 0, "comment mode off: no proposal");
+    await t.evalIn("__v.setCommentMode(true, { selectOnly: true })");
+    const c = await waitFor(async () => { const p = await t.evalIn("__r.proposals"); return p && p.length ? p : null; });
+    assert.equal(c.length, 1);
+    assert.equal(c[0].kind, "text");
+    assert.equal(c[0].block, "b1");
+    assert.match(c[0].quote, /^alpha/);
+    // Phase B: a tap in select-only mode proposes nothing.
+    const before = await t.evalIn("__r.proposals.length");
+    for (const type of ["mousePressed", "mouseReleased"]) await t.send("Input.dispatchMouseEvent", { type, x: 100, y: 90, button: "left", clickCount: 1 });   // inside the frame, below the text
+    await sleep(700);
+    assert.equal(await t.evalIn("__r.proposals.length"), before, "a tap on a document proposes nothing");
+    assert.equal((await t.evalIn("__v.state()")).tripped, false);
+    // Phase A: a fast drag (dozens of selectionchange events) → one more proposal, no trip.
+    await drag(22, 330, 60);
+    await sleep(900);
+    const after = await t.evalIn("__r.proposals.length");
+    assert.ok(after >= 2 && after <= 3, "debounced: " + after + " proposals for one drag");
+    const st = await t.evalIn("__v.state()");
+    assert.equal(st.tripped, false, "an ordinary drag-select never trips the flood guard");
+  } finally { await t.close(); }
+});

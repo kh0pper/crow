@@ -118,14 +118,21 @@ export function svgElements(svg, max = 500) {
 
 /** Rendered text of SANITIZED block HTML, linear (no regex over the input:
  *  ReDoS review), capped. Entities: the handful sanitize-html emits. */
+const BLOCK_TAGS = new Set(["p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote", "table", "thead", "tbody", "tr", "td", "th", "hr", "dl", "dt", "dd", "figure", "figcaption"]);
 const ENT = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&nbsp;": " " };
 export function plainOf(html, cap = 4000) {
   const s = String(html || "");
-  let out = "", inTag = false;
+  // Review M-1: only BLOCK-level tags separate words; inline tags
+  // (**un**believable, `foo()`'s) must not insert a space.
+  let out = "", inTag = false, tag = "";
   for (let i = 0; i < s.length && out.length < cap * 2; i++) {
     const c = s[i];
-    if (inTag) { if (c === ">") { inTag = false; out += " "; } continue; }
-    if (c === "<") { inTag = true; continue; }
+    if (inTag) {
+      if (c === ">") { inTag = false; if (BLOCK_TAGS.has(tag.replace(/^\//, "").split(/[\s/]/)[0].toLowerCase())) out += " "; tag = ""; }
+      else if (tag.length < 16) tag += c;
+      continue;
+    }
+    if (c === "<") { inTag = true; tag = ""; continue; }
     if (c === "&") {
       const semi = s.indexOf(";", i);
       if (semi > i && semi - i <= 6 && ENT[s.slice(i, semi + 1)]) { out += ENT[s.slice(i, semi + 1)]; i = semi; continue; }

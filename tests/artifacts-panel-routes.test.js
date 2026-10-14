@@ -593,3 +593,12 @@ test("D28: the threads route resolves a document block anchor server-side — ma
   assert.deepEqual(await anchorOf(await post({ kind: "block", id: "b1", quote: "Second block" })), { kind: "text", quote: "Second block", prefix: "", suffix: "" });
   assert.equal((await post({ kind: "block", id: "b77" })).status, 400, "an unknown block with no quote is refused");
 });
+
+test("D28 (review low): a block anchor resolves against the REQUESTED version's map, not the current one", async () => {
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Two versions", type: "document", source: { markdown: "Version one words." }, actor: { kind: "session" } }, { markdownBlocks });
+  await store.addVersion(s.db, s.blobs, { artifactId: doc.id, source: { markdown: "Completely different now." }, actor: { kind: "session" } }, { markdownBlocks });
+  const r = await req("POST", `/api/artifacts/${doc.id}/threads`, { body: { versionN: 1, anchor: { kind: "block", id: "b1", quote: "one words" }, text: "c" } });
+  assert.equal(r.status, 201);
+  const a = JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [r.body.threadId] })).rows[0].anchor_json);
+  assert.deepEqual(a, { kind: "block", id: "b1", text: "Version one words.", quote: "one words" });
+});
