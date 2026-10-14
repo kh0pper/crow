@@ -216,12 +216,16 @@ async function tab() {
   const ws = new WebSocket(t.webSocketDebuggerUrl);
   await new Promise((r, j) => { ws.once("open", r); ws.once("error", j); });
   let id = 0;
-  const send = (method, params = {}) => new Promise((resolveP, reject) => {
+  const send = (method, params = {}, sessionId = undefined) => new Promise((resolveP, reject) => {
     const mine = ++id;
     const on = (raw) => { const m = JSON.parse(raw); if (m.id !== mine) return; ws.off("message", on); m.error ? reject(new Error(JSON.stringify(m.error))) : resolveP(m.result || {}); };
     ws.on("message", on);
-    ws.send(JSON.stringify({ id: mine, method, params }));
+    ws.send(JSON.stringify(sessionId ? { id: mine, method, params, sessionId } : { id: mine, method, params }));
   });
+  // Cross-site artifact frames are out-of-process: tests reach into them
+  // through auto-attached CDP sessions (flatten mode).
+  const attached = [];
+  ws.on("message", (raw) => { const m = JSON.parse(raw); if (m.method === "Target.attachedToTarget") attached.push(m.params); });
   const evalIn = async (expr) => {
     const out = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
     if (out.exceptionDetails) return { threw: out.exceptionDetails.exception?.className || out.exceptionDetails.text };
@@ -235,7 +239,7 @@ async function tab() {
     if (m.method === "Runtime.exceptionThrown") errors.push(JSON.stringify(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text || "").slice(0, 300));
     if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error") errors.push("console: " + JSON.stringify(m.params.args.map((a) => a.value ?? a.description)).slice(0, 300));
   });
-  return { send, evalIn, errors, nav: (url) => send("Page.navigate", { url }), close: async () => { ws.close(); await fetch(chrome.cdp + "/json/close/" + t.id).catch(() => {}); } };
+  return { send, evalIn, errors, attached, nav: (url) => send("Page.navigate", { url }), close: async () => { ws.close(); await fetch(chrome.cdp + "/json/close/" + t.id).catch(() => {}); } };
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, ms = 15000) {
@@ -291,8 +295,8 @@ test("live @412x730: no horizontal page scroll, the threads sheet docks at the b
     assert.ok(g.scrollWidth <= g.innerWidth && g.bodyScrollWidth <= g.innerWidth, `no horizontal page scroll: ${m}`);
     assert.ok(Math.abs(g.sideBottom - g.innerHeight) <= 2 && g.sideH <= 80, `collapsed sheet docked at the bottom: ${m}`);
     assert.ok(g.commentH >= 44 && g.commentW >= 44, `the Comment toggle is tappable: ${m}`);
-    // Comment on a document opens the sections list in the sheet.
-    await t.evalIn(`document.querySelector('.cv-comment').click()`);
+    // D28: the section list opens on demand from the menu (never auto-opened by Comment).
+    await t.evalIn(`(() => { document.querySelector('.cv-more').setAttribute('open', ''); document.querySelector('.cv-pick-section').click(); })()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open') && !document.querySelector('.cv-sections').hidden`)) === true), "the sheet opened on the sections");
     const btnH = await t.evalIn(`document.querySelector('.cv-sections button').getBoundingClientRect().height`);
     assert.ok(btnH >= 44, `section buttons are tappable (${btnH}px)`);
@@ -452,5 +456,50 @@ test("live, review M2: opened from a chat that can no longer take it, the sheet 
     await sleep(400);
     assert.equal(s.engine.sent.length, sentBefore, "Send with no choice sends nothing");
     assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_rounds WHERE artifact_id=?", args: [doc.id] })).rows[0].n, 0);
+  } finally { await t.close(); }
+});
+
+test("live D28: on a document, Comment opens no sheet and no list; selecting words proposes, the trusted button composes, and the comment anchors to that block + quote", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Highlight doc", type: "document", source: { markdown: "# Heading\n\nThe quick **brown** fox jumps.\n\nA second paragraph here." }, actor: OWNER }, { markdownBlocks });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  try {
+    await t.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000), `frame (errors ${JSON.stringify(t.errors)})`);
+    assert.equal(await t.evalIn(`document.querySelector('iframe.crow-artifact-frame').getAttribute('sandbox')`), "allow-scripts", "a document frame speaks (helper-only)");
+    await t.evalIn(`document.querySelector('.cv-comment').click()`);
+    await sleep(300);
+    assert.equal(await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open')`), false, "no sheet over the document");
+    assert.equal(await t.evalIn(`document.querySelector('.cv-sections').hidden`), true, "no section list");
+    assert.match(await t.evalIn(`document.querySelector('.cv-status').textContent`), /Select the words/);
+    // Select words INSIDE the cross-site frame, as a user would.
+    // Out-of-process frame → its auto-attached session; in-process → an
+    // isolated world in that frame (same DOM, so the helper sees the selection).
+    const oop = await waitFor(() => t.attached.find((a) => a.targetInfo.type === "iframe"), 2000);
+    let evalFrame;
+    if (oop) {
+      await t.send("Runtime.enable", {}, oop.sessionId);
+      evalFrame = (expression) => t.send("Runtime.evaluate", { expression, returnByValue: true }, oop.sessionId);
+    } else {
+      const tree = await t.send("Page.getFrameTree");
+      const child = (tree.frameTree.childFrames || []).find((c) => /\/v\//.test(c.frame.url));
+      assert.ok(child, "found the artifact frame");
+      const { executionContextId } = await t.send("Page.createIsolatedWorld", { frameId: child.frame.id, worldName: "test-select" });
+      evalFrame = (expression) => t.send("Runtime.evaluate", { expression, returnByValue: true, contextId: executionContextId });
+    }
+    const sel = await evalFrame(`(() => { const p = document.querySelector('#b2'); const w = document.createTreeWalker(p, NodeFilter.SHOW_TEXT); let n; const nodes = []; while ((n = w.nextNode())) nodes.push(n); const a = nodes.find((x) => x.data.includes("quick")), b = nodes.find((x) => x.data.includes("jumps")); const r = document.createRange(); r.setStart(a, a.data.indexOf("quick")); r.setEnd(b, b.data.indexOf("jumps") + 5); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return s.toString(); })()`);
+    assert.equal(sel.result && sel.result.value, "quick brown fox jumps", JSON.stringify(sel).slice(0, 400));
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-selbar:not([hidden]) button')`)) === true, 5000), "the trusted 'Comment on …' button appeared");
+    assert.match(await t.evalIn(`document.querySelector('.cv-selbar button').textContent`), /quick brown fox jumps/);
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-compose')`), false, "nothing composes until the owner taps");
+    await t.evalIn(`document.querySelector('.cv-selbar button').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-compose textarea')`)) === true), "compose opened on the tap");
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-compose .cv-quote')`), false, "no redundant 'exact words' box when the quote came from the selection");
+    await t.evalIn(`(() => { document.querySelector('.cv-compose textarea').value = 'make it slower'; document.querySelector('.cv-compose .cv-primary').click(); })()`);
+    const row = await waitFor(async () => (await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE artifact_id=?", args: [doc.id] })).rows[0], 5000);
+    assert.deepEqual(JSON.parse(row.anchor_json), { kind: "block", id: "b2", text: "The quick **brown** fox jumps.", quote: "quick brown fox jumps" });
+    assert.equal((await s.db.execute({ sql: "SELECT flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].flagged_reason, null, "the speaking document frame never tripped");
   } finally { await t.close(); }
 });

@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import { createArtifactOriginHandler } from "../servers/gateway/artifact-origin/server.js";
 import { createViewTokenStore, loadDecision } from "../servers/gateway/artifact-origin/view-tokens.js";
-import { iframeSandboxFor, isScriptedType, effectiveType, viewerCsp } from "../servers/gateway/artifact-origin/policy.js";
+import { iframeSandboxFor, isScriptedType, effectiveType, frameGrantFor, viewerCsp } from "../servers/gateway/artifact-origin/policy.js";
 import net from "node:net";
 
 const VIEWER_JS = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
@@ -222,8 +222,9 @@ function grantFor(type, files, { originBase = `http://art.test:${P}`, dashboardO
   const artifactId = "art-" + (++seq);
   CONTENT.set(artifactId, files);
   const { token, tokenId, nonce } = tokens.mint({ artifactId, versionN: 1, type, dashboardOrigin, scriptsOff });
-  const eff = effectiveType(type, scriptsOff);
-  return { url: `${originBase}/v/${token}/`, token, tokenId, nonce, sandbox: iframeSandboxFor(eff), scripted: isScriptedType(eff), type };
+  // D28/review H2: the same one decision the view-mint route uses.
+  const fg = frameGrantFor(type, scriptsOff);
+  return { url: `${originBase}/v/${token}/`, token, tokenId, nonce, sandbox: fg.sandbox, scripted: fg.speaks, type };
 }
 
 async function harness(t, g, { mode = "narrow", mount = null, before = "" } = {}) {
@@ -306,15 +307,15 @@ test("fallback layout (second port, same host): cookies arrive at the socket —
   } finally { await t.close(); }
 });
 
-test("script-free document: no script runs, meta refresh and every subresource to another origin are refused (E16)", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+test("sealed (a scripts-off page, D20/D28): no script runs, meta refresh and every subresource to another origin are refused (E16)", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
   const t = await tab();
   try {
     const E = `http://evil.test:${P}`;
     const before = evil.length;
-    const g = grantFor("document", { "index.html": html(`<!doctype html><html><head><meta http-equiv="refresh" content="0;url=${E}/meta"><link rel=stylesheet href="${E}/css"><link rel=prefetch href="${E}/prefetch"></head><body>
+    const g = grantFor("page", { "index.html": html(`<!doctype html><html><head><meta http-equiv="refresh" content="0;url=${E}/meta"><link rel=stylesheet href="${E}/css"><link rel=prefetch href="${E}/prefetch"></head><body>
 <script>parent.postMessage({t:"probe-result",r:{ran:true}},"*"); new Image().src="${E}/scriptimg";</script>
 <img src="${E}/img"><iframe src="${E}/subframe"></iframe><object data="${E}/object"></object><p style="background:url(${E}/bg)">x</p>
-<form action="${E}/form" method=post><button id=b>go</button></form></body></html>`) });
+<form action="${E}/form" method=post><button id=b>go</button></form></body></html>`) }, { scriptsOff: true });
     await harness(t, g);
     await waitFor(() => t.evalIn("__r.ready"));
     await sleep(1500);
@@ -378,9 +379,10 @@ test("the viewer refuses grants that would weaken the frame (bad sandbox, bad UR
       { ...good, nonce: "" },
     ];
     for (const b of bads) {
-      const out = await t.evalIn(`(() => { const r = { trips: [] }; const v = CrowArtifactViewer.mount({ container: c, mint: () => (${JSON.stringify(b)}), onTrip: (x) => r.trips.push(x) });
-        return v.load().then(() => "mounted", (e) => e.message + "|" + r.trips.join(",") + "|" + v.state().framed); })()`);
-      assert.equal(out, "bad-grant|bad-grant|false", JSON.stringify(b).slice(0, 120));
+      // D28/review H2: refused LOCALLY (onRefuse) — never framed, never a trip/flag.
+      const out = await t.evalIn(`(() => { const r = { trips: [], refused: [] }; const v = CrowArtifactViewer.mount({ container: c, mint: () => (${JSON.stringify(b)}), onTrip: (x) => r.trips.push(x), onRefuse: (x) => r.refused.push(x) });
+        return v.load().then(() => "mounted", (e) => e.message + "|" + r.trips.join(",") + "|" + r.refused.join(",") + "|" + v.state().framed); })()`);
+      assert.equal(out, "bad-grant||bad-grant|false", JSON.stringify(b).slice(0, 120));
     }
     assert.equal(await t.evalIn("window.__pwned"), undefined);
   } finally { await t.close(); }
@@ -798,8 +800,9 @@ test("pins: only owner element/text anchor fields go in; rects come back validat
     assert.deepEqual(JSON.parse(out), [
       { i: 1, anchor: { kind: "element", selector: "#a" } },
       { i: 2, anchor: { kind: "text", quote: "far away", prefix: "p", suffix: "s" } },
-      null, null, null, null,
-    ], "element text, block quotes, regions and bad numbers never cross");
+      { i: 3, anchor: { kind: "block", id: "b1" } },
+      null, null, null,
+    ], "element text, block quotes (D28: a block crosses as its id only), regions and bad numbers never cross");
     // validRects: clamped to the frame box, off-screen dropped, junk refused.
     const vr = await t.evalIn(`JSON.stringify([
       CrowArtifactViewer.validRects([{ i: 1, x: -5, y: 10, w: 20, h: 900 }, { i: 2, x: 900, y: 10, w: 5, h: 5 }], 800, 600),
@@ -822,5 +825,40 @@ test("pins: only owner element/text anchor fields go in; rects come back validat
     await sleep(1500);
     assert.deepEqual(await t.evalIn("__r.trips"), [], "no flood trip");
     assert.ok((await t.evalIn("__r.rects.length")) >= 2, "rects followed the scroll");
+  } finally { await t.close(); }
+});
+
+test("D28: a document is HELPER-ONLY — its own inline script, handlers, javascript: URLs, other script files and SVG scripts never run; the helper says hello", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const E = `http://evil.test:${P}`;
+    const before = evil.length;
+    // Hand-crafted, UNSANITIZED markup (the renderer would strip all of it):
+    // the CSP alone must hold.
+    const probe = (k) => `parent.postMessage({t:"probe-result",r:{ran:"${k}"}},"*");new Image().src="${E}/${k}"`;
+    const g = grantFor("document", {
+      "index.html": html(`<!doctype html><html><head></head><body><div class="blk" id="b1"><p>hello words</p></div>
+<script>${probe("inline")}</script>
+<img src="nope.png" onerror='${probe("onerror")}'>
+<a id=js href='javascript:${probe("jsurl")}'>x</a>
+<script src="other.js"></script>
+<script src="__crow/Anchor-Helper.js"></script>
+<svg><script>${probe("svg")}</script></svg>
+<iframe srcdoc="<script>${probe("srcdoc")}</script>"></iframe>
+<script type=module>${probe("module")}</script>
+</body></html>`),
+      "other.js": { body: probe("otherjs"), contentType: "text/javascript" },
+    });
+    await harness(t, g);
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.ready")) === 1), "the helper said hello");
+    await t.evalIn(`(() => { try { document.querySelector('iframe.crow-artifact-frame').contentWindow.postMessage({}, "*"); } catch (e) {} })()`);
+    await sleep(1500);
+    assert.equal(await t.evalIn(`JSON.stringify(__r.raw.filter(m => m && m.t === "probe-result"))`), "[]", "no content script ran");
+    assert.deepEqual(evil.slice(before).map((e) => e.path), [], "nothing reached evil.test");
+    const attrs = await t.evalIn(`document.querySelector('iframe.crow-artifact-frame').getAttribute('sandbox')`);
+    assert.equal(attrs, "allow-scripts");
+    const st = await t.evalIn("__v.state()");
+    assert.equal(st.tripped, false);
+    assert.equal(st.loads, 1);
   } finally { await t.close(); }
 });

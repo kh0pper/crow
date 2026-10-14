@@ -63,7 +63,12 @@
     if (s.length > MAX_ANCHOR) return null;
     var str = function (v, n) { return typeof v === "string" && v.length <= n; };
     if (a.kind === "element" && str(a.selector, 1024) && str(a.text, 400)) return { kind: "element", selector: a.selector, text: a.text };
-    if (a.kind === "text" && str(a.quote, 1000) && a.quote.trim() && str(a.prefix || "", 200) && str(a.suffix || "", 200)) return { kind: "text", quote: a.quote, prefix: a.prefix || "", suffix: a.suffix || "" };
+    if (a.kind === "text" && str(a.quote, 1000) && a.quote.trim() && str(a.prefix || "", 200) && str(a.suffix || "", 200)) {
+      var t = { kind: "text", quote: a.quote, prefix: a.prefix || "", suffix: a.suffix || "" };
+      // D28: the enclosing renderer block, if the frame named a well-formed one.
+      if (typeof a.block === "string" && /^b\d{1,6}$/.test(a.block)) t.block = a.block;
+      return t;
+    }
     if (a.kind === "region" && typeof a.x === "number" && typeof a.y === "number" && a.x >= 0 && a.x <= 1 && a.y >= 0 && a.y <= 1) return { kind: "region", x: a.x, y: a.y };
     if (a.kind === "block" && str(a.id, 64) && /^b\d{1,6}$/.test(a.id) && str(a.text || "", 400)) return { kind: "block", id: a.id, text: a.text || "", quote: str(a.quote || "", 1000) ? (a.quote || "") : "" };
     return null;
@@ -76,6 +81,10 @@
     if (!a) return null;
     if (a.kind === "element") return { i: p.i, anchor: { kind: "element", selector: a.selector } };
     if (a.kind === "text") return { i: p.i, anchor: { kind: "text", quote: a.quote, prefix: a.prefix, suffix: a.suffix } };
+    // D28: document block anchors get pins — the block ID only. A block
+    // anchor's quote may be text the owner TYPED (the section list's "exact
+    // words"), and owner-typed text never crosses into the frame.
+    if (a.kind === "block") return { i: p.i, anchor: { kind: "block", id: a.id } };
     return null;
   }
 
@@ -206,7 +215,7 @@
 
     function postMode() {
       if (state.iframe && state.grant && state.grant.scripted && state.hello && !state.tripped) {
-        state.iframe.contentWindow.postMessage({ t: "crow-viewer", kind: "comment-mode", on: state.commentMode }, "*");
+        state.iframe.contentWindow.postMessage({ t: "crow-viewer", kind: "comment-mode", on: state.commentMode, selectOnly: !!state.selectOnly }, "*");
       }
     }
 
@@ -220,7 +229,9 @@
         return opts.mint(fragment || null, { replaces: replaces });
       }).then(function (g) {
         if (state.tripped || gen !== state.gen) throw new Error("stale");
-        if (!validGrant(g)) { trip("bad-grant"); throw new Error("bad-grant"); }
+        // D28/review H2: a malformed grant is OUR bug (route/policy skew), not
+        // an escape attempt — refuse locally, never flag the version.
+        if (!validGrant(g)) { try { opts.onRefuse && opts.onRefuse("bad-grant"); } catch (x) {} throw new Error("bad-grant"); }
         if (state.iframe) { state.iframe.remove(); state.iframe = null; }
         clearTimeout(state.helloTimer);
         state.grant = g; state.loads = 0; state.hello = false; state.stamps = [];
@@ -255,13 +266,14 @@
     return {
       load: function () { return load(null); },
       reload: function () { return load(null); },          // a refresh is a new token + a new frame load
-      setCommentMode: function (on) { state.commentMode = !!on; postMode(); },
+      setCommentMode: function (on, o) { state.commentMode = !!on; state.selectOnly = !!(o && o.selectOnly); postMode(); },
       /** Numbered owner anchors for the cosmetic pins (scripted types). */
       setPins: function (list) { state.pins = (Array.isArray(list) ? list : []).slice(0, 100).map(pinOut).filter(Boolean); postPins(); },
       /** Script-free types: show a block by mounting a fresh frame at its fragment. */
       showBlock: function (id) {
         if (state.pending) return Promise.reject(new Error("pending"));
-        if (!state.grant || state.grant.scripted || !/^b\d{1,6}$/.test(id)) return Promise.resolve(null);
+        // D28: documents speak now; a block jump is still a fresh document load.
+        if (!state.grant || state.grant.type !== "document" || !/^b\d{1,6}$/.test(id)) return Promise.resolve(null);
         return load(id);
       },
       state: function () { return { loads: state.loads, hello: state.hello, tripped: state.tripped, pending: state.pending, framed: !!state.iframe }; },

@@ -34,3 +34,24 @@ test("resolveBlockAnchor: map text + a quote found in rendered text → block an
   assert.deepEqual(resolveBlockAnchor(map, { kind: "region", x: 0.5, y: 0.5 }), { kind: "region", x: 0.5, y: 0.5 });
   assert.equal(resolveBlockAnchor(null, { kind: "block", id: "b1", quote: "q" }).kind, "text", "no map → text anchor");
 });
+
+test("review M1: the renderer is the meta-refresh control for helper-only documents — hostile markdown never yields meta, base, script, iframe, object, form or event handlers", async () => {
+  const md = [
+    '<meta http-equiv="refresh" content="0;url=https://evil.example/">',
+    '<base href="https://evil.example/">',
+    '<script>alert(1)</script>',
+    '<iframe srcdoc="<script>x</script>"></iframe>',
+    '<object data="https://evil.example/o"></object>',
+    '<form action="https://evil.example/f"><button>go</button></form>',
+    '<img src="x" onerror="alert(1)">',
+    '<a href="javascript:alert(1)">j</a>',
+    '<svg><script>alert(1)</script></svg>',
+    '<style>@import url(https://evil.example/c.css)</style>',
+  ].join("\n\n");
+  const r = await renderVersion("document", { markdown: md }, { markdownBlocks });
+  const html = r.files.find((f) => f.path === "index.html").body.toString("utf8");
+  const body = html.slice(html.indexOf("<body>"));
+  for (const bad of [/<meta/i, /<base/i, /<script/i, /<iframe/i, /<object/i, /<form/i, /\son\w+\s*=/i, /javascript:/i, /@import/i]) {
+    assert.doesNotMatch(body, bad, String(bad));
+  }
+});
