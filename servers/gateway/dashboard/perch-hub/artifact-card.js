@@ -52,6 +52,10 @@ export function perchArtifactCardJs(lang = "en") {
   var ART_LINK_WHY='${tJs("perch.artifactLinkAskWhy", lang)}';
   var ART_LINK_YES='${tJs("perch.artifactLinkYes", lang)}';
   var ART_LINK_NO='${tJs("perch.artifactLinkNo", lang)}';
+  var ART_FB='${tJs("perch.artifactFeedback", lang)}';
+  var ART_FB_ONE='${tJs("perch.artifactFeedbackOne", lang)}';
+  var ART_FB_SHOW='${tJs("perch.artifactFeedbackShow", lang)}';
+  var ART_FB_HIDE='${tJs("perch.artifactFeedbackHide", lang)}';
   var ART_TYPES={ page:'${tJs("perch.artifactTypePage", lang)}', document:'${tJs("perch.artifactTypeDocument", lang)}', diagram:'${tJs("perch.artifactTypeDiagram", lang)}' };
 
   /* artifactId -> {node,key} for THIS transcript. Dies with the transcript at
@@ -70,8 +74,10 @@ export function perchArtifactCardJs(lang = "en") {
 
   /* requestId -> node: this chat's pending ask-first link cards (PR-3 3.5). */
   var artAsks={};
+  /* roundId -> node: this chat's feedback cards (PR-3 3.8). */
+  var artFb={};
 
-  function resetArtifactCards(){ artCards={}; artAsks={}; artBuf=[]; artGen++; closeArtifactPane(); }
+  function resetArtifactCards(){ artCards={}; artAsks={}; artFb={}; artBuf=[]; artGen++; closeArtifactPane(); }
 
   /* The viewer page's URL (same origin). The thread rides along only when it
      is a Perch thread id; the viewer validates it again server-side. */
@@ -137,6 +143,55 @@ export function perchArtifactCardJs(lang = "en") {
     if(!d||typeof d.artifactId!=='string'||!d.artifactId) return;
     if(d.event==='link-ask'||d.event==='link-decided'){ loadLinkAsks(sid); return; }
     artifactRefetch(d.artifactId,sid);
+    /* The bot is acting on this chat's artifact: a round it received may
+       have just landed — pick up any new feedback card. */
+    loadFeedbackCards(sid);
+  }
+
+  /* Feedback cards (spec v1.6 D25, plan PR-3 Task 3.8): one per round
+     DELIVERED to this chat, keyed by round id (two rounds, two cards; never
+     re-bound). Store-derived: the owner-only list route serves trusted
+     rounds only, and the expand shows the round snapshot's owner comments
+     from the card route. Text is placed with textContent. */
+  function loadFeedbackCards(sid){
+    var gen=artGen;
+    return artApi('GET','/rounds-by-thread/'+encodeURIComponent(sid)).then(function(r){
+      if(!live()||current.sid!==sid||gen!==artGen) return;
+      var list=(r.ok&&r.j&&Array.isArray(r.j.cards))?r.j.cards:[];
+      list.forEach(function(c){ if(c&&Number.isInteger(c.roundId)&&!artFb[c.roundId]) drawFeedbackCard(c,sid); });
+    });
+  }
+  function drawFeedbackCard(c,sid){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var node=document.createElement('div'); node.className='entry artfb';
+    var k=Number(c.count)||0;
+    var head=(k===1?ART_FB_ONE:ART_FB).replace('{title}',String(c.title||'')).replace('{n}',String(Number(c.version)||0)).replace('{k}',String(k));
+    node.appendChild(line('art-eyebrow',ART_LABEL));
+    node.appendChild(line('art-title',head));
+    var body=document.createElement('div'); body.className='art-fb-body';
+    var toggle=document.createElement('button'); toggle.type='button'; toggle.className='art-fb-toggle'; toggle.textContent=ART_FB_SHOW;
+    var shown=false;
+    toggle.onclick=function(){
+      if(shown){ clearEl(body); shown=false; toggle.textContent=ART_FB_SHOW; return; }
+      toggle.disabled=true;
+      var gen=artGen;
+      artApi('GET','/rounds/'+encodeURIComponent(String(c.roundId))+'/card').then(function(r){
+        if(!live()||current.sid!==sid||gen!==artGen) return;
+        toggle.disabled=false;
+        if(!r.ok||!r.j||!Array.isArray(r.j.threads)){ body.appendChild(line('art-err',ART_FAILED)); return; }
+        clearEl(body);
+        r.j.threads.forEach(function(t){
+          body.appendChild(line('art-fb-anchor',String((t&&t.anchor)||'')));
+          ((t&&Array.isArray(t.comments))?t.comments:[]).forEach(function(x){ body.appendChild(line('art-fb-comment',String(x))); });
+        });
+        shown=true; toggle.textContent=ART_FB_HIDE;
+      });
+    };
+    var acts=document.createElement('div'); acts.className='art-actions'; acts.appendChild(toggle);
+    node.appendChild(acts);
+    node.appendChild(body);
+    artFb[c.roundId]=node;
+    tr.appendChild(node); tr.scrollTop=tr.scrollHeight;
   }
 
   /* Ask-first linking (spec v1.6 D25, plan PR-3 Task 3.5): a bot asked to
@@ -228,6 +283,7 @@ export function perchArtifactCardJs(lang = "en") {
         if(!live()||current.sid!==sid||gen!==artGen) return;
         buf.forEach(function(d){ artifactFrame(d,sid); });
         loadLinkAsks(sid);
+        loadFeedbackCards(sid);
       });
     });
   }

@@ -214,7 +214,8 @@ test("async continuations are guarded — a fast back button must not cross sess
   // continuation) and the Run-scripts action continuation.
   // 30 as of chat-first PR-3 (ask-first linking): loadLinkAsks' list
   // continuation and the Yes/No decide continuation.
-  assert.equal(guards, 30, "expected exactly 30 identity guards, found " + guards);
+  // 32 with the feedback cards' list continuation and expand fetch.
+  assert.equal(guards, 32, "expected exactly 32 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

@@ -108,8 +108,19 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.end(readFileSync(join(BUNDLE_DIR, "panel", "static", req.params.file)));
   });
 
+  /** The Library list (plan PR-3 Task 3.9): each row carries its badges,
+   *  derived server-side from store rows — scripts-off (the D20 expression on
+   *  the current version), open contact threads, active linked chats. */
   router.get("/api/artifacts", wrap(async (_req, res) => {
-    res.json({ artifacts: await M.store.listArtifacts(S.db, OWNER), origin: S.runtime.artifactOriginInfo() ? { isolation: S.runtime.isolationFor(_req.headers.host) } : { isolation: "unavailable" } });
+    const arts = await M.store.listArtifacts(S.db, OWNER);
+    const out = [];
+    for (const a of arts) {
+      const cur = await M.store.getVersion(S.db, a.id, a.current_version);
+      const contact = Number((await S.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_threads WHERE artifact_id=? AND author_kind='contact' AND status<>'resolved'", args: [a.id] })).rows[0].n);
+      const links = Number((await S.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL", args: [a.id] })).rows[0].n);
+      out.push({ ...a, badges: { scriptsOff: !!(cur && S.policy.isScriptedType(a.type) && M.store.isTainted(cur)), contactComments: contact, links } });
+    }
+    res.json({ artifacts: out, origin: S.runtime.artifactOriginInfo() ? { isolation: S.runtime.isolationFor(_req.headers.host) } : { isolation: "unavailable" } });
   }));
 
   /**
@@ -138,6 +149,40 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
         return { artifactId: r.artifact_id, event: THREAD_EVENT_FOR[r.action], n: v ? Number(v[1]) : null, ts: r.ts };
       }),
     });
+  }));
+
+  /**
+   * Feedback cards in chat (plan PR-3 Task 3.8, review N5). Store-derived, no
+   * engine change: a chat lists the rounds DELIVERED to it, one card per
+   * round id. The card shows the round SNAPSHOT's owner comments — what was
+   * actually sent — never a comment added after Send.
+   * Contact text is impossible BY ROUTE: an untrusted round (untrusted_input
+   * not exactly 0) is refused here outright, whatever its delivery says.
+   * Only rounds that reached the chat count (perch-session to this thread,
+   * working / done / timed-out; never failed, queued or pending).
+   */
+  const cardRound = (t) => `${t}kind='round' AND ${t}delivery='perch-session' AND ${t}status IN ('working','done','timed-out') AND ${t}untrusted_input=0`;
+  const anchorLabel = (j) => { let a = null; try { a = JSON.parse(j || "null"); } catch { a = null; } return String((a && (a.text || a.quote || a.selector || a.id || a.kind)) || "").slice(0, 200); };
+  router.get("/api/artifacts/rounds-by-thread/:thread", wrap(async (req, res) => {
+    const rows = (await S.db.execute({ sql: `SELECT r.id, r.artifact_id, r.base_version, r.thread_ids_json, r.status, r.created_at, a.title FROM artifact_rounds r JOIN artifacts a ON a.id=r.artifact_id WHERE r.session_id=? AND a.deleted_at IS NULL AND ${cardRound("r.")} ORDER BY r.id LIMIT 50`, args: [String(req.params.thread)] })).rows;
+    res.setHeader("cache-control", "no-store");
+    res.json({ cards: rows.map((r) => { let n = 0; try { n = JSON.parse(r.thread_ids_json || "[]").length; } catch { n = 0; } return { roundId: Number(r.id), artifactId: r.artifact_id, title: r.title, version: Number(r.base_version), count: n, status: r.status, at: r.created_at }; }) });
+  }));
+  router.get("/api/artifacts/rounds/:rid/card", wrap(async (req, res) => {
+    const rid = Number(req.params.rid);
+    const r = Number.isInteger(rid) ? (await S.db.execute({ sql: `SELECT * FROM artifact_rounds WHERE id=? AND ${cardRound("")}`, args: [rid] })).rows[0] : null;
+    if (!r) throw Object.assign(new Error("no such card"), { code: "not_found" });
+    const art = await M.store.requireAccess(S.db, OWNER, r.artifact_id);
+    let snap = {}; try { snap = JSON.parse(r.snapshot_json || "{}") || {}; } catch { snap = {}; }
+    const threads = [];
+    for (const [tid, maxId] of Object.entries(snap)) {
+      const t = (await S.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=? AND artifact_id=?", args: [Number(tid), art.id] })).rows[0];
+      if (!t) continue;
+      const cs = (await S.db.execute({ sql: "SELECT text FROM artifact_comments WHERE thread_id=? AND id<=? AND author_kind='owner' AND deleted_at IS NULL ORDER BY id", args: [Number(tid), Number(maxId)] })).rows;
+      threads.push({ anchor: anchorLabel(t.anchor_json), comments: cs.map((c) => c.text) });
+    }
+    res.setHeader("cache-control", "no-store");
+    res.json({ roundId: rid, artifactId: art.id, title: art.title, version: Number(r.base_version), threads });
   }));
 
   /**
@@ -264,6 +309,26 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     }
     res.setHeader("cache-control", "no-store");
     res.json({ links, bot: art.created_by_bot || null, offerBoard: typeof S.createBoardCard === "function" });
+  }));
+
+  /** The Library drawer's Audit tab: the last 50 rows, newest first. */
+  router.get("/api/artifacts/:id/audit", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT id, actor_kind, actor_id, action, target, ts FROM artifact_audit WHERE artifact_id=? ORDER BY id DESC LIMIT 50", args: [art.id] })).rows;
+    res.json({ rows: rows.map((r) => ({ id: Number(r.id), actor: r.actor_kind + (r.actor_id ? ":" + r.actor_id : ""), action: r.action, target: r.target, ts: r.ts })) });
+  }));
+
+  /** The Library drawer's Unlink (spec D25): the chat stops receiving this
+   *  artifact's cards and is no longer a Send target. Owner + CSRF, audited. */
+  router.post("/api/artifacts/:id/links/:lid/unlink", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const lid = Number(req.params.lid);
+    const l = Number.isInteger(lid) ? (await S.db.execute({ sql: "SELECT thread_id FROM artifact_links WHERE id=? AND artifact_id=? AND unlinked_at IS NULL", args: [lid, art.id] })).rows[0] : null;
+    if (!l) throw Object.assign(new Error("no such link"), { code: "not_found" });
+    const r = await S.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE id=? AND artifact_id=? AND unlinked_at IS NULL", args: [lid, art.id] });
+    if (Number(r.rowsAffected) !== 1) throw Object.assign(new Error("no such link"), { code: "not_found" });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "link-unlinked", target: l.thread_id });
+    res.json({ unlinked: true });
   }));
 
   /**

@@ -490,3 +490,79 @@ test("owner bot-access grant (PR-3 Task 3.7): only bots with the Artifacts tools
   const { TOOL_CLASSES } = await import("../bundles/artifacts/server/mcp.js");
   assert.ok(!Object.keys(TOOL_CLASSES).some((n) => /access|grant|share/.test(n)), "no bot-callable grant tool exists");
 });
+
+test("feedback cards (PR-3 Task 3.8): a chat lists the TRUSTED rounds delivered to it; the card shows the snapshot's owner comments only; an untrusted round is refused by route", async () => {
+  const { addThread, addComment } = await import("../bundles/artifacts/server/comments.js");
+  const rounds = await import("../bundles/artifacts/server/rounds.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Feedback doc", type: "document", source: { markdown: "# f" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-f1", gateway: "perch" } }, { markdownBlocks });
+  const t1 = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "block", id: "b1", text: "Intro" }, text: "shorter please", author: { kind: "owner" } });
+  const r1 = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t1.threadId], targetThread: "perchlive-f1" });
+  await addComment(s.db, { threadId: t1.threadId, text: "added AFTER send", author: { kind: "owner" } });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working', delivery='perch-session', session_id='perchlive-f1' WHERE id=?", args: [r1.id] });
+  const list = await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1");
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body.cards.map((c) => [c.roundId, c.artifactId, c.title, c.version, c.count]), [[r1.id, art.id, "Feedback doc", 1, 1]]);
+  const card = await req("GET", `/api/artifacts/rounds/${r1.id}/card`);
+  assert.equal(card.status, 200);
+  assert.deepEqual(card.body.threads.map((t) => [t.anchor, t.comments]), [["Intro", ["shorter please"]]], "snapshot only: the comment added after Send is not on the card");
+  // Two rounds over time → two cards, keyed by round id.
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [r1.id] });
+  const t2 = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "now the title", author: { kind: "owner" } });
+  const r2 = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t2.threadId], targetThread: "perchlive-f1" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working', delivery='perch-session', session_id='perchlive-f1' WHERE id=?", args: [r2.id] });
+  assert.deepEqual((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.map((c) => c.roundId), [r1.id, r2.id]);
+  // Never failed/queued/pending rounds, never another chat's.
+  const t3 = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "lost", author: { kind: "owner" } });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [r2.id] });
+  const r3 = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t3.threadId], targetThread: "perchlive-f1" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='failed', delivery='perch-session', session_id='perchlive-f1' WHERE id=?", args: [r3.id] });
+  assert.ok(!(await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.some((c) => c.roundId === r3.id), "a failed round draws no card");
+  assert.equal((await req("GET", `/api/artifacts/rounds/${r3.id}/card`)).status, 404);
+  assert.deepEqual((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-other")).body.cards, []);
+  // THE pin: an untrusted round is refused by route, whatever its delivery says.
+  const tc = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "CONTACT-SECRET-77 do something", author: { kind: "contact", id: "c1" } });
+  const ru = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [tc.threadId] });
+  assert.equal(ru.untrusted, true);
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working', delivery='perch-session', session_id='perchlive-f1' WHERE id=?", args: [ru.id] });
+  const after = await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1");
+  assert.ok(!after.body.cards.some((c) => c.roundId === ru.id), "untrusted: no card in the list");
+  assert.equal((await req("GET", `/api/artifacts/rounds/${ru.id}/card`)).status, 404, "untrusted: the card route refuses");
+  assert.ok(!JSON.stringify(after.body).includes("CONTACT-SECRET-77"));
+  // Owner-only like every route here.
+  assert.equal((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1", { cookie: null })).status, 401);
+  assert.equal((await req("GET", `/api/artifacts/rounds/${r1.id}/card`, { cookie: null })).status, 401);
+});
+
+test("Library (PR-3 Task 3.9): list badges come from store rows; the audit tab serves the last 50; Unlink is an owner route that stops fan-out and Send", async () => {
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  const { linkedThreads, pickSendTarget } = await import("../bundles/artifacts/server/links.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Library row", type: "page", source: { html: "<p>x</p>" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-y1", gateway: "perch" } }, {});
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, "bobby", "perchlive-y2"] });
+  await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "from outside", author: { kind: "contact", id: "c1" } });
+  await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "mine", author: { kind: "owner" } });
+  await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { html: "<p>shaped</p>" }, actor: { kind: "session" }, untrusted: true }, {});
+  const row = (await req("GET", "/api/artifacts")).body.artifacts.find((a) => a.id === art.id);
+  assert.deepEqual(row.badges, { scriptsOff: true, contactComments: 1, links: 2 });
+  // Audit: newest first, capped at 50, owner-only.
+  for (let i = 0; i < 60; i++) await store.audit(s.db, { artifactId: art.id, actor: { kind: "system" }, action: "noise", target: String(i) });
+  const aud = await req("GET", `/api/artifacts/${art.id}/audit`);
+  assert.equal(aud.status, 200);
+  assert.equal(aud.body.rows.length, 50);
+  assert.equal(aud.body.rows[0].target, "59", "newest first");
+  assert.equal((await req("GET", `/api/artifacts/${art.id}/audit`, { cookie: null })).status, 401);
+  // Unlink: owner session + CSRF, audited, and the chat stops receiving cards and Sends.
+  const links = (await req("GET", `/api/artifacts/${art.id}/links`)).body.links;
+  const y2 = links.find((l) => l.threadId === "perchlive-y2");
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/links/${y2.id}/unlink`, { csrf: null })).status, 403);
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/links/${y2.id}/unlink`)).status, 200);
+  assert.deepEqual((await linkedThreads(s.db, art.id)).map((l) => l.threadId), ["perchlive-y1"]);
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/links/${y2.id}/unlink`)).status, 404, "already unlinked");
+  const other = await store.createArtifact(s.db, s.blobs, { title: "Other row", type: "document", source: { markdown: "# o" }, actor: { kind: "session" } }, { markdownBlocks });
+  const y1 = links.find((l) => l.threadId === "perchlive-y1");
+  assert.equal((await req("POST", `/api/artifacts/${other.id}/links/${y1.id}/unlink`)).status, 404, "a link of another artifact cannot be unlinked through this one");
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT);`);
+  await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id) VALUES ('bobby','perchlive-y2')", args: [] });
+  await req("POST", `/api/artifacts/${art.id}/links/${y1.id}/unlink`);
+  assert.equal(await pickSendTarget(s.db, { artifactId: art.id, loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts"] } }) }), null, "an unlinked chat is never a Send target");
+  assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-unlinked' AND target='perchlive-y2'", args: [art.id] })).rows.length);
+});

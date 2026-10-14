@@ -60,9 +60,10 @@ test("T1 static pin: every async continuation carries the artGen guard (review M
   const js = perchArtifactCardJs("en");
   // refetch, by-thread list continuation, buffered-frame continuation, and
   // the Run-scripts action (L4). If this count moves, a guard moved with it.
-  // PR-3 adds the link-ask list continuation and the Yes/No decision.
-  assert.equal((js.match(/gen!==artGen/g) || []).length, 6, "six artGen guards");
-  assert.equal((js.match(/gen=artGen/g) || []).length, 5, "captured at call/render time in the five functions that await");
+  // PR-3 adds the link-ask list continuation, the Yes/No decision, and the
+  // feedback cards' list continuation and expand fetch.
+  assert.equal((js.match(/gen!==artGen/g) || []).length, 8, "eight artGen guards");
+  assert.equal((js.match(/gen=artGen/g) || []).length, 7, "captured at call/render time in the seven functions that await");
 });
 
 test("every card string is a translated key with en AND es", async () => {
@@ -162,6 +163,8 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     pushBufForTest: function(d){ artBuf.push(d); },
     loadLinkAsks: loadLinkAsks,
     asks: function(){ return artAsks; },
+    loadFeedbackCards: loadFeedbackCards,
+    feedback: function(){ return artFb; },
   });\n})();`;
   vm.runInContext(src, sandbox);
   return { sandbox, transcript, fetches, hubRoot, bodyClasses };
@@ -299,7 +302,7 @@ test("loadArtifactCards replays the by-thread batch: distinct artifacts, oldest 
   assert.equal(cards.length, 2, "one card per DISTINCT artifact");
   assert.deepEqual(texts(cards[0]).filter((t) => t.startsWith("T-")), ["T-art_a"]);
   assert.deepEqual(texts(cards[1]).filter((t) => t.startsWith("T-")), ["T-art_b"]);
-  const gets = hub.fetches.filter((f) => f.method === "GET" && !f.url.includes("/by-thread/") && !f.url.includes("/link-requests?")).map((f) => f.url);
+  const gets = hub.fetches.filter((f) => f.method === "GET" && !f.url.includes("by-thread/") && !f.url.includes("/link-requests?")).map((f) => f.url);
   assert.deepEqual(gets, ["/api/artifacts/art_a", "/api/artifacts/art_b"],
     "one refetch per distinct artifact, in batch order (the pre-settle buffering arm itself is pinned statically + in the hub harness)");
 });
@@ -542,4 +545,42 @@ test("reload: loadArtifactCards also redraws this chat's pending link asks; a re
   assert.equal(byClass(hub.transcript, "artask").length, 1);
   api.resetArtifactCards();
   assert.deepEqual(Object.keys(api.asks()), [], "the index dies with the transcript");
+});
+
+// ---------------------------------------------------------------------------
+// PR-3 Task 3.8: the feedback card (store-derived, keyed by round id)
+// ---------------------------------------------------------------------------
+
+test("feedback cards: one per delivered round (keyed by round id, never re-bound); expanding fetches the card route; texts land as text", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  let list = [{ roundId: 4, artifactId: "art_fb", title: "Plan", version: 2, count: 1 }];
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/rounds-by-thread/")) return json({ cards: list });
+      if (url === "/api/artifacts/rounds/4/card") return json({ roundId: 4, threads: [{ anchor: "Intro", comments: ["<i>shorter</i> please"] }] });
+      if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [] });
+      return json(row({ id: "art_fb" }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadFeedbackCards(sidX);
+  await tick();
+  assert.ok(hub.fetches.some((f) => f.url === "/api/artifacts/rounds-by-thread/" + sidX));
+  let cards = byClass(hub.transcript, "artfb");
+  assert.equal(cards.length, 1);
+  assert.ok(texts(cards[0]).some((t) => t.includes("Plan") && t.includes("v2")), JSON.stringify(texts(cards[0])));
+  byClass(cards[0], "art-fb-toggle")[0].onclick();
+  await tick();
+  assert.ok(hub.fetches.some((f) => f.url === "/api/artifacts/rounds/4/card"));
+  assert.ok(texts(cards[0]).some((t) => t.includes("<i>shorter</i> please")), "comment text lands as text");
+  // A second round → a second card; the first is never re-bound or redrawn.
+  list = list.concat([{ roundId: 5, artifactId: "art_fb", title: "Plan", version: 3, count: 2 }]);
+  api.artifactFrame({ type: "artifact", artifactId: "art_fb", n: 3, event: "update" }, sidX);
+  await tick();
+  cards = byClass(hub.transcript, "artfb");
+  assert.equal(cards.length, 2);
+  assert.deepEqual(Object.keys(api.feedback()).sort(), ["4", "5"]);
+  api.resetArtifactCards();
+  assert.deepEqual(Object.keys(api.feedback()), [], "the index dies with the transcript");
 });
