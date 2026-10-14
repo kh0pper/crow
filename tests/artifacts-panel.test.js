@@ -392,3 +392,39 @@ test("live: '⋯ → Let a bot work on this' lists only bots with the Artifacts 
     assert.ok(await waitFor(async () => (await grants()).length === 0), "a second tick revokes");
   } finally { await t.close(); }
 });
+
+test("live: the Library — badges from the store, search narrows the list, the drawer has five tabs with honest stubs, and Unlink drops a chat", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const CHAT = "perchlive-5ee0cc01", CHAT2 = "perchlive-5ee0cc02";
+  const lib = await store.createArtifact(s.db, s.blobs, { title: "Zebra library entry", type: "document", source: { markdown: "# z" }, actor: { kind: "bot", id: "bobby", thread: CHAT, gateway: "perch" } }, { markdownBlocks });
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [lib.id, "bobby", CHAT2] });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const item = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Zebra library entry'))`;
+  try {
+    await t.nav(`${base}/dashboard/artifacts`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!(${item})`)) === true, 15000), `the list rendered (page errors: ${JSON.stringify(t.errors)})`);
+    assert.match(await t.evalIn(`(${item}).querySelector('.ca-badges').textContent`), /Document.*v1.*2 linked chats/);
+    // Search narrows.
+    await t.evalIn(`(() => { const q = document.querySelector('#crow-artifacts .ca-search'); q.value = 'zebra'; q.dispatchEvent(new Event('input')); })()`);
+    assert.equal(await t.evalIn(`document.querySelectorAll('#crow-artifacts .ca-item').length`), 1);
+    // The drawer.
+    await t.evalIn(`(${item}).querySelector('.ca-details').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-tab').length`)) === 5), "five tabs");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-tabpanel').textContent.includes('v1')`)) === true), "Versions lists v1");
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=projects]').click()`);
+    assert.equal(await t.evalIn(`(${item}).querySelector('.ca-soon').textContent`), "Adding artifacts to projects is coming soon.");
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=links]').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 2), "two linked chats");
+    assert.equal(await t.evalIn(`(${item}).querySelector('.ca-openchat').getAttribute('href').startsWith('/dashboard/perch#perchlive-')`), true);
+    await t.evalIn(`(${item}).querySelector('.ca-unlink').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 1), "one left after Unlink");
+    assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL", args: [lib.id] })).rows[0].n, 1);
+    await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=audit]').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-audit') && (${item}).querySelector('.ca-audit').textContent.includes('link-unlinked')`)) === true), "the audit tab shows the unlink");
+    // Phone width: no horizontal page scroll with the drawer open.
+    await t.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 800, deviceScaleFactor: 2, mobile: true });
+    await sleep(200);
+    assert.ok(await t.evalIn(`document.documentElement.scrollWidth <= innerWidth`), "no horizontal scroll at 390px");
+  } finally { await t.close(); }
+});
