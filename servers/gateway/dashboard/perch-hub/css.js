@@ -645,6 +645,20 @@ font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;font-variant-n
 #perch-hub-root .artcard [hidden]{display:none}
 #perch-hub-root .artcard a.art-window{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid var(--line);
 border-radius:10px;color:var(--teal);font-size:13.5px;text-decoration:none}
+/* PR-3: the ask-first link card and the feedback card share the artifact
+   card's look (same tokens; text only, buttons 44px). */
+#perch-hub-root .artask,#perch-hub-root .artfb{flex-direction:column;gap:6px;align-self:stretch;width:100%;min-width:0;max-width:100%;
+background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
+#perch-hub-root :is(.artask,.artfb)>*{min-width:0;max-width:100%}
+#perch-hub-root :is(.artask,.artfb) .art-eyebrow{font:11px/1.2 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+#perch-hub-root :is(.artask,.artfb) .art-title{font-weight:600;font-size:15px;color:var(--ink);word-break:break-word}
+#perch-hub-root :is(.artask,.artfb) .art-meta{font-size:13px;color:var(--dim)}
+#perch-hub-root :is(.artask,.artfb) .art-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root :is(.artask,.artfb) button{min-height:44px;padding:10px 14px;font-size:13.5px;border-radius:10px;border:1px solid var(--line);background:none;color:var(--teal)}
+#perch-hub-root .artask button.art-link-yes{background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600}
+#perch-hub-root :is(.artask,.artfb) .art-err{color:var(--err);font-size:13px}
+#perch-hub-root .artfb .art-fb-anchor{font-size:12px;color:var(--dim);margin-top:4px}
+#perch-hub-root .artfb .art-fb-comment{font-size:14px;color:var(--ink);padding-left:10px;border-left:2px solid var(--line)}
 /* Q2: the viewer beside the chat (>=1024px: docked right, the hub narrows
    beside it) or as a full-screen sheet (phone). The pane hosts the SAME-ORIGIN
    viewer page; the hub itself never frames the artifact origin. */

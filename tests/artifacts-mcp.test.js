@@ -513,7 +513,7 @@ test("R2 (review): the sweep timing a round out mid-update wins — no result st
 test("L3 (review): links never fan out for an operator-made artifact, and a deleted artifact drops off the links", async () => {
   const { linkedThreads } = await import("../bundles/artifacts/server/links.js");
   // created_by_bot NULL with an origin_session set (hand-built row; the MCP
-  // rail cannot make one, but PR-3 rewrites this function — pin the arm).
+  // rail cannot make one): no link row exists for it, so no fan-out.
   await s.db.execute({ sql: "INSERT INTO artifacts (id,title,type,owner,created_by_bot,origin_session,received,title_tainted,current_version) VALUES ('art_op1','Op made','document','owner',NULL,'perchlive-op',0,0,1)", args: [] });
   assert.deepEqual(await linkedThreads(s.db, "art_op1"), [], "no bot, no fan-out target (the engine bot-check would refuse anyway — defence in depth)");
   // A soft-deleted artifact's origin chat is not a link either.
@@ -521,9 +521,119 @@ test("L3 (review): links never fan out for an operator-made artifact, and a dele
   const c = await client(s.artToken, bot("bobby", "perchlive-f7"));
   try {
     const id = (await call(c, "artifact_create", { title: "Doomed", type: "document", source: { markdown: "# x" } })).data.id;
-    assert.deepEqual(await linkedThreads(s.db, id), [{ threadId: "perchlive-f7", botId: "bobby" }]);
+    assert.deepEqual((await linkedThreads(s.db, id)).map(({ threadId, botId }) => ({ threadId, botId })), [{ threadId: "perchlive-f7", botId: "bobby" }]);
     await s.db.execute({ sql: "UPDATE artifacts SET deleted_at=datetime('now') WHERE id=?", args: [id] });
     assert.deepEqual(await linkedThreads(s.db, id), [], "a deleted artifact fans out nowhere");
     assert.deepEqual(await linkedThreads(s.db, "art_nope"), [], "an unknown artifact fans out nowhere");
   } finally { await c.close(); }
+});
+
+// ─── PR-3: ask-first linking (Task 3.5) and artifact_find (Task 3.6) ──────
+
+test("artifact_attach: scope-checked first; raises ONE pending request and a link-ask card in the REQUESTING chat only; already linked is a no-op; never writes a link", async () => {
+  await freshSession("bobby", "perchlive-at01");
+  await freshSession("mallory", "perchlive-at02");
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Attach me", type: "document", source: { markdown: "# a" } })).data.id;
+  const links = async () => (await s.db.execute({ sql: "SELECT thread_id FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL ORDER BY id", args: [id] })).rows.map((r) => r.thread_id);
+  // The origin chat is already linked: a no-op success, no request, no card.
+  s.frames.length = 0;
+  assert.deepEqual((await call(maker, "artifact_attach", { artifact_id: id })).data, { linked: true });
+  assert.equal(s.frames.length, 0);
+  // Another bot: the standard scope error, nothing written.
+  const mal = await client(s.artToken, bot("mallory", "perchlive-at02"));
+  assert.match((await call(mal, "artifact_attach", { artifact_id: id })).err, /not_found/);
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=?", args: [id] })).rows[0].n, 0);
+  // A new chat of the same bot asks.
+  const c = await client(s.artToken, bot("bobby", "perchlive-at01"));
+  const r = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(r.err, null, r.err);
+  assert.equal(r.data.requested, true);
+  assert.match(r.data.note, /owner decides/);
+  assert.deepEqual(s.frames.map((f) => [f.tid, f.frame.event, f.frame.artifactId, f.opts.botId]), [["perchlive-at01", "link-ask", id, "bobby"]], "the card goes to the requesting chat only");
+  assert.deepEqual(await links(), ["perchlive-1"], "a bot never links: still only the origin link");
+  // A duplicate while pending: the same request, no second card.
+  s.frames.length = 0;
+  const again = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(again.data.request_id, r.data.request_id);
+  assert.equal(s.frames.length, 0);
+  // L8 cap: pending + declined per (artifact, chat) per day.
+  await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='declined', decided_at=datetime('now') WHERE artifact_id=?", args: [id] });
+  for (let i = 0; i < 3; i++) await s.db.execute({ sql: "INSERT INTO artifact_link_requests (artifact_id,bot_id,thread_id,status,decided_at) VALUES (?,?,?,'declined',datetime('now'))", args: [id, "bobby", "perchlive-at01"] });
+  const fifth = await call(c, "artifact_attach", { artifact_id: id });
+  assert.equal(fifth.err, null, "four used: the fifth still asks");
+  await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='declined' WHERE artifact_id=?", args: [id] });
+  const capped = await call(c, "artifact_attach", { artifact_id: id });
+  assert.match(capped.err, /rate_limited/);
+  assert.ok((await s.db.execute({ sql: "SELECT 1 FROM artifact_audit WHERE artifact_id=? AND action='link-refused'", args: [id] })).rows.length, "the refusal is audited");
+  await c.close(); await mal.close(); await maker.close();
+});
+
+test("artifact_attach: a channel turn (not a Perch chat) cannot ask — there is no card to show it in", async () => {
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Channel", type: "document", source: { markdown: "# c" } })).data.id;
+  const h = { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": "bobby", "X-Crow-Actor-Thread": "gmail-thread-9", "X-Crow-Actor-Gateway": "gmail" };
+  h["X-Crow-Actor-Sig"] = signArtifactsActor({ botId: "bobby", threadId: "gmail-thread-9", gatewayType: "gmail" });
+  const ch = await client(s.artToken, h);
+  assert.match((await call(ch, "artifact_attach", { artifact_id: id })).err, /forbidden/);
+  await ch.close(); await maker.close();
+});
+
+test("artifact_find: id, viewer URL (host ignored, query/fragment ok) and title arms; ambiguity lists candidates; another bot's artifacts are invisible", async () => {
+  const c = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const a = (await call(c, "artifact_create", { title: "Quarterly Garden Plan", type: "document", source: { markdown: "# g" } })).data.id;
+  const b = (await call(c, "artifact_create", { title: "Garden budget", type: "document", source: { markdown: "# b" } })).data.id;
+  const byId = (await call(c, "artifact_find", { ref: a })).data;
+  assert.equal(byId.artifact.id, a);
+  for (const url of [`https://crow.example.ts.net:8444/dashboard/artifacts/view/${a}`, `/dashboard/artifacts/view/${a}?v=1&thread=perchlive-1`, `https://elsewhere.example/dashboard/artifacts/view/${a}#c2`]) {
+    assert.equal((await call(c, "artifact_find", { ref: url })).data.artifact.id, a, url);
+  }
+  assert.equal((await call(c, "artifact_find", { ref: "quarterly garden" })).data.artifact.id, a, "case-insensitive title substring, single match");
+  const amb = (await call(c, "artifact_find", { ref: "garden" })).data;
+  assert.equal(amb.artifact, undefined);
+  assert.deepEqual(amb.candidates.map((x) => x.id).sort(), [a, b].sort());
+  assert.ok(amb.candidates.every((x) => x.title && x.type && x.current_version), "candidate rows carry id, title, type, version");
+  assert.match((await call(c, "artifact_find", { ref: "no such thing here" })).err, /not_found/);
+  const mal = await client(s.artToken, bot("mallory", "perchlive-2"));
+  assert.match((await call(mal, "artifact_find", { ref: a })).err, /not_found/, "another bot's id: invisible");
+  assert.match((await call(mal, "artifact_find", { ref: "garden" })).err, /not_found/, "another bot's titles: invisible");
+  assert.match((await call(mal, "artifact_find", { ref: `/dashboard/artifacts/view/${a}` })).err, /not_found/);
+  await c.close(); await mal.close();
+});
+
+test("review M3 pins: a locked round session can neither attach nor find; a bot's title search skips tainted titles; received artifacts are invisible; % and _ are literal", async () => {
+  // A locked session bound to an untrusted round on its artifact.
+  await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status, narrowed_tools) VALUES ('bobby','perch','perchlive-lk01','perch-live','active',?)", args: [JSON.stringify(["crow:locked", "crow:only:mcp__artifacts__"])] });
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Pinned title 100% done_x", type: "document", source: { markdown: "# p" } })).data.id;
+  await s.db.execute({ sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,bot_id,session_id,status) VALUES (?,'round',1,'[]',1,'bobby','perchlive-lk01','working')", args: [id] });
+  const locked = await client(s.artToken, bot("bobby", "perchlive-lk01"));
+  assert.match((await call(locked, "artifact_attach", { artifact_id: id })).err, /forbidden/, "attach from a locked round session");
+  assert.match((await call(locked, "artifact_find", { ref: id })).err, /forbidden/, "find from a locked round session");
+  // Literal % and _ (LIKE escaping).
+  assert.equal((await call(maker, "artifact_find", { ref: "100% done_x" })).data.artifact.id, id);
+  assert.match((await call(maker, "artifact_find", { ref: "1%e" })).err, /not_found/, "% is not a wildcard");
+  // A tainted title is never matched by a bot's title search; the id still works.
+  await s.db.execute({ sql: "UPDATE artifacts SET title_tainted=1 WHERE id=?", args: [id] });
+  assert.match((await call(maker, "artifact_find", { ref: "pinned title" })).err, /not_found/);
+  assert.equal((await call(maker, "artifact_find", { ref: id })).data.artifact.id, id);
+  const op = await client(s.fullToken);
+  assert.equal((await call(op, "artifact_find", { ref: "pinned title" })).data.artifact.id, id, "the operator still finds it");
+  // Received artifacts: invisible to a bot by any arm.
+  await s.db.execute({ sql: "UPDATE artifacts SET title_tainted=0, received=1 WHERE id=?", args: [id] });
+  assert.match((await call(maker, "artifact_find", { ref: "pinned title" })).err, /not_found/);
+  assert.match((await call(maker, "artifact_find", { ref: id })).err, /not_found/);
+  await maker.close(); await locked.close(); await op.close();
+});
+
+test("review L3: concurrent attaches from one chat make ONE pending request", async () => {
+  await freshSession("bobby", "perchlive-cc01");
+  const maker = await client(s.artToken, bot("bobby", "perchlive-1"));
+  const id = (await call(maker, "artifact_create", { title: "Racy", type: "document", source: { markdown: "# r" } })).data.id;
+  const c = await client(s.artToken, bot("bobby", "perchlive-cc01"));
+  const outs = await Promise.all([1, 2, 3, 4].map(() => call(c, "artifact_attach", { artifact_id: id })));
+  assert.ok(outs.every((o) => o.err === null), JSON.stringify(outs.map((o) => o.err)));
+  assert.equal(new Set(outs.map((o) => o.data.request_id)).size, 1);
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=? AND status='pending'", args: [id] })).rows[0].n, 1);
+  await c.close(); await maker.close();
 });

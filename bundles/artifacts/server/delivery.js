@@ -4,17 +4,25 @@
 //  - UNTRUSTED round (any non-owner text): always a NEW Perch session started
 //    LOCKED to the Artifacts tools (engine.spawn({narrowedTools}) +
 //    scripts/pi-bots/narrowing-lock.mjs). Never an existing session, never a
-//    board card in v1 (card jobs have no locked-narrowing path yet).
-//  - trusted round, choice "auto": the session that made the base version if
-//    it is live, else the bot's most recent live Perch session; none → the
-//    owner chooses (D4): "new-session" or "board-card".
+//    board card in v1 (card jobs have no locked-narrowing path yet). This
+//    holds for a TARGETED round too (review M5(b)): trust is re-classified
+//    first, and a downgraded round never reaches its target chat.
+//  - trusted round, choice "chat" (spec v1.6 D25, plan PR-3 Task 3.3): ONLY
+//    the round's persisted target_thread — re-verified now (active link, bot
+//    access, the chat is this bot's, tools), not LOCKED (D23: a tainted chat
+//    is fine, its results save tainted), woken through the engine if it
+//    sleeps. Anything else FAILS by name with the threads released. There is
+//    no "any live session" and no origin fallback (round-2 B7/B8). No target
+//    at all → the owner chooses: "new-session" or "board-card".
 //  - at capacity (interactive_capacity / pi_capacity): the round is QUEUED and
-//    the owner is offered a board card (trusted rounds only).
+//    the owner is offered a board card (trusted rounds only); the sweep
+//    retries the SAME choice (the target, or a new session).
 // The engine is injected (servers/gateway/perch-interactive.js
 // getInteractiveEngine), so this module has no gateway imports.
-import { roundMessage, setDelivery, UNTRUSTED_ALLOW, reclassifyAtDelivery } from "./rounds.js";
+import { roundMessage, setDelivery, UNTRUSTED_ALLOW, reclassifyAtDelivery, failRound, getRound } from "./rounds.js";
 import { audit } from "./store.js";
-import { sessionIsClean, markSessionTainted } from "./trust.js";
+import { isLocked, markSessionTainted } from "./trust.js";
+import { verifyTarget } from "./links.js";
 
 const CAPACITY = new Set(["interactive_capacity", "pi_capacity"]);
 const codeOf = (e) => e?.code || [...CAPACITY].find((c) => String(e?.message || "").includes(c)) || null;
@@ -31,19 +39,6 @@ export function grantsServer(entry, server) {
 export function botHasArtifactsTools(def) {
   const list = (def && def.tools && def.tools.crow_mcp) || [];
   return list.some((s) => grantsServer(s, "artifacts"));
-}
-
-/** Live sessions a TRUSTED round may reuse: never a locked one (plan review
- *  R-M2) — its context holds untrusted text, so trust is per session. A
- *  session whose lock state cannot be read is excluded too (fail closed).
- *  Task 3.4b: most-recently-active first (snapshot()'s lastEventAt; a session
- *  without a stamp sorts last, and the sort is stable). */
-async function liveSessionsOf(db, engine, botId) {
-  const all = (await engine.list()).filter((s) => s.botId === botId && !["stopped"].includes(s.state) && !s.archived);
-  const out = [];
-  for (const s of all) if (await sessionIsClean(db, botId, s.threadId)) out.push(s);   // trust.js: unknown = untrusted
-  out.sort((a, b) => (b.lastEventAt || 0) - (a.lastEventAt || 0));
-  return out;
 }
 
 /** R-M3: stop a locked round session when its round ends. Returns true when
@@ -76,7 +71,12 @@ export async function deliverRound(db, round, opts) {
   const back = round.status === "queued" ? "queued" : "pending";
   const revert = (unbind) => db.execute({ sql: `UPDATE artifact_rounds SET status=?${unbind ? ", session_id=NULL" : ""}, updated_at=datetime('now') WHERE id=? AND status='delivering'`, args: [back, round.id] });
   try {
-    const out = await deliverClaimed(db, { ...round, status: back }, opts);
+    // Review M1: deliver from the row AS CLAIMED, never from the caller's copy
+    // — the owner may have re-targeted the round (target_thread / bot_id)
+    // after the caller read it (e.g. the sweep's earlier read).
+    const fresh = await getRound(db, round.id);
+    if (!fresh) { await revert(true); return { status: "busy", error: "already_delivering_or_delivered" }; }
+    const out = await deliverClaimed(db, { ...fresh, status: back }, opts);
     await revert(false);   // a no-op unless the round is still 'delivering'
     return out;
   } catch (e) {
@@ -85,11 +85,12 @@ export async function deliverRound(db, round, opts) {
   }
 }
 
-async function deliverClaimed(db, round, { engine, botDef, choice = "auto", originThread = null, createBoardCard = null, actor = { kind: "session" } }) {
-  if (!botHasArtifactsTools(botDef)) {
-    await setDelivery(db, round.id, { status: "failed" });
-    return { status: "failed", error: "bot_lacks_artifacts" };
-  }
+/** Engine codes that mean "that chat cannot be woken" (B8). */
+const ASLEEP = new Set(["session_stopped", "no_such_session"]);
+
+async function deliverClaimed(db, round, { engine, botDef, choice = "chat", createBoardCard = null, actor = { kind: "session" } }) {
+  const fail = async (error) => { await failRound(db, round, error); return { status: "failed", error }; };
+  if (!botHasArtifactsTools(botDef)) return fail("bot_lacks_artifacts");
   // R2-H1: trust is re-checked from the snapshot NOW, before any text leaves.
   const wasTrusted = !round.untrusted;
   await reclassifyAtDelivery(db, round);
@@ -128,19 +129,32 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "auto", orig
     }
     if (choice === "new-session") {
       const s = await spawnAndSend(false);
+      // Kevin 2026-10-13 (review L8): the owner's "New chat with <bot>" Send
+      // links that chat, so later versions show there and it can be the next
+      // Send's target. Trusted rounds only (this branch): an untrusted
+      // round's locked chat is never linked. A writer of artifact_links driven
+      // by the OWNER's Send, never by a bot.
+      try {
+        await db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [round.artifact_id, round.bot_id, s.threadId] });
+        await audit(db, { artifactId: round.artifact_id, actor, action: "link-new-chat", target: s.threadId });
+      } catch (e) { if (!/UNIQUE/i.test(String(e.message))) throw e; }
       return { status: "working", delivery: "perch-session", threadId: s.threadId };
     }
-    // auto
-    const live = await liveSessionsOf(db, engine, round.bot_id);
-    // The origin session when it is live and clean, else the most recently
-    // active one (Task 3.4b's sort in liveSessionsOf).
-    const pick = live.find((s) => s.threadId === originThread) || live[0];
-    if (!pick) return { status: round.status, needsChoice: true, offerBoard: typeof createBoardCard === "function" };
-    // A trusted round to an existing clean session: send first, bind after (a
-    // busy session leaves the round unbound and retryable).
-    await engine.message(pick.sessionId, text);
-    await setDelivery(db, round.id, { status: "working", delivery: "perch-session", sessionId: pick.threadId });
-    return { status: "working", delivery: "perch-session", threadId: pick.threadId };
+    // "chat": the persisted target, and only it.
+    const target = round.target_thread ? String(round.target_thread) : null;
+    if (!target) return { status: round.status, needsChoice: true, offerBoard: typeof createBoardCard === "function" };
+    const why = await verifyTarget(db, { artifactId: round.artifact_id, botId: round.bot_id, threadId: target, botDef });
+    if (why) return fail(why);
+    if (await isLocked(db, round.bot_id, target)) return fail("target_locked");   // D23
+    const seen = (await engine.list()).find((x) => x.threadId === target);
+    if (seen && (seen.botId !== round.bot_id)) return fail("target_not_bots_chat");
+    if (seen && seen.state === "stopped") return fail("target_asleep");
+    // Send first, bind after (a busy chat leaves the round unbound and
+    // retryable). message() wakes a hibernating chat itself (B8).
+    try { await engine.message(seen ? seen.sessionId : target, text); }
+    catch (e) { if (ASLEEP.has(codeOf(e))) return fail("target_asleep"); throw e; }
+    await setDelivery(db, round.id, { status: "working", delivery: "perch-session", sessionId: target });
+    return { status: "working", delivery: "perch-session", threadId: target };
   } catch (e) {
     const code = codeOf(e);
     if (CAPACITY.has(code)) {

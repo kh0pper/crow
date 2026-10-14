@@ -204,8 +204,14 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
   const { size, contentHash } = plan;
   const id = newArtifactId();
   const bot = actor.kind === "bot" ? actor.id : null;
+  // M3/B6 (plan PR-3 Task 3.2): the origin link rides the SAME batch as the
+  // artifact row — bound to the signed actor's OWN thread (never
+  // origin.session) and only for a Perch actor (a channel or job turn's
+  // thread can never receive a card or a Send).
+  const linkOrigin = bot && actor.gateway === "perch" && actor.thread ? [{ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'origin')", args: [id, bot, String(actor.thread)] }] : [];
   try { await db.batch([
     { sql: "INSERT INTO artifacts (id,title,type,created_by_bot,origin_session,origin_card,current_version,title_tainted,received) VALUES (?,?,?,?,?,?,1,?,0)", args: [id, t, type, bot, origin.session || actor.thread || null, origin.card || null, untrusted ? 1 : 0] },
+    ...linkOrigin,
     { sql: "INSERT INTO artifact_versions (artifact_id,n,state,files_json,source_json,size,content_hash,made_by,made_by_bot,change_note,anchor_map_json,untrusted_input) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
       args: [id, 1, "current", JSON.stringify(manifest), sourceJson, size, contentHash, bot ? "bot" : "user", bot, changeNote ? String(changeNote).slice(0, LIMITS.changeNoteChars) : null, rendered.anchorMap ? JSON.stringify(rendered.anchorMap) : null, untrusted ? 1 : 0] },
   ]); } catch (e) { await gcKeys(db, blobs, manifest.map((m) => m.key)); throw e; }

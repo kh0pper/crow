@@ -241,6 +241,7 @@
     moreMenu.textContent = "";
     moreMenu.appendChild(button(T.reload, function () { more.removeAttribute("open"); if (S.viewer) S.viewer.reload().catch(function () {}); }));
     moreMenu.lastChild.setAttribute("title", T.reload_note);
+    if (S.art && S.art.created_by_bot) moreMenu.appendChild(button(T.let_bot, function () { more.removeAttribute("open"); openGrants(); }, "cv-grant"));
     var v = version(S.n);
     if (!v || !v.anchor_map || v.anchor_map.kind !== "blocks") return;
     var byBlock = {};
@@ -385,45 +386,118 @@
     else if (S.activeRound) refresh().catch(function () {});
   });
 
-  // ── Send N comments to chat (interim: the round preview + D4 delivery) ──
+  // ── Send N comments to chat: the send sheet (plan PR-3 Task 3.4) ───────
+  // What to include (owner threads on, contact threads off unless ticked),
+  // then WHERE: the artifact's linked chats (most recent first; ones a Send
+  // cannot reach shown disabled), "New chat with <bot>", and "Board card"
+  // when this instance has a board. The chat this viewer was opened from is
+  // preselected. The server verifies the choice again; there is no banner
+  // path — a needsChoice answer reopens the sheet on its where-step.
+  function whyText(code) { return T["why_" + code] || fmt(T.delivery_failed, { e: code }); }
   function delivered(r) {
     var d = r.delivery || {};
     clearBanners("cv-delivery");
     var b;
-    if (d.needsChoice) {
-      var go = function (choice) { return function () { b.remove(); api("POST", BASE + "/rounds/" + r.round.id + "/deliver", { choice: choice }).then(delivered, function (e) { banner(e.message, "warn"); }); }; };
-      b = banner(T.no_session, "info", [button(T.new_session, go("new-session"))].concat(d.offerBoard ? [button(T.board_card, go("board-card"))] : []));
-    } else if (d.status === "queued") b = banner(T.queued, "info");
-    else if (d.error || d.status === "failed") b = banner(fmt(T.delivery_failed, { e: d.error || d.status }), "warn");   // never a false "working"
+    if (d.needsChoice) { openSheet({ roundId: r.round.id }); return refresh(); }
+    if (d.status === "queued") b = banner(T.queued, "info");
+    else if (d.error || d.status === "failed") b = banner(whyText(d.error || d.status), "warn");   // never a false "working"
     if (b) b.classList.add("cv-delivery");
     return refresh();
   }
-  sendBtn.addEventListener("click", function () {
-    api("GET", BASE + "/round-preview").then(function (pv) {
-      if (pv.activeRound) { banner(T.round_running, "warn"); return; }
+  function failed(e) { banner(e.code === "round_running" ? T.round_running : T["why_" + e.code] ? whyText(e.code) : e.message, "warn"); }
+  function chatName(l) { return l.threadId === THREAD ? T.this_chat : (l.label || fmt(T.a_chat, { id: String(l.threadId).slice(-8) })); }
+
+  function whereStep(dlg, info, roundId) {
+    var box = el("fieldset", { class: "cv-where" }, [el("legend", { text: roundId ? T.pick_where : T.send_to })]);
+    var options = [];
+    if (!roundId) (info.links || []).forEach(function (l) { options.push({ choice: "chat", thread: l.threadId, text: chatName(l) + (l.state === "stopped" ? " (" + T.asleep_note + ")" : ""), disabled: !l.sendable }); });
+    options.push({ choice: "new-session", text: fmt(T.new_chat, { bot: info.bot || T.bot }) });
+    if (info.offerBoard) options.push({ choice: "board-card", text: T.board_card });
+    // Review M2: opened from a chat, Send means THAT chat — never quietly
+    // another one. If it cannot take the round, nothing is preselected and
+    // the sheet says why; the owner picks. Opened from the Library (no
+    // chat), the first option that can take it is the default.
+    var pick = null;
+    if (THREAD && !roundId) {
+      var mine = (info.links || []).filter(function (l) { return l.threadId === THREAD; })[0];
+      pick = options.filter(function (o) { return !o.disabled && o.thread === THREAD; })[0] || null;
+      if (!pick) box.appendChild(el("p", { class: "cv-err", role: "alert", text: whyText((mine && mine.why) || "target_unlinked") }));
+    } else pick = options.filter(function (o) { return !o.disabled; })[0];
+    options.forEach(function (o, i) {
+      var rb = el("input", { type: "radio", name: "cv-where", value: String(i) });
+      if (o.disabled) rb.setAttribute("disabled", "");
+      if (o === pick) rb.checked = true;
+      box.appendChild(el("label", { class: "cv-where-opt" + (o.disabled ? " cv-disabled" : "") }, [rb, el("span", { text: " " + o.text })]));
+    });
+    dlg.appendChild(box);
+    return function () { var c = dlg.querySelector('input[name="cv-where"]:checked'); return c ? options[Number(c.value)] : null; };
+  }
+
+  function openSheet(opts) {
+    var roundId = opts && opts.roundId;
+    Promise.all([roundId ? Promise.resolve(null) : api("GET", BASE + "/round-preview"), api("GET", BASE + "/links")]).then(function (got) {
+      var pv = got[0], info = got[1];
+      if (pv && pv.activeRound) { banner(T.round_running, "warn"); return; }
       var dlg = el("dialog", { class: "cv-preview" });
-      dlg.appendChild(el("h2", { text: T.preview_title }));
-      pv.threads.forEach(function (t) {
-        var cb = el("input", { type: "checkbox", value: String(t.id) });
-        cb.checked = !!t.includedByDefault;
-        var body = el("div", {}, t.comments.map(function (c) { return el("p", {}, [el("b", { text: authorName(c) + ": " }), el("span", { text: c.text })]); }));
-        if (t.untrusted) body.insertBefore(el("em", { text: T.contact_thread }), body.firstChild);
-        dlg.appendChild(el("div", { class: "cv-pv" + (t.untrusted ? " cv-untrusted" : "") }, [el("label", {}, [cb, el("span", { text: " " + T.include })]), body]));
-      });
+      if (pv) {
+        dlg.appendChild(el("h2", { text: T.preview_title }));
+        pv.threads.forEach(function (t) {
+          var cb = el("input", { type: "checkbox", value: String(t.id), class: "cv-include" });
+          cb.checked = !!t.includedByDefault;
+          var body = el("div", {}, t.comments.map(function (c) { return el("p", {}, [el("b", { text: authorName(c) + ": " }), el("span", { text: c.text })]); }));
+          if (t.untrusted) body.insertBefore(el("em", { text: T.contact_thread }), body.firstChild);
+          dlg.appendChild(el("div", { class: "cv-pv" + (t.untrusted ? " cv-untrusted" : "") }, [el("label", {}, [cb, el("span", { text: " " + T.include })]), body]));
+        });
+      }
+      var where = whereStep(dlg, info, roundId);
       var close = function () { dlg.close(); dlg.remove(); };
       dlg.appendChild(el("div", { class: "cv-row" }, [
         button(T.send_go, function () {
-          var ids = Array.prototype.map.call(dlg.querySelectorAll("input:checked"), function (x) { return Number(x.value); });
+          var w = where();
+          if (!w) return;
+          var body = { choice: w.choice };
+          if (w.thread) body.thread = w.thread;
+          if (roundId) { close(); api("POST", BASE + "/rounds/" + roundId + "/deliver", body).then(delivered, failed); return; }
+          var ids = Array.prototype.map.call(dlg.querySelectorAll("input.cv-include:checked"), function (x) { return Number(x.value); });
           close();
           if (!ids.length) return;
-          api("POST", BASE + "/rounds", { include: ids, kind: "round" }).then(delivered, function (e) { banner(e.code === "round_running" ? T.round_running : e.message, "warn"); });
+          body.include = ids; body.kind = "round";
+          api("POST", BASE + "/rounds", body).then(delivered, failed);
         }, "cv-primary"),
         button(T.cancel, close),
       ]));
       root.appendChild(dlg);
       dlg.showModal();
     }, function (e) { banner(e.message, "warn"); });
-  });
+  }
+  sendBtn.addEventListener("click", function () { openSheet(null); });
+
+  // ── "Let a bot work on this" (plan PR-3 Task 3.7): owner routes only ─────
+  function openGrants() {
+    Promise.all([api("GET", "/api/artifacts/bots"), api("GET", BASE + "/access")]).then(function (got) {
+      var others = (got[0].bots || []).filter(function (b) { return b.id !== S.art.created_by_bot; });
+      var granted = {};
+      (got[1].grants || []).forEach(function (g) { granted[g.botId] = true; });
+      var dlg = el("dialog", { class: "cv-grants" }, [el("h2", { text: T.grant_title })]);
+      var msg = el("p", { class: "cv-err", role: "alert" });
+      if (!others.length) dlg.appendChild(el("p", { text: T.grant_none }));
+      else dlg.appendChild(el("p", { class: "cv-note", text: T.grant_note }));
+      others.forEach(function (b) {
+        var cb = el("input", { type: "checkbox", value: b.id });
+        cb.checked = !!granted[b.id];
+        cb.addEventListener("change", function () {
+          cb.disabled = true; msg.textContent = "";
+          var p = cb.checked ? api("POST", BASE + "/access", { botId: b.id }) : api("DELETE", BASE + "/access/" + encodeURIComponent(b.id));
+          p.then(function () { cb.disabled = false; }, function (e) { cb.checked = !cb.checked; cb.disabled = false; msg.textContent = e.message; });
+        });
+        dlg.appendChild(el("label", { class: "cv-where-opt" }, [cb, el("span", { text: " " + b.name })]));
+      });
+      dlg.appendChild(msg);
+      dlg.appendChild(el("div", { class: "cv-row" }, [button(T.done, function () { dlg.close(); dlg.remove(); }, "cv-primary")]));
+      root.appendChild(dlg);
+      dlg.showModal();
+    }, function (e) { banner(e.message, "warn"); });
+  }
 
   refresh().then(mountFrame, function (e) {
     showPanel("cv-gone", e.status === 404 ? T.gone : e.message);

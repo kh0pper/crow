@@ -106,7 +106,7 @@ export async function previewRound(db, artifactId) {
  * Start a round or an Ask (owner only). `include` lists the thread ids the
  * owner ticked in the preview — nothing else is sent.
  */
-export async function startRound(db, { artifactId, actor, include, kind = "round", datasetsApproved = false, botId, now = Date.now() }) {
+export async function startRound(db, { artifactId, actor, include, kind = "round", datasetsApproved = false, botId, targetThread = null, now = Date.now() }) {
   if (actor?.kind !== "session") throw err("forbidden", "only the owner starts rounds");
   if (!Array.isArray(include) || !include.length) throw err("bad_request", "pick at least one thread");
   const ids = [...new Set(include.map(Number))];
@@ -137,8 +137,8 @@ export async function startRound(db, { artifactId, actor, include, kind = "round
   let roundId;
   try {
     const r = await db.execute({
-      sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,datasets_approved,bot_id,status,deadline,snapshot_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      args: [artifactId, kind, Number(art.current_version), JSON.stringify(ids), untrusted, datasetsApproved ? 1 : 0, botId || art.created_by_bot, "pending", deadline, JSON.stringify(snapshot)],
+      sql: "INSERT INTO artifact_rounds (artifact_id,kind,base_version,thread_ids_json,untrusted_input,datasets_approved,bot_id,status,deadline,snapshot_json,target_thread) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      args: [artifactId, kind, Number(art.current_version), JSON.stringify(ids), untrusted, datasetsApproved ? 1 : 0, botId || art.created_by_bot, "pending", deadline, JSON.stringify(snapshot), targetThread || null],
     });
     roundId = Number(r.lastInsertRowid);
   } catch (e) {
@@ -255,6 +255,18 @@ export async function completeRound(db, { roundId, artifactId, actor, summary, r
   }
   await audit(db, { artifactId, actor, action: r.kind === "ask" ? "ask-done" : "round-done", target: String(roundId) });
   return getRound(db, roundId);
+}
+
+/** A round that cannot be delivered ends FAILED with a named reason (kept in
+ *  summary for the owner), audited, and its threads open again so the owner
+ *  can send them elsewhere. Only an undelivered/active round can fail. */
+export async function failRound(db, round, reason) {
+  const why = String(reason || "failed").slice(0, 64);
+  const r = await db.execute({ sql: "UPDATE artifact_rounds SET status='failed', summary=?, updated_at=datetime('now') WHERE id=? AND status IN ('queued','pending','delivering','working')", args: [why, round.id] });
+  if (Number(r.rowsAffected) !== 1) return false;
+  await db.execute({ sql: "UPDATE artifact_threads SET sent_round_id=NULL WHERE sent_round_id=? AND status<>'resolved'", args: [round.id] });
+  await audit(db, { artifactId: round.artifact_id, actor: { kind: "system" }, action: "round-failed", target: String(round.id), detail: { reason: why } });
+  return true;
 }
 
 /** Timeouts (§7.4): pending/working past the deadline → timed-out; threads stay open. */
