@@ -460,3 +460,33 @@ test("ask-first linking (PR-3 Task 3.5): the owner lists a chat's pending reques
   assert.equal((await req("POST", `/api/artifacts/link-requests/${stale}/decide`, { body: { accept: true } })).body.error, "target_no_access");
   assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND thread_id='perchlive-k5'", args: [other.id] })).rows[0].n, 0);
 });
+
+test("owner bot-access grant (PR-3 Task 3.7): only bots with the Artifacts tools are offered; grant/revoke are owner routes, audited; a revoke unlinks that bot's chats; no MCP path grants", async () => {
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1);`);
+  for (const [id, name, tools] of [["bobby", "Bobby", ["artifacts"]], ["eve", "Eve", ["artifacts/artifact_get"]], ["mailer", "Mailer", ["gmail/send"]]]) {
+    await s.db.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition) VALUES (?,?,?)", args: [id, name, JSON.stringify({ tools: { crow_mcp: tools } })] });
+  }
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Shared work", type: "document", source: { markdown: "# s" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-g1", gateway: "perch" } }, { markdownBlocks });
+  const bots = await req("GET", "/api/artifacts/bots");
+  assert.equal(bots.status, 200);
+  assert.deepEqual(bots.body.bots.map((b) => [b.id, b.name]), [["bobby", "Bobby"], ["eve", "Eve"]], "only bots that have the Artifacts tools");
+  assert.equal((await req("GET", "/api/artifacts/bots", { cookie: null })).status, 401);
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/access`, { body: { botId: "mailer" } })).status, 400, "a bot without the tools cannot be granted");
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/access`, { body: { botId: "eve" }, csrf: null })).status, 403, "CSRF");
+  const g = await req("POST", `/api/artifacts/${art.id}/access`, { body: { botId: "eve" } });
+  assert.equal(g.status, 200);
+  assert.equal(await store.canAccess(s.db, { kind: "bot", id: "eve" }, await store.getArtifact(s.db, art.id)), true, "the grant opens find/attach/get for eve");
+  assert.deepEqual((await req("GET", `/api/artifacts/${art.id}/access`)).body.grants.map((x) => x.botId), ["eve"]);
+  // eve's chat gets linked (an owner Yes), then the owner revokes.
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [art.id, "eve", "perchlive-g2"] });
+  const r = await req("DELETE", `/api/artifacts/${art.id}/access/eve`);
+  assert.equal(r.status, 200);
+  assert.equal(await store.canAccess(s.db, { kind: "bot", id: "eve" }, await store.getArtifact(s.db, art.id)), false);
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND bot_id='eve' AND unlinked_at IS NULL", args: [art.id] })).rows[0].n, 0, "eve's chats are unlinked with the grant");
+  assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND bot_id='bobby' AND unlinked_at IS NULL", args: [art.id] })).rows[0].n, 1, "the maker's own link stays");
+  const aud = (await s.db.execute({ sql: "SELECT action FROM artifact_audit WHERE artifact_id=? AND action IN ('access-granted','access-revoked') ORDER BY id", args: [art.id] })).rows.map((x) => x.action);
+  assert.deepEqual(aud, ["access-granted", "access-revoked"]);
+  assert.equal((await req("POST", `/api/artifacts/${art.id}/access`, { body: { botId: "bobby" } })).status, 400, "the maker needs no grant");
+  const { TOOL_CLASSES } = await import("../bundles/artifacts/server/mcp.js");
+  assert.ok(!Object.keys(TOOL_CLASSES).some((n) => /access|grant|share/.test(n)), "no bot-callable grant tool exists");
+});

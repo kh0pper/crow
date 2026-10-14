@@ -241,6 +241,7 @@
     moreMenu.textContent = "";
     moreMenu.appendChild(button(T.reload, function () { more.removeAttribute("open"); if (S.viewer) S.viewer.reload().catch(function () {}); }));
     moreMenu.lastChild.setAttribute("title", T.reload_note);
+    if (S.art && S.art.created_by_bot) moreMenu.appendChild(button(T.let_bot, function () { more.removeAttribute("open"); openGrants(); }, "cv-grant"));
     var v = version(S.n);
     if (!v || !v.anchor_map || v.anchor_map.kind !== "blocks") return;
     var byBlock = {};
@@ -461,6 +462,33 @@
     }, function (e) { banner(e.message, "warn"); });
   }
   sendBtn.addEventListener("click", function () { openSheet(null); });
+
+  // ── "Let a bot work on this" (plan PR-3 Task 3.7): owner routes only ─────
+  function openGrants() {
+    Promise.all([api("GET", "/api/artifacts/bots"), api("GET", BASE + "/access")]).then(function (got) {
+      var others = (got[0].bots || []).filter(function (b) { return b.id !== S.art.created_by_bot; });
+      var granted = {};
+      (got[1].grants || []).forEach(function (g) { granted[g.botId] = true; });
+      var dlg = el("dialog", { class: "cv-grants" }, [el("h2", { text: T.grant_title })]);
+      var msg = el("p", { class: "cv-err", role: "alert" });
+      if (!others.length) dlg.appendChild(el("p", { text: T.grant_none }));
+      else dlg.appendChild(el("p", { class: "cv-note", text: T.grant_note }));
+      others.forEach(function (b) {
+        var cb = el("input", { type: "checkbox", value: b.id });
+        cb.checked = !!granted[b.id];
+        cb.addEventListener("change", function () {
+          cb.disabled = true; msg.textContent = "";
+          var p = cb.checked ? api("POST", BASE + "/access", { botId: b.id }) : api("DELETE", BASE + "/access/" + encodeURIComponent(b.id));
+          p.then(function () { cb.disabled = false; }, function (e) { cb.checked = !cb.checked; cb.disabled = false; msg.textContent = e.message; });
+        });
+        dlg.appendChild(el("label", { class: "cv-where-opt" }, [cb, el("span", { text: " " + b.name })]));
+      });
+      dlg.appendChild(msg);
+      dlg.appendChild(el("div", { class: "cv-row" }, [button(T.done, function () { dlg.close(); dlg.remove(); }, "cv-primary")]));
+      root.appendChild(dlg);
+      dlg.showModal();
+    }, function (e) { banner(e.message, "warn"); });
+  }
 
   refresh().then(mountFrame, function (e) {
     showPanel("cv-gone", e.status === 404 ? T.gone : e.message);

@@ -183,6 +183,50 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json({ decided: accept ? "accepted" : "declined" });
   }));
 
+  /**
+   * The owner's "Let <bot> work on this" (plan PR-3 Task 3.7). NEVER
+   * bot-callable: dashboard auth + CSRF only, no MCP tool. The picker lists
+   * bots whose def grants the Artifacts tools. A grant opens the artifact to
+   * that bot (get/find/attach/update); a revoke closes it and unlinks that
+   * bot's chats from it (a chat of a bot that can no longer reach the
+   * artifact must not keep receiving its cards). Both audited.
+   * /api/artifacts/bots is registered before /api/artifacts/:id.
+   */
+  async function artifactBots() {
+    let rows = [];
+    try { rows = (await S.db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1 ORDER BY display_name", args: [] })).rows; } catch { rows = []; }
+    const out = [];
+    for (const r of rows) {
+      let def = null; try { def = JSON.parse(r.definition || "{}"); } catch { def = null; }
+      if (M.delivery.botHasArtifactsTools(def)) out.push({ id: String(r.bot_id), name: String(r.display_name || r.bot_id) });
+    }
+    return out;
+  }
+  router.get("/api/artifacts/bots", wrap(async (_req, res) => { res.json({ bots: await artifactBots() }); }));
+  router.get("/api/artifacts/:id/access", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const rows = (await S.db.execute({ sql: "SELECT bot_id, granted_at FROM artifact_bot_access WHERE artifact_id=? ORDER BY granted_at", args: [art.id] })).rows;
+    res.json({ grants: rows.map((r) => ({ botId: r.bot_id, grantedAt: r.granted_at })) });
+  }));
+  router.post("/api/artifacts/:id/access", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const botId = String(req.body?.botId || "");
+    if (!botId || botId === art.created_by_bot) throw Object.assign(new Error("pick another bot"), { code: "bad_request" });
+    if (!(await artifactBots()).some((b) => b.id === botId)) throw Object.assign(new Error("that bot has no Artifacts tools"), { code: "bad_request" });
+    await S.db.execute({ sql: "INSERT OR IGNORE INTO artifact_bot_access (artifact_id, bot_id) VALUES (?,?)", args: [art.id, botId] });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "access-granted", target: botId });
+    res.json({ granted: botId });
+  }));
+  router.delete("/api/artifacts/:id/access/:botId", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const botId = String(req.params.botId);
+    const r = await S.db.execute({ sql: "DELETE FROM artifact_bot_access WHERE artifact_id=? AND bot_id=?", args: [art.id, botId] });
+    if (Number(r.rowsAffected) !== 1) throw Object.assign(new Error("no such grant"), { code: "not_found" });
+    if (botId !== art.created_by_bot) await S.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND bot_id=? AND unlinked_at IS NULL", args: [art.id, botId] });
+    await M.store.audit(S.db, { artifactId: art.id, actor: OWNER, action: "access-revoked", target: botId });
+    res.json({ revoked: botId });
+  }));
+
   router.get("/api/artifacts/:id", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
     const versions = (await S.db.execute({ sql: "SELECT n, state, made_by, made_by_bot, round_id, untrusted_input, trust_cleared_at, change_note, proposed_reason, flagged_reason, created_at, anchor_map_json FROM artifact_versions WHERE artifact_id=? ORDER BY n DESC", args: [art.id] })).rows;

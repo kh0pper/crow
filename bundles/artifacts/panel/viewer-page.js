@@ -44,6 +44,8 @@ export const VIEWER_STRINGS = {
     why_target_locked: "That chat is limited to one feedback round.", why_target_no_access: "That bot can't work on this artifact.",
     why_target_other_bot: "That chat belongs to another bot.", why_target_not_bots_chat: "That chat belongs to another bot.",
     why_bot_lacks_artifacts: "The bot no longer has the Artifacts tools.",
+    let_bot: "Let a bot work on this", grant_title: "Which other bots can work on this?", grant_none: "No other bot has the Artifacts tools.",
+    grant_note: "A bot you tick can read and revise this artifact and ask to link it to its chats.", done: "Done",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -74,6 +76,8 @@ export const VIEWER_STRINGS = {
     why_target_locked: "Ese chat está limitado a una sola ronda de comentarios.", why_target_no_access: "Ese bot no puede trabajar en este artefacto.",
     why_target_other_bot: "Ese chat pertenece a otro bot.", why_target_not_bots_chat: "Ese chat pertenece a otro bot.",
     why_bot_lacks_artifacts: "El bot ya no tiene las herramientas de Artefactos.",
+    let_bot: "Dejar que un bot trabaje en esto", grant_title: "¿Qué otros bots pueden trabajar en esto?", grant_none: "Ningún otro bot tiene las herramientas de Artefactos.",
+    grant_note: "Un bot que marques puede leer y revisar este artefacto y pedir vincularlo a sus chats.", done: "Listo",
   },
 };
 
