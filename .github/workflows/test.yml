@@ -108,6 +108,12 @@ jobs:
       # field are skipped by design — that is the pre-vendor draft state.
       - name: Vendored payload digest check
         run: node scripts/check-vendored-payloads.mjs
+      # Design kit (bundles/design-kit/lib): every pinned file's sha256, every
+      # licence file, exact version pins, no CSS that fetches at runtime, and no
+      # remote URL in the kit's code or skills. Fix by re-vendoring:
+      # node scripts/design-kit/vendor-lib.mjs
+      - name: Design kit library check
+        run: node scripts/check-design-kit-lib.mjs
       - run: npm run validate-model-catalog
       # This repo is public: no process documents (specs/plans/handoffs),
       # credentials, or real tailnet hostnames in tracked files. The local
