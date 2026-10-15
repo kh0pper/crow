@@ -155,6 +155,19 @@ border-radius:10px;background:var(--sky);color:var(--ink)}
    source-order reason as #perch-launch-note above. */
 #perch-hub-root #perch-cwd-note{padding:0;flex:1 1 100%;font-size:12.5px}
 #perch-launch [hidden]{display:none}
+/* QW2: "More options" — model + directory fold away under one full-width
+   disclosure. The summary is a thumb target like every launcher control; the
+   body is its own flex row (a <details> is not a flex container itself), so
+   the field/Browse pairing above keeps working inside it. */
+#perch-hub-root #perch-launch-more{flex:1 1 100%;min-width:0}
+#perch-hub-root #perch-launch-more>summary{min-height:44px;display:flex;align-items:center;gap:0;cursor:pointer;
+color:var(--dim);font-size:13px;overflow-wrap:anywhere}
+#perch-hub-root #perch-launch-more-model{color:var(--ink)}
+#perch-hub-root .launch-more-body{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0 0}
+/* Closed means NOT RENDERED. Current Chrome hides a closed <details> body
+   with content-visibility, which still leaves the fields boxes (measured:
+   getClientRects non-empty); display:none makes it unambiguous. */
+#perch-hub-root #perch-launch-more:not([open]) .launch-more-body{display:none}
 #perch-hub-root .title{font-weight:600;font-size:17px}
 #perch-hub-root .meta{color:var(--dim);font-size:13px;margin-top:2px;word-break:break-all}
 #perch-hub-root .state{font-size:13px;color:var(--alive);font-weight:500;white-space:nowrap}
@@ -176,6 +189,16 @@ border-radius:10px;background:var(--sky);color:var(--ink)}
 #perch-hub-root .roost-row button{padding:8px 12px;font-size:13px;min-height:44px}
 /* Close is destructive and must not compete with Open for a thumb. */
 #perch-hub-root .roost-close{color:var(--dim)}
+/* QW2: the row's one ⋯ trigger (a square thumb target) and its menu, opened
+   INLINE below the row — the list body scrolls, so a floating popover would
+   clip. [hidden] needs its own rule: the display:flex here would beat the
+   UA's hidden. */
+#perch-hub-root .roost-row .roost-more{min-width:44px;padding:8px 10px;font-size:18px;line-height:1;color:var(--dim)}
+#perch-hub-root .roost-menu{flex:1 1 100%;display:flex;flex-direction:column;gap:2px;padding:4px;
+border:1px solid var(--line);border-radius:10px;background:var(--card)}
+#perch-hub-root .roost-menu[hidden]{display:none}
+#perch-hub-root .roost-menu button{width:100%;text-align:left;border:0;background:none}
+#perch-hub-root .roost-menu button:focus-visible{outline:2px solid var(--teal);outline-offset:-2px}
 /* PR-C (audit item 14): the archive affordance. Archive is reversible (not
    destructive), so it sits quiet beside Rename. The Archived section is a
    full-width quiet toggle above a dimmed, collapsed list. */

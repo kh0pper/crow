@@ -552,6 +552,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
     try {
       const seen = await s.json(`JSON.stringify({
         subtitles: Array.from(document.querySelectorAll('#perch-list-body .roost-when')).map(e=>e.textContent),
+        rowTexts: Array.from(document.querySelectorAll('#perch-list-body .roost-row .roost-main')).map(e=>e.innerText),
         flat: document.getElementById('perch-list-body').innerText.replace(/\\s+/g,''),
         hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         overflow: Array.from(document.querySelectorAll('#perch-list-body .roost-when'))
@@ -559,11 +560,14 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       })`);
       // Before the fix this read, verbatim:
       // "R4AssistantawakeOpenCloseR4AssistantawakeOpenCloseR4AssistantawakeOpenClose"
+      // QW2: the fixture's three rows differ by card (248), by name, and by
+      // being the only plain row — so each reads as itself WITHOUT hex. The
+      // id-when-colliding case (eight nameless rows) is pinned in the vm suite.
       assert.equal(seen.subtitles.length, 3);
-      assert.equal(new Set(seen.subtitles).size, 3,
-        "three sessions on one bot must read as three different things: " + JSON.stringify(seen.subtitles));
-      assert.match(seen.subtitles[0], /11111111/, "the short sid is the unambiguous handle");
-      assert.match(seen.subtitles[0], /card 248/, "and the card is the human one, when there is one");
+      assert.equal(new Set(seen.rowTexts).size, 3,
+        "three sessions on one bot must read as three different things: " + JSON.stringify(seen.rowTexts));
+      assert.match(seen.subtitles[0], /card 248/, "the card is the human handle, when there is one");
+      for (const s of seen.subtitles) assert.doesNotMatch(s, /\b[0-9a-f]{8}\b/, "no raw id where nothing collides: " + s);
       assert.equal(seen.hScroll, false, "identity must not cost a horizontal scrollbar at " + w + "px");
       assert.deepEqual(seen.overflow, [false, false, false],
         "and must not be clipped inside its own row: " + JSON.stringify(seen.subtitles));
@@ -625,7 +629,9 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
     resetApi();
     const s = await session(w, h);
     try {
+      // QW2: the picker lives in "More options"; measure it opened.
       const seen = await s.json(`(function(){
+        document.getElementById('perch-launch-more').open=true;
         var box=function(id){ var e=document.getElementById(id), r=e.getBoundingClientRect();
           return { hidden:e.hidden, w:Math.round(r.width), h:Math.round(r.height),
                    top:Math.round(r.top), bottom:Math.round(r.bottom),
@@ -796,7 +802,7 @@ test("F1b live: crossing the breakpoint with a chat open refreshes the list that
 // ---------------------------------------------------------------------------
 
 for (const [w, h] of [[412, 730], [1280, 900]]) {
-  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps four thumb-sized controls`, async (t) => {
+  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps Open + ⋯ thumb-sized`, async (t) => {
     if (!available) return t.skip("no CDP endpoint at " + CDP);
     resetApi();
     const s = await session(w, h);
@@ -806,7 +812,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         var named=null;
         for(var i=0;i<rows.length;i++){ if(rows[i].querySelector('.roost-name')) named=rows[i]; }
         var nameEl=named&&named.querySelector('.roost-name');
-        var btns=named?Array.prototype.map.call(named.querySelectorAll('button'),function(b){
+        var btns=named?Array.prototype.filter.call(named.children,function(c){return c.tagName==='BUTTON';}).map(function(b){
           var r=b.getBoundingClientRect();
           return { text:b.textContent, w:Math.round(r.width), h:Math.round(r.height),
                    inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
@@ -817,6 +823,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         return JSON.stringify({
           rows: rows.length,
           name: nameEl?nameEl.textContent:null,
+          when: named?named.querySelector('.roost-when').textContent:null,
           nameClipped: nameEl? nameEl.scrollWidth > nameEl.clientWidth + 1 : null,
           nameOverflowsRow: nameEl? nameEl.getBoundingClientRect().right > named.getBoundingClientRect().right + 1 : null,
           btns: btns,
@@ -826,8 +833,10 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.name, "November package copy pass, English and Spanish together");
       assert.equal(seen.nameOverflowsRow, false,
         "an 80-char operator name must be clipped inside its row, not spill out of it");
-      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "Rename", "Archive", "Close"],
-        "the row grew a fourth control (Archive, PR-C): " + JSON.stringify(seen.btns.map((b) => b.text)));
+      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "\u22ef"],
+        "QW2: Rename/Archive/Close moved into the row's ⋯ menu: " + JSON.stringify(seen.btns.map((b) => b.text)));
+      assert.ok(seen.btns[1].w >= 44, `the ⋯ trigger is ${seen.btns[1].w}px wide`);
+      assert.doesNotMatch(seen.when, /\b[0-9a-f]{8}\b/, "a named row carries no raw id: " + seen.when);
       for (const b of seen.btns) {
         assert.ok(b.h >= 44, `${b.text} is ${b.w}x${b.h}; every row control clears the 44px thumb target`);
         assert.equal(b.inViewport, true, `${b.text} must be on screen`);
@@ -1423,6 +1432,110 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         `ten lines grew the composer to ${seen.grew}px — above the floor, at/under the 120px ceiling`);
       assert.equal(seen.sendReachable, true, "a grown composer must never push Send off screen");
       assert.equal(seen.hScroll, false);
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// QW2 (design quick win 2), live: the row's ⋯ menu and the folded launcher,
+// measured at both viewports in a real browser.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 915], [1280, 900]]) {
+  test(`QW2 live @${w}x${h}: ⋯ opens three hit-testable items inline; ArrowDown/Escape behave; Escape stops at the menu`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var hitBox=function(b){ var r=b.getBoundingClientRect();
+          return { text:b.textContent, w:Math.round(r.width), h:Math.round(r.height),
+                   inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+                   hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                                    return !!e && (e===b||b.contains(e)); })() }; };
+        var docEsc=0;
+        document.addEventListener('keydown',function(e){ if(e.key==='Escape') docEsc++; });
+        var row=document.querySelector('#perch-list-body .roost-row');
+        var more=row.querySelector('.roost-more'), menu=row.querySelector('.roost-menu');
+        var closedRect=menu.getBoundingClientRect();
+        var trig=hitBox(more);
+        more.click();
+        var items=Array.prototype.map.call(menu.querySelectorAll('[role=menuitem]'),hitBox);
+        var firstFocused=document.activeElement===menu.querySelector('[role=menuitem]');
+        var menuBelowRow=menu.getBoundingClientRect().top>=row.querySelector('.roost-main').getBoundingClientRect().bottom-1;
+        var esc=new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true});
+        document.activeElement.dispatchEvent(esc);
+        var afterEsc={ hidden:menu.hidden, expanded:more.getAttribute('aria-expanded'),
+                       focusBack:document.activeElement===more, docEsc:docEsc };
+        more.focus();
+        more.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+        var afterDown={ open:!menu.hidden, first:document.activeElement===menu.querySelector('[role=menuitem]') };
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+        var second=document.activeElement.textContent;
+        document.body.click();
+        var outsideClosed=menu.hidden;
+        var doc=document.documentElement;
+        return JSON.stringify({ closedH:Math.round(closedRect.height), trig:trig, items:items,
+          firstFocused:firstFocused, menuBelowRow:menuBelowRow, afterEsc:afterEsc, afterDown:afterDown,
+          second:second, outsideClosed:outsideClosed, hScroll: doc.scrollWidth > doc.clientWidth });
+      })()`);
+      assert.equal(seen.closedH, 0, "a closed menu takes no space");
+      assert.ok(seen.trig.w >= 44 && seen.trig.h >= 44, `⋯ is ${seen.trig.w}x${seen.trig.h}`);
+      assert.equal(seen.trig.hit, true, "⋯ is hit-testable");
+      assert.deepEqual(seen.items.map((b) => b.text), ["Rename", "Archive", "Close"]);
+      for (const b of seen.items) {
+        assert.ok(b.h >= 44, `${b.text} is ${b.w}x${b.h}`);
+        assert.equal(b.inViewport, true, `${b.text} on screen`);
+        assert.equal(b.hit, true, `${b.text} hit-testable`);
+      }
+      assert.equal(seen.firstFocused, true, "opening focuses the first item");
+      assert.equal(seen.menuBelowRow, true, "the menu opens inline, below the row's text");
+      assert.deepEqual(seen.afterEsc, { hidden: true, expanded: "false", focusBack: true, docEsc: 0 },
+        "Escape closes, refocuses ⋯, and never reaches the document's Escape handlers");
+      assert.deepEqual(seen.afterDown, { open: true, first: true }, "ArrowDown on ⋯ opens onto the first item");
+      assert.equal(seen.second, "Archive", "ArrowDown moves through the items");
+      assert.equal(seen.outsideClosed, true, "a click elsewhere closes it");
+      assert.equal(seen.hScroll, false, "no sideways scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`QW2 live @${w}x${h}: model + directory wait behind More options, which names the model and opens to 44px fields`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const closed = await s.json(`(function(){
+        var shown=function(id){ return document.getElementById(id).getClientRects().length>0; };
+        var sum=document.querySelector('#perch-launch-more>summary'), r=sum.getBoundingClientRect();
+        return JSON.stringify({ model:shown('perch-new-model'), cwd:shown('perch-new-cwd'),
+          browse:shown('perch-browse-btn'), newBtn:shown('perch-new'),
+          summary:sum.textContent, sumH:Math.round(r.height) });
+      })()`);
+      assert.deepEqual([closed.model, closed.cwd, closed.browse], [false, false, false],
+        "not rendered until More options opens");
+      assert.equal(closed.newBtn, true, "New session stays one tap away");
+      assert.ok(closed.sumH >= 44, `the summary is ${closed.sumH}px tall`);
+      assert.match(closed.summary, /^More options · Qwen3\.6 35B/, "the summary names the model: " + closed.summary);
+      const opened = await s.json(`(async function(){
+        document.querySelector('#perch-launch-more>summary').click();
+        ${sleepJs(100)}
+        var box=function(id){ var e=document.getElementById(id), r=e.getBoundingClientRect();
+          return { h:Math.round(r.height), inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth }; };
+        var res={ open:document.getElementById('perch-launch-more').open,
+          model:box('perch-new-model'), cwd:box('perch-new-cwd'), browse:box('perch-browse-btn') };
+        document.getElementById('perch-browse-btn').click();
+        ${sleepJs(400)}
+        res.modal=!document.getElementById('perch-browse-modal').hidden;
+        res.hScroll=document.documentElement.scrollWidth>document.documentElement.clientWidth;
+        return JSON.stringify(res);
+      })()`);
+      assert.equal(opened.open, true);
+      for (const k of ["model", "cwd", "browse"]) {
+        assert.ok(opened[k].h >= 44, `${k} is ${opened[k].h}px tall`);
+        assert.equal(opened[k].inViewport, true, `${k} on screen`);
+      }
+      assert.equal(opened.modal, true, "Browse still opens its picker");
+      assert.equal(opened.hScroll, false, "no sideways scroll at " + w + "px");
     } finally { resetApi(); await s.close(); }
   });
 }

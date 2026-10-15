@@ -2744,6 +2744,8 @@ export const translations = {
     es: "Ningún bot tiene un canal Perch, así que no hay nada que iniciar.",
   },
   "perch.close": { en: "Close", es: "Cerrar" },
+  "perch.rowActions": { en: "More actions for {session}", es: "Más acciones para {session}" },
+  "perch.moreOptions": { en: "More options", es: "Más opciones" },
   "perch.closeConfirm": {
     en: "Close {session}? It cannot be reopened.",
     es: "¿Cerrar {session}? No se podrá volver a abrir.",

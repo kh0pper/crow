@@ -54,28 +54,38 @@ ${engineBanner(engine, lang)}
     <div id="perch-launch">
       <label class="field-label" id="perch-new-bot-label" for="perch-new-bot" hidden>${escapeHtml(t("perch.newSessionBot", lang))}</label>
       <select id="perch-new-bot" aria-labelledby="perch-new-bot-label" hidden></select>
-      <!-- The model for the session about to be started. Populated from
-           GET /bots/<id>/models (session-free — there is no session yet to
-           ask), pre-selected on the bot's own configured default, so the
-           common case stays one tap on the button beside it. Hidden until
-           that list arrives: an empty-but-visible picker is the state this
-           whole task exists to stop shipping. -->
-      <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
-      <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
-      <!-- "Show more (N)": the picker offers only models that answer
-           (or start on demand) AND that pi can spawn; the rest are one tap
-           away here, never silently dropped. Hidden when there are none. -->
-      <button type="button" class="quiet perch-model-more" id="perch-new-model-more" aria-controls="perch-new-model" aria-expanded="false" hidden></button>
-      <!-- Open-anywhere C2: the directory the session about to be started
-           runs in. EMPTY means "the bot's default" and the key is never
-           sent — the route/engine treat an absent cwd as the world root.
-           The browse button opens the server-backed picker modal (built
-           client-side; GET /dashboard/perch-api/browse). -->
-      <label class="field-label" id="perch-new-cwd-label" for="perch-new-cwd">${escapeHtml(t("perch.cwdLabel", lang))}</label>
-      <input type="text" id="perch-new-cwd" aria-labelledby="perch-new-cwd-label" placeholder="${escapeHtml(t("perch.cwdPlaceholder", lang))}" autocomplete="off" spellcheck="false">
-      <button type="button" id="perch-browse-btn">${escapeHtml(t("perch.browse", lang))}</button>
-      <div class="empty" id="perch-cwd-note">${escapeHtml(t("perch.cwdDefaultNote", lang))}</div>
       <button type="button" class="primary" id="perch-new" disabled>${escapeHtml(t("perch.newSession", lang))}</button>
+      <!-- QW2: the secondary fields fold away. One tap on New session still
+           starts on the bot's default model in its default directory; the
+           summary names the model the next session will use, so a changed
+           pick never hides behind the closed disclosure. -->
+      <details id="perch-launch-more">
+        <summary>${escapeHtml(t("perch.moreOptions", lang))}<span id="perch-launch-more-model"></span></summary>
+        <div class="launch-more-body">
+          <!-- The model for the session about to be started. Populated from
+               GET /bots/<id>/models (session-free — there is no session yet to
+               ask), pre-selected on the bot's own configured default. Hidden
+               until that list arrives: an empty-but-visible picker is the
+               state this whole task exists to stop shipping. -->
+          <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
+          <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
+          <!-- "Show more (N)": the picker offers only models that answer
+               (or start on demand) AND that pi can spawn; the rest are one tap
+               away here, never silently dropped. Hidden when there are none. -->
+          <button type="button" class="quiet perch-model-more" id="perch-new-model-more" aria-controls="perch-new-model" aria-expanded="false" hidden></button>
+          <!-- Open-anywhere C2: the directory the session about to be started
+               runs in. EMPTY means "the bot's default" and the key is never
+               sent — the route/engine treat an absent cwd as the world root.
+               The browse button opens the server-backed picker modal (built
+               client-side; GET /dashboard/perch-api/browse). -->
+          <label class="field-label" id="perch-new-cwd-label" for="perch-new-cwd">${escapeHtml(t("perch.cwdLabel", lang))}</label>
+          <input type="text" id="perch-new-cwd" aria-labelledby="perch-new-cwd-label" placeholder="${escapeHtml(t("perch.cwdPlaceholder", lang))}" autocomplete="off" spellcheck="false">
+          <button type="button" id="perch-browse-btn">${escapeHtml(t("perch.browse", lang))}</button>
+          <div class="empty" id="perch-cwd-note">${escapeHtml(t("perch.cwdDefaultNote", lang))}</div>
+        </div>
+      </details>
+      <!-- OUTSIDE the details on purpose: every launcher error lands here,
+           and an error must never sit inside a closed disclosure. -->
       <div class="empty" id="perch-launch-note" hidden></div>
     </div>
     <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
