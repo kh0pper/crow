@@ -188,7 +188,7 @@ export async function mountFeatureRoutes(app, deps) {
     }
   }
 
-  // Mount tea-maps public routes (capstone choropleth bundle; no auth required)
+  // Mount tea-maps public routes (choropleth bundle; no auth required)
   try {
     const { existsSync } = await import("node:fs");
     const { join } = await import("node:path");
