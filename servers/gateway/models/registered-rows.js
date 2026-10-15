@@ -13,9 +13,10 @@ import { servingClassOf, startAffordance } from "./serving-class.js";
  * @param {object} args.core    a lifecycle core (lifecycle-core.js)
  * @param {object} args.catalog the model catalog ({ models: [...] })
  * @param {boolean} args.orchestrationDisabled
- * @returns {{ rows: object[], groups: string[], roles: string[], orchestrationDisabled: boolean }}
+ * @param {object} [args.env]  environment (CROW_LLAMA_SERVER_BIN)
+ * @returns {{ rows: object[], groups: string[], roles: string[], orchestrationDisabled: boolean, llamaServerBin: string|null }}
  */
-export function registeredSnapshot({ core, catalog, orchestrationDisabled }) {
+export function registeredSnapshot({ core, catalog, orchestrationDisabled, env = process.env }) {
   const providers = core.providers() || {};
   const byCatalogId = new Map((catalog?.models || []).map((m) => [m.id, m]));
   const rows = core.listing().map((row) => {
@@ -43,5 +44,8 @@ export function registeredSnapshot({ core, catalog, orchestrationDisabled }) {
   // Suggested provider ids (spec §6): the enabled bundle rows' ids, the
   // roles a native model can later take over in a migration window.
   const roles = Object.entries(providers).filter(([, p]) => doorKindOf(p) === "bundle").map(([id]) => id).sort();
-  return { rows, groups, roles, orchestrationDisabled: !!orchestrationDisabled };
+  // A host-level llama-server override from the environment is shown
+  // read-only (it is set outside the dashboard).
+  const llamaServerBin = typeof env?.CROW_LLAMA_SERVER_BIN === "string" && env.CROW_LLAMA_SERVER_BIN.trim() ? env.CROW_LLAMA_SERVER_BIN.trim() : null;
+  return { rows, groups, roles, orchestrationDisabled: !!orchestrationDisabled, llamaServerBin };
 }
