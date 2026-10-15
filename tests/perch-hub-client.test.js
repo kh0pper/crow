@@ -622,9 +622,9 @@ function makeResponse(status, body) {
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
 async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
-                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize } = {}) {
+                          legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en" } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
-  const js = perchHubJs("en");
+  const js = perchHubJs(lang);
 
   const IDS = ["perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
     "perch-session-meta", "perch-session-id", "perch-state", "perch-model", "perch-thinking", "perch-permission",
@@ -4812,4 +4812,89 @@ test("strand 2: a 422 tool_budget send keeps the operator's message and shows th
   assert.ok(!rows.some((t) => t.includes("Bot could not start")), "the bot did start; that label would be wrong");
   assert.ok(!rows.some((t) => t.trim() === "tool_budget"), "never the raw code");
   assert.equal(hub.els["perch-send"].textContent, "Send", "not a running turn");
+});
+
+// ---------------------------------------------------------------------------
+// Design quick win 1: friendlier chat rows. A bot turn is labelled with the
+// bot's display NAME; the operator's own turn has no visible label (the boxed
+// row reads as theirs) but keeps a visually hidden "You:" for screen readers.
+// Never the raw role words user / assistant / bot / you.
+// ---------------------------------------------------------------------------
+
+const msgRows = (hub) => hub.els["perch-transcript"].children
+  .filter((c) => /(^|\s)entry(\s|$)/.test(String(c.className)) && /(^|\s)(bot|user)(\s|$)/.test(String(c.className)));
+const whoOf = (row) => row.children.find((k) => /(^|\s)who(\s|$)/.test(String(k.className)));
+const RAW_ROLE = /^(user|assistant|bot|you)$/i;
+const histFetch = (events, roost) => stdFetch({
+  "/transcript": () => makeResponse(200, { events }),
+  ...(roost ? { "/roost": () => makeResponse(200, roost) } : {}),
+});
+const HIST = [userMsg("what boards are there?"),
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "There are four." }] } }];
+
+function assertLabels(hub, botLabel, youLabel = "You:") {
+  const rows = msgRows(hub);
+  assert.ok(rows.length > 0, "message rows were drawn");
+  for (const row of rows) {
+    const who = whoOf(row);
+    assert.ok(who, "every message row keeps a .who line: " + row.className);
+    assert.doesNotMatch(String(who.textContent), RAW_ROLE, "no raw role word as a label");
+    if (String(row.className).includes("user")) {
+      assert.equal(who.className, "who vh", "the operator's label is visually hidden");
+      assert.equal(who.textContent, youLabel, "but still said to screen readers");
+    } else {
+      assert.equal(who.className, "who", "the bot's label is visible");
+      assert.equal(who.textContent, botLabel, "the bot's display name");
+    }
+  }
+}
+
+test("QW1: history rows on the warm path carry the bot's name and a hidden You:", async () => {
+  const hub = await mountHub({ fetchImpl: histFetch(HIST) });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(msgRows(hub).length, 2);
+  assertLabels(hub, "R4 Assistant");
+});
+
+test("QW1: a cold deep link labels history AND live text/reply frames with the /roost name", async () => {
+  const hub = await mountHub({ fetchImpl: histFetch(HIST), initialHash: "#perchlive-aaaaaaaa" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  runTurn(hub, ["Streamed text."], "Streamed text.");
+  runTurn(hub, [], "Reply-only answer.");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["There are four.", "Streamed text.", "Reply-only answer."]);
+  assertLabels(hub, "R4 Assistant");
+});
+
+test("QW1: the operator's own echo is a hidden You: and the bot row keeps its copy button", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hello there";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  FakeEventSource.instances[0]._serverFrame("reply", { text: "hi!", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assertLabels(hub, "R4 Assistant");
+  const bot = msgRows(hub).find((r) => String(r.className).includes("bot"));
+  assert.ok(bot.children.some((k) => k.className === "copy-msg"), "copy button still on bot rows");
+  const user = msgRows(hub).find((r) => String(r.className).includes("user"));
+  assert.ok(!user.children.some((k) => k.className === "copy-msg"), "and still not on yours");
+});
+
+test("QW1: a bot with no display name falls back to its id", async () => {
+  const roost = { birds: [{ id: "r4", name: "", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false }] }] };
+  const hub = await mountHub({ fetchImpl: histFetch(HIST, roost), initialHash: "#perchlive-aaaaaaaa" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assertLabels(hub, "r4");
+});
+
+test("QW1 (es): the hidden operator label is translated", async () => {
+  const hub = await mountHub({ fetchImpl: histFetch(HIST), lang: "es" });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assertLabels(hub, "R4 Assistant", "T\u00fa:");
 });

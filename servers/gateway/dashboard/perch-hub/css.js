@@ -193,20 +193,25 @@ border-radius:0;padding:12px 16px;min-height:44px}
    .ask-card .ask-message) and renamed onto the classes THIS script emits
    (entry/who/what/ask-card/ask-title/ask-message/ask-controls — the bundle's
    own ask card nested a bare .title and used .ask-opts for the button row). */
-#perch-hub-root .entry{display:flex;gap:10px;font-size:14px}
-#perch-hub-root .who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
-#perch-hub-root .entry.user .who{color:var(--teal)}
-#perch-hub-root .what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
-/* Phones (client.js adds .perch-narrow to the root under 600px): no gutter.
-   The row wraps — role label (and a bot row's copy button) on one short line,
-   the message on the next at the FULL width; your own messages sit in a quiet
-   card so the two voices stay apart without the column. Cards (tool chips,
-   files, phone calls) are column boxes already and are untouched. */
-#perch-hub-root.perch-narrow .entry{flex-wrap:wrap;column-gap:10px;row-gap:2px}
-#perch-hub-root.perch-narrow .who{flex:1 1 auto;line-height:1.4}
-#perch-hub-root.perch-narrow .copy-msg{order:1}
-#perch-hub-root.perch-narrow .what{flex:1 1 100%;order:2}
-#perch-hub-root.perch-narrow .entry.user{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
+/* Design quick win 1: one stacked row at EVERY width (the old 64px role
+   gutter could not hold a bot's name). The label — the bot's display name in
+   normal case — and a bot row's copy button share one short line; the
+   message takes the next at the FULL width. Your own messages sit in a quiet
+   card and carry no visible label (a visually hidden "You:" for screen
+   readers, .who.vh below). Cards (tool chips, files, phone calls, artifacts)
+   are column boxes already and keep their own layout. position:relative
+   anchors that hidden label INSIDE the scrolling transcript: without it, the
+   labels of rows scrolled out of view hang below the page and make it scroll.
+   .perch-narrow (client.js, under 600px) stays as a class for other rules. */
+#perch-hub-root .entry{display:flex;flex-wrap:wrap;column-gap:10px;row-gap:2px;font-size:14px;position:relative}
+#perch-hub-root .who{flex:1 1 auto;min-width:0;font:600 13px/1.4 Inter,"Public Sans",system-ui,sans-serif;color:var(--ink);overflow-wrap:anywhere}
+#perch-hub-root .what{flex:1 1 100%;order:2;min-width:0;white-space:pre-wrap;word-break:break-word}
+#perch-hub-root .copy-msg{order:1}
+#perch-hub-root .entry.user{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
+/* The ONE visually-hidden rule (the phone card's .ph-sr shares it). .who.vh
+   outweighs .who above; user-select:none keeps "You:" out of a copied chat. */
+#perch-hub-root .vh,#perch-hub-root .who.vh,#perch-hub-root .ph-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;user-select:none;-webkit-user-select:none}
 /* Strand 1: a turn that ended in a model error. A plain BLOCK box at every
    width (the label is longer than the 64px role gutter, and a flex column let
    a long unbroken provider token push the row sideways at 412px); the error
@@ -621,7 +626,6 @@ white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 #perch-hub-root .phonecard .ph-t-agent{align-self:flex-start;background:var(--sky);border:1px solid var(--line);border-radius:14px 14px 14px 4px}
 #perch-hub-root .phonecard .ph-t-farend{align-self:flex-end;background:var(--teal-soft);border-radius:14px 14px 4px 14px}
 #perch-hub-root .phonecard .ph-t-state,#perch-hub-root .phonecard .ph-t-dtmf{align-self:center;font-size:12px;color:var(--dim);text-align:center}
-#perch-hub-root .phonecard .ph-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 #perch-hub-root .phonecard .ph-prompt{font-weight:600;color:var(--teal);font-size:13px}
 /* The composer is the card's last row; it wraps to two lines at narrow widths
    (input on its own line, Send + Hang up below) instead of overflowing. */
@@ -649,7 +653,7 @@ white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
 #perch-hub-root .artcard>*{min-width:0;max-width:100%}
 #perch-hub-root .artcard .art-head{display:flex;align-items:center;gap:8px}
-#perch-hub-root .artcard .art-eyebrow{font:11px/1.2 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+#perch-hub-root .artcard .art-eyebrow{font:600 13px/1.2 Inter,"Public Sans",system-ui,sans-serif;color:var(--dim)}
 #perch-hub-root .artcard .art-type{font-size:12px;color:var(--dim)}
 #perch-hub-root .artcard .art-pill{flex:none;margin-left:auto;display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;
 font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -673,7 +677,7 @@ border-radius:10px;color:var(--teal);font-size:13.5px;text-decoration:none}
 #perch-hub-root .artask,#perch-hub-root .artfb{flex-direction:column;gap:6px;align-self:stretch;width:100%;min-width:0;max-width:100%;
 background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
 #perch-hub-root :is(.artask,.artfb)>*{min-width:0;max-width:100%}
-#perch-hub-root :is(.artask,.artfb) .art-eyebrow{font:11px/1.2 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+#perch-hub-root :is(.artask,.artfb) .art-eyebrow{font:600 13px/1.2 Inter,"Public Sans",system-ui,sans-serif;color:var(--dim)}
 #perch-hub-root :is(.artask,.artfb) .art-title{font-weight:600;font-size:15px;color:var(--ink);word-break:break-word}
 #perch-hub-root :is(.artask,.artfb) .art-meta{font-size:13px;color:var(--dim)}
 #perch-hub-root :is(.artask,.artfb) .art-actions{display:flex;flex-wrap:wrap;gap:8px}
