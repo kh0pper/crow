@@ -4794,3 +4794,22 @@ test("strand 1 (review M2): a buffered error with the SAME text as an older turn
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(turnErrRows(hub).length, 2, "A's row from the batch AND B's live row");
 });
+
+// ---- Strand 2: a send refused for the tool budget keeps the text and says why ----
+
+test("strand 2: a 422 tool_budget send keeps the operator's message and shows the refusal itself, not 'could not start'", async () => {
+  const detail = "This session's model (m) accepts at most 128 tools; this bot has 318. Pick another model for this session.";
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => makeResponse(422, { error: "tool_budget", detail }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "book me a haircut";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = transcriptTexts(hub);
+  assert.ok(rows.some((t) => t.includes("book me a haircut")), "the message stays");
+  assert.ok(rows.some((t) => t.includes("accepts at most 128 tools")), "the reason is in the chat");
+  assert.ok(!rows.some((t) => t.includes("Bot could not start")), "the bot did start; that label would be wrong");
+  assert.ok(!rows.some((t) => t.trim() === "tool_budget"), "never the raw code");
+  assert.equal(hub.els["perch-send"].textContent, "Send", "not a running turn");
+});

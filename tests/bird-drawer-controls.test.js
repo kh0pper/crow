@@ -939,3 +939,8 @@ test("an inactive plan says nothing at all — no empty note, no noise line", as
   assert.ok(/if\s*\(\s*txt\s*\)/.test(listener.slice(0, 400)),
     "only append when there is something to say");
 });
+
+test("strand 2: a send refused for the tool budget shows the engine's sentence, not the raw code", async () => {
+  const sendFn = extractFunction(birdDrawerJs("en"), "bdSend");
+  assert.match(sendFn, /error==='tool_budget'[^;]*r\.j\.detail/, "tool_budget → the detail text");
+});

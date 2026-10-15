@@ -142,6 +142,7 @@ import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../
 import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
 import { markTaintUnrecorded } from "./session-taint-memory.js";
 import { redactErrorText, lastAssistantError } from "./perch-error-text.js";
+import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scripts/pi-bots/tool-budget.mjs";
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
@@ -368,13 +369,8 @@ function toolResultSnippet(result, cap) {
   return text.length > cap ? text.slice(0, cap) + "\u2026" : text;
 }
 
-/** Wave 2: how many tools the child's pinned --tools csv actually exposes
- *  ("" is a real, deliberate zero — the empty-envelope case). */
-function countCsvTools(csv) {
-  if (csv == null) return null;
-  const n = String(csv).split(",").filter((x) => x.trim()).length;
-  return Number.isFinite(n) ? n : null;
-}
+/** Wave 2: countCsvTools — how many tools the child's pinned --tools csv
+ *  exposes — lives in scripts/pi-bots/tool-budget.mjs (strand 2 shares it). */
 
 /** Wave 2: the child's RSS from /proc — Linux-only, best-effort, one small
  *  read, cheap enough to ride every state frame while the child is awake.
@@ -511,17 +507,20 @@ export function createInteractiveEngine({
       seams = bridge;
       return seams;
     }
-    const [world, br, life, warm, metering, tracker] = await Promise.all([
+    const [world, br, life, warm, metering, tracker, budget] = await Promise.all([
       import("../../scripts/pi-bots/bot-world.mjs"),
       import("../../scripts/pi-bots/bridge.mjs"),
       import("../../scripts/pi-bots/pi_lifecycle.mjs"),
       import("../../scripts/pi-bots/warm.mjs"),
       import("../../scripts/pi-bots/metering.mjs"),
       import("../../scripts/pi-bots/tracker.mjs"),
+      import("../../scripts/pi-bots/tool-budget.mjs"),
     ]);
     seams = {
       buildBotWorld: world.buildBotWorld,
       prepareSpawn: world.prepareSpawn,
+      // Strand 2: a model's tool cap, from provider data (null = none).
+      capFor: budget.capFor,
       PiRpc: br.PiRpc,
       warmModel: warm.warmModel,
       countLivePi: life.countLivePi,
@@ -1673,6 +1672,23 @@ export function createInteractiveEngine({
     s.childSince = Date.now();
     s.toolCount = countCsvTools(pi.toolsCsv);
     attachExit(s, pi);
+    // Strand 2: say it once on the rail when this child's model cannot take
+    // its tool surface (turns will be refused until the model changes), or is
+    // close to its limit. Once per session per (count, cap).
+    {
+      const b = checkToolBudget(pi.toolsCsv, sessionCap(S, s));
+      const mark = b.count + "/" + b.cap;
+      if (!b.ok) forgetCap(s);
+      // Kept on the session and replayed by subscribe(): a fresh spawn emits
+      // this before any client has subscribed.
+      s.budgetNotice = (!b.ok || b.near) ? (b.ok
+        ? "tool surface " + b.count + " is close to this model's limit of " + b.cap
+        : "this model accepts at most " + b.cap + " tools and this bot has " + b.count + " — turns will be refused until you pick another model for this session") : null;
+      if (s.budgetNotice && s.budgetWarned !== mark) {
+        s.budgetWarned = mark;
+        emit(s, { type: "log", text: s.budgetNotice });
+      }
+    }
 
     await writeRow(s, {
       status: "active",
@@ -1889,6 +1905,7 @@ export function createInteractiveEngine({
     // s.resolved says NOW, not what the turn started on — so the model that
     // actually served the reply is what gets metered.
     s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    s.budgetNotice = null;                        // strand 2: it described the old model
     // Fix round 3 R1: a /model typed in the TUI is an operator choice exactly
     // like the drawer's switch, and must survive a restart too. Never throws
     // (writeModel's own contract); pending-belted when the row is not yet
@@ -2280,6 +2297,51 @@ export function createInteractiveEngine({
    * reserveSlot() actually counts), refuse with a typed error. Returns true
    * (and the caller throws) iff the child is gone.
    */
+  /**
+   * Strand 2 (rev 4): the session's CURRENT model must accept the tool surface
+   * pinned into this child, or every turn dies as a provider 400. Checked when
+   * a turn starts — never at spawn/wake — so spawning on a capped default and
+   * then switching the session's model (the launcher does exactly that) keeps
+   * working. The cap is cached per model key. Over: the turn claim is
+   * released, the child stays, and the refusal names every way out.
+   */
+  function sessionCap(S, s) {
+    const key = s.resolved && s.resolved.key;
+    if (s.budgetCap && s.budgetCap.key === key) return s.budgetCap.cap;
+    let cap = null;
+    try { cap = typeof S.capFor === "function" ? S.capFor(s.resolved) : null; } catch { cap = null; }   // fails open
+    s.budgetCap = { key, cap };
+    return cap;
+  }
+
+  /** A refusing cap is never kept: an operator who raises the model's
+   *  maxTools on the provider row is honoured on the very next send. */
+  function forgetCap(s) { s.budgetCap = null; }
+
+  function refuseIfOverBudget(S, s, turn) {
+    const b = checkToolBudget(s.pi.toolsCsv, sessionCap(S, s));
+    if (b.ok) return;
+    const detail = sessionBudgetMessage({ count: b.count, cap: b.cap, model: (s.resolved && s.resolved.model) || "?" });
+    forgetCap(s);
+    s.lastError = detail;
+    // A card dispatch starts its turn fire-and-forget, so with nobody
+    // watching the refusal would go unseen: push it, like an away reply.
+    if (s.subscribers.size === 0) {
+      pushAttention({
+        type: "attention",
+        priority: "normal",
+        title: s.botId + " can't run its turn",
+        body: detail.slice(0, 140),
+        action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+      });
+    }
+    if (s.turn === turn) s.turn = null;
+    writeRow(s, { status: "waiting-user" }).catch(() => {});
+    emit(s, stateEvent(s));
+    armIdle(s);
+    throw engineError("tool_budget", { detail });
+  }
+
   function refuseIfPiGone(s, turn) {
     if (s.pi) return false;
     if (s.turn === turn) s.turn = null;
@@ -2504,6 +2566,7 @@ export function createInteractiveEngine({
     // D1: the child may already be gone (killed the instant before this call
     // landed) — refuse honestly rather than null-deref s.pi below.
     if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
+    refuseIfOverBudget(S, s, turn);
     turn.statsBefore = await s.pi.getSessionStats().catch(() => null);
     // D1: …or it died WHILE that stats call was in flight.
     if (refuseIfPiGone(s, turn)) throw engineError("pi_gone", { detail: s.lastError });
@@ -2755,6 +2818,7 @@ export function createInteractiveEngine({
         s.currentModelParts = { provider: rProvider, modelId: rId };
         s.currentModel = rKey;
         s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
+        s.budgetNotice = null;                        // strand 2: it described the old model
         applied.model = rKey;
         await writeModel(s);                           // survives a restart (N2)
         // The child's OWN model_select event for this same switch will also
@@ -3202,6 +3266,9 @@ export function createInteractiveEngine({
       // waiting for the NEXT bus tick (which may never come if nothing
       // changes).
       if (s.planMode) fn({ type: "plan_state", state: s.planMode });
+      // Strand 2: the child's tool-budget notice (emitted at spawn, usually
+      // before anyone was listening).
+      if (s.budgetNotice && s.pi) fn({ type: "log", text: s.budgetNotice });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }

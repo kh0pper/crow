@@ -2106,6 +2106,10 @@ export function perchHubJs(lang = "en") {
          read as one, flipping the composer to Steer and saying nothing. */
       if(r.status===409&&(code==='turn_in_progress'||!code)){ setTurnInFlight(true); return; }
       if(code==='pi_gone'){ showSendFailure(mySid,(r.j&&r.j.detail)||code); return; }
+      /* Strand 2: the session's model can't take this bot's tools. The bot
+         DID start, so no "could not start" label — the engine's sentence
+         (model, both numbers, the ways out) is the whole note. */
+      if(code==='tool_budget'){ showSendFailure(mySid,(r.j&&r.j.detail)||code,true); return; }
       if(!r.ok) appendNote(code||SEND_FAILED);
     });
   }
@@ -2128,7 +2132,7 @@ export function perchHubJs(lang = "en") {
   function bumpUnsentAfter(sid,delta){
     (unsent[sid]||[]).forEach(function(u){ u.after=Math.max(0,(u.after||0)+delta); });
   }
-  function showSendFailure(sid,detail){
+  function showSendFailure(sid,detail,bare){
     if(!lastSent||lastSent.sid!==sid) return;
     var rec=lastSent;
     var sent=rec.text;
@@ -2139,7 +2143,7 @@ export function perchHubJs(lang = "en") {
        message_end), so it IS in the on-disk transcript. It is still kept as
        unsent — the death may have come before pi wrote it — but flagged, so
        replayUnsent drops it when the rebuilt transcript already has it. */
-    var note=BOT_START_FAILED+' '+String(detail||'');
+    var note=bare?String(detail||''):BOT_START_FAILED+' '+String(detail||'');
     appendNote(note);
     if(sent==null||sent==='') return;
     (unsent[sid]=unsent[sid]||[]).push({text:sent,note:note,after:0,maybeDelivered:!!rec.counted});

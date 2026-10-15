@@ -154,6 +154,10 @@ const ERROR_MAP = {
   // write to, and minting a row would leave a phantom for a session that never
   // spawned. 409, not 500 — the refusal is honest and the session is fine.
   not_persisted: [409, "not_persisted"],
+  // Strand 2: the session's model cannot take this bot's tool surface. 422,
+  // not 409 — nothing is busy or gone; the request can't be served as is.
+  // `detail` names the model, both numbers and the ways out.
+  tool_budget: [422, "tool_budget"],
 };
 
 function mapEngineError(res, err) {

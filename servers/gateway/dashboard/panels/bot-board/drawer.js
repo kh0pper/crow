@@ -920,7 +920,10 @@ export function birdDrawerJs(lang) {
     perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/message',body).then(function(r){
       if(!r.ok){
         bdSetTurnInFlight(false);
-        bdAppendNote('err',(r.j&&r.j.error)||'${tJs("botboard.bdSendFailed", lang)}');
+        // Strand 2: a tool-budget refusal carries the engine's sentence (the
+        // model, both numbers, the ways out) — show it, not the bare code.
+        var why=(r.j&&r.j.error==='tool_budget'&&r.j.detail)||(r.j&&r.j.error);
+        bdAppendNote('err',why||'${tJs("botboard.bdSendFailed", lang)}');
       }
     }).catch(function(){
       bdSetTurnInFlight(false);
