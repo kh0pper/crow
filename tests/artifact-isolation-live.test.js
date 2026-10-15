@@ -380,9 +380,10 @@ test("the viewer refuses grants that would weaken the frame (bad sandbox, bad UR
     ];
     for (const b of bads) {
       // D28/review H2: refused LOCALLY (onRefuse) — never framed, never a trip/flag.
-      const out = await t.evalIn(`(() => { const r = { trips: [], refused: [] }; const v = CrowArtifactViewer.mount({ container: c, mint: () => (${JSON.stringify(b)}), onTrip: (x) => r.trips.push(x), onRefuse: (x) => r.refused.push(x) });
-        return v.load().then(() => "mounted", (e) => e.message + "|" + r.trips.join(",") + "|" + r.refused.join(",") + "|" + v.state().framed); })()`);
-      assert.equal(out, "bad-grant||bad-grant|false", JSON.stringify(b).slice(0, 120));
+      // D28 low: the refused grant's minted token is handed back for revocation.
+      const out = await t.evalIn(`(() => { const r = { trips: [], refused: [], revoked: [] }; const v = CrowArtifactViewer.mount({ container: c, mint: () => (${JSON.stringify(b)}), onTrip: (x) => r.trips.push(x), onRefuse: (x) => r.refused.push(x), revoke: (id) => r.revoked.push(id) });
+        return v.load().then(() => "mounted", (e) => e.message + "|" + r.trips.join(",") + "|" + r.refused.join(",") + "|" + v.state().framed + "|" + r.revoked.join(",")); })()`);
+      assert.equal(out, "bad-grant||bad-grant|false|" + b.tokenId, JSON.stringify(b).slice(0, 120));
     }
     assert.equal(await t.evalIn("window.__pwned"), undefined);
   } finally { await t.close(); }

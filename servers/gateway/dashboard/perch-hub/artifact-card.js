@@ -192,7 +192,23 @@ export function perchArtifactCardJs(lang = "en") {
     node.appendChild(acts);
     node.appendChild(body);
     artFb[c.roundId]=node;
+    /* Review L9: on reload the history rows carry their time (data-ts), so
+       the card goes back where the round was delivered: before the first
+       message newer than the round. A card newer than every stamped row
+       (a live delivery) still lands at the end, scrolled into view. */
+    var ref=fbPlace(tr,c.at);
+    if(ref){ tr.insertBefore(node,ref); return; }
     tr.appendChild(node); tr.scrollTop=tr.scrollHeight;
+  }
+  function fbPlace(tr,at){
+    var t=Date.parse(String(at||'').replace(' ','T')+'Z');
+    if(!isFinite(t)) return null;
+    var kids=tr.children||[];
+    for(var i=0;i<kids.length;i++){
+      var ts=Number(kids[i].getAttribute&&kids[i].getAttribute('data-ts'));
+      if(ts&&ts>t) return kids[i];
+    }
+    return null;
   }
 
   /* Ask-first linking (spec v1.6 D25, plan PR-3 Task 3.5): a bot asked to

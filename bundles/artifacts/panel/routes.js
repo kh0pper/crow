@@ -174,12 +174,17 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     if (!r) throw Object.assign(new Error("no such card"), { code: "not_found" });
     const art = await M.store.requireAccess(S.db, OWNER, r.artifact_id);
     let snap = {}; try { snap = JSON.parse(r.snapshot_json || "{}") || {}; } catch { snap = {}; }
+    // Review L5: the words AS SENT (frozen at Send); a round frozen before
+    // owner_text existed falls back to today's text.
+    const sent = snap.owner_text && typeof snap.owner_text === "object" ? snap.owner_text : {};
+    const textOf = (c) => (Object.prototype.hasOwnProperty.call(sent, String(c.id)) && typeof sent[c.id] === "string" ? sent[c.id] : c.text);
     const threads = [];
     for (const [tid, maxId] of Object.entries(snap)) {
+      if (!/^\d+$/.test(tid)) continue;
       const t = (await S.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=? AND artifact_id=?", args: [Number(tid), art.id] })).rows[0];
       if (!t) continue;
-      const cs = (await S.db.execute({ sql: "SELECT text FROM artifact_comments WHERE thread_id=? AND id<=? AND author_kind='owner' AND deleted_at IS NULL ORDER BY id", args: [Number(tid), Number(maxId)] })).rows;
-      threads.push({ anchor: anchorLabel(t.anchor_json), comments: cs.map((c) => c.text) });
+      const cs = (await S.db.execute({ sql: "SELECT id, text FROM artifact_comments WHERE thread_id=? AND id<=? AND author_kind='owner' AND deleted_at IS NULL ORDER BY id", args: [Number(tid), Number(maxId)] })).rows;
+      threads.push({ anchor: anchorLabel(t.anchor_json), comments: cs.map(textOf) });
     }
     res.setHeader("cache-control", "no-store");
     res.json({ roundId: rid, artifactId: art.id, title: art.title, version: Number(r.base_version), threads });
@@ -369,6 +374,20 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       sandbox: fg.sandbox, scripted: fg.speaks, scriptsOff,
       isolation: S.runtime.isolationFor(req.headers.host),
     });
+  }));
+
+  /**
+   * D28 (review low): the viewer refused a grant locally (bad-grant) and hands
+   * back the token that mint already made live. Revoked only when it belongs
+   * to THIS artifact; any other id is a no-op.
+   */
+  router.post("/api/artifacts/:id/view-tokens/revoke", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const tokens = S.runtime.viewTokens();
+    const id = typeof req.body?.tokenId === "string" ? req.body.tokenId : null;
+    const mine = !!id && tokens.evidence(id)?.artifactId === art.id;
+    if (mine) tokens.revokeToken(id);
+    res.json({ revoked: mine });
   }));
 
   /**

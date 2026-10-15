@@ -237,6 +237,48 @@ test("D24: a retry's view call revokes the token it replaces (same artifact only
   assert.ok(runtime.viewTokens().check(o.body.url.split("/v/")[1].slice(0, 43)), "another artifact's token survives");
 });
 
+test("D28 review L-5: the REAL view-mint route's grants — document helper-only, page scripted, tainted page sealed — all pass the REAL viewer validGrant", async () => {
+  const { readFileSync } = await import("node:fs");
+  const vm = await import("node:vm");
+  const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
+  const box = { URL, location: { origin: `http://${s.host}` }, document: { createElement: () => ({ style: {}, setAttribute() {}, addEventListener() {} }), addEventListener() {} }, setTimeout, clearTimeout, console };
+  box.window = box;
+  vm.createContext(box);
+  vm.runInContext(src, box);
+  const { validGrant } = box.CrowArtifactViewer;
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Grant doc", type: "document", source: { markdown: "# g" }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const page = await store.createArtifact(s.db, s.blobs, { title: "Grant page", type: "page", source: { html: "<p>g</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const tainted = await store.addVersion(s.db, s.blobs, { artifactId: page.id, source: { html: "<p>shaped</p>" }, actor: { kind: "session" }, untrusted: true }, {});
+  const cases = [
+    [doc.id, 1, { sandbox: "allow-scripts", scripted: true, scriptsOff: false }],
+    [page.id, 1, { sandbox: "allow-scripts", scripted: true, scriptsOff: false }],
+    [page.id, tainted.n, { sandbox: "", scripted: false, scriptsOff: true }],
+  ];
+  for (const [id, n, want] of cases) {
+    const g = await req("POST", `/api/artifacts/${id}/versions/${n}/view`);
+    assert.equal(g.status, 200);
+    assert.deepEqual({ sandbox: g.body.sandbox, scripted: g.body.scripted, scriptsOff: g.body.scriptsOff }, want, `${id} v${n}`);
+    assert.equal(validGrant(g.body), true, `${id} v${n}: the route's own grant passes the viewer`);
+  }
+});
+
+test("D28 low: the viewer hands back a refused grant's token — the revoke route kills it (same artifact only, owner + CSRF)", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "D28 revoke", type: "page", source: { html: "<p>r</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const other = await store.createArtifact(s.db, s.blobs, { title: "D28 other", type: "page", source: { html: "<p>o</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const a = await req("POST", `/api/artifacts/${art.id}/versions/1/view`);
+  const o = await req("POST", `/api/artifacts/${other.id}/versions/1/view`);
+  const secret = (g) => g.body.url.split("/v/")[1].slice(0, 43);
+  const path = `/api/artifacts/${art.id}/view-tokens/revoke`;
+  assert.equal((await req("POST", path, { body: { tokenId: a.body.tokenId }, csrf: null })).status, 403);
+  assert.equal((await req("POST", path, { body: { tokenId: a.body.tokenId }, cookie: null })).status, 401);
+  assert.ok(runtime.viewTokens().check(secret(a)), "nothing revoked by a refused request");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: o.body.tokenId } })).body, { revoked: false }, "another artifact's token is ignored");
+  assert.ok(runtime.viewTokens().check(secret(o)), "another artifact's token survives");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: a.body.tokenId } })).body, { revoked: true });
+  assert.equal(runtime.viewTokens().check(secret(a)), null, "the refused grant's secret no longer serves");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: 42 } })).body, { revoked: false }, "a malformed id is a no-op");
+});
+
 function getPage(path, { cookie = "crow_session=good; crow_csrf=tok" } = {}) {
   return new Promise((resolve, reject) => {
     const r = http.request({ host: "127.0.0.1", port: s.port, path, method: "GET", headers: cookie ? { cookie } : {} }, (res) => {
@@ -531,6 +573,26 @@ test("feedback cards (PR-3 Task 3.8): a chat lists the TRUSTED rounds delivered 
   // Owner-only like every route here.
   assert.equal((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1", { cookie: null })).status, 401);
   assert.equal((await req("GET", `/api/artifacts/rounds/${r1.id}/card`, { cookie: null })).status, 401);
+});
+
+test("review L5: the feedback card shows each owner comment AS SENT, even after the owner edits it once the round ends", async () => {
+  const { addThread, addComment, editComment } = await import("../bundles/artifacts/server/comments.js");
+  const rounds = await import("../bundles/artifacts/server/rounds.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Edited later", type: "document", source: { markdown: "# e" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-e1", gateway: "perch" } }, { markdownBlocks });
+  const t = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "AS-SENT first", author: { kind: "owner" } });
+  const c2 = await addComment(s.db, { threadId: t.threadId, text: "AS-SENT second", author: { kind: "owner" } });
+  const r = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t.threadId], targetThread: "perchlive-e1" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done', delivery='perch-session', session_id='perchlive-e1' WHERE id=?", args: [r.id] });
+  // The round is over, so the owner may edit again.
+  const first = Number((await s.db.execute({ sql: "SELECT id FROM artifact_comments WHERE thread_id=? ORDER BY id LIMIT 1", args: [t.threadId] })).rows[0].id);
+  await editComment(s.db, { commentId: first, artifactId: art.id, text: "EDITED-AFTER first", actor: { kind: "session" } });
+  await editComment(s.db, { commentId: c2.commentId, artifactId: art.id, text: "EDITED-AFTER second", actor: { kind: "session" } });
+  const card = await req("GET", `/api/artifacts/rounds/${r.id}/card`);
+  assert.equal(card.status, 200);
+  assert.deepEqual(card.body.threads[0].comments, ["AS-SENT first", "AS-SENT second"]);
+  // A round frozen before this fix carries no texts: it shows today's text (the old behaviour).
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET snapshot_json=? WHERE id=?", args: [JSON.stringify({ [t.threadId]: c2.commentId }), r.id] });
+  assert.deepEqual((await req("GET", `/api/artifacts/rounds/${r.id}/card`)).body.threads[0].comments, ["EDITED-AFTER first", "EDITED-AFTER second"]);
 });
 
 test("Library (PR-3 Task 3.9): list badges come from store rows; the audit tab serves the last 50; Unlink is an owner route that stops fan-out and Send", async () => {

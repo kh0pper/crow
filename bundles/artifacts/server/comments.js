@@ -28,13 +28,26 @@ export function validAnchor(a) {
  * stored anchor map, server-side. The client (and the frame behind it) only
  * names the block id and the quote; the block TEXT always comes from the
  * map. A quote that does not occur in that block's rendered text (`plain`,
- * or `text` for versions saved before D28) is not that block's: it becomes
- * a text anchor instead, so a comment can never be pinned to the wrong
- * section. Non-block anchors pass through. Returns null when unanchorable.
+ * or `text` minus its markdown markup for versions saved before D28) is
+ * not that block's: it becomes a text anchor instead, so a comment can
+ * never be pinned to the wrong section. Non-block anchors pass through. Returns null when unanchorable.
  */
 // Compared with ALL whitespace removed (review M-1): rendered text and a
 // browser selection disagree about spaces around inline formatting.
 const noWs = (s) => String(s || "").replace(/\s+/g, "");
+// D28 (review low): versions saved before D28 have no `plain`, only the
+// block's markdown `text` (capped at 400 chars). A selection is rendered
+// text, so drop the common markdown markup before comparing: link/image
+// syntax keeps its label, block markers go, emphasis/code marks go only when
+// they wrap words (snake_case and 2*3 stay). Past the 400-char cap a quote
+// still demotes to a text anchor, which is the safe direction.
+const mdPlain = (s) => String(s || "")
+  .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+  .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d+[.)][ \t]+)/gm, "")
+  .replace(/`+([^`]*?)`+/g, "$1")
+  .replace(/(\*\*|__|~~)(?=\S)([\s\S]*?\S)\1/g, "$2")
+  .replace(/(^|[^\w*])([*_])(?=\S)([^*_]*?\S)\2(?![\w*])/g, "$1$3");
+const renderedOf = (b) => (typeof b.plain === "string" ? b.plain : mdPlain(b.text));
 export function resolveBlockAnchor(anchorMap, a) {
   if (!a || a.kind !== "block") return a;
   const quote = typeof a.quote === "string" ? a.quote.slice(0, 1000) : "";
@@ -47,7 +60,7 @@ export function resolveBlockAnchor(anchorMap, a) {
   // A section the owner picked from the trusted list stays that section even
   // when the typed "exact words" are not verbatim (review low); its quote is
   // owner text and never crosses into the frame (pins carry the id only).
-  if (quote.trim() && !a.fromList && !noWs(typeof b.plain === "string" ? b.plain : b.text).includes(noWs(quote))) return asText();
+  if (quote.trim() && !a.fromList && !noWs(renderedOf(b)).includes(noWs(quote))) return asText();
   return { kind: "block", id: b.id, text: String(b.text || "").slice(0, 400), quote };
 }
 

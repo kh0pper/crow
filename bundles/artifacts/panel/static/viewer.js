@@ -27,7 +27,12 @@
  *    mount only on an explicit owner action;
  *  - the grant from mint() is not trusted: sandbox must be exactly "" or
  *    "allow-scripts" (and agree with `scripted`), the URL must be http(s),
- *    /v/<43-char token>/ and NOT the dashboard's own origin — else bad-grant;
+ *    /v/<43-char token>/ and NOT the dashboard's own origin. A grant that
+ *    fails is refused LOCALLY ("bad-grant" via opts.onRefuse; D28): nothing
+ *    is framed, it is NOT a trip (no flag, no report, the mount stays usable)
+ *    because a malformed grant is our own route/policy skew, not content
+ *    escaping. Its minted token is handed to opts.revoke so it never outlives
+ *    the refusal;
  *  - a fragment jump (showBlock) mounts a FRESH frame (new token, first load)
  *    instead of changing src, so no "expected load" flag exists that a later
  *    real navigation could hide behind;
@@ -231,7 +236,12 @@
         if (state.tripped || gen !== state.gen) throw new Error("stale");
         // D28/review H2: a malformed grant is OUR bug (route/policy skew), not
         // an escape attempt — refuse locally, never flag the version.
-        if (!validGrant(g)) { try { opts.onRefuse && opts.onRefuse("bad-grant"); } catch (x) {} throw new Error("bad-grant"); }
+        if (!validGrant(g)) {
+          // The server minted a live token for this grant: hand it back.
+          if (g && typeof g.tokenId === "string") { try { opts.revoke && Promise.resolve(opts.revoke(g.tokenId)).catch(function () {}); } catch (x) {} }
+          try { opts.onRefuse && opts.onRefuse("bad-grant"); } catch (x) {}
+          throw new Error("bad-grant");
+        }
         if (state.iframe) { state.iframe.remove(); state.iframe = null; }
         clearTimeout(state.helloTimer);
         state.grant = g; state.loads = 0; state.hello = false; state.stamps = [];

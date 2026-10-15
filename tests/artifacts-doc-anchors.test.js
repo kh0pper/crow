@@ -35,6 +35,22 @@ test("resolveBlockAnchor: map text + a quote found in rendered text → block an
   assert.equal(resolveBlockAnchor(null, { kind: "block", id: "b1", quote: "q" }).kind, "text", "no map → text anchor");
 });
 
+test("D28 low: a pre-D28 version (no plain) matches a selection against its markdown with the markup stripped, still never another block's words", () => {
+  // What a pre-D28 anchor map holds: markdown text only, no plain.
+  const old = { kind: "blocks", blocks: [
+    { id: "b1", type: "p", text: "Hello **bold** and _italic_ with `code` and [a link](https://x.example) here." },
+    { id: "b2", type: "h2", text: "## A heading" },
+    { id: "b3", type: "p", text: "Another block entirely." },
+    { id: "b4", type: "p", text: "Name it snake_case or 2*3*4." },
+  ] };
+  for (const [id, quote] of [["b1", "bold and italic"], ["b1", "with code and a link here"], ["b2", "A heading"], ["b4", "snake_case or 2*3*4"]]) {
+    assert.deepEqual(resolveBlockAnchor(old, { kind: "block", id, quote }), { kind: "block", id, text: old.blocks.find((b) => b.id === id).text, quote }, `${id}: "${quote}"`);
+  }
+  assert.equal(resolveBlockAnchor(old, { kind: "block", id: "b1", quote: "snake_case" }).kind, "text", "words not in the block still demote");
+  assert.equal(resolveBlockAnchor(old, { kind: "block", id: "b1", quote: "Another block" }).kind, "text", "another block's words still demote");
+  assert.equal(resolveBlockAnchor(old, { kind: "block", id: "b1", quote: "x.example" }).kind, "text", "a link's URL is markup, not rendered words");
+});
+
 test("review M1: the renderer is the meta-refresh control for helper-only documents — hostile markdown never yields meta, base, script, iframe, object, form or event handlers", async () => {
   const md = [
     '<meta http-equiv="refresh" content="0;url=https://evil.example/">',

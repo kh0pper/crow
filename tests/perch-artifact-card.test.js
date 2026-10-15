@@ -92,6 +92,8 @@ function makeEl(tag) {
     className: "", textContent: "", hidden: false, disabled: false, type: "", scrollTop: 0,
     style: {}, onclick: null,
     appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+    insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) return this.appendChild(c); this.children.splice(i, 0, c); c.parentNode = this; return c; },
+    getAttribute(k) { return this["attr:" + k] === undefined ? null : this["attr:" + k]; },
     removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; },
     setAttribute(k, v) { this["attr:" + k] = v; },
     focus() { this.focused = true; },
@@ -583,6 +585,30 @@ test("feedback cards: one per delivered round (keyed by round id, never re-bound
   assert.deepEqual(Object.keys(api.feedback()).sort(), ["4", "5"]);
   api.resetArtifactCards();
   assert.deepEqual(Object.keys(api.feedback()), [], "the index dies with the transcript");
+});
+
+test("review L9: on reload a feedback card keeps its place in the transcript (before the first message newer than the round), not the end", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/rounds-by-thread/")) return json({ cards: [
+        { roundId: 21, artifactId: "art_l9", title: "Plan", version: 1, count: 1, at: "2026-10-13 22:17:00" },
+        { roundId: 22, artifactId: "art_l9", title: "Plan", version: 2, count: 1, at: "2026-10-13 23:59:00" },
+      ] });
+      return json(row({ id: "art_l9" }));
+    },
+  });
+  const msg = (label, iso) => { const n = hub.sandbox.line("entry user", label); if (iso) n.setAttribute("data-ts", String(Date.parse(iso))); hub.transcript.appendChild(n); return n; };
+  msg("before", "2026-10-13T22:16:54.950Z");
+  msg("round message", "2026-10-13T22:17:01.000Z");
+  msg("reply", "2026-10-13T22:17:30.000Z");
+  msg("live echo, no stamp", null);
+  hub.sandbox.__exportedApi.loadFeedbackCards(sidX);
+  await tick();
+  const order = hub.transcript.children.map((n) => (String(n.className).includes("artfb") ? "card" : n.textContent));
+  assert.deepEqual(order, ["before", "card", "round message", "reply", "live echo, no stamp", "card"],
+    "round 21 sits where it was delivered; round 22 (newer than every stamped message) stays at the end");
 });
 
 test("review L6: authored titles are literal — no $-pattern expansion, no placeholder re-substitution", async () => {

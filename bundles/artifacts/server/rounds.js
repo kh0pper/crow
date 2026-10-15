@@ -16,7 +16,7 @@ export const ACTIVE = ["queued", "pending", "delivering", "working"];
 /** Tools an untrusted round's session keeps (bridge allow-list, narrowing-lock.mjs). */
 export const UNTRUSTED_ALLOW = ["crow:only:mcp__artifacts__"];
 
-/** @param snapshot  {threadId: maxCommentId} — when given, only comments up to
+/** @param snapshot  {threadId: maxCommentId, owner_text?} — when given, only comments up to
  *  that id are returned (R2-H1: a round sends exactly what the owner saw). */
 async function threadsWithComments(db, artifactId, ids = null, snapshot = null) {
   const threads = (await db.execute({ sql: "SELECT * FROM artifact_threads WHERE artifact_id=? ORDER BY id", args: [artifactId] })).rows
@@ -130,9 +130,17 @@ export async function startRound(db, { artifactId, actor, include, kind = "round
     if (threads.length !== 1 || threads[0].author_kind !== "owner" || untrustedT(threads[0])) throw err("forbidden", "Ask now is owner-only: one of your own threads");
   }
   const untrusted = threads.some(untrustedT) || (await baseTainted(db, artifactId, Number(art.current_version))) ? 1 : 0;
-  // R2-H1: freeze exactly what is being sent.
+  // R2-H1: freeze exactly what is being sent. Review L5: the OWNER's words
+  // are frozen too (owner_text: commentId -> text), so the chat's feedback
+  // card keeps showing what was sent after the owner edits a comment once
+  // the round ends. Readers index the snapshot by numeric thread id only.
   const snapshot = {};
-  for (const t of threads) snapshot[Number(t.id)] = t.comments.length ? Math.max(...t.comments.map((c) => Number(c.id))) : 0;
+  const ownerText = {};
+  for (const t of threads) {
+    snapshot[Number(t.id)] = t.comments.length ? Math.max(...t.comments.map((c) => Number(c.id))) : 0;
+    for (const c of t.comments) if (c.author_kind === "owner") ownerText[Number(c.id)] = String(c.text);
+  }
+  snapshot.owner_text = ownerText;
   const deadline = now + (kind === "ask" ? LIMITS.askTimeoutMs : LIMITS.roundTimeoutMs);
   let roundId;
   try {

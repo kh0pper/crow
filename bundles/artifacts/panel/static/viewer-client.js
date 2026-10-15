@@ -347,6 +347,7 @@
     var viewer = S.viewer = window.CrowArtifactViewer.mount({
       container: frameBox,
       mint: function (fragment, x) { return api("POST", BASE + "/versions/" + n + "/view", { fragment: fragment || null, replaces: (x && x.replaces) || null }); },
+      revoke: function (tokenId) { return api("POST", BASE + "/view-tokens/revoke", { tokenId: tokenId }); },
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
       // A tap (pages) composes at once; a SELECTION waits for the owner's tap
       // on the trusted "Comment on …" button (review H1).
@@ -479,6 +480,22 @@
           if (t.untrusted) body.insertBefore(el("em", { text: T.contact_thread }), body.firstChild);
           dlg.appendChild(el("div", { class: "cv-pv" + (t.untrusted ? " cv-untrusted" : "") }, [el("label", {}, [cb, el("span", { text: " " + T.include })]), body]));
         });
+      }
+      // Review L7: words from outside the owner's Crow (a ticked contact
+      // thread, or a base version shaped by one) make the server send the
+      // round to a NEW, LOCKED chat whatever is picked below — say so.
+      var lockedNote = null;
+      if (pv) {
+        lockedNote = el("p", { class: "cv-note cv-outside-note", role: "status", text: fmt(T.outside_note, { bot: info.bot || T.bot }) });
+        var syncLocked = function () {
+          var outside = !!pv.baseTainted || Array.prototype.some.call(dlg.querySelectorAll("input.cv-include:checked"), function (x) {
+            return pv.threads.some(function (t) { return String(t.id) === x.value && t.untrusted; });
+          });
+          lockedNote.hidden = !outside;
+        };
+        Array.prototype.forEach.call(dlg.querySelectorAll("input.cv-include"), function (x) { x.addEventListener("change", syncLocked); });
+        syncLocked();
+        dlg.appendChild(lockedNote);
       }
       var where = whereStep(dlg, info, roundId);
       var close = function () { dlg.close(); dlg.remove(); };
