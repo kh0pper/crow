@@ -1678,11 +1678,15 @@ export function createInteractiveEngine({
     {
       const b = checkToolBudget(pi.toolsCsv, sessionCap(S, s));
       const mark = b.count + "/" + b.cap;
-      if ((!b.ok || b.near) && s.budgetWarned !== mark) {
+      if (!b.ok) forgetCap(s);
+      // Kept on the session and replayed by subscribe(): a fresh spawn emits
+      // this before any client has subscribed.
+      s.budgetNotice = (!b.ok || b.near) ? (b.ok
+        ? "tool surface " + b.count + " is close to this model's limit of " + b.cap
+        : "this model accepts at most " + b.cap + " tools and this bot has " + b.count + " — turns will be refused until you pick another model for this session") : null;
+      if (s.budgetNotice && s.budgetWarned !== mark) {
         s.budgetWarned = mark;
-        emit(s, { type: "log", text: b.ok
-          ? "tool surface " + b.count + " is close to this model's limit of " + b.cap
-          : "this model accepts at most " + b.cap + " tools and this bot has " + b.count + " — turns will be refused until you pick another model for this session" });
+        emit(s, { type: "log", text: s.budgetNotice });
       }
     }
 
@@ -2309,11 +2313,27 @@ export function createInteractiveEngine({
     return cap;
   }
 
+  /** A refusing cap is never kept: an operator who raises the model's
+   *  maxTools on the provider row is honoured on the very next send. */
+  function forgetCap(s) { s.budgetCap = null; }
+
   function refuseIfOverBudget(S, s, turn) {
     const b = checkToolBudget(s.pi.toolsCsv, sessionCap(S, s));
     if (b.ok) return;
     const detail = sessionBudgetMessage({ count: b.count, cap: b.cap, model: (s.resolved && s.resolved.model) || "?" });
+    forgetCap(s);
     s.lastError = detail;
+    // A card dispatch starts its turn fire-and-forget, so with nobody
+    // watching the refusal would go unseen: push it, like an away reply.
+    if (s.subscribers.size === 0) {
+      pushAttention({
+        type: "attention",
+        priority: "normal",
+        title: s.botId + " can't run its turn",
+        body: detail.slice(0, 140),
+        action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+      });
+    }
     if (s.turn === turn) s.turn = null;
     writeRow(s, { status: "waiting-user" }).catch(() => {});
     emit(s, stateEvent(s));
@@ -3244,6 +3264,9 @@ export function createInteractiveEngine({
       // waiting for the NEXT bus tick (which may never come if nothing
       // changes).
       if (s.planMode) fn({ type: "plan_state", state: s.planMode });
+      // Strand 2: the child's tool-budget notice (emitted at spawn, usually
+      // before anyone was listening).
+      if (s.budgetNotice && s.pi) fn({ type: "log", text: s.budgetNotice });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }

@@ -37,7 +37,8 @@ function readProviderRow(provider) {
     // busy_timeout-only, read-only, short-lived — never createDbClient (the
     // bridge must not WAL-flip a prod crow.db; same idiom as model_resolver).
     d = new Database(botsDbPath(), { readonly: true, fileMustExist: true });
-    d.pragma("busy_timeout = 10000");
+    // Short: this read is synchronous inside the gateway's event loop.
+    d.pragma("busy_timeout = 1000");
     try {
       return d.prepare("SELECT models, gpu_policy FROM providers WHERE id=?").get(provider) || null;
     } catch {
@@ -80,6 +81,12 @@ export function checkToolBudget(csv, cap) {
 export function sessionBudgetMessage({ count, cap, model }) {
   return "This session's model (" + model + ") accepts at most " + cap + " tools; this bot has " + count +
     ". Pick another model for this session, untick services in Bot Builder, or change the bot's default model.";
+}
+
+/** Operator surfaces (a job's recorded error, the board): names the model. */
+export function operatorBudgetMessage({ count, cap, key }) {
+  return "tool budget: this bot has " + count + " tools and " + key + " accepts at most " + cap +
+    " — untick services in Bot Builder or change the bot's model";
 }
 
 /** Channels: said to a correspondent, so no provider or model id. */

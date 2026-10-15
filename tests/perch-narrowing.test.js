@@ -337,30 +337,62 @@ test("R2-L2: grant shapes — the bundle's grantsServer and the bridge path (too
 });
 
 // ---------------------------------------------------------------------------
-// Strand 2: buildToolsCsv is THE csv PiRpc pins — every channel's argv is
-// byte-identical to what the shared builder returns (the channel preflight
-// counts the builder's answer, so a drift here would count the wrong thing).
+// Strand 2: buildToolsCsv is THE csv PiRpc pins. Pinned against LITERAL
+// expected strings (comparing it to PiRpc's argv alone would be circular now
+// that PiRpc calls it): the channel preflight counts this answer.
 // ---------------------------------------------------------------------------
 
-test("strand 2: buildToolsCsv equals the --tools value PiRpc pins, for channel, interactive, narrowed and multi-agent spawns", async () => {
+test("strand 2: the pinned --tools csv, literally, for channel / interactive / narrowed / multi-agent / remote spawns", async () => {
   const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
   const base = { tools: { pi_builtin: ["read", "bash"], crow_mcp: ["crow-tasks/tasks_list", "crow-memory/crow_store_memory"] } };
+  const MCP = "read,bash,mcp__crow-tasks__tasks_list,mcp__crow-memory__crow_store_memory";
   const ma = Object.assign({}, base, { permission_policy: { multi_agent: true } });
+  const remote = { tools: { pi_builtin: ["read"], remote_mcp: ["abcdef0123456789::crow-memory", "bad-entry"] } };
+  const stub = { provider: "stub", model: "m1", key: "stub/m1" };
+  const capable = { provider: "zai-coding", model: "glm-5", key: "zai-coding/glm-5" };   // multi-agent capable
   const cases = [
-    { def: base },
-    { def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" } },
-    { def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" }, narrowedTools: '["bash","ask_user"]' },
-    { def: ma, extraEnv: { PI_BOT_INTERACTIVE: "1" } },
-    { def: { tools: {} } },
+    [{ def: base }, stub, MCP],
+    [{ def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" } }, stub, MCP + ",ask_user,send_user_file"],
+    [{ def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" }, narrowedTools: '["bash","ask_user"]' }, stub,
+      "read,mcp__crow-tasks__tasks_list,mcp__crow-memory__crow_store_memory,send_user_file"],
+    [{ def: ma }, stub, MCP],                                      // opted in, model not capable
+    [{ def: ma, extraEnv: { PI_BOT_INTERACTIVE: "1" } }, capable, MCP + ",subagent,ask_user,send_user_file"],
+    [{ def: remote, remoteEnabled: true }, stub, "read,mcp__crow-remote-abcdef01-crow-memory"],
+    [{ def: remote }, stub, "read"],
+    [{ def: { tools: {} } }, stub, ""],
   ];
-  for (const opts of cases) {
-    const argv = await spawnArgs(opts);
+  for (const [opts, resolved, expected] of cases) {
     const built = buildToolsCsv(opts.def, {
-      resolved: { provider: "stub", model: "m1", key: "stub/m1" },
+      resolved,
       remoteEnabled: opts.remoteEnabled,
       interactive: !!(opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1"),
       narrowedTools: opts.narrowedTools,
     });
-    assert.equal(built.csv, toolsFlag(argv), JSON.stringify(opts));
+    assert.equal(built.csv, expected, JSON.stringify(opts) + " on " + resolved.key);
+    if (resolved === stub) assert.equal(toolsFlag(await spawnArgs(opts)), expected, "and PiRpc pins exactly that");
+  }
+});
+
+test("strand 2: a channel turn on a model whose maxTools the bot exceeds is refused BEFORE pi spawns — reply names no provider, row is error, the result carries the sentence", async () => {
+  const c = raw();
+  c.prepare("INSERT OR REPLACE INTO providers (id, base_url, models, disabled) VALUES (?,?,?,0)")
+    .run("stub", "http://127.0.0.1:1/v1", JSON.stringify([{ id: "m1", maxTools: 2 }]));
+  c.close();
+  try {
+    const replies = [];
+    const r = await handleInbound({
+      bot_id: "narrowbot", user_message: "hello", gateway_thread_id: "gmail-budget", gateway_type: "gmail",
+      sendReply: async (t) => { replies.push(t); }, log: () => {},
+    });
+    assert.equal(r.action, "error");
+    assert.match(r.error, /3 tools/);
+    assert.match(r.error, /stub\/m1/, "the job/board record names the model (operator surface)");
+    assert.equal(existsSync(ARGV_OUT), false, "pi was never spawned");
+    assert.equal(replies.length, 1);
+    assert.match(replies[0], /more tools \(3\) than its model accepts \(2\)/);
+    assert.doesNotMatch(replies[0], /stub/, "no provider id to a correspondent");
+    assert.equal(sessionRow("gmail-budget").status, "error");
+  } finally {
+    const d = raw(); d.prepare("DELETE FROM providers WHERE id='stub'").run(); d.close();
   }
 });

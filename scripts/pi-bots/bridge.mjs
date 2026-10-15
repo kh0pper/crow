@@ -39,7 +39,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
-import { capFor, checkToolBudget, channelBudgetMessage } from "./tool-budget.mjs";
+import { capFor, checkToolBudget, channelBudgetMessage, operatorBudgetMessage } from "./tool-budget.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
@@ -963,7 +963,8 @@ export async function handleInbound(opts) {
         payload: { error: "tool budget", code: "tool_budget", count: budget.count, cap: budget.cap, model: resolved.key },
       });
       log("tool-budget refused bot=" + bot_id + " model=" + resolved.key + " tools=" + budget.count + " cap=" + budget.cap);
-      return { action: "error", error: "tool_budget" };
+      // job_runner records `error` on the card job: the operator sentence.
+      return { action: "error", error: operatorBudgetMessage({ count: budget.count, cap: budget.cap, key: resolved.key }) };
     }
   }
 

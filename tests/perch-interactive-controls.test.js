@@ -1520,3 +1520,20 @@ test("strand 2: a child started on a model its surface exceeds says so ONCE on t
   const warns = sink.events.filter((e) => e.type === "log" && /at most 2 tools/.test(e.text));
   assert.equal(warns.length, 1, "once per session per (count, cap): " + JSON.stringify(sink.events.filter((e) => e.type === "log")));
 });
+
+test("strand 2 (review): a late subscriber is told about the over-cap child (the spawn-time notice is replayed)", async () => {
+  const { engine } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
+  const s = await spawned(engine);                    // nobody listening at spawn
+  const sink = await collect(engine, s.sessionId);
+  assert.ok(sink.events.some((e) => e.type === "log" && /at most 2 tools/.test(e.text)), JSON.stringify(sink.events));
+});
+
+test("strand 2 (review): a refusing cap is not cached — raising the model's limit is honoured on the next send", async () => {
+  let cap = 2;
+  const { engine, state } = budgetEngine(() => cap);
+  const s = await spawned(engine);
+  await assert.rejects(() => engine.message(s.sessionId, "hi"), (e) => e.code === "tool_budget");
+  cap = 512;                                          // the operator raised maxTools on the provider row
+  assert.ok((await engine.message(s.sessionId, "hi again")).turnId);
+  assert.equal(state.instances[0].turns.length, 1);
+});
