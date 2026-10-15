@@ -82,6 +82,18 @@ test("VIEWER_STRINGS: en/es parity, translated, same placeholders", () => {
   }
 });
 
+test("VIEWER_STRINGS: the full-tab bar's title (QW4 B2)", () => {
+  assert.equal(VIEWER_STRINGS.en.library_title, "Artifacts");
+  assert.equal(VIEWER_STRINGS.es.library_title, "Artefactos");
+});
+
+test("QW4 B1: the Library's Details and drawer actions (Approve, Open chat, Unlink) carry the dashboard button classes", () => {
+  const src = readFileSync(join(ROOT, "bundles/artifacts/panel/static/panel-client.js"), "utf8");
+  for (const c of ["ca-details", "ca-approve", "ca-openchat", "ca-unlink"]) {
+    assert.ok(src.includes(`class: "btn btn-secondary btn-sm ${c}"`), `${c} is a .btn.btn-secondary.btn-sm`);
+  }
+});
+
 // ─── static: the Library handler and the viewer page ──────────────────────
 
 function fakeRes() {
@@ -339,6 +351,45 @@ test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hu
   } finally { await t.close(); }
 });
 
+test("live QW4 B2/B3: the full-tab viewer's way out is a slim full-bleed bar (title, Library, Crow's Nest) at phone and desktop widths; a disabled Send reads as disabled, not as a dim accent button", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Bar doc", type: "document", source: { markdown: "# Bar\n\nwords" }, actor: OWNER }, { markdownBlocks });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  try {
+    for (const [width, height, mobile] of [[412, 915, true], [1280, 900, false]]) {
+      await t.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile });
+      await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+      assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-nav') && !!document.querySelector('.cv-send')`)) === true, 15000), `viewer drawn @${width} (page errors: ${JSON.stringify(t.errors)})`);
+      const m = JSON.parse(await t.evalIn(`(() => {
+        const nav = document.querySelector('.cv-nav'), r = nav.getBoundingClientRect(), cs = getComputedStyle(nav);
+        const title = nav.querySelector('.cv-nav-title');
+        const links = [...nav.querySelectorAll('a')].map((a) => { const b = a.getBoundingClientRect(); return { href: a.getAttribute('href'), left: b.left, right: b.right, h: b.height, w: b.width }; });
+        const send = document.querySelector('.cv-send'), ss = getComputedStyle(send);
+        const probe = document.createElement('button'); probe.className = 'cv-primary'; document.getElementById('crow-artifact-viewer').appendChild(probe);
+        const accent = getComputedStyle(probe).backgroundColor; probe.remove();
+        return JSON.stringify({ innerWidth, scrollWidth: document.documentElement.scrollWidth, left: r.left, top: r.top, width: r.width, height: r.height,
+          borderBottom: cs.borderBottomWidth, title: title ? title.textContent : null, titleIsLink: !!(title && title.closest('a')),
+          links, sendDisabled: send.disabled, sendBg: ss.backgroundColor, sendOpacity: ss.opacity, sendCursor: ss.cursor, accent });
+      })()`));
+      const at = `@${width}: ${JSON.stringify(m)}`;
+      assert.ok(m.scrollWidth <= m.innerWidth, `no horizontal page scroll ${at}`);
+      assert.ok(Math.abs(m.left) <= 1 && Math.abs(m.top) <= 1 && Math.abs(m.width - m.innerWidth) <= 1, `the bar is full-bleed at the top ${at}`);
+      assert.ok(m.height >= 44 && m.height <= 64, `a slim bar, one row ${at}`);
+      assert.equal(m.borderBottom, "1px", `a 1px bottom line ${at}`);
+      assert.equal(m.title, "Artifacts", `the bar carries the title ${at}`);
+      assert.equal(m.titleIsLink, false, "the title is not a link");
+      assert.deepEqual(m.links.map((l) => l.href), ["/dashboard/artifacts", "/dashboard/nest"], "still exactly the two ways out");
+      for (const l of m.links) assert.ok(l.h >= 44 && l.w >= 44, `tappable ${at}`);
+      assert.ok(m.links[1].right >= m.innerWidth - 24, `Crow's Nest sits at the right edge ${at}`);
+      assert.equal(m.sendDisabled, true, "no comments yet: Send is disabled");
+      assert.notEqual(m.sendBg, m.accent, `a disabled Send is not accent-filled ${at}`);
+      assert.equal(m.sendOpacity, "1", `and not a faded accent either ${at}`);
+      assert.equal(m.sendCursor, "not-allowed", at);
+    }
+  } finally { await t.close(); }
+});
+
 test("live: the send sheet — the opening chat is preselected and is where the round goes; with no linked chat only 'New chat with <bot>' remains; no board without a board", async (ctx) => {
   if (!chrome || !server) return ctx.skip("no headless Chrome");
   const { addThread } = await import("../bundles/artifacts/server/comments.js");
@@ -413,6 +464,17 @@ test("live: the Library — badges from the store, search narrows the list, the 
     await t.evalIn(`(() => { const q = document.querySelector('#crow-artifacts .ca-search'); q.value = 'zebra'; q.dispatchEvent(new Event('input')); })()`);
     assert.equal(await t.evalIn(`document.querySelectorAll('#crow-artifacts .ca-item').length`), 1);
     // The drawer.
+    // QW4 B1: Details is a dashboard secondary button (the page renders in
+    // layout(), so .btn applies), compared against a probe of the same classes.
+    const btnLook = `(() => { const pick = (e) => { const c = getComputedStyle(e); return [c.backgroundColor, c.borderTopColor, c.borderRadius, c.fontSize, c.cursor].join("|"); };
+      const d = (${item}).querySelector('.ca-details'); const p = document.createElement('button'); p.className = 'btn btn-secondary btn-sm'; d.parentNode.appendChild(p);
+      const plain = document.createElement('button'); d.parentNode.appendChild(plain);
+      const out = JSON.stringify({ cls: d.className, d: pick(d), probe: pick(p), plain: pick(plain), h: d.getBoundingClientRect().height }); p.remove(); plain.remove(); return out; })()`;
+    const look = JSON.parse(await t.evalIn(btnLook));
+    assert.match(look.cls, /\bbtn\b.*\bbtn-secondary\b.*\bbtn-sm\b/, JSON.stringify(look));
+    assert.equal(look.d, look.probe, `Details looks like a .btn.btn-secondary: ${JSON.stringify(look)}`);
+    assert.notEqual(look.d, look.plain, `and not like a bare button: ${JSON.stringify(look)}`);
+    assert.ok(look.h >= 44, `still a 44px target: ${JSON.stringify(look)}`);
     await t.evalIn(`(${item}).querySelector('.ca-details').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-tab').length`)) === 5), "five tabs");
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-tabpanel').textContent.includes('v1')`)) === true), "Versions lists v1");
@@ -421,6 +483,7 @@ test("live: the Library — badges from the store, search narrows the list, the 
     await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=links]').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 2), "two linked chats");
     assert.equal(await t.evalIn(`(${item}).querySelector('.ca-openchat').getAttribute('href').startsWith('/dashboard/perch#perchlive-')`), true);
+    assert.deepEqual(JSON.parse(await t.evalIn(`JSON.stringify([...(${item}).querySelectorAll('.ca-unlink, .ca-openchat')].map((e) => ["btn", "btn-secondary", "btn-sm"].every((c) => e.classList.contains(c))))`)), [true, true, true, true], "Open chat and Unlink are dashboard buttons too");
     await t.evalIn(`(${item}).querySelector('.ca-unlink').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-unlink').length`)) === 1), "one left after Unlink");
     assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_links WHERE artifact_id=? AND unlinked_at IS NULL", args: [lib.id] })).rows[0].n, 1);

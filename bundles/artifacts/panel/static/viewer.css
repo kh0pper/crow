@@ -15,6 +15,10 @@ body{background:#eef1f3}
 #crow-artifact-viewer button[disabled]{opacity:.55;cursor:default}
 #crow-artifact-viewer .cv-primary,#crow-artifact-viewer .cv-send{background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600}
 #crow-artifact-viewer [hidden]{display:none !important}
+/* QW4 B3: a disabled primary/Send reads as disabled (card, line, dim text),
+   not as a faded accent button. Id-prefixed so it outranks the rules above. */
+#crow-artifact-viewer .cv-send[disabled],#crow-artifact-viewer .cv-primary[disabled]{background:var(--card);border-color:var(--line);
+  color:var(--dim);opacity:1;cursor:not-allowed;font-weight:600}
 
 .cv-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .cv-title{font-size:20px;margin:0;flex:1 1 200px;min-width:0;overflow-wrap:anywhere}
@@ -89,8 +93,14 @@ body{background:#eef1f3}
   #crow-artifact-viewer{padding-bottom:24px}
 }
 /* The way out (full-tab viewer only) and the owner's comment actions. */
-.cv-nav{display:flex;flex-wrap:wrap;gap:4px 16px;margin:0 0 8px}
-.cv-nav a{color:var(--teal);text-decoration:none;font-weight:600;min-height:44px;display:inline-flex;align-items:center}
+/* QW4 B2: a slim, full-bleed, header-like bar. The negative margins undo the
+   root's padding (12px 16px); system fonts only (the viewer CSP loads no
+   external fonts). */
+.cv-nav{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;min-height:calc(56px + env(safe-area-inset-top,0px));margin:-12px -16px 12px;
+  padding:env(safe-area-inset-top,0px) 16px 0;background:var(--card);border-bottom:1px solid var(--line)}
+.cv-nav a{color:var(--teal);text-decoration:none;font-weight:600;min-height:44px;min-width:44px;display:inline-flex;align-items:center;white-space:nowrap}
+.cv-nav-title{font-weight:600;font-size:17px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cv-nav-nest{margin-left:auto}
 .cv-nav a:hover,.cv-nav a:focus-visible{text-decoration:underline}
 .cv-edited{color:var(--dim);font-size:12px}
 .cv-cacts{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}

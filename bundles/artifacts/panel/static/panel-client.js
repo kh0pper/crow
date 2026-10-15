@@ -68,7 +68,7 @@
         b.links > 0 ? el("span", { class: "ca-badge", text: fmt(T.links_n, { n: b.links }) }) : null,
       ]);
       var drawer = el("div", { class: "ca-drawer", hidden: "" });
-      var toggle = el("button", { type: "button", class: "ca-details", "aria-expanded": "false", text: T.details });
+      var toggle = el("button", { type: "button", class: "btn btn-secondary btn-sm ca-details", "aria-expanded": "false", text: T.details });
       toggle.addEventListener("click", function () {
         var open = drawer.hasAttribute("hidden");
         if (open) { drawer.removeAttribute("hidden"); fillDrawer(drawer, a, "versions"); } else drawer.setAttribute("hidden", "");
@@ -108,7 +108,7 @@
           if (v.flagged_reason) tags.push(T.v_flagged);
           if (tainted) tags.push(T.v_tainted);
           var li = el("li", {}, [el("span", { text: "v" + v.n + " · " + tags.join(" · ") }), v.change_note ? el("span", { class: "ca-note", text: " — " + v.change_note }) : null]);
-          if (tainted && !v.flagged_reason) li.appendChild(el("button", { type: "button", class: "ca-approve", text: T.approve, onclick: function () {
+          if (tainted && !v.flagged_reason) li.appendChild(el("button", { type: "button", class: "btn btn-secondary btn-sm ca-approve", text: T.approve, onclick: function () {
             api("POST", base(a.id) + "/versions/" + encodeURIComponent(v.n) + "/approve", {}).then(function () { fillDrawer(drawer, a, "versions"); }, fail);
           } }));
           ul.appendChild(li);
@@ -123,8 +123,8 @@
           var name = (l.label || l.threadId) + " · " + l.botId + (l.state === "stopped" ? " (" + T.asleep + ")" : "");
           ul.appendChild(el("li", {}, [
             el("span", { text: name }),
-            el("a", { class: "ca-openchat", href: "/dashboard/perch#" + encodeURIComponent(l.threadId), text: T.open_chat }),
-            el("button", { type: "button", class: "ca-unlink", text: T.unlink, onclick: function () {
+            el("a", { class: "btn btn-secondary btn-sm ca-openchat", href: "/dashboard/perch#" + encodeURIComponent(l.threadId), text: T.open_chat }),
+            el("button", { type: "button", class: "btn btn-secondary btn-sm ca-unlink", text: T.unlink, onclick: function () {
               api("POST", base(a.id) + "/links/" + encodeURIComponent(l.id) + "/unlink", {}).then(function () { a.badges.links = Math.max(0, (a.badges.links || 1) - 1); fillDrawer(drawer, a, "links"); }, fail);
             } }),
           ]));
