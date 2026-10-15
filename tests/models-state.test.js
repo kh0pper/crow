@@ -92,11 +92,32 @@ test("allocatePort records owner {crowHome, pid} and createdAt", async () => {
 });
 
 test("allocatePort bind-tests and skips a port actually held on the host", async () => {
-  const held = await listenOn(PORT_RANGE_START);
+  // No fixed port: the suite's window (run-suite.mjs) sits in the kernel's
+  // ephemeral range, so ANY port in it can already be taken -- by another
+  // test file's real allocatePort, or by an outbound connection's local
+  // port (seen live: a held 127.0.0.1:<start> made listenOn() throw
+  // EADDRINUSE, and a held <start>+1 made the exact-port assertion fail).
+  // So hold whichever in-range port we CAN bind, reserve every port below
+  // it in state (allocatePort skips reservations without probing), and run
+  // the REAL bind probe: it must step past our held port. Whatever else the
+  // host holds above it the probe skips too, so assert "past held", not an
+  // exact port.
+  const state = { reservations: {}, journal: {}, registry: {} };
+  let held = null;
+  let heldPort = PORT_RANGE_START;
+  for (; heldPort < PORT_RANGE_END && !held; heldPort++) {
+    try {
+      held = await listenOn(heldPort);
+    } catch {
+      state.reservations[`filler-${heldPort}`] = { port: heldPort };
+    }
+  }
+  heldPort -= 1;
+  assert.ok(held, "could not hold any port in the allocator range");
   try {
-    const state = { reservations: {}, journal: {}, registry: {} };
     const port = await allocatePort(state, "model-a");
-    assert.equal(port, PORT_RANGE_START + 1);
+    assert.notEqual(port, heldPort, "the probe must skip a port held on the host");
+    assert.ok(port > heldPort && port <= PORT_RANGE_END, `expected a port past ${heldPort}, got ${port}`);
   } finally {
     await closeServer(held);
   }
