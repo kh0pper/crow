@@ -12,7 +12,10 @@
 #crow-artifacts .ca-warnb{border-color:#e2a03f}
 #crow-artifacts .ca-drawer{margin-top:.5rem;border-top:1px solid var(--border,#8886);padding-top:.5rem}
 #crow-artifacts .ca-tabs{display:flex;flex-wrap:wrap;gap:.35rem}
-#crow-artifacts .ca-tab[aria-selected="true"]{font-weight:600;text-decoration:underline}
+/* S7: the tabs are dashboard buttons; the selected one is teal (border + text). */
+#crow-artifacts{--ca-teal:#0e6b62}
+@media (prefers-color-scheme:dark){#crow-artifacts{--ca-teal:#4fbdb0}}
+#crow-artifacts .ca-tab[aria-selected="true"]{font-weight:600;border-color:var(--ca-teal);color:var(--ca-teal)}
 #crow-artifacts .ca-tabpanel{padding:.5rem 0}
 #crow-artifacts .ca-sub{margin:0;padding-left:1rem;display:flex;flex-direction:column;gap:.35rem}
 #crow-artifacts .ca-sub li{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}

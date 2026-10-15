@@ -299,14 +299,13 @@ test("live @412x730: no horizontal page scroll, the threads sheet docks at the b
     const m = await t.evalIn(`(() => {
       const de = document.documentElement;
       const side = document.querySelector('.cv-side').getBoundingClientRect();
-      const c = document.querySelector('.cv-comment').getBoundingClientRect();
       return JSON.stringify({ innerWidth, innerHeight, scrollWidth: de.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
-        sideBottom: side.bottom, sideH: side.height, commentH: c.height, commentW: c.width });
+        sideBottom: side.bottom, sideH: side.height, comment: !!document.querySelector('.cv-comment') });
     })()`);
     const g = JSON.parse(m);
     assert.ok(g.scrollWidth <= g.innerWidth && g.bodyScrollWidth <= g.innerWidth, `no horizontal page scroll: ${m}`);
     assert.ok(Math.abs(g.sideBottom - g.innerHeight) <= 2 && g.sideH <= 80, `collapsed sheet docked at the bottom: ${m}`);
-    assert.ok(g.commentH >= 44 && g.commentW >= 44, `the Comment toggle is tappable: ${m}`);
+    assert.equal(g.comment, false, `S6: a document has no Comment toggle (selection is always on): ${m}`);
     // D28: the section list opens on demand from the menu (never auto-opened by Comment).
     await t.evalIn(`(() => { document.querySelector('.cv-more').setAttribute('open', ''); document.querySelector('.cv-pick-section').click(); })()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open') && !document.querySelector('.cv-sections').hidden`)) === true), "the sheet opened on the sections");
@@ -453,6 +452,9 @@ test("live: the Library — badges from the store, search narrows the list, the 
   const CHAT = "perchlive-5ee0cc01", CHAT2 = "perchlive-5ee0cc02";
   const lib = await store.createArtifact(s.db, s.blobs, { title: "Zebra library entry", type: "document", source: { markdown: "# z" }, actor: { kind: "bot", id: "bobby", thread: CHAT, gateway: "perch" } }, { markdownBlocks });
   await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [lib.id, "bobby", CHAT2] });
+  const yak = await store.createArtifact(s.db, s.blobs, { title: "Yak single entry", type: "document", source: { markdown: "# y" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-5ee0cc03", gateway: "perch" } }, { markdownBlocks });
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  await addThread(s.db, { artifactId: yak.id, versionN: 1, anchor: { kind: "whole" }, text: "from a contact", author: { kind: "contact", id: "c-yak" } });
   const t = await tab();
   const base = `http://${chrome.pageHost}:${port}`;
   const item = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Zebra library entry'))`;
@@ -460,6 +462,12 @@ test("live: the Library — badges from the store, search narrows the list, the 
     await t.nav(`${base}/dashboard/artifacts`);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!(${item})`)) === true, 15000), `the list rendered (page errors: ${JSON.stringify(t.errors)})`);
     assert.match(await t.evalIn(`(${item}).querySelector('.ca-badges').textContent`), /Document.*v1.*2 linked chats/);
+    // S7.1: one is singular (both badges), in the list the store serves.
+    const one = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Yak single entry'))`;
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!(${one})`)) === true, 5000), "the single-link entry rendered");
+    const oneBadges = await t.evalIn(`(${one}).querySelector('.ca-badges').textContent`);
+    assert.match(oneBadges, /1 linked chat(?!s)/, oneBadges);
+    assert.match(oneBadges, /1 contact comment(?!s)/, oneBadges);
     // Search narrows.
     await t.evalIn(`(() => { const q = document.querySelector('#crow-artifacts .ca-search'); q.value = 'zebra'; q.dispatchEvent(new Event('input')); })()`);
     assert.equal(await t.evalIn(`document.querySelectorAll('#crow-artifacts .ca-item').length`), 1);
@@ -477,6 +485,12 @@ test("live: the Library — badges from the store, search narrows the list, the 
     assert.ok(look.h >= 44, `still a 44px target: ${JSON.stringify(look)}`);
     await t.evalIn(`(${item}).querySelector('.ca-details').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-tab').length`)) === 5), "five tabs");
+    // S7.2: the tabs are dashboard buttons; exactly one is selected, and it looks selected.
+    const tabs = JSON.parse(await t.evalIn(`JSON.stringify([...(${item}).querySelectorAll('.ca-tab')].map((e) => ({ btn: ["btn", "btn-secondary", "btn-sm"].every((c) => e.classList.contains(c)), sel: e.getAttribute('aria-selected'), color: getComputedStyle(e).color, border: getComputedStyle(e).borderTopColor })))`));
+    assert.ok(tabs.every((x) => x.btn), `every tab is a .btn.btn-secondary.btn-sm: ${JSON.stringify(tabs)}`);
+    assert.equal(tabs.filter((x) => x.sel === "true").length, 1, "exactly one tab is selected");
+    const selTab = tabs.find((x) => x.sel === "true"), other = tabs.find((x) => x.sel !== "true");
+    assert.notEqual(selTab.border, other.border, `the selected tab is marked (teal border): ${JSON.stringify(tabs)}`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-tabpanel').textContent.includes('v1')`)) === true), "Versions lists v1");
     await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=projects]').click()`);
     assert.equal(await t.evalIn(`(${item}).querySelector('.ca-soon').textContent`), "Adding artifacts to projects is coming soon.");
@@ -532,11 +546,12 @@ test("live D28: on a document, Comment opens no sheet and no list; selecting wor
     await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000), `frame (errors ${JSON.stringify(t.errors)})`);
     assert.equal(await t.evalIn(`document.querySelector('iframe.crow-artifact-frame').getAttribute('sandbox')`), "allow-scripts", "a document frame speaks (helper-only)");
-    await t.evalIn(`document.querySelector('.cv-comment').click()`);
+    // S6/S7: on a document selection is always on — there is no Comment toggle to press.
     await sleep(300);
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-comment')`), false, "no Comment button on a document");
     assert.equal(await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open')`), false, "no sheet over the document");
     assert.equal(await t.evalIn(`document.querySelector('.cv-sections').hidden`), true, "no section list");
-    assert.match(await t.evalIn(`document.querySelector('.cv-status').textContent`), /Select the words/);
+    assert.match(await t.evalIn(`document.querySelector('.cv-threads').textContent`), /Select the words/, "the empty list says how to comment on a document");
     // Select words INSIDE the cross-site frame, as a user would.
     // Out-of-process frame → its auto-attached session; in-process → an
     // isolated world in that frame (same DOM, so the helper sees the selection).
@@ -562,7 +577,133 @@ test("live D28: on a document, Comment opens no sheet and no list; selecting wor
     assert.equal(await t.evalIn(`!!document.querySelector('.cv-compose .cv-quote')`), false, "no redundant 'exact words' box when the quote came from the selection");
     await t.evalIn(`(() => { document.querySelector('.cv-compose textarea').value = 'make it slower'; document.querySelector('.cv-compose .cv-primary').click(); })()`);
     const row = await waitFor(async () => (await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE artifact_id=?", args: [doc.id] })).rows[0], 5000);
-    assert.deepEqual(JSON.parse(row.anchor_json), { kind: "block", id: "b2", text: "The quick **brown** fox jumps.", quote: "quick brown fox jumps" });
+    const stored = JSON.parse(row.anchor_json);
+    assert.deepEqual({ ...stored, suffix: stored.suffix.trim() }, { kind: "block", id: "b2", text: "The quick **brown** fox jumps.", quote: "quick brown fox jumps", prefix: "The ", suffix: ".", span: { start: 4, end: 25, nth: 0 } },
+      "S1: the selection's own context, and the server's span into the block's plain text");
     assert.equal((await s.db.execute({ sql: "SELECT flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].flagged_reason, null, "the speaking document frame never tripped");
+  } finally { await t.close(); }
+});
+
+// ── S3 (step-6 smoke): the commented words stay highlighted ─────────────────
+async function frameEval(t, prevIds = new Set()) {
+  // The artifact frame is cross-site (out of process: its auto-attached
+  // session) or in process (an isolated world in that frame).
+  const oop = await waitFor(() => t.attached.find((a) => a.targetInfo.type === "iframe" && !prevIds.has(a.sessionId)), 3000);
+  if (oop) {
+    await t.send("Runtime.enable", {}, oop.sessionId);
+    return { id: oop.sessionId, run: async (expression) => (await t.send("Runtime.evaluate", { expression, returnByValue: true }, oop.sessionId)).result?.value };
+  }
+  const tree = await t.send("Page.getFrameTree");
+  const child = (tree.frameTree.childFrames || []).find((c) => /\/v\//.test(c.frame.url));
+  const { executionContextId } = await t.send("Page.createIsolatedWorld", { frameId: child.frame.id, worldName: "test-hl" });
+  return { id: child.frame.id, run: async (expression) => (await t.send("Runtime.evaluate", { expression, returnByValue: true, contextId: executionContextId })).result?.value };
+}
+
+test("live S3: a commented quote is painted with the CSS Highlight API (no <style> node), still after a reload, and not once the thread is resolved", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread, resolveBlockAnchor, setThreadStatus } = await import("../bundles/artifacts/server/comments.js");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Highlight S3", type: "document", source: { markdown: "# Head\n\nThe quick **brown** fox jumps.\n\nOther words." }, actor: OWNER }, { markdownBlocks });
+  const map = JSON.parse((await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].anchor_map_json);
+  const th = await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: resolveBlockAnchor(map, { kind: "block", id: "b2", quote: "brown fox", prefix: "The quick ", suffix: " jumps." }), text: "redder", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const size = "(() => { const h = CSS.highlights.get('crow-comments'); return h ? h.size : 0; })()";
+  const painted = "(() => { const h = CSS.highlights.get('crow-comments'); if (!h) return ''; return [...h].map((r) => r.toString()).join('|'); })()";
+  try {
+    await t.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-pin')`)) === true, 15000), `a pin (errors ${JSON.stringify(t.errors)})`);
+    let f = await frameEval(t);
+    assert.ok(await waitFor(async () => (await f.run(size)) === 1, 5000), "one highlighted range");
+    assert.equal(await f.run(painted), "brown fox", "the commented words, across the <strong>");
+    assert.equal(await f.run("document.querySelectorAll('style').length"), 1, "no <style> node was added (only the document's own)");
+    assert.ok((await f.run("document.adoptedStyleSheets.length")) >= 1, "the highlight style is an adopted sheet");
+    // ⋯ → Reload view: a fresh frame, still painted.
+    const seen = new Set([f.id]);
+    await t.evalIn(`(() => { document.querySelector('.cv-more').setAttribute('open',''); document.querySelector('.cv-menu button').click(); })()`);
+    await sleep(800);
+    f = await frameEval(t, seen);
+    assert.ok(await waitFor(async () => (await f.run(size)) === 1, 8000), "still one after a reload");
+    // Resolved: no pin, no paint.
+    await setThreadStatus(s.db, { threadId: th.threadId, status: "resolved", artifactId: doc.id });
+    seen.add(f.id);
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000));
+    await sleep(1200);
+    f = await frameEval(t, seen);
+    assert.equal(await f.run(size), 0, "a resolved thread is not painted");
+  } finally { await t.close(); }
+});
+
+// ── S6/S7 (step-6 smoke): always-on selection for documents; the toggle in the header ──
+test("live S6 @412x730: on a document a selection shows 'Comment on …' with nothing pressed, stays on top of the open sheet, hides on collapse; collapsed→collapsed posts nothing; 30 select/collapse cycles in 1 s never trip", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Always on", type: "document", source: { markdown: "# Heading\n\nThe quick **brown** fox jumps.\n\nA second paragraph here." }, actor: OWNER }, { markdownBlocks });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  try {
+    await t.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 730, deviceScaleFactor: 2, mobile: true });
+    await t.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000));
+    // A test-side counter of the frame's messages (the parent sees every one).
+    await t.evalIn(`(() => { window.__fmsg = []; addEventListener('message', (e) => { if (e.data && e.data.t === 'crow-artifact') window.__fmsg.push(e.data.kind); }, true); })()`);
+    await sleep(800);
+    const f = await frameEval(t);
+    const select = `(() => { const p = document.querySelector('#b2'); const w = document.createTreeWalker(p, NodeFilter.SHOW_TEXT); let n; const nodes = []; while ((n = w.nextNode())) nodes.push(n); const a = nodes.find((x) => x.data.includes("quick")), b = nodes.find((x) => x.data.includes("jumps")); const r = document.createRange(); r.setStart(a, a.data.indexOf("quick")); r.setEnd(b, b.data.indexOf("jumps") + 5); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return s.toString(); })()`;
+    assert.equal(await f.run(select), "quick brown fox jumps");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-selbar:not([hidden]) button')`)) === true, 5000), "the trusted button appeared with nothing pressed");
+    assert.match(await t.evalIn(`document.querySelector('.cv-selbar button').textContent`), /Comment on .quick brown fox jumps./);
+    // The sheet open: the button is still the top element at its centre.
+    await t.evalIn(`document.querySelector('.cv-handle').click()`);
+    await sleep(400);
+    assert.equal(await t.evalIn(`document.querySelector('.cv-side').classList.contains('cv-open')`), true);
+    assert.equal(await t.evalIn(`(() => { const b = document.querySelector('.cv-selbar button'); const r = b.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === b; })()`), true, "the button sits above the open sheet");
+    await t.evalIn(`document.querySelector('.cv-handle').click()`);
+    // Collapse: the button goes.
+    await f.run(`getSelection().removeAllRanges()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`document.querySelector('.cv-selbar').hidden`)) === true, 3000), "collapsing hides it");
+    await sleep(500);
+    // Collapsed → collapsed (taps, caret moves): nothing is posted.
+    const before = await t.evalIn(`window.__fmsg.filter((k) => k !== 'anchor-rect').length`);
+    await f.run(`(async () => { const n = document.querySelector('#b3').firstChild.firstChild || document.querySelector('#b3').firstChild; for (let k = 0; k < 6; k++) { getSelection().collapse(n, k); await new Promise((r) => setTimeout(r, 60)); } })()`);
+    await sleep(700);
+    assert.equal(await t.evalIn(`window.__fmsg.filter((k) => k !== 'anchor-rect').length`), before, "no message for collapsed→collapsed");
+    // H2: 30 select/collapse cycles inside 1 s.
+    await f.run(`(async () => { const p = document.querySelector('#b2'); const tn = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode(); for (let k = 0; k < 30; k++) { const r = document.createRange(); r.setStart(tn, 0); r.setEnd(tn, 3); getSelection().removeAllRanges(); getSelection().addRange(r); await new Promise((x) => setTimeout(x, 16)); getSelection().removeAllRanges(); await new Promise((x) => setTimeout(x, 16)); } })()`);
+    await sleep(1500);
+    assert.equal(await t.evalIn(`!!document.querySelector('.cv-flagged')`), false, "no false flag");
+    assert.equal(await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`), true, "the frame is still mounted");
+    assert.equal((await s.db.execute({ sql: "SELECT flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].flagged_reason, null, "the version row is not flagged");
+    const cleared = await t.evalIn(`window.__fmsg.filter((k) => k === 'selection-cleared').length`);
+    assert.ok(cleared >= 1 && cleared <= 6, `selection-cleared is throttled (${cleared} for 30 cycles)`);
+  } finally { await t.close(); }
+});
+
+test("live S7: on a page and a diagram the Comment toggle sits in the header (not floating over the frame) and is tappable; on a page with the toggle off a selection offers nothing", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const page = await store.createArtifact(s.db, s.blobs, { title: "Toggle page", type: "page", source: { html: '<!doctype html><p id="x">some page words here</p>' }, actor: OWNER }, {});
+  const diagram = await store.createArtifact(s.db, s.blobs, { title: "Toggle diagram", type: "diagram", source: { svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="10" y="10" width="80" height="40"/></svg>' }, actor: OWNER }, {});
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  try {
+    await t.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    for (const [w, h] of [[412, 730], [1280, 900]]) {
+      await t.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 600 });
+      for (const a of [page, diagram]) {
+        await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(a.id)}`);
+        assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame') && !!document.querySelector('.cv-comment')`)) === true, 15000), `${a.id} @${w}`);
+        const g = JSON.parse(await t.evalIn(`JSON.stringify((() => { const c = document.querySelector('.cv-comment'); const r = c.getBoundingClientRect(), fr = document.querySelector('.cv-frame').getBoundingClientRect(); return { inHead: !!c.closest('.cv-headtools'), pos: getComputedStyle(c).position, overlap: !(r.right <= fr.left || r.left >= fr.right || r.bottom <= fr.top || r.top >= fr.bottom), w: r.width, h: r.height }; })())`));
+        assert.ok(g.inHead && g.pos !== "fixed" && !g.overlap && g.w >= 44 && g.h >= 44, `${a.id} @${w}: ${JSON.stringify(g)}`);
+      }
+    }
+    // A page with the toggle off: a selection inside the frame offers no button.
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(page.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000));
+    await sleep(800);
+    const f = await frameEval(t);
+    await f.run(`(() => { const n = document.querySelector('#x').firstChild; const r = document.createRange(); r.setStart(n, 0); r.setEnd(n, 9); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await sleep(900);
+    assert.equal(await t.evalIn(`document.querySelector('.cv-selbar').hidden`), true, "toggle off: no 'Comment on …'");
   } finally { await t.close(); }
 });

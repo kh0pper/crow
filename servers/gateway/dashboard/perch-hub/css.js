@@ -709,6 +709,10 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1
 #perch-hub-root :is(.artask,.artfb) .art-err{color:var(--err);font-size:13px}
 #perch-hub-root .artfb .art-fb-anchor{font-size:12px;color:var(--dim);margin-top:4px}
 #perch-hub-root .artfb .art-fb-comment{font-size:14px;color:var(--ink);padding-left:10px;border-left:2px solid var(--line)}
+/* Item 4: the feedback card's live status line and its Show vN action. */
+#perch-hub-root .artfb .art-fb-status{font-size:13px;color:var(--dim)}
+#perch-hub-root .artfb .art-fb-status:empty{display:none}
+#perch-hub-root .artfb button.art-fb-showv{background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600}
 /* Q2: the viewer beside the chat (>=1024px: docked right, the hub narrows
    beside it) or as a full-screen sheet (phone). The pane hosts the SAME-ORIGIN
    viewer page; the hub itself never frames the artifact origin. */
@@ -722,6 +726,9 @@ border:1px solid var(--line);border-radius:10px;background:var(--card);color:var
 #perch-hub-root .art-pane-window{margin-left:auto;color:var(--teal) !important}
 #perch-hub-root .art-pane-frame{flex:1 1 auto;width:100%;border:0;min-height:0}
 body.perch-art-split #perch-hub-root{margin-right:min(48vw,760px)}
+/* S4: no pull-to-refresh from an overscroll while the viewer pane is open. */
+html.art-pane-open,html.art-pane-open body{overscroll-behavior-y:contain}
+#perch-hub-root .art-pane-frame{overscroll-behavior:contain}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

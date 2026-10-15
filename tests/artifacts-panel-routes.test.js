@@ -561,6 +561,12 @@ test("feedback cards (PR-3 Task 3.8): a chat lists the TRUSTED rounds delivered 
   assert.ok(!(await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.some((c) => c.roundId === r3.id), "a failed round draws no card");
   assert.equal((await req("GET", `/api/artifacts/rounds/${r3.id}/card`)).status, 404);
   assert.deepEqual((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-other")).body.cards, []);
+  // Item 4: the card's live status — resultVersion after a round that made a
+  // version, null after a no-change round; status rides along.
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET result_version=2 WHERE id=?", args: [r1.id] });
+  const st = Object.fromEntries((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.map((c) => [c.roundId, [c.status, c.resultVersion]]));
+  assert.deepEqual(st[r1.id], ["done", 2], "a round that made v2");
+  assert.deepEqual(st[r2.id], ["done", null], "a no-change round");
   // THE pin: an untrusted round is refused by route, whatever its delivery says.
   const tc = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "CONTACT-SECRET-77 do something", author: { kind: "contact", id: "c1" } });
   const ru = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [tc.threadId] });
@@ -651,7 +657,7 @@ test("D28: the threads route resolves a document block anchor server-side — ma
   const anchorOf = async (r) => JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [r.body.threadId] })).rows[0].anchor_json);
   const a = await post({ kind: "block", id: "b1", quote: "bold world", text: "FORGED" });
   assert.equal(a.status, 201);
-  assert.deepEqual(await anchorOf(a), { kind: "block", id: "b1", text: "Hello **bold** world.", quote: "bold world" });
+  assert.deepEqual(await anchorOf(a), { kind: "block", id: "b1", text: "Hello **bold** world.", quote: "bold world", span: { start: 6, end: 16, nth: 0 } }, "S1: the server records where the quote sits");
   assert.deepEqual(await anchorOf(await post({ kind: "block", id: "b1", quote: "Second block" })), { kind: "text", quote: "Second block", prefix: "", suffix: "" });
   assert.equal((await post({ kind: "block", id: "b77" })).status, 400, "an unknown block with no quote is refused");
 });
@@ -662,5 +668,5 @@ test("D28 (review low): a block anchor resolves against the REQUESTED version's 
   const r = await req("POST", `/api/artifacts/${doc.id}/threads`, { body: { versionN: 1, anchor: { kind: "block", id: "b1", quote: "one words" }, text: "c" } });
   assert.equal(r.status, 201);
   const a = JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [r.body.threadId] })).rows[0].anchor_json);
-  assert.deepEqual(a, { kind: "block", id: "b1", text: "Version one words.", quote: "one words" });
+  assert.deepEqual(a, { kind: "block", id: "b1", text: "Version one words.", quote: "one words", span: { start: 8, end: 17, nth: 0 } }, "S1: the span is against the requested version");
 });

@@ -13,13 +13,17 @@
  *    design: the first request has already left when this fires;
  *  - every frame message is an untrusted PROPOSAL: source, origin, shape,
  *    size, rate and nonce checked; nothing acts without a user gesture in the
- *    rail;
+ *    rail. The kinds: hello, anchor (a proposal), anchor-rect (pin rects) and
+ *    selection-cleared (S6: hides the trusted "Comment on …" button, nothing
+ *    else); all but hello are ignored before the hello;
  *  - the parent never posts anything sensitive in: only {kind:"comment-mode"}
  *    and {kind:"pins"} — the numbered anchors of the OWNER's threads on this
  *    version (element selectors / text quotes the content itself proposed;
- *    never comment text, authors, contact anchors or ids). The helper answers
- *    {kind:"anchor-rect", rects:[{i,x,y,w,h}]}: untrusted, validated and
- *    clamped to the frame box, used only to draw cosmetic numbered pins.
+ *    document block ids, with the server-rendered words a block anchor's span
+ *    covers — S1; never comment text, authors, contact anchors or ids). The
+ *    helper answers {kind:"anchor-rect", rects:[{i,x,y,w,h,bx?}]} (the first
+ *    line box and the block's left edge): untrusted, validated and clamped to
+ *    the frame box, used only to draw cosmetic numbered pins.
  *
  * FAIL CLOSED (scratch-run security review, 2026-10-08):
  *  - a trip is TERMINAL for this mount: load()/reload() refuse afterwards; the
@@ -75,12 +79,27 @@
       return t;
     }
     if (a.kind === "region" && typeof a.x === "number" && typeof a.y === "number" && a.x >= 0 && a.x <= 1 && a.y >= 0 && a.y <= 1) return { kind: "region", x: a.x, y: a.y };
-    if (a.kind === "block" && str(a.id, 64) && /^b\d{1,6}$/.test(a.id) && str(a.text || "", 400)) return { kind: "block", id: a.id, text: a.text || "", quote: str(a.quote || "", 1000) ? (a.quote || "") : "" };
+    if (a.kind === "block" && str(a.id, 64) && /^b\d{1,6}$/.test(a.id) && str(a.text || "", 400)) {
+      var b = { kind: "block", id: a.id, text: a.text || "", quote: str(a.quote || "", 1000) ? (a.quote || "") : "" };
+      // S1: the SERVER's record of where the quote sits in the block's plain.
+      if (validSpan(a.span)) b.span = { start: a.span.start, end: a.span.end, nth: a.span.nth };
+      return b;
+    }
     return null;
   }
+  function validSpan(sp) {
+    var int = function (v, max) { return typeof v === "number" && v >= 0 && v <= max && v === Math.floor(v); };
+    return !!sp && typeof sp === "object" && int(sp.start, 1e6) && int(sp.end, 1e6) && sp.end > sp.start && int(sp.nth, 9999);
+  }
 
-  /** Pins posted INTO the frame: owner element/text anchors only (see header). */
-  function pinOut(p) {
+  /** Pins posted INTO the frame: owner element/text anchors only (see header).
+   *  S1 (plan Rev 3 M1): a document block anchor crosses as its id, plus —
+   *  only when the server recorded a span AND the MOUNTED version's anchor
+   *  map has that block's rendered `plain` covering it — the words
+   *  plain.slice(start, end) and which occurrence (nth). So what crosses is
+   *  always a literal substring of the trusted, server-rendered document text,
+   *  never the stored quote (which may be text the owner typed). */
+  function pinOut(p, anchorMap) {
     if (!p || typeof p !== "object" || !(p.i >= 1 && p.i <= 999 && p.i === Math.floor(p.i))) return null;
     var a = validAnchor(p.anchor);
     if (!a) return null;
@@ -89,7 +108,17 @@
     // D28: document block anchors get pins — the block ID only. A block
     // anchor's quote may be text the owner TYPED (the section list's "exact
     // words"), and owner-typed text never crosses into the frame.
-    if (a.kind === "block") return { i: p.i, anchor: { kind: "block", id: a.id } };
+    if (a.kind === "block") {
+      var blk = null;
+      if (a.span && anchorMap && anchorMap.kind === "blocks" && Array.isArray(anchorMap.blocks)) {
+        for (var k = 0; k < anchorMap.blocks.length; k++) if (anchorMap.blocks[k] && anchorMap.blocks[k].id === a.id) { blk = anchorMap.blocks[k]; break; }
+      }
+      if (blk && typeof blk.plain === "string" && a.span.end <= blk.plain.length) {
+        var words = blk.plain.slice(a.span.start, a.span.end);
+        if (words.trim()) return { i: p.i, anchor: { kind: "block", id: a.id, quote: words, nth: a.span.nth } };
+      }
+      return { i: p.i, anchor: { kind: "block", id: a.id } };
+    }
     return null;
   }
 
@@ -101,10 +130,14 @@
       var r = list[k];
       if (!r || typeof r !== "object" || !(r.i >= 1 && r.i <= 999 && r.i === Math.floor(r.i))) return null;
       if (!fin(r.x) || !fin(r.y) || !fin(r.w) || !fin(r.h)) return null;
+      if (r.bx !== undefined && !fin(r.bx)) return null;
       var x = Math.max(0, Math.min(w, r.x)), y = Math.max(0, Math.min(h, r.y));
       // Off-screen anchors (scrolled away) are dropped, not pinned to an edge.
       if (r.x + Math.max(0, r.w) < 0 || r.y + Math.max(0, r.h) < 0 || r.x > w || r.y > h) continue;
-      out.push({ i: r.i, x: x, y: y, w: Math.max(0, Math.min(w - x, r.w)), h: Math.max(0, Math.min(h - y, r.h)) });
+      var o = { i: r.i, x: x, y: y, w: Math.max(0, Math.min(w - x, r.w)), h: Math.max(0, Math.min(h - y, r.h)) };
+      // S1: the anchor's block's left edge (the pin gutter), clamped like x.
+      if (r.bx !== undefined) o.bx = Math.max(0, Math.min(w, r.bx));
+      out.push(o);
     }
     return out;
   }
@@ -206,6 +239,13 @@
         if (rects) try { opts.onRects && opts.onRects(rects); } catch (x) {}
         return;
       }
+      // S6 (plan Rev 3 H2): the helper says a selection went away (posted
+      // only on a real selected→collapsed transition, at most 4/s). Effect
+      // only: the trusted "Comment on …" button hides. Ignored before hello.
+      if (d.kind === "selection-cleared") {
+        if (state.hello) try { opts.onSelectionCleared && opts.onSelectionCleared(); } catch (x) {}
+        return;
+      }
       if (d.kind === "anchor" && state.hello) {
         var a = validAnchor(d.anchor);
         if (a) try { opts.onProposal && opts.onProposal(a); } catch (x) {}
@@ -278,7 +318,7 @@
       reload: function () { return load(null); },          // a refresh is a new token + a new frame load
       setCommentMode: function (on, o) { state.commentMode = !!on; state.selectOnly = !!(o && o.selectOnly); postMode(); },
       /** Numbered owner anchors for the cosmetic pins (scripted types). */
-      setPins: function (list) { state.pins = (Array.isArray(list) ? list : []).slice(0, 100).map(pinOut).filter(Boolean); postPins(); },
+      setPins: function (list, anchorMap) { state.pins = (Array.isArray(list) ? list : []).slice(0, 100).map(function (p) { return pinOut(p, anchorMap); }).filter(Boolean); postPins(); },
       /** Script-free types: show a block by mounting a fresh frame at its fragment. */
       showBlock: function (id) {
         if (state.pending) return Promise.reject(new Error("pending"));

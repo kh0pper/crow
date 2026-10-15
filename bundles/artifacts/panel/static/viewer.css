@@ -3,7 +3,7 @@
 --line:#dde4e8;--ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6;--pin:#d1633e}
 @media (prefers-color-scheme:dark){#crow-artifact-viewer{--sky:#131a1f;--card:#1b242b;--ink:#e4ebef;--dim:#8fa0ab;
 --teal:#4fbdb0;--teal-soft:#16322f;--line:#2a353d;--ok:#6fd39b;--ok-soft:#173326;--warn:#f0b955;--warn-soft:#3a2d12;--err:#ff8f84;--err-soft:#3d1f1c}}
-html,body{margin:0;padding:0}
+html,body{margin:0;padding:0;overscroll-behavior-y:contain}   /* S4: no pull-to-refresh from the viewer */
 body{background:#eef1f3}
 @media (prefers-color-scheme:dark){body{background:#131a1f}}
 #crow-artifact-viewer{box-sizing:border-box;min-height:100vh;background:var(--sky);color:var(--ink);
@@ -44,6 +44,9 @@ body{background:#eef1f3}
 .cv-pins{position:absolute;inset:0;pointer-events:none}
 .cv-pin{pointer-events:auto;position:absolute;transform:translate(-50%,-50%);border-radius:999px !important;
   background:var(--pin) !important;border-color:var(--pin) !important;color:#fff !important;font-weight:700;padding:0 !important}
+/* S1: a 28px pin that fits a document's gutter; the ::before keeps a 44px tap target. */
+#crow-artifact-viewer .cv-pin{min-height:28px;min-width:28px;width:28px;height:28px;font-size:13px}
+.cv-pin::before{content:"";position:absolute;inset:-8px}
 .cv-region{position:absolute;inset:0;cursor:crosshair;background:rgba(14,107,98,.06)}
 .cv-panel{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center}
 .cv-panel-title{font-weight:600;font-size:17px;margin:0}
@@ -70,7 +73,6 @@ body{background:#eef1f3}
 .cv-compose{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .cv-compose textarea,.cv-compose input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--sky);color:var(--ink)}
 .cv-row{display:flex;flex-wrap:wrap;gap:8px}
-.cv-comment{position:fixed;right:16px;bottom:72px;z-index:20;box-shadow:0 4px 16px rgba(0,0,0,.2)}
 .cv-comment[aria-pressed="true"]{background:var(--teal) !important;color:var(--card) !important;border-color:var(--teal) !important}
 .cv-note{font-size:13px;color:var(--dim)}
 .cv-preview{max-width:min(560px,calc(100vw - 32px));border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink)}
@@ -81,7 +83,7 @@ body{background:#eef1f3}
 @media (max-width:1023.98px){
   .cv-side{position:fixed;left:0;right:0;bottom:0;z-index:25;border-radius:14px 14px 0 0;max-height:62px;overflow:hidden;
     box-shadow:0 -4px 20px rgba(0,0,0,.18);transition:max-height .2s}
-  .cv-side.cv-open{max-height:70vh;overflow-y:auto}
+  .cv-side.cv-open{max-height:70vh;overflow-y:auto;overscroll-behavior:contain}
   .cv-handle{flex:1 1 auto}
 }
 /* Wide: the threads column on the right, the frame beside it. */
@@ -89,7 +91,6 @@ body{background:#eef1f3}
   .cv-body{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
   .cv-side{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow-y:auto}
   .cv-handle{pointer-events:none;border:0 !important;background:transparent !important;font-weight:600}
-  .cv-comment{bottom:24px;right:372px}
   #crow-artifact-viewer{padding-bottom:24px}
 }
 /* The way out (full-tab viewer only) and the owner's comment actions. */
@@ -115,7 +116,9 @@ body{background:#eef1f3}
 .cv-where legend{font-weight:600;padding:0 4px}
 .cv-where-opt{display:flex;align-items:center;gap:8px;min-height:44px}
 .cv-where-opt.cv-disabled{color:var(--dim)}
-/* D28: the trusted "Comment on <selection>" button, above the Comment toggle. */
-.cv-selbar{position:fixed;left:16px;right:16px;bottom:128px;z-index:21;display:flex;justify-content:center}
+/* D28: the trusted "Comment on <selection>" button. S6: above the bottom
+   sheet (z-order and position; viewer-client sets bottom from the sheet). */
+.cv-selbar{position:fixed;left:16px;right:16px;bottom:24px;z-index:30;display:flex;justify-content:center}
+@media (max-width:1023.98px){.cv-selbar{bottom:70px}}
 .cv-selbar{pointer-events:none}
 .cv-selbar button{pointer-events:auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.18)}

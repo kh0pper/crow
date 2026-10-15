@@ -164,9 +164,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const cardRound = (t) => `${t}kind='round' AND ${t}delivery='perch-session' AND ${t}status IN ('working','done','timed-out') AND ${t}untrusted_input=0`;
   const anchorLabel = (j) => { let a = null; try { a = JSON.parse(j || "null"); } catch { a = null; } return String((a && (a.text || a.quote || a.selector || a.id || a.kind)) || "").slice(0, 200); };
   router.get("/api/artifacts/rounds-by-thread/:thread", wrap(async (req, res) => {
-    const rows = (await S.db.execute({ sql: `SELECT r.id, r.artifact_id, r.base_version, r.thread_ids_json, r.status, r.created_at, a.title FROM artifact_rounds r JOIN artifacts a ON a.id=r.artifact_id WHERE r.session_id=? AND a.deleted_at IS NULL AND ${cardRound("r.")} ORDER BY r.id LIMIT 50`, args: [String(req.params.thread)] })).rows;
+    const rows = (await S.db.execute({ sql: `SELECT r.id, r.artifact_id, r.base_version, r.result_version, r.thread_ids_json, r.status, r.created_at, a.title FROM artifact_rounds r JOIN artifacts a ON a.id=r.artifact_id WHERE r.session_id=? AND a.deleted_at IS NULL AND ${cardRound("r.")} ORDER BY r.id LIMIT 50`, args: [String(req.params.thread)] })).rows;
     res.setHeader("cache-control", "no-store");
-    res.json({ cards: rows.map((r) => { let n = 0; try { n = JSON.parse(r.thread_ids_json || "[]").length; } catch { n = 0; } return { roundId: Number(r.id), artifactId: r.artifact_id, title: r.title, version: Number(r.base_version), count: n, status: r.status, at: r.created_at }; }) });
+    res.json({ cards: rows.map((r) => { let n = 0; try { n = JSON.parse(r.thread_ids_json || "[]").length; } catch { n = 0; } return { roundId: Number(r.id), artifactId: r.artifact_id, title: r.title, version: Number(r.base_version), resultVersion: r.result_version == null ? null : Number(r.result_version), count: n, status: r.status, at: r.created_at }; }) });
   }));
   router.get("/api/artifacts/rounds/:rid/card", wrap(async (req, res) => {
     const rid = Number(req.params.rid);

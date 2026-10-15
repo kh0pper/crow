@@ -121,6 +121,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
   const transcript = makeEl("div");
   const hubRoot = makeEl("div");
   const bodyClasses = new Set();
+  const htmlClasses = new Set();
   const fetches = [];
   const sandbox = {
     console,
@@ -130,9 +131,15 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
       removeEventListener(type, fn) { const l = sandbox.__docListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
       getElementById: (id) => (id === "perch-hub-root" ? hubRoot : null),
       body: { classList: classList(bodyClasses), appendChild: (c) => hubRoot.appendChild(c) },
+      documentElement: { classList: classList(htmlClasses) },
     },
-    window: { innerWidth: 1280 },
+    window: {
+      innerWidth: 1280,
+      addEventListener(type, fn) { (sandbox.__winListeners[type] ||= []).push(fn); },
+      removeEventListener(type, fn) { const l = sandbox.__winListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
+    },
     __docListeners: {},
+    __winListeners: {},
     el: (id) => (id === "perch-transcript" ? transcript : null),
     csrf: () => "tok",
     live: () => true,
@@ -169,7 +176,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     feedback: function(){ return artFb; },
   });\n})();`;
   vm.runInContext(src, sandbox);
-  return { sandbox, transcript, fetches, hubRoot, bodyClasses };
+  return { sandbox, transcript, fetches, hubRoot, bodyClasses, htmlClasses };
 }
 
 // row builder: the exact GET /api/artifacts/:id payload shape the route serves.
@@ -629,4 +636,99 @@ test("review L6: authored titles are literal — no $-pattern expansion, no plac
   const fb = texts(byClass(hub.transcript, "artfb")[0]).join("|");
   assert.ok(ask.includes(evil), ask);
   assert.ok(fb.includes(evil) && fb.includes("v3"), fb);
+});
+
+// ---------------------------------------------------------------------------
+// Item 4 (step-6 smoke): the feedback card's live status line
+// ---------------------------------------------------------------------------
+
+test("item 4: a working card says so; after the round-done frame the SAME node says v2 ready with a Show v2 control (?v=2); an identical re-poll does not re-render", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  let card = { roundId: 7, artifactId: "art_i4", title: "Plan", version: 1, count: 1, status: "working", resultVersion: null };
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/rounds-by-thread/")) return json({ cards: [card] });
+      if (url.startsWith("/api/artifacts/link-requests?")) return json({ requests: [] });
+      return json(row({ id: "art_i4", current: 2 }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadFeedbackCards(sidX);
+  await tick();
+  const node = byClass(hub.transcript, "artfb")[0];
+  assert.ok(node, "drawn");
+  const status = () => byClass(node, "art-fb-status")[0];
+  assert.equal(status().textContent, "Working on it…");
+  assert.equal(byClass(node, "art-fb-showv").length, 0, "no Show control while it works");
+  // The round-done frame (mcp round_done → hub) arrives.
+  card = { ...card, status: "done", resultVersion: 2 };
+  api.artifactFrame({ type: "artifact", artifactId: "art_i4", n: 2, event: "round-done" }, sidX);
+  await tick();
+  assert.equal(byClass(hub.transcript, "artfb").length, 1, "still one card");
+  assert.equal(byClass(hub.transcript, "artfb")[0], node, "the SAME node, in place");
+  assert.equal(status().textContent, "v2 ready");
+  const show = byClass(node, "art-fb-showv")[0];
+  assert.ok(show, "a Show control");
+  assert.equal(show.textContent, "Show v2");
+  show.onclick();
+  const frame = api.pane().children.find((c) => c.className === "art-pane-frame");
+  assert.match(frame.src, /\/dashboard\/artifacts\/view\/art_i4\?v=2&thread=perchlive-aaaaaaaa$/, frame.src);
+  api.closeArtifactPane();
+  // An identical re-poll does not re-render the status line.
+  const before = status();
+  api.loadFeedbackCards(sidX);
+  await tick();
+  assert.equal(status(), before, "unchanged status: the line node is kept");
+});
+
+test("item 4: done without a version says so; a timed-out round says so; artViewerUrl carries v only when it is a positive integer", async () => {
+  const sidX = "perchlive-aaaaaaaa";
+  const hub = mountCard({
+    sid: sidX,
+    fetchImpl: (m, url) => {
+      if (url.startsWith("/api/artifacts/rounds-by-thread/")) return json({ cards: [
+        { roundId: 8, artifactId: "art_i4b", title: "Plan", version: 1, count: 1, status: "done", resultVersion: null },
+        { roundId: 9, artifactId: "art_i4b", title: "Plan", version: 1, count: 1, status: "timed-out", resultVersion: null },
+      ] });
+      return json(row({ id: "art_i4b" }));
+    },
+  });
+  const api = hub.sandbox.__exportedApi;
+  api.loadFeedbackCards(sidX);
+  await tick();
+  const lines = byClass(hub.transcript, "art-fb-status").map((n) => n.textContent);
+  assert.deepEqual(lines, ["Replied, no new version", "Timed out"]);
+  assert.equal(api.artViewerUrl("art_x", sidX, 3), "/dashboard/artifacts/view/art_x?v=3&thread=" + sidX);
+  assert.equal(api.artViewerUrl("art_x", null, 3), "/dashboard/artifacts/view/art_x?v=3");
+  assert.equal(api.artViewerUrl("art_x", sidX, "3x"), "/dashboard/artifacts/view/art_x?thread=" + sidX);
+  assert.equal(api.artViewerUrl("art_x", sidX), "/dashboard/artifacts/view/art_x?thread=" + sidX);
+});
+
+// ---------------------------------------------------------------------------
+// S4 (step-6 smoke): no pull-to-refresh while the viewer pane is open
+// ---------------------------------------------------------------------------
+
+test("S4: the pane toggles art-pane-open on <html>; a Turbo visit or pagehide clears it; its listeners live only while the pane is open", () => {
+  for (const ev of ["turbo:before-visit", "pagehide", "reset", "close"]) {
+    const hub = mountCard();
+    const api = hub.sandbox.__exportedApi;
+    const count = () => (hub.sandbox.__docListeners["turbo:before-visit"] || []).length + (hub.sandbox.__winListeners.pagehide || []).length;
+    assert.equal(count(), 0, "nothing attached at load");
+    api.openArtifactPane("art_s4", "perchlive-aaaaaaaa");
+    assert.ok(hub.htmlClasses.has("art-pane-open"), "open: the class is on <html>");
+    assert.equal(count(), 2, "both clear-listeners attached while open");
+    if (ev === "turbo:before-visit") hub.sandbox.__docListeners[ev][0]({});
+    else if (ev === "pagehide") hub.sandbox.__winListeners[ev][0]({});
+    else if (ev === "reset") api.resetArtifactCards();
+    else api.closeArtifactPane();
+    assert.equal(hub.htmlClasses.has("art-pane-open"), false, ev + " clears the class");
+    assert.equal(count(), 0, ev + " detaches the listeners");
+  }
+});
+
+test("S4: the hub CSS contains scroll chaining while the pane is open", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/css.js", import.meta.url), "utf8");
+  assert.match(css, /html\.art-pane-open,\s*html\.art-pane-open body\{overscroll-behavior-y:contain\}/);
 });

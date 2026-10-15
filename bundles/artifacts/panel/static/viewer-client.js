@@ -2,8 +2,9 @@
  * Crow Artifacts — the viewer page client (dashboard origin, trusted; plan
  * PR-2 Task 2.2). Classic script. Draws the header (title, version switcher,
  * status, Run scripts, More), the frame (through viewer.js), the numbered
- * pins, the threads column (wide) or bottom sheet (phone), the floating
- * Comment toggle and the one primary action, Send N comments to chat.
+ * pins, the threads column (wide) or bottom sheet (phone), the Comment
+ * toggle in the header (pages and diagrams; a document's selection is always
+ * on, S6) and the one primary action, Send N comments to chat.
  *
  * Rules:
  *  - every user-, bot- or contact-authored string is placed with textContent;
@@ -58,7 +59,8 @@
   var openChat = el("a", { class: "cv-openchat", hidden: "", text: T.open_chat });
   var moreMenu = el("div", { class: "cv-menu" });
   var more = el("details", { class: "cv-more" }, [el("summary", { "aria-label": T.more, text: "⋯" }), moreMenu]);
-  var head = el("header", { class: "cv-head" }, [title, el("div", { class: "cv-headtools" }, [versionSel, runBtn, openChat, more]), status]);
+  var headTools = el("div", { class: "cv-headtools" }, [versionSel, runBtn, openChat, more]);
+  var head = el("header", { class: "cv-head" }, [title, headTools, status]);
   var banners = el("div", { class: "cv-banners" });
   var trust = el("div", { class: "cv-trust" });
   var frameBox = el("div", { class: "cv-frame" });
@@ -91,7 +93,6 @@
   root.appendChild(trust);
   root.appendChild(el("div", { class: "cv-body" }, [stage, side]));
   root.appendChild(selBar);
-  root.appendChild(commentBtn);
   root.appendChild(el("p", { class: "cv-note", text: T.never_password }));
 
   function banner(text, kind, buttons) {
@@ -107,6 +108,21 @@
     S.sheetOpen = !!open;
     side.classList.toggle("cv-open", S.sheetOpen);
     handle.setAttribute("aria-expanded", S.sheetOpen ? "true" : "false");
+    placeSelBar();
+    setTimeout(placeSelBar, 250);   // after the sheet's height transition
+  }
+  // S6: on a phone the "Comment on …" button sits just above the bottom
+  // sheet, open or not (and above it in z-order), never under it.
+  function placeSelBar() {
+    var docked = window.getComputedStyle(side).position === "fixed";
+    selBar.style.bottom = docked ? (side.offsetHeight + 8) + "px" : "";
+  }
+  window.addEventListener("resize", placeSelBar);
+  // S7: no floating button. Pages and diagrams get the Comment toggle in the
+  // header; a document has none (selection is always on, S6).
+  function placeCommentBtn() {
+    if (isDoc()) { if (commentBtn.parentNode) commentBtn.parentNode.removeChild(commentBtn); return; }
+    if (commentBtn.parentNode !== headTools) headTools.insertBefore(commentBtn, more);
   }
   handle.addEventListener("click", function () { setSheet(!S.sheetOpen); });
 
@@ -122,6 +138,7 @@
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
+      placeCommentBtn();
       title.textContent = S.art.title;
       trust.textContent = fmt(T.made_by, { bot: S.art.created_by_bot || T.you });
       renderVersions(); renderThreads(); renderStatus(); renderSections();
@@ -162,11 +179,12 @@
       (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
       threadList.appendChild(li);
     });
-    if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: T.no_comments }));
+    if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: isDoc() ? T.no_comments_doc : T.no_comments }));
     var n = shown().length;
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
-    sendBtn.textContent = k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
+    // S5: while a round runs, the disabled Send says why.
+    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: (S.art && S.art.created_by_bot) || T.bot }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
   }
@@ -221,12 +239,30 @@
   }
 
   // ── pins (cosmetic; click = focus that thread) ──────────────────────────
+  // S1 (plan Rev 3 L6): a pin sits in the LEFT GUTTER of its anchor's block
+  // (x = the block's left edge minus the pin), on the quote's first line
+  // (y = that line's centre), so it never covers the words. Pins closer than
+  // one pin height step sideways in the gutter; none is hidden. A diagram's
+  // region pins (no h, no bx) sit exactly on their point.
+  var PIN_R = 14;
   function drawPins(list) {
     pinLayer.textContent = "";
-    list.forEach(function (p) {
+    var placed = [];
+    list.slice().sort(function (a, b) { return a.y - b.y || a.i - b.i; }).forEach(function (p) {
+      var x = p.x, y = p.y;
+      if (p.h !== undefined || p.bx !== undefined) {
+        x = Math.max(PIN_R + 2, (p.bx !== undefined ? p.bx : p.x) - PIN_R - 4);
+        y = p.y + (p.h || 0) / 2;
+        var base = x;
+        for (var k = 0; k < placed.length; k++) {
+          if (Math.abs(placed[k].y - y) < 2 * PIN_R && Math.abs(placed[k].x - x) < 2 * PIN_R) { x = placed[k].x + 2 * PIN_R + 2; k = -1; }
+          if (x - base > 20 * PIN_R) break;
+        }
+      }
+      placed.push({ x: x, y: y });
       var b = el("button", { type: "button", class: "cv-pin", "aria-label": fmt(T.pin, { n: p.i }), text: String(p.i), onclick: function () { focusThread(p.i); } });
-      b.style.left = Math.round(p.x) + "px";
-      b.style.top = Math.round(p.y) + "px";
+      b.style.left = Math.round(x) + "px";
+      b.style.top = Math.round(y) + "px";
       pinLayer.appendChild(b);
     });
   }
@@ -239,7 +275,10 @@
     } else if (S.viewer) {
       // Scripted types: the OWNER's element/text anchors only (viewer.js
       // re-validates); the helper reports where they are.
-      S.viewer.setPins(shown().map(function (t, k) { return t.author_kind === "owner" && t.status !== "resolved" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean));
+      // S1: the MOUNTED version's anchor map lets a document block anchor
+      // cross as that version's own rendered words (viewer.js pinOut).
+      var mv = version(S.n);
+      S.viewer.setPins(shown().map(function (t, k) { return t.author_kind === "owner" && t.status !== "resolved" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean), mv && mv.anchor_map);
     }
   }
   window.addEventListener("resize", function () { if (S.art && S.art.type === "diagram") pushPins(); });
@@ -278,6 +317,7 @@
     selBar.textContent = "";
     selBar.appendChild(button(fmt(T.comment_selection, { q: q }), function () { hideSelBar(); compose(anchor); }, "cv-primary"));
     selBar.removeAttribute("hidden");
+    placeSelBar();
   }
 
   // ── compose ─────────────────────────────────────────────────────────────
@@ -311,7 +351,7 @@
     // Script-free documents cannot propose from inside the frame: pick a section.
     // D28: no list, no sheet over the document — select text instead.
     if (!S.commentOn) sectionList.setAttribute("hidden", "");
-    if (S.commentOn) status.textContent = isDoc() ? T.commenting_doc : T.commenting; else renderStatus();
+    renderStatus();
   }
   commentBtn.addEventListener("click", function () { setComment(!S.commentOn); });
   region.addEventListener("click", function (e) {
@@ -351,7 +391,12 @@
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
       // A tap (pages) composes at once; a SELECTION waits for the owner's tap
       // on the trusted "Comment on …" button (review H1).
-      onProposal: function (a) { if (!S.commentOn) return; if (a.kind === "text") offerSelection(a); else compose(a); },
+      // S6: on a document selection is always on (no toggle); a page or a
+      // diagram proposes only with Comment pressed.
+      // Review of #488: a document proposes only selections (select-only);
+      // any other kind from its frame is ignored, never composed.
+      onProposal: function (a) { if (!S.commentOn && !isDoc()) return; if (isDoc() && a.kind !== "text") return; if (a.kind === "text") offerSelection(a); else compose(a); },
+      onSelectionCleared: function () { hideSelBar(); },
       onTrip: function (reason) {
         showFlagged();   // F3: replaced at once, before the server answers
         api("POST", BASE + "/versions/" + n + "/tripwire", { reason: reason }).then(refresh, function () {});
@@ -371,6 +416,8 @@
         if (!/[?&]reloaded=1/.test(location.search)) location.replace(location.pathname + location.search + (location.search ? "&" : "?") + "reloaded=1");
       },
     });
+    // S6: documents select-only, always on — sent at the hello, never turned off.
+    if (isDoc()) viewer.setCommentMode(true, { selectOnly: true });
     viewer.load().then(function (g) {
       if (!g) return;
       isolationNote(g.isolation);
@@ -394,9 +441,10 @@
       banner(fmt(T.proposed_note, { n: p.n }) + (p.change_note ? " — " + p.change_note : ""), "info",
         [button(T.accept, decide(true)), button(T.drop, decide(false))]).classList.add("cv-proposed");
     });
-    if (S.commentOn) { if (S.activeRound) S.lastRound = S.activeRound; poll(); return; }
+    // S5: the banners always run; only the idle status line yields to the
+    // comment-mode hint.
     if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
-    else status.textContent = "";
+    else status.textContent = S.commentOn && !isDoc() ? T.commenting : "";
     // A round just finished with a new current version: say so, offer it.
     if (S.lastRound && !S.activeRound) {
       S.lastRound = null;
