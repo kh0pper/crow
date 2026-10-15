@@ -1905,6 +1905,7 @@ export function createInteractiveEngine({
     // s.resolved says NOW, not what the turn started on — so the model that
     // actually served the reply is what gets metered.
     s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    s.budgetNotice = null;                        // strand 2: it described the old model
     // Fix round 3 R1: a /model typed in the TUI is an operator choice exactly
     // like the drawer's switch, and must survive a restart too. Never throws
     // (writeModel's own contract); pending-belted when the row is not yet
@@ -2817,6 +2818,7 @@ export function createInteractiveEngine({
         s.currentModelParts = { provider: rProvider, modelId: rId };
         s.currentModel = rKey;
         s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
+        s.budgetNotice = null;                        // strand 2: it described the old model
         applied.model = rKey;
         await writeModel(s);                           // survives a restart (N2)
         // The child's OWN model_select event for this same switch will also

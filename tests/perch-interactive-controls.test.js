@@ -1537,3 +1537,11 @@ test("strand 2 (review): a refusing cap is not cached — raising the model's li
   assert.ok((await engine.message(s.sessionId, "hi again")).turnId);
   assert.equal(state.instances[0].turns.length, 1);
 });
+
+test("strand 2 (re-review): after a live switch to a model that fits, a late subscriber is NOT told turns will be refused", async () => {
+  const { engine } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const sink = await collect(engine, s.sessionId);
+  assert.ok(!sink.events.some((e) => e.type === "log" && /at most 2 tools/.test(e.text)), JSON.stringify(sink.events));
+});
