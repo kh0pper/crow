@@ -249,7 +249,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
       const sctx = { db, lang, botId, row, remoteInvocationOn, changed: changeTracker(b) };
       let r;
       if (tab === "basics") r = await saveBasics(def, b, sctx);
-      else if (tab === "abilities") r = saveAbilities(def, b, sctx);
+      else if (tab === "abilities") r = await saveAbilities(def, b, sctx);
       else if (tab === "safety") r = saveSafety(def, b, sctx);
       else r = await saveAdvanced(def, b, sctx);
       if (r.error) {

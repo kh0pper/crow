@@ -350,6 +350,13 @@ export async function mountMcpServers(app, deps) {
       await initArtifactsTables(artDb);
       const { minted } = await ensureArtifactsToken(artDb);
       if (minted) console.log("[gateway] artifacts token minted");
+      // S2a (review M7): once per instance, defs that grant artifact_update
+      // get artifact_find + artifact_attach written in (cap-guarded) — the
+      // needs_link recovery path. Off the boot path; never throws.
+      setImmediate(async () => {
+        try { (await import("../../../scripts/pi-bots/artifacts-companions.mjs")).migrateArtifactsCompanions(artDb).catch(() => {}); }
+        catch (e) { console.warn(`[gateway] artifacts companion migration: ${e.message}`); }
+      });
       // MinIO when shared storage is available, else local disk (spec §11).
       const blobs = await createBlobStore(artDb, resolveDataDir());
       initGatewayActorKey();
