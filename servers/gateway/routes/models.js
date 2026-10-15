@@ -68,7 +68,11 @@ import { loadState, registryEntryRuntimeState, findRegistryEntries } from "../mo
 import {
   enqueueDownload, registerModel, unregisterModel, providerBindings,
   downloadHfFile, fetchHfPathInfo, isValidHfRepoId, isValidHfFilename, deriveModelIdFromFilename,
+  adoptModel, hfSyntheticCatalog,
 } from "../models/manager.js";
+import { registeredSnapshot } from "../models/registered-rows.js";
+import { isExternalEngine } from "../../shared/provider-engine.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
 import { servingClassOf } from "../models/serving-class.js";
@@ -190,6 +194,8 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     fetchHfPathInfoFn = fetchHfPathInfo,
     // Plan 3a: the lifecycle core shared with /llm/models (same job store).
     lifecycleCoreFn = () => createLifecycleCore(defaultLifecycleDeps()),
+    adoptModelFn = adoptModel,
+    ownInstanceIdFn = getOrCreateLocalInstanceId,
   } = opts;
 
   let _core = null;
@@ -739,6 +745,153 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       res.json({ deleted: true, provider: name, disabled: result.disabled, fileDeleted: result.deleted, bindings });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  // --- Registered models, register / adopt / hf-adopt (plan 3a) ----------
+
+  router.get("/api/models/registered", (req, res) => {
+    try {
+      res.json(registeredSnapshot({ core: core(), catalog: loadCatalogFn(), orchestrationDisabled: isModelOrchestrationDisabled() }));
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: "INTERNAL" });
+    }
+  });
+
+  const BAD_REQUEST = new Set(["INVALID_LAUNCH", "UNKNOWN_MODEL", "UNKNOWN_QUANT", "INVALID_HF_REPO", "INVALID_HF_FILE", "BAD_REQUEST"]);
+  const CONFLICT = new Set(["PROVIDER_ID_CONFLICT", "EXTERNAL_ENGINE_CONFLICT", "EXTERNAL_ENGINE", "NOT_OWNER", "BUNDLE_ROW"]);
+  /** One error mapper for the registration routes: `{ error, code, errors?, owner? }`. */
+  function sendErr(res, err) {
+    const code = err?.code || "INTERNAL";
+    let status = 500;
+    if (BAD_REQUEST.has(code) || code.startsWith("ADOPT_")) status = 400;
+    else if (CONFLICT.has(code)) status = 409;
+    const body = { error: err?.message || String(err), code };
+    if (Array.isArray(err?.errors)) body.errors = err.errors;
+    if (err?.owner !== undefined) body.owner = err.owner;
+    return res.status(status).json(body);
+  }
+  const fail = (code, message) => Object.assign(new Error(message), { code });
+
+  /** Shared request shape for register/adopt (the dialog's role fields). */
+  function roleOpts(body) {
+    const out = {};
+    if (body.providerId !== undefined && body.providerId !== null && body.providerId !== "") {
+      if (typeof body.providerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerId)) {
+        throw fail("BAD_REQUEST", "providerId must be letters, digits, dot, dash or underscore");
+      }
+      out.providerId = body.providerId;
+    }
+    // undefined → the usual chat-group rule; null → no group; a string → that group.
+    if (body.mutexGroup === null || typeof body.mutexGroup === "string") out.mutexGroup = body.mutexGroup || null;
+    if (body.alwaysResident !== undefined) out.alwaysResident = body.alwaysResident === true;
+    if (body.defaultMember !== undefined) out.defaultMember = body.defaultMember === true;
+    if (body.launch !== undefined && body.launch !== null) {
+      if (typeof body.launch !== "object" || Array.isArray(body.launch)) throw fail("INVALID_LAUNCH", "launch must be a JSON object");
+      out.launch = body.launch;
+    }
+    return out;
+  }
+
+  function resolveCatalogQuant(catalog, catalogId, quant) {
+    const model = findModel(catalog, catalogId);
+    if (!model) throw fail("UNKNOWN_MODEL", `Unknown model id: ${catalogId}`);
+    const resolved = findQuant(model, quant);
+    if (!resolved) throw fail("UNKNOWN_QUANT", `Unknown quant for ${catalogId}: ${quant}`);
+    return resolved.quantId;
+  }
+
+  /** Ownership pre-check (review H1/M1) BEFORE any hashing or write: an
+   * external engine, a bundle-backed row or a row owned by another instance
+   * is refused with the row untouched. registerModel re-checks inside. */
+  async function refuseForeignTarget(db, providerId) {
+    const row = (await listProvidersAllFn(db)).find((r) => r.id === providerId);
+    if (!row) return;
+    if (isExternalEngine(row)) throw fail("EXTERNAL_ENGINE", `"${providerId}" is an external engine; Crow never registers over it`);
+    if (row.bundleId) throw fail("BUNDLE_ROW", `"${providerId}" is served by the ${row.bundleId} bundle — converting it is a migration step, not a registration`);
+    const owner = row.gpuPolicy?.owner;
+    if (row.gpuPolicy?.runtime === "native" && owner && owner !== ownInstanceIdFn()) {
+      throw Object.assign(fail("NOT_OWNER", `"${providerId}" is owned by another instance`), { owner });
+    }
+  }
+
+  const residentNow = (providerId) => !!getNativeHandleFn(providerId)?.live;
+
+  router.post("/api/models/register", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const db = dbFactory();
+    try {
+      const body = req.body || {};
+      const catalog = loadCatalogFn();
+      const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
+      const roles = roleOpts(body);
+      await refuseForeignTarget(db, roles.providerId || body.catalogId);
+      const provider = await registerModelFn({ modelId: body.catalogId, quant, catalog, db, dir: resolveDir(), refuseBundleRow: true, ...roles });
+      res.json({ provider, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  router.post("/api/models/adopt", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const db = dbFactory();
+    try {
+      const body = req.body || {};
+      const catalog = loadCatalogFn();
+      const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
+      const roles = roleOpts(body);
+      await refuseForeignTarget(db, roles.providerId || body.catalogId);
+      const companionPaths = {};
+      if (body.companionPaths && typeof body.companionPaths === "object") {
+        for (const [k, v] of Object.entries(body.companionPaths)) if (typeof v === "string" && v) companionPaths[k] = v;
+      }
+      const provider = await adoptModelFn({
+        modelId: body.catalogId, quant, path: body.path, companionPaths, allowUnverified: body.allowUnverified === true,
+        catalog, db, dir: resolveDir(), refuseBundleRow: true, ...roles,
+      });
+      res.json({ provider, verified: provider.verified, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  router.post("/api/models/hf-adopt", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const { hfRepo, file, path } = req.body || {};
+    if (!isValidHfRepoId(hfRepo)) return res.status(400).json({ error: `Invalid Hugging Face repo id: ${JSON.stringify(hfRepo)}`, code: "INVALID_HF_REPO" });
+    if (!isValidHfFilename(file)) return res.status(400).json({ error: `Invalid file name: ${JSON.stringify(file)}`, code: "INVALID_HF_FILE" });
+    const db = dbFactory();
+    try {
+      let token = null;
+      try { token = await getHfToken(db); } catch { /* an un-gated file needs no token */ }
+      let info;
+      try {
+        info = await fetchHfPathInfoFn({ hfRepo, file, hfApiBase, hfToken: token });
+      } catch (err) {
+        const notFound = err.code === "HF_FILE_NOT_FOUND";
+        return res.status(notFound ? 404 : 502).json({ error: err.message, code: notFound ? "HF_FILE_NOT_FOUND" : "HF_UPSTREAM_ERROR" });
+      }
+      if (!info?.sha256) {
+        return res.status(422).json({ error: "This file has no verifiable checksum (it isn't LFS-tracked) — refusing to adopt an unverifiable file.", code: "NO_VERIFIABLE_CHECKSUM" });
+      }
+      const modelId = deriveModelIdFromFilename(file);
+      const sizeMb = typeof info.sizeBytes === "number" ? info.sizeBytes / 1_000_000 : null;
+      const catalog = hfSyntheticCatalog({ hfRepo, file, modelId, sha256: info.sha256, sizeMb });
+      await refuseForeignTarget(db, modelId);
+      const provider = await adoptModelFn({
+        modelId, quant: "hf", path, catalog, allowUnverified: req.body?.allowUnverified === true,
+        db, dir: resolveDir(), refuseBundleRow: true, registryExtra: { source: "hf-browser" },
+      });
+      res.json({ provider, verified: provider.verified, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
     } finally {
       try { db.close(); } catch { /* best effort */ }
     }
