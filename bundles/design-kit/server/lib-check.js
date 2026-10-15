@@ -35,23 +35,53 @@ function walk(dir, root = dir, out = []) {
   return out;
 }
 
-/** CSS that would fetch at runtime: any @import, or url(...) whose target has a
- *  scheme other than data: or is protocol-relative. Linear scan (no regex over
- *  the whole file). */
+/** True when a CSS fetch target (text right after `url(`, a quote, ...) is a
+ *  remote one: protocol-relative, or a scheme other than data:. */
+function remoteTarget(low, from) {
+  let j = from;
+  while (j < low.length && (/\s/.test(low[j]) || low[j] === "'" || low[j] === '"')) j++;
+  const head = low.slice(j, j + 16);
+  if (head.startsWith("//")) return true;
+  const colon = head.indexOf(":");
+  return colon > 0 && /^[a-z][a-z0-9+.-]*$/.test(head.slice(0, colon)) && !head.startsWith("data:");
+}
+
+/** CSS that would fetch at runtime. Fails closed: any @import (also with an
+ *  escaped name); url() / src() whose target is remote or contains a CSS
+ *  escape; and any quoted string inside image-set() that is remote. Linear
+ *  scans (no regex over the whole file). */
 export function cssFetches(css) {
   const low = String(css).toLowerCase();
-  if (low.includes("@import")) return true;
+  if (low.includes("@import") || /@\s*\\/.test(low)) return true;
+  for (const fn of ["url(", "src("]) {
+    let i = 0;
+    for (;;) {
+      const k = low.indexOf(fn, i);
+      if (k < 0) break;
+      i = k + fn.length;
+      if (fn === "src(" && /[a-z0-9_-]/.test(low[k - 1] || " ")) continue; // a name ending in src(, not the function
+      const end = low.indexOf(")", i);
+      if (low.slice(i, end < 0 ? low.length : end).includes("\\")) return true;
+      if (remoteTarget(low, i)) return true;
+    }
+  }
   let i = 0;
   for (;;) {
-    const k = low.indexOf("url(", i);
+    const k = low.indexOf("image-set(", i);
     if (k < 0) return false;
-    i = k + 4;
-    let j = i;
-    while (j < low.length && (low[j] === " " || low[j] === "'" || low[j] === '"')) j++;
-    const head = low.slice(j, j + 16);
-    if (head.startsWith("//")) return true;
-    const colon = head.indexOf(":");
-    if (colon > 0 && /^[a-z][a-z0-9+.-]*$/.test(head.slice(0, colon)) && !head.startsWith("data:")) return true;
+    i = k + 10;
+    let stop = low.length;
+    for (const c of [";", "}"]) { const x = low.indexOf(c, i); if (x >= 0 && x < stop) stop = x; }
+    const seg = low.slice(i, stop);
+    if (seg.includes("\\")) return true;
+    for (const q of ["'", '"']) {
+      let at = seg.indexOf(q);
+      while (at >= 0) {
+        if (remoteTarget(seg, at + 1)) return true;
+        const close = seg.indexOf(q, at + 1);
+        at = close < 0 ? -1 : seg.indexOf(q, close + 1);
+      }
+    }
   }
 }
 
@@ -85,6 +115,7 @@ export function checkLib(libDir) {
     if (!VERSION_RE.test(String(e.version))) fail(`${where}: version must be exact x.y.z`);
     if (!LICENSE_IDS.has(e.license)) fail(`${where}: licence ${e.license} is not on the allowlist`);
     const lf = cleanLibPath(e.license_file);
+    if (lf && !lf.startsWith("licenses/")) fail(`${where}: licence file must live under licenses/`);
     if (!lf || !existsSync(join(libDir, lf)) || !readFileSync(join(libDir, lf), "utf8").trim()) fail(`${where}: licence file missing or empty`);
     else {
       listed.add(lf);
@@ -110,7 +141,10 @@ export function checkLib(libDir) {
     if (!e.files.some((f) => f.path === e.main)) fail(`${where}: main must be one of its files`);
     for (const r of e.requires || []) if (!names.has(r)) fail(`${where}: requires unknown ${r}`);
   }
-  for (const m of man.meta_files || []) verify("meta_files", m);
+  for (const m of man.meta_files || []) {
+    if (!CONTENT_TYPES.has(m && m.type)) fail(`meta_files: ${m && m.path}: type ${m && m.type} not allowed`);
+    verify("meta_files", m);
+  }
   for (const p of existsSync(libDir) ? walk(libDir) : []) if (!listed.has(p)) fail(`unlisted file in lib/: ${p}`);
   return { errors, entries: man.entries.length };
 }
@@ -118,7 +152,19 @@ export function checkLib(libDir) {
 /** The kit's own code and skills never name a remote host (spec §3.2 "no entry
  *  is fetched at runtime"). Loopback URLs are allowed (the renderer). The
  *  Dockerfile's build-time download is not runtime and is not scanned. */
-const REMOTE_URL = /https?:\/\/(?!127\.0\.0\.1[:/]|localhost[:/]|\[::1\][:/])/i;
+const HOSTS_OK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+// A scheme followed by a slash pair and an authority, or a protocol-relative
+// authority introduced by a quote, paren or equals sign.
+const REMOTE_REF = /(?:\b[a-z][a-z0-9+.-]*:\/\/|["'`(=]\s*\/\/)([^\s"'`<>)\/?#\\]+)/gi;
+function namesRemoteHost(text) {
+  for (const m of text.matchAll(REMOTE_REF)) {
+    // Authority = userinfo@host:port; the host is what follows the LAST "@".
+    const hostport = m[1].slice(m[1].lastIndexOf("@") + 1).toLowerCase();
+    const host = hostport.startsWith("[") ? hostport.slice(0, hostport.indexOf("]") + 1) : hostport.replace(/:\d*$/, "");
+    if (!HOSTS_OK.has(host)) return true;
+  }
+  return false;
+}
 export function checkNoRemoteRefs(kitDir) {
   const out = [];
   const scan = (rel, test) => {
@@ -126,7 +172,7 @@ export function checkNoRemoteRefs(kitDir) {
     if (!existsSync(abs)) return;
     for (const f of walk(abs)) {
       if (f.split("/").includes("node_modules") || !test(f)) continue;
-      if (REMOTE_URL.test(readFileSync(join(abs, f), "utf8"))) out.push(`${rel}/${f} names a remote URL`);
+      if (namesRemoteHost(readFileSync(join(abs, f), "utf8"))) out.push(`${rel}/${f} names a remote URL`);
     }
   };
   scan("server", (f) => f.endsWith(".js"));

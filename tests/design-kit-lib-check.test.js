@@ -112,3 +112,51 @@ test("the repo's own lib/ passes", () => {
   assert.deepEqual(r.errors, []);
   assert.deepEqual(checkNoRemoteRefs(join(ROOT, "bundles", "design-kit")), []);
 });
+
+test("cssFetches fails closed on whitespace, escapes, image-set, src() and bare @import strings", () => {
+  for (const css of [
+    "a{background:url(\t'https://evil.example/x.png')}",
+    "a{background:url(\n//evil.example/x.png)}",
+    "a{background:url(\f\"https://evil.example/x.png\")}",
+    "a{background:url(h\\74tps://evil.example/x.png)}",
+    "a{background:url(./x\\.png)}",
+    "a{background:image-set(\"https://evil.example/x.png\" 1x)}",
+    "a{background:image-set(\"a.png\" 1x, \"//evil.example/b.png\" 2x)}",
+    "a{background:-webkit-image-set(\n'ftp://evil.example/x.png' 1x)}",
+    "a{background:src(\"https://evil.example/x.png\")}",
+    "@import \"x.css\";",
+    "@\\69mport 'x.css';",
+  ]) assert.equal(cssFetches(css), true, css);
+  for (const css of [
+    "a{background:image-set(\"a.png\" 1x, \"b.png\" 2x)}",
+    "a{background:url(\n./x.png)}",
+    "a{content:\"see https://example.org\"}",
+  ]) assert.equal(cssFetches(css), false, css);
+});
+
+test("remote-URL scan catches protocol-relative, other schemes and userinfo tricks", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dk-refs2-"));
+  try {
+    mkdirSync(join(dir, "server")); mkdirSync(join(dir, "skills"));
+    const bad = (body) => { writeFileSync(join(dir, "server", "k.js"), body); return checkNoRemoteRefs(dir).length; };
+    assert.equal(bad("const u = 'http://localhost:8018/x'; // note\nconst v = 'http://[::1]:80/'"), 0);
+    assert.equal(bad("fetch('//evil.example/x.js')"), 1);
+    assert.equal(bad("new WebSocket('wss://evil.example/s')"), 1);
+    assert.equal(bad("const u = 'ftp://evil.example/f'"), 1);
+    assert.equal(bad("const u = 'http://localhost:80@evil.example/'"), 1);
+    assert.equal(bad("const u = 'http://127.0.0.1@evil.example/'"), 1);
+    assert.equal(bad("const u = 'http://127.0.0.1.evil.example/'"), 1);
+    assert.equal(bad("const u = 'HTTP://Evil.example/'"), 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("meta_files types are checked and licence files must live under licenses/", () => {
+  assert.match(errsOf((m, lib) => {
+    writeFileSync(join(lib, "meta.html"), "<p>x</p>");
+    m.meta_files = [{ path: "meta.html", sha256: sha256Hex(Buffer.from("<p>x</p>")), type: "text/html" }];
+  }), /meta_files: meta\.html: type text\/html not allowed/);
+  assert.match(errsOf((m, lib) => {
+    writeFileSync(join(lib, "css", "LICENSE"), "MIT License\n");
+    m.entries[0].license_file = "css/LICENSE";
+  }), /licence file must live under licenses\//);
+});
