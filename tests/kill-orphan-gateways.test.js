@@ -41,6 +41,7 @@ import {
   copyFileSync,
   chmodSync,
   realpathSync,
+  readlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -207,6 +208,7 @@ const { spawn } = require("node:child_process");
 const { openSync } = require("node:fs");
 const errFd = openSync(${JSON.stringify(binPath + ".stderr")}, "a");
 const c = spawn(${JSON.stringify(binPath)}, ${JSON.stringify(args)}, {
+  argv0: "llama-server-fixture",
   detached: true,
   stdio: ["ignore", "ignore", errFd],
   cwd: ${JSON.stringify(opts.cwd || tmpdir())},
@@ -281,69 +283,24 @@ function makeFakeNativeRuntime() {
  * `runtime.js`'s `buildLlamaServerArgs` shape exactly (the flags Sweep 3's
  * `native_port_of` actually parses). `port` omitted entirely tests the
  * fail-closed "couldn't determine a port" path. */
+/** The test-scoped ORPHAN_NATIVE_PATTERN that selects exactly the fixture
+ * spawned from `binPath`. */
+function nativeFixturePattern(binPath) {
+  return escRe(fixtureModelPath(binPath));
+}
+
+/** A per-fixture `--model` token: unique (it carries the fixture's mkdtemp
+ * name) and free of the "runtimes/llamacpp" fragment, so the PROD sweeper's
+ * default pattern never selects the fixture (see the de-collision test). */
+function fixtureModelPath(binPath) {
+  const T = binPath.slice(0, binPath.indexOf("/runtimes/llamacpp/"));
+  return `/fake/${T.split("/").pop()}/model.gguf`;
+}
+
 async function spawnFakeNativeModel(binPath, { port, alias = "test-model" } = {}) {
-  await awaitProdSweeperClearance();
-  const args = ["-c", "import time; time.sleep(600)", "--model", "/fake/model.gguf", "--alias", alias];
+  const args = ["-c", "import time; time.sleep(600)", "--model", fixtureModelPath(binPath), "--alias", alias];
   if (port != null) args.push("--port", String(port), "--host", "127.0.0.1");
   return spawnOrphanedBinary(binPath, args);
-}
-
-// ── prod-sweeper avoidance (2026-08-13 flake hunt) ──────────────────────
-// crow-orphan-sweep.timer runs THIS SAME SCRIPT every minute with its
-// DEFAULT native pattern (`runtimes/llamacpp`). A live sweep-3 fixture is
-// BY DESIGN indistinguishable from a real orphan — that identity is what
-// these tests prove — so a fixture whose alive window overlaps a tick gets
-// legitimately reaped (journal-proven: 2026-08-13 07:56:43, the prod
-// sweeper SIGTERMed the dry-run test's port-18141 fixture mid-assertion).
-// Gateway fixtures were renamed out of the default pattern for this exact
-// class of flake (the de-collision test above); native fixtures cannot be,
-// so the spawn steers around the next tick instead. Fail-open: on any
-// surprise (no systemctl, no timer, unparseable output) we proceed exactly
-// as before — the clearance is flake-avoidance, never correctness.
-function parseSystemdSpanMs(str) {
-  if (typeof str !== "string") return null;
-  const t = str.trim();
-  if (!t || /^(infinity|n\/a)$/i.test(t)) return null;
-  const UNIT = { d: 86400000, h: 3600000, min: 60000, s: 1000, ms: 1, us: 0.001 };
-  let ms = 0;
-  for (const tok of t.split(/\s+/)) {
-    const m = /^([\d.]+)(d|h|min|s|ms|us)$/.exec(tok);
-    if (!m) return null;
-    ms += Number(m[1]) * UNIT[m[2]];
-  }
-  return ms;
-}
-
-async function awaitProdSweeperClearance(windowMs = 15000, capMs = 180000) {
-  // Poll-until-runway, never a fixed post-tick margin: systemd timers
-  // default AccuracySec=1min, so the real fire lands anywhere up to a
-  // minute AFTER NextElapse — the first version of this helper waited
-  // "tick + 6s" and the timer fired straight through it (observed
-  // 2026-08-13 08:09:03 vs a computed ~08:08:57 tick). Clear runway means:
-  // the next fire is comfortably far away AND no sweep is running right
-  // now. NextElapse jumps ~1min forward at activation, so both conditions
-  // flip true only after the awaited tick has observably happened.
-  const deadline = Date.now() + capMs;
-  while (Date.now() < deadline) {
-    let shown;
-    try {
-      shown = spawnSync("systemctl", ["show", "crow-orphan-sweep.timer", "-p", "NextElapseUSecMonotonic", "--value"],
-        { encoding: "utf8", timeout: 5000 });
-    } catch { return; }
-    if (!shown || shown.status !== 0) return;
-    const nextMs = parseSystemdSpanMs(shown.stdout);
-    if (nextMs == null || nextMs === 0) return; // timer absent/inactive → nothing to avoid
-    let uptimeMs;
-    try { uptimeMs = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]) * 1000; } catch { return; }
-    if (!Number.isFinite(uptimeMs)) return;
-    const untilFire = nextMs - uptimeMs; // negative = fired-late window, keep waiting
-    const active = spawnSync("systemctl", ["is-active", "crow-orphan-sweep.service"],
-      { encoding: "utf8", timeout: 5000 });
-    const sweepRunning = (active.stdout || "").trim() === "active";
-    if (!sweepRunning && untilFire >= windowMs) return;
-    await sleep(2000);
-  }
-  // Cap hit — proceed rather than hang the suite; worst case is the old flake odds.
 }
 
 /** Write `T/models/state.json` with a single reservation — the same shape
@@ -615,6 +572,36 @@ test("fixture filename is invisible to the script's DEFAULT gateway pattern (pro
   }
 });
 
+test("native-runtime fixtures are invisible to the script's DEFAULT native pattern (prod-sweeper de-collision)", async (t) => {
+  // crow-orphan-sweep.timer runs this script every minute with its DEFAULT
+  // native pattern. A fixture whose cmdline matched it was reaped by the PROD
+  // sweeper mid-test whenever a loaded suite outran the old wait-for-the-tick
+  // window (journal: 2026-10-13, the dry-run test's fixture SIGTERMed by
+  // crow-orphan-sweep.service). Same cure as the gateway fixtures above: the
+  // cmdline must not match the default, while /proc/<pid>/exe still resolves
+  // under runtimes/llamacpp/ so the sweep's real identity proof is unchanged.
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+  const src = readFileSync(SCRIPT, "utf8");
+  const m = src.match(/NATIVE_PATTERN="\$\{ORPHAN_NATIVE_PATTERN:-(.+?)\}"/);
+  assert.ok(m, "could not find the NATIVE_PATTERN default in the script");
+  const defaultRe = new RegExp(m[1].replace(/\\\\/g, "\\"));
+
+  const pid = await spawnFakeNativeModel(binPath, { port: 18140 });
+  spawned.push(pid);
+  assertFixtureLive(pid, binPath, "native runtime fixture must be alive");
+  const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+  assert.doesNotMatch(cmdline, defaultRe, "fixture cmdline must NOT match the script's default native pattern");
+  assert.match(cmdline, new RegExp(nativeFixturePattern(binPath)), "the test-scoped pattern must still select the fixture");
+  assert.match(readlinkSync(`/proc/${pid}/exe`), /\/runtimes\/llamacpp\//, "exe identity must still sit under runtimes/llamacpp/");
+});
+
 // ---------------------------------------------------------------------------
 // Sweep 3: orphaned native model runtime processes (Item G, Task 14)
 // ---------------------------------------------------------------------------
@@ -642,7 +629,7 @@ test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
   });
 
   await waitFor(() => !isAlive(pid), 5000, "orphaned native runtime fixture to die");
@@ -670,7 +657,7 @@ test("sweep 3 ORPHAN_DRY_RUN=1 names the native runtime victim but kills nothing
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
     ORPHAN_DRY_RUN: "1",
   });
 
@@ -716,7 +703,7 @@ test("sweep 3 SKIPS a candidate whose port is reserved in its own CROW_HOME's st
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
     ORPHAN_DRY_RUN: "1",
   });
 
@@ -756,7 +743,7 @@ test("sweep 3 still reaps a candidate whose port has NO reservation at all (trul
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
   });
 
   await waitFor(() => !isAlive(pid), 5000, "unreserved native runtime fixture to die");
@@ -787,7 +774,7 @@ test("sweep 3 fails CLOSED when a candidate's own port can't be determined (no -
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
   });
 
   await sleep(2500);
@@ -833,7 +820,7 @@ test("sweep 3 fails CLOSED when its own CROW_HOME's state.json exists but is cor
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
-    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_NATIVE_PATTERN: nativeFixturePattern(binPath),
     ORPHAN_DRY_RUN: "1",
   });
 
@@ -891,7 +878,10 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
   const T = mkdtempSync(join(tmpdir(), "orphan-native-cwd-"));
   const releaseDir = join(T, "runtimes", "llamacpp", "vTest");
   mkdirSync(releaseDir, { recursive: true });
-  const script = join(releaseDir, "fake-native-child.js");
+  // The script lives OUTSIDE the release dir: only its cwd is under
+  // runtimes/llamacpp/, so its cmdline stays invisible to the prod sweeper's
+  // default pattern (de-collision test above) while the cwd branch is proven.
+  const script = join(T, "fake-native-child.js");
   writeFileSync(script, `setInterval(() => {}, 1000);\n`);
   const spawned = [];
   t.after(() => {
@@ -902,13 +892,14 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
   // A realistic --port flag so the adoption cross-check (fix round 1) can
   // determine the candidate's port and proceed past its fail-closed guard;
   // no T/models/state.json exists at all, so it's correctly unreserved.
-  await awaitProdSweeperClearance(); // cwd is under runtimes/llamacpp — prod-sweepable like the exe fixtures
   const pid = await spawnOrphaned(script, {
     cwd: releaseDir,
     extraArgs: ["--model", "/fake/model.gguf", "--alias", "cwd-test-model", "--port", "18144", "--host", "127.0.0.1"],
   });
   spawned.push(pid);
   assert.ok(isAlive(pid), "cwd-fixture must be alive pre-run");
+  assert.doesNotMatch(readFileSync(`/proc/${pid}/cmdline`, "utf8"), /runtimes\/llamacpp/,
+    "cwd-fixture cmdline must stay invisible to the prod sweeper's default pattern");
 
   await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
@@ -919,29 +910,4 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
   await waitFor(() => !isAlive(pid), 5000, "cwd-matched native runtime fixture to die");
   assert.ok(!isAlive(pid), `cwd-matched native runtime fixture ${pid} must be gone`);
   assertProdAlive(prod, "after the cwd-match reap run");
-});
-
-// ---------------------------------------------------------------------------
-// prod-sweeper avoidance plumbing (2026-08-13 flake hunt) — the span parser
-// that awaitProdSweeperClearance feeds /proc/uptime math with. Journal-proven
-// flake: 2026-08-13 07:56:43, crow-orphan-sweep.service (the host's
-// once-a-minute DEFAULT-pattern run of this same script) SIGTERMed the
-// dry-run test's port-18141 fixture mid-assertion — a live sweep-3 fixture
-// is BY DESIGN indistinguishable from a real orphan, so unlike the gateway
-// fixtures (renamed out of the default pattern after the 2026-07-18 flake,
-// see the de-collision test above) native fixtures must steer AROUND the
-// tick instead.
-// ---------------------------------------------------------------------------
-
-test("parseSystemdSpanMs parses systemctl's human-readable monotonic spans", () => {
-  assert.equal(parseSystemdSpanMs("39s"), 39000);
-  assert.equal(parseSystemdSpanMs("1min 2.5s"), 62500);
-  assert.equal(parseSystemdSpanMs("500ms"), 500);
-  const composite = parseSystemdSpanMs("4d 22h 3min 39.930388s");
-  assert.ok(Math.abs(composite - (4 * 86400000 + 22 * 3600000 + 3 * 60000 + 39930.388)) < 0.01,
-    `composite span parsed wrong: ${composite}`);
-  assert.equal(parseSystemdSpanMs(""), null);
-  assert.equal(parseSystemdSpanMs("infinity"), null);
-  assert.equal(parseSystemdSpanMs("n/a"), null);
-  assert.equal(parseSystemdSpanMs("garbage tokens"), null, "unparseable → null → clearance is skipped, never guessed");
 });
