@@ -37,9 +37,32 @@ export const PUBLIC_FUNNEL_PREFIXES = [
  * three conditions at the top of this file apply to every entry added here.
  * Read at middleware creation, not per request.
  */
+let _warnedLoneSlashFor = null; // log the dropped lone "/" once per env value
+
 function envFunnelPrefixes() {
-  return (process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES || "")
+  const entries = (process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES || "")
     .split(",").map((s) => s.trim()).filter((s) => s.startsWith("/"));
+  // A lone "/" is a subtree prefix of every path: it would open the whole
+  // gateway (dashboard included) to the internet. Never honour it.
+  if (entries.includes("/") && _warnedLoneSlashFor !== process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES) {
+    _warnedLoneSlashFor = process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
+    console.warn('[funnel] GATEWAY_FUNNEL_PUBLIC_PREFIXES contains a lone "/" — ignored: it would make every path public.');
+  }
+  return entries.filter((s) => s !== "/");
+}
+
+/**
+ * The allowlist this gateway actually enforces: the static list plus the
+ * GATEWAY_FUNNEL_PUBLIC_PREFIXES entries. The middleware below and the Nest
+ * exposure check both read it, so the warning and the enforcement agree.
+ */
+export function effectiveFunnelPrefixes() {
+  return [...PUBLIC_FUNNEL_PREFIXES, ...envFunnelPrefixes()];
+}
+
+/** Same prefix semantics as the middleware: trailing "/" = subtree, else exact. */
+export function isFunnelPublicPath(path, prefixes = effectiveFunnelPrefixes()) {
+  return prefixes.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p));
 }
 
 /**
@@ -55,17 +78,11 @@ function envFunnelPrefixes() {
  * @returns {(req, res, next) => void}
  */
 export function rejectFunneledMiddleware() {
-  const allowed = [...PUBLIC_FUNNEL_PREFIXES, ...envFunnelPrefixes()];
+  const allowed = effectiveFunnelPrefixes();
   return (req, res, next) => {
     if (!req.headers["tailscale-funnel-request"]) return next();
     if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
-    if (
-      allowed.some((p) => {
-        if (p.endsWith("/")) return req.path.startsWith(p);
-        return req.path === p;
-      })
-    )
-      return next();
+    if (isFunnelPublicPath(req.path, allowed)) return next();
     res.status(403).type("text/plain").send("Forbidden: private path not reachable via Tailscale Funnel.");
   };
 }
