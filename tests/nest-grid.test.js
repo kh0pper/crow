@@ -48,9 +48,13 @@ const LONG_NAME = "Offline Block Coding (Scratch-compatible)";
 const BUNDLES = [
   { id: "artifacts", name: "Artifacts", icon: "layers", isRunning: false, hasContainer: false, webUI: null },
   { id: "dotbundle", name: "Dot Bundle", icon: "database", isRunning: true, hasContainer: true, webUI: null },
-  { id: "hiddenbundle", name: "Hidden Bundle", icon: "lock", isRunning: true, hasContainer: true, webUI: null },
-  { id: "noicon", name: "No Icon Bundle", icon: null, isRunning: false, hasContainer: false, webUI: null },
-  { id: "emojiicon", name: "Emoji Icon", icon: "\u{1F426}", isRunning: false, hasContainer: false, webUI: null },
+  { id: "hiddenbundle", name: "Hidden Bundle", icon: "lock", isRunning: true, hasContainer: true, webUI: { port: 8701, path: "/" } },
+  { id: "noicon", name: "No Icon Bundle", icon: null, isRunning: false, hasContainer: false, webUI: { port: 8702, path: "/" } },
+  { id: "emojiicon", name: "Emoji Icon", icon: "\u{1F426}", isRunning: false, hasContainer: false, webUI: { port: 8703, path: "/" } },
+  // Nothing to open: a model server with no web UI, and an orphan install
+  // record whose manifest is gone (the data layer yields name = id, no webUI).
+  { id: "noui-x", name: "Headless Model Server", icon: "cpu", isRunning: true, hasContainer: true, webUI: null },
+  { id: "orphan-x", name: "orphan-x", icon: null, isRunning: false, hasContainer: false, webUI: null },
   { id: "changedetection-x", name: "Changedetection.io", icon: "eye", isRunning: true, hasContainer: true, webUI: { port: 5000, path: "/" } },
   { id: "stirling-x", name: "Stirling PDF", icon: "file-text", isRunning: true, hasContainer: true, webUI: { port: 8080, path: "/" } },
   { id: "abs-x", name: "Audiobookshelf", icon: "mic", isRunning: false, hasContainer: true, webUI: { port: 13378, path: "/" } },
@@ -171,11 +175,33 @@ test("a container bundle's running dot moves onto its panel tile", () => {
   assert.match(dot[0].body, /nest-app-status[^>]*var\(--crow-success\)/, "running → success colour");
 });
 
-test("a bundle whose panel is hidden keeps its own bundle tile", () => {
+test("a web-UI bundle whose panel is hidden keeps its own bundle tile", () => {
   const all = tiles(buildNestHTML(baseData(), "en"));
   const hb = all.filter((t) => /Hidden Bundle/.test(t.label || ""));
   assert.equal(hb.length, 1);
   assert.equal(hb[0].kind, "bundle");
+});
+
+test("only openable bundles get a tile: no web UI and no panel means no tile", () => {
+  for (const lang of ["en", "es"]) {
+    const all = tiles(buildNestHTML(baseData(), lang));
+    const labels = all.map((t) => t.label);
+    assert.ok(!labels.includes("Headless Model Server"), `[${lang}] a no-UI bundle must not be a tile`);
+    assert.ok(!labels.includes("orphan-x"), `[${lang}] an orphan record must not be a tile`);
+    assert.equal(all.filter((t) => t.label === "Stirling PDF").length, 1, `[${lang}] a web-UI bundle still renders`);
+    assert.equal(all.filter((t) => t.href === "/dashboard/artifacts").length, 1, `[${lang}] a no-UI bundle with a visible panel renders once, as its panel`);
+  }
+  // A hidden panel is not something to open either: without a web UI its bundle has no tile.
+  const noUiHidden = BUNDLES.map((b) => b.id === "hiddenbundle" ? { ...b, webUI: null } : b);
+  const hb = tiles(buildNestHTML(baseData({ bundles: noUiHidden }), "en")).filter((t) => /Hidden Bundle/.test(t.label || ""));
+  assert.equal(hb.length, 0);
+});
+
+test("a direct-mode web UI tile keeps the Extensions href as its no-JS fallback", () => {
+  const direct = [...BUNDLES, { id: "direct-x", name: "Direct App", icon: "eye", isRunning: true, hasContainer: true, webUI: { port: 8704, path: "/", proxyMode: "direct" } }];
+  const t = tiles(buildNestHTML(baseData({ bundles: direct }), "en")).find((x) => x.label === "Direct App");
+  assert.ok(t, "direct-mode tile renders");
+  assert.equal(t.href, "/dashboard/extensions");
 });
 
 test("container-less bundle tiles show no status dot; container ones do", () => {
@@ -300,7 +326,10 @@ before(async () => {
     const lang = u.searchParams.get("lang") || "en";
     const healthSignals = u.searchParams.get("health") === "warn" ? HEALTH_WARN : HEALTH_OK;
     const content = nestCSS() + buildNestHTML(baseData({ healthSignals }), lang)
-      + "<style>.nest-app{animation:none!important;opacity:1!important}</style>";
+      + "<style>.nest-app{animation:none!important;opacity:1!important}</style>"
+      // ?scale=150 stands in for a phone's font-size setting (Android Chrome
+      // scales rem text the same way): every rem in the page grows by 1.5x.
+      + (u.searchParams.get("scale") === "150" ? "<style>html{font-size:150%!important}</style>" : "");
     const html = renderLayout({ title: "Crow's Nest", content, activePanel: "nest", panels: getVisiblePanels(), lang });
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(html);
@@ -355,13 +384,43 @@ async function measure(w, h, query, { dark = false } = {}) {
       var overflow = labels.filter(function(l){
         var lh = parseFloat(getComputedStyle(l).lineHeight);
         var clipped = l.scrollHeight > l.clientHeight + 1;
-        return l.scrollWidth > l.clientWidth + 1 || l.clientHeight > 2 * lh + 1 || (clipped && l.textContent !== LONG_NAME); }).map(function(l){ return l.textContent; });
+        // The clamp's ellipsis on the long fixture can widen scrollWidth, so
+        // sideways spill is read from the rendered lines themselves too.
+        var lb = l.getBoundingClientRect(), rg = document.createRange();
+        rg.selectNodeContents(l);
+        var spill = [].slice.call(rg.getClientRects()).some(function(x){ return x.width > 0 && (x.left < lb.left - 1 || x.right > lb.right + 1); });
+        var wide = l.scrollWidth > l.clientWidth + 1 && !(clipped && l.textContent === LONG_NAME);
+        return spill || wide || l.clientHeight > 2 * lh + 1 || (clipped && l.textContent !== LONG_NAME); }).map(function(l){ return l.textContent; });
+      // A word is broken when its glyphs land on more than one line
+      // ("Extension / s").
+      var broken = [];
+      [].slice.call(document.querySelectorAll('.nest-grid .nest-app')).forEach(function(app){
+        var l = app.querySelector('.nest-app-label');
+        if (!l || !l.firstChild || l.firstChild.nodeType !== 3) return;
+        var node = l.firstChild, text = node.textContent, re = /\\S+/g, m;
+        while ((m = re.exec(text))) {
+          var r = document.createRange();
+          r.setStart(node, m.index); r.setEnd(node, m.index + m[0].length);
+          var tops = {};
+          [].slice.call(r.getClientRects()).forEach(function(rc){ if (rc.width > 0) tops[Math.round(rc.top)] = 1; });
+          var probe = document.createElement('span');
+          probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap';
+          probe.textContent = m[0];
+          l.appendChild(probe);
+          var w = probe.getBoundingClientRect().width;
+          l.removeChild(probe);
+          // Core (panel) labels must never break; a bundle's single word
+          // wider than the whole cell ("Changedetection.io") may, as a last resort.
+          var core = app.classList.contains('nest-app--panel');
+          if (Object.keys(tops).length > 1 && (core || w <= app.clientWidth)) broken.push(text + ' [' + m[0] + ' ' + Math.round(w) + 'px in ' + app.clientWidth + 'px]');
+        }
+      });
       var bird = document.querySelector('.nest-welcome-crow');
       var bb = bird ? bird.getBoundingClientRect() : null;
       var bundleIcon = document.querySelector('.nest-grid .nest-app--bundle .nest-app-icon');
       return {
         firstTop: apps[0].getBoundingClientRect().top,
-        total: apps.length, full: full, overflow: overflow,
+        total: apps.length, full: full, overflow: overflow, broken: broken,
         artifacts: document.querySelectorAll('.nest-grid a[href="/dashboard/artifacts"]').length,
         birdVisible: !!bb && bb.height > 0 && getComputedStyle(bird).display !== 'none',
         hScroll: document.documentElement.scrollWidth > vw + 1,
@@ -409,4 +468,23 @@ test("live 1280x900: desktop keeps the greeting bird, one Artifacts tile, no ove
   assert.equal(m.artifacts, 1);
   assert.deepEqual(m.overflow, []);
   assert.equal(m.hScroll, false);
+});
+
+test("live 412x915 + 1280x900 with text scaled to 150%: no word breaks inside a tile label", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  for (const [w, h] of [[412, 915], [1280, 900]]) {
+    for (const lang of ["en", "es"]) {
+      const m = await measure(w, h, `?lang=${lang}&scale=150`);
+      assert.deepEqual(m.broken, [], `[${w} ${lang} 150%] words broken mid-word`);
+      assert.equal(m.hScroll, false, `[${w} ${lang} 150%] no horizontal scroll`);
+    }
+  }
+});
+
+test("live 412x915 at default text size: no word breaks either", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  for (const lang of ["en", "es"]) {
+    const m = await measure(412, 915, `?lang=${lang}`);
+    assert.deepEqual(m.broken, [], `[${lang}] words broken mid-word`);
+  }
 });
