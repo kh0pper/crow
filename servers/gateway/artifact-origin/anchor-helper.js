@@ -23,7 +23,9 @@
  *      words and which occurrence (nth, S1). Each rect is the quote's FIRST
  *      line box plus bx, the enclosing block's left edge (the pin gutter).
  *      The rects are cosmetic and untrusted: the viewer clamps them and a pin
- *      only focuses a thread in the trusted rail.
+ *      only focuses a thread in the trusted rail. The same quote ranges are
+ *      painted with the CSS Highlight API (S3; an adopted, constructed sheet);
+ *      element and whole-block anchors are not painted.
  * The viewer never posts anything sensitive in: only {kind:"comment-mode"}
  * and {kind:"pins"} (owner anchors the content itself proposed).
  */
@@ -114,13 +116,34 @@ export function anchorHelperSource(nonce) {
     } catch (e) {}
     return null;
   }
+  /* S3: the pinned quotes stay highlighted (CSS Custom Highlight API). The
+     style is a CONSTRUCTED sheet adopted by the document: no <style> node,
+     and independent of the style-src policy. No CSS.highlights (older
+     browsers): nothing is painted and the pin stays. A page's own CSS can
+     restyle ::highlight(crow-comments): cosmetic, and fine. */
+  let hlSheet = null;
+  function paint(ranges) {
+    try {
+      if (typeof CSS === "undefined" || !CSS.highlights || typeof Highlight !== "function") return;
+      if (!ranges.length) { CSS.highlights.delete("crow-comments"); return; }
+      if (!hlSheet && Array.isArray(document.adoptedStyleSheets) && typeof CSSStyleSheet === "function") {
+        hlSheet = new CSSStyleSheet();
+        hlSheet.replaceSync("::highlight(crow-comments){background-color:rgba(255,196,0,.35)}");
+        document.adoptedStyleSheets = document.adoptedStyleSheets.concat([hlSheet]);
+      }
+      CSS.highlights.set("crow-comments", new Highlight(...ranges));
+    } catch (e) {}
+  }
   function sendRects() {
     timer = 0; last = Date.now();
-    const rects = [], cache = new Map();
+    const rects = [], ranges = [], cache = new Map();
     for (const p of pins.slice(0, 100)) {
       const r = rectOf(p.anchor || {}, cache);
-      if (r) rects.push({ i: p.i, x: r.box.left, y: r.box.top, w: r.box.width, h: r.box.height, bx: r.bx });
+      if (!r) continue;
+      rects.push({ i: p.i, x: r.box.left, y: r.box.top, w: r.box.width, h: r.box.height, bx: r.bx });
+      if (r.range) ranges.push(r.range);
     }
+    paint(ranges);
     post({ kind: "anchor-rect", rects });
   }
   function queueRects() { if (!pins.length || timer) return; timer = setTimeout(sendRects, Math.max(0, 250 - (Date.now() - last))); }
@@ -129,7 +152,7 @@ export function anchorHelperSource(nonce) {
   addEventListener("message", (e) => {
     if (e.source !== parent || !e.data || e.data.t !== "crow-viewer") return;
     if (e.data.kind === "comment-mode") { on = !!e.data.on; selectOnly = !!e.data.selectOnly; lastQuote = ""; if (on) proposeSelection(); }
-    if (e.data.kind === "pins" && Array.isArray(e.data.pins)) { pins = e.data.pins; queueRects(); }
+    if (e.data.kind === "pins" && Array.isArray(e.data.pins)) { pins = e.data.pins; if (!pins.length) paint([]); queueRects(); }
   });
   addEventListener("click", (e) => {
     if (!on || selectOnly) return;   // documents (D28): selection only, a tap proposes nothing

@@ -583,3 +583,54 @@ test("live D28: on a document, Comment opens no sheet and no list; selecting wor
     assert.equal((await s.db.execute({ sql: "SELECT flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].flagged_reason, null, "the speaking document frame never tripped");
   } finally { await t.close(); }
 });
+
+// ── S3 (step-6 smoke): the commented words stay highlighted ─────────────────
+async function frameEval(t, prevIds = new Set()) {
+  // The artifact frame is cross-site (out of process: its auto-attached
+  // session) or in process (an isolated world in that frame).
+  const oop = await waitFor(() => t.attached.find((a) => a.targetInfo.type === "iframe" && !prevIds.has(a.sessionId)), 3000);
+  if (oop) {
+    await t.send("Runtime.enable", {}, oop.sessionId);
+    return { id: oop.sessionId, run: async (expression) => (await t.send("Runtime.evaluate", { expression, returnByValue: true }, oop.sessionId)).result?.value };
+  }
+  const tree = await t.send("Page.getFrameTree");
+  const child = (tree.frameTree.childFrames || []).find((c) => /\/v\//.test(c.frame.url));
+  const { executionContextId } = await t.send("Page.createIsolatedWorld", { frameId: child.frame.id, worldName: "test-hl" });
+  return { id: child.frame.id, run: async (expression) => (await t.send("Runtime.evaluate", { expression, returnByValue: true, contextId: executionContextId })).result?.value };
+}
+
+test("live S3: a commented quote is painted with the CSS Highlight API (no <style> node), still after a reload, and not once the thread is resolved", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  const { addThread, resolveBlockAnchor, setThreadStatus } = await import("../bundles/artifacts/server/comments.js");
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Highlight S3", type: "document", source: { markdown: "# Head\n\nThe quick **brown** fox jumps.\n\nOther words." }, actor: OWNER }, { markdownBlocks });
+  const map = JSON.parse((await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].anchor_map_json);
+  const th = await addThread(s.db, { artifactId: doc.id, versionN: 1, anchor: resolveBlockAnchor(map, { kind: "block", id: "b2", quote: "brown fox", prefix: "The quick ", suffix: " jumps." }), text: "redder", author: { kind: "owner" } });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const size = "(() => { const h = CSS.highlights.get('crow-comments'); return h ? h.size : 0; })()";
+  const painted = "(() => { const h = CSS.highlights.get('crow-comments'); if (!h) return ''; return [...h].map((r) => r.toString()).join('|'); })()";
+  try {
+    await t.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-pin')`)) === true, 15000), `a pin (errors ${JSON.stringify(t.errors)})`);
+    let f = await frameEval(t);
+    assert.ok(await waitFor(async () => (await f.run(size)) === 1, 5000), "one highlighted range");
+    assert.equal(await f.run(painted), "brown fox", "the commented words, across the <strong>");
+    assert.equal(await f.run("document.querySelectorAll('style').length"), 1, "no <style> node was added (only the document's own)");
+    assert.ok((await f.run("document.adoptedStyleSheets.length")) >= 1, "the highlight style is an adopted sheet");
+    // ⋯ → Reload view: a fresh frame, still painted.
+    const seen = new Set([f.id]);
+    await t.evalIn(`(() => { document.querySelector('.cv-more').setAttribute('open',''); document.querySelector('.cv-menu button').click(); })()`);
+    await sleep(800);
+    f = await frameEval(t, seen);
+    assert.ok(await waitFor(async () => (await f.run(size)) === 1, 8000), "still one after a reload");
+    // Resolved: no pin, no paint.
+    await setThreadStatus(s.db, { threadId: th.threadId, status: "resolved", artifactId: doc.id });
+    seen.add(f.id);
+    await t.nav(`${base}/dashboard/artifacts/view/${encodeURIComponent(doc.id)}`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('iframe.crow-artifact-frame')`)) === true, 15000));
+    await sleep(1200);
+    f = await frameEval(t, seen);
+    assert.equal(await f.run(size), 0, "a resolved thread is not painted");
+  } finally { await t.close(); }
+});
