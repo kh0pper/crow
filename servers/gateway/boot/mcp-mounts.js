@@ -385,7 +385,11 @@ export async function mountMcpServers(app, deps) {
           return { delivered: false, botId: null, reason: "no_engine" };
         }
       };
-      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal }), sessionManager, authMiddleware, peerExposureGate);
+      // S2 M5: the needs_link gate lets an owner-made card's session write
+      // without a chat link; the bundle cannot open tasks.db, so the gateway
+      // answers (fails closed on any error).
+      const { cardMadeByOwner } = await import("../board/artifact-card.js");
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
       const { readReservation } = await import("../box-reservation.js");
       const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
       // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists

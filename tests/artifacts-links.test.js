@@ -83,3 +83,16 @@ test("one active link per (artifact, chat): a duplicate insert is refused by the
   const a = await store.createArtifact(s.db, s.blobs, { title: "U", ...doc, actor: { kind: "bot", id: "bobby", thread: "perchlive-uq000001", gateway: "perch" } }, deps);
   await assert.rejects(s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,?)", args: [a.id, "bobby", "perchlive-uq000001", "owner-yes"] }), /UNIQUE/i);
 });
+
+test("S2 gate: a Perch chat may write while linked (to THIS bot); after Unlink it may not", async () => {
+  const { chatMayWrite } = await import("../bundles/artifacts/server/mcp.js");
+  await s.db.execute({ sql: "CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT, status TEXT, narrowed_tools TEXT, card_id INTEGER)", args: [] });
+  const actor = { kind: "bot", id: "bobby", thread: "perchlive-gt000001", gateway: "perch" };
+  const a = await store.createArtifact(s.db, s.blobs, { title: "G", ...doc, actor }, deps);
+  assert.equal(await chatMayWrite(s.db, a.id, actor), null, "the origin chat is linked");
+  assert.equal(await chatMayWrite(s.db, a.id, { ...actor, id: "mallory" }), "link-other-bot", "L2: the link must name this bot");
+  await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=?", args: [a.id] });
+  assert.equal(await chatMayWrite(s.db, a.id, actor), "unlinked");
+  assert.equal(await chatMayWrite(s.db, a.id, { ...actor, gateway: "discord" }), null, "S2b: channel turns are not gated");
+  assert.equal(await chatMayWrite(s.db, a.id, { kind: "session" }), null, "the operator is not gated");
+});

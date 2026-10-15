@@ -75,6 +75,51 @@ export async function scopeOf(db, actor) {
 const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
 
 /**
+ * S2 (artifacts smoke fixes): the ask-first gate. Applies to a bot in a
+ * Perch chat only — a channel (Discord, Gmail) or job turn has no chat to
+ * show the link card in, so it stays allowed (Kevin's S2b; the board-tool
+ * residual is recorded in the private engineering notes), and the operator
+ * is never gated.
+ */
+export const isPerchChat = (actor) => actor?.kind === "bot" && actor.gateway === "perch" && !!actor.thread;
+
+/** ONE static refusal for every case (missing, foreign, unbound round; unlinked
+ *  chat), so a bot cannot enumerate rounds. The reason stays server-side. */
+export const NEEDS_LINK_TEXT = "this chat is not linked to this artifact: call artifact_attach and wait for the owner's yes";
+const needsLink = () => Object.assign(new Error(NEEDS_LINK_TEXT), { code: "needs_link" });
+
+/**
+ * May this Perch chat write to the artifact without a round? True when the
+ * chat holds an ACTIVE link naming THIS bot (review L2: parity with
+ * verifyTarget), or (review M5) its session is card-bound and the OWNER made
+ * that card (board_mutations create row with actor_kind 'human', read by the
+ * gateway's cardMadeByOwner seam). A bot-made card, a missing row or an
+ * unreadable store is not owner-made: fail closed.
+ * @returns {Promise<null|string>} null when it may, else the refusal reason
+ */
+export async function chatMayWrite(db, artifactId, actor, { cardMadeByOwner = async () => false } = {}) {
+  if (!isPerchChat(actor)) return null;
+  const link = await activeLink(db, artifactId, actor.thread);
+  if (link && link.botId === String(actor.id)) return null;
+  let cardId = null;
+  try { cardId = (await db.execute({ sql: "SELECT card_id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [String(actor.id), String(actor.thread)] })).rows[0]?.card_id ?? null; }
+  catch { cardId = null; }
+  if (cardId != null) {
+    let owner = false;
+    try { owner = (await cardMadeByOwner(Number(cardId))) === true; } catch { owner = false; }
+    return owner ? null : "card-not-owner-made";
+  }
+  return link ? "link-other-bot" : "unlinked";
+}
+
+/** The H1 binding check for a round id passed by a Perch chat. null = bound. */
+async function roundRefusal(db, artifactId, roundId, actor) {
+  const row = (await db.execute({ sql: "SELECT id, session_id, target_thread, delivery, card_id FROM artifact_rounds WHERE id=? AND artifact_id=? AND bot_id=?", args: [Number(roundId), String(artifactId), String(actor.id)] })).rows[0];
+  if (!row) return "round-missing";
+  return (await rounds.roundBoundToChat(db, row, actor)) ? null : "round-unbound";
+}
+
+/**
  * THE taint gate (self-review: one gate, parity across tools). A tool body
  * never decides who may see non-owner text. It wraps every such value in
  * U(value, where) and returns; gate() — run by the shared wrapper on EVERY
@@ -115,7 +160,7 @@ export const TOOL_CLASSES = Object.freeze({
 // 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
 
-export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null } = {}) {
+export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
   if (!McpServer || !z) throw new Error("createArtifactsMcpServer needs the gateway's McpServer and z");
@@ -170,6 +215,18 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       if (a.round_id == null && !scope && actor.kind === "bot" && actor.thread) {
         const bound = (await db.execute({ sql: `SELECT id, kind FROM artifact_rounds WHERE artifact_id=? AND bot_id=? AND session_id=? AND status IN (${rounds.ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`, args: [a.artifact_id, actor.id, actor.thread, ...rounds.ACTIVE] })).rows[0];
         if (bound) throw Object.assign(new Error(bound.kind === "ask" ? "this chat has an active question round for this artifact: answer it with artifact_reply first" : "this chat has an active feedback round for this artifact: pass its round_id"), { code: "update_needs_round_id" });
+      }
+      // S2: the ask-first gate (after the round guard above, which only ever
+      // fires for a chat holding a bound round). A locked scope already pins
+      // its round, so it is exempt. The scope check runs first: an artifact
+      // the bot cannot see is not_found, never needs_link.
+      if (!scope && isPerchChat(actor)) {
+        await store.requireAccess(db, actor, a.artifact_id);
+        const why = a.round_id != null ? await roundRefusal(db, a.artifact_id, a.round_id, actor) : await chatMayWrite(db, a.artifact_id, actor, { cardMadeByOwner });
+        if (why) {
+          await store.audit(db, { artifactId: a.artifact_id, actor, action: "update-refused", target: String(actor.thread), detail: { reason: why } });
+          throw needsLink();
+        }
       }
       let round = null;
       if (scope && a.round_id !== scope.roundId) throw Object.assign(new Error("use this round's id"), { code: "forbidden" });
@@ -295,6 +352,15 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
     async (a, actor, scope) => {
       await store.requireAccess(db, actor, a.artifact_id);
       if (scope && a.round_id !== scope.roundId) throw Object.assign(new Error("use this round's id"), { code: "forbidden" });
+      // S2 H1: a Perch chat closes only a round bound to it (the same rule
+      // and the same uniform refusal as artifact_update).
+      if (!scope && isPerchChat(actor)) {
+        const why = await roundRefusal(db, a.artifact_id, a.round_id, actor);
+        if (why) {
+          await store.audit(db, { artifactId: a.artifact_id, actor, action: "round-done-refused", target: String(actor.thread), detail: { reason: why } });
+          throw needsLink();
+        }
+      }
       const r = await rounds.completeRound(db, { roundId: a.round_id, artifactId: a.artifact_id, actor, summary: a.summary });
       await onRoundDone(r);
       await hub(a.artifact_id, r.result_version == null ? null : Number(r.result_version), "round-done");

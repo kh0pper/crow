@@ -210,6 +210,33 @@ export async function roundMessage(db, round) {
   return capped + `\nWhen finished, call artifact_round_done(round_id=${round.id}).`;
 }
 
+/**
+ * S2 H1 (artifacts smoke fixes): may THIS Perch chat use this round's id?
+ * True only when the round was
+ *   (a) delivered to this chat (session_id = the chat), or
+ *   (b) targeted at this chat and not yet bound — the owner's targeted Send
+ *       between engine.message and setDelivery (delivery.js sends first,
+ *       binds after); new-session and locked deliveries bind BEFORE the
+ *       message, so (a) covers them, or
+ *   (c) a board-card round whose card THIS chat's session is running (the
+ *       chat's latest bot_sessions row for this bot carries the round's card).
+ * Anything else — queued, unbound, another chat's, timed out unbound — is
+ * false. `round` is a raw artifact_rounds row. A failed read is false.
+ */
+export async function roundBoundToChat(db, round, actor) {
+  if (!round || !actor || !actor.thread) return false;
+  const thread = String(actor.thread);
+  if (round.session_id != null && String(round.session_id) === thread) return true;
+  if (round.session_id == null && round.target_thread != null && String(round.target_thread) === thread) return true;
+  if (round.delivery === "board-card" && round.card_id != null) {
+    try {
+      const s = (await db.execute({ sql: "SELECT card_id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1", args: [String(actor.id), thread] })).rows[0];
+      return !!s && s.card_id != null && Number(s.card_id) === Number(round.card_id);
+    } catch { return false; }
+  }
+  return false;
+}
+
 /** Bot side: only the round's own bot, on an active round. */
 export async function requireRoundForBot(db, roundId, actor, artifactId) {
   const r = await getRound(db, roundId);
