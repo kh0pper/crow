@@ -6,9 +6,8 @@
 
 Extracts text from a PDF (block-level via PyMuPDF, tables emitted as
 [TABLE] markdown paragraphs), runs the cleanup chain, and prints JSON.
-The cleanup functions are copied verbatim from
-bundles/capstone-tracker/src/services/ereader_tts.py so both readers
-share one battle-tested pipeline.
+The cleanup functions were copied verbatim from an earlier e-reader
+pipeline, so the two share one battle-tested cleanup chain.
 """
 
 import argparse
