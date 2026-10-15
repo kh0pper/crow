@@ -30,8 +30,11 @@ services:
       - "8000"
       - --dtype
       - bfloat16
+      # 0.105 of the 124 GiB the APU exposes keeps a KV pool of ~10x the
+      # configured worst case (8 seqs x 8192); the observed peak was ~3 running
+      # requests using 12% of the old pool. (Measured 2026-10-15.)
       - --gpu-memory-utilization
-      - "0.12"
+      - "0.105"
       - --max-model-len
       - "8192"
       - --max-num-seqs
@@ -46,6 +49,14 @@ services:
       - --tool-call-parser
       - qwen3_xml
       - --enforce-eager
+      # Prefill in 2048-token chunks. The PyTorch caching allocator keeps every
+      # activation segment it ever allocated, sized by the chunk; with the
+      # default (max-model-len) the 4b grew ~6 GiB beyond vLLM's own budget
+      # over days of mixed-length traffic. Classifier latency is unchanged
+      # (p50 0.18 s). Never set VLLM_LOGGING_LEVEL=DEBUG here: it made
+      # requests ~33x slower in the same test.
+      - --max-num-batched-tokens
+      - "2048"
       # Text-only. Qwen3.5-4B is natively vision-language, but its ViT encoder's
       # worst-case multimodal profiling (preprocessor longest_edge=16.7M px →
       # ~65k ViT patches → a 65k² attention matrix) triggers a 256 GiB HIP OOM on

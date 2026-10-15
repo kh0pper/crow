@@ -43,13 +43,15 @@ services:
       - -fa
       - "on"
       - --no-mmap
-      # 0.6B encoder model with 32K context. We don't need a giant KV budget
-      # for embeddings (one forward pass, no decoded tokens), but allow plenty
-      # of concurrent embedding requests via --parallel for batch indexing.
+      # -c is SPLIT across the --parallel slots: 16384 / 4 = 4096 tokens per
+      # slot (the same per-slot context as before; the largest real input seen
+      # was ~3.5k tokens). 4 slots instead of 8 frees ~1.75 GiB of KV cache;
+      # batch indexing jobs queue in two waves instead of one (measured
+      # 2026-10-15: 16 concurrent ~2k-token inputs in 1.2 s, identical vectors).
       - -c
-      - "32768"
+      - "16384"
       - --parallel
-      - "8"
+      - "4"
       # 500-word chunks hit ~650 tokens; raise the physical batch + ubatch
       # so a single chunk fits in one forward pass. 4096 leaves headroom
       # for occasional longer chunks without OOM at 0.6B params.
