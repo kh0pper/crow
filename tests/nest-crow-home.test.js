@@ -62,6 +62,19 @@ test("nest bundles report hasContainer from a shipped docker-compose.yml", async
   assert.strictEqual(byId["scratch-bundle"].isRunning, false);
 });
 
+test("nest bundles (review M1): an installed copy WITHOUT a compose file still counts as a container bundle when its manifest declares docker", async () => {
+  writeFileSync(join(scratch, "installed.json"), JSON.stringify([
+    { id: "scratch-docker-manifest", type: "bundle", installedAt: "2026-07-19T00:00:00Z" },
+  ]));
+  mkdirSync(join(scratch, "bundles", "scratch-docker-manifest"), { recursive: true });
+  writeFileSync(join(scratch, "bundles", "scratch-docker-manifest", "manifest.json"),
+    JSON.stringify({ name: "Scratch Docker", docker: { composefile: "docker-compose.yml" } }));
+  const { getNestData } = await import("../servers/gateway/dashboard/panels/nest/data-queries.js");
+  const data = await getNestData({ execute: async () => ({ rows: [] }) }, "en");
+  const b = data.bundles.find((x) => x.id === "scratch-docker-manifest");
+  assert.strictEqual(b.hasContainer, true, "the manifest says it runs a container — keep its running dot");
+});
+
 test("skills panel lists user skills from CROW_HOME, not homedir", async () => {
   mkdirSync(join(scratch, "skills"), { recursive: true });
   writeFileSync(

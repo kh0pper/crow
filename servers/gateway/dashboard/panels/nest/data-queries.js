@@ -89,13 +89,16 @@ export async function getNestData(db, lang, opts = {}) {
               webUI = manifest.webUI || null;
               icon = manifest.icon || null;
               category = manifest.category || null;
+              if (manifest.docker) hasContainer = true;
             } catch {}
-            // A bundle runs a container only when it ships a compose file;
-            // the rest (MCP-only, panel-only) have no running state.
-            hasContainer = existsSync(join(dirname(mp), "docker-compose.yml"));
             break;
           }
         }
+        // A bundle runs a container when it ships a compose file — in the
+        // installed copy OR the repo copy (installed copies don't always carry
+        // it) — or its manifest declares `docker`. The rest (MCP-only,
+        // panel-only) have no running state.
+        if (!hasContainer) hasContainer = manifestPaths.some((mp) => existsSync(join(dirname(mp), "docker-compose.yml")));
         const status = hasContainer ? getBundleDockerStatus(id) : null;
         const isRunning = status !== null && status.toLowerCase().startsWith("up");
         bundles.push({ id, name, type: meta.type, isRunning, hasContainer, webUI, icon, category, installedAt });
