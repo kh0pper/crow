@@ -825,8 +825,8 @@ function renderStepBody(stem, lang, ctx = {}) {
         + body
         + `<div class="onboarding-example">
           <p class="onboarding-example-label">${e("exampleLabel")}</p>
-          <p class="onboarding-example-line"><span class="onboarding-example-who">${e("exampleYouName")}</span>${e("exampleYou")}</p>
-          <p class="onboarding-example-line onboarding-example-line--crow"><span class="onboarding-example-who">Crow</span>${e("exampleCrow")}</p>
+          <p class="onboarding-example-line"><span class="onboarding-example-who">${e("exampleYouName")}:</span> ${e("exampleYou")}</p>
+          <p class="onboarding-example-line onboarding-example-line--crow"><span class="onboarding-example-who">Crow:</span> ${e("exampleCrow")}</p>
         </div>
         <p class="onboarding-example-note">${e("exampleNote")}</p>`;
     }

@@ -136,6 +136,13 @@ for (const lang of ["en", "es"]) {
     }
   });
 
+  test(`welcome example (${lang}): the speaker and the line are separated in text, not only by CSS (review M)`, async () => {
+    const html = await render({ step: "0" }, `crow_lang=${lang}`);
+    const lines = [...html.matchAll(/<p class="onboarding-example-line[^"]*">([\s\S]*?)<\/p>/g)].map((m) => m[1].replace(/<[^>]+>/g, ""));
+    assert.equal(lines.length, 2);
+    for (const l of lines) assert.match(l, /^\S+?: \S/, "speaker, colon, space, then the line: " + l);
+  });
+
   test(`onboarding stepper (${lang}): translated compact line and group label`, async () => {
     const html = await render({ step: "1" }, `crow_lang=${lang}`);
     const label = i18n.fill(i18n.t("common.stepOf", lang), { n: 2, total: STEP_KEYS.length }) + " · " + i18n.t("onboarding.ai.title", lang);
