@@ -162,3 +162,15 @@ def test_service_emitted_static_urls_are_prefixed_client_side():
     assert "card.href = mat.href" not in ereader_html
     reader_js = (SRC / "static" / "js" / "ereader.js").read_text(encoding="utf-8")
     assert "sw.js" not in reader_js  # registered a file the bundle never shipped
+
+
+def test_root_path_slash_means_host_root(monkeypatch):
+    """ROOT_PATH="/" must not turn the redirect into a protocol-relative //pir."""
+    import importlib
+    import src.server as srv
+    monkeypatch.setenv("ROOT_PATH", "/")
+    try:
+        assert importlib.reload(srv).app.root_path == ""
+    finally:
+        monkeypatch.delenv("ROOT_PATH")
+        importlib.reload(srv)

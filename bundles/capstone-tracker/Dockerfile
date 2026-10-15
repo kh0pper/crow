@@ -1,7 +1,7 @@
-# TODO(deploy): pin the base by digest, FROM python:3.12-slim@sha256:<digest>.
-# The base image is not present on the build host, so the digest the running
-# image was built from (Python 3.12.13, Debian 13.4) could not be read locally.
-FROM python:3.12-slim
+# Pinned to the exact Python + Debian release the running image was built on
+# (Python 3.12.13, Debian 13 "trixie"); dependencies are pinned in
+# constraints.txt. A digest pin can be added once the base is pulled locally.
+FROM python:3.12.13-slim-trixie
 
 WORKDIR /app
 

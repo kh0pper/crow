@@ -68,7 +68,9 @@ app = FastAPI(
     title="Capstone Tracker",
     version="1.0.0",
     lifespan=lifespan,
-    root_path=os.environ.get("ROOT_PATH", "/proxy/capstone-tracker"),
+    # rstrip("/"): ROOT_PATH="/" must mean "served at the root" ("" ), never
+    # a "//pir" protocol-relative redirect.
+    root_path=os.environ.get("ROOT_PATH", "/proxy/capstone-tracker").rstrip("/"),
 )
 
 # ── Static files ──────────────────────────────────────────────────────────
