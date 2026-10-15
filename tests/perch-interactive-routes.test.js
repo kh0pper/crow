@@ -466,6 +466,16 @@ test("POST /interactive/:sid/message: pi_gone carries the engine's detail (pi's 
   assert.equal(r2.body.detail, undefined, "no detail key when the engine gave none");
 });
 
+test("POST /interactive/:sid/message (strand 2): tool_budget is a 422 carrying the engine's refusal text", async () => {
+  engineImpl.message = async () => {
+    throw Object.assign(engineErr("tool_budget"), { detail: "This session's model (m) accepts at most 128 tools; this bot has 318." });
+  };
+  const r = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r.status, 422);
+  assert.equal(r.body.error, "tool_budget");
+  assert.match(r.body.detail, /at most 128 tools/);
+});
+
 // ---------------------------------------------------------------------------
 // POST /interactive/:sid/steer (Task 13, controller ruling)
 // ---------------------------------------------------------------------------

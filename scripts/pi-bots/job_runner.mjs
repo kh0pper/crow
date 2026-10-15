@@ -349,6 +349,9 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     log(`job ${job.job_id} bot=${job.bot_id} model=${resolved.key}`);
 
     // Warm the bundle (no-op for cloud/already-resident) before the turn.
+    // (No tool-budget preflight on this goal-job path yet — card jobs go
+    // through handleInbound, which has one; an over-cap goal job still fails
+    // as the provider's 400.)
     await warmModel(resolved.provider, log);
 
     const pi = new bridge.PiRpc({

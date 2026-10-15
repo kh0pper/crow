@@ -168,7 +168,10 @@ function labelFor(id) {
  *      does NOT grant is a KNOWN denial and renders locked;
  *   2. mcp + remote ids: derived by toolAllowlist() itself (bridge.mjs) from
  *      the def's own selections, so every one of them is by definition allowed.
- * `subagent` is appended by PiRpc AFTER the allowlist (bridge.mjs ~:141) when
+ * Not the spawn csv: the csv a child is actually pinned with (and the one the
+ * tool-budget preflight counts) is bridge.mjs buildToolsCsv(); this view lists
+ * the def's GRANT for the narrowing UI.
+ * `subagent` is appended by PiRpc AFTER the allowlist (bridge.mjs buildToolsCsv) when
  * the def opts into multi_agent, so it is listed here as narrowable on the same
  * condition — narrowing means "less than the def grants", subagent included.
  * (The bridge additionally requires a capability-listed model at spawn; the

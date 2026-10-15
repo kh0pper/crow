@@ -39,6 +39,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
+import { capFor, checkToolBudget, channelBudgetMessage, operatorBudgetMessage } from "./tool-budget.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
@@ -93,6 +94,51 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
     }
   }
   return out.join(",");
+}
+
+/**
+ * THE `--tools` csv a pi child is pinned with (strand 2: extracted from the
+ * PiRpc constructor verbatim, so the channel tool-budget preflight counts
+ * exactly what the child will get). Also returns the multi-agent flags,
+ * which feed PI_BOT_PERMISSION_POLICY.
+ * @returns {{csv: string, maOptIn: boolean, maCapable: boolean}}
+ */
+export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null } = {}) {
+  const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
+  const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
+  // Belt (R7 — pi `--tools` provably filters extension-registered tools
+  // too: dist/cli/args.js:220-221 "Applies to built-in, extension, and
+  // custom tools"). Only expose `subagent` to the model when capable+
+  // opted-in; otherwise pi never offers it. The gate is the backstop if a
+  // hand DB-edit bypasses this.
+  let tools = toolAllowlist(def, { remoteEnabled });
+  if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
+  // PL-3 completion, same belt as subagent above. pi-lab's ask-user
+  // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
+  // (shared/bot-mode.mjs askUserPath: "ui" for interactive, "off" for
+  // channel bots — no user to ask there), and `--tools` filters
+  // extension-registered tools too (R7). Without this append the perch
+  // unlock the engine's extraEnv was built for never reached the model:
+  // the tool was registered but invisible, so a bot asked "can you give me
+  // choices?" truthfully answered no (measured live on r4-assistant,
+  // 2026-09-12). Appended exactly where the tool exists — interactive
+  // spawns — so every channel caller's csv stays byte-identical, and the
+  // per-session narrowing below can still take it away (envelope model:
+  // narrowing only ever removes).
+  // PR-E (audit item 12) rides the SAME gate: pi-lab's send-user-file
+  // extension registers send_user_file only under askUserPath "ui"
+  // (PERMISSION_POLICY + INTERACTIVE), so appending it exactly where
+  // ask_user is appended keeps every channel bot's csv byte-identical and
+  // lets per-session narrowing below still take it away.
+  if (interactive) {
+    tools = [tools, "ask_user", "send_user_file"].filter(Boolean).join(",");
+  }
+  // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
+  // subagent append — so a session can narrow `subagent` away too. Narrowing
+  // only ever removes (applySessionNarrowing); opts.narrowedTools absent (every
+  // non-perch caller) leaves `tools` untouched — identical to what shipped before.
+  const csv = applySessionNarrowing(tools, narrowedTools);
+  return { csv, maOptIn, maCapable };
 }
 
 /**
@@ -201,41 +247,14 @@ export class PiRpc {
     // capability-listed. Both flow into PI_BOT_PERMISSION_POLICY for the
     // pi-lab gate (the hard backstop, fail-closed on absence) and gate the
     // `subagent` belt below.
-    const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
-    const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
-    // Belt (R7 — pi `--tools` provably filters extension-registered tools
-    // too: dist/cli/args.js:220-221 "Applies to built-in, extension, and
-    // custom tools"). Only expose `subagent` to the model when capable+
-    // opted-in; otherwise pi never offers it. The gate is the backstop if a
-    // hand DB-edit bypasses this.
-    let tools = toolAllowlist(def, { remoteEnabled: opts.remoteEnabled });
-    if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
-    // PL-3 completion, same belt as subagent above. pi-lab's ask-user
-    // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
-    // (shared/bot-mode.mjs askUserPath: "ui" for interactive, "off" for
-    // channel bots — no user to ask there), and `--tools` filters
-    // extension-registered tools too (R7). Without this append the perch
-    // unlock the engine's extraEnv was built for never reached the model:
-    // the tool was registered but invisible, so a bot asked "can you give me
-    // choices?" truthfully answered no (measured live on r4-assistant,
-    // 2026-09-12). Appended exactly where the tool exists — interactive
-    // spawns — so every channel caller's csv stays byte-identical, and the
-    // per-session narrowing below can still take it away (envelope model:
-    // narrowing only ever removes).
-    // PR-E (audit item 12) rides the SAME gate: pi-lab's send-user-file
-    // extension registers send_user_file only under askUserPath "ui"
-    // (PERMISSION_POLICY + INTERACTIVE), so appending it exactly where
-    // ask_user is appended keeps every channel bot's csv byte-identical and
-    // lets per-session narrowing below still take it away.
-    if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
-      tools = [tools, "ask_user", "send_user_file"].filter(Boolean).join(",");
-    }
-    // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
-    // subagent append — so a session can narrow `subagent` away too. Narrowing
-    // only ever removes (applySessionNarrowing); opts.narrowedTools absent (every
-    // non-perch caller) leaves `tools` untouched and the branch below identical
-    // to what shipped before.
-    const narrowedTools = applySessionNarrowing(tools, opts.narrowedTools);
+    // Strand 2: the assembly lives in buildToolsCsv (below the class) so the
+    // channel tool-budget preflight counts EXACTLY what is pinned here.
+    const { csv: narrowedTools, maOptIn, maCapable } = buildToolsCsv(def, {
+      resolved,
+      remoteEnabled: opts.remoteEnabled,
+      interactive: !!(opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1"),
+      narrowedTools: opts.narrowedTools,
+    });
     // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
     // facts can report the tool count the child was actually pinned with
     // (envelope + appends − narrowing) without re-deriving this assembly.
@@ -921,6 +940,33 @@ export async function handleInbound(opts) {
     return { action: "error", error: e.message };
   }
   const resolved = spawnPrep.resolved;
+
+  // Strand 2: a model that cannot take this bot's tool surface fails every
+  // turn as a provider 400. Refuse before the session goes active, the model
+  // warms or pi spawns — same shape as PI_MODEL_UNAVAILABLE above. The
+  // correspondent's reply names no provider; the audit row carries the key.
+  {
+    const po = spawnPrep.piRpcOpts || {};
+    const { csv } = buildToolsCsv(po.def || def, {
+      resolved,
+      remoteEnabled: po.remoteEnabled,
+      interactive: !!(po.extraEnv && po.extraEnv.PI_BOT_INTERACTIVE === "1"),
+      narrowedTools: po.narrowedTools,
+    });
+    const budget = checkToolBudget(csv, capFor(resolved));
+    if (!budget.ok) {
+      session = upsertSession(Object.assign({}, session || {}, { bot_id, gateway_thread_id, gateway_type, project_id: projectId, status: "error" }));
+      await sendReply("(bridge error: " + channelBudgetMessage(budget) + ")");
+      appendAuditBridge(projectId, {
+        actor_type: "bot", actor_id: bot_id, action: "bot.error",
+        target: "thread:" + gateway_thread_id,
+        payload: { error: "tool budget", code: "tool_budget", count: budget.count, cap: budget.cap, model: resolved.key },
+      });
+      log("tool-budget refused bot=" + bot_id + " model=" + resolved.key + " tools=" + budget.count + " cap=" + budget.cap);
+      // job_runner records `error` on the card job: the operator sentence.
+      return { action: "error", error: operatorBudgetMessage({ count: budget.count, cap: budget.cap, key: resolved.key }) };
+    }
+  }
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // D-T1.4: plans are board_plans records now, resolved from the

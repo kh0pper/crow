@@ -399,6 +399,19 @@ test("turn end (strand 1): a turn deferred on overflow compaction pushes no empt
   assert.equal(mine.length, 0);
 });
 
+test("strand 2: a turn refused for the tool budget with nobody watching (a card dispatch) pushes the reason", async () => {
+  const { engine, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
+  bridge.capFor = () => 1;                            // any surface is over a cap of 1
+  const s = await spawned(engine, "botty-budget");
+  bridge._state.instances[0].toolsCsv = "read,bash";   // the pinned surface: 2 tools
+  await assert.rejects(() => engine.message(s.sessionId, "work the card"), (e) => e.code === "tool_budget");
+  await tick();
+  const mine = notificationRows().filter((r) => r.action_url === "/dashboard/bot-board#bird=" + s.sessionId);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].title, "botty-budget can't run its turn");
+  assert.match(mine[0].body, /at most 1 tools/);
+});
+
 test("turn end: a turn that ran BELOW PERCH_NOTIFY_MIN_RUN_S pushes nothing", async () => {
   const { engine, bridge } = makeEngine({ PERCH_NOTIFY_MIN_RUN_S: "30" });
   const s = await spawned(engine, "botty-quick");
