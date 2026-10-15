@@ -807,12 +807,23 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
    * is refused with the row untouched. registerModel re-checks inside. */
   async function refuseForeignTarget(db, providerId) {
     const row = (await listProvidersAllFn(db)).find((r) => r.id === providerId);
-    if (!row) return;
+    if (!row) return refuseForeignLive(providerId);
     if (isExternalEngine(row)) throw fail("EXTERNAL_ENGINE", `"${providerId}" is an external engine; Crow never registers over it`);
     if (row.bundleId) throw fail("BUNDLE_ROW", `"${providerId}" is served by the ${row.bundleId} bundle — converting it is a migration step, not a registration`);
     const owner = row.gpuPolicy?.owner;
     if (row.gpuPolicy?.runtime === "native" && owner && owner !== ownInstanceIdFn()) {
       throw Object.assign(fail("NOT_OWNER", `"${providerId}" is owned by another instance`), { owner });
+    }
+    refuseForeignLive(providerId);
+  }
+
+  /** Same pre-check against the localized enabled row (review 5). */
+  function refuseForeignLive(providerId) {
+    // The localized enabled row knows whether it is another instance's door
+    // even when it carries no owner (review 5).
+    const live = core().providers()[providerId];
+    if (live && doorKindOf(live) === "native-foreign") {
+      throw Object.assign(fail("NOT_OWNER", `"${providerId}" is owned by another instance`), { owner: live.gpuPolicy?.owner ?? null });
     }
   }
 
@@ -827,7 +838,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
       const roles = roleOpts(body);
       await refuseForeignTarget(db, roles.providerId || body.catalogId);
-      const provider = await registerModelFn({ modelId: body.catalogId, quant, catalog, db, dir: resolveDir(), refuseBundleRow: true, ...roles });
+      const provider = await registerModelFn({ modelId: body.catalogId, quant, catalog, db, dir: resolveDir(), refuseBundleRow: true, keepAdoptedFiles: true, ...roles });
       res.json({ provider, running: residentNow(provider.id) });
     } catch (err) {
       sendErr(res, err);
@@ -866,6 +877,11 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     const { hfRepo, file, path } = req.body || {};
     if (!isValidHfRepoId(hfRepo)) return res.status(400).json({ error: `Invalid Hugging Face repo id: ${JSON.stringify(hfRepo)}`, code: "INVALID_HF_REPO" });
     if (!isValidHfFilename(file)) return res.status(400).json({ error: `Invalid file name: ${JSON.stringify(file)}`, code: "INVALID_HF_FILE" });
+    // An arbitrary Hugging Face file has no curated size to trust, so its
+    // LFS sha256 is the only check: a size-only adopt is refused.
+    if (req.body?.allowUnverified === true) {
+      return res.status(400).json({ error: "hf-adopt always verifies the file's sha256; allowUnverified is not accepted", code: "BAD_REQUEST" });
+    }
     const db = dbFactory();
     try {
       let token = null;
@@ -885,7 +901,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       const catalog = hfSyntheticCatalog({ hfRepo, file, modelId, sha256: info.sha256, sizeMb });
       await refuseForeignTarget(db, modelId);
       const provider = await adoptModelFn({
-        modelId, quant: "hf", path, catalog, allowUnverified: req.body?.allowUnverified === true,
+        modelId, quant: "hf", path, catalog, allowUnverified: false,
         db, dir: resolveDir(), refuseBundleRow: true, registryExtra: { source: "hf-browser" },
       });
       res.json({ provider, verified: provider.verified, running: residentNow(provider.id) });

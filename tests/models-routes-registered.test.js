@@ -13,7 +13,7 @@ import { createLifecycleCore } from "../servers/gateway/models/lifecycle-core.js
 import { createJobStore } from "../servers/gateway/models/lifecycle.js";
 import { hfSyntheticCatalog, registerModel } from "../servers/gateway/models/manager.js";
 import { upsertProvider, listProvidersAll } from "../servers/shared/providers-db.js";
-import { loadState } from "../servers/gateway/models/state.js";
+import { loadState, registryKey } from "../servers/gateway/models/state.js";
 import {
   freshLibsql, seedSession, authHeaders, noCsrfHeaders, noSessionHeaders, withServer, withOrchestrationDisabled,
 } from "./fixtures/models-routes-harness.mjs";
@@ -245,4 +245,90 @@ test("hfSyntheticCatalog keeps the shape downloadHfFile always built", () => {
     id: "repo-q4-k-m", family: "Repo-GGUF", hf_repo: "org/Repo-GGUF", task: "chat", context_len: null, default_quant: "hf",
     quants: [{ file: "Repo-Q4_K_M.gguf", quant: "hf", sha256: "abc", size_mb: 12.5, min_ram_mb: 12.5, min_vram_mb: 0 }],
   }] });
+});
+
+// ─── Review fixes (2026-10-15) ──────────────────────────────────────────────
+
+/** What the orchestrator opens on start (gpu-orchestrator.js startNativeAndAwaitReady):
+ * the row's catalogId@quant registry entry, its absolute `path` if adopted, else the blob dir. */
+function startFileFor(dir, row) {
+  const entry = loadState(dir).registry[registryKey(row.gpuPolicy.catalogId, row.gpuPolicy.quant)];
+  return entry ? (entry.path || join(dir, "models", "blobs", entry.file)) : null;
+}
+
+test("review 1: Edit and Register as… on an adopted install keep path/adopted/verified/companions, and both providers still start from the adopted file", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    const file = join(weights, "ok.gguf");
+    writeFileSync(file, PRIMARY);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      assert.equal((await post(base, "/api/models/adopt", token, { catalogId: "small-chat", quant: "Q4_K_M", path: file, providerId: "crow-chat" })).status, 200);
+      const before = loadState(h.dir).registry["small-chat@Q4_K_M"];
+      // Edit (re-register under the same id) and Register as… (a second id).
+      assert.equal((await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "crow-chat", launch: { ctx: 2048 } })).status, 200);
+      assert.equal((await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "crow-chat-b" })).status, 200);
+    });
+    const entry = loadState(h.dir).registry["small-chat@Q4_K_M"];
+    assert.equal(entry.path, file);
+    assert.equal(entry.adopted, true);
+    assert.equal(entry.verified, true);
+    assert.deepEqual(entry.companions, []);
+    const rows = await listProvidersAll(h.db);
+    for (const id of ["crow-chat", "crow-chat-b"]) {
+      const row = rows.find((r) => r.id === id);
+      assert.equal(startFileFor(h.dir, row), file, `${id} starts from the adopted file`);
+    }
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("review 1: a download-shaped re-register still drops adopted fields (the I2 rule is unchanged)", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    writeFileSync(join(weights, "ok.gguf"), PRIMARY);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      await post(base, "/api/models/adopt", token, { catalogId: "small-chat", quant: "Q4_K_M", path: join(weights, "ok.gguf") });
+    });
+    await registerModel({ modelId: "small-chat", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+    const entry = loadState(h.dir).registry["small-chat@Q4_K_M"];
+    assert.equal(entry.adopted, undefined);
+    assert.equal(entry.path, undefined);
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("review 5: an owner-less foreign native row (its base_url is another door) is refused NOT_OWNER", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    await upsertProvider(h.db, { id: "peer-noowner", baseUrl: "http://100.64.9.1:3008/llm/p/peer-noowner/v1", host: "local", models: [{ id: "small-chat", task: "chat" }], providerType: "openai-compat",
+      gpuPolicy: { runtime: "native", port: 18121, catalogId: "small-chat", quant: "Q4_K_M" } });
+    const core = () => createLifecycleCore({
+      providersFn: () => ({ "peer-noowner": { models: [{ id: "small-chat" }], baseUrl: "http://100.64.9.1:3008/llm/p/peer-noowner/v1", gpuPolicy: { runtime: "native", port: 18121, catalogId: "small-chat", quant: "Q4_K_M" } } }),
+      ownInstanceIdFn: () => "me", readReservationFn: () => null, snapshotOfFn: () => null, siblingsOfFn: () => [], externalHealthFn: () => ({}),
+      acquireFn: async () => true, stopFn: async () => ({}), jobs: createJobStore(),
+    });
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: core }, async (base) => {
+      const r = await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "peer-noowner" });
+      assert.equal(r.status, 409);
+      assert.equal((await r.json()).code, "NOT_OWNER");
+    });
+    assert.equal(Object.keys(loadState(h.dir).registry).length, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("review 6: hf-adopt refuses allowUnverified (it always verifies the LFS sha256)", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let looked = 0;
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore, fetchHfPathInfoFn: async () => { looked += 1; return { sha256: "x", sizeBytes: 1 }; } }, async (base) => {
+      const r = await post(base, "/api/models/hf-adopt", token, { hfRepo: "t/withsha", file: "A-Q4_K_M.gguf", path: "/srv/A-Q4_K_M.gguf", allowUnverified: true });
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).code, "BAD_REQUEST");
+    });
+    assert.equal(looked, 0);
+  } finally { await h.cleanup(); }
 });

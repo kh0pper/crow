@@ -457,6 +457,17 @@ export async function adoptModel({
       { file: path }
     );
   }
+  // Companion paths go to llama-server verbatim too (--mmproj), so the same
+  // absolute-path rule applies, checked before anything is hashed.
+  for (const [kind, cPath] of Object.entries(companionPaths || {})) {
+    if (cPath && (typeof cPath !== "string" || !isAbsolute(cPath))) {
+      throw new AdoptMismatchError(
+        `adopt: ${kind} path must be absolute, got ${JSON.stringify(cPath)}`,
+        "ADOPT_PATH_NOT_ABSOLUTE",
+        { file: cPath, kind }
+      );
+    }
+  }
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const what = `${model.id} ${quantEntry.quant} (${quantEntry.file})`;
   const shards = Array.isArray(quantEntry.shards) ? quantEntry.shards : [];
@@ -1656,6 +1667,7 @@ export async function registerModel({
   defaultMember = false,
   registryExtra = {},
   refuseBundleRow = false,
+  keepAdoptedFiles = false,
   ownInstanceIdFn = getOrCreateLocalInstanceId,
   tailnetIpFn = getOwnTailnetIp,
   gatewayPortFn = gatewayPort,
@@ -1762,6 +1774,16 @@ export async function registerModel({
   const carriedRuntimeState = {};
   if (prevEntry.wasLive !== undefined) carriedRuntimeState.wasLive = prevEntry.wasLive;
   if (prevEntry.lastStoppedAt !== undefined) carriedRuntimeState.lastStoppedAt = prevEntry.lastStoppedAt;
+  // The panel's register/edit path (`keepAdoptedFiles`) re-registers an
+  // existing install without touching its weights: an adopted entry keeps
+  // the files it points at, or the next start would look in the blob dir
+  // (review 2026-10-15). A download or adopt still re-derives them (I2).
+  const carriedFiles = {};
+  if (keepAdoptedFiles && prevEntry.adopted) {
+    for (const k of ["path", "adopted", "verified", "companions", "shardFiles", "source"]) {
+      if (prevEntry[k] !== undefined) carriedFiles[k] = prevEntry[k];
+    }
+  }
   state.registry[key] = {
     ...carriedRuntimeState,
     file: sanitizeFilename(quantEntry.file),
@@ -1771,6 +1793,7 @@ export async function registerModel({
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
     shardFiles: plannedFiles.filter((f) => f.role === "shard").map((f) => f.dest),
     companions: plannedFiles.filter((f) => f.role === "companion").map((f) => ({ kind: f.kind, file: f.dest })),
+    ...carriedFiles,
     ...registryExtra,
   };
   saveState(dir, state);

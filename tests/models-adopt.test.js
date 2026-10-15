@@ -216,3 +216,20 @@ test("adoptModel: an out-of-tolerance size mismatch names both sizes and the cat
     );
   } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
 });
+
+test("review 4: a relative companion path is refused before anything is hashed or registered", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const primary = Buffer.from("primary-bytes"), mmproj = Buffer.from("mmproj-bytes");
+    writeFileSync(join(weights, "big.gguf"), primary);
+    let hashed = 0;
+    await assert.rejects(
+      adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: join(weights, "big.gguf"), companionPaths: { mmproj: "proj.gguf" },
+        catalog: catalogFor({ primary, mmproj }), hashFileFn: async (p) => { hashed += 1; return hashFileSha256(p); }, ...OPTS(h) }),
+      (e) => e instanceof AdoptMismatchError && e.code === "ADOPT_PATH_NOT_ABSOLUTE" && /mmproj/.test(e.message)
+    );
+    assert.equal(hashed, 0);
+    assert.equal(Object.keys(loadState(h.dir).registry).length, 0);
+  } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
