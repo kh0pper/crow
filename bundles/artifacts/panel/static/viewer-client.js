@@ -347,6 +347,7 @@
     var viewer = S.viewer = window.CrowArtifactViewer.mount({
       container: frameBox,
       mint: function (fragment, x) { return api("POST", BASE + "/versions/" + n + "/view", { fragment: fragment || null, replaces: (x && x.replaces) || null }); },
+      revoke: function (tokenId) { return api("POST", BASE + "/view-tokens/revoke", { tokenId: tokenId }); },
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
       // A tap (pages) composes at once; a SELECTION waits for the owner's tap
       // on the trusted "Comment on …" button (review H1).

@@ -372,6 +372,20 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   }));
 
   /**
+   * D28 (review low): the viewer refused a grant locally (bad-grant) and hands
+   * back the token that mint already made live. Revoked only when it belongs
+   * to THIS artifact; any other id is a no-op.
+   */
+  router.post("/api/artifacts/:id/view-tokens/revoke", wrap(async (req, res) => {
+    const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    const tokens = S.runtime.viewTokens();
+    const id = typeof req.body?.tokenId === "string" ? req.body.tokenId : null;
+    const mine = !!id && tokens.evidence(id)?.artifactId === art.id;
+    if (mine) tokens.revokeToken(id);
+    res.json({ revoked: mine });
+  }));
+
+  /**
    * D24: a scripted frame said no hello in time — should the viewer flag it or
    * offer "couldn't load — retry"? Answered from the origin's own per-token
    * record (view-tokens.js loadDecision), which the frame content cannot

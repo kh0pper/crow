@@ -237,6 +237,23 @@ test("D24: a retry's view call revokes the token it replaces (same artifact only
   assert.ok(runtime.viewTokens().check(o.body.url.split("/v/")[1].slice(0, 43)), "another artifact's token survives");
 });
 
+test("D28 low: the viewer hands back a refused grant's token — the revoke route kills it (same artifact only, owner + CSRF)", async () => {
+  const art = await store.createArtifact(s.db, s.blobs, { title: "D28 revoke", type: "page", source: { html: "<p>r</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const other = await store.createArtifact(s.db, s.blobs, { title: "D28 other", type: "page", source: { html: "<p>o</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const a = await req("POST", `/api/artifacts/${art.id}/versions/1/view`);
+  const o = await req("POST", `/api/artifacts/${other.id}/versions/1/view`);
+  const secret = (g) => g.body.url.split("/v/")[1].slice(0, 43);
+  const path = `/api/artifacts/${art.id}/view-tokens/revoke`;
+  assert.equal((await req("POST", path, { body: { tokenId: a.body.tokenId }, csrf: null })).status, 403);
+  assert.equal((await req("POST", path, { body: { tokenId: a.body.tokenId }, cookie: null })).status, 401);
+  assert.ok(runtime.viewTokens().check(secret(a)), "nothing revoked by a refused request");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: o.body.tokenId } })).body, { revoked: false }, "another artifact's token is ignored");
+  assert.ok(runtime.viewTokens().check(secret(o)), "another artifact's token survives");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: a.body.tokenId } })).body, { revoked: true });
+  assert.equal(runtime.viewTokens().check(secret(a)), null, "the refused grant's secret no longer serves");
+  assert.deepEqual((await req("POST", path, { body: { tokenId: 42 } })).body, { revoked: false }, "a malformed id is a no-op");
+});
+
 function getPage(path, { cookie = "crow_session=good; crow_csrf=tok" } = {}) {
   return new Promise((resolve, reject) => {
     const r = http.request({ host: "127.0.0.1", port: s.port, path, method: "GET", headers: cookie ? { cookie } : {} }, (res) => {
