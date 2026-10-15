@@ -237,6 +237,31 @@ test("D24: a retry's view call revokes the token it replaces (same artifact only
   assert.ok(runtime.viewTokens().check(o.body.url.split("/v/")[1].slice(0, 43)), "another artifact's token survives");
 });
 
+test("D28 review L-5: the REAL view-mint route's grants — document helper-only, page scripted, tainted page sealed — all pass the REAL viewer validGrant", async () => {
+  const { readFileSync } = await import("node:fs");
+  const vm = await import("node:vm");
+  const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
+  const box = { URL, location: { origin: `http://${s.host}` }, document: { createElement: () => ({ style: {}, setAttribute() {}, addEventListener() {} }), addEventListener() {} }, setTimeout, clearTimeout, console };
+  box.window = box;
+  vm.createContext(box);
+  vm.runInContext(src, box);
+  const { validGrant } = box.CrowArtifactViewer;
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Grant doc", type: "document", source: { markdown: "# g" }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const page = await store.createArtifact(s.db, s.blobs, { title: "Grant page", type: "page", source: { html: "<p>g</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
+  const tainted = await store.addVersion(s.db, s.blobs, { artifactId: page.id, source: { html: "<p>shaped</p>" }, actor: { kind: "session" }, untrusted: true }, {});
+  const cases = [
+    [doc.id, 1, { sandbox: "allow-scripts", scripted: true, scriptsOff: false }],
+    [page.id, 1, { sandbox: "allow-scripts", scripted: true, scriptsOff: false }],
+    [page.id, tainted.n, { sandbox: "", scripted: false, scriptsOff: true }],
+  ];
+  for (const [id, n, want] of cases) {
+    const g = await req("POST", `/api/artifacts/${id}/versions/${n}/view`);
+    assert.equal(g.status, 200);
+    assert.deepEqual({ sandbox: g.body.sandbox, scripted: g.body.scripted, scriptsOff: g.body.scriptsOff }, want, `${id} v${n}`);
+    assert.equal(validGrant(g.body), true, `${id} v${n}: the route's own grant passes the viewer`);
+  }
+});
+
 test("D28 low: the viewer hands back a refused grant's token — the revoke route kills it (same artifact only, owner + CSRF)", async () => {
   const art = await store.createArtifact(s.db, s.blobs, { title: "D28 revoke", type: "page", source: { html: "<p>r</p>" }, actor: { kind: "bot", id: "bobby" } }, {});
   const other = await store.createArtifact(s.db, s.blobs, { title: "D28 other", type: "page", source: { html: "<p>o</p>" }, actor: { kind: "bot", id: "bobby" } }, {});

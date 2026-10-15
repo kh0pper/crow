@@ -61,7 +61,8 @@ test("review H2: every routes-shaped grant passes the REAL viewer validGrant (no
   for (const type of policy.ARTIFACT_TYPES) {
     for (const scriptsOff of [false, true]) {
       const fg = policy.frameGrantFor(type, scriptsOff);
-      // The exact shape the view-mint route returns.
+      // The view-mint route's shape, for every type × scripts-off; the REAL
+      // route's grants are fed to validGrant in artifacts-panel-routes.test.js.
       const g = { url: "https://art.example/v/" + "A".repeat(43) + "/", tokenId: "x".repeat(64), nonce: "n".repeat(22), type, fragment: null, sandbox: fg.sandbox, scripted: fg.speaks, scriptsOff, isolation: "own-host" };
       assert.equal(validGrant(g), true, `${type}/${scriptsOff}`);
     }
