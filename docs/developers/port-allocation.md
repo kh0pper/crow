@@ -77,7 +77,9 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to grackle :8002) | external, freed |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
+| 8004 | tailscale IP | llamacpp-vulkan-qwen3-embed (crow-embed; same port as faster-whisper, different interface) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
+| 8011 | tailscale IP | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
 | 8080 | 127.0.0.1 | localai (existing) | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
