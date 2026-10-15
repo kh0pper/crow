@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { checkLib, checkNoRemoteRefs, cssFetches, sha256Hex } from "../bundles/design-kit/server/lib-check.js";
+import { checkLib, checkNoRemoteRefs, cssFetches, svgUnsafe, sha256Hex } from "../bundles/design-kit/server/lib-check.js";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -128,9 +128,7 @@ test("cssFetches fails closed on whitespace, escapes, image-set, src() and bare 
     "@\\69mport 'x.css';",
   ]) assert.equal(cssFetches(css), true, css);
   for (const css of [
-    "a{background:image-set(\"a.png\" 1x, \"b.png\" 2x)}",
     "a{background:url(\n./x.png)}",
-    "a{content:\"see https://example.org\"}",
   ]) assert.equal(cssFetches(css), false, css);
 });
 
@@ -173,5 +171,98 @@ test("cssFetches refuses comments and escapes outside strings, and image() targe
   ]) assert.equal(cssFetches(css), true, css);
   // A backslash inside a quoted string (an icon-font content escape) is plain data.
   assert.equal(cssFetches(".i:before{content:\"\\e900\"}"), false);
-  assert.equal(cssFetches("a{b:image(\"local.png\")}"), false);
+});
+
+const R = "https://e.x/a";
+test("fail-closed CSS allowlist: every probed bypass is refused", () => {
+  const bad = {
+    "CR ends a string, then escaped url": `a{content:"x\r}b{c:u\\72l(${R})}`,
+    "FF ends a string, then escaped url": `a{content:"x\f}b{c:u\\72l(${R})}`,
+    "CR ends a string, then comment": `a{content:"x\r}/**/b{c:url(${R})}`,
+    "TAB in a quoted scheme": `a{b:url("ht\ttps://e.x/a")}`,
+    "C0 control before a quoted url": `a{b:url("\x01${R}")}`,
+    "TAB in image() string": `a{b:image("ht\ttps://e.x/a")}`,
+    "NUL in a scheme": `a{b:url("ht\0tps://e.x/a")}`,
+    "DEL": `a{b:url(./x\x7f.png)}`,
+    "; inside an earlier image-set string": `a{b:image-set("a;b" 1x,"${R}" 2x)}`,
+    "} inside an earlier image-set string": `a{b:image-set("a}b" 1x,"${R}" 2x)}`,
+    "mixed quotes in image-set": `a{b:image-set("it's" 1x,'${R}' 2x)}`,
+    "var() string in image-set": `:root{--u:"${R}"}a{b:image-set(var(--u) 1x)}`,
+    "var() string in image()": `:root{--u:"${R}"}a{b:image(var(--u))}`,
+    "var() string in src()": `:root{--u:"${R}"}@font-face{font-family:x;src:src(var(--u))}`,
+    "attr() in image-set": `a{b:image-set(attr(data-u) 1x)}`,
+    "-webkit-image-set": `a{b:-webkit-image-set("${R}" 1x)}`,
+    "cross-fade": `a{b:cross-fade(url(${R}),url(x))}`,
+    "element()": `a{b:element(#x)}`,
+    "@import url with layer": `@import url(${R}) layer(x) screen;`,
+    "upper-case @IMPORT": `@IMPORT "${R}";`,
+    "upper-case URL(": `a{b:URL(${R})}`,
+    "@namespace url": `@namespace url(http://www.w3.org/1999/xhtml);`,
+    "@namespace string": `@namespace "http://www.w3.org/1999/xhtml";`,
+    "var url": `:root{--x:url(${R})}`,
+    "content url": `a:before{content:url(${R})}`,
+    "src url format": `@font-face{font-family:x;src:url(${R}) format("woff2")}`,
+    "svg data url": `a{b:url("data:image/svg+xml,<svg><image href='${R}'/></svg>")}`,
+    "unterminated string": `a{b:url("${R}`,
+    "newline in a quoted url": `a{b:url("\n${R}")}`,
+    "absolute path": `a{b:url(/x.png)}`,
+    "double slash": `a{b:url(x//y.png)}`,
+    "query char": `a{b:url(./x.png?a=1)}`,
+    "colon in a string": `a{content:"see https://example.org"}`,
+    "leading // in a string": `a{content:" //e.x/a"}`,
+    "UTF-8 BOM": `\ufeffa{b:url(./x.png)}`,
+    "UTF-16 BOM decoded as UTF-8": Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`a{b:url(${R})}`, "utf16le")]),
+    "UTF-8 BOM bytes": Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("a{b:red}")]),
+    "invalid UTF-8": Buffer.from([0x61, 0x7b, 0xc3, 0x28, 0x7d]),
+    "CRLF": "a{b:red}\r\nc{d:red}",
+  };
+  for (const [k, v] of Object.entries(bad)) assert.equal(cssFetches(v), true, k);
+});
+
+test("fail-closed CSS allowlist: the shapes Task 2 vendors still pass", () => {
+  const ok = {
+    "fontsource font-face": `@font-face{font-family:'Inter';font-style:normal;font-display:swap;font-weight:400;src:url(./files/inter-latin-400-normal.woff2) format('woff2'),url(./files/inter-latin-400-normal.woff) format("woff");unicode-range:U+0000-00FF,U+0131}\n`,
+    "src local": `@font-face{font-family:x;src:local(Foo),url(./x.woff2)}`,
+    "open-props style": `:where(html){--size-1:.25rem;--gradient-1:linear-gradient(to bottom right,#1f005c,#5b0060);--ease-1:cubic-bezier(.25,0,.5,1);--font-mono:ui-monospace,"Cascadia Code",monospace}\n@media (prefers-color-scheme:dark){:root{color-scheme:dark}}\n.a::after{content:"\\e900"}`,
+    "pico style": `a{--pico-x:calc(1rem*2)}\n:is(button,[type=submit]):focus{box-shadow:0 0 0 .1rem var(--pico-primary-focus)}\n@media (min-width:768px){.grid{grid-template-columns:repeat(auto-fit,minmax(0%,1fr))}}`,
+    "relative targets": `a{b:url("../img/a-b_c.png")} c{d:url( ./a/b.svg )} e{f:url(x.png)}`,
+    "raster data url": `a{background:url(data:image/png;base64,iVBORw0KGgo=)}`,
+  };
+  for (const [k, v] of Object.entries(ok)) assert.equal(cssFetches(v), false, k);
+});
+
+test("svgUnsafe: plain icon SVGs pass, active or fetching content does not", () => {
+  const lucide = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"\n\tstroke-linecap="round" stroke-linejoin="round">\r\n  <path d="M20 6 9 17l-5-5"/><circle cx="12" cy="12" r="3"/>\n</svg>\n`;
+  assert.equal(svgUnsafe(lucide), false);
+  assert.equal(svgUnsafe(`<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g"/></defs><rect fill="url(#g)"/><use href="#g"/></svg>`), false);
+  for (const [k, v] of Object.entries({
+    style: `<svg><style>a{}</style></svg>`,
+    import: `<svg><style>@import "x"</style></svg>`,
+    "url(remote)": `<svg><rect fill="url(${R})"/></svg>`,
+    "href remote": `<svg><image href="${R}"/></svg>`,
+    "xlink:href remote": `<svg><use xlink:href="${R}"/></svg>`,
+    "unquoted href": `<svg><use href=${R}/></svg>`,
+    script: `<svg><SCRIPT>1</SCRIPT></svg>`,
+    foreignObject: `<svg><foreignObject/></svg>`,
+    "on attr": `<svg onload="x()"/>`,
+    "on attr spaced": `<svg onclick = "x()"/>`,
+    doctype: `<!DOCTYPE svg [<!ENTITY a "b">]><svg/>`,
+    animate: `<svg><animate attributeName="href" to="${R}"/></svg>`,
+    "BOM": "\ufeff<svg/>",
+    NUL: "<svg\0/>",
+  })) assert.equal(svgUnsafe(v), true, k);
+});
+
+test("checkLib applies the CSS and SVG allowlists to listed files", () => {
+  assert.match(errsOf((m, lib) => {
+    const css = Buffer.from("a{b:image-set(\"x.png\" 1x)}");
+    writeFileSync(join(lib, "css", "demo", "demo.css"), css);
+    m.entries[0].files[0].sha256 = sha256Hex(css);
+  }), /would fetch at runtime/);
+  assert.match(errsOf((m, lib) => {
+    mkdirSync(join(lib, "icons"), { recursive: true });
+    const svg = Buffer.from("<svg><script>1</script></svg>");
+    writeFileSync(join(lib, "icons", "a.svg"), svg);
+    m.entries[0].files.push({ path: "icons/a.svg", sha256: sha256Hex(svg), type: "image/svg+xml" });
+  }), /icons\/a\.svg is not a plain SVG/);
 });

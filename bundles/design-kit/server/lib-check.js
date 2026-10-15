@@ -2,6 +2,18 @@
 // bundles/design-kit/lib/ (scripts/check-design-kit-lib.mjs) and the hash check
 // the kit repeats when it copies a file. node: imports only: the installed copy,
 // the CI script and the vendor script all load this file directly.
+//
+// CSS and SVG are checked against a fail-closed ALLOWLIST, not a blocklist, so
+// the vendor step (scripts/design-kit/vendor-lib.mjs) must normalize what it
+// copies: UTF-8 or ASCII with no BOM; LF line endings (no CRLF, no tabs: CSS
+// may hold only LF as a control character); all /* comments */ stripped
+// (licence text lives under licenses/); no backslash escapes outside quoted
+// strings; no @import, @namespace, image(), image-set(), src(), cross-fade() or
+// element(); every url() a relative path ([A-Za-z0-9._/-], no query, no colon)
+// or a base64 raster data: URL; and no quoted string containing "://" (so
+// inline SVG data: URLs with an xmlns must be rewritten or dropped). SVG icons
+// get no doctype, style, script, foreignObject, animation or on* attributes,
+// and only url(#id) / href="#id" references. Tabs and CRs are fine in SVG.
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -35,71 +47,94 @@ function walk(dir, root = dir, out = []) {
   return out;
 }
 
-/** True when a CSS fetch target (text right after `url(`, a quote, ...) is a
- *  remote one: protocol-relative, or a scheme other than data:. */
-function remoteTarget(low, from) {
-  let j = from;
-  while (j < low.length && (/\s/.test(low[j]) || low[j] === "'" || low[j] === '"')) j++;
-  const head = low.slice(j, j + 16);
-  if (head.startsWith("//")) return true;
-  const colon = head.indexOf(":");
-  return colon > 0 && /^[a-z][a-z0-9+.-]*$/.test(head.slice(0, colon)) && !head.startsWith("data:");
+/** Decode file bytes as strict UTF-8 with no BOM (UTF-8 or UTF-16), or null.
+ *  A string is taken as already decoded. */
+function decodeText(input) {
+  if (typeof input === "string") return input.startsWith("﻿") ? null : input;
+  const b = Buffer.from(input);
+  if ((b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) || (b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff)) return null;
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(b); } catch { return null; }
 }
 
-/** True for a CSS comment or a backslash outside a quoted string. Either can
- *  hide a function name or a url() target from the checks below (`u\72l(`,
- *  `url(/**\/"https:..."`), so they are refused outright; vendor-time code
- *  strips comments from vendored CSS. A string ends at its quote or a newline. */
-function hasCommentOrBareEscape(low) {
-  let q = "";
-  for (let i = 0; i < low.length; i++) {
-    const c = low[i];
-    if (q) {
-      if (c === "\\") i++;
-      else if (c === q || c === "\n") q = "";
-    } else if (c === "\\" || (c === "/" && low[i + 1] === "*")) return true;
-    else if (c === '"' || c === "'") q = c;
+// CSS allows only LF among the control characters (CR, FF and TAB end or alter
+// tokens differently in browsers than in a hand-written scanner; DEL and NUL are
+// stripped or replaced). SVG may also carry TAB and CR.
+const CSS_BAD_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f]/;
+const SVG_BAD_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const REL_TARGET = /^(?:\.{1,2}\/)*[A-Za-z0-9._/-]+$/;
+const RASTER_DATA = /^data:image\/(?:png|gif|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
+// Functions that fetch (or can be handed a string to fetch) other than url().
+const FORBIDDEN_CSS = ["@import", "@namespace", "image(", "image-set(", "src(", "cross-fade(", "element("];
+
+/** Walk CSS tokens. Returns the quoted string contents, or null when a comment
+ *  or a backslash appears outside a string, or a string never closes. A string
+ *  ends at its closing quote; a newline inside one is refused. */
+function cssStrings(css) {
+  const out = [];
+  for (let i = 0; i < css.length; i++) {
+    const c = css[i];
+    if (c === "\\" || (c === "/" && css[i + 1] === "*")) return null;
+    if (c !== '"' && c !== "'") continue;
+    let j = i + 1;
+    let body = "";
+    for (; j < css.length && css[j] !== c; j++) {
+      if (css[j] === "\n") return null;
+      if (css[j] === "\\") { body += css[j++]; }
+      body += css[j] ?? "";
+    }
+    if (j >= css.length) return null;
+    out.push(body);
+    i = j;
+  }
+  return out;
+}
+
+/** True when CSS may fetch at runtime, or is not in the plain shape the vendor
+ *  step produces. A fail-closed ALLOWLIST (spec §3.2): valid UTF-8 without a
+ *  BOM; LF the only control character; no comments and no backslash outside a
+ *  quoted string; no @import/@namespace/image()/image-set()/src()/cross-fade()/
+ *  element(); every url() target a relative path (or a base64 raster data:
+ *  URL); and no quoted string that holds "://" or begins with "//". Accepts
+ *  bytes (preferred; checks the encoding) or an already decoded string. */
+export function cssFetches(input) {
+  const css = decodeText(input);
+  if (css === null || CSS_BAD_CHARS.test(css)) return true;
+  const strings = cssStrings(css);
+  if (!strings) return true;
+  for (const t of strings) if (t.includes("://") || t.trimStart().startsWith("//")) return true;
+  const low = css.toLowerCase();
+  if (FORBIDDEN_CSS.some((f) => low.includes(f))) return true;
+  for (let i = low.indexOf("url("); i >= 0; i = low.indexOf("url(", i + 4)) {
+    const end = low.indexOf(")", i);
+    if (end < 0) return true;
+    let t = css.slice(i + 4, end).trim();
+    const q = t[0];
+    if (q === '"' || q === "'") {
+      if (t.length < 2 || t[t.length - 1] !== q) return true;
+      t = t.slice(1, -1);
+    }
+    const okRel = REL_TARGET.test(t) && !t.includes("//") && !t.startsWith("/");
+    if (!okRel && !RASTER_DATA.test(t)) return true;
   }
   return false;
 }
 
-/** CSS that would fetch at runtime. Fails closed: any @import; any comment or
- *  bare escape (see above); url() / src() / image() whose target is remote or
- *  contains an escape; and any quoted string inside image-set() that is remote. Linear
- *  scans (no regex over the whole file). */
-export function cssFetches(css) {
-  const low = String(css).toLowerCase();
-  if (low.includes("@import") || hasCommentOrBareEscape(low)) return true;
-  for (const fn of ["url(", "src(", "image("]) {
-    let i = 0;
-    for (;;) {
-      const k = low.indexOf(fn, i);
-      if (k < 0) break;
-      i = k + fn.length;
-      if (fn !== "url(" && /[a-z0-9_]/.test(low[k - 1] || " ")) continue; // a longer name ending in it, not the function
-      const end = low.indexOf(")", i);
-      if (low.slice(i, end < 0 ? low.length : end).includes("\\")) return true;
-      if (remoteTarget(low, i)) return true;
-    }
+/** True when an SVG is not a plain, inert image: valid UTF-8 without a BOM, no
+ *  doctype/processing instruction, no style/script/foreignObject/animation
+ *  elements, no on* attributes, no url() except url(#id), and no href or
+ *  xlink:href except "#id". Fail closed. */
+export function svgUnsafe(input) {
+  const svg = decodeText(input);
+  if (svg === null || SVG_BAD_CHARS.test(svg)) return true;
+  const low = svg.toLowerCase();
+  if (/<[!?]|<(?:style|script|foreignobject|animate|set|handler)\b|@import|@namespace/.test(low)) return true;
+  if (/\bon[a-z]+\s*=/.test(low)) return true;
+  if (/url\(\s*(?!["']?#)/.test(low)) return true;
+  for (const m of low.matchAll(/href\s*=\s*(.?)/g)) {
+    if (m[1] !== '"' && m[1] !== "'") return true;
   }
-  let i = 0;
-  for (;;) {
-    const k = low.indexOf("image-set(", i);
-    if (k < 0) return false;
-    i = k + 10;
-    let stop = low.length;
-    for (const c of [";", "}"]) { const x = low.indexOf(c, i); if (x >= 0 && x < stop) stop = x; }
-    const seg = low.slice(i, stop);
-    if (seg.includes("\\")) return true;
-    for (const q of ["'", '"']) {
-      let at = seg.indexOf(q);
-      while (at >= 0) {
-        if (remoteTarget(seg, at + 1)) return true;
-        const close = seg.indexOf(q, at + 1);
-        at = close < 0 ? -1 : seg.indexOf(q, close + 1);
-      }
-    }
-  }
+  for (const m of low.matchAll(/href\s*=\s*(["'])(.*?)\1/g)) if (!m[2].startsWith("#")) return true;
+  return false;
 }
 
 export function checkLib(libDir) {
@@ -120,7 +155,8 @@ export function checkLib(libDir) {
     if (!existsSync(abs)) return fail(`${where}: missing file ${p}`);
     const body = readFileSync(abs);
     if (sha256Hex(body) !== f.sha256) fail(`${where}: sha256 mismatch for ${p}`);
-    if (f.type === "text/css" && cssFetches(body.toString("utf8"))) fail(`${where}: ${p} would fetch at runtime (@import or a remote url())`);
+    if (f.type === "text/css" && cssFetches(body)) fail(`${where}: ${p} would fetch at runtime or is not plain CSS (see the lib-check.js header)`);
+    if (f.type === "image/svg+xml" && svgUnsafe(body)) fail(`${where}: ${p} is not a plain SVG (see the lib-check.js header)`);
   };
   for (const e of man.entries) {
     const where = e && typeof e.name === "string" ? e.name : "(unnamed entry)";
