@@ -8,6 +8,7 @@
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { getAddonLogo } from "../../shared/logos.js";
+import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
 import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
 import { formEnvVars } from "../../../bundle-env-form.js";
@@ -60,9 +61,10 @@ export function iconEmoji(name) {
   return Object.hasOwn(ICON_MAP, name) ? ICON_MAP[name] : null;
 }
 
-/** Collection card icon, with the generic-package default. */
+/** Collection card icon: a line glyph from the shared app icon set, with the
+ *  package glyph for an unknown key. Keys are lookup-only (app-icons.js). */
 function collectionIcon(name) {
-  return iconEmoji(name) || "\u{1F4E6}";
+  return appIconSvg(name) || appIconSvg("package");
 }
 
 export const CATEGORY_COLORS = {
@@ -269,7 +271,7 @@ export function buildExtensionsHTML({
 
   // ─── Starter collections ───
   const collectionCard = (c) => `<button type="button" class="ext-collection-card" data-collection-id="${escapeHtml(c.id)}">
-        <span class="ext-collection-card__icon">${collectionIcon(c.icon)}</span>
+        <span class="ext-collection-card__icon" aria-hidden="true">${collectionIcon(c.icon)}</span>
         <span class="ext-collection-card__name">${escapeHtml(c.name)}</span>
         <span class="ext-collection-card__desc">${escapeHtml(c.description)}</span>
         <span class="ext-collection-card__count">${c.members.length} ${t("extensions.collectionMembers", lang)}</span>

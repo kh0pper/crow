@@ -93,6 +93,13 @@ test("WIZARD_STEP_KEYS is the five-step spec order", () => {
   assert.deepEqual(WIZARD_STEP_KEYS, ["template", "basics", "model", "channel", "review"]);
 });
 
+test("the wizard stepper carries the translated compact line and group label", async () => {
+  const html = await renderGet();
+  const line = `Step 1 of 5 · ${translations["botbuilder.wizStep_template"].en}`;
+  assert.ok(html.includes(line), `compact line "${line}"`);
+  assert.ok(html.includes('<div class="stepper-wrap" role="group" aria-label="Steps">'));
+});
+
 test("slugifyBotId + uniqueBotId collision suffix", async () => {
   assert.equal(slugifyBotId("  My Research Scout! "), "my-research-scout");
   assert.equal(slugifyBotId("---"), "");

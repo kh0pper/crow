@@ -214,17 +214,41 @@ export function callout(content, type = "info") {
 
 /**
  * Stepper (display-only). 0-based current index.
+ *
+ * Renders a labelled group holding two views of the same steps:
+ *  - a compact line ("Step 2 of 8 · Integrations" + a thin decorative bar),
+ *    aria-hidden and shown only at the phone breakpoint;
+ *  - the full <ol>, shown on wider screens and kept sr-only on phones so
+ *    screen readers still get every step and the one aria-current.
+ * The breakpoint CSS lives in components-css.js.
+ *
  * @param {{label: string}[]} steps
  * @param {number} current
+ * @param {{compactLabel?: string, ariaLabel?: string}} [opts] - both are
+ *   plain text (escaped here); compactLabel is the caller's translated
+ *   "Step n of total" (falls back to "n / total"); " · <current label>" is
+ *   appended here.
  */
-export function stepper(steps, current = 0) {
-  const items = (steps || []).map((s, i) => {
-    const state = i < current ? "step-done" : i === current ? "step-active" : "step-upcoming";
+export function stepper(steps, current = 0, opts = {}) {
+  const list = Array.isArray(steps) ? steps : [];
+  const total = list.length;
+  const cur = total ? Math.min(Math.max(Number(current) || 0, 0), total - 1) : 0;
+  const items = list.map((s, i) => {
+    const state = i < cur ? "step-done" : i === cur ? "step-active" : "step-upcoming";
     // aria-current marks the active step for AT (Item 5 PR2, spec §4 a11y).
-    const aria = i === current ? ` aria-current="step"` : "";
+    const aria = i === cur ? ` aria-current="step"` : "";
     return `<li class="step ${state}"${aria}><span class="step-num">${i + 1}</span><span class="step-label">${escapeHtml(s.label || "")}</span></li>`;
   }).join("");
-  return `<ol class="stepper">${items}</ol>`;
+  const o = opts || {};
+  const head = typeof o.compactLabel === "string" && o.compactLabel ? o.compactLabel : `${total ? cur + 1 : 0} / ${total}`;
+  const curLabel = total ? (list[cur].label || "") : "";
+  const text = curLabel ? `${head} · ${curLabel}` : head;
+  const pct = total ? Math.round(((cur + 1) / total) * 100) : 0;
+  const ariaLabel = typeof o.ariaLabel === "string" && o.ariaLabel ? ` aria-label="${escapeHtml(o.ariaLabel)}"` : "";
+  return `<div class="stepper-wrap" role="group"${ariaLabel}>` +
+    `<div class="stepper-compact" aria-hidden="true"><span class="stepper-compact-text">${escapeHtml(text)}</span>` +
+    `<span class="stepper-compact-bar"><span class="stepper-compact-fill" style="width:${pct}%"></span></span></div>` +
+    `<ol class="stepper">${items}</ol></div>`;
 }
 
 /**
