@@ -121,7 +121,7 @@ const isSet = (v) => typeof v === "string" && v.trim() !== "";
  * `managed` is the managed-evidence gate: false when there is no positive evidence the
  * gateway manages this bundle's config (no .env AND no mcp-addons entry). On a real
  * host a missing .env usually means "not gateway-managed-with-config", not
- * "unconfigured" — capstone-tracker's installed dir holds only manifest.json;
+ * "unconfigured" — a bundle whose installed dir holds only manifest.json;
  * frigate/motioneye have no .env. Callers must fail closed on managed === false.
  *
  * @param {string} bundleId

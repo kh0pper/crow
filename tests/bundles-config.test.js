@@ -75,7 +75,7 @@ function writeMcpAddons(map) {
 const REQ = (...names) => names.map((n) => ({ name: n, required: true }));
 
 test("managed-evidence gate: no .env and no mcp-addons entry => nothing reported (fail closed)", () => {
-  // The measured prod case: capstone-tracker's installed dir holds ONLY manifest.json;
+  // The measured prod case: a bundle whose installed dir holds ONLY manifest.json;
   // frigate has no .env. existsSync(bundleDir) passes for both, so it is the wrong gate.
   // Without positive evidence the gateway manages this bundle's config we cannot tell
   // "unconfigured" from "not managed this way" — and a false nag is worse than none.
