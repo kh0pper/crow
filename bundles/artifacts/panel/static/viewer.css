@@ -44,6 +44,9 @@ body{background:#eef1f3}
 .cv-pins{position:absolute;inset:0;pointer-events:none}
 .cv-pin{pointer-events:auto;position:absolute;transform:translate(-50%,-50%);border-radius:999px !important;
   background:var(--pin) !important;border-color:var(--pin) !important;color:#fff !important;font-weight:700;padding:0 !important}
+/* S1: a 28px pin that fits a document's gutter; the ::before keeps a 44px tap target. */
+#crow-artifact-viewer .cv-pin{min-height:28px;min-width:28px;width:28px;height:28px;font-size:13px}
+.cv-pin::before{content:"";position:absolute;inset:-8px}
 .cv-region{position:absolute;inset:0;cursor:crosshair;background:rgba(14,107,98,.06)}
 .cv-panel{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center}
 .cv-panel-title{font-weight:600;font-size:17px;margin:0}

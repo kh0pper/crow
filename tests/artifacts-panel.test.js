@@ -577,7 +577,9 @@ test("live D28: on a document, Comment opens no sheet and no list; selecting wor
     assert.equal(await t.evalIn(`!!document.querySelector('.cv-compose .cv-quote')`), false, "no redundant 'exact words' box when the quote came from the selection");
     await t.evalIn(`(() => { document.querySelector('.cv-compose textarea').value = 'make it slower'; document.querySelector('.cv-compose .cv-primary').click(); })()`);
     const row = await waitFor(async () => (await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE artifact_id=?", args: [doc.id] })).rows[0], 5000);
-    assert.deepEqual(JSON.parse(row.anchor_json), { kind: "block", id: "b2", text: "The quick **brown** fox jumps.", quote: "quick brown fox jumps" });
+    const stored = JSON.parse(row.anchor_json);
+    assert.deepEqual({ ...stored, suffix: stored.suffix.trim() }, { kind: "block", id: "b2", text: "The quick **brown** fox jumps.", quote: "quick brown fox jumps", prefix: "The ", suffix: ".", span: { start: 4, end: 25, nth: 0 } },
+      "S1: the selection's own context, and the server's span into the block's plain text");
     assert.equal((await s.db.execute({ sql: "SELECT flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0].flagged_reason, null, "the speaking document frame never tripped");
   } finally { await t.close(); }
 });

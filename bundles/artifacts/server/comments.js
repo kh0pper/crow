@@ -18,7 +18,15 @@ export function validAnchor(a) {
   if (a.kind === "element" && str(a.selector, 1024) && str(a.text, 400)) return { kind: "element", selector: a.selector, text: a.text };
   if (a.kind === "text" && str(a.quote, 1000) && a.quote.trim() && str(a.prefix || "", 200) && str(a.suffix || "", 200)) return { kind: "text", quote: a.quote, prefix: a.prefix || "", suffix: a.suffix || "" };
   if (a.kind === "region" && Number.isFinite(a.x) && Number.isFinite(a.y) && a.x >= 0 && a.x <= 1 && a.y >= 0 && a.y <= 1) return { kind: "region", x: a.x, y: a.y };
-  if (a.kind === "block" && typeof a.id === "string" && /^b\d{1,6}$/.test(a.id) && str(a.text || "", 400) && str(a.quote || "", 1000)) return { kind: "block", id: a.id, text: a.text || "", quote: a.quote || "" };
+  if (a.kind === "block" && typeof a.id === "string" && /^b\d{1,6}$/.test(a.id) && str(a.text || "", 400) && str(a.quote || "", 1000) && str(a.prefix || "", 200) && str(a.suffix || "", 200)) {
+    // S1 (plan Rev 3 M1): `span` is NEVER taken from input — only the server
+    // sets it (withSpan), from the version's own anchor map. The selection's
+    // context is kept (M2) so a repeated phrase stays distinguishable.
+    const b = { kind: "block", id: a.id, text: a.text || "", quote: a.quote || "" };
+    if (a.prefix) b.prefix = a.prefix;
+    if (a.suffix) b.suffix = a.suffix;
+    return b;
+  }
   if (a.kind === "whole") return { kind: "whole" };
   return null;
 }
@@ -59,9 +67,58 @@ export function resolveBlockAnchor(anchorMap, a) {
   if (!b) return asText();
   // A section the owner picked from the trusted list stays that section even
   // when the typed "exact words" are not verbatim (review low); its quote is
-  // owner text and never crosses into the frame (pins carry the id only).
+  // owner text and never crosses into the frame (S1: a pin carries the id,
+  // plus — only with a server span — the block's OWN rendered words).
   if (quote.trim() && !a.fromList && !noWs(renderedOf(b)).includes(noWs(quote))) return asText();
-  return { kind: "block", id: b.id, text: String(b.text || "").slice(0, 400), quote };
+  const out = { kind: "block", id: b.id, text: String(b.text || "").slice(0, 400), quote };
+  // S1/M2: the selection's context rides along (validAnchor keeps it).
+  if (ctx(a.prefix)) out.prefix = ctx(a.prefix);
+  if (ctx(a.suffix)) out.suffix = ctx(a.suffix);
+  return out;
+}
+
+/** S1 (plan Rev 3 M1/M2): where a block anchor's quote sits in the block's
+ *  rendered text. Matching is whitespace-insensitive (a browser selection and
+ *  the rendered text disagree about spaces); `start`/`end` are offsets into
+ *  `plain`, `nth` counts the (overlapping) whitespace-free occurrences before
+ *  it — exactly what the anchor helper counts in the frame. With repeats, the
+ *  occurrence whose surroundings best match the selection's prefix/suffix
+ *  wins (longest common suffix + prefix); ties go to the first. Bounded:
+ *  `plain` is capped at 4,000 chars by the renderer. Null when not found. */
+export function blockSpan(plain, quote, prefix, suffix) {
+  const p = typeof plain === "string" ? plain.slice(0, 8000) : "";
+  const q = noWs(quote);
+  if (!p || !q) return null;
+  let c = "";
+  const map = [];
+  for (let i = 0; i < p.length; i++) if (!/\s/.test(p[i])) { c += p[i]; map.push(i); }
+  const occ = [];
+  for (let at = c.indexOf(q); at >= 0 && occ.length < 1000; at = c.indexOf(q, at + 1)) occ.push(at);
+  if (!occ.length) return null;
+  const pre = noWs(prefix), suf = noWs(suffix);
+  const tailMatch = (x, y) => { let n = 0; while (n < x.length && n < y.length && x[x.length - 1 - n] === y[y.length - 1 - n]) n++; return n; };
+  const headMatch = (x, y) => { let n = 0; while (n < x.length && n < y.length && x[n] === y[n]) n++; return n; };
+  let best = 0, bestScore = -1;
+  occ.forEach((at, k) => {
+    const score = tailMatch(pre, c.slice(Math.max(0, at - pre.length), at)) + headMatch(suf, c.slice(at + q.length, at + q.length + suf.length));
+    if (score > bestScore) { bestScore = score; best = k; }
+  });
+  const at = occ[best];
+  return { start: map[at], end: map[at + q.length - 1] + 1, nth: best };
+}
+
+/** The internal constructor that may set `span` (S1/M1): a validated block
+ *  anchor plus its position in the given anchor map's block. Anything else,
+ *  or a quote not found in that block's `plain`, returns the anchor WITHOUT
+ *  a span. Never fed from input. */
+export function withSpan(a, anchorMap) {
+  if (!a || a.kind !== "block") return a;
+  const { span, ...rest } = a;
+  const blocks = anchorMap && anchorMap.kind === "blocks" && Array.isArray(anchorMap.blocks) ? anchorMap.blocks : [];
+  const b = blocks.find((x) => x && x.id === rest.id);
+  if (!b || typeof b.plain !== "string" || !String(rest.quote || "").trim()) return rest;
+  const sp = blockSpan(b.plain, rest.quote, rest.prefix, rest.suffix);
+  return sp ? { ...rest, span: sp } : rest;
 }
 
 function cleanText(t) {
@@ -94,16 +151,20 @@ function checkAuthor(a) {
 
 export async function addThread(db, { artifactId, versionN, anchor, text, author, tainted = false }) {
   checkAuthor(author);
-  const a = validAnchor(anchor);
+  let a = validAnchor(anchor);
   if (!a) throw err("bad_anchor", "anchor rejected");
   const body = cleanText(text);
   if (author.kind === "contact") await contactCaps(db, artifactId, author.id, { newThread: true });
   if (author.kind === "bot") await botCaps(db, author.id);
   const total = Number((await db.execute({ sql: "SELECT COUNT(*) AS c FROM artifact_threads WHERE artifact_id=? AND status<>'resolved'", args: [artifactId] })).rows[0].c);
   if (total >= LIMITS.threadsPerArtifact) throw err("too_many_threads", "this artifact has too many open threads");
-  const v = (await db.execute({ sql: "SELECT n, flagged_reason FROM artifact_versions WHERE artifact_id=? AND n=?", args: [artifactId, versionN] })).rows[0];
+  const v = (await db.execute({ sql: "SELECT n, flagged_reason, anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=?", args: [artifactId, versionN] })).rows[0];
   if (!v) throw err("not_found", "no such version");
   if (v.flagged_reason) throw err("forbidden", "this version was flagged");
+  if (a.kind === "block") {
+    let map = null; try { map = v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null; } catch { map = null; }
+    a = withSpan(a, map);   // S1: the quote's position, from the stored map only
+  }
   const r = await db.execute({ sql: "INSERT INTO artifact_threads (artifact_id,version_n,anchor_json,author_kind,author_id,anchor_from_version) VALUES (?,?,?,?,?,?)", args: [artifactId, versionN, JSON.stringify(a), author.kind, author.id || null, versionN] });
   const threadId = Number(r.lastInsertRowid);
   await db.execute({ sql: "INSERT INTO artifact_comments (thread_id,author_kind,author_id,text,ts,tainted) VALUES (?,?,?,?,?,?)", args: [threadId, author.kind, author.id || null, body, Date.now(), tainted ? 1 : 0] });
@@ -307,7 +368,12 @@ export async function carryForward(db, { artifactId, toN, next, onlyThreads = nu
       ok = true;
     }
     const status = ok ? "open" : "anchor-moved";
-    moved = validAnchor(moved) || a;   // re-validated: the 4 KB cap holds after a move
+    // Re-validated: the 4 KB cap holds after a move. validAnchor drops any
+    // span; S1/M1: a block anchor's span is recomputed against the NEW
+    // version's block, and is simply gone when the quote is not there.
+    const checked = validAnchor(moved);
+    if (checked) moved = checked.kind === "block" && ok ? withSpan(checked, next.anchorMap) : checked;
+    else { const { span: _drop, ...rest } = a; moved = rest; }
     await db.execute({ sql: "UPDATE artifact_threads SET version_n=?, anchor_json=?, status=?, updated_at=datetime('now') WHERE id=?", args: [toN, JSON.stringify(moved), status, t.id] });
     out.push({ threadId: t.id, status });
   }

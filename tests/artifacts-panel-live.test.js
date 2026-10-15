@@ -288,7 +288,8 @@ test("viewer pins: numbered pins only for the owner's anchors, placed on the ele
     const g = JSON.parse(await t.evalIn(`JSON.stringify({ pin: document.querySelector('.cv-pin').getBoundingClientRect(), frame: document.querySelector('iframe.crow-artifact-frame').getBoundingClientRect(), label: document.querySelector('.cv-pin').textContent })`));
     assert.equal(g.label, "1");
     const cx = g.pin.x + g.pin.width / 2 - g.frame.x, cy = g.pin.y + g.pin.height / 2 - g.frame.y;
-    assert.ok(cx >= 8 && cx <= 12 && cy >= 8 && cy <= 12, `the pin sits on the element's corner (${cx},${cy})`);
+    // S1 (L6): the gutter rule — x = max(PIN_R + 2, left − PIN_R − 4) = 16 for an element at x 10; y = its first line's centre (10 + 60/2).
+    assert.ok(cx >= 14 && cx <= 18 && cy >= 38 && cy <= 42, `the pin sits in the element's gutter, at its vertical centre (${cx},${cy})`);
     await t.evalIn("document.querySelector('.cv-pin').click()");
     assert.ok(await yes(t, "document.getElementById('cv-t1').classList.contains('cv-focus')"), "the pin focused thread 1");
     assert.equal(await t.evalIn("document.querySelectorAll('.cv-thread').length"), 2, "both threads are listed in the trusted column");
@@ -382,5 +383,35 @@ test("S5: on a document, a round's end shows the ready banner too, and Send read
     await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [round.id] });
     assert.ok(await yes(t, "!!document.querySelector('.cv-ready button')", 12000), "the ready banner on a document");
     assert.equal(await t.evalIn("document.querySelector('.cv-send').textContent.includes('working')"), false, "Send is back to its count");
+  } finally { await t.close(); }
+});
+
+test("S1 (step-6 smoke): document pins sit on the commented words — distinct pins for a list item, a repeated word in item 3 and table cells, in reading order, in the gutter", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const comments = await import("../bundles/artifacts/server/comments.js");
+  const md = "# Grind\n\n1. Use a medium grind.\n2. Rinse the filter.\n3. Keep the medium heat steady.\n\n| Size | Grind |\n| --- | --- |\n| Cup | Medium-fine |";
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Coffee guide", type: "document", source: { markdown: md }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const map = JSON.parse((await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [art.id] })).rows[0].anchor_map_json);
+  const list = map.blocks.find((b) => b.type === "list"), table = map.blocks.find((b) => b.type === "table");
+  // What the route stores for a selection (resolveBlockAnchor → addThread).
+  const add = (id, quote, prefix, suffix, text) => comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: comments.resolveBlockAnchor(map, { kind: "block", id, quote, prefix, suffix }), text, author: { kind: "owner" } });
+  await add(list.id, "Rinse the filter", "Use a medium grind. ", ". Keep", "item 2");
+  await add(list.id, "medium", "Keep the ", " heat steady.", "item 3's medium");
+  await add(table.id, "Size", "", " Grind", "header");
+  await add(table.id, "Medium-fine", "Cup ", "", "a cell");
+  const t = await tab();
+  try {
+    await nav(t, `/dashboard/artifacts/view/${art.id}`);
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 4", 15000), "four pins");
+    await sleep(600);
+    const pins = JSON.parse(await t.evalIn(`JSON.stringify((() => { const f = document.querySelector('iframe.crow-artifact-frame').getBoundingClientRect(); return [...document.querySelectorAll('.cv-pin')].map((p) => { const r = p.getBoundingClientRect(); return { n: Number(p.textContent), x: r.x + r.width / 2 - f.x, y: r.y + r.height / 2 - f.y }; }).sort((a, b) => a.n - b.n); })())`));
+    const [item2, item3, head, cell] = pins;
+    assert.equal(new Set(pins.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`)).size, 4, `four distinct pins: ${JSON.stringify(pins)}`);
+    assert.ok(item2.y < item3.y && item3.y < head.y && head.y < cell.y, `reading order: ${JSON.stringify(pins)}`);
+    assert.ok(item3.y - item2.y > 15 && item3.y - item2.y < 40, `the repeated 'medium' pins on item 3's line, one line below item 2 (not item 1): ${JSON.stringify(pins)}`);
+    assert.ok(cell.y - head.y > 15, `the cell's pin is below the header row: ${JSON.stringify(pins)}`);
+    // The gutter: left of the document's text column (body padding 24px, centred).
+    for (const p of pins) assert.ok(p.x >= 14 && p.x <= 64, `pin ${p.n} is in the left gutter: ${JSON.stringify(p)}`);
+    assert.ok(Math.abs(head.x - cell.x) <= 1, "same block, no collision → the same gutter x");
   } finally { await t.close(); }
 });

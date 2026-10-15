@@ -23,6 +23,7 @@ import { createArtifactOriginHandler } from "../servers/gateway/artifact-origin/
 import { createViewTokenStore, loadDecision } from "../servers/gateway/artifact-origin/view-tokens.js";
 import { iframeSandboxFor, isScriptedType, effectiveType, frameGrantFor, viewerCsp } from "../servers/gateway/artifact-origin/policy.js";
 import net from "node:net";
+import { anchorHelperSource } from "../servers/gateway/artifact-origin/anchor-helper.js";
 
 const VIEWER_JS = readFileSync(new URL("../bundles/artifacts/panel/static/viewer.js", import.meta.url), "utf8");
 
@@ -826,6 +827,58 @@ test("pins: only owner element/text anchor fields go in; rects come back validat
     await sleep(1500);
     assert.deepEqual(await t.evalIn("__r.trips"), [], "no flood trip");
     assert.ok((await t.evalIn("__r.rects.length")) >= 2, "rects followed the scroll");
+  } finally { await t.close(); }
+});
+
+// ── S1 (step-6 smoke, plan Rev 3): pins on the commented words ────────────
+test("S1/L4: the generated helper source parses, and carries no backtick", () => {
+  const src = anchorHelperSource("n0nce-n0nce-n0nce");
+  assert.doesNotThrow(() => new Function(src), "the helper evaluates with no syntax error");
+  assert.equal(src.includes("`"), false);
+});
+
+test("S1: a block pin crosses as the trusted anchor_map's plain substring + nth (never the stored quote); the helper reports that occurrence's FIRST line and the block's left edge", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const doc = `<!doctype html><html><head><style>body{margin:0;font:10px/15px monospace}strong{font-weight:normal}p{margin:0}#b1{position:absolute;left:20px;top:5px;width:280px;white-space:nowrap}#b2{position:absolute;left:30px;top:60px;width:100px}</style></head><body><div class="blk" id="b1"><p>Use a <strong>medium</strong> grind. Keep the medium heat.</p></div><div class="blk" id="b2"><p>aaaa bbbb cccc dddd eeee ffff gggg target words here</p></div></body></html>`;
+    const g = grantFor("document", { "index.html": html(doc) });
+    await harness(t, g);
+    assert.ok(await waitFor(async () => (await t.evalIn("__r.ready")) === 1), "hello");
+    const map = { kind: "blocks", blocks: [
+      { id: "b1", type: "paragraph", text: "Use a **medium** grind. Keep the medium heat.", plain: "Use a medium grind. Keep the medium heat." },
+      { id: "b2", type: "paragraph", text: "aaaa", plain: "aaaa bbbb cccc dddd eeee ffff gggg target words here" },
+    ] };
+    // pinOut: what may cross INTO the frame.
+    const out = JSON.parse(await t.evalIn(`JSON.stringify([
+      CrowArtifactViewer.pinOut({ i: 1, anchor: { kind: "block", id: "b1", text: "t", quote: "STORED QUOTE", span: { start: 29, end: 35, nth: 1 } } }, ${JSON.stringify(map)}),
+      CrowArtifactViewer.pinOut({ i: 2, anchor: { kind: "block", id: "b1", text: "t", quote: "medium", span: { start: 29, end: 35, nth: 1 } } }),
+      CrowArtifactViewer.pinOut({ i: 3, anchor: { kind: "block", id: "b1", text: "t", quote: "medium", span: { start: 29, end: 99, nth: 1 } } }, ${JSON.stringify(map)}),
+      CrowArtifactViewer.pinOut({ i: 4, anchor: { kind: "block", id: "b1", text: "t", quote: "medium" } }, ${JSON.stringify(map)}),
+      CrowArtifactViewer.pinOut({ i: 5, anchor: { kind: "block", id: "b1", text: "t", quote: "medium", span: { start: 29, end: 35, nth: 1 } } }, { kind: "blocks", blocks: [{ id: "b1", text: "no plain here" }] })
+    ])`));
+    assert.deepEqual(out, [
+      { i: 1, anchor: { kind: "block", id: "b1", quote: "medium", nth: 1 } },
+      { i: 2, anchor: { kind: "block", id: "b1" } },
+      { i: 3, anchor: { kind: "block", id: "b1" } },
+      { i: 4, anchor: { kind: "block", id: "b1" } },
+      { i: 5, anchor: { kind: "block", id: "b1" } },
+    ], "the plain substring crosses (never the stored quote) only with a span inside the mounted map's plain");
+    assert.deepEqual(JSON.parse(await t.evalIn(`JSON.stringify(CrowArtifactViewer.validRects([{ i: 1, x: 10, y: 10, w: 5, h: 5, bx: -3 }, { i: 2, x: 10, y: 10, w: 5, h: 5, bx: 9000 }, { i: 3, x: 10, y: 10, w: 5, h: 5 }], 800, 600))`)),
+      [{ i: 1, x: 10, y: 10, w: 5, h: 5, bx: 0 }, { i: 2, x: 10, y: 10, w: 5, h: 5, bx: 800 }, { i: 3, x: 10, y: 10, w: 5, h: 5 }], "bx is optional and clamped like x");
+    assert.deepEqual(JSON.parse(await t.evalIn(`JSON.stringify(CrowArtifactViewer.validRects([{ i: 1, x: 1, y: 1, w: 1, h: 1, bx: "1" }], 800, 600))`)), null, "a non-numeric bx is refused");
+    const pin = (i, start, end, nth, id = "b1") => ({ i, anchor: { kind: "block", id, text: "", quote: "x", span: { start, end, nth } } });
+    await t.evalIn(`__v.setPins(${JSON.stringify([pin(1, 6, 12, 0), pin(2, 29, 35, 1), pin(3, 4, 18, 0), pin(4, 5, 41, 0, "b2"), { i: 5, anchor: { kind: "block", id: "b1", text: "", quote: "medium" } }])}, ${JSON.stringify(map)})`);
+    assert.ok(await waitFor(async () => (await t.evalIn("(__r.rects.at(-1) || []).length")) === 5), "five rects");
+    const r = Object.fromEntries(JSON.parse(await t.evalIn("JSON.stringify(__r.rects.at(-1))")).map((x) => [x.i, x]));
+    const cw = (r[2].x - r[1].x) / 23;
+    assert.ok(cw > 3 && cw < 10, `nth 1 is the SECOND medium, 23 chars right of the first (${JSON.stringify(r)})`);
+    assert.ok(Math.abs(r[1].x - (20 + 6 * cw)) <= 2, `first medium at char 6: ${JSON.stringify(r[1])}`);
+    assert.ok(Math.abs(r[3].x - (20 + 4 * cw)) <= 2, `"a medium grind" crosses the <strong> and starts at char 4: ${JSON.stringify(r[3])}`);
+    for (const k of [1, 2, 3, 5]) assert.equal(r[k].bx, 20, `block b1's left edge for pin ${k}`);
+    assert.ok(Math.abs(r[5].x - 20) <= 1, "no span: the block itself");
+    assert.equal(r[4].bx, 30);
+    assert.ok(Math.abs(r[4].x - (30 + 5 * cw)) <= 2 && r[4].y >= 59 && r[4].y <= 66 && r[4].h < 20, `a wrapped quote reports its first line only: ${JSON.stringify(r[4])}`);
+    assert.deepEqual(await t.evalIn("__r.trips"), []);
   } finally { await t.close(); }
 });
 

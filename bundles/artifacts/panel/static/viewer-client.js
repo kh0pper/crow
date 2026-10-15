@@ -222,12 +222,30 @@
   }
 
   // ── pins (cosmetic; click = focus that thread) ──────────────────────────
+  // S1 (plan Rev 3 L6): a pin sits in the LEFT GUTTER of its anchor's block
+  // (x = the block's left edge minus the pin), on the quote's first line
+  // (y = that line's centre), so it never covers the words. Pins closer than
+  // one pin height step sideways in the gutter; none is hidden. A diagram's
+  // region pins (no h, no bx) sit exactly on their point.
+  var PIN_R = 14;
   function drawPins(list) {
     pinLayer.textContent = "";
-    list.forEach(function (p) {
+    var placed = [];
+    list.slice().sort(function (a, b) { return a.y - b.y || a.i - b.i; }).forEach(function (p) {
+      var x = p.x, y = p.y;
+      if (p.h !== undefined || p.bx !== undefined) {
+        x = Math.max(PIN_R + 2, (p.bx !== undefined ? p.bx : p.x) - PIN_R - 4);
+        y = p.y + (p.h || 0) / 2;
+        var base = x;
+        for (var k = 0; k < placed.length; k++) {
+          if (Math.abs(placed[k].y - y) < 2 * PIN_R && Math.abs(placed[k].x - x) < 2 * PIN_R) { x = placed[k].x + 2 * PIN_R + 2; k = -1; }
+          if (x - base > 20 * PIN_R) break;
+        }
+      }
+      placed.push({ x: x, y: y });
       var b = el("button", { type: "button", class: "cv-pin", "aria-label": fmt(T.pin, { n: p.i }), text: String(p.i), onclick: function () { focusThread(p.i); } });
-      b.style.left = Math.round(p.x) + "px";
-      b.style.top = Math.round(p.y) + "px";
+      b.style.left = Math.round(x) + "px";
+      b.style.top = Math.round(y) + "px";
       pinLayer.appendChild(b);
     });
   }
@@ -240,7 +258,10 @@
     } else if (S.viewer) {
       // Scripted types: the OWNER's element/text anchors only (viewer.js
       // re-validates); the helper reports where they are.
-      S.viewer.setPins(shown().map(function (t, k) { return t.author_kind === "owner" && t.status !== "resolved" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean));
+      // S1: the MOUNTED version's anchor map lets a document block anchor
+      // cross as that version's own rendered words (viewer.js pinOut).
+      var mv = version(S.n);
+      S.viewer.setPins(shown().map(function (t, k) { return t.author_kind === "owner" && t.status !== "resolved" ? { i: k + 1, anchor: t.anchor } : null; }).filter(Boolean), mv && mv.anchor_map);
     }
   }
   window.addEventListener("resize", function () { if (S.art && S.art.type === "diagram") pushPins(); });
