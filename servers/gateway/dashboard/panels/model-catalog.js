@@ -50,6 +50,7 @@ import { isModelOrchestrationDisabled } from "../../../shared/model-orchestratio
 import { registeredSnapshot } from "../../models/registered-rows.js";
 import { defaultLifecycleCore } from "../../models/lifecycle-deps.js";
 import { renderRegisteredSection, registeredClientJS } from "./model-catalog-registered.js";
+import { dialogClientJS } from "./model-catalog-dialog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -187,6 +188,9 @@ export async function loadPanelData({
       registeredQuant: regEntry ? regEntry.quant : null,
       running: !!(handle && handle.live),
       serving_class: servingClassOf(model),
+      // The register/adopt dialog pre-fills from these (plan 3a, Task 7).
+      launch: model.launch && typeof model.launch === "object" ? model.launch : null,
+      companions: (Array.isArray(model.companions) ? model.companions : []).map((c) => c && c.kind).filter(Boolean),
       quants,
     };
   });
@@ -638,23 +642,28 @@ function renderModelCard(model, lang, hfTokenConfigured, orchestrationDisabled =
   // An orchestration-off host shows neither; Remove and Download stay.
   const target = `data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(model.providerId || model.id)}"`;
   const removeBtn = button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` });
+  // Register as… / Adopt open the dialog (plan 3a, Task 7). An
+  // orchestration-off host refuses registration (409), so neither is offered.
+  const registerAsBtn = orchestrationDisabled ? "" : button(t("models.dlgActionRegisterAs", lang), { variant: "secondary", size: "sm", attrs: `data-action="register-as" data-model-id="${escapeHtml(model.id)}"` });
+  const adoptBtn = orchestrationDisabled ? "" : button(t("models.dlgActionAdopt", lang), { variant: "secondary", size: "sm", attrs: `data-action="adopt" data-model-id="${escapeHtml(model.id)}"` });
   let actionHtml;
   if (model.running) {
-    actionHtml = (orchestrationDisabled ? "" : button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" ${target}` })) + removeBtn;
+    actionHtml = (orchestrationDisabled ? "" : button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" ${target}` })) + registerAsBtn + removeBtn;
   } else if (model.registered) {
     actionHtml = affordance !== "start"
-      ? `${servingNotice}${removeBtn}`
-      : (orchestrationDisabled ? "" : button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" ${target}` })) + removeBtn;
+      ? `${servingNotice}${registerAsBtn}${removeBtn}`
+      : (orchestrationDisabled ? "" : button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" ${target}` })) + registerAsBtn + removeBtn;
   } else if (initialFit === "wont_fit") {
     actionHtml = `<div class="mcat-card__notice">${escapeHtml(t("models.fitWontFitHint", lang))}</div>`;
   } else {
     actionHtml = button(t("models.actionDownload", lang), {
       variant: "primary", size: "sm",
       attrs: `data-action="download" data-model-id="${escapeHtml(model.id)}"`,
-    });
+    }) + adoptBtn;
   }
 
-  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}">
+  const dialogAttrs = ` data-launch="${escapeHtml(JSON.stringify(model.launch ?? null))}" data-companions="${escapeHtml(JSON.stringify(model.companions || []))}" data-quants="${escapeHtml(JSON.stringify((model.quants || []).map((q) => q.quant)))}" data-default-quant="${escapeHtml(model.default_quant || "")}" data-registered-quant="${escapeHtml(model.registeredQuant || "")}" data-can-register="${orchestrationDisabled ? "0" : "1"}"`;
+  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}"${dialogAttrs}>
     <div class="mcat-card__head">
       <span class="mcat-card__title">${escapeHtml(model.id)}</span>
       ${badges.join("")}
@@ -739,8 +748,11 @@ export function modelCatalogClientJS(lang) {
 
         function hideModal() { document.getElementById("mcat-modal-overlay").style.display = "none"; }
         function showModal() { document.getElementById("mcat-modal-overlay").style.display = "flex"; }
+        // Backdrop click closes; a click that bubbles up from inside the
+        // dialog (e.g. its Save button) never does. currentTarget, not
+        // this: some DOM shims bind this to the event target.
         document.getElementById("mcat-modal-overlay").addEventListener("click", function (e) {
-          if (e.target === this) hideModal();
+          if (e.target === e.currentTarget) hideModal();
         });
 
         function apiFetch(path, opts) {
@@ -843,6 +855,16 @@ export function modelCatalogClientJS(lang) {
             btn.setAttribute("data-model-id", modelId);
             btn.textContent = '${tJs("models.actionDownload", lang)}';
             actions.appendChild(btn);
+            // Adopt (weights already on disk) sits next to Download.
+            if (card.getAttribute("data-can-register") === "1") {
+              var adopt = document.createElement("button");
+              adopt.type = "button";
+              adopt.className = "btn btn-secondary btn-sm";
+              adopt.setAttribute("data-action", "adopt");
+              adopt.setAttribute("data-model-id", modelId);
+              adopt.textContent = '${tJs("models.dlgActionAdopt", lang)}';
+              actions.appendChild(adopt);
+            }
           }
         }
 
@@ -1319,6 +1341,16 @@ export function modelCatalogClientJS(lang) {
             showHfDownloadConfirm(repoId, file, gated, statusSpan, progressTrack, actions);
           });
           actions.appendChild(downloadBtn);
+          // Adopt: the file is already on disk (window.CrowModelDialog,
+          // hf-adopt mode, picks it up through data-action).
+          var adoptBtn = document.createElement("button");
+          adoptBtn.type = "button";
+          adoptBtn.className = "btn btn-secondary btn-sm";
+          adoptBtn.setAttribute("data-action", "hf-adopt");
+          adoptBtn.setAttribute("data-hf-repo", repoId);
+          adoptBtn.setAttribute("data-hf-file", file);
+          adoptBtn.textContent = '${tJs("models.dlgActionAdopt", lang)}';
+          actions.appendChild(adoptBtn);
           row.appendChild(actions);
 
           var progressTrack = document.createElement("div");
@@ -1516,6 +1548,7 @@ export default {
       ${tabsHtml}
       ${modelCatalogClientJS(lang)}
       ${registeredClientJS(lang)}
+      ${dialogClientJS(lang)}
     `;
 
     return layout({ title: t("models.pageTitle", lang), content });
