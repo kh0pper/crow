@@ -726,6 +726,9 @@ border:1px solid var(--line);border-radius:10px;background:var(--card);color:var
 #perch-hub-root .art-pane-window{margin-left:auto;color:var(--teal) !important}
 #perch-hub-root .art-pane-frame{flex:1 1 auto;width:100%;border:0;min-height:0}
 body.perch-art-split #perch-hub-root{margin-right:min(48vw,760px)}
+/* S4: no pull-to-refresh from an overscroll while the viewer pane is open. */
+html.art-pane-open,html.art-pane-open body{overscroll-behavior-y:contain}
+#perch-hub-root .art-pane-frame{overscroll-behavior:contain}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

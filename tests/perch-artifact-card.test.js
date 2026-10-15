@@ -121,6 +121,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
   const transcript = makeEl("div");
   const hubRoot = makeEl("div");
   const bodyClasses = new Set();
+  const htmlClasses = new Set();
   const fetches = [];
   const sandbox = {
     console,
@@ -130,9 +131,15 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
       removeEventListener(type, fn) { const l = sandbox.__docListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
       getElementById: (id) => (id === "perch-hub-root" ? hubRoot : null),
       body: { classList: classList(bodyClasses), appendChild: (c) => hubRoot.appendChild(c) },
+      documentElement: { classList: classList(htmlClasses) },
     },
-    window: { innerWidth: 1280 },
+    window: {
+      innerWidth: 1280,
+      addEventListener(type, fn) { (sandbox.__winListeners[type] ||= []).push(fn); },
+      removeEventListener(type, fn) { const l = sandbox.__winListeners[type] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
+    },
     __docListeners: {},
+    __winListeners: {},
     el: (id) => (id === "perch-transcript" ? transcript : null),
     csrf: () => "tok",
     live: () => true,
@@ -169,7 +176,7 @@ function mountCard({ fetchImpl, sid = "perchlive-aaaaaaaa" } = {}) {
     feedback: function(){ return artFb; },
   });\n})();`;
   vm.runInContext(src, sandbox);
-  return { sandbox, transcript, fetches, hubRoot, bodyClasses };
+  return { sandbox, transcript, fetches, hubRoot, bodyClasses, htmlClasses };
 }
 
 // row builder: the exact GET /api/artifacts/:id payload shape the route serves.
@@ -696,4 +703,32 @@ test("item 4: done without a version says so; a timed-out round says so; artView
   assert.equal(api.artViewerUrl("art_x", null, 3), "/dashboard/artifacts/view/art_x?v=3");
   assert.equal(api.artViewerUrl("art_x", sidX, "3x"), "/dashboard/artifacts/view/art_x?thread=" + sidX);
   assert.equal(api.artViewerUrl("art_x", sidX), "/dashboard/artifacts/view/art_x?thread=" + sidX);
+});
+
+// ---------------------------------------------------------------------------
+// S4 (step-6 smoke): no pull-to-refresh while the viewer pane is open
+// ---------------------------------------------------------------------------
+
+test("S4: the pane toggles art-pane-open on <html>; a Turbo visit or pagehide clears it; its listeners live only while the pane is open", () => {
+  for (const ev of ["turbo:before-visit", "pagehide", "reset", "close"]) {
+    const hub = mountCard();
+    const api = hub.sandbox.__exportedApi;
+    const count = () => (hub.sandbox.__docListeners["turbo:before-visit"] || []).length + (hub.sandbox.__winListeners.pagehide || []).length;
+    assert.equal(count(), 0, "nothing attached at load");
+    api.openArtifactPane("art_s4", "perchlive-aaaaaaaa");
+    assert.ok(hub.htmlClasses.has("art-pane-open"), "open: the class is on <html>");
+    assert.equal(count(), 2, "both clear-listeners attached while open");
+    if (ev === "turbo:before-visit") hub.sandbox.__docListeners[ev][0]({});
+    else if (ev === "pagehide") hub.sandbox.__winListeners[ev][0]({});
+    else if (ev === "reset") api.resetArtifactCards();
+    else api.closeArtifactPane();
+    assert.equal(hub.htmlClasses.has("art-pane-open"), false, ev + " clears the class");
+    assert.equal(count(), 0, ev + " detaches the listeners");
+  }
+});
+
+test("S4: the hub CSS contains scroll chaining while the pane is open", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/css.js", import.meta.url), "utf8");
+  assert.match(css, /html\.art-pane-open,\s*html\.art-pane-open body\{overscroll-behavior-y:contain\}/);
 });

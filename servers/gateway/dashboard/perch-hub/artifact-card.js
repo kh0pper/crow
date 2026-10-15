@@ -105,9 +105,17 @@ export function perchArtifactCardJs(lang = "en") {
      script load: every Turbo visit re-runs this script, and a load-time
      document listener would pile up one per visit (perch-hub-stream-leak). */
   function artPaneKey(e){ if(e.key==='Escape'&&artPane) closeArtifactPane(); }
+  /* S4: while the pane is open, an overscroll inside it must never chain to
+     the page (Android pull-to-refresh). The class sits on the root element (html), which a
+     Turbo visit keeps, so it is also cleared on turbo:before-visit and
+     pagehide; those listeners are attached only while the pane is open. */
+  function artPaneLeave(){ closeArtifactPane(); }
   function closeArtifactPane(){
     if(!artPane) return;
     document.removeEventListener('keydown',artPaneKey);
+    document.removeEventListener('turbo:before-visit',artPaneLeave);
+    window.removeEventListener('pagehide',artPaneLeave);
+    document.documentElement.classList.remove('art-pane-open');
     if(artPane.parentNode) artPane.parentNode.removeChild(artPane);
     artPane=null;
     document.body.classList.remove('perch-art-split');
@@ -135,6 +143,9 @@ export function perchArtifactCardJs(lang = "en") {
     document.body.classList.add(mode==='split'?'perch-art-split':'perch-art-sheet');
     artPane=p;
     document.addEventListener('keydown',artPaneKey);
+    document.documentElement.classList.add('art-pane-open');
+    document.addEventListener('turbo:before-visit',artPaneLeave);
+    window.addEventListener('pagehide',artPaneLeave);
     back.focus();
   }
 

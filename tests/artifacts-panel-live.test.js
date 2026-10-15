@@ -283,6 +283,8 @@ test("viewer pins: numbered pins only for the owner's anchors, placed on the ele
   try {
     await nav(t, `/dashboard/artifacts/view/${art.id}`);
     assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 1", 15000), "one pin (the owner's)");
+    // S4: an overscroll at the top never chains to the page (pull-to-refresh).
+    assert.equal(await t.evalIn("getComputedStyle(document.documentElement).overscrollBehaviorY + '|' + getComputedStyle(document.body).overscrollBehaviorY"), "contain|contain");
     const g = JSON.parse(await t.evalIn(`JSON.stringify({ pin: document.querySelector('.cv-pin').getBoundingClientRect(), frame: document.querySelector('iframe.crow-artifact-frame').getBoundingClientRect(), label: document.querySelector('.cv-pin').textContent })`));
     assert.equal(g.label, "1");
     const cx = g.pin.x + g.pin.width / 2 - g.frame.x, cy = g.pin.y + g.pin.height / 2 - g.frame.y;
