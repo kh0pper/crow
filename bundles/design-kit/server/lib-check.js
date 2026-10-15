@@ -46,20 +46,37 @@ function remoteTarget(low, from) {
   return colon > 0 && /^[a-z][a-z0-9+.-]*$/.test(head.slice(0, colon)) && !head.startsWith("data:");
 }
 
-/** CSS that would fetch at runtime. Fails closed: any @import (also with an
- *  escaped name); url() / src() whose target is remote or contains a CSS
- *  escape; and any quoted string inside image-set() that is remote. Linear
+/** True for a CSS comment or a backslash outside a quoted string. Either can
+ *  hide a function name or a url() target from the checks below (`u\72l(`,
+ *  `url(/**\/"https:..."`), so they are refused outright; vendor-time code
+ *  strips comments from vendored CSS. A string ends at its quote or a newline. */
+function hasCommentOrBareEscape(low) {
+  let q = "";
+  for (let i = 0; i < low.length; i++) {
+    const c = low[i];
+    if (q) {
+      if (c === "\\") i++;
+      else if (c === q || c === "\n") q = "";
+    } else if (c === "\\" || (c === "/" && low[i + 1] === "*")) return true;
+    else if (c === '"' || c === "'") q = c;
+  }
+  return false;
+}
+
+/** CSS that would fetch at runtime. Fails closed: any @import; any comment or
+ *  bare escape (see above); url() / src() / image() whose target is remote or
+ *  contains an escape; and any quoted string inside image-set() that is remote. Linear
  *  scans (no regex over the whole file). */
 export function cssFetches(css) {
   const low = String(css).toLowerCase();
-  if (low.includes("@import") || /@\s*\\/.test(low)) return true;
-  for (const fn of ["url(", "src("]) {
+  if (low.includes("@import") || hasCommentOrBareEscape(low)) return true;
+  for (const fn of ["url(", "src(", "image("]) {
     let i = 0;
     for (;;) {
       const k = low.indexOf(fn, i);
       if (k < 0) break;
       i = k + fn.length;
-      if (fn === "src(" && /[a-z0-9_-]/.test(low[k - 1] || " ")) continue; // a name ending in src(, not the function
+      if (fn !== "url(" && /[a-z0-9_]/.test(low[k - 1] || " ")) continue; // a longer name ending in it, not the function
       const end = low.indexOf(")", i);
       if (low.slice(i, end < 0 ? low.length : end).includes("\\")) return true;
       if (remoteTarget(low, i)) return true;

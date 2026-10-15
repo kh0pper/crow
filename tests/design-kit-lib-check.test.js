@@ -160,3 +160,18 @@ test("meta_files types are checked and licence files must live under licenses/",
     m.entries[0].license_file = "css/LICENSE";
   }), /licence file must live under licenses\//);
 });
+
+test("cssFetches refuses comments and escapes outside strings, and image() targets", () => {
+  for (const css of [
+    "a{b:url(/**/\"https://e.x/a\")}",
+    "a{b:u\\72l(https://e.x/a)}",
+    "a{b:image-s\\65t(\"https://e.x/a\" 1x)}",
+    "a{b:s\\72c(\"https://e.x/a\")}",
+    "a{b:image(\"https://e.x/a\")}",
+    "a{b:image(//e.x/a)}",
+    "/* note */ a{color:red}",
+  ]) assert.equal(cssFetches(css), true, css);
+  // A backslash inside a quoted string (an icon-font content escape) is plain data.
+  assert.equal(cssFetches(".i:before{content:\"\\e900\"}"), false);
+  assert.equal(cssFetches("a{b:image(\"local.png\")}"), false);
+});
