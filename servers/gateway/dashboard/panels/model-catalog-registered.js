@@ -119,7 +119,7 @@ export function renderRegisteredSection(snapshot, lang) {
 
   const body = rows.length === 0
     ? `<div class="mcat-reg__line">${label("models.regEmpty")}</div>`
-    : `<table class="mcat-reg__table"><thead><tr>
+    : `<div class="table-scroll"><table class="mcat-reg__table"><thead><tr>
         <th>${label("models.regColProvider")}</th><th>${label("models.regColModel")}</th><th>${label("models.regColStatus")}</th>
         <th>${label("models.regColGroup")}</th><th>${label("models.regColArgv")}</th><th>${label("models.regColActions")}</th>
       </tr></thead><tbody>${rows.map((row) => {
@@ -133,7 +133,7 @@ export function renderRegisteredSection(snapshot, lang) {
           <td data-label="${label("models.regColArgv")}">${argvCell(row, lang)}</td>
           <td data-label="${label("models.regColActions")}"><div class="mcat-reg__actions">${actionButtons(row, snapshot || {}, lang)}</div><div class="mcat-reg__msg" data-provider-msg="${escapeHtml(row.provider)}"></div></td>
         </tr>`;
-      }).join("")}</tbody></table>`;
+      }).join("")}</tbody></table></div>`;
 
   return `${registeredStyles()}<section class="mcat-reg" id="mcat-registered">
     <div class="mcat-reg__title">${label("models.regHeading")}</div>
