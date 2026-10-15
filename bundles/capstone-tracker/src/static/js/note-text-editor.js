@@ -294,7 +294,7 @@
             if (!confirm("Delete this note?")) return;
             fetch((window.BASE_URL + "/api/notes/") + noteData.id, { method: "DELETE" })
                 .then(function () {
-                    window.location.href = "/notes";
+                    window.location.href = window.BASE_URL + "/notes";
                 })
                 .catch(function (e) {
                     console.error("Delete failed:", e);

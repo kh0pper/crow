@@ -52,7 +52,7 @@
 
     <!-- Filters -->
     <div class="filters card">
-        <form method="get" action="{{ request.url_for('pir_index') }}" class="pir-filters-form">
+        <form method="get" action="{{ url_for('pir_index') }}" class="pir-filters-form">
             <label>
                 Group by
                 <select name="group_by" onchange="this.form.submit()">
@@ -135,7 +135,7 @@
                             <div class="pir-action-btns">
                                 <button class="btn btn-small btn-outline" onclick="openEditModal({{ p.id }})">Edit</button>
                                 {% if p.note_id %}
-                                <a href="{{ request.url_for('note_view', note_id=p.note_id) }}" target="_blank" class="btn btn-small btn-outline" title="View Note">Note</a>
+                                <a href="{{ url_for('note_view', note_id=p.note_id) }}" target="_blank" class="btn btn-small btn-outline" title="View Note">Note</a>
                                 {% endif %}
                                 <button class="btn btn-small btn-outline" onclick="openStatusModal({{ p.id }}, '{{ p.status }}')">Status</button>
                             </div>
@@ -700,7 +700,7 @@ function openAddModal() {
     body.textContent = 'Loading...';
     modal.style.display = 'flex';
 
-    htmx.ajax('GET', '/pir/add', {target: '#modal-body', swap: 'innerHTML'});
+    htmx.ajax('GET', window.BASE_URL + '/pir/add', {target: '#modal-body', swap: 'innerHTML'});
 }
 
 function openEditModal(id) {
@@ -712,7 +712,7 @@ function openEditModal(id) {
     body.textContent = 'Loading...';
     modal.style.display = 'flex';
 
-    htmx.ajax('GET', '/pir/' + id + '/edit', {target: '#modal-body', swap: 'innerHTML'});
+    htmx.ajax('GET', window.BASE_URL + '/pir/' + id + '/edit', {target: '#modal-body', swap: 'innerHTML'});
 }
 
 function closeModal() {
@@ -724,7 +724,7 @@ function openStatusModal(id, currentStatus) {
     const form = document.getElementById('status-form');
     const select = document.getElementById('status-select');
 
-    form.setAttribute('hx-post', '/pir/' + id + '/status');
+    form.setAttribute('hx-post', window.BASE_URL + '/pir/' + id + '/status');
     htmx.process(form);
     select.value = currentStatus;
     document.getElementById('status-notes-input').value = '';

@@ -20,7 +20,7 @@
             document.documentElement.setAttribute('data-theme', theme);
         })();
     </script>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/json-enc.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -29,13 +29,13 @@
 <body>
     <nav class="navbar">
         <div class="nav-brand">
-            <a href="{{ request.url_for('pir_index') }}">📚 Capstone Tracker</a>
+            <a href="{{ url_for('pir_index') }}">📚 Capstone Tracker</a>
         </div>
         <ul class="nav-links">
-            <li><a href="{{ request.url_for('pir_index') }}" {% if '/pir' in request.url.path %}class="active"{% endif %}>PIR</a></li>
-            <li><a href="{{ request.url_for('notes_index') }}" {% if '/notes' in request.url.path %}class="active"{% endif %}>Notes</a></li>
-            <li><a href="{{ request.url_for('advocacy_index') }}" {% if '/advocacy' in request.url.path %}class="active"{% endif %}>Advocacy</a></li>
-            <li><a href="{{ request.url_for('ereader_library') }}" {% if '/ereader' in request.url.path %}class="active"{% endif %}>E-Reader</a></li>
+            <li><a href="{{ url_for('pir_index') }}" {% if '/pir' in request.url.path %}class="active"{% endif %}>PIR</a></li>
+            <li><a href="{{ url_for('notes_index') }}" {% if '/notes' in request.url.path %}class="active"{% endif %}>Notes</a></li>
+            <li><a href="{{ url_for('advocacy_index') }}" {% if '/advocacy' in request.url.path %}class="active"{% endif %}>Advocacy</a></li>
+            <li><a href="{{ url_for('ereader_library') }}" {% if '/ereader' in request.url.path %}class="active"{% endif %}>E-Reader</a></li>
             <li>
                 <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
                     <svg class="theme-icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -54,13 +54,13 @@
         <div class="footer-content">
             <span class="footer-brand">Capstone Tracker v1.0.0</span>
             <nav class="footer-nav">
-                <a href="/health">Health</a>
+                <a href="{{ url_for('health') }}">Health</a>
             </nav>
         </div>
     </footer>
 
     {% block scripts %}{% endblock %}
 
-    <script src="{{ request.url_for('static', path='js/theme.js') }}"></script>
+    <script src="{{ url_for('static', path='js/theme.js') }}"></script>
 </body>
 </html>

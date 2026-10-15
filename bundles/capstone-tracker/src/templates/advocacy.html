@@ -48,7 +48,7 @@
             </select>
         </label>
         {% if filter_status or filter_phase or filter_org %}
-        <a href="{{ request.url_for('advocacy_index') }}" class="btn btn-secondary">Clear filters</a>
+        <a href="{{ url_for('advocacy_index') }}" class="btn btn-secondary">Clear filters</a>
         {% endif %}
     </form>
 

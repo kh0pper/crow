@@ -18,3 +18,18 @@ E-reader subsystem (reading_progress, ereader_pins, ereader_material_tags, TTS, 
 - `/api/notes/*`, `/api/pir/*` — JSON routes
 
 See the parent plan in the private engineering notes (§ 4) for full context.
+
+## Subpath serving
+The gateway serves the bundle at `/proxy/capstone-tracker/` and strips that prefix before forwarding, so the app learns it only from FastAPI's `root_path` (env `ROOT_PATH`, default `/proxy/capstone-tracker`; set `ROOT_PATH=` to serve at the host root). Every URL handed to a browser must be a path carrying that prefix:
+- templates: the path-only `url_for(...)` Jinja global (never `request.url_for`, which returns an absolute URL with the backend's host);
+- JavaScript: `window.BASE_URL + "/..."`;
+- stored root-relative URLs (`/static/...` uploads, e-reader hrefs) are prefixed client-side when used.
+
+## Dependencies
+`constraints.txt` pins every installed version (captured from the running image); the Dockerfile installs with `uv pip install --system -c constraints.txt .`. Change a pin deliberately, never by rebuilding.
+
+## Tests
+Run inside the bundle image (the host has no fastapi/torch), with no ports or data mounts:
+
+    docker run --rm -v "$PWD":/w -w /w -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 <bundle image> \
+      sh -c "pip install -q --user pytest && python -m pytest -p no:cacheprovider tests"

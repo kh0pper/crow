@@ -1,9 +1,9 @@
 <form id="pir-form"
     hx-ext="json-enc"
     {% if pir %}
-    hx-put="{{ request.url_for('pir_update', pir_id=pir.id) }}"
+    hx-put="{{ url_for('pir_update', pir_id=pir.id) }}"
     {% else %}
-    hx-post="{{ request.url_for('pir_create') }}"
+    hx-post="{{ url_for('pir_create') }}"
     {% endif %}
     hx-target="#modal-body"
     hx-swap="innerHTML">
@@ -173,7 +173,7 @@
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         {% if pir %}
         <button type="button" class="btn btn-danger"
-            hx-delete="{{ request.url_for('pir_delete', pir_id=pir.id) }}"
+            hx-delete="{{ url_for('pir_delete', pir_id=pir.id) }}"
             hx-target="#pir-row-{{ pir.id }}"
             hx-swap="outerHTML"
             hx-confirm="Delete this PIR?"

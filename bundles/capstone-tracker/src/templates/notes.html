@@ -3,7 +3,7 @@
 {% block title %}Notes - Capstone Companion{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ request.url_for('static', path='css/notes.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='css/notes.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -68,5 +68,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ request.url_for('static', path='js/notes.js') }}"></script>
+<script src="{{ url_for('static', path='js/notes.js') }}"></script>
 {% endblock %}

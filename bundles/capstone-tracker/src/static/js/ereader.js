@@ -234,7 +234,7 @@
       controller.abort();
     }, 30000);
 
-    var promise = fetch("/api/ereader/tts", {
+    var promise = fetch(window.BASE_URL + "/api/ereader/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
@@ -655,7 +655,7 @@
     // the user actively engages (clicks play or resume), not on periodic saves.
 
     // Fire-and-forget POST to server for reading progress tracking
-    fetch("/api/ereader/progress", {
+    fetch(window.BASE_URL + "/api/ereader/progress", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -741,16 +741,6 @@
     });
   }
 
-  // ── Service Worker ─────────────────────────────────────────────
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker
-      .register("/static/js/sw.js")
-      .catch(function (err) {
-        // Non-critical, just for media session persistence
-        console.log("SW registration skipped:", err.message);
-      });
-  }
-
   // ── Public API (for template inline scripts) ───────────────────
   window.EReader = {
     resumeBookmark: function () {
@@ -798,7 +788,7 @@
       var mt = DATA.materialType;
       var mk = DATA.materialKey;
       fetch(
-        "/api/ereader/" +
+        window.BASE_URL + "/api/ereader/" +
           encodeURIComponent(mt) +
           "/" +
           encodeURIComponent(mk) +
@@ -821,7 +811,7 @@
       var mt = DATA.materialType;
       var mk = DATA.materialKey;
       fetch(
-        "/api/ereader/" +
+        window.BASE_URL + "/api/ereader/" +
           encodeURIComponent(mt) +
           "/" +
           encodeURIComponent(mk) +

@@ -794,13 +794,13 @@ E-Reader Library - Capstone Companion
 <!-- ═══════════════════ TOC MODE ═══════════════════ -->
 <div class="er-toc">
     <header class="er-toc-header">
-        <div class="breadcrumb"><a href="/ereader">E-Reader</a> / {{ textbook.short_title }}</div>
+        <div class="breadcrumb"><a href="{{ url_for('ereader_library') }}">E-Reader</a> / {{ textbook.short_title }}</div>
         <h1>{{ textbook.title }}</h1>
     </header>
 
     <div class="er-chapter-list">
         {% for ch in chapters %}
-        <a href="{% if ch.word_count > 0 %}/ereader/textbook/{{ textbook.short_title }}/{{ ch.chapter_number }}{% else %}#{% endif %}"
+        <a href="{% if ch.word_count > 0 %}{{ url_for('ereader_chapter', short_title=textbook.short_title, chapter_num=ch.chapter_number) }}{% else %}#{% endif %}"
            class="er-chapter-item{% if ch.word_count == 0 %} no-content{% endif %}">
             <span class="er-chapter-num">Ch {{ ch.chapter_number }}</span>
             <span class="er-chapter-title">{{ ch.title }}</span>
@@ -818,7 +818,7 @@ E-Reader Library - Capstone Companion
 <!-- ═══════════════════ DOCUMENT TOC MODE ═══════════════════ -->
 <div class="er-toc">
     <header class="er-toc-header">
-        <div class="breadcrumb"><a href="/ereader">E-Reader</a> / {{ document.short_title }}</div>
+        <div class="breadcrumb"><a href="{{ url_for('ereader_library') }}">E-Reader</a> / {{ document.short_title }}</div>
         <h1>{{ document.title }}</h1>
         {% if document.authors_short or document.publication_year or document.document_type %}
         <div style="color: var(--color-text-muted); font-size: 0.9rem; margin-top: 0.25rem;">
@@ -831,7 +831,7 @@ E-Reader Library - Capstone Companion
 
     <div class="er-chapter-list">
         {% for sec in sections %}
-        <a href="{% if sec.word_count > 0 %}/ereader/document/{{ document.short_title }}/{{ sec.section_number }}{% else %}#{% endif %}"
+        <a href="{% if sec.word_count > 0 %}{{ url_for('ereader_document_section', short_title=document.short_title, section_num=sec.section_number) }}{% else %}#{% endif %}"
            class="er-chapter-item{% if sec.word_count == 0 %} no-content{% endif %}">
             <span class="er-chapter-num">{{ sec.section_number }}</span>
             <span class="er-chapter-title">{{ sec.title }}</span>
@@ -853,7 +853,7 @@ E-Reader Library - Capstone Companion
         {% if content_type == 'textbook' %}
         <div class="er-sidebar-title">{{ textbook.short_title }}</div>
         {% for ch in chapters %}
-        <a href="/ereader/textbook/{{ textbook.short_title }}/{{ ch.chapter_number }}"
+        <a href="{{ url_for('ereader_chapter', short_title=textbook.short_title, chapter_num=ch.chapter_number) }}"
            class="er-sidebar-item{% if ch.chapter_number == chapter.chapter_number %} active{% endif %}{% if ch.word_count == 0 %} no-content{% endif %}">
             Ch {{ ch.chapter_number }}: {{ ch.title }}
         </a>
@@ -861,7 +861,7 @@ E-Reader Library - Capstone Companion
         {% elif content_type == 'document' %}
         <div class="er-sidebar-title">{{ document.short_title }}</div>
         {% for sec in sections %}
-        <a href="/ereader/document/{{ document.short_title }}/{{ sec.section_number }}"
+        <a href="{{ url_for('ereader_document_section', short_title=document.short_title, section_num=sec.section_number) }}"
            class="er-sidebar-item{% if sec.section_number == section.section_number %} active{% endif %}{% if sec.word_count == 0 %} no-content{% endif %}">
             {{ sec.section_number }}. {{ sec.title }}
         </a>
@@ -880,22 +880,22 @@ E-Reader Library - Capstone Companion
         <div class="er-reading-header">
             {% if content_type == 'textbook' %}
             <div class="breadcrumb">
-                <a href="/ereader">E-Reader</a> /
-                <a href="/ereader/textbook/{{ textbook.short_title }}">{{ textbook.short_title }}</a> /
+                <a href="{{ url_for('ereader_library') }}">E-Reader</a> /
+                <a href="{{ url_for('ereader_textbook_toc', short_title=textbook.short_title) }}">{{ textbook.short_title }}</a> /
                 Ch {{ chapter.chapter_number }}
             </div>
             <h1>{{ chapter.title }}</h1>
             {% elif content_type == 'document' %}
             <div class="breadcrumb">
-                <a href="/ereader">E-Reader</a> /
-                <a href="/ereader/document/{{ document.short_title }}">{{ document.short_title }}</a> /
+                <a href="{{ url_for('ereader_library') }}">E-Reader</a> /
+                <a href="{{ url_for('ereader_document_toc', short_title=document.short_title) }}">{{ document.short_title }}</a> /
                 Section {{ section.section_number }}
             </div>
             <h1>{{ section.title }}</h1>
             {% else %}
             <div class="breadcrumb">
-                <a href="/ereader">E-Reader</a> /
-                <a href="/research?highlight={{ source.source_id }}">Research</a> /
+                <a href="{{ url_for('ereader_library') }}">E-Reader</a> /
+                Research /
                 Source
             </div>
             <h1>{{ source.title }}</h1>
@@ -992,7 +992,7 @@ E-Reader Library - Capstone Companion
 
 {% block scripts %}
 {% if mode == 'reader' %}
-<script src="/static/js/ereader.js"></script>
+<script src="{{ url_for('static', path='js/ereader.js') }}"></script>
 {% elif mode == 'library' %}
 <script>
 window.EReader = window.EReader || {};
@@ -1042,15 +1042,15 @@ EReader.renderBookmarks = function() {
         card.className = 'er-continue-card';
         var href = '', title = '', detail = '';
         if (bm.type === 'textbook') {
-            href = '/ereader/textbook/' + encodeURIComponent(bm.shortTitle) + '/' + bm.chapter;
+            href = window.BASE_URL + '/ereader/textbook/' + encodeURIComponent(bm.shortTitle) + '/' + bm.chapter;
             title = bm.bookTitle || bm.shortTitle;
             detail = 'Chapter ' + bm.chapter + ', paragraph ' + (bm.para + 1);
         } else if (bm.type === 'document') {
-            href = '/ereader/document/' + encodeURIComponent(bm.shortTitle) + '?section=' + bm.section;
+            href = window.BASE_URL + '/ereader/document/' + encodeURIComponent(bm.shortTitle) + '?section=' + bm.section;
             title = bm.documentTitle || bm.shortTitle;
             detail = 'Section ' + bm.section + ', paragraph ' + (bm.para + 1);
         } else {
-            href = '/ereader/source/' + encodeURIComponent(bm.sourceId);
+            href = window.BASE_URL + '/ereader/source/' + encodeURIComponent(bm.sourceId);
             title = bm.sourceTitle || 'Research Source';
             detail = 'Paragraph ' + (bm.para + 1);
         }
@@ -1114,7 +1114,7 @@ EReader.togglePin = function(type, key, btn, event) {
     if (!mat) return;
     var wasPinned = mat.pinned;
     var method = wasPinned ? 'DELETE' : 'POST';
-    fetch('/api/ereader/' + encodeURIComponent(type) + '/' + encodeURIComponent(key) + '/pin', {
+    fetch(window.BASE_URL + '/api/ereader/' + encodeURIComponent(type) + '/' + encodeURIComponent(key) + '/pin', {
         method: method
     }).then(function() {
         mat.pinned = !wasPinned;
@@ -1125,7 +1125,8 @@ EReader.togglePin = function(type, key, btn, event) {
 // ── Build a material card ──
 EReader.buildCard = function(mat, showPin) {
     var card = document.createElement('a');
-    card.href = mat.href;
+    // mat.href is root-relative server data; prefix at render.
+    card.href = window.BASE_URL + mat.href;
     card.className = 'er-book-card';
 
     // Pin button

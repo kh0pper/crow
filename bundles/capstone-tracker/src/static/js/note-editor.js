@@ -210,10 +210,17 @@ function addTextToCanvas(fabricCanvas, obj) {
 }
 
 
+// Uploaded-image URLs are stored root-relative (/static/uploads/...) in the
+// canvas JSON, so saved notes stay valid if the mount prefix ever changes.
+// Prefix them only when loading; _imageData keeps the stored form.
+function assetUrl(url) {
+    return url.startsWith('/static/') ? window.BASE_URL + url : url;
+}
+
 function loadImageObject(fabricCanvas, obj) {
     const url = obj.url || '';
     if (!url) return;
-    fabric.Image.fromURL(url, (img) => {
+    fabric.Image.fromURL(assetUrl(url), (img) => {
         img.set({
             left: obj.left || 0,
             top: obj.top || 0,
@@ -919,7 +926,7 @@ function placeImage(fabricCanvas, point) {
             if (!resp.ok) { alert('Upload failed'); return; }
             const data = await resp.json();
 
-            fabric.Image.fromURL(data.url, (img) => {
+            fabric.Image.fromURL(assetUrl(data.url), (img) => {
                 const maxDim = 600;
                 let scale = 1;
                 if (img.width > maxDim || img.height > maxDim) {
@@ -1217,7 +1224,7 @@ function bindToolbar() {
             if (!confirm('Delete this note? This cannot be undone.')) return;
             try {
                 await fetch((window.BASE_URL + '/api/notes/') + state.noteId, { method: 'DELETE' });
-                window.location.href = '/notes';
+                window.location.href = window.BASE_URL + '/notes';
             } catch (err) {
                 alert('Delete failed: ' + err.message);
             }

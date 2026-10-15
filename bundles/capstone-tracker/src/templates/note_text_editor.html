@@ -5,7 +5,7 @@
 {% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ request.url_for('static', path='css/notes.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='css/notes.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -13,7 +13,7 @@
     <!-- Top bar -->
     <div class="editor-toolbar">
         <div class="toolbar-left">
-            <a href="{{ request.url_for('notes_index') }}" class="btn-back" title="Back to notes">&larr;</a>
+            <a href="{{ url_for('notes_index') }}" class="btn-back" title="Back to notes">&larr;</a>
             <input type="text" class="note-title-input" id="note-title"
                    value="{{ note.title }}" placeholder="Untitled Note">
         </div>
@@ -89,5 +89,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ request.url_for('static', path='js/note-text-editor.js') }}"></script>
+<script src="{{ url_for('static', path='js/note-text-editor.js') }}"></script>
 {% endblock %}

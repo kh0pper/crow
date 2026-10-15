@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 
 # Templates directory
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -86,3 +87,17 @@ def render_markdown(value):
 templates.env.filters["datetime"] = format_datetime
 templates.env.filters["days_until"] = days_until
 templates.env.filters["markdown"] = render_markdown
+
+
+@pass_context
+def url_for_path(context, name: str, /, **path_params) -> str:
+    """Path-only url_for: keeps the proxy root_path, drops scheme and host.
+
+    Starlette's own url_for global returns an absolute URL built from the
+    request's Host header. Behind the gateway proxy that host is the loopback
+    backend, so every link must be a path instead.
+    """
+    return context["request"].url_for(name, **path_params).path
+
+
+templates.env.globals["url_for"] = url_for_path

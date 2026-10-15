@@ -9,8 +9,10 @@ Mounts:
     /health       — GET, healthcheck for docker-compose
 
 Subpath proxy: the crow gateway mounts the bundle at /proxy/capstone-tracker/.
-Templates use Jinja's request.url_for() and JS reads window.BASE_URL injected
-into base.html via the `root_path` set on the FastAPI app (see plan § 4.0.7).
+Templates use the path-only `url_for()` Jinja global (src/templates_config.py)
+and JS prepends window.BASE_URL, injected into base.html from the `root_path`
+set on the FastAPI app. Links are paths, never absolute URLs: the gateway
+proxy rewrites Host, so an absolute self URL would point at the backend.
 """
 
 import logging
@@ -18,7 +20,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -59,9 +61,9 @@ async def lifespan(app: FastAPI):
 # Root-path autodetect: when crow-gateway proxies us at /proxy/capstone-tracker/,
 # it forwards the rewritten path WITHOUT that prefix (extension-proxy.js
 # strips it before forwarding to localhost:8090). Setting root_path here lets
-# request.url_for() emit absolute URLs that include the proxy prefix so
-# subpath-proxied browsers land on the right URL. Override via env if the
-# bundle is ever direct-mode mounted.
+# request.url_for() emit paths that include the proxy prefix so
+# subpath-proxied browsers land on the right URL. Override via env
+# (ROOT_PATH="") if the bundle is ever served at the host root.
 app = FastAPI(
     title="Capstone Tracker",
     version="1.0.0",
@@ -89,7 +91,7 @@ app.include_router(ereader_routes.router)
 
 
 # ── Health ────────────────────────────────────────────────────────────────
-@app.get("/health")
+@app.get("/health", name="health")
 async def health():
     return {"status": "ok"}
 
@@ -116,5 +118,6 @@ from fastapi.responses import RedirectResponse
 
 
 @app.get("/")
-async def index():
-    return RedirectResponse(url=app.url_path_for("pir_index"))
+async def index(request: Request):
+    # A path (not a relative "pir", not an absolute URL) that keeps root_path.
+    return RedirectResponse(url=request.url_for("pir_index").path)
