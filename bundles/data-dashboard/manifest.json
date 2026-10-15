@@ -26,7 +26,5 @@
     "min_ram_mb": 128,
     "min_disk_mb": 100
   },
-  "env_vars": [
-    { "name": "CROW_BLOG_FIGURES_BUCKET", "description": "Object-storage bucket for rendered blog figures (default blog-figures).", "required": false }
-  ]
+  "env_vars": []
 }

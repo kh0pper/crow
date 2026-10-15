@@ -92,3 +92,13 @@ test("B6: hydrate assets are served from CROW_BLOG_HYDRATE_ASSETS_DIR", async ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("B7: the data-dashboard manifest does not declare CROW_BLOG_FIGURES_BUCKET (the gateway's env is the one source)", () => {
+  // A bundle-level value would win inside the bundle child while the gateway's
+  // /blog/figures route kept reading the gateway env: uploads and reads would
+  // hit different buckets. The bundle inherits the gateway env instead.
+  const manifest = JSON.parse(readFileSync(join(ROOT, "bundles/data-dashboard/manifest.json"), "utf8"));
+  const names = (manifest.env_vars || []).map((v) => v.name);
+  assert.ok(!names.includes("CROW_BLOG_FIGURES_BUCKET"));
+  assert.ok(!JSON.stringify(manifest.requires || {}).includes("CROW_BLOG_FIGURES_BUCKET"));
+});

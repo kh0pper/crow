@@ -193,7 +193,7 @@ To turn it on, create `~/.crow/blog/collections.json` (more precisely `<CROW_HOM
       "tag": "field-notes",
       "blurb": "Short reads.",
       "docLinks": {
-        "base": "/blog/docs/",
+        "base": "https://docs.example.com/notes/",
         "rules": [{ "slugContains": "summary", "file": "summary.pdf" }],
         "defaultFile": "notes.pdf"
       }
@@ -204,14 +204,14 @@ To turn it on, create `~/.crow/blog/collections.json` (more precisely `<CROW_HOM
 ```
 
 - **`case-studies` sections** list published, public posts linked from a project's case studies (Data Dashboard extension), in their display order. Without that extension the section shows its empty text.
-- **`tag` sections** list published, public posts with the tag. They are hidden when empty unless `hideIfEmpty` is `false`. `docLinks` adds one link per post: the `file` of the first rule whose `slugContains` appears in the slug, otherwise `defaultFile`, appended to `base`. `base` must be a `/blog/` path or an `http(s)` URL.
+- **`tag` sections** list published, public posts with the tag. They are hidden when empty unless `hideIfEmpty` is `false`. `docLinks` adds one link per post: the `file` of the first rule whose `slugContains` appears in the slug, otherwise `defaultFile`, appended to `base`. `base` must be an `http(s)` URL or a `/blog/` path. Crow serves no files under `/blog/` for this, so a `/blog/` base only works if something else (your reverse proxy, another route) serves that path; otherwise the links 404.
 - **`chapterNav`** adds previous/next links between the project's case-study posts that carry its tag.
 - **`lang`** (`en` or `es`) sets the page language and its built-in labels.
 - **`featured.blurbHtml`** accepts a small amount of HTML: `<em>`, `<strong>` and `<a href>` with an absolute `http(s)` URL. Everything else is removed. All other strings are shown as plain text.
 
 The schema is strict: an unknown key, a bad value or more than eight sections disables the page and logs one warning that names the file and the problem (never the values). Nothing in Crow writes this file; you edit it yourself.
 
-Figures that the Data Dashboard renders for blog posts are stored in the object-storage bucket named by `CROW_BLOG_FIGURES_BUCKET` (default `blog-figures`).
+Figures that the Data Dashboard renders for blog posts are stored in the object-storage bucket named by `CROW_BLOG_FIGURES_BUCKET` (default `blog-figures`). Set it in the gateway's environment (its `.env` file or a systemd drop-in for the gateway unit), not in the Data Dashboard extension's settings: the gateway serves `/blog/figures/*` from its own environment, and the extension inherits that environment, so both always use the same bucket.
 
 ## Making Your Blog Public
 
