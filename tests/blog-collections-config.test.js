@@ -179,3 +179,21 @@ test("C10: the env override is honoured; the default path is under resolveCrowHo
     else process.env.CROW_BLOG_COLLECTIONS_CONFIG = prev;
   }
 });
+
+test("C9: sanitizeLimitedHtml keeps em/strong/http(s) links and strips the rest", async () => {
+  const { sanitizeLimitedHtml } = await import("../servers/blog/limited-html.js");
+  const out = sanitizeLimitedHtml(
+    `<em>a</em> <strong>b</strong> <a href="https://example.com/x">ok</a>` +
+    `<script>alert(1)</script><span onclick="x()">c</span><img src=x onerror="y()">` +
+    `<a href="javascript:alert(1)">js</a><a href="//evil.example/">pr</a><a href="/rel">rel</a>` +
+    `<a href="data:text/html,x">data</a>`,
+  );
+  assert.match(out, /<em>a<\/em>/);
+  assert.match(out, /<strong>b<\/strong>/);
+  assert.match(out, /<a href="https:\/\/example\.com\/x" rel="noopener noreferrer">ok<\/a>/);
+  for (const bad of ["<script", "alert(1)", "onclick", "<img", "onerror", "javascript:", "evil.example", "href=\"/rel\"", "data:"]) {
+    assert.ok(!out.includes(bad), `must strip ${bad}: ${out}`);
+  }
+  assert.ok(out.includes(">rel<") || out.endsWith("rel") || out.includes("rel<a"), `link text survives even when its href is dropped: ${out}`);
+  assert.equal(sanitizeLimitedHtml(undefined), "");
+});
