@@ -709,6 +709,10 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1
 #perch-hub-root :is(.artask,.artfb) .art-err{color:var(--err);font-size:13px}
 #perch-hub-root .artfb .art-fb-anchor{font-size:12px;color:var(--dim);margin-top:4px}
 #perch-hub-root .artfb .art-fb-comment{font-size:14px;color:var(--ink);padding-left:10px;border-left:2px solid var(--line)}
+/* Item 4: the feedback card's live status line and its Show vN action. */
+#perch-hub-root .artfb .art-fb-status{font-size:13px;color:var(--dim)}
+#perch-hub-root .artfb .art-fb-status:empty{display:none}
+#perch-hub-root .artfb button.art-fb-showv{background:var(--teal);border-color:var(--teal);color:var(--card);font-weight:600}
 /* Q2: the viewer beside the chat (>=1024px: docked right, the hub narrows
    beside it) or as a full-screen sheet (phone). The pane hosts the SAME-ORIGIN
    viewer page; the hub itself never frames the artifact origin. */

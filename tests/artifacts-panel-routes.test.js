@@ -561,6 +561,12 @@ test("feedback cards (PR-3 Task 3.8): a chat lists the TRUSTED rounds delivered 
   assert.ok(!(await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.some((c) => c.roundId === r3.id), "a failed round draws no card");
   assert.equal((await req("GET", `/api/artifacts/rounds/${r3.id}/card`)).status, 404);
   assert.deepEqual((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-other")).body.cards, []);
+  // Item 4: the card's live status — resultVersion after a round that made a
+  // version, null after a no-change round; status rides along.
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET result_version=2 WHERE id=?", args: [r1.id] });
+  const st = Object.fromEntries((await req("GET", "/api/artifacts/rounds-by-thread/perchlive-f1")).body.cards.map((c) => [c.roundId, [c.status, c.resultVersion]]));
+  assert.deepEqual(st[r1.id], ["done", 2], "a round that made v2");
+  assert.deepEqual(st[r2.id], ["done", null], "a no-change round");
   // THE pin: an untrusted round is refused by route, whatever its delivery says.
   const tc = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "CONTACT-SECRET-77 do something", author: { kind: "contact", id: "c1" } });
   const ru = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [tc.threadId] });

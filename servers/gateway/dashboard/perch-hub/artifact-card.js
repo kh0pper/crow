@@ -56,6 +56,11 @@ export function perchArtifactCardJs(lang = "en") {
   var ART_FB_ONE='${tJs("perch.artifactFeedbackOne", lang)}';
   var ART_FB_SHOW='${tJs("perch.artifactFeedbackShow", lang)}';
   var ART_FB_HIDE='${tJs("perch.artifactFeedbackHide", lang)}';
+  var ART_FB_WORKING='${tJs("perch.artifactFbWorking", lang)}';
+  var ART_FB_READY='${tJs("perch.artifactFbReady", lang)}';
+  var ART_FB_SHOWV='${tJs("perch.artifactFbShowV", lang)}';
+  var ART_FB_NOCHANGE='${tJs("perch.artifactFbNoChange", lang)}';
+  var ART_FB_TIMEDOUT='${tJs("perch.artifactFbTimedOut", lang)}';
   var ART_TYPES={ page:'${tJs("perch.artifactTypePage", lang)}', document:'${tJs("perch.artifactTypeDocument", lang)}', diagram:'${tJs("perch.artifactTypeDiagram", lang)}' };
 
   /* artifactId -> {node,key} for THIS transcript. Dies with the transcript at
@@ -76,15 +81,20 @@ export function perchArtifactCardJs(lang = "en") {
   var artAsks={};
   /* roundId -> node: this chat's feedback cards (PR-3 3.8). */
   var artFb={};
+  /* roundId -> {key,line,acts,show}: the feedback card's live status line
+     (item 4), re-rendered in place only when status|resultVersion moves. */
+  var artFbSt={};
 
-  function resetArtifactCards(){ artCards={}; artAsks={}; artFb={}; artBuf=[]; artGen++; closeArtifactPane(); }
+  function resetArtifactCards(){ artCards={}; artAsks={}; artFb={}; artFbSt={}; artBuf=[]; artGen++; closeArtifactPane(); }
 
   /* The viewer page's URL (same origin). The thread rides along only when it
      is a Perch thread id; the viewer validates it again server-side. */
-  function artViewerUrl(id,sid){
-    var u='/dashboard/artifacts/view/'+encodeURIComponent(String(id));
-    if(typeof sid==='string'&&/^perchlive-[0-9a-f]{8}$/.test(sid)) u+='?thread='+encodeURIComponent(sid);
-    return u;
+  function artViewerUrl(id,sid,v){
+    var u='/dashboard/artifacts/view/'+encodeURIComponent(String(id)), q=[];
+    /* Item 4: a version to open at (a positive integer only). */
+    if(typeof v==='number'&&Number.isInteger(v)&&v>0) q.push('v='+String(v));
+    if(typeof sid==='string'&&/^perchlive-[0-9a-f]{8}$/.test(sid)) q.push('thread='+encodeURIComponent(sid));
+    return q.length?u+'?'+q.join('&'):u;
   }
   /* Split pane at >=1024px, full-screen sheet below (the breakpoint the
      viewer page's own layout uses). Pure, so tests pin it. */
@@ -103,7 +113,7 @@ export function perchArtifactCardJs(lang = "en") {
     document.body.classList.remove('perch-art-split');
     document.body.classList.remove('perch-art-sheet');
   }
-  function openArtifactPane(id,sid){
+  function openArtifactPane(id,sid,v){
     closeArtifactPane();
     var mode=artPaneMode(window.innerWidth);
     var p=document.createElement('div'); p.id='perch-art-pane'; p.className='art-pane art-pane-'+mode;
@@ -114,11 +124,11 @@ export function perchArtifactCardJs(lang = "en") {
     back.onclick=closeArtifactPane;
     bar.appendChild(back);
     var win=document.createElement('a'); win.className='art-pane-window';
-    win.href=artViewerUrl(id,sid); win.target='_blank'; win.rel='noopener'; win.textContent=ART_OPEN_WINDOW;
+    win.href=artViewerUrl(id,sid,v); win.target='_blank'; win.rel='noopener'; win.textContent=ART_OPEN_WINDOW;
     bar.appendChild(win);
     p.appendChild(bar);
     var f=document.createElement('iframe'); f.className='art-pane-frame';
-    f.title=ART_PANE_TITLE; f.src=artViewerUrl(id,sid);
+    f.title=ART_PANE_TITLE; f.src=artViewerUrl(id,sid,v);
     f.setAttribute('referrerpolicy','same-origin');
     p.appendChild(f);
     (document.getElementById('perch-hub-root')||document.body).appendChild(p);
@@ -158,8 +168,36 @@ export function perchArtifactCardJs(lang = "en") {
     return artApi('GET','/rounds-by-thread/'+encodeURIComponent(sid)).then(function(r){
       if(!live()||current.sid!==sid||gen!==artGen) return;
       var list=(r.ok&&r.j&&Array.isArray(r.j.cards))?r.j.cards:[];
-      list.forEach(function(c){ if(c&&Number.isInteger(c.roundId)&&!artFb[c.roundId]) drawFeedbackCard(c,sid); });
+      list.forEach(function(c){
+        if(!c||!Number.isInteger(c.roundId)) return;
+        if(!artFb[c.roundId]) drawFeedbackCard(c,sid); else fbStatus(c,sid);
+      });
     });
+  }
+  /* Item 4: the card's status line, from the store row's status and
+     result version (never from a frame). Upserted by status|resultVersion:
+     an identical re-poll touches nothing; a change rewrites the SAME line
+     node in place, so the card keeps its place in the transcript. */
+  function fbStatus(c,sid){
+    var rec=artFbSt[c.roundId]; if(!rec) return;
+    var v=(Number.isInteger(c.resultVersion)&&c.resultVersion>0)?c.resultVersion:null;
+    var st=String(c.status||'');
+    var key=st+'|'+String(v);
+    if(rec.key===key) return;
+    rec.key=key;
+    var text='';
+    if(st==='working'||st==='delivering'||st==='pending'||st==='queued') text=ART_FB_WORKING;
+    else if(st==='timed-out') text=ART_FB_TIMEDOUT;
+    else if(st==='done') text=v?ART_FB_READY.replace('{n}',String(v)):ART_FB_NOCHANGE;
+    rec.line.textContent=text;
+    if(rec.show&&rec.show.parentNode) rec.show.parentNode.removeChild(rec.show);
+    rec.show=null;
+    if(v&&(st==='done'||st==='timed-out')){
+      var b=document.createElement('button'); b.type='button'; b.className='art-fb-showv';
+      b.textContent=ART_FB_SHOWV.replace('{n}',String(v));
+      b.onclick=function(){ openArtifactPane(c.artifactId,sid,v); };
+      rec.acts.appendChild(b); rec.show=b;
+    }
   }
   function drawFeedbackCard(c,sid){
     var tr=el('perch-transcript'); if(!tr) return;
@@ -169,6 +207,8 @@ export function perchArtifactCardJs(lang = "en") {
     var head=(k===1?ART_FB_ONE:ART_FB).replace('{n}',String(Number(c.version)||0)).replace('{k}',String(k)).replace('{title}',function(){ return ct; });
     node.appendChild(line('art-eyebrow',ART_LABEL));
     node.appendChild(line('art-title',head));
+    var stLine=line('art-fb-status','');
+    node.appendChild(stLine);
     var body=document.createElement('div'); body.className='art-fb-body';
     var toggle=document.createElement('button'); toggle.type='button'; toggle.className='art-fb-toggle'; toggle.textContent=ART_FB_SHOW;
     var shown=false;
@@ -192,6 +232,8 @@ export function perchArtifactCardJs(lang = "en") {
     node.appendChild(acts);
     node.appendChild(body);
     artFb[c.roundId]=node;
+    artFbSt[c.roundId]={key:'',line:stLine,acts:acts,show:null};
+    fbStatus(c,sid);
     /* Review L9: on reload the history rows carry their time (data-ts), so
        the card goes back where the round was delivered: before the first
        message newer than the round. A card newer than every stamped row
