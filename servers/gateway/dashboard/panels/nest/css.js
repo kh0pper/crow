@@ -153,13 +153,18 @@ export function nestCSS() {
     grid-template-columns: repeat(4, 1fr);
     gap: 1.25rem 1rem;
     padding: 2rem 2rem 3rem;
-    max-width: 520px;
+    /* rem, so a larger text size widens the cells with the labels. */
+    max-width: 32.5rem;
     margin: 0 auto;
   }
   @media (max-width: 600px) {
     .nest-grid {
       grid-template-columns: repeat(3, 1fr);
-      padding: 1.5rem 1.5rem 2.5rem;
+      /* A phone's width is fixed, so the side gutters give way as the text
+         grows: 24px / 16px at the default size (as before), narrower at a
+         larger one, so "Extensiones" still fits its cell at 150%. */
+      padding: 1.5rem max(8px, calc(48px - 1.5rem)) 2.5rem;
+      column-gap: max(6px, calc(32px - 1rem));
       max-width: 380px;
     }
   }
@@ -175,6 +180,8 @@ export function nestCSS() {
     display: flex;
     flex-direction: column;
     align-items: center;
+    width: 100%;
+    min-width: 0;
     gap: 0.45rem;
     text-decoration: none;
     color: var(--crow-text-secondary);
@@ -208,12 +215,16 @@ export function nestCSS() {
   }
 
   /* Two lines, then clipped: "Kolibri Learning Platform" reads whole instead
-     of "Kolibri Lea...". min-height keeps one-line labels on the same rows. */
+     of "Kolibri Lea...". min-height keeps one-line labels on the same rows.
+     The label spans the whole grid cell (not a fixed 80px), so a word wraps
+     only between words; break-word stays as the last resort for a single
+     word wider than the cell ("Changedetection.io"). */
   .nest-app-label {
     font-size: 0.7rem;
     font-weight: 500;
     text-align: center;
-    max-width: 80px;
+    width: 100%;
+    max-width: 100%;
     line-height: 1.2;
     min-height: 2.4em;
     white-space: normal;
