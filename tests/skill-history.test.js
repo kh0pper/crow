@@ -64,3 +64,38 @@ test("--check fails when a skill is edited without updating the ledger; the defa
     assert.equal(run(["--root", root, "--check"]).status, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("--check --base <ref>: the ledger must be append-only against the base (no dropped key, no dropped or reordered hash)", () => {
+  const root = mkdtempSync(join(tmpdir(), "skill-history-base-"));
+  const git = (...a) => { const r = spawnSync("git", ["-C", root, ...a], { encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  try {
+    git("init", "-q");
+    git("config", "user.email", "t@example.invalid"); git("config", "user.name", "t");
+    put(root, "bundles/alpha/manifest.json", JSON.stringify({ id: "alpha", version: "1.0.0", skills: ["skills/alpha.md"] }));
+    put(root, "bundles/alpha/skills/alpha.md", "# v1\n");
+    assert.equal(run(["--root", root]).status, 0);
+    git("add", "-A"); git("commit", "-qm", "base");
+    const base = git("rev-parse", "HEAD");
+    // A normal edit + append passes against the base.
+    put(root, "bundles/alpha/skills/alpha.md", "# v2\n");
+    assert.equal(run(["--root", root]).status, 0);
+    let r = run(["--root", root, "--check", "--base", base]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    // Dropping the old hash fails, naming the key.
+    const lp = join(root, "bundles", "skill-history.json");
+    writeFileSync(lp, JSON.stringify({ "alpha/skills/alpha.md": [skillHash("# v2\n")] }));
+    r = run(["--root", root, "--check", "--base", base]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout + r.stderr, /append-only.*alpha\/skills\/alpha\.md/s);
+    // Reordering fails too.
+    writeFileSync(lp, JSON.stringify({ "alpha/skills/alpha.md": [skillHash("# v2\n"), skillHash("# v1\n")] }));
+    assert.equal(run(["--root", root, "--check", "--base", base]).status, 1);
+    // A base without a ledger yet (first introduction) has nothing to keep.
+    git("rm", "-q", "--cached", "bundles/skill-history.json"); git("commit", "-qm", "no ledger");
+    assert.equal(run(["--root", root]).status, 0);
+    writeFileSync(lp, JSON.stringify({ "alpha/skills/alpha.md": [skillHash("# v2\n")] }));
+    assert.equal(run(["--root", root, "--check", "--base", git("rev-parse", "HEAD")]).status, 0);
+    // An unknown base ref is an error, never a silent pass.
+    assert.equal(run(["--root", root, "--check", "--base", "0123456789abcdef0123456789abcdef01234567"]).status, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

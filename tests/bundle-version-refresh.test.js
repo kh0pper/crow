@@ -1047,6 +1047,34 @@ describe("skill sync — rules 0–4, record, modes, atomic writes", async () =>
     assert.deepEqual(off.skillLines, []);
   });
 
+  test("review 1: report mode never asks for a notification (nothing is persisted, so it would repeat every boot)", async () => {
+    let root = repoWith("sk-repnote", { "sk-repnote.md": "# r1\n" });
+    setInstalled(["sk-repnote"]);
+    await boot(root);
+    put(CROW_HOME, "skills/sk-repnote.md", "# r1 MY EDIT\n");
+    root = repoWith("sk-repnote", { "sk-repnote.md": "# r2\n" });
+    for (let i = 0; i < 2; i++) {
+      const out = await boot(root, { skillMode: "report" });
+      assert.deepEqual(out.skillsKept.filter((k) => k.bundle === "sk-repnote"), [{ bundle: "sk-repnote", skill: "sk-repnote.md", reason: "edited", notify: false }]);
+    }
+    const on = await boot(root);
+    assert.deepEqual(on.skillsKept.filter((k) => k.bundle === "sk-repnote").map((k) => k.notify), [true], "on notifies (once)");
+  });
+
+  test("review 3: an explicit (re)install restores a skill the owner deleted; the boot sync still leaves it deleted", async () => {
+    const { syncBundleSkills } = await import("../servers/gateway/bundle-skill-sync.js");
+    const root = repoWith("sk-reinst", { "sk-reinst.md": "# ri\n" });
+    setInstalled(["sk-reinst"]);
+    await boot(root);
+    unlinkSync(join(skillsDir(), "sk-reinst.md"));
+    await boot(root);
+    assert.equal(existsSync(join(skillsDir(), "sk-reinst.md")), false);
+    const manifest = JSON.parse(readFileSync(join(root, "sk-reinst", "manifest.json"), "utf8"));
+    const out = syncBundleSkills({ id: "sk-reinst", src: join(root, "sk-reinst"), manifest, mode: "on", install: true, skillsDir: skillsDir(), recordPath: recordPath(), ledger: {}, log: () => {} });
+    assert.equal(skillAt("sk-reinst.md"), "# ri\n");
+    assert.ok(out.lines.some((l) => l.action === "install"));
+  });
+
   test("an INSTALLED manifest with \"refresh\": false opts the bundle's skills out too", async () => {
     const root = repoWith("sk-optout", { "sk-optout.md": "# repo\n" });
     put(CROW_HOME, "bundles/sk-optout/manifest.json", JSON.stringify({ id: "sk-optout", version: "1.0.0", refresh: false }));

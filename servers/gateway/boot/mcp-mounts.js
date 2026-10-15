@@ -238,6 +238,8 @@ export async function mountMcpServers(app, deps) {
     // Skill sync: one notification per skill the owner EDITED, once per new
     // shipped version (the record's notifiedFor). Unverified copies are never
     // notified — we cannot tell the owner they edited something we cannot verify.
+    // notify is only ever true in mode "on" (bundle-skill-sync.js), so a
+    // report-mode gateway never posts this.
     const edited = skillsKept.filter((k) => k.notify && k.reason === "edited");
     if (edited.length) {
       const ndb = createDbClient();
@@ -354,7 +356,7 @@ export async function mountMcpServers(app, deps) {
       // get artifact_find + artifact_attach written in (cap-guarded) — the
       // needs_link recovery path. Off the boot path; never throws.
       setImmediate(async () => {
-        try { (await import("../../../scripts/pi-bots/artifacts-companions.mjs")).migrateArtifactsCompanions(artDb).catch(() => {}); }
+        try { (await import("../../../scripts/pi-bots/artifacts-companions.mjs")).migrateArtifactsCompanions(artDb, { notify: (n) => createNotification(artDb, n) }).catch(() => {}); }
         catch (e) { console.warn(`[gateway] artifacts companion migration: ${e.message}`); }
       });
       // MinIO when shared storage is available, else local disk (spec §11).

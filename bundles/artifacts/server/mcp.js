@@ -75,11 +75,15 @@ export async function scopeOf(db, actor) {
 const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
 
 /**
- * S2 (artifacts smoke fixes): the ask-first gate. Applies to a bot in a
- * Perch chat only — a channel (Discord, Gmail) or job turn has no chat to
- * show the link card in, so it stays allowed (Kevin's S2b; the board-tool
- * residual is recorded in the private engineering notes), and the operator
- * is never gated.
+ * S2 (artifacts smoke fixes): the ask-first gate applies ONLY to a bot whose
+ * signed gateway is `perch` (and that has a thread) — the one place a link
+ * card can be shown. EVERY other gateway is exempt: Discord, Gmail, jobs,
+ * crow-messages rooms, glasses, the companion, Telegram, Slack and anything
+ * added later. That is the accepted residual (Kevin's S2b, review M6): a bot
+ * reaching an artifact from any non-Perch gateway — including a job it made
+ * for itself with board tools — can update without a link, so ask-first is
+ * advisory for such bots. What those turns write saves untrusted whenever
+ * the turn has no clean session record. The operator is never gated.
  */
 export const isPerchChat = (actor) => actor?.kind === "bot" && actor.gateway === "perch" && !!actor.thread;
 

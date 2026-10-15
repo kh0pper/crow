@@ -20,6 +20,13 @@
  *   node scripts/build-skill-history.mjs --seed    ALSO walk each skill's full git
  *                                                  history (needs a full clone;
  *                                                  run once by the author).
+ *   --check --base <ref>                           ALSO enforce append-only against the
+ *                                                  ledger at <ref> (CI passes the PR's
+ *                                                  base / the push's previous commit):
+ *                                                  no key dropped, every base list a
+ *                                                  prefix of the current one. An unknown
+ *                                                  ref is an error; a base without a
+ *                                                  ledger has nothing to keep.
  *   --root <repo>                                  operate on another checkout (tests)
  *
  * Append-only: an existing hash is never removed or reordered, so a copy of
@@ -97,6 +104,25 @@ if (flag("--check")) {
     for (const s of missing) console.error(`  ${s.key}`);
     console.error("Run: node scripts/build-skill-history.mjs   (then commit bundles/skill-history.json)");
     process.exit(1);
+  }
+  const bi = args.indexOf("--base");
+  if (bi >= 0) {
+    const ref = args[bi + 1];
+    const git = (a) => execFileSync("git", ["-C", ROOT, ...a], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    try { git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]); }
+    catch { console.error(`[skill-history] --base ${ref}: no such commit here`); process.exit(1); }
+    let baseLedger = {};
+    try { baseLedger = JSON.parse(git(["show", `${ref}:bundles/skill-history.json`])); }
+    catch { baseLedger = {}; }   // not in the base yet: nothing to keep
+    const broken = Object.entries(baseLedger).filter(([k, old]) => {
+      const cur = ledger[k];
+      return !Array.isArray(cur) || !Array.isArray(old) || old.some((h, i) => cur[i] !== h);
+    }).map(([k]) => k);
+    if (broken.length) {
+      console.error(`[skill-history] the ledger must stay append-only (base ${ref}); changed or dropped:`);
+      for (const k of broken) console.error(`  ${k}`);
+      process.exit(1);
+    }
   }
   console.log(`[skill-history] ok: ${skills.length} shipped skills covered`);
   process.exit(0);

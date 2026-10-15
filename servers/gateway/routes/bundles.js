@@ -935,13 +935,14 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
  * sync, copying from the INSTALLED bundle dir (review L9: that also serves
  * third-party bundles, which have no repo source). Always mode "on": an
  * install is the operator's explicit action, so CROW_SKILL_SYNC (which
- * governs the silent boot pass) does not apply. An edited copy already in
- * place is kept, never overwritten.
+ * governs the silent boot pass) does not apply, and a skill the owner had
+ * deleted is installed again (review 3). An edited copy already in place is
+ * kept, never overwritten.
  */
 function installBundleSkills(bundleId, destDir, manifest, job) {
   mkdirSync(SKILLS_DIR, { recursive: true });
   const { lines, kept } = syncBundleSkills({
-    id: bundleId, src: destDir, manifest, mode: "on", skillsDir: SKILLS_DIR,
+    id: bundleId, src: destDir, manifest, mode: "on", install: true, skillsDir: SKILLS_DIR,
     recordPath: SKILL_RECORD_PATH, ledger: readSkillLedger(APP_BUNDLES), log: () => {},
   });
   for (const l of lines) {

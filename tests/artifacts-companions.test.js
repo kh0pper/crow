@@ -131,3 +131,32 @@ test("a federation patch granting artifact_update stays exactly as sent (peer gr
   const merged = applyPeerPatch({ tools: { crow_mcp: [] } }, { "tools.crow_mcp": [U] });
   assert.deepEqual(merged.tools.crow_mcp, [U]);
 });
+
+test("review 2: a save where Update was ALREADY granted never re-adds an untick of Find/Attach", async () => {
+  const def = { tools: { crow_mcp: [U, F, A, "artifacts/artifact_get"] } };
+  // The owner unticks Attach (Update stays ticked).
+  await saveAbilities(def, { src_catalog: catalog, src__artifacts: "custom", src__artifacts__was: "custom", tool__artifacts: [U, F, "artifacts/artifact_get"] }, ctx(10));
+  assert.deepEqual(def.tools.crow_mcp.slice().sort(), [U, F, "artifacts/artifact_get"].sort(), "the untick stands");
+  // An unrelated Abilities save later: still not re-added.
+  await saveAbilities(def, { files_mode: "read", files_mode__was: "read" }, ctx(10));
+  assert.ok(!def.tools.crow_mcp.includes(A));
+  // Update off → on in one save: added.
+  const d2 = { tools: { crow_mcp: [U, "artifacts/artifact_get"] } };
+  await saveAbilities(d2, { src_catalog: catalog, src__artifacts: "custom", src__artifacts__was: "custom", tool__artifacts: ["artifacts/artifact_get"] }, ctx(10));
+  assert.deepEqual(d2.tools.crow_mcp, ["artifacts/artifact_get"]);
+  await saveAbilities(d2, { src_catalog: catalog, src__artifacts: "custom", src__artifacts__was: "custom", tool__artifacts: ["artifacts/artifact_get", U] }, ctx(10));
+  assert.ok(d2.tools.crow_mcp.includes(F) && d2.tools.crow_mcp.includes(A), "re-ticking Update brings them");
+});
+
+test("review 4: a cap-refused bot gets ONE owner notification naming it and saying why", async () => {
+  const db = await defsDb();
+  try {
+    const notes = [];
+    await migrateArtifactsCompanions(db, { log: () => {}, budgetFor: async () => budget(5), notify: async (n) => notes.push(n) });
+    assert.equal(notes.length, 1);
+    assert.match(notes[0].title, /big/);
+    assert.match(notes[0].body, /tool limit/);
+    await migrateArtifactsCompanions(db, { log: () => {}, budgetFor: async () => budget(5), notify: async (n) => notes.push(n) });
+    assert.equal(notes.length, 1, "the migration runs once, so the notice is posted once");
+  } finally { db.close(); }
+});

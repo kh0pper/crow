@@ -101,13 +101,15 @@ function lstatOrNull(p) { try { return lstatSync(p); } catch { return null; } }
  * @param {"on"|"report"|"off"} [o.mode]
  * @param {string} o.skillsDir
  * @param {string} o.recordPath
+ * @param {boolean} [o.install]  an explicit (re)install by the owner: a skill
+ *   they deleted is installed again (rule 2's "leave it" is for the silent boot pass)
  * @param {object} [o.ledger]
  * @param {(m: string) => void} [o.log]
  * @returns {{ lines: Array<{bundle, skill, action}>, kept: Array<{bundle, skill, reason, notify}> }}
  *   action ∈ same | adopt | install | refresh | kept-edited | kept-unverified |
  *            skip-symlink | skip-deleted | skip-optout
  */
-export function syncBundleSkills({ id, src, manifest, installedManifest = null, mode = "on", skillsDir, recordPath, ledger = {}, log = (m) => console.log(m) }) {
+export function syncBundleSkills({ id, src, manifest, installedManifest = null, mode = "on", install = false, skillsDir, recordPath, ledger = {}, log = (m) => console.log(m) }) {
   const lines = [];
   const kept = [];
   if (mode === "off") return { lines, kept };
@@ -140,7 +142,7 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
     if (st && st.isSymbolicLink()) { say(skill, "skip-symlink", "symlink, left alone (user-managed)"); continue; }
     // 2. missing.
     if (!st) {
-      if (rec) { say(skill, "skip-deleted", null); continue; }
+      if (rec && !install) { say(skill, "skip-deleted", null); continue; }
       copyIn(dst, srcBuf);
       put(skill, { bundle: id, sha256: hs, installedAt: now });
       say(skill, "install", "installed");
@@ -163,7 +165,9 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
         put(skill, { bundle: id, sha256: hs, installedAt: now });
         say(skill, "refresh", "refreshed (unedited)");
       } else {
-        const notify = rec.notifiedFor !== hs;
+        // Review 1: only a writing pass may ask for a notification — report
+        // mode persists no notifiedFor, so it would repeat every boot.
+        const notify = write && rec.notifiedFor !== hs;
         if (notify) put(skill, { ...rec, notifiedFor: hs });
         kept.push({ bundle: id, skill, reason: "edited", notify });
         say(skill, "kept-edited", "edited after install, kept (the new version was not applied)");

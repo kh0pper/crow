@@ -22,7 +22,7 @@ import { applyCommandsMode } from "./bash-mode.js";
 import { selectedWriteTools, toolsFromKeys } from "./sources.js";
 import { normText } from "./ui.js";
 import { lines } from "./data-queries.js";
-import { addCompanionsGuarded } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
+import { addCompanionsGuarded, grantsArtifactUpdate } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const arr = (v) => (v == null ? [] : [].concat(v)).filter((x) => typeof x === "string");
@@ -196,6 +196,7 @@ export async function saveBasics(def, b, ctx) {
 
 export async function saveAbilities(def, b, { lang, changed, companionBudget = null }) {
   const out = {};
+  const prevMcp = def.tools && Array.isArray(def.tools.crow_mcp) ? def.tools.crow_mcp.slice() : [];
   def.tools = def.tools || {};
   if (b.files_mode) {
     const r = applyFilesMode(def, { mode: String(b.files_mode), was: String(b.files_mode__was || "") });
@@ -227,10 +228,13 @@ export async function saveAbilities(def, b, { lang, changed, companionBudget = n
   }
   // S2a (artifacts smoke fixes, review M7): a def granting artifact_update
   // also gets artifact_find + artifact_attach (the needs_link recovery path),
-  // written into the def itself — but never past the model's tool cap. Ticked
-  // companions are posted like any tool, so explicit entries survive a save
-  // and unticking Update never removes them.
-  if (Array.isArray(def.tools.crow_mcp)) {
+  // written into the def itself — but never past the model's tool cap, and
+  // ONLY when Update goes from off to on in this save (PR review 2): once
+  // Update is granted, the owner's own ticks rule, so a deliberate untick of
+  // Find or Attach is never silently undone. Ticked companions are posted
+  // like any tool, so explicit entries survive a save and unticking Update
+  // never removes them.
+  if (Array.isArray(def.tools.crow_mcp) && !grantsArtifactUpdate(prevMcp) && grantsArtifactUpdate(def.tools.crow_mcp)) {
     const r = await addCompanionsGuarded(def, { budget: companionBudget ? await companionBudget(def) : null });
     if (r.refused) out.warn = [t("botbuilder.abArtifactsCompanionsCapped", lang)];
     else if (r.added.length) def.tools.crow_mcp = r.def.tools.crow_mcp;
