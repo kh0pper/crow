@@ -254,18 +254,22 @@ export function buildNestHTML(data, lang) {
   }).join("");
 
   // --- Bundle Tiles (icon: branded logo → manifest icon → package glyph) ---
-  const bundleTiles = bundles.filter(b => !panelIds.has(b.id)).map(b => {
+  // Only bundles with something to open: a web UI. A model server or worker
+  // with no UI, or an orphan install record (no manifest → no webUI), stays in
+  // Extensions and off the launcher — the same rule peers use (federation.js).
+  const bundleTiles = bundles.filter(b => !panelIds.has(b.id) && b.webUI).map(b => {
     const logo = getAddonLogo(b.id, 32);
     const iconHtml = logo || `<div class="nest-bundle-glyph">${appIconSvg(b.icon) || PACKAGE_ICON}</div>`;
     const statusDot = b.hasContainer ? statusDotHtml(b.isRunning, lang) : "";
-    const hasWebUI = !!b.webUI;
-    const isDirect = hasWebUI && b.webUI.proxyMode === "direct";
+    const isDirect = b.webUI.proxyMode === "direct";
+    const path = b.webUI.path || "/";
     // Direct-mode: use HTTPS + hostname + port (Tailscale serve provides TLS)
     // Subpath proxy: use /proxy/<id>/ through the gateway (inherits TLS)
-    const directUrl = `'https://'+location.hostname+':${hasWebUI ? b.webUI.port : ""}${hasWebUI ? (b.webUI.path || "/") : ""}'`;
-    const proxyUrl = `'/proxy/${b.id}${hasWebUI ? (b.webUI.path || "/") : ""}'`;
-    const href = hasWebUI && !isDirect ? `/proxy/${b.id}${b.webUI.path || "/"}` : "/dashboard/extensions";
-    const onclick = hasWebUI ? ` onclick="window.open(${isDirect ? directUrl : proxyUrl},'_blank');return false"` : "";
+    const directUrl = `'https://'+location.hostname+':${b.webUI.port}${path}'`;
+    const proxyUrl = `'/proxy/${b.id}${path}'`;
+    // Direct mode needs JS (the host comes from location); its no-JS fallback is Extensions.
+    const href = isDirect ? "/dashboard/extensions" : `/proxy/${b.id}${path}`;
+    const onclick = ` onclick="window.open(${isDirect ? directUrl : proxyUrl},'_blank');return false"`;
     const delay = tileIndex++ * 40;
     return `<a href="${escapeHtml(href)}" class="nest-app nest-app--bundle" style="animation-delay:${delay}ms"${onclick}>
       <div class="nest-app-icon">${statusDot}${iconHtml}</div>
