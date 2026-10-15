@@ -468,7 +468,7 @@ export function perchHubJs(lang = "en") {
     var counts={}, keys={};
     (list||[]).forEach(function(r){
       if(!r||!r.sessionId) return;
-      var k=[r.botName||r.botId||'',r.label||'',cardOf(r)].join('\u0000');
+      var k=[r.botName||r.botId||'',r.label||'',cardOf(r)].join('\\u0000');
       keys[r.sessionId]=k; counts[k]=(counts[k]||0)+1;
     });
     var out={};
@@ -513,7 +513,7 @@ export function perchHubJs(lang = "en") {
 
   function buildRowMenu(row,sid,actions){
     var more=document.createElement('button');
-    more.type='button'; more.className='roost-more'; more.textContent='\u22ef';
+    more.type='button'; more.className='roost-more'; more.textContent='\\u22ef';
     more.setAttribute('data-sid',sid);
     more.setAttribute('aria-haspopup','menu');
     more.setAttribute('aria-expanded','false');
@@ -557,7 +557,16 @@ export function perchHubJs(lang = "en") {
         if(ev.preventDefault) ev.preventDefault();
         setRowMenu(menu,false,true); return;
       }
-      if(k==='Tab'){ setRowMenu(menu,false,false); return; }
+      /* Tab: close, but draw a parked poll on the NEXT tick — redrawing
+         inside this keydown removes the focused item before the browser
+         moves focus, and focus falls to <body>. */
+      if(k==='Tab'){
+        setRowMenu(menu,false,false,true);
+        setTimeout(function(){
+          if(!openRowMenu()&&deferredList){ var d=deferredList; deferredList=null; renderList(d.rows,d.archived); }
+        },0);
+        return;
+      }
       var next=-1;
       if(k==='ArrowDown') next=(i+1)%n;
       else if(k==='ArrowUp') next=(i<=0?n:i)-1;
@@ -828,7 +837,7 @@ export function perchHubJs(lang = "en") {
       var opts=sel.options||[], want=String(sel.value||'');
       for(var i=0;i<opts.length;i++){ if(String(opts[i].value)===want){ txt=opts[i].textContent; break; } }
     }
-    span.textContent=txt?(' \u00b7 '+txt):'';
+    span.textContent=txt?(' \\u00b7 '+txt):'';
   }
 
   function renderLaunchModels(list,dflt){

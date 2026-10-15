@@ -1509,13 +1509,18 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
         var sum=document.querySelector('#perch-launch-more>summary'), r=sum.getBoundingClientRect();
         return JSON.stringify({ model:shown('perch-new-model'), cwd:shown('perch-new-cwd'),
           browse:shown('perch-browse-btn'), newBtn:shown('perch-new'),
-          summary:sum.textContent, sumH:Math.round(r.height) });
+          summary:sum.textContent, sumH:Math.round(r.height),
+          display:getComputedStyle(sum).display, rendered:sum.innerText });
       })()`);
       assert.deepEqual([closed.model, closed.cwd, closed.browse], [false, false, false],
         "not rendered until More options opens");
       assert.equal(closed.newBtn, true, "New session stays one tap away");
       assert.ok(closed.sumH >= 44, `the summary is ${closed.sumH}px tall`);
       assert.match(closed.summary, /^More options · Qwen3\.6 35B/, "the summary names the model: " + closed.summary);
+      // Code review M1: a flex <summary> loses its disclosure triangle and the
+      // separator's leading space (it rendered "More options· Qwen…").
+      assert.equal(closed.display, "list-item", "the summary keeps its disclosure marker");
+      assert.match(closed.rendered, /More options · Qwen3\.6 35B/, "rendered text keeps the space: " + closed.rendered);
       const opened = await s.json(`(async function(){
         document.querySelector('#perch-launch-more>summary').click();
         ${sleepJs(100)}

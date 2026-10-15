@@ -160,8 +160,8 @@ border-radius:10px;background:var(--sky);color:var(--ink)}
    body is its own flex row (a <details> is not a flex container itself), so
    the field/Browse pairing above keeps working inside it. */
 #perch-hub-root #perch-launch-more{flex:1 1 100%;min-width:0}
-#perch-hub-root #perch-launch-more>summary{min-height:44px;display:flex;align-items:center;gap:0;cursor:pointer;
-color:var(--dim);font-size:13px;overflow-wrap:anywhere}
+#perch-hub-root #perch-launch-more>summary{min-height:44px;box-sizing:border-box;padding:12px 0;cursor:pointer;
+color:var(--dim);font-size:13px;line-height:20px;overflow-wrap:anywhere}
 #perch-hub-root #perch-launch-more-model{color:var(--ink)}
 #perch-hub-root .launch-more-body{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0 0}
 /* Closed means NOT RENDERED. Current Chrome hides a closed <details> body

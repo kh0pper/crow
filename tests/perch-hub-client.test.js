@@ -5110,6 +5110,22 @@ test("QW2: a poll while a menu is open keeps it open; the latest payload renders
   assert.equal(liveRows(hub).length, 1, "closing renders the LATEST deferred payload, not the first");
 });
 
+test("QW2 (review M2): Tab with a parked poll does not redraw inside the keydown (focus would fall to <body>); it redraws on the next tick", async () => {
+  let roost = ROOST_ALL_BUSY;
+  const hub = await mountHub({ fetchImpl: (m, p) => roostFetch(roost)(m, p) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  roost = { birds: [{ ...ROOST_ALL_BUSY.birds[0], sessions: ROOST_ALL_BUSY.birds[0].sessions.slice(0, 1) }] };
+  await firePoll(hub);
+  menu.onkeydown(keyEv("Tab"));
+  assert.equal(menu.hidden, true, "Tab closes the menu");
+  assert.equal(liveRows(hub)[0], row, "the list is NOT torn down while the browser is still moving focus");
+  for (const [id, fn] of [...hub.timers.entries()]) {
+    if (hub.timerDelays.get(id) === 0) { hub.timers.delete(id); fn(); }
+  }
+  assert.equal(liveRows(hub).length, 1, "the parked poll lands on the next tick");
+});
+
 test("QW2: a failed /roost while the menu is open clears the list; the next poll redraws it", async () => {
   let fail = false;
   const hub = await mountHub({ fetchImpl: (m, p) => (p === "/roost" && fail)
