@@ -141,6 +141,7 @@
 import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, isSentinel, mentionsLock } from "../../scripts/pi-bots/narrowing-lock.mjs";
 import { taintsSession } from "../../scripts/pi-bots/outside-text-tools.mjs";
 import { markTaintUnrecorded } from "./session-taint-memory.js";
+import { redactErrorText, lastAssistantError } from "./perch-error-text.js";
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
@@ -860,10 +861,36 @@ export function createInteractiveEngine({
     s.stallTimer = timer(() => { onStall(s, turn); }, stallMs());
   }
 
+  /** Strand 1: a turn's error frame — at most ONE per turn, whichever of
+   *  stall, onTurnError, onTurnEnd or a failed overflow recovery reports it
+   *  first (a stall's abort can race a rejected prompt). The hub draws it as
+   *  the turn's danger row; the hub also dedupes per turnId. */
+  function emitTurnError(s, turn, text, reason) {
+    if (turn.errorShown) return;
+    turn.errorShown = true;
+    const frame = { type: "error", text, turnId: turn.id };
+    if (reason) frame.reason = reason;
+    emit(s, frame);
+  }
+
+  /** Review M1: pi's overflow recovery finished. willRetry → the compacted
+   *  retry is running (its answer arrives later); otherwise recovery failed
+   *  or was aborted, and the deferred turn gets its row now. A compaction_end
+   *  with no deferred turn (pi's "already attempted" path, which skips
+   *  compaction_start) adds nothing: onTurnEnd already drew that turn. */
+  function onOverflowCompactionEnd(s, m) {
+    s.overflowCompacting = false;
+    const pending = s.overflowTurn;
+    if (!pending || m.willRetry) return;
+    s.overflowTurn = null;
+    if (pending.turn.aborted || m.aborted) return;
+    emitTurnError(s, pending.turn, m.errorMessage ? redactErrorText(m.errorMessage) : pending.errorText, "turn_error");
+  }
+
   function onStall(s, turn) {
     if (s.turn !== turn || turn.aborted) return;
     s.lastError = "turn stalled";
-    emit(s, { type: "error", text: "turn stalled" });
+    emitTurnError(s, turn, "turn stalled");
     // A single tool silent past the window IS aborted — named operator-facing
     // policy (r2 S12).
     abortInFlight(s).catch(() => {});
@@ -1696,6 +1723,9 @@ export function createInteractiveEngine({
   function attachExit(s, pi) {
     pi.exited.then(() => {
       if (s.pi !== pi) return;                       // an expected close
+      const deadTurn = s.turn;                       // strand 1: the frame names it
+      s.overflowCompacting = false;                  // review M1: dies with the child
+      s.overflowTurn = null;
       s.pi = null;
       s.turn = null;
       clearStall(s);
@@ -1722,7 +1752,7 @@ export function createInteractiveEngine({
       writeLeases();
       // reason "pi_exit": the drawer shows this one IN the chat (the operator's
       // message went nowhere), not only on the Activity rail.
-      emit(s, { type: "error", text: message, reason: "pi_exit" });
+      emit(s, { type: "error", text: message, reason: "pi_exit", turnId: deadTurn ? deadTurn.id : null });
       emit(s, stateEvent(s));
       writeRow(s, { status: "waiting-user" }).catch(() => {});
     }).catch(() => {});
@@ -1808,8 +1838,23 @@ export function createInteractiveEngine({
         // null when the child speaks outside a turn — the client falls back to
         // its transition flag there.
         if (text) emit(s, { type: "text", text, turnId: s.turn ? s.turn.id : null });
+        // Strand 1: an errored message draws NOTHING here. pi emits one
+        // message_end(error) per ATTEMPT, before its auto-retry, so a 503 it
+        // recovers from would leave a red bubble above a good reply. The turn's
+        // error is decided once, in onTurnEnd. aborted (the user asked),
+        // deferred and pending (not an outcome yet) stay silent everywhere.
         return;
       }
+      case "compaction_start":
+        if (m.reason === "overflow") s.overflowCompacting = true;
+        return;
+      case "compaction_end":
+        if (m.reason === "overflow") onOverflowCompactionEnd(s, m);
+        return;
+      case "auto_retry_start":
+        // Strand 1: a retry is rail news, not a chat event.
+        emit(s, { type: "log", text: "retrying after an error (" + Number(m.attempt) + "/" + Number(m.maxAttempts) + ")" });
+        return;
       case "extension_ui_request":
         onUiRequest(s, m);
         return;
@@ -2137,6 +2182,27 @@ export function createInteractiveEngine({
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted) {
       const replyText = replyTextOf(end);
+      // Strand 1: the turn ENDED in a model error (retries, if any, are
+      // spent — this is the non-retrying agent_end). One frame per turn, by
+      // construction: stall/abort, onTurnError and pi_exit never reach here.
+      let failed = lastAssistantError(end && end.messages);
+      const errorText = failed ? redactErrorText(failed.errorMessage) : null;
+      // Review M1: a context-overflow error is NOT final even though pi tags
+      // its agent_end willRetry:false — pi compacts and retries once
+      // (compaction_start{reason:"overflow"} arrives after agent_end, before
+      // pi answers the stats call awaited above). Defer: compaction_end
+      // decides. If compaction_start lands later than that (unlikely), the
+      // row is drawn now: a visible false failure. NOT surfaced: a failure of
+      // the compacted retry itself — the bridge ends the turn on the overflow
+      // agent_end, so the retry's own agent_end reaches no turn (the bridge
+      // turn-boundary seam, tracked separately in the private engineering notes).
+      let deferred = false;
+      if (failed && s.overflowCompacting) {
+        s.overflowTurn = { turn, errorText };
+        failed = null;
+        deferred = true;
+      }
+      if (failed) emitTurnError(s, turn, errorText, "turn_error");
       // The id of the turn this reply COMPLETES (see the text frame above):
       // without it a reconnected drawer cannot tell "I already rendered this
       // turn" from "I already rendered a different one".
@@ -2144,14 +2210,14 @@ export function createInteractiveEngine({
       // Track 3 Task 8: an operator watching the drawer live (any live
       // subscriber) already sees the reply — the push is for someone who
       // is AWAY, and only for a turn that actually took a while.
-      if (s.subscribers.size === 0) {
+      if (s.subscribers.size === 0 && !deferred) {
         const ranS = (now() - turn.startedAt) / 1000;
         if (ranS >= notifyMinRunS()) {
           pushAttention({
             type: "attention",
             priority: "normal",
-            title: s.botId + " replied",
-            body: replyText.slice(0, 140),
+            title: s.botId + (failed ? "'s turn failed" : " replied"),
+            body: (failed ? errorText : replyText).slice(0, 140),
             action_url: "/dashboard/bot-board#bird=" + s.sessionId,
           });
         }
@@ -2174,7 +2240,8 @@ export function createInteractiveEngine({
     stopTurnClocks(s, turn);
     const message = String((err && err.message) || err);
     s.lastError = message;
-    emit(s, { type: "error", text: message });
+    // Strand 1: this text now reaches the chat, and it can carry pi's stderr.
+    emitTurnError(s, turn, redactErrorText(message));
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
 
     // A PREFLIGHT refusal never started an agent loop (C-12 (h)): the child is
@@ -2390,8 +2457,13 @@ export function createInteractiveEngine({
     // Track 3 Task 8: startedAt is this turn's own clock reading, distinct
     // from any lastEventAt touch — onTurnEnd diffs against it to decide
     // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
-    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now() };
+    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false };
     s.turn = turn;
+    // Review M1: overflow-recovery state belongs to the PREVIOUS turn. A
+    // retry that recovered leaves it set; a compaction still running (the
+    // operator sent again while it summarizes) keeps it, so its failure still
+    // reaches the turn it belongs to. attachExit clears it with the child.
+    if (!s.overflowCompacting) s.overflowTurn = null;
     // ---------------------------------------------------------------------
     try {
       if (needsWake) {
