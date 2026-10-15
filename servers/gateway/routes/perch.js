@@ -65,6 +65,7 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
+import { redactErrorText } from "../perch-error-text.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -401,7 +402,16 @@ function readTranscript(file) {
       // client keeps its own messageText() fallback and nothing downstream
       // that reads `message` sees a changed shape.
       const html = event && event.type === "message" ? assistantHtml(event) : null;
-      events.push(html ? { ...event, html } : event);
+      let out = html ? { ...event, html } : event;
+      // Strand 1: an assistant message that ended in a model error carries
+      // the provider's raw body in `errorMessage`. Replace it with the same
+      // redacted text the live frame carried; the raw body stays on disk.
+      const m = out && out.type === "message" ? out.message : null;
+      if (m && m.role === "assistant" && m.stopReason === "error") {
+        const { errorMessage, ...rest } = m;
+        out = { ...out, message: rest, errorText: redactErrorText(errorMessage) };
+      }
+      events.push(out);
     } catch { /* skip: not our business to guess */ }
   }
   return {

@@ -4691,3 +4691,106 @@ test("text size: Perch reuses the layout head script's runtime when present (one
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   assert.ok(perchHubJs("en").includes(textSizeRuntimeJs()), "the fallback is the shared runtime source verbatim");
 });
+
+// ---------------------------------------------------------------------------
+// Strand 1 (perch strands plan rev 3): turn errors render as a danger row,
+// once per turn, live and on reload — never as an empty bot bubble.
+// ---------------------------------------------------------------------------
+
+const turnErrRows = (hub) => hub.els["perch-transcript"].children
+  .filter((c) => String(c.className).includes("turnerr")).map(deepText);
+const asstErr = (errorText, text) => ({
+  type: "message",
+  message: { role: "assistant", content: text ? [{ type: "text", text }] : [], stopReason: "error" },
+  errorText,
+});
+const userMsg = (text) => ({ type: "message", message: { role: "user", content: text } });
+
+test("strand 1: a live turn_error frame draws ONE danger row per turnId, text-only, and is not a send failure", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t1" }) }) });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("error", { text: "400 invalid_tools <img src=x onerror=alert(1)>", reason: "turn_error", turnId: "t1" });
+  es._serverFrame("error", { text: "400 invalid_tools <img src=x onerror=alert(1)>", reason: "turn_error", turnId: "t1" });
+  es._serverFrame("reply", { text: "", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = turnErrRows(hub);
+  assert.equal(rows.length, 1, "deduped per turnId");
+  assert.ok(rows[0].includes("<img src=x onerror=alert(1)>"), "rendered as literal text");
+  assert.ok(!transcriptTexts(hub).some((t) => t.includes("Bot could not start")), "the send reached pi — no send-failure note");
+  assert.deepEqual(botEntries(hub), [], "no empty bot bubble");
+  assert.ok(hub.els["perch-activity-list"].children.some((c) => c.textContent.includes("invalid_tools")), "still on the rail");
+});
+
+test("strand 1: a stall frame with a turnId draws the danger row; pi_exit keeps its send-failure note instead", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/message": () => makeResponse(202, { turnId: "t2" }) }) });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("error", { text: "turn stalled", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(turnErrRows(hub).length, 1);
+  hub.els["perch-input"].value = "hi";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  es._serverFrame("error", { text: UNKNOWN_PROVIDER, reason: "pi_exit", turnId: "t2" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(turnErrRows(hub).length, 1, "pi_exit is not a second danger row");
+  assert.ok(transcriptTexts(hub).some((t) => t.startsWith("Bot could not start:")));
+});
+
+test("strand 1: reload draws the persisted error as the danger row — no empty bot bubble, and only the LAST error of a turn", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events: [
+      userMsg("first"),
+      asstErr("503 overloaded"),             // attempt 1 — retried
+      asstErr("400 invalid_tools"),          // attempt 2 — the turn's end
+      userMsg("second"),
+      asstErr("503 overloaded"),             // retried and RECOVERED
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: "all good" }], stopReason: "stop" } },
+      userMsg("third"),
+      asstErr("500 boom", "half an answer"), // partial text + error
+    ] }) }),
+  });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = turnErrRows(hub);
+  assert.equal(rows.length, 2, "one per failed turn; the recovered turn draws none");
+  assert.ok(rows[0].includes("400 invalid_tools"));
+  assert.ok(rows[1].includes("500 boom"));
+  assert.deepEqual(botEntries(hub), ["all good", "half an answer"], "no empty bot bubbles; partial text still shows");
+});
+
+test("strand 1: a turn_error buffered across the history window is not drawn as a bot row, and lands once", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("error", { text: "400 invalid_tools", reason: "turn_error", turnId: "t7" });
+  es._serverFrame("error", { text: "429 slow down", reason: "turn_error", turnId: "t8" });
+  settleBatch(makeResponse(200, { events: [userMsg("hi"), asstErr("400 invalid_tools")] }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), [], "never a bot row");
+  const rows = turnErrRows(hub);
+  assert.equal(rows.length, 2, "the batch's copy of t7 once, and t8 (newer than the snapshot) behind it");
+  assert.ok(rows[0].includes("400 invalid_tools") && rows[1].includes("429 slow down"));
+});
+
+test("strand 1 (review M2): a buffered error with the SAME text as an older turn's error is not swallowed by it", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  // Turn B fails live with the same text turn A failed with; B's message is not
+  // in the snapshot (the snapshot ends with turn B's user message).
+  es._serverFrame("error", { text: "400 invalid_tools", reason: "turn_error", turnId: "tB" });
+  settleBatch(makeResponse(200, { events: [userMsg("a"), asstErr("400 invalid_tools"), userMsg("b")] }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(turnErrRows(hub).length, 2, "A's row from the batch AND B's live row");
+});
