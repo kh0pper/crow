@@ -208,9 +208,12 @@ export function perchHubJs(lang = "en") {
   }
   /* \`html\` is optional and server-rendered; without it this is byte-for-byte
      the old textContent behaviour. */
-  function appendMessage(cls,who,text,html){
+  function appendMessage(cls,who,text,html,ts){
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
+    /* Review L9: history rows carry their time so a reloaded feedback card
+       can sit where its round was delivered (artifact-card.js fbPlace). */
+    if(ts&&isFinite(ts)) row.setAttribute('data-ts',String(ts));
     row.appendChild(line(cls==='user'?'who vh':'who',rowLabel(cls,who)));
     if(html&&typeof html==='string'){
       var what=document.createElement('div');
@@ -1864,7 +1867,8 @@ export function perchHubJs(lang = "en") {
              it was the empty bubble every failed turn left behind. */
           if(!(errored&&!txt)){
             if(String(m.role||'?')!=='user') batchTexts.push(txt);
-            appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html);
+            appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html,
+              Date.parse(String(e.timestamp||''))||Number(m.timestamp)||0);
           }
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;

@@ -1544,3 +1544,24 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
     } finally { resetApi(); await s.close(); }
   });
 }
+
+test("review L9 live: reloaded history rows carry their time (data-ts) so a feedback card can keep its place", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  transcriptEvents = [
+    { type: "message", timestamp: "2026-10-13T22:16:54.950Z", message: { role: "user", content: "stamped by the event" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "stamped by the message" }], timestamp: 1791929830000 } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "no stamp at all" }] } },
+  ];
+  const s = await session(1280, 900);
+  try {
+    await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+    await new Promise((r) => setTimeout(r, 1200));
+    const rows = await s.json(`JSON.stringify(Array.prototype.map.call(document.querySelectorAll('#perch-transcript .entry.user, #perch-transcript .entry.bot'), function(n){ return [n.querySelector('.what').textContent, n.getAttribute('data-ts')]; }))`);
+    assert.deepEqual(rows, [
+      ["stamped by the event", String(Date.parse("2026-10-13T22:16:54.950Z"))],
+      ["stamped by the message", "1791929830000"],
+      ["no stamp at all", null],
+    ]);
+  } finally { resetApi(); await s.close(); }
+});
