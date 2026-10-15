@@ -4898,3 +4898,20 @@ test("QW1 (es): the hidden operator label is translated", async () => {
   await new Promise((r) => setTimeout(r, 0));
   assertLabels(hub, "R4 Assistant", "T\u00fa:");
 });
+
+test("QW1 (review): switching sessions to ANOTHER bot relabels its rows with that bot's name — no leak from the previous one", async () => {
+  const roost = { birds: [
+    { id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+      sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false }] },
+    { id: "writer", name: "Writer", perch_attached: true, state: "working",
+      sessions: [{ sessionId: "perchlive-bbbbbbbb", state: "awake", cardId: null, pendingUi: false }] },
+  ] };
+  const hub = await mountHub({ fetchImpl: histFetch(HIST, roost), initialHash: "#perchlive-aaaaaaaa" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assertLabels(hub, "R4 Assistant");
+  hub.location.hash = "perchlive-bbbbbbbb";
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assertLabels(hub, "Writer");
+});

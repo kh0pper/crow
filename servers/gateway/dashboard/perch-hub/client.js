@@ -196,8 +196,6 @@ export function perchHubJs(lang = "en") {
     }
   }
 
-  /* \`html\` is optional and server-rendered; without it this is byte-for-byte
-     the old textContent behaviour. */
   /* Design quick win 1: the row label is resolved HERE, in one place. A bot
      turn reads as the bot's display name (from showHeader, which always runs
      before the stream opens or history loads); the operator's own turn has no
@@ -208,6 +206,8 @@ export function perchHubJs(lang = "en") {
     if(who==='bot'||who==='assistant') return current.botName||current.botId||who;
     return who;
   }
+  /* \`html\` is optional and server-rendered; without it this is byte-for-byte
+     the old textContent behaviour. */
   function appendMessage(cls,who,text,html){
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
