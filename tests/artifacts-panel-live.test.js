@@ -328,6 +328,11 @@ test("viewer: while a round is active the page polls; when it ends with a new ve
     await nav(t, `/dashboard/artifacts/view/${art.id}`);
     assert.ok(await yes(t, "document.querySelector('.cv-status').textContent.includes('working on your comments')", 15000), "the status says the bot is working");
     assert.equal(await t.evalIn("document.querySelector('.cv-send').disabled"), true, "no second round while one runs");
+    // S5: the disabled Send says why.
+    assert.match(await t.evalIn("document.querySelector('.cv-send').textContent"), /bobby is working on your comments/, "Send names the running round");
+    // S5: comment mode on (a page) must not swallow the ready banner.
+    await t.evalIn("document.querySelector('.cv-comment').click()");
+    assert.equal(await t.evalIn("document.querySelector('.cv-comment').getAttribute('aria-pressed')"), "true");
     await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { html: BUY.replace("Buy now", "Buy v2") }, actor: { kind: "bot", id: "bobby" }, roundId: round.id }, {});
     await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [round.id] });
     assert.ok(await yes(t, "!!document.querySelector('.cv-ready button')", 12000), "the next poll announced the new version");
@@ -356,5 +361,24 @@ test("viewer pins + numbering are scoped to the mounted version; a resolved thre
     assert.ok(await yes(t, "document.querySelectorAll('.cv-thread').length === 2", 15000), "v1 lists its two threads");
     assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 1", 15000), "one pin: the resolved thread has none");
     assert.equal(await t.evalIn("document.querySelector('.cv-pin').textContent"), "1");
+  } finally { await t.close(); }
+});
+
+test("S5: on a document, a round's end shows the ready banner too, and Send reads as working while it runs", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const comments = await import("../bundles/artifacts/server/comments.js");
+  const rounds = await import("../bundles/artifacts/server/rounds.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Polled doc", type: "document", source: { markdown: "# One\n\nwords" }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const th = await comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "go", author: { kind: "owner" } });
+  const round = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [th.threadId], kind: "round" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='working' WHERE id=?", args: [round.id] });
+  const t = await tab();
+  try {
+    await nav(t, `/dashboard/artifacts/view/${art.id}`);
+    assert.ok(await yes(t, "document.querySelector('.cv-send').disabled && document.querySelector('.cv-send').textContent.includes('working on your comments')", 15000), "Send is disabled and says the bot is working");
+    await store.addVersion(s.db, s.blobs, { artifactId: art.id, source: { markdown: "# One\n\nnew words" }, actor: { kind: "bot", id: "bobby" }, roundId: round.id }, { markdownBlocks });
+    await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [round.id] });
+    assert.ok(await yes(t, "!!document.querySelector('.cv-ready button')", 12000), "the ready banner on a document");
+    assert.equal(await t.evalIn("document.querySelector('.cv-send').textContent.includes('working')"), false, "Send is back to its count");
   } finally { await t.close(); }
 });

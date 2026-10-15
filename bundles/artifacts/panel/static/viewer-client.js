@@ -166,7 +166,8 @@
     var n = shown().length;
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
-    sendBtn.textContent = k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
+    // S5: while a round runs, the disabled Send says why.
+    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: (S.art && S.art.created_by_bot) || T.bot }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
   }
@@ -311,7 +312,7 @@
     // Script-free documents cannot propose from inside the frame: pick a section.
     // D28: no list, no sheet over the document — select text instead.
     if (!S.commentOn) sectionList.setAttribute("hidden", "");
-    if (S.commentOn) status.textContent = isDoc() ? T.commenting_doc : T.commenting; else renderStatus();
+    renderStatus();
   }
   commentBtn.addEventListener("click", function () { setComment(!S.commentOn); });
   region.addEventListener("click", function (e) {
@@ -394,9 +395,10 @@
       banner(fmt(T.proposed_note, { n: p.n }) + (p.change_note ? " — " + p.change_note : ""), "info",
         [button(T.accept, decide(true)), button(T.drop, decide(false))]).classList.add("cv-proposed");
     });
-    if (S.commentOn) { if (S.activeRound) S.lastRound = S.activeRound; poll(); return; }
+    // S5: the banners always run; only the idle status line yields to the
+    // comment-mode hint.
     if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
-    else status.textContent = "";
+    else status.textContent = S.commentOn ? (isDoc() ? T.commenting_doc : T.commenting) : "";
     // A round just finished with a new current version: say so, offer it.
     if (S.lastRound && !S.activeRound) {
       S.lastRound = null;
