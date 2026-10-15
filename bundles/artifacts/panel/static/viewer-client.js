@@ -78,9 +78,12 @@
   // A way out when the viewer has the whole tab (opened from the Library or
   // "Open in new window"). Inside the hub pane the pane has its own close.
   if (window.top === window) {
+    // A slim header-like bar (QW4 B2). The title is plain text, not a link:
+    // the bar has exactly two ways out.
     root.appendChild(el("nav", { class: "cv-nav", "aria-label": T.nav }, [
-      el("a", { href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
-      el("a", { href: "/dashboard/nest", text: T.nest }),
+      el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
+      el("span", { class: "cv-nav-title", text: T.library_title }),
+      el("a", { class: "cv-nav-nest", href: "/dashboard/nest", text: T.nest }),
     ]));
   }
   root.appendChild(head);
