@@ -420,6 +420,10 @@ test("funnel: a lone '/' in GATEWAY_FUNNEL_PUBLIC_PREFIXES is ignored, never ope
     assert.equal(runFunnelMw("/dashboard").statusCode, 403);
     assert.equal(runFunnelMw("/s/family").nexted, true, "the other entries still apply");
     assert.ok(warned.some((w) => /GATEWAY_FUNNEL_PUBLIC_PREFIXES/.test(w)), "the dropped entry is logged");
+    const before = warned.length;
+    effectiveFunnelPrefixes();
+    effectiveFunnelPrefixes();
+    assert.equal(warned.length, before, "the warning is logged once, not on every health check");
   } finally {
     console.warn = origWarn;
     delete process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;

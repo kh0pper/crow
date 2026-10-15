@@ -37,12 +37,15 @@ export const PUBLIC_FUNNEL_PREFIXES = [
  * three conditions at the top of this file apply to every entry added here.
  * Read at middleware creation, not per request.
  */
+let _warnedLoneSlashFor = null; // log the dropped lone "/" once per env value
+
 function envFunnelPrefixes() {
   const entries = (process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES || "")
     .split(",").map((s) => s.trim()).filter((s) => s.startsWith("/"));
   // A lone "/" is a subtree prefix of every path: it would open the whole
   // gateway (dashboard included) to the internet. Never honour it.
-  if (entries.includes("/")) {
+  if (entries.includes("/") && _warnedLoneSlashFor !== process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES) {
+    _warnedLoneSlashFor = process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
     console.warn('[funnel] GATEWAY_FUNNEL_PUBLIC_PREFIXES contains a lone "/" — ignored: it would make every path public.');
   }
   return entries.filter((s) => s !== "/");

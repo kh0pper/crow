@@ -282,7 +282,7 @@ test("exposure: an unparseable proxy target counts as this gateway's → warn", 
 });
 
 test("classifyFunnelTarget: [::1], 0.0.0.0, https+insecure, bare port and host:port count as own", () => {
-  for (const t of ["http://[::1]:3001", "http://0.0.0.0:3001", "https+insecure://localhost:3001", "3001", "localhost:3001", "https://127.0.0.1:3001"]) {
+  for (const t of ["http://[::1]:3001", "http://[::ffff:127.0.0.1]:3001", "http://[::ffff:7f00:1]:3001", "http://0.0.0.0:3001", "https+insecure://localhost:3001", "3001", "localhost:3001", "https://127.0.0.1:3001"]) {
     assert.equal(classifyFunnelTarget(t, { port: 3001 }).own, true, t);
   }
 });
@@ -291,6 +291,8 @@ test("classifyFunnelTarget: the tailnet/LAN address of this host counts as own; 
   const ownHosts = new Set(["100.64.20.5", "10.0.0.5", "crowhost"]);
   assert.equal(classifyFunnelTarget("http://100.64.20.5:3001/blog", { port: 3001, ownHosts }).own, true);
   assert.equal(classifyFunnelTarget("http://crowhost:3001", { port: 3001, ownHosts }).own, true);
+  assert.equal(classifyFunnelTarget("http://[::ffff:100.64.20.5]:3001", { port: 3001, ownHosts }).own, true, "IPv4-mapped tailnet address");
+  assert.equal(classifyFunnelTarget("http://[::ffff:6440:1405]:3001", { port: 3001, ownHosts }).own, true, "IPv4-mapped tailnet address, hex form");
   assert.equal(classifyFunnelTarget("http://10.0.0.5:3008/s", { port: 3001, ownHosts }).own, false);
 });
 
@@ -335,4 +337,20 @@ test("pruneResolved: keeps active ids, drops resolved", () => {
   const map = { a: 1, b: 2, c: 3 };
   const out = pruneResolved(map, ["a", "c"]);
   assert.deepEqual(out, { a: 1, c: 3 });
+});
+
+test("exposure: near-miss backend paths are not public-safe; /s and /s-assets are (with the share-page env)", async () => {
+  const env = { PORT: "3008", CROW_GATEWAY_PORT: "3008", GATEWAY_FUNNEL_PUBLIC_PREFIXES: "/s/,/s,/s-assets/" };
+  const one = (path) => ({
+    AllowFunnel: { "crow.example.ts.net:443": true },
+    Web: { "crow.example.ts.net:443": { Handlers: { "/x": { Proxy: `http://127.0.0.1:3008${path}` } } } },
+  });
+  for (const bad of ["/blog-evil", "/s-assetsX", "/robots.txtx", "/"]) {
+    const { warns } = await exposureWith(one(bad), env);
+    assert.equal(warns.length, 1, `${bad} must warn`);
+  }
+  for (const good of ["/s-assets", "/s"]) {
+    const { warns } = await exposureWith(one(good), env);
+    assert.equal(warns.length, 0, `${good} is public-safe`);
+  }
 });

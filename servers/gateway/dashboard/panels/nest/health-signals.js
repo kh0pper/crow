@@ -768,11 +768,24 @@ function defaultOwnHosts() {
   return hosts;
 }
 
+// ::ffff:127.0.0.1 and ::ffff:7f00:1 (what URL normalises it to) → 127.0.0.1.
+function unmapIPv4(h) {
+  const dotted = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return dotted[1];
+  const hex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return h;
+  const [a, b] = [parseInt(hex[1], 16), parseInt(hex[2], 16)];
+  return `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+}
+
+// Known limit: an alias or MagicDNS name for this host that defaultOwnHosts()
+// does not list classifies as another service (info, not warn). Layer 1 — the
+// Funnel-header middleware in funnel.js — still enforces the allowlist there.
 function isOwnHost(host, ownHosts) {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  const h = unmapIPv4(host.toLowerCase().replace(/^\[|\]$/g, ""));
   if (ownHosts.has(h)) return true;
   if (h.endsWith(".localhost")) return true;
-  if (/^127\.\d+\.\d+\.\d+$/.test(h) || /^::ffff:127\./.test(h)) return true;
+  if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
   // The machine's own name under any domain (crow.local, crow.<tailnet>.ts.net).
   for (const o of ownHosts) if (/^[a-z]/.test(o) && h.startsWith(o + ".")) return true;
   return false;
