@@ -103,15 +103,33 @@ test("host-networking bundle refused on managed hosting → 403 hosted_forbidden
 });
 
 test("bundle whose GPU-arch requirement the host doesn't satisfy → 400 gpu_arch_gate", async () => {
-  // 'vllm-cuda-embed' declares requires.gpu_arch: ["cuda"]. This crow host is
-  // an AMD Strix Halo box (gfx1151 / ROCm) with no NVIDIA GPU, so
-  // checkGpuArchCompatible() must refuse it. gpu_arch has no forceInstall
-  // bypass (the install would just crash), so forceInstall only needs to
-  // clear the earlier hardware-headroom gate.
-  const r = await validateInstall("vllm-cuda-embed", { forceInstall: true });
+  // 'sdxl' declares requires.gpu_arch: ["cuda"] and is not a model bundle
+  // (no inference: true), so it reaches the arch gate. The test hosts (an AMD
+  // box, a CI runner) have no NVIDIA GPU, so checkGpuArchCompatible() must
+  // refuse it. gpu_arch has no forceInstall bypass (the install would just
+  // crash), so forceInstall only needs to clear the earlier hardware gate.
+  // (This used vllm-cuda-embed until model bundles moved to the Model Catalog.)
+  const r = await validateInstall("sdxl", { forceInstall: true });
   assert.equal(r.ok, false);
   assert.equal(r.status, 400);
   assert.equal(r.code, "gpu_arch_gate");
+});
+
+test("a model bundle (inference: true) → 409 model_bundle_moved, even with force_install", async () => {
+  for (const id of ["vllm-cuda-embed", "llamacpp-vulkan-qwen3-embed"]) {
+    const r = await validateInstall(id, { forceInstall: true });
+    assert.equal(r.ok, false, id);
+    assert.equal(r.status, 409, id);
+    assert.equal(r.code, "model_bundle_moved", id);
+    assert.match(r.error, /\/dashboard\/model-catalog/);
+  }
+});
+
+test("GPU apps that are not model bundles are never refused as model_bundle_moved", async () => {
+  for (const id of ["ollama", "localai", "sdxl"]) {
+    const r = await validateInstall(id, { forceInstall: true });
+    assert.notEqual(r.code, "model_bundle_moved", id);
+  }
 });
 
 test("bundle with a missing required dependency bundle → 400 missing_dependencies", async () => {

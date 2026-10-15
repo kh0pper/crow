@@ -1856,6 +1856,19 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   const orchRefusal = bundleOrchestrationRefusal(bundleId);
   if (orchRefusal) return { ok: false, ...orchRefusal };
 
+  // Models plan 3a: model bundles (manifest `inference: true`) are installed
+  // from the Model Catalog now, which registers native llama-server models.
+  // A direct POST is refused; force_install does not bypass it. Deliberately
+  // narrow: not isModelBundleManifest(), which would also catch TTS/STT and
+  // GPU apps such as kokoro or ollama. install-set shares this gate (no
+  // collection lists an inference bundle).
+  if (getManifest(bundleId)?.inference === true) {
+    return {
+      ok: false, status: 409, code: "model_bundle_moved",
+      error: `'${bundleId}' is a model bundle — models are installed from the Model Catalog (/dashboard/model-catalog)`,
+    };
+  }
+
   // Check source exists
   const sourceDir = join(APP_BUNDLES, bundleId);
   if (!existsSync(sourceDir)) {
