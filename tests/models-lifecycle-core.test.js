@@ -236,3 +236,83 @@ test("DELETE refuses rows this instance does not own natively, and a row with a 
     release();
   } finally { await h.cleanup(); }
 });
+
+// ─── Review fixes (2026-10-15) ──────────────────────────────────────────────
+
+test("review 2: a confirmed DELETE holds the provider: a start from either door during the removal is refused, and nothing is acquired", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps, calls } = coreDeps();
+    const core = createLifecycleCore(deps);
+    const bearer = createLifecycleCore({ ...deps });
+    let releaseBindings;
+    const bindingsGate = new Promise((r) => { releaseBindings = r; });
+    let midStart = null;
+    await withServer({
+      dir: h.dir,
+      lifecycleCoreFn: () => core,
+      providerBindingsFn: async () => {
+        // A start arrives while the removal awaits.
+        midStart = bearer.start("crow-chat", "pi-lab");
+        await bindingsGate;
+        return { profiles: [], bots: [] };
+      },
+      unregisterModelFn: async () => ({ disabled: true, deleted: false }),
+    }, async (base) => {
+      const del = fetch(`${base}/api/models/providers/crow-chat?confirm=true`, { method: "DELETE", headers: authHeaders(token) });
+      while (!midStart) await new Promise((r) => setTimeout(r, 5));
+      releaseBindings();
+      const r = await del;
+      assert.equal(r.status, 200);
+      assert.equal(midStart.status, 409);
+      assert.equal(midStart.body.code, "REMOVING");
+      assert.deepEqual(calls.acquire, [], "no llama-server started under a removal");
+      assert.equal(deps.jobs.isRemoving("crow-chat"), false, "the hold is released afterwards");
+      assert.equal(core.start("crow-chat", "x").status, 202, "starts work again once the removal is over");
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("review 2: the hold is released even when the removal fails", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { deps } = coreDeps();
+    await withServer({
+      dir: h.dir, lifecycleCoreFn: () => createLifecycleCore(deps),
+      providerBindingsFn: async () => ({ profiles: [], bots: [] }),
+      unregisterModelFn: async () => { throw new Error("disk on fire"); },
+    }, async (base) => {
+      const r = await fetch(`${base}/api/models/providers/crow-chat?confirm=true`, { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(r.status, 500);
+    });
+    assert.equal(deps.jobs.isRemoving("crow-chat"), false);
+  } finally { await h.cleanup(); }
+});
+
+test("review 8: the real llmModelsRouter() and modelsRouter() defaults share one job store", async () => {
+  const { default: express } = await import("express");
+  const { default: llmModelsRouter } = await import("../servers/gateway/routes/llm-models.js");
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const job = sharedJobStore().create("shared-probe");
+    const app = express();
+    app.use(express.json());
+    app.use(llmModelsRouter({ authFn: async (t) => t === "good" }));
+    const server = app.listen(0);
+    await new Promise((r) => server.once("listening", r));
+    try {
+      const viaBearer = await fetch(`http://127.0.0.1:${server.address().port}/llm/models/jobs/${job.id}`, { headers: { authorization: "Bearer good" } });
+      assert.equal(viaBearer.status, 200);
+      assert.equal((await viaBearer.json()).provider, "shared-probe");
+    } finally { server.close(); }
+    await withServer({ dir: h.dir }, async (base) => {
+      const viaPanel = await fetch(`${base}/api/models/jobs/${job.id}`, { headers: authHeaders(token) });
+      assert.equal(viaPanel.status, 200);
+      assert.equal((await viaPanel.json()).provider, "shared-probe");
+    });
+    sharedJobStore().update(job.id, { state: "failed" });
+  } finally { await h.cleanup(); }
+});

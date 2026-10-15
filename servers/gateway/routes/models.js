@@ -728,10 +728,17 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     if (c.jobs.activeFor(name)) {
       return res.status(409).json({ error: `"${name}" is starting; wait for the start to finish, then remove it`, code: "START_IN_PROGRESS" });
     }
+    const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+    // A confirmed removal holds the provider in the shared job store from
+    // here to the end (review 2): the check and the hold are one synchronous
+    // step, and every start through either door is refused (REMOVING) while
+    // the awaits below run.
+    if (confirmed && !c.jobs.beginRemoval(name)) {
+      return res.status(409).json({ error: `"${name}" is starting or already being removed`, code: "START_IN_PROGRESS" });
+    }
     const db = dbFactory();
     try {
       const bindings = await providerBindingsFn(db, name);
-      const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
       if (!confirmed) return res.json({ requiresConfirm: true, provider: name, bindings });
       // Stop through stopNativeProvider (the orchestrator's single-flight
       // queue), never a bare handle.stop() that could race an acquire. Under
@@ -745,6 +752,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
     } finally {
+      if (confirmed) c.jobs.endRemoval(name);
       try { db.close(); } catch { /* best effort */ }
     }
   });

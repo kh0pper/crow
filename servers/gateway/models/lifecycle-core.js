@@ -75,6 +75,7 @@ export function createLifecycleCore(deps) {
   function start(name, requester) {
     const refused = refusal(name);
     if (refused) return refused;
+    if (jobs.isRemoving?.(name)) return { status: 409, body: { code: "REMOVING", message: `"${name}" is being unregistered` } };
     const active = jobs.activeFor(name);
     if (active) return { status: 202, body: { job_id: active.id } };
     const job = jobs.create(name);
