@@ -181,18 +181,6 @@ test("BEHAVIOR: group 'none' sends null; 'automatic' leaves the group out; an em
   assert.equal(b.posts().at(-1).body.mutexGroup, null);
 });
 
-test("BEHAVIOR: hf-adopt posts repo, file and path to /hf-adopt", async () => {
-  const b = boot([], (url) => okRegistered(url) || (url === "/api/models/hf-adopt" ? json(200, { provider: { id: "x" }, verified: true }) : json(200, {})));
-  b.window.CrowModelDialog.open({ mode: "hf-adopt", hfRepo: "org/Repo-GGUF", hfFile: "Repo-Q4_K_M.gguf" });
-  await b.settle();
-  b.$("#mcat-dlg-path").value = "/srv/models/Repo-Q4_K_M.gguf";
-  b.$("#mcat-dlg-unverified").checked = true;
-  b.click(b.$("#mcat-dlg-save"));
-  await b.settle();
-  const post = b.posts().find((c) => c.url === "/api/models/hf-adopt");
-  assert.deepEqual(JSON.parse(JSON.stringify(post.body)), { hfRepo: "org/Repo-GGUF", file: "Repo-Q4_K_M.gguf", path: "/srv/models/Repo-Q4_K_M.gguf", allowUnverified: true });
-});
-
 // ─── Live layout ────────────────────────────────────────────────────────────
 
 let chrome = null, server = null, base = "";
@@ -257,3 +245,31 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
     assert.equal(m.hScroll, false);
   });
 }
+
+// ─── Review fixes (2026-10-15) ──────────────────────────────────────────────
+
+test("review 3: adopt warns that hashing a large file takes minutes, and a second Save while one is pending sends nothing", async () => {
+  const b = boot([cardModel()], (url) => okRegistered(url) || (url === "/api/models/adopt" ? new Promise(() => {}) : json(200, {})));
+  b.click(b.$('.mcat-card [data-action="adopt"]'));
+  await b.settle();
+  assert.match(b.$("#mcat-modal-content").textContent, /several minutes/);
+  b.$("#mcat-dlg-path").value = "/srv/models/big.gguf";
+  b.click(b.$("#mcat-dlg-save"));
+  await b.settle();
+  b.click(b.$("#mcat-dlg-save"));
+  await b.settle();
+  assert.equal(b.posts().filter((c) => c.url === "/api/models/adopt").length, 1);
+  assert.equal(b.$("#mcat-dlg-save").disabled, true);
+});
+
+test("review 6: hf-adopt offers no size-only option and never sends allowUnverified", async () => {
+  const b = boot([], (url) => okRegistered(url) || json(200, { provider: { id: "x" } }));
+  b.window.CrowModelDialog.open({ mode: "hf-adopt", hfRepo: "org/Repo-GGUF", hfFile: "Repo-Q4_K_M.gguf" });
+  await b.settle();
+  assert.equal(b.$("#mcat-dlg-unverified"), null);
+  b.$("#mcat-dlg-path").value = "/srv/models/Repo-Q4_K_M.gguf";
+  b.click(b.$("#mcat-dlg-save"));
+  await b.settle();
+  const post = b.posts().find((c) => c.url === "/api/models/hf-adopt");
+  assert.deepEqual(JSON.parse(JSON.stringify(post.body)), { hfRepo: "org/Repo-GGUF", file: "Repo-Q4_K_M.gguf", path: "/srv/models/Repo-Q4_K_M.gguf" });
+});

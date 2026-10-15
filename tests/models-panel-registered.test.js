@@ -310,3 +310,17 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
     assert.deepEqual(m.outside, []);
   });
 }
+
+test("review 7: a provider id with selector-hostile characters still gets its own message area", async () => {
+  const odd = 'we"ird]id';
+  const b = boot([row({ provider: odd, status: "stopped" })], (url) => {
+    if (url.endsWith("/start")) return json(202, { job_id: "jx" });
+    if (url === "/api/models/jobs/jx") return json(200, { id: "jx", state: "failed", error: "nope", cause: [] });
+    return json(200, {});
+  });
+  const btn = [...b.document.querySelectorAll('[data-reg-action="start"]')].find((x) => x.getAttribute("data-provider") === odd);
+  b.click(btn);
+  await b.settle(); b.flush(); await b.settle();
+  const msg = [...b.document.querySelectorAll("[data-provider-msg]")].find((x) => x.getAttribute("data-provider-msg") === odd);
+  assert.match(msg.textContent, /nope/);
+});

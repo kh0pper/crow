@@ -56,6 +56,7 @@ export function dialogClientJS(lang) {
           path: '${tJs("models.dlgPath", lang)}',
           companion: '${tJs("models.dlgCompanion", lang)}',
           unverified: '${tJs("models.dlgUnverified", lang)}',
+          hashHint: '${tJs("models.dlgHashHint", lang)}',
           save: '${tJs("models.dlgSave", lang)}',
           saving: '${tJs("models.dlgSaving", lang)}',
           badJson: '${tJs("models.dlgBadJson", lang)}',
@@ -192,7 +193,10 @@ export function dialogClientJS(lang) {
               refs.companions.push(i);
               box.appendChild(field(fill(T.companion, { kind: kind }), i));
             });
-            box.appendChild(check("mcat-dlg-unverified", T.unverified, false));
+            // hf-adopt always verifies the LFS sha256 (review 6): no size-only option.
+            if (!isHf) box.appendChild(check("mcat-dlg-unverified", T.unverified, false));
+            // Verified adopt hashes the whole file inside the request (review 3).
+            box.appendChild(el("div", { "class": "mcat-dlg__hint" }, T.hashHint));
           }
 
           var err = el("div", { id: "mcat-dlg-error", "class": "mcat-dlg__error", role: "alert" });
@@ -206,11 +210,14 @@ export function dialogClientJS(lang) {
           actions.appendChild(save);
           box.appendChild(actions);
 
+          var pending = false;
           save.addEventListener("click", function () {
+            // One request at a time: a verified adopt can hash for minutes.
+            if (pending) return;
             var body;
             var path;
             if (isHf) {
-              body = { hfRepo: opts.hfRepo, file: opts.hfFile, path: refs.path.value.trim(), allowUnverified: !!document.getElementById("mcat-dlg-unverified").checked };
+              body = { hfRepo: opts.hfRepo, file: opts.hfFile, path: refs.path.value.trim() };
               path = "/hf-adopt";
             } else {
               var launchText = refs.launch.value.trim();
@@ -243,9 +250,11 @@ export function dialogClientJS(lang) {
                 path = "/register";
               }
             }
+            pending = true;
             save.disabled = true;
             save.textContent = T.saving;
             call("POST", path, body).then(function (res) {
+              pending = false;
               save.disabled = false;
               save.textContent = T.save;
               if (!res.ok) { showError(err, res.data || {}); return; }
@@ -262,6 +271,7 @@ export function dialogClientJS(lang) {
               hide();
               location.reload();
             }).catch(function () {
+              pending = false;
               save.disabled = false;
               save.textContent = T.save;
               showError(err, {});

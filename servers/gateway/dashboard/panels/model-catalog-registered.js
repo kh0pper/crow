@@ -246,6 +246,15 @@ export function registeredClientJS(lang) {
         // runtime strip call this too).
         window.CrowModelLifecycle = { start: start, stop: stop, show: show };
 
+        // Look rows up by attribute value, never by building a selector from
+        // a provider id (review 7): an id can hold characters a selector
+        // would need escaped.
+        function byAttr(name, value) {
+          var els = document.querySelectorAll("[" + name + "]");
+          for (var i = 0; i < els.length; i++) if (els[i].getAttribute(name) === value) return els[i];
+          return null;
+        }
+
         function overlay() { return document.getElementById("mcat-modal-overlay"); }
         function hideModal() { var o = overlay(); if (o) o.style.display = "none"; }
 
@@ -302,7 +311,7 @@ export function registeredClientJS(lang) {
           if (!b) return;
           var provider = b.getAttribute("data-provider");
           var action = b.getAttribute("data-reg-action");
-          var el = document.querySelector('[data-provider-msg="' + provider + '"]');
+          var el = byAttr("data-provider-msg", provider);
           if (action === "start") start(provider, el);
           else if (action === "stop") stop(provider, el);
           else if (action === "remove") requestRemove(provider, el);
@@ -319,9 +328,9 @@ export function registeredClientJS(lang) {
           var edited = JSON.parse(sessionStorage.getItem("mcat-edited") || "[]");
           sessionStorage.removeItem("mcat-edited");
           (Array.isArray(edited) ? edited : []).forEach(function (provider) {
-            var tr = document.querySelector('[data-provider-row="' + provider + '"]');
+            var tr = byAttr("data-provider-row", provider);
             if (tr && tr.getAttribute("data-status") === "resident") {
-              show(document.querySelector('[data-provider-msg="' + provider + '"]'), T.restartToApply);
+              show(byAttr("data-provider-msg", provider), T.restartToApply);
             }
           });
         } catch (err) { /* storage unavailable: no note */ }

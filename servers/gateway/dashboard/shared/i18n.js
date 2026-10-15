@@ -853,6 +853,7 @@ export const translations = {
   "models.dlgLaunchHint": { en: "Leave empty to use the catalog defaults.", es: "Déjalo vacío para usar los valores del catálogo." },
   "models.dlgPath": { en: "Weights file (absolute path)", es: "Archivo de pesos (ruta absoluta)" },
   "models.dlgCompanion": { en: "{kind} file (absolute path)", es: "Archivo {kind} (ruta absoluta)" },
+  "models.dlgHashHint": { en: "Without the size-only option, Crow hashes the whole file to verify it. A large file can take several minutes; keep this dialog open.", es: "Sin la opción de solo tamaño, Crow calcula el hash del archivo completo para verificarlo. Un archivo grande puede tardar varios minutos; deja este diálogo abierto." },
   "models.dlgUnverified": { en: "Accept a size match without hashing (marked unverified)", es: "Aceptar una coincidencia de tamaño sin calcular el hash (marcado sin verificar)" },
   "models.dlgSave": { en: "Save", es: "Guardar" },
   "models.dlgSaving": { en: "Saving…", es: "Guardando…" },
