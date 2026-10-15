@@ -23,38 +23,25 @@
 import express, { Router } from "express";
 import { ipKeyGenerator } from "express-rate-limit";
 import { tieredRateLimit } from "../middleware/rate-limit.js";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { createDbClient } from "../../db.js";
 import { runReadOnlyQueryAsync } from "../../shared/sqlite-datasets.js";
 import { getObject } from "../../storage/s3-client.js";
+import { resolveCrowHome } from "../../shared/crow-home.js";
+import { figuresBucket, figureGatewayUrl } from "../../blog/figures-bucket.js";
 
 // Tailscale Serve only exposes /blog/* to the funnel (per the April
 // 2026 security fix that narrowed the public surface). The blog-hydrate
 // script + its vendored deps (Chart.js, Leaflet, shared renderer) must
 // therefore live under /blog/* too — the /bundles/* path works inside
 // the tailnet but 404s over the public URL. We static-mount the
-// tea-maps bundle's client assets under /blog/assets/* here.
-const TEA_MAPS_REPO = resolve(
-  homedir(),
-  "research-bundles",
-  "tea-maps",
-);
-const TEA_MAPS_INSTALLED = resolve(
-  homedir(),
-  ".crow",
-  "bundles",
-  "tea-maps",
-);
-const TEA_MAPS_DIR = existsSync(TEA_MAPS_INSTALLED)
-  ? TEA_MAPS_INSTALLED
-  : TEA_MAPS_REPO;
+// tea-maps bundle's client assets under /blog/assets/* here, from
+// CROW_BLOG_HYDRATE_ASSETS_DIR or this instance's installed bundle copy.
+function hydrateAssetsDir(env = process.env) {
+  return env.CROW_BLOG_HYDRATE_ASSETS_DIR || join(resolveCrowHome(env), "bundles", "tea-maps");
+}
 
 const MAX_ROWS = 5000;
-const FIGURES_BUCKET = "capstone-research";
-const GATEWAY_INTERNAL_URL =
-  process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";
 
 // Budget per 60-second window. Each chapter hydrate fetches
 // config.json + data.json for every chart (~2× chart count) + 1
@@ -140,6 +127,7 @@ export function blogEmbedApiRouter() {
   // JS + CSS + image sprites). The underlying bundle dirs are on disk;
   // express.static sets proper Content-Type.
   const staticOpts = { maxAge: "1h", index: false, dotfiles: "deny" };
+  const TEA_MAPS_DIR = hydrateAssetsDir();
   router.use(
     "/blog/assets/shared",
     express.static(resolve(TEA_MAPS_DIR, "shared"), staticOpts),
@@ -214,7 +202,7 @@ export function blogEmbedApiRouter() {
       if (config.region) params.set("region", String(config.region));
       if (config.county) params.set("county", config.county);
 
-      const upstreamUrl = `${GATEWAY_INTERNAL_URL}/bundles/tea-maps/api/geojson?${params.toString()}`;
+      const upstreamUrl = `${figureGatewayUrl()}/bundles/tea-maps/api/geojson?${params.toString()}`;
       const upstream = await fetch(upstreamUrl);
       res.status(upstream.status);
       res.set("Cache-Control", "public, max-age=300");
@@ -244,7 +232,7 @@ export function blogEmbedApiRouter() {
 
       const s3Key = `figures/${filename}`;
       try {
-        const { stream, stat } = await getObject(s3Key, { bucket: FIGURES_BUCKET });
+        const { stream, stat } = await getObject(s3Key, { bucket: figuresBucket() });
         res.set("Content-Type", stat.metaData?.["content-type"] || "image/png");
         res.set("Cache-Control", "public, max-age=31536000, immutable");
         stream.on("error", (err) => {
