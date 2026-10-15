@@ -329,7 +329,10 @@ before(async () => {
       + "<style>.nest-app{animation:none!important;opacity:1!important}</style>"
       // ?scale=150 stands in for a phone's font-size setting (Android Chrome
       // scales rem text the same way): every rem in the page grows by 1.5x.
-      + (u.searchParams.get("scale") === "150" ? "<style>html{font-size:150%!important}</style>" : "");
+      + (u.searchParams.get("scale") === "150" ? "<style>html{font-size:150%!important}</style>" : "")
+      // ?labels=150 grows ONLY the label text (root and gutters unchanged), the
+      // other way a phone's text setting can land.
+      + (u.searchParams.get("labels") === "150" ? "<style>.nest-app-label{font-size:1.05rem!important}</style>" : "");
     const html = renderLayout({ title: "Crow's Nest", content, activePanel: "nest", panels: getVisiblePanels(), lang });
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(html);
@@ -421,6 +424,7 @@ async function measure(w, h, query, { dark = false } = {}) {
       return {
         firstTop: apps[0].getBoundingClientRect().top,
         total: apps.length, full: full, overflow: overflow, broken: broken,
+        labels: labels.map(function(l){ return l.textContent; }),
         artifacts: document.querySelectorAll('.nest-grid a[href="/dashboard/artifacts"]').length,
         birdVisible: !!bb && bb.height > 0 && getComputedStyle(bird).display !== 'none',
         hScroll: document.documentElement.scrollWidth > vw + 1,
@@ -486,5 +490,18 @@ test("live 412x915 at default text size: no word breaks either", async (t) => {
   for (const lang of ["en", "es"]) {
     const m = await measure(412, 915, `?lang=${lang}`);
     assert.deepEqual(m.broken, [], `[${lang}] words broken mid-word`);
+  }
+});
+
+test("live 412x915 + 360x800 with only the label text at 150%: core labels never break mid-word", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const CORE_WORDS = { en: ["Extensions", "Messages", "Artifacts", "Settings"], es: ["Extensiones", "Mensajes", "Artefactos", "Ajustes"] };
+  for (const [w, h] of [[412, 915], [360, 800]]) {
+    for (const lang of ["en", "es"]) {
+      const m = await measure(w, h, `?lang=${lang}&labels=150`);
+      assert.deepEqual(m.broken, [], `[${w} ${lang} labels 150%] words broken mid-word`);
+      for (const word of CORE_WORDS[lang]) assert.ok(m.labels.includes(word), `[${w} ${lang}] "${word}" is on the grid`);
+      assert.equal(m.hScroll, false, `[${w} ${lang} labels 150%] no horizontal scroll`);
+    }
   }
 });
