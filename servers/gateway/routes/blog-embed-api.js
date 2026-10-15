@@ -181,7 +181,7 @@ export function blogEmbedApiRouter() {
       res.json({ section_id: sectionId, columns, rows, row_count: rows.length });
     } catch (err) {
       console.warn("[blog-embed-api] chart data error:", err.message);
-      res.status(500).json({ error: "internal_error", detail: err.message });
+      res.status(500).json({ error: "internal_error" });
     } finally {
       db.close();
     }
