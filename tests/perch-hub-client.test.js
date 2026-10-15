@@ -510,6 +510,10 @@ function makeEventTarget() {
    per-mount registry; appendChild registers any child that has an id, which
    mirrors what a real document's getElementById resolves after an append. */
 let ID_REGISTRY = null;
+/* QW2: the document whose activeElement focus() writes. mountHub points this
+   at its fake document; elements reach it here because a fake element has no
+   ownerDocument. */
+let FOCUS_DOC = null;
 
 function makeFakeElement(tag) {
   const target = makeEventTarget();
@@ -550,6 +554,11 @@ function makeFakeElement(tag) {
     getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
     hasAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name); },
     click() { if (this.onclick) this.onclick(); },
+    // QW2: focus management. focus() records its options so a test can prove
+    // preventScroll; contains() walks parentNode like the real one.
+    focus(opts) { if (FOCUS_DOC) FOCUS_DOC.activeElement = this; this._focusOpts = opts || null; },
+    blur() { if (FOCUS_DOC && FOCUS_DOC.activeElement === this) FOCUS_DOC.activeElement = null; },
+    contains(n) { for (let x = n; x; x = x.parentNode) { if (x === this) return true; } return false; },
   });
   // defineProperty, NOT a `get firstChild()` in the object literal above:
   // Object.assign copies a getter's VALUE, not the getter, so firstChild was
@@ -639,6 +648,8 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     // Open-anywhere C2: the launcher's directory field, its picker trigger,
     // and the root the client-built modal appends itself to.
     "perch-new-cwd", "perch-browse-btn", "perch-cwd-note", "perch-hub-root",
+    // QW2: the launcher's collapsed "More options" and the model it names.
+    "perch-launch-more", "perch-launch-more-model",
     // Phase D: the four tab panels + their buttons, the Activity rail, the
     // Session tab's cwd readout and its change trigger, the Files pane.
     "perch-tab-chat", "perch-tab-session", "perch-tab-files", "perch-tab-activity",
@@ -681,7 +692,9 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     getElementById(id) { return els[id] || dynamic[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
     createTextNode(text) { const n = makeFakeElement("#text"); n.textContent = String(text == null ? "" : text); return n; },
+    activeElement: null,
   });
+  FOCUS_DOC = doc;
 
   const winTarget = makeEventTarget();
   const vvTarget = makeEventTarget();
@@ -1429,6 +1442,12 @@ function listButtons(hub) {
   for (const row of hub.els["perch-list-body"].children) {
     for (const child of row.children || []) {
       if (child.tagName === "BUTTON") out.push({ row, btn: child, text: child.textContent });
+      // QW2: Rename / Archive / Close live inside the row's menu.
+      else if (String(child.className).split(" ").includes("roost-menu")) {
+        for (const item of child.children || []) {
+          if (item.tagName === "BUTTON") out.push({ row, btn: item, text: item.textContent });
+        }
+      }
     }
   }
   return out;
@@ -1882,17 +1901,21 @@ test("F1: a row says WHICH session it is, not just which bot", async () => {
   const rowSubtitle = await extract("rowSubtitle",
     "var WAITING_ON_YOU='waiting on you', ROW_CARD='card {id}';" +
     "function shortSid(s){return String(s==null?'':s).replace(/^perchlive-/,'');}");
-  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-11111111", cardId: 248 }),
+  // QW2: the second argument is renderList's collision verdict — the id is
+  // shown only when the row's visible text matches another row's.
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-11111111", cardId: 248 }, true),
     "awake · 11111111 · card 248");
-  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-22222222", cardId: null }),
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-22222222", cardId: null }, true),
     "awake · 22222222");
-  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-33333333", cardId: null, pendingUi: true }),
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-33333333", cardId: null, pendingUi: true }, true),
     "waiting on you · 33333333", "pendingUi still outranks the state word");
   // An idle bot row is unchanged: no session, so nothing to disambiguate.
-  assert.equal(rowSubtitle({ state: "idle", sessionId: null, cardId: null }), "idle");
+  assert.equal(rowSubtitle({ state: "idle", sessionId: null, cardId: null }, true), "idle");
   // cardId 0 is a real id, not an absence.
-  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-abcdef01", cardId: 0 }),
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-abcdef01", cardId: 0 }, true),
     "awake · abcdef01 · card 0");
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-abcdef01", cardId: 0 }, false),
+    "awake · card 0", "card 0 still tells it apart without the id");
 });
 
 test("F1: eight sessions on one bot render eight DISTINGUISHABLE rows", async () => {
@@ -2469,19 +2492,19 @@ const ROOST_NAMED = {
       label: "Nov package copy pass" }] }],
 };
 
-test("a named session renders its name AND keeps the id subtitle it always had", async () => {
+test("a named session renders its name; a unique row needs no id beside it (QW2)", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED) }) });
   const rowEl = hub.els["perch-list-body"].children[0];
   const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
-  assert.deepEqual(texts, ["R4 Assistant", "Nov package copy pass", "awake · aaaaaaaa · card 248"],
-    "the name is a convenience; the machine id is the identity and stays visible");
+  assert.deepEqual(texts, ["R4 Assistant", "Nov package copy pass", "awake · card 248"],
+    "the name and card identify it; the id stays in the close confirm (sessionLabel)");
 });
 
-test("an unnamed session falls back to exactly the subtitle it had before", async () => {
+test("an unnamed session alone on its bot reads as bot + state, no empty name line (QW2)", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch() });
   const rowEl = hub.els["perch-list-body"].children[0];
   const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
-  assert.deepEqual(texts, ["R4 Assistant", "awake · aaaaaaaa"], "no empty name line, no change to the old rendering");
+  assert.deepEqual(texts, ["R4 Assistant", "awake"], "nothing else on the list reads the same, so no hex");
 });
 
 test("a name containing markup is rendered as TEXT, in the row and in the confirm", async () => {
@@ -4914,4 +4937,340 @@ test("QW1 (review): switching sessions to ANOTHER bot relabels its rows with tha
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   assertLabels(hub, "Writer");
+});
+
+// ---------------------------------------------------------------------------
+// QW2 (design quick win 2): a tidy session list — one ⋯ menu per row, the raw
+// id only when the row would otherwise read the same as another, and a
+// launcher whose secondary fields fold into "More options".
+// ---------------------------------------------------------------------------
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+const tokens = (n) => String(n && n.className).split(/\s+/);
+const hasTok = (n, t) => tokens(n).includes(t);
+const liveRows = (hub) => hub.els["perch-list-body"].children.filter((c) => hasTok(c, "roost-row"));
+const rowMore = (row) => row.children.find((c) => hasTok(c, "roost-more"));
+const rowMenu = (row) => row.children.find((c) => hasTok(c, "roost-menu"));
+const menuItems = (row) => rowMenu(row).children.filter((c) => c.tagName === "BUTTON");
+const keyEv = (key) => {
+  const ev = { key, stopped: false, prevented: false };
+  ev.stopPropagation = () => { ev.stopped = true; };
+  ev.preventDefault = () => { ev.prevented = true; };
+  return ev;
+};
+/** Fire the list's 10s poll the way the interval would. */
+async function firePoll(hub) {
+  for (const [id, fn] of [...hub.timers.entries()]) {
+    if (hub.timerDelays.get(id) === 10000) fn();
+  }
+  await flush();
+}
+
+test("QW2: a live row shows Open and ONE ⋯ trigger; Rename/Archive/Close live in its menu", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const row = liveRows(hub)[0];
+  const direct = row.children.filter((c) => c.tagName === "BUTTON").map((b) => b.textContent);
+  assert.deepEqual(direct, ["Open", "⋯"], "the row itself carries only Open and the menu trigger");
+  const more = rowMore(row), menu = rowMenu(row);
+  assert.equal(more.getAttribute("aria-haspopup"), "menu");
+  assert.equal(more.getAttribute("aria-expanded"), "false");
+  assert.ok(menu.id, "the menu has an id for aria-controls");
+  assert.equal(more.getAttribute("aria-controls"), menu.id);
+  assert.equal(more.getAttribute("aria-label"), "More actions for R4 Assistant 11111111");
+  assert.equal(menu.getAttribute("role"), "menu");
+  assert.equal(menu.hidden, true, "closed until asked");
+  const items = menuItems(row);
+  assert.deepEqual(items.map((b) => b.textContent), ["Rename", "Archive", "Close"]);
+  assert.deepEqual(items.map((b) => tokens(b).find((t) => t.startsWith("roost-"))),
+    ["roost-rename", "roost-archive", "roost-close"], "the old classes stay on the items");
+  for (const b of items) {
+    assert.equal(b.getAttribute("role"), "menuitem");
+    assert.equal(b.getAttribute("tabindex"), "-1");
+  }
+  // Two rows never share a menu id.
+  assert.notEqual(rowMenu(liveRows(hub)[1]).id, menu.id);
+});
+
+test("QW2: an operator name with $& lands in the trigger's label literally", async () => {
+  const roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, label: "a$&b$'c" }] }] };
+  const hub = await mountHub({ fetchImpl: roostFetch(roost) });
+  const label = rowMore(liveRows(hub)[0]).getAttribute("aria-label");
+  assert.ok(label.includes("a$&b$'c"), "no replacement-pattern expansion: " + label);
+});
+
+test("QW2: the trigger toggles the menu, aria-expanded follows, focus goes to the first item", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  assert.equal(menu.hidden, false);
+  assert.equal(more.getAttribute("aria-expanded"), "true");
+  assert.equal(hub.doc.activeElement, menuItems(row)[0]);
+  more.onclick();
+  assert.equal(menu.hidden, true);
+  assert.equal(more.getAttribute("aria-expanded"), "false");
+});
+
+test("QW2: opening one row's menu closes another's", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const [a, b] = liveRows(hub);
+  rowMore(a).onclick();
+  rowMore(b).onclick();
+  assert.equal(rowMenu(a).hidden, true);
+  assert.equal(rowMore(a).getAttribute("aria-expanded"), "false");
+  assert.equal(rowMenu(b).hidden, false);
+});
+
+test("QW2: keyboard — ArrowDown opens, arrows/Home/End move, Escape closes, refocuses, and stops there", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  const items = menuItems(row);
+  const down = keyEv("ArrowDown");
+  more.onkeydown(down);
+  assert.equal(menu.hidden, false, "ArrowDown on the trigger opens");
+  assert.equal(down.prevented, true, "and does not scroll the list");
+  assert.equal(hub.doc.activeElement, items[0]);
+  menu.onkeydown(keyEv("ArrowDown"));
+  assert.equal(hub.doc.activeElement, items[1]);
+  menu.onkeydown(keyEv("End"));
+  assert.equal(hub.doc.activeElement, items[2]);
+  menu.onkeydown(keyEv("ArrowDown"));
+  assert.equal(hub.doc.activeElement, items[0], "wraps");
+  menu.onkeydown(keyEv("ArrowUp"));
+  assert.equal(hub.doc.activeElement, items[2], "wraps back");
+  menu.onkeydown(keyEv("Home"));
+  assert.equal(hub.doc.activeElement, items[0]);
+  const esc = keyEv("Escape");
+  menu.onkeydown(esc);
+  assert.equal(menu.hidden, true, "Escape closes");
+  assert.equal(more.getAttribute("aria-expanded"), "false");
+  assert.equal(hub.doc.activeElement, more, "and hands focus back to the trigger");
+  assert.equal(esc.stopped, true,
+    "Escape must not ALSO reach the document handlers (the artifact pane, the slash menu)");
+  // Enter / Space are the button's own click, which opens it.
+  more.onclick();
+  assert.equal(menu.hidden, false);
+  menu.onkeydown(keyEv("Tab"));
+  assert.equal(menu.hidden, true, "Tab closes without trapping focus");
+});
+
+test("QW2: choosing an item closes the menu and refocuses the trigger BEFORE prompt()/confirm()", async () => {
+  let focusAtPrompt = null, focusAtConfirm = null, hubRef = null;
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY),
+    promptImpl: () => { focusAtPrompt = hubRef.doc.activeElement; return null; },
+    confirmImpl: () => { focusAtConfirm = hubRef.doc.activeElement; return false; },
+  });
+  hubRef = hub;
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  menuItems(row)[0].onclick();
+  assert.equal(menu.hidden, true);
+  assert.equal(focusAtPrompt, more);
+  more.onclick();
+  menuItems(row)[2].onclick();
+  assert.equal(menu.hidden, true);
+  assert.equal(focusAtConfirm, more);
+});
+
+test("QW2: an outside click closes the menu; a click on its own trigger is left to the trigger", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  hub.doc._dispatch("click", { target: more });
+  assert.equal(menu.hidden, false, "the document handler ignores the trigger");
+  hub.doc._dispatch("click", { target: menuItems(row)[1] });
+  assert.equal(menu.hidden, false, "or anything inside the menu");
+  hub.doc._dispatch("click", { target: hub.els["perch-transcript"] });
+  assert.equal(menu.hidden, true, "anywhere else closes it");
+  assert.equal(more.getAttribute("aria-expanded"), "false");
+});
+
+test("QW2: the outside-click listener is bound once across Turbo re-runs", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const before = hub.doc._listenerCount("click");
+  vm.runInContext((await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en"), hub.sandbox);
+  await flush();
+  assert.equal(hub.doc._listenerCount("click"), before, "no growth per visit");
+});
+
+test("QW2: a poll while a menu is open keeps it open; the latest payload renders on close", async () => {
+  let roost = ROOST_ALL_BUSY;
+  const hub = await mountHub({ fetchImpl: (m, p) => roostFetch(roost)(m, p) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  roost = { birds: [{ ...ROOST_ALL_BUSY.birds[0], sessions: ROOST_ALL_BUSY.birds[0].sessions.slice(0, 2) }] };
+  await firePoll(hub);
+  roost = { birds: [{ ...ROOST_ALL_BUSY.birds[0], sessions: ROOST_ALL_BUSY.birds[0].sessions.slice(0, 1) }] };
+  await firePoll(hub);
+  assert.equal(liveRows(hub)[0], row, "the open row was not re-rendered under the operator");
+  assert.equal(menu.hidden, false, "and its menu is still open");
+  assert.equal(liveRows(hub).length, 3, "the deferred payloads wait");
+  menu.onkeydown(keyEv("Escape"));
+  assert.equal(liveRows(hub).length, 1, "closing renders the LATEST deferred payload, not the first");
+});
+
+test("QW2 (review M2): Tab with a parked poll does not redraw inside the keydown (focus would fall to <body>); it redraws on the next tick", async () => {
+  let roost = ROOST_ALL_BUSY;
+  const hub = await mountHub({ fetchImpl: (m, p) => roostFetch(roost)(m, p) });
+  const row = liveRows(hub)[0], more = rowMore(row), menu = rowMenu(row);
+  more.onclick();
+  roost = { birds: [{ ...ROOST_ALL_BUSY.birds[0], sessions: ROOST_ALL_BUSY.birds[0].sessions.slice(0, 1) }] };
+  await firePoll(hub);
+  menu.onkeydown(keyEv("Tab"));
+  assert.equal(menu.hidden, true, "Tab closes the menu");
+  assert.equal(liveRows(hub)[0], row, "the list is NOT torn down while the browser is still moving focus");
+  for (const [id, fn] of [...hub.timers.entries()]) {
+    if (hub.timerDelays.get(id) === 0) { hub.timers.delete(id); fn(); }
+  }
+  assert.equal(liveRows(hub).length, 1, "the parked poll lands on the next tick");
+});
+
+test("QW2: a failed /roost while the menu is open clears the list; the next poll redraws it", async () => {
+  let fail = false;
+  const hub = await mountHub({ fetchImpl: (m, p) => (p === "/roost" && fail)
+    ? makeResponse(503, { error: "x" }) : roostFetch(ROOST_ALL_BUSY)(m, p) });
+  rowMore(liveRows(hub)[0]).onclick();
+  fail = true;
+  await firePoll(hub);
+  assert.equal(liveRows(hub).length, 0, "the failure note replaced the rows");
+  fail = false;
+  await firePoll(hub);
+  assert.equal(liveRows(hub).length, 3, "a stale 'menu open' must not freeze the list forever");
+});
+
+test("QW2: a re-render restores focus inside the list, without scrolling, and never steals it", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  rowMore(liveRows(hub)[1]).focus();
+  await firePoll(hub);
+  const now = liveRows(hub)[1];
+  assert.equal(hub.doc.activeElement, rowMore(now), "the poll put focus back on the same control");
+  assert.equal(hub.doc.activeElement._focusOpts.preventScroll, true, "and without scrolling the list");
+  // Open buttons too.
+  const open = (r) => r.children.find((c) => c.tagName === "BUTTON" && c.textContent === "Open");
+  open(liveRows(hub)[2]).focus();
+  await firePoll(hub);
+  assert.equal(hub.doc.activeElement, open(liveRows(hub)[2]));
+  // Focus outside the list is left alone.
+  hub.els["perch-input"].focus();
+  await firePoll(hub);
+  assert.equal(hub.doc.activeElement, hub.els["perch-input"], "a poll must never pull focus into the list");
+});
+
+test("QW2: after Close, focus lands on the next row's ⋯, or New session when none is left", async () => {
+  let sessions = ROOST_ALL_BUSY.birds[0].sessions.slice(0, 2);
+  const roostNow = () => ({ birds: [{ ...ROOST_ALL_BUSY.birds[0], sessions }] });
+  const hub = await mountHub({
+    fetchImpl: (m, p) => {
+      const stop = p.match(/\/interactive\/([^/]+)\/stop$/);
+      if (stop) { sessions = sessions.filter((s) => s.sessionId !== stop[1]); return makeResponse(200, { ok: true }); }
+      return roostFetch(roostNow())(m, p);
+    },
+    confirmImpl: () => true,
+  });
+  menuItems(liveRows(hub)[0])[2].onclick();
+  await flush(); await flush();
+  assert.equal(liveRows(hub).length, 1);
+  assert.equal(hub.doc.activeElement, rowMore(liveRows(hub)[0]), "the next row's ⋯");
+  menuItems(liveRows(hub)[0])[2].onclick();
+  await flush(); await flush();
+  assert.equal(hub.doc.activeElement, hub.els["perch-new"], "no rows left: New session");
+});
+
+test("QW2: rowSubtitle shows the id only when asked to", async () => {
+  const rowSubtitle = await extract("rowSubtitle",
+    "var WAITING_ON_YOU='waiting on you', ROW_CARD='card {id}';" +
+    "function shortSid(s){return String(s==null?'':s).replace(/^perchlive-/,'');}");
+  const r = { state: "awake", sessionId: "perchlive-11111111", cardId: 248 };
+  assert.equal(rowSubtitle(r, false), "awake · card 248");
+  assert.equal(rowSubtitle(r, true), "awake · 11111111 · card 248");
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-22222222", cardId: null }, false), "awake");
+});
+
+/** One bot, sessions as given, and an optional archived list. */
+const roostOf = (sessions, archived) => ({
+  birds: [{ id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: sessions.map((s, i) => ({ sessionId: "perchlive-" + String(i + 1).repeat(8), state: "awake",
+      cardId: null, pendingUi: false, ...s })) }],
+  archived,
+});
+
+test("QW2: the raw id is hidden on a row whose name or card already tells it apart", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(roostOf([
+    { label: "November package" }, { cardId: 248 }, {},
+  ])) });
+  const seen = subtitles(hub);
+  assert.deepEqual(seen, ["awake", "awake · card 248", "awake"], JSON.stringify(seen));
+  for (const s of seen) assert.doesNotMatch(s, /\b[0-9a-f]{8}\b/);
+});
+
+test("QW2: the id comes back exactly where the visible text collides — names, cards, not the state word", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(roostOf([
+    { label: "Same" }, { label: "Same", state: "hibernating" },   // duplicate names, different states
+    { cardId: 7 }, { cardId: 7 },                                  // one card, two sessions
+    { label: "Unique" },
+  ])) });
+  const seen = subtitles(hub);
+  assert.match(seen[0], /11111111/); assert.match(seen[1], /22222222/);
+  assert.match(seen[2], /33333333/); assert.match(seen[3], /44444444/);
+  assert.doesNotMatch(seen[4], /55555555/, "a unique row keeps its id hidden");
+});
+
+test("QW2: archived rows are compared among archived rows only", async () => {
+  const arch = (sid, label) => ({ sessionId: sid, botId: "r4-assistant", botName: "R4 Assistant",
+    label, state: "hibernating", archivedAt: "2026-09-13T12:00:00.000Z" });
+  const hub = await mountHub({ fetchImpl: roostFetch(roostOf([{ label: "old session" }], [
+    arch("perchlive-aaaa0001", "old session"),
+    arch("perchlive-bbbb0002", "twin"), arch("perchlive-cccc0003", "twin"),
+  ])) });
+  const list = hub.els["perch-list-body"].children.find((c) => hasTok(c, "archived-list"));
+  const when = list.children.map((r) => r.children.find((c) => c.className === "roost-main")
+    .children.find((c) => c.className === "roost-when").textContent);
+  assert.doesNotMatch(when[0], /aaaa0001/, "an archived name matching a LIVE row is not a collision");
+  assert.match(when[1], /bbbb0002/); assert.match(when[2], /cccc0003/);
+  assert.doesNotMatch(when[0], /perchlive-/, "never the raw full id");
+});
+
+test("QW2: the launcher folds model + directory into More options, whose summary names the model", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY, {
+    "/models": () => makeResponse(200, { models: LAUNCH_MODELS, default: "crow-local/qwen" }),
+  }) });
+  await flush();
+  assert.match(hub.els["perch-launch-more-model"].textContent, /Qwen/,
+    "a non-default pick must not hide behind a closed disclosure");
+  const sel = hub.els["perch-new-model"];
+  sel.value = "raven-flash/flash-next";
+  sel.onchange();
+  assert.match(hub.els["perch-launch-more-model"].textContent, /Flash Next/);
+});
+
+test("QW2: a bad_cwd spawn opens More options so the field it is about is on screen", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY, {
+    "/interactive": (m, p) => (m === "POST" && p.endsWith("/interactive"))
+      ? makeResponse(400, { error: "bad_cwd" }) : makeResponse(200, {}),
+  }) });
+  hub.els["perch-launch-more"].open = false;
+  hub.els["perch-new-cwd"].value = "/gone";
+  hub.els["perch-new"].onclick();
+  await flush();
+  assert.equal(hub.els["perch-launch-more"].open, true);
+  assert.equal(hub.els["perch-launch-note"].hidden, false);
+});
+
+test("QW2: any other launcher error leaves More options closed (the note sits outside it)", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY, {
+    "/interactive": (m, p) => (m === "POST" && p.endsWith("/interactive"))
+      ? makeResponse(500, {}) : makeResponse(200, {}),
+  }) });
+  hub.els["perch-launch-more"].open = false;
+  hub.els["perch-new"].onclick();
+  await flush();
+  assert.equal(hub.els["perch-launch-more"].open, false);
+  assert.equal(hub.els["perch-launch-note"].hidden, false);
+  assert.equal(hub.els["perch-launch-note"].textContent, "Could not start a session.");
+});
+
+test("QW2: Spanish strings for the row menu label", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), lang: "es" });
+  assert.match(rowMore(liveRows(hub)[0]).getAttribute("aria-label"), /^Más acciones para R4 Assistant 11111111$/);
 });

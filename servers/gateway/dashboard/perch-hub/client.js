@@ -356,6 +356,8 @@ export function perchHubJs(lang = "en") {
   var MODEL_HIDE_UNAVAILABLE='${tJs("perch.modelHideUnavailable", lang)}';
   var LAUNCH_MODEL_FAILED='${tJs("perch.launchModelFailed", lang)}';
   var CLOSE_LABEL='${tJs("perch.close", lang)}';
+  /* QW2: the row's one action menu. */
+  var ROW_ACTIONS='${tJs("perch.rowActions", lang)}';
   var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
   var CLOSE_FAILED='${tJs("perch.closeFailed", lang)}';
   var CLOSE_FAILED_FOR='${tJs("perch.closeFailedFor", lang)}';
@@ -415,12 +417,16 @@ export function perchHubJs(lang = "en") {
      each pass sitting on top of an irreversible Close. Open is recoverable;
      Close is not, which is what makes identity load-bearing here rather than
      decorative. The engine mints "perchlive-" + 8 hex, so the hex alone is
-     the short, unambiguous handle. */
+     the short, unambiguous handle.
+     QW2: the handle is shown only where it is NEEDED — when the row's
+     visible text (bot, name, card) matches another row's in the same list.
+     renderList decides (rowCollisions) and passes the verdict in; a named or
+     carded row reads as itself without hex. */
   function shortSid(sid){ return String(sid==null?'':sid).replace(/^perchlive-/,''); }
-  function rowSubtitle(r){
+  function rowSubtitle(r,showId){
     if(!r) return '';
     var parts=[r.pendingUi?WAITING_ON_YOU:r.state];
-    if(r.sessionId) parts.push(shortSid(r.sessionId));
+    if(showId&&r.sessionId) parts.push(shortSid(r.sessionId));
     /* The card a session is working is the most human handle there is, when
        it has one. cardId is already on every row listRows() builds. */
     if(r.cardId!=null) parts.push(ROW_CARD.replace('{id}',String(r.cardId)));
@@ -453,59 +459,215 @@ export function perchHubJs(lang = "en") {
 
   var rowIndex={};                    /* sessionId -> row, for a warm openSession */
 
+  /* QW2: which session rows would read the same as another row in the SAME
+     list (live rows and archived rows are compared separately — they sit in
+     different sections). The key is what the operator actually sees: bot,
+     name, card. The state word is deliberately left out: it flickers between
+     polls, and the id appearing and vanishing with it would be noise. */
+  function rowCollisions(list,cardOf){
+    var counts={}, keys={};
+    (list||[]).forEach(function(r){
+      if(!r||!r.sessionId) return;
+      var k=[r.botName||r.botId||'',r.label||'',cardOf(r)].join('\\u0000');
+      keys[r.sessionId]=k; counts[k]=(counts[k]||0)+1;
+    });
+    var out={};
+    for(var sid in keys) out[sid]=counts[keys[sid]]>1;
+    return out;
+  }
+
+  /* ---- QW2: the row's ⋯ menu ------------------------------------------
+     Rename / Archive / Close moved off the row into one menu, opened INLINE
+     below its row (the list body scrolls; a popover would clip). "Is a menu
+     open" is read from the DOM every time, never kept in a variable:
+     showListNote() clears the body on any failure, and a flag that outlived
+     its menu would freeze the list for good. */
+  var menuSeq=0;
+  function hasClass(n,c){ return !!n&&String(n.className||'').split(' ').indexOf(c)>=0; }
+  /* Depth-first search of a (small) list subtree. */
+  function findIn(node,pred){
+    var kids=(node&&node.children)||[];
+    for(var i=0;i<kids.length;i++){
+      if(pred(kids[i])) return kids[i];
+      var hit=findIn(kids[i],pred); if(hit) return hit;
+    }
+    return null;
+  }
+  function openRowMenu(){
+    return findIn(el('perch-list-body'),function(c){ return !c.hidden&&hasClass(c,'roost-menu'); });
+  }
+  function focusEl(n){ if(n&&n.focus) n.focus({preventScroll:true}); }
+  /* keepDeferred: switching straight to another row's menu must not redraw
+     the list (and with it the menu being opened) in between. */
+  function setRowMenu(menu,open,refocus,keepDeferred){
+    if(!menu) return;
+    menu.hidden=!open;
+    var trig=menu.__trigger;
+    if(trig) trig.setAttribute('aria-expanded',open?'true':'false');
+    if(open){ focusEl(menu.__items[0]); return; }
+    if(refocus) focusEl(trig);
+    /* A poll that arrived while the menu was open was parked; draw it now. */
+    if(deferredList&&!keepDeferred){ var d=deferredList; deferredList=null; renderList(d.rows,d.archived); }
+  }
+  function closeRowMenu(refocus){ var m=openRowMenu(); if(m) setRowMenu(m,false,refocus); }
+
+  function buildRowMenu(row,sid,actions){
+    var more=document.createElement('button');
+    more.type='button'; more.className='roost-more'; more.textContent='\\u22ef';
+    more.setAttribute('data-sid',sid);
+    more.setAttribute('aria-haspopup','menu');
+    more.setAttribute('aria-expanded','false');
+    /* A FUNCTION replacement: the label is operator text, and a string
+       replacement would expand $& / $' inside it. */
+    more.setAttribute('aria-label',ROW_ACTIONS.replace('{session}',function(){ return sessionLabel(sid); }));
+    var menu=document.createElement('div');
+    menu.className='roost-menu'; menu.id='roost-menu-'+(++menuSeq);
+    menu.setAttribute('role','menu'); menu.hidden=true;
+    more.setAttribute('aria-controls',menu.id);
+    var items=[];
+    actions.forEach(function(a){
+      var it=document.createElement('button');
+      it.type='button'; it.className=a.cls; it.textContent=a.label;
+      it.setAttribute('role','menuitem'); it.setAttribute('tabindex','-1');
+      /* Close and hand focus back BEFORE the action: prompt()/confirm()
+         return focus to whatever had it, and that must be the trigger, not a
+         menu that no longer exists. */
+      it.onclick=function(){ setRowMenu(menu,false,true); a.run(); };
+      items.push(it); menu.appendChild(it);
+    });
+    menu.__trigger=more; menu.__items=items;
+    more.onclick=function(){
+      var open=menu.hidden;
+      if(open){ var other=openRowMenu(); if(other&&other!==menu) setRowMenu(other,false,false,true); }
+      setRowMenu(menu,open,!open);
+    };
+    /* Enter and Space are the button's own click (which opens and focuses
+       the first item); ArrowDown is the menu-button extra. */
+    more.onkeydown=function(ev){
+      if(!ev||ev.key!=='ArrowDown') return;
+      if(ev.preventDefault) ev.preventDefault();
+      if(menu.hidden) more.onclick(); else focusEl(items[0]);
+    };
+    menu.onkeydown=function(ev){
+      var k=ev&&ev.key, i=items.indexOf(document.activeElement), n=items.length;
+      if(k==='Escape'){
+        /* Stop here: the document's own Escape handlers (the slash menu, the
+           artifact pane) must not ALSO fire for this keypress. */
+        if(ev.stopPropagation) ev.stopPropagation();
+        if(ev.preventDefault) ev.preventDefault();
+        setRowMenu(menu,false,true); return;
+      }
+      /* Tab: close, but draw a parked poll on the NEXT tick — redrawing
+         inside this keydown removes the focused item before the browser
+         moves focus, and focus falls to <body>. */
+      if(k==='Tab'){
+        setRowMenu(menu,false,false,true);
+        setTimeout(function(){
+          if(!openRowMenu()&&deferredList){ var d=deferredList; deferredList=null; renderList(d.rows,d.archived); }
+        },0);
+        return;
+      }
+      var next=-1;
+      if(k==='ArrowDown') next=(i+1)%n;
+      else if(k==='ArrowUp') next=(i<=0?n:i)-1;
+      else if(k==='Home') next=0;
+      else if(k==='End') next=n-1;
+      if(next<0) return;
+      if(ev.preventDefault) ev.preventDefault();
+      focusEl(items[next]);
+    };
+    row.appendChild(more);
+    row.appendChild(menu);
+  }
+
+  /* Outside click closes the open menu. document outlives a Turbo body swap,
+     so this is the bindOnce + live() pattern. A click on the trigger (or in
+     the menu) is the trigger's own business. */
+  bindOnce(document,'click','rowMenuOutside',function(ev){
+    if(!live()) return;
+    var m=openRowMenu(); if(!m) return;
+    var t=ev&&ev.target;
+    if(t&&(m.contains(t)||(m.__trigger&&m.__trigger.contains(t)))) return;
+    setRowMenu(m,false,false);
+  });
+
+  /* The latest /roost payload that arrived while a menu was open. Only the
+     newest is worth drawing, so each poll overwrites it. */
+  var deferredList=null;
+
+  /* Which list control had focus, so a re-render can put it back. Only when
+     focus was INSIDE the list body: a poll must never pull focus out of the
+     composer. */
+  function listFocusMark(body){
+    var ae=document.activeElement;
+    if(!ae||ae===body||!body.contains||!body.contains(ae)) return null;
+    var sid=ae.getAttribute?ae.getAttribute('data-sid'):null;
+    if(!sid) return null;
+    var rows=body.children||[], idx=-1;
+    for(var i=0;i<rows.length;i++){ if(rows[i].contains&&rows[i].contains(ae)){ idx=i; break; } }
+    return {sid:sid,more:hasClass(ae,'roost-more'),idx:idx};
+  }
+  function restoreListFocus(body,mark){
+    if(!mark) return;
+    var target=findIn(body,function(c){
+      return !!c.getAttribute&&c.getAttribute('data-sid')===mark.sid&&hasClass(c,'roost-more')===mark.more;
+    });
+    if(!target){
+      /* The row is gone (closed, archived): the next row's ⋯ — which now sits
+         at the same index — or, with none left, New session. */
+      var r=mark.idx>=0?(body.children||[])[mark.idx]:null;
+      target=findIn(r,function(c){ return hasClass(c,'roost-more'); })||el('perch-new');
+    }
+    focusEl(target);
+  }
+
   function renderList(rows,archived){
     var body=el('perch-list-body'); if(!body) return;
+    deferredList=null;
+    var mark=listFocusMark(body);
     clearEl(body); rowIndex={};
     var arch=Array.isArray(archived)?archived:[];
     /* No live rows: say so, UNLESS archived sessions exist — then the
        Archived affordance below is the operator's way back in, and a flat
        "No sessions" would hide it. */
-    if(!rows.length&&!arch.length){ body.appendChild(line('empty',NO_SESSIONS)); flushPendingNote(); return; }
+    if(!rows.length&&!arch.length){ body.appendChild(line('empty',NO_SESSIONS)); flushPendingNote(); restoreListFocus(body,mark); return; }
+    var collide=rowCollisions(rows,function(r){ return r.cardId==null?'':String(r.cardId); });
     rows.forEach(function(r){
       var row=document.createElement('div'); row.className='roost-row';
       row.appendChild(line('roost-dot',''));
       var main=document.createElement('div'); main.className='roost-main';
       main.appendChild(line('roost-cwd',r.botName));
-      /* The name on its OWN line, above the unchanged subtitle. Folding it
-         into rowSubtitle() instead would push state/id/card out of a 320px
-         column; this keeps "state · id · card" exactly as it was, which is
-         also the fallback when there is no name. textContent via line(),
+      /* The name on its OWN line, above the subtitle, so a long name cannot
+         push state/card out of a 320px column. textContent via line(),
          never innerHTML — this string came from an operator. */
       if(r.label) main.appendChild(line('roost-name',r.label));
-      main.appendChild(line('roost-when',rowSubtitle(r)));
+      main.appendChild(line('roost-when',rowSubtitle(r,!!collide[r.sessionId])));
       row.appendChild(main);
+      /* Cached BEFORE the menu is built: its aria-label names the session
+         through sessionLabel(), which reads rowIndex. */
+      if(r.sessionId) rowIndex[r.sessionId]=r;
       var b=document.createElement('button');
       b.type='button'; b.textContent=r.sessionId?OPEN_LABEL:TALK_LABEL;
+      if(r.sessionId) b.setAttribute('data-sid',r.sessionId);
       b.onclick=r.sessionId
         ? function(){ rowIndex[r.sessionId]=r; location.hash=r.sessionId; }
         : function(){ startSession(r.botId,r.botName); };
       row.appendChild(b);
-      /* Only a live session can be closed; an idle bot row has nothing to
-         stop. Second button, not a swipe or a long-press: this has to work
-         with a thumb on a 412px screen. */
+      /* Only a live session has actions; an idle bot row has nothing to
+         rename or stop. Rename and Archive are reversible (no confirm);
+         Close is terminal and keeps its confirm in stopSession(). */
       if(r.sessionId){
-        /* No confirm on this one: renaming is reversible and cheap. */
-        var n=document.createElement('button');
-        n.type='button'; n.className='roost-rename'; n.textContent=RENAME_LABEL;
-        n.onclick=function(){ renameSession(r.sessionId,r.label||''); };
-        row.appendChild(n);
-        /* PR-C: archive hides the session from the live list without stopping
-           it (a live child keeps running). Reversible via the Archived
-           affordance, so no confirm — same posture as rename. */
-        var ar=document.createElement('button');
-        ar.type='button'; ar.className='roost-archive'; ar.textContent=ARCHIVE_LABEL;
-        ar.onclick=function(){ archiveSession(r.sessionId); };
-        row.appendChild(ar);
-        var x=document.createElement('button');
-        x.type='button'; x.className='roost-close'; x.textContent=CLOSE_LABEL;
-        x.onclick=function(){ stopSession(r.sessionId); };
-        row.appendChild(x);
+        buildRowMenu(row,r.sessionId,[
+          {cls:'roost-rename',label:RENAME_LABEL,run:function(){ renameSession(r.sessionId,r.label||''); }},
+          {cls:'roost-archive',label:ARCHIVE_LABEL,run:function(){ archiveSession(r.sessionId); }},
+          {cls:'roost-close',label:CLOSE_LABEL,run:function(){ stopSession(r.sessionId); }}
+        ]);
       }
-      if(r.sessionId) rowIndex[r.sessionId]=r;
       body.appendChild(row);
     });
     renderArchived(body,arch);
     flushPendingNote();               /* a parked note must survive this render */
+    restoreListFocus(body,mark);
   }
 
   /* PR-C (audit item 14): the "Archived" affordance. A collapsed toggle whose
@@ -520,16 +682,20 @@ export function perchHubJs(lang = "en") {
     head.type='button'; head.className='archived-toggle';
     head.textContent=ARCHIVED_LABEL+' ('+archived.length+')';
     var cont=document.createElement('div'); cont.className='archived-list'; cont.hidden=!archivedOpen;
+    /* Same id rule as the live rows, compared among archived rows only.
+       Archived rows carry no card. */
+    var collide=rowCollisions(archived,function(){ return ''; });
     archived.forEach(function(a){
       if(!a||!a.sessionId) return;
       var row=document.createElement('div'); row.className='roost-row archived-row';
       var main=document.createElement('div'); main.className='roost-main';
       main.appendChild(line('roost-cwd',a.botName||a.botId||''));
       if(a.label) main.appendChild(line('roost-name',a.label));
-      main.appendChild(line('roost-when',a.sessionId));
+      main.appendChild(line('roost-when',rowSubtitle({state:a.state,sessionId:a.sessionId,cardId:null},!!collide[a.sessionId])));
       row.appendChild(main);
       var u=document.createElement('button');
       u.type='button'; u.className='roost-rename'; u.textContent=UNARCHIVE_LABEL;
+      u.setAttribute('data-sid',a.sessionId);
       u.onclick=function(){ unarchiveSession(a.sessionId); };
       row.appendChild(u);
       cont.appendChild(row);
@@ -658,6 +824,20 @@ export function perchHubJs(lang = "en") {
     /* want cleared too, so the next poll retries a list that failed to load
        rather than leaving the picker permanently absent. */
     launchModels={botId:null,default:null,want:null,list:null,showAll:false};
+    syncLaunchSummary();
+  }
+
+  /* QW2: the "More options" summary names the model the next session will
+     start on — the picker lives inside the collapsed details, and a changed
+     pick must stay visible with it closed. Empty while there is no list. */
+  function syncLaunchSummary(){
+    var span=el('perch-launch-more-model'); if(!span) return;
+    var sel=el('perch-new-model'), txt='';
+    if(sel&&!sel.hidden){
+      var opts=sel.options||[], want=String(sel.value||'');
+      for(var i=0;i<opts.length;i++){ if(String(opts[i].value)===want){ txt=opts[i].textContent; break; } }
+    }
+    span.textContent=txt?(' \\u00b7 '+txt):'';
   }
 
   function renderLaunchModels(list,dflt){
@@ -687,6 +867,7 @@ export function perchHubJs(lang = "en") {
     if(listed) sel.value=dflt;
     sel.hidden=false;
     if(lbl) lbl.hidden=false;
+    syncLaunchSummary();
   }
 
   /* "Show more (N)": re-render with the hidden entries in their own
@@ -699,7 +880,10 @@ export function perchHubJs(lang = "en") {
     launchModels.showAll=!launchModels.showAll;
     renderLaunchModels(launchModels.list,launchModels.default);
     if(selectHasValue(sel,keep)) sel.value=keep;
+    syncLaunchSummary();
   };
+  var launchModelSel=el('perch-new-model');
+  if(launchModelSel) launchModelSel.onchange=syncLaunchSummary;
 
   function syncLaunchModels(){
     var botId=launchBotId();
@@ -952,7 +1136,12 @@ export function perchHubJs(lang = "en") {
       /* The route validated the directory before the engine ever saw it
          (open-anywhere C1): a stale picker choice — deleted between browse
          and spawn — lands here, and the note belongs beside the field. */
-      if(r.status===400&&r.j&&r.j.error==='bad_cwd'){ setLaunchNote(CWD_INVALID); return; }
+      if(r.status===400&&r.j&&r.j.error==='bad_cwd'){
+        /* QW2: the directory field lives in "More options" — open it, so the
+           field this note is about is on screen beside it. */
+        var moreOpts=el('perch-launch-more'); if(moreOpts) moreOpts.open=true;
+        setLaunchNote(CWD_INVALID); return;
+      }
       if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
       var sid=r.j.sessionId;
       rowIndex[sid]={botId:botId,botName:botName,sessionId:sid};
@@ -985,7 +1174,14 @@ export function perchHubJs(lang = "en") {
       /* One payload, two renders: the rows AND the launcher's bot roster.
          Deriving the launcher from the same /roost response is what keeps
          this to a single request per poll. */
-      if(r.ok&&r.j){ renderLauncher(spawnableBots(r.j)); renderList(listRows(r.j),(r.j.archived||[])); return; }
+      if(r.ok&&r.j){
+        renderLauncher(spawnableBots(r.j));
+        /* QW2: never redraw the rows under an open ⋯ menu — the operator is
+           mid-choice. Park the payload; closing the menu draws it. */
+        if(openRowMenu()){ deferredList={rows:listRows(r.j),archived:(r.j.archived||[])}; return; }
+        renderList(listRows(r.j),(r.j.archived||[]));
+        return;
+      }
       /* A failed /roost is NOT an empty roost, and the old else branch said
          both of the wrong things at once: it rendered "No live sessions." (a
          lie) and skipped renderLauncher entirely, leaving #perch-new greyed
