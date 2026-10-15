@@ -30,6 +30,14 @@ Extensions with web UIs are automatically proxied through the gateway (no extra 
 2. Find the installed extension and click **Remove**
 3. Containers are stopped, files are removed, firewall ports are closed
 
+## Local models live in the Model Catalog
+
+Extensions no longer lists model bundles (bundles that serve an LLM, embedding, rerank or vision model). In the **AI & Models** group a single **Local models** card shows how many models are registered and running, and opens the **Model Catalog** page of the dashboard, where models are downloaded, adopted from disk, registered, started and stopped. A model bundle that is already installed stays under **Installed** with its usual actions until it is migrated. Installing a model bundle directly through the API is refused with `model_bundle_moved`.
+
+GPU apps that are not model bundles, such as Ollama, LocalAI, Kokoro TTS or SDXL, still install from Extensions.
+
+**If you relied on the CUDA vLLM model bundles.** `vllm-cuda-embed`, `vllm-cuda-rerank` and `vllm-cuda-vision` leave Browse. Their Model Catalog equivalents run on llama-server (Vulkan) on any GPU, NVIDIA included: `qwen3-embedding-0.6b` or `embeddinggemma-300m` for embeddings, `qwen3-reranker-0.6b` for reranking and `qwen3-vl-4b-instruct` for vision. An operator on a CUDA-only host who wants vLLM can still install the generic `vllm` app bundle.
+
 ## Available Extensions
 
 ### AI & Automation
