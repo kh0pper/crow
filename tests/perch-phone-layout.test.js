@@ -226,43 +226,138 @@ test("live @1280x900: the desktop card is untouched — full height, nothing scr
 
 // ─── phone transcript: full-width messages under 600px ────────────────────
 
-test("css: under .perch-narrow the message row wraps and the body takes the full width", async () => {
+test("css (QW1): the message row stacks at EVERY width — label line, then the body at the full width", async () => {
   const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
   const css = perchHubCss().replace(/\/\*[\s\S]*?\*\//g, "");
-  assert.match(css, /#perch-hub-root\.perch-narrow \.entry\{flex-wrap:wrap/);
-  assert.match(css, /#perch-hub-root\.perch-narrow \.what\{flex:1 1 100%;order:2\}/);
-  // The desktop rule is untouched: the 64px gutter is still the default.
-  assert.match(css, /#perch-hub-root \.who\{flex:0 0 64px/);
+  const rule = (sel) => { const i = css.indexOf(sel + "{"); assert.ok(i >= 0, "missing rule " + sel); return css.slice(i, css.indexOf("}", i) + 1); };
+  const entry = rule("#perch-hub-root .entry");
+  assert.match(entry, /flex-wrap:wrap/);
+  assert.match(entry, /position:relative/, "the hidden label needs a positioned ancestor inside the scroller (review H)");
+  assert.match(rule("#perch-hub-root .what"), /flex:1 1 100%;order:2/);
+  assert.match(rule("#perch-hub-root .copy-msg"), /order:1/);
+  assert.match(rule("#perch-hub-root .entry.user"), /border:1px solid var\(--line\)/, "your own turn is the boxed row everywhere");
+  const who = rule("#perch-hub-root .who");
+  assert.doesNotMatch(who, /flex:0 0 64px/, "no 64px gutter left");
+  assert.doesNotMatch(who, /text-transform:uppercase|JetBrains|monospace/, "the label is the bot's name in normal case, not a mono role tag");
+  assert.match(who, /overflow-wrap:anywhere/, "a long bot name wraps instead of pushing the row sideways");
+  assert.match(who, /color:var\(--/, "the name colour comes from the theme tokens");
+  assert.doesNotMatch(css, /\.perch-narrow \.(entry|who|what|copy-msg)\b/, "the phone-only copies are gone (the class itself stays)");
+  // One shared visually-hidden rule (the phone card's .ph-sr merged into it).
+  const vh = css.match(/[^{}]*\.who\.vh[^{}]*\{[^}]*\}/);
+  assert.ok(vh, "a .who.vh rule beats .who on specificity");
+  assert.match(vh[0], /#perch-hub-root \.vh/);
+  assert.match(vh[0], /\.ph-sr/, "the phone card reuses the same rule");
+  assert.match(vh[0], /position:absolute/);
+  assert.match(vh[0], /user-select:none/, "copying a transcript does not paste You: into it");
+  assert.equal((css.match(/\.ph-sr\b/g) || []).length, 1, "no second hidden-text rule");
+  // The other small labels in the transcript follow suit.
+  assert.doesNotMatch(css.match(/[^{}]*\.artcard \.art-eyebrow\{[^}]*\}/)[0], /uppercase|JetBrains/);
+  assert.doesNotMatch(css.match(/[^{}]*:is\(\.artask,\.artfb\) \.art-eyebrow\{[^}]*\}/)[0], /uppercase|JetBrains/);
 });
 
 const MSG_GEOMETRY = `(function(){
   var tr=document.getElementById('perch-transcript').getBoundingClientRect();
   var bot=document.querySelector('#perch-transcript .entry.bot');
-  var who=bot.querySelector('.who').getBoundingClientRect(), what=bot.querySelector('.what').getBoundingClientRect();
+  var whoEl=bot.querySelector('.who'), whoCs=getComputedStyle(whoEl);
+  var who=whoEl.getBoundingClientRect(), what=bot.querySelector('.what').getBoundingClientRect();
+  var user=document.querySelector('#perch-transcript .entry.user'), uw=user.querySelector('.who'), uwr=uw.getBoundingClientRect();
+  var uwhat=user.querySelector('.what').getBoundingClientRect(), ub=user.getBoundingClientRect();
+  var labels=[].map.call(document.querySelectorAll('#perch-transcript .entry .who'),function(e){return e.textContent;});
   var table=bot.querySelector('table'), pre=bot.querySelector('pre');
   return JSON.stringify({ narrow:/(^|\\s)perch-narrow(\\s|$)/.test(document.getElementById('perch-hub-root').className),
+    whoText:whoEl.textContent, whoTransform:whoCs.textTransform, whoFont:whoCs.fontFamily, whoColor:whoCs.color,
+    userWhoText:uw.textContent, userWhoW:uwr.width, userWhoH:uwr.height,
+    userWhatTop:uwhat.top, userTop:ub.top, labels:labels,
     trLeft:tr.left, trWidth:tr.width, whoBottom:who.bottom, whatTop:what.top, whatLeft:what.left, whatWidth:what.width,
     tableRight:table.getBoundingClientRect().right, preRight:pre.getBoundingClientRect().right, trRight:tr.right,
     docScrollX:document.documentElement.scrollWidth-innerWidth });
 })()`;
 const MSG_READY = "!!document.querySelector('#perch-transcript .entry.bot table')";
 
-test("live @412x915: messages use the full width, the role label sits above them", async (t) => {
+// QW1: the same stacked row at both widths (the 64px gutter is gone), the
+// label is the bot's display name in normal case, and your own turn carries
+// a visually hidden "You:".
+for (const [w, h] of [[412, 915], [1280, 900]]) {
+  test(`live @${w}x${h} (QW1): the bot's name sits above a full-width message; your own label is hidden but spoken`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    const m = await measure(w, h, MSG_GEOMETRY, { ready: MSG_READY });
+    assert.equal(m.narrow, w < 600);
+    assert.equal(m.whoText, "Hank", "the bot's display name: " + JSON.stringify(m.labels));
+    assert.equal(m.whoTransform, "none", "normal case");
+    assert.doesNotMatch(m.whoFont, /mono/i, "not a monospace role tag: " + m.whoFont);
+    assert.ok(!m.labels.some((x) => /^(user|assistant|bot|you)$/i.test(x)), "no raw role word anywhere: " + JSON.stringify(m.labels));
+    assert.equal(m.userWhoText, "You:");
+    assert.ok(m.userWhoW <= 1 && m.userWhoH <= 1, "your label takes no visible space: " + JSON.stringify(m));
+    assert.ok(m.userWhatTop - m.userTop <= 12, "your message starts at the top of its box, no label line: " + JSON.stringify(m));
+    assert.ok(Math.abs(m.whatLeft - m.trLeft) <= 1, "no gutter: " + JSON.stringify(m));
+    assert.ok(m.whatWidth >= m.trWidth - 30, "the message spans the column: " + JSON.stringify(m));
+    assert.ok(m.whatTop >= m.whoBottom - 1, "the label is on its own line above: " + JSON.stringify(m));
+    assert.ok(m.tableRight <= m.trRight + 1 && m.preRight <= m.trRight + 1, "wide content stays inside: " + JSON.stringify(m));
+    assert.equal(m.docScrollX, 0, "no horizontal page scroll");
+  });
+}
+
+// Review H: the hidden label is position:absolute. Without a positioned
+// ancestor inside the scrolling transcript, the labels of rows scrolled out
+// of view hang below the page and make the PAGE scroll on a long chat.
+const LONG_CHAT = `(function(){
+  var tr=document.getElementById('perch-transcript');
+  var rows=[].slice.call(tr.querySelectorAll('.entry.user, .entry.bot'));
+  for(var i=0;i<12;i++) rows.forEach(function(r){ tr.appendChild(r.cloneNode(true)); });
+  tr.scrollTop=0;
+  var cb=document.querySelector('.content-body');
+  return JSON.stringify({ screens:tr.scrollHeight/innerHeight, contentBodyScroll:cb.scrollHeight-cb.clientHeight,
+    docScrollY:document.documentElement.scrollHeight-innerHeight, docScrollX:document.documentElement.scrollWidth-innerWidth });
+})()`;
+
+test("live @412x915 (QW1): a transcript over three screens long does not make the page scroll", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
-  const m = await measure(412, 915, MSG_GEOMETRY, { ready: MSG_READY });
-  assert.equal(m.narrow, true);
-  assert.ok(Math.abs(m.whatLeft - m.trLeft) <= 1, "no gutter: " + JSON.stringify(m));
-  assert.ok(m.whatWidth >= m.trWidth - 30, "the message spans the column: " + JSON.stringify(m));
-  assert.ok(m.whatTop >= m.whoBottom - 1, "the label is on its own line above: " + JSON.stringify(m));
-  assert.ok(m.tableRight <= m.trRight + 1 && m.preRight <= m.trRight + 1, "wide content stays inside: " + JSON.stringify(m));
-  assert.equal(m.docScrollX, 0, "no horizontal page scroll");
+  const m = await measure(412, 915, LONG_CHAT, { ready: MSG_READY });
+  assert.ok(m.screens > 3, "the fixture is long enough: " + JSON.stringify(m));
+  assert.equal(m.contentBodyScroll, 0, "the page itself scrolls: " + JSON.stringify(m));
+  assert.ok(m.docScrollY <= 0 && m.docScrollX <= 0, JSON.stringify(m));
 });
 
-test("live @1280x900: the desktop keeps the role gutter", async (t) => {
+test("live @412x915 (QW1): the long-chat test reaches the mechanism — without the row's position:relative the page scrolls", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
-  const m = await measure(1280, 900, MSG_GEOMETRY, { ready: MSG_READY });
-  assert.equal(m.narrow, false);
-  assert.ok(m.whatLeft - m.trLeft >= 64, "the body sits beside the 64px label column: " + JSON.stringify(m));
+  const m = await measure(412, 915, LONG_CHAT, { ready: MSG_READY, css: "#perch-hub-root .entry{position:static !important}" });
+  assert.ok(m.contentBodyScroll > 0 || m.docScrollY > 0, "with the fix knocked out the page must scroll again: " + JSON.stringify(m));
+});
+
+// Review M: stacking every row must not move the cards that share .entry.
+// Synthetic cards with the real classes, measured with the new row rules and
+// with the two row properties the change adds knocked back out of the cards.
+const CARD_WIDTHS = `(function(){
+  var tr=document.getElementById('perch-transcript');
+  function mk(cls,html){ var d=document.createElement('div'); d.className='entry '+cls; d.innerHTML=html; tr.appendChild(d); return d; }
+  var cards={
+    tool:mk('toolwrap','<button type="button" class="tool-chip"><span class="tn">read_file</span><span>done</span></button>'),
+    file:mk('filecard','<div class="file-title">report-2026.pdf</div><div class="file-meta">12 KB</div><a class="file-dl" href="#">Download</a>'),
+    art:mk('artcard','<div class="art-head"><span class="art-eyebrow">Artifact</span><span class="art-pill art-pill-ok">Ready</span></div><div class="art-title">Plan</div><div class="art-actions"><button class="art-open">Open</button></div>'),
+    phone:mk('phonecard','<div class="ph-head">Smile Dental</div><div class="ph-transcript"><div class="ph-t-agent"><span class="ph-sr">Assistant: </span>Hello</div></div>')
+  };
+  var cb=document.querySelector('.content-body');
+  var out={ pageScroll:cb.scrollHeight-cb.clientHeight };
+  /* Relative to the column: the baseline's phone card has an unanchored .ph-sr
+     that gives the transcript a scrollbar, which narrows every card by its
+     width for a reason that has nothing to do with the card rules. */
+  for(var k in cards){ var b=cards[k].getBoundingClientRect(); out[k]=Math.round(b.width)-tr.clientWidth; out[k+'Inner']=Math.round(cards[k].firstElementChild.getBoundingClientRect().width); }
+  return JSON.stringify(out);
+})()`;
+
+test("live @1280x900 (QW1): tool chips, file, artifact and phone cards keep their widths", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const now = await measure(1280, 900, CARD_WIDTHS, { ready: MSG_READY });
+  const before = await measure(1280, 900, CARD_WIDTHS, { ready: MSG_READY,
+    // Cards only: knocking the message rows' position back out would let their
+    // hidden labels scroll the page and change the column width for another reason.
+    css: "#perch-hub-root .entry:not(.bot):not(.user){flex-wrap:nowrap !important;position:static !important}" });
+  // Inner widths that hug their text (the chip) must match exactly; the
+  // column-wide cards stay column-wide.
+  // (±1px: the tool wrap is 90% of the column, rounded.)
+  for (const k of ["tool", "file", "art", "phone"]) assert.ok(Math.abs(now[k] - before[k]) <= 1, k + ": " + JSON.stringify({ now, before }));
+  assert.equal(now.toolInner, before.toolInner, "the chip hugs its text as before");
+  assert.equal(now.pageScroll, 0, "the page does not scroll");
 });
 
 const ERR_GEOMETRY = `(function(){
@@ -273,6 +368,8 @@ const ERR_GEOMETRY = `(function(){
   return JSON.stringify({ rowLeft:b.left, rowRight:b.right, trLeft:tr.left, trRight:tr.right,
     whoBottom:who.bottom, whatTop:what.top, whatRight:what.right,
     whoColor:getComputedStyle(row.querySelector('.who')).color,
+    whoTransform:getComputedStyle(row.querySelector('.who')).textTransform,
+    whoFont:getComputedStyle(row.querySelector('.who')).fontFamily,
     label:row.querySelector('.who').textContent,
     emptyBots:[].filter.call(document.querySelectorAll('#perch-transcript .entry.bot .what'),function(w){return !w.textContent.trim();}).length,
     docScrollX:document.documentElement.scrollWidth-innerWidth });
@@ -287,6 +384,8 @@ for (const [w, h] of [[412, 915], [1280, 900]]) {
     assert.ok(m.whatRight <= m.trRight + 1, "the long token wraps: " + JSON.stringify(m));
     assert.ok(m.whatTop >= m.whoBottom - 1, "the label sits above the error: " + JSON.stringify(m));
     assert.match(m.label, /turn failed/i);
+    assert.equal(m.whoTransform, "none", "QW1: the error label is normal case");
+    assert.doesNotMatch(m.whoFont, /mono/i, "QW1: and not a mono tag");
     assert.notEqual(m.whoColor, "rgb(0, 0, 0)", "the label carries the error color");
     assert.equal(m.emptyBots, 0, "no empty bot bubble for the errored message");
     assert.equal(m.docScrollX, 0, "no horizontal page scroll");

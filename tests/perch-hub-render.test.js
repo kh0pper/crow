@@ -959,7 +959,7 @@ async function renderedTranscript() {
     // never overflows, so it would prove nothing about the scroll container.
     "outputs/2026-09-10T14-22-05Z_sample-package-copy-pass_final.tar.gz |\n" +
     "| 2 | Comms | 3 | Jordan Lee | 2026-09-08 | approved | waiting on review |\n\n" +
-    "```js\nconst aVeryLongLineOfCodeThatCannotWrapAnywhereAtAllBecauseItIsOneToken = 1;\n```\n";
+    "```js\nconst aVeryLongLineOfCodeThatCannotWrapAnywhereAtAllBecauseItIsOneTokenEvenInTheFullWidthColumn = 1;\n```\n";
   const hostile = "<img src=x onerror=\"window.__pwned=1\">\n\n" +
     "<script>window.__pwned=1</script>\n\n[click me](javascript:window.__pwned=1)";
   return [
@@ -1024,8 +1024,9 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.tables, 1);
 
       // The wide-content rule. The code fence is the guaranteed-overflow
-      // element at BOTH widths (an unbreakable 74-char line against a 304px
-      // and a 560px column); the table overflows at 412 and happens to fit at
+      // element at BOTH widths (an unbreakable 100-char line against a 304px
+      // and a ~634px column — the full width since the role gutter went, QW1);
+      // the table overflows at 412 and happens to fit at
       // 1280, so its scroll is asserted only where it is real.
       assert.equal(seen.preScrolls, true,
         "the code fence must genuinely exceed its box, or the scroll container proves nothing");
