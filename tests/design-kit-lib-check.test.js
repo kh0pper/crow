@@ -266,3 +266,104 @@ test("checkLib applies the CSS and SVG allowlists to listed files", () => {
     m.entries[0].files.push({ path: "icons/a.svg", sha256: sha256Hex(svg), type: "image/svg+xml" });
   }), /icons\/a\.svg is not a plain SVG/);
 });
+
+// Fix round 4: probe2 findings (re-review of d346d2f1).
+test("cssFetches: non-ASCII outside strings is refused (U+0130 lower-cases to two code units)", () => {
+  const pad = "a".repeat(60);
+  assert.equal(cssFetches(`a{content:"${"\u0130".repeat(60)}"}b{c:url(${R})}c{--z:${pad}}`), true, "60 x U+0130 then remote url");
+  assert.equal(cssFetches(`a{content:"\u0130"}b{c:url(${R})}`), true, "one U+0130 then remote url");
+  assert.equal(cssFetches(`a{content:"x"}\u0130b{c:url(./x.png)}`), true, "non-ASCII outside a string");
+  assert.equal(cssFetches(`.\u00e9{c:red}`), true, "non-ASCII selector");
+  // Non-ASCII inside a quoted string is plain data, and ASCII-only lower-casing keeps offsets.
+  assert.equal(cssFetches(`a{content:"\u0130\u00e9\u2014"}b{c:url(./x.png)}`), false);
+});
+
+test("cssFetches: probe2 url() targets", () => {
+  for (const [k, v] of Object.entries({
+    "escaped scheme in a quoted url": `a{b:url("\\68ttps://e.x/a")}`,
+    "escaped slashes in a quoted url": `a{b:url("\\2f\\2f e.x/a")}`,
+    "svg data url (base64)": `a{b:url(data:image/svg+xml;base64,PHN2Zz4=)}`,
+    "font-face, one remote url": `@font-face{font-family:x;src:url(./a.woff2) format("woff2"),url(${R}) format("woff")}`,
+    "Url( remote": `a{b:Url(${R})}`,
+    "space inside an unquoted url": `a{b:url(./x y.png)}`,
+    ") inside a quoted url": `a{b:url("./a)b")}`,
+    "escaped quote inside a quoted url": `a{b:url("./x\\".png")}`,
+  })) assert.equal(cssFetches(v), true, k);
+  for (const [k, v] of Object.entries({
+    "icon-font content escape": `a:before{content:"\\e900"}`,
+    "escaped slashes in content (not a fetch)": `a:before{content:"\\2f\\2f e.x"}`,
+    "font-face, all relative": `@font-face{font-family:x;src:url(./a.woff2) format("woff2"),url(./b.woff) format("woff")}`,
+    "URL( relative": `a{b:URL(./x.png)}`,
+    "url-prefix() does not fetch": `@-moz-document url-prefix(){a{b:red}}`,
+    "plain rule": `a{b:red}`,
+  })) assert.equal(cssFetches(v), false, k);
+});
+
+// Verbatim from lucide-static@1.57.0 (ISC) and @tabler/icons@3.49.0 (MIT).
+const REAL_ICONS = {
+  "lucide check": "<!-- @license lucide-static v1.57.0 - ISC -->\n<svg\n  class=\"lucide lucide-check\"\n  xmlns=\"http://www.w3.org/2000/svg\"\n  width=\"24\"\n  height=\"24\"\n  viewBox=\"0 0 24 24\"\n  fill=\"none\"\n  stroke=\"currentColor\"\n  stroke-width=\"2\"\n  stroke-linecap=\"round\"\n  stroke-linejoin=\"round\"\n>\n  <path d=\"M20 6 9 17l-5-5\" />\n</svg>\n",
+  "lucide alert-circle": "<!-- @license lucide-static v1.57.0 - ISC -->\n<svg\n  class=\"lucide lucide-alert-circle\"\n  xmlns=\"http://www.w3.org/2000/svg\"\n  width=\"24\"\n  height=\"24\"\n  viewBox=\"0 0 24 24\"\n  fill=\"none\"\n  stroke=\"currentColor\"\n  stroke-width=\"2\"\n  stroke-linecap=\"round\"\n  stroke-linejoin=\"round\"\n>\n  <circle cx=\"12\" cy=\"12\" r=\"10\" />\n  <line x1=\"12\" x2=\"12\" y1=\"8\" y2=\"12\" />\n  <line x1=\"12\" x2=\"12.01\" y1=\"16\" y2=\"16\" />\n</svg>\n",
+  "tabler outline x": "<svg\n  xmlns=\"http://www.w3.org/2000/svg\"\n  width=\"24\"\n  height=\"24\"\n  viewBox=\"0 0 24 24\"\n  fill=\"none\"\n  stroke=\"currentColor\"\n  stroke-width=\"2\"\n  stroke-linecap=\"round\"\n  stroke-linejoin=\"round\"\n  class=\"icon icon-tabler icons-tabler-outline icon-tabler-x\"\n>\n  <path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" />\n  <path d=\"M18 6l-12 12\" />\n  <path d=\"M6 6l12 12\" />\n</svg>",
+  "tabler filled heart": "<svg\n  xmlns=\"http://www.w3.org/2000/svg\"\n  width=\"24\"\n  height=\"24\"\n  viewBox=\"0 0 24 24\"\n  fill=\"currentColor\"\n  class=\"icon icon-tabler icons-tabler-filled icon-tabler-heart\"\n>\n  <path stroke=\"none\" d=\"M0 0h24v24H0z\" fill=\"none\" />\n  <path d=\"M6.979 3.074a6 6 0 0 1 4.988 1.425l.037 .033l.034 -.03a6 6 0 0 1 4.733 -1.44l.246 .036a6 6 0 0 1 3.364 10.008l-.18 .185l-.048 .041l-7.45 7.379a1 1 0 0 1 -1.313 .082l-.094 -.082l-7.493 -7.422a6 6 0 0 1 3.176 -10.215z\" />\n</svg>",
+};
+
+test("svgUnsafe allowlist: real Lucide/Tabler icons and plain shapes pass", () => {
+  for (const [k, v] of Object.entries(REAL_ICONS)) assert.equal(svgUnsafe(v), false, k);
+  for (const [k, v] of Object.entries({
+    "xml declaration": `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><rect x="0" y="0" width="1" height="1"/></svg>`,
+    "gradient, clip, mask, use #id": `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1"><title>t</title><desc>d</desc><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" gradientTransform="rotate(45) translate(1, 2)"><stop offset="0" stop-color="#fff" stop-opacity=".5"/></linearGradient><radialGradient id="h"/><clipPath id="c"><rect width="1" height="1"/></clipPath><mask id="m"><ellipse cx="1" cy="1" rx="1" ry="1"/></mask></defs><g clip-path="url(#c)" mask="url(#m)"><polygon points="0,0 1,1 0,1" fill="url(#g)" fill-rule="evenodd" clip-rule="nonzero"/><polyline points="0 0 1 1" stroke-dasharray="1 2" stroke-dashoffset="1" stroke-miterlimit="4"/><use href="#c" x="1"/><use xlink:href="#h"/></g></svg>`,
+    "single-quoted attribute": `<svg xmlns='http://www.w3.org/2000/svg'><path d='M0 0h1'/></svg>`,
+  })) assert.equal(svgUnsafe(v), false, k);
+});
+
+test("svgUnsafe allowlist: probe2 bypasses and anything off the list are refused", () => {
+  for (const [k, v] of Object.entries({
+    "href entity &#x68;ttps": `<svg><image href="&#x68;ttps://e.x/a"/></svg>`,
+    "href leading newline": `<svg><image href="\n${R}"/></svg>`,
+    "use href tab+newline": `<svg><use href="\t\n${R}#a"/></svg>`,
+    "use href newline before #": `<svg><use href="\n#a"/></svg>`,
+    "xlink:href spaced": `<svg><use xlink:href = "${R}"/></svg>`,
+    "use href remote": `<svg><use href="${R}#x"/></svg>`,
+    "image element": `<svg><image href="x.png"/></svg>`,
+    "CDATA": `<svg><![CDATA[x]]></svg>`,
+    "style attr url": `<svg style="background:url(${R})"/>`,
+    "style attr entity url": `<svg style="background:&#117;rl(${R})"/>`,
+    "fill entity url": `<svg><rect fill="&#x75;rl(${R})"/></svg>`,
+    "fill escaped url": `<svg><rect fill="\\75rl(${R})"/></svg>`,
+    "style attr image-set": `<svg style="background-image:image-set('${R}' 1x)"/>`,
+    "style attr image()": `<svg style="background-image:image('${R}')"/>`,
+    "mask image()": `<svg><rect mask="image('${R}')"/></svg>`,
+    "a href remote": `<svg><a href="${R}"><rect/></a></svg>`,
+    "a element": `<svg><a href="#x"><rect/></a></svg>`,
+    "animateTransform": `<svg><animateTransform attributeName="transform" type="rotate"/></svg>`,
+    "animateMotion": `<svg><animateMotion dur="1s"/></svg>`,
+    "img src": `<svg><img src="${R}"></svg>`,
+    "embed src": `<svg><embed src="${R}"></svg>`,
+    "meta refresh": `<svg><meta http-equiv="refresh" content="0;url=${R}"></svg>`,
+    "iframe": `<svg><iframe src="${R}"></iframe></svg>`,
+    "feImage": `<svg><filter><feImage href="${R}"/></filter></svg>`,
+    "mask url remote spaced": `<svg><rect mask="url( '${R}#m')"/></svg>`,
+    "url(#id) with a quote": `<svg><rect fill="url('#g')"/></svg>`,
+    "xml:base": `<svg xml:base="${R}"><use href="#x"/></svg>`,
+    "href on a non-use element": `<svg><rect href="#x"/></svg>`,
+    "xmlns other value": `<svg xmlns="${R}"/>`,
+    "unknown attribute": `<svg><path data-x="1"/></svg>`,
+    "namespaced element": `<svg><html:script/></svg>`,
+    "comment after the root starts": `<svg><!-- x --><path d="M0 0"/></svg>`,
+    "comment with markup": `<!-- <script> --><svg/>`,
+    "processing instruction": `<?xml-stylesheet href="${R}"?><svg/>`,
+    "xml decl not first": ` <?xml version="1.0"?><svg/>`,
+    "text outside title/desc": `<svg>${R}<path d="M0 0"/></svg>`,
+    "unbalanced": `<svg><g></svg>`,
+    "mismatched close": `<svg><g></rect></svg>`,
+    "two roots": `<svg/><svg/>`,
+    "root not svg": `<g/>`,
+    "content after root": `<svg/>x`,
+    "unquoted attribute": `<svg width=1/>`,
+    "< inside a value": `<svg><title>t</title><path d="<x"/></svg>`,
+    "transform with an unknown function": `<svg><g transform="url(#a)"/></svg>`,
+    "duplicate attribute": `<svg><path d="M0 0" d="M1 1"/></svg>`,
+    "upper-case element": `<SVG/>`,
+    "set": `<svg><set attributeName="x" to="1"/></svg>`,
+  })) assert.equal(svgUnsafe(v), true, k);
+});

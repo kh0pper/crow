@@ -11,9 +11,11 @@
 // strings; no @import, @namespace, image(), image-set(), src(), cross-fade() or
 // element(); every url() a relative path ([A-Za-z0-9._/-], no query, no colon)
 // or a base64 raster data: URL; and no quoted string containing "://" (so
-// inline SVG data: URLs with an xmlns must be rewritten or dropped). SVG icons
-// get no doctype, style, script, foreignObject, animation or on* attributes,
-// and only url(#id) / href="#id" references. Tabs and CRs are fine in SVG.
+// inline SVG data: URLs with an xmlns must be rewritten or dropped). No
+// non-ASCII outside CSS strings. SVG icons pass an element/attribute allowlist
+// (see svgUnsafe): no entities, style attributes, comments after the root
+// starts, or references other than url(#id) and <use href="#id">. Tabs and CRs
+// are fine in SVG.
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -66,14 +68,17 @@ const RASTER_DATA = /^data:image\/(?:png|gif|jpeg|webp);base64,[A-Za-z0-9+/=]+$/
 // Functions that fetch (or can be handed a string to fetch) other than url().
 const FORBIDDEN_CSS = ["@import", "@namespace", "image(", "image-set(", "src(", "cross-fade(", "element("];
 
-/** Walk CSS tokens. Returns the quoted string contents, or null when a comment
- *  or a backslash appears outside a string, or a string never closes. A string
+/** Walk CSS tokens. Returns the quoted string contents, or null when a comment,
+ *  a backslash or a non-ASCII character appears outside a string, or a string
+ *  never closes. A string
  *  ends at its closing quote; a newline inside one is refused. */
 function cssStrings(css) {
   const out = [];
   for (let i = 0; i < css.length; i++) {
     const c = css[i];
-    if (c === "\\" || (c === "/" && css[i + 1] === "*")) return null;
+    // Non-ASCII outside a string is refused: no legitimate vendored selector or
+    // value needs it, and it keeps the scan free of Unicode case-mapping tricks.
+    if (c === "\\" || (c === "/" && css[i + 1] === "*") || c.charCodeAt(0) > 0x7e) return null;
     if (c !== '"' && c !== "'") continue;
     let j = i + 1;
     let body = "";
@@ -93,7 +98,7 @@ function cssStrings(css) {
  *  step produces. A fail-closed ALLOWLIST (spec §3.2): valid UTF-8 without a
  *  BOM; LF the only control character; no comments and no backslash outside a
  *  quoted string; no @import/@namespace/image()/image-set()/src()/cross-fade()/
- *  element(); every url() target a relative path (or a base64 raster data:
+ *  element(); no non-ASCII outside strings; every url() target a relative path (or a base64 raster data:
  *  URL); and no quoted string that holds "://" or begins with "//". Accepts
  *  bytes (preferred; checks the encoding) or an already decoded string. */
 export function cssFetches(input) {
@@ -102,7 +107,10 @@ export function cssFetches(input) {
   const strings = cssStrings(css);
   if (!strings) return true;
   for (const t of strings) if (t.includes("://") || t.trimStart().startsWith("//")) return true;
-  const low = css.toLowerCase();
+  // ASCII-only lower-casing: String#toLowerCase can change the length (U+0130
+  // becomes two code units), which would shift the offsets used to slice
+  // url() targets out of the original text.
+  const low = css.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
   if (FORBIDDEN_CSS.some((f) => low.includes(f))) return true;
   for (let i = low.indexOf("url("); i >= 0; i = low.indexOf("url(", i + 4)) {
     const end = low.indexOf(")", i);
@@ -119,22 +127,111 @@ export function cssFetches(input) {
   return false;
 }
 
-/** True when an SVG is not a plain, inert image: valid UTF-8 without a BOM, no
- *  doctype/processing instruction, no style/script/foreignObject/animation
- *  elements, no on* attributes, no url() except url(#id), and no href or
- *  xlink:href except "#id". Fail closed. */
+// SVG is an ALLOWLIST too: a tag tokenizer that accepts only these elements
+// and attributes. Checked against the per-icon files of lucide-static@1.57.0
+// and @tabler/icons@3.49.0 (svg, path, circle, rect, line, polyline, polygon,
+// ellipse; class, xmlns, width, height, viewBox, fill, stroke*, d, cx, cy, r,
+// rx, ry, x, y, points, opacity).
+const SVG_ELEMENTS = new Set(["svg", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "g", "defs",
+  "linearGradient", "radialGradient", "stop", "clipPath", "mask", "use", "title", "desc"]);
+const SVG_ATTRS = new Set(["xmlns", "xmlns:xlink", "viewBox", "width", "height", "fill", "stroke", "stroke-width",
+  "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "fill-rule",
+  "clip-rule", "opacity", "fill-opacity", "stroke-opacity", "d", "cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1",
+  "x2", "y2", "points", "transform", "class", "id", "offset", "stop-color", "stop-opacity", "gradientUnits",
+  "gradientTransform", "clip-path", "mask", "version", "href", "xlink:href"]);
+// Namespace names, not fetches (written as regexes so checkNoRemoteRefs, which
+// scans this file, does not read them as remote URLs).
+const SVG_NS = { xmlns: /^http:\/\/www\.w3\.org\/2000\/svg$/, "xmlns:xlink": /^http:\/\/www\.w3\.org\/1999\/xlink$/ };
+const ID_REF = /^#[A-Za-z0-9_-]+$/;
+const URL_ID = /^url\(#[A-Za-z0-9_-]+\)$/;
+// Plain attribute values: no quotes, "<", "&", "\", ":" or "/" (only xmlns,
+// matched exactly above, needs those). Parentheses are checked separately.
+const SVG_VALUE = /^[A-Za-z0-9 \t\r\n.,%#+_()-]*$/;
+const TRANSFORM_FNS = new Set(["matrix", "translate", "scale", "rotate", "skewX", "skewY"]);
+const COLOR_FNS = new Set(["rgb", "rgba", "hsl", "hsla"]);
+const COLOR_ATTRS = new Set(["fill", "stroke", "stop-color"]);
+const PAINT_REF_ATTRS = new Set(["fill", "stroke", "clip-path", "mask"]);
+// Optional leading XML declaration, then optional comments of a narrow charset
+// (Lucide ships "<!-- @license lucide-static vX - ISC -->"), all before the root.
+const XML_DECL = /<\?xml(?:[ \t\r\n]+(?:version|encoding|standalone)[ \t\r\n]*=[ \t\r\n]*(?:"[A-Za-z0-9._-]*"|'[A-Za-z0-9._-]*'))*[ \t\r\n]*\?>/y;
+// One character class per step (no nested quantifiers), and no "--" inside.
+const LEAD_COMMENT = /[ \t\r\n]*<!--(?:[ A-Za-z0-9@.,_]|-(?!-))*-->/y;
+const WS = /[ \t\r\n]*/y;
+const END_TAG = /\/([A-Za-z]+)[ \t\r\n]*>/y;
+const TAG_NAME = /[A-Za-z]+/y;
+const ATTR = /([A-Za-z][A-Za-z0-9:-]*)[ \t\r\n]*=[ \t\r\n]*(["'])/y;
+const sticky = (re, s, i) => { re.lastIndex = i; return re.exec(s); };
+
+function svgValueOk(el, name, v) {
+  if (name === "xmlns" || name === "xmlns:xlink") return SVG_NS[name].test(v);
+  if (name === "href" || name === "xlink:href") return el === "use" && ID_REF.test(v);
+  if (!SVG_VALUE.test(v)) return false;
+  if (!v.includes("(") && !v.includes(")")) return true;
+  if (PAINT_REF_ATTRS.has(name) && URL_ID.test(v)) return true;
+  // Otherwise only known function names, each called once with plain numbers.
+  const fns = name === "transform" || name === "gradientTransform" ? TRANSFORM_FNS : COLOR_ATTRS.has(name) ? COLOR_FNS : null;
+  if (!fns) return false;
+  const rest = v.replace(/([A-Za-z]+)\(([0-9 \t\r\n.,%+eE-]*)\)/g, (m, f) => (fns.has(f) ? "" : "("));
+  return !rest.includes("(") && !rest.includes(")");
+}
+
+/** True when an SVG is not a plain, inert icon. A fail-closed ALLOWLIST: valid
+ *  UTF-8 without a BOM; no "&" (so no entities) and no backslash anywhere; an
+ *  optional leading XML declaration and leading plain comments, then exactly
+ *  one <svg> root built only from SVG_ELEMENTS with SVG_ATTRS (double- or
+ *  single-quoted values, read up to the closing quote so newlines cannot hide
+ *  anything); no style attribute, doctype, CDATA, processing instruction or
+ *  later comment; text only inside <title>/<desc>; href/xlink:href only on
+ *  <use> and only "#id"; any url() exactly url(#id). */
 export function svgUnsafe(input) {
   const svg = decodeText(input);
-  if (svg === null || SVG_BAD_CHARS.test(svg)) return true;
-  const low = svg.toLowerCase();
-  if (/<[!?]|<(?:style|script|foreignobject|animate|set|handler)\b|@import|@namespace/.test(low)) return true;
-  if (/\bon[a-z]+\s*=/.test(low)) return true;
-  if (/url\(\s*(?!["']?#)/.test(low)) return true;
-  for (const m of low.matchAll(/href\s*=\s*(.?)/g)) {
-    if (m[1] !== '"' && m[1] !== "'") return true;
+  if (svg === null || SVG_BAD_CHARS.test(svg) || svg.includes("&") || svg.includes("\\")) return true;
+  let i = 0;
+  const decl = sticky(XML_DECL, svg, 0);
+  if (decl) i = decl[0].length;
+  for (let m; (m = sticky(LEAD_COMMENT, svg, i)); ) i += m[0].length;
+  const stack = [];
+  let rootDone = false;
+  while (i < svg.length) {
+    const lt = svg.indexOf("<", i);
+    const text = svg.slice(i, lt < 0 ? svg.length : lt);
+    const inText = stack.length && (stack.at(-1) === "title" || stack.at(-1) === "desc");
+    if (text.trim() && !inText) return true;
+    if (text.includes(">") && !inText) return true;
+    if (lt < 0) break;
+    i = lt + 1;
+    if (svg[i] === "/") {
+      const m = sticky(END_TAG, svg, i);
+      if (!m || stack.pop() !== m[1]) return true;
+      i += m[0].length;
+      if (!stack.length) rootDone = true;
+      continue;
+    }
+    const nm = sticky(TAG_NAME, svg, i);
+    if (!nm || rootDone || !SVG_ELEMENTS.has(nm[0])) return true;
+    const el = nm[0];
+    if (stack.length === 0 && el !== "svg") return true;
+    if (inText) return true;
+    i += el.length;
+    const seen = new Set();
+    for (;;) {
+      const ws = sticky(WS, svg, i)[0];
+      i += ws.length;
+      if (svg.startsWith("/>", i)) { i += 2; if (!stack.length) rootDone = true; break; }
+      if (svg[i] === ">") { i += 1; stack.push(el); break; }
+      if (!ws) return true;
+      const a = sticky(ATTR, svg, i);
+      if (!a || !SVG_ATTRS.has(a[1]) || seen.has(a[1])) return true;
+      seen.add(a[1]);
+      i += a[0].length;
+      const close = svg.indexOf(a[2], i);
+      if (close < 0) return true;
+      const v = svg.slice(i, close);
+      if (v.includes("<") || !svgValueOk(el, a[1], v)) return true;
+      i = close + 1;
+    }
   }
-  for (const m of low.matchAll(/href\s*=\s*(["'])(.*?)\1/g)) if (!m[2].startsWith("#")) return true;
-  return false;
+  return !rootDone || stack.length > 0;
 }
 
 export function checkLib(libDir) {
