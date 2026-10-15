@@ -12,6 +12,7 @@ import { fetchRegistryData, fetchBundleStatus, fetchNeedsConfig, dockerAvailable
 import { extensionsClientJS } from "./extensions/client.js";
 import { handleExtensionsPost } from "./extensions/api-handlers.js";
 import { buildExtensionsHTML } from "./extensions/html.js";
+import { localModelsCounts } from "./extensions/local-models-card.js";
 
 export default {
   id: "extensions",
@@ -59,8 +60,17 @@ export default {
       needsRepin = addonsNeedingRepin(Object.keys(installed));
     } catch { needsRepin = {}; }
 
+    // The Local models card's counts come from the lifecycle listing
+    // (provider rows), computed here so html.js stays pure.
+    let localModels = { registered: 0, resident: 0 };
+    try {
+      const { defaultLifecycleCore } = await import("../../models/lifecycle-deps.js");
+      const core = defaultLifecycleCore();
+      localModels = localModelsCounts(() => core.listing());
+    } catch { /* zero counts rather than no page */ }
+
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, dockerOk, keychainPending, vaultSecure, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, dockerOk, keychainPending, vaultSecure, localModels, lang,
     });
 
     // ─── Modal + client-side JavaScript ───

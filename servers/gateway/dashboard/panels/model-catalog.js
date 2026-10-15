@@ -47,6 +47,10 @@ import { listProvidersAll } from "../../../shared/providers-db.js";
 import { HF_TOKEN_PROVIDER_ID } from "../../routes/models.js";
 import { servingClassOf, startAffordance } from "../../models/serving-class.js";
 import { isModelOrchestrationDisabled } from "../../../shared/model-orchestration.js";
+import { registeredSnapshot } from "../../models/registered-rows.js";
+import { defaultLifecycleCore } from "../../models/lifecycle-deps.js";
+import { renderRegisteredSection, registeredClientJS } from "./model-catalog-registered.js";
+import { dialogClientJS } from "./model-catalog-dialog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -182,8 +186,14 @@ export async function loadPanelData({
       first_run_default: !!model.first_run_default,
       registered: !!regEntry,
       registeredQuant: regEntry ? regEntry.quant : null,
+      // Every quant of this model already on the machine: Register as… may
+      // only re-point those (PR #483 review).
+      registeredQuants: [...new Set(findRegistryEntries(state, model.id).map((e) => e.entry?.quant).filter(Boolean))],
       running: !!(handle && handle.live),
       serving_class: servingClassOf(model),
+      // The register/adopt dialog pre-fills from these (plan 3a, Task 7).
+      launch: model.launch && typeof model.launch === "object" ? model.launch : null,
+      companions: (Array.isArray(model.companions) ? model.companions : []).map((c) => c && c.kind).filter(Boolean),
       quants,
     };
   });
@@ -268,6 +278,36 @@ export async function loadPanelData({
     hfTokenConfigured,
     orchestrationDisabled: isModelOrchestrationDisabled(),
   };
+}
+
+/**
+ * catalog id → the provider id that serves it here, from the registered
+ * snapshot's rows: an own native row named after the catalog id first, else
+ * the first own row for that catalog id. The curated cards and the runtime
+ * strip key on the catalog id; their Start/Stop must name a provider for the
+ * job-store route (plan 3a review M2).
+ */
+export function providerIdsByCatalogId(rows) {
+  const map = new Map();
+  for (const r of rows || []) {
+    if (!r.own || !r.catalogId) continue;
+    if (r.provider === r.catalogId || !map.has(r.catalogId)) map.set(r.catalogId, r.provider);
+  }
+  return map;
+}
+
+let _registeredSnapshotForTest = null;
+/** Test fixture hook: the live panel tests render fixture rows through the
+ * real handler. Production never sets it. */
+export function _setRegisteredSnapshotForTest(fn) { _registeredSnapshotForTest = fn; }
+
+function loadRegisteredSnapshot(orchestrationDisabled) {
+  if (_registeredSnapshotForTest) return _registeredSnapshotForTest();
+  try {
+    return registeredSnapshot({ core: defaultLifecycleCore(), catalog: defaultLoadCatalog(), orchestrationDisabled });
+  } catch {
+    return { rows: [], groups: [], roles: [], orchestrationDisabled, llamaServerBin: null };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,11 +535,16 @@ export function renderRuntimeStrip(data, lang) {
       ? escapeHtml(t(stateKey, lang)) + `<div class="mcat-strip__status">${escapeHtml(t("models.runtimeStateReloadingHint", lang))}</div>`
       : escapeHtml(t(stateKey, lang));
     const affordance = startAffordance(m.servingClass ?? null);
-    const actionBtn = m.live
-      ? button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(m.modelId)}"` })
-      : affordance === "start"
-        ? button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(m.modelId)}"` })
-        : `<span class="mcat-strip__status">${escapeHtml(t(affordance === "never" ? "models.servingWedgeRiskBadge" : "models.servingWindowedBadge", lang))}</span>`;
+    // Start/Stop name the serving provider (job-store route, review M2);
+    // none at all on an orchestration-off host.
+    const target = `data-model-id="${escapeHtml(m.modelId)}" data-provider-id="${escapeHtml(m.providerId || m.modelId)}"`;
+    const actionBtn = orchestrationDisabled
+      ? ""
+      : m.live
+        ? button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" ${target}` })
+        : affordance === "start"
+          ? button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" ${target}` })
+          : `<span class="mcat-strip__status">${escapeHtml(t(affordance === "never" ? "models.servingWedgeRiskBadge" : "models.servingWindowedBadge", lang))}</span>`;
     // Task 13 fix round 3: an hf-browser-registered model has NO curated
     // card (its id is never in the catalog), so the runtime strip is the
     // only place it can ever be removed from — give it a Remove button
@@ -508,7 +553,7 @@ export function renderRuntimeStrip(data, lang) {
     // curated cards already use. Curated rows keep relying on their own
     // card's Remove button, unchanged.
     const removeBtn = m.source === "hf-browser"
-      ? button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(m.modelId)}"` })
+      ? button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(m.modelId)}"${m.providerId ? ` data-provider-id="${escapeHtml(m.providerId)}"` : ""}` })
       : "";
     return `<tr>
       <td class="mono">${escapeHtml(m.modelId)}</td>
@@ -550,7 +595,7 @@ export function renderRuntimeStrip(data, lang) {
   </div>`;
 }
 
-function renderModelCard(model, lang, hfTokenConfigured) {
+function renderModelCard(model, lang, hfTokenConfigured, orchestrationDisabled = false) {
   const defaultQuant = model.quants.find((q) => q.quant === model.default_quant) || model.quants[0] || null;
 
   const options = model.quants.map((q) => {
@@ -595,25 +640,37 @@ function renderModelCard(model, lang, hfTokenConfigured) {
   // override affordance in the curated UI); the reason is shown as text
   // instead. Tight/unknown: Download stays enabled, with the fit hint above
   // already showing the honest warning copy.
+  // Start/Stop name the provider that serves this catalog model, so they go
+  // through the job-store route like every other panel start (review M2).
+  // An orchestration-off host shows neither; Remove and Download stay.
+  const target = `data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(model.providerId || model.id)}"`;
+  // Remove unregisters the provider this card stands for (it may carry a
+  // custom id such as crow-chat); without one the server resolves the
+  // catalog id's providers (PR #483 review).
+  const removeTarget = model.providerId ? ` data-provider-id="${escapeHtml(model.providerId)}"` : "";
+  const removeBtn = button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"${removeTarget}` });
+  // Register as… / Adopt open the dialog (plan 3a, Task 7). An
+  // orchestration-off host refuses registration (409), so neither is offered.
+  const registerAsBtn = orchestrationDisabled ? "" : button(t("models.dlgActionRegisterAs", lang), { variant: "secondary", size: "sm", attrs: `data-action="register-as" data-model-id="${escapeHtml(model.id)}"` });
+  const adoptBtn = orchestrationDisabled ? "" : button(t("models.dlgActionAdopt", lang), { variant: "secondary", size: "sm", attrs: `data-action="adopt" data-model-id="${escapeHtml(model.id)}"` });
   let actionHtml;
   if (model.running) {
-    actionHtml = `${button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(model.id)}"` })}` +
-      `${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`;
+    actionHtml = (orchestrationDisabled ? "" : button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" ${target}` })) + registerAsBtn + removeBtn;
   } else if (model.registered) {
     actionHtml = affordance !== "start"
-      ? `${servingNotice}${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`
-      : `${button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(model.id)}"` })}` +
-        `${button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` })}`;
+      ? `${servingNotice}${registerAsBtn}${removeBtn}`
+      : (orchestrationDisabled ? "" : button(t("models.actionStart", lang), { variant: "primary", size: "sm", attrs: `data-action="start" ${target}` })) + registerAsBtn + removeBtn;
   } else if (initialFit === "wont_fit") {
     actionHtml = `<div class="mcat-card__notice">${escapeHtml(t("models.fitWontFitHint", lang))}</div>`;
   } else {
     actionHtml = button(t("models.actionDownload", lang), {
       variant: "primary", size: "sm",
       attrs: `data-action="download" data-model-id="${escapeHtml(model.id)}"`,
-    });
+    }) + adoptBtn;
   }
 
-  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}">
+  const dialogAttrs = ` data-launch="${escapeHtml(JSON.stringify(model.launch ?? null))}" data-companions="${escapeHtml(JSON.stringify(model.companions || []))}" data-quants="${escapeHtml(JSON.stringify((model.quants || []).map((q) => q.quant)))}" data-default-quant="${escapeHtml(model.default_quant || "")}" data-registered-quant="${escapeHtml(model.registeredQuant || "")}" data-registered-quants="${escapeHtml(JSON.stringify(model.registeredQuants || (model.registeredQuant ? [model.registeredQuant] : [])))}" data-can-register="${orchestrationDisabled ? "0" : "1"}"`;
+  return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}"${dialogAttrs}>
     <div class="mcat-card__head">
       <span class="mcat-card__title">${escapeHtml(model.id)}</span>
       ${badges.join("")}
@@ -641,7 +698,7 @@ export function renderCuratedTab(data, lang) {
   const sections = order
     .filter(([key]) => groups[key].length > 0)
     .map(([key, titleKey]) => {
-      const cards = groups[key].map((m) => renderModelCard(m, lang, data.hfTokenConfigured)).join("");
+      const cards = groups[key].map((m) => renderModelCard(m, lang, data.hfTokenConfigured, !!data.orchestrationDisabled)).join("");
       return `<div class="mcat-group">
         <div class="mcat-group__title">${escapeHtml(t(titleKey, lang))}</div>
         <div class="mcat-grid">${cards}</div>
@@ -698,8 +755,11 @@ export function modelCatalogClientJS(lang) {
 
         function hideModal() { document.getElementById("mcat-modal-overlay").style.display = "none"; }
         function showModal() { document.getElementById("mcat-modal-overlay").style.display = "flex"; }
+        // Backdrop click closes; a click that bubbles up from inside the
+        // dialog (e.g. its Save button) never does. currentTarget, not
+        // this: some DOM shims bind this to the event target.
         document.getElementById("mcat-modal-overlay").addEventListener("click", function (e) {
-          if (e.target === this) hideModal();
+          if (e.target === e.currentTarget) hideModal();
         });
 
         function apiFetch(path, opts) {
@@ -802,6 +862,16 @@ export function modelCatalogClientJS(lang) {
             btn.setAttribute("data-model-id", modelId);
             btn.textContent = '${tJs("models.actionDownload", lang)}';
             actions.appendChild(btn);
+            // Adopt (weights already on disk) sits next to Download.
+            if (card.getAttribute("data-can-register") === "1") {
+              var adopt = document.createElement("button");
+              adopt.type = "button";
+              adopt.className = "btn btn-secondary btn-sm";
+              adopt.setAttribute("data-action", "adopt");
+              adopt.setAttribute("data-model-id", modelId);
+              adopt.textContent = '${tJs("models.dlgActionAdopt", lang)}';
+              actions.appendChild(adopt);
+            }
           }
         }
 
@@ -976,30 +1046,28 @@ export function modelCatalogClientJS(lang) {
         }
 
         // --- Start / stop ---
-        function startModel(modelId) {
-          setStatus(modelId, '${tJs("models.actionStarting", lang)}');
-          apiFetch("/" + encodeURIComponent(modelId) + "/start", { method: "POST" }).then(function (res) {
-            if (res.ok) {
-              setTimeout(function () { location.reload(); }, 1200);
-            } else {
-              setStatus(modelId, messageFor(res.data.code, res.data.error));
-            }
-          }).catch(function () { setStatus(modelId, messageFor("INTERNAL")); });
+        // One start path for every panel button (plan 3a review M2): the
+        // provider job-store route via window.CrowModelLifecycle (defined by
+        // the registered-models script), which polls the job and shows a
+        // failed start's stderr lines in the card's status area.
+        function startModel(modelId, providerId) {
+          if (!window.CrowModelLifecycle) { setStatus(modelId, messageFor("INTERNAL")); return; }
+          window.CrowModelLifecycle.start(providerId || modelId, statusEl(modelId));
         }
 
-        function stopModel(modelId) {
-          setStatus(modelId, '${tJs("models.actionStopping", lang)}');
-          apiFetch("/" + encodeURIComponent(modelId) + "/stop", { method: "POST" }).then(function (res) {
-            if (res.ok) {
-              setTimeout(function () { location.reload(); }, 1000);
-            } else {
-              setStatus(modelId, messageFor(res.data.code, res.data.error));
-            }
-          }).catch(function () { setStatus(modelId, messageFor("INTERNAL")); });
+        function stopModel(modelId, providerId) {
+          if (!window.CrowModelLifecycle) { setStatus(modelId, messageFor("INTERNAL")); return; }
+          window.CrowModelLifecycle.stop(providerId || modelId, statusEl(modelId));
         }
 
         // --- Delete (confirm-then-delete) ---
-        function showDeleteConfirm(modelId, bindings) {
+        // A known provider id goes to DELETE /api/models/providers/:p; a bare
+        // catalog id to the legacy route, which resolves its providers.
+        function deletePath(modelId, providerId) {
+          return providerId ? "/providers/" + encodeURIComponent(providerId) : "/" + encodeURIComponent(modelId);
+        }
+
+        function showDeleteConfirm(modelId, bindings, providerId) {
           var frag = document.createElement("div");
 
           var title = document.createElement("div");
@@ -1052,7 +1120,7 @@ export function modelCatalogClientJS(lang) {
           confirmBtn.textContent = '${tJs("models.deleteConfirmButton", lang)}';
           confirmBtn.addEventListener("click", function () {
             confirmBtn.disabled = true;
-            apiFetch("/" + encodeURIComponent(modelId) + "?confirm=true", { method: "DELETE" }).then(function (res) {
+            apiFetch(deletePath(modelId, providerId) + "?confirm=true", { method: "DELETE" }).then(function (res) {
               hideModal();
               if (res.ok) {
                 setStatus(modelId, '${tJs("models.deleteSuccess", lang)}');
@@ -1074,10 +1142,10 @@ export function modelCatalogClientJS(lang) {
           showModal();
         }
 
-        function requestDelete(modelId) {
-          apiFetch("/" + encodeURIComponent(modelId), { method: "DELETE" }).then(function (res) {
+        function requestDelete(modelId, providerId) {
+          apiFetch(deletePath(modelId, providerId), { method: "DELETE" }).then(function (res) {
             if (res.ok && res.data && res.data.requiresConfirm) {
-              showDeleteConfirm(modelId, res.data.bindings);
+              showDeleteConfirm(modelId, res.data.bindings, providerId);
             } else if (!res.ok) {
               setStatus(modelId, messageFor(res.data.code, res.data.error));
             }
@@ -1091,9 +1159,9 @@ export function modelCatalogClientJS(lang) {
           var action = el.getAttribute("data-action");
           var modelId = el.getAttribute("data-model-id");
           if (action === "download" && modelId) startDownload(modelId);
-          else if (action === "start" && modelId) startModel(modelId);
-          else if (action === "stop" && modelId) stopModel(modelId);
-          else if (action === "remove" && modelId) requestDelete(modelId);
+          else if (action === "start" && modelId) startModel(modelId, el.getAttribute("data-provider-id"));
+          else if (action === "stop" && modelId) stopModel(modelId, el.getAttribute("data-provider-id"));
+          else if (action === "remove" && modelId) requestDelete(modelId, el.getAttribute("data-provider-id"));
           else if (action === "reprobe") {
             var statusSpan = document.getElementById("mcat-reprobe-status");
             if (statusSpan) statusSpan.textContent = '${tJs("models.runtimeReprobing", lang)}';
@@ -1286,6 +1354,16 @@ export function modelCatalogClientJS(lang) {
             showHfDownloadConfirm(repoId, file, gated, statusSpan, progressTrack, actions);
           });
           actions.appendChild(downloadBtn);
+          // Adopt: the file is already on disk (window.CrowModelDialog,
+          // hf-adopt mode, picks it up through data-action).
+          var adoptBtn = document.createElement("button");
+          adoptBtn.type = "button";
+          adoptBtn.className = "btn btn-secondary btn-sm";
+          adoptBtn.setAttribute("data-action", "hf-adopt");
+          adoptBtn.setAttribute("data-hf-repo", repoId);
+          adoptBtn.setAttribute("data-hf-file", file);
+          adoptBtn.textContent = '${tJs("models.dlgActionAdopt", lang)}';
+          actions.appendChild(adoptBtn);
           row.appendChild(actions);
 
           var progressTrack = document.createElement("div");
@@ -1462,6 +1540,14 @@ export default {
       return layout({ title: t("models.pageTitle", lang), content });
     }
 
+    // Registered models (plan 3a): the same snapshot GET /api/models/registered
+    // answers. Its provider ids also address the curated cards' and the
+    // strip's Start/Stop.
+    const registered = loadRegisteredSnapshot(data.orchestrationDisabled);
+    const providerOf = providerIdsByCatalogId(registered.rows);
+    for (const m of data.models) m.providerId = providerOf.get(m.id) || null;
+    for (const m of data.runtimeModels) m.providerId = providerOf.get(m.modelId) || null;
+
     const tabsHtml = tabs([
       { id: "curated", label: t("models.tabCurated", lang), content: renderCuratedTab(data, lang) },
       { id: "browse-hf", label: t("models.tabBrowseHf", lang), content: renderHfTab(data, lang) },
@@ -1470,9 +1556,12 @@ export default {
     const content = `
       ${panelStyles()}
       <p class="mcat-intro">${escapeHtml(t("models.pageIntro", lang))}</p>
+      ${renderRegisteredSection(registered, lang)}
       ${renderRuntimeStrip(data, lang)}
       ${tabsHtml}
       ${modelCatalogClientJS(lang)}
+      ${registeredClientJS(lang)}
+      ${dialogClientJS(lang)}
     `;
 
     return layout({ title: t("models.pageTitle", lang), content });

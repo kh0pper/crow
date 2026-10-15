@@ -12,6 +12,9 @@ const FINISHED = new Set(["resident", "failed", "blocked_by_reservation"]);
 
 export function createJobStore({ now = Date.now, maxJobs = 200, idFn = randomUUID } = {}) {
   const jobs = new Map();
+  // Providers being unregistered (plan 3a review 2): a start is refused while
+  // one is held, so a removal never races a new llama-server.
+  const removing = new Set();
   function evict() {
     if (jobs.size <= maxJobs) return;
     for (const [id, j] of jobs) {
@@ -42,7 +45,24 @@ export function createJobStore({ now = Date.now, maxJobs = 200, idFn = randomUUI
       for (const j of jobs.values()) if (j.provider === provider && !FINISHED.has(j.state)) return { ...j };
       return null;
     },
+    /** Hold `provider` for a removal. False when a start is active or another
+     * removal holds it; check-and-set is synchronous, so nothing slips in. */
+    beginRemoval(provider) {
+      if (removing.has(provider) || this.activeFor(provider)) return false;
+      removing.add(provider);
+      return true;
+    },
+    endRemoval(provider) { removing.delete(provider); },
+    isRemoving(provider) { return removing.has(provider); },
   };
+}
+
+let _shared = null;
+/** The one job store both lifecycle doors share (plan 3a): /llm/models and
+ * /api/models/providers/* see the same jobs, so one provider never gets two
+ * concurrent starts from the two doors. Lazy, one per process. */
+export function sharedJobStore() {
+  return (_shared ||= createJobStore());
 }
 
 function firstModelId(p) {
