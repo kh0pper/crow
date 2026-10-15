@@ -13,6 +13,7 @@
 
 import { t, tJs } from "./i18n.js";
 import { crowTalkRowHtml } from "./crow-talk.js";
+import { CROW_BODY_GROUP } from "./crow-mark.js";
 
 // ─── Shared notification JS (used by both classic and tamagotchi modes) ───
 
@@ -699,26 +700,7 @@ export function tamagotchiHtml(lang, { talkAvailable } = {}) {
 <div class="crow-tama-wrap" id="crow-tama-wrap">
   <button type="button" class="crow-tama-btn" id="crow-bird-btn" onclick="toggleCrowDropdown(event)" aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"${talk ? " data-crow-talk" : ""}>
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" aria-hidden="true" focusable="false">
-    <g class="crow-body-group">
-      <!-- Feet -->
-      <g class="crow-feet">
-        <line x1="19" y1="42" x2="17" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="19" y1="42" x2="21" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="29" y1="42" x2="27" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="29" y1="42" x2="31" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
-      </g>
-      <!-- Body -->
-      <ellipse class="crow-body" cx="24" cy="34" rx="12" ry="10" fill="#0e6b62"/>
-      <!-- Wing -->
-      <ellipse class="crow-wing" cx="14" cy="33" rx="6" ry="8" fill="#4fbdb0" opacity="0.5" transform-origin="14 33"/>
-      <!-- Head -->
-      <circle class="crow-head" cx="24" cy="18" r="9" fill="#0e6b62"/>
-      <!-- Eye -->
-      <circle class="crow-eye" cx="28" cy="16" r="3" fill="#d9a521"/>
-      <circle class="crow-pupil" cx="29" cy="16" r="1.5" fill="#22303a"/>
-      <!-- Beak -->
-      <polygon class="crow-beak" points="33,18 40,20 33,22" fill="#d9a521"/>
-    </g>
+    ${CROW_BODY_GROUP}
     <!-- Thought bubble (notification count) -->
     <g class="crow-bubble" id="crow-bubble" style="display:none">
       <rect x="32" y="0" width="16" height="14" rx="5" fill="var(--crow-bg-surface, #22303a)" stroke="var(--crow-border, #2a2a3e)" stroke-width="1"/>

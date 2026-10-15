@@ -20,7 +20,7 @@
 
 import { escapeHtml, section, stepper, button, callout, docsUrl } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { loadModelOptions, defaultDefinition, probeAll, loadSkills } from "./data-queries.js";
 import {
   renderGatewayFields, normalizeGatewayFields, SIMPLE_GATEWAY_TYPES,
@@ -329,7 +329,10 @@ export async function renderWizard(req, res, { db, layout, lang, PAGE_CSS, notic
   return res.send(layout({
     title: t("botbuilder.wizTitle", lang),
     content: PAGE_CSS + (notice || "") +
-      stepper(steps, step) +
+      stepper(steps, step, {
+        compactLabel: fill(t("common.stepOf", lang), { n: step + 1, total: steps.length }),
+        ariaLabel: t("common.stepsLabel", lang),
+      }) +
       section(t(`botbuilder.wizStep_${stem}`, lang), form) +
       cancel,
   }));

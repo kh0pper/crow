@@ -106,6 +106,8 @@ export const translations = {
   "common.loading": { en: "Loading...", es: "Cargando..." },
   "common.error": { en: "Error", es: "Error" },
   "common.close": { en: "Close", es: "Cerrar" },
+  "common.stepOf": { en: "Step {n} of {total}", es: "Paso {n} de {total}" },
+  "common.stepsLabel": { en: "Steps", es: "Pasos" },
 
   // ─── Time formatting ───
   "time.justNow": { en: "just now", es: "ahora mismo" },
@@ -2376,6 +2378,17 @@ export const translations = {
   "onboarding.welcome.body": {
     en: "Crow is your persistent memory and research assistant. It remembers what matters and works across the AI clients you already use. This short tour points you to the few things worth setting up.",
     es: "Crow es tu asistente de memoria persistente e investigación. Recuerda lo importante y funciona con los clientes de IA que ya usas. Este breve recorrido te muestra las pocas cosas que vale la pena configurar.",
+  },
+  "onboarding.welcome.exampleLabel": { en: "For example", es: "Por ejemplo" },
+  "onboarding.welcome.exampleYouName": { en: "You", es: "Tú" },
+  "onboarding.welcome.exampleYou": { en: "When is my sister's birthday?", es: "¿Cuándo es el cumpleaños de mi hermana?" },
+  "onboarding.welcome.exampleCrow": {
+    en: "March 4 — you saved it from another app last Tuesday.",
+    es: "El 4 de marzo — lo guardaste desde otra app el martes pasado.",
+  },
+  "onboarding.welcome.exampleNote": {
+    en: "That works because the memory lives in your Crow, not in one chat app.",
+    es: "Funciona porque la memoria vive en tu Crow, no en una sola app de chat.",
   },
   "onboarding.ai.title": { en: "Set up an AI model", es: "Configura un modelo de IA" },
   "onboarding.ai.body": {

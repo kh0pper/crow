@@ -14,7 +14,8 @@
  *   - Done step shows a subtle CSS-only celebration + "what to try" cards
  */
 import { stepper, section, callout, button, escapeHtml, docsUrl } from "../shared/components.js";
-import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
+import { t, fill, SUPPORTED_LANGS } from "../shared/i18n.js";
+import { crowMarkSvg } from "../shared/crow-mark.js";
 import { parseCookies } from "../auth.js";
 import { upsertSetting, readSetting } from "../settings/registry.js";
 import { loadCollections } from "./extensions/collections.js";
@@ -133,6 +134,34 @@ function renderStarterCards(lang) {
     </div>`).join("");
   return `${CARD_CSS}<div class="onboarding-action-cards">${cardHtml}</div>`;
 }
+
+/**
+ * Welcome step CSS: the crow mark, the body, then an example
+ * exchange ("You" / "Crow") in a quiet card, then a one-line caption.
+ */
+const WELCOME_CSS = `
+<style>
+.onboarding-welcome-mark { display: block; margin: 0 0 var(--crow-space-3); line-height: 0; }
+.onboarding-example {
+  margin: 0 0 var(--crow-space-3);
+  padding: var(--crow-space-3) var(--crow-space-4);
+  background: var(--crow-bg-elevated);
+  border: 1px solid var(--crow-border);
+  border-radius: var(--crow-radius-card);
+}
+.onboarding-example-label {
+  margin: 0 0 var(--crow-space-2);
+  font-size: var(--crow-text-xs);
+  color: var(--crow-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.onboarding-example-line { margin: 0; font-size: var(--crow-text-base); line-height: var(--crow-leading-normal); color: var(--crow-text-primary); }
+.onboarding-example-line + .onboarding-example-line { margin-top: var(--crow-space-2); }
+.onboarding-example-who { font-weight: 600; margin-right: var(--crow-space-2); }
+.onboarding-example-line--crow .onboarding-example-who { color: var(--crow-accent); }
+.onboarding-example-note { margin: 0; font-size: var(--crow-text-sm); color: var(--crow-text-secondary); }
+</style>`;
 
 /**
  * Celebration CSS — scoped to onboarding done step. Subtle pop animation on
@@ -789,7 +818,18 @@ function renderStepBody(stem, lang, ctx = {}) {
         + renderBackupSection(lang, ctx)
         + renderActionCards(lang);
     }
-    case "welcome":
+    case "welcome": {
+      const e = (k) => escapeHtml(t(`onboarding.welcome.${k}`, lang));
+      return WELCOME_CSS
+        + `<span class="onboarding-welcome-mark">${crowMarkSvg({ size: 64 })}</span>`
+        + body
+        + `<div class="onboarding-example">
+          <p class="onboarding-example-label">${e("exampleLabel")}</p>
+          <p class="onboarding-example-line"><span class="onboarding-example-who">${e("exampleYouName")}:</span> ${e("exampleYou")}</p>
+          <p class="onboarding-example-line onboarding-example-line--crow"><span class="onboarding-example-who">Crow:</span> ${e("exampleCrow")}</p>
+        </div>
+        <p class="onboarding-example-note">${e("exampleNote")}</p>`;
+    }
     default:
       return body;
   }
@@ -858,7 +898,10 @@ export default {
 
     const steps = STEP_KEYS.map((k) => ({ label: t(`onboarding.${k}.title`, lang) }));
     const content =
-      stepper(steps, current) +
+      stepper(steps, current, {
+        compactLabel: fill(t("common.stepOf", lang), { n: current + 1, total: steps.length }),
+        ariaLabel: t("common.stepsLabel", lang),
+      }) +
       section(t(`onboarding.${stem}.title`, lang), renderStepBody(stem, lang, ctx)) +
       renderNav(current, lang);
 

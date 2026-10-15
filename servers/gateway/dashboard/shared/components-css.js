@@ -21,6 +21,14 @@ export function componentsCss() {
   .btn-danger:hover { filter:brightness(1.1); }
   .btn-ghost { background:transparent; color:var(--crow-text-secondary); }
   .btn-ghost:hover { color:var(--crow-text-primary); background:var(--crow-bg-elevated); }
+  /* Disabled: grey, not a dimmed accent. The doubled class (0,3,0+) outranks
+     the legacy .btn-primary:hover / .btn-danger:hover rules that layout.js
+     injects after this block, so hover and focus cannot recolour it. */
+  .btn.btn:disabled, .btn.btn[aria-disabled="true"],
+  .btn.btn:disabled:hover, .btn.btn[aria-disabled="true"]:hover,
+  .btn.btn:disabled:focus, .btn.btn[aria-disabled="true"]:focus {
+    background:var(--crow-bg-elevated); color:var(--crow-text-tertiary);
+    border-color:var(--crow-border); cursor:not-allowed; filter:none; }
 
   /* Code block */
   .code-block { border:1px solid var(--crow-border); border-radius:var(--crow-radius-card);
@@ -55,6 +63,21 @@ export function componentsCss() {
   .step-done .step-num { background:var(--crow-accent); color:var(--crow-accent-contrast); border-color:var(--crow-accent); }
   .step-active { color:var(--crow-text-primary); font-weight:500; }
   .step-active .step-num { border-color:var(--crow-accent); color:var(--crow-accent); }
+  /* Compact stepper (phones): one line + a thin bar instead of the chip
+     list, which wraps to three or four rows at phone widths. The bar is
+     decorative (the wrapper is aria-hidden); the list stays in the DOM. */
+  .stepper-compact { display:none; margin:var(--crow-space-3) 0 var(--crow-space-4); }
+  .stepper-compact-text { display:block; font-size:var(--crow-text-sm); font-weight:500; color:var(--crow-text-primary); }
+  .stepper-compact-bar { display:block; height:4px; margin-top:var(--crow-space-2); border-radius:2px; background:var(--crow-border); overflow:hidden; }
+  .stepper-compact-fill { display:block; height:100%; background:var(--crow-accent); }
+  /* Same inclusive breakpoint as layout.js's phone rules. The list is made
+     sr-only (clipped), NOT display:none: screen readers keep every step and
+     the aria-current one; tests/onboarding-stepper-live.test.js guards it. */
+  @media (max-width:768px) {
+    .stepper-wrap .stepper-compact { display:block; }
+    .stepper-wrap .stepper { position:absolute; width:1px; height:1px; margin:0; padding:0; overflow:hidden;
+      clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+  }
 
   /* Tabs */
   .tab-list { display:flex; flex-wrap:wrap; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
