@@ -52,8 +52,8 @@ export function createLifecycleCore(deps) {
   }
 
   async function runStart(job, name, requester) {
-    jobs.update(job.id, { state: (deps.siblingsOfFn(name) || []).some((s) => deps.snapshotOfFn(s)?.live) ? "evicting" : "starting" });
     try {
+      jobs.update(job.id, { state: (deps.siblingsOfFn(name) || []).some((s) => deps.snapshotOfFn(s)?.live) ? "evicting" : "starting" });
       const result = await deps.acquireFn(name, { requester });
       // acquireProvider returns null when the row is not orchestratable here
       // and false on a readiness timeout: only `true` means resident (review C6).

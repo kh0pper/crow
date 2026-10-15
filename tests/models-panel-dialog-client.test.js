@@ -273,3 +273,10 @@ test("review 6: hf-adopt offers no size-only option and never sends allowUnverif
   const post = b.posts().find((c) => c.url === "/api/models/hf-adopt");
   assert.deepEqual(JSON.parse(JSON.stringify(post.body)), { hfRepo: "org/Repo-GGUF", file: "Repo-Q4_K_M.gguf", path: "/srv/models/Repo-Q4_K_M.gguf" });
 });
+
+test("round 2 #2: Register as… lists only quants already on this machine", async () => {
+  const b = boot([cardModel({ registered: true, registeredQuant: "Q8_0", registeredQuants: ["Q8_0"] })], (url) => okRegistered(url) || json(200, {}));
+  b.click(b.$('.mcat-card [data-action="register-as"]'));
+  await b.settle();
+  assert.deepEqual([...b.$("#mcat-dlg-quant").options].map((o) => o.value), ["Q8_0"]);
+});

@@ -324,3 +324,37 @@ test("review 7: a provider id with selector-hostile characters still gets its ow
   const msg = [...b.document.querySelectorAll("[data-provider-msg]")].find((x) => x.getAttribute("data-provider-msg") === odd);
   assert.match(msg.textContent, /nope/);
 });
+
+// ─── PR #483 review round 2 ─────────────────────────────────────────────────
+
+test("round 2 #1: a curated card's Remove unregisters the provider it stands for, by provider id", async () => {
+  const model = {
+    id: "small-chat", providerId: "crow-chat", family: "f", lab: "L", license: "mit", gated: false, task: "chat", context_len: 4096, tags: ["small"], notes: null,
+    default_quant: "Q4", first_run_default: false, registered: true, registeredQuant: "Q4", running: false, serving_class: null,
+    quants: [{ quant: "Q4", size_mb: 500, min_ram_mb: 500, min_vram_mb: 0, fitBadge: "fits" }],
+  };
+  const data = { runtime: { name: "llama.cpp", release: "b1" }, probe: null, estimatedRamMb: 0, estimatedVramMb: 0, hfTokenConfigured: false, models: [model], runtimeModels: [] };
+  const b = boot([], (url, init) => {
+    if (url === "/api/models/providers/crow-chat" && init.method === "DELETE") return json(200, { requiresConfirm: true, provider: "crow-chat", bindings: { profiles: [], bots: [] } });
+    if (url === "/api/models/providers/crow-chat?confirm=true") return json(200, { deleted: true });
+    return json(200, {});
+  }, { withCatalogClient: true, catalogData: data });
+  b.click(b.document.querySelector('.mcat-card [data-action="remove"]'));
+  await b.settle();
+  b.click(b.document.querySelector("#mcat-modal-content .btn-danger"));
+  await b.settle();
+  const deletes = b.calls.filter((c) => c.method === "DELETE").map((c) => c.url);
+  assert.deepEqual(deletes, ["/api/models/providers/crow-chat", "/api/models/providers/crow-chat?confirm=true"]);
+});
+
+test("round 2 #3: the registered-row unregister confirm warns when the weights file will be deleted, and only then", async () => {
+  for (const willDeleteFiles of [true, false]) {
+    const b = boot(FIXTURE_ROWS, (url, init) => (url === "/api/models/providers/crow-idle" && init.method === "DELETE"
+      ? json(200, { requiresConfirm: true, bindings: { profiles: [], bots: [] }, willDeleteFiles })
+      : json(200, {})));
+    b.click(b.document.querySelector('[data-provider-row="crow-idle"] [data-reg-action="remove"]'));
+    await b.settle();
+    const text = b.document.getElementById("mcat-modal-content").textContent;
+    assert.equal(/delete the downloaded file/.test(text), willDeleteFiles, `willDeleteFiles=${willDeleteFiles}`);
+  }
+});

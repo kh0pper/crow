@@ -154,7 +154,10 @@ export function dialogClientJS(lang) {
             box.appendChild(pf);
 
             refs.quant = el("select", { id: "mcat-dlg-quant" });
-            var quants = isEdit ? [row.quant] : (opts.quants && opts.quants.length ? opts.quants : [opts.quant]);
+            // Register as… only re-points weights already here; adopt may
+            // name any catalog quant (its file is on disk by definition).
+            var pool = mode === "register" && opts.registeredQuants && opts.registeredQuants.length ? opts.registeredQuants : opts.quants;
+            var quants = isEdit ? [row.quant] : (pool && pool.length ? pool : [opts.quant]);
             var wantQuant = isEdit ? row.quant : (opts.quant || quants[0]);
             quants.forEach(function (q) {
               var o = el("option", { value: q }, q);
@@ -317,6 +320,7 @@ export function dialogClientJS(lang) {
             catalogId: card.getAttribute("data-model-id"),
             quant: card.getAttribute("data-registered-quant") || card.getAttribute("data-default-quant"),
             quants: parseList(card.getAttribute("data-quants")),
+            registeredQuants: parseList(card.getAttribute("data-registered-quants")),
             companions: parseList(card.getAttribute("data-companions")),
             launch: launch
           });

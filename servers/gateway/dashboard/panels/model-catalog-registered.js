@@ -166,6 +166,7 @@ export function registeredClientJS(lang) {
           removeBindings: '${tJs("models.regRemoveBindings", lang)}',
           removeNoBindings: '${tJs("models.regRemoveNoBindings", lang)}',
           removeConfirm: '${tJs("models.regRemoveConfirm", lang)}',
+          deletesFile: '${tJs("models.deleteConfirmIntro", lang)}',
           cancel: '${tJs("models.deleteCancelButton", lang)}'
         };
 
@@ -258,7 +259,7 @@ export function registeredClientJS(lang) {
         function overlay() { return document.getElementById("mcat-modal-overlay"); }
         function hideModal() { var o = overlay(); if (o) o.style.display = "none"; }
 
-        function confirmRemove(provider, bindings, el) {
+        function confirmRemove(provider, bindings, el, willDeleteFiles) {
           var n = ((bindings && bindings.profiles) || []).length + ((bindings && bindings.bots) || []).length;
           var box = document.createElement("div");
           var title = document.createElement("div");
@@ -268,6 +269,13 @@ export function registeredClientJS(lang) {
           var p = document.createElement("p");
           p.textContent = n > 0 ? fill(T.removeBindings, { n: n }) : T.removeNoBindings;
           box.appendChild(p);
+          // A downloaded entry nobody else uses loses its weights file too.
+          if (willDeleteFiles) {
+            var warn = document.createElement("p");
+            warn.className = "mcat-reg__warn";
+            warn.textContent = T.deletesFile;
+            box.appendChild(warn);
+          }
           var actions = document.createElement("div");
           actions.className = "mcat-modal__actions";
           var cancel = document.createElement("button");
@@ -301,7 +309,7 @@ export function registeredClientJS(lang) {
 
         function requestRemove(provider, el) {
           call("DELETE", "/providers/" + encodeURIComponent(provider)).then(function (res) {
-            if (res.ok && res.data && res.data.requiresConfirm) confirmRemove(provider, res.data.bindings, el);
+            if (res.ok && res.data && res.data.requiresConfirm) confirmRemove(provider, res.data.bindings, el, !!res.data.willDeleteFiles);
             else if (!res.ok) show(el, errText(res.data));
           }).catch(function () { show(el, T.failed); });
         }

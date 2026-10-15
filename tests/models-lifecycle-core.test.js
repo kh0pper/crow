@@ -316,3 +316,14 @@ test("review 8: the real llmModelsRouter() and modelsRouter() defaults share one
     sharedJobStore().update(job.id, { state: "failed" });
   } finally { await h.cleanup(); }
 });
+
+test("round 2 (b): a throw while choosing evicting/starting fails the job instead of leaving it queued forever", async () => {
+  const { deps } = coreDeps({ siblingsOfFn: () => { throw new Error("orchestrator unavailable"); } });
+  const core = createLifecycleCore(deps);
+  const { body } = core.start("crow-chat", "t");
+  await new Promise((r) => setImmediate(r));
+  const j = core.job(body.job_id).body;
+  assert.equal(j.state, "failed");
+  assert.match(j.error, /orchestrator unavailable/);
+  assert.equal(deps.jobs.activeFor("crow-chat"), null);
+});

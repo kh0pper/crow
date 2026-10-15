@@ -186,6 +186,9 @@ export async function loadPanelData({
       first_run_default: !!model.first_run_default,
       registered: !!regEntry,
       registeredQuant: regEntry ? regEntry.quant : null,
+      // Every quant of this model already on the machine: Register as… may
+      // only re-point those (PR #483 review).
+      registeredQuants: [...new Set(findRegistryEntries(state, model.id).map((e) => e.entry?.quant).filter(Boolean))],
       running: !!(handle && handle.live),
       serving_class: servingClassOf(model),
       // The register/adopt dialog pre-fills from these (plan 3a, Task 7).
@@ -550,7 +553,7 @@ export function renderRuntimeStrip(data, lang) {
     // curated cards already use. Curated rows keep relying on their own
     // card's Remove button, unchanged.
     const removeBtn = m.source === "hf-browser"
-      ? button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(m.modelId)}"` })
+      ? button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(m.modelId)}"${m.providerId ? ` data-provider-id="${escapeHtml(m.providerId)}"` : ""}` })
       : "";
     return `<tr>
       <td class="mono">${escapeHtml(m.modelId)}</td>
@@ -641,7 +644,11 @@ function renderModelCard(model, lang, hfTokenConfigured, orchestrationDisabled =
   // through the job-store route like every other panel start (review M2).
   // An orchestration-off host shows neither; Remove and Download stay.
   const target = `data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(model.providerId || model.id)}"`;
-  const removeBtn = button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"` });
+  // Remove unregisters the provider this card stands for (it may carry a
+  // custom id such as crow-chat); without one the server resolves the
+  // catalog id's providers (PR #483 review).
+  const removeTarget = model.providerId ? ` data-provider-id="${escapeHtml(model.providerId)}"` : "";
+  const removeBtn = button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(model.id)}"${removeTarget}` });
   // Register as… / Adopt open the dialog (plan 3a, Task 7). An
   // orchestration-off host refuses registration (409), so neither is offered.
   const registerAsBtn = orchestrationDisabled ? "" : button(t("models.dlgActionRegisterAs", lang), { variant: "secondary", size: "sm", attrs: `data-action="register-as" data-model-id="${escapeHtml(model.id)}"` });
@@ -662,7 +669,7 @@ function renderModelCard(model, lang, hfTokenConfigured, orchestrationDisabled =
     }) + adoptBtn;
   }
 
-  const dialogAttrs = ` data-launch="${escapeHtml(JSON.stringify(model.launch ?? null))}" data-companions="${escapeHtml(JSON.stringify(model.companions || []))}" data-quants="${escapeHtml(JSON.stringify((model.quants || []).map((q) => q.quant)))}" data-default-quant="${escapeHtml(model.default_quant || "")}" data-registered-quant="${escapeHtml(model.registeredQuant || "")}" data-can-register="${orchestrationDisabled ? "0" : "1"}"`;
+  const dialogAttrs = ` data-launch="${escapeHtml(JSON.stringify(model.launch ?? null))}" data-companions="${escapeHtml(JSON.stringify(model.companions || []))}" data-quants="${escapeHtml(JSON.stringify((model.quants || []).map((q) => q.quant)))}" data-default-quant="${escapeHtml(model.default_quant || "")}" data-registered-quant="${escapeHtml(model.registeredQuant || "")}" data-registered-quants="${escapeHtml(JSON.stringify(model.registeredQuants || (model.registeredQuant ? [model.registeredQuant] : [])))}" data-can-register="${orchestrationDisabled ? "0" : "1"}"`;
   return `<div class="mcat-card" data-model-id="${escapeHtml(model.id)}" data-serving-class="${escapeHtml(model.serving_class || "")}"${dialogAttrs}>
     <div class="mcat-card__head">
       <span class="mcat-card__title">${escapeHtml(model.id)}</span>
@@ -1054,7 +1061,13 @@ export function modelCatalogClientJS(lang) {
         }
 
         // --- Delete (confirm-then-delete) ---
-        function showDeleteConfirm(modelId, bindings) {
+        // A known provider id goes to DELETE /api/models/providers/:p; a bare
+        // catalog id to the legacy route, which resolves its providers.
+        function deletePath(modelId, providerId) {
+          return providerId ? "/providers/" + encodeURIComponent(providerId) : "/" + encodeURIComponent(modelId);
+        }
+
+        function showDeleteConfirm(modelId, bindings, providerId) {
           var frag = document.createElement("div");
 
           var title = document.createElement("div");
@@ -1107,7 +1120,7 @@ export function modelCatalogClientJS(lang) {
           confirmBtn.textContent = '${tJs("models.deleteConfirmButton", lang)}';
           confirmBtn.addEventListener("click", function () {
             confirmBtn.disabled = true;
-            apiFetch("/" + encodeURIComponent(modelId) + "?confirm=true", { method: "DELETE" }).then(function (res) {
+            apiFetch(deletePath(modelId, providerId) + "?confirm=true", { method: "DELETE" }).then(function (res) {
               hideModal();
               if (res.ok) {
                 setStatus(modelId, '${tJs("models.deleteSuccess", lang)}');
@@ -1129,10 +1142,10 @@ export function modelCatalogClientJS(lang) {
           showModal();
         }
 
-        function requestDelete(modelId) {
-          apiFetch("/" + encodeURIComponent(modelId), { method: "DELETE" }).then(function (res) {
+        function requestDelete(modelId, providerId) {
+          apiFetch(deletePath(modelId, providerId), { method: "DELETE" }).then(function (res) {
             if (res.ok && res.data && res.data.requiresConfirm) {
-              showDeleteConfirm(modelId, res.data.bindings);
+              showDeleteConfirm(modelId, res.data.bindings, providerId);
             } else if (!res.ok) {
               setStatus(modelId, messageFor(res.data.code, res.data.error));
             }
@@ -1148,7 +1161,7 @@ export function modelCatalogClientJS(lang) {
           if (action === "download" && modelId) startDownload(modelId);
           else if (action === "start" && modelId) startModel(modelId, el.getAttribute("data-provider-id"));
           else if (action === "stop" && modelId) stopModel(modelId, el.getAttribute("data-provider-id"));
-          else if (action === "remove" && modelId) requestDelete(modelId);
+          else if (action === "remove" && modelId) requestDelete(modelId, el.getAttribute("data-provider-id"));
           else if (action === "reprobe") {
             var statusSpan = document.getElementById("mcat-reprobe-status");
             if (statusSpan) statusSpan.textContent = '${tJs("models.runtimeReprobing", lang)}';
