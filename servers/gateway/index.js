@@ -62,6 +62,7 @@ import { generalLimiterSkip } from "./middleware/rate-limit.js";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
+import { gatewayListenPort } from "./listen-port.js";
 
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
@@ -86,7 +87,7 @@ import { runPostListenSetup } from "./boot/post-listen.js";
 import { frameAncestorsFor, createPeerFrameHosts } from "./frame-ancestors.js";
 import { getTrustedInstances } from "./dashboard/panels/nest/data-queries.js";
 
-const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
+const PORT = gatewayListenPort();
 const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
 const noAuth = process.argv.includes("--no-auth");
 

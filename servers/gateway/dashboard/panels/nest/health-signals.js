@@ -43,9 +43,10 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
-import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
+import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
+import { gatewayListenPort } from "../../../listen-port.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
@@ -718,56 +719,169 @@ let _tsServeCache = { ts: 0, raw: null };
 let _tailscaleReader = () => execFileSync("tailscale", ["serve", "status", "-json"], { encoding: "utf-8", timeout: 2000 });
 export function _setTailscaleReader(fn) { _tailscaleReader = fn; _tsServeCache = { ts: 0, raw: null }; }
 
-// Returns funnel-exposed paths (array), or null when we couldn't determine
-// (CLI absent / erroring / unexpected shape) → caller skips silently.
+// Returns what Funnel exposes — { handlers: [{ mount, kind, proxy }], tcpForwards:
+// [port] } — or null when we couldn't determine it (CLI absent / erroring /
+// unexpected shape) → caller skips silently.
 // C1: serve ≠ funnel. A healthy PRIVATE box mounts "/" under Web.<host> with
-// NO AllowFunnel key — that must NOT be read as exposure. Only paths under a
+// NO AllowFunnel key — that must NOT be read as exposure. Only handlers under a
 // hostport with AllowFunnel===true are actually public.
-function funnelExposedPaths(nowMs) {
+function funnelExposure(nowMs) {
   if (nowMs - _tsServeCache.ts < 5 * 60 * 1000) return _tsServeCache.raw;
-  let paths = null;
+  let out = null;
   try {
     const cfg = JSON.parse(_tailscaleReader());
     const allow = cfg.AllowFunnel || {};
     const enabledHostports = Object.keys(allow).filter((hp) => allow[hp] === true);
-    // Absent/empty AllowFunnel → fully private → empty list (not null).
-    paths = [];
+    // Absent/empty AllowFunnel → fully private → empty lists (not null).
+    out = { handlers: [], tcpForwards: [] };
     for (const hp of enabledHostports) {
       const handlers = (cfg.Web && cfg.Web[hp] && cfg.Web[hp].Handlers) || {};
-      for (const p of Object.keys(handlers)) paths.push(p);
+      for (const [mount, h] of Object.entries(handlers)) {
+        const proxy = typeof h?.Proxy === "string" && h.Proxy ? h.Proxy : null;
+        out.handlers.push({ mount, kind: proxy ? "proxy" : "other", proxy });
+      }
+      // A raw TCP forwarder on a Funnel port never passes through the gateway's
+      // Funnel-header middleware.
+      const port = hp.slice(hp.lastIndexOf(":") + 1);
+      const tcp = cfg.TCP && cfg.TCP[port];
+      if (tcp && tcp.TCPForward) out.tcpForwards.push(port);
     }
   } catch {
-    paths = null; // CLI missing / not running / unexpected shape → skip
+    out = null; // CLI missing / not running / unexpected shape → skip
   }
-  _tsServeCache = { ts: nowMs, raw: paths };
-  return paths;
+  _tsServeCache = { ts: nowMs, raw: out };
+  return out;
 }
 
-// Reuse funnel.js's exact prefix semantics (trailing-slash = subtree, else exact).
-function isPublicSafePath(p) {
-  return PUBLIC_FUNNEL_PREFIXES.some((pre) => pre.endsWith("/") ? p.startsWith(pre) : p === pre);
+// Every name/address a Serve target could use to reach a listener on THIS host.
+function defaultOwnHosts() {
+  const hosts = new Set(["localhost", "0.0.0.0", "::", "::1"]);
+  try {
+    const h = hostname().toLowerCase();
+    if (h) hosts.add(h);
+  } catch {}
+  try {
+    for (const addrs of Object.values(networkInterfaces())) {
+      for (const a of addrs || []) if (a && a.address) hosts.add(String(a.address).toLowerCase().split("%")[0]);
+    }
+  } catch {}
+  return hosts;
 }
 
+// ::ffff:127.0.0.1 and ::ffff:7f00:1 (what URL normalises it to) → 127.0.0.1.
+function unmapIPv4(h) {
+  const dotted = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return dotted[1];
+  const hex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return h;
+  const [a, b] = [parseInt(hex[1], 16), parseInt(hex[2], 16)];
+  return `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+}
+
+// Known limit: an alias or MagicDNS name for this host that defaultOwnHosts()
+// does not list classifies as another service (info, not warn). Layer 1 — the
+// Funnel-header middleware in funnel.js — still enforces the allowlist there.
+function isOwnHost(host, ownHosts) {
+  const h = unmapIPv4(host.toLowerCase().replace(/^\[|\]$/g, ""));
+  if (ownHosts.has(h)) return true;
+  if (h.endsWith(".localhost")) return true;
+  if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+  // The machine's own name under any domain (crow.local, crow.<tailnet>.ts.net).
+  for (const o of ownHosts) if (/^[a-z]/.test(o) && h.startsWith(o + ".")) return true;
+  return false;
+}
+
+/**
+ * Classify a Tailscale Serve proxy target. Mirrors tailscale's expandProxyArg
+ * (ipn/ipnlocal/serve.go): a bare port means http://127.0.0.1:<port>, host:port
+ * means http://host:port, https+insecure:// is https. Returns
+ * { own, backendPath, label }: own = the target is THIS gateway (or we can't
+ * tell — unparseable and unix-socket targets count as own, so they warn);
+ * backendPath = the path the gateway receives for a request at the mount itself.
+ * Tailscale strips the mount and joins the remainder onto the target's path
+ * (serveWebHandler's http.StripPrefix + reverseProxy SetURL), so a mount
+ * proxied to a bare host:port hands the gateway "/" and everything under it.
+ */
+export function classifyFunnelTarget(proxy, { port = gatewayListenPort(), ownHosts = defaultOwnHosts() } = {}) {
+  const raw = String(proxy || "");
+  let urlStr;
+  if (/^https?:\/\//i.test(raw)) urlStr = raw;
+  else if (/^https\+insecure:\/\//i.test(raw)) urlStr = "https://" + raw.slice("https+insecure://".length);
+  else if (/^\d+$/.test(raw)) urlStr = "http://127.0.0.1:" + raw;
+  else if (raw && !raw.startsWith("unix:")) urlStr = "http://" + raw;
+  let u = null;
+  try { if (urlStr) u = new URL(urlStr); } catch { u = null; }
+  if (!u || !u.hostname) return { own: true, backendPath: "/", label: raw };
+  const targetPort = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+  const local = isOwnHost(u.hostname, ownHosts);
+  return {
+    own: local && targetPort === port,
+    backendPath: u.pathname || "/",
+    label: local ? `:${targetPort}` : `${u.hostname}:${targetPort}`,
+  };
+}
+
+// A backend path is public-safe when it is on the allowlist itself (an exact
+// file like /robots.txt) or when its subtree is (/s-assets → /s-assets/…):
+// either way the mapping targets a public surface, and the middleware 403s any
+// stray path under it. "/" is never on the list (funnel.js refuses a lone "/").
+function isPublicSafeBackendPath(p, prefixes) {
+  const sub = p.endsWith("/") ? p : p + "/";
+  return isFunnelPublicPath(p, prefixes) || isFunnelPublicPath(sub, prefixes);
+}
+
+// Scope: this check guards THIS Crow's routes (CLAUDE.md "Network exposure
+// invariant"). A Funnel proxy to another port/host belongs to another service
+// (or another Crow on this host, which judges its own paths against its own
+// allowlist), so it is surfaced as an info line — visible, never silent — not
+// as this Crow's warning. Anything we cannot attribute (non-proxy handlers,
+// TCP forwarders, unparseable targets) is treated as this Crow's and warns.
 function exposureSignal(lang, nowFn) {
   const problems = [];
   if (process.env.CROW_DASHBOARD_PUBLIC === "true") problems.push(t("signals.exposure.public", lang));
   if (process.argv.includes("--no-auth")) problems.push(t("signals.exposure.noauth", lang));
   if (process.env.CROW_CSRF_STRICT === "0") problems.push(t("signals.exposure.csrf", lang));
 
-  const exposed = funnelExposedPaths(nowFn());
-  if (Array.isArray(exposed)) {
-    const unsafe = exposed.filter((p) => !isPublicSafePath(p));
-    if (unsafe.length > 0) problems.push(t("signals.exposure.funnel", lang));
+  const exposed = funnelExposure(nowFn());
+  const foreign = new Map(); // target label → [mount]
+  if (exposed) {
+    const prefixes = effectiveFunnelPrefixes();
+    const port = gatewayListenPort();
+    const ownHosts = defaultOwnHosts();
+    let unsafe = false;
+    for (const h of exposed.handlers) {
+      if (h.kind !== "proxy") { unsafe = true; continue; }
+      const c = classifyFunnelTarget(h.proxy, { port, ownHosts });
+      if (!c.own) {
+        if (!foreign.has(c.label)) foreign.set(c.label, []);
+        foreign.get(c.label).push(h.mount);
+        continue;
+      }
+      if (!isPublicSafeBackendPath(c.backendPath, prefixes)) unsafe = true;
+    }
+    if (exposed.tcpForwards.length > 0) problems.push(t("signals.exposure.tcp", lang));
+    if (unsafe) problems.push(t("signals.exposure.funnel", lang));
   }
 
+  const out = [];
   if (problems.length === 0) {
-    return { id: "exposure", severity: null, state: "ok", label: t("signals.exposure.label", lang), value: t("signals.exposure.private", lang) };
+    out.push({ id: "exposure", severity: null, state: "ok", label: t("signals.exposure.label", lang), value: t("signals.exposure.private", lang) });
+  } else {
+    out.push({
+      id: "exposure", severity: "warn", state: "warn", label: t("signals.exposure.label", lang),
+      value: t("signals.exposure.open", lang), issueLabel: problems[0],
+      actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
+    });
   }
-  return {
-    id: "exposure", severity: "warn", state: "warn", label: t("signals.exposure.label", lang),
-    value: t("signals.exposure.open", lang), issueLabel: problems[0],
-    actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
-  };
+  if (foreign.size > 0) {
+    const list = [...foreign].map(([target, mounts]) => `${mounts.sort().join(", ")} → ${target}`).join("; ");
+    out.push({
+      id: "exposure:foreign", severity: "info", state: "info", issueOnly: true,
+      label: fill(t("signals.exposure.foreign", lang), { list }),
+      actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
+    });
+  }
+  return out;
 }
 
 async function integrationsSignal(db, lang) {
