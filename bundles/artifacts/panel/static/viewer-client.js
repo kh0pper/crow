@@ -393,7 +393,9 @@
       // on the trusted "Comment on …" button (review H1).
       // S6: on a document selection is always on (no toggle); a page or a
       // diagram proposes only with Comment pressed.
-      onProposal: function (a) { if (!S.commentOn && !isDoc()) return; if (a.kind === "text") offerSelection(a); else compose(a); },
+      // Review of #488: a document proposes only selections (select-only);
+      // any other kind from its frame is ignored, never composed.
+      onProposal: function (a) { if (!S.commentOn && !isDoc()) return; if (isDoc() && a.kind !== "text") return; if (a.kind === "text") offerSelection(a); else compose(a); },
       onSelectionCleared: function () { hideSelBar(); },
       onTrip: function (reason) {
         showFlagged();   // F3: replaced at once, before the server answers
