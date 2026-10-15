@@ -13,7 +13,9 @@
  *    design: the first request has already left when this fires;
  *  - every frame message is an untrusted PROPOSAL: source, origin, shape,
  *    size, rate and nonce checked; nothing acts without a user gesture in the
- *    rail;
+ *    rail. The kinds: hello, anchor (a proposal), anchor-rect (pin rects) and
+ *    selection-cleared (S6: hides the trusted "Comment on …" button, nothing
+ *    else); all but hello are ignored before the hello;
  *  - the parent never posts anything sensitive in: only {kind:"comment-mode"}
  *    and {kind:"pins"} — the numbered anchors of the OWNER's threads on this
  *    version (element selectors / text quotes the content itself proposed;
@@ -235,6 +237,13 @@
         var box = state.iframe.getBoundingClientRect();
         var rects = validRects(d.rects, box.width, box.height);
         if (rects) try { opts.onRects && opts.onRects(rects); } catch (x) {}
+        return;
+      }
+      // S6 (plan Rev 3 H2): the helper says a selection went away (posted
+      // only on a real selected→collapsed transition, at most 4/s). Effect
+      // only: the trusted "Comment on …" button hides. Ignored before hello.
+      if (d.kind === "selection-cleared") {
+        if (state.hello) try { opts.onSelectionCleared && opts.onSelectionCleared(); } catch (x) {}
         return;
       }
       if (d.kind === "anchor" && state.hello) {

@@ -26,8 +26,18 @@
  *      only focuses a thread in the trusted rail. The same quote ranges are
  *      painted with the CSS Highlight API (S3; an adopted, constructed sheet);
  *      element and whole-block anchors are not painted.
+ *   4. selection-cleared (S6, plan Rev 3 H2): documents keep selection on
+ *      all the time, so when a selection goes away the viewer must hide its
+ *      "Comment on …" button. Posted ONLY on a real selected→collapsed
+ *      transition (taps and caret moves on a collapsed selection post
+ *      nothing), at most once per 250 ms (trailing).
  * The viewer never posts anything sensitive in: only {kind:"comment-mode"}
  * and {kind:"pins"} (owner anchors the content itself proposed).
+ *
+ * MESSAGE BUDGET: the viewer trips its wire at more than 20 messages a
+ * second, so this helper stays at or under 10: hello (once) + anchor-rect
+ * (at most 4/s) + proposals (at most 2.5/s: one per 400 ms) + selection-
+ * cleared (at most 4/s). Anything new must fit in what is left.
  */
 export function anchorHelperSource(nonce) {
   const n = JSON.stringify(String(nonce));
@@ -186,10 +196,22 @@ export function anchorHelperSource(nonce) {
     } catch (e) {}
     post({ kind: "anchor", anchor: { kind: "text", quote, prefix, suffix, block } });
   }
+  let hadSel = false, clrTimer = 0, clrLast = 0;
+  function postCleared() {
+    clrTimer = 0;
+    const cur = getSelection && getSelection();
+    if (cur && !cur.isCollapsed) return;   // selected again meanwhile: nothing to clear
+    clrLast = Date.now();
+    post({ kind: "selection-cleared" });
+  }
   document.addEventListener("selectionchange", () => {
     if (!on) return;
     const cur = getSelection && getSelection();
-    if (!cur || cur.isCollapsed) lastQuote = "";   // re-selecting the same words proposes again
+    if (!cur || cur.isCollapsed) {
+      lastQuote = "";   // re-selecting the same words proposes again
+      // S6/H2: only a selected→collapsed transition, throttled (trailing).
+      if (hadSel) { hadSel = false; if (!clrTimer) clrTimer = setTimeout(postCleared, Math.max(0, 250 - (Date.now() - clrLast))); }
+    } else hadSel = true;
     clearTimeout(selTimer);
     selTimer = setTimeout(proposeSelection, 400);
   });

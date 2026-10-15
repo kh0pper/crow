@@ -2,8 +2,9 @@
  * Crow Artifacts — the viewer page client (dashboard origin, trusted; plan
  * PR-2 Task 2.2). Classic script. Draws the header (title, version switcher,
  * status, Run scripts, More), the frame (through viewer.js), the numbered
- * pins, the threads column (wide) or bottom sheet (phone), the floating
- * Comment toggle and the one primary action, Send N comments to chat.
+ * pins, the threads column (wide) or bottom sheet (phone), the Comment
+ * toggle in the header (pages and diagrams; a document's selection is always
+ * on, S6) and the one primary action, Send N comments to chat.
  *
  * Rules:
  *  - every user-, bot- or contact-authored string is placed with textContent;
@@ -58,7 +59,8 @@
   var openChat = el("a", { class: "cv-openchat", hidden: "", text: T.open_chat });
   var moreMenu = el("div", { class: "cv-menu" });
   var more = el("details", { class: "cv-more" }, [el("summary", { "aria-label": T.more, text: "⋯" }), moreMenu]);
-  var head = el("header", { class: "cv-head" }, [title, el("div", { class: "cv-headtools" }, [versionSel, runBtn, openChat, more]), status]);
+  var headTools = el("div", { class: "cv-headtools" }, [versionSel, runBtn, openChat, more]);
+  var head = el("header", { class: "cv-head" }, [title, headTools, status]);
   var banners = el("div", { class: "cv-banners" });
   var trust = el("div", { class: "cv-trust" });
   var frameBox = el("div", { class: "cv-frame" });
@@ -91,7 +93,6 @@
   root.appendChild(trust);
   root.appendChild(el("div", { class: "cv-body" }, [stage, side]));
   root.appendChild(selBar);
-  root.appendChild(commentBtn);
   root.appendChild(el("p", { class: "cv-note", text: T.never_password }));
 
   function banner(text, kind, buttons) {
@@ -107,6 +108,21 @@
     S.sheetOpen = !!open;
     side.classList.toggle("cv-open", S.sheetOpen);
     handle.setAttribute("aria-expanded", S.sheetOpen ? "true" : "false");
+    placeSelBar();
+    setTimeout(placeSelBar, 250);   // after the sheet's height transition
+  }
+  // S6: on a phone the "Comment on …" button sits just above the bottom
+  // sheet, open or not (and above it in z-order), never under it.
+  function placeSelBar() {
+    var docked = window.getComputedStyle(side).position === "fixed";
+    selBar.style.bottom = docked ? (side.offsetHeight + 8) + "px" : "";
+  }
+  window.addEventListener("resize", placeSelBar);
+  // S7: no floating button. Pages and diagrams get the Comment toggle in the
+  // header; a document has none (selection is always on, S6).
+  function placeCommentBtn() {
+    if (isDoc()) { if (commentBtn.parentNode) commentBtn.parentNode.removeChild(commentBtn); return; }
+    if (commentBtn.parentNode !== headTools) headTools.insertBefore(commentBtn, more);
   }
   handle.addEventListener("click", function () { setSheet(!S.sheetOpen); });
 
@@ -122,6 +138,7 @@
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
+      placeCommentBtn();
       title.textContent = S.art.title;
       trust.textContent = fmt(T.made_by, { bot: S.art.created_by_bot || T.you });
       renderVersions(); renderThreads(); renderStatus(); renderSections();
@@ -162,7 +179,7 @@
       (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
       threadList.appendChild(li);
     });
-    if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: T.no_comments }));
+    if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: isDoc() ? T.no_comments_doc : T.no_comments }));
     var n = shown().length;
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
@@ -300,6 +317,7 @@
     selBar.textContent = "";
     selBar.appendChild(button(fmt(T.comment_selection, { q: q }), function () { hideSelBar(); compose(anchor); }, "cv-primary"));
     selBar.removeAttribute("hidden");
+    placeSelBar();
   }
 
   // ── compose ─────────────────────────────────────────────────────────────
@@ -373,7 +391,10 @@
       loadEvidence: function (tokenId) { return api("GET", BASE + "/versions/" + n + "/load-evidence?tokenId=" + encodeURIComponent(tokenId)); },
       // A tap (pages) composes at once; a SELECTION waits for the owner's tap
       // on the trusted "Comment on …" button (review H1).
-      onProposal: function (a) { if (!S.commentOn) return; if (a.kind === "text") offerSelection(a); else compose(a); },
+      // S6: on a document selection is always on (no toggle); a page or a
+      // diagram proposes only with Comment pressed.
+      onProposal: function (a) { if (!S.commentOn && !isDoc()) return; if (a.kind === "text") offerSelection(a); else compose(a); },
+      onSelectionCleared: function () { hideSelBar(); },
       onTrip: function (reason) {
         showFlagged();   // F3: replaced at once, before the server answers
         api("POST", BASE + "/versions/" + n + "/tripwire", { reason: reason }).then(refresh, function () {});
@@ -393,6 +414,8 @@
         if (!/[?&]reloaded=1/.test(location.search)) location.replace(location.pathname + location.search + (location.search ? "&" : "?") + "reloaded=1");
       },
     });
+    // S6: documents select-only, always on — sent at the hello, never turned off.
+    if (isDoc()) viewer.setCommentMode(true, { selectOnly: true });
     viewer.load().then(function (g) {
       if (!g) return;
       isolationNote(g.isolation);
@@ -419,7 +442,7 @@
     // S5: the banners always run; only the idle status line yields to the
     // comment-mode hint.
     if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
-    else status.textContent = S.commentOn ? (isDoc() ? T.commenting_doc : T.commenting) : "";
+    else status.textContent = S.commentOn && !isDoc() ? T.commenting : "";
     // A round just finished with a new current version: say so, offer it.
     if (S.lastRound && !S.activeRound) {
       S.lastRound = null;

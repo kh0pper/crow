@@ -153,7 +153,8 @@ window.__mountWith = (g, o) => { o = o || {}; window.__v = CrowArtifactViewer.mo
   onRects: (r) => __r.rects.push(r),
   helloMs: o.helloMs, loadMs: o.loadMs, loadEvidence: o.evidence === "none" ? undefined : (id) => fetch((o.evidence === "500" ? "/evidence500?" : "/evidence?") + "tokenId=" + encodeURIComponent(id)).then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); }),
   onRetry: (x) => __r.retries.push(x),
-  onProposal: (a) => __r.proposals.push(a), onTrip: (x) => __r.trips.push(x), onReady: () => __r.ready++, onRefuse: (x) => __r.refused.push(x) }); return __v.load().then(() => true, (e) => e.message); };
+  onProposal: (a) => __r.proposals.push(a), onTrip: (x) => __r.trips.push(x), onReady: () => __r.ready++, onRefuse: (x) => __r.refused.push(x),
+  onSelectionCleared: () => { __r.cleared = (__r.cleared || 0) + 1; } }); return __v.load().then(() => true, (e) => e.message); };
 </script></body>`);
       }
     }
@@ -879,6 +880,27 @@ test("S1: a block pin crosses as the trusted anchor_map's plain substring + nth 
     assert.equal(r[4].bx, 30);
     assert.ok(Math.abs(r[4].x - (30 + 5 * cw)) <= 2 && r[4].y >= 59 && r[4].y <= 66 && r[4].h < 20, `a wrapped quote reports its first line only: ${JSON.stringify(r[4])}`);
     assert.deepEqual(await t.evalIn("__r.trips"), []);
+  } finally { await t.close(); }
+});
+
+test("S6/H2: selection-cleared is accepted only after the hello, and its only effect is the onSelectionCleared callback", async (ctx) => { if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    const g = grantFor("document", { "index.html": html(`<!doctype html><html><head></head><body><div class="blk" id="b1"><p>hello words</p></div></body></html>`) });
+    await harness(t, g, { before: "window.__dropHello = true" });
+    assert.ok(await waitFor(async () => (await t.evalIn("__v.state().framed")) === true), "framed");
+    await sleep(300);
+    // Synthetic frame messages: the right source, origin and nonce (what the helper would send).
+    const fake = (kind) => `window.dispatchEvent(new MessageEvent("message", { data: { t: "crow-artifact", nonce: ${JSON.stringify(g.nonce)}, kind: "${kind}" }, origin: "null", source: document.querySelector("iframe").contentWindow }))`;
+    await t.evalIn(fake("selection-cleared"));
+    assert.equal(await t.evalIn("__r.cleared || 0"), 0, "before the hello: ignored");
+    await t.evalIn("window.__dropHello = false");
+    await t.evalIn(fake("hello"));
+    assert.equal(await t.evalIn("__v.state().hello"), true);
+    await t.evalIn(fake("selection-cleared"));
+    assert.equal(await t.evalIn("__r.cleared || 0"), 1, "after the hello: the callback");
+    assert.deepEqual(await t.evalIn("__r.trips"), [], "no trip");
+    assert.deepEqual(await t.evalIn("__r.proposals"), [], "and no proposal");
   } finally { await t.close(); }
 });
 

@@ -73,7 +73,6 @@ body{background:#eef1f3}
 .cv-compose{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .cv-compose textarea,.cv-compose input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--sky);color:var(--ink)}
 .cv-row{display:flex;flex-wrap:wrap;gap:8px}
-.cv-comment{position:fixed;right:16px;bottom:72px;z-index:20;box-shadow:0 4px 16px rgba(0,0,0,.2)}
 .cv-comment[aria-pressed="true"]{background:var(--teal) !important;color:var(--card) !important;border-color:var(--teal) !important}
 .cv-note{font-size:13px;color:var(--dim)}
 .cv-preview{max-width:min(560px,calc(100vw - 32px));border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink)}
@@ -92,7 +91,6 @@ body{background:#eef1f3}
   .cv-body{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
   .cv-side{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow-y:auto}
   .cv-handle{pointer-events:none;border:0 !important;background:transparent !important;font-weight:600}
-  .cv-comment{bottom:24px;right:372px}
   #crow-artifact-viewer{padding-bottom:24px}
 }
 /* The way out (full-tab viewer only) and the owner's comment actions. */
@@ -118,7 +116,9 @@ body{background:#eef1f3}
 .cv-where legend{font-weight:600;padding:0 4px}
 .cv-where-opt{display:flex;align-items:center;gap:8px;min-height:44px}
 .cv-where-opt.cv-disabled{color:var(--dim)}
-/* D28: the trusted "Comment on <selection>" button, above the Comment toggle. */
-.cv-selbar{position:fixed;left:16px;right:16px;bottom:128px;z-index:21;display:flex;justify-content:center}
+/* D28: the trusted "Comment on <selection>" button. S6: above the bottom
+   sheet (z-order and position; viewer-client sets bottom from the sheet). */
+.cv-selbar{position:fixed;left:16px;right:16px;bottom:24px;z-index:30;display:flex;justify-content:center}
+@media (max-width:1023.98px){.cv-selbar{bottom:70px}}
 .cv-selbar{pointer-events:none}
 .cv-selbar button{pointer-events:auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.18)}
