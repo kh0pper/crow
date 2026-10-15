@@ -67,7 +67,7 @@ installedBundle("fx-mcp", REQUIRED("MCP_KEY"), null);
 installedBundle("fx-ambient", REQUIRED("AMBIENT_KEY"), null);
 process.env.AMBIENT_KEY = "from-systemd";
 
-// manifest-only stub (capstone-tracker's real shape): no .env, no mcp entry → AC-5
+// manifest-only stub (a real prod shape): no .env, no mcp entry → AC-5
 installedBundle("fx-stub", REQUIRED("STUB_KEY"), null);
 
 // every required key has a value → AC-6

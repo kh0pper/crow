@@ -19,8 +19,8 @@ milestones don't need a migration.
 - **Extraction** — PDFs go through a vendored PyMuPDF extractor
   (`scripts/extract.py`, run via `uv`): block-level text, `[TABLE]`
   markdown for tabular content, and a cleanup chain (de-hyphenation,
-  paragraph reflow, long-paragraph sentence splitting) shared with the
-  capstone-tracker bundle's e-reader pipeline. Web pages go through
+  paragraph reflow, long-paragraph sentence splitting) taken from an
+  earlier e-reader pipeline. Web pages go through
   `@mozilla/readability` + `linkedom`. Extraction runs as a subprocess
   with a timeout and structured JSON errors — a failed or partial
   extraction still creates a document row (`extraction_status`:

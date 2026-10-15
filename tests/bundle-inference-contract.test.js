@@ -297,20 +297,12 @@ test("malformed manifest (null) does not throw when the leak scan runs", () => {
 
 // --- Integration: the real bundles/ tree passes the FULL contract,
 //     proving Task 15's providers/no_auto_provider fields + Task 16's
-//     inference:true stamps are internally consistent and capstone-tracker's
-//     leaked IP default is actually fixed. ---
+//     inference:true stamps are internally consistent. ---
 
 test("all tracked real bundle manifests pass the full contract (inference + no_auto_provider + leak scan)", () => {
   const { audit } = buildRegistry();
   const invalid = audit.filter((a) => a.status === "invalid");
   assert.equal(invalid.length, 0, "invalid manifests: " + invalid.map((a) => `${a.id} [${a.errors.join(", ")}]`).join(" | "));
-});
-
-test("capstone-tracker no longer carries the leaked OCR_VISION_URL default IP", () => {
-  const { audit } = buildRegistry();
-  const entry = audit.find((a) => a.id === "capstone-tracker");
-  assert.ok(entry, "capstone-tracker must still be a bundle in the tree");
-  assert.equal(entry.ok, true, "capstone-tracker must pass the contract: " + entry.errors.join("; "));
 });
 
 test("every real inference bundle (providers[] present) is stamped inference: true", () => {

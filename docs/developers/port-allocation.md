@@ -88,7 +88,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
 | 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped) | external |
-| 8090 | 127.0.0.1 | capstone-tracker | shipped |
+| 8090 | 127.0.0.1 | (reserved — a private bundle maintained outside this repo) | reserved |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
 | 8094 | 127.0.0.1 | gatus | MVP PR 2 |
