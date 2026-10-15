@@ -86,6 +86,11 @@ jobs:
         run: node scripts/check-port-allocation.js
       - name: Registry build check
         run: node scripts/build-registry.mjs --check
+      # Every shipped bundle skill's current text must be in the ledger the
+      # boot-time skill sync reads (bundles/skill-history.json). Fix with:
+      # node scripts/build-skill-history.mjs, then commit the ledger.
+      - name: Skill history check
+        run: node scripts/build-skill-history.mjs --check
       # Vendored upstream payloads (bundles/<id>/payload/) must match the
       # payload_sha256 their vendor script stamped. Manifests without that
       # field are skipped by design — that is the pre-vendor draft state.

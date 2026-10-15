@@ -53,6 +53,7 @@ import {
   _setAppBundlesForTest,
 } from "../bundles-config.js";
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
+import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
@@ -135,6 +136,9 @@ const CONSENT_TOKEN_SCHEMA_VERSION = 1;
 // and only APP_BUNDLES binding for every reader). Re-exported below for pre-existing
 // importers (tests/bundles-install-set.test.js, tests/install-set-e2e.test.js).
 const SKILLS_DIR = join(CROW_HOME, "skills");
+// The skill sync's record (bundle-skill-sync.js): outside skills/ so the
+// resolver and the Skills panel never see it.
+const SKILL_RECORD_PATH = join(CROW_HOME, "skill-installs.json");
 const PANELS_DIR = join(CROW_HOME, "panels");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
@@ -927,6 +931,26 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
 }
 
 /**
+ * Install-time skill copy (both install paths): the same rules as the boot
+ * sync, copying from the INSTALLED bundle dir (review L9: that also serves
+ * third-party bundles, which have no repo source). Always mode "on": an
+ * install is the operator's explicit action, so CROW_SKILL_SYNC (which
+ * governs the silent boot pass) does not apply. An edited copy already in
+ * place is kept, never overwritten.
+ */
+function installBundleSkills(bundleId, destDir, manifest, job) {
+  mkdirSync(SKILLS_DIR, { recursive: true });
+  const { lines, kept } = syncBundleSkills({
+    id: bundleId, src: destDir, manifest, mode: "on", skillsDir: SKILLS_DIR,
+    recordPath: SKILL_RECORD_PATH, ledger: readSkillLedger(APP_BUNDLES), log: () => {},
+  });
+  for (const l of lines) {
+    if (l.action === "install" || l.action === "refresh" || l.action === "adopt" || l.action === "same") appendLog(job, `Installed skill: ${l.skill}`);
+  }
+  for (const k of kept) appendLog(job, `Kept your edited copy of skill ${k.skill} (the bundle's version was not applied)`);
+}
+
+/**
  * Repair missing bundle UI artifacts for already-installed bundles, and
  * (D1, BH-4) refresh a bundle's installed copy when the repo manifest's
  * version has moved past the installed manifest's version.
@@ -956,18 +980,23 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
  *        defaults to the module's `run`).
  * @returns {Promise<{repaired: string[], errors: Array<{id, error}>}>}
  */
-export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run } = {}) {
+export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m) } = {}) {
   const repaired = [];
   const errors = [];
+  // Skill sync (bundle-skill-sync.js): what it did per skill, and the copies
+  // it kept (the caller notifies the owner once per edited skill per repo hash).
+  const skillLines = [];
+  const skillsKept = [];
+  const ledger = skillLedger || readSkillLedger(appBundles);
 
   let installed;
   try {
     installed = getInstalled();
   } catch (err) {
-    return { repaired, errors: [{ id: "*", error: `read installed: ${err.message}` }] };
+    return { repaired, errors: [{ id: "*", error: `read installed: ${err.message}` }], skillLines, skillsKept };
   }
   if (!Array.isArray(installed) || installed.length === 0) {
-    return { repaired, errors };
+    return { repaired, errors, skillLines, skillsKept };
   }
 
   for (const entry of installed) {
@@ -986,6 +1015,23 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
     const touched = [];
     try {
       mkdirSync(destDir, { recursive: true });
+
+      // Skill sync, on EVERY boot (version bump or not) and BEFORE the
+      // refresh's `continue` below (review L9). It reads the INSTALLED
+      // manifest's "refresh": false itself (that check otherwise lives only
+      // inside refreshVersionedBundle, which runs on a version delta). Its
+      // own catch: a skill problem never blocks the bundle's code repair.
+      try {
+        const out = syncBundleSkills({
+          id, src: appSrc, manifest: readJsonSafe(join(appSrc, "manifest.json"), null),
+          installedManifest: readJsonSafe(join(destDir, "manifest.json"), null),
+          mode: skillMode, skillsDir: SKILLS_DIR, recordPath: SKILL_RECORD_PATH, ledger, log,
+        });
+        skillLines.push(...out.lines);
+        skillsKept.push(...out.kept);
+      } catch (err) {
+        errors.push({ id, error: `skill sync: ${err.message}` });
+      }
 
       // D1: version-keyed refresh phase, BEFORE the missing-only repair below.
       const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner });
@@ -1026,7 +1072,7 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
     }
   }
 
-  return { repaired, errors };
+  return { repaired, errors, skillLines, skillsKept };
 }
 
 function getInstalled() {
@@ -2442,17 +2488,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     } else if (addonType === "skill") {
       // Skill — copy skill files to ~/.crow/skills/
-      mkdirSync(SKILLS_DIR, { recursive: true });
-      if (manifest?.skills) {
-        for (const skillPath of manifest.skills) {
-          const src = join(destDir, skillPath);
-          const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-          if (existsSync(src)) {
-            cpSync(src, dest);
-            appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-          }
-        }
-      }
+      installBundleSkills(bundleId, destDir, manifest, job);
     } else if (addonType === "panel") {
       // Panel — copy panel file to ~/.crow/panels/ and register
       mkdirSync(PANELS_DIR, { recursive: true });
@@ -2499,15 +2535,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
     // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
     if (addonType !== "skill" && manifest?.skills) {
-      mkdirSync(SKILLS_DIR, { recursive: true });
-      for (const skillPath of manifest.skills) {
-        const src = join(destDir, skillPath);
-        const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-        if (existsSync(src)) {
-          cpSync(src, dest);
-          appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-        }
-      }
+      installBundleSkills(bundleId, destDir, manifest, job);
     }
 
     // 5. Auto-configure AI Provider when installing local AI bundles
@@ -3170,14 +3198,15 @@ export default function bundlesRouter() {
         }
 
         // 2. Remove associated skills (all types can have skills)
+        // Review L7: only copies provably ours and unedited are deleted; an
+        // edited copy (or the operator's symlink) is kept and logged.
         if (manifest?.skills) {
-          for (const skillPath of manifest.skills) {
-            const skillFile = join(SKILLS_DIR, skillPath.split("/").pop());
-            if (existsSync(skillFile)) {
-              rmSync(skillFile);
-              appendLog(job, `Removed skill: ${skillPath.split("/").pop()}`);
-            }
-          }
+          const { removed, kept } = removeBundleSkills({
+            id: bundle_id, manifest, src: join(BUNDLES_DIR, bundle_id), skillsDir: SKILLS_DIR,
+            recordPath: SKILL_RECORD_PATH, ledger: readSkillLedger(APP_BUNDLES),
+          });
+          for (const k of removed) appendLog(job, `Removed skill: ${k}`);
+          for (const k of kept) appendLog(job, `Kept skill ${k}: it was edited after install (delete it in Skills if you no longer want it)`);
         }
 
         // 3. Re-comment env vars in gateway .env

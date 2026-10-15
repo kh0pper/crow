@@ -228,12 +228,28 @@ export async function mountMcpServers(app, deps) {
   // re-copy them from the app repo. Prevents the Companion migration gap from recurring.
   try {
     const { repairInstalledBundleAssets } = await import("../routes/bundles.js");
-    const { repaired, errors } = await repairInstalledBundleAssets();
+    const { repaired, errors, skillsKept = [] } = await repairInstalledBundleAssets();
     if (repaired.length > 0) {
       console.log(`[bundles] Repaired assets: ${repaired.join("; ")}`);
     }
     if (errors.length > 0) {
       console.warn(`[bundles] Asset repair errors:`, errors);
+    }
+    // Skill sync: one notification per skill the owner EDITED, once per new
+    // shipped version (the record's notifiedFor). Unverified copies are never
+    // notified — we cannot tell the owner they edited something we cannot verify.
+    const edited = skillsKept.filter((k) => k.notify && k.reason === "edited");
+    if (edited.length) {
+      const ndb = createDbClient();
+      try {
+        for (const k of edited) {
+          await createNotification(ndb, {
+            title: `Your edited skill "${k.skill}" was kept`,
+            body: `A newer version ships with the ${k.bundle} extension, but your copy was edited after install, so it was not replaced. Delete your copy in Skills to get the new one.`,
+            type: "system", source: "bundles",
+          }).catch(() => {});
+        }
+      } finally { try { ndb.close(); } catch {} }
     }
   } catch (err) {
     console.warn("[bundles] Asset repair failed:", err.message);
