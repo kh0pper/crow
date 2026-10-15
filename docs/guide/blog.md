@@ -168,6 +168,51 @@ CROW_BLOG_AUTHOR=Your Name
 
 These values appear in the RSS feed and page headers.
 
+## Collections Page
+
+The blog can show an optional landing page at `/blog/research` that groups related posts: case studies from one project, and posts carrying a tag. It is **off by default**. With no config file, `/blog/research` returns 404, the blog navigation shows no link to it, and posts render without chapter navigation.
+
+To turn it on, create `~/.crow/blog/collections.json` (more precisely `<CROW_HOME>/blog/collections.json`; set `CROW_BLOG_COLLECTIONS_CONFIG` to use a different path). The gateway re-reads the file when it changes, so no restart is needed. Deleting it turns the page off again.
+
+```json
+{
+  "enabled": true,
+  "navTitle": "Notes",
+  "pageTitle": "Example collection",
+  "intro": "Long-form notes from the field.",
+  "lang": "en",
+  "featured": {
+    "title": "Start here",
+    "blurbHtml": "An <em>overview</em> of the series, with a <a href=\"https://example.com/\">reference</a>."
+  },
+  "sections": [
+    { "kind": "case-studies", "heading": "Entries", "projectId": 2 },
+    {
+      "kind": "tag",
+      "heading": "Field notes",
+      "tag": "field-notes",
+      "blurb": "Short reads.",
+      "docLinks": {
+        "base": "https://docs.example.com/notes/",
+        "rules": [{ "slugContains": "summary", "file": "summary.pdf" }],
+        "defaultFile": "notes.pdf"
+      }
+    }
+  ],
+  "chapterNav": { "tag": "case-study", "projectId": 2, "indexLabel": "All entries" }
+}
+```
+
+- **`case-studies` sections** list published, public posts linked from a project's case studies (Data Dashboard extension), in their display order. Without that extension the section shows its empty text.
+- **`tag` sections** list published, public posts with the tag. They are hidden when empty unless `hideIfEmpty` is `false`. `docLinks` adds one link per post: the `file` of the first rule whose `slugContains` appears in the slug, otherwise `defaultFile`, appended to `base`. `base` must be an `http(s)` URL or a `/blog/` path. Crow serves no files under `/blog/` for this, so a `/blog/` base only works if something else (your reverse proxy, another route) serves that path; otherwise the links 404.
+- **`chapterNav`** adds previous/next links between the project's case-study posts that carry its tag.
+- **`lang`** (`en` or `es`) sets the page language and its built-in labels.
+- **`featured.blurbHtml`** accepts a small amount of HTML: `<em>`, `<strong>` and `<a href>` with an absolute `http(s)` URL. Everything else is removed. All other strings are shown as plain text.
+
+The schema is strict: an unknown key, a bad value or more than eight sections disables the page and logs one warning that names the file and the problem (never the values). Nothing in Crow writes this file; you edit it yourself.
+
+Figures that the Data Dashboard renders for blog posts are stored in the object-storage bucket named by `CROW_BLOG_FIGURES_BUCKET` (default `blog-figures`). Set it in the gateway's environment (its `.env` file or a systemd drop-in for the gateway unit), not in the Data Dashboard extension's settings: the gateway serves `/blog/figures/*` from its own environment, and the extension inherits that environment, so both always use the same bucket.
+
 ## Making Your Blog Public
 
 Your blog has no web presence without the gateway running. How your blog becomes accessible depends on your deployment:

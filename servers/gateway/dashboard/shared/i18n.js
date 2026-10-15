@@ -507,6 +507,11 @@ export const translations = {
   // W3-4: alert() → crowToast replacements (blog panel)
   "blog.uploadFailed": { en: "Image upload failed", es: "Error al subir la imagen" },
   "blog.uploadError": { en: "Upload error", es: "Error de carga" },
+  "blog.collections.empty": { en: "Nothing published here yet.", es: "Aún no hay nada publicado aquí." },
+  "blog.collections.previous": { en: "Previous", es: "Anterior" },
+  "blog.collections.next": { en: "Next", es: "Siguiente" },
+  "blog.collections.allEntries": { en: "All entries", es: "Todas las entradas" },
+  "blog.collections.document": { en: "Document", es: "Documento" },
 
   // ─── Memory Panel ───
   "memory.pageTitle": { en: "Memory", es: "Memoria" },

@@ -23,8 +23,9 @@ const { createDbClient } = await appImport("servers/db.js");
 const { renderChart, renderMap, cacheKey, s3KeyFor } = await appImport("servers/blog/figure-renderer.js");
 const { uploadObject, getClient: getStorageClient } = await appImport("servers/storage/s3-client.js");
 
-const FIGURES_BUCKET = "capstone-research";
-const GATEWAY_INTERNAL_URL = process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";
+// Read per call (CROW_BLOG_FIGURES_BUCKET / BLOG_FIGURE_GATEWAY_URL, passed
+// through from the gateway's environment).
+const { figuresBucket, figureGatewayUrl } = await appImport("servers/blog/figures-bucket.js");
 
 let _tablesInitialized = false;
 
@@ -564,7 +565,7 @@ export async function createDataDashboardServer(dbPath, options = {}) {
         ? await renderChart({ config: { ...config, title: section.title }, rows })
         : await renderMap({ config: { ...config, title: section.title }, title: section.title || "", geojson });
       await uploadObject(s3Key, buffer, {
-        bucket: FIGURES_BUCKET,
+        bucket: figuresBucket(),
         contentType: "image/png",
       });
     }
@@ -577,7 +578,7 @@ export async function createDataDashboardServer(dbPath, options = {}) {
     try {
       const client = getStorageClient();
       if (!client) return false;
-      await client.statObject(FIGURES_BUCKET, s3Key);
+      await client.statObject(figuresBucket(), s3Key);
       return true;
     } catch {
       return false;
@@ -611,7 +612,7 @@ export async function createDataDashboardServer(dbPath, options = {}) {
     if (config.year) params.set("year", config.year);
     if (config.region) params.set("region", String(config.region));
     if (config.county) params.set("county", config.county);
-    const url = `${GATEWAY_INTERNAL_URL}/bundles/tea-maps/api/geojson?${params.toString()}`;
+    const url = `${figureGatewayUrl()}/bundles/tea-maps/api/geojson?${params.toString()}`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`tea-maps geojson fetch failed: ${resp.status} ${resp.statusText}`);
     return resp.json();
