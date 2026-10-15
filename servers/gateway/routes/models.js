@@ -28,11 +28,15 @@
  * NEVER add `/api/models` to `PUBLIC_FUNNEL_PREFIXES` — see CLAUDE.md's
  * "Network exposure invariant".
  *
- * No CSRF middleware here: matching `routes/push.js`/`routes/notifications.js`
- * (state-changing JSON routes mounted at the app root, outside the
- * `/dashboard` router `csrfMiddleware` is scoped to) — the session cookie
- * itself (HttpOnly, SameSite=Lax) is this route family's only defense
- * against cross-origin calls, identical to its siblings.
+ * CSRF: the routes that predate plan 3a carry no CSRF middleware (matching
+ * `routes/push.js`/`routes/notifications.js`, state-changing JSON routes
+ * mounted at the app root, outside the `/dashboard` router `csrfMiddleware`
+ * is scoped to). Every mutating route plan 3a adds (provider start/stop/
+ * unregister, register, adopt, hf-adopt) runs the same double-submit check
+ * (`dashboard/shared/csrf.js`: cookie `crow_csrf`, header `X-Crow-Csrf`) per
+ * route: they start processes, run code paths with operator-supplied launch
+ * args, and delete files, and a sibling port on the same site could otherwise
+ * ride the SameSite=Lax session cookie.
  *
  * HF token storage: `POST /api/models/hf-token` reuses the EXACT storage
  * path Settings -> Providers uses for cloud-provider API keys —
@@ -51,24 +55,31 @@
  */
 
 import { Router } from "express";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { createDbClient, resolveDataDir } from "../../db.js";
 import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth.js";
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
-import { loadState, registryEntryRuntimeState, findRegistryEntries } from "../models/state.js";
+import { loadState, registryEntryRuntimeState, findRegistryEntries, findRegistryEntryForProvider, registryKey } from "../models/state.js";
 import {
   enqueueDownload, registerModel, unregisterModel, providerBindings,
   downloadHfFile, fetchHfPathInfo, isValidHfRepoId, isValidHfFilename, deriveModelIdFromFilename,
+  adoptModel, hfSyntheticCatalog, sanitizeFilename,
 } from "../models/manager.js";
+import { registeredSnapshot } from "../models/registered-rows.js";
+import { isExternalEngine } from "../../shared/provider-engine.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
 import { servingClassOf } from "../models/serving-class.js";
 import { isModelOrchestrationDisabled } from "../../shared/model-orchestration.js";
+import { csrfMiddleware } from "../dashboard/shared/csrf.js";
+import { doorKindOf } from "../models/door-resolve.js";
+import { defaultLifecycleCore } from "../models/lifecycle-deps.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // routes/models.js -> gateway -> servers -> repo root -> registry/model-catalog.json
@@ -180,7 +191,14 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     registryEntryRuntimeStateFn = registryEntryRuntimeState,
     downloadHfFileFn = downloadHfFile,
     fetchHfPathInfoFn = fetchHfPathInfo,
+    // Plan 3a: the lifecycle core shared with /llm/models (same job store).
+    lifecycleCoreFn = defaultLifecycleCore,
+    adoptModelFn = adoptModel,
+    ownInstanceIdFn = getOrCreateLocalInstanceId,
   } = opts;
+
+  let _core = null;
+  const core = () => (_core ||= lifecycleCoreFn());
 
   const router = Router();
 
@@ -550,26 +568,59 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     }
 
     const db = dbFactory();
+    const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+    let held = [];
     try {
-      const bindings = await providerBindingsFn(db, modelId);
+      // Resolve the providers this instance runs for the catalog id — a model
+      // adopted or registered under a custom provider id (crow-chat) has no
+      // row named after the catalog id, and unregistering the bare id would
+      // be a silent no-op (PR #483 review). Foreign rows are not ours to
+      // remove; a legacy row without catalogId matches by its own id.
+      const own = ownInstanceIdFn();
+      const providers = (await listProvidersAllFn(db))
+        .filter((r) => !r.disabled && r.gpuPolicy?.runtime === "native"
+          && (r.gpuPolicy.catalogId === modelId || (!r.gpuPolicy.catalogId && r.id === modelId))
+          && (!r.gpuPolicy.owner || r.gpuPolicy.owner === own))
+        .map((r) => r.id);
+      if (providers.length === 0) {
+        return res.status(409).json({ error: `No provider on this instance serves ${modelId}; nothing to remove`, code: "NO_PROVIDER" });
+      }
+      const bindings = { profiles: [], bots: [] };
+      for (const id of providers) {
+        const b = await providerBindingsFn(db, id);
+        bindings.profiles.push(...(b?.profiles || []));
+        bindings.bots.push(...(b?.bots || []));
+      }
 
       // Guard: without ?confirm=true (or a JSON body { confirm: true }),
       // report what deleting this model would break and stop — the
       // client re-issues the same DELETE with confirm once the operator
-      // has seen the bindings. Two calls, one endpoint (documented here
-      // for Task 13, since the brief left the exact confirm mechanism to
-      // this task's judgment).
-      const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+      // has seen the bindings. Two calls, one endpoint.
       if (!confirmed) {
-        return res.status(200).json({ requiresConfirm: true, modelId, bindings });
+        return res.status(200).json({ requiresConfirm: true, modelId, providers, bindings });
       }
 
-      const handle = getNativeHandleFn(modelId);
-      const result = await unregisterModelFn({ modelId, db, dir, runtimeHandle: handle });
-      res.json({ deleted: true, modelId, disabled: result.disabled, fileDeleted: result.deleted, bindings });
+      // Same hold as DELETE /providers/:p: no start may race the removal.
+      const jobs = core().jobs;
+      for (const id of providers) {
+        if (!jobs.beginRemoval(id)) {
+          return res.status(409).json({ error: `"${id}" is starting or already being removed`, code: "START_IN_PROGRESS" });
+        }
+        held.push(id);
+      }
+      const results = [];
+      for (const id of providers) {
+        results.push(await unregisterModelFn({ modelId: id, db, dir, runtimeHandle: getNativeHandleFn(id) }));
+      }
+      // Never report a deletion that did not happen.
+      if (!results.some((r) => r?.disabled)) {
+        return res.status(409).json({ error: `Nothing was removed for ${modelId}`, code: "NOTHING_REMOVED", providers });
+      }
+      res.json({ deleted: true, modelId, providers, disabled: true, fileDeleted: results.some((r) => r?.deleted), bindings });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
     } finally {
+      for (const id of held) core().jobs.endRemoval(id);
       try { db.close(); } catch { /* best effort */ }
     }
   });
@@ -661,6 +712,266 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       res.json({ running: false });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
+    }
+  });
+
+  // --- Provider lifecycle (plan 3a): the dashboard-session door ------------
+  //
+  // Start/stop/jobs delegate to the lifecycle core routes/llm-models.js also
+  // uses, over one job store, so a panel start and a pi-lab start of the same
+  // provider share a job. Refusals keep their codes (UNKNOWN_PROVIDER 404;
+  // EXTERNAL_ENGINE / NOT_OWNER (+owner, door) / NOT_NATIVE 409), flattened
+  // to this router's `{ error, code, ... }` envelope.
+
+  const orchestrationOff = (res) => res.status(409).json({
+    error: "Model orchestration is disabled on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — models here are started outside Crow",
+    code: "MODEL_ORCHESTRATION_DISABLED",
+  });
+  const sendCore = (res, { status, body }) => {
+    if (status < 400) return res.status(status).json(body);
+    const { code, message, ...extra } = body || {};
+    return res.status(status).json({ error: message, code, ...extra });
+  };
+
+  router.post("/api/models/providers/:provider/start", csrfMiddleware, (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    sendCore(res, core().start(req.params.provider, "models-panel"));
+  });
+
+  router.post("/api/models/providers/:provider/stop", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    sendCore(res, await core().stop(req.params.provider, "models-panel"));
+  });
+
+  router.get("/api/models/jobs/:id", (req, res) => sendCore(res, core().job(req.params.id)));
+
+  // Unregister by provider id. Only rows this instance owns natively: a
+  // foreign-owned native row, an external engine or a bundle-backed row is
+  // refused (Rev 2 H1), and so is a row with a start in flight (M3). Two
+  // steps: without ?confirm=true it reports the bindings that would break.
+  router.delete("/api/models/providers/:provider", csrfMiddleware, async (req, res) => {
+    const name = req.params.provider;
+    const c = core();
+    const p = c.providers()[name];
+    if (doorKindOf(p) === "bundle") {
+      return res.status(409).json({ error: `"${name}" is served by a bundle; remove it from Extensions`, code: "BUNDLE_ROW" });
+    }
+    const refused = c.refusal(name, p);
+    if (refused) return sendCore(res, refused);
+    if (c.jobs.activeFor(name)) {
+      return res.status(409).json({ error: `"${name}" is starting; wait for the start to finish, then remove it`, code: "START_IN_PROGRESS" });
+    }
+    const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+    // A confirmed removal holds the provider in the shared job store from
+    // here to the end (review 2): the check and the hold are one synchronous
+    // step, and every start through either door is refused (REMOVING) while
+    // the awaits below run.
+    if (confirmed && !c.jobs.beginRemoval(name)) {
+      return res.status(409).json({ error: `"${name}" is starting or already being removed`, code: "START_IN_PROGRESS" });
+    }
+    const db = dbFactory();
+    try {
+      const bindings = await providerBindingsFn(db, name);
+      if (!confirmed) {
+        // Will unregistering delete the weights? Only for a downloaded (not
+        // adopted) entry no other enabled provider still uses — the same
+        // rule unregisterModel applies.
+        const rows = await listProvidersAllFn(db);
+        const self = rows.find((r) => r.id === name);
+        const found = self ? findRegistryEntryForProvider(loadStateFn(resolveDir()), self) : null;
+        const shared = found && rows.some((r) => r.id !== name && !r.disabled && r.gpuPolicy?.runtime === "native"
+          && r.gpuPolicy.catalogId && r.gpuPolicy.quant && registryKey(r.gpuPolicy.catalogId, r.gpuPolicy.quant) === found.key);
+        const willDeleteFiles = !!found && !found.entry.adopted && !shared;
+        return res.json({ requiresConfirm: true, provider: name, bindings, willDeleteFiles });
+      }
+      // Stop through stopNativeProvider (the orchestrator's single-flight
+      // queue), never a bare handle.stop() that could race an acquire. Under
+      // orchestration-off Crow never started it, so there is nothing to stop.
+      if (!isModelOrchestrationDisabled()) {
+        const stopped = await c.stop(name, "models-panel");
+        if (stopped.status >= 400) return sendCore(res, stopped);
+      }
+      const result = await unregisterModelFn({ modelId: name, db, dir: resolveDir() });
+      res.json({ deleted: true, provider: name, disabled: result.disabled, fileDeleted: result.deleted, bindings });
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: "INTERNAL" });
+    } finally {
+      if (confirmed) c.jobs.endRemoval(name);
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  // --- Registered models, register / adopt / hf-adopt (plan 3a) ----------
+
+  router.get("/api/models/registered", (req, res) => {
+    try {
+      res.json(registeredSnapshot({ core: core(), catalog: loadCatalogFn(), orchestrationDisabled: isModelOrchestrationDisabled() }));
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: "INTERNAL" });
+    }
+  });
+
+  const BAD_REQUEST = new Set(["INVALID_LAUNCH", "UNKNOWN_MODEL", "UNKNOWN_QUANT", "INVALID_HF_REPO", "INVALID_HF_FILE", "BAD_REQUEST"]);
+  const CONFLICT = new Set(["PROVIDER_ID_CONFLICT", "EXTERNAL_ENGINE_CONFLICT", "EXTERNAL_ENGINE", "NOT_OWNER", "BUNDLE_ROW", "NOT_DOWNLOADED"]);
+  /** One error mapper for the registration routes: `{ error, code, errors?, owner? }`. */
+  function sendErr(res, err) {
+    const code = err?.code || "INTERNAL";
+    let status = 500;
+    if (BAD_REQUEST.has(code) || code.startsWith("ADOPT_")) status = 400;
+    else if (CONFLICT.has(code)) status = 409;
+    const body = { error: err?.message || String(err), code };
+    if (Array.isArray(err?.errors)) body.errors = err.errors;
+    if (err?.owner !== undefined) body.owner = err.owner;
+    return res.status(status).json(body);
+  }
+  const fail = (code, message) => Object.assign(new Error(message), { code });
+
+  /** Shared request shape for register/adopt (the dialog's role fields). */
+  function roleOpts(body) {
+    const out = {};
+    if (body.providerId !== undefined && body.providerId !== null && body.providerId !== "") {
+      if (typeof body.providerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerId)) {
+        throw fail("BAD_REQUEST", "providerId must be letters, digits, dot, dash or underscore");
+      }
+      out.providerId = body.providerId;
+    }
+    // undefined → the usual chat-group rule; null → no group; a string → that group.
+    if (body.mutexGroup === null || typeof body.mutexGroup === "string") out.mutexGroup = body.mutexGroup || null;
+    if (body.alwaysResident !== undefined) out.alwaysResident = body.alwaysResident === true;
+    if (body.defaultMember !== undefined) out.defaultMember = body.defaultMember === true;
+    if (body.launch !== undefined && body.launch !== null) {
+      if (typeof body.launch !== "object" || Array.isArray(body.launch)) throw fail("INVALID_LAUNCH", "launch must be a JSON object");
+      out.launch = body.launch;
+    }
+    return out;
+  }
+
+  function resolveCatalogQuant(catalog, catalogId, quant) {
+    const model = findModel(catalog, catalogId);
+    if (!model) throw fail("UNKNOWN_MODEL", `Unknown model id: ${catalogId}`);
+    const resolved = findQuant(model, quant);
+    if (!resolved) throw fail("UNKNOWN_QUANT", `Unknown quant for ${catalogId}: ${quant}`);
+    return resolved.quantId;
+  }
+
+  /** Ownership pre-check (review H1/M1) BEFORE any hashing or write: an
+   * external engine, a bundle-backed row or a row owned by another instance
+   * is refused with the row untouched. registerModel re-checks inside. */
+  async function refuseForeignTarget(db, providerId) {
+    const row = (await listProvidersAllFn(db)).find((r) => r.id === providerId);
+    if (!row) return refuseForeignLive(providerId);
+    if (isExternalEngine(row)) throw fail("EXTERNAL_ENGINE", `"${providerId}" is an external engine; Crow never registers over it`);
+    if (row.bundleId) throw fail("BUNDLE_ROW", `"${providerId}" is served by the ${row.bundleId} bundle — converting it is a migration step, not a registration`);
+    const owner = row.gpuPolicy?.owner;
+    if (row.gpuPolicy?.runtime === "native" && owner && owner !== ownInstanceIdFn()) {
+      throw Object.assign(fail("NOT_OWNER", `"${providerId}" is owned by another instance`), { owner });
+    }
+    refuseForeignLive(providerId);
+  }
+
+  /** Same pre-check against the localized enabled row (review 5). */
+  function refuseForeignLive(providerId) {
+    // The localized enabled row knows whether it is another instance's door
+    // even when it carries no owner (review 5).
+    const live = core().providers()[providerId];
+    if (live && doorKindOf(live) === "native-foreign") {
+      throw Object.assign(fail("NOT_OWNER", `"${providerId}" is owned by another instance`), { owner: live.gpuPolicy?.owner ?? null });
+    }
+  }
+
+  const residentNow = (providerId) => !!getNativeHandleFn(providerId)?.live;
+
+  router.post("/api/models/register", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const db = dbFactory();
+    try {
+      const body = req.body || {};
+      const catalog = loadCatalogFn();
+      const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
+      const roles = roleOpts(body);
+      await refuseForeignTarget(db, roles.providerId || body.catalogId);
+      // Register (and Edit) only re-point weights this instance already has:
+      // a registry entry for catalogId@quant (downloaded or adopted) or the
+      // downloaded blob on disk. Otherwise the row would point at a missing
+      // file (PR #483 review).
+      const quantFile = findQuant(findModel(catalog, body.catalogId), quant).entry.file;
+      const state = loadStateFn(resolveDir());
+      const known = state.registry[registryKey(body.catalogId, quant)]
+        || (state.registry[body.catalogId]?.quant === quant ? state.registry[body.catalogId] : null);
+      if (!known && !existsSync(join(resolveDir(), "models", "blobs", sanitizeFilename(quantFile)))) {
+        throw fail("NOT_DOWNLOADED", `${body.catalogId} ${quant} is not on this machine — download or adopt it first`);
+      }
+      const provider = await registerModelFn({ modelId: body.catalogId, quant, catalog, db, dir: resolveDir(), refuseBundleRow: true, keepAdoptedFiles: true, ...roles });
+      res.json({ provider, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  router.post("/api/models/adopt", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const db = dbFactory();
+    try {
+      const body = req.body || {};
+      const catalog = loadCatalogFn();
+      const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
+      const roles = roleOpts(body);
+      await refuseForeignTarget(db, roles.providerId || body.catalogId);
+      const companionPaths = {};
+      if (body.companionPaths && typeof body.companionPaths === "object") {
+        for (const [k, v] of Object.entries(body.companionPaths)) if (typeof v === "string" && v) companionPaths[k] = v;
+      }
+      const provider = await adoptModelFn({
+        modelId: body.catalogId, quant, path: body.path, companionPaths, allowUnverified: body.allowUnverified === true,
+        catalog, db, dir: resolveDir(), refuseBundleRow: true, ...roles,
+      });
+      res.json({ provider, verified: provider.verified, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  });
+
+  router.post("/api/models/hf-adopt", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    const { hfRepo, file, path } = req.body || {};
+    if (!isValidHfRepoId(hfRepo)) return res.status(400).json({ error: `Invalid Hugging Face repo id: ${JSON.stringify(hfRepo)}`, code: "INVALID_HF_REPO" });
+    if (!isValidHfFilename(file)) return res.status(400).json({ error: `Invalid file name: ${JSON.stringify(file)}`, code: "INVALID_HF_FILE" });
+    // An arbitrary Hugging Face file has no curated size to trust, so its
+    // LFS sha256 is the only check: a size-only adopt is refused.
+    if (req.body?.allowUnverified === true) {
+      return res.status(400).json({ error: "hf-adopt always verifies the file's sha256; allowUnverified is not accepted", code: "BAD_REQUEST" });
+    }
+    const db = dbFactory();
+    try {
+      let token = null;
+      try { token = await getHfToken(db); } catch { /* an un-gated file needs no token */ }
+      let info;
+      try {
+        info = await fetchHfPathInfoFn({ hfRepo, file, hfApiBase, hfToken: token });
+      } catch (err) {
+        const notFound = err.code === "HF_FILE_NOT_FOUND";
+        return res.status(notFound ? 404 : 502).json({ error: err.message, code: notFound ? "HF_FILE_NOT_FOUND" : "HF_UPSTREAM_ERROR" });
+      }
+      if (!info?.sha256) {
+        return res.status(422).json({ error: "This file has no verifiable checksum (it isn't LFS-tracked) — refusing to adopt an unverifiable file.", code: "NO_VERIFIABLE_CHECKSUM" });
+      }
+      const modelId = deriveModelIdFromFilename(file);
+      const sizeMb = typeof info.sizeBytes === "number" ? info.sizeBytes / 1_000_000 : null;
+      const catalog = hfSyntheticCatalog({ hfRepo, file, modelId, sha256: info.sha256, sizeMb });
+      await refuseForeignTarget(db, modelId);
+      const provider = await adoptModelFn({
+        modelId, quant: "hf", path, catalog, allowUnverified: false,
+        db, dir: resolveDir(), refuseBundleRow: true, registryExtra: { source: "hf-browser" },
+      });
+      res.json({ provider, verified: provider.verified, running: residentNow(provider.id) });
+    } catch (err) {
+      sendErr(res, err);
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
     }
   });
 

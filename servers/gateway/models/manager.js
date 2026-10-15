@@ -277,6 +277,33 @@ export class ExternalEngineConflictError extends Error {
   }
 }
 
+/** Thrown by `registerModel` when the native row at the target id belongs
+ * to another instance (its `gpu_policy.owner` is not this instance). A
+ * replicated peer row must never be re-registered, and so re-pointed, from
+ * here (plan 3a review H1). */
+export class NotOwnerError extends Error {
+  constructor(providerId, owner) {
+    super(`Provider "${providerId}" is owned by another instance (${owner}) — only its owner can change it.`);
+    this.name = "NotOwnerError";
+    this.code = "NOT_OWNER";
+    this.modelId = providerId;
+    this.owner = owner;
+  }
+}
+
+/** Thrown by `registerModel` with `refuseBundleRow: true` when the target id
+ * is a bundle-backed row. Converting a bundle row to native is a windowed
+ * migration job (plan 4), never a panel click (plan 3a review M1). */
+export class BundleRowError extends Error {
+  constructor(providerId, bundleId) {
+    super(`Provider "${providerId}" is served by the ${bundleId} bundle — converting it to a native model is a migration step, not a registration.`);
+    this.name = "BundleRowError";
+    this.code = "BUNDLE_ROW";
+    this.modelId = providerId;
+    this.bundleId = bundleId;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Host allowlist
 // ---------------------------------------------------------------------------
@@ -361,6 +388,10 @@ export function hashFileSha256(path, { createReadStreamImpl = createReadStream }
   });
 }
 
+function formatMb(bytes) {
+  return (bytes / 1e6).toFixed(2);
+}
+
 function sizeMatches(actualBytes, sizeMb) {
   const expected = sizeMb * 1e6;
   return Math.abs(actualBytes - expected) <= expected * 0.005;
@@ -377,15 +408,25 @@ async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hash
   } catch {
     throw new AdoptMismatchError(`${what}: file not found at ${path}`, "ADOPT_FILE_MISSING", { file: path });
   }
+  // A FIFO, a device (/dev/zero) or a directory is never model weights:
+  // hashing one could block forever or read without end.
+  if (typeof st.isFile === "function" && !st.isFile()) {
+    throw new AdoptMismatchError(`${what}: ${path} is not a regular file`, "ADOPT_NOT_A_FILE", { file: path });
+  }
   if (!allowUnverified) {
     const actual = await hashFileFn(path);
     if (actual !== expectedSha) {
-      throw new AdoptMismatchError(`${what}: sha256 of ${path} is ${actual}, expected ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha, actual });
+      // The computed hash is not echoed: it fingerprints whatever file the
+      // path named, which is the operator's to see on disk, not the API's.
+      throw new AdoptMismatchError(`${what}: the sha256 of ${path} does not match the catalog's ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha });
     }
     return true;
   }
   if (!sizeMatches(st.size, sizeMb)) {
-    throw new AdoptMismatchError(`${what}: ${path} is ${st.size} bytes, expected about ${Math.round(sizeMb * 1e6)}`, "ADOPT_SIZE_MISMATCH", { file: path, expected: Math.round(sizeMb * 1e6), actual: st.size });
+    const exp = Math.round(sizeMb * 1e6);
+    throw new AdoptMismatchError(
+      `${what}: ${path} is ${st.size} bytes (${formatMb(st.size)} MB) but the catalog says about ${exp} bytes (${formatMb(exp)} MB), beyond the 0.5 % tolerance — add a catalog quant entry for this build or download the current file`,
+      "ADOPT_SIZE_MISMATCH", { file: path, expected: exp, actual: st.size });
   }
   return false;
 }
@@ -422,6 +463,17 @@ export async function adoptModel({
       "ADOPT_PATH_NOT_ABSOLUTE",
       { file: path }
     );
+  }
+  // Companion paths go to llama-server verbatim too (--mmproj), so the same
+  // absolute-path rule applies, checked before anything is hashed.
+  for (const [kind, cPath] of Object.entries(companionPaths || {})) {
+    if (cPath && (typeof cPath !== "string" || !isAbsolute(cPath))) {
+      throw new AdoptMismatchError(
+        `adopt: ${kind} path must be absolute, got ${JSON.stringify(cPath)}`,
+        "ADOPT_PATH_NOT_ABSOLUTE",
+        { file: cPath, kind }
+      );
+    }
   }
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const what = `${model.id} ${quantEntry.quant} (${quantEntry.file})`;
@@ -1169,6 +1221,24 @@ export async function fetchHfPathInfo({
   return { sha256, sizeBytes };
 }
 
+/** The one-model, one-quant catalog an arbitrary Hugging Face file is
+ * registered against (quant id "hf"). Shared by `downloadHfFile` and the
+ * panel's hf-adopt route, so a downloaded file and an adopted one resolve
+ * to the same entry shape. */
+export function hfSyntheticCatalog({ hfRepo, file, modelId = deriveModelIdFromFilename(file), sha256, sizeMb = null }) {
+  return {
+    models: [{
+      id: modelId,
+      family: hfRepo.split("/")[1] || hfRepo,
+      hf_repo: hfRepo,
+      task: "chat",
+      context_len: null,
+      default_quant: "hf",
+      quants: [{ file, quant: "hf", sha256, size_mb: sizeMb, min_ram_mb: sizeMb, min_vram_mb: 0 }],
+    }],
+  };
+}
+
 /**
  * Download one arbitrary GGUF file out of a Hugging Face repo the operator
  * picked from the Browse-Hugging-Face search tab — not a curated catalog
@@ -1231,17 +1301,7 @@ export async function downloadHfFile({
   // entry's `sizeMb` that scales the native readiness timeout.
   const sizeMb = typeof sizeBytes === "number" ? sizeBytes / 1_000_000 : null;
 
-  const catalog = {
-    models: [{
-      id: modelId,
-      family: hfRepo.split("/")[1] || hfRepo,
-      hf_repo: hfRepo,
-      task: "chat",
-      context_len: null,
-      default_quant: "hf",
-      quants: [{ file, quant: "hf", sha256, size_mb: sizeMb, min_ram_mb: sizeMb, min_vram_mb: 0 }],
-    }],
-  };
+  const catalog = hfSyntheticCatalog({ hfRepo, file, modelId, sha256, sizeMb });
 
   const extraHeaders = hfToken ? { Authorization: `Bearer ${hfToken}` } : undefined;
 
@@ -1589,6 +1649,10 @@ export function pickChatMutexGroup(existingRows) {
  *
  * @throws {ExternalEngineConflictError} if a provider already exists at
  *   this id and is marked as an external engine.
+ * @throws {NotOwnerError} if the existing native row is owned by another
+ *   instance.
+ * @throws {BundleRowError} with `refuseBundleRow: true`, if the existing
+ *   row is bundle-backed (the panel never converts; plan 4 does).
  * @throws {ProviderIdConflictError} if a provider already exists at this id
  *   and isn't a prior registration of this same model by this runtime, or
  *   a convertible bundle row.
@@ -1609,6 +1673,8 @@ export async function registerModel({
   alwaysResident = false,
   defaultMember = false,
   registryExtra = {},
+  refuseBundleRow = false,
+  keepAdoptedFiles = false,
   ownInstanceIdFn = getOrCreateLocalInstanceId,
   tailnetIpFn = getOwnTailnetIp,
   gatewayPortFn = gatewayPort,
@@ -1642,6 +1708,11 @@ export async function registerModel({
       && existingRow.models.some((m) => m && m.id === model.id);
     const isBundleRow = !!existingRow.bundleId;
     if (!isOurs && !isBundleRow) throw new ProviderIdConflictError(providerId);
+    // "Ours" also means owned by THIS instance: a replicated peer row for the
+    // same catalog model must not be re-pointed from here (review H1).
+    const rowOwner = existingRow.gpuPolicy?.owner;
+    if (isOurs && rowOwner && rowOwner !== ownInstanceIdFn()) throw new NotOwnerError(providerId, rowOwner);
+    if (isBundleRow && refuseBundleRow) throw new BundleRowError(providerId, existingRow.bundleId);
     converted = isBundleRow;
   }
 
@@ -1710,6 +1781,16 @@ export async function registerModel({
   const carriedRuntimeState = {};
   if (prevEntry.wasLive !== undefined) carriedRuntimeState.wasLive = prevEntry.wasLive;
   if (prevEntry.lastStoppedAt !== undefined) carriedRuntimeState.lastStoppedAt = prevEntry.lastStoppedAt;
+  // The panel's register/edit path (`keepAdoptedFiles`) re-registers an
+  // existing install without touching its weights: an adopted entry keeps
+  // the files it points at, or the next start would look in the blob dir
+  // (review 2026-10-15). A download or adopt still re-derives them (I2).
+  const carriedFiles = {};
+  if (keepAdoptedFiles && prevEntry.adopted) {
+    for (const k of ["path", "adopted", "verified", "companions", "shardFiles", "source"]) {
+      if (prevEntry[k] !== undefined) carriedFiles[k] = prevEntry[k];
+    }
+  }
   state.registry[key] = {
     ...carriedRuntimeState,
     file: sanitizeFilename(quantEntry.file),
@@ -1719,6 +1800,7 @@ export async function registerModel({
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
     shardFiles: plannedFiles.filter((f) => f.role === "shard").map((f) => f.dest),
     companions: plannedFiles.filter((f) => f.role === "companion").map((f) => ({ kind: f.kind, file: f.dest })),
+    ...carriedFiles,
     ...registryExtra,
   };
   saveState(dir, state);
