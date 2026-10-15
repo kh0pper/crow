@@ -55,20 +55,20 @@
  */
 
 import { Router } from "express";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { createDbClient, resolveDataDir } from "../../db.js";
 import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth.js";
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
-import { loadState, registryEntryRuntimeState, findRegistryEntries } from "../models/state.js";
+import { loadState, registryEntryRuntimeState, findRegistryEntries, findRegistryEntryForProvider, registryKey } from "../models/state.js";
 import {
   enqueueDownload, registerModel, unregisterModel, providerBindings,
   downloadHfFile, fetchHfPathInfo, isValidHfRepoId, isValidHfFilename, deriveModelIdFromFilename,
-  adoptModel, hfSyntheticCatalog,
+  adoptModel, hfSyntheticCatalog, sanitizeFilename,
 } from "../models/manager.js";
 import { registeredSnapshot } from "../models/registered-rows.js";
 import { isExternalEngine } from "../../shared/provider-engine.js";
@@ -568,26 +568,59 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     }
 
     const db = dbFactory();
+    const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+    let held = [];
     try {
-      const bindings = await providerBindingsFn(db, modelId);
+      // Resolve the providers this instance runs for the catalog id — a model
+      // adopted or registered under a custom provider id (crow-chat) has no
+      // row named after the catalog id, and unregistering the bare id would
+      // be a silent no-op (PR #483 review). Foreign rows are not ours to
+      // remove; a legacy row without catalogId matches by its own id.
+      const own = ownInstanceIdFn();
+      const providers = (await listProvidersAllFn(db))
+        .filter((r) => !r.disabled && r.gpuPolicy?.runtime === "native"
+          && (r.gpuPolicy.catalogId === modelId || (!r.gpuPolicy.catalogId && r.id === modelId))
+          && (!r.gpuPolicy.owner || r.gpuPolicy.owner === own))
+        .map((r) => r.id);
+      if (providers.length === 0) {
+        return res.status(409).json({ error: `No provider on this instance serves ${modelId}; nothing to remove`, code: "NO_PROVIDER" });
+      }
+      const bindings = { profiles: [], bots: [] };
+      for (const id of providers) {
+        const b = await providerBindingsFn(db, id);
+        bindings.profiles.push(...(b?.profiles || []));
+        bindings.bots.push(...(b?.bots || []));
+      }
 
       // Guard: without ?confirm=true (or a JSON body { confirm: true }),
       // report what deleting this model would break and stop — the
       // client re-issues the same DELETE with confirm once the operator
-      // has seen the bindings. Two calls, one endpoint (documented here
-      // for Task 13, since the brief left the exact confirm mechanism to
-      // this task's judgment).
-      const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+      // has seen the bindings. Two calls, one endpoint.
       if (!confirmed) {
-        return res.status(200).json({ requiresConfirm: true, modelId, bindings });
+        return res.status(200).json({ requiresConfirm: true, modelId, providers, bindings });
       }
 
-      const handle = getNativeHandleFn(modelId);
-      const result = await unregisterModelFn({ modelId, db, dir, runtimeHandle: handle });
-      res.json({ deleted: true, modelId, disabled: result.disabled, fileDeleted: result.deleted, bindings });
+      // Same hold as DELETE /providers/:p: no start may race the removal.
+      const jobs = core().jobs;
+      for (const id of providers) {
+        if (!jobs.beginRemoval(id)) {
+          return res.status(409).json({ error: `"${id}" is starting or already being removed`, code: "START_IN_PROGRESS" });
+        }
+        held.push(id);
+      }
+      const results = [];
+      for (const id of providers) {
+        results.push(await unregisterModelFn({ modelId: id, db, dir, runtimeHandle: getNativeHandleFn(id) }));
+      }
+      // Never report a deletion that did not happen.
+      if (!results.some((r) => r?.disabled)) {
+        return res.status(409).json({ error: `Nothing was removed for ${modelId}`, code: "NOTHING_REMOVED", providers });
+      }
+      res.json({ deleted: true, modelId, providers, disabled: true, fileDeleted: results.some((r) => r?.deleted), bindings });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
     } finally {
+      for (const id of held) core().jobs.endRemoval(id);
       try { db.close(); } catch { /* best effort */ }
     }
   });
@@ -739,7 +772,18 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     const db = dbFactory();
     try {
       const bindings = await providerBindingsFn(db, name);
-      if (!confirmed) return res.json({ requiresConfirm: true, provider: name, bindings });
+      if (!confirmed) {
+        // Will unregistering delete the weights? Only for a downloaded (not
+        // adopted) entry no other enabled provider still uses — the same
+        // rule unregisterModel applies.
+        const rows = await listProvidersAllFn(db);
+        const self = rows.find((r) => r.id === name);
+        const found = self ? findRegistryEntryForProvider(loadStateFn(resolveDir()), self) : null;
+        const shared = found && rows.some((r) => r.id !== name && !r.disabled && r.gpuPolicy?.runtime === "native"
+          && r.gpuPolicy.catalogId && r.gpuPolicy.quant && registryKey(r.gpuPolicy.catalogId, r.gpuPolicy.quant) === found.key);
+        const willDeleteFiles = !!found && !found.entry.adopted && !shared;
+        return res.json({ requiresConfirm: true, provider: name, bindings, willDeleteFiles });
+      }
       // Stop through stopNativeProvider (the orchestrator's single-flight
       // queue), never a bare handle.stop() that could race an acquire. Under
       // orchestration-off Crow never started it, so there is nothing to stop.
@@ -768,7 +812,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
   });
 
   const BAD_REQUEST = new Set(["INVALID_LAUNCH", "UNKNOWN_MODEL", "UNKNOWN_QUANT", "INVALID_HF_REPO", "INVALID_HF_FILE", "BAD_REQUEST"]);
-  const CONFLICT = new Set(["PROVIDER_ID_CONFLICT", "EXTERNAL_ENGINE_CONFLICT", "EXTERNAL_ENGINE", "NOT_OWNER", "BUNDLE_ROW"]);
+  const CONFLICT = new Set(["PROVIDER_ID_CONFLICT", "EXTERNAL_ENGINE_CONFLICT", "EXTERNAL_ENGINE", "NOT_OWNER", "BUNDLE_ROW", "NOT_DOWNLOADED"]);
   /** One error mapper for the registration routes: `{ error, code, errors?, owner? }`. */
   function sendErr(res, err) {
     const code = err?.code || "INTERNAL";
@@ -846,6 +890,17 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       const quant = resolveCatalogQuant(catalog, body.catalogId, body.quant);
       const roles = roleOpts(body);
       await refuseForeignTarget(db, roles.providerId || body.catalogId);
+      // Register (and Edit) only re-point weights this instance already has:
+      // a registry entry for catalogId@quant (downloaded or adopted) or the
+      // downloaded blob on disk. Otherwise the row would point at a missing
+      // file (PR #483 review).
+      const quantFile = findQuant(findModel(catalog, body.catalogId), quant).entry.file;
+      const state = loadStateFn(resolveDir());
+      const known = state.registry[registryKey(body.catalogId, quant)]
+        || (state.registry[body.catalogId]?.quant === quant ? state.registry[body.catalogId] : null);
+      if (!known && !existsSync(join(resolveDir(), "models", "blobs", sanitizeFilename(quantFile)))) {
+        throw fail("NOT_DOWNLOADED", `${body.catalogId} ${quant} is not on this machine — download or adopt it first`);
+      }
       const provider = await registerModelFn({ modelId: body.catalogId, quant, catalog, db, dir: resolveDir(), refuseBundleRow: true, keepAdoptedFiles: true, ...roles });
       res.json({ provider, running: residentNow(provider.id) });
     } catch (err) {

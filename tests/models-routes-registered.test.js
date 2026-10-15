@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,6 +48,12 @@ function listingCore() {
     snapshotOfFn: () => null, siblingsOfFn: () => [], externalHealthFn: () => ({}),
     acquireFn: async () => true, stopFn: async () => ({ stopped: true }), jobs: createJobStore(),
   });
+}
+
+/** A downloaded (not adopted) quant: the blob file the download pipeline writes. */
+function seedDownloaded(dir, id = "small-chat", quant = "Q4_K_M") {
+  mkdirSync(join(dir, "models", "blobs"), { recursive: true });
+  writeFileSync(join(dir, "models", "blobs", `${id}-${quant}.gguf`), PRIMARY);
 }
 
 const post = (base, path, token, body, headers = authHeaders(token)) =>
@@ -102,6 +108,7 @@ test("POST /api/models/register: registers, re-register edits the own row; INVAL
   const h = freshLibsql();
   try {
     const token = await seedSession(h.db);
+    seedDownloaded(h.dir);
     await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
       const r = await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "crow-chat", mutexGroup: null });
       assert.equal(r.status, 200);
@@ -331,4 +338,103 @@ test("review 6: hf-adopt refuses allowUnverified (it always verifies the LFS sha
     });
     assert.equal(looked, 0);
   } finally { await h.cleanup(); }
+});
+
+// ─── PR #483 review round 2 ─────────────────────────────────────────────────
+
+test("round 2 #2: Register as… a quant that was never downloaded or adopted is 409 NOT_DOWNLOADED and writes nothing", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      const r = await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "crow-chat" });
+      assert.equal(r.status, 409);
+      assert.equal((await r.json()).code, "NOT_DOWNLOADED");
+    });
+    assert.equal((await listProvidersAll(h.db)).some((p) => p.id === "crow-chat"), false);
+    assert.equal(Object.keys(loadState(h.dir).registry).length, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("round 2 #1: the legacy DELETE /api/models/:catalogId removes the custom-id provider an adopt created", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    writeFileSync(join(weights, "ok.gguf"), PRIMARY);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      assert.equal((await post(base, "/api/models/adopt", token, { catalogId: "small-chat", quant: "Q4_K_M", path: join(weights, "ok.gguf"), providerId: "crow-chat" })).status, 200);
+      const preview = await (await fetch(`${base}/api/models/small-chat`, { method: "DELETE", headers: authHeaders(token) })).json();
+      assert.equal(preview.requiresConfirm, true);
+      assert.deepEqual(preview.providers, ["crow-chat"]);
+      const r = await fetch(`${base}/api/models/small-chat?confirm=true`, { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).deleted, true);
+    });
+    const row = (await listProvidersAll(h.db)).find((p) => p.id === "crow-chat");
+    assert.equal(!!row.disabled, true, "the provider the card stood for is really gone");
+    assert.equal(existsSync(join(weights, "ok.gguf")), true, "adopted weights are never deleted");
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("round 2 #1: the legacy DELETE refuses 409 when no provider of this instance serves the catalog id — never deleted:true for a no-op", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    writeFileSync(join(weights, "ok.gguf"), PRIMARY);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      await post(base, "/api/models/adopt", token, { catalogId: "small-chat", quant: "Q4_K_M", path: join(weights, "ok.gguf"), providerId: "crow-chat" });
+      const { disableProvider } = await import("../servers/shared/providers-db.js");
+      await disableProvider(h.db, "crow-chat");
+      const r = await fetch(`${base}/api/models/small-chat?confirm=true`, { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(r.status, 409);
+      const b = await r.json();
+      assert.equal(b.code, "NO_PROVIDER");
+      assert.notEqual(b.deleted, true);
+    });
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("round 2 #3: the unregister preview says whether the weights file will be deleted", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    seedDownloaded(h.dir);
+    writeFileSync(join(weights, "ok.gguf"), PRIMARY);
+    const providers = {};
+    const { getOrCreateLocalInstanceId } = await import("../servers/gateway/instance-registry.js");
+    const core = () => createLifecycleCore({
+      providersFn: () => providers, ownInstanceIdFn: getOrCreateLocalInstanceId, readReservationFn: () => null, snapshotOfFn: () => null,
+      siblingsOfFn: () => [], externalHealthFn: () => ({}), acquireFn: async () => true, stopFn: async () => ({}), jobs: createJobStore(),
+    });
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: core }, async (base) => {
+      await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "dl-a" });
+      for (const r of await listProvidersAll(h.db)) providers[r.id] = { ...r, doorUrl: "http://d/llm/v1" };
+      const solo = await (await fetch(`${base}/api/models/providers/dl-a`, { method: "DELETE", headers: authHeaders(token) })).json();
+      assert.equal(solo.willDeleteFiles, true, "downloaded, no other user");
+      await post(base, "/api/models/register", token, { catalogId: "small-chat", quant: "Q4_K_M", providerId: "dl-b" });
+      for (const r of await listProvidersAll(h.db)) providers[r.id] = { ...r, doorUrl: "http://d/llm/v1" };
+      const shared = await (await fetch(`${base}/api/models/providers/dl-a`, { method: "DELETE", headers: authHeaders(token) })).json();
+      assert.equal(shared.willDeleteFiles, false, "another provider still uses the weights");
+      await post(base, "/api/models/adopt", token, { catalogId: "big-window", quant: "Q4_K_M", path: join(weights, "ok.gguf"), providerId: "ad-1" });
+      for (const r of await listProvidersAll(h.db)) providers[r.id] = { ...r, doorUrl: "http://d/llm/v1" };
+      const adopted = await (await fetch(`${base}/api/models/providers/ad-1`, { method: "DELETE", headers: authHeaders(token) })).json();
+      assert.equal(adopted.willDeleteFiles, false, "adopted weights are never deleted");
+    });
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("round 2 (a): adopt refuses a path that is not a regular file", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const token = await seedSession(h.db);
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, lifecycleCoreFn: listingCore }, async (base) => {
+      const r = await post(base, "/api/models/adopt", token, { catalogId: "small-chat", quant: "Q4_K_M", path: weights, allowUnverified: true });
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).code, "ADOPT_NOT_A_FILE");
+    });
+  } finally { await h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
 });

@@ -233,3 +233,14 @@ test("review 4: a relative companion path is refused before anything is hashed o
     assert.equal(Object.keys(loadState(h.dir).registry).length, 0);
   } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
 });
+
+test("round 2 (a): a sha mismatch never echoes the computed hash", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    writeFileSync(join(weights, "big.gguf"), "wrong-bytes");
+    const computed = sha(Buffer.from("wrong-bytes"));
+    await assert.rejects(adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: join(weights, "big.gguf"), catalog: catalogFor({ primary: Buffer.from("primary-bytes") }), ...OPTS(h) }),
+      (e) => e.code === "ADOPT_SHA_MISMATCH" && !e.message.includes(computed) && e.actual === undefined);
+  } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});

@@ -408,10 +408,17 @@ async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hash
   } catch {
     throw new AdoptMismatchError(`${what}: file not found at ${path}`, "ADOPT_FILE_MISSING", { file: path });
   }
+  // A FIFO, a device (/dev/zero) or a directory is never model weights:
+  // hashing one could block forever or read without end.
+  if (typeof st.isFile === "function" && !st.isFile()) {
+    throw new AdoptMismatchError(`${what}: ${path} is not a regular file`, "ADOPT_NOT_A_FILE", { file: path });
+  }
   if (!allowUnverified) {
     const actual = await hashFileFn(path);
     if (actual !== expectedSha) {
-      throw new AdoptMismatchError(`${what}: sha256 of ${path} is ${actual}, expected ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha, actual });
+      // The computed hash is not echoed: it fingerprints whatever file the
+      // path named, which is the operator's to see on disk, not the API's.
+      throw new AdoptMismatchError(`${what}: the sha256 of ${path} does not match the catalog's ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha });
     }
     return true;
   }
