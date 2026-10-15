@@ -472,6 +472,35 @@ test("the launcher carries a labelled directory field, a Browse button and the d
   assert.ok(cwd > html.indexOf('id="perch-launch"') && cwd < html.indexOf('id="perch-list-body"'));
 });
 
+test("QW2: More options holds model + directory; New session and every error note stay outside it", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  for (const lang of ["en", "es"]) {
+    const html = perchHubContent(lang);
+    const open = html.indexOf('<details id="perch-launch-more"');
+    const close = html.indexOf("</details>", open);
+    assert.ok(open > html.indexOf('id="perch-launch"') && close > open, "a details inside the launcher");
+    const inside = (id) => { const i = html.indexOf('id="' + id + '"'); return i > open && i < close; };
+    for (const id of ["perch-new-model", "perch-new-model-label", "perch-new-model-more",
+                      "perch-new-cwd", "perch-browse-btn", "perch-cwd-note"]) {
+      assert.ok(inside(id), id + " folds into More options");
+    }
+    for (const id of ["perch-new", "perch-new-bot", "perch-launch-note"]) {
+      assert.ok(html.includes('id="' + id + '"') && !inside(id),
+        id + " must stay outside — one tap starts a session, and an error is never hidden");
+    }
+    const summary = html.slice(html.indexOf("<summary>", open), html.indexOf("</summary>", open));
+    assert.match(summary, lang === "en" ? /More options/ : /Más opciones/);
+    assert.ok(summary.includes('id="perch-launch-more-model"'), "the summary names the model");
+    // A <details> is not a flex container: its fields sit in their own wrapper.
+    assert.ok(/<details id="perch-launch-more">\s*<summary>[\s\S]*?<\/summary>\s*<div class="launch-more-body">/.test(html));
+  }
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(/\.launch-more-body\{[^}]*display:flex/.test(css) && /\.launch-more-body\{[^}]*flex-wrap:wrap/.test(css));
+  assert.ok(/#perch-launch-more>summary\{[^}]*min-height:44px/.test(css), "the summary is a thumb target");
+  assert.ok(/\.roost-menu\[hidden\]\{display:none\}/.test(css), "the menu's display:flex must not beat hidden");
+});
+
 test("the picker dismiss never depends on one path: Escape via the registry AND a visible Cancel", async () => {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
