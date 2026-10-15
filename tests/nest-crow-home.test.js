@@ -42,6 +42,26 @@ test("nest home grid reads installed bundles from CROW_HOME, not homedir", async
   assert.strictEqual(sb.name, "Scratch Bundle");
 });
 
+test("nest bundles report hasContainer from a shipped docker-compose.yml", async () => {
+  writeFileSync(
+    join(scratch, "installed.json"),
+    JSON.stringify([
+      { id: "scratch-bundle", type: "bundle", installedAt: "2026-07-17T00:00:00Z" },
+      { id: "scratch-compose", type: "bundle", installedAt: "2026-07-18T00:00:00Z" },
+    ])
+  );
+  mkdirSync(join(scratch, "bundles", "scratch-compose"), { recursive: true });
+  writeFileSync(join(scratch, "bundles", "scratch-compose", "manifest.json"), JSON.stringify({ name: "Scratch Compose" }));
+  writeFileSync(join(scratch, "bundles", "scratch-compose", "docker-compose.yml"), "services: {}\n");
+
+  const { getNestData } = await import("../servers/gateway/dashboard/panels/nest/data-queries.js");
+  const data = await getNestData({ execute: async () => ({ rows: [] }) }, "en");
+  const byId = Object.fromEntries(data.bundles.map((b) => [b.id, b]));
+  assert.strictEqual(byId["scratch-compose"].hasContainer, true, "compose file → container bundle");
+  assert.strictEqual(byId["scratch-bundle"].hasContainer, false, "no compose file → no container");
+  assert.strictEqual(byId["scratch-bundle"].isRunning, false);
+});
+
 test("skills panel lists user skills from CROW_HOME, not homedir", async () => {
   mkdirSync(join(scratch, "skills"), { recursive: true });
   writeFileSync(

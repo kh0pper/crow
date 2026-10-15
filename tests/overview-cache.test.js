@@ -24,7 +24,7 @@ function okEnvelope(overrides = {}) {
       instance: { id: "aaa111", name: "crow", hostname: "crow.ts.net", is_home: false },
       tiles: [
         { id: "memory", name: "Memory", icon: "memory", pathname: "/dashboard/memory", port: null, category: "local-panel" },
-        { id: "navidrome", name: "Navidrome", icon: "music", pathname: "/proxy/navidrome/", port: null, category: "bundle" },
+        { id: "navidrome", name: "Navidrome", icon: "not-an-icon", pathname: "/proxy/navidrome/", port: null, category: "bundle" },
       ],
       health: { status: "ok", checkedAt: "2026-04-20T00:00:00Z" },
     },
@@ -47,9 +47,24 @@ test("overview-cache: unknown icon → silently mapped to 'default'", async () =
   const r = await getPeerOverview(fakeDb, "peer-aaa111");
   assert.equal(r.status, "ok");
   const navidrome = r.tiles.find(t => t.id === "navidrome");
-  assert.equal(navidrome.icon, "default", "unknown icon 'music' should downgrade to 'default'");
+  assert.equal(navidrome.icon, "default", "unknown icon 'not-an-icon' should downgrade to 'default'");
   const memory = r.tiles.find(t => t.id === "memory");
   assert.equal(memory.icon, "memory", "known icon preserved");
+});
+
+test("overview-cache: alias keys, newer keys and older keys survive; prototype keys do not", async () => {
+  const icons = ["phone-video", "document", "bot", "layers", "music", "project", "__proto__", "constructor", "toString"];
+  _setFetchImpl(async () => okEnvelope({
+    body: {
+      instance: { id: "aaa111", name: "crow", hostname: "crow.ts.net", is_home: false },
+      tiles: icons.map((icon, i) => ({ id: `t${i}`, name: `T${i}`, icon, pathname: `/dashboard/t${i}`, port: null, category: "local-panel" })),
+      health: { status: "ok", checkedAt: "2026-04-20T00:00:00Z" },
+    },
+  }));
+  const r = await getPeerOverview(fakeDb, "peer-aaa111");
+  assert.equal(r.status, "ok");
+  assert.deepEqual(r.tiles.map((t) => t.icon),
+    ["phone-video", "document", "bot", "layers", "music", "project", "default", "default", "default"]);
 });
 
 test("overview-cache: pathname with '..' segment → tile dropped", async () => {

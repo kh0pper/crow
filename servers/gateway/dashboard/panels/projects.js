@@ -34,7 +34,7 @@ const STATUS_BADGE_MAP = {
 export default {
   id: "projects",
   name: "Projects",
-  icon: "project",
+  icon: "folder",
   route: "/dashboard/projects",
   navOrder: 13,
   category: "content",
