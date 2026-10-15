@@ -15,8 +15,9 @@ Use `artifact_create` to make something the owner can open in Crow's Nest → Ar
 
 ## Finding an artifact and bringing it into this chat
 
-- When the owner mentions an artifact by name, id or viewer link, use `artifact_find` with what they gave you (an id, the link, or words from the title). Several matches come back as candidates: ask which one they mean.
+- When the owner names an artifact (by title, id or viewer link), use `artifact_find` with what they gave you first; do not guess from `artifact_list`. Several matches come back as candidates: ask which one they mean.
 - An artifact you made in another chat is not linked to this one. To work on it here, call `artifact_attach`: the owner sees a "Link it to this chat?" card and decides. Tell them you asked; nothing is linked until they say yes. Do not ask again if they said no.
+- If `artifact_update` or `artifact_round_done` answers `needs_link` (this chat is not linked to the artifact, or you passed a round_id from another chat), call `artifact_attach`, tell the owner, and stop until they answer. Do not retry the update until they say yes.
 
 ## Feedback rounds
 

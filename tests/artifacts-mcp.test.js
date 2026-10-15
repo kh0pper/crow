@@ -29,7 +29,7 @@ import { initGatewayActorKey, signArtifactsActor, signActor, verifyArtifactsActo
 
 initGatewayActorKey();
 const saved = { CROW_HOME: process.env.CROW_HOME, CROW_DATA_DIR: process.env.CROW_DATA_DIR };
-const s = { frames: [], emitFail: false, roundsDone: [], notes: [], onVersionHook: null };
+const s = { frames: [], emitFail: false, roundsDone: [], notes: [], onVersionHook: null, ownerCards: new Set(), tasksBroken: false };
 
 before(async () => {
   s.home = mkdtempSync(join(tmpdir(), "artifacts-mcp-"));
@@ -39,7 +39,7 @@ before(async () => {
     CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE dashboard_settings_overrides (key TEXT NOT NULL, instance_id TEXT NOT NULL, value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')), lamport_ts INTEGER DEFAULT 0, PRIMARY KEY (key, instance_id));
-    CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT, status TEXT, narrowed_tools TEXT);`);
+    CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_type TEXT, gateway_thread_id TEXT, kind TEXT, status TEXT, narrowed_tools TEXT, card_id INTEGER);`);
   await initArtifactsTables(s.db);
   // A CLEAN Perch session created AFTER the artifacts install (trust.js: no
   // record = untrusted; sessions that predate the install are backfilled tainted, D22).
@@ -61,7 +61,9 @@ before(async () => {
   mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: s.db, blobs: s.blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks },
     onVersion: async (o) => { if (s.onVersionHook) await s.onVersionHook(o); if (o.state === "current") await comments.carryForwardTo(s.db, s.blobs, o.artifactId, o.n, o.onlyThreads || null); },
     onRoundDone: async (r) => { s.roundsDone.push(Number(r.id)); await roundDoneEffects(s.db, r, { engine: null, notify: async (n) => s.notes.push(n) }); },
-    emitExternal: async (tid, frame, opts) => { if (s.emitFail) throw new Error("engine down"); s.frames.push({ tid, frame, opts }); return { delivered: true }; } }), sm, noAuth);
+    emitExternal: async (tid, frame, opts) => { if (s.emitFail) throw new Error("engine down"); s.frames.push({ tid, frame, opts }); return { delivered: true }; },
+    // M5 seam: the gateway reads board_mutations in the instance tasks.db.
+    cardMadeByOwner: async (cardId) => { if (s.tasksBroken) throw new Error("tasks.db unreadable"); return s.ownerCards.has(Number(cardId)); } }), sm, noAuth);
   s.http = app.listen(0); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
 });
@@ -128,9 +130,12 @@ test("an UNTRUSTED round's session is held to its own artifact: no create, no li
 });
 
 test("a round update whose base moved is stored PROPOSED; an Ask cannot revise; another bot cannot finish the round", async () => {
-  const c = await client(s.artToken, bot("bobby", "perchlive-1"));
+  // S2 H1: a Perch chat may use a round id only when the round is bound to
+  // it, so the rounds here are delivered to their own chat (perchlive-pr).
+  const c = await client(s.artToken, bot("bobby", "perchlive-pr"));
   const t = await comments.addThread(s.db, { artifactId: s.artId, versionN: 2, anchor: { kind: "whole" }, text: "owner says hi", author: { kind: "owner" } });
   const r = await rounds.startRound(s.db, { artifactId: s.artId, actor: { kind: "session" }, include: [t.threadId] });
+  await rounds.setDelivery(s.db, r.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-pr" });
   await store.addVersion(s.db, s.blobs, { artifactId: s.artId, source: { html: "<p>owner edit mid-round</p>" }, actor: { kind: "session" } }, {});
   const up = await call(c, "artifact_update", { artifact_id: s.artId, source: { html: "<p>bot result</p>" }, round_id: r.id });
   assert.equal(up.data.state, "proposed");
@@ -138,8 +143,9 @@ test("a round update whose base moved is stored PROPOSED; an Ask cannot revise; 
   // never stamp itself as the round's result.
   assert.equal((await rounds.getRound(s.db, r.id)).result_version, null, "a proposed version is never the round's result");
   const m = await client(s.artToken, bot("mallory", "perchlive-9"));
-  assert.match((await call(m, "artifact_round_done", { artifact_id: s.artId, round_id: r.id, summary: "x" })).err, /not_found/);
+  assert.match((await call(m, "artifact_round_done", { artifact_id: s.artId, round_id: r.id, summary: "x" })).err, /not_found/, "the scope check comes first: another bot cannot even see the artifact");
   const ask = await rounds.startRound(s.db, { artifactId: s.artId, actor: { kind: "session" }, kind: "ask", include: [t.threadId] });
+  await rounds.setDelivery(s.db, ask.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-pr" });
   assert.match((await call(c, "artifact_update", { artifact_id: s.artId, source: { html: "<p>no</p>" }, round_id: ask.id })).err, /ask_rounds_do_not_revise/);
   await c.close(); await m.close();
 });
@@ -471,7 +477,11 @@ test("F7(4) boundaries: another chat of the same bot and the operator are never 
     assert.match((await call(c4, "artifact_update", { artifact_id: id, source: { markdown: "# sneaky" } })).err, /update_needs_round_id/);
     // …passing the ask's id is refused too (asks never revise)…
     assert.match((await call(c4, "artifact_update", { artifact_id: id, source: { markdown: "# sneaky" }, round_id: ask.id })).err, /ask_rounds_do_not_revise/);
-    // …while ANOTHER chat of the same bot and the operator are unaffected.
+    // …while ANOTHER (linked) chat of the same bot and the operator are
+    // unaffected by the round guard. S2: an unlinked one is refused by the
+    // link gate instead.
+    assert.match((await call(c5, "artifact_update", { artifact_id: id, source: { markdown: "# from f5" } })).err, /needs_link/);
+    await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [id, "bobby", "perchlive-f5"] });
     assert.equal((await call(c5, "artifact_update", { artifact_id: id, source: { markdown: "# from f5" } })).err, null);
     assert.equal((await call(op, "artifact_update", { artifact_id: id, source: { markdown: "# from owner" } })).err, null);
     // Answering the ask unblocks the chat.
@@ -636,4 +646,147 @@ test("review L3: concurrent attaches from one chat make ONE pending request", as
   assert.equal(new Set(outs.map((o) => o.data.request_id)).size, 1);
   assert.equal((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_link_requests WHERE artifact_id=? AND status='pending'", args: [id] })).rows[0].n, 1);
   await c.close(); await maker.close();
+});
+
+// ─── S2 (artifacts smoke fixes): the needs_link gate ─────────────────────
+// A Perch chat may write a version (or close a round) only when it is linked
+// to the artifact, holds a round bound to it, or runs an owner-made card.
+// Every refusal is the SAME static text, so a bot cannot tell a missing round
+// from a foreign one (review H1).
+const NEEDS_LINK = "[needs_link] this chat is not linked to this artifact: call artifact_attach and wait for the owner's yes";
+const actorOf = (id, thread, gateway) => {
+  const h = { "X-Crow-Actor-Kind": "bot", "X-Crow-Actor-Id": id, "X-Crow-Actor-Gateway": gateway };
+  if (thread) h["X-Crow-Actor-Thread"] = thread;
+  h["X-Crow-Actor-Sig"] = signArtifactsActor({ botId: id, threadId: thread, gatewayType: gateway });
+  return h;
+};
+async function gateDoc(title) {
+  await freshSession("bobby", "perchlive-g0");
+  const c = await client(s.artToken, bot("bobby", "perchlive-g0"));
+  try { return (await call(c, "artifact_create", { title, type: "document", source: { markdown: "# " + title } })).data.id; } finally { await c.close(); }
+}
+const versions = async (id) => Number((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifact_versions WHERE artifact_id=?", args: [id] })).rows[0].n);
+const refusedAudits = async (id) => (await s.db.execute({ sql: "SELECT detail_json FROM artifact_audit WHERE artifact_id=? AND action='update-refused'", args: [id] })).rows.map((r) => JSON.parse(r.detail_json || "{}").reason);
+
+test("S2: an unlinked Perch chat cannot update (no version, audited); the origin chat, a Yes-linked chat, channel and job turns and the operator can", async () => {
+  const id = await gateDoc("Gate doc");
+  await freshSession("bobby", "perchlive-g1");
+  const g1 = await client(s.artToken, bot("bobby", "perchlive-g1"));
+  const g0 = await client(s.artToken, bot("bobby", "perchlive-g0"));
+  const op = await client(s.fullToken);
+  const mail = await client(s.artToken, actorOf("bobby", "gmail-thread-g", "gmail"));
+  const job = await client(s.artToken, actorOf("bobby", null, "job"));
+  try {
+    const before = await versions(id);
+    const r = await call(g1, "artifact_update", { artifact_id: id, source: { markdown: "# sneaky" } });
+    assert.equal(r.err, NEEDS_LINK);
+    assert.equal(await versions(id), before, "no version");
+    assert.deepEqual(await refusedAudits(id), ["unlinked"], "audited, with the reason kept server-side");
+    assert.equal((await call(g0, "artifact_update", { artifact_id: id, source: { markdown: "# from origin" } })).err, null, "the origin chat is linked");
+    assert.equal((await call(op, "artifact_update", { artifact_id: id, source: { markdown: "# owner" } })).err, null);
+    assert.equal((await call(mail, "artifact_update", { artifact_id: id, source: { markdown: "# mail" } })).err, null, "S2b: a channel turn is exempt");
+    assert.equal((await call(job, "artifact_update", { artifact_id: id, source: { markdown: "# job" } })).err, null, "S2b: a job turn is exempt");
+    // Attach → the owner's Yes links the chat; after that it may write.
+    const att = await call(g1, "artifact_attach", { artifact_id: id });
+    assert.equal(att.data.requested, true);
+    assert.equal((await call(g1, "artifact_update", { artifact_id: id, source: { markdown: "# x" } })).err, NEEDS_LINK, "asking is not a yes");
+    await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='accepted', decided_at=datetime('now') WHERE id=?", args: [att.data.request_id] });
+    await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [id, "bobby", "perchlive-g1"] });
+    assert.equal((await call(g1, "artifact_update", { artifact_id: id, source: { markdown: "# after yes" } })).err, null);
+    // Unlink: refused again.
+    await s.db.execute({ sql: "UPDATE artifact_links SET unlinked_at=datetime('now') WHERE artifact_id=? AND thread_id='perchlive-g1'", args: [id] });
+    assert.equal((await call(g1, "artifact_update", { artifact_id: id, source: { markdown: "# after unlink" } })).err, NEEDS_LINK);
+  } finally { await g1.close(); await g0.close(); await op.close(); await mail.close(); await job.close(); }
+});
+
+test("S2 L2: a link naming ANOTHER bot on this thread does not let this bot write; the owner's No leaves it refused", async () => {
+  const id = await gateDoc("Other bot link");
+  await s.db.execute({ sql: "INSERT INTO artifact_bot_access (artifact_id, bot_id) VALUES (?, 'mallory')", args: [id] });
+  await freshSession("mallory", "perchlive-l2");
+  await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [id, "bobby", "perchlive-l2"] });
+  const m = await client(s.artToken, bot("mallory", "perchlive-l2"));
+  try {
+    assert.equal((await call(m, "artifact_get", { artifact_id: id })).err, null, "mallory holds a grant: the scope check passes");
+    assert.equal((await call(m, "artifact_update", { artifact_id: id, source: { markdown: "# m" } })).err, NEEDS_LINK, "the chat's link names bobby, not mallory");
+  } finally { await m.close(); }
+  await freshSession("bobby", "perchlive-no");
+  const c = await client(s.artToken, bot("bobby", "perchlive-no"));
+  try {
+    const att = await call(c, "artifact_attach", { artifact_id: id });
+    await s.db.execute({ sql: "UPDATE artifact_link_requests SET status='declined', decided_at=datetime('now') WHERE id=?", args: [att.data.request_id] });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# no" } })).err, NEEDS_LINK);
+  } finally { await c.close(); }
+});
+
+test("S2 H1: a round id is honoured only when the round is bound to THIS chat; every other case is the same needs_link", async () => {
+  await freshSession("bobby", "perchlive-h1");
+  const c = await client(s.artToken, bot("bobby", "perchlive-h1"));
+  const owner = (id) => comments.addThread(s.db, { artifactId: id, versionN: 1, anchor: { kind: "whole" }, text: "owner note", author: { kind: "owner" } });
+  try {
+    // A QUEUED round (session_id NULL, no target): refused.
+    let id = await gateDoc("H1 queued");
+    let t = await owner(id);
+    let r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t.threadId] });
+    await rounds.setDelivery(s.db, r.id, { status: "queued" });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# q" }, round_id: r.id })).err, NEEDS_LINK);
+    assert.equal((await call(c, "artifact_round_done", { artifact_id: id, round_id: r.id, summary: "x" })).err, NEEDS_LINK);
+    assert.equal((await rounds.getRound(s.db, r.id)).status, "queued", "a foreign chat cannot close it");
+    // A nonexistent round id and another bot's round id: the same text.
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# q" }, round_id: 987654 })).err, NEEDS_LINK);
+    // A round DELIVERED to another chat: refused; from the bound chat: fine.
+    id = await gateDoc("H1 delivered");
+    t = await owner(id);
+    r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t.threadId] });
+    await rounds.setDelivery(s.db, r.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-h1-other" });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# d" }, round_id: r.id })).err, NEEDS_LINK);
+    assert.equal((await call(c, "artifact_round_done", { artifact_id: id, round_id: r.id, summary: "x" })).err, NEEDS_LINK);
+    await freshSession("bobby", "perchlive-h1-other");
+    const other = await client(s.artToken, bot("bobby", "perchlive-h1-other"));
+    try {
+      assert.equal((await call(other, "artifact_update", { artifact_id: id, source: { markdown: "# d" }, round_id: r.id })).err, null, "(a) the bound chat");
+      const done = await call(other, "artifact_round_done", { artifact_id: id, round_id: r.id, summary: "ok" });
+      assert.equal(done.err, null);
+      assert.equal(done.data.status, "done");
+    } finally { await other.close(); }
+    // Another bot's round: the same text.
+    id = await gateDoc("H1 mallory");
+    t = await owner(id);
+    r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t.threadId], botId: "mallory" });
+    await rounds.setDelivery(s.db, r.id, { status: "working", delivery: "perch-session", sessionId: "perchlive-h1" });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# m" }, round_id: r.id })).err, NEEDS_LINK);
+    // (b) a targeted Send between message and bind: target_thread = this chat, session_id NULL.
+    id = await gateDoc("H1 targeted");
+    t = await owner(id);
+    r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t.threadId], targetThread: "perchlive-h1" });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# t" }, round_id: r.id })).err, null, "(b) targeted at this chat, not yet bound");
+    // (c) a BOARD-CARD round: refused from an unlinked chat; the card's own session may use it.
+    id = await gateDoc("H1 board");
+    t = await owner(id);
+    r = await rounds.startRound(s.db, { artifactId: id, actor: { kind: "session" }, include: [t.threadId] });
+    await rounds.setDelivery(s.db, r.id, { status: "pending", delivery: "board-card", cardId: 4401 });
+    assert.equal((await call(c, "artifact_update", { artifact_id: id, source: { markdown: "# b" }, round_id: r.id })).err, NEEDS_LINK);
+    await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status, card_id) VALUES ('bobby','perch','perchlive-card4401','perch-live','active',4401)", args: [] });
+    const card = await client(s.artToken, bot("bobby", "perchlive-card4401"));
+    try {
+      assert.equal((await call(card, "artifact_update", { artifact_id: id, source: { markdown: "# b" }, round_id: r.id })).err, null, "(c) the card-bound session of that card");
+      assert.equal((await call(card, "artifact_round_done", { artifact_id: id, round_id: r.id, summary: "done" })).err, null);
+    } finally { await card.close(); }
+    assert.ok((await refusedAudits(id)).includes("round-unbound"));
+  } finally { await c.close(); }
+});
+
+test("S2 M5: a card-bound session counts as linked when the OWNER made the card; a bot-made card or an unreadable tasks.db does not", async () => {
+  const id = await gateDoc("M5 doc");
+  const sess = async (thread, cardId) => s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, status, card_id) VALUES ('bobby','perch',?,'perch-live','active',?)", args: [thread, cardId] });
+  await sess("perchlive-m5-owner", 5501);
+  await sess("perchlive-m5-bot", 5502);
+  s.ownerCards.add(5501);
+  const ownerCard = await client(s.artToken, bot("bobby", "perchlive-m5-owner"));
+  const botCard = await client(s.artToken, bot("bobby", "perchlive-m5-bot"));
+  try {
+    assert.equal((await call(ownerCard, "artifact_update", { artifact_id: id, source: { markdown: "# owner card" } })).err, null);
+    assert.equal((await call(botCard, "artifact_update", { artifact_id: id, source: { markdown: "# bot card" } })).err, NEEDS_LINK);
+    s.tasksBroken = true;
+    assert.equal((await call(ownerCard, "artifact_update", { artifact_id: id, source: { markdown: "# broken" } })).err, NEEDS_LINK, "unreadable: not owner-made (fail closed)");
+  } finally { s.tasksBroken = false; await ownerCard.close(); await botCard.close(); }
 });

@@ -50,3 +50,28 @@ export function makeArtifactBoardCard({ db, tasksDbPath = defaultTasksDbPath } =
     }
   };
 }
+
+/**
+ * Artifacts smoke fixes S2, review M5: was this card made by the OWNER? The
+ * needs_link gate lets a card-bound Perch session write without a chat link
+ * only for an owner-made card (its `create` board_mutations row has
+ * actor_kind 'human' — the dashboard and the Artifacts "Create a board card"
+ * both record that). A bot-made card, a missing row, or a store that cannot
+ * be read is NOT owner-made: the caller fails closed.
+ * @param {number} cardId
+ * @param {{ tasksDbPath?: () => string }} [o] test seam
+ * @returns {Promise<boolean>}
+ */
+export async function cardMadeByOwner(cardId, { tasksDbPath = defaultTasksDbPath } = {}) {
+  if (!Number.isInteger(Number(cardId))) return false;
+  let tdb;
+  try {
+    tdb = createDbClient(tasksDbPath());
+    const r = (await tdb.execute({ sql: "SELECT actor_kind FROM board_mutations WHERE item_id=? AND verb='create' ORDER BY id LIMIT 1", args: [Number(cardId)] })).rows[0];
+    return !!r && r.actor_kind === "human";
+  } catch {
+    return false;
+  } finally {
+    try { tdb && tdb.close(); } catch {}
+  }
+}

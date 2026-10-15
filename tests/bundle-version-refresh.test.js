@@ -921,3 +921,228 @@ describe("manifest.refreshFiles — docker opt-in refresh of named code paths", 
     assert.match(c, /- \.\/onlyoffice-plugin:\/var\/www\/onlyoffice\/documentserver\/sdkjs-plugins\/\{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1\}:ro/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Skill sync (artifacts smoke plan S2 fix 3; review H3/M3/L7/L8/L9/L11): the
+// boot repair keeps <CROW_HOME>/skills/<basename> in step with the bundle's
+// shipped skill for EVERY installed bundle, on every boot, version bump or
+// not. A copy is overwritten only when provably unedited (its hash equals
+// what we wrote, or a past shipped version in the ledger); anything else is
+// kept. No runtime git: the ledger is a fixture here.
+// ---------------------------------------------------------------------------
+describe("skill sync — rules 0–4, record, modes, atomic writes", async () => {
+  const { skillHash, removeBundleSkills } = await import("../servers/gateway/bundle-skill-sync.js");
+  const { lstatSync, statSync, symlinkSync, readdirSync, rmSync: rm, unlinkSync } = await import("node:fs");
+  const skillsDir = () => join(CROW_HOME, "skills");
+  const recordPath = () => join(CROW_HOME, "skill-installs.json");
+  const record = () => { try { return JSON.parse(readFileSync(recordPath(), "utf8")); } catch { return {}; } };
+  const skillAt = (name) => readFileSync(join(skillsDir(), name), "utf8");
+  // One throwaway repo per scenario: bundle `id` ships skills/<name>.md with `text`.
+  function repoWith(id, files, version = "1.0.0", extra = {}) {
+    const root = freshRoot(`crowrepo-skill-${id}-`);
+    put(root, `${id}/manifest.json`, JSON.stringify({ id, name: id, version, type: "bundle", category: "misc", description: "d", skills: Object.keys(files).map((n) => `skills/${n}`), ...extra }));
+    for (const [n, text] of Object.entries(files)) put(root, `${id}/skills/${n}`, text);
+    // The installed copy is at the SAME version: no refresh fires, the sync must still run.
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version, type: "bundle" }));
+    return root;
+  }
+  const boot = (root, opts = {}) => repairInstalledBundleAssets({ appBundles: root, run: fakeRunner(), skillMode: "on", ...opts });
+
+  test("rule 2: a missing copy with no record is installed and recorded; a recorded copy the user deleted stays deleted", async () => {
+    const root = repoWith("sk-install", { "sk-install.md": "# v1\n" });
+    setInstalled(["sk-install"]);
+    const out = await boot(root);
+    assert.equal(skillAt("sk-install.md"), "# v1\n");
+    assert.equal(record()["sk-install.md"].sha256, skillHash("# v1\n"));
+    assert.equal(record()["sk-install.md"].bundle, "sk-install");
+    assert.ok(out.skillLines.some((l) => l.skill === "sk-install.md" && l.action === "install"));
+    unlinkSync(join(skillsDir(), "sk-install.md"));
+    const again = await boot(root);
+    assert.equal(existsSync(join(skillsDir(), "sk-install.md")), false, "the user deleted it: left deleted");
+    assert.ok(again.skillLines.some((l) => l.skill === "sk-install.md" && l.action === "skip-deleted"));
+  });
+
+  test("rule 1: an identical copy is adopted (recorded, not rewritten); CRLF vs LF of the same text counts as identical", async () => {
+    const root = repoWith("sk-adopt", { "sk-adopt.md": "# same\nline\n" });
+    put(CROW_HOME, "skills/sk-adopt.md", "# same\r\nline\r\n");
+    const ino = statSync(join(skillsDir(), "sk-adopt.md")).ino;
+    setInstalled(["sk-adopt"]);
+    const out = await boot(root);
+    assert.equal(skillAt("sk-adopt.md"), "# same\r\nline\r\n", "never rewritten");
+    assert.equal(statSync(join(skillsDir(), "sk-adopt.md")).ino, ino);
+    assert.equal(record()["sk-adopt.md"].sha256, skillHash("# same\nline\n"));
+    assert.ok(out.skillLines.some((l) => l.skill === "sk-adopt.md" && l.action === "adopt"));
+    assert.deepEqual(out.skillsKept, []);
+  });
+
+  test("rule 3: an unedited recorded copy is refreshed atomically (new inode, no tmp left); an edited one is kept and notified ONCE per repo hash", async () => {
+    let root = repoWith("sk-rec", { "sk-rec.md": "# v1\n", "sk-rec-b.md": "# b1\n" });
+    setInstalled(["sk-rec"]);
+    await boot(root);
+    // The user edits b; a is untouched. The repo ships v2 of both.
+    put(CROW_HOME, "skills/sk-rec-b.md", "# b1 MY EDIT\n");
+    const inoA = statSync(join(skillsDir(), "sk-rec.md")).ino;
+    root = repoWith("sk-rec", { "sk-rec.md": "# v2\n", "sk-rec-b.md": "# b2\n" });
+    const out = await boot(root);
+    assert.equal(skillAt("sk-rec.md"), "# v2\n");
+    assert.notEqual(statSync(join(skillsDir(), "sk-rec.md")).ino, inoA, "replaced by rename, never written in place");
+    assert.deepEqual(readdirSync(skillsDir()).filter((f) => !f.endsWith(".md")), [], "no tmp file remains");
+    assert.equal(record()["sk-rec.md"].sha256, skillHash("# v2\n"));
+    assert.equal(skillAt("sk-rec-b.md"), "# b1 MY EDIT\n", "an edited copy is kept");
+    assert.deepEqual(out.skillsKept.filter((k) => k.bundle === "sk-rec"), [{ bundle: "sk-rec", skill: "sk-rec-b.md", reason: "edited", notify: true }]);
+    const second = await boot(root);
+    assert.deepEqual(second.skillsKept.filter((k) => k.bundle === "sk-rec").map((k) => k.notify), [false], "notified once for this repo hash");
+    root = repoWith("sk-rec", { "sk-rec.md": "# v2\n", "sk-rec-b.md": "# b3\n" });
+    const third = await boot(root);
+    assert.deepEqual(third.skillsKept.filter((k) => k.bundle === "sk-rec").map((k) => k.notify), [true], "a NEW repo version notifies again");
+  });
+
+  test("rule 4: a legacy copy (no record) whose hash is a past shipped version is refreshed; an unknown one is kept unverified, never notified, quiet on the next boot", async () => {
+    const root = repoWith("sk-legacy", { "sk-old.md": "# new text\n", "sk-mine.md": "# new mine\n" });
+    put(CROW_HOME, "skills/sk-old.md", "# old shipped text\r\n");
+    put(CROW_HOME, "skills/sk-mine.md", "# something the user wrote\n");
+    setInstalled(["sk-legacy"]);
+    const ledger = { "sk-legacy/skills/sk-old.md": [skillHash("# old shipped text\n"), skillHash("# new text\n")], "sk-legacy/skills/sk-mine.md": [skillHash("# new mine\n")] };
+    const out = await boot(root, { skillLedger: ledger });
+    assert.equal(skillAt("sk-old.md"), "# new text\n", "CRLF copy of a past version: unedited stale, refreshed");
+    assert.equal(skillAt("sk-mine.md"), "# something the user wrote\n");
+    const rec = record()["sk-mine.md"];
+    assert.equal(rec.sha256, null);
+    assert.equal(rec.kept, true);
+    assert.equal(rec.reason, "unverified");
+    assert.equal(rec.notifiedFor, null);
+    const kept = out.skillsKept.filter((k) => k.bundle === "sk-legacy");
+    assert.deepEqual(kept, [{ bundle: "sk-legacy", skill: "sk-mine.md", reason: "unverified", notify: false }]);
+    const logged = [];
+    const second = await boot(root, { skillLedger: ledger, log: (m) => logged.push(m) });
+    assert.ok(second.skillsKept.every((k) => k.notify === false));
+    assert.ok(!logged.some((m) => /sk-mine/.test(m)), "an unverified copy logs once, then stays quiet");
+  });
+
+  test("rule 0: a symlinked copy is never written, recorded or notified — the link survives", async () => {
+    const root = repoWith("sk-link", { "sk-link.md": "# repo text\n" });
+    const target = join(CROW_HOME, "bundles", "sk-link", "skills", "sk-link.md");
+    put(CROW_HOME, "bundles/sk-link/skills/sk-link.md", "# operator text\n");
+    mkdirSync(skillsDir(), { recursive: true });
+    symlinkSync(target, join(skillsDir(), "sk-link.md"));
+    setInstalled(["sk-link"]);
+    const out = await boot(root);
+    assert.ok(lstatSync(join(skillsDir(), "sk-link.md")).isSymbolicLink());
+    assert.equal(readFileSync(target, "utf8"), "# operator text\n", "never written THROUGH the link");
+    assert.equal(record()["sk-link.md"], undefined);
+    assert.ok(out.skillLines.some((l) => l.skill === "sk-link.md" && l.action === "skip-symlink"));
+    assert.deepEqual(out.skillsKept.filter((k) => k.bundle === "sk-link"), []);
+  });
+
+  test("modes: report writes nothing (no skill, no record) but says what on would do; off does nothing", async () => {
+    const root = repoWith("sk-mode", { "sk-mode.md": "# m\n" });
+    setInstalled(["sk-mode"]);
+    const before = existsSync(recordPath()) ? readFileSync(recordPath(), "utf8") : null;
+    const rep = await boot(root, { skillMode: "report" });
+    assert.equal(existsSync(join(skillsDir(), "sk-mode.md")), false);
+    assert.equal(existsSync(recordPath()) ? readFileSync(recordPath(), "utf8") : null, before, "the record is untouched");
+    assert.ok(rep.skillLines.some((l) => l.skill === "sk-mode.md" && l.action === "install"));
+    const off = await boot(root, { skillMode: "off" });
+    assert.equal(existsSync(join(skillsDir(), "sk-mode.md")), false);
+    assert.deepEqual(off.skillLines, []);
+  });
+
+  test("review 1: report mode never asks for a notification (nothing is persisted, so it would repeat every boot)", async () => {
+    let root = repoWith("sk-repnote", { "sk-repnote.md": "# r1\n" });
+    setInstalled(["sk-repnote"]);
+    await boot(root);
+    put(CROW_HOME, "skills/sk-repnote.md", "# r1 MY EDIT\n");
+    root = repoWith("sk-repnote", { "sk-repnote.md": "# r2\n" });
+    for (let i = 0; i < 2; i++) {
+      const out = await boot(root, { skillMode: "report" });
+      assert.deepEqual(out.skillsKept.filter((k) => k.bundle === "sk-repnote"), [{ bundle: "sk-repnote", skill: "sk-repnote.md", reason: "edited", notify: false }]);
+    }
+    const on = await boot(root);
+    assert.deepEqual(on.skillsKept.filter((k) => k.bundle === "sk-repnote").map((k) => k.notify), [true], "on notifies (once)");
+  });
+
+  test("review 3: an explicit (re)install restores a skill the owner deleted; the boot sync still leaves it deleted", async () => {
+    const { syncBundleSkills } = await import("../servers/gateway/bundle-skill-sync.js");
+    const root = repoWith("sk-reinst", { "sk-reinst.md": "# ri\n" });
+    setInstalled(["sk-reinst"]);
+    await boot(root);
+    unlinkSync(join(skillsDir(), "sk-reinst.md"));
+    await boot(root);
+    assert.equal(existsSync(join(skillsDir(), "sk-reinst.md")), false);
+    const manifest = JSON.parse(readFileSync(join(root, "sk-reinst", "manifest.json"), "utf8"));
+    const out = syncBundleSkills({ id: "sk-reinst", src: join(root, "sk-reinst"), manifest, mode: "on", install: true, skillsDir: skillsDir(), recordPath: recordPath(), ledger: {}, log: () => {} });
+    assert.equal(skillAt("sk-reinst.md"), "# ri\n");
+    assert.ok(out.lines.some((l) => l.action === "install"));
+  });
+
+  test("an INSTALLED manifest with \"refresh\": false opts the bundle's skills out too", async () => {
+    const root = repoWith("sk-optout", { "sk-optout.md": "# repo\n" });
+    put(CROW_HOME, "bundles/sk-optout/manifest.json", JSON.stringify({ id: "sk-optout", version: "1.0.0", refresh: false }));
+    put(CROW_HOME, "skills/sk-optout.md", "# hand maintained\n");
+    setInstalled(["sk-optout"]);
+    await boot(root, { skillLedger: { "sk-optout/skills/sk-optout.md": [skillHash("# hand maintained\n")] } });
+    assert.equal(skillAt("sk-optout.md"), "# hand maintained\n");
+  });
+
+  test("the sync also runs on a version-bump boot (before the refresh's continue)", async () => {
+    const root = repoWith("sk-bump", { "sk-bump.md": "# bumped\n" }, "2.0.0");
+    put(CROW_HOME, "bundles/sk-bump/manifest.json", JSON.stringify({ id: "sk-bump", version: "1.0.0", type: "bundle" }));
+    setInstalled(["sk-bump"]);
+    const out = await boot(root);
+    assert.ok(out.repaired.some((r) => /sk-bump: refreshed/.test(r)));
+    assert.equal(skillAt("sk-bump.md"), "# bumped\n");
+  });
+
+  test("uninstall (L7): an unedited copy is deleted, an edited one is kept, a symlink is left", async () => {
+    const root = repoWith("sk-un", { "sk-un-a.md": "# a\n", "sk-un-b.md": "# b\n", "sk-un-c.md": "# c\n" });
+    setInstalled(["sk-un"]);
+    await boot(root);
+    put(CROW_HOME, "skills/sk-un-b.md", "# b EDITED\n");
+    rm(join(skillsDir(), "sk-un-c.md"));
+    symlinkSync(join(root, "sk-un", "skills", "sk-un-c.md"), join(skillsDir(), "sk-un-c.md"));
+    const manifest = JSON.parse(readFileSync(join(root, "sk-un", "manifest.json"), "utf8"));
+    const out = removeBundleSkills({ id: "sk-un", manifest, src: join(root, "sk-un"), skillsDir: skillsDir(), recordPath: recordPath(), ledger: {}, log: () => {} });
+    assert.equal(existsSync(join(skillsDir(), "sk-un-a.md")), false);
+    assert.equal(skillAt("sk-un-b.md"), "# b EDITED\n");
+    assert.ok(lstatSync(join(skillsDir(), "sk-un-c.md")).isSymbolicLink());
+    assert.deepEqual(out.removed, ["sk-un-a.md"]);
+    assert.deepEqual(out.kept.sort(), ["sk-un-b.md", "sk-un-c.md"]);
+    assert.equal(record()["sk-un-a.md"], undefined, "a removed copy's record goes too (a reinstall installs fresh)");
+  });
+
+  test("every real bundle that ships a skill: a stale ledger-known copy is refreshed on a plain boot (no version bump)", async () => {
+    const realBundles = join(import.meta.dirname, "..", "bundles");
+    const ids = readdirSync(realBundles).filter((d) => existsSync(join(realBundles, d, "manifest.json")));
+    const ledger = {};
+    const shipping = [];
+    for (const id of ids) {
+      const m = JSON.parse(readFileSync(join(realBundles, id, "manifest.json"), "utf8"));
+      const skills = (Array.isArray(m.skills) ? m.skills : []).filter((p) => typeof p === "string" && existsSync(join(realBundles, id, p)));
+      if (!skills.length) continue;
+      shipping.push(id);
+      // The installed copy matches the repo version: only the sync can act.
+      put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify(m));
+      for (const p of skills) {
+        const base = p.split("/").pop();
+        const stale = `# stale copy of ${id}/${p}\n`;
+        put(CROW_HOME, `skills/${base}`, stale);
+        ledger[`${id}/${p}`] = [skillHash(stale)];
+      }
+    }
+    assert.ok(shipping.length >= 10, "the table covers the real skill-shipping bundles");
+    // No record for these names yet: rule 4 (legacy) decides from the ledger.
+    const rec = record();
+    for (const k of Object.keys(rec)) if (shipping.some((id) => rec[k].bundle === id)) delete rec[k];
+    writeFileSync(recordPath(), JSON.stringify(rec));
+    setInstalled(shipping);
+    const out = await boot(realBundles, { skillLedger: ledger });
+    for (const id of shipping) {
+      const m = JSON.parse(readFileSync(join(realBundles, id, "manifest.json"), "utf8"));
+      for (const p of m.skills.filter((x) => typeof x === "string" && existsSync(join(realBundles, id, x)))) {
+        const base = p.split("/").pop();
+        assert.equal(readFileSync(join(skillsDir(), base), "utf8"), readFileSync(join(realBundles, id, p), "utf8"), `${id}: ${base} refreshed`);
+      }
+    }
+    assert.deepEqual(out.skillsKept.filter((k) => shipping.includes(k.bundle)), []);
+  });
+});

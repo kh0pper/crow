@@ -10,7 +10,8 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
-import { makeArtifactBoardCard } from "../servers/gateway/board/artifact-card.js";
+import { makeArtifactBoardCard, cardMadeByOwner } from "../servers/gateway/board/artifact-card.js";
+import { createCard } from "../servers/gateway/board/card-service.js";
 
 const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
@@ -111,5 +112,18 @@ test("a second card gets its own plan version 1 (plans never collide across card
       assert.deepEqual(plans.map((p) => p.body_md), ["first", "second"]);
       assert.ok(plans.every((p) => p.version === 1));
     } finally { t.close(); }
+  });
+});
+
+test("S2 M5: cardMadeByOwner — an owner-made card is; a bot-made card, a missing card or an unreadable store is not", async () => {
+  await withStore(async ({ db, tasksDbPath, tasksFile }) => {
+    const ownerCard = await makeArtifactBoardCard({ db, tasksDbPath })({ round: { id: 3, artifact_id: "art_t1", kind: "round" }, text: "t" });
+    const tdb = createDbClient(tasksFile);
+    let botCard;
+    try { botCard = Number((await createCard(tdb, { title: "bot made" }, { kind: "bot", id: "bobby", jobId: null })).id); } finally { tdb.close(); }
+    assert.equal(await cardMadeByOwner(ownerCard, { tasksDbPath }), true);
+    assert.equal(await cardMadeByOwner(botCard, { tasksDbPath }), false);
+    assert.equal(await cardMadeByOwner(999999, { tasksDbPath }), false);
+    assert.equal(await cardMadeByOwner(ownerCard, { tasksDbPath: () => join(tasksFile, "nope", "tasks.db") }), false, "unreadable: fail closed");
   });
 });

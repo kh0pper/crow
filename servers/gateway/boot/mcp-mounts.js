@@ -228,12 +228,30 @@ export async function mountMcpServers(app, deps) {
   // re-copy them from the app repo. Prevents the Companion migration gap from recurring.
   try {
     const { repairInstalledBundleAssets } = await import("../routes/bundles.js");
-    const { repaired, errors } = await repairInstalledBundleAssets();
+    const { repaired, errors, skillsKept = [] } = await repairInstalledBundleAssets();
     if (repaired.length > 0) {
       console.log(`[bundles] Repaired assets: ${repaired.join("; ")}`);
     }
     if (errors.length > 0) {
       console.warn(`[bundles] Asset repair errors:`, errors);
+    }
+    // Skill sync: one notification per skill the owner EDITED, once per new
+    // shipped version (the record's notifiedFor). Unverified copies are never
+    // notified — we cannot tell the owner they edited something we cannot verify.
+    // notify is only ever true in mode "on" (bundle-skill-sync.js), so a
+    // report-mode gateway never posts this.
+    const edited = skillsKept.filter((k) => k.notify && k.reason === "edited");
+    if (edited.length) {
+      const ndb = createDbClient();
+      try {
+        for (const k of edited) {
+          await createNotification(ndb, {
+            title: `Your edited skill "${k.skill}" was kept`,
+            body: `A newer version ships with the ${k.bundle} extension, but your copy was edited after install, so it was not replaced. Delete your copy in Skills to get the new one.`,
+            type: "system", source: "bundles",
+          }).catch(() => {});
+        }
+      } finally { try { ndb.close(); } catch {} }
     }
   } catch (err) {
     console.warn("[bundles] Asset repair failed:", err.message);
@@ -334,6 +352,13 @@ export async function mountMcpServers(app, deps) {
       await initArtifactsTables(artDb);
       const { minted } = await ensureArtifactsToken(artDb);
       if (minted) console.log("[gateway] artifacts token minted");
+      // S2a (review M7): once per instance, defs that grant artifact_update
+      // get artifact_find + artifact_attach written in (cap-guarded) — the
+      // needs_link recovery path. Off the boot path; never throws.
+      setImmediate(async () => {
+        try { (await import("../../../scripts/pi-bots/artifacts-companions.mjs")).migrateArtifactsCompanions(artDb, { notify: (n) => createNotification(artDb, n) }).catch(() => {}); }
+        catch (e) { console.warn(`[gateway] artifacts companion migration: ${e.message}`); }
+      });
       // MinIO when shared storage is available, else local disk (spec §11).
       const blobs = await createBlobStore(artDb, resolveDataDir());
       initGatewayActorKey();
@@ -362,7 +387,11 @@ export async function mountMcpServers(app, deps) {
           return { delivered: false, botId: null, reason: "no_engine" };
         }
       };
-      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal }), sessionManager, authMiddleware, peerExposureGate);
+      // S2 M5: the needs_link gate lets an owner-made card's session write
+      // without a chat link; the bundle cannot open tasks.db, so the gateway
+      // answers (fails closed on any error).
+      const { cardMadeByOwner } = await import("../board/artifact-card.js");
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
       const { readReservation } = await import("../box-reservation.js");
       const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
       // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists

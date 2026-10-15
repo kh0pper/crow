@@ -66,6 +66,25 @@ export function botGrantsServer(def, server) {
 }
 
 /**
+ * Artifacts smoke fixes S2a (review M7): `artifact_update` is answered with
+ * `needs_link` from an unlinked Perch chat, and the way out is
+ * `artifact_attach` (plus `artifact_find` to name the artifact). A def that
+ * grants Update per tool therefore also needs those two. PURE: returns a new
+ * list with any missing companion appended; a whole-server `artifacts` grant
+ * (which already covers them) or a list without Update is returned as is.
+ * Callers (scripts/pi-bots/artifacts-companions.mjs) write the result INTO the
+ * stored def — never at runtime — so every crow_mcp consumer sees it.
+ */
+const ART_COMPANIONS = ["artifact_find", "artifact_attach"];
+export function withArtifactsCompanions(crowMcp) {
+  const list = Array.isArray(crowMcp) ? crowMcp.slice() : [];
+  const has = (tool) => list.includes(`artifacts/${tool}`) || list.includes(`artifacts__${tool}`);
+  if (list.includes("artifacts") || !has("artifact_update")) return list;
+  for (const t of ART_COMPANIONS) if (!has(t)) list.push(`artifacts/${t}`);
+  return list;
+}
+
+/**
  * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
  * a bot whose tools grant the Artifacts server ran WITHOUT the protocol skill
  * unless the operator had attached it by hand — it tried to `read` the skill

@@ -1,0 +1,254 @@
+{
+  "actual-budget/skills/actual-budget.md": [
+    "3dc1033813587d7c5baa77bb6962f35897dc7b989d7411c2159009dbef1aaa17"
+  ],
+  "adguard-home/skills/adguard-home.md": [
+    "27c0d0bc676111b0a62945bd2fa449dd89fb29b7b6bc53bd3081f277f0d67c4b"
+  ],
+  "artifacts/skills/artifacts.md": [
+    "528920200f7aaddf1618560754836a979979287a5345c64122be279786349f5d",
+    "5e13a28fa5739b79b2c25f72b6108a52f10bfbee76de7297099023316922b245",
+    "35b04a37fee86b30b94f784e735adb49e375c595f8e6bf83bc869ec794a1c961",
+    "155ca556953166fcc1da6a996f69a5932a3ce6abd5aa8487a64191b254a21ad8",
+    "c2d2531fd3b3e29fccae2521eb728ca937b71f5106af1560f1eec812d0af8b8e"
+  ],
+  "audiobookshelf/skills/audiobookshelf.md": [
+    "abb73397595dd8a43434829afa72a34b3fe129eda391de5f5d129a421c7c07fb"
+  ],
+  "bookstack/skills/bookstack.md": [
+    "8ed5b9903c3a9b15f6b32f4e1b0598947d2f736cb3a6611d7eaa59371c54e87c"
+  ],
+  "browser/skills/crow-browser.md": [
+    "4455b49127c22c7e9e5365a588758dd54f9840d08cb5d16ef22146e644815385",
+    "99cf22931107609581d044bccbbd041e99231bde2472a61e3f38a9ecc46c89ba"
+  ],
+  "browser/skills/scrape-recipe-template.md": [
+    "482e3002ae7eb84a18c688582dce32ee994d58773367675bd4091eb9d8e86d6e"
+  ],
+  "caddy/skills/caddy.md": [
+    "13f17203da46b28af7b42f80b9f1bcacd07f66f4531b0b43800123d3a8c12e1a",
+    "663f04770f6c70ccba7f4755b2f62c1111dd071f7cec9bfe5c130bc646cb2cb6"
+  ],
+  "calibre-server/skills/calibre-server.md": [
+    "3d852176ecf01b84c073e9ff12ba1b75cc6e0c12cff92d0568fc872d735e308d"
+  ],
+  "calibre-web/skills/calibre-web.md": [
+    "49ea27d32e41dc7a9505815be2d529f346e895119700a3f9f0ca6632063a9ccf",
+    "6c2363d3c94a4d1b94cec2d1152f59105dfbb1a692a12212f8eb4c10e877afa9"
+  ],
+  "calls/skills/calls.md": [
+    "930140c5eb9cf9aadb5897047e54390664e683c6de418a987d751d4a522c34bd"
+  ],
+  "campaigns/skills/campaigns.md": [
+    "a2d582e703813d5fe37d72e466e1de2f01f7edd1a616dc60439c09b08f97279a"
+  ],
+  "changedetection/skills/changedetection.md": [
+    "a7368aa6cd8fffac72acde4328f17875000741fc50bba7c20f16c5cba0bf6acb"
+  ],
+  "companion/skills/companion.md": [
+    "1c7e9faa451283be9baf2ea9bf0aadb70540d291fc6e0ac94181e30670ffe0e4",
+    "4f09b92edef91b803bedf040d1fcf20d8b65d40fbd9188543e292de2305a64aa"
+  ],
+  "crowdsec/skills/crowdsec.md": [
+    "b7a53a93c1d4b3c53ab59534c86f549b6efd690fe8c1b1022d93e8a2a9d88d17"
+  ],
+  "data-dashboard/skills/data-dashboard.md": [
+    "a68fabb99c6013ca98a6f3762b8dc61a934e555b145e004c7e11a9578cb53f66",
+    "7d85c13367cfe67358bec5fe60cef4b4b4d0c78841a3bc264886be77babc18aa"
+  ],
+  "data-dashboard/skills/data-scraping.md": [
+    "298f7323483fd9e407389445b3d34d4824e19b0b021ac016191ed9959af2ecf6",
+    "de4fc443194ced60f7a86340045fc4c2e66802967d49d5d419072cb35042f911"
+  ],
+  "dozzle/skills/dozzle.md": [
+    "098dcbc2705a15d7b5cf7e407ec6505c0642d94b91759ea42dca0f30c1b72db4"
+  ],
+  "forgejo/skills/forgejo.md": [
+    "99601d9e114f465f6f1079e4d28ab102088638d868988ffebb3ea48ddfa08ecb"
+  ],
+  "frigate/skills/frigate.md": [
+    "683196e3953985a861d1218040ea756193ceb2fb5b7ab88f2471313db60970c5"
+  ],
+  "funkwhale/skills/funkwhale.md": [
+    "012622fd0f3847289df99cee03785d199f839bfff4ce05a2bb850432842a79a3",
+    "df17d6e23d8818dbef0acc9d4b155a05fae3c9587d5a228a1ea12fea892293d5",
+    "878dddf15ac42bc310ad2507c20b19cee8918a197cf3d4744de07010c00127ea",
+    "b6349f9ebe85413fbedec7ee60bda594192a5b3bede59d01b16f3f96f5fb124e",
+    "6bfa750266b3cddfb57c46d186976922b7139e56ce57b42eb83bbcc2ddd78c90"
+  ],
+  "gitea/skills/gitea.md": [
+    "27b0cfe0a05df7f2ec45ddb6029533a834d32a1e649e1ebe0cdb35c8341a8e0f"
+  ],
+  "gotosocial/skills/gotosocial.md": [
+    "88973680407b8a922f2a2b8e16b44c5aa810498e34a1830178849bd36133d0e0"
+  ],
+  "home-assistant/skills/home-assistant.md": [
+    "e70d7dc324a437d2ac530c3ae3732b73587fde15d2f519ecdac68298fe6083d9"
+  ],
+  "homepage/skills/homepage.md": [
+    "09af90c410b53ec4551ee510b6b417b3d931ced8ee3585d0c989118c070a2ded"
+  ],
+  "immich/skills/immich.md": [
+    "e52c6d5ef6a1f59427a7fbcf2eb4206fc1d1b234121a921e6738aa370c69733e"
+  ],
+  "iptv/skills/iptv.md": [
+    "3ee9d09ca9438993a9cea2ac6ada7898599f2c7bebe20efaa4854f240f98d968"
+  ],
+  "jellyfin/skills/jellyfin.md": [
+    "ae5f994dfbb526c3573d1d10527821b08935f3d208fff3405679db02d9809b32"
+  ],
+  "kavita/skills/kavita.md": [
+    "523cef7aeb2410c89a4e2c8829ae115ecf51028ac1102cfe1ee6f874162066c9"
+  ],
+  "kiosk/skills/kiosk.md": [
+    "99d3e0de467a9b2ff92b64597593531ebc96672feebdd96695ed0ae4c498f11b",
+    "500476c9d282e7b930a9f2ecc3e618f97b97023a283aa158df618499085cee99"
+  ],
+  "knowledge-base/skills/knowledge-base.md": [
+    "e8ed9a6e406a02f0208377a474d8e5ad86e5431ad1b08f7063f81030169ef784"
+  ],
+  "kodi/skills/kodi.md": [
+    "9a8ee30c13010b36e334a2f882b3434ba3330e4d97ddb81eba64d9677a777723"
+  ],
+  "kolibri/skills/kolibri.md": [
+    "f90e3bc25edb4e0536233a77d5baf5790424a091dda627d809c7263c024fee39"
+  ],
+  "lemmy/skills/lemmy.md": [
+    "8159d8d03f02023153a8b78a885c92ed45d76bd163fee5f547487b400fb3529f"
+  ],
+  "linkding/skills/linkding.md": [
+    "72ab294aa4ba9d905e8ccf81212e14290c7c3a864c5ab3f6119b2ca6e65526c6"
+  ],
+  "localai/skills/localai.md": [
+    "61e0809b3b5ea89c095cc655570527ac99fba32abc891d72d458220f4b5ef374"
+  ],
+  "maker-lab-advanced/skills/maker-lab-advanced.md": [
+    "f7431a55dac5beae1502ce44d434503b90efbdb08ea5557940f6655d93c632dc"
+  ],
+  "maker-lab/skills/maker-lab.md": [
+    "23c1a0b6eecad5f6808bc16a2dfd95f11a3ea2b7f1c470359d5a55786c22e6c5"
+  ],
+  "mastodon/skills/mastodon.md": [
+    "252d2689b2af4503bc630a85c1e8cfac843158d07dd2ff6b0d6b9f01e68c0b78",
+    "701f44a9a2eda09390474486e427cc645ba3a76f0b6ef92282b42114758ea735",
+    "6a7b113686b8a36f560e75d28d73a15a616551315c507b7ceb9db9409287b297"
+  ],
+  "matrix-bridges/skills/matrix-bridges.md": [
+    "4b60ef84eab5c796f488b60a3fadd1470f0bdff9a39610ccbe2ee6647fafcaa9"
+  ],
+  "matrix-dendrite/skills/matrix-dendrite.md": [
+    "9b96e30ab101fe0e82e2c1a015361eeef790e09c7e162ec942c61015a390031d",
+    "98da43826a4bc30774f556da474235b0187ed0d774ecc65b7d2215f59efd9267"
+  ],
+  "media/skills/media.md": [
+    "21621b484657885b98f45c880261081e5086e144b2f1f173952a4dc88b4ebc4d",
+    "3dd742ba23a4e981e3002c80955bb31f6dba5aa3ccc64818b3cf01e487c4c8ca"
+  ],
+  "meta-glasses/skills/meta-glasses.md": [
+    "b995635438b26b8d4012d5d6080f2d0da892dc32a08fb80eadd69fedbee624bb",
+    "dffad0589668d1f6670df3c0ef7b6ab55a53a90d2da8bbc500a675e26a8b4292",
+    "0bd57033e0e0e17f94f38c7a60fe547b9500034fd6fd402499b2145c00101682",
+    "d7c402d1fe86542dc536cc4822de52a7d3c10bb7dc5d4f3d7291f8084643a868",
+    "ca788eb495a2b7b5942a505538b0a786df92e5e5e4ade7bcd33653639a14c78b"
+  ],
+  "miniflux/skills/miniflux.md": [
+    "1fce17d7cd70ca48e0fa93e6f708a07d672162dc913bd8b0ba1b8de089884944"
+  ],
+  "motioneye/skills/motioneye.md": [
+    "e9cf1fef4b582df5a91bca00c8552c8fd68656d947fdd8282550a2ff2957e8f8"
+  ],
+  "navidrome/skills/navidrome.md": [
+    "60bc921a4434238ccfef827cf512743f954526fd90b0ff156cfccbe5d1d0d33a"
+  ],
+  "netdata/skills/netdata.md": [
+    "f4d24499a80ff4da26adfa6d0575da6dec972f21fb82e16b785de35406cb0ea5"
+  ],
+  "nextcloud/skills/nextcloud.md": [
+    "2e74a6af36b62aaf8ae012463e5398ef56c18900bf8f16cb44526a59461d3ac3",
+    "b61e17fe012cfe6cddbcf345b547e735c4c644e50babb5130b1be6f57bb0b7d8",
+    "dfcf686ae18e8efc72177a597def8662bd88a5d85eeb4a1d0833ceb55cd48e48"
+  ],
+  "nominatim/skills/gis.md": [
+    "dbcba23f242b6bcb0ad21cb17da1e4c15f3c47ac181de37c30d5c2341ce2db20"
+  ],
+  "obsidian/skills/obsidian.md": [
+    "8ef0fea4536c7cfe63dd9e1073c2a5a7ad31789bc29aace8bdab444b814d4470",
+    "a97a3a940f2e0dc45590ee03e3d1ed8bd95c4c45e5088d9a5261478928e28486"
+  ],
+  "ollama/skills/ollama.md": [
+    "8c73f277026edd30a8107766731cb69d7111c07d13c55348c287b5575b08ea10"
+  ],
+  "paperless/skills/paperless.md": [
+    "91825506c9e038e2954d134739f48448ce668e1025aecc430d66c66a5f7dfa15"
+  ],
+  "peertube/skills/peertube.md": [
+    "1af560c8002131b2e0b1cef54fa1325042aef45ff7b2d818aaf7e4984be547da",
+    "cc71ec8a710eb8f27068d5c15aab1b821d05413d1b3c05ba0a7aade1baaf91f2",
+    "8f6f35c8336ae38f2e88c203af8879121c2abd74264cbd785c76151be885b7fb"
+  ],
+  "pixelfed/skills/pixelfed.md": [
+    "612bc22cb66519c0f08237ad9818c9e68cf686a0df2c28895fcae5559c272952",
+    "9b94b8fde1eb4ea8de337a1c00ca65c78281a654eebfdc538479e70e8a7db238",
+    "81ff40d1c99bc22fc0832f0f9fc7deaa2a9f97739dd03c1f786ba11b58070825"
+  ],
+  "plex/skills/plex.md": [
+    "c58a88b11e4dc8907bc4de478c8ec5dea7af50b6febdf3c8b401613ab2125a20"
+  ],
+  "pm-workspace/skills/pm-workspace.md": [
+    "5f2e0cd7c01817d68d500d87dbb1633a6b55d8baa6f8368465a6c162ddbabda6",
+    "4284082fd68e5ea1a4ecda1581acc69b795df0177e4a1df15456d0902510cb59"
+  ],
+  "podcast/skills/podcast.md": [
+    "1c7240265ae7bf5a303eae721f3f7c13dc6c0cdefb1b1d723783498da16e91c0"
+  ],
+  "romm/skills/romm.md": [
+    "da17f21ec4c2b2468339eca1a52affe5d5efb762f7761257bd852fcc2bfcf8ce"
+  ],
+  "scratch-offline/skills/scratch-offline.md": [
+    "9a7f4a4b17f63902be21475378dd74b606a1cc5f2ce6ca2af5053c0d11bf6418",
+    "1b5f7421a8bd94e452b0d2e45140b0f1f616fbddc9c11da1866e14f4199442d6"
+  ],
+  "searxng/skills/searxng.md": [
+    "ea9981bfd9f7ac3767945134912d88d39c104e99d0f3864ababf89adb5f0ef53"
+  ],
+  "shiori/skills/shiori.md": [
+    "f8d26787916c1109744b8eb0613fa8b056d0ce22f6f1c8767458bb43b5c87083"
+  ],
+  "songbook/skills/songbook.md": [
+    "30640e1b04d8d4a20da3d54afc8ce41ac11418a684c55f5c42dc2e1c64de87a2"
+  ],
+  "stirling-pdf/skills/stirling-pdf.md": [
+    "7ef4bfb3e6380a96d62cf39927fdb4c2204c8be1f142a6abe80acb438e9f9d56"
+  ],
+  "tailscale/skills/tailscale.md": [
+    "79905ccb29d174d2fb94b9d86f80de956e3413dbda3280e12a398d2828a29610"
+  ],
+  "tax/skills/crow-tax.md": [
+    "e1f18465c4477caf7b9aaf74041d58de20ac77536cdf440880779814109ea6f2"
+  ],
+  "trilium/skills/trilium.md": [
+    "03ab13700c12015dd9a1291d8d1764fcb6210fea1932766855040e39b12fd39b"
+  ],
+  "uptime-kuma/skills/uptime-kuma.md": [
+    "b7b4872de406736f0ad2bae18e5be6ebda85377f686f60ec5a2b7cbe50d55f44"
+  ],
+  "vaultwarden/skills/vaultwarden.md": [
+    "031b15ed4be8e6cf019cdaa7a542e5e9ab5f913e5a1b01903b54a8c52b15c5e4",
+    "49ede47cfcb596a5d483ef7f979e3007eade7d70d60d25436be93f2fcc370dc6"
+  ],
+  "vikunja/skills/vikunja.md": [
+    "49d4deabc1840141cc489b33339f6e13c5ca62464fa273d294764633a5ce1656"
+  ],
+  "vllm/skills/vllm.md": [
+    "7749fb6fb1f405cef519488136e7b0adf59780862a1c659ba2b11d9f6a411cfe"
+  ],
+  "wallabag/skills/wallabag.md": [
+    "b3f303df38fb12002a319fd4ca7f220fd5cef735bc654ff9c2f2c0581e8d0a66"
+  ],
+  "workspace/skills/workspace.md": [
+    "1ade90431211a3a2371e769396e1ffb81b5c5b90aed7cee3c74829bfb5d25ce4"
+  ],
+  "writefreely/skills/writefreely.md": [
+    "42acb93d1a5fea33bdf559559334afe2a219cc8f3ee05be02b4ceedea6d871f6"
+  ]
+}

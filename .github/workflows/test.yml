@@ -86,6 +86,23 @@ jobs:
         run: node scripts/check-port-allocation.js
       - name: Registry build check
         run: node scripts/build-registry.mjs --check
+      # Every shipped bundle skill's current text must be in the ledger the
+      # boot-time skill sync reads (bundles/skill-history.json), and the
+      # ledger must stay append-only against the base (the PR's base commit,
+      # or the push's previous commit — one shallow fetch of that single
+      # commit). Fix with: node scripts/build-skill-history.mjs, then commit
+      # the ledger. With no base (a first push), only coverage is checked.
+      - name: Skill history check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            node scripts/build-skill-history.mjs --check --base "$BASE_SHA"
+          else
+            echo "no base commit: append-only check skipped"
+            node scripts/build-skill-history.mjs --check
+          fi
       # Vendored upstream payloads (bundles/<id>/payload/) must match the
       # payload_sha256 their vendor script stamped. Manifests without that
       # field are skipped by design — that is the pre-vendor draft state.
