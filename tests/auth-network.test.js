@@ -391,3 +391,44 @@ test("the display ticket mount is never a public-funnel path", async () => {
     assert.equal((await fetch(base + "/display/t/AAAAAAAAAAAAAAAAAAAAAA/stream")).status, 200, "without the Funnel header the stub answers: the 403 above is the Funnel refusal");
   } finally { srv.close(); }
 });
+
+// Plan 2026-10-15 (exposure check judges only this gateway's paths): the Nest
+// exposure check and the middleware must read ONE allowlist.
+test("funnel: effectiveFunnelPrefixes() is the static list plus the env entries the middleware enforces", async () => {
+  const { effectiveFunnelPrefixes, PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES = "/s/,/s, /s-assets/ ,not-a-path";
+  try {
+    assert.deepEqual(effectiveFunnelPrefixes(), [...PUBLIC_FUNNEL_PREFIXES, "/s/", "/s", "/s-assets/"]);
+    for (const p of effectiveFunnelPrefixes()) {
+      const probe = p.endsWith("/") ? p + "x" : p;
+      assert.equal(runFunnelMw(probe).nexted, true, `${probe} is in the effective list, so the middleware passes it`);
+    }
+  } finally {
+    delete process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
+  }
+  assert.deepEqual(effectiveFunnelPrefixes(), [...PUBLIC_FUNNEL_PREFIXES]);
+});
+
+test("funnel: a lone '/' in GATEWAY_FUNNEL_PUBLIC_PREFIXES is ignored, never opens every path", async () => {
+  const { effectiveFunnelPrefixes } = await import("../servers/gateway/funnel.js");
+  process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES = "/, /s/";
+  const origWarn = console.warn;
+  const warned = [];
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    assert.ok(!effectiveFunnelPrefixes().includes("/"));
+    assert.equal(runFunnelMw("/dashboard").statusCode, 403);
+    assert.equal(runFunnelMw("/s/family").nexted, true, "the other entries still apply");
+    assert.ok(warned.some((w) => /GATEWAY_FUNNEL_PUBLIC_PREFIXES/.test(w)), "the dropped entry is logged");
+  } finally {
+    console.warn = origWarn;
+    delete process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
+  }
+});
+
+test("gatewayListenPort: PORT, then CROW_GATEWAY_PORT, then 3001", async () => {
+  const { gatewayListenPort } = await import("../servers/gateway/listen-port.js");
+  assert.equal(gatewayListenPort({}), 3001);
+  assert.equal(gatewayListenPort({ CROW_GATEWAY_PORT: "3008" }), 3008);
+  assert.equal(gatewayListenPort({ PORT: "3009", CROW_GATEWAY_PORT: "3008" }), 3009);
+});

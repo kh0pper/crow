@@ -215,6 +215,8 @@ export const translations = {
   "signals.exposure.noauth": { en: "The password requirement is turned off", es: "El requisito de contraseña está desactivado" },
   "signals.exposure.csrf": { en: "A protection against request forgery is turned off", es: "Una protección contra la falsificación de solicitudes está desactivada" },
   "signals.exposure.funnel": { en: "More of this Crow is shared to the internet than expected", es: "Se comparte más de este Crow en internet de lo esperado" },
+  "signals.exposure.tcp": { en: "A raw connection is shared to the internet, past Crow's privacy checks", es: "Una conexión directa se comparte en internet, sin pasar por las comprobaciones de privacidad de Crow" },
+  "signals.exposure.foreign": { en: "Shared publicly by another service on this computer: {list}", es: "Compartido públicamente por otro servicio en este equipo: {list}" },
   "signals.exposure.action": { en: "Review access", es: "Revisar acceso" },
   // integrations
   "signals.integrations.label": { en: "Connections", es: "Conexiones" },
