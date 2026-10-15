@@ -196,12 +196,22 @@ export function perchHubJs(lang = "en") {
     }
   }
 
+  /* Design quick win 1: the row label is resolved HERE, in one place. A bot
+     turn reads as the bot's display name (from showHeader, which always runs
+     before the stream opens or history loads); the operator's own turn has no
+     visible label (the boxed row reads as theirs) but keeps a visually hidden
+     "You:" for screen readers. Any other role keeps its raw text. */
+  function rowLabel(cls,who){
+    if(cls==='user') return YOU_LABEL;
+    if(who==='bot'||who==='assistant') return current.botName||current.botId||who;
+    return who;
+  }
   /* \`html\` is optional and server-rendered; without it this is byte-for-byte
      the old textContent behaviour. */
   function appendMessage(cls,who,text,html){
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
-    row.appendChild(line('who',who));
+    row.appendChild(line(cls==='user'?'who vh':'who',rowLabel(cls,who)));
     if(html&&typeof html==='string'){
       var what=document.createElement('div');
       what.className='what md';
@@ -306,6 +316,7 @@ export function perchHubJs(lang = "en") {
   var WAITING_ON_YOU='${tJs("perch.waitingOnYou", lang)}';
   var OPEN_LABEL='${tJs("perch.open", lang)}';
   var TALK_LABEL='${tJs("perch.talk", lang)}';
+  var YOU_LABEL='${tJs("perch.you", lang)}';
   var START_FAILED='${tJs("perch.startFailed", lang)}';
   var NOT_ATTACHED='${tJs("perch.notAttached", lang)}';
   var ENGINE_REQUIRED='${tJs("perch.engineRequired", lang)}';
@@ -1145,7 +1156,7 @@ export function perchHubJs(lang = "en") {
     return /^perchlive-[0-9a-f]{8}$/.test(raw)?{sessionId:raw}:null;
   }
 
-  var current={sid:null};
+  var current={sid:null,botName:null};
   /* Images attached via attachFile(), queued for the NEXT send() only —
      drawer.js:406/916 does the same two-part attach: upload now (POST
      .../files), attach the wire-shape {mime,data_b64} array on the send that
@@ -1162,6 +1173,7 @@ export function perchHubJs(lang = "en") {
     if(current.sid===sid) return;          /* a re-entered hash is a no-op */
     closeStream();
     current.sid=sid;
+    current.botName=null;                   /* the previous bot's name must not label this one */
     var mySid=sid;                          /* identity guard for every await below */
     setView('chat');
     /* SSE is the live signal for the CHAT. It says nothing about the list,
@@ -1492,6 +1504,7 @@ export function perchHubJs(lang = "en") {
        resync-on-reconnect re-fetches the transcript BY BOT, and the cold
        deep-link path learns it from /roost before ever calling this. */
     current.botId=botId;
+    current.botName=botName||null;          /* labels this session's bot rows (appendMessage) */
     el('perch-bot-name').textContent=botName||botId;
     /* The session id is the identity the close confirm and every API path
        use. It shows in the head on desktop; on phones (queue item 13) the
