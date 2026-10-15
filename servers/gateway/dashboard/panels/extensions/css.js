@@ -108,7 +108,8 @@ export function extensionStyles() {
   box-shadow:0 10px 28px rgba(0,0,0,0.22);
 }
 .ext-collection-card:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
-.ext-collection-card__icon { font-size:1.6rem; line-height:1; margin-bottom:0.15rem; }
+.ext-collection-card__icon { display:block; width:28px; height:28px; line-height:0; margin-bottom:0.15rem; color:var(--crow-accent); }
+.ext-collection-card__icon svg { width:100%; height:100%; display:block; }
 .ext-collection-card__name {
   font-family:var(--crow-body-font);
   font-size:1.05rem; font-weight:600;

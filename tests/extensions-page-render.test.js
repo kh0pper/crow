@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { buildExtensionsHTML } from "../servers/gateway/dashboard/panels/extensions/html.js";
 import { loadCollections } from "../servers/gateway/dashboard/panels/extensions/collections.js";
 import { extensionStyles } from "../servers/gateway/dashboard/panels/extensions/css.js";
+import { appIconSvg } from "../servers/gateway/dashboard/shared/app-icons.js";
 
 const AVAILABLE = [
   { id: "jellyfin", name: "Jellyfin", description: "Media server", type: "bundle", category: "media", version: "1.0.0", author: "Crow", featured: true, tags: ["media"] },
@@ -115,6 +116,29 @@ test("collections registry JSON is embedded for the client modal", () => {
   const { collectionsScript } = render();
   assert.match(collectionsScript, /id="collection-registry"/);
   assert.ok(collectionsScript.includes("home-server"));
+});
+
+test("starter collection cards draw line icons from the shared app icon set, not emoji", () => {
+  const { viewsHtml } = render();
+  const cards = viewsHtml.match(/<button type="button" class="ext-collection-card"[\s\S]*?<\/button>/g) || [];
+  assert.ok(cards.length >= 5, "the five starter collections render");
+  for (const c of cards) {
+    const icon = c.match(/<span class="ext-collection-card__icon" aria-hidden="true">([\s\S]*?)<\/span>/);
+    assert.ok(icon, "the icon span is decorative: " + c.slice(0, 120));
+    assert.ok(icon[1].startsWith("<svg") && icon[1].includes('stroke="currentColor"'), "a stroke svg");
+    assert.ok(!/\p{Extended_Pictographic}/u.test(icon[1]), "no emoji");
+  }
+  for (const key of ["home", "graduation-cap", "search", "git", "bot"]) {
+    assert.ok(viewsHtml.includes(appIconSvg(key)), `the ${key} glyph renders`);
+  }
+});
+
+test("a collection with an unknown or hostile icon key gets the package glyph", () => {
+  const base = loadCollections()[0];
+  for (const icon of ["no-such-icon", "__proto__", "constructor", 42, undefined]) {
+    const { viewsHtml } = render({ collections: [{ ...base, icon }] });
+    assert.ok(viewsHtml.includes(appIconSvg("package")), `icon ${String(icon)} → package`);
+  }
 });
 
 test("empty collections → the section is simply absent (crash-proof)", () => {

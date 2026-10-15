@@ -7,6 +7,9 @@ import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
 const ONBOARDING_KEYS = [
   "onboarding.title",
   "onboarding.welcome.title", "onboarding.welcome.body",
+  "onboarding.welcome.exampleLabel", "onboarding.welcome.exampleYouName",
+  "onboarding.welcome.exampleYou", "onboarding.welcome.exampleCrow", "onboarding.welcome.exampleNote",
+  "common.stepOf", "common.stepsLabel",
   "onboarding.ai.title", "onboarding.ai.body",
   "onboarding.aiEmptyNote", "onboarding.aiConfiguredNote", "onboarding.openProviders",
   "onboarding.integrations.title", "onboarding.integrations.body",
@@ -108,6 +111,45 @@ test("honors the crow_lang=es cookie for Spanish copy", async () => {
   assert.ok(es.includes(i18n.t("onboarding.welcome.body", "es")), "ES body present");
   assert.ok(en.includes(i18n.t("onboarding.welcome.body", "en")), "EN body present");
 });
+
+test("welcome copy: the approved example lines, verbatim", () => {
+  assert.equal(i18n.t("onboarding.welcome.exampleYou", "en"), "When is my sister's birthday?");
+  assert.equal(i18n.t("onboarding.welcome.exampleCrow", "en"), "March 4 — you saved it from another app last Tuesday.");
+  assert.equal(i18n.t("onboarding.welcome.exampleNote", "en"), "That works because the memory lives in your Crow, not in one chat app.");
+  assert.equal(i18n.t("common.stepOf", "en"), "Step {n} of {total}");
+  assert.equal(i18n.t("common.stepOf", "es"), "Paso {n} de {total}");
+});
+
+for (const lang of ["en", "es"]) {
+  test(`welcome step (${lang}): crow mark, body, the example and its caption`, async () => {
+    const html = await render({ step: "0" }, `crow_lang=${lang}`);
+    const at = html.indexOf('class="crow-mark"');
+    assert.ok(at !== -1, "the crow mark renders");
+    const svg = html.slice(html.lastIndexOf("<svg", at), html.indexOf("</svg>", at) + 6);
+    assert.ok(!/\sid=/.test(svg), "the mark carries no id (the header bird owns #crow-tama)");
+    assert.ok(svg.includes('aria-hidden="true"') && svg.includes('focusable="false"'), "the mark is decorative");
+    assert.ok(svg.includes('class="crow-body-group"'), "the mark is the header bird's geometry");
+    for (const k of ["onboarding.welcome.body", "onboarding.welcome.exampleLabel", "onboarding.welcome.exampleYouName",
+      "onboarding.welcome.exampleYou", "onboarding.welcome.exampleCrow", "onboarding.welcome.exampleNote"]) {
+      const v = i18n.t(k, lang).replace(/'/g, "&#39;");
+      assert.ok(html.includes(v) || html.includes(i18n.t(k, lang)), `${k} renders`);
+    }
+  });
+
+  test(`welcome example (${lang}): the speaker and the line are separated in text, not only by CSS (review M)`, async () => {
+    const html = await render({ step: "0" }, `crow_lang=${lang}`);
+    const lines = [...html.matchAll(/<p class="onboarding-example-line[^"]*">([\s\S]*?)<\/p>/g)].map((m) => m[1].replace(/<[^>]+>/g, ""));
+    assert.equal(lines.length, 2);
+    for (const l of lines) assert.match(l, /^\S+?: \S/, "speaker, colon, space, then the line: " + l);
+  });
+
+  test(`onboarding stepper (${lang}): translated compact line and group label`, async () => {
+    const html = await render({ step: "1" }, `crow_lang=${lang}`);
+    const label = i18n.fill(i18n.t("common.stepOf", lang), { n: 2, total: STEP_KEYS.length }) + " · " + i18n.t("onboarding.ai.title", lang);
+    assert.ok(html.includes(label), `compact line "${label}"`);
+    assert.ok(html.includes(`role="group" aria-label="${i18n.t("common.stepsLabel", lang)}"`));
+  });
+}
 
 import helpSetupSection from "../servers/gateway/dashboard/settings/sections/help-setup.js";
 

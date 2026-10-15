@@ -108,7 +108,7 @@ export default {
         callout("Warning — check this.", "warning") +
         callout("Error — something failed.", "error")) +
       section("Code block", codeBlock('{\n  "mcpServers": { "crow": { "url": "https://crow.example/router/mcp" } }\n}', { lang: "json" })) +
-      section("Stepper", stepper([{ label: "Welcome" }, { label: "Integrations" }, { label: "Connect" }, { label: "Done" }], 1)) +
+      section("Stepper", stepper([{ label: "Welcome" }, { label: "Integrations" }, { label: "Connect" }, { label: "Done" }], 1, { compactLabel: "Step 2 of 4", ariaLabel: "Steps" })) +
       section("Tabs", tabs([
         { id: "cc", label: "Claude Code", content: codeBlock("claude mcp add crow ...", { lang: "sh" }) },
         { id: "web", label: "claude.ai", content: callout("Connect via Settings → Connectors.", "info") },
