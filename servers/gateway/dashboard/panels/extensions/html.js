@@ -12,6 +12,7 @@ import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
 import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
 import { formEnvVars } from "../../../bundle-env-form.js";
+import { renderLocalModelsCard } from "./local-models-card.js";
 
 /** Add-ons shown per group before "Show all" — a fixed count, deliberately not
  *  "two grid rows" (which would need viewport-dependent column measurement). */
@@ -172,8 +173,14 @@ export function buildExtensionsHTML({
   dockerOk = true,
   keychainPending = [],
   vaultSecure = false,
+  localModels = null,
   lang,
 }) {
+  // Models plan 3a: model bundles (inference: true) leave Browse — they are
+  // installed from the Model Catalog now. Installed ones keep their Installed
+  // row, actions and detail modal (plan 4 migrates them). `available` stays
+  // the full list for the emptiness check and the Installed lookup.
+  const browseable = available.filter((a) => a.inference !== true);
   const installedCount = Object.keys(installed).length;
   const hostArches = detectGpuArch();
   const hostVramGb = detectGpuVramGb();
@@ -286,7 +293,7 @@ export function buildExtensionsHTML({
     : "";
 
   // ─── Featured ───
-  const featured = available.filter((a) => a.featured && !a._community);
+  const featured = browseable.filter((a) => a.featured && !a._community);
   const featuredHtml = featured.length > 0
     ? `<section class="ext-section ext-featured" id="ext-featured">
       <h2 class="ext-section-title ext-section-title--feature">${t("extensions.featuredTitle", lang)}</h2>
@@ -309,22 +316,30 @@ export function buildExtensionsHTML({
             <p>${t("extensions.registryUnavailableDesc", lang)}</p>
           </div>`;
   } else {
-    const grouped = groupAddons(available);
+    const grouped = groupAddons(browseable);
+    // The Local models card lives in the AI group, which therefore always
+    // exists when the card is shown; it counts in the chip, the section and
+    // "Show all (N)".
+    if (localModels && !grouped.has("ai")) grouped.set("ai", []);
+    const extra = (gid) => (localModels && gid === "ai" ? 1 : 0);
 
     chipsHtml = `<div class="ext-group-chips" id="ext-group-chips">
         ${DISPLAY_GROUPS.filter((g) => grouped.has(g.id)).map((g) =>
-          `<button type="button" class="ext-group-chip" data-group="${escapeHtml(g.id)}">${t(g.labelKey, lang)} <span class="ext-group-chip__count">${grouped.get(g.id).length}</span></button>`,
+          `<button type="button" class="ext-group-chip" data-group="${escapeHtml(g.id)}">${t(g.labelKey, lang)} <span class="ext-group-chip__count">${grouped.get(g.id).length + extra(g.id)}</span></button>`,
         ).join("")}
       </div>`;
 
     groupsHtml = DISPLAY_GROUPS.filter((g) => grouped.has(g.id)).map((g) => {
       const addons = grouped.get(g.id);
-      const more = addons.length > GROUP_SHOWN
-        ? `<button type="button" class="btn btn-sm btn-secondary ext-group-more" data-group="${escapeHtml(g.id)}">${t("extensions.showAll", lang)} (${addons.length})</button>`
+      const lead = extra(g.id);
+      const total = addons.length + lead;
+      const more = total > GROUP_SHOWN
+        ? `<button type="button" class="btn btn-sm btn-secondary ext-group-more" data-group="${escapeHtml(g.id)}">${t("extensions.showAll", lang)} (${total})</button>`
         : "";
+      const leadCard = lead ? renderLocalModelsCard(localModels, getCategoryColor("ai"), lang) : "";
       return `<section class="ext-group-section" data-group="${escapeHtml(g.id)}">
-        <h3 class="ext-section-title">${t(g.labelKey, lang)} <span class="ext-section-count">${addons.length}</span></h3>
-        <div class="ext-grid">${addons.map((a, i) => addonCard(a, i, i >= GROUP_SHOWN)).join("")}</div>
+        <h3 class="ext-section-title">${t(g.labelKey, lang)} <span class="ext-section-count">${total}</span></h3>
+        <div class="ext-grid">${leadCard}${addons.map((a, i) => addonCard(a, i + lead, i + lead >= GROUP_SHOWN)).join("")}</div>
         ${more}
       </section>`;
     }).join("");
@@ -450,6 +465,8 @@ export function buildExtensionsHTML({
   // ─── Add-on registry blob for the client-side detail modal ───
   const addonMap = {};
   for (const addon of available) {
+    // A model bundle keeps its detail modal only while it is installed.
+    if (addon.inference === true && !installed[addon.id]) continue;
     const catColor = getCategoryColor(addon.category);
     addonMap[addon.id] = {
       id: addon.id,

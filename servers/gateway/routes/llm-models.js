@@ -14,29 +14,9 @@
 import express from "express";
 import { createDbClient } from "../../db.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { loadProviders } from "../../shared/providers.js";
-import { getOrCreateLocalInstanceId } from "../instance-registry.js";
-import { readReservation } from "../box-reservation.js";
-import { getProviderHealth } from "../provider-health.js";
-import { acquireProvider, stopNativeProvider, nativeSnapshot, mutexSiblingsOf } from "../gpu-orchestrator.js";
-import { sharedJobStore } from "../models/lifecycle.js";
 import { createLifecycleCore } from "../models/lifecycle-core.js";
+import { defaultLifecycleDeps } from "../models/lifecycle-deps.js";
 import { requesterTag } from "../requester-tag.js";
-
-/** The production lifecycle deps, shared by both doors (tests override). */
-export function defaultLifecycleDeps() {
-  return {
-    providersFn: () => (loadProviders() || {}).providers || {},
-    ownInstanceIdFn: getOrCreateLocalInstanceId,
-    readReservationFn: readReservation,
-    snapshotOfFn: nativeSnapshot,
-    siblingsOfFn: mutexSiblingsOf,
-    externalHealthFn: () => getProviderHealth().external,
-    acquireFn: acquireProvider,
-    stopFn: stopNativeProvider,
-    jobs: sharedJobStore(),
-  };
-}
 
 export default function llmModelsRouter(opts = {}) {
   let _db = null;

@@ -78,9 +78,8 @@ import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.
 import { servingClassOf } from "../models/serving-class.js";
 import { isModelOrchestrationDisabled } from "../../shared/model-orchestration.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
-import { createLifecycleCore } from "../models/lifecycle-core.js";
 import { doorKindOf } from "../models/door-resolve.js";
-import { defaultLifecycleDeps } from "./llm-models.js";
+import { defaultLifecycleCore } from "../models/lifecycle-deps.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // routes/models.js -> gateway -> servers -> repo root -> registry/model-catalog.json
@@ -193,7 +192,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     downloadHfFileFn = downloadHfFile,
     fetchHfPathInfoFn = fetchHfPathInfo,
     // Plan 3a: the lifecycle core shared with /llm/models (same job store).
-    lifecycleCoreFn = () => createLifecycleCore(defaultLifecycleDeps()),
+    lifecycleCoreFn = defaultLifecycleCore,
     adoptModelFn = adoptModel,
     ownInstanceIdFn = getOrCreateLocalInstanceId,
   } = opts;
