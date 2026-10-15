@@ -208,8 +208,12 @@ test("a contact thread included in the round makes a LOCKED new session; its wor
     assert.equal(oRow.ticked, true, "the owner's thread goes by default");
     assert.equal(cRow.ticked, false, "the contact's thread does NOT");
     assert.equal(cRow.untrusted, true, "and is labelled as a contact's");
+    // Review L7: no "locked chat" note while only the owner's words go.
+    const note = "(() => { const n = document.querySelector('dialog.cv-preview .cv-outside-note'); return n && !n.hidden ? n.textContent : ''; })()";
+    assert.equal(await t.evalIn(note), "", "owner-only selection: no locked-chat note");
     // The owner includes it explicitly.
-    await t.evalIn(`(() => { const d = [...document.querySelectorAll('dialog.cv-preview .cv-pv')].find(x => x.textContent.includes('CONTACT-WORDS-4477')); d.querySelector('input').checked = true; })()`);
+    await t.evalIn(`(() => { const d = [...document.querySelectorAll('dialog.cv-preview .cv-pv')].find(x => x.textContent.includes('CONTACT-WORDS-4477')); d.querySelector('input').click(); })()`);
+    assert.match(await t.evalIn(note), /new, locked chat with bobby/, "ticking a contact thread says where the round will really go");
     await t.evalIn("document.querySelector('dialog.cv-preview button').click()");
     assert.ok(await waitFor(() => s.messages.length > messagesBefore), "the round reached the engine");
     assert.deepEqual(s.spawns.at(-1), { botId: "bobby", narrowedTools: ["crow:only:mcp__artifacts__"] }, "a contact thread ⇒ a NEW session LOCKED to Artifacts");
