@@ -335,3 +335,32 @@ test("R2-L2: grant shapes — the bundle's grantsServer and the bridge path (too
     assert.equal(bundle, bridge, `shape ${JSON.stringify(shape)}: bundle ${bundle} vs bridge ${bridge}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Strand 2: buildToolsCsv is THE csv PiRpc pins — every channel's argv is
+// byte-identical to what the shared builder returns (the channel preflight
+// counts the builder's answer, so a drift here would count the wrong thing).
+// ---------------------------------------------------------------------------
+
+test("strand 2: buildToolsCsv equals the --tools value PiRpc pins, for channel, interactive, narrowed and multi-agent spawns", async () => {
+  const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
+  const base = { tools: { pi_builtin: ["read", "bash"], crow_mcp: ["crow-tasks/tasks_list", "crow-memory/crow_store_memory"] } };
+  const ma = Object.assign({}, base, { permission_policy: { multi_agent: true } });
+  const cases = [
+    { def: base },
+    { def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" } },
+    { def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" }, narrowedTools: '["bash","ask_user"]' },
+    { def: ma, extraEnv: { PI_BOT_INTERACTIVE: "1" } },
+    { def: { tools: {} } },
+  ];
+  for (const opts of cases) {
+    const argv = await spawnArgs(opts);
+    const built = buildToolsCsv(opts.def, {
+      resolved: { provider: "stub", model: "m1", key: "stub/m1" },
+      remoteEnabled: opts.remoteEnabled,
+      interactive: !!(opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1"),
+      narrowedTools: opts.narrowedTools,
+    });
+    assert.equal(built.csv, toolsFlag(argv), JSON.stringify(opts));
+  }
+});

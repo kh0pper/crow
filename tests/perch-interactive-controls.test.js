@@ -1457,3 +1457,66 @@ test("Wave 3: commands() relays pi's get_commands registry; a hibernating child 
     "waking a child because the operator typed '/' would be a lie of availability");
   await assert.rejects(() => engine.commands("perchlive-deadbeef"), /no_such_session/);
 });
+
+// ---------------------------------------------------------------------------
+// Strand 2 rev 4 (perch strands plan): the tool budget is checked when a turn
+// STARTS, against the session's CURRENT model — never at spawn, so the
+// launcher's spawn-then-switch recovery keeps working.
+// ---------------------------------------------------------------------------
+
+function budgetEngine(capFor) {
+  const bridge = makeBridge();
+  bridge.capFor = capFor;            // the fake pi pins "read,write,ask_user" = 3 tools
+  return makeEngine({ bridge });
+}
+
+test("strand 2: a turn on a model whose cap the surface exceeds is REFUSED before the prompt — child kept, session awake, claim released", async () => {
+  const { engine, state } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
+  const s = await spawned(engine);                    // spawn itself is never refused
+  const pi = state.instances[0];
+  await assert.rejects(() => engine.message(s.sessionId, "hi"), (e) => {
+    assert.equal(e.code, "tool_budget");
+    assert.match(e.detail, /qwen3\.6-35b-a3b/);
+    assert.match(e.detail, /at most 2 tools/);
+    assert.match(e.detail, /has 3/);
+    return true;
+  });
+  assert.equal(pi.turns.length, 0, "nothing reached the model");
+  assert.equal(pi.closed, 0, "the child stays — switching model is the way out");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
+  await assert.rejects(() => engine.message(s.sessionId, "again"), (e) => e.code === "tool_budget",
+    "the claim was released: a second send is refused for the same reason, not turn_in_progress");
+});
+
+test("strand 2: switching this session to a model without that cap lets the next turn run", async () => {
+  const { engine, state } = budgetEngine((r) => (r.provider === "crow-local" ? 2 : null));
+  const s = await spawned(engine);
+  await assert.rejects(() => engine.message(s.sessionId, "hi"), (e) => e.code === "tool_budget");
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  const r = await engine.message(s.sessionId, "hi again");
+  assert.ok(r.turnId);
+  assert.equal(state.instances[0].turns.length, 1);
+});
+
+test("strand 2: exactly at the cap runs; an unreadable cap fails open", async () => {
+  const atCap = budgetEngine(() => 3);
+  const s1 = await spawned(atCap.engine);
+  assert.ok((await atCap.engine.message(s1.sessionId, "hi")).turnId);
+
+  const broken = budgetEngine(() => { throw new Error("db locked"); });
+  const s2 = await spawned(broken.engine, "botty-2");
+  assert.ok((await broken.engine.message(s2.sessionId, "hi")).turnId);
+});
+
+test("strand 2: a child started on a model its surface exceeds says so ONCE on the rail (cycle restarts the child)", async () => {
+  const { engine } = budgetEngine((r) => (r.provider === "crow-chat" ? 2 : null));
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  await engine.cycle(s.sessionId);
+  await tick();
+  await engine.cycle(s.sessionId);
+  await tick();
+  const warns = sink.events.filter((e) => e.type === "log" && /at most 2 tools/.test(e.text));
+  assert.equal(warns.length, 1, "once per session per (count, cap): " + JSON.stringify(sink.events.filter((e) => e.type === "log")));
+});
