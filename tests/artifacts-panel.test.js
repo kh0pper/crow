@@ -453,6 +453,9 @@ test("live: the Library — badges from the store, search narrows the list, the 
   const CHAT = "perchlive-5ee0cc01", CHAT2 = "perchlive-5ee0cc02";
   const lib = await store.createArtifact(s.db, s.blobs, { title: "Zebra library entry", type: "document", source: { markdown: "# z" }, actor: { kind: "bot", id: "bobby", thread: CHAT, gateway: "perch" } }, { markdownBlocks });
   await s.db.execute({ sql: "INSERT INTO artifact_links (artifact_id,bot_id,thread_id,linked_by) VALUES (?,?,?,'owner-yes')", args: [lib.id, "bobby", CHAT2] });
+  const yak = await store.createArtifact(s.db, s.blobs, { title: "Yak single entry", type: "document", source: { markdown: "# y" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-5ee0cc03", gateway: "perch" } }, { markdownBlocks });
+  const { addThread } = await import("../bundles/artifacts/server/comments.js");
+  await addThread(s.db, { artifactId: yak.id, versionN: 1, anchor: { kind: "whole" }, text: "from a contact", author: { kind: "contact", id: "c-yak" } });
   const t = await tab();
   const base = `http://${chrome.pageHost}:${port}`;
   const item = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Zebra library entry'))`;
@@ -460,6 +463,12 @@ test("live: the Library — badges from the store, search narrows the list, the 
     await t.nav(`${base}/dashboard/artifacts`);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!(${item})`)) === true, 15000), `the list rendered (page errors: ${JSON.stringify(t.errors)})`);
     assert.match(await t.evalIn(`(${item}).querySelector('.ca-badges').textContent`), /Document.*v1.*2 linked chats/);
+    // S7.1: one is singular (both badges), in the list the store serves.
+    const one = `[...document.querySelectorAll('#crow-artifacts .ca-item')].find((li) => li.textContent.includes('Yak single entry'))`;
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!(${one})`)) === true, 5000), "the single-link entry rendered");
+    const oneBadges = await t.evalIn(`(${one}).querySelector('.ca-badges').textContent`);
+    assert.match(oneBadges, /1 linked chat(?!s)/, oneBadges);
+    assert.match(oneBadges, /1 contact comment(?!s)/, oneBadges);
     // Search narrows.
     await t.evalIn(`(() => { const q = document.querySelector('#crow-artifacts .ca-search'); q.value = 'zebra'; q.dispatchEvent(new Event('input')); })()`);
     assert.equal(await t.evalIn(`document.querySelectorAll('#crow-artifacts .ca-item').length`), 1);
@@ -477,6 +486,12 @@ test("live: the Library — badges from the store, search narrows the list, the 
     assert.ok(look.h >= 44, `still a 44px target: ${JSON.stringify(look)}`);
     await t.evalIn(`(${item}).querySelector('.ca-details').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelectorAll('.ca-tab').length`)) === 5), "five tabs");
+    // S7.2: the tabs are dashboard buttons; exactly one is selected, and it looks selected.
+    const tabs = JSON.parse(await t.evalIn(`JSON.stringify([...(${item}).querySelectorAll('.ca-tab')].map((e) => ({ btn: ["btn", "btn-secondary", "btn-sm"].every((c) => e.classList.contains(c)), sel: e.getAttribute('aria-selected'), color: getComputedStyle(e).color, border: getComputedStyle(e).borderTopColor })))`));
+    assert.ok(tabs.every((x) => x.btn), `every tab is a .btn.btn-secondary.btn-sm: ${JSON.stringify(tabs)}`);
+    assert.equal(tabs.filter((x) => x.sel === "true").length, 1, "exactly one tab is selected");
+    const selTab = tabs.find((x) => x.sel === "true"), other = tabs.find((x) => x.sel !== "true");
+    assert.notEqual(selTab.border, other.border, `the selected tab is marked (teal border): ${JSON.stringify(tabs)}`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(${item}).querySelector('.ca-tabpanel').textContent.includes('v1')`)) === true), "Versions lists v1");
     await t.evalIn(`(${item}).querySelector('.ca-tab[data-tab=projects]').click()`);
     assert.equal(await t.evalIn(`(${item}).querySelector('.ca-soon').textContent`), "Adding artifacts to projects is coming soon.");

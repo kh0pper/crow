@@ -64,8 +64,8 @@
         el("span", { class: "ca-badge", text: TYPES[a.type] || a.type }),
         el("span", { class: "ca-badge", text: "v" + a.current_version }),
         b.scriptsOff ? el("span", { class: "ca-badge ca-warnb", text: T.scripts_off }) : null,
-        b.contactComments > 0 ? el("span", { class: "ca-badge ca-warnb", text: fmt(T.contact_n, { n: b.contactComments }) }) : null,
-        b.links > 0 ? el("span", { class: "ca-badge", text: fmt(T.links_n, { n: b.links }) }) : null,
+        b.contactComments > 0 ? el("span", { class: "ca-badge ca-warnb", text: b.contactComments === 1 ? T.contact_1 : fmt(T.contact_n, { n: b.contactComments }) }) : null,
+        b.links > 0 ? el("span", { class: "ca-badge", text: b.links === 1 ? T.links_1 : fmt(T.links_n, { n: b.links }) }) : null,
       ]);
       var drawer = el("div", { class: "ca-drawer", hidden: "" });
       var toggle = el("button", { type: "button", class: "btn btn-secondary btn-sm ca-details", "aria-expanded": "false", text: T.details });
@@ -93,7 +93,7 @@
     var bar = el("div", { class: "ca-tabs", role: "tablist" });
     var panel = el("div", { class: "ca-tabpanel", role: "tabpanel" });
     TABS.forEach(function (t) {
-      bar.appendChild(el("button", { type: "button", role: "tab", class: "ca-tab", "aria-selected": t[0] === tab ? "true" : "false", "data-tab": t[0], text: t[1],
+      bar.appendChild(el("button", { type: "button", role: "tab", class: "btn btn-secondary btn-sm ca-tab", "aria-selected": t[0] === tab ? "true" : "false", "data-tab": t[0], text: t[1],
         onclick: function () { fillDrawer(drawer, a, t[0]); } }));
     });
     drawer.appendChild(bar);
