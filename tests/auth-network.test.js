@@ -436,3 +436,11 @@ test("gatewayListenPort: PORT, then CROW_GATEWAY_PORT, then 3001", async () => {
   assert.equal(gatewayListenPort({ CROW_GATEWAY_PORT: "3008" }), 3008);
   assert.equal(gatewayListenPort({ PORT: "3009", CROW_GATEWAY_PORT: "3008" }), 3009);
 });
+
+test("funnel: /blog stays in PUBLIC_FUNNEL_PREFIXES (the public blog surface; tailnet-only content under /blog needs its own Funnel block)", async () => {
+  // Moved here from the retired source-archive route test. Every route mounted
+  // under /blog is public over Funnel by default; anything that must stay
+  // tailnet-only under /blog has to reject the Funnel header itself.
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  assert.ok(PUBLIC_FUNNEL_PREFIXES.includes("/blog"));
+});

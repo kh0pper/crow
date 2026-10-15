@@ -206,6 +206,17 @@ test("R5: a tag section hides when empty; docLinks hrefs follow the first matchi
   assert.ok(!r.body.includes("default.pdf"), "every slug matched a rule");
 });
 
+test("R6: the removed source-archive routes are 404, with and without a Funnel header", async () => {
+  useDb(withDash);
+  setConfig(config());
+  for (const path of ["/blog/sources/pirs", "/blog/sources/legislative", "/blog/sources/files/1"]) {
+    for (const headers of [{}, { "Tailscale-Funnel-Request": "?1" }]) {
+      const r = await get(path, headers);
+      assert.equal(r.status, 404, `${path} ${JSON.stringify(headers)}`);
+    }
+  }
+});
+
 test("R7: lang:'es' sets <html lang> and the es empty text; other pages stay lang=en", async () => {
   useDb(withDash);
   setConfig(config({ lang: "es", sections: [{ kind: "case-studies", heading: "Entradas", projectId: 3000 }] }));
