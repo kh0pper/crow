@@ -322,7 +322,7 @@ function style() {
 export default {
   id: "fediverse",
   name: "Fediverse Admin",
-  icon: "globe",
+  icon: "share-2",
   route: "/dashboard/fediverse",
   navOrder: 80,
   category: "connections",

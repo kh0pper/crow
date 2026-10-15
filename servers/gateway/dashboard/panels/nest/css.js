@@ -207,15 +207,22 @@ export function nestCSS() {
     transform: scale(0.95);
   }
 
+  /* Two lines, then clipped: "Kolibri Learning Platform" reads whole instead
+     of "Kolibri Lea...". min-height keeps one-line labels on the same rows. */
   .nest-app-label {
     font-size: 0.7rem;
     font-weight: 500;
     text-align: center;
-    max-width: 72px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-width: 80px;
     line-height: 1.2;
+    min-height: 2.4em;
+    white-space: normal;
+    overflow-wrap: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .nest-app:hover .nest-app-label {
     color: var(--crow-text-primary);
@@ -235,12 +242,25 @@ export function nestCSS() {
   }
 
   .nest-app--bundle .nest-app-icon {
-    background: rgba(168,85,247,0.1);
-    color: #a855f7;
-    box-shadow: 0 2px 8px rgba(168,85,247,0.08);
+    background: rgba(147,51,234,0.1);
+    color: #9333ea;
+    box-shadow: 0 2px 8px rgba(147,51,234,0.08);
   }
   .nest-app--bundle:hover .nest-app-icon {
-    box-shadow: 0 4px 20px rgba(168,85,247,0.18);
+    box-shadow: 0 4px 20px rgba(147,51,234,0.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    .nest-app--bundle .nest-app-icon {
+      background: rgba(192,132,252,0.12);
+      color: #c084fc;
+    }
+  }
+  .nest-bundle-glyph {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   /* Bundle status dot */
@@ -456,6 +476,41 @@ export function nestCSS() {
     background: rgba(239,68,68,0.08);
     border-color: rgba(239,68,68,0.25);
     color: var(--crow-error);
+  }
+
+  /* ─── Phone: start the grid high (design quick win 3) ───
+     The greeting, the all-good strip and the grid padding used to push the
+     first tile to ~360px on a 412x915 phone. Compact all three; the desktop
+     layout above is unchanged. */
+  @media (max-width: 600px) {
+    .nest-welcome { padding: 0.75rem 1rem 0.5rem; }
+    .nest-welcome-crow { display: none; }
+    .nest-greeting { font-size: 1.1rem; margin-bottom: 0; }
+    .nest-date {
+      font-family: var(--crow-body-font);
+      font-size: 0.75rem;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .nest-health-strip { padding: 0.45rem 0.8rem; margin-bottom: 0.25rem; }
+    .nest-health-strip--ok {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.25rem 0.75rem;
+    }
+    .nest-health-strip--ok .nest-health-details {
+      margin-top: 0;
+      border-top: none;
+    }
+    .nest-health-strip--ok .nest-health-details summary { padding-top: 0; }
+    .nest-health-strip--ok .nest-health-details[open] {
+      flex-basis: 100%;
+      border-top: 1px solid var(--crow-border);
+    }
+    .nest-health-strip--ok .nest-health-details[open] summary { padding-top: 0.4rem; }
+    .nest-grid { padding-top: 0.75rem; row-gap: 1rem; }
   }
 
 </style>`;

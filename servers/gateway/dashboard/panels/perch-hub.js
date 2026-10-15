@@ -19,7 +19,7 @@ import { t } from "../shared/i18n.js";
 export default {
   id: "perch",
   name: "Perch Hub",
-  icon: "messages",
+  icon: "bot",
   route: "/dashboard/perch",
   navOrder: 15.5,
   category: "ai",

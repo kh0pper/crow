@@ -28,6 +28,11 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
+  "nav.perch": { en: "Perch Hub", es: "Perch Hub" },
+  "nav.bot-builder": { en: "Bot Builder", es: "Constructor de bots" },
+  "nav.bot-board": { en: "Bot Board", es: "Tablero de bots" },
+  "nav.metering": { en: "Usage", es: "Uso" },
+  "nav.artifacts": { en: "Artifacts", es: "Artefactos" },
   // Nav group headers — spine-aligned (W3-6)
   "nav.group.home": { en: "Home", es: "Inicio" },
   "nav.group.agents": { en: "Agents", es: "Agentes" },

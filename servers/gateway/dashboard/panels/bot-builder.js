@@ -53,7 +53,7 @@ function warnValues(raw) {
 export default {
   id: "bot-builder",
   name: "Bot Builder",
-  icon: "extensions",
+  icon: "tool",
   route: "/dashboard/bot-builder",
   navOrder: 14,
   category: "tools",

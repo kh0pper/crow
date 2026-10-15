@@ -14,6 +14,7 @@ import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { crowTalkCss, crowTalkJs, crowTalkOverlayHtml } from "./crow-talk.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 import { textSizeCss, textSizeHeadScript } from "./text-size.js";
+import { appIconSvg } from "./app-icons.js";
 
 // Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
 // Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
@@ -190,7 +191,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       const groupLabel = t("nav.group." + g.id, lang) !== "nav.group." + g.id ? t("nav.group." + g.id, lang) : g.name;
       const items = g.panels.map((p) => {
         const active = p.id === activePanel ? "active" : "";
-        const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
+        const icon = navIcon(p.icon);
         const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
         const preload = p.preload ? " data-turbo-preload" : "";
         return `<a href="${p.route}" class="nav-item ${active}"${preload}>${icon}<span>${escapeHtml(label)}</span></a>`;
@@ -209,7 +210,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     // Flat navigation (backward compatible)
     navItems = sortedPanels.map((p) => {
       const active = p.id === activePanel ? "active" : "";
-      const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
+      const icon = navIcon(p.icon);
       const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
       const preload = p.preload ? " data-turbo-preload" : "";
       return `<a href="${p.route}" class="nav-item ${active}"${preload}>${icon}<span>${escapeHtml(label)}</span></a>`;
@@ -876,6 +877,14 @@ const NAV_ICONS = {
   models: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="15" x2="4" y2="15"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="15" x2="23" y2="15"/></svg>`,
   default: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>`,
 };
+
+// Sidebar glyph for a panel's icon key: the sidebar's own set first, then the
+// shared app icon set, then the default circle. Own-property lookups only, so
+// a key like "constructor" never resolves to a prototype member.
+function navIcon(key) {
+  if (typeof key === "string" && Object.hasOwn(NAV_ICONS, key)) return NAV_ICONS[key];
+  return appIconSvg(key, 18) || NAV_ICONS.default;
+}
 
 function dashboardCss() {
   return `<style>

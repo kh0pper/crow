@@ -6,7 +6,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { getPeerCreds } from "../../../../shared/peer-credentials.js";
@@ -74,6 +74,7 @@ export async function getNestData(db, lang, opts = {}) {
         let webUI = null;
         let icon = null;
         let category = null;
+        let hasContainer = false;
         const installedAt = meta.installedAt || null;
         // Try to load manifest from <CROW_HOME>/bundles/ or repo bundles/
         const manifestPaths = [
@@ -88,13 +89,19 @@ export async function getNestData(db, lang, opts = {}) {
               webUI = manifest.webUI || null;
               icon = manifest.icon || null;
               category = manifest.category || null;
+              if (manifest.docker) hasContainer = true;
             } catch {}
             break;
           }
         }
-        const status = getBundleDockerStatus(id);
+        // A bundle runs a container when it ships a compose file — in the
+        // installed copy OR the repo copy (installed copies don't always carry
+        // it) — or its manifest declares `docker`. The rest (MCP-only,
+        // panel-only) have no running state.
+        if (!hasContainer) hasContainer = manifestPaths.some((mp) => existsSync(join(dirname(mp), "docker-compose.yml")));
+        const status = hasContainer ? getBundleDockerStatus(id) : null;
         const isRunning = status !== null && status.toLowerCase().startsWith("up");
-        bundles.push({ id, name, type: meta.type, isRunning, webUI, icon, category, installedAt });
+        bundles.push({ id, name, type: meta.type, isRunning, hasContainer, webUI, icon, category, installedAt });
       }
       bundles.sort((a, b) => new Date(a.installedAt || 0) - new Date(b.installedAt || 0));
     } catch {}
