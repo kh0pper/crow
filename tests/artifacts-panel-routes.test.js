@@ -575,6 +575,26 @@ test("feedback cards (PR-3 Task 3.8): a chat lists the TRUSTED rounds delivered 
   assert.equal((await req("GET", `/api/artifacts/rounds/${r1.id}/card`, { cookie: null })).status, 401);
 });
 
+test("review L5: the feedback card shows each owner comment AS SENT, even after the owner edits it once the round ends", async () => {
+  const { addThread, addComment, editComment } = await import("../bundles/artifacts/server/comments.js");
+  const rounds = await import("../bundles/artifacts/server/rounds.js");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Edited later", type: "document", source: { markdown: "# e" }, actor: { kind: "bot", id: "bobby", thread: "perchlive-e1", gateway: "perch" } }, { markdownBlocks });
+  const t = await addThread(s.db, { artifactId: art.id, versionN: 1, anchor: { kind: "whole" }, text: "AS-SENT first", author: { kind: "owner" } });
+  const c2 = await addComment(s.db, { threadId: t.threadId, text: "AS-SENT second", author: { kind: "owner" } });
+  const r = await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [t.threadId], targetThread: "perchlive-e1" });
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done', delivery='perch-session', session_id='perchlive-e1' WHERE id=?", args: [r.id] });
+  // The round is over, so the owner may edit again.
+  const first = Number((await s.db.execute({ sql: "SELECT id FROM artifact_comments WHERE thread_id=? ORDER BY id LIMIT 1", args: [t.threadId] })).rows[0].id);
+  await editComment(s.db, { commentId: first, artifactId: art.id, text: "EDITED-AFTER first", actor: { kind: "session" } });
+  await editComment(s.db, { commentId: c2.commentId, artifactId: art.id, text: "EDITED-AFTER second", actor: { kind: "session" } });
+  const card = await req("GET", `/api/artifacts/rounds/${r.id}/card`);
+  assert.equal(card.status, 200);
+  assert.deepEqual(card.body.threads[0].comments, ["AS-SENT first", "AS-SENT second"]);
+  // A round frozen before this fix carries no texts: it shows today's text (the old behaviour).
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET snapshot_json=? WHERE id=?", args: [JSON.stringify({ [t.threadId]: c2.commentId }), r.id] });
+  assert.deepEqual((await req("GET", `/api/artifacts/rounds/${r.id}/card`)).body.threads[0].comments, ["EDITED-AFTER first", "EDITED-AFTER second"]);
+});
+
 test("Library (PR-3 Task 3.9): list badges come from store rows; the audit tab serves the last 50; Unlink is an owner route that stops fan-out and Send", async () => {
   const { addThread } = await import("../bundles/artifacts/server/comments.js");
   const { linkedThreads, pickSendTarget } = await import("../bundles/artifacts/server/links.js");
