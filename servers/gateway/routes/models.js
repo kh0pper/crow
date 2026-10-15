@@ -28,11 +28,15 @@
  * NEVER add `/api/models` to `PUBLIC_FUNNEL_PREFIXES` — see CLAUDE.md's
  * "Network exposure invariant".
  *
- * No CSRF middleware here: matching `routes/push.js`/`routes/notifications.js`
- * (state-changing JSON routes mounted at the app root, outside the
- * `/dashboard` router `csrfMiddleware` is scoped to) — the session cookie
- * itself (HttpOnly, SameSite=Lax) is this route family's only defense
- * against cross-origin calls, identical to its siblings.
+ * CSRF: the routes that predate plan 3a carry no CSRF middleware (matching
+ * `routes/push.js`/`routes/notifications.js`, state-changing JSON routes
+ * mounted at the app root, outside the `/dashboard` router `csrfMiddleware`
+ * is scoped to). Every mutating route plan 3a adds (provider start/stop/
+ * unregister, register, adopt, hf-adopt) runs the same double-submit check
+ * (`dashboard/shared/csrf.js`: cookie `crow_csrf`, header `X-Crow-Csrf`) per
+ * route: they start processes, run code paths with operator-supplied launch
+ * args, and delete files, and a sibling port on the same site could otherwise
+ * ride the SameSite=Lax session cookie.
  *
  * HF token storage: `POST /api/models/hf-token` reuses the EXACT storage
  * path Settings -> Providers uses for cloud-provider API keys —
@@ -69,6 +73,10 @@ import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
 import { servingClassOf } from "../models/serving-class.js";
 import { isModelOrchestrationDisabled } from "../../shared/model-orchestration.js";
+import { csrfMiddleware } from "../dashboard/shared/csrf.js";
+import { createLifecycleCore } from "../models/lifecycle-core.js";
+import { doorKindOf } from "../models/door-resolve.js";
+import { defaultLifecycleDeps } from "./llm-models.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // routes/models.js -> gateway -> servers -> repo root -> registry/model-catalog.json
@@ -180,7 +188,12 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     registryEntryRuntimeStateFn = registryEntryRuntimeState,
     downloadHfFileFn = downloadHfFile,
     fetchHfPathInfoFn = fetchHfPathInfo,
+    // Plan 3a: the lifecycle core shared with /llm/models (same job store).
+    lifecycleCoreFn = () => createLifecycleCore(defaultLifecycleDeps()),
   } = opts;
+
+  let _core = null;
+  const core = () => (_core ||= lifecycleCoreFn());
 
   const router = Router();
 
@@ -661,6 +674,73 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       res.json({ running: false });
     } catch (err) {
       res.status(500).json({ error: err.message, code: "INTERNAL" });
+    }
+  });
+
+  // --- Provider lifecycle (plan 3a): the dashboard-session door ------------
+  //
+  // Start/stop/jobs delegate to the lifecycle core routes/llm-models.js also
+  // uses, over one job store, so a panel start and a pi-lab start of the same
+  // provider share a job. Refusals keep their codes (UNKNOWN_PROVIDER 404;
+  // EXTERNAL_ENGINE / NOT_OWNER (+owner, door) / NOT_NATIVE 409), flattened
+  // to this router's `{ error, code, ... }` envelope.
+
+  const orchestrationOff = (res) => res.status(409).json({
+    error: "Model orchestration is disabled on this host (CROW_DISABLE_MODEL_ORCHESTRATION) — models here are started outside Crow",
+    code: "MODEL_ORCHESTRATION_DISABLED",
+  });
+  const sendCore = (res, { status, body }) => {
+    if (status < 400) return res.status(status).json(body);
+    const { code, message, ...extra } = body || {};
+    return res.status(status).json({ error: message, code, ...extra });
+  };
+
+  router.post("/api/models/providers/:provider/start", csrfMiddleware, (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    sendCore(res, core().start(req.params.provider, "models-panel"));
+  });
+
+  router.post("/api/models/providers/:provider/stop", csrfMiddleware, async (req, res) => {
+    if (isModelOrchestrationDisabled()) return orchestrationOff(res);
+    sendCore(res, await core().stop(req.params.provider, "models-panel"));
+  });
+
+  router.get("/api/models/jobs/:id", (req, res) => sendCore(res, core().job(req.params.id)));
+
+  // Unregister by provider id. Only rows this instance owns natively: a
+  // foreign-owned native row, an external engine or a bundle-backed row is
+  // refused (Rev 2 H1), and so is a row with a start in flight (M3). Two
+  // steps: without ?confirm=true it reports the bindings that would break.
+  router.delete("/api/models/providers/:provider", csrfMiddleware, async (req, res) => {
+    const name = req.params.provider;
+    const c = core();
+    const p = c.providers()[name];
+    if (doorKindOf(p) === "bundle") {
+      return res.status(409).json({ error: `"${name}" is served by a bundle; remove it from Extensions`, code: "BUNDLE_ROW" });
+    }
+    const refused = c.refusal(name, p);
+    if (refused) return sendCore(res, refused);
+    if (c.jobs.activeFor(name)) {
+      return res.status(409).json({ error: `"${name}" is starting; wait for the start to finish, then remove it`, code: "START_IN_PROGRESS" });
+    }
+    const db = dbFactory();
+    try {
+      const bindings = await providerBindingsFn(db, name);
+      const confirmed = req.query.confirm === "true" || req.body?.confirm === true;
+      if (!confirmed) return res.json({ requiresConfirm: true, provider: name, bindings });
+      // Stop through stopNativeProvider (the orchestrator's single-flight
+      // queue), never a bare handle.stop() that could race an acquire. Under
+      // orchestration-off Crow never started it, so there is nothing to stop.
+      if (!isModelOrchestrationDisabled()) {
+        const stopped = await c.stop(name, "models-panel");
+        if (stopped.status >= 400) return sendCore(res, stopped);
+      }
+      const result = await unregisterModelFn({ modelId: name, db, dir: resolveDir() });
+      res.json({ deleted: true, provider: name, disabled: result.disabled, fileDeleted: result.deleted, bindings });
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: "INTERNAL" });
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
     }
   });
 

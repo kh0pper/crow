@@ -45,6 +45,14 @@ export function createJobStore({ now = Date.now, maxJobs = 200, idFn = randomUUI
   };
 }
 
+let _shared = null;
+/** The one job store both lifecycle doors share (plan 3a): /llm/models and
+ * /api/models/providers/* see the same jobs, so one provider never gets two
+ * concurrent starts from the two doors. Lazy, one per process. */
+export function sharedJobStore() {
+  return (_shared ||= createJobStore());
+}
+
 function firstModelId(p) {
   const m = Array.isArray(p?.models) ? p.models[0] : null;
   return typeof m === "string" ? m : m?.id ?? null;
