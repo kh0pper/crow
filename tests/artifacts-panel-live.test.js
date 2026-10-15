@@ -415,3 +415,56 @@ test("S1 (step-6 smoke): document pins sit on the commented words — distinct p
     assert.ok(Math.abs(head.x - cell.x) <= 1, "same block, no collision → the same gutter x");
   } finally { await t.close(); }
 });
+
+test("review L (PR #488): a whole-block pin (picked from the section list) sits on the block's FIRST line, not its middle; partly scrolled off, it stays at the top of what is visible", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const comments = await import("../bundles/artifacts/server/comments.js");
+  const long = Array.from({ length: 70 }, (_, k) => `Sentence number ${k + 1} keeps this paragraph tall.`).join(" ");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Tall block", type: "document", source: { markdown: `# Tall\n\n${long}\n\nAfter.` }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const map = JSON.parse((await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [art.id] })).rows[0].anchor_map_json);
+  // Thread 1: the block's first words (a quote pin on its first line) — the reference.
+  await comments.addThread(s.db, { artifactId: art.id, versionN: 1, anchor: comments.resolveBlockAnchor(map, { kind: "block", id: "b2", quote: "Sentence number 1 keeps", suffix: " this" }), text: "first words", author: { kind: "owner" } });
+  const t = await tab();
+  try {
+    await nav(t, `/dashboard/artifacts/view/${art.id}`);
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 1", 15000));
+    // Thread 2: the whole block, from the section list (no quote).
+    await t.evalIn("(() => { document.querySelector('.cv-more').setAttribute('open',''); document.querySelector('.cv-pick-section').click(); })()");
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-sections button').length >= 2"));
+    await t.evalIn("document.querySelectorAll('.cv-sections button')[1].click()");
+    assert.ok(await yes(t, "!!document.querySelector('.cv-compose textarea')"));
+    await t.evalIn("document.querySelector('.cv-compose textarea').value = 'whole block'; document.querySelector('.cv-compose .cv-primary').click()");
+    assert.ok(await yes(t, "document.querySelectorAll('.cv-pin').length === 2", 15000), "two pins");
+    await sleep(600);
+    const pins = async () => JSON.parse(await t.evalIn(`JSON.stringify((() => { const f = document.querySelector('iframe.crow-artifact-frame').getBoundingClientRect(); return Object.fromEntries([...document.querySelectorAll('.cv-pin')].map((p) => { const r = p.getBoundingClientRect(); return [p.textContent, { x: r.x + r.width / 2 - f.x, y: r.y + r.height / 2 - f.y }]; })); })())`));
+    const p = await pins();
+    assert.ok(Math.abs(p["2"].y - p["1"].y) <= 3, `the whole-block pin is on the block's first line (with the first words' pin), not its middle: ${JSON.stringify(p)}`);
+    // Scroll the frame so the block's first line is off the top but the block still fills the view.
+    const fr = JSON.parse(await t.evalIn("JSON.stringify(document.querySelector('iframe.crow-artifact-frame').getBoundingClientRect())"));
+    for (let k = 0; k < 4; k++) await t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: fr.x + fr.width / 2, y: fr.y + fr.height / 2, deltaX: 0, deltaY: 100 });
+    assert.ok(await yes(t, "![...document.querySelectorAll('.cv-pin')].some((x) => x.textContent === '1')", 5000), "the first-words pin scrolled away");
+    const q = await pins();
+    assert.ok(q["2"] && q["2"].y >= 0 && q["2"].y <= 40, `the whole-block pin stays at the top of the visible block: ${JSON.stringify(q)}`);
+  } finally { await t.close(); }
+});
+
+test("review L (PR #488): on a document only a text selection can propose — an element proposal never opens compose", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const art = await store.createArtifact(s.db, s.blobs, { title: "Doc proposals", type: "document", source: { markdown: "# A\n\nSome words here." }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const t = await tab();
+  try {
+    // Test-side hook: remember the minted grant (its nonce) so the test can speak as the frame.
+    await t.send("Page.addScriptToEvaluateOnNewDocument", { source: `(() => { const of = window.fetch; window.fetch = function (u, o) { return of.apply(this, arguments).then((r) => { if (/\\/view$/.test(String(u))) r.clone().json().then((j) => { window.__grant = j; }); return r; }); }; })()` });
+    await nav(t, `/dashboard/artifacts/view/${art.id}`);
+    assert.ok(await yes(t, "!!window.__grant && !!document.querySelector('iframe.crow-artifact-frame')", 15000));
+    await sleep(800);
+    const speak = (anchor) => t.evalIn(`window.dispatchEvent(new MessageEvent("message", { data: { t: "crow-artifact", nonce: window.__grant.nonce, kind: "anchor", anchor: ${JSON.stringify(anchor)} }, origin: "null", source: document.querySelector("iframe.crow-artifact-frame").contentWindow }))`);
+    await speak({ kind: "element", selector: "#b2", text: "Some words here." });
+    await sleep(300);
+    assert.equal(await t.evalIn("!!document.querySelector('.cv-compose')"), false, "an element proposal on a document composes nothing");
+    // Positive control: the same path with a text proposal offers the trusted button.
+    await speak({ kind: "text", quote: "words", prefix: "Some ", suffix: " here.", block: "b2" });
+    assert.ok(await yes(t, "!!document.querySelector('.cv-selbar:not([hidden]) button')", 3000), "a text proposal still offers 'Comment on …'");
+    assert.equal(await t.evalIn("!!document.querySelector('.cv-flagged')"), false);
+  } finally { await t.close(); }
+});

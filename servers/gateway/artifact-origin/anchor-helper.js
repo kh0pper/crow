@@ -110,14 +110,29 @@ export function anchorHelperSource(nonce) {
     }
     return 0;
   }
+  /* An element's FIRST line (its first non-blank text's first line box),
+     not its whole box, so a pin on a tall block or element sits where it
+     starts (review of PR #488). No text (an image): the top of the box, at
+     most 40px tall. Partly scrolled off (the first line above the view, the
+     element still in it): the top of what is visible. */
+  function lineBox(el) {
+    const b = el.getBoundingClientRect();
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let n, line = null;
+    while ((n = w.nextNode())) if (/\\S/.test(n.data)) { const r = document.createRange(); r.selectNodeContents(n); line = firstBox(r); break; }
+    const h = line ? line.height : Math.min(b.height, 40);
+    let top = line ? line.top : b.top;
+    if (top + h <= 0 && b.bottom > 0) top = Math.min(0, b.bottom - h);
+    return { left: b.left, top: top, width: b.width, height: h };
+  }
   function rectOf(a, cache) {
     try {
-      if (a.kind === "element") { const el = document.querySelector(a.selector); if (!el) return null; const b = el.getBoundingClientRect(); return { box: b, bx: b.left }; }
+      if (a.kind === "element") { const el = document.querySelector(a.selector); if (!el) return null; return { box: lineBox(el), bx: el.getBoundingClientRect().left }; }
       if (a.kind === "block" && /^b\\d{1,6}$/.test(a.id || "")) {
         const el = document.getElementById(a.id);
         if (!el) return null;
         const r = a.quote ? quoteRange(el, a.quote, a.nth, cache) : null;
-        return { box: r ? firstBox(r) : el.getBoundingClientRect(), bx: el.getBoundingClientRect().left, range: r };
+        return { box: r ? firstBox(r) : lineBox(el), bx: el.getBoundingClientRect().left, range: r };
       }
       if (a.kind === "text" && a.quote) {
         const r = quoteRange(document.body || document.documentElement, a.quote, 0, cache);
