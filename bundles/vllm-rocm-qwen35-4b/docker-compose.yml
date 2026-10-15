@@ -30,9 +30,9 @@ services:
       - "8000"
       - --dtype
       - bfloat16
-      # 0.105 of the 124 GiB the APU exposes keeps a KV pool of ~10x the
-      # configured worst case (8 seqs x 8192); the observed peak was ~3 running
-      # requests using 12% of the old pool. (Measured 2026-10-15.)
+      # 0.105 of the 124 GiB the APU exposes leaves ~3.9 GiB of KV (~100k
+      # tokens): ~11x vLLM's max concurrency at 8192, ~1.5x all 8 sequences at
+      # full length. The observed peak was ~17k tokens (3 running requests).
       - --gpu-memory-utilization
       - "0.105"
       - --max-model-len
@@ -52,8 +52,9 @@ services:
       # Prefill in 2048-token chunks. The PyTorch caching allocator keeps every
       # activation segment it ever allocated, sized by the chunk; with the
       # default (max-model-len) the 4b grew ~6 GiB beyond vLLM's own budget
-      # over days of mixed-length traffic. Classifier latency is unchanged
-      # (p50 0.18 s). Never set VLLM_LOGGING_LEVEL=DEBUG here: it made
+      # over days of mixed-length traffic. Smaller chunks are EXPECTED to cap
+      # that growth (under observation; a one-hour test cannot show it).
+      # Classifier latency is unchanged (p50 0.18 s). Never set VLLM_LOGGING_LEVEL=DEBUG here: it made
       # requests ~33x slower in the same test.
       - --max-num-batched-tokens
       - "2048"
