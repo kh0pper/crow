@@ -361,6 +361,10 @@ export function hashFileSha256(path, { createReadStreamImpl = createReadStream }
   });
 }
 
+function formatMb(bytes) {
+  return (bytes / 1e6).toFixed(2);
+}
+
 function sizeMatches(actualBytes, sizeMb) {
   const expected = sizeMb * 1e6;
   return Math.abs(actualBytes - expected) <= expected * 0.005;
@@ -385,7 +389,10 @@ async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hash
     return true;
   }
   if (!sizeMatches(st.size, sizeMb)) {
-    throw new AdoptMismatchError(`${what}: ${path} is ${st.size} bytes, expected about ${Math.round(sizeMb * 1e6)}`, "ADOPT_SIZE_MISMATCH", { file: path, expected: Math.round(sizeMb * 1e6), actual: st.size });
+    const exp = Math.round(sizeMb * 1e6);
+    throw new AdoptMismatchError(
+      `${what}: ${path} is ${st.size} bytes (${formatMb(st.size)} MB) but the catalog says about ${exp} bytes (${formatMb(exp)} MB), beyond the 0.5 % tolerance — add a catalog quant entry for this build or download the current file`,
+      "ADOPT_SIZE_MISMATCH", { file: path, expected: exp, actual: st.size });
   }
   return false;
 }

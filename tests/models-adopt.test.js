@@ -196,3 +196,23 @@ test("adoptModel: a relative path is refused before anything is hashed or regist
     assert.equal(Object.keys(loadState(h.dir).registry).length, 0, "nothing registered");
   } finally { h.cleanup(); }
 });
+
+test("adoptModel: an out-of-tolerance size mismatch names both sizes and the catalog-quant remedy", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    writeFileSync(join(weights, "big.gguf"), Buffer.alloc(5_000, 2));
+    await assert.rejects(
+      adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: join(weights, "big.gguf"), catalog: catalogFor({ primary: Buffer.alloc(10_000, 1) }), allowUnverified: true, ...OPTS(h) }),
+      (e) => {
+        assert.equal(e.code, "ADOPT_SIZE_MISMATCH");
+        assert.equal(e.expected, 10_000);
+        assert.equal(e.actual, 5_000);
+        assert.match(e.message, /5000 bytes \(0\.01 MB\)/);
+        assert.match(e.message, /about 10000 bytes \(0\.01 MB\)/);
+        assert.match(e.message, /catalog quant entry/);
+        return true;
+      }
+    );
+  } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
