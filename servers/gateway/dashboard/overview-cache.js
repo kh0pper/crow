@@ -33,6 +33,7 @@
 import { forwardSignedRequest } from "../../shared/peer-forward.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import bus from "../../shared/event-bus.js";
+import { isAppIconKey } from "./shared/app-icons.js";
 
 const TTL_SUCCESS_MS = 30_000;
 const TTL_SCHEMA_VIOLATION_MS = 60_000;
@@ -45,24 +46,6 @@ const ID_REGEX = /^[a-z][a-z0-9_-]{0,63}$/;
 // common case) emit `pathname: "/"` and we must accept it.
 const PATHNAME_REGEX = /^\/[a-zA-Z0-9_\-./]*$/;
 const CATEGORY_ENUM = new Set(["local-panel", "bundle", "instance"]);
-
-// Icon key allowlist. Must match keys advertised by panels/nest/html.js. We
-// keep the allowlist here so the cache can reject/downgrade unknown values
-// before they reach the renderer — unknown → "default" (silent fallback).
-//
-// Keep this list in sync with panels/nest/html.js TILE_ICONS + PANEL_ICON_MAP
-// + ADDON_ICON_MAP. Adding an icon here that isn't rendered is harmless; the
-// renderer does its own final mapping.
-const ICON_ALLOWLIST = new Set([
-  // TILE_ICONS keys
-  "messages", "edit", "files", "settings", "extensions", "health", "skills",
-  "contacts", "memory", "media", "conversation", "blog_draft", "project",
-  "instance", "default",
-  // ADDON_ICON_MAP keys
-  "brain", "cloud", "image", "home", "book", "rss", "mic", "message-circle",
-  "gamepad", "archive",
-  // PANEL_ICON_MAP keys not already above
-]);
 
 const _cache = new Map();
 
@@ -83,7 +66,10 @@ function validateTile(tile) {
   if (!CATEGORY_ENUM.has(tile.category)) return null;
   const port = tile.port === undefined ? null : tile.port;
   if (port !== null && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) return null;
-  const icon = typeof tile.icon === "string" && ICON_ALLOWLIST.has(tile.icon) ? tile.icon : "default";
+  // Icon allowlist: the shared icon set's keys plus its alias keys
+  // (shared/app-icons.js), the same set the Nest renderer accepts. Anything
+  // else is downgraded to "default" before it reaches the renderer.
+  const icon = isAppIconKey(tile.icon) ? tile.icon : "default";
   return {
     id: tile.id,
     name: tile.name,

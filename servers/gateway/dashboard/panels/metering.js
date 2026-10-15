@@ -117,7 +117,7 @@ export function renderUsageBody(summary, priceRules, csrf = "", lang = "en", err
 export default {
   id: "metering",
   name: "Usage",
-  icon: "extensions",
+  icon: "pie-chart",
   route: "/dashboard/metering",
   navOrder: 36,
   category: "tools",

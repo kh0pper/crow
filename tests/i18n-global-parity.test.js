@@ -29,6 +29,7 @@ import { translations, SUPPORTED_LANGS, fill } from "../servers/gateway/dashboar
 // language-neutral terms, product/protocol names, numerals, enum labels).
 const IDENTICAL_OK = new Set([
   "nav.blog",
+  "nav.perch", // "Perch Hub" — product name
   "login.2faPlaceholder", // "000000"
   "common.error", // "Error" is Spanish too
   "notif.ram",

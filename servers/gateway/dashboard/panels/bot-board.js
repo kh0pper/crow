@@ -18,7 +18,7 @@ import { botRuntimeActive } from "./bot-runtime-flag.js";
 export default {
   id: "bot-board",
   name: "Bot Board",
-  icon: "project",
+  icon: "kanban",
   route: "/dashboard/bot-board",
   navOrder: 15,
   category: "tools",
