@@ -142,7 +142,11 @@ test("C7: docLinks.base accepts /blog/ paths and http(s) URLs only", () => {
   const withBase = (base) => fixture({
     sections: [{ kind: "tag", heading: "x", tag: "a", docLinks: { base, rules: [], defaultFile: "doc.html" } }],
   });
-  const rejected = ["javascript:alert(1)", "data:text/html,x", "//evil.example/", "/blog/../dashboard/", "/blog//x/", "/dashboard/"];
+  const rejected = [
+    "javascript:alert(1)", "data:text/html,x", "//evil.example/", "/blog/../dashboard/", "/blog//x/", "/dashboard/",
+    // percent-encoded traversal and separators, either case
+    "/blog/%2e%2e/dashboard/", "/blog/%2E%2E/dashboard/", "/blog/x%2fy/", "/blog/x%2Fy/", "/blog/x%5cy/", "/blog/x%5Cy/",
+  ];
   const accepted = ["/blog/docs/", "https://example.com/docs/", "http://example.com/"];
   for (const base of rejected) {
     const p = write(`r-${rejected.indexOf(base)}.json`, withBase(base));

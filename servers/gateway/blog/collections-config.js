@@ -26,7 +26,10 @@ const FILE_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 function isSafeDocBase(base) {
   if (base.startsWith("/blog/")) {
-    return !base.includes("..") && !base.includes("//") && !base.includes("\\") && !/\s/.test(base);
+    // Reject traversal and separators, including percent-encoded forms
+    // (%2e ".", %2f "/", %5c "\\"), which a browser or proxy may decode.
+    return !base.includes("..") && !base.includes("//") && !base.includes("\\") && !/\s/.test(base)
+      && !/%(2e|2f|5c)/i.test(base);
   }
   try {
     const u = new URL(base);
