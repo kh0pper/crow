@@ -277,7 +277,7 @@ export function relativeDatesContext(now, tz) {
   const off = offsetOf(today, tz);
   const at = (i) => { const day = fromDayNum(dayNum(today) + i); const o = offsetOf(day, tz); return `${isoYmd(day)}${o !== off ? ` (${o})` : ""}`; };
   const days = [];
-  for (let i = 1; i <= 6; i++) days.push(`${fmtYmd("en-US", fromDayNum(dayNum(today) + i), WEEKDAY)} ${at(i)}${i === 1 ? " (tomorrow)" : ""}`);
+  for (let i = 1; i <= 6; i += 1) days.push(`${fmtYmd("en-US", fromDayNum(dayNum(today) + i), WEEKDAY)} ${at(i)}${i === 1 ? " (tomorrow)" : ""}`);
   return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. For something already past, it is the previous one. UTC offset ${off}.`;
 }
 
