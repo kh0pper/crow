@@ -2,7 +2,7 @@
 // every hash, every licence file, exact pins, and no runtime fetch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -366,4 +366,47 @@ test("svgUnsafe allowlist: probe2 bypasses and anything off the list are refused
     "upper-case element": `<SVG/>`,
     "set": `<svg><set attributeName="x" to="1"/></svg>`,
   })) assert.equal(svgUnsafe(v), true, k);
+});
+
+// Final-review T5: icon-set maps are checked by checkLib itself (CI time), not
+// only by the vendor step and the content test. The hash is re-pinned to the
+// tampered map, so only the SVG rule can catch it.
+function iconSet(icons) {
+  return (m, lib) => {
+    const body = Buffer.from(typeof icons === "string" ? icons : JSON.stringify(icons));
+    mkdirSync(join(lib, "icons"), { recursive: true });
+    writeFileSync(join(lib, "icons", "demo.json"), body);
+    m.entries.push({
+      name: "icons:demo", kind: "icon-set", version: "1.0.0", license: "MIT", license_file: "licenses/demo.txt", license_sha256: sha256Hex(Buffer.from("MIT License\n")),
+      source: "npm:demo-icons@1.0.0", allowed: ["page"],
+      files: [{ path: "icons/demo.json", sha256: sha256Hex(body), type: "application/json" }], main: "icons/demo.json",
+    });
+  };
+}
+const OK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 1h2"/></svg>';
+
+test("checkLib checks every icon in an icon-set map with the SVG allowlist", () => {
+  assert.equal(errsOf(iconSet({ ok: OK_ICON })), "");
+  assert.match(errsOf(iconSet({ ok: OK_ICON, bad: '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>' })), /icons:demo: icon "bad" in icons\/demo\.json is not a plain SVG/);
+  assert.match(errsOf(iconSet({ ok: OK_ICON, bad: '<svg xmlns="http://www.w3.org/2000/svg"><use href="https://x.example/a.svg#i"/></svg>' })), /icon "bad"/);
+  assert.match(errsOf(iconSet({ ok: 42 })), /icon "ok" in icons\/demo\.json is not a plain SVG/);
+  assert.match(errsOf(iconSet("[1,2]")), /icons\/demo\.json is not an icon map/);
+  assert.match(errsOf(iconSet("{not json")), /icons\/demo\.json is not an icon map/);
+});
+
+test("checkLib refuses an unsafe SVG in the shipped icon maps when one is tampered in", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dk-icons-"));
+  try {
+    const lib = join(dir, "lib");
+    cpSync(join(ROOT, "bundles/design-kit/lib"), lib, { recursive: true });
+    const man = JSON.parse(readFileSync(join(lib, "manifest.json"), "utf8"));
+    const set = man.entries.find((e) => e.name === "icons:lucide");
+    const map = JSON.parse(readFileSync(join(lib, set.files[0].path), "utf8"));
+    map.coffee = '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>';
+    const body = Buffer.from(JSON.stringify(map));
+    writeFileSync(join(lib, set.files[0].path), body);
+    set.files[0].sha256 = sha256Hex(body);
+    writeFileSync(join(lib, "manifest.json"), JSON.stringify(man));
+    assert.match(checkLib(lib).errors.join("\n"), /icons:lucide: icon "coffee" in icons\/lucide\.json is not a plain SVG/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

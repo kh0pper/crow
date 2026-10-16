@@ -255,6 +255,18 @@ export function checkLib(libDir) {
     if (f.type === "text/css" && cssFetches(body)) fail(`${where}: ${p} would fetch at runtime or is not plain CSS (see the lib-check.js header)`);
     if (f.type === "image/svg+xml" && svgUnsafe(body)) fail(`${where}: ${p} is not a plain SVG (see the lib-check.js header)`);
   };
+  // Every icon in an icon-set map passes the SVG allowlist here, at CI time,
+  // not only in the vendor step (the kit copies these strings as .svg files).
+  const checkIconMap = (where, main) => {
+    const p = cleanLibPath(main);
+    if (!p || !existsSync(join(libDir, p))) return;
+    let map;
+    try { map = JSON.parse(readFileSync(join(libDir, p), "utf8")); } catch { map = null; }
+    if (!map || typeof map !== "object" || Array.isArray(map)) return fail(`${where}: ${p} is not an icon map`);
+    for (const [name, svg] of Object.entries(map)) {
+      if (typeof svg !== "string" || svgUnsafe(svg)) fail(`${where}: icon ${JSON.stringify(name)} in ${p} is not a plain SVG (see the lib-check.js header)`);
+    }
+  };
   for (const e of man.entries) {
     const where = e && typeof e.name === "string" ? e.name : "(unnamed entry)";
     if (!e || !NAME_RE.test(String(e.name))) { fail(`${where}: bad name`); continue; }
@@ -289,6 +301,7 @@ export function checkLib(libDir) {
       verify(where, f);
     }
     if (!e.files.some((f) => f.path === e.main)) fail(`${where}: main must be one of its files`);
+    if (e.kind === "icon-set") checkIconMap(where, e.main);
     for (const r of e.requires || []) if (!names.has(r)) fail(`${where}: requires unknown ${r}`);
   }
   for (const m of man.meta_files || []) {
