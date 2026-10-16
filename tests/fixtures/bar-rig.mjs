@@ -224,6 +224,12 @@ export async function openTab(chrome, { targetId = null, width = 1280, height = 
   return {
     id: t.id, send, evalIn, events,
     async go(url) { await send("Page.navigate", { url }); },
+    /**
+     * Run `expression` that leaves the page (a link click, history.back()) AFTER Runtime.evaluate has answered:
+     * evaluated directly, a navigation that commits first (a loaded box) rejects the call with "Inspected target
+     * navigated or closed". Follow it with until(...) on the next page.
+     */
+    async navigate(expression) { await evalIn(`(setTimeout(function () { ${expression}; }, 0), true)`); },
     /** A real mouse click at the centre of `selector` (a user gesture, as on a phone or a desktop). */
     async click(selector) {
       const r = await evalIn(`(function(){ var e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({block:'center'}); var b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);

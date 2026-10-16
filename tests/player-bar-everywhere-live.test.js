@@ -52,7 +52,7 @@ test("(a)(b)(c) the station plays on the viewer, and after Back, and after ← L
   try {
     const { owner } = await stationOnBar(tb);
     const g0 = rig.gets.length;
-    await tb.evalIn("document.getElementById('viewer').click()");
+    await tb.navigate("document.getElementById('viewer').click()");
     assert.equal(await until(tb.evalIn, isViewer), true, "the viewer loaded");
     assert.equal(await until(tb.evalIn, playingNow), true, "playing on the viewer: " + JSON.stringify(await tb.evalIn(BAR)));
     let s = await tb.evalIn(BAR);
@@ -61,15 +61,15 @@ test("(a)(b)(c) the station plays on the viewer, and after Back, and after ← L
     assert.deepEqual(rig.gets.slice(g0).map((g) => [g.owner, g.item]), [[owner, true]], "one GET, this tab's nonce, the item handed back");
     if (SHOTS) await tb.shot(join(SHOTS, "viewer-desktop-playing.png"));
 
-    await tb.evalIn("history.back()");
+    await tb.navigate("history.back()");
     assert.equal(await until(tb.evalIn, isPage("Nest")), true);
     assert.equal(await until(tb.evalIn, playingNow), true, "playing after Back: " + JSON.stringify(await tb.evalIn(BAR)));
 
-    await tb.evalIn("document.getElementById('viewer').click()");
+    await tb.navigate("document.getElementById('viewer').click()");
     assert.equal(await until(tb.evalIn, isViewer), true);
     assert.equal(await until(tb.evalIn, playingNow), true);
     await until(tb.evalIn, "!!document.querySelector('.cv-nav-back')");
-    await tb.evalIn("document.querySelector('.cv-nav-back').click()");
+    await tb.navigate("document.querySelector('.cv-nav-back').click()");
     assert.equal(await until(tb.evalIn, isPage("Library")), true, "← Library");
     assert.equal(await until(tb.evalIn, playingNow), true, "playing after ← Library: " + JSON.stringify(await tb.evalIn(BAR)));
     s = await tb.evalIn(BAR);
@@ -86,14 +86,14 @@ test("I2: a fast viewer → Back → viewer loop (and a podcast-like track) neve
     await stationOnBar(tb);
     // Each page leaves the moment its audio starts: the old page's stream is still closing as the next one opens.
     for (let i = 0; i < 4; i++) {
-      await tb.evalIn("document.getElementById('viewer').click()");
+      await tb.navigate("document.getElementById('viewer').click()");
       assert.equal(await until(tb.evalIn, isViewer), true);
       await until(tb.evalIn, "(function(){ var a = document.getElementById('crow-audio'); return !!a && !a.paused && a.currentTime > 0; })()", 5000);
-      await tb.evalIn("history.back()");
+      await tb.navigate("history.back()");
       assert.equal(await until(tb.evalIn, isPage("Nest")), true);
       await until(tb.evalIn, "(function(){ var a = document.getElementById('crow-audio'); return !!a && !a.paused && a.currentTime > 0; })()", 5000);
     }
-    await tb.evalIn("document.getElementById('viewer').click()");
+    await tb.navigate("document.getElementById('viewer').click()");
     assert.equal(await until(tb.evalIn, isViewer), true);
     const ok = await until(tb.evalIn, playingNow, 12000);
     const s = await tb.evalIn(BAR);
@@ -102,7 +102,7 @@ test("I2: a fast viewer → Back → viewer loop (and a podcast-like track) neve
     assert.equal(ok, true, `still playing after the loop (429s: ${refused}): ` + JSON.stringify(s));
     assert.equal(s.visible, true);
     // A track (not a station: it seeks, it is not live) through the same loop.
-    await tb.evalIn("history.back()");
+    await tb.navigate("history.back()");
     assert.equal(await until(tb.evalIn, isPage("Nest")), true);
     const owner = await tb.evalIn("window.crowPlayer.kioskOwner()");
     const load = rig.playStation(owner, "Episode 12", "podcast");
@@ -111,10 +111,10 @@ test("I2: a fast viewer → Back → viewer loop (and a podcast-like track) neve
       P.kioskDetach({ volume: 0.8, resume: true }); })()`);
     assert.equal(await until(tb.evalIn, playingNow), true);
     for (let i = 0; i < 2; i++) {
-      await tb.evalIn("document.getElementById('viewer').click()");
+      await tb.navigate("document.getElementById('viewer').click()");
       assert.equal(await until(tb.evalIn, isViewer), true);
       assert.equal(await until(tb.evalIn, playingNow), true, "the track on the viewer: " + JSON.stringify(await tb.evalIn(BAR)));
-      await tb.evalIn("history.back()");
+      await tb.navigate("history.back()");
       assert.equal(await until(tb.evalIn, isPage("Nest")), true);
       assert.equal(await until(tb.evalIn, playingNow), true, "the track after Back");
     }
@@ -201,7 +201,7 @@ test("T7 restart: the item cannot come back — after a reload the bar says Play
   const tb = await tab();
   try {
     await stationOnBar(tb);
-    await tb.evalIn("document.getElementById('viewer').click()");
+    await tb.navigate("document.getElementById('viewer').click()");
     assert.equal(await until(tb.evalIn, isViewer), true);
     assert.equal(await until(tb.evalIn, playingNow), true);
     rig.restart();
@@ -209,7 +209,8 @@ test("T7 restart: the item cannot come back — after a reload the bar says Play
     assert.equal(await until(tb.evalIn, `(function(){ var s = ${BAR}; return s.visible && s.subtitle === 'Playback ended'; })()`, 30000), true, "in place: " + JSON.stringify(await tb.evalIn(BAR)));
     // A reload after a restart: the tab's own session cannot come back.
     await stationOnBar(tb);
-    await tb.evalIn("document.getElementById('viewer').click()");
+    await tb.navigate("document.getElementById('viewer').click()");
+    assert.equal(await until(tb.evalIn, isViewer), true);
     assert.equal(await until(tb.evalIn, playingNow), true);
     rig.restart();
     await tb.send("Page.reload");
