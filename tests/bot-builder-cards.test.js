@@ -1,9 +1,11 @@
 /**
- * Bot Builder rows (queue item 20, option A; T2/T3) — the bot list is one
- * row per bot (avatar, name, status dot, purpose, friendly model, "updated
- * N ago", Chat / Edit / ⋯) instead of a stacked key/value table. Raw ids and
- * model keys only on hover; empty fields are left out; every action the
- * table offered stays reachable through the row or its ⋯ menu.
+ * Bot Builder cards (queue item 20, option B; T2/T3) — the bot list is one
+ * compact card per bot (large initial avatar, name + status dot, purpose,
+ * model chip, "updated N ago", a No board chip, Chat / Edit / ⋯ along the
+ * bottom) in a grid that ends in a dashed "+ New bot" tile, instead of a
+ * stacked key/value table. Raw ids and model keys only on hover; empty fields
+ * are left out; every action the table offered stays reachable through the
+ * card or its ⋯ popover menu.
  *
  * Fixture mirrors the five bot shapes a real install carries: three with no
  * tracker and no project, one kanban bot with a project, one of type none.
@@ -15,7 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const dir = mkdtempSync(join(tmpdir(), "btb-rows-"));
+const dir = mkdtempSync(join(tmpdir(), "btb-cards-"));
 process.env.CROW_DATA_DIR = dir;
 
 let db = null, renderBotList = null, translations = null, PROJECT_ID = null;
@@ -61,32 +63,55 @@ async function render(lang = "en", { csrf = "tok123" } = {}) {
 
 /** The list section only (the run monitor below is a table on purpose). */
 function listPart(html) {
-  const a = html.indexOf('class="btb-rows"');
-  assert.ok(a >= 0, "the rows container must render");
+  const a = html.indexOf('class="btb-cards"');
+  assert.ok(a >= 0, "the card grid must render");
   const b = html.indexOf("<turbo-stream-source");
   return html.slice(html.lastIndexOf("<", a), b > a ? b : undefined);
 }
 
-/** One row's markup, from its opening tag to the next row (or the list end). */
+/** One card's markup, from its opening tag to the next card (or the New tile). */
 function rowOf(html, botId) {
   const list = listPart(html);
   const at = list.indexOf(`data-bot="${botId}"`);
-  assert.ok(at >= 0, `row for ${botId}`);
+  assert.ok(at >= 0, `card for ${botId}`);
   const start = list.lastIndexOf("<div", at);
-  const next = list.indexOf('class="btb-row"', at);
-  return list.slice(start, next > 0 ? list.lastIndexOf("<div", next) : undefined);
+  const ends = [list.indexOf('class="btb-botcard"', at), list.indexOf('class="btb-botcard-new"', at)].filter((n) => n > 0);
+  const next = ends.length ? Math.min(...ends) : -1;
+  return list.slice(start, next > 0 ? list.lastIndexOf("<", next) : undefined);
 }
 
 const visibleText = (h) => h.replace(/<[^>]*>/g, " ");
 
-test("one .btb-row per bot, inside a role=list container, and no table in the list", async () => {
+test("one .btb-botcard per bot in a role=list grid, no table, and no option-A rows", async () => {
   const html = await render();
   const list = listPart(html);
-  assert.match(list, /<div class="btb-rows" role="list">/);
-  assert.equal((list.match(/class="btb-row"/g) || []).length, BOTS.length);
-  assert.ok(!list.includes("<table"), "the list is rows, not a table");
-  assert.equal((list.match(/role="listitem"/g) || []).length, BOTS.length);
+  assert.match(list, /<div class="btb-cards" role="list">/);
+  assert.equal((list.match(/class="btb-botcard"/g) || []).length, BOTS.length);
+  assert.ok(!list.includes("<table"), "the list is cards, not a table");
+  assert.ok(!html.includes("btb-row"), "the option-A rows are gone");
+  // five bot cards plus the New bot tile, all list items of the grid
+  assert.equal((list.match(/role="listitem"/g) || []).length, BOTS.length + 1);
   assert.ok(html.includes("window.__btbRowMenu"), "the ⋯ menu script ships with the list");
+});
+
+test("each card: a large initial avatar, then the name block; Chat / Edit / ⋯ in a footer at the bottom", async () => {
+  const card = rowOf(await render(), "helper");
+  assert.match(card, /<div class="btb-botcard-top"><span class="btb-av btb-av-l btb-hue-\d" aria-hidden="true">H<\/span>/);
+  const foot = card.indexOf('class="btb-botcard-foot"');
+  assert.ok(foot > card.indexOf('class="btb-botcard-meta"'), "the footer comes after the meta line");
+  for (const bit of ['href="/dashboard/perch?bot=helper"', 'href="/dashboard/bot-builder?bot=helper&tab=ai"', 'class="btb-more"']) {
+    assert.ok(card.indexOf(bit) > foot, `${bit} sits in the footer`);
+  }
+  assert.ok(card.indexOf('class="btb-menu') > card.indexOf('class="btb-more"'), "the menu follows its trigger");
+});
+
+test("the grid ends in a dashed + New bot tile linking to the wizard", async () => {
+  const list = listPart(await render());
+  const tile = list.slice(list.indexOf('class="btb-botcard-new"'));
+  assert.ok(list.indexOf('class="btb-botcard-new"') > list.lastIndexOf('class="btb-botcard"'), "the tile is last");
+  assert.match(tile, /<a class="btb-botcard-new-link" href="\/dashboard\/bot-builder\?new=1">/);
+  assert.ok(tile.includes(translations["botbuilder.rowNewBot"].en));
+  assert.ok(tile.includes(translations["botbuilder.newTileHint"].en));
 });
 
 test("the bot id is never visible text — only in title= and hrefs", async () => {
@@ -105,7 +130,7 @@ test("no dashes for empty fields; friendly model visible with the raw key on hov
   const html = await render();
   for (const [id] of BOTS) assert.ok(!visibleText(rowOf(html, id)).includes("—"), `${id}: no em dash placeholder`);
   const alpha = rowOf(html, "alpha-home");
-  assert.match(alpha, /<span title="crow-chat\/qwen3\.6-35b-a3b">Qwen3\.6 35B A3B<\/span>/);
+  assert.match(alpha, /<span class="btb-mchip" title="crow-chat\/qwen3\.6-35b-a3b">Qwen3\.6 35B A3B<\/span>/);
   assert.ok(!visibleText(alpha).includes("crow-chat/"), "the raw key is not visible text");
   assert.ok(visibleText(rowOf(html, "beta-home")).includes("Z.AI GLM-5.1"));
   assert.ok(visibleText(rowOf(html, "gamma-glasses")).includes("qwen3.5-4b"), "unknown provider falls back to the model id");
@@ -117,7 +142,7 @@ test("purpose line: from the channels; left out when there is nothing to say", a
   assert.ok(rowOf(html, "alpha-home").includes("AI Companion on a display"));
   assert.ok(rowOf(html, "gamma-glasses").includes("Voice assistant on your glasses"));
   assert.ok(rowOf(html, "helper").includes("Chats in Perch"));
-  assert.ok(!rowOf(html, "beta-home").includes("btb-row-purpose"), "no channel, no board: no purpose line");
+  assert.ok(!rowOf(html, "beta-home").includes("btb-botcard-purpose"), "no channel, no board: no purpose line");
 });
 
 test("Chat only for perch-attached bots", async () => {
@@ -130,12 +155,12 @@ test("Chat only for perch-attached bots", async () => {
   }
 });
 
-test("the ⋯ menu: role=menu, hidden, Edit and Delete… on every row", async () => {
+test("the ⋯ menu: a role=menu popover, hidden, Edit and Delete… on every card", async () => {
   const html = await render();
   for (const [id] of BOTS) {
     const row = rowOf(html, id);
     assert.match(row, /<button type="button" class="btb-more"[^>]*aria-haspopup="menu"[^>]*aria-expanded="false"/, `${id}: trigger`);
-    assert.match(row, /<div class="btb-menu" id="[^"]+" role="menu" hidden>/, `${id}: menu starts hidden`);
+    assert.match(row, /<div class="btb-menu btb-pop" id="[^"]+" role="menu" hidden>/, `${id}: menu starts hidden`);
     assert.ok(row.includes(`href="/dashboard/bot-builder?bot=${id}&tab=ai"`), `${id}: Edit`);
     assert.ok(row.includes(`href="/dashboard/bot-builder?bot=${id}&confirm_delete=1"`), `${id}: Delete… keeps its confirmation page`);
     assert.ok(row.includes(`href="/dashboard/bot-board?bot=${id}"`), `${id}: Give a task…`);
@@ -181,11 +206,15 @@ test("a No board chip on the four bots whose board is off", async () => {
   }
 });
 
-test("with bots: a small Guide link beside + New bot; the big tutorial line is gone", async () => {
+test("with bots: + New bot in the toolbar, and 'New to bots?' is one quiet line UNDER the grid", async () => {
   const html = await render();
-  assert.match(html, /<a class="btb-guide-link"[^>]*target="_blank" rel="noopener"[^>]*>Guide<\/a>/);
-  assert.ok(!html.includes(translations["botbuilder.tutorialLink"].en), "the long 'New to bots?' line is demoted");
-  assert.ok(html.includes('href="/dashboard/bot-builder?new=1"'), "+ New bot stays");
+  const grid = html.indexOf('class="btb-cards"');
+  assert.match(html.slice(0, grid), /<a class="btn btn-primary btn-sm" href="\/dashboard\/bot-builder\?new=1">\+ New bot<\/a>/);
+  assert.ok(!html.slice(0, grid).includes(translations["botbuilder.tutorialLink"].en), "no tutorial line above the grid");
+  const help = html.indexOf('<p class="btb-helpline">');
+  assert.ok(help > html.indexOf('class="btb-botcard-new"'), "the line follows the grid");
+  assert.match(html.slice(help), /^<p class="btb-helpline"><a href="[^"]+" target="_blank" rel="noopener">New to bots\? Read the step-by-step tutorial<\/a><\/p>/);
+  assert.ok(!html.includes("btb-guide-link"), "the option-A Guide link is gone");
 });
 
 test("with no bots: the empty-state wording and the tutorial line are unchanged", async () => {
@@ -195,7 +224,8 @@ test("with no bots: the empty-state wording and the tutorial line are unchanged"
     const html = await render();
     assert.ok(html.includes(translations["botbuilder.emptyListWizard"].en));
     assert.ok(html.includes(translations["botbuilder.tutorialLink"].en));
-    assert.ok(!html.includes('class="btb-rows"'));
+    assert.ok(!html.includes('class="btb-cards"'));
+    assert.ok(!html.includes('class="btb-helpline"'), "the hero carries the tutorial; no second quiet line");
   } finally {
     for (const r of saved) {
       await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id, updated_at) VALUES (?,?,?,?,?,?)",
@@ -215,7 +245,7 @@ test("Spanish render carries none of the new English strings", async () => {
   const used = ["botbuilder.purposePerch", "botbuilder.purposeGlasses", "botbuilder.purposeCompanion",
     "botbuilder.updatedAgoDays", "botbuilder.rowNoBoard", "botbuilder.rowOpenBoard", "botbuilder.rowTurnOn",
     "botbuilder.rowGiveTask", "botbuilder.rowSessions", "botbuilder.rowProject", "botbuilder.rowDelete",
-    "botbuilder.rowEdit", "botbuilder.rowGuide", "botbuilder.rowMore", "botbuilder.boardOnWarn",
+    "botbuilder.rowEdit", "botbuilder.newTileHint", "botbuilder.rowMore", "botbuilder.boardOnWarn",
     "botbuilder.dotOn"];
   for (const k of used) {
     const e = translations[k];
@@ -224,4 +254,15 @@ test("Spanish render carries none of the new English strings", async () => {
     assert.doesNotMatch(es, new RegExp("(^|[^\\p{L}])" + en + "($|[^\\p{L}])", "u"), `${k}: English "${e.en}" in the es render`);
   }
   assert.ok(es.includes("actualizado hace 9 días"));
+});
+
+test("CSS: one column on a phone, three on a wide screen; the popover renders inline on a phone", async () => {
+  const { botBuilderStyles } = await import("../servers/gateway/dashboard/panels/bot-builder/css.js");
+  const css = botBuilderStyles();
+  assert.match(css, /\.btb-cards\{display:grid;grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /@media\s*\(min-width:1024px\)\{[^{}]*\.btb-cards\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}/);
+  assert.match(css, /\.btb-pop\{[^}]*position:absolute/);
+  assert.match(css, /@media\s*\(max-width:640px\)\{[^{}]*\.btb-pop\{position:static/);
+  assert.match(css, /\.btb-botcard-new\{[^}]*border:1px dashed/);
+  assert.ok(!css.includes(".btb-row"), "the option-A row rules are gone");
 });

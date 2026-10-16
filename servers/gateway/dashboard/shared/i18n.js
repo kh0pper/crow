@@ -1278,7 +1278,7 @@ export const translations = {
   "botbuilder.monThThread": { en: "thread", es: "hilo" },
   "botbuilder.monThUpdated": { en: "updated", es: "actualizado" },
   "botbuilder.tutorialLink": { en: "New to bots? Read the step-by-step tutorial", es: "¿Nuevo con los bots? Lee el tutorial paso a paso" },
-  // Bot list rows (queue item 20, option A): shared/bot-display.js
+  // Bot list cards (queue item 20, option B): shared/bot-display.js
   "botbuilder.purposePerch": { en: "Chats in Perch", es: "Conversa en Perch" },
   "botbuilder.purposeGlasses": { en: "Voice assistant on your glasses", es: "Asistente de voz en tus gafas" },
   "botbuilder.purposeCompanion": { en: "AI Companion on a display", es: "AI Companion en una pantalla" },
@@ -1301,7 +1301,7 @@ export const translations = {
   "botbuilder.rowProject": { en: "Project", es: "Proyecto" },
   "botbuilder.rowDelete": { en: "Delete…", es: "Eliminar…" },
   "botbuilder.rowEdit": { en: "Edit", es: "Editar" },
-  "botbuilder.rowGuide": { en: "Guide", es: "Guía" },
+  "botbuilder.newTileHint": { en: "Start from a template or from scratch", es: "Empieza con una plantilla o desde cero" },
   "botbuilder.rowNewBot": { en: "+ New bot", es: "+ Nuevo bot" },
   "botbuilder.rowMore": { en: "More actions for {name}", es: "Más acciones para {name}" },
   "botbuilder.rowSetUpInEdit": { en: "Set up its tracker in Edit", es: "Configura su rastreador en Editar" },

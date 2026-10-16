@@ -35,13 +35,14 @@ function hueOf(id) {
 }
 
 /**
- * One bot as a row (option A): avatar, name (id on hover), status dot, an
- * optional purpose line, a meta line (friendly model with the raw key on
- * hover, updated N ago, a No board chip), then Chat / Edit / ⋯. The ⋯ menu
- * opens inline under the row and carries every other action the old table
- * offered. Empty fields are left out, never dashed.
+ * One bot as a compact card (option B): a large initial avatar beside the
+ * name (id on hover) + status dot and an optional purpose line; a meta line
+ * (the friendly model as a chip with the raw key on hover, a No board chip,
+ * updated N ago); then Chat / Edit / ⋯ along the bottom. The ⋯ menu is a
+ * popover under the footer (inline on a phone) and carries every other
+ * action the old table offered. Empty fields are left out, never dashed.
  */
-function botRowHtml(bt, { i, lang, req, now, providerRows, active }) {
+function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
   let def = {};
   try { def = JSON.parse(bt.definition || "{}") || {}; } catch { def = {}; }
   const id = String(bt.bot_id);
@@ -57,9 +58,9 @@ function botRowHtml(bt, { i, lang, req, now, providerRows, active }) {
   const editHref = `/dashboard/bot-builder?bot=${enc}&tab=ai`;
   const menuId = `btb-menu-${i}`;
   const meta = [
-    model ? `<span title="${escapeHtml(modelKey)}">${escapeHtml(model)}</span>` : "",
-    ago ? `<span>${escapeHtml(ago)}</span>` : "",
+    model ? `<span class="btb-mchip" title="${escapeHtml(modelKey)}">${escapeHtml(model)}</span>` : "",
     board.state === "off" ? `<span class="btb-nob">${t("botbuilder.rowNoBoard", lang)}</span>` : "",
+    ago ? `<span>${escapeHtml(ago)}</span>` : "",
   ].filter(Boolean).join("");
   let boardItem;
   if (board.state === "on" || board.state === "custom") {
@@ -73,21 +74,21 @@ function botRowHtml(bt, { i, lang, req, now, providerRows, active }) {
       `<button type="submit" role="menuitem" tabindex="-1">${t("botbuilder.rowTurnOn", lang)}` +
       `<span class="btb-mhint">${t("botbuilder.boardOnWarn", lang)}</span></button></form>`;
   }
-  const menu = `<div class="btb-menu" id="${menuId}" role="menu" hidden>` + boardItem +
+  const menu = `<div class="btb-menu btb-pop" id="${menuId}" role="menu" hidden>` + boardItem +
     `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowGiveTask", lang)}</a>` +
     `<a role="menuitem" tabindex="-1" href="/dashboard/perch">${t("botbuilder.rowSessions", lang)}</a>` +
     (bt.project_id != null ? `<a role="menuitem" tabindex="-1" href="/dashboard/projects?view=${encodeURIComponent(String(bt.project_id))}">${t("botbuilder.rowProject", lang)}</a>` : "") +
     `<a role="menuitem" tabindex="-1" class="btb-danger-link" href="/dashboard/bot-builder?bot=${enc}&confirm_delete=1">${t("botbuilder.rowDelete", lang)}</a>` +
     `</div>`;
-  return `<div class="btb-row" role="listitem" data-bot="${escapeHtml(id)}">` +
-    `<span class="btb-av btb-hue-${hueOf(id)}" aria-hidden="true">${escapeHtml(Array.from(name.trim())[0] || "?").toUpperCase()}</span>` +
-    `<div class="btb-row-main">` +
-    `<div class="btb-row-name"><span title="${escapeHtml(id)}">${escapeHtml(name)}</span>` +
+  return `<div class="btb-botcard" role="listitem" data-bot="${escapeHtml(id)}">` +
+    `<div class="btb-botcard-top"><span class="btb-av btb-av-l btb-hue-${hueOf(id)}" aria-hidden="true">${escapeHtml(Array.from(name.trim())[0] || "?").toUpperCase()}</span>` +
+    `<div class="btb-botcard-tm">` +
+    `<div class="btb-botcard-name"><span title="${escapeHtml(id)}">${escapeHtml(name)}</span>` +
     `<span class="btb-dot btb-dot-${dot[0]}" role="img" aria-label="${escapeHtml(dot[1])}" title="${escapeHtml(dot[1])}"></span></div>` +
-    (purpose ? `<div class="btb-row-purpose">${escapeHtml(purpose)}</div>` : "") +
-    (meta ? `<div class="btb-row-meta">${meta}</div>` : "") +
-    `</div>` +
-    `<div class="btb-row-acts">` +
+    (purpose ? `<div class="btb-botcard-purpose">${escapeHtml(purpose)}</div>` : "") +
+    `</div></div>` +
+    (meta ? `<div class="btb-botcard-meta">${meta}</div>` : "") +
+    `<div class="btb-botcard-foot">` +
     (perchAttached(def) ? `<a class="btn btn-primary btn-sm" href="/dashboard/perch?bot=${enc}">${t("perch.tabChat", lang)}</a>` : "") +
     `<a class="btn btn-secondary btn-sm" href="${editHref}">${t("botbuilder.rowEdit", lang)}</a>` +
     `<button type="button" class="btb-more" aria-haspopup="menu" aria-expanded="false" aria-controls="${menuId}" ` +
@@ -107,19 +108,23 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
   const now = Date.now();
   const activeIds = new Set(sessions.filter((s) => s.status === "active" && Number(s.n) > 0).map((s) => s.bot_id));
-  const rows = bots.map((bt, i) => botRowHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) }));
+  const cards = bots.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) }));
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
-  // Option A rows: once bots exist, the tutorial shrinks to a small Guide
-  // link beside "+ New bot"; with none, the empty state keeps its wording.
+  // Option B: once bots exist, "+ New bot" sits in the toolbar and closes
+  // the grid as a dashed tile, and the tutorial is one quiet line under the
+  // grid; with none, the empty state keeps its wording (the hero).
   const tutorialHref = docsUrl((lang === "es" ? "es/" : "") + "guide/bot-builder-tutorial");
-  const wizCta = rows.length
-    ? `<div class="btb-toolbar"><a class="btn btn-primary btn-sm" href="/dashboard/bot-builder?new=1">${t("botbuilder.rowNewBot", lang)}</a>` +
-      `<a class="btb-guide-link" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.rowGuide", lang)}</a></div>`
+  const wizCta = cards.length
+    ? `<div class="btb-toolbar"><a class="btn btn-primary btn-sm" href="/dashboard/bot-builder?new=1">${t("botbuilder.rowNewBot", lang)}</a></div>`
     : `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a> ` +
       `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
+  const newTile = `<div class="btb-botcard-new" role="listitem"><a class="btb-botcard-new-link" href="/dashboard/bot-builder?new=1">` +
+    `<b>${t("botbuilder.rowNewBot", lang)}</b><span>${t("botbuilder.newTileHint", lang)}</span></a></div>`;
   const list = section(t("botbuilder.listTitle", lang),
-    notice + wizCta + (rows.length
-      ? `<div class="btb-rows" role="list">${rows.join("")}</div>` + rowMenuScript()
+    notice + wizCta + (cards.length
+      ? `<div class="btb-cards" role="list">${cards.join("")}${newTile}</div>` +
+        `<p class="btb-helpline"><a href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>` +
+        rowMenuScript()
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];

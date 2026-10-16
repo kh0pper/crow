@@ -1,8 +1,10 @@
 /**
- * Bot Builder list — the row ⋯ menu's client script (queue item 20, option A).
+ * Bot Builder list — the bot card ⋯ menu's client script (queue item 20;
+ * written for option A's rows, kept for option B's cards).
  *
  * Same semantics as the Perch session rows' menu (perch-hub/client.js,
- * buildRowMenu): the menu opens INLINE under its row; opening one closes the
+ * buildRowMenu): the menu is a popover under its card's footer (CSS renders
+ * it inline below the footer on a phone); opening one closes the
  * others; ArrowDown on the trigger opens it on its first item; arrows,
  * Home/End move inside; Escape closes and hands focus back to the trigger; an
  * outside click closes it, and so does focus leaving it (Tab away) for
@@ -10,7 +12,7 @@
  *
  * Document-level delegation, bound once per page lifetime: Turbo swaps the
  * body but keeps window/document, so a second run must not stack listeners.
- * The rows are server-rendered (html.js); the script carries no strings.
+ * The cards are server-rendered (html.js); the script carries no strings.
  *
  * This is a template literal: never put a backtick or a dollar-brace inside.
  */

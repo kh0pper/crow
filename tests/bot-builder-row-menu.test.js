@@ -1,5 +1,5 @@
 /**
- * Bot Builder rows (queue item 20, option A; T3) — the row ⋯ menu's client
+ * Bot Builder cards (queue item 20, option B; T3) — the card ⋯ menu's client
  * script: toggles hidden + aria-expanded, Escape closes and hands focus back
  * to the trigger, ArrowDown focuses the first item, an outside click closes
  * it, and opening one menu closes the others (the Perch #477 semantics).
@@ -69,7 +69,7 @@ function makeDom(rowCount = 2) {
     menu.hidden = true;
     const items = [0, 1, 2].map((k) => new El(doc, "a", { role: "menuitem", "data-k": String(k) }));
     menu.append(...items);
-    const row = new El(doc, "div", { class: "btb-row" }).append(new El(doc, "span", { class: "btb-av" }), more, menu);
+    const row = new El(doc, "div", { class: "btb-botcard" }).append(new El(doc, "span", { class: "btb-av" }), more, menu);
     body.append(row);
     rows.push({ row, more, menu, items });
   }
