@@ -94,6 +94,7 @@ function specError(engine, e) {
 }
 
 const WS = (c) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f";
+const LIB_HREF = /^__lib\/(?!.*\.\.)[a-z0-9._/-]{1,200}\.svg$/;
 // data: URLs a rendered SVG may carry in url(): fonts (D2 embeds its fonts)
 // and raster images. Never data:image/svg+xml or text/html (a nested document).
 const DATA_MIME_PREFIXES = ["font/", "application/font-", "application/x-font-"];
@@ -114,7 +115,7 @@ function okDataUrl(low, j) {
 /** href / xlink:href that is not an in-document fragment (any whitespace
  *  around "="), url() that is not #id or a font/raster data: URL, @import,
  *  image-set(, src(. Linear scans (ReDoS review). Input is lowercased. */
-export function hasExternalRef(low) {
+export function hasExternalRef(low, libOk = false) {
   let i = 0;
   for (;;) {
     const k = low.indexOf("href", i);
@@ -127,7 +128,11 @@ export function hasExternalRef(low) {
     while (WS(low.charAt(j))) j++;
     const q = low.charAt(j);
     if (q !== '"' && q !== "'") return true;
-    if (low.charAt(j + 1) !== "#") return true;
+    if (low.charAt(j + 1) === "#") continue;
+    // A bot diagram may point an <image> at a Design kit icon copied into the
+    // version (__lib/…): same version, relative, no "..", no query or scheme.
+    const close = libOk ? low.indexOf(q, j + 1) : -1;
+    if (close < 0 || !LIB_HREF.test(low.slice(j + 1, close))) return true;
   }
   if (low.includes("@import") || low.includes("image-set(") || low.includes("src(")) return true;
   i = 0;
@@ -153,6 +158,7 @@ const SVG_ELEMENTS = new Set(["svg", "g", "defs", "symbol", "use", "title", "des
   "fepointlight", "fespecularlighting", "fespotlight", "fetile", "feturbulence"]);
 // Second layer, by substring (the brief's list): never in any rendered SVG.
 const BANNED_TAGS = ["<script", "<foreignobject", "<set", "<animate", "<a ", "<a>", "<a\n", "<a\t", "<a/", "<iframe", "<embed", "<object", "<img"];
+const TEXT_ONLY = new Set(["title", "desc"]);
 const NAME_CH = (c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-";
 
 /** Markup walk (linear): exactly one root <svg>, well nested (an element
@@ -162,7 +168,7 @@ const NAME_CH = (c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c ===
  *  allowed element; no comment, doctype or processing instruction; CDATA only
  *  inside a <style> inside the root; no backslash (a CSS escape such as
  *  \75 rl( or @\69mport) in any tag or in style text. */
-function markupOk(low) {
+function markupOk(low, allowImage = false) {
   let i = 0;
   const stack = [];
   for (;;) {
@@ -184,8 +190,11 @@ function markupOk(low) {
     while (NAME_CH(low.charAt(j))) j++;
     const name = low.slice(n0, j);
     const after = low.charAt(j);
-    if (!(name && name.charAt(0) >= "a" && name.charAt(0) <= "z" && SVG_ELEMENTS.has(name)) || !(WS(after) || after === "/" || after === ">")) return false;
+    if (!(name && name.charAt(0) >= "a" && name.charAt(0) <= "z" && (SVG_ELEMENTS.has(name) || (allowImage && name === "image"))) || !(WS(after) || after === "/" || after === ">")) return false;
     if (lt === 0 ? name !== "svg" || closing : !stack.length) return false;
+    // Fix round 3: <title> and <desc> are HTML integration points in inline
+    // SVG (a <style> in them is HTML raw text, without CDATA): text only.
+    if (!closing && TEXT_ONLY.has(stack.at(-1))) return false;
     if (inStyle && !(closing && name === "style")) return false;
     j = closing ? skipWs(low, j) : attrsEnd(low, j);
     if (j < 0 || low.charAt(j) !== ">") return false;
@@ -265,16 +274,27 @@ const asciiLower = (s) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
  *  escapes. Fail closed: refused, never repaired. */
 export function checkRenderedSvg(raw) {
   if (typeof raw !== "string" || Buffer.byteLength(raw) > LIMITS.renderedSvgBytes) throw err("render_too_large", TOO_LARGE);
+  const svg = stripProlog(raw);
+  if (!safeSvg(svg, false)) throw err("render_failed", UNSAFE);
+  return svg;
+}
+const stripProlog = (raw) => {
   let svg = raw.trim();
   if (svg.startsWith("<?xml")) { const e = svg.indexOf("?>"); svg = e < 0 ? "" : svg.slice(e + 2).trim(); }
+  return svg;
+};
+/** The structure and reference rules, shared by renderer output and a bot's
+ *  own { svg } diagram (fix round 3). `bot` also allows <image> of a kit icon
+ *  under __lib/. */
+function safeSvg(svg, bot) {
   const low = asciiLower(svg);
   const opens = low.startsWith("<svg>") || (low.startsWith("<svg") && WS(low.charAt(4)));
   const dec = opens ? decodeRefs(low) : null;
-  if (!opens || !low.endsWith("</svg>") || dec === null || BANNED_TAGS.some((t) => low.includes(t)) || !markupOk(low) || hasEventAttr(low) || hasExternalRef(low) || hasExternalRef(asciiLower(dec)) || dec.includes("\\")) {
-    throw err("render_failed", UNSAFE);
-  }
-  return svg;
+  return !(!opens || !low.endsWith("</svg>") || dec === null || BANNED_TAGS.some((t) => low.includes(t)) || !markupOk(low, bot) || hasEventAttr(low)
+    || hasExternalRef(low, bot) || hasExternalRef(asciiLower(dec), bot) || dec.includes("\\"));
 }
+/** Fixed, actionable text for a bot's own SVG that fails safeSvg. */
+const BOT_SVG = "svg must be plain SVG: one root <svg> holding shapes, text, gradients, filters and <style> only, every attribute quoted, <title> and <desc> as plain text; no links, HTML, comments, CDATA outside <style>, CSS escapes or external references (a Design kit icon is <image href=\"__lib/icons/<set>/<name>.svg\">)";
 
 const specKey = (engine, source) => `${engine}:${createHash("sha256").update(String(source)).digest("hex")}`;
 
@@ -536,6 +556,9 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     // source honest and the anchor map meaningful.
     const low = svg.toLowerCase();
     if (low.includes("<script") || low.includes("<foreignobject") || hasEventAttr(low)) throw err("bad_source", "svg may not carry scripts, event handlers or foreignObject");
+    // Fix round 3: the SVG is inlined into HTML, so the HTML parser's
+    // break-outs apply to a bot's own SVG too. Rendered SVG passed already.
+    if (!renderedN && !safeSvg(svg, true)) throw err("bad_source", BOT_SVG);
     const aspect = svgAspect(svg);
     const elements = svgElements(svg);
     const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>${headLinks(lib)}</head><body>${svg}</body></html>`;

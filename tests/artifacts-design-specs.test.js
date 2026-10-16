@@ -351,3 +351,46 @@ test("fix round 2: one root <svg>, nothing after it; CDATA only inside a <style>
   ];
   for (const svg of good) assert.ok(checkRenderedSvg(svg).startsWith("<svg"), svg);
 });
+
+// Fix round 3: <title> and <desc> are HTML integration points in inline SVG; a
+// <style> inside them is HTML raw text (no CDATA), so they hold text only. The
+// bot-supplied { svg } diagram gets the same structure rules.
+const R3_BREAKOUTS = [
+  '<svg><title><style><![CDATA[</style><meta http-equiv="refresh" content="0;url=https://evil.example/">]]></style></title></svg>',
+  '<svg><desc><style><![CDATA[</style><table background="https://evil.example/t.png"></table>]]></style></desc></svg>',
+  '<svg><g><title><style><![CDATA[</style><form action="https://evil.example/"><button>Continue</button></form>]]></style></title></g></svg>',
+];
+const BOT_SVG_MSG = /^svg must be plain SVG/;
+test("fix round 3: <title>/<desc> hold text only, in rendered and bot-supplied SVG", async () => {
+  const refused = (svg) => { try { checkRenderedSvg(svg); return null; } catch (e) { return e.code; } };
+  const bad = [...R3_BREAKOUTS, "<svg><title><g></g></title></svg>", "<svg><desc><![CDATA[x]]></desc></svg>", "<svg><title>a<tspan>b</tspan></title></svg>", "<svg><desc><style></style></desc></svg>"];
+  for (const svg of bad) {
+    assert.equal(refused(svg), "render_failed", svg);
+    const e = await errOf(renderVersion("diagram", { svg }, {}));
+    assert.equal(e && e.code, "bad_source", svg);
+    assert.match(e.message, BOT_SVG_MSG);
+  }
+  const good = '<svg viewBox="0 0 2 1"><g id="n1"><title>Node one &amp; two</title><desc>A box</desc><rect/></g></svg>';
+  assert.ok(checkRenderedSvg(good));
+  assert.deepEqual((await renderVersion("diagram", { svg: good }, {})).anchorMap.elements, [{ id: "n1", tag: "g", title: "Node one &amp; two" }]);
+});
+
+test("fix round 3: a bot { svg } diagram fails closed on HTML, links, external refs and break-outs; kit icons stay usable", async () => {
+  const bad = [
+    '<svg></svg><style><![CDATA[</style><meta http-equiv="refresh" content="0;url=https://evil.example/">]]></style></svg>',
+    "<svg><div>x</div></svg>", '<svg><a href="https://evil.example"><text>x</text></a></svg>', '<svg><a href="#n1"><text>x</text></a></svg>',
+    '<svg><image href="https://evil.example/i.png"/></svg>', '<svg><image href="__lib/../x.svg"/></svg>', '<svg><image href="__lib/icons/x.svg?y=//evil.example"/></svg>',
+    '<svg><rect style="fill:url(https://evil.example/p)"/></svg>', "<svg><!-- c --></svg>", '<svg><rect x=1/></svg>', "<svg><style>@import 'x.css';</style></svg>",
+    '<svg><use href="__lib/icons/lucide/coffee.svg#i"/></svg>',
+  ];
+  for (const svg of bad) {
+    const e = await errOf(renderVersion("diagram", { svg }, {}));
+    assert.equal(e && e.code, "bad_source", svg);
+    assert.match(e.message, BOT_SVG_MSG, svg);
+  }
+  const icon = '<svg viewBox="0 0 24 24"><image href="__lib/icons/lucide/coffee.svg" width="24" height="24"/></svg>';
+  assert.ok(await renderVersion("diagram", { svg: icon }, {}), "a kit icon by its __lib/ path");
+  assert.equal((() => { try { checkRenderedSvg(icon); return null; } catch (e) { return e.code; } })(), "render_failed", "renderer output never carries <image>");
+  // The older, more specific messages still win where they apply.
+  assert.match((await errOf(renderVersion("diagram", { svg: "<svg><script>alert(1)</script></svg>" }, {}))).message, /scripts/);
+});
