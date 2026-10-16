@@ -48,6 +48,10 @@ Un gateway conecta un agente con un lugar donde la gente habla con él. La misma
 - **Crow Messages**: El agente se vuelve accesible como un contacto. Las personas que invites pueden enviarle mensajes, puedes explorar y agregar los bots que corren en tus Crows, y puedes reunir a personas y bots en una sala grupal. Consulta la [guía de Crow Messages](/es/guide/crow-messages).
 - **Perch**: El agente se vuelve conversable directamente en el tablero de tu propio panel. No hay nada que configurar: elegir el canal es toda la configuración, y nada que instalar. Consulta [Perch](#perch-habla-con-un-agente-desde-tu-propio-panel) más abajo.
 
+### Qué bot responde por voz
+
+La tarjeta de cada bot dice dónde responde por voz: **Responde por voz en:** nombra las gafas o el Compañero IA vinculados, **Teléfono y panel** cuando responde a Hablar con Crow (con *(automático)* cuando nadie eligió uno y Automático lo escogió) y cada pantalla de kiosco donde está. Con la extensión Kiosk instalada, **⋯ → Usar para la voz…** le asigna Teléfono y panel o una pantalla en un paso. Guarda los mismos ajustes que el panel Kiosk. Una pantalla cambia al momento; Teléfono y panel se aplica la próxima vez que se abra Hablar con Crow. Las gafas y el compañero se configuran en los ajustes de canal del bot, a los que el diálogo enlaza. Una pantalla no puede quedarse sin bot, así que para quitársela a este bot, elige otro bot para ella.
+
 Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a la vez, y elegir un nuevo agente para un dispositivo libera el vínculo anterior.
 
 ## Perch: habla con un agente desde tu propio panel

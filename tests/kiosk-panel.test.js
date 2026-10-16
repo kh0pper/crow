@@ -220,7 +220,7 @@ test("fit in the dashboard-voice picker: every assistant has its status, the war
   const box = p.document.getElementById("kk-dash");
   const sel = box.querySelector("select");
   const labels = Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
-  assert.equal(labels[""], STRINGS.en.dash_voice_auto);
+  assert.equal(labels[""], STRINGS.en.dash_voice_auto_now.replace("{name}", "Chef"), "Automatic names who it picks");
   assert.equal(labels.huge, `Huge — ${STRINGS.en.fit_tag_too_large}`);
   assert.equal(labels.general, `General — ${STRINGS.en.fit_tag_no_skills}`);
   assert.equal(labels.chef, "Chef");
@@ -237,7 +237,56 @@ test("fit in the dashboard-voice picker: every assistant has its status, the war
   const nbox = none.document.getElementById("kk-dash");
   assert.ok(nbox.textContent.includes(STRINGS.en.dash_voice_none_fit));
   assert.ok(nbox.querySelector(".kk-warn"));
-  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].dash_voice_none_fit); assert.match(STRINGS[L].dash_voice_auto, L === "en" ? /fits/ : /quepa/); }
+  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].dash_voice_none_fit); assert.match(STRINGS[L].dash_voice_fits_explain, L === "en" ? /small enough/ : /pequeño/); }
+});
+
+// ── Item 20 PR 3: which bot answers voice ─────────────────────────────────
+const optLabels = (sel) => Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
+
+test("voice bot choice: the Automatic option names the assistant it picks — also while another one is chosen — and says when none fits", async () => {
+  const dev = { ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" };
+  const auto = await runPanel(dev, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: "household", auto_bot_id: "household" } });
+  const sel = auto.document.querySelector("#kk-dash select");
+  assert.equal(optLabels(sel)[""], "Automatic — now Household");
+  assert.equal(sel.value, "", "Automatic is selected");
+  const chosen = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef", auto_bot_id: "household" } });
+  const csel = chosen.document.querySelector("#kk-dash select");
+  assert.equal(optLabels(csel)[""], "Automatic — now Household", "named even while Chef is the explicit choice");
+  assert.equal(csel.value, "chef");
+  const none = await runPanel(dev, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: null, auto_bot_id: null } });
+  assert.equal(optLabels(none.document.querySelector("#kk-dash select"))[""], STRINGS.en.dash_voice_auto_none);
+  // An older listing without auto_bot_id: Automatic is the effective bot when nothing is chosen, else unnamed.
+  const old = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef" } });
+  assert.equal(optLabels(old.document.querySelector("#kk-dash select"))[""], STRINGS.en.dash_voice_auto);
+});
+
+test("voice bot choice: after a save the Automatic label follows the server's answer", async () => {
+  const dev = { ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" };
+  const p = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef", auto_bot_id: "chef" },
+    postReply: { ok: true, bot_id: null, effective_bot_id: "household", auto_bot_id: "household" } });
+  const sel = p.document.querySelector("#kk-dash select");
+  assert.equal(optLabels(sel)[""], "Automatic — now Chef");
+  p.choose(sel, "");
+  await p.flush();
+  assert.deepEqual(p.posts.at(-1), { path: "/api/kiosk/admin/dashboard-voice", body: { bot_id: "" } });
+  assert.equal(optLabels(sel)[""], "Automatic — now Household");
+  assert.ok(p.document.getElementById("kk-dash").textContent.includes(STRINGS.en.dash_voice_now.replace("{name}", "Household")));
+});
+
+test("voice bot choice: 'fits' is explained in plain words, and every picker says it can also be set from a bot's card in Bot Builder", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: "chef", auto_bot_id: "chef" } });
+  const dash = p.document.getElementById("kk-dash").textContent;
+  assert.ok(dash.includes(STRINGS.en.dash_voice_fits_explain));
+  assert.ok(dash.includes(STRINGS.en.voice_also_in_builder));
+  assert.ok(p.card.textContent.includes(STRINGS.en.voice_also_in_builder), "each display card too");
+  for (const L of ["en", "es"]) {
+    for (const k of ["dash_voice_auto_now", "dash_voice_auto_none", "dash_voice_fits_explain", "voice_also_in_builder"]) {
+      assert.ok(STRINGS[L][k], `${L}.${k}`);
+      assert.ok(!STRINGS[L][k].includes("`") && !STRINGS[L][k].includes("${"), `${L}.${k}`);
+    }
+    assert.match(STRINGS[L].dash_voice_auto_now, /\{name\}/);
+    assert.match(STRINGS[L].voice_also_in_builder, /Bot Builder/);
+  }
 });
 
 test("the memories switch says how memories are used: when asked to remember or recall, not on every question (en + es)", async () => {

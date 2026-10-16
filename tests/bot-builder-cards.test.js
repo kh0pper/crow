@@ -51,13 +51,28 @@ before(async () => {
       args: [id, name, JSON.stringify(def), id === "helper" ? PROJECT_ID : null],
     });
   }
+  await seedDevices();
 });
+// Voice devices (item 20 PR 3): a companion and two glasses (one an older
+// record with no device_kind, read as glasses), plus a kiosk display — kiosk
+// displays are NOT in the server part of the line (the Kiosk listing fills them).
+const DEVICES = [
+  { id: "d1", name: "Living room companion", device_kind: "companion", bound_bot_id: "alpha-home" },
+  { id: "d2", name: "Walk <glasses>", device_kind: "glasses", bound_bot_id: "gamma-glasses" },
+  { id: "d3", name: "Old glasses", bound_bot_id: "gamma-glasses" },
+  { id: "kiosk-k1", name: "Kitchen", device_kind: "kiosk", bound_bot_id: "beta-home" },
+  { id: "d4", name: "Spare glasses", device_kind: "glasses", bound_bot_id: null },
+];
+async function seedDevices() {
+  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('meta_glasses_devices', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    args: [JSON.stringify(DEVICES)] });
+}
 after(() => { try { db && db.close && db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
-async function render(lang = "en", { csrf = "tok123" } = {}) {
+async function render(lang = "en", { csrf = "tok123", kioskAvailable, dbOver } = {}) {
   const res = { html: null, send(h) { this.html = h; return this; }, redirectAfterPost() {} };
   const headers = lang === "es" ? { cookie: "crow_lang=es" } : {};
-  await renderBotList(res, { db, layout: ({ content }) => content, notice: "", PAGE_CSS: "", req: { headers, csrfToken: csrf } });
+  await renderBotList(res, { db: dbOver || db, layout: ({ content }) => content, notice: "", PAGE_CSS: "", req: { headers, csrfToken: csrf }, kioskAvailable });
   return res.html;
 }
 
@@ -268,4 +283,99 @@ test("CSS: one column on a phone, three on a wide screen; the popover renders in
   assert.match(css, /@media\s*\(max-width:640px\)\{[^{}]*\.btb-pop\{position:static/);
   assert.match(css, /\.btb-botcard-new\{[^}]*border:1px dashed/);
   assert.ok(!css.includes(".btb-row"), "the option-A row rules are gone");
+});
+
+// ── Item 20 PR 3: which bot answers voice ─────────────────────────────────
+function voiceLine(card) {
+  const m = card.match(/<p class="btb-voice"[^>]*>[\s\S]*?<\/p>/);
+  return m ? m[0] : null;
+}
+
+test("voice line (server part): a bot bound to a companion or glasses names those devices, escaped; kiosk displays are left to the Kiosk listing", async () => {
+  const html = await render();
+  const alpha = voiceLine(rowOf(html, "alpha-home"));
+  assert.ok(alpha, "alpha-home has a voice line");
+  assert.match(alpha, /^<p class="btb-voice" data-voice-bot="alpha-home"/);
+  assert.ok(!/^<p[^>]*\shidden/.test(alpha), "shown");
+  assert.ok(alpha.includes(translations["botbuilder.voiceOn"].en));
+  assert.ok(alpha.includes("Living room companion"));
+  const gamma = voiceLine(rowOf(html, "gamma-glasses"));
+  assert.ok(gamma.includes("Walk &lt;glasses&gt;"), "escaped");
+  assert.ok(!gamma.includes("Walk <glasses>"));
+  assert.ok(gamma.includes("Old glasses"), "a record with no device_kind is glasses");
+  assert.ok(!html.includes("Spare glasses"), "an unbound device is on no card");
+  const beta = voiceLine(rowOf(html, "beta-home"));
+  assert.match(beta, /^<p class="btb-voice"[^>]*\shidden/, "nothing server-side: the line is hidden, never a dash");
+  assert.ok(!beta.includes("Kitchen"), "kiosk displays come from the Kiosk listing, not from here");
+});
+
+test("voice line: the device registry is read once per render, and a registry failure renders the grid without any device names", async () => {
+  let reads = 0;
+  const counting = { execute: (q) => { if (q && Array.isArray(q.args) && q.args[0] === "meta_glasses_devices") reads++; return db.execute(q); } };
+  await render("en", { dbOver: counting });
+  assert.equal(reads, 1, "one listDevices per render, not one per card");
+  const failing = { execute: (q) => (q && Array.isArray(q.args) && q.args[0] === "meta_glasses_devices" ? Promise.reject(new Error("registry gone")) : db.execute(q)) };
+  const html = await render("en", { dbOver: failing });
+  assert.equal((listPart(html).match(/class="btb-botcard"/g) || []).length, BOTS.length, "the grid still renders");
+  assert.ok(!html.includes("Living room companion"));
+  for (const [id] of BOTS) assert.match(voiceLine(rowOf(html, id)), /^<p class="btb-voice"[^>]*\shidden/, id);
+});
+
+test("⋯ Use for voice…: only with the kiosk available (decided on the server), only on enabled bots, hidden until the Kiosk listing loads; the dialog and its script ship with it", async () => {
+  const off = await render();
+  assert.ok(!off.includes("btb-voice-use"), "no kiosk: no menu item");
+  assert.ok(!off.includes('id="btb-vu"'), "no kiosk: no dialog");
+  assert.ok(!off.includes("__btbVoiceUse"), "no kiosk: no script");
+  await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 0 WHERE bot_id = 'beta-home'", args: [] });
+  try {
+    const on = await render("en", { kioskAvailable: true });
+    for (const [id] of BOTS) {
+      const card = rowOf(on, id);
+      if (id === "beta-home") { assert.ok(!card.includes("btb-voice-use"), "a disabled bot is offered nothing"); continue; }
+      const item = card.match(/<button[^>]*class="btb-voice-use"[^>]*>/);
+      assert.ok(item, `${id}: the item`);
+      assert.match(item[0], /role="menuitem"/);
+      assert.match(item[0], /\shidden/, `${id}: hidden until the listing loads`);
+      assert.match(item[0], new RegExp(`data-bot-id="${id}"`));
+      assert.match(item[0], /aria-controls="btb-vu"/);
+      assert.ok(card.includes(translations["botbuilder.rowUseForVoice"].en));
+    }
+    const dlg = on.indexOf('id="btb-vu"');
+    assert.ok(dlg > 0 && dlg > on.indexOf("</section>") || dlg > 0, "the dialog renders");
+    assert.ok(on.slice(on.lastIndexOf("<", dlg), dlg).includes('role="dialog"') || on.slice(on.lastIndexOf("<", dlg)).startsWith('<div class="btb-give btb-vu" id="btb-vu" role="dialog"'));
+    assert.ok(on.includes("__btbVoiceUse"), "the client script ships");
+  } finally { await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 WHERE bot_id = 'beta-home'", args: [] }); }
+});
+
+test("voice strings: en + es, and the Spanish render carries none of the English ones", async () => {
+  const keys = ["botbuilder.voiceOn", "botbuilder.rowUseForVoice"];
+  for (const k of keys) assert.ok(translations[k] && translations[k].en && translations[k].es && translations[k].en !== translations[k].es, k);
+  const es = await render("es", { kioskAvailable: true });
+  for (const k of keys) assert.ok(!es.includes(translations[k].en), `${k}: English in the es render`);
+  assert.ok(es.includes(translations["botbuilder.voiceOn"].es));
+});
+
+test("I2: the panel gets kiosk availability from the dashboard router (the installed Kiosk panel + its routes), not from the client", async () => {
+  const { default: panel } = await import("../servers/gateway/dashboard/panels/bot-builder.js");
+  const run = async (ctx) => {
+    let html = "";
+    await panel.handler({ method: "GET", query: {}, headers: {}, csrfToken: "tok" }, { send: (h) => { html = h; }, redirectAfterPost() {} },
+      { db, lang: "en", layout: ({ content }) => content, ...ctx });
+    return html;
+  };
+  assert.ok((await run({ kioskAvailable: true })).includes('class="btb-voice-use"'));
+  assert.ok(!(await run({})).includes('class="btb-voice-use"'), "absent unless the router says so");
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/dashboard/index.js", import.meta.url), "utf8");
+  const call = src.slice(src.indexOf("await panel.handler(req, res, {"), src.indexOf("await panel.handler(req, res, {") + 400);
+  assert.match(call, /kioskAvailable:\s*talkAvailable/, "index.js hands isCrowTalkAvailable's answer to every panel");
+});
+
+test("CSS: a hidden ⋯ item and a hidden voice line really hide (the menu's display:block would otherwise beat [hidden]); the line wraps", async () => {
+  const { botBuilderStyles } = await import("../servers/gateway/dashboard/panels/bot-builder/css.js");
+  const css = botBuilderStyles();
+  assert.match(css, /\.btb-menu \[hidden\]\{display:none\}/);
+  assert.match(css, /\.btb-voice\[hidden\]\{display:none\}/);
+  assert.match(css, /\.btb-voice\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css, /\.btb-vu-row\{[^}]*min-width:0/);
 });

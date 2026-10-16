@@ -512,6 +512,8 @@ export function createKioskRuntime(deps) {
   }
   /** The session display's assistant; Automatic only picks one that fits (a session display starts with memories off). */
   const sessionBot = (db) => resolveSessionBot(db, deps.settings, (id) => botFit(db, id, false));
+  /** Who "Automatic" would pick right now, whatever is chosen: the same resolver with no choice (the pickers name it). */
+  const automaticBot = (db) => resolveSessionBot(db, { readSetting: async () => "" }, (id) => botFit(db, id, false));
   /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
   async function authorizeSessionHello(req, sessionToken, msg) {
     if (!deps.csrfTokenAccepted(req, msg?.csrf)) return null;
@@ -710,7 +712,7 @@ export function createKioskRuntime(deps) {
         for (const b of bots) { b.fit = await botFit(db, b.bot_id, false); b.fit_memory = await botFit(db, b.bot_id, true); }
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
         const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
-        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db) };
+        const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) };
         return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles"), dashboard_voice };
       });
       res.json(body);
@@ -759,7 +761,7 @@ export function createKioskRuntime(deps) {
           if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
         }
         await deps.settings.writeSetting(db, SESSION_BOT_SETTING, botId);
-        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await sessionBot(db) });
+        res.json({ ok: true, bot_id: botId || null, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) });
       });
     }));
     r.post("/api/kiosk/admin/displays/:id", json, wrap(async (req, res) => {

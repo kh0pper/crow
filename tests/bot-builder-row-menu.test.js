@@ -31,6 +31,7 @@ class El {
   }
   get id() { return this.attrs.id || ""; }
   get className() { return this.attrs.class || ""; }
+  get parentNode() { return this.parent; }
   append(...kids) { for (const k of kids) { k.parent = this; this.children.push(k); } return this; }
   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; }
   setAttribute(n, v) { this.attrs[n] = String(v); }
@@ -164,4 +165,30 @@ test("focusout with no destination (window blur) leaves the menu alone", () => {
   fire("click", rows[1].more);
   fire("focusout", rows[1].items[0], {});
   assert.equal(rows[1].menu.hidden, false);
+});
+
+// Item 20 PR 3: "Use for voice…" stays hidden until the Kiosk listing loads,
+// so a hidden item (or one inside a hidden wrapper) is never focused.
+test("hidden items are skipped: first focus, arrows, Home/End never land on a hidden item or one in a hidden wrapper", () => {
+  const { doc, rows, fire } = makeDom();
+  const r = rows[0];
+  r.items[0].hidden = true;                       // the first item is hidden
+  const wrap = new El(doc, "div", {});
+  wrap.hidden = true;
+  const inner = new El(doc, "button", { role: "menuitem" });
+  wrap.append(inner);
+  r.menu.append(wrap);                            // and a last item inside a hidden wrapper
+  fire("click", r.more);
+  assert.equal(doc.activeElement, r.items[1], "first focus skips the hidden item");
+  fire("keydown", r.items[1], { key: "ArrowDown" });
+  assert.equal(doc.activeElement, r.items[2]);
+  fire("keydown", r.items[2], { key: "ArrowDown" });
+  assert.equal(doc.activeElement, r.items[1], "wraps past the hidden ones");
+  fire("keydown", r.items[1], { key: "End" });
+  assert.equal(doc.activeElement, r.items[2], "End is the last VISIBLE item");
+  fire("keydown", r.items[2], { key: "Home" });
+  assert.equal(doc.activeElement, r.items[1]);
+  r.items[0].hidden = false;                       // shown once the listing loads
+  fire("keydown", r.items[1], { key: "Home" });
+  assert.equal(doc.activeElement, r.items[0]);
 });

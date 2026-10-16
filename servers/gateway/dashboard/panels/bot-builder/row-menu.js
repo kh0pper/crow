@@ -13,6 +13,8 @@
  * Document-level delegation, bound once per page lifetime: Turbo swaps the
  * body but keeps window/document, so a second run must not stack listeners.
  * The cards are server-rendered (html.js); the script carries no strings.
+ * A hidden item (or one inside a hidden wrapper) is never focused: "Use for
+ * voice…" stays hidden until the Kiosk listing loads (voice-use.js).
  *
  * This is a template literal: never put a backtick or a dollar-brace inside.
  */
@@ -22,7 +24,8 @@ export function rowMenuScript() {
   window.__btbRowMenu = 1;
   function trigOf(m){ return document.querySelector('[aria-controls="' + m.id + '"]'); }
   function menuOf(b){ return document.getElementById(b.getAttribute('aria-controls')); }
-  function itemsOf(m){ return Array.prototype.slice.call(m.querySelectorAll('[role="menuitem"]')); }
+  function shown(e, m){ for (var n = e; n && n !== m; n = n.parentNode) if (n.hidden) return false; return true; }
+  function itemsOf(m){ return Array.prototype.slice.call(m.querySelectorAll('[role="menuitem"]')).filter(function(e){ return shown(e, m); }); }
   function openMenu(){
     var all = document.querySelectorAll('.btb-menu');
     for (var i = 0; i < all.length; i++) if (!all[i].hidden) return all[i];

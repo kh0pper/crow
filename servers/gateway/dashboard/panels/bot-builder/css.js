@@ -286,6 +286,24 @@ export function botBuilderStyles() {
   .btb-menu-form{margin:0}
   .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}
   .btb-menu a:hover,.btb-menu button:hover{background:var(--crow-bg-elevated)}
+  .btb-menu [hidden]{display:none}
+  /* "Answers voice on: …" (queue item 20, PR 3): one quiet line that wraps; hidden when there is nothing to say. */
+  .btb-voice{margin:0;font-size:.8rem;color:var(--crow-text-secondary);min-width:0;overflow-wrap:anywhere}
+  .btb-voice[hidden]{display:none}
+  .btb-voice-l{color:var(--crow-text-muted)}
+  /* "Use <Name> for voice" rows (voice-use.js), inside the give dialog's panel styles. */
+  .btb-vu-rows{display:flex;flex-direction:column;gap:.5rem;min-width:0}
+  .btb-vu-row{display:flex;flex-direction:column;gap:.15rem;min-width:0;padding:.45rem .6rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);overflow-wrap:anywhere}
+  .btb-vu-l{display:flex;align-items:center;gap:.5rem;min-height:36px;font-weight:600;cursor:pointer}
+  .btb-vu-l input{flex:none;width:20px;height:20px;margin:0}
+  .btb-vu-name{min-width:0;overflow-wrap:anywhere}
+  .btb-vu-sub,.btb-vu-fit,.btb-vu-msg{font-size:.8rem;color:var(--crow-text-secondary)}
+  .btb-vu-msg:empty{display:none}
+  .btb-vu-bad{color:var(--crow-error)}
+  .btb-vu-warn{color:var(--crow-warning)}
+  .btb-vu-group{margin:.4rem 0 0;font-size:.85rem;font-weight:600;color:var(--crow-text-secondary)}
+  .btb-vu-hint{margin:0;font-size:.78rem;color:var(--crow-text-muted)}
+  .btb-vu-status:empty{display:none}
   .btb-menu .btb-danger-link{color:var(--crow-error)}
   .btb-mhint{display:block;font-size:.78rem;color:var(--crow-text-muted);margin-top:.15rem;white-space:normal}
 

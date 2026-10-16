@@ -543,11 +543,25 @@ test("fit: the dashboard-voice setting refuses a too-large assistant (as the bin
     assert.equal(await withDb((db) => registry.readSetting(db, "kiosk_dashboard_bot_id")), "", "nothing was saved");
     const ok = await f.choose("b-house");
     assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { ok: true, bot_id: "b-house", effective_bot_id: "b-house" });
+    assert.deepEqual(await ok.json(), { ok: true, bot_id: "b-house", effective_bot_id: "b-house", auto_bot_id: "b-house" });
     assert.equal((await f.choose("")).status, 200, "back to automatic");
     const l = await f.listing();
     assert.deepEqual(l.bots.map((x) => [x.bot_id, x.fit]).sort(), [["a-first", "too_large"], ["b-house", "no_skills"]], "the picker has every assistant's status");
   } finally { f.close(); await resetChoice(); }
+});
+
+test("voice bot choice (item 20 PR 3): the listing and the save name who Automatic would pick, also while an explicit choice is set — the same resolver, never a second one", async () => {
+  await resetChoice();
+  await withDb((db) => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('c-small','Small','{}',1)", args: [] }));
+  const f = await serve(fitVoice({ "a-first": "too_large", "b-house": "no_skills", "c-small": "full" }));
+  try {
+    let dv = (await f.listing()).dashboard_voice;
+    assert.deepEqual([dv.bot_id, dv.effective_bot_id, dv.auto_bot_id], [null, "c-small", "c-small"]);
+    const saved = await (await f.choose("b-house")).json();
+    assert.deepEqual(saved, { ok: true, bot_id: "b-house", effective_bot_id: "b-house", auto_bot_id: "c-small" });
+    dv = (await f.listing()).dashboard_voice;
+    assert.deepEqual([dv.bot_id, dv.effective_bot_id, dv.auto_bot_id], ["b-house", "b-house", "c-small"], "Automatic is still named while b-house is chosen");
+  } finally { f.close(); await resetChoice(); await withDb((db) => db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'c-small'", args: [] })); }
 });
 
 test("fit: with no estimator (an older gateway) or an unknown model context, Automatic is unchanged — the first enabled assistant", async () => {

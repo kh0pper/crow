@@ -48,6 +48,10 @@ A gateway connects an agent to a place where people talk to it. The same agent d
 - **Crow Messages**: The agent becomes reachable as a contact. People you invite can message it, you can browse and add the bots running across your Crows, and you can put people and bots together in a group room. See the [Crow Messages guide](/guide/crow-messages).
 - **Perch**: The agent becomes chattable right on the board in your own dashboard. There is nothing to configure — choosing the channel is the whole setup, and nothing to install. See [Perch](#perch-talk-to-an-agent-from-your-own-dashboard) below.
 
+### Which bot answers voice
+
+Each bot's card says where it answers voice: **Answers voice on:** names the glasses or AI Companion bound to it, **Phone & dashboard** when it answers Talk to Crow (marked *(automatic)* when nobody chose one and Automatic picked it), and each kiosk display it is on. With the Kiosk extension installed, the card's **⋯ → Use for voice…** gives it Phone & dashboard or a display in one step. It saves the same settings as the Kiosk panel. A display switches right away; Phone & dashboard applies the next time Talk to Crow opens. Glasses and the companion are set in the bot's channel settings, which the dialog links to. A display can't be left without a bot, so to move one off this bot, choose another bot for it.
+
 Binding glasses to an agent is one-to-one: a device drives one agent at a time, and choosing a new agent for a device releases the old binding.
 
 ## Perch: talk to an agent from your own dashboard
