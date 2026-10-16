@@ -407,3 +407,24 @@ dockerTest("Compose never sees the gateway's secrets: ${ANY_VAR} interpolates to
     assert.ok(!JSON.stringify(model).includes("gw-secret-value-xyz"));
   } finally { delete process.env.CROW_TEST_GATEWAY_SECRET; }
 });
+
+dockerTest("services behind an inactive profile are checked too (a hook or an operator can start them)", async () => {
+  const dir = project({ "docker-compose.yml": C("") + "  extra:\n    image: busybox\n    profiles: [bridge]\n    privileged: true\n" });
+  assert.equal((await gateDir(dir, { textCheck: false })).valid, false);
+});
+
+dockerTest("managed hosting: host networking is refused from the resolved model too (${N:-host}, LAN-level drivers)", async () => {
+  const { validateInstall } = B;
+  const prev = process.env.CROW_HOSTED;
+  process.env.CROW_HOSTED = "1";
+  try {
+    for (const [id, compose] of [
+      ["fx-hosted-a", C("    network_mode: ${N:-host}\n")],
+      ["fx-hosted-b", C("    networks: [lan]\n") + "networks:\n  lan:\n    driver: macvlan\n"],
+    ]) {
+      stage(id, compose);
+      const r = await validateInstall(id, { forceInstall: true });
+      assert.equal(r.code, "hosted_forbidden", `${id}: ${JSON.stringify(r)}`);
+    }
+  } finally { if (prev === undefined) delete process.env.CROW_HOSTED; else process.env.CROW_HOSTED = prev; }
+});

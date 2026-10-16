@@ -20,7 +20,6 @@ import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync } from 
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
-const DANGEROUS_CAPS = new Set(["ALL", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE", "SYS_RAWIO", "NET_RAW", "SYS_MODULE", "DAC_READ_SEARCH", "SYS_BOOT", "SYS_TIME", "MAC_ADMIN", "MAC_OVERRIDE", "BPF", "PERFMON"]);
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
 // finished later with Configure): relative, so it resolves inside the bundle dir.
 export const UNSET_SENTINEL = "./crow-unset-value";
@@ -282,6 +281,20 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   return { valid: true };
 }
 
+/** True when the model reaches the host's network: host / another container's network
+ * mode, a network on the host driver or named host, or a LAN-level driver. */
+export function usesHostNetwork(model) {
+  for (const s of Object.values(model?.services || {})) {
+    const nm = String(s?.network_mode || "");
+    if (nm === "host" || nm.startsWith("container:")) return true;
+  }
+  for (const [name, n] of Object.entries(model?.networks || {})) {
+    const real = String(n?.name || name);
+    if (["host", "macvlan", "ipvlan"].includes(String(n?.driver || "")) || (n?.external && real === "host")) return true;
+  }
+  return false;
+}
+
 /** `${VAR:?…}` / `${VAR?…}` names in a compose text (the ones Compose refuses to leave blank). */
 export function requiredComposeVars(text) {
   const out = new Set();
@@ -311,8 +324,10 @@ function parseDotEnv(path) {
  */
 export async function loadComposeModel(bundleDir, { env, runConfig }) {
   const args = ["config", "--format", "json", "--no-env-resolution"];
+  // Every profile: a service behind an inactive profile is still in the file, and
+  // `compose --profile x up` (a hook, an operator) would start it.
   const attempt = async (e) => {
-    const { stdout } = await runConfig(args, { cwd: bundleDir, env: e });
+    const { stdout } = await runConfig(args, { cwd: bundleDir, env: { ...e, COMPOSE_PROFILES: "*" } });
     return JSON.parse(String(stdout));
   };
   try {

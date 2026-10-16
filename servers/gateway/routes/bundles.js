@@ -58,7 +58,7 @@ import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnv
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, loadComposeModel } from "../compose-guard.js";
+import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
@@ -2209,7 +2209,14 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     const composePath = join(sourceDir, "docker-compose.yml");
     if (existsSync(composePath)) {
       const composeContent = readFileSync(composePath, "utf8");
-      if (HOST_NETWORK.test(composeContent)) {
+      // The text check, then the model Compose resolves (catches ${N:-host}, LAN-level
+      // network drivers). A model that can't be read is refused here (fail-closed).
+      let hostNet = HOST_NETWORK.test(composeContent);
+      if (!hostNet) {
+        const loaded = await loadComposeModel(sourceDir, { env: composeEnv(), runConfig: runComposeConfig });
+        hostNet = !!loaded.error || usesHostNetwork(loaded.model);
+      }
+      if (hostNet) {
         return {
           ok: false, status: 403, code: "hosted_forbidden",
           error: "This bundle requires host networking and is not available on managed hosting.",
