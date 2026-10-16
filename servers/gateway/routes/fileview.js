@@ -23,6 +23,7 @@ import { relative, isAbsolute, basename } from "node:path";
 import { homedir } from "node:os";
 import { renderMarkdown } from "../../blog/renderer.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
+import { playerShellHtml } from "../dashboard/shared/player-shell.js";
 
 const DEFAULT_ROOT = process.env.CROW_FILEVIEW_ROOT || homedir();
 if (process.env.CROW_FILEVIEW_ROOT && !DEFAULT_ROOT.startsWith("/home/")) {
@@ -59,13 +60,25 @@ export function resolveSafeMarkdownPath(rawPath, allowRoot = DEFAULT_ROOT) {
   return real;
 }
 
-function page(title, bodyHtml) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+/** The page's language for the player bar: the dashboard's crow_lang cookie (en unless "es"). */
+function langOf(req) {
+  const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
+  return m && m[1] === "es" ? "es" : "en";
+}
+
+/**
+ * The page carries the player bar (bar on every Crow page): the core shell, dark-pinned like the page.
+ * Every response here has passed dashboardAuth (router.use above the GET). A full load, never a Turbo
+ * render (turbo-visit-control), and the shell's reserve script installs once per document anyway.
+ */
+function page(title, bodyHtml, lang = "en") {
+  return `<!doctype html><html lang="${lang === "es" ? "es" : "en"}"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+    `<meta name="turbo-visit-control" content="reload">` +
     `<title>${escapeHtml(title)}</title><style>` +
     `:root{color-scheme:light dark}` +
     `body{margin:0;background:#0d1117;color:#c9d1d9;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}` +
-    `.wrap{max-width:820px;margin:0 auto;padding:2.5rem 1.25rem 5rem}` +
+    `.wrap{max-width:820px;margin:0 auto;padding:2.5rem 1.25rem calc(5rem + var(--crow-player-h,0px))}` +
     `.crumb{font-size:.8rem;color:#8b949e;margin:0 0 1.5rem;word-break:break-all}` +
     `article{}` +
     `article h1,article h2,article h3{line-height:1.25;margin:1.6em 0 .6em}` +
@@ -79,7 +92,7 @@ function page(title, bodyHtml) {
     // renderMarkdown() wraps tables in .table-scroll; this page has no dashboard CSS.
     `.table-scroll{max-width:100%;overflow-x:auto}@media print{.table-scroll{overflow:visible;max-width:none}}` +
     `article blockquote{border-left:3px solid #30363d;margin:0;padding:.1em 1em;color:#8b949e}` +
-    `</style></head><body><div class="wrap">${bodyHtml}</div></body></html>`;
+    `</style></head><body><div class="wrap">${bodyHtml}</div>\n${playerShellHtml(lang, { dark: true })}\n</body></html>`;
 }
 
 export default function fileviewRouter(dashboardAuth) {
@@ -87,21 +100,22 @@ export default function fileviewRouter(dashboardAuth) {
   router.use("/dashboard/fileview", dashboardAuth);
 
   router.get("/dashboard/fileview", (req, res) => {
+    const lang = langOf(req);
     const raw = typeof req.query.path === "string" ? req.query.path : "";
     const safe = resolveSafeMarkdownPath(raw);
     if (!safe) {
       return res.status(404).type("html").send(
-        page("Not found", `<p>File not found, not a <code>.md</code> file, or outside the allowed root.</p>`)
+        page("Not found", `<p lang="en">File not found, not a <code>.md</code> file, or outside the allowed root.</p>`, lang)
       );
     }
     let md;
     try {
       md = readFileSync(safe, "utf8");
     } catch {
-      return res.status(404).type("html").send(page("Not found", `<p>File could not be read.</p>`));
+      return res.status(404).type("html").send(page("Not found", `<p lang="en">File could not be read.</p>`, lang));
     }
     const body = `<p class="crumb">${escapeHtml(safe)}</p><article>${renderMarkdown(md)}</article>`;
-    res.type("html").send(page(basename(safe), body));
+    res.type("html").send(page(basename(safe), body, lang));
   });
 
   return router;

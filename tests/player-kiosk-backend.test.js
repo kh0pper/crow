@@ -94,7 +94,10 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
   return {
     P, win, window, document, audio, calls, fire, drain, fetches, posted, advance, handlers, local, session, attach, $,
     setLive: (v) => { live = v; },
+    fireWin: (type, ev = {}) => (listeners[type] || []).forEach((fn) => fn(ev)),
     shown: () => $("crow-player-bar").style.display !== "none",
+    /** The "Playback ended" note (Q1): the bar stays with the old title, ⏯ off, × dismisses. */
+    ended: () => $("crow-player-bar").style.display !== "none" && $("crow-player-subtitle").textContent === "Playback ended" && $("crow-player-toggle").disabled === true && $("crow-player-close").title === "Dismiss",
     events: (type) => posted.filter((m) => m.type === type),
     srcSets: () => calls.filter((c) => c[0] === "src" && c[1]).length,
   };
@@ -336,12 +339,16 @@ test("detached ended: POST {do:'ended', id} and the answer's next item loads and
   assert.equal(h.fetches.at(-1).body.id, "m2");
 });
 
-test("detached error: POST {do:'error'}; an empty answer clears the bar", async () => {
+test("detached error: POST {do:'error'}; an empty answer ends the item: the bar says Playback ended (never vanishes silently)", async () => {
   const h = detached((r) => (r.method === "POST" ? { status: 200, body: view(null, { state: "none" }) } : null));
   h.fire("error");
   await flush();
   assert.deepEqual(h.fetches.map((f) => f.body.do), ["error"]);
-  assert.equal(h.shown(), false);
+  assert.ok(h.ended());
+  assert.equal(h.$("crow-player-title").textContent, "Song One", "the old title stays");
+  assert.equal(h.audio.src, "", "nothing left on the element");
+  h.P.close();
+  assert.equal(h.shown(), false, "× dismisses it");
 });
 
 test("review 9: detached, the kiosk backend keeps a stall watchdog that POSTs error; playing in time disarms it", async () => {
@@ -358,12 +365,13 @@ test("review 9: detached, the kiosk backend keeps a stall watchdog that POSTs er
   assert.deepEqual(h.fetches.map((f) => [f.body.do, f.body.id]), [["error", "m1"]]);
 });
 
-test("S8: a 409 (superseded) clears the bar and never adopts anything; so does a 401", async () => {
+test("S8: a 409 (superseded) ends the item and never adopts anything; so does a 401 (logout): Playback ended, the marker gone", async () => {
   for (const status of [409, 401]) {
     const h = detached(() => ({ status, body: { error: "x" } }));
     h.P.next();
     await flush();
-    assert.equal(h.shown(), false, String(status));
+    assert.ok(h.ended(), String(status));
+    assert.equal(h.audio.src, "");
     assert.equal(h.P.getBackend(), "local");
     assert.equal(h.local.get("crow-player-state"), undefined, "the marker goes too");
   }
@@ -445,13 +453,16 @@ test("a reload restores by GET (with the tab's owner kept in sessionStorage); it
   assert.match(h2.$("crow-player-toggle").style.animation, /crow-pulse/);
 });
 
-test("a reload marker with nothing to restore (404: no kiosk; or an empty view) clears itself; a paused session stays paused", async () => {
-  for (const r of [{ status: 404, body: { error: "not_found" } }, { status: 200, body: view(null) }]) {
+test("a reload marker with nothing to restore (404: no kiosk; 401: logged out; or an empty view) in its OWN tab: Playback ended, the marker goes; a paused session stays paused", async () => {
+  for (const r of [{ status: 404, body: { error: "not_found" } }, { status: 401, body: { error: "unauthorized" } }, { status: 200, body: view(null) }]) {
     const local = new Map([["crow-player-state", JSON.stringify({ backend: "kiosk", title: "x" })]]);
-    const h = harness({ local, respond: () => r });
+    const h = harness({ local, session: new Map([["crow-kiosk-bar-owner", "Owner_nonce-0123456789"]]), respond: () => r });
     await flush();
-    assert.equal(h.shown(), false);
+    assert.ok(h.ended(), String(r.status));
+    assert.equal(h.$("crow-player-title").textContent, "x");
     assert.equal(local.has("crow-player-state"), false);
+    h.fireWin("pagehide");
+    assert.equal(local.has("crow-player-state"), false, "the note is never saved as a marker");
   }
   const local = new Map([["crow-player-state", JSON.stringify({ backend: "kiosk", title: "x" })]]);
   const h = harness({ local, respond: () => ({ status: 200, body: view(ITEM1, { state: "paused" }) }) });
@@ -547,11 +558,11 @@ test("review 2 (S3): saveState never stores a ticket src, whatever the backend",
   for (const v of local.values()) assert.ok(!String(v).includes("/display/t/"), v);
 });
 
-test("review 4: a 403 clears the bar like a 401", async () => {
+test("review 4: a 403 ends the item like a 401", async () => {
   const h = detached(() => ({ status: 403, body: { error: "forbidden" } }));
   h.P.next();
   await flush();
-  assert.equal(h.shown(), false);
+  assert.ok(h.ended());
   assert.equal(h.P.getBackend(), "local");
 });
 
@@ -746,4 +757,103 @@ test("debug ring: the bar's title cannot be selected (a long press opens the rin
   h.P.kioskApply(LOAD);
   h.$("crow-player-title").dispatchEvent(new h.window.Event("contextmenu", { cancelable: true }));
   assert.equal(h.$("crow-player-debug").getAttribute("role"), "log");
+});
+
+// ─── bar on every Crow page (2026-10-16): new tabs, the tab flag, Playback ended ─────────────────────
+
+test("H2: a NEW tab (no nonce of its own) finds a kiosk marker with nothing for it: the bar stays hidden and the marker is KEPT (not this tab's to clear)", async () => {
+  const local = new Map([["crow-player-state", JSON.stringify({ backend: "kiosk", title: "KPFT" })]]);
+  const h = harness({ local, respond: () => ({ status: 200, body: view(null) }) });
+  await flush();
+  assert.equal(h.fetches.length, 1, "it still asks (another tab's item is never handed over)");
+  assert.equal(h.shown(), false);
+  assert.equal(local.get("crow-player-state"), JSON.stringify({ backend: "kiosk", title: "KPFT" }));
+});
+
+test("H2 (I1): a DUPLICATED tab (its copied nonce answered by the live tab, so re-minted) keeps the marker too; the original keeps its bar", async () => {
+  const bus = bcBus();
+  const marker = JSON.stringify({ backend: "kiosk", title: "KPFT" });
+  const a = harness({ session: new Map([[KEY, NONCE]]), BroadcastChannel: bus.BC });
+  await flush(); a.advance(5000); await flush();
+  const local = new Map([["crow-player-state", marker]]);
+  const b = harness({ session: new Map([[KEY, NONCE]]), local, BroadcastChannel: bus.BC, respond: () => ({ status: 200, body: view(null) }) });
+  await flush();
+  assert.notEqual(b.P.kioskOwner(), NONCE);
+  assert.equal(b.shown(), false);
+  assert.equal(local.get("crow-player-state"), marker, "the duplicate never clears the original's marker");
+});
+
+test("H3: a local marker that was playing, in a NEW tab: the bar shows the item paused, never plays, never pulses", async () => {
+  const local = new Map([["crow-player-state", JSON.stringify({ backend: "local", src: "https://pod.example/ep.mp3", title: "Episode", time: 42, wasPlaying: true })]]);
+  const h = harness({ local });
+  h.fire("loadedmetadata");
+  await flush();
+  assert.ok(h.shown());
+  assert.equal(h.$("crow-player-title").textContent, "Episode");
+  assert.equal(h.calls.filter((c) => c[0] === "play").length, 0, "no second copy of the podcast");
+  assert.equal(h.audio.paused, true);
+  assert.doesNotMatch(String(h.$("crow-player-toggle").style.animation || ""), /crow-pulse/);
+  h.P.toggle();
+  assert.equal(h.audio.paused, false, "a tap plays it here");
+});
+
+test("H3: the SAME tab after a reload (its tab flag) auto-resumes a playing local item, as before", async () => {
+  const local = new Map([["crow-player-state", JSON.stringify({ backend: "local", src: "https://pod.example/ep.mp3", title: "Episode", time: 42, wasPlaying: true })]]);
+  const session = new Map([["crow-player-tab", "1"]]);
+  const h = harness({ local, session });
+  assert.equal(h.audio.preload, "metadata", "preload=none would never fire loadedmetadata, so nothing would resume (found live)");
+  h.fire("loadedmetadata");
+  await flush();
+  assert.equal(h.audio.paused, false);
+  assert.equal(h.audio.currentTime, 42);
+});
+
+test("data usage: a paused (or new-tab) local item never asks for its media on a page load; the position is the start position, and pagehide keeps it", async () => {
+  const marker = { backend: "local", src: "https://pod.example/ep.mp3", title: "Episode", time: 42 };
+  for (const [name, saved, session] of [
+    ["paused, same tab", { ...marker, wasPlaying: false }, new Map([["crow-player-tab", "1"]])],
+    ["playing, new tab", { ...marker, wasPlaying: true }, new Map()],
+  ]) {
+    const local = new Map([["crow-player-state", JSON.stringify(saved)]]);
+    const h = harness({ local, session });
+    assert.notEqual(h.audio.preload, "metadata", name + ": no metadata fetch (or open stream) for an item that will not resume");
+    assert.equal(h.audio.currentTime, 42, name + ": the saved position is the start position before any metadata");
+    h.fireWin("pagehide");
+    assert.equal(JSON.parse(local.get("crow-player-state")).time, 42, name + ": a pagehide here never overwrites the position with 0");
+  }
+});
+
+test("I1: the tab flag is in sessionStorage only between pagehide and the next load (a tab duplicated while live copies none)", async () => {
+  const session = new Map([["crow-player-tab", "1"]]);
+  const h = harness({ session });
+  assert.equal(session.has("crow-player-tab"), false, "consumed at load");
+  h.P.load("/media/a.mp3", "A");
+  await flush();
+  assert.equal(session.has("crow-player-tab"), false, "playing writes nothing yet");
+  h.fireWin("pagehide");
+  assert.equal(session.get("crow-player-tab"), "1", "written on the way out");
+  const fresh = new Map();
+  const g = harness({ session: fresh });
+  g.fireWin("pagehide");
+  assert.equal(fresh.has("crow-player-tab"), false, "a tab that never played writes no flag");
+});
+
+test("Playback ended: a new item clears the note (⏯ back, the new subtitle); a user stop or close is a silent hide", async () => {
+  const h = detached(() => ({ status: 409, body: { error: "superseded" } }));
+  h.P.next(); await flush();
+  assert.ok(h.ended());
+  h.P.load("/media/b.mp3", "B", "Artist B");
+  assert.equal(h.$("crow-player-toggle").disabled, false);
+  assert.equal(h.$("crow-player-subtitle").textContent, "Artist B");
+  assert.equal(h.$("crow-player-close").title, "Close");
+  const k = detached(() => ({ status: 200, body: view(null) }));
+  k.P.stop(); await flush();
+  assert.equal(k.shown(), false, "the user's own stop: no note");
+});
+
+test("Playback ended: es strings", async () => {
+  const { document } = parseHTML(`<html><body>${playerBarHtml("es")}</body></html>`);
+  assert.equal(document.getElementById("crow-player-close").getAttribute("title"), "Cerrar");
+  const js = playerBarJs("es");
+  assert.ok(js.includes("Reproducción terminada") && js.includes("Descartar"));
 });

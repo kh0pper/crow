@@ -69,6 +69,9 @@ export function designTokensCss() {
        browser font-size) instead of clipping the nav labels. 15rem = 240px at
        the default 16px root. */
     --crow-sidebar-width: 15rem;
+    /* The player bar's height while it shows, else 0 (set on <html> by the player shell's reserve script,
+       shared/player-shell.js): pages without the layout pad content and bottom sheets with it. */
+    --crow-player-h: 0px;
     --crow-space-1: 4px;  --crow-space-2: 8px;  --crow-space-3: 12px;
     --crow-space-4: 16px; --crow-space-5: 24px; --crow-space-6: 32px;
     --crow-space-8: 48px; --crow-space-10: 64px;

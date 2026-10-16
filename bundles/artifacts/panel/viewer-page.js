@@ -104,7 +104,11 @@ export function viewerHeaders(viewerCsp, origin) {
   return { "content-security-policy": viewerCsp(origin), "cache-control": "no-store", "referrer-policy": "same-origin" };
 }
 
-export function renderViewerPage({ lang = "en", id, v = null, thread = null }) {
+/**
+ * shellHtml: the core player-bar shell (servers/gateway/dashboard/shared/player-shell.js), passed in by the
+ * route, which has already passed dashboardAuth. Empty on an older core: the page then has no bar.
+ */
+export function renderViewerPage({ lang = "en", id, v = null, thread = null, shellHtml = "" }) {
   const L = lang === "es" ? "es" : "en";
   const T = VIEWER_STRINGS[L];
   return `<!doctype html>
@@ -118,5 +122,6 @@ export function renderViewerPage({ lang = "en", id, v = null, thread = null }) {
 <div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
 <script src="/artifacts/static/viewer.js"></script>
 <script src="/artifacts/static/viewer-client.js"></script>
+${shellHtml}
 </body></html>`;
 }

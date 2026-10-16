@@ -104,8 +104,13 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       const origin = S.runtime.artifactOriginInfo()?.baseUrl || null;
       for (const [k, v] of Object.entries(page.viewerHeaders(S.policy.viewerCsp, origin))) res.setHeader(k, v);
       const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
+      const lang = m && m[1] === "es" ? "es" : "en";
       const { v, thread } = page.viewerParams(req.query);
-      res.type("html").send(page.renderViewerPage({ lang: m && m[1] === "es" ? "es" : "en", id: req.params.id, v, thread }));
+      // The player bar (bar on every Crow page): the core shell, emitted only here, behind dashboardAuth.
+      // An older core without the module renders the viewer with no bar.
+      let shellHtml = "";
+      try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, shellHtml }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }

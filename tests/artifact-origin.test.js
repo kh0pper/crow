@@ -372,6 +372,24 @@ test("viewerCsp: frame-src is only the artifact origin's /v/ path; anything that
   assert.doesNotMatch(csp, /unsafe-eval/);
 });
 
+test("bar on every page: viewerCsp adds media-src 'self' https: blob: (the dashboard's) and nothing else changes", async () => {
+  const { viewerCsp } = await import("../servers/gateway/artifact-origin/policy.js");
+  const dir = (csp, name) => new RegExp(`(?:^|; )${name} ([^;]*)`).exec(csp)?.[1];
+  for (const o of ["https://art.example", null]) {
+    const csp = viewerCsp(o);
+    assert.equal(dir(csp, "media-src"), "'self' https: blob:");
+    assert.equal(dir(csp, "frame-ancestors"), "'self'");
+    assert.equal(dir(csp, "connect-src"), "'self'");
+    assert.equal(dir(csp, "default-src"), "'self'");
+    assert.equal(dir(csp, "script-src"), "'self' 'unsafe-inline'");
+    assert.equal(dir(csp, "img-src"), "'self' data: blob:");
+    assert.equal(dir(csp, "base-uri"), "'self'");
+    assert.equal(dir(csp, "form-action"), "'self'");
+    assert.equal(dir(csp, "frame-src"), o ? o + "/v/" : "'none'");
+    assert.equal(csp.split("; ").length, 10, "exactly one directive added");
+  }
+});
+
 test("D28 review M7: variants of the helper path never redirect (CSP path-exact matching ignores the path after a redirect)", async () => {
   const { token } = tokens.mint({ artifactId: "a1", versionN: 3, type: "document", dashboardOrigin: "https://dash.example" });
   for (const v of ["__crow/anchor-helper.js?n=x", "__crow/Anchor-Helper.js", "__crow/anchor-helper.js/", "__crow//anchor-helper.js", "__crow/anchor%2Dhelper.js", "__crow/anchor-helper.js%3Fx", "__crow/./anchor-helper.js", "__crow/../__crow/anchor-helper.js", "__CROW/anchor-helper.js"]) {

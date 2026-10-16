@@ -141,6 +141,9 @@ export function baseHeaders(csp) {
  */
 export function viewerCsp(artifactOrigin) {
   const ok = typeof artifactOrigin === "string" && /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(artifactOrigin);
+  // media-src: the player bar rides on this page (bar on every Crow page, 2026-10-16) — the dashboard's
+  // own media-src, so external podcast/stream items keep playing. Artifact content never sees it: its
+  // frame has its own CSP (cspFor, media-src 'none') and sandbox.
   return "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
-    "connect-src 'self'; frame-src " + (ok ? artifactOrigin + "/v/" : "'none'") + "; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
+    "media-src 'self' https: blob:; connect-src 'self'; frame-src " + (ok ? artifactOrigin + "/v/" : "'none'") + "; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
 }

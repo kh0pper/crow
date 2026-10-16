@@ -148,6 +148,17 @@ test("viewer page: the core viewerCsp (frame-ancestors 'self'), no-store, valida
   assert.ok(ARTIFACT_ID_RE.test("art_abc12345") && !ARTIFACT_ID_RE.test("art_<x>"));
 });
 
+test("bar on every page: renderViewerPage places the player shell after the viewer scripts, before </body>; no shell, no bar (an older core)", () => {
+  const html = renderViewerPage({ lang: "en", id: "art_abc12345", shellHtml: "<x-shell></x-shell>" });
+  const client = html.indexOf('<script src="/artifacts/static/viewer-client.js"></script>');
+  const shell = html.indexOf("<x-shell></x-shell>");
+  assert.ok(client > 0 && shell > client, "after viewer-client.js");
+  assert.ok(shell < html.indexOf("</body>"), "before </body>");
+  assert.ok(html.indexOf('<div id="crow-artifact-viewer"') < client, "the viewer root is untouched and first");
+  const bare = renderViewerPage({ lang: "en", id: "art_abc12345" });
+  assert.doesNotMatch(bare, /crow-player-bar|x-shell/);
+});
+
 // ─── live: Turbo visit + loopback fallback + phone width ───────────────────
 
 let chrome = null, server = null, port = 0, s = null;
