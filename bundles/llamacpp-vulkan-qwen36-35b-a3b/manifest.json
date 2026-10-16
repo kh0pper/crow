@@ -1,5 +1,6 @@
 {
   "id": "llamacpp-vulkan-qwen36-35b-a3b",
+  "version": "1.0.1",
   "type": "bundle",
   "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
   "category": "ai",
