@@ -437,6 +437,7 @@ export function markdownBlocks(markdown) {
     .filter((t) => t.type !== "space")
     .map((t) => ({
       type: t.type,
+      ...(t.type === "code" ? { lang: String(t.lang || "").trim().split(/\s+/)[0].toLowerCase(), code: String(t.text || "") } : {}),
       text: String(t.text || t.raw || "").replace(/\s+/g, " ").trim().slice(0, 400),
       html: sanitizeRendered(marked.parser([t])),
     }));
