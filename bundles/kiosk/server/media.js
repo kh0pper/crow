@@ -65,15 +65,16 @@ export function cleanTitle(v) {
  */
 export function createMediaStore({ now = Date.now, tickets, send, onFailed = () => {}, onEnded = () => {}, onStarted = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const devs = new Map();
-  const dev = (id) => { let d = devs.get(id); if (!d) { d = { queue: [], index: -1, item: null, state: "idle", volume: DEFAULT_VOLUME, muted: false, seq: 0, lost: null, origin: null, retries: 0, retry: null }; devs.set(id, d); } return d; };
+  const dev = (id) => { let d = devs.get(id); if (!d) { d = { queue: [], index: -1, item: null, state: "idle", volume: DEFAULT_VOLUME, muted: false, seq: 0, lost: null, origin: null, retries: 0, retry: null, retryAt: 0, owner: null }; devs.set(id, d); } return d; };
   const live = (id) => { const d = devs.get(id); return d && d.item ? d : null; };
   /** One Quieter from v: VOLUME_MOVE down, never below VOLUME_FLOOR (a level already at or under it stays). */
   const quieter = (v) => { const cur = Number(v) || 0; return cur <= VOLUME_FLOOR ? cur : Math.max(VOLUME_FLOOR, cur - VOLUME_MOVE); };
   const step = (v, max = 100) => Math.max(0, Math.min(Math.min(100, Math.max(VOLUME_STEP, max)), Math.round(v / VOLUME_STEP) * VOLUME_STEP));
-  const loadMsg = (d, extra = {}) => ({ type: "media", action: "load", id: d.item.id, form: "audio", url: d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, volume: d.volume, muted: d.muted, ...extra });
+  const loadMsg = (d, extra = {}) => ({ type: "media", action: "load", id: d.item.id, form: "audio", url: d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, live: isRadio(d), volume: d.volume, muted: d.muted, ...extra });
   const isRadio = (d) => d.item.source === "radio";
   function unload(d) {
     if (d.retry) { clearTimer(d.retry); d.retry = null; }
+    d.retryAt = 0;
     if (d.item) { tickets.revoke(d.item.ticket); d.item = null; }
   }
   function end(id, d) {
@@ -108,14 +109,35 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
     d.retries += 1;
     tickets.revoke(d.item.ticket);                 // the dead stream's ticket goes now; the item stays so the session is still "this station"
     d.item.playingSince = null;
+    d.retryAt = now() + wait;
     d.retry = setTimer(() => {
-      d.retry = null;
+      d.retry = null; d.retryAt = 0;
       if (live(id) !== d) return;
       if (d.state === "paused") return;            // paused meanwhile: resume() loads a live stream anyway
       load(id, d, d.index, { again: true });
     }, wait);
     d.retry?.unref?.();
   }
+  /**
+   * B3: what the player bar is told about this display — ONE item at a time, never the queue. During a station
+   * reload the item stays (url null: its ticket is dead) and retry_ms is the time left; asking has no side effect.
+   */
+  function view(id) {
+    const d = devs.get(id);
+    const base = { item: null, state: api.stateOf(id), has_next: false, has_previous: false, volume: d ? d.volume : DEFAULT_VOLUME, muted: d ? d.muted : false };
+    if (!d || !d.item) return base;
+    const out = { ...base, item: { id: d.item.id, url: d.retry ? null : d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, form: "audio", live: isRadio(d) }, has_next: d.index + 1 < d.queue.length, has_previous: d.index > 0 };
+    if (d.retry) out.retry_ms = Math.max(0, d.retryAt - now());
+    return out;
+  }
+  /** B3: the same item on a new ticket (the old one is revoked, cutting whatever still streams it). Not sent: the caller's snapshot is. */
+  function remint(id, d) {
+    if (!d.item || d.retry) return;                // a pending reload mints its own
+    tickets.revoke(d.item.ticket);
+    const t = tickets.mint({ deviceId: id, kind: "stream", resource: d.queue[d.index].upstream, ttlMs: AUDIO_TICKET_MS });
+    d.item.ticket = t.id; d.item.path = t.path;
+  }
+  const ENDPOINT_VERBS = new Set(["pause", "resume", "next", "previous", "stop", "ended", "error"]);
   const api = {
     /**
      * An explicit request to play: replace the queue and start its first item. origin = { source, candidateId }
@@ -204,6 +226,41 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       else if (verb === "mute") api.mute(id, true);
       else if (verb === "unmute") api.mute(id, false);
       else api[verb](id);
+    },
+    view,
+    /** B3 GET: the view for the bar of a display whose audio was handed to it (an owner); any other display shows nothing. */
+    barView(id) { const d = devs.get(id); return d && d.owner ? view(id) : view(null); },
+    itemId: (id) => live(id)?.item.id ?? null,
+    /** B3: does this display's session still hold a usable stream (its ticket alive, or a station reload pending)? */
+    holdsTicket(id) { const d = live(id); return !!d && (!!d.retry || !!tickets.get(d.item.ticket)); },
+    /**
+     * B3: the tab whose player bar owns this display's audio (a per-tab nonce from a bar hello; null for every other
+     * page). A change of owner moves the current item to a new ticket, so the old tab's stream stops. → changed?
+     */
+    setOwner(id, owner) {
+      const o = typeof owner === "string" && owner ? owner : null;
+      const cur = devs.get(id);
+      if ((cur?.owner ?? null) === o) return false;
+      const d = dev(id);
+      d.owner = o;
+      remint(id, d);
+      return true;
+    },
+    /**
+     * B3 POST from the player bar (overlay closed): { do, id, owner }. Only the owning tab, only about the current
+     * item: anything else is 409 (superseded) and changes nothing — a stale stop never ends another tab's item.
+     * With nothing playing the answer is the empty view. → { status, view? }
+     */
+    endpoint(id, { do: verb, id: itemId, owner } = {}) {
+      if (!ENDPOINT_VERBS.has(verb)) return { status: 400 };
+      const holder = devs.get(id);
+      if (!holder?.owner || owner !== holder.owner) return { status: 409 };
+      const d = live(id);
+      if (!d) return { status: 200, view: view(id) };
+      if (itemId !== d.item.id) return { status: 409 };
+      if (verb === "ended" || verb === "error") api.onEvent(id, { id: itemId, state: verb });
+      else api[verb](id);
+      return { status: 200, view: view(id) };
     },
     /** The page went away: the session lasts SESSION_GRACE_MS without it (a phone's network blip reconnects well inside it). */
     sessionLost(id) { const d = live(id); if (!d) return; clearTimer(d.lost); d.lost = setTimer(() => { d.lost = null; const cur = live(id); if (cur) end(id, cur); }, SESSION_GRACE_MS); d.lost?.unref?.(); },
