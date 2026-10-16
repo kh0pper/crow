@@ -92,3 +92,118 @@ test("the emitted source is safe inside the dashboard's template-literal script:
   assert.ok(!src.includes("${"));
   assert.match(src, /function validateFrameMessage\(/);
 });
+
+// ─── Part 2 (T9): crow-talk.js, the hand-off in the dashboard document ───────────────────────────
+import { parseHTML } from "linkedom";
+import { crowTalkJs, crowTalkOverlayHtml, CROW_TALK_PATH } from "../servers/gateway/dashboard/shared/crow-talk.js";
+import { tamagotchiHtml } from "../servers/gateway/dashboard/shared/notifications.js";
+
+const ORIGIN = "https://crow.example.ts.net:8444";
+
+/** The talk script against a linkedom page; `player` false = a dashboard whose player bar has no kiosk backend. */
+function talk({ player = true } = {}) {
+  const { document, window } = parseHTML(`<html><body>${crowTalkOverlayHtml("en")}<header>${tamagotchiHtml("en", { talkAvailable: true })}</header></body></html>`);
+  const calls = [];
+  const crowPlayer = player ? {
+    kioskAttach: (post, isLive) => calls.push(["attach", post, isLive]),
+    kioskApply: (m) => calls.push(["apply", m]),
+    kioskDetach: (s) => calls.push(["detach", s]),
+  } : undefined;
+  const win = { document, location: { origin: ORIGIN }, navigator: {}, crowPlayer, _l: {}, addEventListener: (type, fn) => { (win._l[type] ||= []).push(fn); } };
+  new Function("window", "document", "location", "navigator", "setTimeout", "clearTimeout", "Date", crowTalkJs())(win, document, win.location, win.navigator, setTimeout, clearTimeout, Date);
+  const overlay = document.getElementById("crow-talk-overlay");
+  const frame = () => overlay.querySelector("iframe");
+  const framePosts = [];
+  let release = { volume: 0.4, resume: true };
+  const open = () => {
+    win.openCrowTalk();
+    const fw = { postMessage: (m, origin) => framePosts.push([m, origin]), crowKioskRelease: () => { calls.push(["release"]); return release; } };
+    Object.defineProperty(frame(), "contentWindow", { configurable: true, value: fw });
+    return fw;
+  };
+  const send = (data, { origin = ORIGIN, source } = {}) => win._l.message.forEach((fn) => fn({ data, origin, source }));
+  return { win, document, window, overlay, frame, open, send, calls, framePosts, setRelease: (r) => { release = r; }, of: (k) => calls.filter((c) => c[0] === k) };
+}
+
+test("T9/D1: the overlay asks for bar mode (?bar=1) only when the player bar has the kiosk backend", () => {
+  const a = talk();
+  a.win.openCrowTalk();
+  assert.equal(a.frame().getAttribute("src"), CROW_TALK_PATH + "?bar=1");
+  const b = talk({ player: false });
+  b.win.openCrowTalk();
+  assert.equal(b.frame().getAttribute("src"), CROW_TALK_PATH, "an old core / no bar: today's in-page audio");
+});
+
+test("T9: a valid load from the live frame attaches the bar once and reaches kioskApply exactly once", () => {
+  const h = talk();
+  const fw = h.open();
+  h.send(LOAD, { source: fw });
+  h.send({ crow: "media", v: 1, op: "play", id: "m12" }, { source: fw });
+  assert.equal(h.of("attach").length, 1);
+  assert.deepEqual(h.of("apply").map((c) => c[1].op), ["load", "play"]);
+  // The post function targets this origin only, and isLive follows the frame.
+  const [, post, isLive] = h.of("attach")[0];
+  post({ crow: "media-event", v: 1, id: "m12", type: "playing" });
+  assert.deepEqual(h.framePosts, [[{ crow: "media-event", v: 1, id: "m12", type: "playing" }, ORIGIN]]);
+  assert.equal(isLive(), true);
+  h.win.closeCrowTalk();
+  assert.equal(isLive(), false, "a removed frame is not live");
+});
+
+test("S1: refuses another origin / another window; S2: a bad url or an unknown op never reaches the bar", () => {
+  const h = talk();
+  const fw = h.open();
+  h.send(LOAD, { origin: "https://evil.example", source: fw });
+  h.send(LOAD, { source: {} });
+  h.send(LOAD, { source: null });
+  h.send({ ...LOAD, url: `https://evil.example${URL_OK}` }, { source: fw });
+  h.send({ ...LOAD, op: "eval" }, { source: fw });
+  h.send({ ...LOAD, v: 2 }, { source: fw });
+  h.send([LOAD], { source: fw });
+  assert.equal(h.of("apply").length, 0);
+  assert.equal(h.of("attach").length, 0);
+  // No frame open: nothing either.
+  const g = talk();
+  g.send(LOAD, { source: null });
+  assert.equal(g.of("apply").length, 0);
+});
+
+test("review 1: close hands crowKioskRelease()'s {volume, resume} to kioskDetach, after the release, and once", () => {
+  const h = talk();
+  const fw = h.open();
+  h.send(LOAD, { source: fw });
+  h.win.closeCrowTalk();
+  assert.deepEqual(h.calls.filter((c) => c[0] !== "apply" && c[0] !== "attach").map((c) => c[0]), ["release", "detach"]);
+  assert.deepEqual(h.of("detach")[0][1], { volume: 0.4, resume: true });
+  assert.equal(h.frame(), null);
+  // A page that returns nothing (an older kiosk copy) still detaches, with no state.
+  const g = talk();
+  const gw = g.open();
+  g.setRelease(undefined);
+  g.send(LOAD, { source: gw });
+  g.win.closeCrowTalk();
+  assert.deepEqual(g.of("detach").map((c) => c[1]), [null]);
+});
+
+test("review 2: a Turbo body swap (Android Back) closes the overlay the same way: release, then detach", () => {
+  const h = talk();
+  const fw = h.open();
+  h.send(LOAD, { source: fw });
+  const ev = new h.window.Event("turbo:before-render");
+  h.document.dispatchEvent(ev);
+  assert.deepEqual(h.calls.filter((c) => c[0] === "release" || c[0] === "detach").map((c) => c[0]), ["release", "detach"]);
+  assert.equal(h.overlay.classList.contains("active"), false);
+});
+
+test("T9: messages from the previous frame are ignored after a reopen; the new frame attaches afresh", () => {
+  const h = talk();
+  const old = h.open();
+  h.send(LOAD, { source: old });
+  h.win.closeCrowTalk();
+  const fresh = h.open();
+  h.send(LOAD, { source: old });
+  assert.equal(h.of("apply").length, 1, "the old window is not the frame any more");
+  h.send(LOAD, { source: fresh });
+  assert.equal(h.of("apply").length, 2);
+  assert.equal(h.of("attach").length, 2);
+});
