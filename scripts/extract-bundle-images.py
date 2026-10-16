@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Extract the pullable docker images referenced by bundle compose files.
 
-Used by .github/workflows/image-freshness.yml. Walks bundles/*/docker-compose.yml,
-skips services with a build: section (their image: is a local tag, never pullable),
-and resolves ${VAR} / ${VAR:-default} interpolation in image references against the
+Used by .github/workflows/image-freshness.yml. Walks bundles/*/docker-compose.yml
+and skips local-only images, which no registry has: services with a build:
+section (their image: is a local tag), services with pull_policy: never, and
+services that reuse an image another service in the same compose builds. It
+resolves ${VAR} / ${VAR:-default} interpolation in image references against the
 bundle's own .env file. A full `docker compose config` is deliberately NOT used:
 many bundles require install-time env (${VAR:?} passwords, media paths) and fail
 strict interpolation, but only the image field matters here.
@@ -73,12 +75,13 @@ def main():
         try:
             with open(compose, encoding="utf-8") as f:
                 doc = yaml.safe_load(f)
-            services = doc.get("services") or {}
-            for service in services.values():
-                if not isinstance(service, dict) or "build" in service:
+            services = [s for s in (doc.get("services") or {}).values() if isinstance(s, dict)]
+            built = {s.get("image") for s in services if "build" in s}
+            for service in services:
+                if "build" in service or service.get("pull_policy") == "never":
                     continue
                 image = service.get("image")
-                if isinstance(image, str):
+                if isinstance(image, str) and image not in built:
                     resolved, unresolved = resolve(image, env)
                     if unresolved:
                         failures.append(
